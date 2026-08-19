@@ -121,6 +121,100 @@ const SECOND_MODEL: &str = r#"resource "model" "summarizer" {
 }
 "#;
 
+// Shared model + deployment used by the residency fixtures below.
+const RESIDENCY_MODEL_AND_DEPLOYMENT: &str = r#"resource "model" "support_chat" {
+  source {
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen2.5-7B-Instruct"
+  }
+  architecture   = "qwen2"
+  modalities     = ["text"]
+  artifact {
+    format       = "gguf"
+    quantization = "q4_k_m"
+  }
+  context_length = 8192
+  variant {
+    quantization = "q4_k_m"
+    file         = "model.gguf"
+    size         = "4GiB"
+  }
+}
+
+resource "deployment" "support_local" {
+  model    = model.support_chat.id
+  hardware = hardware_profile.dev_mac.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 8192
+    port           = 8000
+    n_gpu_layers   = -1
+  }
+}
+"#;
+
+// Hardware in `us-east-1` while the only allowed residency is `eu-central-1`.
+const REGION_RESIDENCY_VIOLATION: &str = r#"resource "hardware_profile" "dev_mac" {
+  provider = "local_apple"
+  region   = "us-east-1"
+  accelerator {
+    kind   = "apple_silicon"
+    model  = "m3_pro"
+    count  = 1
+    memory = "36GiB"
+  }
+  memory = "36GiB"
+}
+
+resource "data_class" "pii" {
+  sensitivity = "confidential"
+  residency   = ["eu-central-1"]
+}
+"#;
+
+// Allow rule permits only `aws`; the deployment's provider is `local_apple`.
+const PROVIDER_ALLOWLIST_VIOLATION: &str = r#"resource "hardware_profile" "dev_mac" {
+  provider = "local_apple"
+  accelerator {
+    kind   = "apple_silicon"
+    model  = "m3_pro"
+    count  = 1
+    memory = "36GiB"
+  }
+  memory = "36GiB"
+}
+
+resource "governance_rule" "only_aws" {
+  effect            = "allow"
+  allowed_providers = ["aws"]
+}
+"#;
+
+// Region and provider both satisfy the configured allowlists.
+const RESIDENCY_COMPLIANT: &str = r#"resource "hardware_profile" "dev_mac" {
+  provider = "local_apple"
+  region   = "eu-central-1"
+  accelerator {
+    kind   = "apple_silicon"
+    model  = "m3_pro"
+    count  = 1
+    memory = "36GiB"
+  }
+  memory = "36GiB"
+}
+
+resource "data_class" "pii" {
+  sensitivity = "confidential"
+  residency   = ["eu-central-1"]
+}
+
+resource "governance_rule" "allow_apple" {
+  effect            = "allow"
+  allowed_providers = ["local_apple"]
+  allowed_regions   = ["eu-central-1"]
+}
+"#;
+
 struct TempDir {
     path: PathBuf,
 }
@@ -244,6 +338,84 @@ fn validate_invalid_config_reports_missing_reference() {
             .any(|d| d.code.to_string() == "AMICU-REF-001"),
         "expected a missing-reference diagnostic"
     );
+}
+
+fn has_code(report: &amicu_core::diagnostic::DiagnosticReport, code: &str) -> bool {
+    report
+        .diagnostics
+        .iter()
+        .any(|d| d.code.to_string() == code)
+}
+
+#[test]
+fn region_residency_violation_blocks_validate_plan_and_apply() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", RESIDENCY_MODEL_AND_DEPLOYMENT);
+    write(&td.path, "policy.hcl", REGION_RESIDENCY_VIOLATION);
+
+    // validate
+    let mut out = Vec::new();
+    let code = commands::validate::run(&project, false, OutputFormat::Json, &mut out).unwrap();
+    assert_eq!(code, 1);
+    let report: amicu_core::diagnostic::DiagnosticReport = serde_json::from_slice(&out).unwrap();
+    assert!(!report.valid);
+    assert!(
+        has_code(&report, "AMICU-POLICY-002"),
+        "expected a region-residency diagnostic"
+    );
+
+    // plan
+    let mut out = Vec::new();
+    let code = commands::plan::run(&project, OutputFormat::Json, &mut out).unwrap();
+    assert_eq!(code, 1);
+    let report: amicu_core::diagnostic::DiagnosticReport = serde_json::from_slice(&out).unwrap();
+    assert!(has_code(&report, "AMICU-POLICY-002"));
+
+    // apply never reaches a side effect
+    let mut out = Vec::new();
+    let code = commands::apply::run(&project, true, OutputFormat::Json, &mut out).unwrap();
+    assert_eq!(code, 1);
+    let report: amicu_core::diagnostic::DiagnosticReport = serde_json::from_slice(&out).unwrap();
+    assert!(has_code(&report, "AMICU-POLICY-002"));
+    assert!(
+        project.load_state().unwrap().is_none(),
+        "a residency-violating stack must never reach apply"
+    );
+}
+
+#[test]
+fn provider_allowlist_violation_reports_policy_003() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", RESIDENCY_MODEL_AND_DEPLOYMENT);
+    write(&td.path, "policy.hcl", PROVIDER_ALLOWLIST_VIOLATION);
+
+    let mut out = Vec::new();
+    let code = commands::validate::run(&project, false, OutputFormat::Json, &mut out).unwrap();
+    assert_eq!(code, 1);
+    let report: amicu_core::diagnostic::DiagnosticReport = serde_json::from_slice(&out).unwrap();
+    assert!(!report.valid);
+    assert!(
+        has_code(&report, "AMICU-POLICY-003"),
+        "expected a provider-not-allowed diagnostic"
+    );
+}
+
+#[test]
+fn residency_compliant_stack_passes() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", RESIDENCY_MODEL_AND_DEPLOYMENT);
+    write(&td.path, "policy.hcl", RESIDENCY_COMPLIANT);
+
+    let mut out = Vec::new();
+    let code = commands::validate::run(&project, false, OutputFormat::Json, &mut out).unwrap();
+    assert_eq!(code, 0);
+    let report: amicu_core::diagnostic::DiagnosticReport = serde_json::from_slice(&out).unwrap();
+    assert!(report.valid);
+    assert!(!has_code(&report, "AMICU-POLICY-002"));
+    assert!(!has_code(&report, "AMICU-POLICY-003"));
 }
 
 #[test]

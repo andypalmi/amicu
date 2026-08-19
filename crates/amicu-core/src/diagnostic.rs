@@ -292,6 +292,14 @@ pub mod catalog {
     pub const MEM_ARTIFACT_OVERSIZE: DiagnosticCode = DiagnosticCode::new(Category::Mem, 2);
     /// `AMICU-POLICY-001` — deployment exceeds the configured budget.
     pub const POLICY_BUDGET_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Policy, 1);
+    // --- TASK-024: region / data-residency validation ---
+    /// `AMICU-POLICY-002` — a deployment's region violates the configured
+    /// residency / region allowlist (or matches a deny rule's region).
+    pub const POLICY_REGION_RESIDENCY: DiagnosticCode = DiagnosticCode::new(Category::Policy, 2);
+    /// `AMICU-POLICY-003` — a deployment's provider is not allowed (or matches
+    /// a deny rule's provider).
+    pub const POLICY_PROVIDER_NOT_ALLOWED: DiagnosticCode =
+        DiagnosticCode::new(Category::Policy, 3);
     /// `AMICU-STATE-001` — state is locked by another operation.
     pub const STATE_LOCKED: DiagnosticCode = DiagnosticCode::new(Category::State, 1);
     /// `AMICU-PROVIDER-001` — requested capacity is unavailable in region.
@@ -320,7 +328,7 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 15] {
+    pub const fn all() -> [DiagnosticCode; 17] {
         [
             PARSE_UNCLOSED_BLOCK,
             SCHEMA_MISSING_REQUIRED,
@@ -329,6 +337,9 @@ pub mod catalog {
             MEM_VRAM_EXCEEDED,
             MEM_ARTIFACT_OVERSIZE,
             POLICY_BUDGET_EXCEEDED,
+            // TASK-024 additions:
+            POLICY_REGION_RESIDENCY,
+            POLICY_PROVIDER_NOT_ALLOWED,
             STATE_LOCKED,
             PROVIDER_CAPACITY_UNAVAILABLE,
             PROVIDER_DOWNLOAD_FAILED,
@@ -383,6 +394,14 @@ mod tests {
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(codes.len(), total, "catalog contains a duplicate code");
+        assert_eq!(
+            catalog::POLICY_REGION_RESIDENCY.to_string(),
+            "AMICU-POLICY-002"
+        );
+        assert_eq!(
+            catalog::POLICY_PROVIDER_NOT_ALLOWED.to_string(),
+            "AMICU-POLICY-003"
+        );
         assert_eq!(catalog::MEM_ARTIFACT_OVERSIZE.to_string(), "AMICU-MEM-002");
         assert_eq!(
             catalog::PROVIDER_DOWNLOAD_FAILED.to_string(),
