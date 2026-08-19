@@ -1,1 +1,30 @@
-//! Local/remote state, locks, drift
+//! State backend adapters: canonical state, locking, history, and drift.
+//!
+//! A [`StateBackendAdapter`] stores the canonical [`StateSnapshot`], mediates
+//! concurrent writes with an explicit [`LockHandle`], keeps a [`StateVersion`]
+//! history for rollback, and reports [`DriftReport`]s between a desired graph
+//! and the recorded one. It extends the common
+//! [`Adapter`](amicu_core::adapter::Adapter) contract, so instances live in an
+//! [`amicu_core::adapter::Registry`] alongside every other adapter family.
+//!
+//! Two failure modes demand explicit recovery and are never resolved by a
+//! silent overwrite: lock contention and state corruption. Both surface as
+//! `AMICU-STATE-*` [`AdapterError`](amicu_core::adapter::AdapterError)s via
+//! [`StateError`].
+
+mod adapter;
+mod drift;
+mod error;
+mod lock;
+mod snapshot;
+
+pub use adapter::StateBackendAdapter;
+pub use drift::{DriftReport, detect_drift};
+pub use error::{
+    STATE_CORRUPTED, STATE_LOCK_NOT_HELD, STATE_LOCKED, STATE_VERSION_NOT_FOUND, StateError,
+};
+pub use lock::LockHandle;
+pub use snapshot::{StateSnapshot, StateVersion};
+
+#[cfg(test)]
+mod tests;
