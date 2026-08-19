@@ -1,0 +1,536 @@
+//! Local hardware discovery for on-host runtimes (Apple Silicon, CPU-only).
+//!
+//! Raw data acquisition is abstracted behind [`SystemProbe`] so the parsing
+//! logic stays pure and is unit-tested against captured fixtures. [`discover`]
+//! runs the real [`HostProbe`]; tests inject a fake probe.
+//!
+//! macOS unified memory is reported by `system_profiler` in binary "GB"
+//! (`hw.memsize` confirms an "8 GB" M1 is exactly `8 * 1024^3` bytes), so those
+//! values are interpreted as GiB.
+
+use std::process::Command;
+
+use amicu_core::ByteSize;
+use amicu_core::id::HardwareProfileId;
+use amicu_core::resource::{Accelerator, AcceleratorKind, Cpu, HardwareProfile};
+
+const GIB: u64 = 1024 * 1024 * 1024;
+
+/// Failures raised while discovering local hardware.
+#[derive(Debug, thiserror::Error)]
+pub enum DiscoveryError {
+    /// A probe command or file read failed.
+    #[error("probe '{source_name}' failed: {message}")]
+    Probe {
+        source_name: String,
+        message: String,
+    },
+
+    /// A required field was absent from probe output.
+    #[error("field '{field}' not found in {source_name} output")]
+    FieldNotFound { field: String, source_name: String },
+
+    /// A field was present but its value could not be parsed.
+    #[error("could not parse '{field}' value {value:?} from {source_name}")]
+    ParseValue {
+        field: String,
+        value: String,
+        source_name: String,
+    },
+
+    /// The host OS has no discovery path.
+    #[error("unsupported OS: {0}")]
+    UnsupportedOs(String),
+}
+
+/// Abstracts raw system data acquisition so discovery parsing stays pure.
+pub trait SystemProbe {
+    /// Run `command` with `args`, returning its stdout.
+    fn run(&self, command: &str, args: &[&str]) -> Result<String, DiscoveryError>;
+    /// Read a file (e.g. `/proc/cpuinfo`) to a string.
+    fn read_file(&self, path: &str) -> Result<String, DiscoveryError>;
+}
+
+/// The real probe: shells out and reads files on the host.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct HostProbe;
+
+impl SystemProbe for HostProbe {
+    fn run(&self, command: &str, args: &[&str]) -> Result<String, DiscoveryError> {
+        let output =
+            Command::new(command)
+                .args(args)
+                .output()
+                .map_err(|e| DiscoveryError::Probe {
+                    source_name: command.to_string(),
+                    message: e.to_string(),
+                })?;
+        if !output.status.success() {
+            return Err(DiscoveryError::Probe {
+                source_name: command.to_string(),
+                message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn read_file(&self, path: &str) -> Result<String, DiscoveryError> {
+        std::fs::read_to_string(path).map_err(|e| DiscoveryError::Probe {
+            source_name: path.to_string(),
+            message: e.to_string(),
+        })
+    }
+}
+
+/// A discovered host: the [`HardwareProfile`] plus environment facts that do
+/// not live on the profile (OS name and free disk).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostReport {
+    pub profile: HardwareProfile,
+    pub os: String,
+    pub disk_free: ByteSize,
+}
+
+/// Discover the local [`HardwareProfile`] using the real host probe.
+pub fn discover() -> Result<HardwareProfile, DiscoveryError> {
+    discover_report().map(|r| r.profile)
+}
+
+/// Discover a full [`HostReport`] (profile + OS + free disk) using the host
+/// probe. On macOS, Apple-Silicon detection is tried first with a CPU-only
+/// fallback; Linux uses the CPU-only path.
+pub fn discover_report() -> Result<HostReport, DiscoveryError> {
+    discover_with(&HostProbe, std::env::consts::OS)
+}
+
+fn discover_with(probe: &impl SystemProbe, os: &str) -> Result<HostReport, DiscoveryError> {
+    match os {
+        "macos" => discover_macos(probe, os),
+        "linux" => discover_linux(probe, os),
+        other => Err(DiscoveryError::UnsupportedOs(other.to_string())),
+    }
+}
+
+fn discover_macos(probe: &impl SystemProbe, os: &str) -> Result<HostReport, DiscoveryError> {
+    let disk_free = disk_free(probe)?;
+    let hardware = probe.run("system_profiler", &["SPHardwareDataType"])?;
+    // No "Chip:" line (e.g. Intel Mac): fall back to sysctl CPU discovery.
+    let profile = if let Ok(profile) = parse_apple_silicon(&hardware) {
+        profile
+    } else {
+        let sysctl = probe.run("sysctl", &["hw.model", "hw.memsize", "hw.ncpu"])?;
+        parse_macos_cpu(&sysctl)?
+    };
+    Ok(HostReport {
+        profile,
+        os: os.to_string(),
+        disk_free,
+    })
+}
+
+fn discover_linux(probe: &impl SystemProbe, os: &str) -> Result<HostReport, DiscoveryError> {
+    let cpuinfo = probe.read_file("/proc/cpuinfo")?;
+    let meminfo = probe.read_file("/proc/meminfo")?;
+    let profile = parse_linux_cpu(&cpuinfo, &meminfo)?;
+    let disk_free = disk_free(probe)?;
+    Ok(HostReport {
+        profile,
+        os: os.to_string(),
+        disk_free,
+    })
+}
+
+fn disk_free(probe: &impl SystemProbe) -> Result<ByteSize, DiscoveryError> {
+    let df = probe.run("df", &["-Pk", "/"])?;
+    parse_df_available(&df)
+}
+
+fn parse_apple_silicon(text: &str) -> Result<HardwareProfile, DiscoveryError> {
+    let chip = field(text, "Chip", "system_profiler")?;
+    let memory = parse_apple_memory(&field(text, "Memory", "system_profiler")?)?;
+    let cores = parse_leading_u32(
+        &field(text, "Total Number of Cores", "system_profiler")?,
+        "Total Number of Cores",
+        "system_profiler",
+    )?;
+    let model = normalize_chip(&chip);
+    Ok(HardwareProfile {
+        id: HardwareProfileId::new(format!("local-{model}")),
+        provider: "local".to_string(),
+        region: None,
+        accelerator: Some(Accelerator {
+            kind: AcceleratorKind::AppleSilicon,
+            model,
+            count: 1,
+            memory,
+        }),
+        cpu: Some(Cpu { model: chip, cores }),
+        memory,
+        interconnect: None,
+        price: None,
+    })
+}
+
+fn parse_macos_cpu(text: &str) -> Result<HardwareProfile, DiscoveryError> {
+    let model = field(text, "hw.model", "sysctl")?;
+    let memsize = parse_u64(
+        &field(text, "hw.memsize", "sysctl")?,
+        "hw.memsize",
+        "sysctl",
+    )?;
+    let cores = parse_u32(&field(text, "hw.ncpu", "sysctl")?, "hw.ncpu", "sysctl")?;
+    let memory = ByteSize::from_bytes(memsize);
+    Ok(HardwareProfile {
+        id: HardwareProfileId::new("local-cpu"),
+        provider: "local".to_string(),
+        region: None,
+        accelerator: None,
+        cpu: Some(Cpu { model, cores }),
+        memory,
+        interconnect: None,
+        price: None,
+    })
+}
+
+fn parse_linux_cpu(cpuinfo: &str, meminfo: &str) -> Result<HardwareProfile, DiscoveryError> {
+    let model = field(cpuinfo, "model name", "/proc/cpuinfo")?;
+    let cores = cpuinfo
+        .lines()
+        .filter(|l| {
+            l.split_once(':')
+                .is_some_and(|(k, _)| k.trim() == "processor")
+        })
+        .count();
+    let cores = u32::try_from(cores).unwrap_or(u32::MAX);
+    if cores == 0 {
+        return Err(DiscoveryError::FieldNotFound {
+            field: "processor".to_string(),
+            source_name: "/proc/cpuinfo".to_string(),
+        });
+    }
+    let mem_kb = parse_meminfo_total(meminfo)?;
+    let memory = ByteSize::from_bytes(mem_kb.saturating_mul(1024));
+    Ok(HardwareProfile {
+        id: HardwareProfileId::new("local-cpu"),
+        provider: "local".to_string(),
+        region: None,
+        accelerator: None,
+        cpu: Some(Cpu { model, cores }),
+        memory,
+        interconnect: None,
+        price: None,
+    })
+}
+
+/// Extract the value of a `Key: value` line, matching `key` against the trimmed
+/// text before the first colon. Serves `system_profiler`, `sysctl` and
+/// `/proc/cpuinfo` alike.
+fn field(text: &str, key: &str, source_name: &str) -> Result<String, DiscoveryError> {
+    text.lines()
+        .find_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            (k.trim() == key).then(|| v.trim().to_string())
+        })
+        .ok_or_else(|| DiscoveryError::FieldNotFound {
+            field: key.to_string(),
+            source_name: source_name.to_string(),
+        })
+}
+
+/// `"Apple M3 Max"` -> `"m3_max"`.
+fn normalize_chip(chip: &str) -> String {
+    chip.strip_prefix("Apple ")
+        .unwrap_or(chip)
+        .to_lowercase()
+        .replace(' ', "_")
+}
+
+/// Apple reports unified memory in binary "GB"; interpret as GiB.
+fn parse_apple_memory(s: &str) -> Result<ByteSize, DiscoveryError> {
+    let gib = parse_leading_u64(s, "Memory", "system_profiler")?;
+    Ok(ByteSize::from_bytes(gib.saturating_mul(GIB)))
+}
+
+fn parse_meminfo_total(text: &str) -> Result<u64, DiscoveryError> {
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("MemTotal:"))
+        .ok_or_else(|| DiscoveryError::FieldNotFound {
+            field: "MemTotal".to_string(),
+            source_name: "/proc/meminfo".to_string(),
+        })?;
+    let value = line.split_whitespace().nth(1).unwrap_or_default();
+    parse_u64(value, "MemTotal", "/proc/meminfo")
+}
+
+fn parse_df_available(text: &str) -> Result<ByteSize, DiscoveryError> {
+    let row = text
+        .lines()
+        .nth(1)
+        .ok_or_else(|| DiscoveryError::FieldNotFound {
+            field: "row".to_string(),
+            source_name: "df".to_string(),
+        })?;
+    // df -Pk columns: Filesystem, 1024-blocks, Used, Available, Capacity, Mount.
+    let available = row.split_whitespace().nth(3).unwrap_or_default();
+    let blocks = parse_u64(available, "Available", "df")?;
+    Ok(ByteSize::from_bytes(blocks.saturating_mul(1024)))
+}
+
+fn parse_u64(s: &str, field: &str, source_name: &str) -> Result<u64, DiscoveryError> {
+    s.trim().parse().map_err(|_| DiscoveryError::ParseValue {
+        field: field.to_string(),
+        value: s.to_string(),
+        source_name: source_name.to_string(),
+    })
+}
+
+fn parse_u32(s: &str, field: &str, source_name: &str) -> Result<u32, DiscoveryError> {
+    s.trim().parse().map_err(|_| DiscoveryError::ParseValue {
+        field: field.to_string(),
+        value: s.to_string(),
+        source_name: source_name.to_string(),
+    })
+}
+
+fn parse_leading_u64(s: &str, field: &str, source_name: &str) -> Result<u64, DiscoveryError> {
+    let digits: String = s.trim().chars().take_while(char::is_ascii_digit).collect();
+    parse_u64(&digits, field, source_name).map_err(|_| DiscoveryError::ParseValue {
+        field: field.to_string(),
+        value: s.to_string(),
+        source_name: source_name.to_string(),
+    })
+}
+
+fn parse_leading_u32(s: &str, field: &str, source_name: &str) -> Result<u32, DiscoveryError> {
+    let digits: String = s.trim().chars().take_while(char::is_ascii_digit).collect();
+    parse_u32(&digits, field, source_name).map_err(|_| DiscoveryError::ParseValue {
+        field: field.to_string(),
+        value: s.to_string(),
+        source_name: source_name.to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    const SP_HARDWARE_M1: &str = "Hardware:
+
+    Hardware Overview:
+
+      Model Name: MacBook Air
+      Model Identifier: MacBookAir10,1
+      Chip: Apple M1
+      Total Number of Cores: 8 (4 performance and 4 efficiency)
+      Memory: 8 GB
+      System Firmware Version: mBoot-18000.161.9
+";
+
+    const SP_HARDWARE_M3_MAX: &str = "Hardware:
+
+    Hardware Overview:
+
+      Chip: Apple M3 Max
+      Total Number of Cores: 14 (10 performance and 4 efficiency)
+      Memory: 48 GB
+";
+
+    const SYSCTL_INTEL: &str = "hw.model: MacBookPro15,1
+hw.memsize: 17179869184
+hw.ncpu: 12
+";
+
+    const CPUINFO: &str = "processor\t: 0
+vendor_id\t: GenuineIntel
+model name\t: Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz
+cpu cores\t: 4
+
+processor\t: 1
+vendor_id\t: GenuineIntel
+model name\t: Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz
+cpu cores\t: 4
+";
+
+    const MEMINFO: &str = "MemTotal:       16384000 kB
+MemFree:         1234567 kB
+MemAvailable:    8000000 kB
+";
+
+    const DF_MACOS: &str = "Filesystem     1024-blocks      Used Available Capacity  Mounted on
+/dev/disk3s1s1   239362496  11001500  78500996    13%    /
+";
+
+    const DF_LINUX: &str = "Filesystem     1K-blocks     Used Available Use% Mounted on
+/dev/sda1      103081248 25000000  72836000  26% /
+";
+
+    #[derive(Default)]
+    struct FakeProbe {
+        commands: HashMap<String, String>,
+        files: HashMap<String, String>,
+    }
+
+    impl FakeProbe {
+        fn command(mut self, key: &str, out: &str) -> Self {
+            self.commands.insert(key.to_string(), out.to_string());
+            self
+        }
+        fn file(mut self, path: &str, out: &str) -> Self {
+            self.files.insert(path.to_string(), out.to_string());
+            self
+        }
+    }
+
+    impl SystemProbe for FakeProbe {
+        fn run(&self, command: &str, args: &[&str]) -> Result<String, DiscoveryError> {
+            let key = std::iter::once(command)
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.commands
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| DiscoveryError::Probe {
+                    source_name: key,
+                    message: "no fixture".to_string(),
+                })
+        }
+        fn read_file(&self, path: &str) -> Result<String, DiscoveryError> {
+            self.files
+                .get(path)
+                .cloned()
+                .ok_or_else(|| DiscoveryError::Probe {
+                    source_name: path.to_string(),
+                    message: "no fixture".to_string(),
+                })
+        }
+    }
+
+    #[test]
+    fn parses_apple_silicon() {
+        let profile = parse_apple_silicon(SP_HARDWARE_M3_MAX).unwrap();
+        let acc = profile.accelerator.unwrap();
+        assert_eq!(acc.kind, AcceleratorKind::AppleSilicon);
+        assert_eq!(acc.model, "m3_max");
+        assert_eq!(acc.count, 1);
+        assert_eq!(acc.memory.bytes(), 48 * GIB);
+        assert_eq!(profile.memory.bytes(), 48 * GIB);
+        let cpu = profile.cpu.unwrap();
+        assert_eq!(cpu.model, "Apple M3 Max");
+        assert_eq!(cpu.cores, 14);
+        assert_eq!(profile.provider, "local");
+    }
+
+    #[test]
+    fn parses_apple_silicon_m1_binary_memory() {
+        let profile = parse_apple_silicon(SP_HARDWARE_M1).unwrap();
+        // system_profiler "8 GB" == sysctl hw.memsize 8589934592 == 8 GiB.
+        assert_eq!(profile.memory.bytes(), 8_589_934_592);
+        assert_eq!(profile.accelerator.unwrap().model, "m1");
+    }
+
+    #[test]
+    fn parses_macos_cpu() {
+        let profile = parse_macos_cpu(SYSCTL_INTEL).unwrap();
+        assert!(profile.accelerator.is_none());
+        let cpu = profile.cpu.unwrap();
+        assert_eq!(cpu.model, "MacBookPro15,1");
+        assert_eq!(cpu.cores, 12);
+        assert_eq!(profile.memory.bytes(), 17_179_869_184);
+    }
+
+    #[test]
+    fn parses_linux_cpu() {
+        let profile = parse_linux_cpu(CPUINFO, MEMINFO).unwrap();
+        let cpu = profile.cpu.unwrap();
+        assert_eq!(cpu.model, "Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz");
+        assert_eq!(cpu.cores, 2);
+        assert_eq!(profile.memory.bytes(), 16_384_000 * 1024);
+    }
+
+    #[test]
+    fn parses_disk_free() {
+        assert_eq!(
+            parse_df_available(DF_MACOS).unwrap().bytes(),
+            78_500_996 * 1024
+        );
+        assert_eq!(
+            parse_df_available(DF_LINUX).unwrap().bytes(),
+            72_836_000 * 1024
+        );
+    }
+
+    #[test]
+    fn malformed_apple_output_errs() {
+        let err = parse_apple_silicon("garbage without fields").unwrap_err();
+        assert!(matches!(err, DiscoveryError::FieldNotFound { .. }));
+    }
+
+    #[test]
+    fn malformed_meminfo_errs() {
+        assert!(matches!(
+            parse_linux_cpu(CPUINFO, "MemTotal: not_a_number kB").unwrap_err(),
+            DiscoveryError::ParseValue { .. }
+        ));
+    }
+
+    #[test]
+    fn discovers_macos_apple_silicon() {
+        let probe = FakeProbe::default()
+            .command("system_profiler SPHardwareDataType", SP_HARDWARE_M1)
+            .command("df -Pk /", DF_MACOS);
+        let report = discover_with(&probe, "macos").unwrap();
+        assert_eq!(report.os, "macos");
+        assert_eq!(report.disk_free.bytes(), 78_500_996 * 1024);
+        assert_eq!(
+            report.profile.accelerator.unwrap().kind,
+            AcceleratorKind::AppleSilicon
+        );
+    }
+
+    #[test]
+    fn discovers_macos_cpu_fallback() {
+        // No "Chip:" line -> falls back to sysctl.
+        let probe = FakeProbe::default()
+            .command(
+                "system_profiler SPHardwareDataType",
+                "Hardware:\n  Model Name: iMac\n",
+            )
+            .command("sysctl hw.model hw.memsize hw.ncpu", SYSCTL_INTEL)
+            .command("df -Pk /", DF_MACOS);
+        let report = discover_with(&probe, "macos").unwrap();
+        assert!(report.profile.accelerator.is_none());
+        assert_eq!(report.profile.cpu.unwrap().cores, 12);
+    }
+
+    #[test]
+    fn discovers_linux() {
+        let probe = FakeProbe::default()
+            .file("/proc/cpuinfo", CPUINFO)
+            .file("/proc/meminfo", MEMINFO)
+            .command("df -Pk /", DF_LINUX);
+        let report = discover_with(&probe, "linux").unwrap();
+        assert_eq!(report.os, "linux");
+        assert_eq!(report.disk_free.bytes(), 72_836_000 * 1024);
+        assert_eq!(report.profile.memory.bytes(), 16_384_000 * 1024);
+    }
+
+    #[test]
+    fn rejects_unsupported_os() {
+        let probe = FakeProbe::default();
+        assert!(matches!(
+            discover_with(&probe, "windows").unwrap_err(),
+            DiscoveryError::UnsupportedOs(_)
+        ));
+    }
+
+    #[test]
+    #[ignore = "runs real OS probes; host-dependent"]
+    fn discover_on_host() {
+        let report = discover_report().expect("discovery on host");
+        assert!(report.profile.memory.bytes() > 0);
+        assert!(report.disk_free.bytes() > 0);
+    }
+}

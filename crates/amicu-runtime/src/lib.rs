@@ -15,6 +15,7 @@
 
 mod adapter;
 mod capabilities;
+pub mod discovery;
 mod error;
 mod handle;
 mod plan;
