@@ -1,1 +1,3 @@
-//! Cloud/external/secret adapters
+//! Cloud/external/secret adapters.
+
+pub mod secret;
