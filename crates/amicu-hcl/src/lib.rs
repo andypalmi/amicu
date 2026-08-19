@@ -4,8 +4,8 @@
 //! The round-trip contract is semantic, not textual:
 //! `parse_graph(&format_graph(&g)?) == g` for any graph produced by
 //! [`parse_graph`]. [`format_graph`] is fallible: it rejects graphs whose
-//! resource ids or label keys are not round-trip-safe HCL identifiers rather
-//! than corrupting them silently.
+//! resource ids, label keys, or reference edge values are not round-trip-safe
+//! HCL identifiers rather than corrupting them silently.
 
 mod de;
 mod error;
@@ -18,9 +18,12 @@ pub use ser::format_graph;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use amicu_core::ByteSize;
     use amicu_core::graph::Graph;
     use amicu_core::resource::{
-        Artifact, ArtifactFormat, Model, ModelSource, Quantization, Runtime, SourceRegistry, Tenant,
+        Artifact, ArtifactFormat, Budget, BudgetPeriod, DataClass, Deployment, GovernanceRule,
+        HardwareProfile, LlamaCppSettings, Model, ModelSource, Money, Quantization, RoutingPolicy,
+        RoutingTarget, RuleEffect, Runtime, Sensitivity, SourceRegistry, Tenant, UseCase,
     };
     use std::collections::BTreeMap;
 
@@ -155,6 +158,177 @@ mod tests {
                 .map(String::as_str),
             Some("eng")
         );
+    }
+
+    fn hardware(id: &str) -> HardwareProfile {
+        HardwareProfile {
+            id: id.into(),
+            provider: "local".into(),
+            region: None,
+            accelerator: None,
+            cpu: None,
+            memory: ByteSize::from_bytes(48 * 1024 * 1024 * 1024),
+            interconnect: None,
+            price: None,
+        }
+    }
+
+    fn deployment(id: &str, model_ref: &str, hw_ref: &str) -> Deployment {
+        Deployment {
+            id: id.into(),
+            model: model_ref.into(),
+            hardware_profile: hw_ref.into(),
+            runtime: Runtime::LlamaCpp(LlamaCppSettings {
+                context_length: 8192,
+                port: 8000,
+                n_gpu_layers: -1,
+            }),
+        }
+    }
+
+    fn routing(id: &str, dep_ref: &str) -> RoutingPolicy {
+        RoutingPolicy {
+            id: id.into(),
+            aliases: Vec::new(),
+            targets: vec![RoutingTarget {
+                deployment: dep_ref.into(),
+                weight: 1,
+            }],
+            failover: None,
+            optimize_for: None,
+        }
+    }
+
+    fn data_class(id: &str) -> DataClass {
+        DataClass {
+            id: id.into(),
+            sensitivity: Sensitivity::Public,
+            residency: Vec::new(),
+            allow_external_providers: false,
+            handling: Vec::new(),
+        }
+    }
+
+    fn governance(id: &str, dc_ref: &str) -> GovernanceRule {
+        GovernanceRule {
+            id: id.into(),
+            description: None,
+            effect: RuleEffect::Allow,
+            data_classes: vec![dc_ref.into()],
+            allowed_providers: Vec::new(),
+            allowed_regions: Vec::new(),
+        }
+    }
+
+    fn budget(id: &str, tenant_ref: Option<&str>) -> Budget {
+        Budget {
+            id: id.into(),
+            tenant: tenant_ref.map(Into::into),
+            limit: Money::new(100.0, "USD"),
+            period: BudgetPeriod::Monthly,
+            alert_thresholds: Vec::new(),
+        }
+    }
+
+    fn use_case(id: &str, dc_ref: Option<&str>) -> UseCase {
+        UseCase {
+            id: id.into(),
+            description: None,
+            modalities: Vec::new(),
+            min_context_length: None,
+            max_latency_ms: None,
+            required_data_class: dc_ref.map(Into::into),
+            priority: None,
+        }
+    }
+
+    #[test]
+    fn dangling_non_identifier_references_are_rejected() {
+        let rejected =
+            |g: Graph| matches!(format_graph(&g), Err(HclError::InvalidIdentifier { .. }));
+
+        let mut g = Graph::new();
+        g.deployments.push(deployment("dep", "bad.model", "hw"));
+        assert!(rejected(g), "deployment model reference");
+
+        let mut g = Graph::new();
+        g.deployments.push(deployment("dep", "model", "bad hw"));
+        assert!(rejected(g), "deployment hardware reference");
+
+        let mut g = Graph::new();
+        g.routing_policies.push(routing("route", "bad.dep"));
+        assert!(rejected(g), "routing target deployment reference");
+
+        let mut g = Graph::new();
+        g.governance_rules.push(governance("rule", "bad.dc"));
+        assert!(rejected(g), "governance data_class reference");
+
+        let mut g = Graph::new();
+        g.budgets.push(budget("bud", Some("bad tenant")));
+        assert!(rejected(g), "budget tenant reference");
+
+        let mut g = Graph::new();
+        g.use_cases.push(use_case("uc", Some("bad.dc")));
+        assert!(rejected(g), "use_case required_data_class reference");
+    }
+
+    #[test]
+    fn identifier_safe_references_round_trip_even_when_dangling() {
+        let mut g = Graph::new();
+        g.deployments
+            .push(deployment("edge_dep", "phantom_model", "phantom_hw"));
+        let reparsed = parse_graph(&format_graph(&g).unwrap()).unwrap();
+        assert_eq!(g, reparsed);
+    }
+
+    #[test]
+    fn non_identifier_ids_are_rejected_across_kinds() {
+        let bad = "has.dot";
+        let mut cases: Vec<Graph> = Vec::new();
+        let mut push = |g: Graph| cases.push(g);
+
+        let mut g = Graph::new();
+        g.hardware_profiles.push(hardware(bad));
+        push(g);
+        let mut g = Graph::new();
+        g.deployments.push(deployment(bad, "model", "hw"));
+        push(g);
+        let mut g = Graph::new();
+        g.routing_policies.push(routing(bad, "dep"));
+        push(g);
+        let mut g = Graph::new();
+        g.data_classes.push(data_class(bad));
+        push(g);
+        let mut g = Graph::new();
+        g.governance_rules.push(governance(bad, "dc"));
+        push(g);
+        let mut g = Graph::new();
+        g.budgets.push(budget(bad, None));
+        push(g);
+        let mut g = Graph::new();
+        g.use_cases.push(use_case(bad, None));
+        push(g);
+
+        for g in cases {
+            assert!(matches!(
+                format_graph(&g),
+                Err(HclError::InvalidIdentifier { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn all_kinds_with_safe_ids_round_trip() {
+        let mut g = Graph::new();
+        g.hardware_profiles.push(hardware("hw_1"));
+        g.deployments.push(deployment("dep_1", "model_1", "hw_1"));
+        g.routing_policies.push(routing("route_1", "dep_1"));
+        g.data_classes.push(data_class("dc_1"));
+        g.governance_rules.push(governance("rule_1", "dc_1"));
+        g.budgets.push(budget("bud_1", Some("tenant_1")));
+        g.use_cases.push(use_case("uc_1", Some("dc_1")));
+        let reparsed = parse_graph(&format_graph(&g).unwrap()).unwrap();
+        assert_eq!(g, reparsed);
     }
 
     #[test]

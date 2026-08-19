@@ -15,23 +15,26 @@ use crate::error::HclError;
 ///
 /// # Contract
 ///
-/// The round-trip is only lossless when every resource id and every tenant
-/// label key is a valid HCL identifier, because ids are emitted as bare
-/// traversals (`model.<id>.id`) and label keys as bare attribute names. Ids
-/// serialize identically to the DSL/JSON string form, so a graph built or
-/// deserialized outside [`parse_graph`](crate::parse_graph) may carry ids or
-/// keys that are not identifier-safe (empty, leading digit, or containing `.`
-/// or whitespace) and would otherwise reparse to a *different* value.
+/// The round-trip is only lossless when every resource id, every tenant label
+/// key, and every reference edge value is a valid HCL identifier, because ids
+/// and references are emitted as bare traversals (`model.<id>.id`) and label
+/// keys as bare attribute names. These serialize identically to the DSL/JSON
+/// string form, so a graph built or deserialized outside
+/// [`parse_graph`](crate::parse_graph) may carry a value that is not
+/// identifier-safe (empty, leading digit, or containing `.` or whitespace) and
+/// would otherwise reparse to a *different* value. A dangling reference
+/// (pointing at an id absent from the graph) is the case where such a value can
+/// slip through, since it is never checked against a real id.
 ///
-/// Rather than corrupt such a graph silently, this function validates every
-/// id and label key up front and returns
-/// [`HclError::InvalidIdentifier`] on the first offender. For any graph it
-/// accepts, `parse_graph(&format_graph(g)?)` recovers an equal graph.
+/// Rather than corrupt such a graph silently, this function validates every id,
+/// label key, and reference up front and returns [`HclError::InvalidIdentifier`]
+/// on the first offender. For any graph it accepts,
+/// `parse_graph(&format_graph(g)?)` recovers an equal graph.
 ///
 /// # Errors
 ///
-/// Returns [`HclError::InvalidIdentifier`] if a resource id or tenant label
-/// key is not a valid, round-trip-safe HCL identifier.
+/// Returns [`HclError::InvalidIdentifier`] if a resource id, tenant label key,
+/// or reference edge value is not a valid, round-trip-safe HCL identifier.
 pub fn format_graph(graph: &Graph) -> Result<String, HclError> {
     validate_identifiers(graph)?;
 
@@ -66,8 +69,9 @@ pub fn format_graph(graph: &Graph) -> Result<String, HclError> {
     Ok(hcl::to_string(&body.build()).expect("HCL body always serializes"))
 }
 
-/// Reject any resource id or tenant label key that is not a valid HCL
-/// identifier, since such values cannot round-trip through the emitted HCL.
+/// Reject any resource id, tenant label key, or reference edge value that is
+/// not a valid HCL identifier, since such values cannot round-trip through the
+/// emitted HCL.
 fn validate_identifiers(graph: &Graph) -> Result<(), HclError> {
     let ids = graph
         .models
@@ -124,6 +128,67 @@ fn validate_identifiers(graph: &Graph) -> Result<(), HclError> {
                     key,
                 ));
             }
+        }
+    }
+
+    validate_references(graph)
+}
+
+/// Reject any reference edge value that is not a valid HCL identifier. A
+/// dangling reference (one that matches no resource id) is where such a value
+/// can slip through, so every edge is checked independently of resolution.
+fn validate_references(graph: &Graph) -> Result<(), HclError> {
+    let check = |resource: String, value: &str| -> Result<(), HclError> {
+        if Identifier::new(value).is_err() {
+            return Err(HclError::invalid_identifier(resource, value));
+        }
+        Ok(())
+    };
+
+    for d in &graph.deployments {
+        let id = d.id.as_str();
+        check(
+            format!("deployment `{id}` model reference"),
+            d.model.as_str(),
+        )?;
+        check(
+            format!("deployment `{id}` hardware reference"),
+            d.hardware_profile.as_str(),
+        )?;
+    }
+    for p in &graph.routing_policies {
+        for t in &p.targets {
+            check(
+                format!(
+                    "routing_policy `{}` target deployment reference",
+                    p.id.as_str()
+                ),
+                t.deployment.as_str(),
+            )?;
+        }
+    }
+    for r in &graph.governance_rules {
+        for dc in &r.data_classes {
+            check(
+                format!("governance_rule `{}` data_class reference", r.id.as_str()),
+                dc.as_str(),
+            )?;
+        }
+    }
+    for b in &graph.budgets {
+        if let Some(tenant) = &b.tenant {
+            check(
+                format!("budget `{}` tenant reference", b.id.as_str()),
+                tenant.as_str(),
+            )?;
+        }
+    }
+    for u in &graph.use_cases {
+        if let Some(dc) = &u.required_data_class {
+            check(
+                format!("use_case `{}` required_data_class reference", u.id.as_str()),
+                dc.as_str(),
+            )?;
         }
     }
 
