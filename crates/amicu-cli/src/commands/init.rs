@@ -4,6 +4,8 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use amicu_hcl::{format_graph, parse_graph};
+
 use crate::error::CliError;
 use crate::project::Project;
 
@@ -67,7 +69,9 @@ pub(crate) fn run(project: &Project, out: &mut dyn Write) -> Result<u8, CliError
     let root = project.root();
     let mut created = 0u32;
 
-    created += write_if_absent(out, &root.join("amicu.hcl"), AMICU_HCL)?;
+    // Emit the starter already in canonical form so `fmt --check` is clean.
+    let amicu_hcl = canonical_starter()?;
+    created += write_if_absent(out, &root.join("amicu.hcl"), &amicu_hcl)?;
     created += write_if_absent(out, &root.join("variables.amicu.hcl"), VARIABLES_HCL)?;
 
     ensure_dir(out, &project.dot_dir(), &mut created)?;
@@ -86,6 +90,17 @@ pub(crate) fn run(project: &Project, out: &mut dyn Write) -> Result<u8, CliError
         .map_err(|e| CliError::io("write failed", e))?;
     }
     Ok(0)
+}
+
+/// The starter config, rendered through the same formatter as `fmt`.
+fn canonical_starter() -> Result<String, CliError> {
+    let path = Path::new("amicu.hcl");
+    let to_err = |source| CliError::Hcl {
+        file: path.to_path_buf(),
+        source,
+    };
+    let graph = parse_graph(AMICU_HCL).map_err(to_err)?;
+    format_graph(&graph).map_err(to_err)
 }
 
 fn write_if_absent(out: &mut dyn Write, path: &Path, contents: &str) -> Result<u32, CliError> {

@@ -2,12 +2,14 @@
 
 use std::io::Write;
 
+use amicu_core::diagnostic::{DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
 use amicu_runtime::{EndpointRegistry, RuntimeAdapter, RuntimeHandle};
 
 use crate::OutputFormat;
 use crate::catalog::build_catalog;
+use crate::checks::report_for;
 use crate::error::CliError;
 use crate::planner::{PlanResult, build_plan};
 use crate::project::{LocalState, Project};
@@ -22,16 +24,25 @@ pub(crate) fn run(
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
     let graph = project.load_graph()?;
+
+    // Surface structural errors through the same diagnostic path as `validate`,
+    // before `build_plan` can hard-error on them.
+    let diagnostics = report_for(&graph);
+    if !diagnostics.valid {
+        emit_report(&diagnostics, output, out)?;
+        return Ok(1);
+    }
+
     let prior_state = project.load_state()?;
     let prior_graph = prior_state.as_ref().map(|s| s.graph.clone());
     let result = build_plan(&graph, prior_graph.as_ref())?;
 
     if result.has_errors() {
-        writeln!(
+        emit_report(
+            &DiagnosticReport::new(result.diagnostics.clone()),
+            output,
             out,
-            "Cannot apply: configuration has errors. Run `amicu validate`."
-        )
-        .map_err(|e| CliError::io("write failed", e))?;
+        )?;
         return Ok(1);
     }
 
@@ -92,6 +103,29 @@ async fn apply_all(
     }
 
     Ok(handles)
+}
+
+fn emit_report(
+    report: &DiagnosticReport,
+    output: OutputFormat,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    if output.is_json() {
+        write_json(out, report)?;
+    } else {
+        writeln!(
+            out,
+            "Cannot apply: configuration has errors. Run `amicu validate`."
+        )
+        .map_err(|e| CliError::io("write failed", e))?;
+        for d in &report.diagnostics {
+            if d.severity == Severity::Error {
+                writeln!(out, "  error [{}] {}", d.code, d.message)
+                    .map_err(|e| CliError::io("write failed", e))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn find_handle<'a>(

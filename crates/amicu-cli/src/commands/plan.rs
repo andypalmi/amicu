@@ -5,6 +5,7 @@ use std::io::Write;
 use amicu_core::diagnostic::{DiagnosticReport, Severity};
 
 use crate::OutputFormat;
+use crate::checks::report_for;
 use crate::error::CliError;
 use crate::planner::{PlanResult, build_plan};
 use crate::project::Project;
@@ -17,6 +18,15 @@ pub(crate) fn run(
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
     let graph = project.load_graph()?;
+
+    // Surface structural errors (dangling refs, duplicate ids) through the same
+    // diagnostic path as `validate`, before `build_plan` can hard-error on them.
+    let report = report_for(&graph);
+    if !report.valid {
+        emit_report(&report, output, out)?;
+        return Ok(1);
+    }
+
     let prior = project.load_state()?.map(|s| s.graph);
     let result = build_plan(&graph, prior.as_ref())?;
 
@@ -39,9 +49,20 @@ fn emit_errors(
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
-    let report = DiagnosticReport::new(result.diagnostics.clone());
+    emit_report(
+        &DiagnosticReport::new(result.diagnostics.clone()),
+        output,
+        out,
+    )
+}
+
+fn emit_report(
+    report: &DiagnosticReport,
+    output: OutputFormat,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
     if output.is_json() {
-        write_json(out, &report)?;
+        write_json(out, report)?;
     } else {
         writeln!(out, "Cannot plan: configuration has errors.")
             .map_err(|e| CliError::io("write failed", e))?;
