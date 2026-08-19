@@ -419,6 +419,88 @@ fn apply_end_to_end() {
     assert!(project.load_state().unwrap().is_some());
 }
 
+fn assert_frontmatter(text: &str, expected_name: &str) {
+    assert!(
+        text.starts_with("---\n"),
+        "SKILL.md must open with YAML frontmatter"
+    );
+    let body = &text[4..];
+    let end = body
+        .find("\n---\n")
+        .expect("frontmatter must be closed by ---");
+    let front = &body[..end];
+    assert!(
+        front.contains(&format!("name: {expected_name}")),
+        "frontmatter must declare name: {expected_name}"
+    );
+    assert!(
+        front.contains("description:"),
+        "frontmatter must carry an activation description"
+    );
+}
+
+#[test]
+fn skill_export_writes_expected_tree() {
+    use crate::skills::SKILLS;
+
+    let td = TempDir::new();
+    let mut out = Vec::new();
+    commands::skill::write_skills(&td.path, &mut out).unwrap();
+
+    assert_eq!(SKILLS.len(), 8, "there must be exactly eight skills");
+    for skill in SKILLS {
+        let dir = td.path.join(skill.name);
+        let skill_md = dir.join("SKILL.md");
+        assert!(skill_md.is_file(), "{} SKILL.md missing", skill.name);
+        assert_frontmatter(&std::fs::read_to_string(&skill_md).unwrap(), skill.name);
+        for file in skill.references {
+            assert!(
+                dir.join("references").join(file.name).is_file(),
+                "{}/references/{} missing",
+                skill.name,
+                file.name
+            );
+        }
+    }
+
+    // The core skill must carry the verbatim safety rules.
+    let core = std::fs::read_to_string(td.path.join("amicu-core/SKILL.md")).unwrap();
+    for rule in [
+        "Never run `amicu apply` without a reviewed plan",
+        "Never run destructive state commands without explicit approval",
+        "Never reveal, commit, or transmit secret values",
+        "Always validate before plan",
+        "Preserve existing configuration and make minimal changes",
+    ] {
+        assert!(
+            core.contains(rule),
+            "core skill missing safety rule: {rule}"
+        );
+    }
+}
+
+#[test]
+fn skill_export_works_without_a_project() {
+    // A temp dir with no amicu config: export must still succeed.
+    let td = TempDir::new();
+    let mut out = Vec::new();
+    let code =
+        commands::skill::export(crate::SkillTarget::ClaudeCode, Some(&td.path), &mut out).unwrap();
+    assert_eq!(code, 0);
+    assert!(td.path.join("amicu-core/SKILL.md").is_file());
+    assert!(td.path.join("amicu-presets/SKILL.md").is_file());
+}
+
+#[test]
+fn skill_export_is_idempotent() {
+    let td = TempDir::new();
+    let mut out = Vec::new();
+    commands::skill::write_skills(&td.path, &mut out).unwrap();
+    let mut out2 = Vec::new();
+    commands::skill::write_skills(&td.path, &mut out2).unwrap();
+    assert_eq!(utf8(out), utf8(out2), "re-export must be deterministic");
+}
+
 #[test]
 fn approval_parsing() {
     assert!(commands::apply::approved("y"));

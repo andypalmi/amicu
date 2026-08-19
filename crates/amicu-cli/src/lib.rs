@@ -10,8 +10,10 @@ mod error;
 mod planner;
 mod project;
 mod secret;
+mod skills;
 
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -73,6 +75,57 @@ enum Command {
     },
     /// Run environment and project diagnostics.
     Doctor,
+    /// Export coding-agent skills. Does not require a project.
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SkillCommand {
+    /// Render the canonical agent skills into a target-specific layout.
+    Export {
+        /// Coding agent to render skills for.
+        #[arg(long, value_enum)]
+        target: SkillTarget,
+        /// Output directory (overrides the target default; required for generic).
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
+}
+
+/// A coding agent whose skill layout `skill export` renders to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SkillTarget {
+    /// Claude Code: `.claude/skills/<skill>/SKILL.md` + `references/`.
+    ClaudeCode,
+    /// Cursor: `.cursor/rules/<skill>/`.
+    Cursor,
+    /// Windsurf: `.windsurf/rules/<skill>/`.
+    Windsurf,
+    /// Plain markdown under `--path` (default `./agent-guidance/`).
+    Generic,
+}
+
+impl SkillTarget {
+    fn default_root(self) -> &'static str {
+        match self {
+            SkillTarget::ClaudeCode => ".claude/skills",
+            SkillTarget::Cursor => ".cursor/rules",
+            SkillTarget::Windsurf => ".windsurf/rules",
+            SkillTarget::Generic => "agent-guidance",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SkillTarget::ClaudeCode => "claude-code",
+            SkillTarget::Cursor => "cursor",
+            SkillTarget::Windsurf => "windsurf",
+            SkillTarget::Generic => "generic",
+        }
+    }
 }
 
 /// Parse arguments, run the selected command, and map it to a process exit code.
@@ -90,6 +143,12 @@ pub fn run() -> ExitCode {
 }
 
 fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
+    // `skill export` is project-independent; route it before discovery.
+    if let Command::Skill { command } = &cli.command {
+        let SkillCommand::Export { target, path } = command;
+        return commands::skill::export(*target, path.as_deref(), out);
+    }
+
     let project = Project::discover()?;
     match &cli.command {
         Command::Init => commands::init::run(&project, out),
@@ -100,6 +159,7 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
             commands::apply::run(&project, *auto_approve, cli.output, out)
         }
         Command::Doctor => commands::doctor::run(&project, cli.output, out),
+        Command::Skill { .. } => unreachable!("handled before project discovery"),
     }
 }
 
