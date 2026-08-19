@@ -9,6 +9,7 @@ pub mod provider;
 pub mod runpod;
 pub mod scaleway;
 pub mod secret;
+pub mod self_hosted;
 
 pub use cost::{CostError, Usage, estimate_cost};
 pub use fake::FakeProvider;
@@ -19,3 +20,4 @@ pub use provider::{
 };
 pub use runpod::RunPodProvider;
 pub use scaleway::ScalewayProvider;
+pub use self_hosted::SelfHostedProvider;
