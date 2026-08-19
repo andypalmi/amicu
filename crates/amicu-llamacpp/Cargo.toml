@@ -6,5 +6,16 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+amicu-core = { path = "../amicu-core" }
+amicu-runtime = { path = "../amicu-runtime" }
+amicu-registry = { path = "../amicu-registry" }
+async-trait = "0.1"
+thiserror = "2"
+serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
 [lints]
 workspace = true
