@@ -28,7 +28,7 @@ pub struct ComputeOffering {
     /// Host system memory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<ByteSize>,
-    /// Region codes (see [`super::region::Region`]) this offering is sold in.
+    /// Region codes (see [`super::Region`]) this offering is sold in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub regions: Vec<String>,
     /// On-demand and spot pricing for this offering.
