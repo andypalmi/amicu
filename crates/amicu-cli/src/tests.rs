@@ -79,6 +79,27 @@ resource "deployment" "orphan" {
 }
 "#;
 
+// Redeclares the `support_chat` model id already defined in `VALID_CONFIG`.
+const DUP_MODEL: &str = r#"resource "model" "support_chat" {
+  source {
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen2.5-7B-Instruct"
+  }
+  architecture   = "qwen2"
+  modalities     = ["text"]
+  artifact {
+    format       = "gguf"
+    quantization = "q4_k_m"
+  }
+  context_length = 8192
+  variant {
+    quantization = "q4_k_m"
+    file         = "model.gguf"
+    size         = "4GiB"
+  }
+}
+"#;
+
 struct TempDir {
     path: PathBuf,
 }
@@ -244,6 +265,112 @@ fn plan_diffs_against_prior_state() {
     // Applying against a prior identical graph yields no actions.
     let unchanged = build_plan(&graph, Some(&graph)).unwrap();
     assert!(unchanged.plan.actions.is_empty());
+}
+
+#[test]
+fn plan_detects_referenced_model_change() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let prior = project.load_graph().unwrap();
+
+    // The deployment block is untouched; only the referenced model's variant
+    // changes. Change detection must still surface an update.
+    let mut changed = prior.clone();
+    changed.models[0].variants[0].file = "model-q5.gguf".to_owned();
+
+    let result = build_plan(&changed, Some(&prior)).unwrap();
+    assert_eq!(result.plan.actions.len(), 1);
+    assert_eq!(
+        format!("{:?}", result.plan.actions[0].kind).to_lowercase(),
+        "update"
+    );
+}
+
+#[test]
+fn plan_detects_referenced_hardware_change() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let prior = project.load_graph().unwrap();
+
+    let mut changed = prior.clone();
+    changed.hardware_profiles[0]
+        .accelerator
+        .as_mut()
+        .unwrap()
+        .model = "m4_max".to_owned();
+
+    let result = build_plan(&changed, Some(&prior)).unwrap();
+    assert_eq!(result.plan.actions.len(), 1);
+    assert_eq!(
+        format!("{:?}", result.plan.actions[0].kind).to_lowercase(),
+        "update"
+    );
+}
+
+#[test]
+fn duplicate_id_across_files_is_diagnosed() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "a.hcl", VALID_CONFIG);
+    // A second file redeclares the same model id.
+    write(&td.path, "b.hcl", DUP_MODEL);
+
+    let mut out = Vec::new();
+    let code = commands::validate::run(&project, false, OutputFormat::Json, &mut out).unwrap();
+    assert_eq!(code, 1);
+    let report: amicu_core::diagnostic::DiagnosticReport = serde_json::from_slice(&out).unwrap();
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code.to_string() == "AMICU-SCHEMA-002"),
+        "expected a duplicate-id diagnostic"
+    );
+
+    // And `plan` fails cleanly rather than emitting two same-address items.
+    let mut out = Vec::new();
+    assert_eq!(
+        commands::plan::run(&project, OutputFormat::Human, &mut out).unwrap(),
+        1
+    );
+}
+
+#[test]
+fn plan_json_reports_dangling_reference() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", INVALID_CONFIG);
+
+    let mut out = Vec::new();
+    let code = commands::plan::run(&project, OutputFormat::Json, &mut out).unwrap();
+    assert_eq!(code, 1);
+    // A structured diagnostic body must reach stdout, like `validate --output json`.
+    let report: amicu_core::diagnostic::DiagnosticReport = serde_json::from_slice(&out).unwrap();
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code.to_string() == "AMICU-REF-001"),
+        "expected a missing-reference diagnostic"
+    );
+}
+
+#[test]
+fn init_output_passes_fmt_check() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+
+    let mut out = Vec::new();
+    assert_eq!(commands::init::run(&project, &mut out).unwrap(), 0);
+
+    // The scaffolded files must already be canonical under the formatter.
+    let mut out = Vec::new();
+    assert_eq!(commands::fmt::run(&project, true, &mut out).unwrap(), 0);
+    assert!(utf8(out).contains("correctly formatted"));
 }
 
 #[test]

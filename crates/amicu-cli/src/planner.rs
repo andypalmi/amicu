@@ -63,9 +63,10 @@ pub(crate) fn build_plan(graph: &Graph, prior: Option<&Graph>) -> Result<PlanRes
 
         diagnostics.extend(adapter.validate(d));
 
-        let kind = match prior.and_then(|p| find_deployment(p, &d.id)) {
+        let kind = match prior.and_then(|p| find_deployment(p, &d.id).map(|prev| (p, prev))) {
             None => ActionKind::Create,
-            Some(prev) if prev == d => continue, // unchanged; no action
+            // Unchanged only if the deployment and everything it references match.
+            Some((pg, prev)) if resolve(pg, prev) == resolve(graph, d) => continue,
             Some(_) => ActionKind::Update,
         };
 
@@ -111,6 +112,28 @@ pub(crate) fn build_plan(graph: &Graph, prior: Option<&Graph>) -> Result<PlanRes
 
 fn find_deployment<'a>(graph: &'a Graph, id: &DeploymentId) -> Option<&'a Deployment> {
     graph.deployments.iter().find(|d| &d.id == id)
+}
+
+/// A deployment plus the referenced resources whose contents affect its launch.
+///
+/// Change detection compares this resolved closure, so editing a referenced
+/// model or hardware profile (variant, quantization, size, ...) is seen as an
+/// update even when the deployment block itself is byte-for-byte identical.
+type Resolved<'a> = (
+    &'a Deployment,
+    Option<&'a Model>,
+    Option<&'a HardwareProfile>,
+);
+
+fn resolve<'a>(graph: &'a Graph, d: &'a Deployment) -> Resolved<'a> {
+    (
+        d,
+        graph.models.iter().find(|m| m.id == d.model),
+        graph
+            .hardware_profiles
+            .iter()
+            .find(|h| h.id == d.hardware_profile),
+    )
 }
 
 fn destroy_action(id: &DeploymentId) -> PlannedAction {
