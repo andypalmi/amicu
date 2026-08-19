@@ -27,25 +27,12 @@
 use amicu_core::adapter::{
     Adapter, AdapterError, AdapterErrorKind, AdapterId, DescribeCapabilities,
 };
-use amicu_core::diagnostic::{Category, DiagnosticCode, Severity, catalog};
+use amicu_core::diagnostic::{DiagnosticCode, Severity, catalog};
 use amicu_core::secret::{SecretRef, SecretResolver};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::capability::ProviderCapabilities;
-
-/// `AMICU-PROVIDER-010` — the request names an offering the provider does not
-/// offer.
-const PROVIDER_UNKNOWN_OFFERING: DiagnosticCode = DiagnosticCode::new(Category::Provider, 10);
-/// `AMICU-PROVIDER-011` — the request names a region the provider does not
-/// serve.
-const PROVIDER_UNKNOWN_REGION: DiagnosticCode = DiagnosticCode::new(Category::Provider, 11);
-/// `AMICU-PROVIDER-012` — the handle refers to no known provisioned instance.
-const PROVIDER_UNKNOWN_INSTANCE: DiagnosticCode = DiagnosticCode::new(Category::Provider, 12);
-/// `AMICU-PROVIDER-013` — the provider backend failed transiently.
-const PROVIDER_BACKEND: DiagnosticCode = DiagnosticCode::new(Category::Provider, 13);
-/// `AMICU-PROVIDER-014` — the resolved credential was rejected by the provider.
-const PROVIDER_CREDENTIALS_REJECTED: DiagnosticCode = DiagnosticCode::new(Category::Provider, 14);
 
 /// The provisioning request handed to [`Provider::provision`].
 ///
@@ -253,11 +240,11 @@ impl AdapterErrorKind for ProviderError {
     fn code(&self) -> DiagnosticCode {
         match self {
             ProviderError::CapacityUnavailable { .. } => catalog::PROVIDER_CAPACITY_UNAVAILABLE,
-            ProviderError::UnknownOffering { .. } => PROVIDER_UNKNOWN_OFFERING,
-            ProviderError::UnknownRegion { .. } => PROVIDER_UNKNOWN_REGION,
-            ProviderError::UnknownInstance { .. } => PROVIDER_UNKNOWN_INSTANCE,
-            ProviderError::Backend { .. } => PROVIDER_BACKEND,
-            ProviderError::CredentialsRejected { .. } => PROVIDER_CREDENTIALS_REJECTED,
+            ProviderError::UnknownOffering { .. } => catalog::PROVIDER_UNKNOWN_OFFERING,
+            ProviderError::UnknownRegion { .. } => catalog::PROVIDER_UNKNOWN_REGION,
+            ProviderError::UnknownInstance { .. } => catalog::PROVIDER_UNKNOWN_INSTANCE,
+            ProviderError::Backend { .. } => catalog::PROVIDER_BACKEND,
+            ProviderError::CredentialsRejected { .. } => catalog::PROVIDER_CREDENTIALS_REJECTED,
         }
     }
 
@@ -340,4 +327,44 @@ pub trait Provider: Adapter + DescribeCapabilities {
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<(), AdapterError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_error_normalizes_to_catalog_diagnostic() {
+        let adapter_err = AdapterError::from_kind(ProviderError::UnknownOffering {
+            offering: "gpu.h100.1x".into(),
+        });
+        assert_eq!(adapter_err.code(), catalog::PROVIDER_UNKNOWN_OFFERING);
+
+        let diag = adapter_err.to_diagnostic();
+        assert_eq!(diag.code.to_string(), "AMICU-PROVIDER-010");
+        assert_eq!(diag.severity, Severity::Error);
+        assert_eq!(diag.message, "unknown offering 'gpu.h100.1x'");
+        // Secret-free: only the offering id the caller supplied is echoed back.
+        assert!(!diag.message.contains("credential"));
+    }
+
+    #[test]
+    fn every_provider_error_code_is_in_the_catalog() {
+        let errors = [
+            ProviderError::CapacityUnavailable {
+                offering: "o".into(),
+                region: "r".into(),
+            },
+            ProviderError::UnknownOffering {
+                offering: "o".into(),
+            },
+            ProviderError::UnknownRegion { region: "r".into() },
+            ProviderError::UnknownInstance { id: "i".into() },
+            ProviderError::Backend { detail: "d".into() },
+            ProviderError::CredentialsRejected { detail: "d".into() },
+        ];
+        for err in errors {
+            assert!(catalog::all().contains(&err.code()));
+        }
+    }
 }
