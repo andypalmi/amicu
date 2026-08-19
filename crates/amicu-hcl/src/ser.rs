@@ -9,9 +9,32 @@ use amicu_core::resource::{
     Deployment, HardwareProfile, Model, Money, Runtime, Tenant, VllmSettings,
 };
 
+use crate::error::HclError;
+
 /// Render a graph as HCL text that re-parses into an equal graph.
-#[must_use]
-pub fn format_graph(graph: &Graph) -> String {
+///
+/// # Contract
+///
+/// The round-trip is only lossless when every resource id and every tenant
+/// label key is a valid HCL identifier, because ids are emitted as bare
+/// traversals (`model.<id>.id`) and label keys as bare attribute names. Ids
+/// serialize identically to the DSL/JSON string form, so a graph built or
+/// deserialized outside [`parse_graph`](crate::parse_graph) may carry ids or
+/// keys that are not identifier-safe (empty, leading digit, or containing `.`
+/// or whitespace) and would otherwise reparse to a *different* value.
+///
+/// Rather than corrupt such a graph silently, this function validates every
+/// id and label key up front and returns
+/// [`HclError::InvalidIdentifier`] on the first offender. For any graph it
+/// accepts, `parse_graph(&format_graph(g)?)` recovers an equal graph.
+///
+/// # Errors
+///
+/// Returns [`HclError::InvalidIdentifier`] if a resource id or tenant label
+/// key is not a valid, round-trip-safe HCL identifier.
+pub fn format_graph(graph: &Graph) -> Result<String, HclError> {
+    validate_identifiers(graph)?;
+
     let mut body = Body::builder();
     for m in &graph.models {
         body = body.add_block(model_block(m));
@@ -40,7 +63,71 @@ pub fn format_graph(graph: &Graph) -> String {
     for u in &graph.use_cases {
         body = body.add_block(use_case_block(u));
     }
-    hcl::to_string(&body.build()).expect("HCL body always serializes")
+    Ok(hcl::to_string(&body.build()).expect("HCL body always serializes"))
+}
+
+/// Reject any resource id or tenant label key that is not a valid HCL
+/// identifier, since such values cannot round-trip through the emitted HCL.
+fn validate_identifiers(graph: &Graph) -> Result<(), HclError> {
+    let ids = graph
+        .models
+        .iter()
+        .map(|m| ("model", m.id.as_str()))
+        .chain(
+            graph
+                .hardware_profiles
+                .iter()
+                .map(|h| ("hardware_profile", h.id.as_str())),
+        )
+        .chain(
+            graph
+                .deployments
+                .iter()
+                .map(|d| ("deployment", d.id.as_str())),
+        )
+        .chain(
+            graph
+                .routing_policies
+                .iter()
+                .map(|p| ("routing_policy", p.id.as_str())),
+        )
+        .chain(
+            graph
+                .data_classes
+                .iter()
+                .map(|c| ("data_class", c.id.as_str())),
+        )
+        .chain(
+            graph
+                .governance_rules
+                .iter()
+                .map(|r| ("governance_rule", r.id.as_str())),
+        )
+        .chain(graph.budgets.iter().map(|b| ("budget", b.id.as_str())))
+        .chain(graph.tenants.iter().map(|t| ("tenant", t.id.as_str())))
+        .chain(graph.use_cases.iter().map(|u| ("use_case", u.id.as_str())));
+
+    for (kind, id) in ids {
+        if Identifier::new(id).is_err() {
+            return Err(HclError::invalid_identifier(
+                format!("{kind} resource id"),
+                id,
+            ));
+        }
+    }
+
+    for t in &graph.tenants {
+        for key in t.labels.keys() {
+            if Identifier::new(key).is_err() {
+                return Err(HclError::invalid_identifier(
+                    format!("tenant `{}` label key", t.id.as_str()),
+                    key,
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn model_block(m: &Model) -> Block {
@@ -251,7 +338,7 @@ fn tenant_block(t: &Tenant) -> Block {
     if !t.labels.is_empty() {
         let mut lb = Block::builder("labels");
         for (k, v) in &t.labels {
-            lb = lb.add_attribute((Identifier::sanitized(k), v.clone()));
+            lb = lb.add_attribute((Identifier::unchecked(k), v.clone()));
         }
         body = body.add_block(lb.build());
     }
