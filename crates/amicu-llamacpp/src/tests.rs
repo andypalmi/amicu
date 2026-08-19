@@ -882,6 +882,25 @@ fn launchd_start_writes_plist_and_loads() {
 }
 
 #[test]
+fn launchd_stop_removes_plist() {
+    let tmp = TempDir::new("launchd-stop");
+    let agents = tmp.file("agents");
+    let logs = tmp.file("logs");
+    let manager = LaunchdManager::new(FakeExec::new(true, ""), &agents, &logs);
+    let spec = service_spec();
+    manager.start(&spec).expect("start");
+
+    let plist = agents.join("io.amicu.llama.support_chat_local.plist");
+    assert!(plist.exists(), "plist should exist after start");
+
+    manager.stop(&spec.label).expect("stop");
+    assert!(!plist.exists(), "plist must be removed after stop");
+
+    // A second stop (plist already gone) must not fail.
+    manager.stop(&spec.label).expect("stop is idempotent");
+}
+
+#[test]
 fn launchd_state_maps_pid_exit_and_missing() {
     let active = LaunchdManager::new(FakeExec::new(true, "{\n\t\"PID\" = 1234;\n};"), "/a", "/l");
     assert_eq!(active.state("x").unwrap(), ServiceState::Active);
