@@ -28,10 +28,23 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build --workspace --all-targets --locked
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
+
+  msrv:
+    name: msrv (1.97)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.97
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (MSRV)
+        run: cargo build --workspace --all-targets --locked
