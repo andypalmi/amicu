@@ -1,10 +1,11 @@
-//! Amicu core: IDs, units, canonical resource domain types, and the
-//! versioned canonical resource graph.
+//! Amicu core: IDs, units, canonical resource domain types, the
+//! versioned canonical resource graph, and the diagnostic contract.
 //!
 //! Rust types are the source of truth; canonical JSON is their
 //! serialization. See `GRAPH_VERSIONING.md` for the schema version and
 //! migration policy.
 
+pub mod diagnostic;
 pub mod graph;
 pub mod id;
 pub mod resource;
