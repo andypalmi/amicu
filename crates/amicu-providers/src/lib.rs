@@ -1,5 +1,6 @@
 //! Cloud/external/secret adapters.
 
+pub mod azure;
 pub mod capability;
 pub mod cost;
 pub mod fake;
@@ -12,6 +13,7 @@ pub mod secret;
 pub mod self_hosted;
 pub mod sync;
 
+pub use azure::AzureProvider;
 pub use cost::{CostError, Usage, estimate_cost};
 pub use fake::FakeProvider;
 pub use hetzner::HetznerProvider;
