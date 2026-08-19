@@ -32,24 +32,32 @@ pub struct StateSnapshot {
 
 impl StateSnapshot {
     /// Record `graph` under `version` at `recorded_at`, stamping a fresh checksum.
-    #[must_use]
-    pub fn new(version: impl Into<String>, recorded_at: impl Into<String>, graph: Graph) -> Self {
-        let checksum = checksum_of(&graph);
-        Self {
+    ///
+    /// # Errors
+    /// Returns [`StateError::Corrupted`] if `graph` cannot be serialized for
+    /// checksumming (see [`checksum_of`]).
+    pub fn new(
+        version: impl Into<String>,
+        recorded_at: impl Into<String>,
+        graph: Graph,
+    ) -> Result<Self, StateError> {
+        let checksum = checksum_of(&graph)?;
+        Ok(Self {
             version: version.into(),
             recorded_at: recorded_at.into(),
             checksum,
             graph,
-        }
+        })
     }
 
     /// Recompute the checksum and confirm it matches the recorded one.
     ///
     /// # Errors
     /// Returns [`StateError::Corrupted`] when the graph no longer hashes to the
-    /// stored checksum, signalling the snapshot needs manual recovery.
+    /// stored checksum, or cannot be serialized for checksumming, signalling the
+    /// snapshot needs manual recovery.
     pub fn verify(&self) -> Result<(), StateError> {
-        let actual = checksum_of(&self.graph);
+        let actual = checksum_of(&self.graph)?;
         if actual == self.checksum {
             Ok(())
         } else {
@@ -96,12 +104,19 @@ const CHECKSUM_ALGORITHM: &str = "sha256-v1";
 /// suitable for persistence: a graph rehashes identically on any build. The
 /// graph serializes deterministically (its collections are `BTreeMap`/`Vec`, no
 /// `HashMap`). The result is `"{CHECKSUM_ALGORITHM}:{hex}"`.
-fn checksum_of(graph: &Graph) -> String {
-    let json = serde_json::to_string(graph).unwrap_or_default();
+///
+/// # Errors
+/// Returns [`StateError::Corrupted`] if the graph fails to serialize. The error
+/// is surfaced rather than swallowed: hashing an empty fallback string would let
+/// every failing graph collide on one "valid" checksum.
+fn checksum_of(graph: &Graph) -> Result<String, StateError> {
+    let json = serde_json::to_string(graph).map_err(|source| StateError::Corrupted {
+        detail: format!("graph failed to serialize for checksumming: {source}"),
+    })?;
     let digest = Sha256::digest(json.as_bytes());
     let mut checksum = format!("{CHECKSUM_ALGORITHM}:");
     for byte in digest {
         write!(checksum, "{byte:02x}").expect("writing hex to a String is infallible");
     }
-    checksum
+    Ok(checksum)
 }

@@ -90,7 +90,7 @@ fn sample_graph() -> Graph {
 }
 
 fn snapshot(version: &str, graph: Graph) -> StateSnapshot {
-    StateSnapshot::new(version, "2026-08-19T00:00:00Z", graph)
+    StateSnapshot::new(version, "2026-08-19T00:00:00Z", graph).expect("stamp checksum")
 }
 
 // --- fake in-memory backend --------------------------------------------------
@@ -207,7 +207,7 @@ impl StateBackendAdapter for FakeStateBackend {
         let version = format!("v{}", inner.next_version);
         inner.next_version += 1;
         let parent = Some(inner.current.version.clone());
-        let recorded = StateSnapshot::new(&version, &snapshot.recorded_at, snapshot.graph.clone());
+        let recorded = StateSnapshot::new(&version, &snapshot.recorded_at, snapshot.graph.clone())?;
         inner.snapshots.insert(version.clone(), recorded.clone());
         inner
             .history
@@ -340,16 +340,48 @@ async fn lock_contention_is_explicit() {
 
 #[tokio::test]
 async fn lock_tokens_are_not_sequential() {
+    // The fake is deterministic yet unpredictable; a real backend must use true
+    // randomness (see `LockHandle`). Mint several tokens and assert none is a
+    // guessable increment of the prior one.
+    const N: usize = 8;
     let backend = backend();
-    let first = backend.lock().await.expect("first lock");
-    let t1 = first.token();
-    backend.unlock(first).await.expect("unlock");
-    let second = backend.lock().await.expect("second lock");
-    let t2 = second.token();
+    let mut tokens = Vec::with_capacity(N);
+    for _ in 0..N {
+        let handle = backend.lock().await.expect("lock");
+        tokens.push(handle.token());
+        backend.unlock(handle).await.expect("unlock");
+    }
 
-    // Tokens must not be guessable increments of one another.
-    assert_ne!(t1, t2);
-    assert_ne!(t2, t1.wrapping_add(1));
+    let distinct: std::collections::HashSet<u64> = tokens.iter().copied().collect();
+    assert_eq!(distinct.len(), N, "all minted tokens must be distinct");
+    for pair in tokens.windows(2) {
+        assert_ne!(
+            pair[1],
+            pair[0].wrapping_add(1),
+            "tokens must not be sequential increments"
+        );
+    }
+}
+
+#[test]
+fn checksum_uses_versioned_format_and_is_deterministic() {
+    let snap = snapshot("v0", sample_graph());
+    let checksum = &snap.checksum;
+
+    // Matches ^sha256-v1:[0-9a-f]{64}$.
+    assert!(
+        checksum.strip_prefix("sha256-v1:").is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }),
+        "checksum should be sha256-v1:<64 lowercase hex>, got {checksum}"
+    );
+
+    // Recomputing over the same graph yields the identical string.
+    let again = snapshot("different-version", sample_graph());
+    assert_eq!(snap.checksum, again.checksum);
 }
 
 #[tokio::test]
