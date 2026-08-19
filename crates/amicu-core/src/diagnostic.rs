@@ -308,6 +308,9 @@ pub mod catalog {
     /// `AMICU-PROVIDER-002` — a provider/model artifact download failed
     /// transiently; retrying resumes the transfer.
     pub const PROVIDER_DOWNLOAD_FAILED: DiagnosticCode = DiagnosticCode::new(Category::Provider, 2);
+    /// `AMICU-PROVIDER-003` — provider capability/pricing data is stale or could
+    /// not be refreshed; the last snapshot is surfaced, never fabricated.
+    pub const PROVIDER_METADATA_STALE: DiagnosticCode = DiagnosticCode::new(Category::Provider, 3);
     /// `AMICU-PROVIDER-010` — the request names an offering the provider does
     /// not offer.
     pub const PROVIDER_UNKNOWN_OFFERING: DiagnosticCode =
@@ -328,7 +331,7 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 17] {
+    pub const fn all() -> [DiagnosticCode; 18] {
         [
             PARSE_UNCLOSED_BLOCK,
             SCHEMA_MISSING_REQUIRED,
@@ -343,6 +346,7 @@ pub mod catalog {
             STATE_LOCKED,
             PROVIDER_CAPACITY_UNAVAILABLE,
             PROVIDER_DOWNLOAD_FAILED,
+            PROVIDER_METADATA_STALE,
             PROVIDER_UNKNOWN_OFFERING,
             PROVIDER_UNKNOWN_REGION,
             PROVIDER_UNKNOWN_INSTANCE,
@@ -406,6 +410,10 @@ mod tests {
         assert_eq!(
             catalog::PROVIDER_DOWNLOAD_FAILED.to_string(),
             "AMICU-PROVIDER-002"
+        );
+        assert_eq!(
+            catalog::PROVIDER_METADATA_STALE.to_string(),
+            "AMICU-PROVIDER-003"
         );
     }
 
