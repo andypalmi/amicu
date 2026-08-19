@@ -12,6 +12,7 @@ mod deployment;
 mod governance;
 mod hardware;
 mod model;
+mod region;
 mod routing;
 mod tenant;
 mod use_case;
@@ -24,6 +25,7 @@ pub use hardware::{Accelerator, AcceleratorKind, Cpu, HardwareProfile, Interconn
 pub use model::{
     Artifact, ArtifactFormat, GgufVariant, Model, ModelSource, Quantization, SourceRegistry,
 };
+pub use region::{Region, Residency};
 pub use routing::{FailoverPolicy, OptimizeFor, RoutingPolicy, RoutingTarget};
 pub use tenant::{Quota, Tenant};
 pub use use_case::{Priority, UseCase};

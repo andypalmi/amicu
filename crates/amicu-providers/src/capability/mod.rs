@@ -9,21 +9,20 @@
 //! This module is data models only (TASK-013): no provider trait or adapter
 //! logic. It reuses `amicu-core` types where the concept already exists
 //! ([`Accelerator`], [`ByteSize`], [`Money`](amicu_core::resource::Money),
-//! [`AdapterId`], [`HealthStatus`]) and adds typed [`Region`] / [`Residency`]
-//! and pricing / availability values that core did not yet model.
+//! [`AdapterId`], [`HealthStatus`], and the typed [`Region`] / [`Residency`])
+//! and adds the pricing / availability values core does not model.
 
 mod availability;
 mod compute;
 mod pricing;
-mod region;
 
+pub use amicu_core::resource::{Region, Residency};
 pub use availability::{Availability, AvailabilityState};
 pub use compute::{
     ComputeOffering, CredentialsModel, LifecycleBehavior, ModelDownloadPerformance,
     NetworkCapabilities, OrchestrationSupport, ProvisioningMethod, StorageKind, StorageOption,
 };
 pub use pricing::{BillingGranularity, Pricing, Rate, RateUnit};
-pub use region::{Region, Residency};
 
 use amicu_core::adapter::{AdapterId, HealthStatus};
 use amicu_core::diagnostic::Severity;
