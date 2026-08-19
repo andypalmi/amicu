@@ -5,6 +5,17 @@
 //! less certain, so they are reported as an [`OverheadRange`] band rather than a
 //! single fabricated value. Pass/fail is evaluated on weights against the
 //! device memory pool *after* a configurable [`FitConfig::reserve`].
+//!
+//! A multi-GPU node aggregates VRAM across its cards (`count × per-card`), with a
+//! per-device reserve and a conservative tensor-parallel efficiency haircut
+//! ([`FitConfig::tensor_parallel_efficiency`]) — sharding a model across GPUs
+//! never yields 100% of aggregate VRAM. A single-GPU node is unaffected.
+//! Cross-node (distributed) fitting is out of scope.
+//!
+//! The aggregate check assumes weights shard evenly across the node's cards; it
+//! does not gate on per-card capacity, so a single unshardable tensor larger
+//! than one card's VRAM is not caught here. The haircut is conservative
+//! (multi-GPU is reported with less capacity, never more).
 
 use amicu_core::diagnostic::{Diagnostic, DiagnosticCode, Severity, catalog};
 use amicu_core::resource::{AcceleratorKind, GgufVariant, HardwareProfile, Quantization};
@@ -42,20 +53,34 @@ pub fn weights_memory(total_parameters: u64, quantization: Quantization) -> Byte
 const DEFAULT_OVERHEAD_LOW: f64 = 0.10;
 const DEFAULT_OVERHEAD_HIGH: f64 = 0.30;
 
-/// OS/other-workload memory held back from the device pool. 2 GiB is a visible,
-/// deliberately conservative default; override per host.
+/// OS/other-workload memory held back from the device pool, **per device**. 2
+/// GiB is a visible, deliberately conservative default; override per host. On a
+/// multi-GPU node this is held back on every card.
 const DEFAULT_RESERVE: ByteSize = ByteSize::from_bytes(2 * 1024 * 1024 * 1024);
 
-/// Tunables for a fit check: the memory reserve and the overhead band.
+/// Fraction of aggregate multi-GPU VRAM usable for weights under tensor
+/// parallelism. Sharding replicates buffers and reserves per-card working
+/// memory, so aggregate VRAM is never fully usable. 0.90 is a conservative
+/// default; applies only when `count > 1`.
+const DEFAULT_TENSOR_PARALLEL_EFFICIENCY: f64 = 0.90;
+
+/// Tunables for a fit check: the per-device memory reserve, the overhead band,
+/// and the multi-GPU tensor-parallel efficiency.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct FitConfig {
     /// Memory held back for the OS and other workloads, subtracted from the
-    /// device pool before evaluating fit.
+    /// device pool before evaluating fit. Applied per device (see
+    /// [`DEFAULT_RESERVE`]).
     pub reserve: ByteSize,
     /// Low bound of the overhead band, as a fraction of weights.
     pub overhead_low: f64,
     /// High bound of the overhead band, as a fraction of weights.
     pub overhead_high: f64,
+    /// Fraction of aggregate VRAM usable for weights when sharding across more
+    /// than one accelerator (tensor parallelism). Clamped to `[0, 1]`; ignored
+    /// for single-device pools.
+    pub tensor_parallel_efficiency: f64,
 }
 
 impl Default for FitConfig {
@@ -64,6 +89,7 @@ impl Default for FitConfig {
             reserve: DEFAULT_RESERVE,
             overhead_low: DEFAULT_OVERHEAD_LOW,
             overhead_high: DEFAULT_OVERHEAD_HIGH,
+            tensor_parallel_efficiency: DEFAULT_TENSOR_PARALLEL_EFFICIENCY,
         }
     }
 }
@@ -108,12 +134,18 @@ impl MemoryPool {
 
 /// Structured outcome of a weight-fit check.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct FitReport {
     /// Which memory pool was evaluated.
     pub pool: MemoryPool,
-    /// Total memory in the device pool.
+    /// Total memory in the device pool. For a multi-GPU node this is the
+    /// aggregate across all `accelerator_count` cards.
     pub device_memory: ByteSize,
-    /// Reserve held back for the OS/other workloads.
+    /// Number of accelerators aggregated (1 for a single GPU, non-GPU, or no
+    /// accelerator).
+    pub accelerator_count: u32,
+    /// Reserve held back for the OS/other workloads, totalled across devices
+    /// (per-device reserve × `accelerator_count`).
     pub reserve: ByteSize,
     /// Memory available after the reserve (`device_memory - reserve`).
     pub available: ByteSize,
@@ -156,8 +188,22 @@ pub fn check_variant_fit(
 }
 
 fn evaluate(weights: ByteSize, hw: &HardwareProfile, cfg: &FitConfig) -> FitReport {
-    let (pool, device_memory) = memory_pool(hw);
-    let available = ByteSize::from_bytes(device_memory.bytes().saturating_sub(cfg.reserve.bytes()));
+    let (pool, per_device, count) = device_pool(hw);
+
+    // Aggregate across devices. A single-device pool (count == 1) is byte-for-byte
+    // unchanged; a multi-GPU pool sums per-device VRAM, then applies a
+    // tensor-parallel efficiency haircut because sharding replicates buffers and
+    // reserves per-card working memory, so aggregate VRAM is never fully usable.
+    let device_memory = ByteSize::from_bytes(per_device.bytes().saturating_mul(u64::from(count)));
+    let usable = if count > 1 {
+        let eff = cfg.tensor_parallel_efficiency.clamp(0.0, 1.0);
+        bytes_from_f64(params_as_f64(device_memory.bytes()) * eff).bytes()
+    } else {
+        device_memory.bytes()
+    };
+    // Reserve is per device: every card holds back OS/driver/context memory.
+    let reserve = ByteSize::from_bytes(cfg.reserve.bytes().saturating_mul(u64::from(count)));
+    let available = ByteSize::from_bytes(usable.saturating_sub(reserve.bytes()));
     let fits = weights.bytes() <= available.bytes();
     let headroom = ByteSize::from_bytes(available.bytes().saturating_sub(weights.bytes()));
 
@@ -170,14 +216,21 @@ fn evaluate(weights: ByteSize, hw: &HardwareProfile, cfg: &FitConfig) -> FitRepo
     };
 
     let diagnostic = (!fits).then(|| {
+        let across = if count > 1 {
+            format!(
+                " across {count} × {model} accelerators",
+                model = hw.accelerator.as_ref().map_or("", |a| a.model.as_str()),
+            )
+        } else {
+            String::new()
+        };
         Diagnostic::new(
             pool.diagnostic_code(),
             Severity::Error,
             format!(
-                "model weights need {weights} but only {available} of {device_memory} {pool} is \
-                 available after a {reserve} reserve",
+                "model weights need {weights} but only {available} of {device_memory} {pool}{across} \
+                 is available after a {reserve} reserve",
                 pool = pool.label(),
-                reserve = cfg.reserve,
             ),
         )
     });
@@ -185,7 +238,8 @@ fn evaluate(weights: ByteSize, hw: &HardwareProfile, cfg: &FitConfig) -> FitRepo
     FitReport {
         pool,
         device_memory,
-        reserve: cfg.reserve,
+        accelerator_count: count,
+        reserve,
         available,
         weights,
         overhead,
@@ -195,17 +249,20 @@ fn evaluate(weights: ByteSize, hw: &HardwareProfile, cfg: &FitConfig) -> FitRepo
     }
 }
 
-/// Pick the memory pool to evaluate against. Apple Silicon uses unified system
-/// memory; a discrete accelerator (GPU/TPU) uses its own VRAM; CPU-only or no
-/// accelerator uses system memory.
-fn memory_pool(hw: &HardwareProfile) -> (MemoryPool, ByteSize) {
+/// Pick the memory pool, per-device size, and device count to evaluate against.
+/// Apple Silicon uses unified system memory; a discrete accelerator (GPU/TPU)
+/// uses its own VRAM aggregated across `count` cards; CPU-only or no accelerator
+/// uses system memory. Count is 1 for every non-multi-GPU pool.
+fn device_pool(hw: &HardwareProfile) -> (MemoryPool, ByteSize, u32) {
     match &hw.accelerator {
         Some(acc) => match acc.kind {
-            AcceleratorKind::AppleSilicon => (MemoryPool::Unified, hw.memory),
-            AcceleratorKind::Gpu | AcceleratorKind::Tpu => (MemoryPool::Vram, acc.memory),
-            AcceleratorKind::Cpu => (MemoryPool::System, hw.memory),
+            AcceleratorKind::AppleSilicon => (MemoryPool::Unified, hw.memory, 1),
+            AcceleratorKind::Gpu | AcceleratorKind::Tpu => {
+                (MemoryPool::Vram, acc.memory, acc.count.max(1))
+            }
+            AcceleratorKind::Cpu => (MemoryPool::System, hw.memory, 1),
         },
-        None => (MemoryPool::System, hw.memory),
+        None => (MemoryPool::System, hw.memory, 1),
     }
 }
 
@@ -253,6 +310,10 @@ mod tests {
     }
 
     fn gpu(vram_gib: u64) -> HardwareProfile {
+        multi_gpu(vram_gib, 1)
+    }
+
+    fn multi_gpu(vram_gib_each: u64, count: u32) -> HardwareProfile {
         HardwareProfile {
             id: HardwareProfileId::new("h100"),
             provider: "aws".into(),
@@ -260,8 +321,8 @@ mod tests {
             accelerator: Some(Accelerator {
                 kind: AcceleratorKind::Gpu,
                 model: "h100".into(),
-                count: 1,
-                memory: ByteSize::from_bytes(vram_gib * GIB),
+                count,
+                memory: ByteSize::from_bytes(vram_gib_each * GIB),
             }),
             cpu: None,
             memory: ByteSize::from_bytes(256 * GIB),
@@ -381,6 +442,116 @@ mod tests {
         );
         assert_eq!(report.weights, ByteSize::from_bytes(4 * GIB));
         assert!(report.fits);
+    }
+
+    #[test]
+    fn single_gpu_behavior_is_unchanged() {
+        // count == 1: no aggregation, no efficiency haircut, single reserve.
+        let report = check_fit(
+            1_000_000,
+            Quantization::F16,
+            &gpu(80),
+            &FitConfig::default(),
+        );
+        assert_eq!(report.accelerator_count, 1);
+        assert_eq!(report.device_memory, ByteSize::from_bytes(80 * GIB));
+        assert_eq!(report.reserve, ByteSize::from_bytes(2 * GIB));
+        assert_eq!(report.available, ByteSize::from_bytes(78 * GIB));
+    }
+
+    #[test]
+    fn aggregate_vram_across_gpus_lets_large_model_fit() {
+        // 70B @ F16 (~130 GiB) does not fit one 80 GiB H100 but fits 8×H100
+        // (aggregate 640 GiB, ~90% usable minus per-device reserve).
+        let one = check_fit(
+            70_000_000_000,
+            Quantization::F16,
+            &gpu(80),
+            &FitConfig::default(),
+        );
+        assert!(!one.fits);
+        let eight = check_fit(
+            70_000_000_000,
+            Quantization::F16,
+            &multi_gpu(80, 8),
+            &FitConfig::default(),
+        );
+        assert!(eight.fits);
+        assert_eq!(eight.accelerator_count, 8);
+        assert_eq!(eight.device_memory, ByteSize::from_bytes(640 * GIB));
+    }
+
+    #[test]
+    fn gpu_count_changes_the_fit_outcome() {
+        // 70B @ Q8_0 (~69 GiB): does not fit 1×24 GiB, fits 4×24 GiB aggregate.
+        let one = check_fit(
+            70_000_000_000,
+            Quantization::Q8_0,
+            &gpu(24),
+            &FitConfig::default(),
+        );
+        assert!(!one.fits);
+        let four = check_fit(
+            70_000_000_000,
+            Quantization::Q8_0,
+            &multi_gpu(24, 4),
+            &FitConfig::default(),
+        );
+        assert!(four.fits);
+    }
+
+    #[test]
+    fn tensor_parallel_haircut_and_per_device_reserve_apply_for_multi_gpu() {
+        // 2×80 GiB: aggregate 160, 90% usable = 144, minus 2×2 GiB reserve = 140.
+        let two = check_fit(
+            1_000_000,
+            Quantization::F16,
+            &multi_gpu(80, 2),
+            &FitConfig::default(),
+        );
+        assert_eq!(two.device_memory, ByteSize::from_bytes(160 * GIB));
+        assert_eq!(two.reserve, ByteSize::from_bytes(4 * GIB));
+        assert_eq!(two.available, ByteSize::from_bytes(140 * GIB));
+    }
+
+    #[test]
+    fn tensor_parallel_efficiency_is_configurable() {
+        let cfg = FitConfig {
+            tensor_parallel_efficiency: 0.5,
+            ..FitConfig::default()
+        };
+        // 2×80 GiB: aggregate 160, 50% usable = 80, minus 4 GiB reserve = 76.
+        let two = check_fit(1_000_000, Quantization::F16, &multi_gpu(80, 2), &cfg);
+        assert_eq!(two.available, ByteSize::from_bytes(76 * GIB));
+    }
+
+    #[test]
+    fn zero_count_is_guarded_to_one_device() {
+        // A malformed count of 0 must not zero the pool; it is treated as 1.
+        let report = check_fit(
+            1_000_000,
+            Quantization::F16,
+            &multi_gpu(80, 0),
+            &FitConfig::default(),
+        );
+        assert_eq!(report.accelerator_count, 1);
+        assert_eq!(report.device_memory, ByteSize::from_bytes(80 * GIB));
+        assert_eq!(report.available, ByteSize::from_bytes(78 * GIB));
+    }
+
+    #[test]
+    fn multi_tpu_aggregates_the_same_way() {
+        let mut hw = multi_gpu(32, 4);
+        if let Some(acc) = hw.accelerator.as_mut() {
+            acc.kind = AcceleratorKind::Tpu;
+            acc.model = "v5e".into();
+        }
+        let report = check_fit(1_000_000, Quantization::F16, &hw, &FitConfig::default());
+        assert_eq!(report.pool, MemoryPool::Vram);
+        assert_eq!(report.accelerator_count, 4);
+        // 4×32 = 128 GiB aggregate, 90% usable = 115.2, minus 4×2 reserve.
+        assert_eq!(report.device_memory, ByteSize::from_bytes(128 * GIB));
+        assert_eq!(report.reserve, ByteSize::from_bytes(8 * GIB));
     }
 
     #[test]
