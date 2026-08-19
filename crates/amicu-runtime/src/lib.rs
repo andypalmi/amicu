@@ -19,12 +19,14 @@ pub mod discovery;
 mod error;
 mod handle;
 mod plan;
+mod registry;
 
 pub use adapter::RuntimeAdapter;
 pub use capabilities::{Parallelism, Platform, RuntimeCapabilities, RuntimeKind};
 pub use error::RuntimeError;
 pub use handle::{LogOptions, LogStream, RuntimeHandle, RuntimeMetrics, RuntimeStatus};
 pub use plan::{LaunchPlan, RenderedLaunch, ResourceEstimate};
+pub use registry::{EndpointRegistry, Resolved, ResolvedTarget};
 
 #[cfg(test)]
 mod tests;

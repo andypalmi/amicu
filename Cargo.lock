@@ -145,6 +145,12 @@ dependencies = [
 [[package]]
 name = "amicu-telemetry"
 version = "0.1.0"
+dependencies = [
+ "amicu-core",
+ "amicu-runtime",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "amicu-validation"
