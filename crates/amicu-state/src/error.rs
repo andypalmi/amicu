@@ -1,0 +1,79 @@
+//! State-family error model, classified into the uniform [`AdapterError`].
+//!
+//! Every variant carries a stable `AMICU-STATE-*` diagnostic code. Two failure
+//! modes are load-bearing for correctness and demand explicit recovery, never a
+//! silent overwrite: lock contention ([`StateError::LockContention`]) and state
+//! corruption ([`StateError::Corrupted`]). A push presented without the lock
+//! that guards the state ([`StateError::LockNotHeld`]) is likewise rejected.
+
+use amicu_core::adapter::{AdapterError, AdapterErrorKind};
+use amicu_core::diagnostic::{Category, DiagnosticCode, Severity};
+
+/// `AMICU-STATE-001` — state is locked by another operation.
+pub const STATE_LOCKED: DiagnosticCode = DiagnosticCode::new(Category::State, 1);
+/// `AMICU-STATE-002` — a push was presented without the lock guarding the state.
+pub const STATE_LOCK_NOT_HELD: DiagnosticCode = DiagnosticCode::new(Category::State, 2);
+/// `AMICU-STATE-003` — recorded state is corrupt and needs manual recovery.
+pub const STATE_CORRUPTED: DiagnosticCode = DiagnosticCode::new(Category::State, 3);
+/// `AMICU-STATE-004` — the requested history version does not exist.
+pub const STATE_VERSION_NOT_FOUND: DiagnosticCode = DiagnosticCode::new(Category::State, 4);
+
+/// Failures a state backend can surface, each mapped to an `AMICU-STATE-*` code.
+#[derive(Debug, thiserror::Error)]
+pub enum StateError {
+    /// The state is already locked by another operation. Contention is surfaced
+    /// explicitly rather than waiting forever; callers may retry with backoff.
+    #[error("state is locked by another operation (holder: {holder})")]
+    LockContention {
+        /// Identity currently holding the lock.
+        holder: String,
+    },
+
+    /// A push was rejected because no matching lock is held. The state is never
+    /// overwritten without the lock that guards it; the caller must acquire the
+    /// lock first and retry.
+    #[error("push rejected: the presented lock does not match the held lock")]
+    LockNotHeld,
+
+    /// The recorded state failed its integrity check. This is non-retryable and
+    /// requires manual recovery; the backend must never silently overwrite it.
+    #[error("state is corrupt and requires manual recovery: {detail}")]
+    Corrupted {
+        /// Safe, secret-free summary of the integrity failure.
+        detail: String,
+    },
+
+    /// A rollback (or lookup) referenced a version absent from history.
+    #[error("unknown state version: {version}")]
+    VersionNotFound {
+        /// The version id that could not be found.
+        version: String,
+    },
+}
+
+impl AdapterErrorKind for StateError {
+    fn code(&self) -> DiagnosticCode {
+        match self {
+            StateError::LockContention { .. } => STATE_LOCKED,
+            StateError::LockNotHeld => STATE_LOCK_NOT_HELD,
+            StateError::Corrupted { .. } => STATE_CORRUPTED,
+            StateError::VersionNotFound { .. } => STATE_VERSION_NOT_FOUND,
+        }
+    }
+
+    fn severity(&self) -> Severity {
+        Severity::Error
+    }
+
+    fn retryable(&self) -> bool {
+        // Contention may clear once the holder releases the lock; a missing lock,
+        // corruption, and an unknown version all require deliberate action first.
+        matches!(self, StateError::LockContention { .. })
+    }
+}
+
+impl From<StateError> for AdapterError {
+    fn from(error: StateError) -> Self {
+        error.into_adapter_error()
+    }
+}
