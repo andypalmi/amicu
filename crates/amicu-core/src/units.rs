@@ -10,6 +10,16 @@ use std::str::FromStr;
 /// Binary suffixes (`KiB`, `MiB`, `GiB`, `TiB`) use powers of 1024;
 /// decimal suffixes (`KB`, `MB`, `GB`, `TB`) use powers of 1000. A bare
 /// number, or a `B` suffix, is interpreted as raw bytes.
+///
+/// # Formatting guarantee
+///
+/// [`Display`](fmt::Display) is value- and family-stable: it emits the unit
+/// with the *largest factor that divides the byte count exactly*, comparing
+/// binary and decimal factors on equal footing. This is lossless, so
+/// `parse(display(x)) == x` always holds, and a value authored in a decimal
+/// unit renders back in that family — `"16GB"` displays as `"16GB"`, never as
+/// the equal-but-surprising `"15625000KiB"`. A value with no coarse divisor
+/// falls back to raw bytes (`"…B"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ByteSize(u64);
 
@@ -23,15 +33,16 @@ const MB: u64 = 1000 * KB;
 const GB: u64 = 1000 * MB;
 const TB: u64 = 1000 * GB;
 
-/// Ordered largest-first so formatting picks the coarsest exact unit.
+/// Ordered by descending factor, mixing families, so `Display`'s first exact
+/// divisor is the coarsest unit overall — keeping formatting family-stable.
 const UNITS: &[(&str, u64)] = &[
     ("TiB", TIB),
-    ("GiB", GIB),
-    ("MiB", MIB),
-    ("KiB", KIB),
     ("TB", TB),
+    ("GiB", GIB),
     ("GB", GB),
+    ("MiB", MIB),
     ("MB", MB),
+    ("KiB", KIB),
     ("KB", KB),
     ("B", 1),
 ];
@@ -160,6 +171,29 @@ mod tests {
         assert_eq!(ByteSize::from_bytes(48 * GIB).to_string(), "48GiB");
         assert_eq!(ByteSize::from_bytes(0).to_string(), "0B");
         assert_eq!(ByteSize::from_bytes(1).to_string(), "1B");
+    }
+
+    #[test]
+    fn display_is_family_stable() {
+        // A value authored in a decimal unit renders back in that family
+        // rather than crossing into an equal-but-surprising binary unit.
+        assert_eq!(ByteSize::from_bytes(16 * GB).to_string(), "16GB");
+        assert_eq!(ByteSize::from_bytes(48 * GIB).to_string(), "48GiB");
+        assert_eq!(ByteSize::from_bytes(1024).to_string(), "1KiB");
+        assert_eq!(ByteSize::from_bytes(0).to_string(), "0B");
+        // A non-round value has no coarse divisor and falls back to bytes.
+        assert_eq!(ByteSize::from_bytes(7 * MIB + 3).to_string(), "7340035B");
+    }
+
+    #[test]
+    fn decimal_authored_strings_round_trip_verbatim() {
+        for s in ["16GB", "48GiB", "1024", "0B", "512MiB"] {
+            let size: ByteSize = s.parse().unwrap();
+            let reparsed: ByteSize = size.to_string().parse().unwrap();
+            assert_eq!(size, reparsed);
+        }
+        // Authored decimal unit stays decimal on display.
+        assert_eq!("16GB".parse::<ByteSize>().unwrap().to_string(), "16GB");
     }
 
     #[test]

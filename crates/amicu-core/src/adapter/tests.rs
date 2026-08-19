@@ -131,10 +131,11 @@ impl ExampleAdapter for FakeExampleAdapter {
     ) -> Result<ProvisionOutcome, AdapterError> {
         let plan = plan.into_inner();
         if plan.replicas > self.max_replicas {
-            return Err(AdapterError::from_kind(ExampleError::CapacityUnavailable {
+            return Err(ExampleError::CapacityUnavailable {
                 requested: plan.replicas,
                 limit: self.max_replicas,
-            }));
+            }
+            .into_adapter_error());
         }
         Ok(ProvisionOutcome {
             provisioned: plan.replicas,
@@ -218,7 +219,6 @@ async fn apply_over_capacity_yields_classified_retryable_error() {
     assert_eq!(err.code().to_string(), "AMICU-PROVIDER-001");
     assert_eq!(err.severity(), Severity::Error);
     assert!(err.is_retryable());
-    assert!(err.is_transient());
     // The originating enum is preserved as the error source.
     assert!(std::error::Error::source(&err).is_some());
 }
@@ -232,11 +232,12 @@ fn thiserror_enum_converts_and_classifies() {
     assert!(!permanent.is_retryable());
     assert!(permanent.message().contains("misconfigured"));
 
-    let transient = AdapterError::from_kind(ExampleError::CapacityUnavailable {
+    let transient = ExampleError::CapacityUnavailable {
         requested: 5,
         limit: 2,
-    });
-    assert!(transient.is_transient());
+    }
+    .into_adapter_error();
+    assert!(transient.is_retryable());
 }
 
 #[test]

@@ -367,6 +367,7 @@ async fn download_resumes_after_a_transient_failure() {
         .await
         .expect_err("flaky first attempt");
     assert!(err.is_retryable());
+    assert_eq!(err.code(), catalog::PROVIDER_DOWNLOAD_FAILED);
     assert_eq!(fs::metadata(&dest).unwrap().len(), 32);
 
     // Retry: resumes from the 32-byte partial file and completes.
@@ -435,7 +436,7 @@ async fn weight_fit_failure_yields_mem_error() {
         )
         .await
         .expect_err("120 bytes over a 64-byte budget");
-    assert_eq!(err.code(), catalog::MEM_VRAM_EXCEEDED);
+    assert_eq!(err.code(), catalog::MEM_ARTIFACT_OVERSIZE);
     assert_eq!(err.code().category(), Category::Mem);
     assert_eq!(err.severity(), Severity::Error);
     assert!(!err.is_retryable());

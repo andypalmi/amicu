@@ -1,14 +1,9 @@
 //! Error classification for the model-source adapter family.
 
 use amicu_core::adapter::AdapterErrorKind;
-use amicu_core::diagnostic::{Category, DiagnosticCode, Severity, catalog};
+use amicu_core::diagnostic::{DiagnosticCode, Severity, catalog};
 use amicu_core::id::ModelId;
 use amicu_core::units::ByteSize;
-
-/// Transient failure while transferring artifact bytes; retrying resumes from
-/// the partial download. Not in the seeded catalog, which is intentionally not
-/// exhaustive.
-const SOURCE_DOWNLOAD_FAILED: DiagnosticCode = DiagnosticCode::new(Category::Provider, 2);
 
 /// Adapter-specific errors raised by a [`ModelSourceAdapter`](super::ModelSourceAdapter).
 ///
@@ -50,9 +45,9 @@ impl AdapterErrorKind for SourceError {
             SourceError::ModelNotFound(_) | SourceError::ArtifactUnavailable { .. } => {
                 catalog::CAP_RUNTIME_ARTIFACT_MISMATCH
             }
-            // Weights that do not fit the budget are a memory/capacity fault.
-            SourceError::WeightFit { .. } => catalog::MEM_VRAM_EXCEEDED,
-            SourceError::Download(_) => SOURCE_DOWNLOAD_FAILED,
+            // An oversized artifact is a memory/capacity fault.
+            SourceError::WeightFit { .. } => catalog::MEM_ARTIFACT_OVERSIZE,
+            SourceError::Download(_) => catalog::PROVIDER_DOWNLOAD_FAILED,
         }
     }
 
