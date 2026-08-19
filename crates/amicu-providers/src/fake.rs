@@ -12,6 +12,7 @@ use std::sync::Mutex;
 
 use amicu_core::adapter::{Adapter, AdapterError, AdapterId, DescribeCapabilities, HealthStatus};
 use amicu_core::resource::{Accelerator, AcceleratorKind, Money};
+use amicu_core::secret::{SecretRef, SecretResolver};
 use async_trait::async_trait;
 
 use crate::capability::{
@@ -27,8 +28,10 @@ use crate::provider::{
 struct State {
     /// Monotonic counter backing synthetic instance ids.
     counter: u64,
-    /// Live (not yet torn down) instances, keyed by id.
-    live: HashMap<String, ProvisioningHandle>,
+    /// Every instance ever provisioned, keyed by id, with its current state.
+    instances: HashMap<String, ProvisioningHandle>,
+    /// Observed state transitions per instance id, in order.
+    history: HashMap<String, Vec<ProvisioningState>>,
     /// Every provision request seen, in order.
     provisions: Vec<ProvisionRequest>,
     /// Every torn-down instance id, in order.
@@ -40,6 +43,8 @@ pub struct FakeProvider {
     id: AdapterId,
     capabilities: ProviderCapabilities,
     health: HealthStatus,
+    /// When set, the next `provision` drives to `Failed` with this detail.
+    provision_failure: Option<String>,
     state: Mutex<State>,
 }
 
@@ -55,6 +60,7 @@ impl FakeProvider {
             capabilities: Self::sample_capabilities(&aid),
             id: aid,
             health: HealthStatus::Healthy,
+            provision_failure: None,
             state: Mutex::new(State::default()),
         }
     }
@@ -70,6 +76,14 @@ impl FakeProvider {
     #[must_use]
     pub fn with_health(mut self, health: HealthStatus) -> Self {
         self.health = health;
+        self
+    }
+
+    /// Make `provision` simulate a bring-up failure, ending in
+    /// [`ProvisioningState::Failed`] with `detail`.
+    #[must_use]
+    pub fn with_provision_failure(mut self, detail: impl Into<String>) -> Self {
+        self.provision_failure = Some(detail.into());
         self
     }
 
@@ -115,14 +129,53 @@ impl FakeProvider {
         self.lock().teardowns.clone()
     }
 
-    /// The instances that are currently live (provisioned, not torn down).
+    /// The instances that are currently live (provisioned and non-terminal).
     #[must_use]
     pub fn live_instances(&self) -> Vec<ProvisioningHandle> {
-        self.lock().live.values().cloned().collect()
+        self.lock()
+            .instances
+            .values()
+            .filter(|h| !h.state.is_terminal())
+            .cloned()
+            .collect()
+    }
+
+    /// The recorded state transitions for `id`, in order.
+    #[must_use]
+    pub fn instance_history(&self, id: &str) -> Vec<ProvisioningState> {
+        self.lock().history.get(id).cloned().unwrap_or_default()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().expect("fake provider mutex poisoned")
+    }
+
+    /// Resolve and (pretend to) use the credential to authenticate a backend
+    /// call. The [`SecretValue`](amicu_core::secret::SecretValue) lives only for
+    /// this call and is dropped (zeroized) on return; it is never stored.
+    ///
+    /// An empty resolved credential is rejected as
+    /// [`ProviderError::CredentialsRejected`].
+    async fn authenticate(
+        &self,
+        resolver: &dyn SecretResolver,
+        credentials: Option<&SecretRef>,
+    ) -> Result<(), AdapterError> {
+        let Some(secret_ref) = credentials else {
+            return Ok(());
+        };
+        let value = resolver.resolve(secret_ref).await?;
+        if value.is_empty() {
+            return Err(AdapterError::from_kind(
+                ProviderError::CredentialsRejected {
+                    detail: "empty credential".into(),
+                },
+            ));
+        }
+        // Pretend to sign the simulated backend request; the exposed bytes are
+        // never copied out, logged, or serialized.
+        let _signed = value.expose_secret().len();
+        Ok(())
     }
 
     fn has_offering(&self, offering_id: &str) -> bool {
@@ -163,6 +216,7 @@ impl Provider for FakeProvider {
     async fn provision(
         &self,
         request: &ProvisionRequest,
+        resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningHandle, AdapterError> {
         if !self.has_offering(&request.offering_id) {
             return Err(AdapterError::from_kind(ProviderError::UnknownOffering {
@@ -174,30 +228,88 @@ impl Provider for FakeProvider {
                 region: request.region.clone(),
             }));
         }
+        // Apply-time credential resolution: value is used to authenticate and
+        // dropped inside `authenticate` — never stored on the handle.
+        self.authenticate(resolver, request.credentials.as_ref())
+            .await?;
 
         let mut state = self.lock();
         state.counter += 1;
-        let handle = ProvisioningHandle {
-            id: format!("{}-instance-{}", self.id, state.counter),
-            provider: self.id.clone(),
-            region: request.region.clone(),
-            offering_id: request.offering_id.clone(),
-            state: ProvisioningState::Ready {
+        let id = format!("{}-instance-{}", self.id, state.counter);
+
+        // Drive the bring-up lifecycle, recording each transition.
+        let mut transitions = vec![
+            ProvisioningState::Requested,
+            ProvisioningState::Provisioning {
+                detail: "fake instance starting".into(),
+            },
+        ];
+        let final_state = match &self.provision_failure {
+            Some(detail) => ProvisioningState::Failed {
+                detail: detail.clone(),
+            },
+            None => ProvisioningState::Ready {
                 detail: "fake instance ready".into(),
             },
         };
+        transitions.push(final_state.clone());
+
+        let handle = ProvisioningHandle {
+            id: id.clone(),
+            provider: self.id.clone(),
+            region: request.region.clone(),
+            offering_id: request.offering_id.clone(),
+            credentials: request.credentials.clone(),
+            state: final_state,
+        };
         state.provisions.push(request.clone());
-        state.live.insert(handle.id.clone(), handle.clone());
+        state.history.insert(id.clone(), transitions);
+        state.instances.insert(id, handle.clone());
         Ok(handle)
     }
 
-    async fn teardown(&self, handle: &ProvisioningHandle) -> Result<(), AdapterError> {
+    async fn status(
+        &self,
+        handle: &ProvisioningHandle,
+        resolver: &dyn SecretResolver,
+    ) -> Result<ProvisioningState, AdapterError> {
+        self.authenticate(resolver, handle.credentials.as_ref())
+            .await?;
+        self.lock()
+            .instances
+            .get(&handle.id)
+            .map(|h| h.state.clone())
+            .ok_or_else(|| {
+                AdapterError::from_kind(ProviderError::UnknownInstance {
+                    id: handle.id.clone(),
+                })
+            })
+    }
+
+    async fn teardown(
+        &self,
+        handle: &ProvisioningHandle,
+        resolver: &dyn SecretResolver,
+    ) -> Result<(), AdapterError> {
+        self.authenticate(resolver, handle.credentials.as_ref())
+            .await?;
+
         let mut state = self.lock();
-        if state.live.remove(&handle.id).is_none() {
+        let Some(instance) = state.instances.get_mut(&handle.id) else {
             return Err(AdapterError::from_kind(ProviderError::UnknownInstance {
                 id: handle.id.clone(),
             }));
-        }
+        };
+        instance.state = ProvisioningState::Terminated {
+            detail: "fake instance torn down".into(),
+        };
+        let entry = state.history.entry(handle.id.clone()).or_default();
+        entry.push(ProvisioningState::Stopping {
+            detail: "fake instance stopping".into(),
+        });
+        entry.push(ProvisioningState::Terminated {
+            detail: "fake instance torn down".into(),
+        });
         state.teardowns.push(handle.id.clone());
         Ok(())
     }
@@ -207,11 +319,43 @@ impl Provider for FakeProvider {
 mod tests {
     use super::*;
     use amicu_core::adapter::Registry;
-    use amicu_core::diagnostic::Category as DiagCategory;
+    use amicu_core::diagnostic::{Category as DiagCategory, DiagnosticCode};
+    use amicu_core::secret::SecretValue;
     use std::sync::Arc;
 
     fn provider() -> FakeProvider {
         FakeProvider::new("fake-cloud")
+    }
+
+    /// A small in-memory [`SecretResolver`] for hermetic tests.
+    #[derive(Default)]
+    struct TestResolver {
+        secrets: HashMap<String, SecretValue>,
+    }
+
+    impl TestResolver {
+        fn with(mut self, name: &str, value: &str) -> Self {
+            self.secrets
+                .insert(name.into(), SecretValue::new(value.to_string()));
+            self
+        }
+    }
+
+    #[async_trait]
+    impl SecretResolver for TestResolver {
+        async fn resolve(&self, secret: &SecretRef) -> Result<SecretValue, AdapterError> {
+            self.secrets.get(&secret.name).cloned().ok_or_else(|| {
+                AdapterError::permanent(
+                    DiagnosticCode::new(DiagCategory::Policy, 10),
+                    format!("secret '{}' unavailable", secret.name),
+                )
+            })
+        }
+    }
+
+    /// A resolver seeded with nothing — for requests that carry no credential.
+    fn no_creds() -> TestResolver {
+        TestResolver::default()
     }
 
     #[tokio::test]
@@ -250,24 +394,178 @@ mod tests {
     #[tokio::test]
     async fn provision_then_teardown_is_observable() {
         let p = provider();
+        let resolver = no_creds();
         let req = ProvisionRequest::new("gpu.h100.1x", "eu-central-1");
 
-        let handle = p.provision(&req).await.unwrap();
+        let handle = p.provision(&req, &resolver).await.unwrap();
         assert!(handle.state.is_ready());
         assert_eq!(handle.provider, AdapterId::new("fake-cloud"));
         assert_eq!(handle.offering_id, "gpu.h100.1x");
         assert_eq!(p.provision_calls(), vec![req]);
         assert_eq!(p.live_instances().len(), 1);
 
-        p.teardown(&handle).await.unwrap();
+        p.teardown(&handle, &resolver).await.unwrap();
         assert_eq!(p.teardown_calls(), vec![handle.id.clone()]);
         assert!(p.live_instances().is_empty());
     }
 
     #[tokio::test]
+    async fn provision_drives_lifecycle_and_status_observes_ready() {
+        let p = provider();
+        let resolver = no_creds();
+        let handle = p
+            .provision(
+                &ProvisionRequest::new("gpu.h100.1x", "eu-central-1"),
+                &resolver,
+            )
+            .await
+            .unwrap();
+
+        // Bring-up transitions are recorded and observable.
+        let history = p.instance_history(&handle.id);
+        assert!(matches!(history[0], ProvisioningState::Requested));
+        assert!(matches!(history[1], ProvisioningState::Provisioning { .. }));
+        assert!(history.last().unwrap().is_ready());
+
+        // `status` observes the live Ready state.
+        let observed = p.status(&handle, &resolver).await.unwrap();
+        assert!(observed.is_ready());
+        assert!(!observed.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn teardown_transitions_to_terminated() {
+        let p = provider();
+        let resolver = no_creds();
+        let handle = p
+            .provision(
+                &ProvisionRequest::new("gpu.h100.1x", "eu-central-1"),
+                &resolver,
+            )
+            .await
+            .unwrap();
+
+        p.teardown(&handle, &resolver).await.unwrap();
+
+        let observed = p.status(&handle, &resolver).await.unwrap();
+        assert!(matches!(observed, ProvisioningState::Terminated { .. }));
+        assert!(observed.is_terminal());
+
+        let history = p.instance_history(&handle.id);
+        assert!(matches!(
+            history[history.len() - 2],
+            ProvisioningState::Stopping { .. }
+        ));
+        assert!(matches!(
+            history[history.len() - 1],
+            ProvisioningState::Terminated { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn simulated_failure_yields_failed_state() {
+        let p = provider().with_provision_failure("out of capacity in simulation");
+        let resolver = no_creds();
+        let handle = p
+            .provision(
+                &ProvisionRequest::new("gpu.h100.1x", "eu-central-1"),
+                &resolver,
+            )
+            .await
+            .unwrap();
+
+        assert!(handle.state.is_failed());
+        assert!(handle.state.is_terminal());
+
+        let observed = p.status(&handle, &resolver).await.unwrap();
+        assert!(observed.is_failed());
+        // A failed instance is terminal, so it is not counted as live.
+        assert!(p.live_instances().is_empty());
+    }
+
+    #[tokio::test]
+    async fn predicate_accessors_classify_states() {
+        assert!(ProvisioningState::Ready { detail: "x".into() }.is_ready());
+        assert!(ProvisioningState::Stopped { detail: "x".into() }.is_stopped());
+        assert!(ProvisioningState::Failed { detail: "x".into() }.is_failed());
+        assert!(ProvisioningState::Failed { detail: "x".into() }.is_terminal());
+        assert!(ProvisioningState::Terminated { detail: "x".into() }.is_terminal());
+        assert!(!ProvisioningState::Requested.is_terminal());
+        assert!(!ProvisioningState::Provisioning { detail: "x".into() }.is_ready());
+    }
+
+    #[tokio::test]
+    async fn provision_resolves_credentials_at_apply_time() {
+        let p = provider();
+        let resolver = TestResolver::default().with("provider_token", "s3cr3t-token");
+        let req = ProvisionRequest::new("gpu.h100.1x", "eu-central-1")
+            .with_credentials(SecretRef::new("provider_token"));
+
+        let handle = p.provision(&req, &resolver).await.unwrap();
+        assert!(handle.state.is_ready());
+        // The handle carries the reference, never the resolved value.
+        assert_eq!(handle.credentials, Some(SecretRef::new("provider_token")));
+    }
+
+    #[tokio::test]
+    async fn provision_missing_secret_is_error_not_panic() {
+        let p = provider();
+        let resolver = no_creds(); // seeded with nothing
+        let req = ProvisionRequest::new("gpu.h100.1x", "eu-central-1")
+            .with_credentials(SecretRef::new("provider_token"));
+
+        let err = p
+            .provision(&req, &resolver)
+            .await
+            .expect_err("missing secret must surface as an error");
+        assert_eq!(err.code().category(), DiagCategory::Policy);
+        assert!(p.live_instances().is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_credential_is_rejected() {
+        let p = provider();
+        let resolver = TestResolver::default().with("provider_token", "");
+        let req = ProvisionRequest::new("gpu.h100.1x", "eu-central-1")
+            .with_credentials(SecretRef::new("provider_token"));
+
+        let err = p
+            .provision(&req, &resolver)
+            .await
+            .expect_err("empty credential rejected");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn credentials_never_leak_into_serialized_artifacts() {
+        let p = provider();
+        let secret_value = "leak-me-token";
+        let resolver = TestResolver::default().with("provider_token", secret_value);
+        let req = ProvisionRequest::new("gpu.h100.1x", "eu-central-1")
+            .with_credentials(SecretRef::new("provider_token"));
+
+        // Requests are serialized into plans: only the ref name, never the value.
+        let req_json = serde_json::to_string(&req).unwrap();
+        assert!(req_json.contains("provider_token"));
+        assert!(!req_json.contains(secret_value));
+
+        let handle = p.provision(&req, &resolver).await.unwrap();
+
+        // Handles are persisted; they carry the ref, never the value.
+        let handle_json = serde_json::to_string(&handle).unwrap();
+        assert!(handle_json.contains("provider_token"));
+        assert!(!handle_json.contains(secret_value));
+
+        // describe() (planning telemetry) carries only the credential kind.
+        let describe_json = serde_json::to_string(&p.describe()).unwrap();
+        assert!(!describe_json.contains(secret_value));
+    }
+
+    #[tokio::test]
     async fn provision_unknown_offering_is_a_permanent_provider_error() {
         let err = provider()
-            .provision(&ProvisionRequest::new("nope", "eu-central-1"))
+            .provision(&ProvisionRequest::new("nope", "eu-central-1"), &no_creds())
             .await
             .expect_err("unknown offering");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-010");
@@ -279,7 +577,7 @@ mod tests {
     #[tokio::test]
     async fn provision_unknown_region_is_rejected() {
         let err = provider()
-            .provision(&ProvisionRequest::new("gpu.h100.1x", "mars-1"))
+            .provision(&ProvisionRequest::new("gpu.h100.1x", "mars-1"), &no_creds())
             .await
             .expect_err("unknown region");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-011");
@@ -293,11 +591,15 @@ mod tests {
             provider: AdapterId::new("fake-cloud"),
             region: "eu-central-1".into(),
             offering_id: "gpu.h100.1x".into(),
+            credentials: None,
             state: ProvisioningState::Ready {
                 detail: "n/a".into(),
             },
         };
-        let err = p.teardown(&phantom).await.expect_err("unknown instance");
+        let err = p
+            .teardown(&phantom, &no_creds())
+            .await
+            .expect_err("unknown instance");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
     }
 
@@ -310,7 +612,10 @@ mod tests {
 
         let found: Arc<dyn Provider> = registry.get(&AdapterId::new("fake-cloud")).unwrap();
         let handle = found
-            .provision(&ProvisionRequest::new("gpu.h100.1x", "eu-central-1"))
+            .provision(
+                &ProvisionRequest::new("gpu.h100.1x", "eu-central-1"),
+                &no_creds(),
+            )
             .await
             .unwrap();
         assert!(handle.state.is_ready());
