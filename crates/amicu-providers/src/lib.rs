@@ -1,5 +1,6 @@
 //! Cloud/external/secret adapters.
 
+pub mod aws;
 pub mod azure;
 pub mod capability;
 pub mod cost;
@@ -13,6 +14,7 @@ pub mod secret;
 pub mod self_hosted;
 pub mod sync;
 
+pub use aws::AwsProvider;
 pub use azure::AzureProvider;
 pub use cost::{CostError, Usage, estimate_cost};
 pub use fake::FakeProvider;
