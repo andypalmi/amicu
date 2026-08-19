@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::diagnostic::{DiagnosticCode, Severity};
+use crate::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticReport, Severity};
 
 /// The concrete, dyn-boundary-friendly error every adapter method returns.
 ///
@@ -102,6 +102,30 @@ impl AdapterError {
     pub fn message(&self) -> &str {
         &self.message
     }
+
+    /// Normalize this error into a stable, catalog-coded [`Diagnostic`].
+    ///
+    /// Carries the error's [`code`](Self::code), [`severity`](Self::severity),
+    /// and its already-redacted, secret-free [`message`](Self::message). The
+    /// underlying [`source`](std::error::Error::source) is not rendered, so no
+    /// secret can leak through the diagnostic.
+    #[must_use]
+    pub fn to_diagnostic(&self) -> Diagnostic {
+        Diagnostic::new(self.code, self.severity, self.message.clone())
+    }
+
+    /// Normalize this error into a single-diagnostic [`DiagnosticReport`],
+    /// ready for `--output json` reporting.
+    #[must_use]
+    pub fn to_report(&self) -> DiagnosticReport {
+        DiagnosticReport::new(vec![self.to_diagnostic()])
+    }
+}
+
+impl From<&AdapterError> for Diagnostic {
+    fn from(error: &AdapterError) -> Self {
+        error.to_diagnostic()
+    }
 }
 
 impl std::fmt::Display for AdapterError {
@@ -145,5 +169,35 @@ pub trait AdapterErrorKind: std::error::Error + Send + Sync + Sized + 'static {
             self.to_string(),
         )
         .with_source(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostic::catalog;
+
+    #[test]
+    fn normalizes_into_catalog_coded_diagnostic() {
+        let err = AdapterError::permanent(
+            catalog::PROVIDER_UNKNOWN_OFFERING,
+            "unknown offering 'gpu.h100.1x'",
+        );
+        let diag = err.to_diagnostic();
+        assert_eq!(diag.code, catalog::PROVIDER_UNKNOWN_OFFERING);
+        assert_eq!(diag.code.to_string(), "AMICU-PROVIDER-010");
+        assert_eq!(diag.severity, Severity::Error);
+        assert_eq!(diag.message, "unknown offering 'gpu.h100.1x'");
+        // The `From<&AdapterError>` bridge agrees with `to_diagnostic`.
+        assert_eq!(Diagnostic::from(&err), diag);
+    }
+
+    #[test]
+    fn report_derives_validity_from_severity() {
+        let err = AdapterError::transient(catalog::PROVIDER_BACKEND, "backend blip");
+        let report = err.to_report();
+        assert!(!report.valid);
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(report.diagnostics[0].code, catalog::PROVIDER_BACKEND);
     }
 }

@@ -26,7 +26,45 @@ pub use pricing::{BillingGranularity, Pricing, Rate, RateUnit};
 pub use region::{Region, Residency};
 
 use amicu_core::adapter::{AdapterId, HealthStatus};
+use amicu_core::diagnostic::Severity;
 use serde::{Deserialize, Serialize};
+
+/// A provider-declared operational incident.
+///
+/// Distinct from the instantaneous [`HealthStatus`]: an incident is an ongoing,
+/// machine-readable event carrying its own severity, a safe summary, and an
+/// optional start time. A provider can be [`HealthStatus::Healthy`] while still
+/// tracking a resolved-but-recent or low-severity incident. All fields are
+/// plain data and secret-free.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Incident {
+    /// The incident's severity, reusing the diagnostic [`Severity`] scale.
+    pub severity: Severity,
+    /// A safe, secret-free summary of the incident.
+    pub summary: String,
+    /// When the incident started, as an RFC 3339 timestamp, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
+impl Incident {
+    /// An incident with a severity and summary and no start time.
+    #[must_use]
+    pub fn new(severity: Severity, summary: impl Into<String>) -> Self {
+        Self {
+            severity,
+            summary: summary.into(),
+            since: None,
+        }
+    }
+
+    /// Set the RFC 3339 start timestamp.
+    #[must_use]
+    pub fn since(mut self, since: impl Into<String>) -> Self {
+        self.since = Some(since.into());
+        self
+    }
+}
 
 /// A provider's normalized capability descriptor.
 ///
@@ -70,8 +108,12 @@ pub struct ProviderCapabilities {
     /// Model download performance.
     #[serde(default)]
     pub model_download: ModelDownloadPerformance,
-    /// Provider health and incident state; reuses core [`HealthStatus`].
+    /// Instantaneous provider reachability; reuses core [`HealthStatus`].
     pub health: HealthStatus,
+    /// Active operational incidents, richer than the instantaneous
+    /// [`health`](Self::health). Empty when the provider reports none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incidents: Vec<Incident>,
 }
 
 impl ProviderCapabilities {
@@ -100,12 +142,19 @@ impl ProviderCapabilities {
             availability,
             model_download: ModelDownloadPerformance::default(),
             health,
+            incidents: Vec::new(),
         }
     }
 
     /// Regions residing in the European Union.
     pub fn eu_regions(&self) -> impl Iterator<Item = &Region> {
         self.regions.iter().filter(|r| r.is_eu())
+    }
+
+    /// Whether the provider is currently tracking any active incident.
+    #[must_use]
+    pub fn has_active_incidents(&self) -> bool {
+        !self.incidents.is_empty()
     }
 }
 
@@ -174,6 +223,48 @@ mod tests {
         let json = serde_json::to_string_pretty(&caps).unwrap();
         let back: ProviderCapabilities = serde_json::from_str(&json).unwrap();
         assert_eq!(caps, back);
+    }
+
+    #[test]
+    fn health_is_exposed_and_incidents_default_empty() {
+        let caps = sample();
+        assert!(caps.health.is_healthy());
+        assert!(!caps.has_active_incidents());
+        // Empty incidents are omitted from the wire form.
+        let json = serde_json::to_string(&caps).unwrap();
+        assert!(!json.contains("incidents"));
+        assert!(json.contains("\"status\":\"healthy\""));
+    }
+
+    #[test]
+    fn active_incidents_round_trip_and_are_secret_free() {
+        let mut caps = sample();
+        caps.health = HealthStatus::Degraded {
+            detail: "elevated provision latency".into(),
+        };
+        caps.incidents = vec![
+            Incident::new(
+                Severity::Warning,
+                "elevated provision latency in eu-central-1",
+            )
+            .since("2026-08-19T10:00:00Z"),
+            Incident::new(Severity::Error, "spot capacity exhausted"),
+        ];
+        assert!(caps.has_active_incidents());
+
+        let json = serde_json::to_string(&caps).unwrap();
+        let back: ProviderCapabilities = serde_json::from_str(&json).unwrap();
+        assert_eq!(caps, back);
+        assert_eq!(back.incidents.len(), 2);
+        assert_eq!(
+            back.incidents[0].since.as_deref(),
+            Some("2026-08-19T10:00:00Z")
+        );
+        // Incident summaries carry no secret material.
+        let incidents_json = serde_json::to_string(&caps.incidents).unwrap();
+        assert!(!incidents_json.contains("token"));
+        assert!(!incidents_json.contains("secret"));
+        assert!(!incidents_json.contains("password"));
     }
 
     #[test]

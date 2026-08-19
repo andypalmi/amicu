@@ -300,10 +300,27 @@ pub mod catalog {
     /// `AMICU-PROVIDER-002` — a provider/model artifact download failed
     /// transiently; retrying resumes the transfer.
     pub const PROVIDER_DOWNLOAD_FAILED: DiagnosticCode = DiagnosticCode::new(Category::Provider, 2);
+    /// `AMICU-PROVIDER-010` — the request names an offering the provider does
+    /// not offer.
+    pub const PROVIDER_UNKNOWN_OFFERING: DiagnosticCode =
+        DiagnosticCode::new(Category::Provider, 10);
+    /// `AMICU-PROVIDER-011` — the request names a region the provider does not
+    /// serve.
+    pub const PROVIDER_UNKNOWN_REGION: DiagnosticCode = DiagnosticCode::new(Category::Provider, 11);
+    /// `AMICU-PROVIDER-012` — the handle refers to no known provisioned
+    /// instance.
+    pub const PROVIDER_UNKNOWN_INSTANCE: DiagnosticCode =
+        DiagnosticCode::new(Category::Provider, 12);
+    /// `AMICU-PROVIDER-013` — the provider backend failed transiently.
+    pub const PROVIDER_BACKEND: DiagnosticCode = DiagnosticCode::new(Category::Provider, 13);
+    /// `AMICU-PROVIDER-014` — the resolved credential was rejected by the
+    /// provider.
+    pub const PROVIDER_CREDENTIALS_REJECTED: DiagnosticCode =
+        DiagnosticCode::new(Category::Provider, 14);
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 10] {
+    pub const fn all() -> [DiagnosticCode; 15] {
         [
             PARSE_UNCLOSED_BLOCK,
             SCHEMA_MISSING_REQUIRED,
@@ -315,6 +332,11 @@ pub mod catalog {
             STATE_LOCKED,
             PROVIDER_CAPACITY_UNAVAILABLE,
             PROVIDER_DOWNLOAD_FAILED,
+            PROVIDER_UNKNOWN_OFFERING,
+            PROVIDER_UNKNOWN_REGION,
+            PROVIDER_UNKNOWN_INSTANCE,
+            PROVIDER_BACKEND,
+            PROVIDER_CREDENTIALS_REJECTED,
         ]
     }
 }
@@ -366,6 +388,47 @@ mod tests {
             catalog::PROVIDER_DOWNLOAD_FAILED.to_string(),
             "AMICU-PROVIDER-002"
         );
+    }
+
+    #[test]
+    fn provider_codes_render_expected_strings() {
+        assert_eq!(
+            catalog::PROVIDER_CAPACITY_UNAVAILABLE.to_string(),
+            "AMICU-PROVIDER-001"
+        );
+        assert_eq!(
+            catalog::PROVIDER_DOWNLOAD_FAILED.to_string(),
+            "AMICU-PROVIDER-002"
+        );
+        assert_eq!(
+            catalog::PROVIDER_UNKNOWN_OFFERING.to_string(),
+            "AMICU-PROVIDER-010"
+        );
+        assert_eq!(
+            catalog::PROVIDER_UNKNOWN_REGION.to_string(),
+            "AMICU-PROVIDER-011"
+        );
+        assert_eq!(
+            catalog::PROVIDER_UNKNOWN_INSTANCE.to_string(),
+            "AMICU-PROVIDER-012"
+        );
+        assert_eq!(catalog::PROVIDER_BACKEND.to_string(), "AMICU-PROVIDER-013");
+        assert_eq!(
+            catalog::PROVIDER_CREDENTIALS_REJECTED.to_string(),
+            "AMICU-PROVIDER-014"
+        );
+        // All provider codes are present in the catalog.
+        for code in [
+            catalog::PROVIDER_CAPACITY_UNAVAILABLE,
+            catalog::PROVIDER_DOWNLOAD_FAILED,
+            catalog::PROVIDER_UNKNOWN_OFFERING,
+            catalog::PROVIDER_UNKNOWN_REGION,
+            catalog::PROVIDER_UNKNOWN_INSTANCE,
+            catalog::PROVIDER_BACKEND,
+            catalog::PROVIDER_CREDENTIALS_REJECTED,
+        ] {
+            assert!(catalog::all().contains(&code));
+        }
     }
 
     #[test]
