@@ -67,6 +67,17 @@ impl Region {
         }
     }
 
+    /// A region known only by its `code`, with residency left unresolved.
+    ///
+    /// Used where only a bare code is available (e.g. parsed from the DSL, which
+    /// carries no jurisdiction): the residency is a sentinel to be resolved later
+    /// against the provider catalog, not a claim that the region is
+    /// [`Residency::Other`].
+    #[must_use]
+    pub fn from_code(code: impl Into<String>) -> Self {
+        Self::new(code, Residency::Other(String::new()))
+    }
+
     /// Set the human-readable location name.
     #[must_use]
     pub fn with_display_name(mut self, name: impl Into<String>) -> Self {
