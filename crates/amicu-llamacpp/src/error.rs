@@ -1,6 +1,5 @@
 //! The llama.cpp adapter error enum, classified into the uniform `AdapterError`.
 
-use amicu_core::ByteSize;
 use amicu_core::adapter::AdapterErrorKind;
 use amicu_core::diagnostic::{DiagnosticCode, Severity, catalog};
 use amicu_core::id::{HardwareProfileId, ModelId};
@@ -30,13 +29,10 @@ pub enum LlamaCppError {
     #[error("model '{0}' declares no GGUF variant")]
     NoVariant(ModelId),
 
-    /// The model does not fit in available device memory. Maps to
-    /// `AMICU-MEM-001`.
-    #[error("model needs {required} but only {available} is available")]
-    InsufficientMemory {
-        required: ByteSize,
-        available: ByteSize,
-    },
+    /// A deployment for another runtime family reached the llama.cpp adapter.
+    /// Maps to `AMICU-CAP-001`.
+    #[error("llama.cpp adapter received a non-llama.cpp runtime ({0})")]
+    WrongRuntime(&'static str),
 
     /// The `llama-server` binary could not be located. Maps to
     /// `AMICU-PROVIDER-001`.
@@ -80,8 +76,8 @@ impl AdapterErrorKind for LlamaCppError {
             }
             LlamaCppError::IncompatibleArtifact(_)
             | LlamaCppError::NoVariant(_)
+            | LlamaCppError::WrongRuntime(_)
             | LlamaCppError::VersionTooOld { .. } => catalog::CAP_RUNTIME_ARTIFACT_MISMATCH,
-            LlamaCppError::InsufficientMemory { .. } => catalog::MEM_VRAM_EXCEEDED,
             LlamaCppError::BinaryNotFound
             | LlamaCppError::UnparseableVersion(_)
             | LlamaCppError::Probe(_)

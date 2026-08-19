@@ -13,6 +13,9 @@ amicu-registry = { path = "../amicu-registry" }
 async-trait = "0.1"
 thiserror = "2"
 serde_json = "1"
+# HTTP client for the health probe; http-only (localhost), no TLS pulled in.
+ureq = { version = "3", default-features = false }
+tokio = { version = "1", features = ["rt"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
