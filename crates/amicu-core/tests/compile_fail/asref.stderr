@@ -1,0 +1,11 @@
+error[E0277]: the trait bound `SecretValue: AsRef<[u8]>` is not satisfied
+ --> tests/compile_fail/asref.rs:5:21
+  |
+5 |     assert_as_ref::<amicu_core::secret::SecretValue>();
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AsRef<[u8]>` is not implemented for `SecretValue`
+  |
+note: required by a bound in `assert_as_ref`
+ --> tests/compile_fail/asref.rs:2:21
+  |
+2 | fn assert_as_ref<T: AsRef<[u8]>>() {}
+  |                     ^^^^^^^^^^^ required by this bound in `assert_as_ref`

@@ -287,6 +287,9 @@ pub mod catalog {
     pub const CAP_RUNTIME_ARTIFACT_MISMATCH: DiagnosticCode = DiagnosticCode::new(Category::Cap, 1);
     /// `AMICU-MEM-001` — model does not fit in available VRAM.
     pub const MEM_VRAM_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Mem, 1);
+    /// `AMICU-MEM-002` — a single artifact/weight file exceeds the available
+    /// size budget, independent of aggregate VRAM.
+    pub const MEM_ARTIFACT_OVERSIZE: DiagnosticCode = DiagnosticCode::new(Category::Mem, 2);
     /// `AMICU-POLICY-001` — deployment exceeds the configured budget.
     pub const POLICY_BUDGET_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Policy, 1);
     /// `AMICU-STATE-001` — state is locked by another operation.
@@ -294,19 +297,24 @@ pub mod catalog {
     /// `AMICU-PROVIDER-001` — requested capacity is unavailable in region.
     pub const PROVIDER_CAPACITY_UNAVAILABLE: DiagnosticCode =
         DiagnosticCode::new(Category::Provider, 1);
+    /// `AMICU-PROVIDER-002` — a provider/model artifact download failed
+    /// transiently; retrying resumes the transfer.
+    pub const PROVIDER_DOWNLOAD_FAILED: DiagnosticCode = DiagnosticCode::new(Category::Provider, 2);
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 8] {
+    pub const fn all() -> [DiagnosticCode; 10] {
         [
             PARSE_UNCLOSED_BLOCK,
             SCHEMA_MISSING_REQUIRED,
             REF_UNKNOWN_RESOURCE,
             CAP_RUNTIME_ARTIFACT_MISMATCH,
             MEM_VRAM_EXCEEDED,
+            MEM_ARTIFACT_OVERSIZE,
             POLICY_BUDGET_EXCEEDED,
             STATE_LOCKED,
             PROVIDER_CAPACITY_UNAVAILABLE,
+            PROVIDER_DOWNLOAD_FAILED,
         ]
     }
 }
@@ -343,6 +351,20 @@ mod tests {
         assert_eq!(
             "AMICU-CAP-1".parse::<DiagnosticCode>().unwrap(),
             DiagnosticCode::new(Category::Cap, 1)
+        );
+    }
+
+    #[test]
+    fn catalog_codes_are_distinct() {
+        let mut codes: Vec<String> = catalog::all().iter().map(ToString::to_string).collect();
+        let total = codes.len();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), total, "catalog contains a duplicate code");
+        assert_eq!(catalog::MEM_ARTIFACT_OVERSIZE.to_string(), "AMICU-MEM-002");
+        assert_eq!(
+            catalog::PROVIDER_DOWNLOAD_FAILED.to_string(),
+            "AMICU-PROVIDER-002"
         );
     }
 
