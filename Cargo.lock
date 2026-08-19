@@ -104,6 +104,14 @@ dependencies = [
 [[package]]
 name = "amicu-runtime"
 version = "0.1.0"
+dependencies = [
+ "amicu-core",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "amicu-schema"
