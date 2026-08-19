@@ -7,12 +7,14 @@
 
 pub mod adapter;
 pub mod diagnostic;
+pub mod estimate;
 pub mod graph;
 pub mod id;
 pub mod resource;
 pub mod secret;
 pub mod units;
 
+pub use estimate::{Assumption, Confidence, EstimateRange, Provenance};
 pub use graph::{GRAPH_SCHEMA_VERSION, Graph};
 pub use units::ByteSize;
 
