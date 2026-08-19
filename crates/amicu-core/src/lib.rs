@@ -27,7 +27,7 @@ mod tests {
     use crate::resource::{
         Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Budget, BudgetPeriod, DataClass,
         Deployment, GgufVariant, GovernanceRule, HardwareProfile, LlamaCppSettings, Modality,
-        Model, ModelSource, Money, OptimizeFor, Price, Priority, Quantization, Quota,
+        Model, ModelSource, Money, OptimizeFor, Price, Priority, Quantization, Quota, Region,
         RoutingPolicy, RoutingTarget, RuleEffect, Runtime, Sensitivity, SourceRegistry, Tenant,
         UseCase,
     };
@@ -59,7 +59,7 @@ mod tests {
         HardwareProfile {
             id: HardwareProfileId::new("a100_80gb"),
             provider: "aws".into(),
-            region: Some("us-east-1".into()),
+            region: Some(Region::from_code("us-east-1")),
             accelerator: Some(Accelerator {
                 kind: AcceleratorKind::Gpu,
                 model: "a100".into(),

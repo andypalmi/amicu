@@ -10,7 +10,7 @@ use amicu_core::id::{DeploymentId, HardwareProfileId, ModelId};
 use amicu_core::resource::{
     Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Deployment, GgufVariant,
     HardwareProfile, LlamaCppSettings, Modality, Model, ModelSource, Money, Price, Quantization,
-    Runtime, SourceRegistry,
+    Region, Runtime, SourceRegistry,
 };
 use amicu_core::units::ByteSize;
 use amicu_core::{Graph, diagnostic::Severity};
@@ -51,7 +51,7 @@ fn sample_hardware() -> HardwareProfile {
     HardwareProfile {
         id: HardwareProfileId::new("a100_80gb"),
         provider: "aws".into(),
-        region: Some("us-east-1".into()),
+        region: Some(Region::from_code("us-east-1")),
         accelerator: Some(Accelerator {
             kind: AcceleratorKind::Gpu,
             model: "a100".into(),

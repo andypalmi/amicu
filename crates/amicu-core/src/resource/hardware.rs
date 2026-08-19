@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::Money;
+use super::{Money, Region};
 use crate::id::HardwareProfileId;
 use crate::units::ByteSize;
 
@@ -11,8 +11,11 @@ pub struct HardwareProfile {
     pub id: HardwareProfileId,
     /// Cloud or infra provider, e.g. `"aws"`, `"lambda"`, `"on_prem"`.
     pub provider: String,
+    /// The region the hardware sits in. Parsed from the DSL as a bare code with
+    /// residency unresolved (see [`Region::from_code`]); the jurisdiction is
+    /// resolved against the provider catalog at check time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
+    pub region: Option<Region>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accelerator: Option<Accelerator>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

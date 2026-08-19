@@ -86,7 +86,7 @@ fn residency_violations(graph: &Graph) -> Vec<Diagnostic> {
             continue; // missing hardware ref is reported elsewhere
         };
 
-        if let Some(region) = hw.region.as_deref() {
+        if let Some(region) = hw.region.as_ref().map(|r| r.code.as_str()) {
             if !region_allow.is_empty() && !region_allow.contains(region) {
                 out.push(policy(
                     catalog::POLICY_REGION_RESIDENCY,
@@ -213,8 +213,8 @@ fn collect_dups<'a>(out: &mut Vec<Diagnostic>, kind: &str, ids: impl Iterator<It
 mod residency_tests {
     use super::*;
     use amicu_core::resource::{
-        DataClass, Deployment, GovernanceRule, HardwareProfile, LlamaCppSettings, RuleEffect,
-        Runtime, Sensitivity,
+        DataClass, Deployment, GovernanceRule, HardwareProfile, LlamaCppSettings, Region,
+        RuleEffect, Runtime, Sensitivity,
     };
     use amicu_core::units::ByteSize;
 
@@ -222,7 +222,7 @@ mod residency_tests {
         HardwareProfile {
             id: "hw".into(),
             provider: provider.to_owned(),
-            region: region.map(ToOwned::to_owned),
+            region: region.map(Region::from_code),
             accelerator: None,
             cpu: None,
             memory: ByteSize::from_bytes(1024),

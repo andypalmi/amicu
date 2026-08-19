@@ -9,8 +9,8 @@ use serde::de::DeserializeOwned;
 use amicu_core::graph::Graph;
 use amicu_core::resource::{
     Accelerator, Artifact, Budget, Cpu, DataClass, Deployment, GgufVariant, GovernanceRule,
-    HardwareProfile, LlamaCppSettings, Model, ModelSource, Money, Price, Quota, RoutingPolicy,
-    RoutingTarget, Runtime, Tenant, UseCase, VllmSettings,
+    HardwareProfile, LlamaCppSettings, Model, ModelSource, Money, Price, Quota, Region,
+    RoutingPolicy, RoutingTarget, Runtime, Tenant, UseCase, VllmSettings,
 };
 use amicu_core::units::ByteSize;
 
@@ -92,7 +92,7 @@ fn hardware_profile(name: &str, f: &Fields) -> Result<HardwareProfile> {
     Ok(HardwareProfile {
         id: name.into(),
         provider: f.string("provider")?,
-        region: f.opt_string("region")?,
+        region: f.opt_string("region")?.map(Region::from_code),
         accelerator: f
             .opt_block("accelerator")
             .map(|a| -> Result<Accelerator> {
