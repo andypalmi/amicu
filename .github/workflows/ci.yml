@@ -48,3 +48,6 @@ jobs:
 
       - name: Build (MSRV)
         run: cargo build --workspace --all-targets --locked
+
+      - name: Compile-fail guard (trybuild, pinned)
+        run: cargo test -p amicu-core --test compile_fail -- --include-ignored

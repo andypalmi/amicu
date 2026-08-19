@@ -13,13 +13,17 @@ use std::str::FromStr;
 ///
 /// # Formatting guarantee
 ///
-/// [`Display`](fmt::Display) is value- and family-stable: it emits the unit
-/// with the *largest factor that divides the byte count exactly*, comparing
-/// binary and decimal factors on equal footing. This is lossless, so
-/// `parse(display(x)) == x` always holds, and a value authored in a decimal
-/// unit renders back in that family — `"16GB"` displays as `"16GB"`, never as
-/// the equal-but-surprising `"15625000KiB"`. A value with no coarse divisor
-/// falls back to raw bytes (`"…B"`).
+/// [`Display`](fmt::Display) always emits an exact, lossless representation: it
+/// picks the unit with the *largest factor that divides the byte count
+/// exactly*, comparing binary and decimal factors on equal footing, so
+/// `parse(display(x)) == x` always holds. A value with no coarse divisor falls
+/// back to raw bytes (`"…B"`).
+///
+/// Family preservation is a *tendency*, not a guarantee: for realistic
+/// magnitudes a decimal-authored value renders back in the decimal family —
+/// `"16GB"` displays as `"16GB"`, not the equal-but-surprising `"15625000KiB"`
+/// — but a value that is an exact multiple of both a decimal unit and a larger
+/// binary unit crosses families (still losslessly).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ByteSize(u64);
 
@@ -34,7 +38,7 @@ const GB: u64 = 1000 * MB;
 const TB: u64 = 1000 * GB;
 
 /// Ordered by descending factor, mixing families, so `Display`'s first exact
-/// divisor is the coarsest unit overall — keeping formatting family-stable.
+/// divisor is the coarsest unit overall.
 const UNITS: &[(&str, u64)] = &[
     ("TiB", TIB),
     ("TB", TB),
@@ -119,11 +123,13 @@ impl fmt::Display for ByteSize {
         if self.0 == 0 {
             return write!(f, "0B");
         }
+        // UNITS ends with ("B", 1), which divides every value, so this find
+        // always yields a unit.
         let (name, factor) = UNITS
             .iter()
             .find(|(_, factor)| self.0.is_multiple_of(*factor))
             .copied()
-            .unwrap_or(("B", 1));
+            .expect("UNITS always contains B (factor 1)");
         write!(f, "{}{name}", self.0 / factor)
     }
 }
@@ -175,8 +181,9 @@ mod tests {
 
     #[test]
     fn display_is_family_stable() {
-        // A value authored in a decimal unit renders back in that family
-        // rather than crossing into an equal-but-surprising binary unit.
+        // For realistic magnitudes a value authored in a decimal unit tends to
+        // render back in that family rather than crossing into an
+        // equal-but-surprising binary unit. This is a tendency, not a theorem.
         assert_eq!(ByteSize::from_bytes(16 * GB).to_string(), "16GB");
         assert_eq!(ByteSize::from_bytes(48 * GIB).to_string(), "48GiB");
         assert_eq!(ByteSize::from_bytes(1024).to_string(), "1KiB");
