@@ -5,11 +5,19 @@ use amicu_core::adapter::AdapterId;
 /// Proof that a caller currently holds the state lock.
 ///
 /// A handle pairs the holder's [`AdapterId`] with an opaque `token` the backend
-/// mints on [`lock`](crate::StateBackendAdapter::lock). `push` requires the
-/// handle and the backend compares the token against the one it recorded, so a
-/// push cannot overwrite state without the exact lock that guards it. The token
-/// is not a secret vault, but it is unguessable enough that a stale or forged
-/// handle is rejected rather than honored.
+/// mints on [`lock`](crate::StateBackendAdapter::lock). `push` and `rollback`
+/// require the handle and the backend compares the token against the one it
+/// recorded, so neither can overwrite state without the exact lock that guards
+/// it. The token is not a secret vault, but a stale or forged handle is rejected
+/// rather than honored.
+///
+/// # Security
+/// [`LockHandle::new`] is public and the token is a plain `u64`, so a caller can
+/// fabricate any handle. Real backends MUST therefore mint tokens from an
+/// **unpredictable (random)** source: a sequential or otherwise guessable token
+/// can be forged by an attacker to impersonate the lock holder and race a write
+/// past the ownership check. The in-crate fake derives non-sequential tokens for
+/// the same reason (see the test backend).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockHandle {
     holder: AdapterId,

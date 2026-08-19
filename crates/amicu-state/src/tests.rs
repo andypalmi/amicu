@@ -16,6 +16,7 @@ use amicu_core::units::ByteSize;
 use amicu_core::{Graph, diagnostic::Severity};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::{
     LockHandle, STATE_CORRUPTED, STATE_LOCK_NOT_HELD, STATE_LOCKED, STATE_VERSION_NOT_FOUND,
@@ -105,14 +106,27 @@ struct Inner {
     history: Vec<StateVersion>,
     snapshots: HashMap<String, StateSnapshot>,
     lock: Option<u64>,
-    next_token: u64,
+    token_counter: u64,
     next_version: u64,
     corrupt: bool,
 }
 
 struct FakeStateBackend {
     id: AdapterId,
+    salt: u64,
     inner: Mutex<Inner>,
+}
+
+/// Derive a non-sequential lock token from the backend identity, its salt, and a
+/// monotonic counter via SHA-256. Real backends must use true randomness; this
+/// keeps the fake unpredictable yet deterministic for tests (see `LockHandle`).
+fn mint_token(id: &AdapterId, salt: u64, counter: u64) -> u64 {
+    let mut hasher = Sha256::new();
+    hasher.update(id.to_string().as_bytes());
+    hasher.update(salt.to_le_bytes());
+    hasher.update(counter.to_le_bytes());
+    let digest = hasher.finalize();
+    u64::from_le_bytes(digest[..8].try_into().unwrap())
 }
 
 impl FakeStateBackend {
@@ -120,14 +134,16 @@ impl FakeStateBackend {
         let version = initial.version.clone();
         let mut snapshots = HashMap::new();
         snapshots.insert(version.clone(), initial.clone());
+        let salt = u64::from_le_bytes(Sha256::digest(id.as_bytes())[..8].try_into().unwrap());
         Self {
             id: AdapterId::new(id),
+            salt,
             inner: Mutex::new(Inner {
                 current: initial,
                 history: vec![StateVersion::new(version, None, "initial")],
                 snapshots,
                 lock: None,
-                next_token: 1,
+                token_counter: 0,
                 next_version: 1,
                 corrupt: false,
             }),
@@ -208,8 +224,8 @@ impl StateBackendAdapter for FakeStateBackend {
             }
             .into());
         }
-        let token = inner.next_token;
-        inner.next_token += 1;
+        let token = mint_token(&self.id, self.salt, inner.token_counter);
+        inner.token_counter += 1;
         inner.lock = Some(token);
         Ok(LockHandle::new(self.id.clone(), token))
     }
@@ -229,8 +245,23 @@ impl StateBackendAdapter for FakeStateBackend {
         Ok(self.inner.lock().unwrap().history.clone())
     }
 
-    async fn rollback(&self, version: &StateVersion) -> Result<(), AdapterError> {
+    async fn rollback(
+        &self,
+        version: &StateVersion,
+        lock: &LockHandle,
+    ) -> Result<(), AdapterError> {
         let mut inner = self.inner.lock().unwrap();
+        if inner.corrupt {
+            return Err(StateError::Corrupted {
+                detail: "refusing to roll back corrupt state".into(),
+            }
+            .into());
+        }
+        // Never roll back without the exact lock guarding the state.
+        let held = inner.lock.ok_or(StateError::LockNotHeld)?;
+        if lock.holder() != &self.id || lock.token() != held {
+            return Err(StateError::LockNotHeld.into());
+        }
         let target = inner.snapshots.get(&version.id).cloned().ok_or_else(|| {
             StateError::VersionNotFound {
                 version: version.id.clone(),
@@ -308,6 +339,20 @@ async fn lock_contention_is_explicit() {
 }
 
 #[tokio::test]
+async fn lock_tokens_are_not_sequential() {
+    let backend = backend();
+    let first = backend.lock().await.expect("first lock");
+    let t1 = first.token();
+    backend.unlock(first).await.expect("unlock");
+    let second = backend.lock().await.expect("second lock");
+    let t2 = second.token();
+
+    // Tokens must not be guessable increments of one another.
+    assert_ne!(t1, t2);
+    assert_ne!(t2, t1.wrapping_add(1));
+}
+
+#[tokio::test]
 async fn corruption_is_non_retryable_and_needs_recovery() {
     let backend = backend();
     backend.set_corrupt();
@@ -353,20 +398,86 @@ async fn history_records_pushes_and_rollback_restores() {
     assert_eq!(history[0].id, "v0");
     assert_eq!(history[2].parent.as_deref(), Some("v1"));
 
-    // Roll back to the first push and confirm the graph is restored.
+    // Roll back to the first push (under a held lock) and confirm restoration.
+    let lock = backend.lock().await.expect("relock for rollback");
     let v1 = history[1].clone();
-    backend.rollback(&v1).await.expect("rollback");
+    backend.rollback(&v1, &lock).await.expect("rollback");
     let pulled = backend.pull().await.expect("pull after rollback");
     assert_eq!(pulled.graph.deployments.len(), 1);
 
     // Rolling back to an unknown version is explicit.
     let missing = StateVersion::new("v404", None, "nope");
     let err = backend
-        .rollback(&missing)
+        .rollback(&missing, &lock)
         .await
         .expect_err("unknown version");
     assert_eq!(err.code(), STATE_VERSION_NOT_FOUND);
     assert_eq!(err.code().to_string(), "AMICU-STATE-004");
+    backend.unlock(lock).await.expect("unlock");
+}
+
+#[tokio::test]
+async fn rollback_requires_a_held_lock_and_never_races_a_push() {
+    let backend = backend();
+
+    // Record a second version so there is a prior version to target.
+    let lock = backend.lock().await.expect("lock");
+    let mut changed = sample_graph();
+    changed.deployments.clear();
+    backend
+        .push(&snapshot("_", changed), &lock)
+        .await
+        .expect("push");
+    backend.unlock(lock).await.expect("unlock");
+
+    let history = backend.history().await.expect("history");
+    let v0 = history[0].clone();
+
+    // No lock held: rollback is refused and state is untouched.
+    let forged = LockHandle::new(AdapterId::new("primary"), 999);
+    let err = backend
+        .rollback(&v0, &forged)
+        .await
+        .expect_err("rollback without a held lock");
+    assert_eq!(err.code(), STATE_LOCK_NOT_HELD);
+    assert!(!err.is_retryable());
+    assert!(
+        backend
+            .pull()
+            .await
+            .expect("pull")
+            .graph
+            .deployments
+            .is_empty()
+    );
+
+    // Lock held by another handle, wrong token: still refused, still untouched.
+    let real = backend.lock().await.expect("lock");
+    let wrong = LockHandle::new(AdapterId::new("primary"), 424_242);
+    let err = backend
+        .rollback(&v0, &wrong)
+        .await
+        .expect_err("rollback with the wrong lock");
+    assert_eq!(err.code(), STATE_LOCK_NOT_HELD);
+    assert!(
+        backend
+            .pull()
+            .await
+            .expect("pull")
+            .graph
+            .deployments
+            .is_empty()
+    );
+
+    // The genuine held lock authorizes the rollback.
+    backend
+        .rollback(&v0, &real)
+        .await
+        .expect("rollback under lock");
+    assert_eq!(
+        backend.pull().await.expect("pull").graph.deployments.len(),
+        1
+    );
 }
 
 #[test]

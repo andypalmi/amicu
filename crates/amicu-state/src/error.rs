@@ -3,15 +3,22 @@
 //! Every variant carries a stable `AMICU-STATE-*` diagnostic code. Two failure
 //! modes are load-bearing for correctness and demand explicit recovery, never a
 //! silent overwrite: lock contention ([`StateError::LockContention`]) and state
-//! corruption ([`StateError::Corrupted`]). A push presented without the lock
-//! that guards the state ([`StateError::LockNotHeld`]) is likewise rejected.
+//! corruption ([`StateError::Corrupted`]). A push or rollback presented without
+//! the lock guarding the state ([`StateError::LockNotHeld`]) is likewise rejected.
 
 use amicu_core::adapter::{AdapterError, AdapterErrorKind};
 use amicu_core::diagnostic::{Category, DiagnosticCode, Severity};
 
 /// `AMICU-STATE-001` — state is locked by another operation.
-pub const STATE_LOCKED: DiagnosticCode = DiagnosticCode::new(Category::State, 1);
-/// `AMICU-STATE-002` — a push was presented without the lock guarding the state.
+///
+/// Re-exported from the core catalog rather than re-declared, so this crate and
+/// core cannot drift on the shared code.
+pub use amicu_core::diagnostic::catalog::STATE_LOCKED;
+
+// `AMICU-STATE-002/003/004` have no core catalog entry yet; these are an
+// intentional local mirror pending a core seed. Keep them numerically aligned
+// with `Category::State`.
+/// `AMICU-STATE-002` — a push or rollback was presented without the lock guarding the state.
 pub const STATE_LOCK_NOT_HELD: DiagnosticCode = DiagnosticCode::new(Category::State, 2);
 /// `AMICU-STATE-003` — recorded state is corrupt and needs manual recovery.
 pub const STATE_CORRUPTED: DiagnosticCode = DiagnosticCode::new(Category::State, 3);
@@ -29,10 +36,10 @@ pub enum StateError {
         holder: String,
     },
 
-    /// A push was rejected because no matching lock is held. The state is never
-    /// overwritten without the lock that guards it; the caller must acquire the
-    /// lock first and retry.
-    #[error("push rejected: the presented lock does not match the held lock")]
+    /// A push or rollback was rejected because no matching lock is held. The
+    /// state is never overwritten without the lock that guards it; the caller
+    /// must acquire the lock first and retry.
+    #[error("rejected: the presented lock does not match the held lock")]
     LockNotHeld,
 
     /// The recorded state failed its integrity check. This is non-retryable and
