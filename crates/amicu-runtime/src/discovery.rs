@@ -114,12 +114,18 @@ fn discover_with(probe: &impl SystemProbe, os: &str) -> Result<HostReport, Disco
 fn discover_macos(probe: &impl SystemProbe, os: &str) -> Result<HostReport, DiscoveryError> {
     let disk_free = disk_free(probe)?;
     let hardware = probe.run("system_profiler", &["SPHardwareDataType"])?;
-    // No "Chip:" line (e.g. Intel Mac): fall back to sysctl CPU discovery.
-    let profile = if let Ok(profile) = parse_apple_silicon(&hardware) {
-        profile
-    } else {
-        let sysctl = probe.run("sysctl", &["hw.model", "hw.memsize", "hw.ncpu"])?;
-        parse_macos_cpu(&sysctl)?
+    // Only a missing "Chip" field (e.g. Intel Mac) falls back to sysctl CPU
+    // discovery; any other parse error on a real Apple Silicon host propagates.
+    let profile = match parse_apple_silicon(&hardware) {
+        Ok(profile) => profile,
+        Err(DiscoveryError::FieldNotFound { ref field, .. }) if field == "Chip" => {
+            let sysctl = probe.run(
+                "sysctl",
+                &["machdep.cpu.brand_string", "hw.memsize", "hw.ncpu"],
+            )?;
+            parse_macos_cpu(&sysctl)?
+        }
+        Err(e) => return Err(e),
     };
     Ok(HostReport {
         profile,
@@ -172,7 +178,7 @@ fn parse_apple_silicon(text: &str) -> Result<HardwareProfile, DiscoveryError> {
 }
 
 fn parse_macos_cpu(text: &str) -> Result<HardwareProfile, DiscoveryError> {
-    let model = field(text, "hw.model", "sysctl")?;
+    let model = field(text, "machdep.cpu.brand_string", "sysctl")?;
     let memsize = parse_u64(
         &field(text, "hw.memsize", "sysctl")?,
         "hw.memsize",
@@ -337,7 +343,7 @@ mod tests {
       Memory: 48 GB
 ";
 
-    const SYSCTL_INTEL: &str = "hw.model: MacBookPro15,1
+    const SYSCTL_INTEL: &str = "machdep.cpu.brand_string: Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz
 hw.memsize: 17179869184
 hw.ncpu: 12
 ";
@@ -436,7 +442,7 @@ MemAvailable:    8000000 kB
         let profile = parse_macos_cpu(SYSCTL_INTEL).unwrap();
         assert!(profile.accelerator.is_none());
         let cpu = profile.cpu.unwrap();
-        assert_eq!(cpu.model, "MacBookPro15,1");
+        assert_eq!(cpu.model, "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz");
         assert_eq!(cpu.cores, 12);
         assert_eq!(profile.memory.bytes(), 17_179_869_184);
     }
@@ -498,11 +504,31 @@ MemAvailable:    8000000 kB
                 "system_profiler SPHardwareDataType",
                 "Hardware:\n  Model Name: iMac\n",
             )
-            .command("sysctl hw.model hw.memsize hw.ncpu", SYSCTL_INTEL)
+            .command(
+                "sysctl machdep.cpu.brand_string hw.memsize hw.ncpu",
+                SYSCTL_INTEL,
+            )
             .command("df -Pk /", DF_MACOS);
         let report = discover_with(&probe, "macos").unwrap();
         assert!(report.profile.accelerator.is_none());
-        assert_eq!(report.profile.cpu.unwrap().cores, 12);
+        let cpu = report.profile.cpu.unwrap();
+        assert_eq!(cpu.cores, 12);
+        assert_eq!(cpu.model, "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz");
+    }
+
+    #[test]
+    fn malformed_apple_silicon_does_not_fall_back() {
+        // Has a "Chip:" line but a broken Memory line: parse_apple_silicon
+        // fails with a non-FieldNotFound{Chip} error, which must propagate
+        // rather than silently degrading to CPU-only.
+        let probe = FakeProbe::default()
+            .command(
+                "system_profiler SPHardwareDataType",
+                "Hardware:\n  Chip: Apple M3 Max\n  Total Number of Cores: 14\n  Memory: not_a_number GB\n",
+            )
+            .command("df -Pk /", DF_MACOS);
+        let err = discover_with(&probe, "macos").unwrap_err();
+        assert!(matches!(err, DiscoveryError::ParseValue { .. }));
     }
 
     #[test]
