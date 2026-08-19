@@ -27,5 +27,5 @@ pub use provider::{
 };
 pub use runpod::RunPodProvider;
 pub use scaleway::ScalewayProvider;
-pub use self_hosted::SelfHostedProvider;
+pub use self_hosted::{SelfHostedConfigError, SelfHostedProvider};
 pub use sync::{Freshness, SyncReport, SyncedCapabilities, classify, snapshot, sync_all};

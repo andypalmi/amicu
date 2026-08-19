@@ -50,6 +50,24 @@ use crate::provider::{
 /// The adapter identity the self-hosted provider registers under.
 pub const PROVIDER_ID: &str = "self-hosted";
 
+/// Ambiguity in the operator-declared hosts backing a [`SelfHostedProvider`].
+///
+/// Surfaced by the fallible constructors
+/// ([`try_from_hosts`](SelfHostedProvider::try_from_hosts) /
+/// [`try_with_host`](SelfHostedProvider::try_with_host)) so operator-supplied
+/// ambiguity is rejected rather than silently mis-served.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SelfHostedConfigError {
+    /// Two declared hosts share the same id. Host ids are unique identities: a
+    /// collision produces colliding offering ids and mis-serves provisioning.
+    #[error("duplicate declared-host id '{id}'")]
+    DuplicateHostId { id: String },
+    /// One region code is declared with two different residencies. A region code
+    /// is a unique location identity; conflicting residencies cannot both hold.
+    #[error("region code '{code}' declared with conflicting residency")]
+    ConflictingRegionResidency { code: String },
+}
+
 /// An operator-declared existing machine.
 ///
 /// This is where residency comes from: the operator states the [`Region`] their
@@ -160,6 +178,11 @@ impl SelfHostedProvider {
     }
 
     /// A self-hosted provider built from `hosts`.
+    ///
+    /// Infallible and best-effort: host ids and region codes are treated as
+    /// unique identities on a documented first-wins precondition. Use
+    /// [`try_from_hosts`](Self::try_from_hosts) to enforce that precondition and
+    /// reject ambiguous input.
     #[must_use]
     pub fn from_hosts(hosts: Vec<DeclaredHost>) -> Self {
         let id = AdapterId::new(PROVIDER_ID);
@@ -174,14 +197,71 @@ impl SelfHostedProvider {
         }
     }
 
+    /// A self-hosted provider built from validated `hosts`.
+    ///
+    /// The enforcing counterpart to [`from_hosts`](Self::from_hosts): duplicate
+    /// declared-host ids, or a region code declared with conflicting residency,
+    /// are rejected as [`SelfHostedConfigError`] rather than silently
+    /// mis-served.
+    pub fn try_from_hosts(hosts: Vec<DeclaredHost>) -> Result<Self, SelfHostedConfigError> {
+        Self::validate_hosts(&hosts)?;
+        Ok(Self::from_hosts(hosts))
+    }
+
     /// Add a declared host, rebuilding the descriptor. Host ids and region codes
     /// are treated as unique identities: re-declaring an id, or a region code
-    /// with differing residency, keeps the first declaration.
+    /// with differing residency, keeps the first declaration. Use
+    /// [`try_with_host`](Self::try_with_host) to reject such ambiguity instead.
     #[must_use]
     pub fn with_host(mut self, host: DeclaredHost) -> Self {
         self.hosts.push(host);
         self.capabilities = Self::capabilities_for(&self.id, &self.hosts, &self.health);
         self
+    }
+
+    /// Add a declared host, validating the resulting host set.
+    ///
+    /// The enforcing counterpart to [`with_host`](Self::with_host): a host whose
+    /// id or region-code residency conflicts with an already-declared host is
+    /// rejected as [`SelfHostedConfigError`], leaving the caller to handle it.
+    pub fn try_with_host(mut self, host: DeclaredHost) -> Result<Self, SelfHostedConfigError> {
+        self.hosts.push(host);
+        Self::validate_hosts(&self.hosts)?;
+        self.capabilities = Self::capabilities_for(&self.id, &self.hosts, &self.health);
+        Ok(self)
+    }
+
+    /// Validate the declared hosts backing this provider, reporting the first
+    /// duplicate id or conflicting region residency. The infallible builders
+    /// accept ambiguous input on the documented first-wins precondition; call
+    /// this (or use [`try_from_hosts`](Self::try_from_hosts)) to enforce it.
+    pub fn validate(&self) -> Result<(), SelfHostedConfigError> {
+        Self::validate_hosts(&self.hosts)
+    }
+
+    /// Reject duplicate host ids and region codes declared with conflicting
+    /// residency. Returns the first conflict found.
+    fn validate_hosts(hosts: &[DeclaredHost]) -> Result<(), SelfHostedConfigError> {
+        let mut seen_ids: Vec<&str> = Vec::new();
+        let mut seen_regions: Vec<&Region> = Vec::new();
+        for host in hosts {
+            if seen_ids.contains(&host.id.as_str()) {
+                return Err(SelfHostedConfigError::DuplicateHostId {
+                    id: host.id.clone(),
+                });
+            }
+            seen_ids.push(&host.id);
+            match seen_regions.iter().find(|r| r.code == host.region.code) {
+                Some(prev) if prev.residency != host.region.residency => {
+                    return Err(SelfHostedConfigError::ConflictingRegionResidency {
+                        code: host.region.code.clone(),
+                    });
+                }
+                Some(_) => {}
+                None => seen_regions.push(&host.region),
+            }
+        }
+        Ok(())
     }
 
     /// Override the health status (e.g. for tests or a degraded probe result).
@@ -297,13 +377,15 @@ impl SelfHostedProvider {
 
     /// Whether the offering is sold in `region`. Each self-hosted offering is
     /// sold only in its declared host's region, so this rejects a request whose
-    /// region does not correspond to the declared host.
+    /// region does not correspond to the declared host. Considers every offering
+    /// with the id so a duplicate id (accepted by the infallible builder) is not
+    /// mis-rejected when provisioned in a later host's region.
     fn offering_serves_region(&self, offering_id: &str, region: &str) -> bool {
         self.capabilities
             .compute
             .iter()
-            .find(|o| o.id == offering_id)
-            .is_some_and(|o| o.regions.iter().any(|r| r == region))
+            .filter(|o| o.id == offering_id)
+            .any(|o| o.regions.iter().any(|r| r == region))
     }
 
     /// Resolve and (pretend to) use the SSH key to authenticate the SSH
@@ -526,6 +608,95 @@ mod tests {
         SelfHostedProvider::new()
             .with_host(de_host())
             .with_host(us_host())
+    }
+
+    #[test]
+    fn try_from_hosts_rejects_duplicate_host_id() {
+        // Same id declared in two different regions.
+        let dup = DeclaredHost::new("rack-de-01", Region::new("dc-other", Residency::Eu));
+        let err = SelfHostedProvider::try_from_hosts(vec![de_host(), dup])
+            .err()
+            .expect("duplicate id rejected");
+        assert_eq!(
+            err,
+            SelfHostedConfigError::DuplicateHostId {
+                id: "rack-de-01".into()
+            }
+        );
+    }
+
+    #[test]
+    fn try_from_hosts_rejects_conflicting_region_residency() {
+        // One region code declared with two different residencies.
+        let a = DeclaredHost::new("h1", Region::new("dc-x", Residency::Eu));
+        let b = DeclaredHost::new("h2", Region::new("dc-x", Residency::Us));
+        let err = SelfHostedProvider::try_from_hosts(vec![a, b])
+            .err()
+            .expect("conflicting residency rejected");
+        assert_eq!(
+            err,
+            SelfHostedConfigError::ConflictingRegionResidency {
+                code: "dc-x".into()
+            }
+        );
+    }
+
+    #[test]
+    fn try_from_hosts_accepts_valid_hosts() {
+        let p = SelfHostedProvider::try_from_hosts(vec![de_host(), us_host()])
+            .expect("valid hosts accepted");
+        assert_eq!(p.declared_host_count(), 2);
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn same_region_code_and_residency_across_hosts_is_allowed() {
+        // Two hosts sitting in the same region (same code and residency) is a
+        // valid declaration, not a conflict.
+        let a = DeclaredHost::new("h1", Region::new("dc-x", Residency::Eu));
+        let b = DeclaredHost::new("h2", Region::new("dc-x", Residency::Eu));
+        let p = SelfHostedProvider::try_from_hosts(vec![a, b]).expect("same region ok");
+        assert_eq!(p.capabilities().regions.len(), 1);
+    }
+
+    #[test]
+    fn try_with_host_rejects_conflicting_addition() {
+        let err = SelfHostedProvider::new()
+            .with_host(de_host())
+            .try_with_host(DeclaredHost::new(
+                "rack-de-01",
+                Region::new("dc-other", Residency::Us),
+            ))
+            .err()
+            .expect("duplicate id on add rejected");
+        assert_eq!(
+            err,
+            SelfHostedConfigError::DuplicateHostId {
+                id: "rack-de-01".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_id_via_infallible_builder_still_serves_second_region() {
+        // The infallible builder accepts a duplicate id on its first-wins
+        // precondition; the hardened region check no longer mis-rejects the
+        // second host's region as UnknownRegion.
+        let dup = DeclaredHost::new("rack-de-01", Region::new("dc-virginia", Residency::Us))
+            .with_resources(8, "64GiB".parse().unwrap());
+        let p = SelfHostedProvider::new()
+            .with_host(de_host())
+            .with_host(dup);
+        // The infallible provider is inspectably invalid.
+        assert!(p.validate().is_err());
+        let handle = p
+            .provision(
+                &ProvisionRequest::new("rack-de-01", "dc-virginia"),
+                &no_creds(),
+            )
+            .await
+            .expect("second host's region now serves");
+        assert!(handle.state.is_ready());
     }
 
     #[test]
