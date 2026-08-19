@@ -6,5 +6,11 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+amicu-core = { path = "../amicu-core" }
+hcl-rs = "0.19"
+serde = "1"
+serde_json = "1"
+
 [lints]
 workspace = true
