@@ -34,17 +34,35 @@ pub struct ResolvedTarget {
 
 /// The outcome of resolving an alias: the matched policy and its live targets.
 ///
-/// `candidates` contains only targets with a registered endpoint, in policy
-/// order. It is never empty — [`EndpointRegistry::resolve`] returns `None`
-/// when nothing is live.
+/// The candidate list contains only targets with a registered endpoint, in
+/// policy order. It is never empty: the fields are private and the only
+/// constructor ([`new`](Self::new)) rejects an empty list, so the non-empty
+/// invariant [`weighted`](Self::weighted) relies on cannot be broken from any
+/// construction path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
-    pub policy: RoutingPolicyId,
-    pub candidates: Vec<ResolvedTarget>,
+    policy: RoutingPolicyId,
+    candidates: Vec<ResolvedTarget>,
 }
 
 impl Resolved {
-    /// The live targets for this alias.
+    /// Build from a matched policy and its live targets, or `None` when
+    /// `candidates` is empty — upholding the non-empty invariant.
+    #[must_use]
+    fn new(policy: RoutingPolicyId, candidates: Vec<ResolvedTarget>) -> Option<Self> {
+        if candidates.is_empty() {
+            return None;
+        }
+        Some(Self { policy, candidates })
+    }
+
+    /// The matched routing policy.
+    #[must_use]
+    pub fn policy(&self) -> &RoutingPolicyId {
+        &self.policy
+    }
+
+    /// The live targets for this alias. Guaranteed non-empty.
     #[must_use]
     pub fn candidates(&self) -> &[ResolvedTarget] {
         &self.candidates
@@ -183,13 +201,7 @@ impl EndpointRegistry {
                 })
             })
             .collect();
-        if candidates.is_empty() {
-            return None;
-        }
-        Some(Resolved {
-            policy: policy_id,
-            candidates,
-        })
+        Resolved::new(policy_id, candidates)
     }
 
     /// Resolve an alias and deterministically pick one live target by weight.
@@ -273,7 +285,7 @@ mod tests {
         ));
 
         let resolved = reg.resolve("gpt-4o").expect("alias resolves");
-        assert_eq!(resolved.policy, RoutingPolicyId::new("chat"));
+        assert_eq!(resolved.policy(), &RoutingPolicyId::new("chat"));
         assert_eq!(resolved.candidates().len(), 1);
         assert_eq!(resolved.candidates()[0].endpoint, "http://127.0.0.1:8080");
 
@@ -337,6 +349,13 @@ mod tests {
             reg.resolve("chat").unwrap().weighted(5).endpoint,
             "http://a:8080"
         );
+    }
+
+    #[test]
+    fn resolved_rejects_empty_candidates() {
+        // The non-empty invariant is type-enforced: no `Resolved` can be built
+        // with empty candidates, so `weighted` can never index-panic on one.
+        assert!(Resolved::new(RoutingPolicyId::new("chat"), Vec::new()).is_none());
     }
 
     #[test]
