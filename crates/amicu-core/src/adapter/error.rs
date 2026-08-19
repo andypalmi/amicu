@@ -70,7 +70,10 @@ impl AdapterError {
         self
     }
 
-    /// Build an [`AdapterError`] from any adapter-specific classified error.
+    /// Thin delegator to [`AdapterErrorKind::into_adapter_error`], the
+    /// canonical fold path. Retained for out-of-crate call sites; new code
+    /// should call `error.into_adapter_error()` directly.
+    #[inline]
     #[must_use]
     pub fn from_kind<E: AdapterErrorKind>(error: E) -> Self {
         error.into_adapter_error()
@@ -91,13 +94,6 @@ impl AdapterError {
     /// Whether the failure is transient and worth retrying.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
-        self.retryable
-    }
-
-    /// Alias for [`Self::is_retryable`]: transient failures are retryable,
-    /// permanent ones are not.
-    #[must_use]
-    pub fn is_transient(&self) -> bool {
         self.retryable
     }
 

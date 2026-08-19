@@ -10,6 +10,20 @@ use std::str::FromStr;
 /// Binary suffixes (`KiB`, `MiB`, `GiB`, `TiB`) use powers of 1024;
 /// decimal suffixes (`KB`, `MB`, `GB`, `TB`) use powers of 1000. A bare
 /// number, or a `B` suffix, is interpreted as raw bytes.
+///
+/// # Formatting guarantee
+///
+/// [`Display`](fmt::Display) always emits an exact, lossless representation: it
+/// picks the unit with the *largest factor that divides the byte count
+/// exactly*, comparing binary and decimal factors on equal footing, so
+/// `parse(display(x)) == x` always holds. A value with no coarse divisor falls
+/// back to raw bytes (`"…B"`).
+///
+/// Family preservation is a *tendency*, not a guarantee: for realistic
+/// magnitudes a decimal-authored value renders back in the decimal family —
+/// `"16GB"` displays as `"16GB"`, not the equal-but-surprising `"15625000KiB"`
+/// — but a value that is an exact multiple of both a decimal unit and a larger
+/// binary unit crosses families (still losslessly).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ByteSize(u64);
 
@@ -23,15 +37,16 @@ const MB: u64 = 1000 * KB;
 const GB: u64 = 1000 * MB;
 const TB: u64 = 1000 * GB;
 
-/// Ordered largest-first so formatting picks the coarsest exact unit.
+/// Ordered by descending factor, mixing families, so `Display`'s first exact
+/// divisor is the coarsest unit overall.
 const UNITS: &[(&str, u64)] = &[
     ("TiB", TIB),
-    ("GiB", GIB),
-    ("MiB", MIB),
-    ("KiB", KIB),
     ("TB", TB),
+    ("GiB", GIB),
     ("GB", GB),
+    ("MiB", MIB),
     ("MB", MB),
+    ("KiB", KIB),
     ("KB", KB),
     ("B", 1),
 ];
@@ -108,11 +123,13 @@ impl fmt::Display for ByteSize {
         if self.0 == 0 {
             return write!(f, "0B");
         }
+        // UNITS ends with ("B", 1), which divides every value, so this find
+        // always yields a unit.
         let (name, factor) = UNITS
             .iter()
             .find(|(_, factor)| self.0.is_multiple_of(*factor))
             .copied()
-            .unwrap_or(("B", 1));
+            .expect("UNITS always contains B (factor 1)");
         write!(f, "{}{name}", self.0 / factor)
     }
 }
@@ -160,6 +177,30 @@ mod tests {
         assert_eq!(ByteSize::from_bytes(48 * GIB).to_string(), "48GiB");
         assert_eq!(ByteSize::from_bytes(0).to_string(), "0B");
         assert_eq!(ByteSize::from_bytes(1).to_string(), "1B");
+    }
+
+    #[test]
+    fn display_is_family_stable() {
+        // For realistic magnitudes a value authored in a decimal unit tends to
+        // render back in that family rather than crossing into an
+        // equal-but-surprising binary unit. This is a tendency, not a theorem.
+        assert_eq!(ByteSize::from_bytes(16 * GB).to_string(), "16GB");
+        assert_eq!(ByteSize::from_bytes(48 * GIB).to_string(), "48GiB");
+        assert_eq!(ByteSize::from_bytes(1024).to_string(), "1KiB");
+        assert_eq!(ByteSize::from_bytes(0).to_string(), "0B");
+        // A non-round value has no coarse divisor and falls back to bytes.
+        assert_eq!(ByteSize::from_bytes(7 * MIB + 3).to_string(), "7340035B");
+    }
+
+    #[test]
+    fn decimal_authored_strings_round_trip_verbatim() {
+        for s in ["16GB", "48GiB", "1024", "0B", "512MiB"] {
+            let size: ByteSize = s.parse().unwrap();
+            let reparsed: ByteSize = size.to_string().parse().unwrap();
+            assert_eq!(size, reparsed);
+        }
+        // Authored decimal unit stays decimal on display.
+        assert_eq!("16GB".parse::<ByteSize>().unwrap().to_string(), "16GB");
     }
 
     #[test]

@@ -14,7 +14,10 @@ thiserror = "2"
 zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+rustversion = "1"
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt"] }
+trybuild = "1"
 
 [lints]
 workspace = true
