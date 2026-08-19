@@ -100,6 +100,27 @@ const DUP_MODEL: &str = r#"resource "model" "support_chat" {
 }
 "#;
 
+// A second, distinct model used to prove discovery reaches other files.
+const SECOND_MODEL: &str = r#"resource "model" "summarizer" {
+  source {
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen2.5-7B-Instruct"
+  }
+  architecture   = "qwen2"
+  modalities     = ["text"]
+  artifact {
+    format       = "gguf"
+    quantization = "q4_k_m"
+  }
+  context_length = 8192
+  variant {
+    quantization = "q4_k_m"
+    file         = "model.gguf"
+    size         = "4GiB"
+  }
+}
+"#;
+
 struct TempDir {
     path: PathBuf,
 }
@@ -336,6 +357,57 @@ fn duplicate_id_across_files_is_diagnosed() {
         commands::plan::run(&project, OutputFormat::Human, &mut out).unwrap(),
         1
     );
+}
+
+#[test]
+fn nested_config_is_discovered_and_merged() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let sub = td.path.join("environments");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("prod.hcl"), SECOND_MODEL).unwrap();
+
+    let graph = project.load_graph().unwrap();
+    assert_eq!(graph.models.len(), 2, "nested file must be merged");
+}
+
+#[test]
+fn hcl_under_state_dir_is_not_discovered() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let dot = td.path.join(".amicu");
+    std::fs::create_dir_all(&dot).unwrap();
+    std::fs::write(dot.join("stray.hcl"), SECOND_MODEL).unwrap();
+
+    let graph = project.load_graph().unwrap();
+    assert_eq!(graph.models.len(), 1, ".amicu/ must be excluded");
+}
+
+#[test]
+fn apply_json_stdout_is_a_single_json_value() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    // Prior state holds a deployment the new config drops, yielding a destroy
+    // plan that starts nothing (no handle held) — so no process is spawned.
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let prior = project.load_graph().unwrap();
+    project
+        .save_state(&LocalState {
+            version: LocalState::VERSION.to_owned(),
+            graph: prior,
+            endpoints: Vec::new(),
+        })
+        .unwrap();
+    write(&td.path, "amicu.hcl", SECOND_MODEL);
+
+    let mut out = Vec::new();
+    let code = commands::apply::run(&project, true, OutputFormat::Json, &mut out).unwrap();
+    assert_eq!(code, 0);
+    // The whole stdout buffer must parse as one JSON value.
+    let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(value.is_array());
 }
 
 #[test]
