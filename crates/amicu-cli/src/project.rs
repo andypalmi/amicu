@@ -60,18 +60,12 @@ impl Project {
         self.state_dir().join("state.json")
     }
 
-    /// All `*.hcl` files in the project root, sorted by name.
+    /// Every `*.hcl` file under the project root, sorted by path.
+    ///
+    /// Walks recursively, skipping `.amicu/`, hidden dirs, and `target/`.
     pub fn config_files(&self) -> Result<Vec<PathBuf>, CliError> {
         let mut files = Vec::new();
-        let entries = fs::read_dir(&self.root)
-            .map_err(|e| CliError::io(format!("cannot read {}", self.root.display()), e))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| CliError::io("cannot read directory entry", e))?;
-            let path = entry.path();
-            if path.is_file() && path.extension().is_some_and(|e| e == "hcl") {
-                files.push(path);
-            }
-        }
+        collect_hcl(&self.root, &mut files)?;
         files.sort();
         Ok(files)
     }
@@ -116,6 +110,32 @@ impl Project {
         fs::write(&path, text)
             .map_err(|e| CliError::io(format!("cannot write {}", path.display()), e))?;
         Ok(())
+    }
+}
+
+/// Recursively collect `*.hcl` files under `dir`, skipping excluded subtrees.
+fn collect_hcl(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), CliError> {
+    let entries =
+        fs::read_dir(dir).map_err(|e| CliError::io(format!("cannot read {}", dir.display()), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| CliError::io("cannot read directory entry", e))?;
+        let path = entry.path();
+        if path.is_dir() {
+            if !is_excluded_dir(&path) {
+                collect_hcl(&path, files)?;
+            }
+        } else if path.is_file() && path.extension().is_some_and(|e| e == "hcl") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Directories skipped during discovery: state, hidden dirs, and build output.
+fn is_excluded_dir(path: &Path) -> bool {
+    match path.file_name().and_then(|n| n.to_str()) {
+        Some(name) => name.starts_with('.') || name == "target",
+        None => true,
     }
 }
 

@@ -52,11 +52,20 @@ pub(crate) fn run(
     }
 
     // Safety rule: never apply without showing the plan and getting approval.
-    crate::commands::plan::print_human(&result, out)?;
-
-    if !auto_approve && !prompt_approval(out)? {
-        writeln!(out, "Apply cancelled.").map_err(|e| CliError::io("write failed", e))?;
-        return Ok(0);
+    // In JSON mode stdout must carry only the final handles JSON, so route the
+    // preview and prompt to stderr instead.
+    {
+        let mut stderr = std::io::stderr();
+        let preview: &mut dyn Write = if output.is_json() {
+            &mut stderr
+        } else {
+            &mut *out
+        };
+        crate::commands::plan::print_human(&result, preview)?;
+        if !auto_approve && !prompt_approval(preview)? {
+            writeln!(preview, "Apply cancelled.").map_err(|e| CliError::io("write failed", e))?;
+            return Ok(0);
+        }
     }
 
     let rt = tokio::runtime::Builder::new_current_thread()
