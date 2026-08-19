@@ -1,0 +1,458 @@
+//! Standardized diagnostic error-code catalog and report contract.
+//!
+//! Diagnostic codes follow the shape `AMICU-<CATEGORY>-<NUMBER>` across eight
+//! standardized categories. The JSON produced by [`DiagnosticReport`] is the
+//! stable contract consumed by `--output json` on every automation command.
+
+use std::fmt;
+use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
+
+/// The eight standardized diagnostic categories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Category {
+    /// HCL parsing / syntax.
+    Parse,
+    /// Structural / schema validation.
+    Schema,
+    /// References and dependencies.
+    Ref,
+    /// Runtime / artifact / hardware capability.
+    Cap,
+    /// Memory / VRAM and capacity fit.
+    Mem,
+    /// Governance, budget, residency.
+    Policy,
+    /// State, locking, drift.
+    State,
+    /// Provider provisioning / availability.
+    Provider,
+}
+
+impl Category {
+    /// The uppercase code prefix for this category (without a trailing dash).
+    #[must_use]
+    pub const fn prefix(self) -> &'static str {
+        match self {
+            Category::Parse => "AMICU-PARSE",
+            Category::Schema => "AMICU-SCHEMA",
+            Category::Ref => "AMICU-REF",
+            Category::Cap => "AMICU-CAP",
+            Category::Mem => "AMICU-MEM",
+            Category::Policy => "AMICU-POLICY",
+            Category::State => "AMICU-STATE",
+            Category::Provider => "AMICU-PROVIDER",
+        }
+    }
+
+    /// The bare category token as it appears between the two dashes.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Category::Parse => "PARSE",
+            Category::Schema => "SCHEMA",
+            Category::Ref => "REF",
+            Category::Cap => "CAP",
+            Category::Mem => "MEM",
+            Category::Policy => "POLICY",
+            Category::State => "STATE",
+            Category::Provider => "PROVIDER",
+        }
+    }
+
+    /// All categories, in declaration order.
+    #[must_use]
+    pub const fn all() -> [Category; 8] {
+        [
+            Category::Parse,
+            Category::Schema,
+            Category::Ref,
+            Category::Cap,
+            Category::Mem,
+            Category::Policy,
+            Category::State,
+            Category::Provider,
+        ]
+    }
+
+    fn from_token(token: &str) -> Option<Category> {
+        Category::all().into_iter().find(|c| c.token() == token)
+    }
+}
+
+/// Error returned when a diagnostic code string cannot be parsed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseCodeError(String);
+
+impl fmt::Display for ParseCodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid diagnostic code: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseCodeError {}
+
+/// A diagnostic code carrying its category and a numeric identifier.
+///
+/// Serializes and displays as `AMICU-<CATEGORY>-<NNN>`, zero-padded to three
+/// digits (e.g. `AMICU-CAP-001`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DiagnosticCode {
+    category: Category,
+    number: u16,
+}
+
+impl DiagnosticCode {
+    /// Construct a code from a category and number.
+    #[must_use]
+    pub const fn new(category: Category, number: u16) -> Self {
+        Self { category, number }
+    }
+
+    /// The category of this code.
+    #[must_use]
+    pub const fn category(self) -> Category {
+        self.category
+    }
+
+    /// The numeric identifier of this code.
+    #[must_use]
+    pub const fn number(self) -> u16 {
+        self.number
+    }
+}
+
+impl fmt::Display for DiagnosticCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{:03}", self.category.prefix(), self.number)
+    }
+}
+
+impl FromStr for DiagnosticCode {
+    type Err = ParseCodeError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let err = || ParseCodeError(s.to_owned());
+        let rest = s.strip_prefix("AMICU-").ok_or_else(err)?;
+        let (token, number) = rest.rsplit_once('-').ok_or_else(err)?;
+        let category = Category::from_token(token).ok_or_else(err)?;
+        // Reject non-canonical numeric forms (empty, signs, overflow) but
+        // accept any zero-padding.
+        if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(err());
+        }
+        let number: u16 = number.parse().map_err(|_| err())?;
+        Ok(DiagnosticCode::new(category, number))
+    }
+}
+
+impl Serialize for DiagnosticCode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for DiagnosticCode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// Diagnostic severity level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    /// A blocking problem: the operation cannot proceed.
+    Error,
+    /// A non-blocking concern the user should review.
+    Warning,
+    /// Informational context.
+    Info,
+}
+
+/// The location in a source file a diagnostic refers to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceLocation {
+    /// Source file path.
+    pub file: String,
+    /// 1-based line number.
+    pub line: u32,
+    /// 1-based column number.
+    pub column: u32,
+}
+
+/// A single JSON-patch-like edit that would resolve a diagnostic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Patch {
+    /// The patch operation (e.g. `replace`, `add`, `remove`).
+    pub op: String,
+    /// A JSON Pointer to the target location.
+    pub path: String,
+    /// The value to apply.
+    pub value: serde_json::Value,
+}
+
+/// A suggested fix attached to a diagnostic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SuggestedFix {
+    /// Human-readable description of the fix.
+    pub description: String,
+    /// The proposed patch.
+    pub patch: Patch,
+}
+
+/// A single diagnostic in a [`DiagnosticReport`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Diagnostic {
+    /// The standardized diagnostic code.
+    pub code: DiagnosticCode,
+    /// Severity of this diagnostic.
+    pub severity: Severity,
+    /// The resource address this diagnostic applies to, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    /// The attribute path within the resource, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Human-readable message.
+    pub message: String,
+    /// Source location, if the diagnostic maps to a specific location.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceLocation>,
+    /// Suggested fixes; omitted from output when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_fixes: Vec<SuggestedFix>,
+}
+
+impl Diagnostic {
+    /// Construct a minimal diagnostic with a code, severity and message.
+    #[must_use]
+    pub fn new(code: DiagnosticCode, severity: Severity, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            severity,
+            resource: None,
+            path: None,
+            message: message.into(),
+            source: None,
+            suggested_fixes: Vec::new(),
+        }
+    }
+}
+
+/// The top-level diagnostic report emitted by `--output json`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiagnosticReport {
+    /// Contract version. Currently always `"v1"`.
+    pub version: String,
+    /// Whether the analyzed input is valid (no error-severity diagnostics).
+    pub valid: bool,
+    /// The diagnostics, in report order.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl DiagnosticReport {
+    /// The current contract version string.
+    pub const VERSION: &'static str = "v1";
+
+    /// Build a report from a set of diagnostics, deriving `valid` from the
+    /// absence of any [`Severity::Error`] entry.
+    #[must_use]
+    pub fn new(diagnostics: Vec<Diagnostic>) -> Self {
+        let valid = !diagnostics.iter().any(|d| d.severity == Severity::Error);
+        Self {
+            version: Self::VERSION.to_owned(),
+            valid,
+            diagnostics,
+        }
+    }
+}
+
+/// Seeded catalog of standardized diagnostic codes.
+///
+/// This is a representative, reviewable catalog with at least one code per
+/// category; it is intentionally not exhaustive.
+pub mod catalog {
+    use super::{Category, DiagnosticCode};
+
+    /// `AMICU-PARSE-001` — HCL block is not closed.
+    pub const PARSE_UNCLOSED_BLOCK: DiagnosticCode = DiagnosticCode::new(Category::Parse, 1);
+    /// `AMICU-SCHEMA-001` — required attribute is missing.
+    pub const SCHEMA_MISSING_REQUIRED: DiagnosticCode = DiagnosticCode::new(Category::Schema, 1);
+    /// `AMICU-REF-001` — reference points at an unknown resource.
+    pub const REF_UNKNOWN_RESOURCE: DiagnosticCode = DiagnosticCode::new(Category::Ref, 1);
+    /// `AMICU-CAP-001` — runtime requires a GGUF model artifact.
+    pub const CAP_RUNTIME_ARTIFACT_MISMATCH: DiagnosticCode = DiagnosticCode::new(Category::Cap, 1);
+    /// `AMICU-MEM-001` — model does not fit in available VRAM.
+    pub const MEM_VRAM_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Mem, 1);
+    /// `AMICU-POLICY-001` — deployment exceeds the configured budget.
+    pub const POLICY_BUDGET_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Policy, 1);
+    /// `AMICU-STATE-001` — state is locked by another operation.
+    pub const STATE_LOCKED: DiagnosticCode = DiagnosticCode::new(Category::State, 1);
+    /// `AMICU-PROVIDER-001` — requested capacity is unavailable in region.
+    pub const PROVIDER_CAPACITY_UNAVAILABLE: DiagnosticCode =
+        DiagnosticCode::new(Category::Provider, 1);
+
+    /// Every catalog entry, for discovery and coverage tests.
+    #[must_use]
+    pub const fn all() -> [DiagnosticCode; 8] {
+        [
+            PARSE_UNCLOSED_BLOCK,
+            SCHEMA_MISSING_REQUIRED,
+            REF_UNKNOWN_RESOURCE,
+            CAP_RUNTIME_ARTIFACT_MISMATCH,
+            MEM_VRAM_EXCEEDED,
+            POLICY_BUDGET_EXCEEDED,
+            STATE_LOCKED,
+            PROVIDER_CAPACITY_UNAVAILABLE,
+        ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn code_display_is_zero_padded_uppercase() {
+        assert_eq!(
+            catalog::CAP_RUNTIME_ARTIFACT_MISMATCH.to_string(),
+            "AMICU-CAP-001"
+        );
+        assert_eq!(
+            DiagnosticCode::new(Category::Provider, 42).to_string(),
+            "AMICU-PROVIDER-042"
+        );
+        assert_eq!(
+            DiagnosticCode::new(Category::Mem, 123).to_string(),
+            "AMICU-MEM-123"
+        );
+    }
+
+    #[test]
+    fn code_roundtrips_through_string() {
+        for code in catalog::all() {
+            let s = code.to_string();
+            let parsed: DiagnosticCode = s.parse().unwrap();
+            assert_eq!(parsed, code);
+        }
+        // Zero-padding is tolerated on parse.
+        assert_eq!(
+            "AMICU-CAP-1".parse::<DiagnosticCode>().unwrap(),
+            DiagnosticCode::new(Category::Cap, 1)
+        );
+    }
+
+    #[test]
+    fn code_parse_rejects_garbage() {
+        assert!("CAP-001".parse::<DiagnosticCode>().is_err());
+        assert!("AMICU-NOPE-001".parse::<DiagnosticCode>().is_err());
+        assert!("AMICU-CAP-".parse::<DiagnosticCode>().is_err());
+        assert!("AMICU-CAP-xx".parse::<DiagnosticCode>().is_err());
+    }
+
+    #[test]
+    fn every_category_has_distinct_prefix() {
+        let mut prefixes: Vec<&str> = Category::all().iter().map(|c| c.prefix()).collect();
+        prefixes.sort_unstable();
+        prefixes.dedup();
+        assert_eq!(prefixes.len(), 8);
+    }
+
+    #[test]
+    fn report_matches_prd_example_shape() {
+        let report = DiagnosticReport {
+            version: "v1".to_owned(),
+            valid: false,
+            diagnostics: vec![Diagnostic {
+                code: catalog::CAP_RUNTIME_ARTIFACT_MISMATCH,
+                severity: Severity::Error,
+                resource: Some("deployment.support_chat_local".to_owned()),
+                path: Some("runtime".to_owned()),
+                message: "Runtime 'llama_cpp' requires a GGUF model artifact.".to_owned(),
+                source: Some(SourceLocation {
+                    file: "amicu.hcl".to_owned(),
+                    line: 18,
+                    column: 3,
+                }),
+                suggested_fixes: vec![SuggestedFix {
+                    description: "Select a compatible GGUF artifact.".to_owned(),
+                    patch: Patch {
+                        op: "replace".to_owned(),
+                        path: "/resources/model/support_chat/format".to_owned(),
+                        value: json!("gguf"),
+                    },
+                }],
+            }],
+        };
+
+        let expected = json!({
+            "version": "v1",
+            "valid": false,
+            "diagnostics": [
+                {
+                    "code": "AMICU-CAP-001",
+                    "severity": "error",
+                    "resource": "deployment.support_chat_local",
+                    "path": "runtime",
+                    "message": "Runtime 'llama_cpp' requires a GGUF model artifact.",
+                    "source": {"file": "amicu.hcl", "line": 18, "column": 3},
+                    "suggested_fixes": [
+                        {
+                            "description": "Select a compatible GGUF artifact.",
+                            "patch": {
+                                "op": "replace",
+                                "path": "/resources/model/support_chat/format",
+                                "value": "gguf"
+                            }
+                        }
+                    ]
+                }
+            ]
+        });
+
+        assert_eq!(serde_json::to_value(&report).unwrap(), expected);
+    }
+
+    #[test]
+    fn minimal_diagnostic_omits_optional_fields() {
+        let report = DiagnosticReport::new(vec![Diagnostic::new(
+            catalog::STATE_LOCKED,
+            Severity::Warning,
+            "State is locked.",
+        )]);
+
+        let value = serde_json::to_value(&report).unwrap();
+        let diag = &value["diagnostics"][0];
+        assert!(diag.get("resource").is_none());
+        assert!(diag.get("path").is_none());
+        assert!(diag.get("source").is_none());
+        assert!(diag.get("suggested_fixes").is_none());
+        // No error-severity diagnostics => valid.
+        assert_eq!(value["valid"], json!(true));
+        assert_eq!(
+            diag,
+            &json!({
+                "code": "AMICU-STATE-001",
+                "severity": "warning",
+                "message": "State is locked."
+            })
+        );
+    }
+
+    #[test]
+    fn report_roundtrips_serde() {
+        let report = DiagnosticReport::new(vec![Diagnostic::new(
+            catalog::CAP_RUNTIME_ARTIFACT_MISMATCH,
+            Severity::Error,
+            "boom",
+        )]);
+        let json = serde_json::to_string(&report).unwrap();
+        let back: DiagnosticReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(report, back);
+        assert!(!back.valid);
+    }
+}
