@@ -10,6 +10,7 @@ pub mod diagnostic;
 pub mod graph;
 pub mod id;
 pub mod resource;
+pub mod secret;
 pub mod units;
 
 pub use graph::{GRAPH_SCHEMA_VERSION, Graph};
