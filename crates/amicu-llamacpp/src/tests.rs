@@ -24,14 +24,19 @@ use amicu_registry::{
     ModelSummary, SourceCapabilities, SourceError,
 };
 use amicu_runtime::{
-    LogOptions, LogStream, Platform, RenderedLaunch, RuntimeAdapter, RuntimeHandle, RuntimeMetrics,
-    RuntimeStatus,
+    LaunchPlan, LogOptions, LogStream, Platform, RenderedLaunch, ResourceEstimate, RuntimeAdapter,
+    RuntimeHandle, RuntimeKind, RuntimeMetrics, RuntimeStatus,
 };
 
 use crate::binary::{BinaryConfig, CommandRunner, LlamaVersion, detect_binary};
 use crate::download::download_gguf;
 use crate::error::LlamaCppError;
-use crate::supervisor::{ProcessSupervisor, ResolvedSecret};
+use crate::health::HealthProbe;
+use crate::service::{
+    CommandExec, ExecOutput, HostExec, LaunchdManager, ServiceManager, ServiceSpec, ServiceState,
+    SystemdManager,
+};
+use crate::supervisor::{ProcessSupervisor, ResolvedSecret, ServiceSupervisor};
 use crate::{LlamaCppAdapter, MapCatalog};
 
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -409,7 +414,7 @@ fn plan_launch_renders_visible_command() {
     let plan = fitting_adapter().plan_launch(&deployment()).expect("plan");
     assert_eq!(plan.runtime, amicu_runtime::RuntimeKind::LlamaCpp);
 
-    let RenderedLaunch::Command { text } = &plan.rendered else {
+    let RenderedLaunch::Command { argv, text } = &plan.rendered else {
         panic!("expected a command");
     };
     assert!(text.starts_with("llama-server -m "));
@@ -417,6 +422,11 @@ fn plan_launch_renders_visible_command() {
     assert!(text.contains("--port 8080"));
     assert!(text.contains("--ctx-size 8192"));
     assert!(text.contains("--n-gpu-layers -1"));
+    // argv is the structured source of truth, not a shell-split of `text`.
+    assert_eq!(argv[0], "llama-server");
+    assert_eq!(argv[1], "-m");
+    assert!(argv[2].ends_with("tiny.Q4_K_M.gguf"));
+    assert!(argv.contains(&"--port".to_owned()) && argv.contains(&"8080".to_owned()));
 }
 
 #[test]
@@ -566,4 +576,394 @@ async fn apply_status_stop_round_trip() {
         adapter.status(&handle).await.unwrap(),
         RuntimeStatus::Stopped { .. }
     ));
+}
+
+// ---- ServiceSupervisor over fake ports --------------------------------------
+
+/// A `ServiceManager` returning canned state and recording start/stop.
+struct FakeManager {
+    state: ServiceState,
+    start_ok: bool,
+    logs: Vec<String>,
+    started: Mutex<Option<ServiceSpec>>,
+    stopped: Mutex<bool>,
+}
+
+impl FakeManager {
+    fn new(state: ServiceState) -> Self {
+        Self {
+            state,
+            start_ok: true,
+            logs: vec!["server listening".into()],
+            started: Mutex::new(None),
+            stopped: Mutex::new(false),
+        }
+    }
+    fn failing_start() -> Self {
+        Self {
+            start_ok: false,
+            ..Self::new(ServiceState::Inactive)
+        }
+    }
+}
+
+impl ServiceManager for FakeManager {
+    fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
+        if !self.start_ok {
+            return Err(LlamaCppError::Supervisor("launchctl load failed".into()));
+        }
+        *self.started.lock().unwrap() = Some(spec.clone());
+        Ok(())
+    }
+    fn state(&self, _label: &str) -> Result<ServiceState, LlamaCppError> {
+        Ok(self.state)
+    }
+    fn stop(&self, _label: &str) -> Result<(), LlamaCppError> {
+        *self.stopped.lock().unwrap() = true;
+        Ok(())
+    }
+    fn logs(&self, _label: &str, options: LogOptions) -> Result<Vec<String>, LlamaCppError> {
+        let mut lines = self.logs.clone();
+        if let Some(n) = options.tail {
+            let keep = (n as usize).min(lines.len());
+            lines = lines.split_off(lines.len() - keep);
+        }
+        Ok(lines)
+    }
+}
+
+struct FakeProbe {
+    ready: bool,
+}
+
+#[async_trait]
+impl HealthProbe for FakeProbe {
+    async fn is_ready(&self, _endpoint: &str) -> bool {
+        self.ready
+    }
+}
+
+fn command_plan() -> LaunchPlan {
+    fitting_adapter().plan_launch(&deployment()).expect("plan")
+}
+
+fn manifest_plan() -> LaunchPlan {
+    LaunchPlan {
+        deployment: DeploymentId::new("support_chat_local"),
+        runtime: RuntimeKind::LlamaCpp,
+        rendered: RenderedLaunch::Manifest {
+            text: "manifest".into(),
+        },
+        settings: Runtime::LlamaCpp(LlamaCppSettings {
+            context_length: 8192,
+            port: 8080,
+            n_gpu_layers: -1,
+        }),
+        secret_refs: vec![],
+        estimate: ResourceEstimate {
+            estimated_memory: ByteSize::from_bytes(0),
+            gpu_count: 0,
+        },
+    }
+}
+
+#[tokio::test]
+async fn supervisor_start_yields_running_healthy() {
+    let sup = ServiceSupervisor::new(
+        FakeManager::new(ServiceState::Active),
+        FakeProbe { ready: true },
+    );
+    let handle = sup.start(&command_plan(), &[]).await.expect("start");
+    assert_eq!(handle.id, "io.amicu.llama.support_chat_local");
+    assert_eq!(handle.endpoint, "http://127.0.0.1:8080");
+
+    let status = sup.status(&handle).await.expect("status");
+    assert!(status.is_running());
+    let RuntimeStatus::Running { detail } = status else {
+        panic!("expected running");
+    };
+    assert_eq!(detail, "healthy");
+}
+
+#[tokio::test]
+async fn supervisor_status_degraded_when_endpoint_not_ready() {
+    let sup = ServiceSupervisor::new(
+        FakeManager::new(ServiceState::Active),
+        FakeProbe { ready: false },
+    );
+    let handle = sup.start(&command_plan(), &[]).await.expect("start");
+    let RuntimeStatus::Running { detail } = sup.status(&handle).await.unwrap() else {
+        panic!("expected running (degraded)");
+    };
+    assert!(detail.starts_with("degraded"), "detail was {detail:?}");
+}
+
+#[tokio::test]
+async fn supervisor_status_failed_when_service_crashed() {
+    let sup = ServiceSupervisor::new(
+        FakeManager::new(ServiceState::Failed),
+        FakeProbe { ready: true },
+    );
+    let handle = sup.start(&command_plan(), &[]).await.expect("start");
+    assert!(matches!(
+        sup.status(&handle).await.unwrap(),
+        RuntimeStatus::Failed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn supervisor_status_stopped_when_inactive() {
+    let sup = ServiceSupervisor::new(
+        FakeManager::new(ServiceState::Inactive),
+        FakeProbe { ready: false },
+    );
+    let handle = sup.start(&command_plan(), &[]).await.expect("start");
+    assert!(matches!(
+        sup.status(&handle).await.unwrap(),
+        RuntimeStatus::Stopped { .. }
+    ));
+}
+
+#[tokio::test]
+async fn supervisor_logs_and_stop_and_metrics() {
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: true });
+    let handle = sup.start(&command_plan(), &[]).await.expect("start");
+
+    let logs = sup
+        .logs(&handle, LogOptions::default())
+        .await
+        .expect("logs");
+    assert_eq!(logs.lines(), ["server listening".to_owned()]);
+
+    let _ = sup.metrics(&handle).await.expect("metrics");
+
+    sup.stop(&handle).await.expect("stop");
+    assert!(*manager.stopped.lock().unwrap());
+}
+
+/// Shares one `FakeManager` so a test can inspect it after moving it into the
+/// supervisor.
+struct SharedManager(std::sync::Arc<FakeManager>);
+
+impl ServiceManager for SharedManager {
+    fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
+        self.0.start(spec)
+    }
+    fn state(&self, label: &str) -> Result<ServiceState, LlamaCppError> {
+        self.0.state(label)
+    }
+    fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
+        self.0.stop(label)
+    }
+    fn logs(&self, label: &str, options: LogOptions) -> Result<Vec<String>, LlamaCppError> {
+        self.0.logs(label, options)
+    }
+}
+
+#[tokio::test]
+async fn supervisor_start_failure_is_typed_error() {
+    let sup = ServiceSupervisor::new(FakeManager::failing_start(), FakeProbe { ready: true });
+    let err = sup
+        .start(&command_plan(), &[])
+        .await
+        .expect_err("start fails");
+    assert!(matches!(err, LlamaCppError::Supervisor(_)));
+    assert_eq!(err.code(), catalog::PROVIDER_CAPACITY_UNAVAILABLE);
+    assert!(err.retryable());
+}
+
+#[tokio::test]
+async fn supervisor_rejects_manifest_launch() {
+    let sup = ServiceSupervisor::new(
+        FakeManager::new(ServiceState::Active),
+        FakeProbe { ready: true },
+    );
+    let err = sup.start(&manifest_plan(), &[]).await.expect_err("no argv");
+    assert!(matches!(err, LlamaCppError::Supervisor(_)));
+}
+
+#[tokio::test]
+async fn supervisor_injects_secrets_into_env_not_argv() {
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: true });
+    let secret = ResolvedSecret {
+        name: "api_key".into(),
+        value: SecretValue::new("s3cr3t"),
+    };
+    sup.start(&command_plan(), std::slice::from_ref(&secret))
+        .await
+        .expect("start");
+
+    let spec = manager.started.lock().unwrap().clone().expect("started");
+    assert_eq!(spec.env, vec![("api_key".to_owned(), "s3cr3t".to_owned())]);
+    // The value is in env, never in argv.
+    assert!(spec.argv.iter().all(|a| !a.contains("s3cr3t")));
+}
+
+// ---- launchd / systemd managers over a fake CommandExec ---------------------
+
+struct FakeExec {
+    out: ExecOutput,
+    calls: Mutex<Vec<Vec<String>>>,
+}
+
+impl FakeExec {
+    fn new(success: bool, stdout: &str) -> Self {
+        Self {
+            out: ExecOutput {
+                success,
+                stdout: stdout.to_owned(),
+                stderr: String::new(),
+            },
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+    fn last(&self) -> Vec<String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
+impl CommandExec for FakeExec {
+    fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        let mut call = vec![program.to_owned()];
+        call.extend(args.iter().map(|a| (*a).to_owned()));
+        self.calls.lock().unwrap().push(call);
+        Ok(self.out.clone())
+    }
+}
+
+/// Lets a test share one `FakeExec` with a manager and still inspect it.
+impl<T: CommandExec> CommandExec for std::sync::Arc<T> {
+    fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        (**self).exec(program, args)
+    }
+}
+
+fn service_spec() -> ServiceSpec {
+    ServiceSpec {
+        label: "io.amicu.llama.support_chat_local".into(),
+        argv: vec![
+            "llama-server".into(),
+            "-m".into(),
+            "/models/tiny.gguf".into(),
+            "--port".into(),
+            "8080".into(),
+        ],
+        env: vec![],
+    }
+}
+
+#[test]
+fn launchd_start_writes_plist_and_loads() {
+    let tmp = TempDir::new("launchd");
+    let agents = tmp.file("agents");
+    let logs = tmp.file("logs");
+    let manager = LaunchdManager::new(FakeExec::new(true, ""), &agents, &logs);
+    manager.start(&service_spec()).expect("start");
+
+    let plist = agents.join("io.amicu.llama.support_chat_local.plist");
+    let body = fs::read_to_string(&plist).expect("plist written");
+    assert!(body.contains("<string>llama-server</string>"));
+    assert!(body.contains("<string>/models/tiny.gguf</string>"));
+    assert!(body.contains("<key>RunAtLoad</key>"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&plist).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "plist must be owner-only");
+    }
+}
+
+#[test]
+fn launchd_state_maps_pid_exit_and_missing() {
+    let active = LaunchdManager::new(FakeExec::new(true, "{\n\t\"PID\" = 1234;\n};"), "/a", "/l");
+    assert_eq!(active.state("x").unwrap(), ServiceState::Active);
+
+    let failed = LaunchdManager::new(
+        FakeExec::new(true, "{\n\t\"LastExitStatus\" = 78;\n};"),
+        "/a",
+        "/l",
+    );
+    assert_eq!(failed.state("x").unwrap(), ServiceState::Failed);
+
+    let gone = LaunchdManager::new(FakeExec::new(false, ""), "/a", "/l");
+    assert_eq!(gone.state("x").unwrap(), ServiceState::Inactive);
+}
+
+#[test]
+fn systemd_start_builds_transient_unit_with_setenv() {
+    let exec = std::sync::Arc::new(FakeExec::new(true, ""));
+    let mut spec = service_spec();
+    spec.env = vec![("api_key".into(), "v".into())];
+    SystemdManager::new(exec.clone())
+        .start(&spec)
+        .expect("start");
+    let call = exec.last();
+    assert_eq!(call[0], "systemd-run");
+    assert!(call.contains(&"--user".to_owned()));
+    assert!(call.contains(&"--unit=io.amicu.llama.support_chat_local".to_owned()));
+    assert!(call.contains(&"--setenv=api_key=v".to_owned()));
+    // The argv follows the options, program first.
+    let prog = call
+        .iter()
+        .position(|a| a == "llama-server")
+        .expect("program");
+    assert!(call[prog..].contains(&"/models/tiny.gguf".to_owned()));
+}
+
+#[test]
+fn systemd_state_maps_is_active_output() {
+    assert_eq!(
+        SystemdManager::new(FakeExec::new(true, "active\n"))
+            .state("x")
+            .unwrap(),
+        ServiceState::Active
+    );
+    assert_eq!(
+        SystemdManager::new(FakeExec::new(false, "failed\n"))
+            .state("x")
+            .unwrap(),
+        ServiceState::Failed
+    );
+    assert_eq!(
+        SystemdManager::new(FakeExec::new(false, "inactive\n"))
+            .state("x")
+            .unwrap(),
+        ServiceState::Inactive
+    );
+}
+
+#[test]
+fn systemd_logs_use_journalctl_with_tail() {
+    let exec = std::sync::Arc::new(FakeExec::new(true, "line1\nline2\n"));
+    let lines = SystemdManager::new(exec.clone())
+        .logs(
+            "io.amicu.llama.support_chat_local",
+            LogOptions {
+                follow: false,
+                tail: Some(5),
+            },
+        )
+        .expect("logs");
+    assert_eq!(lines, vec!["line1".to_owned(), "line2".to_owned()]);
+    let call = exec.last();
+    assert_eq!(call[0], "journalctl");
+    assert!(call.contains(&"--lines=5".to_owned()));
+}
+
+// ---- real child process (ignored by default) --------------------------------
+
+#[test]
+#[ignore = "spawns a real child process"]
+fn host_exec_runs_a_real_process() {
+    let out = HostExec.exec("echo", &["amicu"]).expect("echo runs");
+    assert!(out.success);
+    assert!(out.stdout.contains("amicu"));
 }

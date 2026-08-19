@@ -13,8 +13,12 @@ use crate::capabilities::RuntimeKind;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "form", rename_all = "snake_case")]
 pub enum RenderedLaunch {
-    /// A shell command line, e.g. `llama-server --port 8080 ...`.
-    Command { text: String },
+    /// A command to exec directly: the structured argument vector (`argv[0]` is
+    /// the program) plus a shell-quoted `text` for display only.
+    ///
+    /// Supervisors spawn from `argv` — never by shell-splitting `text` — so a
+    /// path with spaces or metacharacters can neither mis-split nor inject.
+    Command { argv: Vec<String>, text: String },
     /// A declarative manifest to submit to a scheduler.
     Manifest { text: String },
 }
@@ -24,7 +28,16 @@ impl RenderedLaunch {
     #[must_use]
     pub fn as_text(&self) -> &str {
         match self {
-            RenderedLaunch::Command { text } | RenderedLaunch::Manifest { text } => text,
+            RenderedLaunch::Command { text, .. } | RenderedLaunch::Manifest { text } => text,
+        }
+    }
+
+    /// The structured argument vector, when this is a [`RenderedLaunch::Command`].
+    #[must_use]
+    pub fn argv(&self) -> Option<&[String]> {
+        match self {
+            RenderedLaunch::Command { argv, .. } => Some(argv),
+            RenderedLaunch::Manifest { .. } => None,
         }
     }
 }

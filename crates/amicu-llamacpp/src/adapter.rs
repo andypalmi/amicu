@@ -171,10 +171,9 @@ impl LlamaCppAdapter {
     fn settings(d: &Deployment) -> Result<&LlamaCppSettings, LlamaCppError> {
         match &d.runtime {
             Runtime::LlamaCpp(s) => Ok(s),
-            // Only reached on a mis-dispatched deployment; report as a mismatch.
-            Runtime::Vllm(_) => Err(LlamaCppError::IncompatibleArtifact(
-                ArtifactFormat::Safetensors,
-            )),
+            // Only reached on a mis-dispatched deployment: a runtime-family
+            // mismatch, not an artifact-format one.
+            Runtime::Vllm(_) => Err(LlamaCppError::WrongRuntime("vllm")),
         }
     }
 
@@ -291,7 +290,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
 
         let report = check_variant_fit(resolved.total_parameters, &variant, &hardware, &self.fit);
         let model_path = self.models_dir.join(model.id.as_str()).join(&variant.file);
-        let text = render_command(&model_path, settings);
+        let (argv, text) = render_command(&model_path, settings);
 
         let gpu_count = u32::from(hardware.accelerator.is_some() && settings.n_gpu_layers != 0);
         let estimated_memory =
@@ -300,7 +299,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
         Ok(LaunchPlan {
             deployment: d.id.clone(),
             runtime: RuntimeKind::LlamaCpp,
-            rendered: RenderedLaunch::Command { text },
+            rendered: RenderedLaunch::Command { argv, text },
             settings: d.runtime.clone(),
             secret_refs: Vec::new(),
             estimate: ResourceEstimate {
