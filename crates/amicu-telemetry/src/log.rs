@@ -34,12 +34,19 @@ pub enum Outcome {
 ///
 /// # Privacy invariant
 /// By construction this type cannot retain prompt or completion text. Every
-/// field is either an identifier ([`DeploymentId`]/[`ModelId`] — a name, not
-/// content, exactly as [`SecretRef`](amicu_core::secret::SecretRef) is), a
+/// field MUST be either an identifier ([`DeploymentId`]/[`ModelId`] — a name,
+/// not content, exactly as [`SecretRef`](amicu_core::secret::SecretRef) is), a
 /// numeric count/measurement, or the [`Outcome`] enum. There is deliberately
 /// **no `String`/`Vec<u8>`/free-text field** and no API that accepts request or
-/// response bodies. A round-trip test asserts the serialized key set to keep
-/// this guarantee from regressing as fields are added.
+/// response bodies.
+///
+/// A content-capable field is forbidden even when hidden from serialization via
+/// `#[serde(skip)]` / `#[serde(skip_serializing_if = ...)]`: such a field would
+/// evade the serialized-key-set test, so that test alone is not the guard. Two
+/// tests hold this line: `record_holds_only_counts_and_metadata` pins the key
+/// set, and `record_fields_are_exhaustively_content_free` destructures every
+/// field so any added field breaks the build until it is deliberately listed —
+/// forcing this invariant to be re-checked before a field can slip in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RequestRecord {
     /// Caller-supplied wall-clock timestamp (ms since epoch). Passed in rather
@@ -239,6 +246,26 @@ mod tests {
         .collect();
         assert_eq!(keys, expected);
         assert_eq!(record.total_tokens(), 192);
+    }
+
+    #[test]
+    fn record_fields_are_exhaustively_content_free() {
+        // Compile-time guard for the no-content invariant (see `RequestRecord`
+        // docs): destructuring every field by name — with no `..` — forces any
+        // newly added field to be listed here before it compiles, even one
+        // hidden from serialization via `#[serde(skip)]` that the key-set test
+        // would miss. Each field below is a count/measurement/id/enum, never
+        // free text.
+        let record = RequestRecord::new(1, DeploymentId::new("d"), 1, 1, 1.0);
+        let RequestRecord {
+            timestamp_ms: _,
+            deployment: _,
+            model: _,
+            prompt_tokens: _,
+            completion_tokens: _,
+            latency_ms: _,
+            outcome: _,
+        } = record;
     }
 
     #[test]
