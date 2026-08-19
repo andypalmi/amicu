@@ -198,6 +198,18 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
                 out.stderr.trim()
             )));
         }
+        // Remove the per-instance plist so its EnvironmentVariables don't linger
+        // on disk; a missing file is fine, any other error is surfaced.
+        match std::fs::remove_file(&plist) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(LlamaCppError::Supervisor(format!(
+                    "remove {}: {e}",
+                    plist.display()
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -281,6 +293,9 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
         let unit = format!("--unit={}", spec.label);
         let mut args = vec!["--user", "--collect", &unit];
+        // --setenv values are visible on systemd-run's own argv (/proc/<pid>/cmdline)
+        // to the same user for the invocation's lifetime; acceptable as this is a
+        // --user unit. A 0600 EnvironmentFile would avoid even that same-user window.
         let setenvs: Vec<String> = spec
             .env
             .iter()
@@ -358,14 +373,22 @@ fn ensure_dir(dir: &Path) -> Result<(), LlamaCppError> {
 /// Write `bytes` to `path` (creating `dir`), owner-readable only — the plist can
 /// hold `EnvironmentVariables`, so it must not be world-readable.
 fn write_private(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), LlamaCppError> {
+    use std::io::Write as _;
     ensure_dir(dir)?;
-    std::fs::write(path, bytes)
-        .map_err(|e| LlamaCppError::Supervisor(format!("write {}: {e}", path.display())))?;
+    // Create 0600 atomically so there is no world/group-readable window; truncate
+    // to overwrite any existing plist. On non-unix, mode() is unavailable but the
+    // rest of this module is unix-only, so a plain create is acceptable there.
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|e| LlamaCppError::Supervisor(format!("chmod {}: {e}", path.display())))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
     }
+    let mut file = opts
+        .open(path)
+        .map_err(|e| LlamaCppError::Supervisor(format!("create {}: {e}", path.display())))?;
+    file.write_all(bytes)
+        .map_err(|e| LlamaCppError::Supervisor(format!("write {}: {e}", path.display())))?;
     Ok(())
 }
