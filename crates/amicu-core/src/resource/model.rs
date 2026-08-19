@@ -1,0 +1,81 @@
+use serde::{Deserialize, Serialize};
+
+use super::Modality;
+use crate::id::ModelId;
+use crate::units::ByteSize;
+
+/// A servable model: where it comes from, its architecture and modalities,
+/// its artifact format/quantization, context needs and GGUF variants.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Model {
+    pub id: ModelId,
+    pub source: ModelSource,
+    /// Architecture family, e.g. `"llama"`, `"qwen2"`, `"mixtral"`.
+    pub architecture: String,
+    pub modalities: Vec<Modality>,
+    pub artifact: Artifact,
+    /// Maximum context length the weights support, in tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
+    /// Available GGUF quantization variants, when the artifact is GGUF.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<GgufVariant>,
+}
+
+/// Where a model's weights are fetched from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSource {
+    pub registry: SourceRegistry,
+    /// Registry-specific reference, e.g. a HF repo `"org/model"` or a URL.
+    pub reference: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceRegistry {
+    HuggingFace,
+    Ollama,
+    Url,
+    Local,
+}
+
+/// The on-disk weight format and, where applicable, its quantization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Artifact {
+    pub format: ArtifactFormat,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantization: Option<Quantization>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactFormat {
+    Gguf,
+    Safetensors,
+    Pytorch,
+    Onnx,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Quantization {
+    F32,
+    F16,
+    Bf16,
+    Int8,
+    Int4,
+    Q4KM,
+    Q5KM,
+    Q6K,
+    Q8_0,
+}
+
+/// A concrete GGUF file at a specific quantization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GgufVariant {
+    pub quantization: Quantization,
+    /// File name within the source repository.
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<ByteSize>,
+}
