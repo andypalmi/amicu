@@ -5,6 +5,7 @@
 //! serialization. See `GRAPH_VERSIONING.md` for the schema version and
 //! migration policy.
 
+pub mod adapter;
 pub mod diagnostic;
 pub mod graph;
 pub mod id;
