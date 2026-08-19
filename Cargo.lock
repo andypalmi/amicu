@@ -177,6 +177,11 @@ version = "0.1.0"
 [[package]]
 name = "amicu-worker"
 version = "0.1.0"
+dependencies = [
+ "amicu-core",
+ "amicu-providers",
+ "tokio",
+]
 
 [[package]]
 name = "anstream"
