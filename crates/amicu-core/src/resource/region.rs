@@ -1,4 +1,8 @@
 //! Typed region and data-residency values.
+//!
+//! Shared by the DSL/core resources and the provider capability descriptor so
+//! residency is one canonical typed value on both sides rather than a bare
+//! string that must be reconciled.
 
 use serde::{Deserialize, Serialize};
 
