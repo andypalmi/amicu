@@ -6,5 +6,27 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "amicu"
+path = "src/main.rs"
+
+[lib]
+name = "amicu_cli"
+path = "src/lib.rs"
+
+[dependencies]
+amicu-core = { path = "../amicu-core" }
+amicu-hcl = { path = "../amicu-hcl" }
+amicu-plan = { path = "../amicu-plan" }
+amicu-llamacpp = { path = "../amicu-llamacpp" }
+amicu-runtime = { path = "../amicu-runtime" }
+amicu-registry = { path = "../amicu-registry" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt"] }
+
 [lints]
 workspace = true
