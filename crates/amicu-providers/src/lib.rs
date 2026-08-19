@@ -1,0 +1,1 @@
+//! Cloud/external/secret adapters
