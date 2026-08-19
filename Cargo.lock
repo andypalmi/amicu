@@ -64,6 +64,15 @@ dependencies = [
 [[package]]
 name = "amicu-llamacpp"
 version = "0.1.0"
+dependencies = [
+ "amicu-core",
+ "amicu-registry",
+ "amicu-runtime",
+ "async-trait",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "amicu-plan"
