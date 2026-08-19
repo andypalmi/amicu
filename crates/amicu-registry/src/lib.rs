@@ -5,8 +5,15 @@
 //! discover models and fetch their weight artifacts. It builds on the common
 //! adapter contract in [`amicu_core::adapter`].
 
+pub mod fit;
+pub mod gguf;
 pub mod source;
 
+pub use fit::{
+    FitConfig, FitReport, MemoryPool, OverheadRange, bytes_per_parameter, check_fit,
+    check_variant_fit, weights_memory,
+};
+pub use gguf::{GgufError, GgufResolver};
 pub use source::{
     ArtifactRef, ArtifactSelector, DownloadResult, ModelMetadata, ModelQuery, ModelSourceAdapter,
     ModelSummary, SourceCapabilities, SourceError,
