@@ -231,7 +231,8 @@ fn model_block(m: &Model) -> Block {
 fn hardware_block(h: &HardwareProfile) -> Block {
     let mut body = Body::builder().add_attribute(("provider", h.provider.clone()));
     if let Some(region) = &h.region {
-        body = body.add_attribute(("region", region.clone()));
+        // HCL carries only the region code; residency is resolved elsewhere.
+        body = body.add_attribute(("region", region.code.clone()));
     }
     if let Some(a) = &h.accelerator {
         body = body.add_block(

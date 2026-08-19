@@ -171,7 +171,7 @@ fn action_for(
         runtime: runtime_settings(d),
         hardware: hardware.map(hardware_label),
         provider: hardware.map(|h| h.provider.clone()),
-        region: hardware.and_then(|h| h.region.clone()),
+        region: hardware.and_then(|h| h.region.as_ref().map(|r| r.code.clone())),
         cost_performance: Some(cost_performance(hardware, launch)),
         required_secrets: launch.secret_refs.iter().map(|r| r.name.clone()).collect(),
         required_action: None,
