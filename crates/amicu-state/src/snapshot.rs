@@ -1,18 +1,21 @@
 //! The recorded canonical state and its history entries.
 
-use std::hash::{Hash, Hasher};
+use std::fmt::Write as _;
 
 use amicu_core::Graph;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::error::StateError;
 
 /// A recorded snapshot of the canonical [`Graph`] plus the metadata that
 /// identifies it and guards its integrity.
 ///
-/// The `checksum` is computed over the graph at construction; [`verify`] recomputes
-/// it and reports [`StateError::Corrupted`] on mismatch, so tampering is caught
-/// before the snapshot is trusted.
+/// The `checksum` is a stable, versioned content hash: SHA-256 over the graph's
+/// canonical JSON, prefixed with the algorithm tag (see [`checksum_of`]). Because
+/// it is a fixed algorithm rather than a toolchain-dependent hasher, a snapshot
+/// persisted under one Rust build recomputes to the same checksum under another,
+/// so [`verify`] only fails on genuine tampering — never spuriously across builds.
 ///
 /// [`verify`]: StateSnapshot::verify
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,10 +86,22 @@ impl StateVersion {
     }
 }
 
-/// Deterministic checksum over a graph's canonical JSON serialization.
+/// Algorithm tag prefixing every checksum, so the hash scheme is versioned and a
+/// future change stays distinguishable from an integrity failure.
+const CHECKSUM_ALGORITHM: &str = "sha256-v1";
+
+/// Stable content hash over a graph's canonical JSON serialization.
+///
+/// SHA-256 is a fixed, cross-toolchain algorithm, so the returned checksum is
+/// suitable for persistence: a graph rehashes identically on any build. The
+/// graph serializes deterministically (its collections are `BTreeMap`/`Vec`, no
+/// `HashMap`). The result is `"{CHECKSUM_ALGORITHM}:{hex}"`.
 fn checksum_of(graph: &Graph) -> String {
     let json = serde_json::to_string(graph).unwrap_or_default();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    json.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let digest = Sha256::digest(json.as_bytes());
+    let mut checksum = format!("{CHECKSUM_ALGORITHM}:");
+    for byte in digest {
+        write!(checksum, "{byte:02x}").expect("writing hex to a String is infallible");
+    }
+    checksum
 }
