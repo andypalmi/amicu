@@ -13,14 +13,17 @@
 //!
 //! Planning (`capabilities`/`validate`/`plan_launch`) is pure and resolves the
 //! deployment's model/hardware through a [`Catalog`]. Apply/runtime-time methods
-//! delegate to a [`ProcessSupervisor`](supervisor::ProcessSupervisor); the real
-//! launchd/systemd supervisors land in TASK-008.
+//! delegate to a [`ProcessSupervisor`](supervisor::ProcessSupervisor), backed by
+//! launchd (macOS) or systemd (Linux) with endpoint health checks
+//! ([`service`], [`health`]).
 
 mod adapter;
 pub mod binary;
 pub mod command;
 pub mod download;
 mod error;
+pub mod health;
+pub mod service;
 pub mod supervisor;
 
 pub use adapter::{Catalog, LlamaCppAdapter, MapCatalog, ResolvedModel};
@@ -30,7 +33,15 @@ pub use binary::{
 pub use command::render_command;
 pub use download::{DEFAULT_MAX_ATTEMPTS, download_gguf};
 pub use error::LlamaCppError;
-pub use supervisor::{ProcessSupervisor, ResolvedSecret};
+pub use health::{Health, HealthProbe, HttpHealthProbe};
+pub use service::{
+    CommandExec, ExecOutput, HostExec, LaunchdManager, ServiceManager, ServiceSpec, ServiceState,
+    SystemdManager,
+};
+pub use supervisor::{
+    LaunchdSupervisor, ProcessSupervisor, ResolvedSecret, ServiceSupervisor, SystemdSupervisor,
+    host_supervisor,
+};
 
 #[cfg(test)]
 mod tests;

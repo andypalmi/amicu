@@ -110,14 +110,21 @@ impl FakeRuntime {
         let refs = self.secret_refs();
         match &d.runtime {
             Runtime::LlamaCpp(s) => {
-                let mut cmd = format!(
-                    "llama-server --port {} --ctx-size {} --n-gpu-layers {}",
-                    s.port, s.context_length, s.n_gpu_layers
-                );
+                let mut argv = vec![
+                    "llama-server".to_owned(),
+                    "--port".to_owned(),
+                    s.port.to_string(),
+                    "--ctx-size".to_owned(),
+                    s.context_length.to_string(),
+                    "--n-gpu-layers".to_owned(),
+                    s.n_gpu_layers.to_string(),
+                ];
                 for r in &refs {
-                    let _ = write!(cmd, " --api-key-ref {}", r.name);
+                    argv.push("--api-key-ref".to_owned());
+                    argv.push(r.name.clone());
                 }
-                RenderedLaunch::Command { text: cmd }
+                let text = argv.join(" ");
+                RenderedLaunch::Command { argv, text }
             }
             Runtime::Vllm(s) => {
                 let mut text = format!(
