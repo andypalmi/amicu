@@ -13,10 +13,12 @@ use crate::snapshot::{StateSnapshot, StateVersion};
 /// The contract makes two failure modes explicit and non-silent:
 ///
 /// - **Locking.** [`lock`](Self::lock) under contention returns an
-///   `AMICU-STATE-*` error instead of blocking forever, and
-///   [`push`](Self::push) requires the [`LockHandle`] it hands back. An
-///   implementation must reject a push whose handle does not match the held
-///   lock rather than overwrite the state.
+///   `AMICU-STATE-*` error instead of blocking forever, and the mutating
+///   operations ([`push`](Self::push), [`rollback`](Self::rollback)) require the
+///   [`LockHandle`] it hands back. An implementation must reject a call whose
+///   handle does not match the held lock rather than overwrite the state, and
+///   MUST mint lock tokens from an unpredictable (random) source so a forged
+///   handle cannot satisfy the ownership check (see [`LockHandle`]).
 /// - **Corruption.** When recorded state fails its integrity check, methods
 ///   return a non-retryable corruption error demanding manual recovery; the
 ///   backend must never silently overwrite corrupt state.
@@ -47,8 +49,13 @@ pub trait StateBackendAdapter: Adapter + DescribeCapabilities {
     /// List recorded versions, oldest first.
     async fn history(&self) -> Result<Vec<StateVersion>, AdapterError>;
 
-    /// Roll the recorded state back to `version`.
-    async fn rollback(&self, version: &StateVersion) -> Result<(), AdapterError>;
+    /// Roll the recorded state back to `version`, authorized by the held `lock`.
+    ///
+    /// Like [`push`](Self::push), this mutates recorded state, so implementations
+    /// MUST reject the rollback when `lock` does not match the lock currently
+    /// guarding the state — a rollback can never race a concurrent push.
+    async fn rollback(&self, version: &StateVersion, lock: &LockHandle)
+    -> Result<(), AdapterError>;
 
     /// Diff `desired` against the graph recorded in `actual`. Pure: no locks,
     /// no I/O, no side effects.
