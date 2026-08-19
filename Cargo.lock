@@ -36,6 +36,20 @@ version = "0.1.0"
 [[package]]
 name = "amicu-cli"
 version = "0.1.0"
+dependencies = [
+ "amicu-core",
+ "amicu-hcl",
+ "amicu-llamacpp",
+ "amicu-plan",
+ "amicu-registry",
+ "amicu-runtime",
+ "async-trait",
+ "clap",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "amicu-core"

@@ -1,0 +1,303 @@
+//! Hermetic tests for the CLI commands, driven against temp-dir fixtures.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use amicu_plan::Plan;
+
+use crate::OutputFormat;
+use crate::checks::report_for;
+use crate::commands;
+use crate::planner::build_plan;
+use crate::project::{LocalState, Project};
+
+const VALID_CONFIG: &str = r#"# a comment that canonical formatting drops
+resource "model" "support_chat" {
+  source {
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen2.5-7B-Instruct"
+  }
+  architecture   = "qwen2"
+  modalities     = ["text"]
+  artifact {
+    format       = "gguf"
+    quantization = "q4_k_m"
+  }
+  context_length = 8192
+  variant {
+    quantization = "q4_k_m"
+    file         = "model.gguf"
+    size         = "4GiB"
+  }
+}
+
+resource "hardware_profile" "dev_mac" {
+  provider = "local_apple"
+  accelerator {
+    kind   = "apple_silicon"
+    model  = "m3_pro"
+    count  = 1
+    memory = "36GiB"
+  }
+  memory = "36GiB"
+}
+
+resource "deployment" "support_local" {
+  model    = model.support_chat.id
+  hardware = hardware_profile.dev_mac.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 8192
+    port           = 8000
+    n_gpu_layers   = -1
+  }
+}
+"#;
+
+// A deployment referencing a model that does not exist.
+const INVALID_CONFIG: &str = r#"resource "hardware_profile" "dev_mac" {
+  provider = "local_apple"
+  accelerator {
+    kind   = "apple_silicon"
+    model  = "m3_pro"
+    count  = 1
+    memory = "36GiB"
+  }
+  memory = "36GiB"
+}
+
+resource "deployment" "orphan" {
+  model    = model.ghost.id
+  hardware = hardware_profile.dev_mac.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 8192
+    port           = 8000
+    n_gpu_layers   = -1
+  }
+}
+"#;
+
+struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    fn new() -> Self {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("amicu-cli-test-{}-{nanos}-{n}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn write(root: &Path, name: &str, contents: &str) {
+    std::fs::write(root.join(name), contents).unwrap();
+}
+
+fn utf8(buf: Vec<u8>) -> String {
+    String::from_utf8(buf).unwrap()
+}
+
+#[test]
+fn init_creates_expected_files_and_is_idempotent() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+
+    let mut out = Vec::new();
+    assert_eq!(commands::init::run(&project, &mut out).unwrap(), 0);
+
+    assert!(td.path.join("amicu.hcl").is_file());
+    assert!(td.path.join("variables.amicu.hcl").is_file());
+    assert!(td.path.join(".amicu/config.yaml").is_file());
+    assert!(td.path.join(".amicu/state").is_dir());
+
+    // The scaffolded config parses and validates.
+    let report = report_for(&project.load_graph().unwrap());
+    assert!(report.valid, "starter config must be valid");
+
+    // Second run creates nothing and reports so.
+    let mut out2 = Vec::new();
+    commands::init::run(&project, &mut out2).unwrap();
+    assert!(utf8(out2).contains("already initialized"));
+}
+
+#[test]
+fn fmt_check_detects_and_fixes_drift() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+
+    // The leading comment makes the file differ from canonical output.
+    let mut out = Vec::new();
+    assert_eq!(commands::fmt::run(&project, true, &mut out).unwrap(), 1);
+    assert!(utf8(out).contains("would be reformatted"));
+
+    // Writing mode fixes it, and a second check is clean.
+    let mut out = Vec::new();
+    assert_eq!(commands::fmt::run(&project, false, &mut out).unwrap(), 0);
+    let mut out = Vec::new();
+    assert_eq!(commands::fmt::run(&project, true, &mut out).unwrap(), 0);
+}
+
+#[test]
+fn fmt_preserves_variables_file() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let vars = "# just comments\n";
+    write(&td.path, "variables.amicu.hcl", vars);
+
+    let mut out = Vec::new();
+    commands::fmt::run(&project, false, &mut out).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(td.path.join("variables.amicu.hcl")).unwrap(),
+        vars,
+        "comments-only file must be left untouched"
+    );
+}
+
+#[test]
+fn validate_valid_config_passes() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+
+    let mut out = Vec::new();
+    let code = commands::validate::run(&project, false, OutputFormat::Json, &mut out).unwrap();
+    assert_eq!(code, 0);
+    let report: amicu_core::diagnostic::DiagnosticReport = serde_json::from_slice(&out).unwrap();
+    assert!(report.valid);
+    assert_eq!(report.version, "v1");
+}
+
+#[test]
+fn validate_invalid_config_reports_missing_reference() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", INVALID_CONFIG);
+
+    let mut out = Vec::new();
+    let code = commands::validate::run(&project, false, OutputFormat::Json, &mut out).unwrap();
+    assert_eq!(code, 1);
+    let report: amicu_core::diagnostic::DiagnosticReport = serde_json::from_slice(&out).unwrap();
+    assert!(!report.valid);
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code.to_string() == "AMICU-REF-001"),
+        "expected a missing-reference diagnostic"
+    );
+}
+
+#[test]
+fn plan_builds_expected_action() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let graph = project.load_graph().unwrap();
+
+    let result = build_plan(&graph, None).unwrap();
+    assert_eq!(result.plan.actions.len(), 1);
+    let action = &result.plan.actions[0];
+    assert_eq!(action.address, "deployment.support_local");
+    assert_eq!(format!("{:?}", action.kind).to_lowercase(), "create");
+    assert!(action.artifact.is_some());
+    assert_eq!(action.provider.as_deref(), Some("local_apple"));
+}
+
+#[test]
+fn plan_json_output_is_valid_contract() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+
+    let mut out = Vec::new();
+    let code = commands::plan::run(&project, OutputFormat::Json, &mut out).unwrap();
+    assert_eq!(code, 0);
+    let plan: Plan = serde_json::from_slice(&out).unwrap();
+    assert_eq!(plan.version, Plan::VERSION);
+    assert_eq!(plan.actions.len(), 1);
+}
+
+#[test]
+fn plan_diffs_against_prior_state() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let graph = project.load_graph().unwrap();
+
+    // Applying against a prior identical graph yields no actions.
+    let unchanged = build_plan(&graph, Some(&graph)).unwrap();
+    assert!(unchanged.plan.actions.is_empty());
+}
+
+#[test]
+fn doctor_emits_structured_json() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+
+    let mut out = Vec::new();
+    // Exit code depends on host; assert on the report shape, not the value.
+    let _ = commands::doctor::run(&project, OutputFormat::Json, &mut out).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(value["version"], "v1");
+    assert!(value["checks"].as_array().unwrap().len() >= 3);
+    assert!(value["ok"].is_boolean());
+}
+
+#[test]
+fn state_round_trips() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let graph = project.load_graph().unwrap();
+
+    let state = LocalState {
+        version: LocalState::VERSION.to_owned(),
+        graph: graph.clone(),
+        endpoints: Vec::new(),
+    };
+    project.save_state(&state).unwrap();
+    let loaded = project.load_state().unwrap().unwrap();
+    assert_eq!(loaded.graph, graph);
+    assert_eq!(loaded.version, "v1");
+}
+
+#[test]
+#[ignore = "spawns a real llama-server via the host supervisor"]
+fn apply_end_to_end() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+
+    let mut out = Vec::new();
+    let code = commands::apply::run(&project, true, OutputFormat::Human, &mut out).unwrap();
+    assert_eq!(code, 0);
+    assert!(project.load_state().unwrap().is_some());
+}
+
+#[test]
+fn approval_parsing() {
+    assert!(commands::apply::approved("y"));
+    assert!(commands::apply::approved("Y\n"));
+    assert!(commands::apply::approved("  yes  "));
+    assert!(!commands::apply::approved("n"));
+    assert!(!commands::apply::approved(""));
+    assert!(!commands::apply::approved("no"));
+}

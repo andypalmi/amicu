@@ -1,0 +1,112 @@
+//! `amicu init` — scaffold a new project. Idempotent; never overwrites.
+
+use std::fs;
+use std::io::Write;
+use std::path::Path;
+
+use crate::error::CliError;
+use crate::project::Project;
+
+const AMICU_HCL: &str = r#"# Amicu starter configuration.
+# Edit these resources, then run `amicu validate` and `amicu plan`.
+
+resource "model" "starter_chat" {
+  source {
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen2.5-7B-Instruct"
+  }
+  architecture   = "qwen2"
+  modalities     = ["text"]
+  artifact {
+    format       = "gguf"
+    quantization = "q4_k_m"
+  }
+  context_length = 8192
+  variant {
+    quantization = "q4_k_m"
+    file         = "qwen2.5-7b-instruct-q4_k_m.gguf"
+    size         = "4GiB"
+  }
+}
+
+resource "hardware_profile" "local_dev" {
+  provider = "local_apple"
+  accelerator {
+    kind   = "apple_silicon"
+    model  = "m4_pro"
+    count  = 1
+    memory = "48GiB"
+  }
+  memory = "48GiB"
+}
+
+resource "deployment" "starter_chat_local" {
+  model    = model.starter_chat.id
+  hardware = hardware_profile.local_dev.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 8192
+    port           = 8000
+    n_gpu_layers   = -1
+  }
+}
+"#;
+
+const VARIABLES_HCL: &str = "# Amicu variables.
+# Reusable values will be declarable here in a future release.
+";
+
+const CONFIG_YAML: &str = "# Amicu project configuration.
+version: 1
+state:
+  backend: local
+";
+
+/// Scaffold the project files, warning on (and skipping) any that exist.
+pub(crate) fn run(project: &Project, out: &mut dyn Write) -> Result<u8, CliError> {
+    let root = project.root();
+    let mut created = 0u32;
+
+    created += write_if_absent(out, &root.join("amicu.hcl"), AMICU_HCL)?;
+    created += write_if_absent(out, &root.join("variables.amicu.hcl"), VARIABLES_HCL)?;
+
+    ensure_dir(out, &project.dot_dir(), &mut created)?;
+    created += write_if_absent(out, &project.dot_dir().join("config.yaml"), CONFIG_YAML)?;
+    ensure_dir(out, &project.state_dir(), &mut created)?;
+    created += write_if_absent(out, &project.state_dir().join(".gitkeep"), "")?;
+
+    if created == 0 {
+        writeln!(out, "Project already initialized; nothing to do.")
+            .map_err(|e| CliError::io("write failed", e))?;
+    } else {
+        writeln!(
+            out,
+            "Initialized Amicu project ({created} item(s) created)."
+        )
+        .map_err(|e| CliError::io("write failed", e))?;
+    }
+    Ok(0)
+}
+
+fn write_if_absent(out: &mut dyn Write, path: &Path, contents: &str) -> Result<u32, CliError> {
+    if path.exists() {
+        writeln!(out, "  skip  {} (exists)", path.display())
+            .map_err(|e| CliError::io("write failed", e))?;
+        return Ok(0);
+    }
+    fs::write(path, contents)
+        .map_err(|e| CliError::io(format!("cannot write {}", path.display()), e))?;
+    writeln!(out, "  create {}", path.display()).map_err(|e| CliError::io("write failed", e))?;
+    Ok(1)
+}
+
+fn ensure_dir(out: &mut dyn Write, path: &Path, created: &mut u32) -> Result<(), CliError> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(path)
+        .map_err(|e| CliError::io(format!("cannot create {}", path.display()), e))?;
+    writeln!(out, "  create {}/", path.display()).map_err(|e| CliError::io("write failed", e))?;
+    *created += 1;
+    Ok(())
+}
