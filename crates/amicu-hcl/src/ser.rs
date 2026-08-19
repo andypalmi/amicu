@@ -1,0 +1,325 @@
+//! Canonical [`Graph`] -> HCL text.
+
+use hcl::expr::{Traversal, TraversalOperator, Variable};
+use hcl::{Block, Body, Expression, Identifier};
+use serde::Serialize;
+
+use amicu_core::graph::Graph;
+use amicu_core::resource::{
+    Deployment, HardwareProfile, Model, Money, Runtime, Tenant, VllmSettings,
+};
+
+/// Render a graph as HCL text that re-parses into an equal graph.
+#[must_use]
+pub fn format_graph(graph: &Graph) -> String {
+    let mut body = Body::builder();
+    for m in &graph.models {
+        body = body.add_block(model_block(m));
+    }
+    for h in &graph.hardware_profiles {
+        body = body.add_block(hardware_block(h));
+    }
+    for d in &graph.deployments {
+        body = body.add_block(deployment_block(d));
+    }
+    for p in &graph.routing_policies {
+        body = body.add_block(routing_block(p));
+    }
+    for c in &graph.data_classes {
+        body = body.add_block(data_class_block(c));
+    }
+    for r in &graph.governance_rules {
+        body = body.add_block(governance_block(r));
+    }
+    for b in &graph.budgets {
+        body = body.add_block(budget_block(b));
+    }
+    for t in &graph.tenants {
+        body = body.add_block(tenant_block(t));
+    }
+    for u in &graph.use_cases {
+        body = body.add_block(use_case_block(u));
+    }
+    hcl::to_string(&body.build()).expect("HCL body always serializes")
+}
+
+fn model_block(m: &Model) -> Block {
+    let mut body = Body::builder()
+        .add_block(
+            Block::builder("source")
+                .add_attribute(("registry", variant(&m.source.registry)))
+                .add_attribute(("reference", m.source.reference.clone()))
+                .build(),
+        )
+        .add_attribute(("architecture", m.architecture.clone()))
+        .add_attribute(("modalities", string_array(&m.modalities)));
+
+    let mut artifact =
+        Block::builder("artifact").add_attribute(("format", variant(&m.artifact.format)));
+    if let Some(q) = &m.artifact.quantization {
+        artifact = artifact.add_attribute(("quantization", variant(q)));
+    }
+    body = body.add_block(artifact.build());
+
+    if let Some(len) = m.context_length {
+        body = body.add_attribute(("context_length", len));
+    }
+    for v in &m.variants {
+        let mut vb = Block::builder("variant")
+            .add_attribute(("quantization", variant(&v.quantization)))
+            .add_attribute(("file", v.file.clone()));
+        if let Some(size) = v.size {
+            vb = vb.add_attribute(("size", size.to_string()));
+        }
+        body = body.add_block(vb.build());
+    }
+    resource("model", m.id.as_str(), body.build())
+}
+
+fn hardware_block(h: &HardwareProfile) -> Block {
+    let mut body = Body::builder().add_attribute(("provider", h.provider.clone()));
+    if let Some(region) = &h.region {
+        body = body.add_attribute(("region", region.clone()));
+    }
+    if let Some(a) = &h.accelerator {
+        body = body.add_block(
+            Block::builder("accelerator")
+                .add_attribute(("kind", variant(&a.kind)))
+                .add_attribute(("model", a.model.clone()))
+                .add_attribute(("count", a.count))
+                .add_attribute(("memory", a.memory.to_string()))
+                .build(),
+        );
+    }
+    if let Some(c) = &h.cpu {
+        body = body.add_block(
+            Block::builder("cpu")
+                .add_attribute(("model", c.model.clone()))
+                .add_attribute(("cores", c.cores))
+                .build(),
+        );
+    }
+    body = body.add_attribute(("memory", h.memory.to_string()));
+    if let Some(i) = &h.interconnect {
+        body = body.add_attribute(("interconnect", variant(i)));
+    }
+    if let Some(p) = &h.price {
+        body = body.add_block(
+            Block::builder("price")
+                .add_block(money_block("per_hour", &p.per_hour))
+                .build(),
+        );
+    }
+    resource("hardware_profile", h.id.as_str(), body.build())
+}
+
+fn deployment_block(d: &Deployment) -> Block {
+    let mut body = Body::builder()
+        .add_attribute(("model", reference("model", d.model.as_str())))
+        .add_attribute((
+            "hardware",
+            reference("hardware_profile", d.hardware_profile.as_str()),
+        ));
+    match &d.runtime {
+        Runtime::LlamaCpp(s) => {
+            body = body.add_attribute(("runtime", "llama_cpp")).add_block(
+                Block::builder("llama_cpp")
+                    .add_attribute(("context_length", s.context_length))
+                    .add_attribute(("port", s.port))
+                    .add_attribute(("n_gpu_layers", s.n_gpu_layers))
+                    .build(),
+            );
+        }
+        Runtime::Vllm(s) => {
+            body = body
+                .add_attribute(("runtime", "vllm"))
+                .add_block(vllm_block(s));
+        }
+    }
+    resource("deployment", d.id.as_str(), body.build())
+}
+
+fn vllm_block(s: &VllmSettings) -> Block {
+    let mut b = Block::builder("vllm")
+        .add_attribute(("context_length", s.context_length))
+        .add_attribute(("port", s.port));
+    if let Some(tp) = s.tensor_parallel_size {
+        b = b.add_attribute(("tensor_parallel_size", tp));
+    }
+    if let Some(util) = s.gpu_memory_utilization {
+        b = b.add_attribute(("gpu_memory_utilization", f64::from(util)));
+    }
+    b.build()
+}
+
+fn routing_block(p: &amicu_core::resource::RoutingPolicy) -> Block {
+    let mut body = Body::builder();
+    if !p.aliases.is_empty() {
+        body = body.add_attribute(("aliases", str_array(&p.aliases)));
+    }
+    for t in &p.targets {
+        body = body.add_block(
+            Block::builder("target")
+                .add_attribute(("deployment", reference("deployment", t.deployment.as_str())))
+                .add_attribute(("weight", t.weight))
+                .build(),
+        );
+    }
+    if let Some(fo) = &p.failover {
+        let mut fb = Block::builder("failover").add_attribute(("enabled", fo.enabled));
+        if let Some(v) = fo.health_check_interval_secs {
+            fb = fb.add_attribute(("health_check_interval_secs", v));
+        }
+        if let Some(v) = fo.max_failures {
+            fb = fb.add_attribute(("max_failures", v));
+        }
+        body = body.add_block(fb.build());
+    }
+    if let Some(o) = &p.optimize_for {
+        body = body.add_attribute(("optimize_for", variant(o)));
+    }
+    resource("routing_policy", p.id.as_str(), body.build())
+}
+
+fn data_class_block(c: &amicu_core::resource::DataClass) -> Block {
+    let mut body = Body::builder().add_attribute(("sensitivity", variant(&c.sensitivity)));
+    if !c.residency.is_empty() {
+        body = body.add_attribute(("residency", str_array(&c.residency)));
+    }
+    body = body.add_attribute(("allow_external_providers", c.allow_external_providers));
+    if !c.handling.is_empty() {
+        body = body.add_attribute(("handling", str_array(&c.handling)));
+    }
+    resource("data_class", c.id.as_str(), body.build())
+}
+
+fn governance_block(r: &amicu_core::resource::GovernanceRule) -> Block {
+    let mut body = Body::builder();
+    if let Some(desc) = &r.description {
+        body = body.add_attribute(("description", desc.clone()));
+    }
+    body = body.add_attribute(("effect", variant(&r.effect)));
+    if !r.data_classes.is_empty() {
+        let refs: Vec<Expression> = r
+            .data_classes
+            .iter()
+            .map(|dc| reference("data_class", dc.as_str()))
+            .collect();
+        body = body.add_attribute(("data_classes", Expression::Array(refs)));
+    }
+    if !r.allowed_providers.is_empty() {
+        body = body.add_attribute(("allowed_providers", str_array(&r.allowed_providers)));
+    }
+    if !r.allowed_regions.is_empty() {
+        body = body.add_attribute(("allowed_regions", str_array(&r.allowed_regions)));
+    }
+    resource("governance_rule", r.id.as_str(), body.build())
+}
+
+fn budget_block(b: &amicu_core::resource::Budget) -> Block {
+    let mut body = Body::builder();
+    if let Some(tenant) = &b.tenant {
+        body = body.add_attribute(("tenant", reference("tenant", tenant.as_str())));
+    }
+    body = body
+        .add_block(money_block("limit", &b.limit))
+        .add_attribute(("period", variant(&b.period)));
+    if !b.alert_thresholds.is_empty() {
+        body = body.add_attribute((
+            "alert_thresholds",
+            Expression::from(b.alert_thresholds.clone()),
+        ));
+    }
+    resource("budget", b.id.as_str(), body.build())
+}
+
+fn tenant_block(t: &Tenant) -> Block {
+    let mut body = Body::builder();
+    if let Some(name) = &t.display_name {
+        body = body.add_attribute(("display_name", name.clone()));
+    }
+    if let Some(q) = &t.quota {
+        let mut qb = Block::builder("quota");
+        if let Some(v) = q.max_requests_per_minute {
+            qb = qb.add_attribute(("max_requests_per_minute", v));
+        }
+        if let Some(v) = q.max_concurrent {
+            qb = qb.add_attribute(("max_concurrent", v));
+        }
+        body = body.add_block(qb.build());
+    }
+    if !t.labels.is_empty() {
+        let mut lb = Block::builder("labels");
+        for (k, v) in &t.labels {
+            lb = lb.add_attribute((Identifier::sanitized(k), v.clone()));
+        }
+        body = body.add_block(lb.build());
+    }
+    resource("tenant", t.id.as_str(), body.build())
+}
+
+fn use_case_block(u: &amicu_core::resource::UseCase) -> Block {
+    let mut body = Body::builder();
+    if let Some(desc) = &u.description {
+        body = body.add_attribute(("description", desc.clone()));
+    }
+    if !u.modalities.is_empty() {
+        body = body.add_attribute(("modalities", string_array(&u.modalities)));
+    }
+    if let Some(v) = u.min_context_length {
+        body = body.add_attribute(("min_context_length", v));
+    }
+    if let Some(v) = u.max_latency_ms {
+        body = body.add_attribute(("max_latency_ms", v));
+    }
+    if let Some(dc) = &u.required_data_class {
+        body = body.add_attribute(("required_data_class", reference("data_class", dc.as_str())));
+    }
+    if let Some(p) = &u.priority {
+        body = body.add_attribute(("priority", variant(p)));
+    }
+    resource("use_case", u.id.as_str(), body.build())
+}
+
+fn money_block(ident: &str, m: &Money) -> Block {
+    Block::builder(ident)
+        .add_attribute(("amount", m.amount))
+        .add_attribute(("currency", m.currency.clone()))
+        .build()
+}
+
+fn resource(kind: &str, id: &str, inner: Body) -> Block {
+    Block::builder("resource")
+        .add_label(kind)
+        .add_label(id)
+        .add_structures(inner.into_inner())
+        .build()
+}
+
+/// A reference expression such as `model.support_chat.id`.
+fn reference(kind: &str, id: &str) -> Expression {
+    Traversal::new(
+        Variable::unchecked(kind),
+        [
+            TraversalOperator::GetAttr(Identifier::unchecked(id)),
+            TraversalOperator::GetAttr(Identifier::unchecked("id")),
+        ],
+    )
+    .into()
+}
+
+/// The DSL spelling of a `snake_case` enum value.
+fn variant<T: Serialize>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(s)) => s,
+        _ => unreachable!("resource enums serialize as strings"),
+    }
+}
+
+fn string_array<T: Serialize>(values: &[T]) -> Expression {
+    Expression::from(values.iter().map(variant).collect::<Vec<_>>())
+}
+
+fn str_array(values: &[String]) -> Expression {
+    Expression::from(values.to_vec())
+}
