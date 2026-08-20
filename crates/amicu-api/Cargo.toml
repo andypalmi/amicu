@@ -10,6 +10,7 @@ rust-version.workspace = true
 amicu-auth = { path = "../amicu-auth" }
 amicu-core = { path = "../amicu-core" }
 axum = "0.8"
+ipnet = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
