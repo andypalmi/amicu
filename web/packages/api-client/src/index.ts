@@ -25,4 +25,8 @@ export type {
   RecommendRequest,
   TuningReportDto,
   RecommendationDto,
+  MonitorRequest,
+  MonitorViewDto,
+  StackMetricsDto,
+  WorkloadEstimateDto,
 } from './schema';

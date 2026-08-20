@@ -61,6 +61,55 @@
         }
       }
     },
+    "/monitor": {
+      "post": {
+        "tags": [
+          "monitor"
+        ],
+        "summary": "Return the monitoring view for a measured metrics + estimate snapshot.",
+        "description": "Validates and normalizes the submitted surface, runs the advisory\n[`diagnose`] rule engine, and returns the metric surface, the estimate, and\nthe tier-appropriate advisory suggestions. Stateless and side-effect-free:\nnothing is collected, stored, or applied.",
+        "operationId": "monitor_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MonitorRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The normalized metric surface, estimate, and tier-appropriate advisory suggestions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MonitorViewDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request body is malformed."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient to reach the endpoint."
+          },
+          "422": {
+            "description": "The JSON body is well-formed but a field has the wrong type or is missing; body is a plain-text decode error."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/plan": {
       "post": {
         "tags": [
@@ -438,7 +487,7 @@
       },
       "AssumptionDto": {
         "type": "object",
-        "description": "A single stated assumption a diagnosis depends on.",
+        "description": "A single stated assumption an estimate or diagnosis depends on.",
         "required": [
           "statement"
         ],
@@ -729,7 +778,7 @@
       },
       "EstimateRangeDto": {
         "type": "object",
-        "description": "An estimate range with the provenance and confidence behind it.",
+        "description": "An estimate range with the provenance and confidence behind it. On the\nrequest side `assumptions` may be omitted; on the response side it carries\nthe range's stated attribution.",
         "required": [
           "low",
           "high",
@@ -737,6 +786,12 @@
           "confidence"
         ],
         "properties": {
+          "assumptions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssumptionDto"
+            }
+          },
           "confidence": {
             "$ref": "#/components/schemas/ConfidenceDto"
           },
@@ -867,6 +922,47 @@
           },
           "currency": {
             "type": "string"
+          }
+        }
+      },
+      "MonitorRequest": {
+        "type": "object",
+        "description": "Request body for `POST /monitor`: the measured metrics snapshot and the\nworkload estimate it is displayed against. Shares the metric + estimate DTOs\nwith `/recommend` (see [`crate::dto`]).",
+        "required": [
+          "metrics",
+          "estimate"
+        ],
+        "properties": {
+          "estimate": {
+            "$ref": "#/components/schemas/WorkloadEstimateDto",
+            "description": "The workload estimate the measured surface is displayed alongside."
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/StackMetricsDto",
+            "description": "The measured serving-metric surface for one stack (the same shape as\n`GET /stacks/:id/metrics`)."
+          }
+        }
+      },
+      "MonitorViewDto": {
+        "type": "object",
+        "description": "What the monitoring dashboard renders: the server-normalized metric surface,\nthe normalized estimate (with its stated assumptions and confidence), and the\nengine's advisory — never automatic — suggested changes.\n\nThe measured-vs-estimated comparison is *presentation*: the frontend places\nthe measured distributions next to the estimate's ranges and stated\nassumptions. This DTO computes no verdict.",
+        "required": [
+          "metrics",
+          "estimate",
+          "suggestions"
+        ],
+        "properties": {
+          "estimate": {
+            "$ref": "#/components/schemas/WorkloadEstimateDto",
+            "description": "The workload estimate, normalized and carrying its stated assumptions and\nper-range confidence for honest side-by-side display."
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/StackMetricsDto",
+            "description": "The measured metric surface, normalized server-side and echoed back so\nthe client renders validated values (e.g. a canonical `vram_used`)."
+          },
+          "suggestions": {
+            "$ref": "#/components/schemas/TuningReportDto",
+            "description": "The engine's advisory tuning report for the caller's tier: suggested (not\napplied) changes with their evidence, rationale, confidence, and rejected\nalternatives. Empty for a caller whose tier unlocks none of them."
           }
         }
       },
@@ -1603,7 +1699,7 @@
       },
       "WorkloadEstimateDto": {
         "type": "object",
-        "description": "Expected serving behavior and the assumptions behind it.",
+        "description": "Expected serving behavior and the assumptions behind it. On the response side\n`assumptions` carries the estimate's stated attribution (prompt/generation\nlength, concurrency) so a measured-vs-estimated divergence is attributable.",
         "required": [
           "assumed_prompt_tokens",
           "assumed_generation_tokens",
@@ -1626,6 +1722,13 @@
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          },
+          "assumptions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssumptionDto"
+            },
+            "description": "Engine-derived attribution strings; ignored on input, populated on echo."
           },
           "expected_tpot_ms": {
             "$ref": "#/components/schemas/EstimateRangeDto"
@@ -1656,6 +1759,10 @@
     {
       "name": "recommend",
       "description": "Stateless advisory tuning recommendations from a metrics + estimate snapshot (auth-gated, tier-appropriate)."
+    },
+    {
+      "name": "monitor",
+      "description": "Stateless monitoring view (measured-vs-estimated): a normalized metric surface, estimate, and tier-appropriate advisory suggestions (auth-gated)."
     }
   ]
 }

@@ -9,6 +9,10 @@
 //! - Recommend: the stateless, auth-gated [`POST /recommend`](recommend::recommend_handler)
 //!   endpoint, which runs the advisory `amicu-recommend` diagnosis engine over a
 //!   submitted metrics + estimate snapshot and returns a tier-appropriate report.
+//! - Monitor: the stateless, auth-gated [`POST /monitor`](monitor::monitor_handler)
+//!   endpoint, which normalizes a submitted metrics + estimate snapshot and
+//!   returns the monitoring view (metric surface + estimate + advisory
+//!   suggestions) the measured-vs-estimated dashboard renders.
 //!
 //! [`api_router`] assembles both plus a live `GET /openapi.json`. The served
 //! spec and the committed `crates/amicu-schema/openapi.json` artifact both come
@@ -23,7 +27,9 @@
 #![allow(clippy::duration_suboptimal_units)]
 
 pub mod auth;
+pub mod dto;
 pub mod engine;
+pub mod monitor;
 pub mod openapi;
 pub mod ratelimit;
 pub mod recommend;
@@ -49,6 +55,7 @@ fn engine_parts() -> (Router<EngineApiState>, utoipa::openapi::OpenApi) {
         .routes(routes!(engine::validate_handler))
         .routes(routes!(engine::plan_handler))
         .routes(routes!(recommend::recommend_handler))
+        .routes(routes!(monitor::monitor_handler))
         .split_for_parts()
 }
 

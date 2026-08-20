@@ -17,6 +17,7 @@ export default async function Layout({ children }: LayoutProps<'/'>) {
         links={[
           { text: 'Console', url: '/app' },
           { text: 'Recommendations', url: '/recommend' },
+          { text: 'Monitoring', url: '/monitor' },
           { text: 'Docs', url: '/docs' },
           { text: 'Account', url: '/account' },
         ]}

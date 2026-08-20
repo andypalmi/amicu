@@ -52,6 +52,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/monitor": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Return the monitoring view for a measured metrics + estimate snapshot.
+         * @description Validates and normalizes the submitted surface, runs the advisory
+         *     [`diagnose`] rule engine, and returns the metric surface, the estimate, and
+         *     the tier-appropriate advisory suggestions. Stateless and side-effect-free:
+         *     nothing is collected, stored, or applied.
+         */
+        post: operations["monitor_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/plan": {
         parameters: {
             query?: never;
@@ -254,7 +277,7 @@ export interface components {
             /** @description Quantization label (e.g. `Q4_K_M`), if quantized. */
             quantization?: string | null;
         };
-        /** @description A single stated assumption a diagnosis depends on. */
+        /** @description A single stated assumption an estimate or diagnosis depends on. */
         AssumptionDto: {
             statement: string;
         };
@@ -361,8 +384,13 @@ export interface components {
             /** Format: double */
             p99: number;
         };
-        /** @description An estimate range with the provenance and confidence behind it. */
+        /**
+         * @description An estimate range with the provenance and confidence behind it. On the
+         *     request side `assumptions` may be omitted; on the response side it carries
+         *     the range's stated attribution.
+         */
         EstimateRangeDto: {
+            assumptions?: components["schemas"]["AssumptionDto"][];
             confidence: components["schemas"]["ConfidenceDto"];
             /** Format: double */
             high: number;
@@ -410,6 +438,47 @@ export interface components {
             /** Format: double */
             amount: number;
             currency: string;
+        };
+        /**
+         * @description Request body for `POST /monitor`: the measured metrics snapshot and the
+         *     workload estimate it is displayed against. Shares the metric + estimate DTOs
+         *     with `/recommend` (see [`crate::dto`]).
+         */
+        MonitorRequest: {
+            /** @description The workload estimate the measured surface is displayed alongside. */
+            estimate: components["schemas"]["WorkloadEstimateDto"];
+            /**
+             * @description The measured serving-metric surface for one stack (the same shape as
+             *     `GET /stacks/:id/metrics`).
+             */
+            metrics: components["schemas"]["StackMetricsDto"];
+        };
+        /**
+         * @description What the monitoring dashboard renders: the server-normalized metric surface,
+         *     the normalized estimate (with its stated assumptions and confidence), and the
+         *     engine's advisory — never automatic — suggested changes.
+         *
+         *     The measured-vs-estimated comparison is *presentation*: the frontend places
+         *     the measured distributions next to the estimate's ranges and stated
+         *     assumptions. This DTO computes no verdict.
+         */
+        MonitorViewDto: {
+            /**
+             * @description The workload estimate, normalized and carrying its stated assumptions and
+             *     per-range confidence for honest side-by-side display.
+             */
+            estimate: components["schemas"]["WorkloadEstimateDto"];
+            /**
+             * @description The measured metric surface, normalized server-side and echoed back so
+             *     the client renders validated values (e.g. a canonical `vram_used`).
+             */
+            metrics: components["schemas"]["StackMetricsDto"];
+            /**
+             * @description The engine's advisory tuning report for the caller's tier: suggested (not
+             *     applied) changes with their evidence, rationale, confidence, and rejected
+             *     alternatives. Empty for a caller whose tier unlocks none of them.
+             */
+            suggestions: components["schemas"]["TuningReportDto"];
         };
         /** @description A single JSON-patch-like edit that would resolve a diagnostic. */
         Patch: {
@@ -693,7 +762,11 @@ export interface components {
             /** @description The Amicu HCL configuration text to validate. */
             config: string;
         };
-        /** @description Expected serving behavior and the assumptions behind it. */
+        /**
+         * @description Expected serving behavior and the assumptions behind it. On the response side
+         *     `assumptions` carries the estimate's stated attribution (prompt/generation
+         *     length, concurrency) so a measured-vs-estimated divergence is attributable.
+         */
         WorkloadEstimateDto: {
             /** Format: int32 */
             assumed_concurrency: number;
@@ -701,6 +774,8 @@ export interface components {
             assumed_generation_tokens: number;
             /** Format: int32 */
             assumed_prompt_tokens: number;
+            /** @description Engine-derived attribution strings; ignored on input, populated on echo. */
+            assumptions?: components["schemas"]["AssumptionDto"][];
             expected_tpot_ms: components["schemas"]["EstimateRangeDto"];
             expected_ttft_ms: components["schemas"]["EstimateRangeDto"];
         };
@@ -732,6 +807,8 @@ export type GpuMetricsDto = components['schemas']['GpuMetricsDto'];
 export type LatencyMetricsDto = components['schemas']['LatencyMetricsDto'];
 export type MemoryKvMetricsDto = components['schemas']['MemoryKvMetricsDto'];
 export type MoneyDto = components['schemas']['MoneyDto'];
+export type MonitorRequest = components['schemas']['MonitorRequest'];
+export type MonitorViewDto = components['schemas']['MonitorViewDto'];
 export type Patch = components['schemas']['Patch'];
 export type Plan = components['schemas']['Plan'];
 export type PlanRequest = components['schemas']['PlanRequest'];
@@ -822,6 +899,58 @@ export interface operations {
             };
             /** @description Rate limited. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    monitor_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MonitorRequest"];
+            };
+        };
+        responses: {
+            /** @description The normalized metric surface, estimate, and tier-appropriate advisory suggestions. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MonitorViewDto"];
+                };
+            };
+            /** @description The request body is malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient to reach the endpoint. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The JSON body is well-formed but a field has the wrong type or is missing; body is a plain-text decode error. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };
