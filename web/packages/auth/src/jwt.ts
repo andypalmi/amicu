@@ -11,6 +11,8 @@ export interface VerifierOptions {
   issuer?: string;
   /** Expected `aud`. When set, tokens with a different audience are rejected. */
   audience?: string;
+  /** Accepted signature algorithms. Defaults to `['EdDSA']` (the TASK-078 signer). */
+  algorithms?: string[];
 }
 
 // JWKS sets are cached per URL (jose caches keys + honors HTTP cache headers and
@@ -39,6 +41,9 @@ export async function verifyAccessToken(
     const { payload } = await jwtVerify(token, jwks(options.jwksUrl), {
       issuer: options.issuer,
       audience: options.audience,
+      // Pin the signature algorithm to the issuer's (TASK-078 signs EdDSA/Ed25519)
+      // so verification fails closed if the JWKS ever serves another key type.
+      algorithms: options.algorithms ?? ['EdDSA'],
     });
     return normalizeClaims(payload as JWTPayload as Record<string, unknown>);
   } catch {

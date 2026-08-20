@@ -42,8 +42,15 @@ async function readError(res: Response): Promise<string | undefined> {
 export interface AuthClient {
   /** Exchange email+password for a token bundle. Maps to `POST /token`. */
   login(input: { email: string; password: string }): Promise<AuthResult<TokenResponse>>;
-  /** Register a new account. Maps to `POST /signup`. */
-  signup(input: { email: string; password: string }): Promise<AuthResult<TokenResponse>>;
+  /**
+   * Register a new account. Maps to `POST /signup`.
+   *
+   * The backend ALWAYS responds `202 { message }` with NO tokens and never 409 —
+   * it does not reveal whether the email already exists (anti-enumeration). So
+   * this is a fire-and-forget acknowledgement: it does NOT log the user in. The
+   * account is confirmed out-of-band (email), after which the user signs in.
+   */
+  signup(input: { email: string; password: string }): Promise<AuthResult<void>>;
   /** Rotate a refresh token for a fresh bundle. Maps to `POST /token/refresh`. */
   refresh(refreshToken: string): Promise<AuthResult<TokenResponse>>;
   /** Revoke a refresh token. Maps to `POST /logout`. */
@@ -90,7 +97,8 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
   return {
     login: (input) =>
       postJson('/token', { grant_type: 'password', ...input }, asTokens),
-    signup: (input) => postJson('/signup', input, asTokens),
+    // 202 ack, no token body — parse as void.
+    signup: (input) => postJson('/signup', input, asVoid),
     refresh: (refreshToken) =>
       postJson('/token/refresh', { refresh_token: refreshToken }, asTokens),
     logout: (refreshToken) =>

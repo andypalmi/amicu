@@ -70,15 +70,16 @@ export async function signupAction(
 
   const result = await authClient.signup(parsed.data);
   if (!result.ok) {
-    if (result.status === 409) {
-      // Do not confirm the email is taken — keep it generic (anti-enumeration).
-      return { error: 'We could not complete sign-up with those details.' };
-    }
     return { error: GENERIC_UNAVAILABLE };
   }
 
-  await setSessionCookies(result.data);
-  redirect(safeNext(formData.get('next')));
+  // The backend returns 202 with no tokens and never reveals whether the email
+  // was already registered (anti-enumeration). We therefore do NOT log the user
+  // in here; we show the same generic acknowledgement in every case. Confirmation
+  // happens out-of-band (email), after which the user signs in.
+  return {
+    notice: 'Check your inbox to confirm your account, then sign in.',
+  };
 }
 
 export async function forgotAction(

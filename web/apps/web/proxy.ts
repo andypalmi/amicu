@@ -16,6 +16,8 @@ const { rewrite: rewriteSuffix } = rewritePath(
 // Routes whose access token the BFF proactively (silently) refreshes.
 const PROTECTED_PREFIXES = ['/app', '/account'];
 
+// secure tied to NODE_ENV so local HTTP dev works; a non-prod build over plain
+// HTTP would omit Secure. Real deployments run production mode behind TLS.
 const cookieAttrs = {
   httpOnly: true,
   secure: IS_PROD,

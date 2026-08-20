@@ -10,10 +10,7 @@ import { SignupForm } from '@/components/auth/signup-form';
 
 export const metadata: Metadata = { title: 'Create account' };
 
-export default async function SignupPage({ searchParams }: PageProps<'/signup'>) {
-  const { next } = await searchParams;
-  const nextPath = typeof next === 'string' ? next : undefined;
-
+export default function SignupPage() {
   return (
     <Card>
       <CardHeader>
@@ -23,7 +20,7 @@ export default async function SignupPage({ searchParams }: PageProps<'/signup'>)
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <SignupForm next={nextPath} />
+        <SignupForm />
       </CardContent>
     </Card>
   );

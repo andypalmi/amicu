@@ -9,8 +9,10 @@ import {
 } from './config';
 
 // Shared cookie attributes. httpOnly keeps both tokens out of browser JS; SameSite
-// Lax is enough for a first-party BFF (top-level navigations carry the cookie);
-// Secure is on everywhere except local dev.
+// Lax is enough for a first-party BFF (top-level navigations carry the cookie).
+// Secure is tied to NODE_ENV so local HTTP dev works; note a non-prod build served
+// over plain HTTP would omit Secure — any real deployment must run production mode
+// behind TLS (it always does here).
 const baseAttrs = {
   httpOnly: true,
   secure: IS_PROD,
