@@ -1,7 +1,7 @@
 //! Runnable bootstrap for the Amicu Management API.
 //!
 //! `amicu-api` is a library — it hands back a [`Router`] from
-//! `api_router(auth_state, engine_state)` but binds no socket. This crate is the
+//! `api_router(auth_state, engine_state, billing_state)` but binds no socket. This crate is the
 //! thin glue that a deployment actually runs: it constructs the auth + engine
 //! state, reads its configuration from the environment (or flags), binds a
 //! `TcpListener`, and serves the router with graceful shutdown.
@@ -43,6 +43,26 @@
 //! | `min_tier` | `--min-tier` | `AMICU_MIN_TIER` | `community` |
 //! | `rate_limit_max` | `--rate-limit-max` | `AMICU_RATE_LIMIT_MAX` | `30` |
 //! | `rate_limit_window_secs` | `--rate-limit-window-secs` | `AMICU_RATE_LIMIT_WINDOW_SECS` | `60` |
+//!
+//! # Billing (Stripe) — env only
+//!
+//! Billing is a real Stripe integration that activates only when its secrets are
+//! present in the environment (there are no flags). Absent them, `/billing/*`
+//! endpoints return a clean `503 { "error": "billing is not configured" }`.
+//!
+//! | Env var | Required | Purpose |
+//! |---------|----------|---------|
+//! | `STRIPE_SECRET_KEY` | yes | Server-side Stripe API key (`sk_…`). |
+//! | `STRIPE_WEBHOOK_SECRET` | yes | Endpoint signing secret (`whsec_…`) for webhook verification. |
+//! | `STRIPE_PRICE_PRO` | one price needed | Stripe price id granting the Pro tier. |
+//! | `STRIPE_PRICE_ENTERPRISE` | optional | Price id granting Enterprise. |
+//! | `STRIPE_PRICE_HOSTED` | optional | Price id granting Hosted. |
+//! | `STRIPE_SUCCESS_URL` | optional | Checkout success redirect (defaults to localhost dev). |
+//! | `STRIPE_CANCEL_URL` | optional | Checkout cancel redirect. |
+//! | `STRIPE_PORTAL_RETURN_URL` | optional | Billing-portal return URL. |
+//!
+//! A subscription change takes effect on the user's **next token issuance**
+//! (sign-in or refresh); live access JWTs are never revoked.
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -50,7 +70,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use amicu_api::{
-    AuthApiState, EngineApiState, ProxyParseError, RateLimiter, TrustedProxies, api_router,
+    AuthApiState, BillingApiState, EngineApiState, ProxyParseError, RateLimiter, TrustedProxies,
+    api_router, stripe_config_from_env,
 };
 use amicu_auth::issuer::{IssuerConfig, TokenIssuer};
 use amicu_auth::key::SigningKey;
@@ -212,10 +233,14 @@ pub fn build_app(config: &Config) -> Result<Router, Error> {
     let jwks = keyring.jwks();
 
     let issuer = TokenIssuer::new(IssuerConfig::new(&config.issuer, &config.audience));
+    // The user store is shared: the auth service and the billing surface write to
+    // the same records, so a webhook-driven tier change lands on the user the
+    // auth service will re-read on the next sign-in/refresh.
+    let users = Arc::new(InMemoryUserStore::default());
     let service = Arc::new(AuthService::new(
         keyring,
         issuer,
-        Arc::new(InMemoryUserStore::default()),
+        users.clone(),
         Arc::new(InMemoryRefreshStore::default()),
         Arc::new(InMemoryResetStore::default()),
         Arc::new(LoggingNotifier),
@@ -227,14 +252,28 @@ pub fn build_app(config: &Config) -> Result<Router, Error> {
     ));
     let auth_state = AuthApiState::new(service, limiter).with_trusted_proxies(trusted);
 
-    let verifier = Verifier::new(
+    let verifier = Arc::new(Verifier::new(
         StaticJwksProvider::new(jwks),
         VerifierConfig::new(&config.issuer, &config.audience),
-    );
-    let engine_state =
-        EngineApiState::new(Arc::new(verifier)).with_min_tier(config.min_tier.into());
+    ));
+    let engine_state = EngineApiState::new(verifier.clone()).with_min_tier(config.min_tier.into());
 
-    Ok(api_router(auth_state, engine_state))
+    // Billing is a real Stripe integration, activated only when its secrets are
+    // present in the environment. Absent them, the endpoints return a clean 503
+    // ("billing is not configured") rather than faking success.
+    let env: std::collections::HashMap<String, String> = std::env::vars().collect();
+    let billing_state = if let Some(stripe) = stripe_config_from_env(&env) {
+        BillingApiState::with_stripe(verifier.clone(), users.clone(), stripe)
+    } else {
+        eprintln!(
+            "amicu-server: billing DISABLED (set STRIPE_SECRET_KEY, \
+             STRIPE_WEBHOOK_SECRET, and STRIPE_PRICE_* to activate); \
+             /billing/* endpoints will return 503."
+        );
+        BillingApiState::unconfigured(verifier, users)
+    };
+
+    Ok(api_router(auth_state, engine_state, billing_state))
 }
 
 /// Serve `app` on an already-bound `listener` until `shutdown` resolves.

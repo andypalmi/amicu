@@ -125,13 +125,12 @@ impl<C: Clock> AuthService<C> {
         let id = new_user_id();
         match self
             .users
-            .create(User {
-                id: id.clone(),
-                email: email.clone(),
+            .create(User::new(
+                id.clone(),
+                email.clone(),
                 password_hash,
-                tier: Tier::Community,
-                roles: Vec::new(),
-            })
+                Tier::Community,
+            ))
             .await
         {
             Ok(()) => Ok(SignUpOutcome::Created(id)),

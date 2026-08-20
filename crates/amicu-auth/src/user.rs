@@ -17,10 +17,36 @@ pub struct User {
     pub email: String,
     /// Argon2id PHC hash.
     pub password_hash: String,
-    /// Access tier.
+    /// Access tier. This is the single source of truth for a user's plan; billing
+    /// webhooks update it (see [`UserStore::set_billing`]) and the next token the
+    /// user is issued carries the new value.
     pub tier: Tier,
     /// RBAC roles.
     pub roles: Vec<String>,
+    /// Stripe customer id (`cus_…`) once a checkout/portal session has been
+    /// created for this user. `None` until the user first enters billing. Used to
+    /// map an incoming Stripe webhook (which identifies the account only by
+    /// customer id) back to the local user.
+    pub stripe_customer_id: Option<String>,
+    /// Stripe subscription id (`sub_…`) of the user's current active subscription,
+    /// set when a subscription is created/updated and cleared when it is deleted.
+    pub stripe_subscription_id: Option<String>,
+}
+
+impl User {
+    /// A newly-registered user: no billing relationship yet.
+    #[must_use]
+    pub fn new(id: String, email: String, password_hash: String, tier: Tier) -> Self {
+        Self {
+            id,
+            email,
+            password_hash,
+            tier,
+            roles: Vec::new(),
+            stripe_customer_id: None,
+            stripe_subscription_id: None,
+        }
+    }
 }
 
 /// User persistence seam.
@@ -32,9 +58,28 @@ pub trait UserStore: Send + Sync {
     async fn get_by_email(&self, email: &str) -> Result<Option<User>>;
     /// Look up a user by id.
     async fn get_by_id(&self, id: &str) -> Result<Option<User>>;
+    /// Look up a user by their Stripe customer id (`cus_…`). Billing webhooks
+    /// identify the account only by customer id, so this is how a subscription
+    /// event is mapped back to the local user. A no-match returns `Ok(None)`.
+    async fn get_by_stripe_customer(&self, customer_id: &str) -> Result<Option<User>>;
     /// Replace a user's password hash (used by password reset). A no-op if the
     /// user id is unknown.
     async fn update_password(&self, user_id: &str, password_hash: String) -> Result<()>;
+    /// Record (or update) a user's Stripe customer id. Called the first time a
+    /// checkout or portal session is created so later webhooks can be mapped back
+    /// to the user. A no-op if the user id is unknown.
+    async fn set_stripe_customer(&self, user_id: &str, customer_id: String) -> Result<()>;
+    /// Persist the outcome of a billing event: the user's new tier plus the
+    /// subscription id backing it (`None` clears it, e.g. on cancellation). This
+    /// is the durable store of a user's plan; the change takes effect on the
+    /// user's next token issuance (sign-in or refresh) — live JWTs are not
+    /// revoked. A no-op if the user id is unknown.
+    async fn set_billing(
+        &self,
+        user_id: &str,
+        tier: Tier,
+        stripe_subscription_id: Option<String>,
+    ) -> Result<()>;
 }
 
 /// In-memory user store (tests, single-node dev).
@@ -73,6 +118,16 @@ impl UserStore for InMemoryUserStore {
             .cloned())
     }
 
+    async fn get_by_stripe_customer(&self, customer_id: &str) -> Result<Option<User>> {
+        Ok(self
+            .inner
+            .lock()
+            .expect("user store poisoned")
+            .values()
+            .find(|u| u.stripe_customer_id.as_deref() == Some(customer_id))
+            .cloned())
+    }
+
     async fn update_password(&self, user_id: &str, password_hash: String) -> Result<()> {
         if let Some(user) = self
             .inner
@@ -82,6 +137,38 @@ impl UserStore for InMemoryUserStore {
             .find(|u| u.id == user_id)
         {
             user.password_hash = password_hash;
+        }
+        Ok(())
+    }
+
+    async fn set_stripe_customer(&self, user_id: &str, customer_id: String) -> Result<()> {
+        if let Some(user) = self
+            .inner
+            .lock()
+            .expect("user store poisoned")
+            .values_mut()
+            .find(|u| u.id == user_id)
+        {
+            user.stripe_customer_id = Some(customer_id);
+        }
+        Ok(())
+    }
+
+    async fn set_billing(
+        &self,
+        user_id: &str,
+        tier: Tier,
+        stripe_subscription_id: Option<String>,
+    ) -> Result<()> {
+        if let Some(user) = self
+            .inner
+            .lock()
+            .expect("user store poisoned")
+            .values_mut()
+            .find(|u| u.id == user_id)
+        {
+            user.tier = tier;
+            user.stripe_subscription_id = stripe_subscription_id;
         }
         Ok(())
     }

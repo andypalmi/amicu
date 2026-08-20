@@ -27,6 +27,10 @@ use utoipa::{Modify, OpenApi};
         crate::auth::reset,
         crate::auth::jwks,
         crate::auth::openid_configuration,
+        crate::billing::checkout_handler,
+        crate::billing::portal_handler,
+        crate::billing::status_handler,
+        crate::billing::webhook_handler,
     ),
     components(schemas(
         crate::auth::Credentials,
@@ -36,6 +40,9 @@ use utoipa::{Modify, OpenApi};
         crate::auth::RecoverRequest,
         crate::auth::RecoverResponse,
         crate::auth::ResetRequest,
+        crate::billing::CheckoutRequest,
+        crate::billing::RedirectResponse,
+        crate::billing::BillingStatusResponse,
     )),
     modifiers(&SecurityAddon),
     tags(
@@ -43,6 +50,7 @@ use utoipa::{Modify, OpenApi};
         (name = "engine", description = "Stateless, side-effect-free validate and plan endpoints (auth-gated)."),
         (name = "recommend", description = "Stateless advisory tuning recommendations from a metrics + estimate snapshot (auth-gated, tier-appropriate)."),
         (name = "monitor", description = "Stateless monitoring view (measured-vs-estimated): a normalized metric surface, estimate, and tier-appropriate advisory suggestions (auth-gated)."),
+        (name = "billing", description = "Stripe-backed subscription billing: checkout, customer portal, status, and the signature-authenticated webhook."),
     ),
 )]
 pub struct ApiDoc;
