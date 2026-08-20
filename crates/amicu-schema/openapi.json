@@ -117,6 +117,72 @@
         ]
       }
     },
+    "/recover": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Request a password reset.",
+        "description": "Anti-enumeration: this ALWAYS returns the same generic `202 Accepted`,\nwhether or not the email is registered, with no account-existence signal in\nthe body or (Argon2 runs on neither path) the timing. A reset token is minted\nand delivered out-of-band via the notification seam only when the account\nexists. Mirrors the identical-response defense on `/signup`.",
+        "operationId": "recover",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoverRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted. If the email is registered, a reset link is sent out-of-band. Response is identical whether or not the account exists (anti-enumeration).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoverResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited."
+          }
+        }
+      }
+    },
+    "/reset": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Complete a password reset: consume a valid reset token and install a new\npassword.",
+        "description": "On success the password hash is replaced and every refresh-token family the\nuser holds is revoked, forcing a fresh sign-in on all devices.\n\nBoth failure modes return `400`, but they are deliberately *not* the same\nmessage: a weak new password gets a distinct, helpful policy message, while\nan unknown/expired/already-used token gets a generic one. This leaks nothing,\nbecause the password policy is checked *before* the token is looked up — so\nthe weak-password message can never depend on (and never signals) whether the\ntoken is valid or which account it belongs to.",
+        "operationId": "reset",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Password reset: the new password is installed and all prior sessions (refresh families) are revoked."
+          },
+          "400": {
+            "description": "Either the new password fails policy (distinct, helpful message) or the reset token is unknown, expired, or already used (generic message). Policy is checked before token lookup, so neither message reveals token validity or account existence."
+          },
+          "429": {
+            "description": "Rate limited."
+          }
+        }
+      }
+    },
     "/signup": {
       "post": {
         "tags": [
@@ -694,6 +760,32 @@
           }
         }
       },
+      "RecoverRequest": {
+        "type": "object",
+        "description": "A password-reset request (`POST /recover`).",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The account email to send a reset link to."
+          }
+        }
+      },
+      "RecoverResponse": {
+        "type": "object",
+        "description": "The generic, anti-enumeration recover acknowledgement.",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "A message that reveals nothing about whether the email is registered."
+          }
+        }
+      },
       "RefreshRequest": {
         "type": "object",
         "description": "A refresh-token-bearing request (refresh rotation / logout).",
@@ -704,6 +796,24 @@
           "refresh_token": {
             "type": "string",
             "description": "The opaque refresh token previously issued to this client."
+          }
+        }
+      },
+      "ResetRequest": {
+        "type": "object",
+        "description": "A password-reset completion (`POST /reset`): the opaque reset token plus the\nnew password to install.",
+        "required": [
+          "reset_token",
+          "new_password"
+        ],
+        "properties": {
+          "new_password": {
+            "type": "string",
+            "description": "The new account password (must satisfy the password policy)."
+          },
+          "reset_token": {
+            "type": "string",
+            "description": "The opaque reset token delivered out-of-band (e.g. via the reset link)."
           }
         }
       },

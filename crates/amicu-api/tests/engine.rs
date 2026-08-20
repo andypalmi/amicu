@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use amicu_api::{AuthApiState, EngineApiState, RateLimiter, api_router};
+use amicu_auth::notify::LoggingNotifier;
 use amicu_auth::refresh::InMemoryRefreshStore;
+use amicu_auth::reset::InMemoryResetStore;
 use amicu_auth::user::InMemoryUserStore;
 use amicu_auth::verifier::StaticJwksProvider;
 use amicu_auth::{
@@ -133,6 +135,8 @@ fn app_with(tier: Tier, min_tier: Tier) -> (Router, String) {
         issuer,
         Arc::new(InMemoryUserStore::default()),
         Arc::new(InMemoryRefreshStore::default()),
+        Arc::new(InMemoryResetStore::default()),
+        Arc::new(LoggingNotifier),
         ISS,
     ));
     let auth_state = AuthApiState::new(

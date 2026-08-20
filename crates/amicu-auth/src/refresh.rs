@@ -154,6 +154,11 @@ pub trait RefreshStore: Send + Sync {
     async fn consume(&self, token_hash: &[u8; 32], now: i64) -> Result<RefreshConsume>;
     /// Mark a single record revoked (idempotent).
     async fn revoke(&self, token_hash: &[u8; 32]) -> Result<()>;
+    /// Revoke *every* refresh token owned by a user, across all families
+    /// (idempotent). Used by password reset to force re-authentication on every
+    /// device after the credential changes. A persistent implementation performs
+    /// this as one conditional update keyed by `user_id`.
+    async fn revoke_all_for_user(&self, user_id: &str) -> Result<()>;
     /// Reuse/theft response: revoke *every* token in a family and flag the
     /// family compromised. Idempotent.
     ///
@@ -164,9 +169,13 @@ pub trait RefreshStore: Send + Sync {
     ///
     // TODO(amicu-planning#96): when the persistent store lands, back the
     // compromised flag with a durable, cross-node table (indexed by
-    // `family_id`) and emit an audit/notification event (e.g. a "suspicious
-    // sign-in" email to the account) — that user-facing signal needs the
-    // email-verification pipeline, which is not yet built.
+    // `family_id`). The user-facing "suspicious sign-in" notice can now ride the
+    // notification seam added in amicu-planning#102
+    // (`crate::notify::Notifier`); it is not wired here because
+    // `compromise_family` sees only a `family_id`, not the owning user's email —
+    // resolving that needs a family→user lookup this in-memory store does not
+    // index yet. Wire it at the service call site once the persistent store
+    // exposes that mapping.
     async fn compromise_family(&self, family_id: &str) -> Result<()>;
     /// Whether a family has been flagged compromised by reuse detection.
     /// Primarily an observability/audit hook — enforcement already follows from
@@ -243,6 +252,16 @@ impl RefreshStore for InMemoryRefreshStore {
             .get_mut(token_hash)
         {
             rec.revoked = true;
+        }
+        Ok(())
+    }
+
+    async fn revoke_all_for_user(&self, user_id: &str) -> Result<()> {
+        let mut state = self.inner.lock().expect("refresh store poisoned");
+        for rec in state.tokens.values_mut() {
+            if rec.user_id == user_id {
+                rec.revoked = true;
+            }
         }
         Ok(())
     }

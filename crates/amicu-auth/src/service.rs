@@ -14,8 +14,10 @@ use crate::issuer::{Clock, SystemClock, TokenIssuer};
 use crate::jwks::{Jwks, OpenIdConfiguration};
 use crate::key::SigningKey;
 use crate::keyring::Keyring;
+use crate::notify::{Notification, NotificationKind, Notifier};
 use crate::password::{check_password_policy, hash_password, verify_password};
 use crate::refresh::{self, RefreshStore};
+use crate::reset::{self, ResetStore};
 use crate::user::{User, UserStore};
 
 /// Result of a sign-up attempt, reported truthfully to the (trusted) caller.
@@ -66,6 +68,8 @@ pub struct AuthService<C: Clock = SystemClock> {
     issuer: TokenIssuer<C>,
     users: Arc<dyn UserStore>,
     refresh: Arc<dyn RefreshStore>,
+    resets: Arc<dyn ResetStore>,
+    notifier: Arc<dyn Notifier>,
     base_url: String,
 }
 
@@ -76,6 +80,8 @@ impl<C: Clock> AuthService<C> {
         issuer: TokenIssuer<C>,
         users: Arc<dyn UserStore>,
         refresh: Arc<dyn RefreshStore>,
+        resets: Arc<dyn ResetStore>,
+        notifier: Arc<dyn Notifier>,
         base_url: impl Into<String>,
     ) -> Self {
         Self {
@@ -83,6 +89,8 @@ impl<C: Clock> AuthService<C> {
             issuer,
             users,
             refresh,
+            resets,
+            notifier,
             base_url: base_url.into(),
         }
     }
@@ -119,7 +127,7 @@ impl<C: Clock> AuthService<C> {
             .users
             .create(User {
                 id: id.clone(),
-                email,
+                email: email.clone(),
                 password_hash,
                 tier: Tier::Community,
                 roles: Vec::new(),
@@ -129,12 +137,23 @@ impl<C: Clock> AuthService<C> {
             Ok(()) => Ok(SignUpOutcome::Created(id)),
             // Swallow the collision: surfacing it would enable enumeration.
             //
-            // TODO(amicu-planning#96): once the email-verification pipeline
-            // lands, dispatch here — a verification link on `Created`, an
-            // "account already exists / reset your password" notice on
-            // `AlreadyRegistered` — both out-of-band, preserving the identical
-            // HTTP response.
-            Err(AuthError::UserExists) => Ok(SignUpOutcome::AlreadyRegistered),
+            // Instead notify the *real* owner out-of-band via the notification
+            // seam (amicu-planning#102): an "account already exists / reset your
+            // password" nudge that the requester never observes on the identical
+            // HTTP response. A verification link on `Created` still waits on the
+            // email-verification pipeline (amicu-planning#96).
+            Err(AuthError::UserExists) => {
+                // Dispatch off the response path (see `spawn_notification`): the
+                // notice is sent only on the collision path, so awaiting it here
+                // would make the collision measurably slower than a fresh
+                // sign-up — an account-enumeration timing oracle. The response
+                // stays identical and same-timing on both paths.
+                self.spawn_notification(Notification {
+                    recipient: email,
+                    kind: NotificationKind::AccountExists,
+                });
+                Ok(SignUpOutcome::AlreadyRegistered)
+            }
             Err(other) => Err(other),
         }
     }
@@ -210,6 +229,117 @@ impl<C: Clock> AuthService<C> {
         Ok(())
     }
 
+    /// Request a password reset for `email`.
+    ///
+    /// Anti-enumeration: this ALWAYS returns immediately with `Ok`, and the HTTP
+    /// boundary always returns the same generic `202`, whether or not the email
+    /// is registered. Crucially, ALL of the account-dependent work — the user
+    /// lookup, and (only when the account exists) the token mint, store insert,
+    /// and out-of-band delivery — runs on a detached background task, so the
+    /// synchronous response time is the *same* on the exists and miss paths.
+    ///
+    /// Doing that work inline would be an account-enumeration timing oracle: the
+    /// exists path does strictly more synchronous work than the miss path, and
+    /// the gap becomes a strong signal the moment a synchronous mailer replaces
+    /// the dev logger (recover would block on SMTP only for real accounts).
+    /// Detaching it removes the send (and the store I/O) from the response path
+    /// entirely. A reset token is still minted and delivered only when the
+    /// account exists; on a miss nothing is sent and nothing is stored.
+    ///
+    /// # Errors
+    /// Never returns an error: background failures are swallowed (surfacing them
+    /// would itself be an existence signal). Kept `Result` for a uniform handler
+    /// signature.
+    // Intentionally `async` with no `.await` on the response path: detaching all
+    // account-dependent work is the whole anti-enumeration point (see above). The
+    // `async` signature is part of the `AuthService` contract — a persistent
+    // store would enqueue via an awaited durable-queue write here — so keep it.
+    #[allow(clippy::unused_async)]
+    pub async fn request_password_reset(&self, email: &str) -> Result<()> {
+        let email = normalize_email(email);
+        // Empty email is a request-level no-op (not an account signal); returning
+        // here changes nothing observable since the exists/miss paths are already
+        // equalized by the detached task below.
+        if email.is_empty() {
+            return Ok(());
+        }
+        // Move the seams into a detached task. The response returns now, in
+        // account-independent time; the (possibly network-bound) lookup + mint +
+        // store + send happen off the response path. See the doc comment.
+        let users = self.users.clone();
+        let resets = self.resets.clone();
+        let notifier = self.notifier.clone();
+        let expires_at = self.issuer.now_unix()
+            + i64::try_from(self.issuer.config().reset_ttl.as_secs()).unwrap_or(i64::MAX);
+        tokio::spawn(async move {
+            let Ok(Some(user)) = users.get_by_email(&email).await else {
+                return; // unknown account: send nothing, store nothing
+            };
+            let minted = reset::mint(&user.id, expires_at);
+            if resets.insert(minted.record).await.is_err() {
+                return; // best-effort: a store failure must not surface anywhere
+            }
+            // Best-effort delivery: a transport failure must not change anything
+            // observable (it already changed nothing on the response path).
+            let _ = notifier
+                .notify(Notification {
+                    recipient: email,
+                    kind: NotificationKind::PasswordReset {
+                        reset_token: minted.token,
+                    },
+                })
+                .await;
+        });
+        Ok(())
+    }
+
+    /// Consume a reset token and set a new password.
+    ///
+    /// The password policy is enforced first (a request-level check that reveals
+    /// nothing about which tokens/accounts exist, and avoids burning a valid
+    /// token on a weak password). The token is then consumed atomically and
+    /// single-use: a reused, expired, or unknown token is rejected with the
+    /// generic [`AuthError::ResetInvalid`] (no enumeration). On success the
+    /// password hash is replaced AND every refresh-token family the user holds is
+    /// revoked, forcing a fresh sign-in on every device.
+    ///
+    /// # Errors
+    /// [`AuthError::InvalidCredentials`] / [`AuthError::WeakPassword`] if the new
+    /// password fails policy; [`AuthError::ResetInvalid`] if the token is unknown,
+    /// expired, or already used; [`AuthError::PasswordHash`] on hashing failure.
+    pub async fn reset_password(
+        &self,
+        token: &SecretValue,
+        new_password: &SecretValue,
+    ) -> Result<()> {
+        // Request-level validation before touching the token: identical error
+        // regardless of token validity, so it leaks nothing.
+        check_password_policy(new_password)?;
+        let raw = token
+            .expose_secret_str()
+            .map_err(|_| AuthError::ResetInvalid)?;
+        let hash = reset::hash_token(raw);
+        // Atomic single-use consume: exactly one caller can win `Consumed`.
+        let user_id = match self.resets.consume(&hash, self.issuer.now_unix()).await? {
+            reset::ResetConsume::Consumed { user_id } => user_id,
+            reset::ResetConsume::NotFound
+            | reset::ResetConsume::Reuse
+            | reset::ResetConsume::Expired => return Err(AuthError::ResetInvalid),
+        };
+        // Hash the new password only after the token is proven live and claimed.
+        let password_hash = hash_password(new_password)?;
+        // Revoke sessions BEFORE installing the new password. These two writes
+        // are not atomic here (they would be one transaction in a persistent
+        // store), so order them for fail-safety: if revocation fails, the token
+        // is already consumed but the password is unchanged and sessions survive
+        // — the user simply requests another reset. The reverse order would leave
+        // the dangerous state (new password live, but old sessions still valid)
+        // on a partial failure.
+        self.refresh.revoke_all_for_user(&user_id).await?;
+        self.users.update_password(&user_id, password_hash).await?;
+        Ok(())
+    }
+
     /// Introduce a new active signing key; the previous key keeps verifying.
     pub fn rotate_keys(&self, new_active: SigningKey) {
         self.keyring
@@ -228,6 +358,21 @@ impl<C: Clock> AuthService<C> {
     #[must_use]
     pub fn openid_configuration(&self) -> OpenIdConfiguration {
         OpenIdConfiguration::new(self.issuer.config().issuer.clone(), &self.base_url)
+    }
+
+    /// Deliver a notification out-of-band without gating the caller's response.
+    ///
+    /// The (possibly network-bound) send runs on a detached task, so response
+    /// timing never depends on whether — or to whom — a message is dispatched.
+    /// This is load-bearing for anti-enumeration: awaiting a send that only
+    /// happens on the account-exists path would be an enumeration timing oracle,
+    /// trivially today and strongly once a synchronous mailer replaces the dev
+    /// logger. Delivery is best-effort; a transport failure is swallowed.
+    fn spawn_notification(&self, notification: Notification) {
+        let notifier = self.notifier.clone();
+        tokio::spawn(async move {
+            let _ = notifier.notify(notification).await;
+        });
     }
 
     /// Issue a token pair opening a brand-new refresh family (fresh sign-in).

@@ -43,9 +43,13 @@ pub mod key;
 #[cfg(feature = "issuer")]
 pub mod keyring;
 #[cfg(feature = "issuer")]
+pub mod notify;
+#[cfg(feature = "issuer")]
 pub mod password;
 #[cfg(feature = "issuer")]
 pub mod refresh;
+#[cfg(feature = "issuer")]
+pub mod reset;
 #[cfg(feature = "issuer")]
 pub mod service;
 #[cfg(feature = "issuer")]
@@ -57,5 +61,9 @@ pub use issuer::{Clock, IssuerConfig, SystemClock, TokenIssuer};
 pub use key::SigningKey;
 #[cfg(feature = "issuer")]
 pub use keyring::Keyring;
+#[cfg(feature = "issuer")]
+pub use notify::{LoggingNotifier, Notification, NotificationKind, Notifier};
+#[cfg(feature = "issuer")]
+pub use reset::{InMemoryResetStore, MintedReset, ResetConsume, ResetRecord, ResetStore};
 #[cfg(feature = "issuer")]
 pub use service::{AuthService, SignUpOutcome, TokenPair};

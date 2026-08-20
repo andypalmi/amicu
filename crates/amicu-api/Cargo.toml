@@ -25,6 +25,8 @@ utoipa-axum = { version = "0.2" }
 tokio = { version = "1", features = ["macros", "rt"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# HTTP tests implement the Notifier trait to capture the out-of-band reset token.
+async-trait = "0.1"
 
 [lints]
 workspace = true

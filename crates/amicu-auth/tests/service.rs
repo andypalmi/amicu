@@ -9,11 +9,14 @@ use amicu_auth::error::AuthError;
 use amicu_auth::issuer::{Clock, IssuerConfig, TokenIssuer};
 use amicu_auth::key::SigningKey;
 use amicu_auth::keyring::Keyring;
+use amicu_auth::notify::{LoggingNotifier, Notification, NotificationKind, Notifier};
 use amicu_auth::refresh::InMemoryRefreshStore;
+use amicu_auth::reset::InMemoryResetStore;
 use amicu_auth::service::{AuthService, SignUpOutcome};
 use amicu_auth::user::InMemoryUserStore;
 use amicu_auth::verifier::{StaticJwksProvider, Verifier, VerifierConfig};
 use amicu_core::secret::SecretValue;
+use async_trait::async_trait;
 
 const ISS: &str = "https://auth.amicu.dev";
 const AUD: &str = "amicu-api";
@@ -51,6 +54,10 @@ fn real_now() -> i64 {
 }
 
 fn build(clock: TestClock) -> AuthService<TestClock> {
+    build_with_notifier(clock, Arc::new(LoggingNotifier))
+}
+
+fn build_with_notifier(clock: TestClock, notifier: Arc<dyn Notifier>) -> AuthService<TestClock> {
     let keyring = Keyring::new(SigningKey::generate().unwrap());
     let issuer = TokenIssuer::with_clock(IssuerConfig::new(ISS, AUD), clock);
     AuthService::new(
@@ -58,8 +65,262 @@ fn build(clock: TestClock) -> AuthService<TestClock> {
         issuer,
         Arc::new(InMemoryUserStore::default()),
         Arc::new(InMemoryRefreshStore::default()),
+        Arc::new(InMemoryResetStore::default()),
+        notifier,
         "https://auth.amicu.dev",
     )
+}
+
+/// A [`Notifier`] that records every message it is handed, so tests can assert
+/// what was sent (and read out the reset token that a real mailer would embed in
+/// a link).
+#[derive(Default)]
+struct CapturingNotifier {
+    sent: std::sync::Mutex<Vec<(String, CapturedKind)>>,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum CapturedKind {
+    PasswordReset(String),
+    AccountExists,
+}
+
+impl CapturingNotifier {
+    fn captured(&self) -> Vec<(String, CapturedKind)> {
+        self.sent.lock().unwrap().clone()
+    }
+
+    /// Cooperatively wait until at least `n` messages have been captured.
+    ///
+    /// Delivery now runs on a detached `tokio::spawn` task (so `/recover` returns
+    /// in account-independent time), so a test must yield to let that task run
+    /// before reading what it captured. On the current-thread test runtime the
+    /// spawned task makes progress at these yield points; the in-memory seams
+    /// complete in a handful of polls, and the bound only guards against a hang.
+    async fn wait_for_count(&self, n: usize) {
+        for _ in 0..10_000 {
+            if self.sent.lock().unwrap().len() >= n {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("timed out waiting for {n} captured notification(s)");
+    }
+
+    /// Wait for, then return, the token from the most recent password-reset
+    /// message.
+    async fn last_reset_token(&self) -> SecretValue {
+        for _ in 0..10_000 {
+            if let Some(t) = self
+                .sent
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find_map(|(_, k)| match k {
+                    CapturedKind::PasswordReset(t) => Some(t.clone()),
+                    CapturedKind::AccountExists => None,
+                })
+            {
+                return SecretValue::new(t.into_bytes());
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("timed out waiting for a password-reset notification");
+    }
+}
+
+#[async_trait]
+impl Notifier for CapturingNotifier {
+    async fn notify(&self, message: Notification) -> Result<(), AuthError> {
+        let kind = match message.kind {
+            NotificationKind::PasswordReset { reset_token } => {
+                CapturedKind::PasswordReset(reset_token.expose_secret_str().unwrap().to_string())
+            }
+            NotificationKind::AccountExists => CapturedKind::AccountExists,
+        };
+        self.sent.lock().unwrap().push((message.recipient, kind));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn password_reset_happy_path_updates_password_and_revokes_sessions() {
+    let notifier = Arc::new(CapturingNotifier::default());
+    let svc = build_with_notifier(TestClock::at(real_now()), notifier.clone());
+    svc.sign_up("reset@example.com", &pw("old-password"))
+        .await
+        .unwrap();
+    // Establish a live session whose refresh token must die on reset.
+    let session = svc
+        .sign_in("reset@example.com", &pw("old-password"))
+        .await
+        .unwrap();
+
+    // Request a reset; the token is delivered out-of-band on a detached task
+    // (captured here once it lands).
+    svc.request_password_reset("Reset@Example.com ")
+        .await
+        .unwrap();
+    let token = notifier.last_reset_token().await;
+
+    // Consume it to set a new password.
+    svc.reset_password(&token, &pw("brand-new-password"))
+        .await
+        .unwrap();
+
+    // New password works; old one no longer does.
+    svc.sign_in("reset@example.com", &pw("brand-new-password"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        svc.sign_in("reset@example.com", &pw("old-password"))
+            .await
+            .unwrap_err(),
+        AuthError::InvalidCredentials
+    ));
+
+    // The pre-reset session's refresh token was revoked (forced re-login).
+    assert!(matches!(
+        svc.refresh(&session.refresh_token).await.unwrap_err(),
+        AuthError::RefreshInvalid
+    ));
+}
+
+#[tokio::test]
+async fn reset_token_is_single_use() {
+    let notifier = Arc::new(CapturingNotifier::default());
+    let svc = build_with_notifier(TestClock::at(real_now()), notifier.clone());
+    svc.sign_up("once@example.com", &pw("first-password"))
+        .await
+        .unwrap();
+    svc.request_password_reset("once@example.com")
+        .await
+        .unwrap();
+    let token = notifier.last_reset_token().await;
+
+    svc.reset_password(&token, &pw("second-password"))
+        .await
+        .unwrap();
+    // A replay of the same token is rejected generically.
+    assert!(matches!(
+        svc.reset_password(&token, &pw("third-password"))
+            .await
+            .unwrap_err(),
+        AuthError::ResetInvalid
+    ));
+}
+
+#[tokio::test]
+async fn expired_reset_token_is_rejected() {
+    let notifier = Arc::new(CapturingNotifier::default());
+    let clock = TestClock::at(real_now());
+    let svc = build_with_notifier(clock.clone(), notifier.clone());
+    svc.sign_up("slow@example.com", &pw("slow-password"))
+        .await
+        .unwrap();
+    svc.request_password_reset("slow@example.com")
+        .await
+        .unwrap();
+    let token = notifier.last_reset_token().await;
+
+    // Advance past the 1-hour reset TTL.
+    clock.advance(3_600 + 1);
+    assert!(matches!(
+        svc.reset_password(&token, &pw("too-late-password"))
+            .await
+            .unwrap_err(),
+        AuthError::ResetInvalid
+    ));
+}
+
+#[tokio::test]
+async fn unknown_reset_token_is_rejected() {
+    let svc = build(TestClock::at(real_now()));
+    let bogus = SecretValue::new(b"not-a-real-reset-token".to_vec());
+    assert!(matches!(
+        svc.reset_password(&bogus, &pw("whatever-password"))
+            .await
+            .unwrap_err(),
+        AuthError::ResetInvalid
+    ));
+}
+
+#[tokio::test]
+async fn reset_enforces_password_policy() {
+    let notifier = Arc::new(CapturingNotifier::default());
+    let svc = build_with_notifier(TestClock::at(real_now()), notifier.clone());
+    svc.sign_up("weakreset@example.com", &pw("old-password"))
+        .await
+        .unwrap();
+    svc.request_password_reset("weakreset@example.com")
+        .await
+        .unwrap();
+    let token = notifier.last_reset_token().await;
+
+    // A weak new password is rejected up front (and must not burn the token).
+    assert!(matches!(
+        svc.reset_password(&token, &pw("short")).await.unwrap_err(),
+        AuthError::WeakPassword
+    ));
+    // The token survives the weak-password rejection and still works.
+    svc.reset_password(&token, &pw("strong-enough-now"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn recover_notifies_only_when_account_exists() {
+    let notifier = Arc::new(CapturingNotifier::default());
+    let svc = build_with_notifier(TestClock::at(real_now()), notifier.clone());
+    svc.sign_up("real@example.com", &pw("real-password"))
+        .await
+        .unwrap();
+
+    // Existing account: a password-reset notification is dispatched (on a
+    // detached task).
+    svc.request_password_reset("real@example.com")
+        .await
+        .unwrap();
+    // Unknown account: still Ok (anti-enumeration); its detached task looks up
+    // the (missing) account and sends nothing.
+    svc.request_password_reset("ghost@example.com")
+        .await
+        .unwrap();
+
+    // Wait for the real account's message. The ghost request captures nothing, so
+    // the count settles at exactly one.
+    notifier.wait_for_count(1).await;
+    let captured = notifier.captured();
+    assert_eq!(
+        captured.len(),
+        1,
+        "exactly one message: only the real account"
+    );
+    assert_eq!(captured[0].0, "real@example.com");
+    assert!(matches!(captured[0].1, CapturedKind::PasswordReset(_)));
+}
+
+#[tokio::test]
+async fn duplicate_signup_notifies_account_owner() {
+    let notifier = Arc::new(CapturingNotifier::default());
+    let svc = build_with_notifier(TestClock::at(real_now()), notifier.clone());
+    // First sign-up creates; no account-exists notice.
+    svc.sign_up("owner@example.com", &pw("owner-password"))
+        .await
+        .unwrap();
+    assert!(notifier.captured().is_empty());
+    // A duplicate sign-up nudges the real owner out-of-band (detached task).
+    svc.sign_up("owner@example.com", &pw("attacker-guess"))
+        .await
+        .unwrap();
+    notifier.wait_for_count(1).await;
+    let captured = notifier.captured();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(
+        captured[0],
+        ("owner@example.com".to_string(), CapturedKind::AccountExists)
+    );
 }
 
 fn verifier_for(svc: &AuthService<TestClock>) -> Verifier<StaticJwksProvider> {
