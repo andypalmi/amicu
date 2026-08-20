@@ -34,10 +34,12 @@ Weights split traffic; failover shifts away from unhealthy targets.
 
 ## Residency & governance
 
-- `data_class` declares `sensitivity`, `residency` (allowed regions),
-  `allow_external_providers`, and `handling`.
+- `data_class` declares `sensitivity`, `residency` (allowed jurisdictions: `eu`,
+  `uk`, `us`, `ca`, `apac`), `allow_external_providers`, and `handling`. A
+  region's jurisdiction is resolved from the provider catalog and checked
+  against this list.
 - `governance_rule` allows/denies by `data_classes`, `allowed_providers`, and
-  `allowed_regions`.
+  `allowed_regions` (region codes, not jurisdictions).
 - The planner rejects any provider/region that violates declared residency or
   allowlists with an `AMICU-POLICY-*` diagnostic — a violating stack never
   reaches apply. Keep EU-residency constraints first-class when required.

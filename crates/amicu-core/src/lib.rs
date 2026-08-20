@@ -28,8 +28,8 @@ mod tests {
         Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Budget, BudgetPeriod, DataClass,
         Deployment, GgufVariant, GovernanceRule, HardwareProfile, LlamaCppSettings, Modality,
         Model, ModelSource, Money, OptimizeFor, Price, Priority, Quantization, Quota, Region,
-        RoutingPolicy, RoutingTarget, RuleEffect, Runtime, Sensitivity, SourceRegistry, Tenant,
-        UseCase,
+        Residency, RoutingPolicy, RoutingTarget, RuleEffect, Runtime, Sensitivity, SourceRegistry,
+        Tenant, UseCase,
     };
     use crate::units::ByteSize;
 
@@ -155,7 +155,7 @@ mod tests {
         assert_json_round_trip(&DataClass {
             id: crate::id::DataClassId::new("pii"),
             sensitivity: Sensitivity::Restricted,
-            residency: vec!["eu".into()],
+            residency: vec![Residency::Eu],
             allow_external_providers: false,
             handling: vec!["no_logging".into()],
         });

@@ -9,7 +9,7 @@ use serde::de::DeserializeOwned;
 use amicu_core::graph::Graph;
 use amicu_core::resource::{
     Accelerator, Artifact, Budget, Cpu, DataClass, Deployment, GgufVariant, GovernanceRule,
-    HardwareProfile, LlamaCppSettings, Model, ModelSource, Money, Price, Quota, Region,
+    HardwareProfile, LlamaCppSettings, Model, ModelSource, Money, Price, Quota, Region, Residency,
     RoutingPolicy, RoutingTarget, Runtime, Tenant, UseCase, VllmSettings,
 };
 use amicu_core::units::ByteSize;
@@ -188,7 +188,13 @@ fn data_class(name: &str, f: &Fields) -> Result<DataClass> {
     Ok(DataClass {
         id: name.into(),
         sensitivity: f.enum_val("sensitivity")?,
-        residency: f.string_vec("residency")?,
+        // Residency jurisdictions arrive as bare tokens ("eu", "us", ...); an
+        // unknown token maps to Residency::Other rather than erroring.
+        residency: f
+            .string_vec("residency")?
+            .into_iter()
+            .map(Residency::from_token)
+            .collect(),
         allow_external_providers: f.opt_bool("allow_external_providers")?.unwrap_or(false),
         handling: f.string_vec("handling")?,
     })

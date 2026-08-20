@@ -6,8 +6,9 @@ use amicu_core::diagnostic::{
     Category, Diagnostic, DiagnosticCode, DiagnosticReport, Severity, catalog,
 };
 use amicu_core::graph::Graph;
-use amicu_core::resource::{RuleEffect, Runtime};
+use amicu_core::resource::{Residency, RuleEffect, Runtime};
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
+use amicu_providers::resolve_residency;
 use amicu_runtime::RuntimeAdapter;
 
 use crate::catalog::build_catalog;
@@ -49,21 +50,25 @@ pub(crate) fn report_for(graph: &Graph) -> DiagnosticReport {
 /// Reject deployments whose hardware region/provider violate the configured
 /// residency/region allowlist or match a deny rule.
 ///
+/// Two distinct region checks run: a `data_class` residency check compares the
+/// hardware region's *jurisdiction* (resolved from the provider catalog) against
+/// the declared allowed jurisdictions; the `governance_rule`
+/// allowed/denied-regions check operates on region *codes*.
+///
 /// v1 limitation: scope is graph-wide (a union over every `data_class` and
 /// `governance_rule`), not per-deployment, because no `deployment -> data_class`
 /// DSL edge exists yet to scope residency precisely per data class.
 fn residency_violations(graph: &Graph) -> Vec<Diagnostic> {
-    let region_allow: HashSet<&str> = graph
+    let jurisdiction_allow: HashSet<&Residency> = graph
         .data_classes
         .iter()
         .flat_map(|d| d.residency.iter())
-        .chain(
-            graph
-                .governance_rules
-                .iter()
-                .filter(|r| r.effect == RuleEffect::Allow)
-                .flat_map(|r| r.allowed_regions.iter()),
-        )
+        .collect();
+    let region_allow: HashSet<&str> = graph
+        .governance_rules
+        .iter()
+        .filter(|r| r.effect == RuleEffect::Allow)
+        .flat_map(|r| r.allowed_regions.iter())
         .map(String::as_str)
         .collect();
     let provider_allow: HashSet<&str> = graph
@@ -86,12 +91,32 @@ fn residency_violations(graph: &Graph) -> Vec<Diagnostic> {
             continue; // missing hardware ref is reported elsewhere
         };
 
+        let provider = hw.provider.as_str();
+
         if let Some(region) = hw.region.as_ref().map(|r| r.code.as_str()) {
+            // data_class residency: compare the region's jurisdiction. An
+            // unresolvable region (provider/region not in the catalog) cannot be
+            // proven to violate a constraint, so it is left unflagged here.
+            if !jurisdiction_allow.is_empty()
+                && let Some(residency) = resolve_residency(provider, region)
+                && !jurisdiction_allow.contains(&residency)
+            {
+                out.push(policy(
+                    catalog::POLICY_REGION_RESIDENCY,
+                    deployment.id.as_str(),
+                    format!(
+                        "region '{region}' ({}) violates the data residency allowlist",
+                        residency.as_token()
+                    ),
+                ));
+            }
+
+            // governance_rule allowed/denied regions: match on region code.
             if !region_allow.is_empty() && !region_allow.contains(region) {
                 out.push(policy(
                     catalog::POLICY_REGION_RESIDENCY,
                     deployment.id.as_str(),
-                    format!("region '{region}' violates the residency allowlist"),
+                    format!("region '{region}' violates the allowed-regions list"),
                 ));
             } else if region_deny.contains(region) {
                 out.push(policy(
@@ -102,7 +127,6 @@ fn residency_violations(graph: &Graph) -> Vec<Diagnostic> {
             }
         }
 
-        let provider = hw.provider.as_str();
         if !provider_allow.is_empty() && !provider_allow.contains(provider) {
             out.push(policy(
                 catalog::POLICY_PROVIDER_NOT_ALLOWED,
@@ -258,11 +282,11 @@ mod residency_tests {
             .collect()
     }
 
-    fn data_class(residency: &[&str]) -> DataClass {
+    fn data_class(residency: &[Residency]) -> DataClass {
         DataClass {
             id: "dc".into(),
             sensitivity: Sensitivity::Confidential,
-            residency: residency.iter().map(ToString::to_string).collect(),
+            residency: residency.to_vec(),
             allow_external_providers: false,
             handling: Vec::new(),
         }
@@ -280,17 +304,43 @@ mod residency_tests {
     }
 
     #[test]
-    fn region_outside_allowlist_is_flagged() {
-        let mut g = graph_with(hw("local_apple", Some("us-east-1")));
-        g.data_classes.push(data_class(&["eu-central-1"]));
+    fn region_jurisdiction_outside_allowlist_is_flagged() {
+        // aws us-east-1 resolves to the US jurisdiction, outside an EU allowlist.
+        let mut g = graph_with(hw("aws", Some("us-east-1")));
+        g.data_classes.push(data_class(&[Residency::Eu]));
         assert_eq!(codes(&g), vec!["AMICU-POLICY-002"]);
     }
 
     #[test]
-    fn missing_region_is_not_flagged() {
-        let mut g = graph_with(hw("local_apple", None));
-        g.data_classes.push(data_class(&["eu-central-1"]));
+    fn region_jurisdiction_within_allowlist_is_ok() {
+        let mut g = graph_with(hw("aws", Some("eu-central-1")));
+        g.data_classes.push(data_class(&[Residency::Eu]));
         assert!(codes(&g).is_empty());
+    }
+
+    #[test]
+    fn unresolvable_region_is_not_flagged() {
+        // No catalog entry for provider/region, so the jurisdiction is unknown
+        // and the residency constraint cannot be proven violated.
+        let mut g = graph_with(hw("local_apple", Some("cupertino")));
+        g.data_classes.push(data_class(&[Residency::Eu]));
+        assert!(codes(&g).is_empty());
+    }
+
+    #[test]
+    fn missing_region_is_not_flagged() {
+        let mut g = graph_with(hw("aws", None));
+        g.data_classes.push(data_class(&[Residency::Eu]));
+        assert!(codes(&g).is_empty());
+    }
+
+    #[test]
+    fn region_outside_governance_allowlist_is_flagged() {
+        // Governance allowed_regions match on code, independent of jurisdiction.
+        let mut g = graph_with(hw("aws", Some("us-east-1")));
+        g.governance_rules
+            .push(rule(RuleEffect::Allow, &[], &["eu-central-1"]));
+        assert_eq!(codes(&g), vec!["AMICU-POLICY-002"]);
     }
 
     #[test]
@@ -313,10 +363,10 @@ mod residency_tests {
 
     #[test]
     fn compliant_stack_has_no_violations() {
-        let mut g = graph_with(hw("local_apple", Some("eu-central-1")));
-        g.data_classes.push(data_class(&["eu-central-1"]));
+        let mut g = graph_with(hw("aws", Some("eu-central-1")));
+        g.data_classes.push(data_class(&[Residency::Eu]));
         g.governance_rules
-            .push(rule(RuleEffect::Allow, &["local_apple"], &["eu-central-1"]));
+            .push(rule(RuleEffect::Allow, &["aws"], &["eu-central-1"]));
         assert!(codes(&g).is_empty());
     }
 
@@ -330,7 +380,7 @@ mod residency_tests {
     fn deployment_without_hardware_is_skipped() {
         let mut g = Graph::new();
         g.deployments.push(deployment());
-        g.data_classes.push(data_class(&["eu-central-1"]));
+        g.data_classes.push(data_class(&[Residency::Eu]));
         assert!(codes(&g).is_empty());
     }
 }
