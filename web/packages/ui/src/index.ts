@@ -18,3 +18,4 @@ export {
   alertVariants,
   type AlertProps,
 } from './components/alert';
+export { Separator, type SeparatorProps } from './components/separator';
