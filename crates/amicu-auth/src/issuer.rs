@@ -35,10 +35,13 @@ pub struct IssuerConfig {
     pub access_ttl: Duration,
     /// Refresh-token lifetime.
     pub refresh_ttl: Duration,
+    /// Password-reset-token lifetime. Deliberately short: a reset link should be
+    /// usable soon after it is requested and not linger.
+    pub reset_ttl: Duration,
 }
 
 impl IssuerConfig {
-    /// Config with 15-minute access and 30-day refresh lifetimes.
+    /// Config with 15-minute access, 30-day refresh, and 1-hour reset lifetimes.
     #[must_use]
     pub fn new(issuer: impl Into<String>, audience: impl Into<String>) -> Self {
         Self {
@@ -46,6 +49,7 @@ impl IssuerConfig {
             audience: audience.into(),
             access_ttl: Duration::from_secs(900),
             refresh_ttl: Duration::from_secs(2_592_000),
+            reset_ttl: Duration::from_secs(3_600),
         }
     }
 }

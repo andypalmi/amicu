@@ -32,6 +32,9 @@ pub trait UserStore: Send + Sync {
     async fn get_by_email(&self, email: &str) -> Result<Option<User>>;
     /// Look up a user by id.
     async fn get_by_id(&self, id: &str) -> Result<Option<User>>;
+    /// Replace a user's password hash (used by password reset). A no-op if the
+    /// user id is unknown.
+    async fn update_password(&self, user_id: &str, password_hash: String) -> Result<()>;
 }
 
 /// In-memory user store (tests, single-node dev).
@@ -68,5 +71,18 @@ impl UserStore for InMemoryUserStore {
             .values()
             .find(|u| u.id == id)
             .cloned())
+    }
+
+    async fn update_password(&self, user_id: &str, password_hash: String) -> Result<()> {
+        if let Some(user) = self
+            .inner
+            .lock()
+            .expect("user store poisoned")
+            .values_mut()
+            .find(|u| u.id == user_id)
+        {
+            user.password_hash = password_hash;
+        }
+        Ok(())
     }
 }

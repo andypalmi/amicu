@@ -10,7 +10,9 @@ use amicu_auth::issuer::{IssuerConfig, TokenIssuer};
 use amicu_auth::jwks::Jwks;
 use amicu_auth::key::SigningKey;
 use amicu_auth::keyring::Keyring;
+use amicu_auth::notify::{LoggingNotifier, Notification, NotificationKind, Notifier};
 use amicu_auth::refresh::InMemoryRefreshStore;
+use amicu_auth::reset::InMemoryResetStore;
 use amicu_auth::service::AuthService;
 use amicu_auth::user::InMemoryUserStore;
 use amicu_auth::verifier::{StaticJwksProvider, Verifier, VerifierConfig};
@@ -30,6 +32,18 @@ fn app(rate_max: u32) -> Router {
 }
 
 fn app_with_proxies(rate_max: u32, trusted: TrustedProxies) -> Router {
+    build_app(rate_max, trusted, Arc::new(LoggingNotifier))
+}
+
+/// Build an app whose notifier captures the out-of-band reset token, so an HTTP
+/// test can drive the full `/recover` → `/reset` flow end to end.
+fn app_capturing(rate_max: u32) -> (Router, Arc<CapturingNotifier>) {
+    let notifier = Arc::new(CapturingNotifier::default());
+    let app = build_app(rate_max, TrustedProxies::default(), notifier.clone());
+    (app, notifier)
+}
+
+fn build_app(rate_max: u32, trusted: TrustedProxies, notifier: Arc<dyn Notifier>) -> Router {
     let keyring = Keyring::new(SigningKey::generate().unwrap());
     let issuer = TokenIssuer::new(IssuerConfig::new(ISS, AUD));
     let service = Arc::new(AuthService::new(
@@ -37,10 +51,43 @@ fn app_with_proxies(rate_max: u32, trusted: TrustedProxies) -> Router {
         issuer,
         Arc::new(InMemoryUserStore::default()),
         Arc::new(InMemoryRefreshStore::default()),
+        Arc::new(InMemoryResetStore::default()),
+        notifier,
         "https://auth.amicu.dev",
     ));
     let limiter = Arc::new(RateLimiter::new(rate_max, Duration::from_secs(60)));
     auth_router(AuthApiState::new(service, limiter).with_trusted_proxies(trusted))
+}
+
+/// A [`Notifier`] that captures the reset token a real mailer would embed in a
+/// link, so an HTTP test can present it back to `/reset`.
+#[derive(Default)]
+struct CapturingNotifier {
+    reset_tokens: std::sync::Mutex<Vec<String>>,
+}
+
+impl CapturingNotifier {
+    fn last_reset_token(&self) -> String {
+        self.reset_tokens
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("a password-reset token was captured")
+    }
+}
+
+#[async_trait::async_trait]
+impl Notifier for CapturingNotifier {
+    async fn notify(&self, message: Notification) -> Result<(), amicu_auth::error::AuthError> {
+        if let NotificationKind::PasswordReset { reset_token } = message.kind {
+            self.reset_tokens
+                .lock()
+                .unwrap()
+                .push(reset_token.expose_secret_str().unwrap().to_string());
+        }
+        Ok(())
+    }
 }
 
 /// Call the router with an explicit peer socket address (as the connect-info
@@ -442,5 +489,154 @@ async fn append_style_spoof_cannot_escape_the_limit_via_trusted_proxy() {
         Some("9.9.9.9, 203.0.113.7"),
     )
     .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn recover_is_always_202_and_indistinguishable() {
+    let app = app(100);
+    // Register one real account.
+    call(
+        &app,
+        "POST",
+        "/signup",
+        Some(json!({"email": "known@example.com", "password": "known-password"})),
+        "5.5.5.5",
+    )
+    .await;
+
+    // A recover for the KNOWN account and for an UNKNOWN one return the exact
+    // same status and body — no enumeration signal.
+    let (s1, b1) = call(
+        &app,
+        "POST",
+        "/recover",
+        Some(json!({"email": "known@example.com"})),
+        "5.5.5.5",
+    )
+    .await;
+    let (s2, b2) = call(
+        &app,
+        "POST",
+        "/recover",
+        Some(json!({"email": "ghost@example.com"})),
+        "5.5.5.5",
+    )
+    .await;
+    assert_eq!(s1, StatusCode::ACCEPTED);
+    assert_eq!(s2, StatusCode::ACCEPTED);
+    assert_eq!(b1, b2, "known/unknown recover responses must be identical");
+    assert!(b1["message"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn reset_with_valid_token_changes_password_and_revokes_sessions() {
+    let (app, notifier) = app_capturing(100);
+    let creds = json!({"email": "flow@example.com", "password": "before-reset-pw"});
+    call(&app, "POST", "/signup", Some(creds.clone()), "6.6.6.6").await;
+
+    // Establish a session whose refresh token must die on reset.
+    let (_, tokens) = call(&app, "POST", "/token", Some(creds), "6.6.6.6").await;
+    let old_refresh = tokens["refresh_token"].as_str().unwrap().to_string();
+
+    // Request a reset; grab the token the notifier captured.
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/recover",
+        Some(json!({"email": "flow@example.com"})),
+        "6.6.6.6",
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let reset_token = notifier.last_reset_token();
+
+    // Complete the reset.
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/reset",
+        Some(json!({"reset_token": reset_token, "new_password": "after-reset-pw"})),
+        "6.6.6.6",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // New password authenticates; old one no longer does.
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/token",
+        Some(json!({"email": "flow@example.com", "password": "after-reset-pw"})),
+        "6.6.6.6",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/token",
+        Some(json!({"email": "flow@example.com", "password": "before-reset-pw"})),
+        "6.6.6.6",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // The pre-reset refresh token was revoked (forced re-login everywhere).
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/token/refresh",
+        Some(json!({"refresh_token": old_refresh})),
+        "6.6.6.6",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn reset_with_invalid_token_is_generic_failure() {
+    let app = app(100);
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/reset",
+        Some(json!({"reset_token": "not-a-real-token", "new_password": "long-enough-pw"})),
+        "7.7.7.7",
+    )
+    .await;
+    // Generic 400: never a 401/404 that would distinguish a bad token from a
+    // missing account.
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn recover_and_reset_are_rate_limited() {
+    let app = app(3);
+    let client = peer("8.8.8.8");
+    let body = json!({"email": "rl@example.com"});
+    for _ in 0..3 {
+        let status = call_peer(&app, "POST", "/recover", Some(body.clone()), client, None).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+    // The 4th recover from the same client is throttled.
+    let status = call_peer(&app, "POST", "/recover", Some(body), client, None).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // `/reset` has its own per-route budget.
+    let reset_body = json!({"reset_token": "x", "new_password": "long-enough-pw"});
+    for _ in 0..3 {
+        let status = call_peer(
+            &app,
+            "POST",
+            "/reset",
+            Some(reset_body.clone()),
+            client,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST); // invalid token, but not throttled
+    }
+    let status = call_peer(&app, "POST", "/reset", Some(reset_body), client, None).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }
