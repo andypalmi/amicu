@@ -1,0 +1,38 @@
+---
+title: Regions and zones
+description: The residency, region, and optional adapter-owned zone (AZ) model.
+---
+
+Amicu models placement in three levels, but you only ever plan against two.
+
+## Residency and region
+
+- **Residency** is the data-residency jurisdiction (`eu`, `uk`, `us`, `ca`,
+  `apac`, …). It is a closed, typed, planning-critical constraint: the planner
+  rejects any provider or region whose jurisdiction violates a declared
+  `data_class` residency or provider allowlist.
+- **Region** is the provider location you select, e.g. `fr-par` (Scaleway) or
+  `europe-west1` (GCP). This is the granularity 95% of stacks pick.
+
+Residency and region are the **only** placement inputs the DSL and planner see.
+
+## Zone (AZ)
+
+Most providers are three-level underneath: a region contains zones (AZs) — GCP
+`europe-west1` → `europe-west1-b`, Scaleway `fr-par` → `fr-par-1`. Some APIs
+address a zone rather than a region (Scaleway's Instance API is zone-scoped).
+
+The **zone is an optional third level the adapter owns**, not a planning
+category. The adapter maps each region to a default zone and uses it for the API
+call; you are never forced to reason about AZs. The zone never enters residency
+or planning logic.
+
+<Callout title="Advanced: explicit zone override">
+  For the rare case where a specific AZ is required, a provision request may carry
+  an explicit `zone` that overrides the region's default. It is honored across the
+  instance lifecycle (create, status, teardown) and remains a placement detail —
+  it does not change the region or its residency.
+</Callout>
+
+Multi-AZ redundancy (spreading replicas across `-a`/`-b`/`-c`) is a production HA
+policy, not a modeling primitive, and is out of scope for this model.

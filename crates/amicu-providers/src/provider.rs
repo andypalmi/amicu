@@ -52,6 +52,11 @@ pub struct ProvisionRequest {
     /// The [`Region`](crate::capability::Region) code to provision in, e.g.
     /// `"eu-central-1"`.
     pub region: String,
+    /// Optional advanced override for the zone (AZ) a zone-addressed provider API
+    /// targets, e.g. `"fr-par-2"`. `None` lets the adapter resolve the region's
+    /// default zone; the planner never sets this — it is not a planning input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
     /// Reference to the credential authenticating the backend call, matching
     /// the provider's [`CredentialsModel`](crate::capability::CredentialsModel)
     /// kind. `None` for a credential-free provider. Resolved to a value only at
@@ -67,6 +72,7 @@ impl ProvisionRequest {
         Self {
             offering_id: offering_id.into(),
             region: region.into(),
+            zone: None,
             credentials: None,
         }
     }
@@ -75,6 +81,14 @@ impl ProvisionRequest {
     #[must_use]
     pub fn with_credentials(mut self, credentials: SecretRef) -> Self {
         self.credentials = Some(credentials);
+        self
+    }
+
+    /// Override the zone (AZ) the adapter would otherwise resolve from the
+    /// region. Advanced use only; leave unset to take the region's default zone.
+    #[must_use]
+    pub fn with_zone(mut self, zone: impl Into<String>) -> Self {
+        self.zone = Some(zone.into());
         self
     }
 }
@@ -177,6 +191,11 @@ pub struct ProvisioningHandle {
     pub provider: AdapterId,
     /// The region the instance runs in.
     pub region: String,
+    /// The zone (AZ) the instance was placed in, when the adapter resolved one.
+    /// Carried so later zone-addressed `status`/`teardown` calls target the same
+    /// zone; `None` for region-addressed providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
     /// The offering that was provisioned.
     pub offering_id: String,
     /// Reference to the credential used for backend operations (name only).
@@ -346,6 +365,30 @@ mod tests {
         assert_eq!(diag.message, "unknown offering 'gpu.h100.1x'");
         // Secret-free: only the offering id the caller supplied is echoed back.
         assert!(!diag.message.contains("credential"));
+    }
+
+    #[test]
+    fn zone_is_optional_and_additive() {
+        // The zone override is additive: existing constructors leave it unset and
+        // it is omitted from the serialized request/handle when absent.
+        let req = ProvisionRequest::new("gpu.h100.1x", "fr-par");
+        assert!(req.zone.is_none());
+        assert!(!serde_json::to_string(&req).unwrap().contains("zone"));
+
+        let req = req.with_zone("fr-par-2");
+        assert_eq!(req.zone.as_deref(), Some("fr-par-2"));
+        assert!(serde_json::to_string(&req).unwrap().contains("fr-par-2"));
+
+        let handle = ProvisioningHandle {
+            id: "srv-1".into(),
+            provider: AdapterId::new("scaleway"),
+            region: "fr-par".into(),
+            zone: None,
+            offering_id: "gpu.h100.1x".into(),
+            credentials: None,
+            state: ProvisioningState::Requested,
+        };
+        assert!(!serde_json::to_string(&handle).unwrap().contains("zone"));
     }
 
     #[test]

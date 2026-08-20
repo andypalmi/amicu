@@ -589,6 +589,7 @@ impl Provider for OvhCloudProvider {
             id: instance.id,
             provider: self.id.clone(),
             region: request.region.clone(),
+            zone: None,
             offering_id: request.offering_id.clone(),
             credentials: request.credentials.clone(),
             state: map_instance_state(instance.status.as_deref()),

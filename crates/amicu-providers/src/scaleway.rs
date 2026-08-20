@@ -71,6 +71,8 @@ struct ScwRegion {
     country: &'static str,
     /// Human-readable location.
     location: &'static str,
+    /// Default zone (AZ) the Instance API addresses for this region.
+    zone: &'static str,
 }
 
 /// Scaleway's regions — all EU. [`ScalewayProvider::new`] admits every one; the
@@ -83,18 +85,21 @@ fn regions() -> [ScwRegion; 3] {
             residency: Residency::Eu,
             country: "FR",
             location: "Paris",
+            zone: "fr-par-1",
         },
         ScwRegion {
             code: "nl-ams",
             residency: Residency::Eu,
             country: "NL",
             location: "Amsterdam",
+            zone: "nl-ams-1",
         },
         ScwRegion {
             code: "pl-waw",
             residency: Residency::Eu,
             country: "PL",
             location: "Warsaw",
+            zone: "pl-waw-1",
         },
     ]
 }
@@ -292,6 +297,7 @@ impl ScalewayProvider {
                 Region::new(r.code, r.residency)
                     .with_country(r.country)
                     .with_display_name(r.location)
+                    .with_default_zone(r.zone)
             })
             .collect();
         let capabilities = Self::capabilities_for(&id, regions);
@@ -409,6 +415,21 @@ impl ScalewayProvider {
         self.capabilities.regions.iter().any(|r| r.code == region)
     }
 
+    /// The zone the Instance API path targets for `region`: the explicit
+    /// `override_zone` when present, else the admitted region's default zone,
+    /// else `region` itself (a region with no mapped zone addresses the region
+    /// directly). Adapter-owned — the zone never reaches the residency filter.
+    fn resolve_zone(&self, region: &str, override_zone: Option<&str>) -> String {
+        self.capabilities
+            .regions
+            .iter()
+            .find(|r| r.code == region)
+            .and_then(|r| r.resolve_zone(override_zone))
+            .or(override_zone)
+            .unwrap_or(region)
+            .to_string()
+    }
+
     /// Build a request for `{base}{path}`, attaching `token` in the Scaleway
     /// `X-Auth-Token` header when present.
     fn build_request(&self, method: HttpMethod, path: &str, token: Option<&str>) -> HttpRequest {
@@ -498,6 +519,10 @@ impl Provider for ScalewayProvider {
                 region: request.region.clone(),
             }));
         }
+        // Scaleway's Instance API path segment is a zone (e.g. `fr-par-1`), not a
+        // region (`fr-par`): resolve the admitted region's default zone, honoring
+        // an explicit override when the request carries one.
+        let zone = self.resolve_zone(&request.region, request.zone.as_deref());
         let token = self
             .resolve_token(resolver, request.credentials.as_ref())
             .await?;
@@ -511,10 +536,7 @@ impl Provider for ScalewayProvider {
                 detail: "failed to encode Scaleway create request".into(),
             })
         })?;
-        // TODO(TASK-023): Scaleway's Instance API path segment is a zone
-        // (e.g. `fr-par-1`), not a region (`fr-par`); resolve region→zone
-        // before live calls.
-        let servers_path = format!("/zones/{}/servers", request.region);
+        let servers_path = format!("/zones/{zone}/servers");
         let create_request = self
             .build_request(HttpMethod::Post, &servers_path, token.as_deref())
             .with_json(body);
@@ -540,7 +562,7 @@ impl Provider for ScalewayProvider {
                     detail: "failed to encode Scaleway action request".into(),
                 })
             })?;
-        let action_path = format!("/zones/{}/servers/{server_id}/action", request.region);
+        let action_path = format!("/zones/{zone}/servers/{server_id}/action");
         let action_request = self
             .build_request(HttpMethod::Post, &action_path, token.as_deref())
             .with_json(action_body);
@@ -554,7 +576,7 @@ impl Provider for ScalewayProvider {
             // created server does not linger (and bill). Its result is ignored;
             // the boot failure is the error surfaced. A 404 here means the
             // just-created instance, not the offering.
-            let cleanup_path = format!("/zones/{}/servers/{server_id}", request.region);
+            let cleanup_path = format!("/zones/{zone}/servers/{server_id}");
             let cleanup = self.build_request(HttpMethod::Delete, &cleanup_path, token.as_deref());
             let _ = self.transport.execute(cleanup).await;
             return Err(lifecycle_error(action_response.status, &server_id));
@@ -563,6 +585,7 @@ impl Provider for ScalewayProvider {
             id: server_id,
             provider: self.id.clone(),
             region: request.region.clone(),
+            zone: Some(zone),
             offering_id: request.offering_id.clone(),
             credentials: request.credentials.clone(),
             state: map_server_state(envelope.server.state.as_deref()),
@@ -577,7 +600,8 @@ impl Provider for ScalewayProvider {
         let token = self
             .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
-        let path = format!("/zones/{}/servers/{}", handle.region, handle.id);
+        let zone = handle.zone.as_deref().unwrap_or(&handle.region);
+        let path = format!("/zones/{zone}/servers/{}", handle.id);
         let request = self.build_request(HttpMethod::Get, &path, token.as_deref());
         let response = self
             .transport
@@ -603,7 +627,8 @@ impl Provider for ScalewayProvider {
         let token = self
             .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
-        let path = format!("/zones/{}/servers/{}", handle.region, handle.id);
+        let zone = handle.zone.as_deref().unwrap_or(&handle.region);
+        let path = format!("/zones/{zone}/servers/{}", handle.id);
         let request = self.build_request(HttpMethod::Delete, &path, token.as_deref());
         let response = self
             .transport
@@ -732,7 +757,11 @@ mod tests {
     async fn provision_in_eu_region_then_teardown() {
         let mock = Arc::new(
             MockTransport::default()
-                .on(HttpMethod::Post, "/zones/fr-par/servers", created("srv-1"))
+                .on(
+                    HttpMethod::Post,
+                    "/zones/fr-par-1/servers",
+                    created("srv-1"),
+                )
                 .on(HttpMethod::Post, "/servers/srv-1/action", poweron_ok())
                 .on(
                     HttpMethod::Get,
@@ -763,7 +792,7 @@ mod tests {
         // action, status, teardown.
         let seen = mock.requests();
         assert_eq!(seen[0].method, HttpMethod::Post);
-        assert!(seen[0].url.ends_with("/zones/fr-par/servers"));
+        assert!(seen[0].url.ends_with("/zones/fr-par-1/servers"));
         assert_eq!(seen[1].method, HttpMethod::Post);
         assert!(seen[1].url.ends_with("/action"));
         assert_eq!(seen[2].method, HttpMethod::Get);
@@ -829,7 +858,11 @@ mod tests {
         // down and the error mapped to UnknownInstance (not UnknownOffering).
         let mock = Arc::new(
             MockTransport::default()
-                .on(HttpMethod::Post, "/zones/fr-par/servers", created("srv-9"))
+                .on(
+                    HttpMethod::Post,
+                    "/zones/fr-par-1/servers",
+                    created("srv-9"),
+                )
                 .on(
                     HttpMethod::Post,
                     "/servers/srv-9/action",
@@ -860,7 +893,7 @@ mod tests {
     async fn provision_maps_401_to_credentials_rejected() {
         let mock = Arc::new(MockTransport::default().on(
             HttpMethod::Post,
-            "/zones/fr-par/servers",
+            "/zones/fr-par-1/servers",
             HttpResponse::new(401, b"denied".to_vec()),
         ));
         let p = mock_provider(mock);
@@ -879,7 +912,7 @@ mod tests {
     async fn provision_maps_404_to_unknown_offering() {
         let mock = Arc::new(MockTransport::default().on(
             HttpMethod::Post,
-            "/zones/fr-par/servers",
+            "/zones/fr-par-1/servers",
             HttpResponse::new(404, b"no such commercial_type".to_vec()),
         ));
         let err = mock_provider(mock)
@@ -894,7 +927,7 @@ mod tests {
     async fn provision_maps_429_to_capacity_unavailable() {
         let mock = Arc::new(MockTransport::default().on(
             HttpMethod::Post,
-            "/zones/fr-par/servers",
+            "/zones/fr-par-1/servers",
             HttpResponse::new(429, b"too many requests".to_vec()),
         ));
         let err = mock_provider(mock)
@@ -909,7 +942,7 @@ mod tests {
     async fn provision_maps_500_to_retryable_backend() {
         let mock = Arc::new(MockTransport::default().on(
             HttpMethod::Post,
-            "/zones/fr-par/servers",
+            "/zones/fr-par-1/servers",
             HttpResponse::new(500, b"boom".to_vec()),
         ));
         let err = mock_provider(mock)
@@ -924,7 +957,7 @@ mod tests {
     async fn provision_malformed_success_body_is_backend_error() {
         let mock = Arc::new(MockTransport::default().on(
             HttpMethod::Post,
-            "/zones/fr-par/servers",
+            "/zones/fr-par-1/servers",
             HttpResponse::new(201, b"not json".to_vec()),
         ));
         let err = mock_provider(mock)
@@ -938,7 +971,11 @@ mod tests {
     async fn status_maps_404_to_unknown_instance() {
         let mock = Arc::new(
             MockTransport::default()
-                .on(HttpMethod::Post, "/zones/fr-par/servers", created("srv-2"))
+                .on(
+                    HttpMethod::Post,
+                    "/zones/fr-par-1/servers",
+                    created("srv-2"),
+                )
                 .on(HttpMethod::Post, "/servers/srv-2/action", poweron_ok())
                 .on(
                     HttpMethod::Get,
@@ -963,7 +1000,11 @@ mod tests {
     async fn teardown_maps_404_to_unknown_instance() {
         let mock = Arc::new(
             MockTransport::default()
-                .on(HttpMethod::Post, "/zones/fr-par/servers", created("srv-2"))
+                .on(
+                    HttpMethod::Post,
+                    "/zones/fr-par-1/servers",
+                    created("srv-2"),
+                )
                 .on(HttpMethod::Post, "/servers/srv-2/action", poweron_ok())
                 .on(
                     HttpMethod::Delete,
@@ -988,7 +1029,7 @@ mod tests {
     async fn transport_failure_maps_to_retryable_backend() {
         let mock = Arc::new(MockTransport::default().on_error(
             HttpMethod::Post,
-            "/zones/fr-par/servers",
+            "/zones/fr-par-1/servers",
             TransportError::Timeout,
         ));
         let err = mock_provider(mock)
@@ -1005,7 +1046,11 @@ mod tests {
         let resolver = TestResolver::default().with("scaleway_secret_key", secret_value);
         let mock = Arc::new(
             MockTransport::default()
-                .on(HttpMethod::Post, "/zones/fr-par/servers", created("srv-3"))
+                .on(
+                    HttpMethod::Post,
+                    "/zones/fr-par-1/servers",
+                    created("srv-3"),
+                )
                 .on(HttpMethod::Post, "/servers/srv-3/action", poweron_ok()),
         );
         let p = mock_provider(mock.clone());
@@ -1052,7 +1097,11 @@ mod tests {
     async fn discoverable_as_a_provider_trait_object() {
         let mock = Arc::new(
             MockTransport::default()
-                .on(HttpMethod::Post, "/zones/nl-ams/servers", created("srv-4"))
+                .on(
+                    HttpMethod::Post,
+                    "/zones/nl-ams-1/servers",
+                    created("srv-4"),
+                )
                 .on(HttpMethod::Post, "/servers/srv-4/action", poweron_ok()),
         );
         let mut registry: Registry<dyn Provider> = Registry::new();
@@ -1078,5 +1127,92 @@ mod tests {
             p.capabilities().health,
             HealthStatus::Degraded { .. }
         ));
+    }
+
+    #[test]
+    fn descriptor_carries_region_default_zones() {
+        let caps = ScalewayProvider::new().capabilities();
+        let fr = caps.regions.iter().find(|r| r.code == "fr-par").unwrap();
+        assert_eq!(fr.default_zone.as_deref(), Some("fr-par-1"));
+    }
+
+    #[tokio::test]
+    async fn provision_path_uses_resolved_zone_not_region() {
+        // The Instance API path segment is the zone (`fr-par-1`), not the region
+        // (`fr-par`): the create call must address the resolved zone, and the
+        // handle records it for later zone-addressed calls.
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(
+                    HttpMethod::Post,
+                    "/zones/fr-par-1/servers",
+                    created("srv-z"),
+                )
+                .on(HttpMethod::Post, "/servers/srv-z/action", poweron_ok()),
+        );
+        let p = mock_provider(mock.clone());
+        let handle = p
+            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .await
+            .unwrap();
+        assert_eq!(handle.region, "fr-par");
+        assert_eq!(handle.zone.as_deref(), Some("fr-par-1"));
+        let seen = mock.requests();
+        assert!(seen[0].url.ends_with("/zones/fr-par-1/servers"));
+        assert!(!seen[0].url.ends_with("/zones/fr-par/servers"));
+    }
+
+    #[tokio::test]
+    async fn explicit_zone_override_is_honored_end_to_end() {
+        // An advanced explicit override replaces the region's default zone across
+        // create, status, and teardown.
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(
+                    HttpMethod::Post,
+                    "/zones/fr-par-2/servers",
+                    created("srv-o"),
+                )
+                .on(HttpMethod::Post, "/servers/srv-o/action", poweron_ok())
+                .on(
+                    HttpMethod::Get,
+                    "/zones/fr-par-2/servers/srv-o",
+                    HttpResponse::new(
+                        200,
+                        br#"{"server":{"id":"srv-o","state":"running"}}"#.to_vec(),
+                    ),
+                )
+                .on(
+                    HttpMethod::Delete,
+                    "/zones/fr-par-2/servers/srv-o",
+                    HttpResponse::new(204, Vec::new()),
+                ),
+        );
+        let p = mock_provider(mock.clone());
+        let req = ProvisionRequest::new("gpu.l40s.1x", "fr-par").with_zone("fr-par-2");
+
+        let handle = p.provision(&req, &no_creds()).await.unwrap();
+        assert_eq!(handle.zone.as_deref(), Some("fr-par-2"));
+        assert!(p.status(&handle, &no_creds()).await.unwrap().is_ready());
+        p.teardown(&handle, &no_creds()).await.unwrap();
+
+        // Every call targeted the override zone, never the region default.
+        let seen = mock.requests();
+        assert!(seen.iter().all(|r| r.url.contains("/zones/fr-par-2/")));
+        assert!(seen.iter().all(|r| !r.url.contains("/zones/fr-par-1/")));
+    }
+
+    #[tokio::test]
+    async fn admitted_region_still_gates_placement_before_zone_resolution() {
+        // Residency filtering is unchanged: a region outside the admitted set is
+        // rejected before any zone is resolved — the zone never enters the filter.
+        let err = ScalewayProvider::new()
+            .provision(
+                &ProvisionRequest::new("gpu.l40s.1x", "us-east-1").with_zone("us-east-1a"),
+                &no_creds(),
+            )
+            .await
+            .expect_err("unknown region rejected regardless of zone override");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-011");
     }
 }

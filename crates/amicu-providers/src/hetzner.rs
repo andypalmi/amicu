@@ -558,6 +558,7 @@ impl Provider for HetznerProvider {
             id: envelope.server.id.to_string(),
             provider: self.id.clone(),
             region: request.region.clone(),
+            zone: None,
             offering_id: request.offering_id.clone(),
             credentials: request.credentials.clone(),
             state: map_server_state(envelope.server.status.as_deref()),

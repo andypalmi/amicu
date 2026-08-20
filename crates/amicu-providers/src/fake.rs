@@ -258,6 +258,7 @@ impl Provider for FakeProvider {
             id: id.clone(),
             provider: self.id.clone(),
             region: request.region.clone(),
+            zone: None,
             offering_id: request.offering_id.clone(),
             credentials: request.credentials.clone(),
             state: final_state,
@@ -590,6 +591,7 @@ mod tests {
             id: "ghost".into(),
             provider: AdapterId::new("fake-cloud"),
             region: "eu-central-1".into(),
+            zone: None,
             offering_id: "gpu.h100.1x".into(),
             credentials: None,
             state: ProvisioningState::Ready {
