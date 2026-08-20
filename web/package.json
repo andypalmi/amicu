@@ -12,6 +12,7 @@
     "dev": "turbo run dev",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
     "check:generated": "turbo run check:generated",
     "clean": "turbo run clean"
   },
