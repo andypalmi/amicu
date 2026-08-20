@@ -76,6 +76,7 @@ dependencies = [
  "amicu-core",
  "axum",
  "http-body-util",
+ "ipnet",
  "serde",
  "serde_json",
  "tokio",

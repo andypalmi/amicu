@@ -11,4 +11,4 @@ pub mod auth;
 pub mod ratelimit;
 
 pub use auth::{AuthApiState, auth_router};
-pub use ratelimit::RateLimiter;
+pub use ratelimit::{ProxyParseError, RateLimiter, TrustedProxies};

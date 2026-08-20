@@ -2,13 +2,14 @@
 //! sign-up / token / refresh / logout endpoints, with rate limiting on the
 //! credential-taking routes.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use amicu_auth::error::AuthError;
 use amicu_auth::jwks::{Jwks, OpenIdConfiguration};
 use amicu_auth::service::{AuthService, TokenPair};
 use amicu_core::secret::SecretValue;
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
@@ -17,20 +18,34 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::ratelimit::RateLimiter;
+use crate::ratelimit::{RateLimiter, TrustedProxies};
 
 /// Shared HTTP state.
 #[derive(Clone)]
 pub struct AuthApiState {
     service: Arc<AuthService>,
     limiter: Arc<RateLimiter>,
+    trusted_proxies: TrustedProxies,
 }
 
 impl AuthApiState {
-    /// Assemble state from a service and a rate limiter.
+    /// Assemble state from a service and a rate limiter. No proxies are trusted
+    /// by default; see [`AuthApiState::with_trusted_proxies`].
     #[must_use]
     pub fn new(service: Arc<AuthService>, limiter: Arc<RateLimiter>) -> Self {
-        Self { service, limiter }
+        Self {
+            service,
+            limiter,
+            trusted_proxies: TrustedProxies::default(),
+        }
+    }
+
+    /// Configure the trusted-proxy allowlist used to decide whether a request's
+    /// `X-Forwarded-For` header may be believed for rate-limit keying.
+    #[must_use]
+    pub fn with_trusted_proxies(mut self, trusted_proxies: TrustedProxies) -> Self {
+        self.trusted_proxies = trusted_proxies;
+        self
     }
 }
 
@@ -147,28 +162,40 @@ fn to_response(pair: &TokenPair) -> Result<TokenResponse, ApiError> {
     })
 }
 
-/// Rate-limit middleware for credential routes. Keys on the proxy-supplied
-/// client IP, falling back to a shared bucket when absent.
+/// Rate-limit middleware for credential routes.
 ///
-/// TODO(amicu-planning#94): keying on unverified `x-forwarded-for` is spoofable and the
-/// shared fallback bucket is a lockout vector; this must not be exposed on a
-/// live socket before the trusted-proxy allowlist + per-route bounded buckets
-/// land.
+/// The bucket key is per route and per client. Client identity comes from the
+/// peer socket address by default; `X-Forwarded-For` is honored only when that
+/// peer is in the configured trusted-proxy allowlist, and then only the real
+/// client parsed right-to-left from the chain, so an attacker rotating the
+/// header cannot mint a fresh bucket per request. There is no single shared
+/// fallback bucket, so no one client can lock every other client out.
+///
+/// For the peer address to be available the server must serve this router with
+/// `Router::into_make_service_with_connect_info::<SocketAddr>()`. If it is
+/// absent (misconfiguration) the request is let through rather than collapsed
+/// into a shared bucket, which would itself be a lockout vector.
 async fn rate_limit(State(state): State<AuthApiState>, request: Request, next: Next) -> Response {
-    let key = request
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0);
+    let xff = request
         .headers()
         .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("global")
-        .to_string();
+        .and_then(|v| v.to_str().ok());
+    let throttled = match state
+        .trusted_proxies
+        .client_key(request.uri().path(), peer, xff)
+    {
+        Some(key) => !state.limiter.check(&key),
+        None => false, // no trustworthy identity: fail open, never share a bucket
+    };
 
-    if state.limiter.check(&key) {
-        next.run(request).await
-    } else {
+    if throttled {
         ApiError(AuthError::RateLimited).into_response()
+    } else {
+        next.run(request).await
     }
 }
 
