@@ -153,9 +153,10 @@ resource "deployment" "support_local" {
 }
 "#;
 
-// Hardware in `us-east-1` while the only allowed residency is `eu-central-1`.
+// Hardware whose region (aws us-east-1) resolves to the US jurisdiction while
+// the only allowed residency is the EU.
 const REGION_RESIDENCY_VIOLATION: &str = r#"resource "hardware_profile" "dev_mac" {
-  provider = "local_apple"
+  provider = "aws"
   region   = "us-east-1"
   accelerator {
     kind   = "apple_silicon"
@@ -168,7 +169,7 @@ const REGION_RESIDENCY_VIOLATION: &str = r#"resource "hardware_profile" "dev_mac
 
 resource "data_class" "pii" {
   sensitivity = "confidential"
-  residency   = ["eu-central-1"]
+  residency   = ["eu"]
 }
 "#;
 
@@ -190,9 +191,9 @@ resource "governance_rule" "only_aws" {
 }
 "#;
 
-// Region and provider both satisfy the configured allowlists.
+// Region jurisdiction and provider both satisfy the configured allowlists.
 const RESIDENCY_COMPLIANT: &str = r#"resource "hardware_profile" "dev_mac" {
-  provider = "local_apple"
+  provider = "aws"
   region   = "eu-central-1"
   accelerator {
     kind   = "apple_silicon"
@@ -205,12 +206,12 @@ const RESIDENCY_COMPLIANT: &str = r#"resource "hardware_profile" "dev_mac" {
 
 resource "data_class" "pii" {
   sensitivity = "confidential"
-  residency   = ["eu-central-1"]
+  residency   = ["eu"]
 }
 
-resource "governance_rule" "allow_apple" {
+resource "governance_rule" "allow_aws" {
   effect            = "allow"
-  allowed_providers = ["local_apple"]
+  allowed_providers = ["aws"]
   allowed_regions   = ["eu-central-1"]
 }
 "#;

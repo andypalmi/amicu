@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use amicu_core::graph::Graph;
 use amicu_core::resource::{
-    Deployment, HardwareProfile, Model, Money, Runtime, Tenant, VllmSettings,
+    Deployment, HardwareProfile, Model, Money, Residency, Runtime, Tenant, VllmSettings,
 };
 
 use crate::error::HclError;
@@ -337,7 +337,7 @@ fn routing_block(p: &amicu_core::resource::RoutingPolicy) -> Block {
 fn data_class_block(c: &amicu_core::resource::DataClass) -> Block {
     let mut body = Body::builder().add_attribute(("sensitivity", variant(&c.sensitivity)));
     if !c.residency.is_empty() {
-        body = body.add_attribute(("residency", str_array(&c.residency)));
+        body = body.add_attribute(("residency", residency_array(&c.residency)));
     }
     body = body.add_attribute(("allow_external_providers", c.allow_external_providers));
     if !c.handling.is_empty() {
@@ -475,4 +475,15 @@ fn string_array<T: Serialize>(values: &[T]) -> Expression {
 
 fn str_array(values: &[String]) -> Expression {
     Expression::from(values.to_vec())
+}
+
+/// Render residency jurisdictions as their DSL tokens. Unlike [`variant`], this
+/// does not panic on [`Residency::Other`], which serializes as an object.
+fn residency_array(values: &[Residency]) -> Expression {
+    Expression::from(
+        values
+            .iter()
+            .map(|r| r.as_token().to_owned())
+            .collect::<Vec<_>>(),
+    )
 }

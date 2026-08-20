@@ -5,7 +5,7 @@
 ```hcl
 resource "data_class" "company_confidential" {
   sensitivity              = "confidential"
-  residency                = ["eu-central", "eu-west"]
+  residency                = ["eu"] # jurisdictions: eu, uk, us, ca, apac
   allow_external_providers = false
   handling                 = ["no_logging", "encrypt_at_rest"]
 }

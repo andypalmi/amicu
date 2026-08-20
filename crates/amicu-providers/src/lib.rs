@@ -3,6 +3,7 @@
 pub mod aws;
 pub mod azure;
 pub mod capability;
+pub mod catalog;
 pub mod cost;
 pub mod fake;
 pub mod gcp;
@@ -17,6 +18,7 @@ pub mod sync;
 
 pub use aws::AwsProvider;
 pub use azure::AzureProvider;
+pub use catalog::resolve_residency;
 pub use cost::{CostError, Usage, estimate_cost};
 pub use fake::FakeProvider;
 pub use gcp::GcpProvider;

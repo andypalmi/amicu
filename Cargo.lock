@@ -41,6 +41,7 @@ dependencies = [
  "amicu-hcl",
  "amicu-llamacpp",
  "amicu-plan",
+ "amicu-providers",
  "amicu-registry",
  "amicu-runtime",
  "async-trait",
