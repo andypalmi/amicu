@@ -32,7 +32,7 @@ thiserror = "2"
 base64 = "0.22"
 # EdDSA sign/verify; `ring` backend (default) keeps the build hermetic and holds
 # MSRV 1.97. `use_pem` (default) is needed to load PKCS#8 PEM signing keys.
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 
 # issuer-only
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "pkcs8", "pem", "rand_core", "zeroize"], optional = true }
