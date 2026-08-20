@@ -6,9 +6,16 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# Additive OpenAPI schema derivation for the HTTP API. Off by default so the
+# CLI's JSON-Schema (schemars) publishing path carries no extra dependency; the
+# API enables it to serve the same contract types as OpenAPI components.
+utoipa = ["dep:utoipa"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 schemars = "0.8"
+utoipa = { version = "5", optional = true }
 
 [dev-dependencies]
 serde_json = "1"

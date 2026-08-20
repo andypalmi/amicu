@@ -1,0 +1,856 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Amicu Management API",
+    "description": "First-party auth plus the stateless validate/plan engine endpoints.",
+    "license": {
+      "name": "AGPL-3.0-only"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/.well-known/jwks.json": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "jwks",
+        "responses": {
+          "200": {
+            "description": "JSON Web Key Set: the issuer's public verification keys."
+          }
+        }
+      }
+    },
+    "/.well-known/openid-configuration": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "openid_configuration",
+        "responses": {
+          "200": {
+            "description": "OpenID Connect discovery document."
+          }
+        }
+      }
+    },
+    "/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "logout",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Refresh token revoked (idempotent)."
+          },
+          "429": {
+            "description": "Rate limited."
+          }
+        }
+      }
+    },
+    "/plan": {
+      "post": {
+        "tags": [
+          "engine"
+        ],
+        "summary": "Plan a submitted configuration.",
+        "description": "Parses the HCL (and optional prior-state HCL), surfaces structural errors\nthrough the same diagnostic path as `/validate`, then diffs into the [`Plan`]\ncontract. When the config cannot be planned (structural errors, or\nadapter-level validation errors) the response is `422` carrying the blocking\n[`DiagnosticReport`]. Stateless and side-effect-free: no plan is applied.",
+        "operationId": "plan_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The computed plan.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Plan"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The config (or prior) text is not valid Amicu HCL."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          },
+          "422": {
+            "description": "The config is invalid and cannot be planned; body is a DiagnosticReport.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagnosticReport"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/signup": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Anti-enumeration: both a brand-new registration and a hit on an existing\naccount return the *same* generic `202 Accepted` body, with the same Argon2\ntiming (the service hashes on both paths). Only request-level validation\n(empty email / weak password) yields a distinguishable error, and that\nreveals nothing about which accounts exist. Mirrors the identical-response\ndefense on `/signin`.",
+        "operationId": "sign_up",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Credentials"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted. If the email can be registered, a follow-up is sent out-of-band. Response is identical whether or not the account already exists (anti-enumeration).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignUpResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request-level validation failed (empty email or weak password)."
+          },
+          "429": {
+            "description": "Rate limited."
+          }
+        }
+      }
+    },
+    "/token": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Credentials"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated: an access + refresh token pair.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid credentials."
+          },
+          "429": {
+            "description": "Rate limited."
+          }
+        }
+      }
+    },
+    "/token/refresh": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "operationId": "refresh",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Rotated: a fresh access + refresh token pair.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Refresh token unknown, expired, or revoked."
+          },
+          "429": {
+            "description": "Rate limited."
+          }
+        }
+      }
+    },
+    "/validate": {
+      "post": {
+        "tags": [
+          "engine"
+        ],
+        "summary": "Validate a submitted configuration.",
+        "description": "Parses the HCL and runs structural + per-deployment validation, returning the\n[`DiagnosticReport`] contract. A config that parses but fails validation\nstill returns `200` with `valid: false`; only a parse error is a `400`.",
+        "operationId": "validate_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Diagnostic report for the submitted config (may contain errors).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiagnosticReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The config text is not valid Amicu HCL."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ActionKind": {
+        "type": "string",
+        "description": "The kind of change a [`PlannedAction`] represents.",
+        "enum": [
+          "create",
+          "update",
+          "replace",
+          "destroy"
+        ]
+      },
+      "Artifact": {
+        "type": "object",
+        "description": "A selected model artifact and its download characteristics.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "estimated_download_size_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Estimated download size in bytes.",
+            "minimum": 0
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Artifact format (e.g. `gguf`, `safetensors`)."
+          },
+          "name": {
+            "type": "string",
+            "description": "Artifact name / identifier."
+          },
+          "quantization": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Quantization label (e.g. `Q4_K_M`), if quantized."
+          }
+        }
+      },
+      "Confidence": {
+        "type": "string",
+        "description": "Confidence level attached to an estimate.",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "CostPerformance": {
+        "type": "object",
+        "description": "Estimated cost and performance, with the basis for the estimate.",
+        "properties": {
+          "assumptions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Assumptions the estimate rests on."
+          },
+          "confidence": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Confidence",
+                "description": "Confidence in the estimate."
+              }
+            ]
+          },
+          "cost": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Range",
+                "description": "Estimated cost range."
+              }
+            ]
+          },
+          "performance": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Range",
+                "description": "Estimated performance range (units described in `assumptions`)."
+              }
+            ]
+          },
+          "provenance": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the estimate came from (e.g. `benchmark`, `heuristic`)."
+          }
+        }
+      },
+      "Credentials": {
+        "type": "object",
+        "description": "Email + password credentials for sign-up and sign-in.",
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "Account email."
+          },
+          "password": {
+            "type": "string",
+            "description": "Account password."
+          }
+        }
+      },
+      "Diagnostic": {
+        "type": "object",
+        "description": "A single diagnostic in a [`DiagnosticReport`].",
+        "required": [
+          "code",
+          "severity",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The standardized diagnostic code.\n\nSerialized as the `AMICU-<CATEGORY>-<NNN>` string form.",
+            "example": "AMICU-CAP-001"
+          },
+          "message": {
+            "type": "string",
+            "description": "Human-readable message."
+          },
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The attribute path within the resource, if any."
+          },
+          "resource": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The resource address this diagnostic applies to, if any."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/Severity",
+            "description": "Severity of this diagnostic."
+          },
+          "source": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SourceLocation",
+                "description": "Source location, if the diagnostic maps to a specific location."
+              }
+            ]
+          },
+          "suggested_fixes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SuggestedFix"
+            },
+            "description": "Suggested fixes; omitted from output when empty."
+          }
+        }
+      },
+      "DiagnosticReport": {
+        "type": "object",
+        "description": "The top-level diagnostic report emitted by `--output json`.",
+        "required": [
+          "version",
+          "valid",
+          "diagnostics"
+        ],
+        "properties": {
+          "diagnostics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Diagnostic"
+            },
+            "description": "The diagnostics, in report order."
+          },
+          "valid": {
+            "type": "boolean",
+            "description": "Whether the analyzed input is valid (no error-severity diagnostics)."
+          },
+          "version": {
+            "type": "string",
+            "description": "Contract version. Currently always `\"v1\"`."
+          }
+        }
+      },
+      "Patch": {
+        "type": "object",
+        "description": "A single JSON-patch-like edit that would resolve a diagnostic.",
+        "required": [
+          "op",
+          "path",
+          "value"
+        ],
+        "properties": {
+          "op": {
+            "type": "string",
+            "description": "The patch operation (e.g. `replace`, `add`, `remove`)."
+          },
+          "path": {
+            "type": "string",
+            "description": "A JSON Pointer to the target location."
+          },
+          "value": {
+            "type": "object",
+            "description": "The value to apply."
+          }
+        }
+      },
+      "Plan": {
+        "type": "object",
+        "description": "A full plan: the set of actions Amicu would take, with the context needed\nto review them.",
+        "required": [
+          "version",
+          "actions"
+        ],
+        "properties": {
+          "actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlannedAction"
+            },
+            "description": "The planned actions, in application order."
+          },
+          "policy": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PolicyOutcome",
+                "description": "Aggregate policy outcome across all actions, if evaluated."
+              }
+            ]
+          },
+          "version": {
+            "type": "string",
+            "description": "Contract version. Currently always `\"v1\"`."
+          }
+        }
+      },
+      "PlanRequest": {
+        "type": "object",
+        "description": "Request body for `POST /plan`.",
+        "required": [
+          "config"
+        ],
+        "properties": {
+          "config": {
+            "type": "string",
+            "description": "The Amicu HCL configuration text to plan."
+          },
+          "prior": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional prior-state config, as HCL, to diff against. When omitted the\nplan is computed against an empty prior (everything is a create)."
+          }
+        }
+      },
+      "PlannedAction": {
+        "type": "object",
+        "description": "A single planned change to one resource.",
+        "required": [
+          "kind",
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "The target resource address (e.g. `deployment.support_chat_local`)."
+          },
+          "artifact": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Artifact",
+                "description": "The selected artifact and its download characteristics."
+              }
+            ]
+          },
+          "cost_performance": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CostPerformance",
+                "description": "Estimated cost and performance ranges with provenance."
+              }
+            ]
+          },
+          "hardware": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Target hardware descriptor (e.g. `gpu.a100_80gb`)."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ActionKind",
+            "description": "The kind of change."
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Target provider (e.g. `runpod`)."
+          },
+          "region": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Target region (e.g. `eu-central`)."
+          },
+          "required_action": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Manual action the user must take before this can be applied."
+          },
+          "required_secrets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Names of secrets this action requires.\n\nThese are secret NAMES only. Secret values never appear in a plan."
+          },
+          "runtime": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Setting"
+            },
+            "description": "Runtime and material launch settings, as opaque key/value pairs."
+          }
+        }
+      },
+      "PolicyOutcome": {
+        "type": "object",
+        "description": "Governance / policy outcome for a plan.",
+        "required": [
+          "allowed"
+        ],
+        "properties": {
+          "allowed": {
+            "type": "boolean",
+            "description": "Whether the plan is permitted under evaluated policy."
+          },
+          "denials": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Reasons the plan was denied, if `allowed` is false."
+          },
+          "risks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Risks surfaced by policy evaluation."
+          }
+        }
+      },
+      "Range": {
+        "type": "object",
+        "description": "An inclusive numeric range with an optional unit.",
+        "required": [
+          "min",
+          "max"
+        ],
+        "properties": {
+          "max": {
+            "type": "number",
+            "format": "double",
+            "description": "Upper bound."
+          },
+          "min": {
+            "type": "number",
+            "format": "double",
+            "description": "Lower bound."
+          },
+          "unit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Unit label (e.g. `usd_per_hour`, `tokens_per_second`)."
+          }
+        }
+      },
+      "RefreshRequest": {
+        "type": "object",
+        "description": "A refresh-token-bearing request (refresh rotation / logout).",
+        "required": [
+          "refresh_token"
+        ],
+        "properties": {
+          "refresh_token": {
+            "type": "string",
+            "description": "The opaque refresh token previously issued to this client."
+          }
+        }
+      },
+      "Setting": {
+        "type": "object",
+        "description": "An opaque runtime or launch setting.",
+        "required": [
+          "key",
+          "value"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Setting key."
+          },
+          "value": {
+            "type": "string",
+            "description": "Setting value, rendered as a string."
+          }
+        }
+      },
+      "Severity": {
+        "type": "string",
+        "description": "Diagnostic severity level.",
+        "enum": [
+          "error",
+          "warning",
+          "info"
+        ]
+      },
+      "SignUpResponse": {
+        "type": "object",
+        "description": "The generic, anti-enumeration sign-up acknowledgement.",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "A message that reveals nothing about whether the email already exists."
+          }
+        }
+      },
+      "SourceLocation": {
+        "type": "object",
+        "description": "The location in a source file a diagnostic refers to.",
+        "required": [
+          "file",
+          "line",
+          "column"
+        ],
+        "properties": {
+          "column": {
+            "type": "integer",
+            "format": "int32",
+            "description": "1-based column number.",
+            "minimum": 0
+          },
+          "file": {
+            "type": "string",
+            "description": "Source file path."
+          },
+          "line": {
+            "type": "integer",
+            "format": "int32",
+            "description": "1-based line number.",
+            "minimum": 0
+          }
+        }
+      },
+      "SuggestedFix": {
+        "type": "object",
+        "description": "A suggested fix attached to a diagnostic.",
+        "required": [
+          "description",
+          "patch"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "Human-readable description of the fix."
+          },
+          "patch": {
+            "$ref": "#/components/schemas/Patch",
+            "description": "The proposed patch."
+          }
+        }
+      },
+      "TokenResponse": {
+        "type": "object",
+        "description": "An issued access + refresh token pair.",
+        "required": [
+          "access_token",
+          "refresh_token",
+          "token_type",
+          "expires_in"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "description": "Short-lived access JWT (verify offline via JWKS)."
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Access-token lifetime, seconds."
+          },
+          "refresh_token": {
+            "type": "string",
+            "description": "Opaque, rotating refresh token."
+          },
+          "token_type": {
+            "type": "string",
+            "description": "Always `Bearer`."
+          }
+        }
+      },
+      "ValidateRequest": {
+        "type": "object",
+        "description": "Request body for `POST /validate`.",
+        "required": [
+          "config"
+        ],
+        "properties": {
+          "config": {
+            "type": "string",
+            "description": "The Amicu HCL configuration text to validate."
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "auth",
+      "description": "Sign-up, token issuance/rotation, logout, and JWKS discovery."
+    },
+    {
+      "name": "engine",
+      "description": "Stateless, side-effect-free validate and plan endpoints (auth-gated)."
+    }
+  ]
+}

@@ -17,6 +17,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use utoipa::ToSchema;
 
 use crate::ratelimit::{RateLimiter, TrustedProxies};
 
@@ -70,35 +71,61 @@ pub fn auth_router(state: AuthApiState) -> Router {
     well_known.merge(credentials).with_state(state)
 }
 
-#[derive(Deserialize)]
-struct Credentials {
+/// Email + password credentials for sign-up and sign-in.
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct Credentials {
+    /// Account email.
     email: String,
+    /// Account password.
     password: String,
 }
 
-#[derive(Deserialize)]
-struct RefreshRequest {
+/// A refresh-token-bearing request (refresh rotation / logout).
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct RefreshRequest {
+    /// The opaque refresh token previously issued to this client.
     refresh_token: String,
 }
 
-#[derive(Serialize)]
-struct TokenResponse {
+/// An issued access + refresh token pair.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct TokenResponse {
+    /// Short-lived access JWT (verify offline via JWKS).
     access_token: String,
+    /// Opaque, rotating refresh token.
     refresh_token: String,
+    /// Always `Bearer`.
     token_type: String,
+    /// Access-token lifetime, seconds.
     expires_in: i64,
 }
 
-#[derive(Serialize)]
-struct SignUpResponse {
+/// The generic, anti-enumeration sign-up acknowledgement.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SignUpResponse {
+    /// A message that reveals nothing about whether the email already exists.
     message: &'static str,
 }
 
-async fn jwks(State(state): State<AuthApiState>) -> Json<Jwks> {
+#[utoipa::path(
+    get,
+    path = "/.well-known/jwks.json",
+    tag = "auth",
+    responses((status = 200, description = "JSON Web Key Set: the issuer's public verification keys.")),
+)]
+pub(crate) async fn jwks(State(state): State<AuthApiState>) -> Json<Jwks> {
     Json(state.service.jwks())
 }
 
-async fn openid_configuration(State(state): State<AuthApiState>) -> Json<OpenIdConfiguration> {
+#[utoipa::path(
+    get,
+    path = "/.well-known/openid-configuration",
+    tag = "auth",
+    responses((status = 200, description = "OpenID Connect discovery document.")),
+)]
+pub(crate) async fn openid_configuration(
+    State(state): State<AuthApiState>,
+) -> Json<OpenIdConfiguration> {
     Json(state.service.openid_configuration())
 }
 
@@ -108,7 +135,18 @@ async fn openid_configuration(State(state): State<AuthApiState>) -> Json<OpenIdC
 /// (empty email / weak password) yields a distinguishable error, and that
 /// reveals nothing about which accounts exist. Mirrors the identical-response
 /// defense on `/signin`.
-async fn sign_up(
+#[utoipa::path(
+    post,
+    path = "/signup",
+    tag = "auth",
+    request_body = Credentials,
+    responses(
+        (status = 202, description = "Accepted. If the email can be registered, a follow-up is sent out-of-band. Response is identical whether or not the account already exists (anti-enumeration).", body = SignUpResponse),
+        (status = 400, description = "Request-level validation failed (empty email or weak password)."),
+        (status = 429, description = "Rate limited."),
+    ),
+)]
+pub(crate) async fn sign_up(
     State(state): State<AuthApiState>,
     Json(body): Json<Credentials>,
 ) -> Result<Response, ApiError> {
@@ -127,7 +165,18 @@ async fn sign_up(
         .into_response())
 }
 
-async fn token(
+#[utoipa::path(
+    post,
+    path = "/token",
+    tag = "auth",
+    request_body = Credentials,
+    responses(
+        (status = 200, description = "Authenticated: an access + refresh token pair.", body = TokenResponse),
+        (status = 401, description = "Invalid credentials."),
+        (status = 429, description = "Rate limited."),
+    ),
+)]
+pub(crate) async fn token(
     State(state): State<AuthApiState>,
     Json(body): Json<Credentials>,
 ) -> Result<Json<TokenResponse>, ApiError> {
@@ -138,7 +187,18 @@ async fn token(
     Ok(Json(to_response(&pair)?))
 }
 
-async fn refresh(
+#[utoipa::path(
+    post,
+    path = "/token/refresh",
+    tag = "auth",
+    request_body = RefreshRequest,
+    responses(
+        (status = 200, description = "Rotated: a fresh access + refresh token pair.", body = TokenResponse),
+        (status = 401, description = "Refresh token unknown, expired, or revoked."),
+        (status = 429, description = "Rate limited."),
+    ),
+)]
+pub(crate) async fn refresh(
     State(state): State<AuthApiState>,
     Json(body): Json<RefreshRequest>,
 ) -> Result<Json<TokenResponse>, ApiError> {
@@ -149,7 +209,17 @@ async fn refresh(
     Ok(Json(to_response(&pair)?))
 }
 
-async fn logout(
+#[utoipa::path(
+    post,
+    path = "/logout",
+    tag = "auth",
+    request_body = RefreshRequest,
+    responses(
+        (status = 204, description = "Refresh token revoked (idempotent)."),
+        (status = 429, description = "Rate limited."),
+    ),
+)]
+pub(crate) async fn logout(
     State(state): State<AuthApiState>,
     Json(body): Json<RefreshRequest>,
 ) -> Result<StatusCode, ApiError> {
@@ -215,7 +285,7 @@ async fn rate_limit(State(state): State<AuthApiState>, request: Request, next: N
 
 /// HTTP error wrapper mapping [`AuthError`] to status codes without leaking
 /// internal detail.
-struct ApiError(AuthError);
+pub(crate) struct ApiError(AuthError);
 
 impl From<AuthError> for ApiError {
     fn from(err: AuthError) -> Self {
