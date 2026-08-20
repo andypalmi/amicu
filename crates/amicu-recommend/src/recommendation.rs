@@ -118,10 +118,11 @@ impl RejectedAlternative {
 /// An advisory, explainable tuning recommendation.
 ///
 /// # Advisory invariant
-/// A recommendation is descriptive data only. There is no method on this type,
-/// and no function in this crate, that applies it to a running stack. The
-/// [`advisory`](Self::advisory) flag is always `true` and cannot be constructed
-/// otherwise; the `advisory_is_always_true` test pins this.
+/// A recommendation is descriptive data only: the guarantee that it is never
+/// auto-applied is structural — no method on this type, and no function in this
+/// crate, applies it to a running stack. The [`advisory`](Self::advisory) flag
+/// is set `true` by every constructor and reported to clients; the
+/// `advisory_is_always_true` test pins the constructed value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recommendation {
     pub bottleneck: BottleneckClass,
@@ -199,10 +200,11 @@ impl Recommendation {
         self
     }
 
-    /// Always `true`. A recommendation is never applied automatically.
+    /// Whether this recommendation is advisory — always `true`; a
+    /// recommendation is never applied automatically.
     #[must_use]
     pub const fn advisory(&self) -> bool {
-        true
+        self.advisory
     }
 }
 

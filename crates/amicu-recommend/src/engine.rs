@@ -198,7 +198,12 @@ fn over_provisioned(
     let gpu_idle = m.gpu.sm_utilization < t.gpu_util_low;
     let paying = m.cost.per_hour.amount > 0.0;
     let not_queueing = m.queue.wait_ms.p99 <= t.queue_wait_p99_ms;
-    if !(gpu_idle && paying && not_queueing) {
+    // Idle GPU only means over-provisioned when latency targets are met; a
+    // decode-bound stack is memory-bandwidth bound and also shows low SM
+    // utilization, so gate on healthy latency to stay exclusive with it.
+    let latency_healthy =
+        m.latency.tpot_ms.p90 <= t.tpot_p90_ms && m.latency.ttft_ms.p90 <= t.ttft_p90_ms;
+    if !(gpu_idle && paying && not_queueing && latency_healthy) {
         return None;
     }
     Some(
@@ -458,6 +463,29 @@ mod tests {
             .find(|r| r.bottleneck == BottleneckClass::DecodeBound)
             .unwrap();
         assert!(rec.assumptions.iter().any(|a| a.statement.contains("TPOT")));
+    }
+
+    #[test]
+    fn decode_bound_suppresses_contradictory_over_provisioned() {
+        // Decode-bound stalls are memory-bandwidth bound: SM utilization is low
+        // even though TPOT is bad. Over-provisioned must not also fire and tell
+        // the operator to downsize the GPU.
+        let mut m = healthy();
+        m.latency.tpot_ms = Distribution::new(50.0, 80.0, 120.0);
+        m.gpu.sm_utilization = 0.2;
+        let report = diagnose(&m, &estimate(), &Thresholds::default());
+        assert!(
+            report
+                .recommendations
+                .iter()
+                .any(|r| r.bottleneck == BottleneckClass::DecodeBound)
+        );
+        assert!(
+            report
+                .recommendations
+                .iter()
+                .all(|r| r.bottleneck != BottleneckClass::OverProvisioned)
+        );
     }
 
     #[test]
