@@ -149,6 +149,11 @@ fn to_response(pair: &TokenPair) -> Result<TokenResponse, ApiError> {
 
 /// Rate-limit middleware for credential routes. Keys on the proxy-supplied
 /// client IP, falling back to a shared bucket when absent.
+///
+/// TODO(TASK-094): keying on unverified `x-forwarded-for` is spoofable and the
+/// shared fallback bucket is a lockout vector; this must not be exposed on a
+/// live socket before the trusted-proxy allowlist + per-route bounded buckets
+/// land.
 async fn rate_limit(State(state): State<AuthApiState>, request: Request, next: Next) -> Response {
     let key = request
         .headers()

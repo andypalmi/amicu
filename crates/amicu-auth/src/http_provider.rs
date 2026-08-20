@@ -3,6 +3,8 @@
 //! The verifier owns caching/refetch policy; this only performs one HTTP GET of
 //! the JWKS document when asked. rustls backend, no system OpenSSL.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 
 use crate::error::{AuthError, Result};
@@ -16,11 +18,18 @@ pub struct HttpJwksProvider {
 }
 
 impl HttpJwksProvider {
-    /// Provider for a fixed JWKS URI.
+    /// Provider for a fixed JWKS URI. Uses a default request timeout so a hung
+    /// issuer cannot stall verify calls; see [`Self::with_client`] to override.
+    ///
+    /// TODO(TASK-095): also cap the response body size.
     #[must_use]
     pub fn new(jwks_uri: impl Into<String>) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
         Self {
-            client: reqwest::Client::new(),
+            client,
             jwks_uri: jwks_uri.into(),
         }
     }
