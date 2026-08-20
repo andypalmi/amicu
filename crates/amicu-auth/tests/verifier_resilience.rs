@@ -187,3 +187,68 @@ async fn refetch_failure_with_no_cached_key_hard_fails() {
     let err = verifier.verify(&token_for(&key)).await.unwrap_err();
     assert!(matches!(err, AuthError::JwksFetch));
 }
+
+/// A *concurrent* flood of unknown `kid`s triggers at most one refetch per
+/// cooldown window: the cooldown check-and-set is atomic, so parallel tasks
+/// cannot all observe the slot as free before any claims it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_unknown_kids_refetch_at_most_once_per_cooldown() {
+    let served = SigningKey::generate().unwrap();
+    let provider = FlakyProvider::new(jwks_of(&[&served]));
+    let verifier = Arc::new(Verifier::with_clock(
+        provider,
+        VerifierConfig::new(ISS, AUD),
+        TestClock::new(),
+    ));
+
+    // Prime the cache (mandatory first fetch is not the unknown-kid path).
+    verifier.verify(&token_for(&served)).await.unwrap();
+    assert_eq!(verifier.provider().count(), 1);
+
+    // Fire a burst of concurrent verifies for the same perpetually-unknown kid.
+    let ghost = token_for(&SigningKey::generate().unwrap());
+    let mut handles = Vec::new();
+    for _ in 0..64 {
+        let v = Arc::clone(&verifier);
+        let t = ghost.clone();
+        handles.push(tokio::spawn(async move {
+            // All are rejected (the kid never resolves); we only assert on the
+            // number of upstream fetches the burst provoked.
+            assert!(matches!(v.verify(&t).await, Err(AuthError::UnknownKid)));
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    assert_eq!(
+        verifier.provider().count(),
+        2,
+        "a concurrent unknown-kid flood must cause at most one refetch per window"
+    );
+}
+
+/// Serve-stale has a ceiling: once the cache ages past `max_stale` and the
+/// provider is still failing, even a cached `kid` is refused (fail closed), so a
+/// key rotated out / revoked during a prolonged outage stops being honoured.
+#[tokio::test]
+async fn cached_key_past_max_stale_is_rejected() {
+    let key = SigningKey::generate().unwrap();
+    let provider = FlakyProvider::new(jwks_of(&[&key]));
+    let clock = TestClock::new();
+    let cfg = VerifierConfig::new(ISS, AUD);
+    let max_stale = cfg.max_stale;
+    let verifier = Verifier::with_clock(provider, cfg, clock.clone());
+
+    let token = token_for(&key);
+    verifier.verify(&token).await.unwrap();
+    assert_eq!(verifier.provider().count(), 1);
+
+    // Age the cache just past max_stale and keep the provider down.
+    clock.advance(max_stale + Duration::from_secs(1));
+    verifier.provider().set_fail(true);
+
+    // The kid is still cached, but the cache is too old to trust: fail closed.
+    let err = verifier.verify(&token).await.unwrap_err();
+    assert!(matches!(err, AuthError::JwksFetch));
+}

@@ -91,11 +91,19 @@ pub struct VerifierConfig {
     /// the first unknown token and, failing that, by the [`Self::cache_ttl`]
     /// refresh.
     pub refetch_cooldown: Duration,
+    /// Hard ceiling on how stale the cache may get while still being served.
+    ///
+    /// Serve-stale keeps valid tokens working through a transient JWKS blip, but
+    /// during a *prolonged* provider outage a key the issuer has rotated out or
+    /// revoked would otherwise be honoured indefinitely. Past this age (measured
+    /// from the last successful fetch) the verifier fails closed even for a
+    /// cached `kid`. Must be comfortably longer than [`Self::cache_ttl`].
+    pub max_stale: Duration,
 }
 
 impl VerifierConfig {
-    /// Config with a 5-minute JWKS cache TTL, 30s leeway, and a 60s unknown-`kid`
-    /// refetch cooldown.
+    /// Config with a 5-minute JWKS cache TTL, 30s leeway, a 60s unknown-`kid`
+    /// refetch cooldown, and a 1-hour max-stale ceiling.
     #[must_use]
     pub fn new(issuer: impl Into<String>, audience: impl Into<String>) -> Self {
         Self {
@@ -104,6 +112,7 @@ impl VerifierConfig {
             leeway_secs: 30,
             cache_ttl: Duration::from_secs(300),
             refetch_cooldown: Duration::from_secs(60),
+            max_stale: Duration::from_secs(3600),
         }
     }
 }
@@ -122,9 +131,9 @@ struct Cache {
 enum RefetchPlan {
     /// Cache is usable as-is; validate against it.
     Skip,
-    /// Refetch first. `unknown` is set when the trigger was an unknown `kid`, so
-    /// the cooldown timestamp is recorded.
-    Fetch { unknown: bool },
+    /// Refetch first. When the trigger was an unknown `kid`, the cooldown slot
+    /// has already been claimed atomically inside `plan_refetch`.
+    Fetch,
 }
 
 /// Offline verifier over a [`JwksProvider`], with a monotonic [`MonoClock`] for
@@ -181,9 +190,11 @@ impl<P: JwksProvider, C: MonoClock> Verifier<P, C> {
     /// Refetches the JWKS when the cache is empty, when it is stale and the
     /// `kid` is known, or when the `kid` is unknown and the refetch cooldown has
     /// elapsed (bounding attacker-driven refetch amplification). If a refetch
-    /// fails but the token's key is still cached, it is served from the stale
-    /// cache (fail-open on availability); it hard-fails only when no usable key
-    /// exists. Signature, `exp`, `nbf`, `aud`, and `iss` are always enforced.
+    /// fails but the token's key is still cached and the cache is younger than
+    /// [`VerifierConfig::max_stale`], it is served from the stale cache (fail-open
+    /// on availability); it hard-fails when no usable key exists or the cache is
+    /// egregiously old. Signature, `exp`, `nbf`, `aud`, and `iss` are always
+    /// enforced.
     ///
     /// # Errors
     /// See [`AuthError`] variants for the rejection reasons.
@@ -192,19 +203,14 @@ impl<P: JwksProvider, C: MonoClock> Verifier<P, C> {
         let kid = header.kid.ok_or(AuthError::InvalidToken)?;
         let now = self.clock.now();
 
-        if let RefetchPlan::Fetch { unknown } = self.plan_refetch(&kid, now) {
-            if unknown {
-                // Record the attempt up front so a burst of unknown `kid`s is
-                // throttled even while this fetch is in flight or if it fails.
-                self.mark_unknown_attempt(now);
-            }
-            if let Err(e) = self.refetch(now).await {
-                // Serve-stale: tolerate a transient provider failure as long as
-                // the token's key is still cached and structurally usable. Only
-                // hard-fail when there is no usable key for this `kid`.
-                if !self.has_key(&kid) {
-                    return Err(e);
-                }
+        if let RefetchPlan::Fetch = self.plan_refetch(&kid, now)
+            && let Err(e) = self.refetch(now).await
+        {
+            // Serve-stale: tolerate a transient provider failure as long as the
+            // token's key is still cached and the cache has not aged past
+            // `max_stale`. Otherwise fail closed.
+            if !self.can_serve_stale(&kid, now) {
+                return Err(e);
             }
         }
 
@@ -217,45 +223,63 @@ impl<P: JwksProvider, C: MonoClock> Verifier<P, C> {
         data.map(|d| d.claims).map_err(|e| map_jwt_error(&e))
     }
 
+    /// Decide whether a refetch is needed and, for the unknown-`kid` path, claim
+    /// the cooldown slot atomically so that under a concurrent flood only one
+    /// task per window proceeds to fetch.
     fn plan_refetch(&self, kid: &str, now: Instant) -> RefetchPlan {
-        let cache = self.cache.read().expect("verifier cache poisoned");
+        // Fast path: the common known-and-fresh case only needs a read lock.
+        {
+            let cache = self.cache.read().expect("verifier cache poisoned");
+            if let Some(fetched_at) = cache.fetched_at
+                && cache.keys.contains_key(kid)
+                && now.duration_since(fetched_at) < self.config.cache_ttl
+            {
+                return RefetchPlan::Skip;
+            }
+        }
+
+        // Slow path: a refetch may be warranted. Take the write lock so the
+        // unknown-`kid` cooldown is a single atomic check-and-set; the write lock
+        // serializes concurrent tasks, so exactly one claims the slot per window.
+        let mut cache = self.cache.write().expect("verifier cache poisoned");
         let Some(fetched_at) = cache.fetched_at else {
             // Never fetched: a mandatory first fetch, not charged to the cooldown.
-            return RefetchPlan::Fetch { unknown: false };
+            return RefetchPlan::Fetch;
         };
 
         if cache.keys.contains_key(kid) {
-            // Known `kid`: refetch only to refresh a stale cache. This path is
-            // reachable only with a validly-signed token, so it is not an
-            // attacker-driven amplification vector and needs no cooldown.
+            // Known `kid`: refetch only to refresh a stale cache. Reachable only
+            // with a validly-signed token, so not an amplification vector.
             return if now.duration_since(fetched_at) >= self.config.cache_ttl {
-                RefetchPlan::Fetch { unknown: false }
+                RefetchPlan::Fetch
             } else {
                 RefetchPlan::Skip
             };
         }
 
         // Unknown `kid`: cooldown-gated regardless of staleness so a flood of
-        // random `kid`s cannot force one upstream fetch per request.
+        // random `kid`s cannot force one upstream fetch per request. Claim the
+        // slot in the same critical section that observed it free.
         let ready = match cache.last_unknown_refetch {
             None => true,
             Some(at) => now.duration_since(at) >= self.config.refetch_cooldown,
         };
         if ready {
-            RefetchPlan::Fetch { unknown: true }
+            cache.last_unknown_refetch = Some(now);
+            RefetchPlan::Fetch
         } else {
             RefetchPlan::Skip
         }
     }
 
-    fn mark_unknown_attempt(&self, now: Instant) {
-        let mut cache = self.cache.write().expect("verifier cache poisoned");
-        cache.last_unknown_refetch = Some(now);
-    }
-
-    fn has_key(&self, kid: &str) -> bool {
+    /// Whether a cached key for `kid` may still be served after a refetch
+    /// failure: it must exist and the cache must be younger than `max_stale`.
+    fn can_serve_stale(&self, kid: &str, now: Instant) -> bool {
         let cache = self.cache.read().expect("verifier cache poisoned");
-        cache.keys.contains_key(kid)
+        let Some(fetched_at) = cache.fetched_at else {
+            return false;
+        };
+        now.duration_since(fetched_at) < self.config.max_stale && cache.keys.contains_key(kid)
     }
 
     async fn refetch(&self, now: Instant) -> Result<()> {
