@@ -32,4 +32,12 @@ export type {
   CheckoutRequest,
   RedirectResponse,
   BillingStatusResponse,
+  MemberView,
+  MembersResponse,
+  AddMemberRequest,
+  ChangeRoleRequest,
+  RoleView,
+  RolesResponse,
+  AuditEntryView,
+  AuditResponse,
 } from './schema';

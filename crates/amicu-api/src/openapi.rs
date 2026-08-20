@@ -31,6 +31,12 @@ use utoipa::{Modify, OpenApi};
         crate::billing::portal_handler,
         crate::billing::status_handler,
         crate::billing::webhook_handler,
+        crate::org::list_members_handler,
+        crate::org::add_member_handler,
+        crate::org::change_role_handler,
+        crate::org::remove_member_handler,
+        crate::org::list_roles_handler,
+        crate::org::audit_handler,
     ),
     components(schemas(
         crate::auth::Credentials,
@@ -43,6 +49,14 @@ use utoipa::{Modify, OpenApi};
         crate::billing::CheckoutRequest,
         crate::billing::RedirectResponse,
         crate::billing::BillingStatusResponse,
+        crate::org::MemberView,
+        crate::org::MembersResponse,
+        crate::org::AddMemberRequest,
+        crate::org::ChangeRoleRequest,
+        crate::org::RoleView,
+        crate::org::RolesResponse,
+        crate::org::AuditEntryView,
+        crate::org::AuditResponse,
     )),
     modifiers(&SecurityAddon),
     tags(
@@ -51,6 +65,7 @@ use utoipa::{Modify, OpenApi};
         (name = "recommend", description = "Stateless advisory tuning recommendations from a metrics + estimate snapshot (auth-gated, tier-appropriate)."),
         (name = "monitor", description = "Stateless monitoring view (measured-vs-estimated): a normalized metric surface, estimate, and tier-appropriate advisory suggestions (auth-gated)."),
         (name = "billing", description = "Stripe-backed subscription billing: checkout, customer portal, status, and the signature-authenticated webhook."),
+        (name = "org", description = "Enterprise-gated organization console: membership, role-based access control, and an append-only audit log."),
     ),
 )]
 pub struct ApiDoc;

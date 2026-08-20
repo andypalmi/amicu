@@ -32,6 +32,7 @@ pub mod dto;
 pub mod engine;
 pub mod monitor;
 pub mod openapi;
+pub mod org;
 pub mod ratelimit;
 pub mod recommend;
 
@@ -47,6 +48,7 @@ pub use auth::{AuthApiState, auth_router};
 pub use billing::{BillingApiState, StripeConfig, billing_router, stripe_config_from_env};
 pub use engine::{AccessVerifier, EngineApiState};
 pub use openapi::ApiDoc;
+pub use org::{InMemoryOrgStore, OrgApiState, OrgStore, org_router};
 pub use ratelimit::{ProxyParseError, RateLimiter, TrustedProxies};
 
 /// Build the engine sub-router (validate/plan, state not yet bound) together
@@ -83,12 +85,15 @@ pub fn openapi_json() -> String {
 }
 
 /// Assemble the full API router: the unauthenticated auth surface, a live
-/// `GET /openapi.json`, the auth-gated engine endpoints, and the billing surface
-/// (auth-gated checkout/portal/status plus the signature-authenticated webhook).
+/// `GET /openapi.json`, the auth-gated engine endpoints, the billing surface
+/// (auth-gated checkout/portal/status plus the signature-authenticated webhook),
+/// and the Enterprise-gated organization console (`/org/*`: membership, RBAC,
+/// audit log).
 pub fn api_router(
     auth_state: AuthApiState,
     engine_state: EngineApiState,
     billing_state: BillingApiState,
+    org_state: OrgApiState,
 ) -> Router {
     let (engine_router, spec) = engine_parts();
     let engine_router = engine_router
@@ -110,4 +115,5 @@ pub fn api_router(
         .merge(auth_router(auth_state))
         .merge(engine_router)
         .merge(billing_router(billing_state))
+        .merge(org_router(org_state))
 }

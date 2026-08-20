@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use amicu_api::{
-    AuthApiState, BillingApiState, EngineApiState, RateLimiter, StripeConfig, api_router,
+    AuthApiState, BillingApiState, EngineApiState, InMemoryOrgStore, OrgApiState, RateLimiter,
+    StripeConfig, api_router,
 };
 use amicu_auth::notify::LoggingNotifier;
 use amicu_auth::refresh::InMemoryRefreshStore;
@@ -106,13 +107,14 @@ async fn harness(tier: Tier, configure_stripe: bool) -> Harness {
             "http://localhost:3000/account/billing?checkout=cancel",
             "http://localhost:3000/account/billing",
         );
-        BillingApiState::with_stripe(verifier, users.clone(), stripe)
+        BillingApiState::with_stripe(verifier.clone(), users.clone(), stripe)
     } else {
-        BillingApiState::unconfigured(verifier, users.clone())
+        BillingApiState::unconfigured(verifier.clone(), users.clone())
     };
+    let org_state = OrgApiState::new(verifier, Arc::new(InMemoryOrgStore::new()));
 
     Harness {
-        app: api_router(auth_state, engine_state, billing_state),
+        app: api_router(auth_state, engine_state, billing_state, org_state),
         users,
         token,
     }

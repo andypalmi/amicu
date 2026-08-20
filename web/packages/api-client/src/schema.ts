@@ -161,6 +161,79 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/org/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The audit log, most-recent first. Requires the `view_audit` permission
+         *     (Owner/Admin).
+         */
+        get: operations["audit_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/org/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the organization's members and their roles. */
+        get: operations["list_members_handler"];
+        put?: never;
+        /** Invite/add a member with a role. */
+        post: operations["add_member_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/org/members/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove a member. */
+        delete: operations["remove_member_handler"];
+        options?: never;
+        head?: never;
+        /** Change a member's role. */
+        patch: operations["change_role_handler"];
+        trace?: never;
+    };
+    "/org/roles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The RBAC catalog: every role and the permissions it grants. */
+        get: operations["list_roles_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/plan": {
         parameters: {
             query?: never;
@@ -349,6 +422,19 @@ export interface components {
          * @enum {string}
          */
         ActionKind: "create" | "update" | "replace" | "destroy";
+        /** @description Request body for `POST /org/members`. */
+        AddMemberRequest: {
+            /**
+             * @description The role to assign (`owner` | `admin` | `member` | `viewer`).
+             * @example member
+             */
+            role: string;
+            /**
+             * @description The user id to add as a member.
+             * @example usr_123
+             */
+            user_id: string;
+        };
         /** @description A selected model artifact and its download characteristics. */
         Artifact: {
             /**
@@ -366,6 +452,35 @@ export interface components {
         /** @description A single stated assumption an estimate or diagnosis depends on. */
         AssumptionDto: {
             statement: string;
+        };
+        /** @description One audit record as returned on the wire. */
+        AuditEntryView: {
+            /**
+             * @description The action name (e.g. `"member.added"`).
+             * @example member.added
+             */
+            action: string;
+            /** @description The user id that performed the action. */
+            actor_id: string;
+            /** @description A human-readable detail. */
+            detail?: string | null;
+            /**
+             * Format: int64
+             * @description Monotonic sequence id.
+             */
+            id: number;
+            /** @description The member the action targeted, if any. */
+            target_id?: string | null;
+            /**
+             * Format: int64
+             * @description When the action was recorded (Unix seconds).
+             */
+            timestamp: number;
+        };
+        /** @description Response for `GET /org/audit`. */
+        AuditResponse: {
+            /** @description The audit log, most-recent first. */
+            entries: components["schemas"]["AuditEntryView"][];
         };
         /**
          * @description The user's billing status: whether billing is live server-side, the
@@ -397,6 +512,14 @@ export interface components {
          * @enum {string}
          */
         ChangeDirectionDto: "increase" | "decrease" | "enable" | "replace";
+        /** @description Request body for `PATCH /org/members/{id}`. */
+        ChangeRoleRequest: {
+            /**
+             * @description The new role to assign.
+             * @example admin
+             */
+            role: string;
+        };
         /** @description Request body for `POST /billing/checkout`: the plan the user wants to buy. */
         CheckoutRequest: {
             /**
@@ -533,6 +656,27 @@ export interface components {
             e2e_ms: components["schemas"]["DistributionDto"];
             tpot_ms: components["schemas"]["DistributionDto"];
             ttft_ms: components["schemas"]["DistributionDto"];
+        };
+        /** @description One member as returned on the wire. */
+        MemberView: {
+            /**
+             * @description The member's role (lowercase, e.g. `"admin"`).
+             * @example admin
+             */
+            role: string;
+            /** @description The member's user id. */
+            user_id: string;
+        };
+        /** @description Response for `GET /org/members`. */
+        MembersResponse: {
+            /**
+             * @description The calling user's own role — so a client can render exactly the controls
+             *     their role allows (the API still enforces every action).
+             * @example owner
+             */
+            caller_role: string;
+            /** @description All members, in a stable order. */
+            members: components["schemas"]["MemberView"][];
         };
         /** @description Memory / KV-cache surface. */
         MemoryKvMetricsDto: {
@@ -757,6 +901,23 @@ export interface components {
             /** @description The opaque reset token delivered out-of-band (e.g. via the reset link). */
             reset_token: string;
         };
+        /** @description One role and the permissions it grants (the RBAC catalog). */
+        RoleView: {
+            /** @description A short human description of the role. */
+            description: string;
+            /** @description The permission names this role holds. */
+            permissions: string[];
+            /**
+             * @description The role name (lowercase).
+             * @example admin
+             */
+            role: string;
+        };
+        /** @description Response for `GET /org/roles`. */
+        RolesResponse: {
+            /** @description Every role, privilege-descending. */
+            roles: components["schemas"]["RoleView"][];
+        };
         /** @description An opaque runtime or launch setting. */
         Setting: {
             /** @description Setting key. */
@@ -904,11 +1065,15 @@ export interface components {
     pathItems: never;
 }
 export type ActionKind = components['schemas']['ActionKind'];
+export type AddMemberRequest = components['schemas']['AddMemberRequest'];
 export type Artifact = components['schemas']['Artifact'];
 export type AssumptionDto = components['schemas']['AssumptionDto'];
+export type AuditEntryView = components['schemas']['AuditEntryView'];
+export type AuditResponse = components['schemas']['AuditResponse'];
 export type BillingStatusResponse = components['schemas']['BillingStatusResponse'];
 export type BottleneckClassDto = components['schemas']['BottleneckClassDto'];
 export type ChangeDirectionDto = components['schemas']['ChangeDirectionDto'];
+export type ChangeRoleRequest = components['schemas']['ChangeRoleRequest'];
 export type CheckoutRequest = components['schemas']['CheckoutRequest'];
 export type ComparisonDto = components['schemas']['ComparisonDto'];
 export type ConcurrencyMetricsDto = components['schemas']['ConcurrencyMetricsDto'];
@@ -924,6 +1089,8 @@ export type EstimateRangeDto = components['schemas']['EstimateRangeDto'];
 export type EvidenceDto = components['schemas']['EvidenceDto'];
 export type GpuMetricsDto = components['schemas']['GpuMetricsDto'];
 export type LatencyMetricsDto = components['schemas']['LatencyMetricsDto'];
+export type MemberView = components['schemas']['MemberView'];
+export type MembersResponse = components['schemas']['MembersResponse'];
 export type MemoryKvMetricsDto = components['schemas']['MemoryKvMetricsDto'];
 export type MoneyDto = components['schemas']['MoneyDto'];
 export type MonitorRequest = components['schemas']['MonitorRequest'];
@@ -945,6 +1112,8 @@ export type RefreshRequest = components['schemas']['RefreshRequest'];
 export type RejectedAlternativeDto = components['schemas']['RejectedAlternativeDto'];
 export type ReliabilityMetricsDto = components['schemas']['ReliabilityMetricsDto'];
 export type ResetRequest = components['schemas']['ResetRequest'];
+export type RoleView = components['schemas']['RoleView'];
+export type RolesResponse = components['schemas']['RolesResponse'];
 export type Setting = components['schemas']['Setting'];
 export type Severity = components['schemas']['Severity'];
 export type SignUpResponse = components['schemas']['SignUpResponse'];
@@ -1235,6 +1404,273 @@ export interface operations {
             };
             /** @description The JSON body is well-formed but a field has the wrong type or is missing; body is a plain-text decode error. */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    audit_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The audit log, most-recent first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditResponse"];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Below Enterprise, not a member, or your role may not view the audit log. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_members_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The members and the caller's own role. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MembersResponse"];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Below the Enterprise tier, or not a member of the organization. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    add_member_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddMemberRequest"];
+            };
+        };
+        responses: {
+            /** @description The member was added. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemberView"];
+                };
+            };
+            /** @description Empty user id or unknown role. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Below Enterprise, not a member, or your role may not add this member. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description That user is already a member. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_member_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The member's user id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The removed member. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemberView"];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Below Enterprise, not a member, or your role may not remove this member. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such member. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Removing this member would leave no Owner. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    change_role_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The member's user id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChangeRoleRequest"];
+            };
+        };
+        responses: {
+            /** @description The member's new role. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemberView"];
+                };
+            };
+            /** @description Unknown role. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Below Enterprise, not a member, or your role may not make this change. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such member. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The change would demote the last remaining Owner. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_roles_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The role → permission catalog. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RolesResponse"];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Below the Enterprise tier, or not a member of the organization. */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
