@@ -208,6 +208,50 @@ async fn refresh_reuse_revokes_whole_family() {
     ));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_refresh_yields_exactly_one_successor() {
+    // Two tasks racing to rotate the SAME valid token must not both succeed:
+    // the compare-and-revoke is atomic, so exactly one wins and the other is
+    // rejected (tripping family compromise). Never two live successors.
+    //
+    // Looped to actually exercise the interleaving window under real
+    // parallelism — the pre-fix `get`/check/`revoke` split would let some
+    // iteration mint two live successors.
+    let svc = Arc::new(build(TestClock::at(real_now())));
+    svc.sign_up("race@example.com", &pw("race-secret-pw"))
+        .await
+        .unwrap();
+
+    for _ in 0..16 {
+        // A fresh independent family per iteration.
+        let token = svc
+            .sign_in("race@example.com", &pw("race-secret-pw"))
+            .await
+            .unwrap()
+            .refresh_token;
+
+        let (s1, t1) = (svc.clone(), token.clone());
+        let (s2, t2) = (svc.clone(), token.clone());
+        let h1 = tokio::spawn(async move { s1.refresh(&t1).await });
+        let h2 = tokio::spawn(async move { s2.refresh(&t2).await });
+        let (r1, r2) = (h1.await.unwrap(), h2.await.unwrap());
+
+        let successors: Vec<_> = [r1, r2].into_iter().filter_map(Result::ok).collect();
+        assert_eq!(
+            successors.len(),
+            1,
+            "exactly one concurrent refresh may succeed, never two live successors"
+        );
+        // The single surviving successor is itself dead: the losing racer
+        // flagged the family compromised, so even the winner's token no longer
+        // rotates (consume rejects any token in a compromised family).
+        assert!(matches!(
+            svc.refresh(&successors[0].refresh_token).await.unwrap_err(),
+            AuthError::RefreshInvalid
+        ));
+    }
+}
+
 #[tokio::test]
 async fn refresh_chain_rotates_across_multiple_hops() {
     let svc = build(TestClock::at(real_now()));

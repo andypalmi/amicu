@@ -172,29 +172,31 @@ impl<C: Clock> AuthService<C> {
             .expose_secret_str()
             .map_err(|_| AuthError::RefreshInvalid)?;
         let hash = refresh::hash_token(token);
-        let record = self
-            .refresh
-            .get(&hash)
-            .await?
-            .ok_or(AuthError::RefreshInvalid)?;
-        // Reuse detection: an already-revoked token being presented again is a
-        // theft/replay signal. Revoke and flag the whole family, then reject.
-        if record.revoked {
-            self.refresh.compromise_family(&record.family_id).await?;
-            return Err(AuthError::RefreshInvalid);
+        // Atomically compare-and-revoke: the liveness check and the revoke are a
+        // single indivisible step in the store, so two concurrent refreshes of
+        // the same token can never both proceed to mint (which would leave two
+        // live successors in one family and silently defeat reuse detection).
+        // Exactly one caller wins `Consumed`; the loser sees `Reuse`.
+        match self.refresh.consume(&hash, self.issuer.now_unix()).await? {
+            refresh::RefreshConsume::NotFound | refresh::RefreshConsume::Expired => {
+                Err(AuthError::RefreshInvalid)
+            }
+            // Reuse/theft: an already-revoked (or already-compromised) token was
+            // presented. Revoke and flag the whole family, then reject.
+            refresh::RefreshConsume::Reuse { family_id } => {
+                self.refresh.compromise_family(&family_id).await?;
+                Err(AuthError::RefreshInvalid)
+            }
+            // This caller won the rotation; mint the successor into the family.
+            refresh::RefreshConsume::Consumed { user_id, family_id } => {
+                let user = self
+                    .users
+                    .get_by_id(&user_id)
+                    .await?
+                    .ok_or(AuthError::RefreshInvalid)?;
+                self.issue_pair_in_family(&user, &family_id).await
+            }
         }
-        if record.expires_at <= self.issuer.now_unix() {
-            return Err(AuthError::RefreshInvalid);
-        }
-        // Rotate: revoke the presented token before minting its successor into
-        // the same family.
-        self.refresh.revoke(&hash).await?;
-        let user = self
-            .users
-            .get_by_id(&record.user_id)
-            .await?
-            .ok_or(AuthError::RefreshInvalid)?;
-        self.issue_pair_in_family(&user, &record.family_id).await
     }
 
     /// Revoke a refresh token (logout). Idempotent.

@@ -16,6 +16,15 @@
 //! attacker's rotated token and the victim's live token both die, forcing a
 //! fresh authentication. This mirrors the OAuth 2.0 refresh-token rotation
 //! guidance (RFC 6749 §10.4 / OAuth 2.0 Security BCP §4.13).
+//!
+//! By design this means replaying *any* leaked old token also terminates the
+//! legitimate user's current session (they must re-authenticate). That is the
+//! intended, BCP-recommended trade-off: a false negative (letting a possibly
+//! stolen token live) is worse than the friction of a re-login.
+//!
+//! Rotation is consumed atomically via [`RefreshStore::consume`] (compare-and-
+//! revoke in one indivisible step), so concurrent refreshes of the same token
+//! cannot both succeed and leave two live successors in a family.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -95,6 +104,35 @@ pub fn hash_token(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
 }
 
+/// Outcome of atomically consuming (compare-and-revoke) a presented token.
+///
+/// Exactly one caller can ever win [`Consumed`](RefreshConsume::Consumed) for a
+/// given token: the store performs the liveness check and the revoke as one
+/// indivisible step, so two concurrent rotations of the same token cannot both
+/// proceed to mint (which would break the one-live-token-per-family invariant).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshConsume {
+    /// No such token.
+    NotFound,
+    /// The token was live and THIS caller atomically revoked it; proceed to
+    /// mint a successor into `family_id` for `user_id`.
+    Consumed {
+        /// Owning user id.
+        user_id: String,
+        /// Family the successor must join.
+        family_id: String,
+    },
+    /// The token existed but was already revoked, or its family was already
+    /// flagged compromised — a reuse/theft signal. The caller must compromise
+    /// the family (idempotent) and reject.
+    Reuse {
+        /// Family to compromise.
+        family_id: String,
+    },
+    /// The token was live but past its expiry.
+    Expired,
+}
+
 /// Persistence + revocation for refresh tokens.
 #[async_trait]
 pub trait RefreshStore: Send + Sync {
@@ -102,6 +140,18 @@ pub trait RefreshStore: Send + Sync {
     async fn insert(&self, record: RefreshRecord) -> Result<()>;
     /// Look up a record by token hash.
     async fn get(&self, token_hash: &[u8; 32]) -> Result<Option<RefreshRecord>>;
+    /// Atomically consume a presented token: in a single indivisible step,
+    /// check that it is live (present, not revoked, family not compromised, not
+    /// expired at `now`) and, if so, revoke it and report [`RefreshConsume::Consumed`].
+    ///
+    /// This is the rotation primitive. It MUST be atomic with respect to
+    /// concurrent callers: the check and the revoke cannot be split across an
+    /// await/round-trip, or two racing refreshes of the same token could both
+    /// pass the check and mint two live successors. A persistent implementation
+    /// backs this with a conditional update (e.g. `UPDATE ... SET revoked=true
+    /// WHERE token_hash=$1 AND NOT revoked RETURNING user_id, family_id`) and
+    /// treats "zero rows affected" on an existing token as reuse.
+    async fn consume(&self, token_hash: &[u8; 32], now: i64) -> Result<RefreshConsume>;
     /// Mark a single record revoked (idempotent).
     async fn revoke(&self, token_hash: &[u8; 32]) -> Result<()>;
     /// Reuse/theft response: revoke *every* token in a family and flag the
@@ -155,6 +205,33 @@ impl RefreshStore for InMemoryRefreshStore {
             .tokens
             .get(token_hash)
             .cloned())
+    }
+
+    async fn consume(&self, token_hash: &[u8; 32], now: i64) -> Result<RefreshConsume> {
+        // Whole check-and-revoke runs under one lock: no await splits it, so two
+        // racing consumers of the same token cannot both observe it live.
+        let mut state = self.inner.lock().expect("refresh store poisoned");
+        let Some(record) = state.tokens.get(token_hash) else {
+            return Ok(RefreshConsume::NotFound);
+        };
+        let family_id = record.family_id.clone();
+        // Reuse: already revoked, or the family was flagged compromised (which
+        // also catches a token minted into a family that was compromised after
+        // this token's own liveness was last observed).
+        if record.revoked || state.compromised.contains(&family_id) {
+            return Ok(RefreshConsume::Reuse { family_id });
+        }
+        if record.expires_at <= now {
+            return Ok(RefreshConsume::Expired);
+        }
+        let user_id = record.user_id.clone();
+        // Win the race: revoke before releasing the lock.
+        state
+            .tokens
+            .get_mut(token_hash)
+            .expect("token present under lock")
+            .revoked = true;
+        Ok(RefreshConsume::Consumed { user_id, family_id })
     }
 
     async fn revoke(&self, token_hash: &[u8; 32]) -> Result<()> {
