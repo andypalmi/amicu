@@ -13,21 +13,30 @@
 //!
 //! The [`ProviderCapabilities`] descriptor carries Scaleway's EU regions and a
 //! representative slice of its single-GPU catalog. Scaleway has no public spot
-//! market, so offerings are priced **on-demand only** (no spot rate). Live
-//! provisioning against Scaleway's REST API and real-time capacity/pricing sync
-//! are out of scope here (the latter is TASK-023); the provisioning surface
-//! simulates the instance lifecycle in memory, mirroring
-//! [`FakeProvider`](crate::fake::FakeProvider), so the planner and apply path can
-//! be exercised without network or credentials. Prices are illustrative catalog
-//! values in EUR/hr, not a live quote.
+//! market, so offerings are priced **on-demand only** (no spot rate).
+//!
+//! Provisioning drives Scaleway's Instance API
+//! (`https://api.scaleway.com/instance/v1`) through the [`HttpTransport`] seam:
+//! `POST /zones/{zone}/servers` to create, `POST /zones/{zone}/servers/{id}/action`
+//! (`{"action":"poweron"}`) to boot it, `GET /zones/{zone}/servers/{id}` for
+//! status, and `DELETE /zones/{zone}/servers/{id}` to tear down. Scaleway
+//! authenticates with an `X-Auth-Token` header (not `Authorization: Bearer`).
+//! The adapter never touches a concrete HTTP client — production uses
+//! [`ReqwestTransport`], tests inject a mock — so the provisioning path is
+//! exercised with no network, credentials, or spend. HTTP status codes map onto
+//! typed [`ProviderError`]s (`401`/`403` → credentials rejected, `404` → unknown
+//! instance/offering, `409`/`429` → capacity unavailable, other non-`2xx` →
+//! retryable backend); a transport failure maps to a retryable backend error.
+//! Real-time capacity/pricing sync is out of scope here (TASK-023); prices are
+//! illustrative catalog values in EUR/hr, not a live quote.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::Arc;
 
 use amicu_core::adapter::{Adapter, AdapterError, AdapterId, DescribeCapabilities, HealthStatus};
 use amicu_core::resource::{Accelerator, AcceleratorKind, Money};
 use amicu_core::secret::{SecretRef, SecretResolver};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::capability::{
     Availability, AvailabilityState, BillingGranularity, ComputeOffering, CredentialsModel,
@@ -38,9 +47,16 @@ use crate::capability::{
 use crate::provider::{
     Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
 };
+use crate::transport::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport, TransportError};
 
 /// The adapter identity Scaleway registers under.
 pub const PROVIDER_ID: &str = "scaleway";
+
+/// The Scaleway Instance API base URL.
+const BASE_URL: &str = "https://api.scaleway.com/instance/v1";
+
+/// Scaleway's non-bearer auth header.
+const AUTH_HEADER: &str = "X-Auth-Token";
 
 /// A Scaleway region: its region code, residency jurisdiction, ISO country code,
 /// and human-readable location. Every Scaleway region is EU, so the catalog holds
@@ -139,24 +155,119 @@ const GPUS: &[GpuSpec] = &[
     },
 ];
 
+/// Request body for `POST {base}/zones/{zone}/servers`.
+///
+/// A minimal create body: the offering id stands in for Scaleway's
+/// `commercial_type`. Richer fields (image, volumes, project) arrive with live
+/// provisioning (TASK-023).
+#[derive(Serialize)]
+struct CreateServerRequest<'a> {
+    name: &'a str,
+    commercial_type: &'a str,
+}
+
+/// Request body for the boot action `POST .../servers/{id}/action`.
+#[derive(Serialize)]
+struct ServerActionRequest {
+    action: &'static str,
+}
+
+/// The Scaleway `{"server":{...}}` envelope returned by create and status.
+#[derive(Deserialize)]
+struct ServerEnvelope {
+    server: ServerObject,
+}
+
+/// The subset of a Scaleway server object the adapter consumes.
+#[derive(Deserialize)]
+struct ServerObject {
+    /// Provider-assigned server id (a UUID).
+    id: String,
+    /// Lifecycle state, e.g. `"running"`.
+    state: Option<String>,
+}
+
+/// Map a Scaleway server state string onto a [`ProvisioningState`].
+fn map_server_state(state: Option<&str>) -> ProvisioningState {
+    match state.unwrap_or_default() {
+        "running" => ProvisioningState::Ready {
+            detail: "instance running".into(),
+        },
+        "starting" => ProvisioningState::Provisioning {
+            detail: "instance starting".into(),
+        },
+        "stopping" => ProvisioningState::Stopping {
+            detail: "instance stopping".into(),
+        },
+        "stopped" | "stopped in place" => ProvisioningState::Stopped {
+            detail: "instance stopped".into(),
+        },
+        "locked" => ProvisioningState::Failed {
+            detail: "instance locked".into(),
+        },
+        "" => ProvisioningState::Provisioning {
+            detail: "instance state unknown".into(),
+        },
+        other => ProvisioningState::Provisioning {
+            detail: format!("instance state {other}"),
+        },
+    }
+}
+
+/// Fold a transport failure (the exchange never completed) into a retryable
+/// backend error.
+fn transport_error(err: &TransportError) -> AdapterError {
+    AdapterError::from_kind(ProviderError::Backend {
+        detail: format!("Scaleway transport failure: {err}"),
+    })
+}
+
+/// Map a non-`2xx` status from a create-path call (create / boot action) onto a
+/// typed error; `404` means the offering is unknown.
+fn create_error(status: u16, request: &ProvisionRequest) -> AdapterError {
+    let kind = match status {
+        401 | 403 => ProviderError::CredentialsRejected {
+            detail: "Scaleway rejected the API secret key".into(),
+        },
+        404 => ProviderError::UnknownOffering {
+            offering: request.offering_id.clone(),
+        },
+        409 | 429 => ProviderError::CapacityUnavailable {
+            offering: request.offering_id.clone(),
+            region: request.region.clone(),
+        },
+        _ => ProviderError::Backend {
+            detail: format!("Scaleway API returned HTTP {status}"),
+        },
+    };
+    AdapterError::from_kind(kind)
+}
+
+/// Map a non-`2xx` status from a per-instance call (`status`/`teardown`) onto a
+/// typed error; `404` means the instance is unknown.
+fn lifecycle_error(status: u16, id: &str) -> AdapterError {
+    let kind = match status {
+        401 | 403 => ProviderError::CredentialsRejected {
+            detail: "Scaleway rejected the API secret key".into(),
+        },
+        404 => ProviderError::UnknownInstance { id: id.into() },
+        _ => ProviderError::Backend {
+            detail: format!("Scaleway API returned HTTP {status}"),
+        },
+    };
+    AdapterError::from_kind(kind)
+}
+
 /// The Scaleway provider adapter.
 ///
-/// Holds the admitted (residency-filtered) region set and the derived capability
-/// descriptor. Provisioning is simulated in memory (see the module docs); every
-/// simulated instance and its transitions are recorded for observability.
+/// Holds the admitted (residency-filtered) region set, the derived capability
+/// descriptor, and the [`HttpTransport`] used to reach Scaleway's REST API.
 pub struct ScalewayProvider {
     id: AdapterId,
     capabilities: ProviderCapabilities,
     health: HealthStatus,
-    state: Mutex<State>,
-}
-
-/// Mutable in-memory state behind the simulated provisioning surface.
-#[derive(Default)]
-struct State {
-    counter: u64,
-    instances: HashMap<String, ProvisioningHandle>,
-    history: HashMap<String, Vec<ProvisioningState>>,
+    transport: Arc<dyn HttpTransport>,
+    base_url: String,
 }
 
 impl ScalewayProvider {
@@ -188,7 +299,8 @@ impl ScalewayProvider {
             id,
             capabilities,
             health: HealthStatus::Healthy,
-            state: Mutex::new(State::default()),
+            transport: Arc::new(ReqwestTransport::new()),
+            base_url: BASE_URL.to_string(),
         }
     }
 
@@ -197,6 +309,19 @@ impl ScalewayProvider {
     pub fn with_health(mut self, health: HealthStatus) -> Self {
         self.capabilities.health = health.clone();
         self.health = health;
+        self
+    }
+
+    /// Swap in a transport and base URL. Test-only: adapter tests inject a mock
+    /// so the provisioning path runs with no network, credentials, or spend.
+    #[cfg(test)]
+    fn with_transport(
+        mut self,
+        transport: Arc<dyn HttpTransport>,
+        base_url: impl Into<String>,
+    ) -> Self {
+        self.transport = transport;
+        self.base_url = base_url.into();
         self
     }
 
@@ -273,27 +398,6 @@ impl ScalewayProvider {
         caps
     }
 
-    /// The instances currently live (provisioned and non-terminal).
-    #[must_use]
-    pub fn live_instances(&self) -> Vec<ProvisioningHandle> {
-        self.lock()
-            .instances
-            .values()
-            .filter(|h| !h.state.is_terminal())
-            .cloned()
-            .collect()
-    }
-
-    /// The recorded state transitions for `id`, in order.
-    #[must_use]
-    pub fn instance_history(&self, id: &str) -> Vec<ProvisioningState> {
-        self.lock().history.get(id).cloned().unwrap_or_default()
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().expect("scaleway provider mutex poisoned")
-    }
-
     fn has_offering(&self, offering_id: &str) -> bool {
         self.capabilities
             .compute
@@ -305,18 +409,31 @@ impl ScalewayProvider {
         self.capabilities.regions.iter().any(|r| r.code == region)
     }
 
-    /// Resolve and (pretend to) use the credential to authenticate the Scaleway
-    /// API call. The [`SecretValue`](amicu_core::secret::SecretValue) lives only
-    /// for this call and is dropped (zeroized) on return; it is never stored,
-    /// placed on a handle, logged, or serialized. An empty credential is rejected
-    /// as [`ProviderError::CredentialsRejected`].
-    async fn authenticate(
+    /// Build a request for `{base}{path}`, attaching `token` in the Scaleway
+    /// `X-Auth-Token` header when present.
+    fn build_request(&self, method: HttpMethod, path: &str, token: Option<&str>) -> HttpRequest {
+        let mut req = HttpRequest::new(method, format!("{}{path}", self.base_url));
+        if let Some(token) = token {
+            req = req.with_header(AUTH_HEADER, token);
+        }
+        req
+    }
+
+    /// Resolve the credential to a transient secret-key token for a single REST
+    /// call.
+    ///
+    /// The returned [`String`] populates the `X-Auth-Token` header for the
+    /// immediate call and is dropped when it returns; it is never stored on a
+    /// [`ProvisioningHandle`], logged, or serialized. `None` credentials yield
+    /// `None`; an empty or non-UTF-8 credential is rejected as
+    /// [`ProviderError::CredentialsRejected`].
+    async fn resolve_token(
         &self,
         resolver: &dyn SecretResolver,
         credentials: Option<&SecretRef>,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<Option<String>, AdapterError> {
         let Some(secret_ref) = credentials else {
-            return Ok(());
+            return Ok(None);
         };
         let value = resolver.resolve(secret_ref).await?;
         if value.is_empty() {
@@ -326,8 +443,12 @@ impl ScalewayProvider {
                 },
             ));
         }
-        let _signed = value.expose_secret().len();
-        Ok(())
+        let token = value.expose_secret_str().map(str::to_owned).map_err(|_| {
+            AdapterError::from_kind(ProviderError::CredentialsRejected {
+                detail: "Scaleway API secret key is not valid UTF-8".into(),
+            })
+        })?;
+        Ok(Some(token))
     }
 }
 
@@ -377,34 +498,75 @@ impl Provider for ScalewayProvider {
                 region: request.region.clone(),
             }));
         }
-        self.authenticate(resolver, request.credentials.as_ref())
+        let token = self
+            .resolve_token(resolver, request.credentials.as_ref())
             .await?;
 
-        let mut state = self.lock();
-        state.counter += 1;
-        let id = format!("scaleway-{}-{}", request.region, state.counter);
-
-        let ready = ProvisioningState::Ready {
-            detail: "instance ready".into(),
+        let create = CreateServerRequest {
+            name: "amicu-instance",
+            commercial_type: request.offering_id.as_str(),
         };
-        let transitions = vec![
-            ProvisioningState::Requested,
-            ProvisioningState::Provisioning {
-                detail: "instance starting".into(),
-            },
-            ready.clone(),
-        ];
-        let handle = ProvisioningHandle {
-            id: id.clone(),
+        let body = serde_json::to_value(&create).map_err(|_| {
+            AdapterError::from_kind(ProviderError::Backend {
+                detail: "failed to encode Scaleway create request".into(),
+            })
+        })?;
+        // TODO(TASK-023): Scaleway's Instance API path segment is a zone
+        // (e.g. `fr-par-1`), not a region (`fr-par`); resolve region→zone
+        // before live calls.
+        let servers_path = format!("/zones/{}/servers", request.region);
+        let create_request = self
+            .build_request(HttpMethod::Post, &servers_path, token.as_deref())
+            .with_json(body);
+        let response = self
+            .transport
+            .execute(create_request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if !response.is_success() {
+            return Err(create_error(response.status, request));
+        }
+        let envelope: ServerEnvelope = response.json().map_err(|_| {
+            AdapterError::from_kind(ProviderError::Backend {
+                detail: "malformed Scaleway create response".into(),
+            })
+        })?;
+        let server_id = envelope.server.id;
+
+        // A freshly created Scaleway server is stopped; boot it explicitly.
+        let action_body =
+            serde_json::to_value(ServerActionRequest { action: "poweron" }).map_err(|_| {
+                AdapterError::from_kind(ProviderError::Backend {
+                    detail: "failed to encode Scaleway action request".into(),
+                })
+            })?;
+        let action_path = format!("/zones/{}/servers/{server_id}/action", request.region);
+        let action_request = self
+            .build_request(HttpMethod::Post, &action_path, token.as_deref())
+            .with_json(action_body);
+        let action_response = self
+            .transport
+            .execute(action_request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if !action_response.is_success() {
+            // Boot failed after create succeeded: best-effort teardown so the
+            // created server does not linger (and bill). Its result is ignored;
+            // the boot failure is the error surfaced. A 404 here means the
+            // just-created instance, not the offering.
+            let cleanup_path = format!("/zones/{}/servers/{server_id}", request.region);
+            let cleanup = self.build_request(HttpMethod::Delete, &cleanup_path, token.as_deref());
+            let _ = self.transport.execute(cleanup).await;
+            return Err(lifecycle_error(action_response.status, &server_id));
+        }
+        Ok(ProvisioningHandle {
+            id: server_id,
             provider: self.id.clone(),
             region: request.region.clone(),
             offering_id: request.offering_id.clone(),
             credentials: request.credentials.clone(),
-            state: ready,
-        };
-        state.history.insert(id.clone(), transitions);
-        state.instances.insert(id, handle.clone());
-        Ok(handle)
+            state: map_server_state(envelope.server.state.as_deref()),
+        })
     }
 
     async fn status(
@@ -412,17 +574,25 @@ impl Provider for ScalewayProvider {
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningState, AdapterError> {
-        self.authenticate(resolver, handle.credentials.as_ref())
+        let token = self
+            .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
-        self.lock()
-            .instances
-            .get(&handle.id)
-            .map(|h| h.state.clone())
-            .ok_or_else(|| {
-                AdapterError::from_kind(ProviderError::UnknownInstance {
-                    id: handle.id.clone(),
-                })
+        let path = format!("/zones/{}/servers/{}", handle.region, handle.id);
+        let request = self.build_request(HttpMethod::Get, &path, token.as_deref());
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if !response.is_success() {
+            return Err(lifecycle_error(response.status, &handle.id));
+        }
+        let envelope: ServerEnvelope = response.json().map_err(|_| {
+            AdapterError::from_kind(ProviderError::Backend {
+                detail: "malformed Scaleway status response".into(),
             })
+        })?;
+        Ok(map_server_state(envelope.server.state.as_deref()))
     }
 
     async fn teardown(
@@ -430,25 +600,19 @@ impl Provider for ScalewayProvider {
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<(), AdapterError> {
-        self.authenticate(resolver, handle.credentials.as_ref())
+        let token = self
+            .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
-
-        let mut state = self.lock();
-        let Some(instance) = state.instances.get_mut(&handle.id) else {
-            return Err(AdapterError::from_kind(ProviderError::UnknownInstance {
-                id: handle.id.clone(),
-            }));
-        };
-        instance.state = ProvisioningState::Terminated {
-            detail: "instance terminated".into(),
-        };
-        let entry = state.history.entry(handle.id.clone()).or_default();
-        entry.push(ProvisioningState::Stopping {
-            detail: "instance stopping".into(),
-        });
-        entry.push(ProvisioningState::Terminated {
-            detail: "instance terminated".into(),
-        });
+        let path = format!("/zones/{}/servers/{}", handle.region, handle.id);
+        let request = self.build_request(HttpMethod::Delete, &path, token.as_deref());
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if !response.is_success() {
+            return Err(lifecycle_error(response.status, &handle.id));
+        }
         Ok(())
     }
 }
@@ -456,10 +620,11 @@ impl Provider for ScalewayProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::{HttpResponse, MockTransport};
     use amicu_core::adapter::Registry;
     use amicu_core::diagnostic::{Category as DiagCategory, DiagnosticCode};
     use amicu_core::secret::SecretValue;
-    use std::sync::Arc;
+    use std::collections::HashMap;
 
     #[derive(Default)]
     struct TestResolver {
@@ -470,6 +635,11 @@ mod tests {
         fn with(mut self, name: &str, value: &str) -> Self {
             self.secrets
                 .insert(name.into(), SecretValue::new(value.to_string()));
+            self
+        }
+
+        fn with_bytes(mut self, name: &str, value: Vec<u8>) -> Self {
+            self.secrets.insert(name.into(), SecretValue::new(value));
             self
         }
     }
@@ -488,6 +658,25 @@ mod tests {
 
     fn no_creds() -> TestResolver {
         TestResolver::default()
+    }
+
+    /// A Scaleway provider whose transport is `mock` and whose base URL points at
+    /// a harmless test host (the mock matches on the URL suffix).
+    fn mock_provider(mock: Arc<MockTransport>) -> ScalewayProvider {
+        ScalewayProvider::new().with_transport(mock, "https://mock.test/instance/v1")
+    }
+
+    /// A successful create response for server `id`, `running`.
+    fn created(id: &str) -> HttpResponse {
+        HttpResponse::new(
+            201,
+            format!(r#"{{"server":{{"id":"{id}","state":"running"}}}}"#).into_bytes(),
+        )
+    }
+
+    /// A successful boot-action response.
+    fn poweron_ok() -> HttpResponse {
+        HttpResponse::new(200, br#"{"task":{"id":"t-1","status":"pending"}}"#.to_vec())
     }
 
     #[test]
@@ -541,29 +730,50 @@ mod tests {
 
     #[tokio::test]
     async fn provision_in_eu_region_then_teardown() {
-        let p = ScalewayProvider::new();
-        let resolver = no_creds();
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(HttpMethod::Post, "/zones/fr-par/servers", created("srv-1"))
+                .on(HttpMethod::Post, "/servers/srv-1/action", poweron_ok())
+                .on(
+                    HttpMethod::Get,
+                    "/servers/srv-1",
+                    HttpResponse::new(
+                        200,
+                        br#"{"server":{"id":"srv-1","state":"running"}}"#.to_vec(),
+                    ),
+                )
+                .on(
+                    HttpMethod::Delete,
+                    "/servers/srv-1",
+                    HttpResponse::new(204, Vec::new()),
+                ),
+        );
+        let p = mock_provider(mock.clone());
         let req = ProvisionRequest::new("gpu.l40s.1x", "fr-par");
 
-        let handle = p.provision(&req, &resolver).await.unwrap();
+        let handle = p.provision(&req, &no_creds()).await.unwrap();
         assert!(handle.state.is_ready());
+        assert_eq!(handle.id, "srv-1");
         assert_eq!(handle.provider, AdapterId::new("scaleway"));
-        assert!(handle.id.starts_with("scaleway-fr-par-"));
-        assert_eq!(p.live_instances().len(), 1);
 
-        let history = p.instance_history(&handle.id);
-        assert!(matches!(history[0], ProvisioningState::Requested));
-        assert!(history.last().unwrap().is_ready());
+        assert!(p.status(&handle, &no_creds()).await.unwrap().is_ready());
+        p.teardown(&handle, &no_creds()).await.unwrap();
 
-        p.teardown(&handle, &resolver).await.unwrap();
-        assert!(p.live_instances().is_empty());
-        assert!(p.status(&handle, &resolver).await.unwrap().is_terminal());
+        // The lifecycle hit the expected REST endpoints in order: create, boot
+        // action, status, teardown.
+        let seen = mock.requests();
+        assert_eq!(seen[0].method, HttpMethod::Post);
+        assert!(seen[0].url.ends_with("/zones/fr-par/servers"));
+        assert_eq!(seen[1].method, HttpMethod::Post);
+        assert!(seen[1].url.ends_with("/action"));
+        assert_eq!(seen[2].method, HttpMethod::Get);
+        assert_eq!(seen[3].method, HttpMethod::Delete);
     }
 
     #[tokio::test]
     async fn provision_in_unknown_region_is_rejected() {
         // A region outside the admitted EU set is rejected by the residency
-        // filter.
+        // filter, before any backend call.
         let p = ScalewayProvider::new();
         let err = p
             .provision(
@@ -574,7 +784,6 @@ mod tests {
             .expect_err("unknown region must be rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-011");
         assert!(!err.is_retryable());
-        assert!(p.live_instances().is_empty());
     }
 
     #[tokio::test]
@@ -601,10 +810,205 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn credentials_never_leak_into_serialized_artifacts() {
+    async fn non_utf8_credential_is_rejected() {
         let p = ScalewayProvider::new();
+        let resolver = TestResolver::default().with_bytes("scaleway_secret_key", vec![0xff, 0xfe]);
+        let req = ProvisionRequest::new("gpu.l40s.1x", "fr-par")
+            .with_credentials(SecretRef::new("scaleway_secret_key"));
+        let err = p
+            .provision(&req, &resolver)
+            .await
+            .expect_err("non-UTF-8 credential rejected");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_poweron_failure_tears_down_and_reports_unknown_instance() {
+        // Create succeeds, boot action 404s: the orphaned server must be torn
+        // down and the error mapped to UnknownInstance (not UnknownOffering).
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(HttpMethod::Post, "/zones/fr-par/servers", created("srv-9"))
+                .on(
+                    HttpMethod::Post,
+                    "/servers/srv-9/action",
+                    HttpResponse::new(404, b"gone".to_vec()),
+                )
+                .on(
+                    HttpMethod::Delete,
+                    "/servers/srv-9",
+                    HttpResponse::new(204, Vec::new()),
+                ),
+        );
+        let p = mock_provider(mock.clone());
+        let err = p
+            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .await
+            .expect_err("poweron failure surfaces");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
+        assert!(!err.is_retryable());
+        // The orphaned server was cleaned up.
+        let seen = mock.requests();
+        assert!(
+            seen.iter()
+                .any(|r| r.method == HttpMethod::Delete && r.url.ends_with("/servers/srv-9"))
+        );
+    }
+
+    #[tokio::test]
+    async fn provision_maps_401_to_credentials_rejected() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/zones/fr-par/servers",
+            HttpResponse::new(401, b"denied".to_vec()),
+        ));
+        let p = mock_provider(mock);
+        let req = ProvisionRequest::new("gpu.l40s.1x", "fr-par")
+            .with_credentials(SecretRef::new("scaleway_secret_key"));
+        let resolver = TestResolver::default().with("scaleway_secret_key", "bad");
+        let err = p
+            .provision(&req, &resolver)
+            .await
+            .expect_err("401 must reject credentials");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_maps_404_to_unknown_offering() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/zones/fr-par/servers",
+            HttpResponse::new(404, b"no such commercial_type".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .await
+            .expect_err("create 404 maps to unknown offering");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-010");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_maps_429_to_capacity_unavailable() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/zones/fr-par/servers",
+            HttpResponse::new(429, b"too many requests".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .await
+            .expect_err("429 must map to capacity unavailable");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-001");
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_maps_500_to_retryable_backend() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/zones/fr-par/servers",
+            HttpResponse::new(500, b"boom".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .await
+            .expect_err("5xx maps to backend");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_malformed_success_body_is_backend_error() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/zones/fr-par/servers",
+            HttpResponse::new(201, b"not json".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .await
+            .expect_err("malformed 2xx body maps to backend");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+    }
+
+    #[tokio::test]
+    async fn status_maps_404_to_unknown_instance() {
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(HttpMethod::Post, "/zones/fr-par/servers", created("srv-2"))
+                .on(HttpMethod::Post, "/servers/srv-2/action", poweron_ok())
+                .on(
+                    HttpMethod::Get,
+                    "/servers/srv-2",
+                    HttpResponse::new(404, b"not found".to_vec()),
+                ),
+        );
+        let p = mock_provider(mock);
+        let handle = p
+            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .await
+            .unwrap();
+        let err = p
+            .status(&handle, &no_creds())
+            .await
+            .expect_err("404 must map to unknown instance");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn teardown_maps_404_to_unknown_instance() {
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(HttpMethod::Post, "/zones/fr-par/servers", created("srv-2"))
+                .on(HttpMethod::Post, "/servers/srv-2/action", poweron_ok())
+                .on(
+                    HttpMethod::Delete,
+                    "/servers/srv-2",
+                    HttpResponse::new(404, b"gone".to_vec()),
+                ),
+        );
+        let p = mock_provider(mock);
+        let handle = p
+            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .await
+            .unwrap();
+        let err = p
+            .teardown(&handle, &no_creds())
+            .await
+            .expect_err("teardown 404 maps to unknown instance");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn transport_failure_maps_to_retryable_backend() {
+        let mock = Arc::new(MockTransport::default().on_error(
+            HttpMethod::Post,
+            "/zones/fr-par/servers",
+            TransportError::Timeout,
+        ));
+        let err = mock_provider(mock)
+            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .await
+            .expect_err("transport failure surfaces as an error");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn credentials_never_leak_into_serialized_artifacts() {
         let secret_value = "leak-me-scaleway-secret-key";
         let resolver = TestResolver::default().with("scaleway_secret_key", secret_value);
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(HttpMethod::Post, "/zones/fr-par/servers", created("srv-3"))
+                .on(HttpMethod::Post, "/servers/srv-3/action", poweron_ok()),
+        );
+        let p = mock_provider(mock.clone());
         let req = ProvisionRequest::new("gpu.l40s.1x", "fr-par")
             .with_credentials(SecretRef::new("scaleway_secret_key"));
 
@@ -621,6 +1025,17 @@ mod tests {
         assert!(!describe_json.contains(secret_value));
         // The descriptor names the credential kind only.
         assert!(describe_json.contains("\"credentials\":\"api_key\""));
+
+        // The token rode in the X-Auth-Token header (never as a bearer) and never
+        // landed in any serialized artifact.
+        let seen = mock.requests();
+        assert!(seen[0].bearer.is_none());
+        assert!(
+            seen[0]
+                .headers
+                .iter()
+                .any(|(k, v)| k == "X-Auth-Token" && v == secret_value)
+        );
     }
 
     #[tokio::test]
@@ -635,8 +1050,13 @@ mod tests {
 
     #[tokio::test]
     async fn discoverable_as_a_provider_trait_object() {
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(HttpMethod::Post, "/zones/nl-ams/servers", created("srv-4"))
+                .on(HttpMethod::Post, "/servers/srv-4/action", poweron_ok()),
+        );
         let mut registry: Registry<dyn Provider> = Registry::new();
-        registry.register(Arc::new(ScalewayProvider::new()));
+        registry.register(Arc::new(mock_provider(mock)));
         let found: Arc<dyn Provider> = registry.get(&AdapterId::new("scaleway")).unwrap();
         let handle = found
             .provision(&ProvisionRequest::new("gpu.l4.1x", "nl-ams"), &no_creds())

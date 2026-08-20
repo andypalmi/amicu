@@ -13,23 +13,30 @@
 //! a caller genuinely needs other jurisdictions.
 //!
 //! Hetzner's GPU hardware lives only in its German and Finnish data centers, so
-//! the GPU offerings are sold in the EU data centers alone. The
-//! [`ProviderCapabilities`] descriptor carries Hetzner's real data centers and a
-//! representative slice of the GEX dedicated-server catalog with monthly
-//! on-demand pricing. Live provisioning against the hcloud REST API and
-//! real-time capacity/pricing sync are out of scope here (the latter is
-//! TASK-023); the provisioning surface simulates the server lifecycle in
-//! memory, mirroring [`FakeProvider`](crate::fake::FakeProvider), so the planner
-//! and apply path can be exercised without network or credentials. Prices are
-//! illustrative catalog values, not a live quote.
+//! the GPU offerings are sold in the EU data centers alone. Provisioning drives
+//! the hcloud REST API (`https://api.hetzner.cloud/v1`) through the
+//! [`HttpTransport`] seam: `POST /servers` to create, `GET /servers/{id}` for
+//! status, and `DELETE /servers/{id}` to tear down, authenticated with
+//! `Authorization: Bearer`. The adapter never touches a concrete HTTP client —
+//! production uses [`ReqwestTransport`], tests inject a mock — so the
+//! provisioning path is exercised with no network, credentials, or spend. HTTP
+//! status codes map onto typed [`ProviderError`]s (`401`/`403` → credentials
+//! rejected, `404` → unknown instance/offering, `409`/`429` → capacity
+//! unavailable, other non-`2xx` → retryable backend); a transport failure maps
+//! to a retryable backend error.
+//!
+//! The [`ProviderCapabilities`] descriptor carries Hetzner's real data centers
+//! and a representative slice of the GEX dedicated-server catalog with monthly
+//! on-demand pricing. Real-time capacity/pricing sync is out of scope here
+//! (TASK-023); prices are illustrative catalog values, not a live quote.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::Arc;
 
 use amicu_core::adapter::{Adapter, AdapterError, AdapterId, DescribeCapabilities, HealthStatus};
 use amicu_core::resource::{Accelerator, AcceleratorKind, Money};
 use amicu_core::secret::{SecretRef, SecretResolver};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::capability::{
     Availability, AvailabilityState, BillingGranularity, ComputeOffering, CredentialsModel,
@@ -40,9 +47,17 @@ use crate::capability::{
 use crate::provider::{
     Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
 };
+use crate::transport::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport, TransportError};
 
 /// The adapter identity Hetzner registers under.
 pub const PROVIDER_ID: &str = "hetzner";
+
+/// The hcloud REST API base URL.
+const BASE_URL: &str = "https://api.hetzner.cloud/v1";
+
+/// Placeholder OS image for the create body. Live provisioning selects the real
+/// image (TASK-023).
+const DEFAULT_IMAGE: &str = "ubuntu-22.04";
 
 /// A Hetzner data center: its location code, residency jurisdiction, ISO
 /// country code, human-readable location, and whether it hosts GPU (GEX)
@@ -154,25 +169,96 @@ const GPUS: &[GpuSpec] = &[
     },
 ];
 
+/// Request body for `POST {base}/servers`.
+///
+/// A minimal create body: the offering id stands in for Hetzner's `server_type`
+/// and the region for its `location`. Richer fields (SSH keys, volumes, user
+/// data) arrive with live provisioning (TASK-023).
+#[derive(Serialize)]
+struct CreateServerRequest<'a> {
+    name: &'a str,
+    server_type: &'a str,
+    location: &'a str,
+    image: &'a str,
+}
+
+/// The hcloud `{"server":{...}}` envelope returned by create and status.
+#[derive(Deserialize)]
+struct ServerEnvelope {
+    server: ServerObject,
+}
+
+/// The subset of an hcloud server object the adapter consumes.
+#[derive(Deserialize)]
+struct ServerObject {
+    /// Provider-assigned server id (an integer in the hcloud API).
+    id: i64,
+    /// Lifecycle status, e.g. `"running"`.
+    status: Option<String>,
+}
+
+/// Map an hcloud server status string onto a [`ProvisioningState`].
+fn map_server_state(status: Option<&str>) -> ProvisioningState {
+    match status.unwrap_or_default() {
+        "running" => ProvisioningState::Ready {
+            detail: "server running".into(),
+        },
+        "initializing" | "starting" | "rebuilding" | "migrating" => {
+            ProvisioningState::Provisioning {
+                detail: "server starting".into(),
+            }
+        }
+        "stopping" => ProvisioningState::Stopping {
+            detail: "server stopping".into(),
+        },
+        "off" => ProvisioningState::Stopped {
+            detail: "server off".into(),
+        },
+        "deleting" => ProvisioningState::Terminated {
+            detail: "server deleting".into(),
+        },
+        "" => ProvisioningState::Provisioning {
+            detail: "server status unknown".into(),
+        },
+        other => ProvisioningState::Provisioning {
+            detail: format!("server status {other}"),
+        },
+    }
+}
+
+/// Fold a transport failure (the exchange never completed) into a retryable
+/// backend error.
+fn transport_error(err: &TransportError) -> AdapterError {
+    AdapterError::from_kind(ProviderError::Backend {
+        detail: format!("Hetzner transport failure: {err}"),
+    })
+}
+
+/// Map a non-`2xx` status from a per-instance call (`status`/`teardown`) onto a
+/// typed error; `404` means the server is unknown.
+fn lifecycle_error(status: u16, id: &str) -> AdapterError {
+    let kind = match status {
+        401 | 403 => ProviderError::CredentialsRejected {
+            detail: "Hetzner rejected the API token".into(),
+        },
+        404 => ProviderError::UnknownInstance { id: id.into() },
+        _ => ProviderError::Backend {
+            detail: format!("Hetzner API returned HTTP {status}"),
+        },
+    };
+    AdapterError::from_kind(kind)
+}
+
 /// The Hetzner provider adapter.
 ///
-/// Holds the admitted (residency-filtered) region set and the derived
-/// capability descriptor. Provisioning is simulated in memory (see the module
-/// docs); every simulated server and its transitions are recorded for
-/// observability.
+/// Holds the admitted (residency-filtered) region set, the derived capability
+/// descriptor, and the [`HttpTransport`] used to reach the hcloud REST API.
 pub struct HetznerProvider {
     id: AdapterId,
     capabilities: ProviderCapabilities,
     health: HealthStatus,
-    state: Mutex<State>,
-}
-
-/// Mutable in-memory state behind the simulated provisioning surface.
-#[derive(Default)]
-struct State {
-    counter: u64,
-    instances: HashMap<String, ProvisioningHandle>,
-    history: HashMap<String, Vec<ProvisioningState>>,
+    transport: Arc<dyn HttpTransport>,
+    base_url: String,
 }
 
 impl HetznerProvider {
@@ -204,7 +290,8 @@ impl HetznerProvider {
             id,
             capabilities,
             health: HealthStatus::Healthy,
-            state: Mutex::new(State::default()),
+            transport: Arc::new(ReqwestTransport::new()),
+            base_url: BASE_URL.to_string(),
         }
     }
 
@@ -213,6 +300,19 @@ impl HetznerProvider {
     pub fn with_health(mut self, health: HealthStatus) -> Self {
         self.capabilities.health = health.clone();
         self.health = health;
+        self
+    }
+
+    /// Swap in a transport and base URL. Test-only: adapter tests inject a mock
+    /// so the provisioning path runs with no network, credentials, or spend.
+    #[cfg(test)]
+    fn with_transport(
+        mut self,
+        transport: Arc<dyn HttpTransport>,
+        base_url: impl Into<String>,
+    ) -> Self {
+        self.transport = transport;
+        self.base_url = base_url.into();
         self
     }
 
@@ -299,27 +399,6 @@ impl HetznerProvider {
         caps
     }
 
-    /// The instances currently live (provisioned and non-terminal).
-    #[must_use]
-    pub fn live_instances(&self) -> Vec<ProvisioningHandle> {
-        self.lock()
-            .instances
-            .values()
-            .filter(|h| !h.state.is_terminal())
-            .cloned()
-            .collect()
-    }
-
-    /// The recorded state transitions for `id`, in order.
-    #[must_use]
-    pub fn instance_history(&self, id: &str) -> Vec<ProvisioningState> {
-        self.lock().history.get(id).cloned().unwrap_or_default()
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().expect("hetzner provider mutex poisoned")
-    }
-
     fn has_offering(&self, offering_id: &str) -> bool {
         self.capabilities
             .compute
@@ -339,18 +418,31 @@ impl HetznerProvider {
             .is_some_and(|o| o.regions.iter().any(|r| r == region))
     }
 
-    /// Resolve and (pretend to) use the credential to authenticate the hcloud
-    /// API call. The [`SecretValue`](amicu_core::secret::SecretValue) lives only
-    /// for this call and is dropped (zeroized) on return; it is never stored,
-    /// placed on a handle, logged, or serialized. An empty credential is
-    /// rejected as [`ProviderError::CredentialsRejected`].
-    async fn authenticate(
+    /// Build a request for `{base}{path}`, attaching `token` as a bearer when
+    /// present.
+    fn build_request(&self, method: HttpMethod, path: &str, token: Option<&str>) -> HttpRequest {
+        let mut req = HttpRequest::new(method, format!("{}{path}", self.base_url));
+        if let Some(token) = token {
+            req = req.with_bearer(token);
+        }
+        req
+    }
+
+    /// Resolve the credential to a transient bearer token for a single REST call.
+    ///
+    /// The returned [`String`] populates
+    /// [`HttpRequest::bearer`](crate::transport::HttpRequest) for the immediate
+    /// call and is dropped when it returns; it is never stored on a
+    /// [`ProvisioningHandle`], logged, or serialized. `None` credentials yield
+    /// `None`; an empty or non-UTF-8 credential is rejected as
+    /// [`ProviderError::CredentialsRejected`].
+    async fn resolve_token(
         &self,
         resolver: &dyn SecretResolver,
         credentials: Option<&SecretRef>,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<Option<String>, AdapterError> {
         let Some(secret_ref) = credentials else {
-            return Ok(());
+            return Ok(None);
         };
         let value = resolver.resolve(secret_ref).await?;
         if value.is_empty() {
@@ -360,8 +452,12 @@ impl HetznerProvider {
                 },
             ));
         }
-        let _signed = value.expose_secret().len();
-        Ok(())
+        let token = value.expose_secret_str().map(str::to_owned).map_err(|_| {
+            AdapterError::from_kind(ProviderError::CredentialsRejected {
+                detail: "Hetzner API token is not valid UTF-8".into(),
+            })
+        })?;
+        Ok(Some(token))
     }
 }
 
@@ -412,34 +508,60 @@ impl Provider for HetznerProvider {
                 region: request.region.clone(),
             }));
         }
-        self.authenticate(resolver, request.credentials.as_ref())
+        let token = self
+            .resolve_token(resolver, request.credentials.as_ref())
             .await?;
 
-        let mut state = self.lock();
-        state.counter += 1;
-        let id = format!("hetzner-{}-{}", request.region, state.counter);
-
-        let ready = ProvisioningState::Ready {
-            detail: "server ready".into(),
+        let create = CreateServerRequest {
+            name: "amicu-server",
+            server_type: request.offering_id.as_str(),
+            location: request.region.as_str(),
+            image: DEFAULT_IMAGE,
         };
-        let transitions = vec![
-            ProvisioningState::Requested,
-            ProvisioningState::Provisioning {
-                detail: "server starting".into(),
-            },
-            ready.clone(),
-        ];
-        let handle = ProvisioningHandle {
-            id: id.clone(),
+        let body = serde_json::to_value(&create).map_err(|_| {
+            AdapterError::from_kind(ProviderError::Backend {
+                detail: "failed to encode Hetzner create request".into(),
+            })
+        })?;
+        let http_request = self
+            .build_request(HttpMethod::Post, "/servers", token.as_deref())
+            .with_json(body);
+        let response = self
+            .transport
+            .execute(http_request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if !response.is_success() {
+            let kind = match response.status {
+                401 | 403 => ProviderError::CredentialsRejected {
+                    detail: "Hetzner rejected the API token".into(),
+                },
+                404 => ProviderError::UnknownOffering {
+                    offering: request.offering_id.clone(),
+                },
+                409 | 429 => ProviderError::CapacityUnavailable {
+                    offering: request.offering_id.clone(),
+                    region: request.region.clone(),
+                },
+                status => ProviderError::Backend {
+                    detail: format!("Hetzner API returned HTTP {status}"),
+                },
+            };
+            return Err(AdapterError::from_kind(kind));
+        }
+        let envelope: ServerEnvelope = response.json().map_err(|_| {
+            AdapterError::from_kind(ProviderError::Backend {
+                detail: "malformed Hetzner create response".into(),
+            })
+        })?;
+        Ok(ProvisioningHandle {
+            id: envelope.server.id.to_string(),
             provider: self.id.clone(),
             region: request.region.clone(),
             offering_id: request.offering_id.clone(),
             credentials: request.credentials.clone(),
-            state: ready,
-        };
-        state.history.insert(id.clone(), transitions);
-        state.instances.insert(id, handle.clone());
-        Ok(handle)
+            state: map_server_state(envelope.server.status.as_deref()),
+        })
     }
 
     async fn status(
@@ -447,17 +569,25 @@ impl Provider for HetznerProvider {
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningState, AdapterError> {
-        self.authenticate(resolver, handle.credentials.as_ref())
+        let token = self
+            .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
-        self.lock()
-            .instances
-            .get(&handle.id)
-            .map(|h| h.state.clone())
-            .ok_or_else(|| {
-                AdapterError::from_kind(ProviderError::UnknownInstance {
-                    id: handle.id.clone(),
-                })
+        let path = format!("/servers/{}", handle.id);
+        let request = self.build_request(HttpMethod::Get, &path, token.as_deref());
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if !response.is_success() {
+            return Err(lifecycle_error(response.status, &handle.id));
+        }
+        let envelope: ServerEnvelope = response.json().map_err(|_| {
+            AdapterError::from_kind(ProviderError::Backend {
+                detail: "malformed Hetzner status response".into(),
             })
+        })?;
+        Ok(map_server_state(envelope.server.status.as_deref()))
     }
 
     async fn teardown(
@@ -465,25 +595,19 @@ impl Provider for HetznerProvider {
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<(), AdapterError> {
-        self.authenticate(resolver, handle.credentials.as_ref())
+        let token = self
+            .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
-
-        let mut state = self.lock();
-        let Some(instance) = state.instances.get_mut(&handle.id) else {
-            return Err(AdapterError::from_kind(ProviderError::UnknownInstance {
-                id: handle.id.clone(),
-            }));
-        };
-        instance.state = ProvisioningState::Terminated {
-            detail: "server terminated".into(),
-        };
-        let entry = state.history.entry(handle.id.clone()).or_default();
-        entry.push(ProvisioningState::Stopping {
-            detail: "server stopping".into(),
-        });
-        entry.push(ProvisioningState::Terminated {
-            detail: "server terminated".into(),
-        });
+        let path = format!("/servers/{}", handle.id);
+        let request = self.build_request(HttpMethod::Delete, &path, token.as_deref());
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if !response.is_success() {
+            return Err(lifecycle_error(response.status, &handle.id));
+        }
         Ok(())
     }
 }
@@ -491,10 +615,11 @@ impl Provider for HetznerProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::{HttpResponse, MockTransport};
     use amicu_core::adapter::Registry;
     use amicu_core::diagnostic::{Category as DiagCategory, DiagnosticCode};
     use amicu_core::secret::SecretValue;
-    use std::sync::Arc;
+    use std::collections::HashMap;
 
     #[derive(Default)]
     struct TestResolver {
@@ -505,6 +630,11 @@ mod tests {
         fn with(mut self, name: &str, value: &str) -> Self {
             self.secrets
                 .insert(name.into(), SecretValue::new(value.to_string()));
+            self
+        }
+
+        fn with_bytes(mut self, name: &str, value: Vec<u8>) -> Self {
+            self.secrets.insert(name.into(), SecretValue::new(value));
             self
         }
     }
@@ -523,6 +653,20 @@ mod tests {
 
     fn no_creds() -> TestResolver {
         TestResolver::default()
+    }
+
+    /// A Hetzner provider whose transport is `mock` and whose base URL points at
+    /// a harmless test host (the mock matches on the URL suffix).
+    fn mock_provider(mock: Arc<MockTransport>) -> HetznerProvider {
+        HetznerProvider::new().with_transport(mock, "https://mock.test/v1")
+    }
+
+    /// A successful `POST /servers` create response for server `id`, `running`.
+    fn created(id: i64) -> HttpResponse {
+        HttpResponse::new(
+            201,
+            format!(r#"{{"server":{{"id":{id},"status":"running"}}}}"#).into_bytes(),
+        )
     }
 
     #[test]
@@ -612,30 +756,44 @@ mod tests {
 
     #[tokio::test]
     async fn provision_in_eu_region_then_teardown() {
-        let p = HetznerProvider::new();
-        let resolver = no_creds();
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(HttpMethod::Post, "/servers", created(42))
+                .on(
+                    HttpMethod::Get,
+                    "/servers/42",
+                    HttpResponse::new(200, br#"{"server":{"id":42,"status":"running"}}"#.to_vec()),
+                )
+                .on(
+                    HttpMethod::Delete,
+                    "/servers/42",
+                    HttpResponse::new(200, br#"{"action":{"id":1}}"#.to_vec()),
+                ),
+        );
+        let p = mock_provider(mock.clone());
         let req = ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1");
 
-        let handle = p.provision(&req, &resolver).await.unwrap();
+        let handle = p.provision(&req, &no_creds()).await.unwrap();
         assert!(handle.state.is_ready());
+        assert_eq!(handle.id, "42");
         assert_eq!(handle.provider, AdapterId::new("hetzner"));
-        assert!(handle.id.starts_with("hetzner-nbg1-"));
-        assert_eq!(p.live_instances().len(), 1);
 
-        let history = p.instance_history(&handle.id);
-        assert!(matches!(history[0], ProvisioningState::Requested));
-        assert!(history.last().unwrap().is_ready());
+        assert!(p.status(&handle, &no_creds()).await.unwrap().is_ready());
+        p.teardown(&handle, &no_creds()).await.unwrap();
 
-        p.teardown(&handle, &resolver).await.unwrap();
-        assert!(p.live_instances().is_empty());
-        assert!(p.status(&handle, &resolver).await.unwrap().is_terminal());
+        // The lifecycle hit the expected REST endpoints in order.
+        let seen = mock.requests();
+        assert_eq!(seen[0].method, HttpMethod::Post);
+        assert!(seen[0].url.ends_with("/servers"));
+        assert_eq!(seen[1].method, HttpMethod::Get);
+        assert_eq!(seen[2].method, HttpMethod::Delete);
     }
 
     #[tokio::test]
     async fn provision_in_non_eu_region_is_rejected() {
         // ash (US) and sin (APAC) are real Hetzner data centers, but the EU
         // adapter admits neither: the residency filter restricts servers to
-        // compliant regions.
+        // compliant regions, before any backend call.
         let p = HetznerProvider::new();
         for region in ["ash", "hil", "sin"] {
             let err = p
@@ -648,7 +806,6 @@ mod tests {
             assert_eq!(err.code().to_string(), "AMICU-PROVIDER-011");
             assert!(!err.is_retryable());
         }
-        assert!(p.live_instances().is_empty());
     }
 
     #[tokio::test]
@@ -675,7 +832,6 @@ mod tests {
             .await
             .expect_err("GPU offering not sold in this region");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-011");
-        assert!(p.live_instances().is_empty());
     }
 
     #[tokio::test]
@@ -693,10 +849,187 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn credentials_never_leak_into_serialized_artifacts() {
+    async fn non_utf8_credential_is_rejected() {
         let p = HetznerProvider::new();
+        let resolver = TestResolver::default().with_bytes("hetzner_token", vec![0xff, 0xfe]);
+        let req = ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1")
+            .with_credentials(SecretRef::new("hetzner_token"));
+        let err = p
+            .provision(&req, &resolver)
+            .await
+            .expect_err("non-UTF-8 credential rejected");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_maps_401_to_credentials_rejected() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/servers",
+            HttpResponse::new(401, b"unauthorized".to_vec()),
+        ));
+        let p = mock_provider(mock);
+        let req = ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1")
+            .with_credentials(SecretRef::new("hetzner_token"));
+        let resolver = TestResolver::default().with("hetzner_token", "bad");
+        let err = p
+            .provision(&req, &resolver)
+            .await
+            .expect_err("401 must reject credentials");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_maps_404_to_unknown_offering() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/servers",
+            HttpResponse::new(404, b"no such server type".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(
+                &ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1"),
+                &no_creds(),
+            )
+            .await
+            .expect_err("create 404 maps to unknown offering");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-010");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_maps_429_to_capacity_unavailable() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/servers",
+            HttpResponse::new(429, b"rate_limit_exceeded".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(
+                &ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1"),
+                &no_creds(),
+            )
+            .await
+            .expect_err("429 must map to capacity unavailable");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-001");
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_maps_500_to_retryable_backend() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/servers",
+            HttpResponse::new(500, b"boom".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(
+                &ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1"),
+                &no_creds(),
+            )
+            .await
+            .expect_err("5xx maps to backend");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_malformed_success_body_is_backend_error() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/servers",
+            HttpResponse::new(201, b"not json".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(
+                &ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1"),
+                &no_creds(),
+            )
+            .await
+            .expect_err("malformed 2xx body maps to backend");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+    }
+
+    #[tokio::test]
+    async fn status_maps_404_to_unknown_instance() {
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(HttpMethod::Post, "/servers", created(7))
+                .on(
+                    HttpMethod::Get,
+                    "/servers/7",
+                    HttpResponse::new(404, b"not found".to_vec()),
+                ),
+        );
+        let p = mock_provider(mock);
+        let handle = p
+            .provision(
+                &ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1"),
+                &no_creds(),
+            )
+            .await
+            .unwrap();
+        let err = p
+            .status(&handle, &no_creds())
+            .await
+            .expect_err("404 must map to unknown instance");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn teardown_maps_404_to_unknown_instance() {
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(HttpMethod::Post, "/servers", created(7))
+                .on(
+                    HttpMethod::Delete,
+                    "/servers/7",
+                    HttpResponse::new(404, b"gone".to_vec()),
+                ),
+        );
+        let p = mock_provider(mock);
+        let handle = p
+            .provision(
+                &ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1"),
+                &no_creds(),
+            )
+            .await
+            .unwrap();
+        let err = p
+            .teardown(&handle, &no_creds())
+            .await
+            .expect_err("teardown 404 maps to unknown instance");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn transport_failure_maps_to_retryable_backend() {
+        let mock = Arc::new(MockTransport::default().on_error(
+            HttpMethod::Post,
+            "/servers",
+            TransportError::Timeout,
+        ));
+        let err = mock_provider(mock)
+            .provision(
+                &ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1"),
+                &no_creds(),
+            )
+            .await
+            .expect_err("transport failure surfaces as an error");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn credentials_never_leak_into_serialized_artifacts() {
         let secret_value = "leak-me-hetzner-token";
         let resolver = TestResolver::default().with("hetzner_token", secret_value);
+        let mock = Arc::new(MockTransport::default().on(HttpMethod::Post, "/servers", created(9)));
+        let p = mock_provider(mock.clone());
         let req = ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1")
             .with_credentials(SecretRef::new("hetzner_token"));
 
@@ -713,6 +1046,10 @@ mod tests {
         assert!(!describe_json.contains(secret_value));
         // The descriptor names the credential kind only.
         assert!(describe_json.contains("\"credentials\":\"api_token\""));
+
+        // The token was sent as a bearer on the wire but never persisted.
+        let seen = mock.requests();
+        assert_eq!(seen[0].bearer.as_deref(), Some(secret_value));
     }
 
     #[tokio::test]
@@ -728,8 +1065,9 @@ mod tests {
 
     #[tokio::test]
     async fn discoverable_as_a_provider_trait_object() {
+        let mock = Arc::new(MockTransport::default().on(HttpMethod::Post, "/servers", created(3)));
         let mut registry: Registry<dyn Provider> = Registry::new();
-        registry.register(Arc::new(HetznerProvider::new()));
+        registry.register(Arc::new(mock_provider(mock)));
         let found: Arc<dyn Provider> = registry.get(&AdapterId::new("hetzner")).unwrap();
         let handle = found
             .provision(
