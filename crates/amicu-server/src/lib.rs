@@ -36,8 +36,8 @@
 //! | Field | Flag | Env var | Default |
 //! |-------|------|---------|---------|
 //! | `bind` | `--bind` | `AMICU_BIND` | `127.0.0.1:8080` |
-//! | `issuer` | `--issuer` | `AMICU_ISSUER` | `https://auth.amicu.dev` |
-//! | `audience` | `--audience` | `AMICU_AUDIENCE` | `amicu-api` |
+//! | `issuer` | `--issuer` | `AMICU_ISSUER` | `http://localhost:8080` |
+//! | `audience` | `--audience` | `AMICU_AUDIENCE` | `amicu` |
 //! | `base_url` | `--base-url` | `AMICU_BASE_URL` | the `issuer` value |
 //! | `trusted_proxies` | `--trusted-proxies` | `AMICU_TRUSTED_PROXIES` | empty (trust none) |
 //! | `min_tier` | `--min-tier` | `AMICU_MIN_TIER` | `community` |
@@ -81,11 +81,18 @@ pub struct Config {
     pub bind: SocketAddr,
 
     /// Token `iss` the server issues and the engine gate requires.
-    #[arg(long, env = "AMICU_ISSUER", default_value = "https://auth.amicu.dev")]
+    ///
+    /// The dev default matches the web BFF's zero-config issuer
+    /// (`API_URL` ≈ `http://localhost:8080`) so local end-to-end sign-in works
+    /// with no env set; production overrides it with the real issuer URL.
+    #[arg(long, env = "AMICU_ISSUER", default_value = "http://localhost:8080")]
     pub issuer: String,
 
     /// Token `aud` the server issues and the engine gate requires.
-    #[arg(long, env = "AMICU_AUDIENCE", default_value = "amicu-api")]
+    ///
+    /// The dev default matches the web BFF's zero-config audience (`amicu`) so
+    /// its offline token verification accepts tokens this server issues.
+    #[arg(long, env = "AMICU_AUDIENCE", default_value = "amicu")]
     pub audience: String,
 
     /// Public base URL advertised in the OIDC discovery document (its

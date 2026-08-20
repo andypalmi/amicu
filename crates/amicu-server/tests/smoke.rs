@@ -19,8 +19,8 @@ use tokio::sync::oneshot;
 fn test_config() -> Config {
     Config {
         bind: "127.0.0.1:0".parse().unwrap(),
-        issuer: "https://auth.amicu.dev".to_string(),
-        audience: "amicu-api".to_string(),
+        issuer: "http://localhost:8080".to_string(),
+        audience: "amicu".to_string(),
         base_url: None,
         trusted_proxies: String::new(),
         min_tier: amicu_server::MinTier::Community,
