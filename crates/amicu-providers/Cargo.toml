@@ -11,9 +11,14 @@ amicu-core = { path = "../amicu-core" }
 async-trait = "0.1"
 # rustls (not native-tls) to keep the build free of a system OpenSSL dependency.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+# Pure-Rust async SSH client for the self-hosted transport seam. The `ring`
+# backend (not the default aws-lc-rs) keeps the build hermetic like rustls: no
+# system OpenSSL/libssh2 C dependency, and it holds MSRV 1.97.
+russh = { version = "0.54", default-features = false, features = ["ring", "flate2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

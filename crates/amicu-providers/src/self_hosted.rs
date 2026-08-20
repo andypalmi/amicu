@@ -17,23 +17,29 @@
 //! becomes a [`ComputeOffering`] sold in that host's declared region.
 //!
 //! Hosts are provisioned over SSH ([`ProvisioningMethod::Ssh`],
-//! [`CredentialsModel::SshKey`]): [`provision`](SelfHostedProvider::provision)
-//! registers/prepares a declared host, validating that the request's offering and
-//! region correspond to a declared host and authenticating the SSH key via the
-//! same transient-secret pattern as the cloud adapters. **Live SSH and real
-//! network access are out of scope** (consistent with the other adapters); the
-//! provisioning surface simulates the `Requested → Provisioning → Ready`
-//! lifecycle in memory, mirroring [`FakeProvider`](crate::fake::FakeProvider), so
-//! the planner and apply path can be exercised without touching real hardware.
-//! Declared hourly costs are amortized/own-hardware figures, not a provider
-//! quote (and default to zero).
+//! [`CredentialsModel::SshKey`]) through the [`SshTransport`] seam:
+//! [`provision`](SelfHostedProvider::provision) validates that the request's
+//! offering and region correspond to a declared host, resolves the SSH key
+//! transiently, then runs the host prep/registration command over SSH;
+//! [`status`](SelfHostedProvider::status) queries host liveness and
+//! [`teardown`](SelfHostedProvider::teardown) runs deregistration/cleanup. The
+//! adapter never touches a concrete SSH client — production uses
+//! [`RusshTransport`], tests inject a mock — so the provisioning path is
+//! exercised with no network, credentials, or spend. A failed SSH exchange
+//! ([`SshTransportError`]) is distinct from a command that ran and returned a
+//! non-zero exit status: auth failure maps to
+//! [`CredentialsRejected`](ProviderError::CredentialsRejected), connection/timeout
+//! to a retryable [`Backend`](ProviderError::Backend), and a non-zero exit to a
+//! [`Backend`](ProviderError::Backend) (or
+//! [`UnknownInstance`](ProviderError::UnknownInstance) when the host reports the
+//! instance is not found). Declared hourly costs are amortized/own-hardware
+//! figures, not a provider quote (and default to zero).
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::Arc;
 
 use amicu_core::adapter::{Adapter, AdapterError, AdapterId, DescribeCapabilities, HealthStatus};
 use amicu_core::resource::{Accelerator, Money};
-use amicu_core::secret::{SecretRef, SecretResolver};
+use amicu_core::secret::{SecretRef, SecretResolver, SecretValue};
 use amicu_core::units::ByteSize;
 use async_trait::async_trait;
 
@@ -46,9 +52,17 @@ use crate::capability::{
 use crate::provider::{
     Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
 };
+use crate::ssh::{CommandOutput, RusshTransport, SshTarget, SshTransport, SshTransportError};
 
 /// The adapter identity the self-hosted provider registers under.
 pub const PROVIDER_ID: &str = "self-hosted";
+
+/// The remote agent invoked over SSH to manage a declared host.
+const HOST_AGENT: &str = "amicu-host";
+
+/// Exit status the host agent uses to signal that an instance is not known
+/// (mapped to [`ProviderError::UnknownInstance`], the SSH analogue of HTTP 404).
+const EXIT_NOT_FOUND: i32 = 44;
 
 /// Ambiguity in the operator-declared hosts backing a [`SelfHostedProvider`].
 ///
@@ -95,6 +109,12 @@ pub struct DeclaredHost {
     /// Whether this host represents an existing cluster (adds managed-Kubernetes
     /// orchestration and a shared network filesystem to the descriptor).
     cluster: bool,
+    /// SSH host/address to connect to. Defaults to the host `id` when unset.
+    address: Option<String>,
+    /// SSH login user.
+    user: String,
+    /// SSH TCP port.
+    ssh_port: u16,
 }
 
 impl DeclaredHost {
@@ -110,7 +130,32 @@ impl DeclaredHost {
             memory: None,
             hourly_cost: 0.0,
             cluster: false,
+            address: None,
+            user: "amicu".into(),
+            ssh_port: 22,
         }
+    }
+
+    /// Declare the host's SSH address and login user. The address defaults to the
+    /// host id and the user to `amicu` when this is not called.
+    #[must_use]
+    pub fn with_ssh(mut self, address: impl Into<String>, user: impl Into<String>) -> Self {
+        self.address = Some(address.into());
+        self.user = user.into();
+        self
+    }
+
+    /// Declare a non-default SSH port.
+    #[must_use]
+    pub fn with_ssh_port(mut self, port: u16) -> Self {
+        self.ssh_port = port;
+        self
+    }
+
+    /// The SSH target for this host: its address (or id) and login user/port.
+    fn ssh_target(&self) -> SshTarget {
+        let address = self.address.clone().unwrap_or_else(|| self.id.clone());
+        SshTarget::new(address, self.user.clone()).with_port(self.ssh_port)
     }
 
     /// Declare the host's accelerator.
@@ -149,23 +194,14 @@ impl DeclaredHost {
 /// The self-hosted / bare-metal provider adapter.
 ///
 /// Built from operator-declared hosts; its descriptor reflects exactly those
-/// hosts and derives residency from their declared regions. Provisioning is
-/// simulated in memory (see the module docs); every simulated instance and its
-/// transitions are recorded for observability.
+/// hosts and derives residency from their declared regions. Provisioning runs
+/// real host-management commands over the [`SshTransport`] seam.
 pub struct SelfHostedProvider {
     id: AdapterId,
     hosts: Vec<DeclaredHost>,
     capabilities: ProviderCapabilities,
     health: HealthStatus,
-    state: Mutex<State>,
-}
-
-/// Mutable in-memory state behind the simulated provisioning surface.
-#[derive(Default)]
-struct State {
-    counter: u64,
-    instances: HashMap<String, ProvisioningHandle>,
-    history: HashMap<String, Vec<ProvisioningState>>,
+    transport: Arc<dyn SshTransport>,
 }
 
 impl SelfHostedProvider {
@@ -193,7 +229,7 @@ impl SelfHostedProvider {
             hosts,
             capabilities,
             health,
-            state: Mutex::new(State::default()),
+            transport: Arc::new(RusshTransport::new()),
         }
     }
 
@@ -272,6 +308,14 @@ impl SelfHostedProvider {
         self
     }
 
+    /// Swap in an SSH transport. Test-only: adapter tests inject a mock so the
+    /// provisioning path runs with no network, credentials, or spend.
+    #[cfg(test)]
+    fn with_transport(mut self, transport: Arc<dyn SshTransport>) -> Self {
+        self.transport = transport;
+        self
+    }
+
     /// Build the descriptor from the declared `hosts`. Each host becomes a
     /// [`ComputeOffering`] sold in its declared region, and each declared region
     /// (deduplicated by code) carries the residency the operator stated.
@@ -345,34 +389,17 @@ impl SelfHostedProvider {
         self.hosts.len()
     }
 
-    /// The instances currently live (provisioned and non-terminal).
-    #[must_use]
-    pub fn live_instances(&self) -> Vec<ProvisioningHandle> {
-        self.lock()
-            .instances
-            .values()
-            .filter(|h| !h.state.is_terminal())
-            .cloned()
-            .collect()
-    }
-
-    /// The recorded state transitions for `id`, in order.
-    #[must_use]
-    pub fn instance_history(&self, id: &str) -> Vec<ProvisioningState> {
-        self.lock().history.get(id).cloned().unwrap_or_default()
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .expect("self-hosted provider mutex poisoned")
-    }
-
     fn has_offering(&self, offering_id: &str) -> bool {
         self.capabilities
             .compute
             .iter()
             .any(|o| o.id == offering_id)
+    }
+
+    /// The declared host backing `offering_id`, if any. Used to build the SSH
+    /// target for provisioning and lifecycle commands.
+    fn host_for(&self, offering_id: &str) -> Option<&DeclaredHost> {
+        self.hosts.iter().find(|h| h.id == offering_id)
     }
 
     /// Whether the offering is sold in `region`. Each self-hosted offering is
@@ -388,18 +415,25 @@ impl SelfHostedProvider {
             .any(|o| o.regions.iter().any(|r| r == region))
     }
 
-    /// Resolve and (pretend to) use the SSH key to authenticate the SSH
-    /// provisioning call. The [`SecretValue`](amicu_core::secret::SecretValue)
-    /// lives only for this call and is dropped (zeroized) on return; it is never
-    /// stored, placed on a handle, logged, or serialized. An empty credential is
-    /// rejected as [`ProviderError::CredentialsRejected`].
-    async fn authenticate(
+    /// Resolve the SSH key to a transient [`SecretValue`] for a single set of
+    /// lifecycle commands.
+    ///
+    /// The returned value authenticates the SSH connection and is dropped
+    /// (zeroized) when the caller returns; it is never stored on a
+    /// [`ProvisioningHandle`], logged, or serialized. Self-hosted provisioning
+    /// requires an SSH key: a missing, empty, or non-UTF-8 credential is rejected
+    /// as [`ProviderError::CredentialsRejected`] before any SSH call.
+    async fn resolve_key(
         &self,
         resolver: &dyn SecretResolver,
         credentials: Option<&SecretRef>,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<SecretValue, AdapterError> {
         let Some(secret_ref) = credentials else {
-            return Ok(());
+            return Err(AdapterError::from_kind(
+                ProviderError::CredentialsRejected {
+                    detail: "self-hosted provisioning requires an SSH key".into(),
+                },
+            ));
         };
         let value = resolver.resolve(secret_ref).await?;
         if value.is_empty() {
@@ -409,8 +443,14 @@ impl SelfHostedProvider {
                 },
             ));
         }
-        let _signed = value.expose_secret().len();
-        Ok(())
+        // Reject a non-UTF-8 key up front so the failure is a permanent
+        // credential error, not a transport error.
+        value.expose_secret_str().map_err(|_| {
+            AdapterError::from_kind(ProviderError::CredentialsRejected {
+                detail: "self-hosted SSH key is not valid UTF-8".into(),
+            })
+        })?;
+        Ok(value)
     }
 }
 
@@ -437,6 +477,73 @@ impl DescribeCapabilities for SelfHostedProvider {
     }
 }
 
+/// POSIX single-quote a value interpolated into a remote shell command, so an
+/// argument cannot break out and inject. Wrap in `'...'`, rendering each embedded
+/// `'` as `'\''`.
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Fold an SSH transport failure (the exchange never completed) onto a typed
+/// error: an auth failure is a permanent credential rejection, a
+/// connection/timeout a retryable backend fault.
+fn transport_error(err: &SshTransportError) -> AdapterError {
+    let kind = match err {
+        SshTransportError::Auth(detail) => ProviderError::CredentialsRejected {
+            detail: format!("self-hosted SSH authentication failed: {detail}"),
+        },
+        SshTransportError::Connection(detail) => ProviderError::Backend {
+            detail: format!("self-hosted SSH connection failure: {detail}"),
+        },
+        SshTransportError::Timeout => ProviderError::Backend {
+            detail: "self-hosted SSH exchange timed out".into(),
+        },
+    };
+    AdapterError::from_kind(kind)
+}
+
+/// Map a lifecycle command that ran but exited non-zero onto a typed error: the
+/// [`EXIT_NOT_FOUND`] sentinel means the instance is unknown, any other non-zero
+/// exit is a retryable backend fault carrying a secret-free `stderr` summary.
+fn command_error(output: &CommandOutput, id: &str) -> AdapterError {
+    let kind = if output.exit_status == EXIT_NOT_FOUND {
+        ProviderError::UnknownInstance { id: id.into() }
+    } else {
+        ProviderError::Backend {
+            detail: format!(
+                "self-hosted host agent exited {} ({})",
+                output.exit_status,
+                output.stderr_summary()
+            ),
+        }
+    };
+    AdapterError::from_kind(kind)
+}
+
+/// Map the host agent's liveness token (on `stdout`) onto a [`ProvisioningState`].
+fn map_status(stdout: &[u8]) -> ProvisioningState {
+    match String::from_utf8_lossy(stdout).trim() {
+        "ready" => ProvisioningState::Ready {
+            detail: "host ready".into(),
+        },
+        "provisioning" | "pending" => ProvisioningState::Provisioning {
+            detail: "host preparing".into(),
+        },
+        "stopped" => ProvisioningState::Stopped {
+            detail: "host stopped".into(),
+        },
+        "terminated" => ProvisioningState::Terminated {
+            detail: "host deregistered".into(),
+        },
+        "" => ProvisioningState::Provisioning {
+            detail: "host status unknown".into(),
+        },
+        other => ProvisioningState::Provisioning {
+            detail: format!("host status {other}"),
+        },
+    }
+}
+
 #[async_trait]
 impl Provider for SelfHostedProvider {
     fn capabilities(&self) -> ProviderCapabilities {
@@ -453,41 +560,62 @@ impl Provider for SelfHostedProvider {
                 offering: request.offering_id.clone(),
             }));
         }
-        // The offering and region must correspond to a declared host: an
-        // offering registered against a different declared region is rejected.
+        // The offering and region must correspond to a declared host, before any
+        // SSH call: an offering registered against a different declared region is
+        // rejected.
         if !self.offering_serves_region(&request.offering_id, &request.region) {
             return Err(AdapterError::from_kind(ProviderError::UnknownRegion {
                 region: request.region.clone(),
             }));
         }
-        self.authenticate(resolver, request.credentials.as_ref())
+        let key = self
+            .resolve_key(resolver, request.credentials.as_ref())
             .await?;
+        let target = self
+            .host_for(&request.offering_id)
+            .ok_or_else(|| {
+                AdapterError::from_kind(ProviderError::UnknownOffering {
+                    offering: request.offering_id.clone(),
+                })
+            })?
+            .ssh_target();
 
-        let mut state = self.lock();
-        state.counter += 1;
-        let id = format!("self-hosted-{}-{}", request.region, state.counter);
-
-        let ready = ProvisioningState::Ready {
-            detail: "host ready".into(),
-        };
-        let transitions = vec![
-            ProvisioningState::Requested,
-            ProvisioningState::Provisioning {
-                detail: "host preparing over ssh".into(),
-            },
-            ready.clone(),
-        ];
-        let handle = ProvisioningHandle {
-            id: id.clone(),
+        // Prepare/register the declared host over SSH.
+        let command = format!(
+            "{HOST_AGENT} provision --offering {} --region {}",
+            sh_quote(&request.offering_id),
+            sh_quote(&request.region)
+        );
+        let output = self
+            .transport
+            .run(&target, &command, &key)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if !output.is_success() {
+            return Err(AdapterError::from_kind(ProviderError::Backend {
+                detail: format!(
+                    "self-hosted host prep exited {} ({})",
+                    output.exit_status,
+                    output.stderr_summary()
+                ),
+            }));
+        }
+        let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if id.is_empty() {
+            return Err(AdapterError::from_kind(ProviderError::Backend {
+                detail: "self-hosted host agent did not report an instance id".into(),
+            }));
+        }
+        Ok(ProvisioningHandle {
+            id,
             provider: self.id.clone(),
             region: request.region.clone(),
             offering_id: request.offering_id.clone(),
             credentials: request.credentials.clone(),
-            state: ready,
-        };
-        state.history.insert(id.clone(), transitions);
-        state.instances.insert(id, handle.clone());
-        Ok(handle)
+            state: ProvisioningState::Ready {
+                detail: "host ready".into(),
+            },
+        })
     }
 
     async fn status(
@@ -495,17 +623,27 @@ impl Provider for SelfHostedProvider {
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningState, AdapterError> {
-        self.authenticate(resolver, handle.credentials.as_ref())
+        let key = self
+            .resolve_key(resolver, handle.credentials.as_ref())
             .await?;
-        self.lock()
-            .instances
-            .get(&handle.id)
-            .map(|h| h.state.clone())
+        let target = self
+            .host_for(&handle.offering_id)
             .ok_or_else(|| {
                 AdapterError::from_kind(ProviderError::UnknownInstance {
                     id: handle.id.clone(),
                 })
-            })
+            })?
+            .ssh_target();
+        let command = format!("{HOST_AGENT} status {}", sh_quote(&handle.id));
+        let output = self
+            .transport
+            .run(&target, &command, &key)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if !output.is_success() {
+            return Err(command_error(&output, &handle.id));
+        }
+        Ok(map_status(&output.stdout))
     }
 
     async fn teardown(
@@ -513,25 +651,26 @@ impl Provider for SelfHostedProvider {
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<(), AdapterError> {
-        self.authenticate(resolver, handle.credentials.as_ref())
+        let key = self
+            .resolve_key(resolver, handle.credentials.as_ref())
             .await?;
-
-        let mut state = self.lock();
-        let Some(instance) = state.instances.get_mut(&handle.id) else {
-            return Err(AdapterError::from_kind(ProviderError::UnknownInstance {
-                id: handle.id.clone(),
-            }));
-        };
-        instance.state = ProvisioningState::Terminated {
-            detail: "host deregistered".into(),
-        };
-        let entry = state.history.entry(handle.id.clone()).or_default();
-        entry.push(ProvisioningState::Stopping {
-            detail: "host stopping".into(),
-        });
-        entry.push(ProvisioningState::Terminated {
-            detail: "host deregistered".into(),
-        });
+        let target = self
+            .host_for(&handle.offering_id)
+            .ok_or_else(|| {
+                AdapterError::from_kind(ProviderError::UnknownInstance {
+                    id: handle.id.clone(),
+                })
+            })?
+            .ssh_target();
+        let command = format!("{HOST_AGENT} teardown {}", sh_quote(&handle.id));
+        let output = self
+            .transport
+            .run(&target, &command, &key)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if !output.is_success() {
+            return Err(command_error(&output, &handle.id));
+        }
         Ok(())
     }
 }
@@ -540,10 +679,12 @@ impl Provider for SelfHostedProvider {
 mod tests {
     use super::*;
     use crate::capability::Residency;
+    use crate::ssh::MockSshTransport;
     use amicu_core::adapter::Registry;
     use amicu_core::diagnostic::{Category as DiagCategory, DiagnosticCode};
     use amicu_core::resource::AcceleratorKind;
     use amicu_core::secret::SecretValue;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     #[derive(Default)]
@@ -555,6 +696,11 @@ mod tests {
         fn with(mut self, name: &str, value: &str) -> Self {
             self.secrets
                 .insert(name.into(), SecretValue::new(value.to_string()));
+            self
+        }
+
+        fn with_bytes(mut self, name: &str, value: Vec<u8>) -> Self {
+            self.secrets.insert(name.into(), SecretValue::new(value));
             self
         }
     }
@@ -573,6 +719,42 @@ mod tests {
 
     fn no_creds() -> TestResolver {
         TestResolver::default()
+    }
+
+    /// A resolver holding a valid (opaque, non-empty UTF-8) SSH key named
+    /// `ssh_key`.
+    fn key_resolver() -> TestResolver {
+        TestResolver::default().with("ssh_key", "PRIVATE-KEY-MATERIAL")
+    }
+
+    /// A provision request for the DE host, binding the `ssh_key` credential.
+    fn de_request() -> ProvisionRequest {
+        ProvisionRequest::new("rack-de-01", "dc-frankfurt")
+            .with_credentials(SecretRef::new("ssh_key"))
+    }
+
+    /// A DE provider whose SSH transport is the given mock.
+    fn mock_provider(mock: Arc<MockSshTransport>) -> SelfHostedProvider {
+        SelfHostedProvider::new()
+            .with_host(de_host())
+            .with_transport(mock)
+    }
+
+    /// A mock that drives the full happy-path lifecycle: provision reports an
+    /// instance id, status reports `ready`, teardown succeeds.
+    fn lifecycle_mock() -> Arc<MockSshTransport> {
+        Arc::new(
+            MockSshTransport::default()
+                .on(
+                    "provision",
+                    CommandOutput::new(0, b"sh-inst-1".to_vec(), Vec::new()),
+                )
+                .on(
+                    "status",
+                    CommandOutput::new(0, b"ready".to_vec(), Vec::new()),
+                )
+                .on("teardown", CommandOutput::new(0, Vec::new(), Vec::new())),
+        )
     }
 
     /// A declared GPU host in Germany (EU residency).
@@ -686,14 +868,14 @@ mod tests {
             .with_resources(8, "64GiB".parse().unwrap());
         let p = SelfHostedProvider::new()
             .with_host(de_host())
-            .with_host(dup);
+            .with_host(dup)
+            .with_transport(lifecycle_mock());
         // The infallible provider is inspectably invalid.
         assert!(p.validate().is_err());
+        let req = ProvisionRequest::new("rack-de-01", "dc-virginia")
+            .with_credentials(SecretRef::new("ssh_key"));
         let handle = p
-            .provision(
-                &ProvisionRequest::new("rack-de-01", "dc-virginia"),
-                &no_creds(),
-            )
+            .provision(&req, &key_resolver())
             .await
             .expect("second host's region now serves");
         assert!(handle.state.is_ready());
@@ -823,24 +1005,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provision_declared_host_then_teardown() {
-        let p = SelfHostedProvider::new().with_host(de_host());
-        let resolver = no_creds();
-        let req = ProvisionRequest::new("rack-de-01", "dc-frankfurt");
+    async fn provision_status_teardown_runs_expected_ssh_commands_in_order() {
+        let mock = lifecycle_mock();
+        let p = mock_provider(mock.clone());
+        let resolver = key_resolver();
 
-        let handle = p.provision(&req, &resolver).await.unwrap();
+        let handle = p.provision(&de_request(), &resolver).await.unwrap();
         assert!(handle.state.is_ready());
         assert_eq!(handle.provider, AdapterId::new("self-hosted"));
-        assert!(handle.id.starts_with("self-hosted-dc-frankfurt-"));
-        assert_eq!(p.live_instances().len(), 1);
+        // The instance id comes from the provision command's stdout.
+        assert_eq!(handle.id, "sh-inst-1");
 
-        let history = p.instance_history(&handle.id);
-        assert!(matches!(history[0], ProvisioningState::Requested));
-        assert!(history.last().unwrap().is_ready());
-
+        assert!(p.status(&handle, &resolver).await.unwrap().is_ready());
         p.teardown(&handle, &resolver).await.unwrap();
-        assert!(p.live_instances().is_empty());
-        assert!(p.status(&handle, &resolver).await.unwrap().is_terminal());
+
+        // The lifecycle ran the host-agent commands in order against the host.
+        let seen = mock.commands();
+        assert_eq!(seen.len(), 3);
+        assert!(seen[0].command.contains("provision"));
+        // Interpolated values are POSIX single-quoted.
+        assert!(seen[0].command.contains("--offering 'rack-de-01'"));
+        assert!(seen[0].command.contains("--region 'dc-frankfurt'"));
+        assert_eq!(seen[0].user, "amicu");
+        assert_eq!(seen[0].host, "rack-de-01");
+        assert!(seen[1].command.contains("status 'sh-inst-1'"));
+        assert!(seen[2].command.contains("teardown 'sh-inst-1'"));
     }
 
     #[tokio::test]
@@ -866,7 +1055,6 @@ mod tests {
             .await
             .expect_err("empty provider has no offerings");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-010");
-        assert!(p.live_instances().is_empty());
     }
 
     #[tokio::test]
@@ -883,7 +1071,6 @@ mod tests {
             .expect_err("region does not correspond to the declared host");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-011");
         assert!(!err.is_retryable());
-        assert!(p.live_instances().is_empty());
     }
 
     #[tokio::test]
@@ -901,12 +1088,202 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_credential_is_rejected() {
+        // Self-hosted provisioning requires an SSH key.
+        let p = mock_provider(lifecycle_mock());
+        let err = p
+            .provision(
+                &ProvisionRequest::new("rack-de-01", "dc-frankfurt"),
+                &no_creds(),
+            )
+            .await
+            .expect_err("missing SSH key rejected");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn non_utf8_credential_is_rejected() {
+        let p = mock_provider(lifecycle_mock());
+        let resolver = TestResolver::default().with_bytes("ssh_key", vec![0xff, 0xfe]);
+        let err = p
+            .provision(&de_request(), &resolver)
+            .await
+            .expect_err("non-UTF-8 key rejected");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn auth_failure_maps_to_credentials_rejected() {
+        let mock = Arc::new(
+            MockSshTransport::default()
+                .on_error("provision", SshTransportError::Auth("bad key".into())),
+        );
+        let err = mock_provider(mock)
+            .provision(&de_request(), &key_resolver())
+            .await
+            .expect_err("auth failure surfaces");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn connection_failure_maps_to_retryable_backend() {
+        let mock = Arc::new(
+            MockSshTransport::default()
+                .on_error("provision", SshTransportError::Connection("refused".into())),
+        );
+        let err = mock_provider(mock)
+            .provision(&de_request(), &key_resolver())
+            .await
+            .expect_err("connection failure surfaces");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn timeout_maps_to_retryable_backend() {
+        let mock =
+            Arc::new(MockSshTransport::default().on_error("provision", SshTransportError::Timeout));
+        let err = mock_provider(mock)
+            .provision(&de_request(), &key_resolver())
+            .await
+            .expect_err("timeout surfaces");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_maps_to_backend() {
+        let mock = Arc::new(MockSshTransport::default().on(
+            "provision",
+            CommandOutput::new(1, Vec::new(), b"prep failed".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(&de_request(), &key_resolver())
+            .await
+            .expect_err("non-zero exit surfaces");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn status_not_found_exit_maps_to_unknown_instance() {
+        let mock = Arc::new(
+            MockSshTransport::default()
+                .on(
+                    "provision",
+                    CommandOutput::new(0, b"sh-inst-1".to_vec(), Vec::new()),
+                )
+                .on(
+                    "status",
+                    CommandOutput::new(EXIT_NOT_FOUND, Vec::new(), Vec::new()),
+                ),
+        );
+        let p = mock_provider(mock);
+        let handle = p.provision(&de_request(), &key_resolver()).await.unwrap();
+        let err = p
+            .status(&handle, &key_resolver())
+            .await
+            .expect_err("not-found exit surfaces");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_empty_instance_id_is_backend_error() {
+        // A create command that succeeds but reports no instance id is a backend
+        // fault, not a silent success.
+        let mock = Arc::new(
+            MockSshTransport::default()
+                .on("provision", CommandOutput::new(0, Vec::new(), Vec::new())),
+        );
+        let err = mock_provider(mock)
+            .provision(&de_request(), &key_resolver())
+            .await
+            .expect_err("empty instance id surfaces");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert_eq!(
+            err.to_diagnostic().message,
+            "provider backend error: self-hosted host agent did not report an instance id"
+        );
+    }
+
+    #[tokio::test]
+    async fn teardown_nonzero_exit_maps_to_backend() {
+        let mock = Arc::new(
+            MockSshTransport::default()
+                .on(
+                    "provision",
+                    CommandOutput::new(0, b"sh-inst-1".to_vec(), Vec::new()),
+                )
+                .on(
+                    "teardown",
+                    CommandOutput::new(7, Vec::new(), b"cleanup failed".to_vec()),
+                ),
+        );
+        let p = mock_provider(mock);
+        let handle = p.provision(&de_request(), &key_resolver()).await.unwrap();
+        let err = p
+            .teardown(&handle, &key_resolver())
+            .await
+            .expect_err("teardown non-zero exit surfaces");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn map_status_covers_every_token() {
+        assert!(map_status(b"ready").is_ready());
+        assert!(matches!(
+            map_status(b"provisioning"),
+            ProvisioningState::Provisioning { .. }
+        ));
+        assert!(matches!(
+            map_status(b"pending"),
+            ProvisioningState::Provisioning { .. }
+        ));
+        assert!(map_status(b"stopped").is_stopped());
+        assert!(map_status(b"terminated").is_terminal());
+        // Empty and unknown tokens both fall back to Provisioning.
+        assert!(matches!(
+            map_status(b""),
+            ProvisioningState::Provisioning { .. }
+        ));
+        match map_status(b"weird") {
+            ProvisioningState::Provisioning { detail } => assert!(detail.contains("weird")),
+            other => panic!("unexpected state: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sh_quote_escapes_single_quotes() {
+        assert_eq!(sh_quote("plain"), "'plain'");
+        assert_eq!(sh_quote("a'b"), r"'a'\''b'");
+    }
+
+    #[tokio::test]
+    async fn custom_ssh_address_user_and_port_reach_the_target() {
+        let host = de_host().with_ssh("10.0.0.5", "ops").with_ssh_port(2200);
+        let mock = lifecycle_mock();
+        let p = SelfHostedProvider::new()
+            .with_host(host)
+            .with_transport(mock.clone());
+        p.provision(&de_request(), &key_resolver()).await.unwrap();
+        let seen = mock.commands();
+        assert_eq!(seen[0].host, "10.0.0.5");
+        assert_eq!(seen[0].user, "ops");
+        assert_eq!(seen[0].port, 2200);
+    }
+
+    #[tokio::test]
     async fn credentials_never_leak_into_serialized_artifacts() {
-        let p = SelfHostedProvider::new().with_host(de_host());
         let secret_value = "leak-me-self-hosted-ssh-key";
+        let mock = lifecycle_mock();
+        let p = mock_provider(mock.clone());
         let resolver = TestResolver::default().with("ssh_key", secret_value);
-        let req = ProvisionRequest::new("rack-de-01", "dc-frankfurt")
-            .with_credentials(SecretRef::new("ssh_key"));
+        let req = de_request();
 
         let req_json = serde_json::to_string(&req).unwrap();
         assert!(req_json.contains("ssh_key"));
@@ -921,6 +1298,11 @@ mod tests {
         assert!(!describe_json.contains(secret_value));
         // The descriptor names the credential kind only.
         assert!(describe_json.contains("\"credentials\":\"ssh_key\""));
+
+        // The key authenticated the SSH connection but was never recorded on the
+        // handle or in the commands the transport ran.
+        let seen = mock.commands();
+        assert!(seen.iter().all(|c| !c.command.contains(secret_value)));
     }
 
     #[tokio::test]
@@ -938,13 +1320,10 @@ mod tests {
     #[tokio::test]
     async fn discoverable_as_a_provider_trait_object() {
         let mut registry: Registry<dyn Provider> = Registry::new();
-        registry.register(Arc::new(SelfHostedProvider::new().with_host(de_host())));
+        registry.register(Arc::new(mock_provider(lifecycle_mock())));
         let found: Arc<dyn Provider> = registry.get(&AdapterId::new("self-hosted")).unwrap();
         let handle = found
-            .provision(
-                &ProvisionRequest::new("rack-de-01", "dc-frankfurt"),
-                &no_creds(),
-            )
+            .provision(&de_request(), &key_resolver())
             .await
             .unwrap();
         assert!(handle.state.is_ready());
