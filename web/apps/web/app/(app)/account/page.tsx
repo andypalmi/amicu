@@ -70,7 +70,7 @@ export default async function AccountPage() {
           </div>
           {user.tier === 'community' ? (
             <Button asChild size="sm" variant="outline">
-              <Link href="/pricing">Upgrade</Link>
+              <Link href="/billing">Upgrade</Link>
             </Button>
           ) : null}
         </CardContent>

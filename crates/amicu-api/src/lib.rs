@@ -27,6 +27,7 @@
 #![allow(clippy::duration_suboptimal_units)]
 
 pub mod auth;
+pub mod billing;
 pub mod dto;
 pub mod engine;
 pub mod monitor;
@@ -43,6 +44,7 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 pub use auth::{AuthApiState, auth_router};
+pub use billing::{BillingApiState, StripeConfig, billing_router, stripe_config_from_env};
 pub use engine::{AccessVerifier, EngineApiState};
 pub use openapi::ApiDoc;
 pub use ratelimit::{ProxyParseError, RateLimiter, TrustedProxies};
@@ -81,8 +83,13 @@ pub fn openapi_json() -> String {
 }
 
 /// Assemble the full API router: the unauthenticated auth surface, a live
-/// `GET /openapi.json`, and the auth-gated engine endpoints.
-pub fn api_router(auth_state: AuthApiState, engine_state: EngineApiState) -> Router {
+/// `GET /openapi.json`, the auth-gated engine endpoints, and the billing surface
+/// (auth-gated checkout/portal/status plus the signature-authenticated webhook).
+pub fn api_router(
+    auth_state: AuthApiState,
+    engine_state: EngineApiState,
+    billing_state: BillingApiState,
+) -> Router {
     let (engine_router, spec) = engine_parts();
     let engine_router = engine_router
         // Cap request bodies before extraction (inner), and gate on auth
@@ -102,4 +109,5 @@ pub fn api_router(auth_state: AuthApiState, engine_state: EngineApiState) -> Rou
         )
         .merge(auth_router(auth_state))
         .merge(engine_router)
+        .merge(billing_router(billing_state))
 }

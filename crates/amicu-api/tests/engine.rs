@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use amicu_api::{AuthApiState, EngineApiState, RateLimiter, api_router};
+use amicu_api::{AuthApiState, BillingApiState, EngineApiState, RateLimiter, api_router};
 use amicu_auth::notify::LoggingNotifier;
 use amicu_auth::refresh::InMemoryRefreshStore;
 use amicu_auth::reset::InMemoryResetStore;
@@ -144,10 +144,16 @@ fn app_with(tier: Tier, min_tier: Tier) -> (Router, String) {
         Arc::new(RateLimiter::new(100, Duration::from_secs(60))),
     );
 
-    let verifier = Verifier::new(StaticJwksProvider::new(jwks), VerifierConfig::new(ISS, AUD));
-    let engine_state = EngineApiState::new(Arc::new(verifier)).with_min_tier(min_tier);
+    let verifier = Arc::new(Verifier::new(
+        StaticJwksProvider::new(jwks),
+        VerifierConfig::new(ISS, AUD),
+    ));
+    let engine_state = EngineApiState::new(verifier.clone()).with_min_tier(min_tier);
+    // Billing is not under test here; wire it unconfigured so /billing/* answer 503.
+    let billing_state =
+        BillingApiState::unconfigured(verifier, Arc::new(InMemoryUserStore::default()));
 
-    (api_router(auth_state, engine_state), token)
+    (api_router(auth_state, engine_state, billing_state), token)
 }
 
 async fn send(app: &Router, req: Request<Body>) -> (StatusCode, serde_json::Value) {

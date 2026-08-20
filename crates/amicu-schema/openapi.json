@@ -35,6 +35,154 @@
         }
       }
     },
+    "/billing/checkout": {
+      "post": {
+        "tags": [
+          "billing"
+        ],
+        "summary": "Create a Stripe Checkout Session for the logged-in user and return its URL.",
+        "description": "Ensures the user has a Stripe customer (creating and persisting one on first\nuse so later webhooks map back), then opens a subscription checkout for the\nrequested plan's price. Returns `503` when billing is unconfigured.",
+        "operationId": "checkout_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckoutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A Stripe Checkout Session URL to redirect the browser to.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RedirectResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown or non-purchasable plan."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "502": {
+            "description": "The billing provider could not be reached."
+          },
+          "503": {
+            "description": "Billing is not configured on this server."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/billing/portal": {
+      "post": {
+        "tags": [
+          "billing"
+        ],
+        "summary": "Create a Stripe Billing Portal session so the user can manage their\nsubscription, and return its URL. `409` if the user has no customer yet.",
+        "operationId": "portal_handler",
+        "responses": {
+          "200": {
+            "description": "A Stripe Billing Portal URL to redirect the browser to.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RedirectResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "409": {
+            "description": "The user has no billing account yet."
+          },
+          "502": {
+            "description": "The billing provider could not be reached."
+          },
+          "503": {
+            "description": "Billing is not configured on this server."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/billing/status": {
+      "get": {
+        "tags": [
+          "billing"
+        ],
+        "summary": "Report the user's billing status: whether Stripe is configured, their\nauthoritative current plan, and whether they hold a subscription.",
+        "operationId": "status_handler",
+        "responses": {
+          "200": {
+            "description": "The user's billing status and current plan.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BillingStatusResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/billing/webhook": {
+      "post": {
+        "tags": [
+          "billing"
+        ],
+        "summary": "The Stripe subscription-lifecycle webhook.",
+        "description": "Authenticated by the `Stripe-Signature` HMAC over the raw body (no bearer\ntoken). On `customer.subscription.created|updated` the subscription's price\nis mapped to a tier and persisted; on `customer.subscription.deleted` the\nuser is dropped back to Community. Unknown event types are acknowledged with\n`200` and ignored. The new tier applies on the user's next token issuance.",
+        "operationId": "webhook_handler",
+        "requestBody": {
+          "description": "Raw Stripe event JSON (signature-verified).",
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Event received (and applied, if relevant)."
+          },
+          "400": {
+            "description": "Missing/invalid signature or malformed body."
+          },
+          "503": {
+            "description": "Billing is not configured on this server."
+          }
+        }
+      }
+    },
     "/logout": {
       "post": {
         "tags": [
@@ -497,6 +645,29 @@
           }
         }
       },
+      "BillingStatusResponse": {
+        "type": "object",
+        "description": "The user's billing status: whether billing is live server-side, the\nauthoritative current plan, and whether an active subscription exists.",
+        "required": [
+          "configured",
+          "plan",
+          "has_subscription"
+        ],
+        "properties": {
+          "configured": {
+            "type": "boolean",
+            "description": "Whether Stripe is configured on the server. When `false` the UI must not\npresent checkout/manage actions (they would `503`)."
+          },
+          "has_subscription": {
+            "type": "boolean",
+            "description": "Whether the user has an active Stripe subscription (drives manage-vs-buy)."
+          },
+          "plan": {
+            "type": "string",
+            "description": "The user's current plan, read from the durable user record (not just the\npossibly-stale token). Lowercase tier name, e.g. `\"community\"`."
+          }
+        }
+      },
       "BottleneckClassDto": {
         "type": "string",
         "description": "The class of bottleneck a diagnosis assigns. Mirrors\n[`amicu_recommend::BottleneckClass`].",
@@ -517,6 +688,20 @@
           "enable",
           "replace"
         ]
+      },
+      "CheckoutRequest": {
+        "type": "object",
+        "description": "Request body for `POST /billing/checkout`: the plan the user wants to buy.",
+        "required": [
+          "plan"
+        ],
+        "properties": {
+          "plan": {
+            "type": "string",
+            "description": "Target plan, e.g. `\"pro\"` or `\"enterprise\"` (a [`Tier`] name).",
+            "example": "pro"
+          }
+        }
       },
       "ComparisonDto": {
         "type": "string",
@@ -1328,6 +1513,19 @@
           }
         }
       },
+      "RedirectResponse": {
+        "type": "object",
+        "description": "A hosted Stripe URL to redirect the browser to.",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The Stripe-hosted URL (checkout or billing portal)."
+          }
+        }
+      },
       "RefreshRequest": {
         "type": "object",
         "description": "A refresh-token-bearing request (refresh rotation / logout).",
@@ -1763,6 +1961,10 @@
     {
       "name": "monitor",
       "description": "Stateless monitoring view (measured-vs-estimated): a normalized metric surface, estimate, and tier-appropriate advisory suggestions (auth-gated)."
+    },
+    {
+      "name": "billing",
+      "description": "Stripe-backed subscription billing: checkout, customer portal, status, and the signature-authenticated webhook."
     }
   ]
 }

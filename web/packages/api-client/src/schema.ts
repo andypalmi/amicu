@@ -36,6 +36,92 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/billing/checkout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a Stripe Checkout Session for the logged-in user and return its URL.
+         * @description Ensures the user has a Stripe customer (creating and persisting one on first
+         *     use so later webhooks map back), then opens a subscription checkout for the
+         *     requested plan's price. Returns `503` when billing is unconfigured.
+         */
+        post: operations["checkout_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/billing/portal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a Stripe Billing Portal session so the user can manage their
+         *     subscription, and return its URL. `409` if the user has no customer yet.
+         */
+        post: operations["portal_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/billing/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Report the user's billing status: whether Stripe is configured, their
+         *     authoritative current plan, and whether they hold a subscription.
+         */
+        get: operations["status_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/billing/webhook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * The Stripe subscription-lifecycle webhook.
+         * @description Authenticated by the `Stripe-Signature` HMAC over the raw body (no bearer
+         *     token). On `customer.subscription.created|updated` the subscription's price
+         *     is mapped to a tier and persisted; on `customer.subscription.deleted` the
+         *     user is dropped back to Community. Unknown event types are acknowledged with
+         *     `200` and ignored. The new tier applies on the user's next token issuance.
+         */
+        post: operations["webhook_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/logout": {
         parameters: {
             query?: never;
@@ -282,6 +368,24 @@ export interface components {
             statement: string;
         };
         /**
+         * @description The user's billing status: whether billing is live server-side, the
+         *     authoritative current plan, and whether an active subscription exists.
+         */
+        BillingStatusResponse: {
+            /**
+             * @description Whether Stripe is configured on the server. When `false` the UI must not
+             *     present checkout/manage actions (they would `503`).
+             */
+            configured: boolean;
+            /** @description Whether the user has an active Stripe subscription (drives manage-vs-buy). */
+            has_subscription: boolean;
+            /**
+             * @description The user's current plan, read from the durable user record (not just the
+             *     possibly-stale token). Lowercase tier name, e.g. `"community"`.
+             */
+            plan: string;
+        };
+        /**
          * @description The class of bottleneck a diagnosis assigns. Mirrors
          *     [`amicu_recommend::BottleneckClass`].
          * @enum {string}
@@ -293,6 +397,14 @@ export interface components {
          * @enum {string}
          */
         ChangeDirectionDto: "increase" | "decrease" | "enable" | "replace";
+        /** @description Request body for `POST /billing/checkout`: the plan the user wants to buy. */
+        CheckoutRequest: {
+            /**
+             * @description Target plan, e.g. `"pro"` or `"enterprise"` (a [`Tier`] name).
+             * @example pro
+             */
+            plan: string;
+        };
         /**
          * @description Whether a measured metric sits above or below its threshold. Mirrors
          *     [`amicu_recommend::Comparison`].
@@ -611,6 +723,11 @@ export interface components {
             /** @description A message that reveals nothing about whether the email is registered. */
             message: string;
         };
+        /** @description A hosted Stripe URL to redirect the browser to. */
+        RedirectResponse: {
+            /** @description The Stripe-hosted URL (checkout or billing portal). */
+            url: string;
+        };
         /** @description A refresh-token-bearing request (refresh rotation / logout). */
         RefreshRequest: {
             /** @description The opaque refresh token previously issued to this client. */
@@ -789,8 +906,10 @@ export interface components {
 export type ActionKind = components['schemas']['ActionKind'];
 export type Artifact = components['schemas']['Artifact'];
 export type AssumptionDto = components['schemas']['AssumptionDto'];
+export type BillingStatusResponse = components['schemas']['BillingStatusResponse'];
 export type BottleneckClassDto = components['schemas']['BottleneckClassDto'];
 export type ChangeDirectionDto = components['schemas']['ChangeDirectionDto'];
+export type CheckoutRequest = components['schemas']['CheckoutRequest'];
 export type ComparisonDto = components['schemas']['ComparisonDto'];
 export type ConcurrencyMetricsDto = components['schemas']['ConcurrencyMetricsDto'];
 export type Confidence = components['schemas']['Confidence'];
@@ -821,6 +940,7 @@ export type RecommendRequest = components['schemas']['RecommendRequest'];
 export type RecommendationDto = components['schemas']['RecommendationDto'];
 export type RecoverRequest = components['schemas']['RecoverRequest'];
 export type RecoverResponse = components['schemas']['RecoverResponse'];
+export type RedirectResponse = components['schemas']['RedirectResponse'];
 export type RefreshRequest = components['schemas']['RefreshRequest'];
 export type RejectedAlternativeDto = components['schemas']['RejectedAlternativeDto'];
 export type ReliabilityMetricsDto = components['schemas']['ReliabilityMetricsDto'];
@@ -870,6 +990,170 @@ export interface operations {
         responses: {
             /** @description OpenID Connect discovery document. */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    checkout_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CheckoutRequest"];
+            };
+        };
+        responses: {
+            /** @description A Stripe Checkout Session URL to redirect the browser to. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RedirectResponse"];
+                };
+            };
+            /** @description Unknown or non-purchasable plan. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The billing provider could not be reached. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Billing is not configured on this server. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    portal_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A Stripe Billing Portal URL to redirect the browser to. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RedirectResponse"];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The user has no billing account yet. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The billing provider could not be reached. */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Billing is not configured on this server. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    status_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The user's billing status and current plan. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BillingStatusResponse"];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    webhook_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description Raw Stripe event JSON (signature-verified). */
+        requestBody: {
+            content: {
+                "text/plain": string;
+            };
+        };
+        responses: {
+            /** @description Event received (and applied, if relevant). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing/invalid signature or malformed body. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Billing is not configured on this server. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

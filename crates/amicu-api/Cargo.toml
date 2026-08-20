@@ -22,6 +22,15 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 utoipa = { version = "5" }
 utoipa-axum = { version = "0.2" }
+# Billing (Stripe): a thin typed reqwest client against the Stripe REST API
+# (form-encoded requests, JSON responses) plus HMAC-SHA256 webhook-signature
+# verification. rustls keeps the TLS stack hermetic and MSRV-1.97-friendly; a
+# full Stripe SDK is deliberately avoided (heavier, MSRV risk) — see billing.rs.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+serde_urlencoded = "0.7"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
@@ -29,6 +38,11 @@ tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # HTTP tests implement the Notifier trait to capture the out-of-band reset token.
 async-trait = "0.1"
+# Billing webhook tests forge a valid `Stripe-Signature` (HMAC-SHA256 over
+# `t.payload`, hex-encoded) with a known secret to exercise verification.
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 [lints]
 workspace = true
