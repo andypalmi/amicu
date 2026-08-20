@@ -258,6 +258,257 @@
         ]
       }
     },
+    "/org/audit": {
+      "get": {
+        "tags": [
+          "org"
+        ],
+        "summary": "The audit log, most-recent first. Requires the `view_audit` permission\n(Owner/Admin).",
+        "operationId": "audit_handler",
+        "responses": {
+          "200": {
+            "description": "The audit log, most-recent first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Below Enterprise, not a member, or your role may not view the audit log."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/org/members": {
+      "get": {
+        "tags": [
+          "org"
+        ],
+        "summary": "List the organization's members and their roles.",
+        "operationId": "list_members_handler",
+        "responses": {
+          "200": {
+            "description": "The members and the caller's own role.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MembersResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Below the Enterprise tier, or not a member of the organization."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "org"
+        ],
+        "summary": "Invite/add a member with a role.",
+        "operationId": "add_member_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddMemberRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The member was added.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty user id or unknown role."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Below Enterprise, not a member, or your role may not add this member."
+          },
+          "409": {
+            "description": "That user is already a member."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/org/members/{id}": {
+      "delete": {
+        "tags": [
+          "org"
+        ],
+        "summary": "Remove a member.",
+        "operationId": "remove_member_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The member's user id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The removed member.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Below Enterprise, not a member, or your role may not remove this member."
+          },
+          "404": {
+            "description": "No such member."
+          },
+          "409": {
+            "description": "Removing this member would leave no Owner."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "org"
+        ],
+        "summary": "Change a member's role.",
+        "operationId": "change_role_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The member's user id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeRoleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The member's new role.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unknown role."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Below Enterprise, not a member, or your role may not make this change."
+          },
+          "404": {
+            "description": "No such member."
+          },
+          "409": {
+            "description": "The change would demote the last remaining Owner."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/org/roles": {
+      "get": {
+        "tags": [
+          "org"
+        ],
+        "summary": "The RBAC catalog: every role and the permissions it grants.",
+        "operationId": "list_roles_handler",
+        "responses": {
+          "200": {
+            "description": "The role → permission catalog.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RolesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Below the Enterprise tier, or not a member of the organization."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/plan": {
       "post": {
         "tags": [
@@ -597,6 +848,26 @@
           "destroy"
         ]
       },
+      "AddMemberRequest": {
+        "type": "object",
+        "description": "Request body for `POST /org/members`.",
+        "required": [
+          "user_id",
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "type": "string",
+            "description": "The role to assign (`owner` | `admin` | `member` | `viewer`).",
+            "example": "member"
+          },
+          "user_id": {
+            "type": "string",
+            "description": "The user id to add as a member.",
+            "example": "usr_123"
+          }
+        }
+      },
       "Artifact": {
         "type": "object",
         "description": "A selected model artifact and its download characteristics.",
@@ -645,6 +916,68 @@
           }
         }
       },
+      "AuditEntryView": {
+        "type": "object",
+        "description": "One audit record as returned on the wire.",
+        "required": [
+          "id",
+          "timestamp",
+          "actor_id",
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "The action name (e.g. `\"member.added\"`).",
+            "example": "member.added"
+          },
+          "actor_id": {
+            "type": "string",
+            "description": "The user id that performed the action."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A human-readable detail."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Monotonic sequence id.",
+            "minimum": 0
+          },
+          "target_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The member the action targeted, if any."
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the action was recorded (Unix seconds)."
+          }
+        }
+      },
+      "AuditResponse": {
+        "type": "object",
+        "description": "Response for `GET /org/audit`.",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditEntryView"
+            },
+            "description": "The audit log, most-recent first."
+          }
+        }
+      },
       "BillingStatusResponse": {
         "type": "object",
         "description": "The user's billing status: whether billing is live server-side, the\nauthoritative current plan, and whether an active subscription exists.",
@@ -688,6 +1021,20 @@
           "enable",
           "replace"
         ]
+      },
+      "ChangeRoleRequest": {
+        "type": "object",
+        "description": "Request body for `PATCH /org/members/{id}`.",
+        "required": [
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "type": "string",
+            "description": "The new role to assign.",
+            "example": "admin"
+          }
+        }
       },
       "CheckoutRequest": {
         "type": "object",
@@ -1059,6 +1406,47 @@
           },
           "ttft_ms": {
             "$ref": "#/components/schemas/DistributionDto"
+          }
+        }
+      },
+      "MemberView": {
+        "type": "object",
+        "description": "One member as returned on the wire.",
+        "required": [
+          "user_id",
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "type": "string",
+            "description": "The member's role (lowercase, e.g. `\"admin\"`).",
+            "example": "admin"
+          },
+          "user_id": {
+            "type": "string",
+            "description": "The member's user id."
+          }
+        }
+      },
+      "MembersResponse": {
+        "type": "object",
+        "description": "Response for `GET /org/members`.",
+        "required": [
+          "caller_role",
+          "members"
+        ],
+        "properties": {
+          "caller_role": {
+            "type": "string",
+            "description": "The calling user's own role — so a client can render exactly the controls\ntheir role allows (the API still enforces every action).",
+            "example": "owner"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemberView"
+            },
+            "description": "All members, in a stable order."
           }
         }
       },
@@ -1597,6 +1985,49 @@
           }
         }
       },
+      "RoleView": {
+        "type": "object",
+        "description": "One role and the permissions it grants (the RBAC catalog).",
+        "required": [
+          "role",
+          "description",
+          "permissions"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "A short human description of the role."
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The permission names this role holds."
+          },
+          "role": {
+            "type": "string",
+            "description": "The role name (lowercase).",
+            "example": "admin"
+          }
+        }
+      },
+      "RolesResponse": {
+        "type": "object",
+        "description": "Response for `GET /org/roles`.",
+        "required": [
+          "roles"
+        ],
+        "properties": {
+          "roles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoleView"
+            },
+            "description": "Every role, privilege-descending."
+          }
+        }
+      },
       "Setting": {
         "type": "object",
         "description": "An opaque runtime or launch setting.",
@@ -1965,6 +2396,10 @@
     {
       "name": "billing",
       "description": "Stripe-backed subscription billing: checkout, customer portal, status, and the signature-authenticated webhook."
+    },
+    {
+      "name": "org",
+      "description": "Enterprise-gated organization console: membership, role-based access control, and an append-only audit log."
     }
   ]
 }

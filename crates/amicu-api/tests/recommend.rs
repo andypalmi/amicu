@@ -6,7 +6,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use amicu_api::{AuthApiState, BillingApiState, EngineApiState, RateLimiter, api_router};
+use amicu_api::{
+    AuthApiState, BillingApiState, EngineApiState, InMemoryOrgStore, OrgApiState, RateLimiter,
+    api_router,
+};
 use amicu_auth::notify::LoggingNotifier;
 use amicu_auth::refresh::InMemoryRefreshStore;
 use amicu_auth::reset::InMemoryResetStore;
@@ -57,9 +60,13 @@ fn app_with(tier: Tier) -> (Router, String) {
     ));
     let engine_state = EngineApiState::new(verifier.clone());
     let billing_state =
-        BillingApiState::unconfigured(verifier, Arc::new(InMemoryUserStore::default()));
+        BillingApiState::unconfigured(verifier.clone(), Arc::new(InMemoryUserStore::default()));
+    let org_state = OrgApiState::new(verifier, Arc::new(InMemoryOrgStore::new()));
 
-    (api_router(auth_state, engine_state, billing_state), token)
+    (
+        api_router(auth_state, engine_state, billing_state, org_state),
+        token,
+    )
 }
 
 async fn send(app: &Router, req: Request<Body>) -> (StatusCode, Value) {

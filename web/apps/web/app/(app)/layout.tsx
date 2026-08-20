@@ -21,6 +21,7 @@ export default async function Layout({ children }: LayoutProps<'/'>) {
           { text: 'Docs', url: '/docs' },
           { text: 'Account', url: '/account' },
           { text: 'Billing', url: '/billing' },
+          { text: 'Organization', url: '/org' },
         ]}
       >
         {children}

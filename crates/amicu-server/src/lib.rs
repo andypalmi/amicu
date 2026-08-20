@@ -1,7 +1,7 @@
 //! Runnable bootstrap for the Amicu Management API.
 //!
 //! `amicu-api` is a library — it hands back a [`Router`] from
-//! `api_router(auth_state, engine_state, billing_state)` but binds no socket. This crate is the
+//! `api_router(auth_state, engine_state, billing_state, org_state)` but binds no socket. This crate is the
 //! thin glue that a deployment actually runs: it constructs the auth + engine
 //! state, reads its configuration from the environment (or flags), binds a
 //! `TcpListener`, and serves the router with graceful shutdown.
@@ -70,8 +70,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use amicu_api::{
-    AuthApiState, BillingApiState, EngineApiState, ProxyParseError, RateLimiter, TrustedProxies,
-    api_router, stripe_config_from_env,
+    AuthApiState, BillingApiState, EngineApiState, InMemoryOrgStore, OrgApiState, ProxyParseError,
+    RateLimiter, TrustedProxies, api_router, stripe_config_from_env,
 };
 use amicu_auth::issuer::{IssuerConfig, TokenIssuer};
 use amicu_auth::key::SigningKey;
@@ -270,10 +270,23 @@ pub fn build_app(config: &Config) -> Result<Router, Error> {
              STRIPE_WEBHOOK_SECRET, and STRIPE_PRICE_* to activate); \
              /billing/* endpoints will return 503."
         );
-        BillingApiState::unconfigured(verifier, users)
+        BillingApiState::unconfigured(verifier.clone(), users)
     };
 
-    Ok(api_router(auth_state, engine_state, billing_state))
+    // The Enterprise organization console (membership + RBAC + audit log). The
+    // store is in-memory and single-node like the auth/billing stores: state is
+    // lost on restart. The first Enterprise caller bootstraps the org as its
+    // Owner; everyone after is invited. SSO federation is deliberately deferred
+    // (post-v1) — see andypalmi/amicu-planning#92.
+    let org_store = Arc::new(InMemoryOrgStore::new());
+    let org_state = OrgApiState::new(verifier, org_store);
+
+    Ok(api_router(
+        auth_state,
+        engine_state,
+        billing_state,
+        org_state,
+    ))
 }
 
 /// Serve `app` on an already-bound `listener` until `shutdown` resolves.

@@ -28,6 +28,8 @@ const PROTECTED_PREFIXES = [
   '/monitor',
   '/billing',
   '/api/billing',
+  '/org',
+  '/api/org',
 ];
 
 // secure tied to NODE_ENV so local HTTP dev works; a non-prod build over plain
