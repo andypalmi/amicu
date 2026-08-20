@@ -8,12 +8,18 @@ rust-version.workspace = true
 
 [dependencies]
 amicu-auth = { path = "../amicu-auth" }
-amicu-core = { path = "../amicu-core" }
+amicu-core = { path = "../amicu-core", features = ["utoipa"] }
+amicu-engine = { path = "../amicu-engine" }
+amicu-hcl = { path = "../amicu-hcl" }
+amicu-plan = { path = "../amicu-plan", features = ["utoipa"] }
+async-trait = "0.1"
 axum = "0.8"
 ipnet = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+utoipa = { version = "5" }
+utoipa-axum = { version = "0.2" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

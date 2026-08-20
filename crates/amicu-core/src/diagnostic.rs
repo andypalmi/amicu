@@ -162,6 +162,7 @@ impl<'de> Deserialize<'de> for DiagnosticCode {
 
 /// Diagnostic severity level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// A blocking problem: the operation cannot proceed.
@@ -174,6 +175,7 @@ pub enum Severity {
 
 /// The location in a source file a diagnostic refers to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct SourceLocation {
     /// Source file path.
     pub file: String,
@@ -185,17 +187,20 @@ pub struct SourceLocation {
 
 /// A single JSON-patch-like edit that would resolve a diagnostic.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Patch {
     /// The patch operation (e.g. `replace`, `add`, `remove`).
     pub op: String,
     /// A JSON Pointer to the target location.
     pub path: String,
     /// The value to apply.
+    #[cfg_attr(feature = "utoipa", schema(value_type = Object))]
     pub value: serde_json::Value,
 }
 
 /// A suggested fix attached to a diagnostic.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct SuggestedFix {
     /// Human-readable description of the fix.
     pub description: String,
@@ -205,8 +210,12 @@ pub struct SuggestedFix {
 
 /// A single diagnostic in a [`DiagnosticReport`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Diagnostic {
     /// The standardized diagnostic code.
+    ///
+    /// Serialized as the `AMICU-<CATEGORY>-<NNN>` string form.
+    #[cfg_attr(feature = "utoipa", schema(value_type = String, example = "AMICU-CAP-001"))]
     pub code: DiagnosticCode,
     /// Severity of this diagnostic.
     pub severity: Severity,
@@ -244,6 +253,7 @@ impl Diagnostic {
 
 /// The top-level diagnostic report emitted by `--output json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct DiagnosticReport {
     /// Contract version. Currently always `"v1"`.
     pub version: String,

@@ -1,0 +1,19 @@
+[package]
+name = "amicu-engine"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+amicu-core = { path = "../amicu-core" }
+amicu-hcl = { path = "../amicu-hcl" }
+amicu-plan = { path = "../amicu-plan" }
+amicu-providers = { path = "../amicu-providers" }
+amicu-llamacpp = { path = "../amicu-llamacpp" }
+amicu-runtime = { path = "../amicu-runtime" }
+amicu-registry = { path = "../amicu-registry" }
+
+[lints]
+workspace = true

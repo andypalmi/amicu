@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 /// A full plan: the set of actions Amicu would take, with the context needed
 /// to review them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Plan {
     /// Contract version. Currently always `"v1"`.
     pub version: String,
@@ -32,6 +33,7 @@ impl Plan {
 
 /// The kind of change a [`PlannedAction`] represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum ActionKind {
     /// Create a resource that does not yet exist.
@@ -46,6 +48,7 @@ pub enum ActionKind {
 
 /// A single planned change to one resource.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct PlannedAction {
     /// The kind of change.
     pub kind: ActionKind,
@@ -81,6 +84,7 @@ pub struct PlannedAction {
 
 /// A selected model artifact and its download characteristics.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Artifact {
     /// Artifact name / identifier.
     pub name: String,
@@ -97,6 +101,7 @@ pub struct Artifact {
 
 /// An opaque runtime or launch setting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Setting {
     /// Setting key.
     pub key: String,
@@ -106,6 +111,7 @@ pub struct Setting {
 
 /// Estimated cost and performance, with the basis for the estimate.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct CostPerformance {
     /// Estimated cost range.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -126,6 +132,7 @@ pub struct CostPerformance {
 
 /// An inclusive numeric range with an optional unit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct Range {
     /// Lower bound.
     pub min: f64,
@@ -138,6 +145,7 @@ pub struct Range {
 
 /// Confidence level attached to an estimate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {
     /// Low confidence.
@@ -150,6 +158,7 @@ pub enum Confidence {
 
 /// Governance / policy outcome for a plan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 pub struct PolicyOutcome {
     /// Whether the plan is permitted under evaluated policy.
     pub allowed: bool,

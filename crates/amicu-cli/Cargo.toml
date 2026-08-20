@@ -18,10 +18,9 @@ path = "src/lib.rs"
 amicu-core = { path = "../amicu-core" }
 amicu-hcl = { path = "../amicu-hcl" }
 amicu-plan = { path = "../amicu-plan" }
-amicu-providers = { path = "../amicu-providers" }
+amicu-engine = { path = "../amicu-engine" }
 amicu-llamacpp = { path = "../amicu-llamacpp" }
 amicu-runtime = { path = "../amicu-runtime" }
-amicu-registry = { path = "../amicu-registry" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
