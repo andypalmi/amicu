@@ -511,6 +511,9 @@ impl Provider for ScalewayProvider {
                 detail: "failed to encode Scaleway create request".into(),
             })
         })?;
+        // TODO(TASK-023): Scaleway's Instance API path segment is a zone
+        // (e.g. `fr-par-1`), not a region (`fr-par`); resolve region→zone
+        // before live calls.
         let servers_path = format!("/zones/{}/servers", request.region);
         let create_request = self
             .build_request(HttpMethod::Post, &servers_path, token.as_deref())
@@ -547,7 +550,14 @@ impl Provider for ScalewayProvider {
             .await
             .map_err(|e| transport_error(&e))?;
         if !action_response.is_success() {
-            return Err(create_error(action_response.status, request));
+            // Boot failed after create succeeded: best-effort teardown so the
+            // created server does not linger (and bill). Its result is ignored;
+            // the boot failure is the error surfaced. A 404 here means the
+            // just-created instance, not the offering.
+            let cleanup_path = format!("/zones/{}/servers/{server_id}", request.region);
+            let cleanup = self.build_request(HttpMethod::Delete, &cleanup_path, token.as_deref());
+            let _ = self.transport.execute(cleanup).await;
+            return Err(lifecycle_error(action_response.status, &server_id));
         }
         Ok(ProvisioningHandle {
             id: server_id,
@@ -811,6 +821,39 @@ mod tests {
             .expect_err("non-UTF-8 credential rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
         assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_poweron_failure_tears_down_and_reports_unknown_instance() {
+        // Create succeeds, boot action 404s: the orphaned server must be torn
+        // down and the error mapped to UnknownInstance (not UnknownOffering).
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(HttpMethod::Post, "/zones/fr-par/servers", created("srv-9"))
+                .on(
+                    HttpMethod::Post,
+                    "/servers/srv-9/action",
+                    HttpResponse::new(404, b"gone".to_vec()),
+                )
+                .on(
+                    HttpMethod::Delete,
+                    "/servers/srv-9",
+                    HttpResponse::new(204, Vec::new()),
+                ),
+        );
+        let p = mock_provider(mock.clone());
+        let err = p
+            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .await
+            .expect_err("poweron failure surfaces");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
+        assert!(!err.is_retryable());
+        // The orphaned server was cleaned up.
+        let seen = mock.requests();
+        assert!(
+            seen.iter()
+                .any(|r| r.method == HttpMethod::Delete && r.url.ends_with("/servers/srv-9"))
+        );
     }
 
     #[tokio::test]
