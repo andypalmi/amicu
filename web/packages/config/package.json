@@ -1,0 +1,25 @@
+{
+  "name": "@amicu/config",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "files": [
+    "tsconfig.base.json",
+    "tsconfig.nextjs.json",
+    "tsconfig.react-library.json",
+    "eslint"
+  ],
+  "exports": {
+    "./tsconfig.base.json": "./tsconfig.base.json",
+    "./tsconfig.nextjs.json": "./tsconfig.nextjs.json",
+    "./tsconfig.react-library.json": "./tsconfig.react-library.json",
+    "./eslint/base": "./eslint/base.mjs",
+    "./eslint/next": "./eslint/next.mjs"
+  },
+  "dependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint-config-next": "16.3.1",
+    "globals": "^17.11.0",
+    "typescript-eslint": "^8.67.0"
+  }
+}

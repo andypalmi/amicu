@@ -1,0 +1,19 @@
+{
+  "name": "@amicu/api-client",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@amicu/config": "workspace:*",
+    "eslint": "^9.39.5",
+    "typescript": "^6.0.3"
+  }
+}
