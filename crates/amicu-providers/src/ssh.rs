@@ -231,7 +231,9 @@ impl SshTransport for RusshTransport {
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let mut exit_status: i32 = 0;
+        // A command that never reports an ExitStatus (channel closed early) or is
+        // killed by a signal is a failure, not a silent success.
+        let mut exit_status: i32 = -1;
         while let Some(msg) = channel.wait().await {
             match msg {
                 russh::ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
@@ -241,6 +243,7 @@ impl SshTransport for RusshTransport {
                 russh::ChannelMsg::ExitStatus { exit_status: code } => {
                     exit_status = i32::try_from(code).unwrap_or(-1);
                 }
+                russh::ChannelMsg::ExitSignal { .. } => exit_status = -1,
                 _ => {}
             }
         }

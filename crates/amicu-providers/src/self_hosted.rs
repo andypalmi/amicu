@@ -477,6 +477,13 @@ impl DescribeCapabilities for SelfHostedProvider {
     }
 }
 
+/// POSIX single-quote a value interpolated into a remote shell command, so an
+/// argument cannot break out and inject. Wrap in `'...'`, rendering each embedded
+/// `'` as `'\''`.
+fn sh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 /// Fold an SSH transport failure (the exchange never completed) onto a typed
 /// error: an auth failure is a permanent credential rejection, a
 /// connection/timeout a retryable backend fault.
@@ -576,7 +583,8 @@ impl Provider for SelfHostedProvider {
         // Prepare/register the declared host over SSH.
         let command = format!(
             "{HOST_AGENT} provision --offering {} --region {}",
-            request.offering_id, request.region
+            sh_quote(&request.offering_id),
+            sh_quote(&request.region)
         );
         let output = self
             .transport
@@ -626,7 +634,7 @@ impl Provider for SelfHostedProvider {
                 })
             })?
             .ssh_target();
-        let command = format!("{HOST_AGENT} status {}", handle.id);
+        let command = format!("{HOST_AGENT} status {}", sh_quote(&handle.id));
         let output = self
             .transport
             .run(&target, &command, &key)
@@ -654,7 +662,7 @@ impl Provider for SelfHostedProvider {
                 })
             })?
             .ssh_target();
-        let command = format!("{HOST_AGENT} teardown {}", handle.id);
+        let command = format!("{HOST_AGENT} teardown {}", sh_quote(&handle.id));
         let output = self
             .transport
             .run(&target, &command, &key)
@@ -1015,11 +1023,13 @@ mod tests {
         let seen = mock.commands();
         assert_eq!(seen.len(), 3);
         assert!(seen[0].command.contains("provision"));
-        assert!(seen[0].command.contains("rack-de-01"));
+        // Interpolated values are POSIX single-quoted.
+        assert!(seen[0].command.contains("--offering 'rack-de-01'"));
+        assert!(seen[0].command.contains("--region 'dc-frankfurt'"));
         assert_eq!(seen[0].user, "amicu");
         assert_eq!(seen[0].host, "rack-de-01");
-        assert!(seen[1].command.contains("status sh-inst-1"));
-        assert!(seen[2].command.contains("teardown sh-inst-1"));
+        assert!(seen[1].command.contains("status 'sh-inst-1'"));
+        assert!(seen[2].command.contains("teardown 'sh-inst-1'"));
     }
 
     #[tokio::test]
@@ -1179,6 +1189,92 @@ mod tests {
             .expect_err("not-found exit surfaces");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
         assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_empty_instance_id_is_backend_error() {
+        // A create command that succeeds but reports no instance id is a backend
+        // fault, not a silent success.
+        let mock = Arc::new(
+            MockSshTransport::default()
+                .on("provision", CommandOutput::new(0, Vec::new(), Vec::new())),
+        );
+        let err = mock_provider(mock)
+            .provision(&de_request(), &key_resolver())
+            .await
+            .expect_err("empty instance id surfaces");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert_eq!(
+            err.to_diagnostic().message,
+            "provider backend error: self-hosted host agent did not report an instance id"
+        );
+    }
+
+    #[tokio::test]
+    async fn teardown_nonzero_exit_maps_to_backend() {
+        let mock = Arc::new(
+            MockSshTransport::default()
+                .on(
+                    "provision",
+                    CommandOutput::new(0, b"sh-inst-1".to_vec(), Vec::new()),
+                )
+                .on(
+                    "teardown",
+                    CommandOutput::new(7, Vec::new(), b"cleanup failed".to_vec()),
+                ),
+        );
+        let p = mock_provider(mock);
+        let handle = p.provision(&de_request(), &key_resolver()).await.unwrap();
+        let err = p
+            .teardown(&handle, &key_resolver())
+            .await
+            .expect_err("teardown non-zero exit surfaces");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn map_status_covers_every_token() {
+        assert!(map_status(b"ready").is_ready());
+        assert!(matches!(
+            map_status(b"provisioning"),
+            ProvisioningState::Provisioning { .. }
+        ));
+        assert!(matches!(
+            map_status(b"pending"),
+            ProvisioningState::Provisioning { .. }
+        ));
+        assert!(map_status(b"stopped").is_stopped());
+        assert!(map_status(b"terminated").is_terminal());
+        // Empty and unknown tokens both fall back to Provisioning.
+        assert!(matches!(
+            map_status(b""),
+            ProvisioningState::Provisioning { .. }
+        ));
+        match map_status(b"weird") {
+            ProvisioningState::Provisioning { detail } => assert!(detail.contains("weird")),
+            other => panic!("unexpected state: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sh_quote_escapes_single_quotes() {
+        assert_eq!(sh_quote("plain"), "'plain'");
+        assert_eq!(sh_quote("a'b"), r"'a'\''b'");
+    }
+
+    #[tokio::test]
+    async fn custom_ssh_address_user_and_port_reach_the_target() {
+        let host = de_host().with_ssh("10.0.0.5", "ops").with_ssh_port(2200);
+        let mock = lifecycle_mock();
+        let p = SelfHostedProvider::new()
+            .with_host(host)
+            .with_transport(mock.clone());
+        p.provision(&de_request(), &key_resolver()).await.unwrap();
+        let seen = mock.commands();
+        assert_eq!(seen[0].host, "10.0.0.5");
+        assert_eq!(seen[0].user, "ops");
+        assert_eq!(seen[0].port, 2200);
     }
 
     #[tokio::test]
