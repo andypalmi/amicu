@@ -27,7 +27,9 @@ pub use jwks::{Jwk, Jwks, OpenIdConfiguration};
 #[cfg(feature = "verifier")]
 pub mod verifier;
 #[cfg(feature = "verifier")]
-pub use verifier::{JwksProvider, StaticJwksProvider, Verifier, VerifierConfig};
+pub use verifier::{
+    JwksProvider, MonoClock, StaticJwksProvider, SystemMonoClock, Verifier, VerifierConfig,
+};
 
 #[cfg(feature = "reqwest-provider")]
 pub mod http_provider;

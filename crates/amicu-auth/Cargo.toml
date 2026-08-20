@@ -46,7 +46,7 @@ zeroize = { version = "1", features = ["derive"], optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 serde_json = "1"
 
 [lints]
