@@ -46,6 +46,13 @@ pub enum AuthError {
     /// Refresh token is unknown, expired, or revoked.
     #[error("refresh token invalid")]
     RefreshInvalid,
+    /// Reset token is unknown, expired, or already used.
+    ///
+    /// Deliberately generic: the password-reset flow renders every rejected
+    /// token identically so it cannot be used to probe which tokens (or
+    /// accounts) exist.
+    #[error("reset token invalid")]
+    ResetInvalid,
     /// Password hashing/verification failed internally.
     #[error("password hashing failure")]
     PasswordHash,

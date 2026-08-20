@@ -66,6 +66,8 @@ pub fn auth_router(state: AuthApiState) -> Router {
         .route("/token", post(token))
         .route("/token/refresh", post(refresh))
         .route("/logout", post(logout))
+        .route("/recover", post(recover))
+        .route("/reset", post(reset))
         .layer(from_fn_with_state(state.clone(), rate_limit));
 
     well_known.merge(credentials).with_state(state)
@@ -105,6 +107,30 @@ pub(crate) struct TokenResponse {
 pub(crate) struct SignUpResponse {
     /// A message that reveals nothing about whether the email already exists.
     message: &'static str,
+}
+
+/// A password-reset request (`POST /recover`).
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct RecoverRequest {
+    /// The account email to send a reset link to.
+    email: String,
+}
+
+/// The generic, anti-enumeration recover acknowledgement.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct RecoverResponse {
+    /// A message that reveals nothing about whether the email is registered.
+    message: &'static str,
+}
+
+/// A password-reset completion (`POST /reset`): the opaque reset token plus the
+/// new password to install.
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct ResetRequest {
+    /// The opaque reset token delivered out-of-band (e.g. via the reset link).
+    reset_token: String,
+    /// The new account password (must satisfy the password policy).
+    new_password: String,
 }
 
 #[utoipa::path(
@@ -231,6 +257,69 @@ pub(crate) async fn logout(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Request a password reset.
+///
+/// Anti-enumeration: this ALWAYS returns the same generic `202 Accepted`,
+/// whether or not the email is registered, with no account-existence signal in
+/// the body or (Argon2 runs on neither path) the timing. A reset token is minted
+/// and delivered out-of-band via the notification seam only when the account
+/// exists. Mirrors the identical-response defense on `/signup`.
+#[utoipa::path(
+    post,
+    path = "/recover",
+    tag = "auth",
+    request_body = RecoverRequest,
+    responses(
+        (status = 202, description = "Accepted. If the email is registered, a reset link is sent out-of-band. Response is identical whether or not the account exists (anti-enumeration).", body = RecoverResponse),
+        (status = 429, description = "Rate limited."),
+    ),
+)]
+pub(crate) async fn recover(
+    State(state): State<AuthApiState>,
+    Json(body): Json<RecoverRequest>,
+) -> Result<Response, ApiError> {
+    state.service.request_password_reset(&body.email).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(RecoverResponse {
+            message: "If that email is registered, a password-reset link is on its way.",
+        }),
+    )
+        .into_response())
+}
+
+/// Complete a password reset: consume a valid reset token and install a new
+/// password.
+///
+/// On success the password hash is replaced and every refresh-token family the
+/// user holds is revoked, forcing a fresh sign-in on all devices. An invalid,
+/// expired, or already-used token yields a generic `400` that reveals nothing
+/// about which tokens or accounts exist.
+#[utoipa::path(
+    post,
+    path = "/reset",
+    tag = "auth",
+    request_body = ResetRequest,
+    responses(
+        (status = 200, description = "Password reset: the new password is installed and all prior sessions (refresh families) are revoked."),
+        (status = 400, description = "The new password fails policy, or the reset token is unknown, expired, or already used (generic; no enumeration)."),
+        (status = 429, description = "Rate limited."),
+    ),
+)]
+pub(crate) async fn reset(
+    State(state): State<AuthApiState>,
+    Json(body): Json<ResetRequest>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .service
+        .reset_password(
+            &SecretValue::new(body.reset_token.into_bytes()),
+            &SecretValue::new(body.new_password.into_bytes()),
+        )
+        .await?;
+    Ok(StatusCode::OK)
+}
+
 /// Render a token pair for the wire. This is the one legitimate place the
 /// opaque refresh secret is serialized: to its owner, over TLS.
 fn to_response(pair: &TokenPair) -> Result<TokenResponse, ApiError> {
@@ -299,7 +388,10 @@ impl IntoResponse for ApiError {
         let status = match self.0 {
             AuthError::InvalidCredentials | AuthError::RefreshInvalid => StatusCode::UNAUTHORIZED,
             // Request-level validation error, not an account-existence signal.
-            AuthError::WeakPassword => StatusCode::BAD_REQUEST,
+            // `ResetInvalid` is deliberately a generic 400 (never 401/404): a
+            // bad/expired/used reset token must not be distinguishable from a
+            // weak-password rejection, so the reset flow leaks no enumeration.
+            AuthError::WeakPassword | AuthError::ResetInvalid => StatusCode::BAD_REQUEST,
             // Internal-only; sign-up never surfaces it (anti-enumeration).
             AuthError::UserExists => StatusCode::CONFLICT,
             AuthError::RateLimited => StatusCode::TOO_MANY_REQUESTS,

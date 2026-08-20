@@ -14,8 +14,10 @@ use crate::issuer::{Clock, SystemClock, TokenIssuer};
 use crate::jwks::{Jwks, OpenIdConfiguration};
 use crate::key::SigningKey;
 use crate::keyring::Keyring;
+use crate::notify::{Notification, NotificationKind, Notifier};
 use crate::password::{check_password_policy, hash_password, verify_password};
 use crate::refresh::{self, RefreshStore};
+use crate::reset::{self, ResetStore};
 use crate::user::{User, UserStore};
 
 /// Result of a sign-up attempt, reported truthfully to the (trusted) caller.
@@ -66,6 +68,8 @@ pub struct AuthService<C: Clock = SystemClock> {
     issuer: TokenIssuer<C>,
     users: Arc<dyn UserStore>,
     refresh: Arc<dyn RefreshStore>,
+    resets: Arc<dyn ResetStore>,
+    notifier: Arc<dyn Notifier>,
     base_url: String,
 }
 
@@ -76,6 +80,8 @@ impl<C: Clock> AuthService<C> {
         issuer: TokenIssuer<C>,
         users: Arc<dyn UserStore>,
         refresh: Arc<dyn RefreshStore>,
+        resets: Arc<dyn ResetStore>,
+        notifier: Arc<dyn Notifier>,
         base_url: impl Into<String>,
     ) -> Self {
         Self {
@@ -83,6 +89,8 @@ impl<C: Clock> AuthService<C> {
             issuer,
             users,
             refresh,
+            resets,
+            notifier,
             base_url: base_url.into(),
         }
     }
@@ -119,7 +127,7 @@ impl<C: Clock> AuthService<C> {
             .users
             .create(User {
                 id: id.clone(),
-                email,
+                email: email.clone(),
                 password_hash,
                 tier: Tier::Community,
                 roles: Vec::new(),
@@ -129,12 +137,23 @@ impl<C: Clock> AuthService<C> {
             Ok(()) => Ok(SignUpOutcome::Created(id)),
             // Swallow the collision: surfacing it would enable enumeration.
             //
-            // TODO(amicu-planning#96): once the email-verification pipeline
-            // lands, dispatch here — a verification link on `Created`, an
-            // "account already exists / reset your password" notice on
-            // `AlreadyRegistered` — both out-of-band, preserving the identical
-            // HTTP response.
-            Err(AuthError::UserExists) => Ok(SignUpOutcome::AlreadyRegistered),
+            // Instead notify the *real* owner out-of-band via the notification
+            // seam (amicu-planning#102): an "account already exists / reset your
+            // password" nudge that the requester never observes on the identical
+            // HTTP response. A verification link on `Created` still waits on the
+            // email-verification pipeline (amicu-planning#96).
+            Err(AuthError::UserExists) => {
+                // Best-effort: a delivery failure must not change the response
+                // (that would leak account existence via timing/errors).
+                let _ = self
+                    .notifier
+                    .notify(Notification {
+                        recipient: email,
+                        kind: NotificationKind::AccountExists,
+                    })
+                    .await;
+                Ok(SignUpOutcome::AlreadyRegistered)
+            }
             Err(other) => Err(other),
         }
     }
@@ -207,6 +226,87 @@ impl<C: Clock> AuthService<C> {
         if let Ok(token) = presented.expose_secret_str() {
             self.refresh.revoke(&refresh::hash_token(token)).await?;
         }
+        Ok(())
+    }
+
+    /// Request a password reset for `email`.
+    ///
+    /// Anti-enumeration: this ALWAYS reports success and the HTTP boundary always
+    /// returns the same generic `202`, whether or not the email is registered. A
+    /// reset token is minted and delivered (via the [`Notifier`] seam) *only*
+    /// when the account exists; on a miss nothing is sent and nothing is stored.
+    /// Because delivery is out-of-band, neither the response nor its timing (no
+    /// Argon2 runs on either path) reveals which emails exist.
+    ///
+    /// # Errors
+    /// Propagates only genuine internal store errors, which are not
+    /// account-existence signals.
+    pub async fn request_password_reset(&self, email: &str) -> Result<()> {
+        let email = normalize_email(email);
+        // Silently no-op on an empty or unknown email: never a distinguishable
+        // signal to the caller.
+        if email.is_empty() {
+            return Ok(());
+        }
+        let Some(user) = self.users.get_by_email(&email).await? else {
+            return Ok(());
+        };
+        let expires_at = self.issuer.now_unix()
+            + i64::try_from(self.issuer.config().reset_ttl.as_secs()).unwrap_or(i64::MAX);
+        let minted = reset::mint(&user.id, expires_at);
+        self.resets.insert(minted.record).await?;
+        // Best-effort delivery: a transport failure must not change the outcome.
+        let _ = self
+            .notifier
+            .notify(Notification {
+                recipient: email,
+                kind: NotificationKind::PasswordReset {
+                    reset_token: minted.token,
+                },
+            })
+            .await;
+        Ok(())
+    }
+
+    /// Consume a reset token and set a new password.
+    ///
+    /// The password policy is enforced first (a request-level check that reveals
+    /// nothing about which tokens/accounts exist, and avoids burning a valid
+    /// token on a weak password). The token is then consumed atomically and
+    /// single-use: a reused, expired, or unknown token is rejected with the
+    /// generic [`AuthError::ResetInvalid`] (no enumeration). On success the
+    /// password hash is replaced AND every refresh-token family the user holds is
+    /// revoked, forcing a fresh sign-in on every device.
+    ///
+    /// # Errors
+    /// [`AuthError::InvalidCredentials`] / [`AuthError::WeakPassword`] if the new
+    /// password fails policy; [`AuthError::ResetInvalid`] if the token is unknown,
+    /// expired, or already used; [`AuthError::PasswordHash`] on hashing failure.
+    pub async fn reset_password(
+        &self,
+        token: &SecretValue,
+        new_password: &SecretValue,
+    ) -> Result<()> {
+        // Request-level validation before touching the token: identical error
+        // regardless of token validity, so it leaks nothing.
+        check_password_policy(new_password)?;
+        let raw = token
+            .expose_secret_str()
+            .map_err(|_| AuthError::ResetInvalid)?;
+        let hash = reset::hash_token(raw);
+        // Atomic single-use consume: exactly one caller can win `Consumed`.
+        let user_id = match self.resets.consume(&hash, self.issuer.now_unix()).await? {
+            reset::ResetConsume::Consumed { user_id } => user_id,
+            reset::ResetConsume::NotFound
+            | reset::ResetConsume::Reuse
+            | reset::ResetConsume::Expired => return Err(AuthError::ResetInvalid),
+        };
+        // Hash the new password only after the token is proven live and claimed.
+        let password_hash = hash_password(new_password)?;
+        self.users.update_password(&user_id, password_hash).await?;
+        // Force re-authentication everywhere: the old credential is gone, so
+        // every outstanding session (refresh family) must die.
+        self.refresh.revoke_all_for_user(&user_id).await?;
         Ok(())
     }
 

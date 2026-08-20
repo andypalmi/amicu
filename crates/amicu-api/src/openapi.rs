@@ -23,6 +23,8 @@ use utoipa::{Modify, OpenApi};
         crate::auth::token,
         crate::auth::refresh,
         crate::auth::logout,
+        crate::auth::recover,
+        crate::auth::reset,
         crate::auth::jwks,
         crate::auth::openid_configuration,
     ),
@@ -31,6 +33,9 @@ use utoipa::{Modify, OpenApi};
         crate::auth::RefreshRequest,
         crate::auth::TokenResponse,
         crate::auth::SignUpResponse,
+        crate::auth::RecoverRequest,
+        crate::auth::RecoverResponse,
+        crate::auth::ResetRequest,
     )),
     modifiers(&SecurityAddon),
     tags(
