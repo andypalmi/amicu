@@ -12,8 +12,9 @@ use amicu_core::resource::Residency;
 
 use crate::capability::Region;
 use crate::{
-    AwsProvider, AzureProvider, GcpProvider, HetznerProvider, OvhCloudProvider, Provider,
-    RunPodProvider, ScalewayProvider, aws, azure, gcp, hetzner, ovhcloud, runpod, scaleway,
+    AwsProvider, AzureProvider, GcpProvider, HetznerProvider, NebiusProvider, OvhCloudProvider,
+    Provider, RunPodProvider, ScalewayProvider, aws, azure, gcp, hetzner, nebius, ovhcloud, runpod,
+    scaleway,
 };
 
 /// Every residency jurisdiction, so catalogued providers expose all of their
@@ -35,6 +36,7 @@ fn provider_regions(provider: &str) -> Option<Vec<Region>> {
         azure::PROVIDER_ID => AzureProvider::for_residencies(ALL_RESIDENCIES).capabilities(),
         gcp::PROVIDER_ID => GcpProvider::for_residencies(ALL_RESIDENCIES).capabilities(),
         hetzner::PROVIDER_ID => HetznerProvider::for_residencies(ALL_RESIDENCIES).capabilities(),
+        nebius::PROVIDER_ID => NebiusProvider::for_residencies(ALL_RESIDENCIES).capabilities(),
         ovhcloud::PROVIDER_ID => OvhCloudProvider::for_residencies(ALL_RESIDENCIES).capabilities(),
         scaleway::PROVIDER_ID => ScalewayProvider::for_residencies(ALL_RESIDENCIES).capabilities(),
         runpod::PROVIDER_ID => RunPodProvider::for_residencies(ALL_RESIDENCIES).capabilities(),
@@ -70,6 +72,10 @@ mod tests {
         assert_eq!(
             resolve_residency("gcp", "asia-east1"),
             Some(Residency::Apac)
+        );
+        assert_eq!(
+            resolve_residency("nebius", "eu-north1"),
+            Some(Residency::Eu)
         );
     }
 
