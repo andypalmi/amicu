@@ -18,7 +18,15 @@ const { rewrite: rewriteSuffix } = rewritePath(
 // TTL is rotated before the route handler runs (attemptRefresh writes the new
 // cookie onto the forwarded request via NextResponse.next({ request }), so the
 // same-request guardEngine() sees it) — no spurious 401 on Validate/Plan.
-const PROTECTED_PREFIXES = ['/app', '/account', '/api/engine', '/api/recommend', '/recommend'];
+const PROTECTED_PREFIXES = [
+  '/app',
+  '/account',
+  '/api/engine',
+  '/api/recommend',
+  '/recommend',
+  '/api/monitor',
+  '/monitor',
+];
 
 // secure tied to NODE_ENV so local HTTP dev works; a non-prod build over plain
 // HTTP would omit Secure. Real deployments run production mode behind TLS.
