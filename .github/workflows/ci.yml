@@ -61,7 +61,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `uses:` steps ignore `defaults.run.working-directory`, so point
+      # action-setup at the web package.json for its pinned `packageManager`
+      # (the repo root is a Rust workspace with no package.json).
       - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
 
       - uses: actions/setup-node@v4
         with:
