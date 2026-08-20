@@ -6,5 +6,47 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["verifier", "issuer"]
+# Offline token verification seam other services embed. Deliberately light: no
+# signing/password/key-generation deps.
+verifier = []
+# Token issuance, key generation/rotation, password hashing, session stores.
+issuer = [
+    "dep:ed25519-dalek",
+    "dep:argon2",
+    "dep:rand_core",
+    "dep:sha2",
+    "dep:zeroize",
+]
+# reqwest-backed JWKS fetcher for the verifier. Off by default so embedders pick
+# their own transport; the cache/refetch logic is transport-agnostic.
+reqwest-provider = ["verifier", "dep:reqwest"]
+
+[dependencies]
+amicu-core = { path = "../amicu-core" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+base64 = "0.22"
+# EdDSA sign/verify; `ring` backend (default) keeps the build hermetic and holds
+# MSRV 1.97. `use_pem` (default) is needed to load PKCS#8 PEM signing keys.
+jsonwebtoken = "9"
+
+# issuer-only
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "pkcs8", "pem", "rand_core", "zeroize"], optional = true }
+argon2 = { version = "0.5", optional = true }
+rand_core = { version = "0.6", features = ["getrandom"], optional = true }
+sha2 = { version = "0.10", optional = true }
+zeroize = { version = "1", features = ["derive"], optional = true }
+
+# verifier http transport
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+serde_json = "1"
+
 [lints]
 workspace = true
