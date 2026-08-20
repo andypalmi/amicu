@@ -137,10 +137,11 @@ async fn full_lifecycle_signup_token_verify_refresh_logout() {
     let app = app(100);
     let creds = json!({"email": "user@example.com", "password": "hunter2-hunter2"});
 
-    // Sign up.
+    // Sign up: generic accepted response, no user id echoed (anti-enumeration).
     let (status, body) = call(&app, "POST", "/signup", Some(creds.clone()), "10.0.0.1").await;
-    assert_eq!(status, StatusCode::CREATED);
-    assert!(body["user_id"].as_str().unwrap().starts_with("usr_"));
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(body["user_id"].is_null());
+    assert!(body["message"].as_str().is_some());
 
     // Get tokens.
     let (status, tokens) = call(&app, "POST", "/token", Some(creds.clone()), "10.0.0.1").await;
@@ -218,13 +219,32 @@ async fn wrong_password_is_unauthorized() {
 }
 
 #[tokio::test]
-async fn duplicate_signup_conflicts() {
+async fn duplicate_signup_is_indistinguishable() {
     let app = app(100);
     let creds = json!({"email": "dup@example.com", "password": "some-password"});
-    let (s1, _) = call(&app, "POST", "/signup", Some(creds.clone()), "3.3.3.3").await;
-    assert_eq!(s1, StatusCode::CREATED);
-    let (s2, _) = call(&app, "POST", "/signup", Some(creds), "3.3.3.3").await;
-    assert_eq!(s2, StatusCode::CONFLICT);
+    // Both the first (new account) and second (collision) sign-up return the
+    // exact same status and body — an attacker cannot enumerate registered
+    // emails through /signup.
+    let (s1, b1) = call(&app, "POST", "/signup", Some(creds.clone()), "3.3.3.3").await;
+    let (s2, b2) = call(&app, "POST", "/signup", Some(creds), "3.3.3.3").await;
+    assert_eq!(s1, StatusCode::ACCEPTED);
+    assert_eq!(s2, StatusCode::ACCEPTED);
+    assert_eq!(b1, b2);
+    assert!(b1["user_id"].is_null());
+}
+
+#[tokio::test]
+async fn signup_weak_password_is_rejected() {
+    let app = app(100);
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/signup",
+        Some(json!({"email": "weak@example.com", "password": "short"})),
+        "4.4.4.4",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

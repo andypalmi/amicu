@@ -10,7 +10,7 @@ use amicu_auth::issuer::{Clock, IssuerConfig, TokenIssuer};
 use amicu_auth::key::SigningKey;
 use amicu_auth::keyring::Keyring;
 use amicu_auth::refresh::InMemoryRefreshStore;
-use amicu_auth::service::AuthService;
+use amicu_auth::service::{AuthService, SignUpOutcome};
 use amicu_auth::user::InMemoryUserStore;
 use amicu_auth::verifier::{StaticJwksProvider, Verifier, VerifierConfig};
 use amicu_core::secret::SecretValue;
@@ -73,10 +73,14 @@ fn verifier_for(svc: &AuthService<TestClock>) -> Verifier<StaticJwksProvider> {
 async fn sign_up_then_sign_in_issues_verifiable_token() {
     let clock = TestClock::at(real_now());
     let svc = build(clock);
-    let id = svc
+    let id = match svc
         .sign_up("Alice@Example.com ", &pw("correct horse"))
         .await
-        .unwrap();
+        .unwrap()
+    {
+        SignUpOutcome::Created(id) => id,
+        SignUpOutcome::AlreadyRegistered => panic!("first sign-up should create"),
+    };
 
     let pair = svc
         .sign_in("alice@example.com", &pw("correct horse"))
@@ -125,16 +129,111 @@ async fn empty_credentials_rejected() {
 }
 
 #[tokio::test]
-async fn duplicate_sign_up_rejected() {
+async fn duplicate_sign_up_is_not_enumerable() {
     let svc = build(TestClock::at(real_now()));
-    svc.sign_up("dup@example.com", &pw("p1-password"))
-        .await
-        .unwrap();
+    // First sign-up creates the account.
     assert!(matches!(
+        svc.sign_up("dup@example.com", &pw("p1-password"))
+            .await
+            .unwrap(),
+        SignUpOutcome::Created(_)
+    ));
+    // A second sign-up for the same email does NOT error (no enumeration): it
+    // reports AlreadyRegistered, which the HTTP layer renders identically to a
+    // fresh registration.
+    assert_eq!(
         svc.sign_up("dup@example.com", &pw("p2-password"))
             .await
+            .unwrap(),
+        SignUpOutcome::AlreadyRegistered
+    );
+    // The original credentials still work; the duplicate did not overwrite.
+    svc.sign_in("dup@example.com", &pw("p1-password"))
+        .await
+        .unwrap();
+    // The duplicate's password was never installed.
+    assert!(matches!(
+        svc.sign_in("dup@example.com", &pw("p2-password"))
+            .await
             .unwrap_err(),
-        AuthError::UserExists
+        AuthError::InvalidCredentials
+    ));
+}
+
+#[tokio::test]
+async fn sign_up_rejects_weak_password() {
+    let svc = build(TestClock::at(real_now()));
+    assert!(matches!(
+        svc.sign_up("weak@example.com", &pw("short"))
+            .await
+            .unwrap_err(),
+        AuthError::WeakPassword
+    ));
+    // A weak password must not have created an account (so a subsequent strong
+    // sign-up is a genuine Create, not an AlreadyRegistered).
+    assert!(matches!(
+        svc.sign_up("weak@example.com", &pw("strong-enough"))
+            .await
+            .unwrap(),
+        SignUpOutcome::Created(_)
+    ));
+}
+
+#[tokio::test]
+async fn refresh_reuse_revokes_whole_family() {
+    let svc = build(TestClock::at(real_now()));
+    svc.sign_up("theft@example.com", &pw("family-secret"))
+        .await
+        .unwrap();
+    let pair = svc
+        .sign_in("theft@example.com", &pw("family-secret"))
+        .await
+        .unwrap();
+
+    // Legitimate rotation: the presented token is revoked, a successor issued.
+    let first = pair.refresh_token.clone();
+    let rotated = svc.refresh(&first).await.unwrap();
+
+    // An attacker replays the OLD (already-revoked) token -> reuse detected.
+    assert!(matches!(
+        svc.refresh(&first).await.unwrap_err(),
+        AuthError::RefreshInvalid
+    ));
+
+    // Reuse detection revoked the WHOLE family: the victim's live successor
+    // token (which had NOT been used yet) is now also dead.
+    assert!(matches!(
+        svc.refresh(&rotated.refresh_token).await.unwrap_err(),
+        AuthError::RefreshInvalid
+    ));
+}
+
+#[tokio::test]
+async fn refresh_chain_rotates_across_multiple_hops() {
+    let svc = build(TestClock::at(real_now()));
+    svc.sign_up("chain@example.com", &pw("chain-secret"))
+        .await
+        .unwrap();
+    let mut current = svc
+        .sign_in("chain@example.com", &pw("chain-secret"))
+        .await
+        .unwrap()
+        .refresh_token;
+    // Several honest rotations in a row all succeed within one family.
+    for _ in 0..4 {
+        current = svc.refresh(&current).await.unwrap().refresh_token;
+    }
+    // Then a single replay of a stale token anywhere still trips detection.
+    let stale = current.clone();
+    let next = svc.refresh(&current).await.unwrap().refresh_token;
+    assert!(matches!(
+        svc.refresh(&stale).await.unwrap_err(),
+        AuthError::RefreshInvalid
+    ));
+    // ...and it took down the family, so even the freshest token is dead.
+    assert!(matches!(
+        svc.refresh(&next).await.unwrap_err(),
+        AuthError::RefreshInvalid
     ));
 }
 
@@ -158,14 +257,16 @@ async fn refresh_rotates_and_old_token_is_revoked() {
         .await
         .unwrap();
 
-    // Reusing the old refresh token now fails (rotation revoked it).
+    // The new refresh token works (honest rotation continues the family).
+    svc.refresh(&rotated.refresh_token).await.unwrap();
+
+    // Reusing the original, already-rotated token fails (it was revoked on
+    // rotation). Family-wide revocation on reuse is covered separately by
+    // `refresh_reuse_revokes_whole_family`.
     assert!(matches!(
         svc.refresh(&first_refresh).await.unwrap_err(),
         AuthError::RefreshInvalid
     ));
-
-    // The new refresh token works.
-    svc.refresh(&rotated.refresh_token).await.unwrap();
 }
 
 #[tokio::test]

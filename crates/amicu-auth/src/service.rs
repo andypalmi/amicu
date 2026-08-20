@@ -14,9 +14,27 @@ use crate::issuer::{Clock, SystemClock, TokenIssuer};
 use crate::jwks::{Jwks, OpenIdConfiguration};
 use crate::key::SigningKey;
 use crate::keyring::Keyring;
-use crate::password::{hash_password, verify_password};
+use crate::password::{check_password_policy, hash_password, verify_password};
 use crate::refresh::{self, RefreshStore};
 use crate::user::{User, UserStore};
+
+/// Result of a sign-up attempt, reported truthfully to the (trusted) caller.
+///
+/// The HTTP boundary MUST collapse both variants to one identical response so a
+/// client cannot tell a new registration from a hit on an existing account
+/// (email enumeration). The distinction is retained here only for internal use:
+/// audit metrics today, and — once the email pipeline lands — deciding which
+/// message to dispatch (a verification link vs. an "account already exists"
+/// notice), both delivered out-of-band so neither is observable on the HTTP
+/// response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignUpOutcome {
+    /// A new account was created; the id is for internal use only and MUST NOT
+    /// be echoed to the client.
+    Created(String),
+    /// The email was already registered; no new account was created.
+    AlreadyRegistered,
+}
 
 /// Tokens returned to a client on sign-in/refresh.
 pub struct TokenPair {
@@ -69,19 +87,36 @@ impl<C: Clock> AuthService<C> {
         }
     }
 
-    /// Register a new user. Returns the new user id.
+    /// Register a new user.
+    ///
+    /// Anti-enumeration: this never signals whether the email was already
+    /// taken. An `AlreadyRegistered` collision is reported as its own
+    /// [`SignUpOutcome`] variant (not an error), and the same password hashing
+    /// runs on both paths so neither the result *nor the timing* distinguishes
+    /// a new account from an existing one. The caller MUST render both outcomes
+    /// identically (see [`SignUpOutcome`]) — mirroring the sign-in
+    /// dummy-hash defense.
+    ///
+    /// Input validation that concerns the *request itself* (empty email, weak
+    /// password) is still reported as an error: it reveals nothing about which
+    /// accounts exist.
     ///
     /// # Errors
-    /// [`AuthError::UserExists`], [`AuthError::InvalidCredentials`] (empty
-    /// credentials), or [`AuthError::PasswordHash`].
-    pub async fn sign_up(&self, email: &str, password: &SecretValue) -> Result<String> {
+    /// [`AuthError::InvalidCredentials`] (empty email or password),
+    /// [`AuthError::WeakPassword`] (fails the password policy), or
+    /// [`AuthError::PasswordHash`].
+    pub async fn sign_up(&self, email: &str, password: &SecretValue) -> Result<SignUpOutcome> {
         let email = normalize_email(email);
         if email.is_empty() {
             return Err(AuthError::InvalidCredentials);
         }
+        check_password_policy(password)?;
+        // Always hash: on the collision path this is the timing equalizer, so a
+        // duplicate sign-up costs the same Argon2 work as a fresh one.
         let password_hash = hash_password(password)?;
         let id = new_user_id();
-        self.users
+        match self
+            .users
             .create(User {
                 id: id.clone(),
                 email,
@@ -89,8 +124,19 @@ impl<C: Clock> AuthService<C> {
                 tier: Tier::Community,
                 roles: Vec::new(),
             })
-            .await?;
-        Ok(id)
+            .await
+        {
+            Ok(()) => Ok(SignUpOutcome::Created(id)),
+            // Swallow the collision: surfacing it would enable enumeration.
+            //
+            // TODO(amicu-planning#96): once the email-verification pipeline
+            // lands, dispatch here — a verification link on `Created`, an
+            // "account already exists / reset your password" notice on
+            // `AlreadyRegistered` — both out-of-band, preserving the identical
+            // HTTP response.
+            Err(AuthError::UserExists) => Ok(SignUpOutcome::AlreadyRegistered),
+            Err(other) => Err(other),
+        }
     }
 
     /// Authenticate with email+password and issue a token pair.
@@ -109,10 +155,18 @@ impl<C: Clock> AuthService<C> {
         self.issue_pair(&user).await
     }
 
-    /// Rotate a refresh token: validate it, revoke it, and issue a fresh pair.
+    /// Rotate a refresh token: validate it, revoke it, and issue a fresh pair
+    /// within the same token family.
+    ///
+    /// Reuse/theft detection: presenting a token that is *already revoked*
+    /// (typically an old token replayed after the family has rotated past it)
+    /// is treated as a compromise — the entire family is revoked and flagged,
+    /// killing both the attacker's rotated token and the victim's live one and
+    /// forcing a fresh sign-in. See the [`refresh`] module docs.
     ///
     /// # Errors
-    /// [`AuthError::RefreshInvalid`] if unknown, expired, or revoked.
+    /// [`AuthError::RefreshInvalid`] if unknown, expired, or revoked (the reuse
+    /// case additionally revokes the family before returning this error).
     pub async fn refresh(&self, presented: &SecretValue) -> Result<TokenPair> {
         let token = presented
             .expose_secret_str()
@@ -123,17 +177,24 @@ impl<C: Clock> AuthService<C> {
             .get(&hash)
             .await?
             .ok_or(AuthError::RefreshInvalid)?;
-        if record.revoked || record.expires_at <= self.issuer.now_unix() {
+        // Reuse detection: an already-revoked token being presented again is a
+        // theft/replay signal. Revoke and flag the whole family, then reject.
+        if record.revoked {
+            self.refresh.compromise_family(&record.family_id).await?;
             return Err(AuthError::RefreshInvalid);
         }
-        // Rotate: revoke the presented token before minting a replacement.
+        if record.expires_at <= self.issuer.now_unix() {
+            return Err(AuthError::RefreshInvalid);
+        }
+        // Rotate: revoke the presented token before minting its successor into
+        // the same family.
         self.refresh.revoke(&hash).await?;
         let user = self
             .users
             .get_by_id(&record.user_id)
             .await?
             .ok_or(AuthError::RefreshInvalid)?;
-        self.issue_pair(&user).await
+        self.issue_pair_in_family(&user, &record.family_id).await
     }
 
     /// Revoke a refresh token (logout). Idempotent.
@@ -167,7 +228,14 @@ impl<C: Clock> AuthService<C> {
         OpenIdConfiguration::new(self.issuer.config().issuer.clone(), &self.base_url)
     }
 
+    /// Issue a token pair opening a brand-new refresh family (fresh sign-in).
     async fn issue_pair(&self, user: &User) -> Result<TokenPair> {
+        self.issue_pair_in_family(user, &refresh::new_family_id())
+            .await
+    }
+
+    /// Issue a token pair whose refresh token joins `family_id` (rotation).
+    async fn issue_pair_in_family(&self, user: &User, family_id: &str) -> Result<TokenPair> {
         let config = self.issuer.config();
         let access_ttl = i64::try_from(config.access_ttl.as_secs()).unwrap_or(i64::MAX);
         let access_token = {
@@ -177,7 +245,7 @@ impl<C: Clock> AuthService<C> {
         };
         let expires_at = self.issuer.now_unix()
             + i64::try_from(config.refresh_ttl.as_secs()).unwrap_or(i64::MAX);
-        let minted = refresh::mint(&user.id, expires_at);
+        let minted = refresh::mint_in_family(&user.id, family_id, expires_at);
         self.refresh.insert(minted.record).await?;
         Ok(TokenPair {
             access_token,
