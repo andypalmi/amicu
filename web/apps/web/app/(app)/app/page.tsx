@@ -1,11 +1,27 @@
-export default function AppHomePage() {
+import type { Metadata } from 'next';
+import { requireSession } from '@/lib/auth/session';
+import { EngineConsole } from '@/components/engine/console';
+
+export const metadata: Metadata = { title: 'Console' };
+
+// The authenticated product surface: an HCL editor that validates configs and
+// plans changes against the Management API (via the /api/engine/* BFF routes),
+// with an optional prior-config diff. Gating is enforced by the API — the UI just
+// degrades gracefully on a 403.
+export default async function AppHomePage() {
+  await requireSession();
+
   return (
-    <main className="flex flex-1 flex-col items-center justify-center gap-4 px-6 py-24 text-center">
-      <h1 className="text-2xl font-bold">App shell</h1>
-      <p className="max-w-md text-muted-foreground">
-        Placeholder for the authenticated product. The dual-mode entry, guided wizard,
-        and stack dashboard land in later slices of the web epic.
-      </p>
+    <main className="mx-auto w-full max-w-6xl space-y-6 px-6 py-10">
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight">Console</h1>
+        <p className="text-muted-foreground">
+          Write your Amicu configuration, validate it, and plan the changes Amicu would
+          apply. Toggle a prior configuration to see a diff.
+        </p>
+      </div>
+
+      <EngineConsole />
     </main>
   );
 }

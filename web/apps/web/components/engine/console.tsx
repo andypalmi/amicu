@@ -1,0 +1,193 @@
+'use client';
+
+import { useState } from 'react';
+import Link from 'next/link';
+import { Button, Badge } from '@amicu/ui';
+import { EXAMPLE_CONFIG } from '@/lib/engine/example';
+import { isTierDenied, type DiagnosticReport, type Plan } from '@/lib/engine/format';
+import { DiagnosticsPanel } from './diagnostics-panel';
+import { PlanPanel } from './plan-panel';
+
+type Result =
+  | { kind: 'idle' }
+  | { kind: 'diagnostics'; report: DiagnosticReport }
+  | { kind: 'plan'; plan: Plan }
+  | { kind: 'error'; message: string; upgrade?: boolean };
+
+type Pending = 'validate' | 'plan' | null;
+
+function looksLikeReport(body: unknown): body is DiagnosticReport {
+  return (
+    !!body &&
+    typeof body === 'object' &&
+    Array.isArray((body as { diagnostics?: unknown }).diagnostics)
+  );
+}
+
+// The authenticated engine console: an HCL editor wired to the /validate and
+// /plan BFF routes, with an optional prior-config pane so /plan renders a diff.
+// All state is client-side; the BFF holds the session and talks to the API.
+export function EngineConsole() {
+  const [config, setConfig] = useState(EXAMPLE_CONFIG);
+  const [prior, setPrior] = useState('');
+  const [diffMode, setDiffMode] = useState(false);
+  const [pending, setPending] = useState<Pending>(null);
+  const [result, setResult] = useState<Result>({ kind: 'idle' });
+
+  async function run(endpoint: 'validate' | 'plan') {
+    setPending(endpoint);
+    setResult({ kind: 'idle' });
+    const body =
+      endpoint === 'plan' && diffMode ? { config, prior } : { config };
+    try {
+      const res = await fetch(`/api/engine/${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const payload: unknown = await res.json().catch(() => null);
+
+      if (res.status === 401) {
+        setResult({
+          kind: 'error',
+          message: 'Your session has expired. Reload the page or sign in again.',
+        });
+        return;
+      }
+      if (isTierDenied(res.status)) {
+        setResult({
+          kind: 'error',
+          message: 'This feature requires a higher plan. The engine is gated by the API.',
+          upgrade: true,
+        });
+        return;
+      }
+      if (res.ok) {
+        if (endpoint === 'validate' && looksLikeReport(payload)) {
+          setResult({ kind: 'diagnostics', report: payload });
+        } else if (endpoint === 'plan') {
+          setResult({ kind: 'plan', plan: payload as Plan });
+        } else {
+          setResult({ kind: 'error', message: 'Unexpected response from the server.' });
+        }
+        return;
+      }
+      // A valid-but-unplannable config comes back 422 with a DiagnosticReport.
+      if (res.status === 422 && looksLikeReport(payload)) {
+        setResult({ kind: 'diagnostics', report: payload });
+        return;
+      }
+      // 400 parse error, 502 upstream, etc. — surface the API's own message.
+      const message =
+        (payload as { error?: string })?.error ?? `Request failed (${res.status}).`;
+      setResult({ kind: 'error', message });
+    } catch {
+      setResult({ kind: 'error', message: 'Could not reach the server. Is it running?' });
+    } finally {
+      setPending(null);
+    }
+  }
+
+  const editorClass =
+    'w-full min-h-[18rem] resize-y rounded-lg border border-border bg-card p-3 font-mono text-xs leading-relaxed text-card-foreground focus:outline-none focus:ring-2 focus:ring-ring';
+
+  return (
+    <div className="grid gap-6 lg:grid-cols-2">
+      {/* Editor column */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between gap-2">
+          <label htmlFor="config" className="text-sm font-medium">
+            Configuration
+          </label>
+          <button
+            type="button"
+            onClick={() => setConfig(EXAMPLE_CONFIG)}
+            className="text-xs text-muted-foreground underline-offset-2 hover:underline"
+          >
+            Reset to example
+          </button>
+        </div>
+        <textarea
+          id="config"
+          value={config}
+          onChange={(e) => setConfig(e.target.value)}
+          spellCheck={false}
+          className={editorClass}
+          aria-label="Amicu HCL configuration"
+        />
+
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={diffMode}
+            onChange={(e) => setDiffMode(e.target.checked)}
+            className="h-4 w-4 rounded border-border"
+          />
+          Diff against a prior configuration
+        </label>
+
+        {diffMode ? (
+          <div className="space-y-2">
+            <label htmlFor="prior" className="text-sm font-medium text-muted-foreground">
+              Prior configuration
+            </label>
+            <textarea
+              id="prior"
+              value={prior}
+              onChange={(e) => setPrior(e.target.value)}
+              spellCheck={false}
+              placeholder="Leave empty to plan everything as a fresh create."
+              className={editorClass}
+              aria-label="Prior Amicu HCL configuration"
+            />
+          </div>
+        ) : null}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            onClick={() => run('validate')}
+            disabled={pending !== null}
+            variant="outline"
+          >
+            {pending === 'validate' ? 'Validating…' : 'Validate'}
+          </Button>
+          <Button onClick={() => run('plan')} disabled={pending !== null}>
+            {pending === 'plan' ? 'Planning…' : diffMode ? 'Plan diff' : 'Plan'}
+          </Button>
+        </div>
+      </section>
+
+      {/* Results column */}
+      <section className="space-y-3">
+        <h2 className="text-sm font-medium">Result</h2>
+        {result.kind === 'idle' ? (
+          <p className="text-sm text-muted-foreground">
+            {pending
+              ? 'Running…'
+              : 'Validate to check the configuration, or Plan to see the actions Amicu would take.'}
+          </p>
+        ) : null}
+
+        {result.kind === 'error' ? (
+          <div className="space-y-3 rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
+            <div className="flex items-center gap-2">
+              <Badge variant="destructive">Error</Badge>
+            </div>
+            <p>{result.message}</p>
+            {result.upgrade ? (
+              <Button asChild size="sm" variant="outline">
+                <Link href="/pricing">See plans</Link>
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
+
+        {result.kind === 'diagnostics' ? (
+          <DiagnosticsPanel report={result.report} />
+        ) : null}
+
+        {result.kind === 'plan' ? <PlanPanel plan={result.plan} /> : null}
+      </section>
+    </div>
+  );
+}
