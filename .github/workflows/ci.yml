@@ -51,3 +51,46 @@ jobs:
 
       - name: Compile-fail guard (trybuild, pinned)
         run: cargo test -p amicu-core --test compile_fail -- --include-ignored
+
+  web:
+    name: web (generated-client drift / lint / typecheck / build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      # `uses:` steps ignore `defaults.run.working-directory`, so point
+      # action-setup at the web package.json for its pinned `packageManager`
+      # (the repo root is a Rust workspace with no package.json).
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # Fails if the committed @amicu/api-client no longer matches
+      # crates/amicu-schema/openapi.json (i.e. the spec changed but nobody
+      # reran `pnpm --filter @amicu/api-client generate`).
+      - name: Generated-client drift check
+        run: pnpm check:generated
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build

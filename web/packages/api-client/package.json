@@ -8,12 +8,18 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "generate": "openapi-typescript ../../../crates/amicu-schema/openapi.json --output ./src/schema.ts --root-types --root-types-no-schema-prefix",
+    "check:generated": "node ./scripts/check-drift.mjs",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "openapi-fetch": "0.17.0"
   },
   "devDependencies": {
     "@amicu/config": "workspace:*",
     "eslint": "^9.39.5",
+    "openapi-typescript": "7.13.0",
     "typescript": "^6.0.3"
   }
 }

@@ -1,23 +1,21 @@
-// Thin, well-typed auth client — fetch wrappers over the TASK-078 auth endpoints.
+// Thin, well-typed auth client for the BFF — a small ergonomic surface over the
+// generated `@amicu/api-client` (OpenAPI-derived, from `crates/amicu-schema/
+// openapi.json`).
 //
-// TODO(amicu-planning#83): replace this hand-written client with the generated
-// `@amicu/api-client` (OpenAPI-derived) once it lands. Keep this surface small and
-// isolated so the swap is a drop-in. The request/response shapes below are the
-// project's best reading of TASK-078 / RFC 0001 §6 and MUST be reconciled against
-// the committed OpenAPI spec — see the "backend gaps" note in the PR.
+// Resolved amicu-planning#83: the request/response *shapes* below are no longer
+// hand-written. `TokenResponse` and every request body are typed straight from the
+// generated schema, so this client cannot drift from the spec. What remains here is
+// only ergonomics: a compact method-per-flow surface returning a discriminated
+// `AuthResult`, so callers (server actions / middleware) don't handle openapi-fetch's
+// `{ data, error, response }` triples directly.
 //
 // Server-only: these calls carry credentials / refresh tokens and must never run
 // in the browser. They are invoked exclusively from the BFF (server actions and
 // route handlers).
 
-/** Token bundle returned by the issuer. */
-export interface TokenResponse {
-  access_token: string;
-  refresh_token: string;
-  /** Access-token lifetime in seconds, when the issuer reports it. */
-  expires_in?: number;
-  token_type?: string;
-}
+import { createApiClient, type TokenResponse } from '@amicu/api-client';
+
+export type { TokenResponse };
 
 export type AuthResult<T> =
   | { ok: true; data: T }
@@ -30,79 +28,70 @@ export interface AuthClientOptions {
   fetch?: typeof fetch;
 }
 
-async function readError(res: Response): Promise<string | undefined> {
-  try {
-    const body = (await res.json()) as { error?: string; code?: string; error_code?: string };
-    return body.code ?? body.error_code ?? body.error;
-  } catch {
-    return undefined;
-  }
-}
-
 export interface AuthClient {
   /** Exchange email+password for a token bundle. Maps to `POST /token`. */
   login(input: { email: string; password: string }): Promise<AuthResult<TokenResponse>>;
   /**
    * Register a new account. Maps to `POST /signup`.
    *
-   * The backend ALWAYS responds `202 { message }` with NO tokens and never 409 —
-   * it does not reveal whether the email already exists (anti-enumeration). So
-   * this is a fire-and-forget acknowledgement: it does NOT log the user in. The
-   * account is confirmed out-of-band (email), after which the user signs in.
+   * The backend ALWAYS responds `202` (with a generic `{ message }` we discard) and
+   * never 409 — it does not reveal whether the email already exists
+   * (anti-enumeration). So this is a fire-and-forget acknowledgement: it does NOT
+   * log the user in. The account is confirmed out-of-band (email), after which the
+   * user signs in.
    */
   signup(input: { email: string; password: string }): Promise<AuthResult<void>>;
   /** Rotate a refresh token for a fresh bundle. Maps to `POST /token/refresh`. */
   refresh(refreshToken: string): Promise<AuthResult<TokenResponse>>;
-  /** Revoke a refresh token. Maps to `POST /logout`. */
+  /** Revoke a refresh token (idempotent, `204`). Maps to `POST /logout`. */
   logout(refreshToken: string): Promise<AuthResult<void>>;
   /**
-   * Request a password-reset email. Maps to `POST /recover` (GoTrue-style).
-   * NOTE: not enumerated in TASK-078's acceptance criteria — flagged as a backend
-   * gap in the PR. The BFF treats every outcome as success (anti-enumeration).
+   * Request a password-reset email. Maps to `POST /recover`; the backend replies
+   * `202` with a generic `{ message }` whether or not the email is registered
+   * (anti-enumeration), which the BFF treats uniformly as success.
    */
   requestPasswordReset(input: { email: string }): Promise<AuthResult<void>>;
 }
 
 export function createAuthClient(options: AuthClientOptions): AuthClient {
-  const doFetch = options.fetch ?? fetch;
-  const base = options.baseUrl.replace(/\/+$/, '');
+  const api = createApiClient({ baseUrl: options.baseUrl, fetch: options.fetch });
 
-  async function postJson<T>(
-    path: string,
-    body: unknown,
-    parse: (res: Response) => Promise<T>,
+  // Normalize openapi-fetch's `{ data, error, response }` into `AuthResult`, and
+  // turn a thrown fetch (network/DNS failure) into a 503-like result the caller can
+  // genericize — never a rejected promise.
+  async function toResult<T>(
+    call: Promise<{ data?: unknown; error?: unknown; response: Response }>,
+    map: (data: unknown) => T,
   ): Promise<AuthResult<T>> {
-    let res: Response;
+    let res: { error?: unknown; response: Response; data?: unknown };
     try {
-      res = await doFetch(`${base}${path}`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify(body),
-        // Never send ambient browser cookies to the issuer; the BFF owns the session.
-        cache: 'no-store',
-      });
+      res = await call;
     } catch {
-      // Network/DNS failure — surface as a 503-like result the caller can genericize.
       return { ok: false, status: 503 };
     }
-    if (!res.ok) {
-      return { ok: false, status: res.status, code: await readError(res) };
+    if (!res.response.ok) {
+      return { ok: false, status: res.response.status, code: errorCode(res.error) };
     }
-    return { ok: true, data: await parse(res) };
+    return { ok: true, data: map(res.data) };
   }
 
-  const asTokens = (res: Response) => res.json() as Promise<TokenResponse>;
-  const asVoid = async () => undefined;
+  // Spec error responses (401/429/400/…) carry no body, so `code` is usually
+  // absent; if a future error body includes one we surface it.
+  function errorCode(error: unknown): string | undefined {
+    if (error && typeof error === 'object') {
+      const e = error as { code?: string; error_code?: string; error?: string };
+      return e.code ?? e.error_code ?? e.error;
+    }
+    return undefined;
+  }
 
   return {
-    login: (input) =>
-      postJson('/token', { grant_type: 'password', ...input }, asTokens),
-    // 202 ack, no token body — parse as void.
-    signup: (input) => postJson('/signup', input, asVoid),
+    login: (input) => toResult(api.POST('/token', { body: input }), (d) => d as TokenResponse),
+    signup: (input) => toResult(api.POST('/signup', { body: input }), () => undefined),
     refresh: (refreshToken) =>
-      postJson('/token/refresh', { refresh_token: refreshToken }, asTokens),
+      toResult(api.POST('/token/refresh', { body: { refresh_token: refreshToken } }), (d) => d as TokenResponse),
     logout: (refreshToken) =>
-      postJson('/logout', { refresh_token: refreshToken }, asVoid),
-    requestPasswordReset: (input) => postJson('/recover', input, asVoid),
+      toResult(api.POST('/logout', { body: { refresh_token: refreshToken } }), () => undefined),
+    requestPasswordReset: (input) => toResult(api.POST('/recover', { body: input }), () => undefined),
   };
 }
