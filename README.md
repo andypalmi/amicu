@@ -6,6 +6,13 @@ Terraform for AI inference infrastructure: a declarative HCL DSL plus a Rust pla
 
 Standing up an inference stack today means hand-wiring model downloads, runtime flags, GPU provisioning, traffic routing, and data-residency rules — differently on a laptop than in production, and differently again per provider. Amicu makes that stack declarative, diffable, and reviewable: define it, `plan` the changes, `apply` them. EU-first data residency and governance are first-class resources, not an afterthought.
 
+## What you get
+
+- **One file, laptop to production** — the same HCL describes a local llama.cpp run and a multi-GPU vLLM cluster; `plan` and `apply` reconcile the difference.
+- **Diffable, reviewable infrastructure** — every change is a plan against tracked state you can read before it runs, not a pile of imperative scripts.
+- **EU-first residency and governance** — data-class, residency, and routing policies are first-class resources, checked at plan time rather than bolted on later.
+- **Provider-portable** — AWS, Azure, GCP, Hetzner, OVHcloud, Scaleway, RunPod, Nebius, or your own SSH hosts, behind a single model.
+
 ## Quickstart
 
 ```bash
@@ -21,19 +28,19 @@ cargo build --release -p amicu-cli
 resource "model" "starter_chat" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "Qwen/Qwen3.5-8B-Instruct"
   }
-  architecture   = "qwen2"
+  architecture   = "qwen3"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
     quantization = "q4_k_m"
   }
-  context_length = 8192
+  context_length = 100000
   variant {
     quantization = "q4_k_m"
-    file         = "qwen2.5-7b-instruct-q4_k_m.gguf"
-    size         = "4GiB"
+    file         = "qwen3.5-8b-instruct-q4_k_m.gguf"
+    size         = "5GiB"
   }
 }
 
@@ -53,7 +60,7 @@ resource "deployment" "starter_chat_local" {
   hardware = hardware_profile.local_dev.id
   runtime  = "llama_cpp"
   llama_cpp {
-    context_length = 8192
+    context_length = 100000
     port           = 8000
     n_gpu_layers   = -1
   }
@@ -86,8 +93,7 @@ Early stage. Working today: the HCL DSL and parser, the CLI (`init`, `fmt`, `val
 
 ## Learn more
 
-- Full documentation site: forthcoming ([andypalmi/amicu-planning#77](https://github.com/andypalmi/amicu-planning/issues/77))
-- Product requirements: [amicu-prd.md](https://github.com/andypalmi/amicu-planning/blob/main/amicu-prd.md)
+- Full documentation site — coming soon.
 
 ## License
 

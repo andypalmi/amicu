@@ -1,3 +1,3 @@
 # sdk
 
-Out of scope for the Rust crate workspace; reserved per the PRD layout.
+Reserved for future client SDKs. Not part of the Rust crate workspace yet.
