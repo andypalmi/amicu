@@ -143,15 +143,15 @@ impl<C: Clock> AuthService<C> {
             // HTTP response. A verification link on `Created` still waits on the
             // email-verification pipeline (amicu-planning#96).
             Err(AuthError::UserExists) => {
-                // Best-effort: a delivery failure must not change the response
-                // (that would leak account existence via timing/errors).
-                let _ = self
-                    .notifier
-                    .notify(Notification {
-                        recipient: email,
-                        kind: NotificationKind::AccountExists,
-                    })
-                    .await;
+                // Dispatch off the response path (see `spawn_notification`): the
+                // notice is sent only on the collision path, so awaiting it here
+                // would make the collision measurably slower than a fresh
+                // sign-up — an account-enumeration timing oracle. The response
+                // stays identical and same-timing on both paths.
+                self.spawn_notification(Notification {
+                    recipient: email,
+                    kind: NotificationKind::AccountExists,
+                });
                 Ok(SignUpOutcome::AlreadyRegistered)
             }
             Err(other) => Err(other),
@@ -231,40 +231,65 @@ impl<C: Clock> AuthService<C> {
 
     /// Request a password reset for `email`.
     ///
-    /// Anti-enumeration: this ALWAYS reports success and the HTTP boundary always
-    /// returns the same generic `202`, whether or not the email is registered. A
-    /// reset token is minted and delivered (via the [`Notifier`] seam) *only*
-    /// when the account exists; on a miss nothing is sent and nothing is stored.
-    /// Because delivery is out-of-band, neither the response nor its timing (no
-    /// Argon2 runs on either path) reveals which emails exist.
+    /// Anti-enumeration: this ALWAYS returns immediately with `Ok`, and the HTTP
+    /// boundary always returns the same generic `202`, whether or not the email
+    /// is registered. Crucially, ALL of the account-dependent work — the user
+    /// lookup, and (only when the account exists) the token mint, store insert,
+    /// and out-of-band delivery — runs on a detached background task, so the
+    /// synchronous response time is the *same* on the exists and miss paths.
+    ///
+    /// Doing that work inline would be an account-enumeration timing oracle: the
+    /// exists path does strictly more synchronous work than the miss path, and
+    /// the gap becomes a strong signal the moment a synchronous mailer replaces
+    /// the dev logger (recover would block on SMTP only for real accounts).
+    /// Detaching it removes the send (and the store I/O) from the response path
+    /// entirely. A reset token is still minted and delivered only when the
+    /// account exists; on a miss nothing is sent and nothing is stored.
     ///
     /// # Errors
-    /// Propagates only genuine internal store errors, which are not
-    /// account-existence signals.
+    /// Never returns an error: background failures are swallowed (surfacing them
+    /// would itself be an existence signal). Kept `Result` for a uniform handler
+    /// signature.
+    // Intentionally `async` with no `.await` on the response path: detaching all
+    // account-dependent work is the whole anti-enumeration point (see above). The
+    // `async` signature is part of the `AuthService` contract — a persistent
+    // store would enqueue via an awaited durable-queue write here — so keep it.
+    #[allow(clippy::unused_async)]
     pub async fn request_password_reset(&self, email: &str) -> Result<()> {
         let email = normalize_email(email);
-        // Silently no-op on an empty or unknown email: never a distinguishable
-        // signal to the caller.
+        // Empty email is a request-level no-op (not an account signal); returning
+        // here changes nothing observable since the exists/miss paths are already
+        // equalized by the detached task below.
         if email.is_empty() {
             return Ok(());
         }
-        let Some(user) = self.users.get_by_email(&email).await? else {
-            return Ok(());
-        };
+        // Move the seams into a detached task. The response returns now, in
+        // account-independent time; the (possibly network-bound) lookup + mint +
+        // store + send happen off the response path. See the doc comment.
+        let users = self.users.clone();
+        let resets = self.resets.clone();
+        let notifier = self.notifier.clone();
         let expires_at = self.issuer.now_unix()
             + i64::try_from(self.issuer.config().reset_ttl.as_secs()).unwrap_or(i64::MAX);
-        let minted = reset::mint(&user.id, expires_at);
-        self.resets.insert(minted.record).await?;
-        // Best-effort delivery: a transport failure must not change the outcome.
-        let _ = self
-            .notifier
-            .notify(Notification {
-                recipient: email,
-                kind: NotificationKind::PasswordReset {
-                    reset_token: minted.token,
-                },
-            })
-            .await;
+        tokio::spawn(async move {
+            let Ok(Some(user)) = users.get_by_email(&email).await else {
+                return; // unknown account: send nothing, store nothing
+            };
+            let minted = reset::mint(&user.id, expires_at);
+            if resets.insert(minted.record).await.is_err() {
+                return; // best-effort: a store failure must not surface anywhere
+            }
+            // Best-effort delivery: a transport failure must not change anything
+            // observable (it already changed nothing on the response path).
+            let _ = notifier
+                .notify(Notification {
+                    recipient: email,
+                    kind: NotificationKind::PasswordReset {
+                        reset_token: minted.token,
+                    },
+                })
+                .await;
+        });
         Ok(())
     }
 
@@ -303,10 +328,15 @@ impl<C: Clock> AuthService<C> {
         };
         // Hash the new password only after the token is proven live and claimed.
         let password_hash = hash_password(new_password)?;
-        self.users.update_password(&user_id, password_hash).await?;
-        // Force re-authentication everywhere: the old credential is gone, so
-        // every outstanding session (refresh family) must die.
+        // Revoke sessions BEFORE installing the new password. These two writes
+        // are not atomic here (they would be one transaction in a persistent
+        // store), so order them for fail-safety: if revocation fails, the token
+        // is already consumed but the password is unchanged and sessions survive
+        // — the user simply requests another reset. The reverse order would leave
+        // the dangerous state (new password live, but old sessions still valid)
+        // on a partial failure.
         self.refresh.revoke_all_for_user(&user_id).await?;
+        self.users.update_password(&user_id, password_hash).await?;
         Ok(())
     }
 
@@ -328,6 +358,21 @@ impl<C: Clock> AuthService<C> {
     #[must_use]
     pub fn openid_configuration(&self) -> OpenIdConfiguration {
         OpenIdConfiguration::new(self.issuer.config().issuer.clone(), &self.base_url)
+    }
+
+    /// Deliver a notification out-of-band without gating the caller's response.
+    ///
+    /// The (possibly network-bound) send runs on a detached task, so response
+    /// timing never depends on whether — or to whom — a message is dispatched.
+    /// This is load-bearing for anti-enumeration: awaiting a send that only
+    /// happens on the account-exists path would be an enumeration timing oracle,
+    /// trivially today and strongly once a synchronous mailer replaces the dev
+    /// logger. Delivery is best-effort; a transport failure is swallowed.
+    fn spawn_notification(&self, notification: Notification) {
+        let notifier = self.notifier.clone();
+        tokio::spawn(async move {
+            let _ = notifier.notify(notification).await;
+        });
     }
 
     /// Issue a token pair opening a brand-new refresh family (fresh sign-in).
