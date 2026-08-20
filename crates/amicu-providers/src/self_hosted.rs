@@ -610,6 +610,7 @@ impl Provider for SelfHostedProvider {
             id,
             provider: self.id.clone(),
             region: request.region.clone(),
+            zone: None,
             offering_id: request.offering_id.clone(),
             credentials: request.credentials.clone(),
             state: ProvisioningState::Ready {

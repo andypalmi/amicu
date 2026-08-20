@@ -387,6 +387,7 @@ impl Provider for NebiusProvider {
             id: id.clone(),
             provider: self.id.clone(),
             region: request.region.clone(),
+            zone: None,
             offering_id: request.offering_id.clone(),
             credentials: request.credentials.clone(),
             state: ready,

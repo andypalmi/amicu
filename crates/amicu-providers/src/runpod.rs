@@ -576,6 +576,7 @@ impl Provider for RunPodProvider {
             id: pod.id,
             provider: self.id.clone(),
             region: request.region.clone(),
+            zone: None,
             offering_id: request.offering_id.clone(),
             credentials: request.credentials.clone(),
             state: map_pod_state(pod.desired_status.as_deref()),

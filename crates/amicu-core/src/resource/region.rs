@@ -75,6 +75,12 @@ impl Residency {
 ///
 /// `code` is the provider-agnostic region identifier used in the DSL and
 /// planner; `residency` is the typed jurisdiction the planner filters on.
+///
+/// `default_zone` is an optional third level the adapter owns: the sub-region
+/// zone (AZ) a zone-addressed provider API targets by default, e.g. `"fr-par-1"`
+/// for `"fr-par"`. It is a placement detail, never a planning input — the DSL
+/// and planner stay at residency + region, and the zone never reaches the
+/// residency filter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Region {
     /// Region code, e.g. `"eu-central-1"` or `"fin-north"`.
@@ -87,6 +93,10 @@ pub struct Region {
     /// ISO 3166-1 alpha-2 country code, e.g. `"DE"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub country: Option<String>,
+    /// Default zone (AZ) for zone-addressed provider APIs, e.g. `"fr-par-1"`.
+    /// Adapter-owned; `None` for regions whose APIs address the region directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_zone: Option<String>,
 }
 
 impl Region {
@@ -98,6 +108,7 @@ impl Region {
             residency,
             display_name: None,
             country: None,
+            default_zone: None,
         }
     }
 
@@ -126,10 +137,26 @@ impl Region {
         self
     }
 
+    /// Set the adapter-owned default zone (AZ).
+    #[must_use]
+    pub fn with_default_zone(mut self, zone: impl Into<String>) -> Self {
+        self.default_zone = Some(zone.into());
+        self
+    }
+
     /// Whether this region resides in the European Union.
     #[must_use]
     pub fn is_eu(&self) -> bool {
         self.residency.is_eu()
+    }
+
+    /// Resolve the zone a zone-addressed provider API should target: the explicit
+    /// `override_zone` when the caller supplied one, else this region's
+    /// [`default_zone`](Self::default_zone). `None` when neither is set — the API
+    /// addresses the region directly.
+    #[must_use]
+    pub fn resolve_zone<'a>(&'a self, override_zone: Option<&'a str>) -> Option<&'a str> {
+        override_zone.or(self.default_zone.as_deref())
     }
 }
 
@@ -157,5 +184,36 @@ mod tests {
             Residency::from_token("latam"),
             Residency::Other("latam".into())
         );
+    }
+
+    #[test]
+    fn region_has_no_zone_by_default() {
+        // The zone is additive: existing constructors leave it unset.
+        assert!(Region::new("fr-par", Residency::Eu).default_zone.is_none());
+        assert!(Region::from_code("fr-par").default_zone.is_none());
+    }
+
+    #[test]
+    fn resolve_zone_prefers_override_then_default() {
+        let region = Region::new("fr-par", Residency::Eu).with_default_zone("fr-par-1");
+        // Explicit override wins.
+        assert_eq!(region.resolve_zone(Some("fr-par-2")), Some("fr-par-2"));
+        // Falls back to the region's default zone.
+        assert_eq!(region.resolve_zone(None), Some("fr-par-1"));
+        // A region with no default zone and no override addresses the region.
+        assert_eq!(
+            Region::new("fr-par", Residency::Eu).resolve_zone(None),
+            None
+        );
+    }
+
+    #[test]
+    fn zone_does_not_affect_residency() {
+        // The zone is a placement detail: it never changes the jurisdiction the
+        // planner filters on.
+        let plain = Region::new("fr-par", Residency::Eu);
+        let zoned = plain.clone().with_default_zone("fr-par-1");
+        assert_eq!(plain.residency, zoned.residency);
+        assert!(zoned.is_eu());
     }
 }
