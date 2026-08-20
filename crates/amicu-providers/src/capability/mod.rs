@@ -6,7 +6,7 @@
 //! and governance constraints. It carries no credentials — only the credential
 //! *model* ([`CredentialsModel`]); secret values are resolved at apply time.
 //!
-//! This module is data models only (TASK-013): no provider trait or adapter
+//! This module is data models only (amicu-planning#13): no provider trait or adapter
 //! logic. It reuses `amicu-core` types where the concept already exists
 //! ([`Accelerator`], [`ByteSize`], [`Money`](amicu_core::resource::Money),
 //! [`AdapterId`], [`HealthStatus`], and the typed [`Region`] / [`Residency`])

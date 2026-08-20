@@ -1,2 +1,2 @@
-// Placeholder. See ./README.md — implemented by TASK-078.
+// Placeholder. See ./README.md — implemented by amicu-planning#78.
 export {};

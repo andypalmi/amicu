@@ -165,7 +165,7 @@ impl Default for RusshTransport {
 
 /// Accepts the server host key. Host-key pinning against a known-hosts store is
 /// out of scope for this phase.
-// TODO(TASK-070): verify the server host key instead of accepting it.
+// TODO(amicu-planning#70): verify the server host key instead of accepting it.
 struct AcceptingHandler;
 
 impl russh::client::Handler for AcceptingHandler {

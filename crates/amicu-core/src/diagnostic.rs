@@ -292,7 +292,7 @@ pub mod catalog {
     pub const MEM_ARTIFACT_OVERSIZE: DiagnosticCode = DiagnosticCode::new(Category::Mem, 2);
     /// `AMICU-POLICY-001` — deployment exceeds the configured budget.
     pub const POLICY_BUDGET_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Policy, 1);
-    // --- TASK-024: region / data-residency validation ---
+    // --- amicu-planning#24: region / data-residency validation ---
     /// `AMICU-POLICY-002` — a deployment's region violates the configured
     /// residency / region allowlist (or matches a deny rule's region).
     pub const POLICY_REGION_RESIDENCY: DiagnosticCode = DiagnosticCode::new(Category::Policy, 2);
@@ -340,7 +340,7 @@ pub mod catalog {
             MEM_VRAM_EXCEEDED,
             MEM_ARTIFACT_OVERSIZE,
             POLICY_BUDGET_EXCEEDED,
-            // TASK-024 additions:
+            // amicu-planning#24 additions:
             POLICY_REGION_RESIDENCY,
             POLICY_PROVIDER_NOT_ALLOWED,
             STATE_LOCKED,
