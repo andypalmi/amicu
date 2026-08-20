@@ -11,6 +11,7 @@
     "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
+    "@amicu/auth": "workspace:*",
     "@amicu/ui": "workspace:*",
     "fumadocs-core": "16.14.5",
     "fumadocs-mdx": "15.3.0",
@@ -18,7 +19,8 @@
     "lucide-react": "^1.33.0",
     "next": "16.3.1",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "server-only": "^0.0.1"
   },
   "devDependencies": {
     "@amicu/config": "workspace:*",

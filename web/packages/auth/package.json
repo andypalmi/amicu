@@ -5,15 +5,21 @@
   "license": "AGPL-3.0-or-later",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./server": "./src/server.ts"
   },
   "scripts": {
     "lint": "eslint .",
+    "test": "node --test --experimental-strip-types 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@amicu/config": "workspace:*",
     "eslint": "^9.39.5",
     "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "jose": "^6.2.9",
+    "zod": "^4.4.3"
   }
 }
