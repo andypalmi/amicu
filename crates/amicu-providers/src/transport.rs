@@ -24,9 +24,11 @@ pub enum HttpMethod {
 
 /// A transport-agnostic HTTP request.
 ///
-/// `bearer` carries the resolved credential for `Authorization: Bearer`; it is
-/// set transiently by the adapter for a single call and is never logged or
-/// serialized (this struct derives no `Serialize`/`Debug` that would expose it).
+/// `bearer` carries the resolved credential for `Authorization: Bearer`;
+/// `headers` carries any other auth headers a provider needs (Scaleway's
+/// `X-Auth-Token`, OVH's signature). Both are set transiently by the adapter for
+/// a single call and are never logged or serialized (this struct derives no
+/// `Serialize`/`Debug` that would expose them).
 pub struct HttpRequest {
     /// The HTTP method.
     pub method: HttpMethod,
@@ -34,6 +36,9 @@ pub struct HttpRequest {
     pub url: String,
     /// Optional bearer token for the `Authorization` header.
     pub bearer: Option<String>,
+    /// Extra request headers, e.g. a non-bearer auth header. Carries credential
+    /// material transiently, like `bearer`; never logged or serialized.
+    pub headers: Vec<(String, String)>,
     /// Optional JSON request body, already serialized.
     pub body: Option<serde_json::Value>,
 }
@@ -46,6 +51,7 @@ impl HttpRequest {
             method,
             url: url.into(),
             bearer: None,
+            headers: Vec::new(),
             body: None,
         }
     }
@@ -54,6 +60,13 @@ impl HttpRequest {
     #[must_use]
     pub fn with_bearer(mut self, token: impl Into<String>) -> Self {
         self.bearer = Some(token.into());
+        self
+    }
+
+    /// Attach an extra request header (e.g. a non-bearer auth header).
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
         self
     }
 
@@ -178,6 +191,9 @@ impl HttpTransport for ReqwestTransport {
         if let Some(token) = &request.bearer {
             builder = builder.bearer_auth(token);
         }
+        for (name, value) in &request.headers {
+            builder = builder.header(name, value);
+        }
         if let Some(body) = &request.body {
             builder = builder.json(body);
         }
@@ -215,14 +231,15 @@ pub(crate) struct MockTransport {
     seen: std::sync::Mutex<Vec<SeenRequest>>,
 }
 
-/// A request a [`MockTransport`] observed: method, URL, and whether a bearer
-/// token was attached (the value is recorded so tests can assert auth without
-/// leaking it elsewhere).
+/// A request a [`MockTransport`] observed: method, URL, the bearer token (if
+/// any), and the extra headers. The auth values are recorded so tests can assert
+/// auth without leaking it elsewhere.
 #[cfg(test)]
 pub(crate) struct SeenRequest {
     pub method: HttpMethod,
     pub url: String,
     pub bearer: Option<String>,
+    pub headers: Vec<(String, String)>,
 }
 
 #[cfg(test)]
@@ -259,6 +276,7 @@ impl HttpTransport for MockTransport {
             method: request.method,
             url: request.url.clone(),
             bearer: request.bearer.clone(),
+            headers: request.headers.clone(),
         });
         let responses = self.responses.lock().unwrap();
         let hit = responses
