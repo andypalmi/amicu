@@ -16,6 +16,7 @@ pub mod scaleway;
 pub mod secret;
 pub mod self_hosted;
 pub mod sync;
+pub mod transport;
 
 pub use aws::AwsProvider;
 pub use azure::AzureProvider;
@@ -33,3 +34,6 @@ pub use runpod::RunPodProvider;
 pub use scaleway::ScalewayProvider;
 pub use self_hosted::{SelfHostedConfigError, SelfHostedProvider};
 pub use sync::{Freshness, SyncReport, SyncedCapabilities, classify, snapshot, sync_all};
+pub use transport::{
+    HttpMethod, HttpRequest, HttpResponse, HttpTransport, ReqwestTransport, TransportError,
+};
