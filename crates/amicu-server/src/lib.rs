@@ -270,6 +270,14 @@ pub async fn run(config: Config) -> Result<(), Error> {
     let app = build_app(&config)?;
     let listener = TcpListener::bind(config.bind).await?;
     let addr = listener.local_addr()?;
+    // This bootstrap is a DEV/single-node target: in-memory stores, a fresh
+    // random signing key each start (tokens don't survive a restart), and a
+    // LoggingNotifier that writes password-reset tokens to stderr. Shout so a
+    // run that faces real users can never mistake it for a production deploy.
+    eprintln!(
+        "amicu-server: WARNING — development server (in-memory state, ephemeral \
+         signing key, reset tokens logged to stderr). NOT for production use."
+    );
     eprintln!("amicu-server listening on http://{addr}");
     serve(listener, app, shutdown_signal()).await?;
     eprintln!("amicu-server shut down");
