@@ -1,2 +1,5 @@
 /target
 *.DS_Store
+
+# Turborepo local cache (also ignored in web/.gitignore for the workspace)
+.turbo/
