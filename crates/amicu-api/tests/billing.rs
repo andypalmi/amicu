@@ -333,6 +333,35 @@ async fn webhook_stale_timestamp_is_400() {
 }
 
 #[tokio::test]
+async fn webhook_extreme_timestamp_is_rejected_without_panic() {
+    // A hostile `t=` at the i64 boundary must not overflow the staleness check
+    // (it once could: `now - i64::MIN` panics in debug). It is rejected as far
+    // out of window (400) and mutates nothing.
+    let h = harness(Tier::Community, true).await;
+    h.users
+        .set_stripe_customer(USER_ID, CUSTOMER_ID.to_owned())
+        .await
+        .unwrap();
+
+    let payload =
+        subscription_event("customer.subscription.updated", PRICE_PRO, "active").to_string();
+    // Signed correctly, but with an extreme (negative) timestamp.
+    let signed = format!("{}.{payload}", i64::MIN);
+    let mut mac = HmacSha256::new_from_slice(WEBHOOK_SECRET.as_bytes()).unwrap();
+    mac.update(signed.as_bytes());
+    let sig = format!(
+        "t={},v1={}",
+        i64::MIN,
+        hex::encode(mac.finalize().into_bytes())
+    );
+
+    let (status, _) = send(&h.app, post_webhook(&payload, Some(&sig))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let user = h.users.get_by_id(USER_ID).await.unwrap().unwrap();
+    assert_eq!(user.tier, Tier::Community);
+}
+
+#[tokio::test]
 async fn webhook_good_signature_upgrades_tier() {
     let h = harness(Tier::Community, true).await;
     // The webhook maps a customer id back to the user, so it must already be

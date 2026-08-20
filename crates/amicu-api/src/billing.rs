@@ -569,8 +569,10 @@ pub fn verify_signature(
         return Err(SignatureError);
     }
     // Replay defense: reject timestamps outside the tolerance window in either
-    // direction.
-    if (now - timestamp).abs() > tolerance_secs {
+    // direction. Overflow-safe against a hostile `t=` (e.g. `i64::MIN`): the
+    // saturating ops clamp rather than panic in debug / wrap in release, so an
+    // extreme timestamp is simply treated as far out of window and rejected.
+    if now.saturating_sub(timestamp).saturating_abs() > tolerance_secs {
         return Err(SignatureError);
     }
 
