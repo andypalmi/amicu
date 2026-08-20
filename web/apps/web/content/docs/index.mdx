@@ -1,0 +1,24 @@
+---
+title: Introduction
+description: What Amicu is and how the documentation is organized.
+---
+
+Amicu is an open-source web application for designing, deploying, and operating
+LLM serving stacks. It is a **thin client** over the Rust Management API: the UI
+renders questions, candidates, plans, and metrics, but never owns planning,
+recommendation, policy, or capability logic — those live in Rust.
+
+## What lives here
+
+- **Getting started** — run the web monorepo locally.
+- **Reference** — a placeholder section that grows as features land.
+
+<Callout title="Early scaffold">
+  This site is the foundation for the web epic. Most feature docs are authored in
+  later tasks; the structure and tooling (`/docs`, `llms.txt`) are in place now.
+</Callout>
+
+## Licensing
+
+The entire frontend — marketing, app, and docs — is **AGPL-3.0-or-later**. Paid
+tiers are gated by the API, not by closed frontend code.

@@ -1,0 +1,21 @@
+# deps
+node_modules
+
+# turbo
+.turbo
+
+# generated fumadocs content
+.source
+
+# next / build
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+
+# env / misc
+.env*.local
+.vercel
+next-env.d.ts
+.DS_Store
