@@ -37,7 +37,7 @@ Turborepo + pnpm. Theme-aware; restrained motion (dev-infra audience).
 
 ## Prerequisites
 
-- Node.js >= 18
+- Node.js >= 20.9.0
 - pnpm — `corepack enable pnpm`
 
 ## Commands
