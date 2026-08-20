@@ -5,10 +5,12 @@
 //!
 //! * **Trustworthy client identity.** `X-Forwarded-For` is client-supplied and
 //!   trivially spoofed, so it is only honored when the *peer* socket address is
-//!   in a configured trusted-proxy allowlist ([`TrustedProxies`]). Otherwise the
-//!   key is derived from the peer address, which an attacker cannot rotate at
-//!   will. Keys are additionally scoped per route, so no single bucket can lock
-//!   every client out of every credential endpoint.
+//!   in a configured trusted-proxy allowlist ([`TrustedProxies`]), and then the
+//!   chain is parsed right-to-left (peeling trusted hops) so an attacker cannot
+//!   prepend a spoofed value. Otherwise the key is derived from the peer
+//!   address, which an attacker cannot rotate at will. Keys are additionally
+//!   scoped per route, so no single bucket can lock every client out of every
+//!   credential endpoint.
 //! * **Bounded memory.** The bucket map is capacity-limited and self-evicting
 //!   (expired windows are swept, then the least-recently-seen bucket is dropped),
 //!   so a key-rotating attacker cannot grow the map without bound.
@@ -106,6 +108,12 @@ impl RateLimiter {
 
     /// Make room for one new key: drop expired windows first, then, while still
     /// at `capacity`, evict the least-recently-seen bucket.
+    ///
+    /// Eviction discards a bucket's counter, so an attacker able to mint many
+    /// distinct identities could, in principle, evict-and-reset their own
+    /// at-limit bucket. That requires forging identities, which the peer-address
+    /// / right-to-left-XFF keying prevents for any single untrusted source; the
+    /// generous default `capacity` keeps eviction off the hot path in practice.
     fn evict(
         buckets: &mut HashMap<String, Bucket>,
         now: Instant,
@@ -187,44 +195,68 @@ impl TrustedProxies {
         self.nets.iter().any(|net| net.contains(&ip))
     }
 
-    /// Derive the per-route rate-limit key for a request.
+    /// Derive the per-route rate-limit key for a request, or `None` when no
+    /// trustworthy client identity is available and the request must be let
+    /// through rather than share a bucket.
     ///
-    /// The key is `"<route>|<client>"` where `<client>` is:
-    /// * the left-most valid `X-Forwarded-For` entry, if the peer is a trusted
-    ///   proxy and supplied one; otherwise
-    /// * the peer IP address; otherwise (no peer address available, i.e. the
-    ///   server was not wired with connection info)
-    /// * a per-route `"unknown"` sentinel.
+    /// The key is `"<route>|<client>"`. The client identity is:
+    /// * the peer socket IP when the peer is **not** a trusted proxy — its
+    ///   `X-Forwarded-For` is not believed at all; otherwise
+    /// * the first untrusted address found walking the `X-Forwarded-For` chain
+    ///   **right-to-left**, peeling off trusted-proxy hops — i.e. the real
+    ///   client as seen by the outermost trusted hop. Parsing right-to-left is
+    ///   what makes this unspoofable: with append-style proxies the header is
+    ///   `"<attacker-supplied>, <real-client>"`, and only the right-hand,
+    ///   proxy-appended addresses can be trusted. Falls back to the peer IP when
+    ///   the chain holds only trusted hops or an unparseable entry (so a proxy
+    ///   forwarding junk can never mint an unbounded set of keys).
+    ///
+    /// Returns `None` when there is no peer address — connect-info was not wired
+    /// on the serving socket. The caller must fail open on `None`; collapsing
+    /// such requests into one shared bucket would be a lockout vector.
     #[must_use]
-    pub fn client_key(&self, route: &str, peer: Option<SocketAddr>, xff: Option<&str>) -> String {
-        format!("{route}|{}", self.client_ident(peer, xff))
+    pub fn client_key(
+        &self,
+        route: &str,
+        peer: Option<SocketAddr>,
+        xff: Option<&str>,
+    ) -> Option<String> {
+        let ident = self.client_ident(peer?, xff);
+        Some(format!("{route}|{ident}"))
     }
 
-    fn client_ident(&self, peer: Option<SocketAddr>, xff: Option<&str>) -> String {
-        match peer {
-            Some(peer) => {
-                if self.is_trusted(peer.ip())
-                    && let Some(client) = xff.and_then(first_forwarded_for)
-                {
-                    return client.to_string();
-                }
-                peer.ip().to_string()
-            }
-            None => "unknown".to_string(),
+    fn client_ident(&self, peer: SocketAddr, xff: Option<&str>) -> String {
+        if !self.is_trusted(peer.ip()) {
+            return peer.ip().to_string();
         }
+        if let Some(client) = xff.and_then(|header| self.real_client_from_chain(header)) {
+            return client.to_string();
+        }
+        peer.ip().to_string()
     }
-}
 
-/// Left-most `X-Forwarded-For` entry, if it parses as an IP address. Rejecting
-/// unparseable values keeps a trusted proxy from being tricked into minting an
-/// unbounded set of junk keys.
-fn first_forwarded_for(header: &str) -> Option<IpAddr> {
-    header
-        .split(',')
-        .next()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .and_then(|s| s.parse::<IpAddr>().ok())
+    /// Walk the `X-Forwarded-For` chain right-to-left, peeling off trusted-proxy
+    /// hops, and return the first untrusted address (the real client as seen by
+    /// the outermost trusted hop). Returns `None` when the chain is empty,
+    /// entirely trusted, or hits an unparseable entry — in every such case the
+    /// caller falls back to the peer IP rather than key on attacker-supplied
+    /// junk. Called only when the peer itself is a trusted proxy.
+    fn real_client_from_chain(&self, header: &str) -> Option<IpAddr> {
+        for entry in header.rsplit(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            // A non-IP entry is where a trusted proxy's clean chain ends; stop
+            // and fall back to the peer instead of keying on the raw value.
+            let ip = entry.parse::<IpAddr>().ok()?;
+            if self.is_trusted(ip) {
+                continue; // peel a trusted proxy hop and keep walking left
+            }
+            return Some(ip); // first untrusted from the right = real client
+        }
+        None
+    }
 }
 
 /// A trusted-proxy allowlist entry that is neither a valid CIDR nor IP address.
@@ -301,29 +333,77 @@ mod tests {
         let spoof_a = tp.client_key("/signin", Some(sock("203.0.113.9")), Some("1.1.1.1"));
         let spoof_b = tp.client_key("/signin", Some(sock("203.0.113.9")), Some("2.2.2.2"));
         assert_eq!(spoof_a, spoof_b, "rotating XFF must not change the key");
-        assert_eq!(spoof_a, "/signin|203.0.113.9");
+        assert_eq!(spoof_a.as_deref(), Some("/signin|203.0.113.9"));
     }
 
     #[test]
-    fn trusted_peer_honors_forwarded_for() {
+    fn trusted_peer_uses_rightmost_untrusted_as_client() {
         let tp = TrustedProxies::from_strs(["10.0.0.0/8"]).unwrap();
+        // Chain is `client, proxy`; the proxy hop (10.1.2.3) is peeled from the
+        // right, leaving the real client.
         let key = tp.client_key(
             "/signin",
             Some(sock("10.1.2.3")),
             Some("198.51.100.7, 10.1.2.3"),
         );
-        assert_eq!(key, "/signin|198.51.100.7");
+        assert_eq!(key.as_deref(), Some("/signin|198.51.100.7"));
         // Bare-IP allowlist entries also work.
         let tp = TrustedProxies::from_strs(["10.1.2.3"]).unwrap();
         let key = tp.client_key("/signin", Some(sock("10.1.2.3")), Some("198.51.100.7"));
-        assert_eq!(key, "/signin|198.51.100.7");
+        assert_eq!(key.as_deref(), Some("/signin|198.51.100.7"));
+    }
+
+    #[test]
+    fn append_style_spoof_is_ignored() {
+        // Append-style proxy (e.g. nginx $proxy_add_x_forwarded_for): the header
+        // is `"<attacker-supplied>, <real-client>"`. Right-to-left parsing keys
+        // on the proxy-appended real client, never the attacker's left value, so
+        // rotating the spoofed prefix cannot mint a fresh bucket per request.
+        let tp = TrustedProxies::from_strs(["10.0.0.0/8"]).unwrap();
+        let proxy = Some(sock("10.9.9.9"));
+        let a = tp.client_key("/signin", proxy, Some("1.1.1.1, 203.0.113.7"));
+        let b = tp.client_key("/signin", proxy, Some("2.2.2.2, 203.0.113.7"));
+        assert_eq!(a, b, "spoofed prefix must not change the key");
+        assert_eq!(a.as_deref(), Some("/signin|203.0.113.7"));
+    }
+
+    #[test]
+    fn multiple_trusted_hops_are_peeled() {
+        // client, then two trusted proxy hops in the chain, peer is a third.
+        let tp = TrustedProxies::from_strs(["10.0.0.0/8"]).unwrap();
+        let key = tp.client_key(
+            "/signin",
+            Some(sock("10.0.0.1")),
+            Some("203.0.113.5, 10.0.0.2, 10.0.0.3"),
+        );
+        assert_eq!(key.as_deref(), Some("/signin|203.0.113.5"));
     }
 
     #[test]
     fn trusted_peer_with_junk_forwarded_for_falls_back_to_peer() {
         let tp = TrustedProxies::from_strs(["10.0.0.0/8"]).unwrap();
         let key = tp.client_key("/signin", Some(sock("10.1.2.3")), Some("not-an-ip"));
-        assert_eq!(key, "/signin|10.1.2.3");
+        assert_eq!(key.as_deref(), Some("/signin|10.1.2.3"));
+    }
+
+    #[test]
+    fn all_trusted_chain_falls_back_to_peer() {
+        let tp = TrustedProxies::from_strs(["10.0.0.0/8"]).unwrap();
+        let key = tp.client_key(
+            "/signin",
+            Some(sock("10.0.0.1")),
+            Some("10.0.0.2, 10.0.0.3"),
+        );
+        assert_eq!(key.as_deref(), Some("/signin|10.0.0.1"));
+    }
+
+    #[test]
+    fn missing_peer_yields_no_key() {
+        // No connect-info: no trustworthy identity, so the caller fails open
+        // instead of sharing one bucket.
+        let tp = TrustedProxies::default();
+        assert_eq!(tp.client_key("/signin", None, Some("1.1.1.1")), None);
+        assert_eq!(tp.client_key("/signin", None, None), None);
     }
 
     #[test]

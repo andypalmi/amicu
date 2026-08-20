@@ -166,12 +166,15 @@ fn to_response(pair: &TokenPair) -> Result<TokenResponse, ApiError> {
 ///
 /// The bucket key is per route and per client. Client identity comes from the
 /// peer socket address by default; `X-Forwarded-For` is honored only when that
-/// peer is in the configured trusted-proxy allowlist, so an attacker rotating
-/// the header cannot mint a fresh bucket per request. There is no single shared
+/// peer is in the configured trusted-proxy allowlist, and then only the real
+/// client parsed right-to-left from the chain, so an attacker rotating the
+/// header cannot mint a fresh bucket per request. There is no single shared
 /// fallback bucket, so no one client can lock every other client out.
 ///
 /// For the peer address to be available the server must serve this router with
-/// `Router::into_make_service_with_connect_info::<SocketAddr>()`.
+/// `Router::into_make_service_with_connect_info::<SocketAddr>()`. If it is
+/// absent (misconfiguration) the request is let through rather than collapsed
+/// into a shared bucket, which would itself be a lockout vector.
 async fn rate_limit(State(state): State<AuthApiState>, request: Request, next: Next) -> Response {
     let peer = request
         .extensions()
@@ -181,14 +184,18 @@ async fn rate_limit(State(state): State<AuthApiState>, request: Request, next: N
         .headers()
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok());
-    let key = state
+    let throttled = match state
         .trusted_proxies
-        .client_key(request.uri().path(), peer, xff);
+        .client_key(request.uri().path(), peer, xff)
+    {
+        Some(key) => !state.limiter.check(&key),
+        None => false, // no trustworthy identity: fail open, never share a bucket
+    };
 
-    if state.limiter.check(&key) {
-        next.run(request).await
-    } else {
+    if throttled {
         ApiError(AuthError::RateLimited).into_response()
+    } else {
+        next.run(request).await
     }
 }
 

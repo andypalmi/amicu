@@ -231,17 +231,35 @@ async fn duplicate_signup_conflicts() {
 async fn rate_limit_trips_after_max() {
     let app = app(3);
     let body = json!({"email": "rl@example.com", "password": "bad"});
+    let client = peer("9.9.9.9");
     // The 4th credential request from the same client is throttled.
     for _ in 0..3 {
-        let (status, _) = call(&app, "POST", "/token", Some(body.clone()), "9.9.9.9").await;
+        let status = call_peer(&app, "POST", "/token", Some(body.clone()), client, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED); // unknown user, but not throttled
     }
-    let (status, _) = call(&app, "POST", "/token", Some(body), "9.9.9.9").await;
+    let status = call_peer(&app, "POST", "/token", Some(body), client, None).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 
     // The unthrottled well-known endpoint still works from the same client.
-    let (status, _) = call(&app, "GET", "/.well-known/jwks.json", None, "9.9.9.9").await;
+    let status = call_peer(&app, "GET", "/.well-known/jwks.json", None, client, None).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn missing_connect_info_fails_open_no_shared_lockout() {
+    // If the server is wired without connect-info, requests must be let through
+    // rather than collapse into one shared bucket that locks everyone out. The
+    // `call` helper injects no ConnectInfo extension.
+    let app = app(1);
+    let body = json!({"email": "rl@example.com", "password": "bad"});
+    for _ in 0..5 {
+        let (status, _) = call(&app, "POST", "/token", Some(body.clone()), "9.9.9.9").await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "never throttled without a peer"
+        );
+    }
 }
 
 #[tokio::test]
@@ -320,8 +338,9 @@ async fn absent_xff_keys_per_peer_with_no_global_lockout() {
 
 #[tokio::test]
 async fn trusted_peer_honors_forwarded_for_per_client() {
-    // When the peer is a trusted proxy, the left-most XFF entry keys the bucket,
-    // so distinct real clients behind the proxy get independent budgets.
+    // When the peer is a trusted proxy, the real client (parsed right-to-left)
+    // keys the bucket, so distinct real clients behind the proxy get independent
+    // budgets.
     let app = app_with_proxies(2, TrustedProxies::from_strs(["10.0.0.0/8"]).unwrap());
     let proxy = peer("10.9.9.9");
     let body = json!({"email": "rl@example.com", "password": "bad"});
@@ -366,4 +385,42 @@ async fn trusted_peer_honors_forwarded_for_per_client() {
         .await,
         StatusCode::UNAUTHORIZED
     );
+}
+
+#[tokio::test]
+async fn append_style_spoof_cannot_escape_the_limit_via_trusted_proxy() {
+    // Behind an append-style trusted proxy the header is
+    // `"<attacker-supplied>, <real-client>"`. Rotating the spoofed prefix must
+    // not grant fresh buckets: all requests key on the proxy-appended real
+    // client and hit the same limit.
+    let app = app_with_proxies(2, TrustedProxies::from_strs(["10.0.0.0/8"]).unwrap());
+    let proxy = peer("10.9.9.9");
+    let body = json!({"email": "rl@example.com", "password": "bad"});
+
+    for i in 0..2 {
+        let status = call_peer(
+            &app,
+            "POST",
+            "/token",
+            Some(body.clone()),
+            proxy,
+            Some(&format!("{i}.{i}.{i}.{i}, 203.0.113.7")), // rotating spoofed prefix
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "request {i} not throttled"
+        );
+    }
+    let status = call_peer(
+        &app,
+        "POST",
+        "/token",
+        Some(body),
+        proxy,
+        Some("9.9.9.9, 203.0.113.7"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }
