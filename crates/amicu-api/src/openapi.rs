@@ -41,6 +41,7 @@ use utoipa::{Modify, OpenApi};
     tags(
         (name = "auth", description = "Sign-up, token issuance/rotation, logout, and JWKS discovery."),
         (name = "engine", description = "Stateless, side-effect-free validate and plan endpoints (auth-gated)."),
+        (name = "recommend", description = "Stateless advisory tuning recommendations from a metrics + estimate snapshot (auth-gated, tier-appropriate)."),
     ),
 )]
 pub struct ApiDoc;

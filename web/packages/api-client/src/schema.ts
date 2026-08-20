@@ -76,6 +76,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/recommend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Diagnose a stack and return advisory recommendations.
+         * @description Runs the advisory rule engine over the submitted measured metrics and the
+         *     workload estimate, then returns the [`TuningReport`] *for the caller's tier*:
+         *     recommendations the caller has not unlocked are withheld (a Community token
+         *     gets `200` with an empty list, Pro+ gets the full depth). Stateless and
+         *     side-effect-free: nothing is applied — recommendations are advisory data.
+         */
+        post: operations["recommend_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/recover": {
         parameters: {
             query?: never;
@@ -230,11 +254,57 @@ export interface components {
             /** @description Quantization label (e.g. `Q4_K_M`), if quantized. */
             quantization?: string | null;
         };
+        /** @description A single stated assumption a diagnosis depends on. */
+        AssumptionDto: {
+            statement: string;
+        };
+        /**
+         * @description The class of bottleneck a diagnosis assigns. Mirrors
+         *     [`amicu_recommend::BottleneckClass`].
+         * @enum {string}
+         */
+        BottleneckClassDto: "under_provisioned" | "over_provisioned" | "prefill_bound" | "decode_bound" | "preemption_recompute";
+        /**
+         * @description Direction of a suggested change. Mirrors
+         *     [`amicu_recommend::ChangeDirection`].
+         * @enum {string}
+         */
+        ChangeDirectionDto: "increase" | "decrease" | "enable" | "replace";
+        /**
+         * @description Whether a measured metric sits above or below its threshold. Mirrors
+         *     [`amicu_recommend::Comparison`].
+         * @enum {string}
+         */
+        ComparisonDto: "above" | "below";
+        /** @description Concurrency & batching surface. */
+        ConcurrencyMetricsDto: {
+            /** Format: int32 */
+            in_flight_requests: number;
+            /** Format: int32 */
+            max_num_seqs: number;
+            /** Format: int32 */
+            running_batch_size: number;
+            /** Format: double */
+            seq_saturation: number;
+        };
         /**
          * @description Confidence level attached to an estimate.
          * @enum {string}
          */
         Confidence: "low" | "medium" | "high";
+        /**
+         * @description How much an estimate or diagnosis can be relied on. Mirrors
+         *     [`amicu_core::estimate::Confidence`].
+         * @enum {string}
+         */
+        ConfidenceDto: "high" | "medium" | "low" | "estimated";
+        /** @description Cost surface, including utilization-adjusted idle burn. */
+        CostMetricsDto: {
+            per_hour: components["schemas"]["MoneyDto"];
+            per_million_tokens: components["schemas"]["MoneyDto"];
+            per_request: components["schemas"]["MoneyDto"];
+            utilization_adjusted_per_hour: components["schemas"]["MoneyDto"];
+        };
         /** @description Estimated cost and performance, with the basis for the estimate. */
         CostPerformance: {
             /** @description Assumptions the estimate rests on. */
@@ -281,6 +351,65 @@ export interface components {
             valid: boolean;
             /** @description Contract version. Currently always `"v1"`. */
             version: string;
+        };
+        /** @description A quantity summarized by percentiles (P50/P90/P99). */
+        DistributionDto: {
+            /** Format: double */
+            p50: number;
+            /** Format: double */
+            p90: number;
+            /** Format: double */
+            p99: number;
+        };
+        /** @description An estimate range with the provenance and confidence behind it. */
+        EstimateRangeDto: {
+            confidence: components["schemas"]["ConfidenceDto"];
+            /** Format: double */
+            high: number;
+            /** Format: double */
+            low: number;
+            provenance: components["schemas"]["ProvenanceDto"];
+        };
+        /** @description A measured metric that triggered a recommendation, with its threshold. */
+        EvidenceDto: {
+            comparison: components["schemas"]["ComparisonDto"];
+            metric: string;
+            /** Format: double */
+            observed: number;
+            /** Format: double */
+            threshold: number;
+        };
+        /** @description GPU surface. `vram_used` is a byte-size string, e.g. `"40GiB"` or `"0B"`. */
+        GpuMetricsDto: {
+            /** Format: double */
+            power_watts: number;
+            /** Format: double */
+            sm_utilization: number;
+            /** @example 40GiB */
+            vram_used: string;
+        };
+        /** @description Latency surface: TTFT, TPOT, end-to-end (ms), each a percentile distribution. */
+        LatencyMetricsDto: {
+            e2e_ms: components["schemas"]["DistributionDto"];
+            tpot_ms: components["schemas"]["DistributionDto"];
+            ttft_ms: components["schemas"]["DistributionDto"];
+        };
+        /** @description Memory / KV-cache surface. */
+        MemoryKvMetricsDto: {
+            /** Format: double */
+            kv_cache_utilization: number;
+            /** Format: int64 */
+            oom_events: number;
+            /** Format: int64 */
+            preemptions: number;
+            /** Format: int64 */
+            recomputations: number;
+        };
+        /** @description A monetary amount in a given ISO currency. */
+        MoneyDto: {
+            /** Format: double */
+            amount: number;
+            currency: string;
         };
         /** @description A single JSON-patch-like edit that would resolve a diagnostic. */
         Patch: {
@@ -346,6 +475,22 @@ export interface components {
             /** @description Risks surfaced by policy evaluation. */
             risks?: string[];
         };
+        /**
+         * @description Where the evidence behind an estimate comes from. Mirrors
+         *     [`amicu_core::estimate::Provenance`].
+         * @enum {string}
+         */
+        ProvenanceDto: "telemetry_aggregate" | "public_benchmark" | "provider_price" | "formula";
+        /** @description Admission-queue surface. */
+        QueueMetricsDto: {
+            /** Format: int64 */
+            admitted: number;
+            /** Format: int32 */
+            depth: number;
+            /** Format: int64 */
+            rejected: number;
+            wait_ms: components["schemas"]["DistributionDto"];
+        };
         /** @description An inclusive numeric range with an optional unit. */
         Range: {
             /**
@@ -361,6 +506,32 @@ export interface components {
             /** @description Unit label (e.g. `usd_per_hour`, `tokens_per_second`). */
             unit?: string | null;
         };
+        /**
+         * @description Request body for `POST /recommend`: the measured metrics, the estimate they
+         *     are judged against, and (optionally) custom rule thresholds.
+         */
+        RecommendRequest: {
+            /** @description The workload estimate the metrics are compared against. */
+            estimate: components["schemas"]["WorkloadEstimateDto"];
+            /**
+             * @description The measured serving-metric surface for one stack (the same shape as
+             *     `GET /stacks/:id/metrics`).
+             */
+            metrics: components["schemas"]["StackMetricsDto"];
+            thresholds?: null | components["schemas"]["ThresholdsDto"];
+        };
+        /** @description An advisory, explainable tuning recommendation. `advisory` is always `true`. */
+        RecommendationDto: {
+            advisory: boolean;
+            assumptions: components["schemas"]["AssumptionDto"][];
+            bottleneck: components["schemas"]["BottleneckClassDto"];
+            changes: components["schemas"]["SuggestedChangeDto"][];
+            confidence: components["schemas"]["ConfidenceDto"];
+            evidence: components["schemas"]["EvidenceDto"][];
+            rejected: components["schemas"]["RejectedAlternativeDto"][];
+            required_tier: components["schemas"]["TierDto"];
+            summary: string;
+        };
         /** @description A password-reset request (`POST /recover`). */
         RecoverRequest: {
             /** @description The account email to send a reset link to. */
@@ -375,6 +546,20 @@ export interface components {
         RefreshRequest: {
             /** @description The opaque refresh token previously issued to this client. */
             refresh_token: string;
+        };
+        /** @description A change the engine considered and ruled out, with why. */
+        RejectedAlternativeDto: {
+            change: string;
+            reason: string;
+        };
+        /** @description Reliability surface. Rates are fractions in `[0, 1]`. */
+        ReliabilityMetricsDto: {
+            /** Format: double */
+            error_rate: number;
+            /** Format: int64 */
+            restarts: number;
+            /** Format: double */
+            timeout_rate: number;
         };
         /**
          * @description A password-reset completion (`POST /reset`): the opaque reset token plus the
@@ -418,6 +603,26 @@ export interface components {
              */
             line: number;
         };
+        /** @description The full measured metric surface for one stack over an observation window. */
+        StackMetricsDto: {
+            concurrency: components["schemas"]["ConcurrencyMetricsDto"];
+            cost: components["schemas"]["CostMetricsDto"];
+            deployment: string;
+            gpu: components["schemas"]["GpuMetricsDto"];
+            latency: components["schemas"]["LatencyMetricsDto"];
+            memory: components["schemas"]["MemoryKvMetricsDto"];
+            queue: components["schemas"]["QueueMetricsDto"];
+            reliability: components["schemas"]["ReliabilityMetricsDto"];
+            throughput: components["schemas"]["ThroughputMetricsDto"];
+            /** Format: int64 */
+            window_seconds: number;
+        };
+        /** @description A described (never applied) tuning change. */
+        SuggestedChangeDto: {
+            action: string;
+            detail: string;
+            direction: components["schemas"]["ChangeDirectionDto"];
+        };
         /** @description A suggested fix attached to a diagnostic. */
         SuggestedFix: {
             /** @description Human-readable description of the fix. */
@@ -425,6 +630,36 @@ export interface components {
             /** @description The proposed patch. */
             patch: components["schemas"]["Patch"];
         };
+        /** @description Rule trigger points. Any omitted field falls back to the engine default. */
+        ThresholdsDto: {
+            /** Format: double */
+            gpu_util_high: number;
+            /** Format: double */
+            gpu_util_low: number;
+            /** Format: double */
+            kv_utilization_high: number;
+            /** Format: double */
+            queue_wait_p99_ms: number;
+            /** Format: double */
+            tpot_p90_ms: number;
+            /** Format: double */
+            ttft_p90_ms: number;
+        };
+        /** @description Throughput surface. */
+        ThroughputMetricsDto: {
+            /** Format: double */
+            output_tokens_per_s: number;
+            /** Format: double */
+            prompt_tokens_per_s: number;
+            /** Format: double */
+            requests_per_s: number;
+        };
+        /**
+         * @description Product tier that unlocks a recommendation. Mirrors
+         *     [`amicu_recommend::Tier`].
+         * @enum {string}
+         */
+        TierDto: "community" | "pro" | "enterprise" | "hosted_cloud";
         /** @description An issued access + refresh token pair. */
         TokenResponse: {
             /** @description Short-lived access JWT (verify offline via JWKS). */
@@ -439,10 +674,30 @@ export interface components {
             /** @description Always `Bearer`. */
             token_type: string;
         };
+        /** @description A diagnosis for one stack: its advisory recommendations, tier-appropriate. */
+        TuningReportDto: {
+            deployment: string;
+            /**
+             * @description Recommendations in severity order; the first is the primary diagnosis.
+             *     Empty for a caller whose tier unlocks none of them.
+             */
+            recommendations: components["schemas"]["RecommendationDto"][];
+        };
         /** @description Request body for `POST /validate`. */
         ValidateRequest: {
             /** @description The Amicu HCL configuration text to validate. */
             config: string;
+        };
+        /** @description Expected serving behavior and the assumptions behind it. */
+        WorkloadEstimateDto: {
+            /** Format: int32 */
+            assumed_concurrency: number;
+            /** Format: int32 */
+            assumed_generation_tokens: number;
+            /** Format: int32 */
+            assumed_prompt_tokens: number;
+            expected_tpot_ms: components["schemas"]["EstimateRangeDto"];
+            expected_ttft_ms: components["schemas"]["EstimateRangeDto"];
         };
     };
     responses: never;
@@ -453,28 +708,55 @@ export interface components {
 }
 export type ActionKind = components['schemas']['ActionKind'];
 export type Artifact = components['schemas']['Artifact'];
+export type AssumptionDto = components['schemas']['AssumptionDto'];
+export type BottleneckClassDto = components['schemas']['BottleneckClassDto'];
+export type ChangeDirectionDto = components['schemas']['ChangeDirectionDto'];
+export type ComparisonDto = components['schemas']['ComparisonDto'];
+export type ConcurrencyMetricsDto = components['schemas']['ConcurrencyMetricsDto'];
 export type Confidence = components['schemas']['Confidence'];
+export type ConfidenceDto = components['schemas']['ConfidenceDto'];
+export type CostMetricsDto = components['schemas']['CostMetricsDto'];
 export type CostPerformance = components['schemas']['CostPerformance'];
 export type Credentials = components['schemas']['Credentials'];
 export type Diagnostic = components['schemas']['Diagnostic'];
 export type DiagnosticReport = components['schemas']['DiagnosticReport'];
+export type DistributionDto = components['schemas']['DistributionDto'];
+export type EstimateRangeDto = components['schemas']['EstimateRangeDto'];
+export type EvidenceDto = components['schemas']['EvidenceDto'];
+export type GpuMetricsDto = components['schemas']['GpuMetricsDto'];
+export type LatencyMetricsDto = components['schemas']['LatencyMetricsDto'];
+export type MemoryKvMetricsDto = components['schemas']['MemoryKvMetricsDto'];
+export type MoneyDto = components['schemas']['MoneyDto'];
 export type Patch = components['schemas']['Patch'];
 export type Plan = components['schemas']['Plan'];
 export type PlanRequest = components['schemas']['PlanRequest'];
 export type PlannedAction = components['schemas']['PlannedAction'];
 export type PolicyOutcome = components['schemas']['PolicyOutcome'];
+export type ProvenanceDto = components['schemas']['ProvenanceDto'];
+export type QueueMetricsDto = components['schemas']['QueueMetricsDto'];
 export type Range = components['schemas']['Range'];
+export type RecommendRequest = components['schemas']['RecommendRequest'];
+export type RecommendationDto = components['schemas']['RecommendationDto'];
 export type RecoverRequest = components['schemas']['RecoverRequest'];
 export type RecoverResponse = components['schemas']['RecoverResponse'];
 export type RefreshRequest = components['schemas']['RefreshRequest'];
+export type RejectedAlternativeDto = components['schemas']['RejectedAlternativeDto'];
+export type ReliabilityMetricsDto = components['schemas']['ReliabilityMetricsDto'];
 export type ResetRequest = components['schemas']['ResetRequest'];
 export type Setting = components['schemas']['Setting'];
 export type Severity = components['schemas']['Severity'];
 export type SignUpResponse = components['schemas']['SignUpResponse'];
 export type SourceLocation = components['schemas']['SourceLocation'];
+export type StackMetricsDto = components['schemas']['StackMetricsDto'];
+export type SuggestedChangeDto = components['schemas']['SuggestedChangeDto'];
 export type SuggestedFix = components['schemas']['SuggestedFix'];
+export type ThresholdsDto = components['schemas']['ThresholdsDto'];
+export type ThroughputMetricsDto = components['schemas']['ThroughputMetricsDto'];
+export type TierDto = components['schemas']['TierDto'];
 export type TokenResponse = components['schemas']['TokenResponse'];
+export type TuningReportDto = components['schemas']['TuningReportDto'];
 export type ValidateRequest = components['schemas']['ValidateRequest'];
+export type WorkloadEstimateDto = components['schemas']['WorkloadEstimateDto'];
 export type $defs = Record<string, never>;
 export interface operations {
     jwks: {
@@ -593,6 +875,51 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["DiagnosticReport"];
                 };
+            };
+        };
+    };
+    recommend_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RecommendRequest"];
+            };
+        };
+        responses: {
+            /** @description The tier-appropriate advisory tuning report. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TuningReportDto"];
+                };
+            };
+            /** @description The request body is malformed. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient to reach the endpoint. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

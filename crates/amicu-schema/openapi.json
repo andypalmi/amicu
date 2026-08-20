@@ -117,6 +117,52 @@
         ]
       }
     },
+    "/recommend": {
+      "post": {
+        "tags": [
+          "recommend"
+        ],
+        "summary": "Diagnose a stack and return advisory recommendations.",
+        "description": "Runs the advisory rule engine over the submitted measured metrics and the\nworkload estimate, then returns the [`TuningReport`] *for the caller's tier*:\nrecommendations the caller has not unlocked are withheld (a Community token\ngets `200` with an empty list, Pro+ gets the full depth). Stateless and\nside-effect-free: nothing is applied — recommendations are advisory data.",
+        "operationId": "recommend_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecommendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The tier-appropriate advisory tuning report.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TuningReportDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request body is malformed."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient to reach the endpoint."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/recover": {
       "post": {
         "tags": [
@@ -387,6 +433,78 @@
           }
         }
       },
+      "AssumptionDto": {
+        "type": "object",
+        "description": "A single stated assumption a diagnosis depends on.",
+        "required": [
+          "statement"
+        ],
+        "properties": {
+          "statement": {
+            "type": "string"
+          }
+        }
+      },
+      "BottleneckClassDto": {
+        "type": "string",
+        "description": "The class of bottleneck a diagnosis assigns. Mirrors\n[`amicu_recommend::BottleneckClass`].",
+        "enum": [
+          "under_provisioned",
+          "over_provisioned",
+          "prefill_bound",
+          "decode_bound",
+          "preemption_recompute"
+        ]
+      },
+      "ChangeDirectionDto": {
+        "type": "string",
+        "description": "Direction of a suggested change. Mirrors\n[`amicu_recommend::ChangeDirection`].",
+        "enum": [
+          "increase",
+          "decrease",
+          "enable",
+          "replace"
+        ]
+      },
+      "ComparisonDto": {
+        "type": "string",
+        "description": "Whether a measured metric sits above or below its threshold. Mirrors\n[`amicu_recommend::Comparison`].",
+        "enum": [
+          "above",
+          "below"
+        ]
+      },
+      "ConcurrencyMetricsDto": {
+        "type": "object",
+        "description": "Concurrency & batching surface.",
+        "required": [
+          "in_flight_requests",
+          "running_batch_size",
+          "max_num_seqs",
+          "seq_saturation"
+        ],
+        "properties": {
+          "in_flight_requests": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "max_num_seqs": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "running_batch_size": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "seq_saturation": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
       "Confidence": {
         "type": "string",
         "description": "Confidence level attached to an estimate.",
@@ -395,6 +513,40 @@
           "medium",
           "high"
         ]
+      },
+      "ConfidenceDto": {
+        "type": "string",
+        "description": "How much an estimate or diagnosis can be relied on. Mirrors\n[`amicu_core::estimate::Confidence`].",
+        "enum": [
+          "high",
+          "medium",
+          "low",
+          "estimated"
+        ]
+      },
+      "CostMetricsDto": {
+        "type": "object",
+        "description": "Cost surface, including utilization-adjusted idle burn.",
+        "required": [
+          "per_hour",
+          "per_million_tokens",
+          "per_request",
+          "utilization_adjusted_per_hour"
+        ],
+        "properties": {
+          "per_hour": {
+            "$ref": "#/components/schemas/MoneyDto"
+          },
+          "per_million_tokens": {
+            "$ref": "#/components/schemas/MoneyDto"
+          },
+          "per_request": {
+            "$ref": "#/components/schemas/MoneyDto"
+          },
+          "utilization_adjusted_per_hour": {
+            "$ref": "#/components/schemas/MoneyDto"
+          }
+        }
       },
       "CostPerformance": {
         "type": "object",
@@ -546,6 +698,172 @@
           "version": {
             "type": "string",
             "description": "Contract version. Currently always `\"v1\"`."
+          }
+        }
+      },
+      "DistributionDto": {
+        "type": "object",
+        "description": "A quantity summarized by percentiles (P50/P90/P99).",
+        "required": [
+          "p50",
+          "p90",
+          "p99"
+        ],
+        "properties": {
+          "p50": {
+            "type": "number",
+            "format": "double"
+          },
+          "p90": {
+            "type": "number",
+            "format": "double"
+          },
+          "p99": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "EstimateRangeDto": {
+        "type": "object",
+        "description": "An estimate range with the provenance and confidence behind it.",
+        "required": [
+          "low",
+          "high",
+          "provenance",
+          "confidence"
+        ],
+        "properties": {
+          "confidence": {
+            "$ref": "#/components/schemas/ConfidenceDto"
+          },
+          "high": {
+            "type": "number",
+            "format": "double"
+          },
+          "low": {
+            "type": "number",
+            "format": "double"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/ProvenanceDto"
+          }
+        }
+      },
+      "EvidenceDto": {
+        "type": "object",
+        "description": "A measured metric that triggered a recommendation, with its threshold.",
+        "required": [
+          "metric",
+          "observed",
+          "threshold",
+          "comparison"
+        ],
+        "properties": {
+          "comparison": {
+            "$ref": "#/components/schemas/ComparisonDto"
+          },
+          "metric": {
+            "type": "string"
+          },
+          "observed": {
+            "type": "number",
+            "format": "double"
+          },
+          "threshold": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "GpuMetricsDto": {
+        "type": "object",
+        "description": "GPU surface. `vram_used` is a byte-size string, e.g. `\"40GiB\"` or `\"0B\"`.",
+        "required": [
+          "sm_utilization",
+          "vram_used",
+          "power_watts"
+        ],
+        "properties": {
+          "power_watts": {
+            "type": "number",
+            "format": "double"
+          },
+          "sm_utilization": {
+            "type": "number",
+            "format": "double"
+          },
+          "vram_used": {
+            "type": "string",
+            "example": "40GiB"
+          }
+        }
+      },
+      "LatencyMetricsDto": {
+        "type": "object",
+        "description": "Latency surface: TTFT, TPOT, end-to-end (ms), each a percentile distribution.",
+        "required": [
+          "ttft_ms",
+          "tpot_ms",
+          "e2e_ms"
+        ],
+        "properties": {
+          "e2e_ms": {
+            "$ref": "#/components/schemas/DistributionDto"
+          },
+          "tpot_ms": {
+            "$ref": "#/components/schemas/DistributionDto"
+          },
+          "ttft_ms": {
+            "$ref": "#/components/schemas/DistributionDto"
+          }
+        }
+      },
+      "MemoryKvMetricsDto": {
+        "type": "object",
+        "description": "Memory / KV-cache surface.",
+        "required": [
+          "kv_cache_utilization",
+          "preemptions",
+          "recomputations",
+          "oom_events"
+        ],
+        "properties": {
+          "kv_cache_utilization": {
+            "type": "number",
+            "format": "double"
+          },
+          "oom_events": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "preemptions": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "recomputations": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "MoneyDto": {
+        "type": "object",
+        "description": "A monetary amount in a given ISO currency.",
+        "required": [
+          "amount",
+          "currency"
+        ],
+        "properties": {
+          "amount": {
+            "type": "number",
+            "format": "double"
+          },
+          "currency": {
+            "type": "string"
           }
         }
       },
@@ -733,6 +1051,46 @@
           }
         }
       },
+      "ProvenanceDto": {
+        "type": "string",
+        "description": "Where the evidence behind an estimate comes from. Mirrors\n[`amicu_core::estimate::Provenance`].",
+        "enum": [
+          "telemetry_aggregate",
+          "public_benchmark",
+          "provider_price",
+          "formula"
+        ]
+      },
+      "QueueMetricsDto": {
+        "type": "object",
+        "description": "Admission-queue surface.",
+        "required": [
+          "depth",
+          "wait_ms",
+          "admitted",
+          "rejected"
+        ],
+        "properties": {
+          "admitted": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "depth": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "rejected": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "wait_ms": {
+            "$ref": "#/components/schemas/DistributionDto"
+          }
+        }
+      },
       "Range": {
         "type": "object",
         "description": "An inclusive numeric range with an optional unit.",
@@ -757,6 +1115,91 @@
               "null"
             ],
             "description": "Unit label (e.g. `usd_per_hour`, `tokens_per_second`)."
+          }
+        }
+      },
+      "RecommendRequest": {
+        "type": "object",
+        "description": "Request body for `POST /recommend`: the measured metrics, the estimate they\nare judged against, and (optionally) custom rule thresholds.",
+        "required": [
+          "metrics",
+          "estimate"
+        ],
+        "properties": {
+          "estimate": {
+            "$ref": "#/components/schemas/WorkloadEstimateDto",
+            "description": "The workload estimate the metrics are compared against."
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/StackMetricsDto",
+            "description": "The measured serving-metric surface for one stack (the same shape as\n`GET /stacks/:id/metrics`)."
+          },
+          "thresholds": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ThresholdsDto",
+                "description": "Custom rule thresholds. Omit to use conservative defaults."
+              }
+            ]
+          }
+        }
+      },
+      "RecommendationDto": {
+        "type": "object",
+        "description": "An advisory, explainable tuning recommendation. `advisory` is always `true`.",
+        "required": [
+          "bottleneck",
+          "summary",
+          "changes",
+          "evidence",
+          "rejected",
+          "confidence",
+          "assumptions",
+          "required_tier",
+          "advisory"
+        ],
+        "properties": {
+          "advisory": {
+            "type": "boolean"
+          },
+          "assumptions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssumptionDto"
+            }
+          },
+          "bottleneck": {
+            "$ref": "#/components/schemas/BottleneckClassDto"
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SuggestedChangeDto"
+            }
+          },
+          "confidence": {
+            "$ref": "#/components/schemas/ConfidenceDto"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EvidenceDto"
+            }
+          },
+          "rejected": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RejectedAlternativeDto"
+            }
+          },
+          "required_tier": {
+            "$ref": "#/components/schemas/TierDto"
+          },
+          "summary": {
+            "type": "string"
           }
         }
       },
@@ -796,6 +1239,46 @@
           "refresh_token": {
             "type": "string",
             "description": "The opaque refresh token previously issued to this client."
+          }
+        }
+      },
+      "RejectedAlternativeDto": {
+        "type": "object",
+        "description": "A change the engine considered and ruled out, with why.",
+        "required": [
+          "change",
+          "reason"
+        ],
+        "properties": {
+          "change": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "ReliabilityMetricsDto": {
+        "type": "object",
+        "description": "Reliability surface. Rates are fractions in `[0, 1]`.",
+        "required": [
+          "error_rate",
+          "timeout_rate",
+          "restarts"
+        ],
+        "properties": {
+          "error_rate": {
+            "type": "number",
+            "format": "double"
+          },
+          "restarts": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "timeout_rate": {
+            "type": "number",
+            "format": "double"
           }
         }
       },
@@ -884,6 +1367,76 @@
           }
         }
       },
+      "StackMetricsDto": {
+        "type": "object",
+        "description": "The full measured metric surface for one stack over an observation window.",
+        "required": [
+          "deployment",
+          "window_seconds",
+          "latency",
+          "throughput",
+          "concurrency",
+          "queue",
+          "memory",
+          "gpu",
+          "cost",
+          "reliability"
+        ],
+        "properties": {
+          "concurrency": {
+            "$ref": "#/components/schemas/ConcurrencyMetricsDto"
+          },
+          "cost": {
+            "$ref": "#/components/schemas/CostMetricsDto"
+          },
+          "deployment": {
+            "type": "string"
+          },
+          "gpu": {
+            "$ref": "#/components/schemas/GpuMetricsDto"
+          },
+          "latency": {
+            "$ref": "#/components/schemas/LatencyMetricsDto"
+          },
+          "memory": {
+            "$ref": "#/components/schemas/MemoryKvMetricsDto"
+          },
+          "queue": {
+            "$ref": "#/components/schemas/QueueMetricsDto"
+          },
+          "reliability": {
+            "$ref": "#/components/schemas/ReliabilityMetricsDto"
+          },
+          "throughput": {
+            "$ref": "#/components/schemas/ThroughputMetricsDto"
+          },
+          "window_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "SuggestedChangeDto": {
+        "type": "object",
+        "description": "A described (never applied) tuning change.",
+        "required": [
+          "action",
+          "direction",
+          "detail"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/ChangeDirectionDto"
+          }
+        }
+      },
       "SuggestedFix": {
         "type": "object",
         "description": "A suggested fix attached to a diagnostic.",
@@ -901,6 +1454,77 @@
             "description": "The proposed patch."
           }
         }
+      },
+      "ThresholdsDto": {
+        "type": "object",
+        "description": "Rule trigger points. Any omitted field falls back to the engine default.",
+        "required": [
+          "gpu_util_high",
+          "gpu_util_low",
+          "queue_wait_p99_ms",
+          "kv_utilization_high",
+          "ttft_p90_ms",
+          "tpot_p90_ms"
+        ],
+        "properties": {
+          "gpu_util_high": {
+            "type": "number",
+            "format": "double"
+          },
+          "gpu_util_low": {
+            "type": "number",
+            "format": "double"
+          },
+          "kv_utilization_high": {
+            "type": "number",
+            "format": "double"
+          },
+          "queue_wait_p99_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "tpot_p90_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "ttft_p90_ms": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "ThroughputMetricsDto": {
+        "type": "object",
+        "description": "Throughput surface.",
+        "required": [
+          "output_tokens_per_s",
+          "prompt_tokens_per_s",
+          "requests_per_s"
+        ],
+        "properties": {
+          "output_tokens_per_s": {
+            "type": "number",
+            "format": "double"
+          },
+          "prompt_tokens_per_s": {
+            "type": "number",
+            "format": "double"
+          },
+          "requests_per_s": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "TierDto": {
+        "type": "string",
+        "description": "Product tier that unlocks a recommendation. Mirrors\n[`amicu_recommend::Tier`].",
+        "enum": [
+          "community",
+          "pro",
+          "enterprise",
+          "hosted_cloud"
+        ]
       },
       "TokenResponse": {
         "type": "object",
@@ -931,6 +1555,26 @@
           }
         }
       },
+      "TuningReportDto": {
+        "type": "object",
+        "description": "A diagnosis for one stack: its advisory recommendations, tier-appropriate.",
+        "required": [
+          "deployment",
+          "recommendations"
+        ],
+        "properties": {
+          "deployment": {
+            "type": "string"
+          },
+          "recommendations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecommendationDto"
+            },
+            "description": "Recommendations in severity order; the first is the primary diagnosis.\nEmpty for a caller whose tier unlocks none of them."
+          }
+        }
+      },
       "ValidateRequest": {
         "type": "object",
         "description": "Request body for `POST /validate`.",
@@ -941,6 +1585,40 @@
           "config": {
             "type": "string",
             "description": "The Amicu HCL configuration text to validate."
+          }
+        }
+      },
+      "WorkloadEstimateDto": {
+        "type": "object",
+        "description": "Expected serving behavior and the assumptions behind it.",
+        "required": [
+          "assumed_prompt_tokens",
+          "assumed_generation_tokens",
+          "assumed_concurrency",
+          "expected_ttft_ms",
+          "expected_tpot_ms"
+        ],
+        "properties": {
+          "assumed_concurrency": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "assumed_generation_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "assumed_prompt_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "expected_tpot_ms": {
+            "$ref": "#/components/schemas/EstimateRangeDto"
+          },
+          "expected_ttft_ms": {
+            "$ref": "#/components/schemas/EstimateRangeDto"
           }
         }
       }
@@ -961,6 +1639,10 @@
     {
       "name": "engine",
       "description": "Stateless, side-effect-free validate and plan endpoints (auth-gated)."
+    },
+    {
+      "name": "recommend",
+      "description": "Stateless advisory tuning recommendations from a metrics + estimate snapshot (auth-gated, tier-appropriate)."
     }
   ]
 }

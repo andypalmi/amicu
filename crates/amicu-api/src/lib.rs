@@ -6,6 +6,9 @@
 //! - Engine: the stateless, auth-gated [`POST /validate`](engine::validate_handler)
 //!   and [`POST /plan`](engine::plan_handler) endpoints, which run the shared
 //!   `amicu-engine` parse → validate → plan orchestration with no side effects.
+//! - Recommend: the stateless, auth-gated [`POST /recommend`](recommend::recommend_handler)
+//!   endpoint, which runs the advisory `amicu-recommend` diagnosis engine over a
+//!   submitted metrics + estimate snapshot and returns a tier-appropriate report.
 //!
 //! [`api_router`] assembles both plus a live `GET /openapi.json`. The served
 //! spec and the committed `crates/amicu-schema/openapi.json` artifact both come
@@ -23,6 +26,7 @@ pub mod auth;
 pub mod engine;
 pub mod openapi;
 pub mod ratelimit;
+pub mod recommend;
 
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn_with_state;
@@ -44,6 +48,7 @@ fn engine_parts() -> (Router<EngineApiState>, utoipa::openapi::OpenApi) {
     OpenApiRouter::with_openapi(openapi::ApiDoc::openapi())
         .routes(routes!(engine::validate_handler))
         .routes(routes!(engine::plan_handler))
+        .routes(routes!(recommend::recommend_handler))
         .split_for_parts()
 }
 
