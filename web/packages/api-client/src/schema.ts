@@ -630,20 +630,25 @@ export interface components {
             /** @description The proposed patch. */
             patch: components["schemas"]["Patch"];
         };
-        /** @description Rule trigger points. Any omitted field falls back to the engine default. */
+        /**
+         * @description Rule trigger points. Every field is optional and independent: provide any
+         *     subset and the omitted fields fall back to the engine's conservative
+         *     defaults. Sending `{ "gpu_util_high": 0.9 }` overrides only that one trigger
+         *     point and leaves the rest at their defaults.
+         */
         ThresholdsDto: {
             /** Format: double */
-            gpu_util_high: number;
+            gpu_util_high?: number | null;
             /** Format: double */
-            gpu_util_low: number;
+            gpu_util_low?: number | null;
             /** Format: double */
-            kv_utilization_high: number;
+            kv_utilization_high?: number | null;
             /** Format: double */
-            queue_wait_p99_ms: number;
+            queue_wait_p99_ms?: number | null;
             /** Format: double */
-            tpot_p90_ms: number;
+            tpot_p90_ms?: number | null;
             /** Format: double */
-            ttft_p90_ms: number;
+            ttft_p90_ms?: number | null;
         };
         /** @description Throughput surface. */
         ThroughputMetricsDto: {
@@ -916,6 +921,13 @@ export interface operations {
             };
             /** @description Access tier insufficient to reach the endpoint. */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The JSON body is well-formed but a field has the wrong type or is missing; body is a plain-text decode error. */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

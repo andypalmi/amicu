@@ -166,6 +166,38 @@ async fn recommend_community_returns_gated_empty_report() {
 }
 
 #[tokio::test]
+async fn recommend_partial_thresholds_override_is_applied() {
+    // A partial thresholds body overrides only the supplied field; the omitted
+    // fields keep the engine's conservative defaults. Setting `gpu_util_high`
+    // above the observed 0.95 SM utilization suppresses the GPU-saturation
+    // signal, yet the request still succeeds with a 200.
+    let (app, token) = app_with(Tier::Pro);
+    let mut body = request_body();
+    body["thresholds"] = json!({ "gpu_util_high": 0.99 });
+    let (status, payload) = send(&app, post("/recommend", Some(&token), &body)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["deployment"], "chat_prod");
+    // The evidence for the primary diagnosis no longer cites GPU saturation at
+    // the raised threshold, proving the single override took effect while the
+    // other (defaulted) rules still ran.
+    let recs = payload["recommendations"]
+        .as_array()
+        .expect("recommendations");
+    let cites_gpu_saturation = recs.iter().any(|rec| {
+        rec["evidence"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|ev| ev["metric"] == "gpu.sm_utilization" && ev["comparison"] == "above")
+    });
+    assert!(
+        !cites_gpu_saturation,
+        "raising gpu_util_high should suppress the GPU-saturation evidence"
+    );
+}
+
+#[tokio::test]
 async fn recommend_unauthenticated_is_rejected() {
     let (app, _token) = app_with(Tier::Pro);
     let (status, _) = send(&app, post("/recommend", None, &request_body())).await;

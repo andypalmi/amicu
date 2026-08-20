@@ -154,6 +154,9 @@
           },
           "403": {
             "description": "Access tier insufficient to reach the endpoint."
+          },
+          "422": {
+            "description": "The JSON body is well-formed but a field has the wrong type or is missing; body is a plain-text decode error."
           }
         },
         "security": [
@@ -1141,7 +1144,7 @@
               },
               {
                 "$ref": "#/components/schemas/ThresholdsDto",
-                "description": "Custom rule thresholds. Omit to use conservative defaults."
+                "description": "Custom rule thresholds. Omit the whole object to use the conservative\nengine defaults; provide any subset of fields to override just those,\nwith the omitted fields still falling back to the engine defaults."
               }
             ]
           }
@@ -1457,38 +1460,48 @@
       },
       "ThresholdsDto": {
         "type": "object",
-        "description": "Rule trigger points. Any omitted field falls back to the engine default.",
-        "required": [
-          "gpu_util_high",
-          "gpu_util_low",
-          "queue_wait_p99_ms",
-          "kv_utilization_high",
-          "ttft_p90_ms",
-          "tpot_p90_ms"
-        ],
+        "description": "Rule trigger points. Every field is optional and independent: provide any\nsubset and the omitted fields fall back to the engine's conservative\ndefaults. Sending `{ \"gpu_util_high\": 0.9 }` overrides only that one trigger\npoint and leaves the rest at their defaults.",
         "properties": {
           "gpu_util_high": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double"
           },
           "gpu_util_low": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double"
           },
           "kv_utilization_high": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double"
           },
           "queue_wait_p99_ms": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double"
           },
           "tpot_p90_ms": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double"
           },
           "ttft_p90_ms": {
-            "type": "number",
+            "type": [
+              "number",
+              "null"
+            ],
             "format": "double"
           }
         }

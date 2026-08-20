@@ -77,6 +77,17 @@ export function RecommendConsole() {
         setResult({ kind: 'report', report: payload });
         return;
       }
+      if (res.status === 422) {
+        // A well-formed-JSON body whose nested fields have the wrong type reaches
+        // the API's extractor, which answers 422 with a plain-text (non-JSON)
+        // body — so don't rely on payload.error here.
+        setResult({
+          kind: 'error',
+          message:
+            'The request body was malformed (a field had the wrong type). Check the metrics and estimate JSON.',
+        });
+        return;
+      }
       // 400 malformed body, 502 upstream, etc. — surface the API's own message.
       const message =
         (payload as { error?: string })?.error ?? `Request failed (${res.status}).`;
