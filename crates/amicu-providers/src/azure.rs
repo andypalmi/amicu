@@ -14,7 +14,7 @@
 //! representative slice of its GPU VM catalog. Azure runs a Spot VM market, so
 //! offerings carry both an on-demand and a spot rate. Live provisioning against
 //! the Azure Resource Manager API and real-time capacity/pricing sync are out of
-//! scope here (the latter is TASK-023); the provisioning surface simulates the
+//! scope here (the latter is amicu-planning#23); the provisioning surface simulates the
 //! instance lifecycle in memory, mirroring [`FakeProvider`](crate::fake::FakeProvider),
 //! so the planner and apply path can be exercised without network or credentials.
 //! Prices are illustrative catalog values in USD/hr, not a live quote.
@@ -130,7 +130,7 @@ struct GpuSpec {
 }
 
 /// A representative slice of Azure's GPU VM catalog. Prices are illustrative
-/// catalog values in USD/hr, not a live quote (real-time pricing is TASK-023).
+/// catalog values in USD/hr, not a live quote (real-time pricing is amicu-planning#23).
 /// Every VM carries a Spot rate — Azure runs a public Spot VM market.
 const GPUS: &[GpuSpec] = &[
     GpuSpec {

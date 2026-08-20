@@ -104,7 +104,7 @@ const GGUF_QUANTIZATIONS: &[Quantization] = &[
 /// Planning (`capabilities`/`validate`/`plan_launch`) is pure and resolves the
 /// deployment's model/hardware through a [`Catalog`]. Apply/runtime-time methods
 /// delegate to a [`ProcessSupervisor`]; real launchd/systemd supervisors land in
-/// TASK-008.
+/// amicu-planning#8.
 pub struct LlamaCppAdapter {
     id: AdapterId,
     catalog: Box<dyn Catalog>,

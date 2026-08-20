@@ -14,7 +14,7 @@
 //! representative slice of its GPU Compute Engine catalog. GCP offers Spot VMs, so
 //! offerings are priced with **both on-demand and spot** rates. Live provisioning
 //! against GCP's APIs and real-time capacity/pricing sync are out of scope here
-//! (the latter is TASK-023); the provisioning surface simulates the instance
+//! (the latter is amicu-planning#23); the provisioning surface simulates the instance
 //! lifecycle in memory, mirroring [`FakeProvider`](crate::fake::FakeProvider), so
 //! the planner and apply path can be exercised without network or credentials.
 //! Prices are illustrative catalog values in USD/hr, not a live quote.
@@ -141,7 +141,7 @@ struct GpuSpec {
 
 /// A representative slice of GCP's GPU Compute Engine catalog. Prices are
 /// illustrative catalog values in USD/hr, not a live quote (real-time pricing is
-/// TASK-023). GCP offers Spot VMs, so every offering carries both an on-demand and
+/// amicu-planning#23). GCP offers Spot VMs, so every offering carries both an on-demand and
 /// a spot rate.
 const GPUS: &[GpuSpec] = &[
     GpuSpec {

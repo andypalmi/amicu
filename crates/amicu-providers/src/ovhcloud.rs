@@ -28,7 +28,7 @@
 //! a retryable backend error. OVH's real auth is an application-key/secret plus a
 //! per-request signature; this mocked phase models the resolved credential as a
 //! single header (see `resolve_token`). Real-time capacity/pricing sync is out of
-//! scope here (TASK-023); prices are illustrative catalog values in EUR/hr, not a
+//! scope here (amicu-planning#23); prices are illustrative catalog values in EUR/hr, not a
 //! live quote.
 
 use std::sync::Arc;
@@ -57,11 +57,11 @@ pub const PROVIDER_ID: &str = "ovhcloud";
 const BASE_URL: &str = "https://eu.api.ovh.com/v1";
 
 /// OVH's per-request signature header. Live signing fills in the full
-/// application-key/consumer-key/timestamp/signature set (TASK-070).
+/// application-key/consumer-key/timestamp/signature set (amicu-planning#70).
 const AUTH_HEADER: &str = "X-Ovh-Signature";
 
 /// Placeholder Public Cloud project id (`serviceName`) for the instance path.
-/// Live provisioning resolves the caller's real project id (TASK-023).
+/// Live provisioning resolves the caller's real project id (amicu-planning#23).
 const SERVICE_NAME: &str = "amicu-project";
 
 /// An OVHcloud data center: its region code, residency jurisdiction, ISO country
@@ -159,7 +159,7 @@ struct GpuSpec {
 
 /// A representative slice of OVHcloud's single-GPU Public Cloud catalog. Prices
 /// are illustrative catalog values in EUR/hr, not a live quote (real-time pricing
-/// is TASK-023). OVH offers no public spot market, so pricing is on-demand-only.
+/// is amicu-planning#23). OVH offers no public spot market, so pricing is on-demand-only.
 const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "gpu.h100.1x",
@@ -221,7 +221,7 @@ const GPUS: &[GpuSpec] = &[
 ///
 /// A minimal create body: the offering id stands in for OVH's `flavorId` and the
 /// region for its `region`. Richer fields (image, SSH key, networks) arrive with
-/// live provisioning (TASK-023).
+/// live provisioning (amicu-planning#23).
 #[derive(Serialize)]
 struct CreateInstanceRequest<'a> {
     name: &'a str,
@@ -453,7 +453,7 @@ impl OvhCloudProvider {
     fn build_request(&self, method: HttpMethod, path: &str, token: Option<&str>) -> HttpRequest {
         let mut req = HttpRequest::new(method, format!("{}{path}", self.base_url));
         if let Some(token) = token {
-            // TODO(TASK-070): full OVH request signing with live credentials.
+            // TODO(amicu-planning#70): full OVH request signing with live credentials.
             req = req.with_header(AUTH_HEADER, token);
         }
         req

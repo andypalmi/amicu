@@ -21,7 +21,7 @@ impl HttpJwksProvider {
     /// Provider for a fixed JWKS URI. Uses a default request timeout so a hung
     /// issuer cannot stall verify calls; see [`Self::with_client`] to override.
     ///
-    /// TODO(TASK-095): also cap the response body size.
+    /// TODO(amicu-planning#95): also cap the response body size.
     #[must_use]
     pub fn new(jwks_uri: impl Into<String>) -> Self {
         let client = reqwest::Client::builder()

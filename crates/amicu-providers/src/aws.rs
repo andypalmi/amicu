@@ -15,7 +15,7 @@
 //! representative slice of its GPU EC2 catalog. AWS runs a real spot market, so
 //! offerings are priced **on-demand and spot** ([`Pricing::with_spot`]). Live
 //! provisioning against the EC2 API and real-time capacity/pricing sync are out
-//! of scope here (the latter is TASK-023); the provisioning surface simulates the
+//! of scope here (the latter is amicu-planning#23); the provisioning surface simulates the
 //! instance lifecycle in memory, mirroring
 //! [`FakeProvider`](crate::fake::FakeProvider), so the planner and apply path can
 //! be exercised without network or credentials. Prices are illustrative catalog
@@ -132,7 +132,7 @@ struct GpuSpec {
 }
 
 /// A representative slice of AWS's GPU EC2 catalog. Prices are illustrative
-/// catalog values in USD/hr, not a live quote (real-time pricing is TASK-023).
+/// catalog values in USD/hr, not a live quote (real-time pricing is amicu-planning#23).
 /// Each offering carries both an on-demand and a spot rate — AWS runs a real spot
 /// market.
 const GPUS: &[GpuSpec] = &[
