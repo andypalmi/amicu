@@ -67,13 +67,18 @@ struct CapturingNotifier {
 }
 
 impl CapturingNotifier {
-    fn last_reset_token(&self) -> String {
-        self.reset_tokens
-            .lock()
-            .unwrap()
-            .last()
-            .cloned()
-            .expect("a password-reset token was captured")
+    /// Cooperatively wait for, then return, the most recently captured reset
+    /// token. `/recover` dispatches delivery on a detached `tokio::spawn` task
+    /// (so its response time is account-independent), so the test yields to let
+    /// that task run before reading what it captured.
+    async fn wait_reset_token(&self) -> String {
+        for _ in 0..10_000 {
+            if let Some(t) = self.reset_tokens.lock().unwrap().last().cloned() {
+                return t;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("timed out waiting for a captured reset token");
     }
 }
 
@@ -549,7 +554,7 @@ async fn reset_with_valid_token_changes_password_and_revokes_sessions() {
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
-    let reset_token = notifier.last_reset_token();
+    let reset_token = notifier.wait_reset_token().await;
 
     // Complete the reset.
     let (status, _) = call(

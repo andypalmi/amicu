@@ -89,18 +89,44 @@ impl CapturingNotifier {
     fn captured(&self) -> Vec<(String, CapturedKind)> {
         self.sent.lock().unwrap().clone()
     }
-    /// The token from the single most recent password-reset message.
-    fn last_reset_token(&self) -> SecretValue {
-        let sent = self.sent.lock().unwrap();
-        let token = sent
-            .iter()
-            .rev()
-            .find_map(|(_, k)| match k {
-                CapturedKind::PasswordReset(t) => Some(t.clone()),
-                CapturedKind::AccountExists => None,
-            })
-            .expect("a password-reset notification was captured");
-        SecretValue::new(token.into_bytes())
+
+    /// Cooperatively wait until at least `n` messages have been captured.
+    ///
+    /// Delivery now runs on a detached `tokio::spawn` task (so `/recover` returns
+    /// in account-independent time), so a test must yield to let that task run
+    /// before reading what it captured. On the current-thread test runtime the
+    /// spawned task makes progress at these yield points; the in-memory seams
+    /// complete in a handful of polls, and the bound only guards against a hang.
+    async fn wait_for_count(&self, n: usize) {
+        for _ in 0..10_000 {
+            if self.sent.lock().unwrap().len() >= n {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("timed out waiting for {n} captured notification(s)");
+    }
+
+    /// Wait for, then return, the token from the most recent password-reset
+    /// message.
+    async fn last_reset_token(&self) -> SecretValue {
+        for _ in 0..10_000 {
+            if let Some(t) = self
+                .sent
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find_map(|(_, k)| match k {
+                    CapturedKind::PasswordReset(t) => Some(t.clone()),
+                    CapturedKind::AccountExists => None,
+                })
+            {
+                return SecretValue::new(t.into_bytes());
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("timed out waiting for a password-reset notification");
     }
 }
 
@@ -131,11 +157,12 @@ async fn password_reset_happy_path_updates_password_and_revokes_sessions() {
         .await
         .unwrap();
 
-    // Request a reset; the token is delivered out-of-band (captured here).
+    // Request a reset; the token is delivered out-of-band on a detached task
+    // (captured here once it lands).
     svc.request_password_reset("Reset@Example.com ")
         .await
         .unwrap();
-    let token = notifier.last_reset_token();
+    let token = notifier.last_reset_token().await;
 
     // Consume it to set a new password.
     svc.reset_password(&token, &pw("brand-new-password"))
@@ -170,7 +197,7 @@ async fn reset_token_is_single_use() {
     svc.request_password_reset("once@example.com")
         .await
         .unwrap();
-    let token = notifier.last_reset_token();
+    let token = notifier.last_reset_token().await;
 
     svc.reset_password(&token, &pw("second-password"))
         .await
@@ -195,7 +222,7 @@ async fn expired_reset_token_is_rejected() {
     svc.request_password_reset("slow@example.com")
         .await
         .unwrap();
-    let token = notifier.last_reset_token();
+    let token = notifier.last_reset_token().await;
 
     // Advance past the 1-hour reset TTL.
     clock.advance(3_600 + 1);
@@ -229,7 +256,7 @@ async fn reset_enforces_password_policy() {
     svc.request_password_reset("weakreset@example.com")
         .await
         .unwrap();
-    let token = notifier.last_reset_token();
+    let token = notifier.last_reset_token().await;
 
     // A weak new password is rejected up front (and must not burn the token).
     assert!(matches!(
@@ -250,15 +277,20 @@ async fn recover_notifies_only_when_account_exists() {
         .await
         .unwrap();
 
-    // Existing account: a password-reset notification is dispatched.
+    // Existing account: a password-reset notification is dispatched (on a
+    // detached task).
     svc.request_password_reset("real@example.com")
         .await
         .unwrap();
-    // Unknown account: still Ok (anti-enumeration), but nothing is sent.
+    // Unknown account: still Ok (anti-enumeration); its detached task looks up
+    // the (missing) account and sends nothing.
     svc.request_password_reset("ghost@example.com")
         .await
         .unwrap();
 
+    // Wait for the real account's message. The ghost request captures nothing, so
+    // the count settles at exactly one.
+    notifier.wait_for_count(1).await;
     let captured = notifier.captured();
     assert_eq!(
         captured.len(),
@@ -278,10 +310,11 @@ async fn duplicate_signup_notifies_account_owner() {
         .await
         .unwrap();
     assert!(notifier.captured().is_empty());
-    // A duplicate sign-up nudges the real owner out-of-band.
+    // A duplicate sign-up nudges the real owner out-of-band (detached task).
     svc.sign_up("owner@example.com", &pw("attacker-guess"))
         .await
         .unwrap();
+    notifier.wait_for_count(1).await;
     let captured = notifier.captured();
     assert_eq!(captured.len(), 1);
     assert_eq!(

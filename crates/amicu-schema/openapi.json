@@ -158,7 +158,7 @@
           "auth"
         ],
         "summary": "Complete a password reset: consume a valid reset token and install a new\npassword.",
-        "description": "On success the password hash is replaced and every refresh-token family the\nuser holds is revoked, forcing a fresh sign-in on all devices. An invalid,\nexpired, or already-used token yields a generic `400` that reveals nothing\nabout which tokens or accounts exist.",
+        "description": "On success the password hash is replaced and every refresh-token family the\nuser holds is revoked, forcing a fresh sign-in on all devices.\n\nBoth failure modes return `400`, but they are deliberately *not* the same\nmessage: a weak new password gets a distinct, helpful policy message, while\nan unknown/expired/already-used token gets a generic one. This leaks nothing,\nbecause the password policy is checked *before* the token is looked up — so\nthe weak-password message can never depend on (and never signals) whether the\ntoken is valid or which account it belongs to.",
         "operationId": "reset",
         "requestBody": {
           "content": {
@@ -175,7 +175,7 @@
             "description": "Password reset: the new password is installed and all prior sessions (refresh families) are revoked."
           },
           "400": {
-            "description": "The new password fails policy, or the reset token is unknown, expired, or already used (generic; no enumeration)."
+            "description": "Either the new password fails policy (distinct, helpful message) or the reset token is unknown, expired, or already used (generic message). Policy is checked before token lookup, so neither message reveals token validity or account existence."
           },
           "429": {
             "description": "Rate limited."

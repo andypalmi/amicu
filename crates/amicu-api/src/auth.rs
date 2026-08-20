@@ -292,9 +292,14 @@ pub(crate) async fn recover(
 /// password.
 ///
 /// On success the password hash is replaced and every refresh-token family the
-/// user holds is revoked, forcing a fresh sign-in on all devices. An invalid,
-/// expired, or already-used token yields a generic `400` that reveals nothing
-/// about which tokens or accounts exist.
+/// user holds is revoked, forcing a fresh sign-in on all devices.
+///
+/// Both failure modes return `400`, but they are deliberately *not* the same
+/// message: a weak new password gets a distinct, helpful policy message, while
+/// an unknown/expired/already-used token gets a generic one. This leaks nothing,
+/// because the password policy is checked *before* the token is looked up — so
+/// the weak-password message can never depend on (and never signals) whether the
+/// token is valid or which account it belongs to.
 #[utoipa::path(
     post,
     path = "/reset",
@@ -302,7 +307,7 @@ pub(crate) async fn recover(
     request_body = ResetRequest,
     responses(
         (status = 200, description = "Password reset: the new password is installed and all prior sessions (refresh families) are revoked."),
-        (status = 400, description = "The new password fails policy, or the reset token is unknown, expired, or already used (generic; no enumeration)."),
+        (status = 400, description = "Either the new password fails policy (distinct, helpful message) or the reset token is unknown, expired, or already used (generic message). Policy is checked before token lookup, so neither message reveals token validity or account existence."),
         (status = 429, description = "Rate limited."),
     ),
 )]
@@ -387,10 +392,13 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.0 {
             AuthError::InvalidCredentials | AuthError::RefreshInvalid => StatusCode::UNAUTHORIZED,
-            // Request-level validation error, not an account-existence signal.
-            // `ResetInvalid` is deliberately a generic 400 (never 401/404): a
-            // bad/expired/used reset token must not be distinguishable from a
-            // weak-password rejection, so the reset flow leaks no enumeration.
+            // Both are request-level 400s, not account-existence signals.
+            // `WeakPassword` keeps its own distinct, helpful message; `ResetInvalid`
+            // is generic (never 401/404, so a bad/expired/used token is not
+            // distinguishable from a missing account). The two carry different
+            // bodies, but that is safe: the password policy is enforced before the
+            // token is ever looked up, so the weak-password message cannot signal
+            // token validity.
             AuthError::WeakPassword | AuthError::ResetInvalid => StatusCode::BAD_REQUEST,
             // Internal-only; sign-up never surfaces it (anti-enumeration).
             AuthError::UserExists => StatusCode::CONFLICT,
