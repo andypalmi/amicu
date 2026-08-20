@@ -58,4 +58,4 @@ pub use key::SigningKey;
 #[cfg(feature = "issuer")]
 pub use keyring::Keyring;
 #[cfg(feature = "issuer")]
-pub use service::{AuthService, TokenPair};
+pub use service::{AuthService, SignUpOutcome, TokenPair};

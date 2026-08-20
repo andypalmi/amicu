@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use amicu_auth::error::AuthError;
 use amicu_auth::jwks::{Jwks, OpenIdConfiguration};
-use amicu_auth::service::{AuthService, TokenPair};
+use amicu_auth::service::{AuthService, SignUpOutcome, TokenPair};
 use amicu_core::secret::SecretValue;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
@@ -91,7 +91,7 @@ struct TokenResponse {
 
 #[derive(Serialize)]
 struct SignUpResponse {
-    user_id: String,
+    message: &'static str,
 }
 
 async fn jwks(State(state): State<AuthApiState>) -> Json<Jwks> {
@@ -102,15 +102,29 @@ async fn openid_configuration(State(state): State<AuthApiState>) -> Json<OpenIdC
     Json(state.service.openid_configuration())
 }
 
+/// Anti-enumeration: both a brand-new registration and a hit on an existing
+/// account return the *same* generic `202 Accepted` body, with the same Argon2
+/// timing (the service hashes on both paths). Only request-level validation
+/// (empty email / weak password) yields a distinguishable error, and that
+/// reveals nothing about which accounts exist. Mirrors the identical-response
+/// defense on `/signin`.
 async fn sign_up(
     State(state): State<AuthApiState>,
     Json(body): Json<Credentials>,
 ) -> Result<Response, ApiError> {
-    let id = state
+    let outcome = state
         .service
         .sign_up(&body.email, &SecretValue::new(body.password.into_bytes()))
         .await?;
-    Ok((StatusCode::CREATED, Json(SignUpResponse { user_id: id })).into_response())
+    // Deliberately discard the Created/AlreadyRegistered distinction here.
+    let _ = matches!(outcome, SignUpOutcome::Created(_));
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SignUpResponse {
+            message: "If that email can be registered, check your inbox to continue.",
+        }),
+    )
+        .into_response())
 }
 
 async fn token(
@@ -213,6 +227,9 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.0 {
             AuthError::InvalidCredentials | AuthError::RefreshInvalid => StatusCode::UNAUTHORIZED,
+            // Request-level validation error, not an account-existence signal.
+            AuthError::WeakPassword => StatusCode::BAD_REQUEST,
+            // Internal-only; sign-up never surfaces it (anti-enumeration).
             AuthError::UserExists => StatusCode::CONFLICT,
             AuthError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             _ => StatusCode::INTERNAL_SERVER_ERROR,

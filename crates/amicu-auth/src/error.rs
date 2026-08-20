@@ -34,8 +34,15 @@ pub enum AuthError {
     #[error("invalid credentials")]
     InvalidCredentials,
     /// Sign-up for an already-registered email.
+    ///
+    /// Internal only: the sign-up flow deliberately never surfaces this to a
+    /// client (it would enable email enumeration). It is raised by the user
+    /// store and swallowed by [`crate::service::AuthService::sign_up`].
     #[error("user already exists")]
     UserExists,
+    /// Password does not meet the minimum strength policy.
+    #[error("password does not meet policy")]
+    WeakPassword,
     /// Refresh token is unknown, expired, or revoked.
     #[error("refresh token invalid")]
     RefreshInvalid,
