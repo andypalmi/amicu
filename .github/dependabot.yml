@@ -1,0 +1,20 @@
+# CVE-only. Dependabot security updates are enabled in repo settings and open
+# PRs for advisories on their own. open-pull-requests-limit: 0 suppresses
+# routine version-update PRs per ecosystem; security updates ignore that limit.
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
