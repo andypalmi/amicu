@@ -8,9 +8,11 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
+    "test": "node --test --experimental-strip-types 'lib/**/*.test.ts'",
     "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
+    "@amicu/api-client": "workspace:*",
     "@amicu/auth": "workspace:*",
     "@amicu/ui": "workspace:*",
     "fumadocs-core": "16.14.5",

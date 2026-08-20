@@ -17,6 +17,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@amicu/api-client':
+        specifier: workspace:*
+        version: link:../../packages/api-client
       '@amicu/auth':
         specifier: workspace:*
         version: link:../../packages/auth

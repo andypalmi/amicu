@@ -14,7 +14,11 @@ const { rewrite: rewriteSuffix } = rewritePath(
 );
 
 // Routes whose access token the BFF proactively (silently) refreshes.
-const PROTECTED_PREFIXES = ['/app', '/account'];
+// Includes the /api/engine/* BFF routes so a session idle past the access-token
+// TTL is rotated before the route handler runs (attemptRefresh writes the new
+// cookie onto the forwarded request via NextResponse.next({ request }), so the
+// same-request guardEngine() sees it) — no spurious 401 on Validate/Plan.
+const PROTECTED_PREFIXES = ['/app', '/account', '/api/engine'];
 
 // secure tied to NODE_ENV so local HTTP dev works; a non-prod build over plain
 // HTTP would omit Secure. Real deployments run production mode behind TLS.
