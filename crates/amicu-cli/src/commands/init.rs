@@ -15,19 +15,19 @@ const AMICU_HCL: &str = r#"# Amicu starter configuration.
 resource "model" "starter_chat" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "Qwen/Qwen3.5-8B-Instruct"
   }
-  architecture   = "qwen2"
+  architecture   = "qwen3"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
     quantization = "q4_k_m"
   }
-  context_length = 8192
+  context_length = 100000
   variant {
     quantization = "q4_k_m"
-    file         = "qwen2.5-7b-instruct-q4_k_m.gguf"
-    size         = "4GiB"
+    file         = "qwen3.5-8b-instruct-q4_k_m.gguf"
+    size         = "5GiB"
   }
 }
 
@@ -47,7 +47,7 @@ resource "deployment" "starter_chat_local" {
   hardware = hardware_profile.local_dev.id
   runtime  = "llama_cpp"
   llama_cpp {
-    context_length = 8192
+    context_length = 100000
     port           = 8000
     n_gpu_layers   = -1
   }

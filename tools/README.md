@@ -1,3 +1,3 @@
 # tools
 
-Out of scope for the Rust crate workspace; reserved per the PRD layout.
+Reserved for future developer tooling. Not part of the Rust crate workspace yet.
