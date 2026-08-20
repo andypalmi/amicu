@@ -35,6 +35,40 @@ impl Residency {
     pub fn is_eu(&self) -> bool {
         matches!(self, Residency::Eu)
     }
+
+    /// The canonical lowercase token for this jurisdiction, matching the DSL and
+    /// canonical JSON spelling of the named variants; [`Residency::Other`]
+    /// yields its raw string. Inverse of [`Residency::from_token`].
+    #[must_use]
+    pub fn as_token(&self) -> &str {
+        match self {
+            Residency::Eu => "eu",
+            Residency::Uk => "uk",
+            Residency::Us => "us",
+            Residency::Ca => "ca",
+            Residency::Apac => "apac",
+            Residency::Other(s) => s,
+        }
+    }
+
+    /// Parse a jurisdiction token, mapping any unrecognized token to
+    /// [`Residency::Other`]. Inverse of [`Residency::as_token`]; used where the
+    /// DSL supplies a bare string with no enum tagging. Not a total inverse:
+    /// a named token always parses to its named variant, so `Other("eu")` is
+    /// not reproduced — such values never reach this path (the parser only
+    /// emits `Other` for genuinely unknown tokens).
+    #[must_use]
+    pub fn from_token(token: impl Into<String>) -> Self {
+        let token = token.into();
+        match token.as_str() {
+            "eu" => Residency::Eu,
+            "uk" => Residency::Uk,
+            "us" => Residency::Us,
+            "ca" => Residency::Ca,
+            "apac" => Residency::Apac,
+            _ => Residency::Other(token),
+        }
+    }
 }
 
 /// A provider region, tagged with the residency jurisdiction it belongs to.
@@ -96,5 +130,32 @@ impl Region {
     #[must_use]
     pub fn is_eu(&self) -> bool {
         self.residency.is_eu()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn residency_token_round_trips() {
+        for r in [
+            Residency::Eu,
+            Residency::Uk,
+            Residency::Us,
+            Residency::Ca,
+            Residency::Apac,
+            Residency::Other("antarctica".into()),
+        ] {
+            assert_eq!(Residency::from_token(r.as_token()), r);
+        }
+    }
+
+    #[test]
+    fn unknown_token_becomes_other() {
+        assert_eq!(
+            Residency::from_token("latam"),
+            Residency::Other("latam".into())
+        );
     }
 }
