@@ -52,6 +52,8 @@ struct GcpRegion {
     country: &'static str,
     /// Human-readable location.
     location: &'static str,
+    /// Default zone (AZ) for zone-addressed calls, e.g. `europe-west1-b`.
+    zone: &'static str,
 }
 
 /// GCP's regions. EU entries are what [`GcpProvider::new`] admits; the non-EU
@@ -65,30 +67,35 @@ fn regions() -> [GcpRegion; 8] {
             residency: Residency::Eu,
             country: "BE",
             location: "Belgium",
+            zone: "europe-west1-b",
         },
         GcpRegion {
             code: "europe-west4",
             residency: Residency::Eu,
             country: "NL",
             location: "Netherlands",
+            zone: "europe-west4-a",
         },
         GcpRegion {
             code: "europe-north1",
             residency: Residency::Eu,
             country: "FI",
             location: "Finland",
+            zone: "europe-north1-a",
         },
         GcpRegion {
             code: "europe-west3",
             residency: Residency::Eu,
             country: "DE",
             location: "Frankfurt",
+            zone: "europe-west3-a",
         },
         GcpRegion {
             code: "europe-west9",
             residency: Residency::Eu,
             country: "FR",
             location: "Paris",
+            zone: "europe-west9-a",
         },
         // Non-EU — excluded by the residency filter.
         GcpRegion {
@@ -96,18 +103,21 @@ fn regions() -> [GcpRegion; 8] {
             residency: Residency::Us,
             country: "US",
             location: "Iowa",
+            zone: "us-central1-a",
         },
         GcpRegion {
             code: "us-east1",
             residency: Residency::Us,
             country: "US",
             location: "South Carolina",
+            zone: "us-east1-b",
         },
         GcpRegion {
             code: "asia-east1",
             residency: Residency::Apac,
             country: "TW",
             location: "Taiwan",
+            zone: "asia-east1-a",
         },
     ]
 }
@@ -222,6 +232,7 @@ impl GcpProvider {
                 Region::new(r.code, r.residency)
                     .with_country(r.country)
                     .with_display_name(r.location)
+                    .with_default_zone(r.zone)
             })
             .collect();
         let capabilities = Self::capabilities_for(&id, regions);
@@ -347,6 +358,19 @@ impl GcpProvider {
         self.capabilities.regions.iter().any(|r| r.code == region)
     }
 
+    /// The zone a zone-addressed GCP call targets for `region`: the explicit
+    /// `override_zone` when present, else the admitted region's default zone.
+    /// Adapter-owned — the zone never reaches the residency filter.
+    fn resolve_zone(&self, region: &str, override_zone: Option<&str>) -> Option<String> {
+        self.capabilities
+            .regions
+            .iter()
+            .find(|r| r.code == region)
+            .and_then(|r| r.resolve_zone(override_zone))
+            .or(override_zone)
+            .map(str::to_string)
+    }
+
     /// Resolve and (pretend to) use the credential to authenticate the GCP API
     /// call. The [`SecretValue`](amicu_core::secret::SecretValue) lives only for
     /// this call and is dropped (zeroized) on return; it is never stored, placed
@@ -422,6 +446,9 @@ impl Provider for GcpProvider {
         self.authenticate(resolver, request.credentials.as_ref())
             .await?;
 
+        // Zone-addressed placement detail the adapter owns: resolve the region's
+        // default zone, honoring an explicit override when the request carries one.
+        let zone = self.resolve_zone(&request.region, request.zone.as_deref());
         let mut state = self.lock();
         state.counter += 1;
         let id = format!("gcp-{}-{}", request.region, state.counter);
@@ -440,6 +467,7 @@ impl Provider for GcpProvider {
             id: id.clone(),
             provider: self.id.clone(),
             region: request.region.clone(),
+            zone,
             offering_id: request.offering_id.clone(),
             credentials: request.credentials.clone(),
             state: ready,
@@ -765,5 +793,43 @@ mod tests {
             p.capabilities().health,
             HealthStatus::Degraded { .. }
         ));
+    }
+
+    #[test]
+    fn descriptor_carries_region_default_zones() {
+        let caps = GcpProvider::new().capabilities();
+        let west1 = caps
+            .regions
+            .iter()
+            .find(|r| r.code == "europe-west1")
+            .unwrap();
+        assert_eq!(west1.default_zone.as_deref(), Some("europe-west1-b"));
+    }
+
+    #[tokio::test]
+    async fn provision_resolves_default_zone_onto_handle() {
+        let p = GcpProvider::new();
+        let handle = p
+            .provision(
+                &ProvisionRequest::new("a2-ultragpu-1g", "europe-west1"),
+                &no_creds(),
+            )
+            .await
+            .unwrap();
+        // The region stays the planning-level input; the zone is the adapter's
+        // resolved default.
+        assert_eq!(handle.region, "europe-west1");
+        assert_eq!(handle.zone.as_deref(), Some("europe-west1-b"));
+    }
+
+    #[tokio::test]
+    async fn explicit_zone_override_is_honored() {
+        let p = GcpProvider::new();
+        let req =
+            ProvisionRequest::new("a2-ultragpu-1g", "europe-west1").with_zone("europe-west1-c");
+        let handle = p.provision(&req, &no_creds()).await.unwrap();
+        assert_eq!(handle.zone.as_deref(), Some("europe-west1-c"));
+        // The override is a placement detail only: the region is unchanged.
+        assert_eq!(handle.region, "europe-west1");
     }
 }
