@@ -1,2 +1,94 @@
 # Amicu
 
+Terraform for AI inference infrastructure: a declarative HCL DSL plus a Rust planner/apply engine that turns model, hardware, routing, and governance definitions into running llama.cpp (local) and vLLM (production) deployments.
+
+## The problem
+
+Standing up an inference stack today means hand-wiring model downloads, runtime flags, GPU provisioning, traffic routing, and data-residency rules — differently on a laptop than in production, and differently again per provider. Amicu makes that stack declarative, diffable, and reviewable: define it, `plan` the changes, `apply` them. EU-first data residency and governance are first-class resources, not an afterthought.
+
+## Quickstart
+
+```bash
+git clone https://github.com/andypalmi/amicu.git
+cd amicu
+cargo build --release -p amicu-cli
+./target/release/amicu init      # scaffolds amicu.hcl in the current directory
+```
+
+`init` writes a minimal, complete config — model, hardware, and the deployment that binds them:
+
+```hcl
+resource "model" "starter_chat" {
+  source {
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen2.5-7B-Instruct"
+  }
+  architecture   = "qwen2"
+  modalities     = ["text"]
+  artifact {
+    format       = "gguf"
+    quantization = "q4_k_m"
+  }
+  context_length = 8192
+  variant {
+    quantization = "q4_k_m"
+    file         = "qwen2.5-7b-instruct-q4_k_m.gguf"
+    size         = "4GiB"
+  }
+}
+
+resource "hardware_profile" "local_dev" {
+  provider = "local_apple"
+  accelerator {
+    kind   = "apple_silicon"
+    model  = "m4_pro"
+    count  = 1
+    memory = "48GiB"
+  }
+  memory = "48GiB"
+}
+
+resource "deployment" "starter_chat_local" {
+  model    = model.starter_chat.id
+  hardware = hardware_profile.local_dev.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 8192
+    port           = 8000
+    n_gpu_layers   = -1
+  }
+}
+```
+
+```bash
+./target/release/amicu validate  # structural, reference, and capacity checks
+./target/release/amicu plan      # shows what apply would do, diffed against state
+./target/release/amicu apply     # executes the plan (prompts for approval)
+```
+
+Six other resource kinds — `routing_policy`, `data_class`, `governance_rule`, `budget`, `tenant`, `use_case` — extend the same graph with traffic splitting, residency/sensitivity constraints, and spend limits. Full reference lives in the docs site (below).
+
+## Install & platforms
+
+No published binary yet — build from source with Rust 1.97+:
+
+```bash
+cargo build --release -p amicu-cli
+```
+
+- **Local runtime (llama.cpp):** macOS (Apple Silicon) and Linux/CPU, run as a native process (launchd on macOS, systemd on Linux).
+- **Production runtime (vLLM):** NVIDIA CUDA, AMD ROCm, and Intel XPU GPUs, deployed via Kubernetes/Helm or k3s.
+- **Provider adapters:** AWS, Azure, GCP, Hetzner, OVHcloud, Scaleway, RunPod, Nebius, and self-hosted (SSH) targets.
+
+## Status
+
+Early stage. Working today: the HCL DSL and parser, the CLI (`init`, `fmt`, `validate`, `plan`, `apply`, `doctor`, `skill export`), the planner and local state, and the provider adapters listed above. Not yet built: the browser UI, hosted service, and performance-intelligence dataset. Expect breaking changes to the DSL and CLI.
+
+## Learn more
+
+- Full documentation site: forthcoming ([andypalmi/amicu-planning#77](https://github.com/andypalmi/amicu-planning/issues/77))
+- Product requirements: [amicu-prd.md](https://github.com/andypalmi/amicu-planning/blob/main/amicu-prd.md)
+
+## License
+
+AGPL-3.0 for the core.
