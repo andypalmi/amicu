@@ -257,6 +257,9 @@ fn map_pod_state(status: Option<&str>) -> ProvisioningState {
         "TERMINATED" | "DEAD" => ProvisioningState::Terminated {
             detail: "pod terminated".into(),
         },
+        "" => ProvisioningState::Provisioning {
+            detail: "pod status unknown".into(),
+        },
         other => ProvisioningState::Provisioning {
             detail: format!("pod status {other}"),
         },
@@ -467,7 +470,7 @@ impl RunPodProvider {
                 },
             ));
         }
-        let token = String::from_utf8(value.expose_secret().to_vec()).map_err(|_| {
+        let token = value.expose_secret_str().map(str::to_owned).map_err(|_| {
             AdapterError::from_kind(ProviderError::CredentialsRejected {
                 detail: "RunPod API token is not valid UTF-8".into(),
             })
@@ -645,6 +648,11 @@ mod tests {
         fn with(mut self, name: &str, value: &str) -> Self {
             self.secrets
                 .insert(name.into(), SecretValue::new(value.to_string()));
+            self
+        }
+
+        fn with_bytes(mut self, name: &str, value: Vec<u8>) -> Self {
+            self.secrets.insert(name.into(), SecretValue::new(value));
             self
         }
     }
@@ -890,6 +898,100 @@ mod tests {
             .expect_err("transport failure surfaces as an error");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
         assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_maps_404_to_unknown_offering() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/pods",
+            HttpResponse::new(404, b"no such gpu type".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(
+                &ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1"),
+                &no_creds(),
+            )
+            .await
+            .expect_err("create 404 maps to unknown offering");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-010");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_maps_500_to_retryable_backend() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/pods",
+            HttpResponse::new(500, b"boom".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(
+                &ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1"),
+                &no_creds(),
+            )
+            .await
+            .expect_err("5xx maps to backend");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_malformed_success_body_is_backend_error() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/pods",
+            HttpResponse::new(201, b"not json".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(
+                &ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1"),
+                &no_creds(),
+            )
+            .await
+            .expect_err("malformed 2xx body maps to backend");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+    }
+
+    #[tokio::test]
+    async fn teardown_maps_404_to_unknown_instance() {
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(HttpMethod::Post, "/pods", created("pod-1"))
+                .on(
+                    HttpMethod::Delete,
+                    "/pods/pod-1",
+                    HttpResponse::new(404, b"gone".to_vec()),
+                ),
+        );
+        let p = mock_provider(mock);
+        let handle = p
+            .provision(
+                &ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1"),
+                &no_creds(),
+            )
+            .await
+            .unwrap();
+        let err = p
+            .teardown(&handle, &no_creds())
+            .await
+            .expect_err("teardown 404 maps to unknown instance");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn non_utf8_credential_is_rejected() {
+        let p = RunPodProvider::new();
+        let resolver = TestResolver::default().with_bytes("runpod_token", vec![0xff, 0xfe]);
+        let req = ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1")
+            .with_credentials(SecretRef::new("runpod_token"));
+        let err = p
+            .provision(&req, &resolver)
+            .await
+            .expect_err("non-UTF-8 credential rejected");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
+        assert!(!err.is_retryable());
     }
 
     #[tokio::test]
