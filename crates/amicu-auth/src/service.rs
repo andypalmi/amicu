@@ -254,7 +254,10 @@ impl<C: Clock> AuthService<C> {
     // account-dependent work is the whole anti-enumeration point (see above). The
     // `async` signature is part of the `AuthService` contract — a persistent
     // store would enqueue via an awaited durable-queue write here — so keep it.
-    #[allow(clippy::unused_async)]
+    // `unused_async_trait_impl` (clippy 1.98+) is the same intent as
+    // `unused_async` for this signature-contract case: the `async` is kept
+    // deliberately, not by accident.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn request_password_reset(&self, email: &str) -> Result<()> {
         let email = normalize_email(email);
         // Empty email is a request-level no-op (not an account signal); returning

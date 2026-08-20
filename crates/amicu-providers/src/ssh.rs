@@ -171,6 +171,9 @@ struct AcceptingHandler;
 impl russh::client::Handler for AcceptingHandler {
     type Error = russh::Error;
 
+    // The `async` is required by russh's `Handler` trait; this impl just accepts
+    // the key with no awaiting (clippy 1.98+ `unused_async_trait_impl`).
+    #[allow(clippy::unused_async_trait_impl)]
     async fn check_server_key(
         &mut self,
         _server_public_key: &russh::keys::ssh_key::PublicKey,
