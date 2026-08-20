@@ -127,6 +127,13 @@ fn forbidden(message: &str) -> Response {
     (StatusCode::FORBIDDEN, Json(json!({ "error": message }))).into_response()
 }
 
+/// Maximum accepted request-body size for the engine endpoints (256 KiB).
+///
+/// An Amicu HCL config comfortably fits well under this; the explicit cap
+/// bounds parser cost and rejects oversized payloads (`413`) before they are
+/// buffered, rather than relying on axum's larger implicit default.
+pub const MAX_ENGINE_BODY_BYTES: usize = 256 * 1024;
+
 /// Request body for `POST /validate`.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ValidateRequest {
@@ -168,8 +175,20 @@ impl From<amicu_core::adapter::AdapterError> for EngineHttpError {
 impl IntoResponse for EngineHttpError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
+            // A parse failure is the client's *own* malformed HCL: echoing the
+            // syntax detail back is safe and useful, and reveals nothing about
+            // the server internals.
             EngineHttpError::Parse(e) => (StatusCode::BAD_REQUEST, e.to_string()),
-            EngineHttpError::Plan(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            // An adapter/launch-render failure is internal detail. Log the real
+            // cause server-side and return a fixed, generic body so nothing
+            // about the runtime internals leaks to the client.
+            EngineHttpError::Plan(e) => {
+                eprintln!("amicu-api: engine plan failed: {e}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal error".to_owned(),
+                )
+            }
         };
         (status, Json(json!({ "error": message }))).into_response()
     }

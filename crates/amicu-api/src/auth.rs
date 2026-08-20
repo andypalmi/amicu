@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use amicu_auth::error::AuthError;
 use amicu_auth::jwks::{Jwks, OpenIdConfiguration};
-use amicu_auth::service::{AuthService, SignUpOutcome, TokenPair};
+use amicu_auth::service::{AuthService, TokenPair};
 use amicu_core::secret::SecretValue;
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
@@ -150,12 +150,13 @@ pub(crate) async fn sign_up(
     State(state): State<AuthApiState>,
     Json(body): Json<Credentials>,
 ) -> Result<Response, ApiError> {
-    let outcome = state
+    // Deliberately discard the Created/AlreadyRegistered distinction: the
+    // response must be identical on both paths (anti-enumeration). We still
+    // await the call so its Argon2 work — the timing equalizer — runs.
+    state
         .service
         .sign_up(&body.email, &SecretValue::new(body.password.into_bytes()))
         .await?;
-    // Deliberately discard the Created/AlreadyRegistered distinction here.
-    let _ = matches!(outcome, SignUpOutcome::Created(_));
     Ok((
         StatusCode::ACCEPTED,
         Json(SignUpResponse {

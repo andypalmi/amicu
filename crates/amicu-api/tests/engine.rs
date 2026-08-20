@@ -299,6 +299,24 @@ async fn insufficient_tier_is_forbidden() {
 }
 
 #[tokio::test]
+async fn oversized_body_is_rejected() {
+    // A valid token passes the auth gate; the body cap then rejects the payload
+    // before parsing. Build a body comfortably larger than the 256 KiB limit.
+    // The 413 body is plain text, so bypass the JSON-parsing `send` helper.
+    let (app, token) = app_with(Tier::Community, Tier::Community);
+    let huge = "x".repeat(400 * 1024);
+    let resp = app
+        .oneshot(post(
+            "/validate",
+            Some(&token),
+            &serde_json::json!({ "config": huge }),
+        ))
+        .await
+        .expect("request");
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
 async fn openapi_json_is_served() {
     let (app, _token) = app_with(Tier::Community, Tier::Community);
     let resp = app

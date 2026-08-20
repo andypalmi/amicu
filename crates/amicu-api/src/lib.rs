@@ -24,6 +24,7 @@ pub mod engine;
 pub mod openapi;
 pub mod ratelimit;
 
+use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn_with_state;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -72,6 +73,10 @@ pub fn openapi_json() -> String {
 pub fn api_router(auth_state: AuthApiState, engine_state: EngineApiState) -> Router {
     let (engine_router, spec) = engine_parts();
     let engine_router = engine_router
+        // Cap request bodies before extraction (inner), and gate on auth
+        // (outer, runs first) so unauthenticated clients are turned away before
+        // any body is buffered.
+        .layer(DefaultBodyLimit::max(engine::MAX_ENGINE_BODY_BYTES))
         .layer(from_fn_with_state(engine_state.clone(), engine::auth_gate))
         .with_state(engine_state);
 
