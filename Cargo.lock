@@ -77,6 +77,8 @@ dependencies = [
  "amicu-engine",
  "amicu-hcl",
  "amicu-plan",
+ "amicu-recommend",
+ "amicu-telemetry",
  "async-trait",
  "axum",
  "http-body-util",

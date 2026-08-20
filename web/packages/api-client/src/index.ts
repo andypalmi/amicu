@@ -22,4 +22,7 @@ export type {
   PlanRequest,
   Plan,
   DiagnosticReport,
+  RecommendRequest,
+  TuningReportDto,
+  RecommendationDto,
 } from './schema';
