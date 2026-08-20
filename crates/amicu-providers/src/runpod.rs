@@ -22,7 +22,7 @@
 //! The [`ProviderCapabilities`] descriptor carries RunPod's real EU data centers
 //! and a representative slice of its GPU catalog with on-demand and interruptible
 //! (spot) pricing. Real-time capacity/pricing sync is out of scope here
-//! (TASK-023); prices are illustrative catalog values, not a live quote.
+//! (amicu-planning#23); prices are illustrative catalog values, not a live quote.
 
 use std::sync::Arc;
 
@@ -161,7 +161,7 @@ struct GpuSpec {
 }
 
 /// A representative slice of RunPod's single-GPU catalog. Prices are illustrative
-/// catalog values in USD/hr, not a live quote (real-time pricing is TASK-023).
+/// catalog values in USD/hr, not a live quote (real-time pricing is amicu-planning#23).
 const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "gpu.h100-80gb.1x",
@@ -219,7 +219,7 @@ const GPUS: &[GpuSpec] = &[
 ///
 /// A minimal create body: the offering id stands in for RunPod's GPU type and the
 /// region for its data center. Richer fields (image, volumes, env) arrive with
-/// live provisioning (TASK-023 / the gated smoke tests).
+/// live provisioning (amicu-planning#23 / the gated smoke tests).
 #[derive(Serialize)]
 struct CreatePodRequest<'a> {
     #[serde(rename = "computeType")]
