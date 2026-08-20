@@ -24,6 +24,14 @@ function looksLikeReport(body: unknown): body is DiagnosticReport {
   );
 }
 
+function looksLikePlan(body: unknown): body is Plan {
+  return (
+    !!body &&
+    typeof body === 'object' &&
+    Array.isArray((body as { actions?: unknown }).actions)
+  );
+}
+
 // The authenticated engine console: an HCL editor wired to the /validate and
 // /plan BFF routes, with an optional prior-config pane so /plan renders a diff.
 // All state is client-side; the BFF holds the session and talks to the API.
@@ -38,7 +46,9 @@ export function EngineConsole() {
     setPending(endpoint);
     setResult({ kind: 'idle' });
     const body =
-      endpoint === 'plan' && diffMode ? { config, prior } : { config };
+      endpoint === 'plan' && diffMode
+        ? { config, prior: prior.trim() ? prior : null }
+        : { config };
     try {
       const res = await fetch(`/api/engine/${endpoint}`, {
         method: 'POST',
@@ -65,8 +75,8 @@ export function EngineConsole() {
       if (res.ok) {
         if (endpoint === 'validate' && looksLikeReport(payload)) {
           setResult({ kind: 'diagnostics', report: payload });
-        } else if (endpoint === 'plan') {
-          setResult({ kind: 'plan', plan: payload as Plan });
+        } else if (endpoint === 'plan' && looksLikePlan(payload)) {
+          setResult({ kind: 'plan', plan: payload });
         } else {
           setResult({ kind: 'error', message: 'Unexpected response from the server.' });
         }
