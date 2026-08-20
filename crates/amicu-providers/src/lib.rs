@@ -8,6 +8,7 @@ pub mod cost;
 pub mod fake;
 pub mod gcp;
 pub mod hetzner;
+pub mod nebius;
 pub mod ovhcloud;
 pub mod provider;
 pub mod runpod;
@@ -23,6 +24,7 @@ pub use cost::{CostError, Usage, estimate_cost};
 pub use fake::FakeProvider;
 pub use gcp::GcpProvider;
 pub use hetzner::HetznerProvider;
+pub use nebius::NebiusProvider;
 pub use ovhcloud::OvhCloudProvider;
 pub use provider::{
     Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
