@@ -14,20 +14,30 @@
 //! The [`ProviderCapabilities`] descriptor carries OVHcloud's real EU data
 //! centers and a representative slice of its single-GPU Public Cloud catalog with
 //! on-demand pricing (OVH bills hourly/monthly with no public spot market, so the
-//! catalog is on-demand-only). Live provisioning against OVH's REST API and
-//! real-time capacity/pricing sync are out of scope here (the latter is
-//! TASK-023); the provisioning surface simulates the instance lifecycle in
-//! memory, mirroring [`FakeProvider`](crate::fake::FakeProvider), so the planner
-//! and apply path can be exercised without network or credentials. Prices are
-//! illustrative catalog values in EUR/hr, not a live quote.
+//! catalog is on-demand-only).
+//!
+//! Provisioning drives OVH's Public Cloud API (`https://eu.api.ovh.com/v1`,
+//! `/cloud/project/{serviceName}/instance`) through the [`HttpTransport`] seam:
+//! `POST .../instance` to create, `GET .../instance/{id}` for status, and
+//! `DELETE .../instance/{id}` to tear down. The adapter never touches a concrete
+//! HTTP client — production uses [`ReqwestTransport`], tests inject a mock — so
+//! the provisioning path is exercised with no network, credentials, or spend.
+//! HTTP status codes map onto typed [`ProviderError`]s (`401`/`403` → credentials
+//! rejected, `404` → unknown instance/offering, `409`/`429` → capacity
+//! unavailable, other non-`2xx` → retryable backend); a transport failure maps to
+//! a retryable backend error. OVH's real auth is an application-key/secret plus a
+//! per-request signature; this mocked phase models the resolved credential as a
+//! single header (see `resolve_token`). Real-time capacity/pricing sync is out of
+//! scope here (TASK-023); prices are illustrative catalog values in EUR/hr, not a
+//! live quote.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::Arc;
 
 use amicu_core::adapter::{Adapter, AdapterError, AdapterId, DescribeCapabilities, HealthStatus};
 use amicu_core::resource::{Accelerator, AcceleratorKind, Money};
 use amicu_core::secret::{SecretRef, SecretResolver};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::capability::{
     Availability, AvailabilityState, BillingGranularity, ComputeOffering, CredentialsModel,
@@ -38,9 +48,21 @@ use crate::capability::{
 use crate::provider::{
     Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
 };
+use crate::transport::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport, TransportError};
 
 /// The adapter identity OVHcloud registers under.
 pub const PROVIDER_ID: &str = "ovhcloud";
+
+/// The OVHcloud (EU) API base URL.
+const BASE_URL: &str = "https://eu.api.ovh.com/v1";
+
+/// OVH's per-request signature header. Live signing fills in the full
+/// application-key/consumer-key/timestamp/signature set (TASK-070).
+const AUTH_HEADER: &str = "X-Ovh-Signature";
+
+/// Placeholder Public Cloud project id (`serviceName`) for the instance path.
+/// Live provisioning resolves the caller's real project id (TASK-023).
+const SERVICE_NAME: &str = "amicu-project";
 
 /// An OVHcloud data center: its region code, residency jurisdiction, ISO country
 /// code, and human-readable location. Both EU and non-EU entries are listed so
@@ -195,24 +217,96 @@ const GPUS: &[GpuSpec] = &[
     },
 ];
 
+/// Request body for `POST .../instance`.
+///
+/// A minimal create body: the offering id stands in for OVH's `flavorId` and the
+/// region for its `region`. Richer fields (image, SSH key, networks) arrive with
+/// live provisioning (TASK-023).
+#[derive(Serialize)]
+struct CreateInstanceRequest<'a> {
+    name: &'a str,
+    #[serde(rename = "flavorId")]
+    flavor_id: &'a str,
+    region: &'a str,
+}
+
+/// The subset of an OVH instance object the adapter consumes.
+#[derive(Deserialize)]
+struct InstanceResponse {
+    /// Provider-assigned instance id.
+    id: String,
+    /// Lifecycle status, e.g. `"ACTIVE"`.
+    status: Option<String>,
+}
+
+/// Map an OVH instance status string onto a [`ProvisioningState`].
+fn map_instance_state(status: Option<&str>) -> ProvisioningState {
+    match status.unwrap_or_default() {
+        "ACTIVE" => ProvisioningState::Ready {
+            detail: "instance active".into(),
+        },
+        "BUILD" | "BUILDING" | "REBOOT" | "HARD_REBOOT" | "REBUILD" => {
+            ProvisioningState::Provisioning {
+                detail: "instance building".into(),
+            }
+        }
+        "STOPPED" | "SHUTOFF" | "SUSPENDED" | "PAUSED" => ProvisioningState::Stopped {
+            detail: "instance stopped".into(),
+        },
+        "DELETING" | "DELETED" | "SOFT_DELETED" => ProvisioningState::Terminated {
+            detail: "instance deleting".into(),
+        },
+        "ERROR" => ProvisioningState::Failed {
+            detail: "instance error".into(),
+        },
+        "" => ProvisioningState::Provisioning {
+            detail: "instance status unknown".into(),
+        },
+        other => ProvisioningState::Provisioning {
+            detail: format!("instance status {other}"),
+        },
+    }
+}
+
+/// The instance path under the placeholder project, with an optional `/{id}`
+/// suffix.
+fn instance_path(suffix: &str) -> String {
+    format!("/cloud/project/{SERVICE_NAME}/instance{suffix}")
+}
+
+/// Fold a transport failure (the exchange never completed) into a retryable
+/// backend error.
+fn transport_error(err: &TransportError) -> AdapterError {
+    AdapterError::from_kind(ProviderError::Backend {
+        detail: format!("OVHcloud transport failure: {err}"),
+    })
+}
+
+/// Map a non-`2xx` status from a per-instance call (`status`/`teardown`) onto a
+/// typed error; `404` means the instance is unknown.
+fn lifecycle_error(status: u16, id: &str) -> AdapterError {
+    let kind = match status {
+        401 | 403 => ProviderError::CredentialsRejected {
+            detail: "OVHcloud rejected the credential".into(),
+        },
+        404 => ProviderError::UnknownInstance { id: id.into() },
+        _ => ProviderError::Backend {
+            detail: format!("OVHcloud API returned HTTP {status}"),
+        },
+    };
+    AdapterError::from_kind(kind)
+}
+
 /// The OVHcloud provider adapter.
 ///
-/// Holds the admitted (residency-filtered) region set and the derived capability
-/// descriptor. Provisioning is simulated in memory (see the module docs); every
-/// simulated instance and its transitions are recorded for observability.
+/// Holds the admitted (residency-filtered) region set, the derived capability
+/// descriptor, and the [`HttpTransport`] used to reach OVH's REST API.
 pub struct OvhCloudProvider {
     id: AdapterId,
     capabilities: ProviderCapabilities,
     health: HealthStatus,
-    state: Mutex<State>,
-}
-
-/// Mutable in-memory state behind the simulated provisioning surface.
-#[derive(Default)]
-struct State {
-    counter: u64,
-    instances: HashMap<String, ProvisioningHandle>,
-    history: HashMap<String, Vec<ProvisioningState>>,
+    transport: Arc<dyn HttpTransport>,
+    base_url: String,
 }
 
 impl OvhCloudProvider {
@@ -244,7 +338,8 @@ impl OvhCloudProvider {
             id,
             capabilities,
             health: HealthStatus::Healthy,
-            state: Mutex::new(State::default()),
+            transport: Arc::new(ReqwestTransport::new()),
+            base_url: BASE_URL.to_string(),
         }
     }
 
@@ -253,6 +348,19 @@ impl OvhCloudProvider {
     pub fn with_health(mut self, health: HealthStatus) -> Self {
         self.capabilities.health = health.clone();
         self.health = health;
+        self
+    }
+
+    /// Swap in a transport and base URL. Test-only: adapter tests inject a mock
+    /// so the provisioning path runs with no network, credentials, or spend.
+    #[cfg(test)]
+    fn with_transport(
+        mut self,
+        transport: Arc<dyn HttpTransport>,
+        base_url: impl Into<String>,
+    ) -> Self {
+        self.transport = transport;
+        self.base_url = base_url.into();
         self
     }
 
@@ -329,27 +437,6 @@ impl OvhCloudProvider {
         caps
     }
 
-    /// The instances currently live (provisioned and non-terminal).
-    #[must_use]
-    pub fn live_instances(&self) -> Vec<ProvisioningHandle> {
-        self.lock()
-            .instances
-            .values()
-            .filter(|h| !h.state.is_terminal())
-            .cloned()
-            .collect()
-    }
-
-    /// The recorded state transitions for `id`, in order.
-    #[must_use]
-    pub fn instance_history(&self, id: &str) -> Vec<ProvisioningState> {
-        self.lock().history.get(id).cloned().unwrap_or_default()
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().expect("ovhcloud provider mutex poisoned")
-    }
-
     fn has_offering(&self, offering_id: &str) -> bool {
         self.capabilities
             .compute
@@ -361,18 +448,32 @@ impl OvhCloudProvider {
         self.capabilities.regions.iter().any(|r| r.code == region)
     }
 
-    /// Resolve and (pretend to) use the credential to authenticate the OVH API
-    /// call. The [`SecretValue`](amicu_core::secret::SecretValue) lives only for
-    /// this call and is dropped (zeroized) on return; it is never stored, placed
-    /// on a handle, logged, or serialized. An empty credential is rejected as
+    /// Build a request for `{base}{path}`, attaching `token` in the OVH auth
+    /// header when present.
+    fn build_request(&self, method: HttpMethod, path: &str, token: Option<&str>) -> HttpRequest {
+        let mut req = HttpRequest::new(method, format!("{}{path}", self.base_url));
+        if let Some(token) = token {
+            // TODO(TASK-070): full OVH request signing with live credentials.
+            req = req.with_header(AUTH_HEADER, token);
+        }
+        req
+    }
+
+    /// Resolve the credential to a transient signing token for a single REST
+    /// call.
+    ///
+    /// The returned [`String`] populates the OVH auth header for the immediate
+    /// call and is dropped when it returns; it is never stored on a
+    /// [`ProvisioningHandle`], logged, or serialized. `None` credentials yield
+    /// `None`; an empty or non-UTF-8 credential is rejected as
     /// [`ProviderError::CredentialsRejected`].
-    async fn authenticate(
+    async fn resolve_token(
         &self,
         resolver: &dyn SecretResolver,
         credentials: Option<&SecretRef>,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<Option<String>, AdapterError> {
         let Some(secret_ref) = credentials else {
-            return Ok(());
+            return Ok(None);
         };
         let value = resolver.resolve(secret_ref).await?;
         if value.is_empty() {
@@ -382,8 +483,12 @@ impl OvhCloudProvider {
                 },
             ));
         }
-        let _signed = value.expose_secret().len();
-        Ok(())
+        let token = value.expose_secret_str().map(str::to_owned).map_err(|_| {
+            AdapterError::from_kind(ProviderError::CredentialsRejected {
+                detail: "OVHcloud API key is not valid UTF-8".into(),
+            })
+        })?;
+        Ok(Some(token))
     }
 }
 
@@ -434,34 +539,60 @@ impl Provider for OvhCloudProvider {
                 region: request.region.clone(),
             }));
         }
-        self.authenticate(resolver, request.credentials.as_ref())
+        let token = self
+            .resolve_token(resolver, request.credentials.as_ref())
             .await?;
 
-        let mut state = self.lock();
-        state.counter += 1;
-        let id = format!("ovhcloud-{}-{}", request.region, state.counter);
-
-        let ready = ProvisioningState::Ready {
-            detail: "instance ready".into(),
+        let create = CreateInstanceRequest {
+            name: "amicu-instance",
+            flavor_id: request.offering_id.as_str(),
+            region: request.region.as_str(),
         };
-        let transitions = vec![
-            ProvisioningState::Requested,
-            ProvisioningState::Provisioning {
-                detail: "instance starting".into(),
-            },
-            ready.clone(),
-        ];
-        let handle = ProvisioningHandle {
-            id: id.clone(),
+        let body = serde_json::to_value(&create).map_err(|_| {
+            AdapterError::from_kind(ProviderError::Backend {
+                detail: "failed to encode OVHcloud create request".into(),
+            })
+        })?;
+        let path = instance_path("");
+        let http_request = self
+            .build_request(HttpMethod::Post, &path, token.as_deref())
+            .with_json(body);
+        let response = self
+            .transport
+            .execute(http_request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if !response.is_success() {
+            let kind = match response.status {
+                401 | 403 => ProviderError::CredentialsRejected {
+                    detail: "OVHcloud rejected the credential".into(),
+                },
+                404 => ProviderError::UnknownOffering {
+                    offering: request.offering_id.clone(),
+                },
+                409 | 429 => ProviderError::CapacityUnavailable {
+                    offering: request.offering_id.clone(),
+                    region: request.region.clone(),
+                },
+                status => ProviderError::Backend {
+                    detail: format!("OVHcloud API returned HTTP {status}"),
+                },
+            };
+            return Err(AdapterError::from_kind(kind));
+        }
+        let instance: InstanceResponse = response.json().map_err(|_| {
+            AdapterError::from_kind(ProviderError::Backend {
+                detail: "malformed OVHcloud create response".into(),
+            })
+        })?;
+        Ok(ProvisioningHandle {
+            id: instance.id,
             provider: self.id.clone(),
             region: request.region.clone(),
             offering_id: request.offering_id.clone(),
             credentials: request.credentials.clone(),
-            state: ready,
-        };
-        state.history.insert(id.clone(), transitions);
-        state.instances.insert(id, handle.clone());
-        Ok(handle)
+            state: map_instance_state(instance.status.as_deref()),
+        })
     }
 
     async fn status(
@@ -469,17 +600,25 @@ impl Provider for OvhCloudProvider {
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningState, AdapterError> {
-        self.authenticate(resolver, handle.credentials.as_ref())
+        let token = self
+            .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
-        self.lock()
-            .instances
-            .get(&handle.id)
-            .map(|h| h.state.clone())
-            .ok_or_else(|| {
-                AdapterError::from_kind(ProviderError::UnknownInstance {
-                    id: handle.id.clone(),
-                })
+        let path = instance_path(&format!("/{}", handle.id));
+        let request = self.build_request(HttpMethod::Get, &path, token.as_deref());
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if !response.is_success() {
+            return Err(lifecycle_error(response.status, &handle.id));
+        }
+        let instance: InstanceResponse = response.json().map_err(|_| {
+            AdapterError::from_kind(ProviderError::Backend {
+                detail: "malformed OVHcloud status response".into(),
             })
+        })?;
+        Ok(map_instance_state(instance.status.as_deref()))
     }
 
     async fn teardown(
@@ -487,25 +626,19 @@ impl Provider for OvhCloudProvider {
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<(), AdapterError> {
-        self.authenticate(resolver, handle.credentials.as_ref())
+        let token = self
+            .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
-
-        let mut state = self.lock();
-        let Some(instance) = state.instances.get_mut(&handle.id) else {
-            return Err(AdapterError::from_kind(ProviderError::UnknownInstance {
-                id: handle.id.clone(),
-            }));
-        };
-        instance.state = ProvisioningState::Terminated {
-            detail: "instance terminated".into(),
-        };
-        let entry = state.history.entry(handle.id.clone()).or_default();
-        entry.push(ProvisioningState::Stopping {
-            detail: "instance stopping".into(),
-        });
-        entry.push(ProvisioningState::Terminated {
-            detail: "instance terminated".into(),
-        });
+        let path = instance_path(&format!("/{}", handle.id));
+        let request = self.build_request(HttpMethod::Delete, &path, token.as_deref());
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if !response.is_success() {
+            return Err(lifecycle_error(response.status, &handle.id));
+        }
         Ok(())
     }
 }
@@ -513,10 +646,11 @@ impl Provider for OvhCloudProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::{HttpResponse, MockTransport};
     use amicu_core::adapter::Registry;
     use amicu_core::diagnostic::{Category as DiagCategory, DiagnosticCode};
     use amicu_core::secret::SecretValue;
-    use std::sync::Arc;
+    use std::collections::HashMap;
 
     #[derive(Default)]
     struct TestResolver {
@@ -527,6 +661,11 @@ mod tests {
         fn with(mut self, name: &str, value: &str) -> Self {
             self.secrets
                 .insert(name.into(), SecretValue::new(value.to_string()));
+            self
+        }
+
+        fn with_bytes(mut self, name: &str, value: Vec<u8>) -> Self {
+            self.secrets.insert(name.into(), SecretValue::new(value));
             self
         }
     }
@@ -545,6 +684,20 @@ mod tests {
 
     fn no_creds() -> TestResolver {
         TestResolver::default()
+    }
+
+    /// An OVHcloud provider whose transport is `mock` and whose base URL points
+    /// at a harmless test host (the mock matches on the URL suffix).
+    fn mock_provider(mock: Arc<MockTransport>) -> OvhCloudProvider {
+        OvhCloudProvider::new().with_transport(mock, "https://mock.test/v1")
+    }
+
+    /// A successful create response for instance `id`, `ACTIVE`.
+    fn created(id: &str) -> HttpResponse {
+        HttpResponse::new(
+            201,
+            format!(r#"{{"id":"{id}","status":"ACTIVE"}}"#).into_bytes(),
+        )
     }
 
     #[test]
@@ -628,29 +781,44 @@ mod tests {
 
     #[tokio::test]
     async fn provision_in_eu_region_then_teardown() {
-        let p = OvhCloudProvider::new();
-        let resolver = no_creds();
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(HttpMethod::Post, "/instance", created("ovh-1"))
+                .on(
+                    HttpMethod::Get,
+                    "/instance/ovh-1",
+                    HttpResponse::new(200, br#"{"id":"ovh-1","status":"ACTIVE"}"#.to_vec()),
+                )
+                .on(
+                    HttpMethod::Delete,
+                    "/instance/ovh-1",
+                    HttpResponse::new(204, Vec::new()),
+                ),
+        );
+        let p = mock_provider(mock.clone());
         let req = ProvisionRequest::new("gpu.a100.1x", "GRA");
 
-        let handle = p.provision(&req, &resolver).await.unwrap();
+        let handle = p.provision(&req, &no_creds()).await.unwrap();
         assert!(handle.state.is_ready());
+        assert_eq!(handle.id, "ovh-1");
         assert_eq!(handle.provider, AdapterId::new("ovhcloud"));
-        assert!(handle.id.starts_with("ovhcloud-GRA-"));
-        assert_eq!(p.live_instances().len(), 1);
 
-        let history = p.instance_history(&handle.id);
-        assert!(matches!(history[0], ProvisioningState::Requested));
-        assert!(history.last().unwrap().is_ready());
+        assert!(p.status(&handle, &no_creds()).await.unwrap().is_ready());
+        p.teardown(&handle, &no_creds()).await.unwrap();
 
-        p.teardown(&handle, &resolver).await.unwrap();
-        assert!(p.live_instances().is_empty());
-        assert!(p.status(&handle, &resolver).await.unwrap().is_terminal());
+        // The lifecycle hit the expected REST endpoints in order.
+        let seen = mock.requests();
+        assert_eq!(seen[0].method, HttpMethod::Post);
+        assert!(seen[0].url.ends_with("/instance"));
+        assert_eq!(seen[1].method, HttpMethod::Get);
+        assert_eq!(seen[2].method, HttpMethod::Delete);
     }
 
     #[tokio::test]
     async fn provision_in_uk_region_is_rejected() {
         // UK1 (London) is a real OVH data center, but the EU adapter does not
-        // admit it: the UK is outside the EU/EEA residency boundary.
+        // admit it: the UK is outside the EU/EEA residency boundary. Rejected
+        // before any backend call.
         let p = OvhCloudProvider::new();
         let err = p
             .provision(&ProvisionRequest::new("gpu.a100.1x", "UK1"), &no_creds())
@@ -658,7 +826,6 @@ mod tests {
             .expect_err("UK region must be rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-011");
         assert!(!err.is_retryable());
-        assert!(p.live_instances().is_empty());
     }
 
     #[tokio::test]
@@ -671,7 +838,6 @@ mod tests {
             .expect_err("non-EU region must be rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-011");
         assert!(!err.is_retryable());
-        assert!(p.live_instances().is_empty());
     }
 
     #[tokio::test]
@@ -698,10 +864,167 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn credentials_never_leak_into_serialized_artifacts() {
+    async fn non_utf8_credential_is_rejected() {
         let p = OvhCloudProvider::new();
+        let resolver = TestResolver::default().with_bytes("ovh_api_key", vec![0xff, 0xfe]);
+        let req = ProvisionRequest::new("gpu.a100.1x", "GRA")
+            .with_credentials(SecretRef::new("ovh_api_key"));
+        let err = p
+            .provision(&req, &resolver)
+            .await
+            .expect_err("non-UTF-8 credential rejected");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_maps_401_to_credentials_rejected() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/instance",
+            HttpResponse::new(403, b"forbidden".to_vec()),
+        ));
+        let p = mock_provider(mock);
+        let req = ProvisionRequest::new("gpu.a100.1x", "GRA")
+            .with_credentials(SecretRef::new("ovh_api_key"));
+        let resolver = TestResolver::default().with("ovh_api_key", "bad");
+        let err = p
+            .provision(&req, &resolver)
+            .await
+            .expect_err("403 must reject credentials");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_maps_404_to_unknown_offering() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/instance",
+            HttpResponse::new(404, b"no such flavor".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
+            .await
+            .expect_err("create 404 maps to unknown offering");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-010");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_maps_429_to_capacity_unavailable() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/instance",
+            HttpResponse::new(429, b"quota".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
+            .await
+            .expect_err("429 must map to capacity unavailable");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-001");
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_maps_500_to_retryable_backend() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/instance",
+            HttpResponse::new(500, b"boom".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
+            .await
+            .expect_err("5xx maps to backend");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn provision_malformed_success_body_is_backend_error() {
+        let mock = Arc::new(MockTransport::default().on(
+            HttpMethod::Post,
+            "/instance",
+            HttpResponse::new(201, b"not json".to_vec()),
+        ));
+        let err = mock_provider(mock)
+            .provision(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
+            .await
+            .expect_err("malformed 2xx body maps to backend");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+    }
+
+    #[tokio::test]
+    async fn status_maps_404_to_unknown_instance() {
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(HttpMethod::Post, "/instance", created("ovh-2"))
+                .on(
+                    HttpMethod::Get,
+                    "/instance/ovh-2",
+                    HttpResponse::new(404, b"not found".to_vec()),
+                ),
+        );
+        let p = mock_provider(mock);
+        let handle = p
+            .provision(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
+            .await
+            .unwrap();
+        let err = p
+            .status(&handle, &no_creds())
+            .await
+            .expect_err("404 must map to unknown instance");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn teardown_maps_404_to_unknown_instance() {
+        let mock = Arc::new(
+            MockTransport::default()
+                .on(HttpMethod::Post, "/instance", created("ovh-2"))
+                .on(
+                    HttpMethod::Delete,
+                    "/instance/ovh-2",
+                    HttpResponse::new(404, b"gone".to_vec()),
+                ),
+        );
+        let p = mock_provider(mock);
+        let handle = p
+            .provision(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
+            .await
+            .unwrap();
+        let err = p
+            .teardown(&handle, &no_creds())
+            .await
+            .expect_err("teardown 404 maps to unknown instance");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn transport_failure_maps_to_retryable_backend() {
+        let mock = Arc::new(MockTransport::default().on_error(
+            HttpMethod::Post,
+            "/instance",
+            TransportError::Timeout,
+        ));
+        let err = mock_provider(mock)
+            .provision(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
+            .await
+            .expect_err("transport failure surfaces as an error");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn credentials_never_leak_into_serialized_artifacts() {
         let secret_value = "leak-me-ovh-api-key";
         let resolver = TestResolver::default().with("ovh_api_key", secret_value);
+        let mock =
+            Arc::new(MockTransport::default().on(HttpMethod::Post, "/instance", created("ovh-3")));
+        let p = mock_provider(mock.clone());
         let req = ProvisionRequest::new("gpu.a100.1x", "GRA")
             .with_credentials(SecretRef::new("ovh_api_key"));
 
@@ -718,6 +1041,17 @@ mod tests {
         assert!(!describe_json.contains(secret_value));
         // The descriptor names the credential kind only.
         assert!(describe_json.contains("\"credentials\":\"api_key\""));
+
+        // The token rode in the OVH signature header (never as a bearer) and never
+        // landed in any serialized artifact.
+        let seen = mock.requests();
+        assert!(seen[0].bearer.is_none());
+        assert!(
+            seen[0]
+                .headers
+                .iter()
+                .any(|(k, v)| k == "X-Ovh-Signature" && v == secret_value)
+        );
     }
 
     #[tokio::test]
@@ -731,8 +1065,10 @@ mod tests {
 
     #[tokio::test]
     async fn discoverable_as_a_provider_trait_object() {
+        let mock =
+            Arc::new(MockTransport::default().on(HttpMethod::Post, "/instance", created("ovh-4")));
         let mut registry: Registry<dyn Provider> = Registry::new();
-        registry.register(Arc::new(OvhCloudProvider::new()));
+        registry.register(Arc::new(mock_provider(mock)));
         let found: Arc<dyn Provider> = registry.get(&AdapterId::new("ovhcloud")).unwrap();
         let handle = found
             .provision(&ProvisionRequest::new("gpu.t4.1x", "DE1"), &no_creds())
