@@ -14,6 +14,7 @@ import {
   type Recommendation,
 } from '@/lib/recommend/format';
 import { useTier } from '@/components/session-provider';
+import { ErrorAlert } from '@/components/common/error-alert';
 
 type Result =
   | { kind: 'idle' }
@@ -151,17 +152,7 @@ export function RecommendConsole() {
         ) : null}
 
         {result.kind === 'error' ? (
-          <div className="space-y-3 rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
-            <div className="flex items-center gap-2">
-              <Badge variant="destructive">Error</Badge>
-            </div>
-            <p>{result.message}</p>
-            {result.upgrade ? (
-              <Button asChild size="sm" variant="outline">
-                <Link href="/pricing">See plans</Link>
-              </Button>
-            ) : null}
-          </div>
+          <ErrorAlert message={result.message} upgrade={result.upgrade} />
         ) : null}
 
         {result.kind === 'report' ? (
