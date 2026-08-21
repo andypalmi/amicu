@@ -1,10 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import Link from 'next/link';
-import { Button, Badge } from '@amicu/ui';
+import { Button } from '@amicu/ui';
 import { EXAMPLE_CONFIG } from '@/lib/engine/example';
 import { isTierDenied, type DiagnosticReport, type Plan } from '@/lib/engine/format';
+import { ErrorAlert } from '@/components/common/error-alert';
 import { DiagnosticsPanel } from './diagnostics-panel';
 import { PlanPanel } from './plan-panel';
 
@@ -179,17 +179,7 @@ export function EngineConsole() {
         ) : null}
 
         {result.kind === 'error' ? (
-          <div className="space-y-3 rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-sm text-destructive">
-            <div className="flex items-center gap-2">
-              <Badge variant="destructive">Error</Badge>
-            </div>
-            <p>{result.message}</p>
-            {result.upgrade ? (
-              <Button asChild size="sm" variant="outline">
-                <Link href="/pricing">See plans</Link>
-              </Button>
-            ) : null}
-          </div>
+          <ErrorAlert message={result.message} upgrade={result.upgrade} />
         ) : null}
 
         {result.kind === 'diagnostics' ? (
