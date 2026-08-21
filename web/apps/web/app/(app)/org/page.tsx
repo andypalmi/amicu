@@ -3,6 +3,7 @@ import { Suspense } from 'react';
 import { requireSession } from '@/lib/auth/session';
 import { TierGate } from '@/components/tier-gate';
 import { OrgConsole } from '@/components/org/console';
+import { PageHeader } from '@/components/common/page-header';
 
 export const metadata: Metadata = { title: 'Organization' };
 
@@ -20,12 +21,10 @@ export default async function OrgPage() {
 
   return (
     <main className="mx-auto w-full max-w-3xl space-y-6 px-6 py-12">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Organization</h1>
-        <p className="text-muted-foreground">
-          Manage members, roles, and review the audit log for your organization.
-        </p>
-      </div>
+      <PageHeader
+        title="Organization"
+        description="Manage members, roles, and review the audit log for your organization."
+      />
 
       <TierGate required="enterprise" feature="The organization console">
         <Suspense fallback={<p className="text-sm text-muted-foreground">Loading…</p>}>

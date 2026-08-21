@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { requireSession } from '@/lib/auth/session';
 import { RecommendConsole } from '@/components/recommend/console';
+import { PageHeader } from '@/components/common/page-header';
 
 export const metadata: Metadata = { title: 'Recommendations' };
 
@@ -14,15 +15,10 @@ export default async function RecommendPage() {
 
   return (
     <main className="mx-auto w-full max-w-6xl space-y-6 px-6 py-10">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Recommendations &amp; transparency</h1>
-        <p className="text-muted-foreground">
-          Diagnose a serving stack from a measured metrics snapshot and its workload estimate.
-          Every recommendation is advisory and explainable: it shows the evidence that triggered
-          it, the confidence behind it, the changes it suggests, and the alternatives it ruled
-          out. Amicu never auto-applies a recommendation.
-        </p>
-      </div>
+      <PageHeader
+        title="Recommendations & transparency"
+        description="Diagnose a serving stack from a measured metrics snapshot and its workload estimate. Every recommendation is advisory and explainable: it shows the evidence that triggered it, the confidence behind it, the changes it suggests, and the alternatives it ruled out. Amicu never auto-applies a recommendation."
+      />
 
       <RecommendConsole />
     </main>

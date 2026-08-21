@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { requireSession } from '@/lib/auth/session';
 import { MonitorDashboard } from '@/components/monitor/dashboard';
+import { PageHeader } from '@/components/common/page-header';
 
 export const metadata: Metadata = { title: 'Monitoring' };
 
@@ -16,16 +17,10 @@ export default async function MonitorPage() {
 
   return (
     <main className="mx-auto w-full max-w-6xl space-y-6 px-6 py-10">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Monitoring</h1>
-        <p className="text-muted-foreground">
-          The measured serving surface shown against its workload estimate. Latencies and queue
-          waits are reported as distributions (P50/P90/P99), never a single point presented as
-          truth. The estimate is a range with a stated confidence and assumptions, so any
-          measured-vs-estimated gap stays attributable. Suggested changes are the engine’s advisory
-          output — Amicu never auto-applies them.
-        </p>
-      </div>
+      <PageHeader
+        title="Monitoring"
+        description="The measured serving surface shown against its workload estimate. Latencies and queue waits are reported as distributions (P50/P90/P99), never a single point presented as truth. The estimate is a range with a stated confidence and assumptions, so any measured-vs-estimated gap stays attributable. Suggested changes are the engine’s advisory output — Amicu never auto-applies them."
+      />
 
       <MonitorDashboard />
     </main>
