@@ -24,6 +24,7 @@ import {
   type BillingStatus,
 } from '@/lib/billing/format';
 import { useTier } from '@/components/session-provider';
+import { ErrorAlert } from '@/components/common/error-alert';
 
 type Load =
   | { kind: 'loading' }
@@ -123,7 +124,7 @@ export function BillingConsole() {
   return (
     <div className="space-y-6">
       {checkoutBanner === 'success' ? (
-        <Alert>
+        <Alert variant="success">
           <AlertTitle>Checkout complete</AlertTitle>
           <AlertDescription>
             Thanks! Your new plan takes effect the next time you sign in or your session refreshes.
@@ -154,9 +155,7 @@ export function BillingConsole() {
             <p className="text-sm text-muted-foreground">Loading billing status…</p>
           ) : null}
 
-          {load.kind === 'error' ? (
-            <p className="text-sm text-muted-foreground">{load.message}</p>
-          ) : null}
+          {load.kind === 'error' ? <ErrorAlert message={load.message} /> : null}
 
           {load.kind === 'ready' ? <ActionArea
             status={load.status}
@@ -165,9 +164,7 @@ export function BillingConsole() {
             onManage={openPortal}
           /> : null}
 
-          {actionError ? (
-            <p className="text-sm text-destructive">{actionError}</p>
-          ) : null}
+          {actionError ? <ErrorAlert message={actionError} /> : null}
         </CardFooter>
       </Card>
 
