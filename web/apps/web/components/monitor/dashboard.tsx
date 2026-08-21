@@ -2,7 +2,16 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
-import { Button, Badge, Separator } from '@amicu/ui';
+import {
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  Separator,
+  Textarea,
+} from '@amicu/ui';
 import { EXAMPLE_SNAPSHOT } from '@/lib/monitor/example';
 import {
   looksLikeMonitorView,
@@ -19,18 +28,13 @@ import {
   type WorkloadEstimate,
   type Distribution,
   type EstimateRange,
-  type Recommendation,
   type TuningReport,
 } from '@/lib/monitor/format';
-import {
-  confidenceMeta,
-  bottleneckLabel,
-  directionMeta,
-  formatEvidence,
-  isTierDenied,
-} from '@/lib/recommend/format';
+import { confidenceMeta, isTierDenied } from '@/lib/recommend/format';
 import { useTier } from '@/components/session-provider';
 import { ErrorAlert } from '@/components/common/error-alert';
+import { EmptyState } from '@/components/common/empty-state';
+import { RecommendationCard } from '@/components/recommend/recommendation-card';
 
 type Result =
   | { kind: 'idle' }
@@ -104,8 +108,9 @@ export function MonitorDashboard() {
     }
   }
 
-  const editorClass =
-    'w-full min-h-[24rem] resize-y rounded-lg border border-border bg-card p-3 font-mono text-xs leading-relaxed text-card-foreground focus:outline-none focus:ring-2 focus:ring-ring';
+  // The editor keeps its taller sizing, resize handle, and mono type; the kit
+  // <Textarea> supplies the uniform border/focus/disabled treatment.
+  const editorClass = 'min-h-[24rem] resize-y font-mono text-xs leading-relaxed';
 
   const isPro = tier === 'pro' || tier === 'enterprise' || tier === 'hosted';
 
@@ -124,7 +129,7 @@ export function MonitorDashboard() {
             Reset to example
           </button>
         </div>
-        <textarea
+        <Textarea
           id="snapshot"
           value={snapshot}
           onChange={(e) => setSnapshot(e.target.value)}
@@ -189,7 +194,7 @@ function LatencyVsEstimate({
 }) {
   const assumptions = estimateAssumptions(estimate);
   return (
-    <Card title="Latency — measured vs. estimated">
+    <MetricCard title="Latency — measured vs. estimated">
       <div className="grid gap-4 md:grid-cols-2">
         <MeasuredVsEstimated
           label="TTFT"
@@ -229,7 +234,7 @@ function LatencyVsEstimate({
           conclusion.
         </p>
       </div>
-    </Card>
+    </MetricCard>
   );
 }
 
@@ -246,32 +251,36 @@ function MeasuredVsEstimated({
 }) {
   const band = confidenceMeta(estimate.confidence);
   return (
-    <div className="space-y-2 rounded-lg border border-border bg-card p-3 text-sm">
-      <div className="flex items-center justify-between gap-2">
-        <span className="font-medium">{label}</span>
-        <span className="text-xs text-muted-foreground">{unit}</span>
-      </div>
-
-      <div className="space-y-1">
-        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Measured
-        </span>
-        <DistributionRow dist={measured} unit={unit} />
-      </div>
-
-      <div className="space-y-1">
-        <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Estimated
-        </span>
-        <div className="flex flex-wrap items-center gap-2">
-          <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">
-            {formatRange(estimate, unit)}
-          </code>
-          <Badge variant={band.tone}>{band.label}</Badge>
-          <span className="text-xs text-muted-foreground">{provenanceLabel(estimate.provenance)}</span>
+    <Card className="text-sm">
+      <CardContent className="space-y-2 p-3">
+        <div className="flex items-center justify-between gap-2">
+          <span className="font-medium">{label}</span>
+          <span className="text-xs text-muted-foreground">{unit}</span>
         </div>
-      </div>
-    </div>
+
+        <div className="space-y-1">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Measured
+          </span>
+          <DistributionRow dist={measured} unit={unit} />
+        </div>
+
+        <div className="space-y-1">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Estimated
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">
+              {formatRange(estimate, unit)}
+            </code>
+            <Badge variant={band.tone}>{band.label}</Badge>
+            <span className="text-xs text-muted-foreground">
+              {provenanceLabel(estimate.provenance)}
+            </span>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -283,20 +292,20 @@ function MetricSurface({ metrics }: { metrics: StackMetrics }) {
   const { throughput, concurrency, queue, memory, gpu, cost, reliability } = metrics;
   return (
     <div className="grid gap-4 md:grid-cols-2">
-      <Card title="Throughput">
+      <MetricCard title="Throughput">
         <ScalarRow label="Output tokens/s" value={formatMeasure(throughput.output_tokens_per_s)} />
         <ScalarRow label="Prompt tokens/s" value={formatMeasure(throughput.prompt_tokens_per_s)} />
         <ScalarRow label="Requests/s" value={formatMeasure(throughput.requests_per_s)} />
-      </Card>
+      </MetricCard>
 
-      <Card title="Concurrency & batching">
+      <MetricCard title="Concurrency & batching">
         <ScalarRow label="In-flight requests" value={formatNumber(concurrency.in_flight_requests)} />
         <ScalarRow label="Running batch size" value={formatNumber(concurrency.running_batch_size)} />
         <ScalarRow label="max-num-seqs" value={formatNumber(concurrency.max_num_seqs)} />
         <ScalarRow label="Seq saturation" value={formatPercent(concurrency.seq_saturation)} />
-      </Card>
+      </MetricCard>
 
-      <Card title="Queue">
+      <MetricCard title="Queue">
         <ScalarRow label="Depth" value={formatNumber(queue.depth)} />
         <div className="space-y-1">
           <span className="text-xs text-muted-foreground">Wait time</span>
@@ -304,22 +313,22 @@ function MetricSurface({ metrics }: { metrics: StackMetrics }) {
         </div>
         <ScalarRow label="Admitted" value={formatNumber(queue.admitted)} />
         <ScalarRow label="Rejected" value={formatNumber(queue.rejected)} />
-      </Card>
+      </MetricCard>
 
-      <Card title="Memory / KV cache">
+      <MetricCard title="Memory / KV cache">
         <ScalarRow label="KV utilization" value={formatPercent(memory.kv_cache_utilization)} />
         <ScalarRow label="Preemptions" value={formatNumber(memory.preemptions)} />
         <ScalarRow label="Recomputations" value={formatNumber(memory.recomputations)} />
         <ScalarRow label="OOM events" value={formatNumber(memory.oom_events)} />
-      </Card>
+      </MetricCard>
 
-      <Card title="GPU">
+      <MetricCard title="GPU">
         <ScalarRow label="SM utilization" value={formatPercent(gpu.sm_utilization)} />
         <ScalarRow label="VRAM used" value={gpu.vram_used} />
         <ScalarRow label="Power" value={formatMeasure(gpu.power_watts, 'W')} />
-      </Card>
+      </MetricCard>
 
-      <Card title="Cost">
+      <MetricCard title="Cost">
         <ScalarRow label="Per hour" value={formatMoney(cost.per_hour)} />
         <ScalarRow label="Per 1M tokens" value={formatMoney(cost.per_million_tokens)} />
         <ScalarRow label="Per request" value={formatMoney(cost.per_request)} />
@@ -327,23 +336,28 @@ function MetricSurface({ metrics }: { metrics: StackMetrics }) {
           label="Utilization-adjusted / hour"
           value={formatMoney(cost.utilization_adjusted_per_hour)}
         />
-      </Card>
+      </MetricCard>
 
-      <Card title="Reliability">
+      <MetricCard title="Reliability">
         <ScalarRow label="Error rate" value={formatPercent(reliability.error_rate)} />
         <ScalarRow label="Timeout rate" value={formatPercent(reliability.timeout_rate)} />
         <ScalarRow label="Restarts" value={formatNumber(reliability.restarts)} />
-      </Card>
+      </MetricCard>
     </div>
   );
 }
 
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
+// A titled metric card composed from the kit `Card` primitives. This replaces a
+// former local `Card` component that shadowed `@amicu/ui`'s `Card`; it keeps the
+// console's compact p-4 sizing and section heading exactly as before.
+function MetricCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="space-y-3 rounded-lg border border-border bg-card p-4 text-sm">
-      <h2 className="text-sm font-semibold">{title}</h2>
-      {children}
-    </section>
+    <Card className="text-sm">
+      <CardHeader className="p-4 pb-0">
+        <CardTitle className="text-sm font-semibold">{title}</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 p-4 pt-3">{children}</CardContent>
+    </Card>
   );
 }
 
@@ -381,22 +395,26 @@ function DistributionRow({ dist, unit }: { dist: Distribution; unit?: string }) 
 function SuggestionsPanel({ report, isPro }: { report: TuningReport; isPro: boolean }) {
   if (report.recommendations.length === 0) {
     return (
-      <Card title="Suggested changes">
-        {isPro ? (
-          <p className="text-muted-foreground">
-            On this snapshot the engine found no bottleneck to flag.
-          </p>
-        ) : (
-          <div className="space-y-2">
-            <p className="text-muted-foreground">
-              Community plans see the metric surface only. Advisory tuning suggestions are a Pro
-              feature.
-            </p>
-            <Button asChild size="sm" variant="outline">
-              <Link href="/pricing">See plans</Link>
-            </Button>
-          </div>
-        )}
+      <Card className="text-sm">
+        <CardHeader className="p-4 pb-0">
+          <CardTitle className="text-sm font-semibold">Suggested changes</CardTitle>
+        </CardHeader>
+        <CardContent className="p-4 pt-3">
+          <EmptyState
+            title={
+              isPro
+                ? 'On this snapshot the engine found no bottleneck to flag.'
+                : 'Community plans see the metric surface only. Advisory tuning suggestions are a Pro feature.'
+            }
+            action={
+              isPro ? undefined : (
+                <Button asChild size="sm" variant="outline">
+                  <Link href="/pricing">See plans</Link>
+                </Button>
+              )
+            }
+          />
+        </CardContent>
       </Card>
     );
   }
@@ -412,102 +430,10 @@ function SuggestionsPanel({ report, isPro }: { report: TuningReport; isPro: bool
       <ul className="space-y-4">
         {report.recommendations.map((rec, i) => (
           <li key={`${rec.bottleneck}-${i}`}>
-            <SuggestionCard rec={rec} />
+            <RecommendationCard rec={rec} />
           </li>
         ))}
       </ul>
     </section>
-  );
-}
-
-function SuggestionCard({ rec }: { rec: Recommendation }) {
-  const confidence = confidenceMeta(rec.confidence);
-  return (
-    <article className="space-y-3 rounded-lg border border-border bg-card p-4 text-sm">
-      <header className="flex flex-wrap items-center gap-2">
-        <Badge variant="outline">{bottleneckLabel(rec.bottleneck)}</Badge>
-        <Badge variant={confidence.tone}>{confidence.label}</Badge>
-        {rec.advisory ? <Badge variant="secondary">Advisory</Badge> : null}
-        <span className="ml-auto text-xs text-muted-foreground">Requires {rec.required_tier}</span>
-      </header>
-
-      <p>{rec.summary}</p>
-
-      {rec.evidence.length > 0 ? (
-        <div className="space-y-1.5">
-          <Separator />
-          <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Evidence
-          </h3>
-          <ul className="space-y-1">
-            {rec.evidence.map((ev, i) => (
-              <li key={`${ev.metric}-${i}`} className="flex flex-wrap items-center gap-2">
-                <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[11px]">
-                  {formatEvidence(ev)}
-                </code>
-                <span className="text-xs text-muted-foreground">
-                  ({ev.comparison === 'above' ? 'above' : 'below'} threshold)
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-
-      {rec.changes.length > 0 ? (
-        <div className="space-y-1.5">
-          <Separator />
-          <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Suggested changes
-          </h3>
-          <ul className="space-y-1">
-            {rec.changes.map((change, i) => {
-              const meta = directionMeta(change.direction);
-              return (
-                <li key={`${change.action}-${i}`} className="flex items-start gap-2">
-                  <span className="font-mono" aria-hidden>
-                    {meta.sigil}
-                  </span>
-                  <span>
-                    <span className="font-medium">{meta.label}</span>{' '}
-                    <code className="font-mono text-xs">{change.action}</code> — {change.detail}
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      ) : null}
-
-      {rec.rejected.length > 0 ? (
-        <div className="space-y-1.5">
-          <Separator />
-          <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Rejected alternatives
-          </h3>
-          <ul className="space-y-1">
-            {rec.rejected.map((alt, i) => (
-              <li key={`${alt.change}-${i}`} className="text-muted-foreground">
-                <span className="font-medium text-foreground">{alt.change}</span> — {alt.reason}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-
-      {rec.assumptions.length > 0 ? (
-        <div className="space-y-1.5">
-          <Separator />
-          <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Assumptions
-          </h3>
-          <ul className="list-inside list-disc space-y-1 text-xs text-muted-foreground">
-            {rec.assumptions.map((a, i) => (
-              <li key={i}>{a.statement}</li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-    </article>
   );
 }
