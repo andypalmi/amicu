@@ -11,8 +11,18 @@ import {
   CardContent,
   Input,
   Label,
+  Select,
   Separator,
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
 } from '@amicu/ui';
+import { ErrorAlert } from '@/components/common/error-alert';
+import { EmptyState } from '@/components/common/empty-state';
+import { toast } from '@/lib/notify/toast';
 import {
   roleLabel,
   actionLabel,
@@ -50,7 +60,6 @@ export function OrgConsole() {
   const [roles, setRoles] = useState<RoleView[] | null>(null);
   const [audit, setAudit] = useState<AuditEntryView[] | null>(null);
   const [auditNote, setAuditNote] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
@@ -121,7 +130,6 @@ export function OrgConsole() {
   async function addMember(userId: string, role: string) {
     setPending(true);
     setActionError(null);
-    setNotice(null);
     try {
       const res = await fetch('/api/org/members', {
         method: 'POST',
@@ -130,7 +138,7 @@ export function OrgConsole() {
       });
       const payload: unknown = await res.json().catch(() => null);
       if (res.ok) {
-        setNotice(`Added ${userId} as ${roleLabel(role)}.`);
+        toast.success('Member added');
         await refresh();
         return;
       }
@@ -145,7 +153,6 @@ export function OrgConsole() {
   async function changeRole(userId: string, role: string) {
     setPending(true);
     setActionError(null);
-    setNotice(null);
     try {
       const res = await fetch(`/api/org/members/${encodeURIComponent(userId)}`, {
         method: 'PATCH',
@@ -154,7 +161,7 @@ export function OrgConsole() {
       });
       const payload: unknown = await res.json().catch(() => null);
       if (res.ok) {
-        setNotice(`Changed ${userId} to ${roleLabel(role)}.`);
+        toast.success('Role updated');
         await refresh();
         return;
       }
@@ -171,14 +178,13 @@ export function OrgConsole() {
   async function removeMember(userId: string) {
     setPending(true);
     setActionError(null);
-    setNotice(null);
     try {
       const res = await fetch(`/api/org/members/${encodeURIComponent(userId)}`, {
         method: 'DELETE',
       });
       const payload: unknown = await res.json().catch(() => null);
       if (res.ok) {
-        setNotice(`Removed ${userId}.`);
+        toast.success('Member removed');
         await refresh();
         return;
       }
@@ -192,10 +198,7 @@ export function OrgConsole() {
 
   return (
     <div className="space-y-6">
-      {notice ? (
-        <p className="rounded-lg border border-border bg-muted/40 p-3 text-sm">{notice}</p>
-      ) : null}
-      {actionError ? <p className="text-sm text-destructive">{actionError}</p> : null}
+      {actionError ? <ErrorAlert message={actionError} /> : null}
 
       <MembersCard
         load={members}
@@ -278,66 +281,64 @@ function MembersTable({
   const options = assignableRoles(caller);
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b border-border text-left text-xs uppercase tracking-wide text-muted-foreground">
-            <th className="py-2 pr-4 font-medium">User</th>
-            <th className="py-2 pr-4 font-medium">Role</th>
-            <th className="py-2 pr-4 font-medium">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {data.members.map((m: MemberView) => {
-            const actable = canManageMembers(caller) && canActOnTarget(caller, m.role) && options.length > 0;
-            return (
-              <tr key={m.user_id} className="border-b border-border/60">
-                <td className="py-2 pr-4 font-mono text-xs">{m.user_id}</td>
-                <td className="py-2 pr-4">
-                  {actable ? (
-                    <select
-                      aria-label={`Role for ${m.user_id}`}
-                      value={m.role}
-                      disabled={pending}
-                      onChange={(e) => {
-                        if (e.target.value !== m.role) onChangeRole(m.user_id, e.target.value);
-                      }}
-                      className="rounded-md border border-border bg-card px-2 py-1 text-sm text-card-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                    >
-                      {/* Ensure the current role is selectable even if not in the
-                          caller's normal assignable set. */}
-                      {(options.includes(m.role as never) ? options : [m.role, ...options]).map(
-                        (r) => (
-                          <option key={r} value={r}>
-                            {roleLabel(r)}
-                          </option>
-                        ),
-                      )}
-                    </select>
-                  ) : (
-                    <Badge variant="outline">{roleLabel(m.role)}</Badge>
-                  )}
-                </td>
-                <td className="py-2 pr-4">
-                  {actable ? (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={pending}
-                      onClick={() => onRemove(m.user_id)}
-                    >
-                      Remove
-                    </Button>
-                  ) : (
-                    <span className="text-xs text-muted-foreground">—</span>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>User</TableHead>
+          <TableHead>Role</TableHead>
+          <TableHead>Actions</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {data.members.map((m: MemberView) => {
+          const actable = canManageMembers(caller) && canActOnTarget(caller, m.role) && options.length > 0;
+          return (
+            <TableRow key={m.user_id}>
+              <TableCell className="font-mono text-xs">{m.user_id}</TableCell>
+              <TableCell>
+                {actable ? (
+                  <Select
+                    aria-label={`Role for ${m.user_id}`}
+                    value={m.role}
+                    disabled={pending}
+                    onChange={(e) => {
+                      if (e.target.value !== m.role) onChangeRole(m.user_id, e.target.value);
+                    }}
+                    className="h-auto w-auto px-2 py-1"
+                  >
+                    {/* Ensure the current role is selectable even if not in the
+                        caller's normal assignable set. */}
+                    {(options.includes(m.role as never) ? options : [m.role, ...options]).map(
+                      (r) => (
+                        <option key={r} value={r}>
+                          {roleLabel(r)}
+                        </option>
+                      ),
+                    )}
+                  </Select>
+                ) : (
+                  <Badge variant="outline">{roleLabel(m.role)}</Badge>
+                )}
+              </TableCell>
+              <TableCell>
+                {actable ? (
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    disabled={pending}
+                    onClick={() => onRemove(m.user_id)}
+                  >
+                    Remove
+                  </Button>
+                ) : (
+                  <span className="text-xs text-muted-foreground">—</span>
+                )}
+              </TableCell>
+            </TableRow>
+          );
+        })}
+      </TableBody>
+    </Table>
   );
 }
 
@@ -375,18 +376,18 @@ function AddMemberForm({
       </div>
       <div className="space-y-1">
         <Label htmlFor="new-role">Role</Label>
-        <select
+        <Select
           id="new-role"
           value={role}
           onChange={(e) => setRole(e.target.value)}
-          className="block rounded-md border border-border bg-card px-2 py-2 text-sm text-card-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+          className="w-auto"
         >
           {options.map((r) => (
             <option key={r} value={r}>
               {roleLabel(r)}
             </option>
           ))}
-        </select>
+        </Select>
       </div>
       <Button type="submit" size="sm" disabled={pending || userId.trim() === ''}>
         {pending ? 'Working…' : 'Add member'}
@@ -445,7 +446,10 @@ function AuditCard({ entries, note }: { entries: AuditEntryView[] | null; note: 
         {note ? <p className="text-sm text-muted-foreground">{note}</p> : null}
         {entries !== null ? (
           entries.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No actions recorded yet.</p>
+            <EmptyState
+              title="No actions recorded yet"
+              description="Privileged actions on your organization will appear here."
+            />
           ) : (
             <ul className="space-y-2">
               {entries.map((e) => (
