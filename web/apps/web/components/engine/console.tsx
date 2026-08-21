@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Button } from '@amicu/ui';
+import { Button, Textarea } from '@amicu/ui';
 import { EXAMPLE_CONFIG } from '@/lib/engine/example';
 import { isTierDenied, type DiagnosticReport, type Plan } from '@/lib/engine/format';
 import { ErrorAlert } from '@/components/common/error-alert';
@@ -98,8 +98,9 @@ export function EngineConsole() {
     }
   }
 
-  const editorClass =
-    'w-full min-h-[18rem] resize-y rounded-lg border border-border bg-card p-3 font-mono text-xs leading-relaxed text-card-foreground focus:outline-none focus:ring-2 focus:ring-ring';
+  // The editor keeps its taller sizing, resize handle, and mono type; the kit
+  // <Textarea> supplies the uniform border/focus/disabled treatment.
+  const editorClass = 'min-h-[18rem] resize-y font-mono text-xs leading-relaxed';
 
   return (
     <div className="grid gap-6 lg:grid-cols-2">
@@ -109,15 +110,16 @@ export function EngineConsole() {
           <label htmlFor="config" className="text-sm font-medium">
             Configuration
           </label>
-          <button
+          <Button
             type="button"
+            variant="link"
+            size="sm"
             onClick={() => setConfig(EXAMPLE_CONFIG)}
-            className="text-xs text-muted-foreground underline-offset-2 hover:underline"
           >
             Reset to example
-          </button>
+          </Button>
         </div>
-        <textarea
+        <Textarea
           id="config"
           value={config}
           onChange={(e) => setConfig(e.target.value)}
@@ -141,7 +143,7 @@ export function EngineConsole() {
             <label htmlFor="prior" className="text-sm font-medium text-muted-foreground">
               Prior configuration
             </label>
-            <textarea
+            <Textarea
               id="prior"
               value={prior}
               onChange={(e) => setPrior(e.target.value)}
