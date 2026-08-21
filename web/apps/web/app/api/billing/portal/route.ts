@@ -15,7 +15,7 @@ export async function POST(): Promise<Response> {
       headers: { Authorization: `Bearer ${guard.token}` },
     });
     return Response.json(data ?? error ?? null, { status: response.status });
-  } catch {
-    return upstreamUnreachable();
+  } catch (err) {
+    return upstreamUnreachable(err, { route: 'POST /api/billing/portal', op: 'billing.portal' });
   }
 }

@@ -26,8 +26,8 @@ export async function PATCH(request: Request, ctx: Ctx): Promise<Response> {
       headers: { Authorization: `Bearer ${guard.token}` },
     });
     return Response.json(data ?? error ?? null, { status: response.status });
-  } catch {
-    return upstreamUnreachable();
+  } catch (err) {
+    return upstreamUnreachable(err, { route: 'PATCH /api/org/members/{id}', op: 'org.members.update' });
   }
 }
 
@@ -43,7 +43,7 @@ export async function DELETE(_request: Request, ctx: Ctx): Promise<Response> {
       headers: { Authorization: `Bearer ${guard.token}` },
     });
     return Response.json(data ?? error ?? null, { status: response.status });
-  } catch {
-    return upstreamUnreachable();
+  } catch (err) {
+    return upstreamUnreachable(err, { route: 'DELETE /api/org/members/{id}', op: 'org.members.delete' });
   }
 }
