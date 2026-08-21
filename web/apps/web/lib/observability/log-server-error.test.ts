@@ -71,6 +71,22 @@ test('buildServerErrorReport tolerates string, null, and circular throwables', (
   assert.equal(report.route, 'POST /api/recommend');
 });
 
+test('org and billing call-site tags flow through to the report verbatim', () => {
+  const org = buildServerErrorReport(new Error('down'), {
+    route: 'GET /api/org/members',
+    op: 'org.members.list',
+  });
+  assert.equal(org.route, 'GET /api/org/members');
+  assert.equal(org.op, 'org.members.list');
+
+  const billing = buildServerErrorReport(new Error('down'), {
+    route: 'POST /api/billing/checkout',
+    op: 'billing.checkout',
+  });
+  assert.equal(billing.route, 'POST /api/billing/checkout');
+  assert.equal(billing.op, 'billing.checkout');
+});
+
 test('buildServerErrorReport omits tags when no context is given', () => {
   const report = buildServerErrorReport(new Error('x'));
   assert.equal(report.route, undefined);

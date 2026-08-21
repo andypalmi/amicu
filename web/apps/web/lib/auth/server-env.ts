@@ -3,8 +3,9 @@
 // This module holds NO `server-only` import on purpose: it is a pure, side-effect
 // free schema so it can be unit-tested under `node --test` with crafted inputs.
 // `lib/auth/config.ts` is the single caller — it invokes `parseServerEnv(process.env)`
-// at module load, so a misconfigured production deploy fails to boot LOUDLY instead
-// of silently targeting localhost. Nothing here is exposed to the browser.
+// on first module evaluation (middleware / first auth request), so a misconfigured
+// production deploy fails LOUDLY instead of silently targeting localhost. Nothing
+// here is exposed to the browser.
 
 import { z } from 'zod';
 
@@ -51,11 +52,11 @@ export function parseServerEnv(env: NodeJS.ProcessEnv): ServerEnv {
 
   // A valid URL, required only when serving in production. Otherwise it may be
   // omitted and a dev default is substituted below.
-  const apiUrl = z.string().url('API_URL must be a valid URL (e.g. https://api.example.com)');
+  const apiUrl = z.url('API_URL must be a valid URL (e.g. https://api.example.com)');
 
   const schema = z.object({
     API_URL: requireApiUrl ? apiUrl : apiUrl.optional(),
-    AUTH_JWKS_URL: z.string().url('AUTH_JWKS_URL must be a valid URL').optional(),
+    AUTH_JWKS_URL: z.url('AUTH_JWKS_URL must be a valid URL').optional(),
     AUTH_ISSUER: z.string().min(1, 'AUTH_ISSUER must be non-empty').optional(),
     AUTH_AUDIENCE: z.string().min(1, 'AUTH_AUDIENCE must be non-empty').optional(),
   });

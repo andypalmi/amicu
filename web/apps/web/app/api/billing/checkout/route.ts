@@ -20,7 +20,7 @@ export async function POST(request: Request): Promise<Response> {
       headers: { Authorization: `Bearer ${guard.token}` },
     });
     return Response.json(data ?? error ?? null, { status: response.status });
-  } catch {
-    return upstreamUnreachable();
+  } catch (err) {
+    return upstreamUnreachable(err, { route: 'POST /api/billing/checkout', op: 'billing.checkout' });
   }
 }

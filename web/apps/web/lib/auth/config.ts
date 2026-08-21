@@ -6,10 +6,11 @@ import { parseServerEnv } from '@/lib/auth/server-env';
 // is exposed to the browser (no NEXT_PUBLIC_*): the browser talks only to the BFF,
 // which in turn talks to the Management API / auth issuer.
 //
-// Validation is fail-fast: `parseServerEnv` runs at module load and THROWS a clear
-// boot-time error if a required variable (API_URL, at minimum) is missing/invalid
-// in production. The dev-friendly localhost default is gated to non-production, so
-// a prod deploy can no longer silently target localhost. See lib/auth/server-env.ts.
+// Validation is fail-fast: `parseServerEnv` runs when this module is first evaluated
+// (middleware / the first request that touches auth) and THROWS a clear error if a
+// required variable (API_URL, at minimum) is missing/invalid in production. The
+// dev-friendly localhost default is gated to non-production, so a prod deploy can no
+// longer silently target localhost. See lib/auth/server-env.ts.
 const env = parseServerEnv(process.env);
 
 /** Base URL of the Rust Management API / TASK-078 auth issuer. */
