@@ -1,4 +1,6 @@
 import { HomeLayout } from 'fumadocs-ui/layouts/home';
+import { Badge } from '@amicu/ui';
+import { TIER_LABELS } from '@amicu/auth';
 import { baseOptions } from '@/lib/layout.shared';
 import { requireSession } from '@/lib/auth/session';
 import { SessionProvider } from '@/components/session-provider';
@@ -14,14 +16,31 @@ export default async function Layout({ children }: LayoutProps<'/'>) {
     <SessionProvider user={user}>
       <HomeLayout
         {...baseOptions()}
+        // `active: 'nested-url'` lets fumadocs mark a nav item active for its whole
+        // section (exact URL or any nested route) using its own client-side
+        // usePathname match. In the neutral theme the active state is a neutral
+        // foreground shift (muted-foreground -> fd-primary, hsl 0 0% 9%) — no accent.
         links={[
-          { text: 'Console', url: '/app' },
-          { text: 'Recommendations', url: '/recommend' },
-          { text: 'Monitoring', url: '/monitor' },
-          { text: 'Docs', url: '/docs' },
-          { text: 'Account', url: '/account' },
-          { text: 'Billing', url: '/billing' },
-          { text: 'Organization', url: '/org' },
+          { text: 'Console', url: '/app', active: 'nested-url' },
+          { text: 'Recommendations', url: '/recommend', active: 'nested-url' },
+          { text: 'Monitoring', url: '/monitor', active: 'nested-url' },
+          { text: 'Docs', url: '/docs', active: 'nested-url' },
+          { text: 'Account', url: '/account', active: 'nested-url' },
+          { text: 'Billing', url: '/billing', active: 'nested-url' },
+          { text: 'Organization', url: '/org', active: 'nested-url' },
+          // Display-only tier badge, sourced from the server-verified session (so it
+          // never flashes a wrong/unknown value). `secondary: true` places it in the
+          // header's right-hand group next to the account/theme controls. This is
+          // presentation only — real tier gating is enforced by the API.
+          {
+            type: 'custom',
+            secondary: true,
+            children: (
+              <Badge variant="secondary" title={`Plan: ${TIER_LABELS[user.tier]}`}>
+                {TIER_LABELS[user.tier]}
+              </Badge>
+            ),
+          },
         ]}
       >
         {children}
