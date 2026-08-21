@@ -26,10 +26,13 @@ const isProd = process.env.NODE_ENV === 'production';
 //    upstream origin is intentionally NOT listed.
 const cspDirectives = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline'",
+  // 'unsafe-eval' is added in dev only: React 19's Fast Refresh runtime and the
+  // Next.js error overlay use eval() in the browser. Production stays strict and
+  // must NOT include 'unsafe-eval'. Matches Next.js's official CSP guidance.
+  `script-src 'self' 'unsafe-inline'${isProd ? '' : " 'unsafe-eval'"}`,
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self'",
-  "img-src 'self' data:",
+  "img-src 'self' blob: data:",
   "connect-src 'self'",
   "object-src 'none'",
   "base-uri 'self'",
