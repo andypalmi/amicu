@@ -14,6 +14,7 @@ import { TIER_LABELS } from '@amicu/auth';
 import { requireSession } from '@/lib/auth/session';
 import { LogoutButton } from '@/components/logout-button';
 import { TierGate } from '@/components/tier-gate';
+import { PageHeader } from '@/components/common/page-header';
 
 export const metadata: Metadata = { title: 'Account' };
 
@@ -22,10 +23,7 @@ export default async function AccountPage() {
 
   return (
     <main className="mx-auto w-full max-w-2xl space-y-6 px-6 py-12">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Account</h1>
-        <p className="text-muted-foreground">Your profile and plan.</p>
-      </div>
+      <PageHeader title="Account" description="Your profile and plan." />
 
       <Card>
         <CardHeader>

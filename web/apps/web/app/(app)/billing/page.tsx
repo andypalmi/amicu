@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { Suspense } from 'react';
 import { requireSession } from '@/lib/auth/session';
 import { BillingConsole } from '@/components/billing/console';
+import { PageHeader } from '@/components/common/page-header';
 
 export const metadata: Metadata = { title: 'Billing' };
 
@@ -13,10 +14,7 @@ export default async function BillingPage() {
 
   return (
     <main className="mx-auto w-full max-w-2xl space-y-6 px-6 py-12">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Billing</h1>
-        <p className="text-muted-foreground">Manage your subscription and plan.</p>
-      </div>
+      <PageHeader title="Billing" description="Manage your subscription and plan." />
 
       <Suspense
         fallback={<p className="text-sm text-muted-foreground">Loading billing…</p>}

@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { requireSession } from '@/lib/auth/session';
 import { EngineConsole } from '@/components/engine/console';
+import { PageHeader } from '@/components/common/page-header';
 
 export const metadata: Metadata = { title: 'Console' };
 
@@ -13,13 +14,10 @@ export default async function AppHomePage() {
 
   return (
     <main className="mx-auto w-full max-w-6xl space-y-6 px-6 py-10">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Console</h1>
-        <p className="text-muted-foreground">
-          Write your Amicu configuration, validate it, and plan the changes Amicu would
-          apply. Toggle a prior configuration to see a diff.
-        </p>
-      </div>
+      <PageHeader
+        title="Console"
+        description="Write your Amicu configuration, validate it, and plan the changes Amicu would apply. Toggle a prior configuration to see a diff."
+      />
 
       <EngineConsole />
     </main>
