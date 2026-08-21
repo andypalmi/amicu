@@ -21,3 +21,12 @@ export {
   type AlertProps,
 } from './components/alert';
 export { Separator, type SeparatorProps } from './components/separator';
+export {
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
+  TableCaption,
+} from './components/table';
