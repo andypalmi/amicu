@@ -9,6 +9,8 @@ export {
   CardFooter,
 } from './components/card';
 export { Input, type InputProps } from './components/input';
+export { Textarea, type TextareaProps } from './components/textarea';
+export { Select, type SelectProps } from './components/select';
 export { Label } from './components/label';
 export { Badge, badgeVariants, type BadgeProps } from './components/badge';
 export {
