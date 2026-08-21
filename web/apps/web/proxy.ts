@@ -13,12 +13,16 @@ const { rewrite: rewriteSuffix } = rewritePath(
   `${docsContentRoute}{/*path}/content.md`,
 );
 
-// Routes whose access token the BFF proactively (silently) refreshes.
-// Includes the /api/engine/* BFF routes so a session idle past the access-token
-// TTL is rotated before the route handler runs (attemptRefresh writes the new
-// cookie onto the forwarded request via NextResponse.next({ request }), so the
-// same-request guardEngine() sees it) — no spurious 401 on Validate/Plan.
-const PROTECTED_PREFIXES = [
+// Prefixes that trigger SILENT TOKEN REFRESH ONLY — this is NOT an access-control
+// gate. The middleware never blocks or redirects unauthenticated requests; it
+// merely rotates a soon-to-expire access token so authed surfaces don't 401 mid
+// session. Real authorization lives in requireSession() (each (app) server
+// component) and guardEngine() (each BFF route). Includes the /api/engine/* BFF
+// routes so a session idle past the access-token TTL is rotated before the route
+// handler runs (attemptRefresh writes the new cookie onto the forwarded request
+// via NextResponse.next({ request }), so the same-request guardEngine() sees it)
+// — no spurious 401 on Validate/Plan.
+const REFRESH_PREFIXES = [
   '/app',
   '/account',
   '/api/engine',
@@ -92,7 +96,7 @@ export default async function proxy(request: NextRequest) {
   }
 
   // Silent session refresh for authed surfaces.
-  if (PROTECTED_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
+  if (REFRESH_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
     return handleAuth(request);
   }
 
