@@ -1,6 +1,7 @@
 import 'server-only';
 import { getSession } from '@/lib/auth/session';
 import { readAccessToken } from '@/lib/auth/cookies';
+import { logServerError, type ServerErrorContext } from '@/lib/observability/log-server-error';
 
 // Shared plumbing for the /api/engine/* BFF routes. Each route requires a valid
 // session, forwards the bearer token upstream, and mirrors the Management API's
@@ -42,8 +43,18 @@ export async function readConfigBody(
   return { config, prior };
 }
 
-/** A 502 for when the Management API itself is unreachable. */
-export function upstreamUnreachable(): Response {
+/**
+ * A 502 for when the Management API itself is unreachable.
+ *
+ * The client-facing body is intentionally generic — no internal message is ever
+ * echoed. When the caught `error` is passed, it is logged server-side (stderr
+ * only) with the given `context` BEFORE the 502 is returned, so upstream outages
+ * are visible to operators without leaking anything to the browser.
+ */
+export function upstreamUnreachable(error?: unknown, context?: ServerErrorContext): Response {
+  if (arguments.length > 0) {
+    logServerError(error, context);
+  }
   return Response.json(
     { error: 'the management API is unreachable' },
     { status: 502 },
