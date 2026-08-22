@@ -33,6 +33,7 @@ pub mod engine;
 pub mod monitor;
 pub mod openapi;
 pub mod org;
+pub mod preset;
 pub mod ratelimit;
 pub mod recommend;
 
@@ -60,6 +61,9 @@ fn engine_parts() -> (Router<EngineApiState>, utoipa::openapi::OpenApi) {
         .routes(routes!(engine::plan_handler))
         .routes(routes!(recommend::recommend_handler))
         .routes(routes!(monitor::monitor_handler))
+        .routes(routes!(preset::list_presets_handler))
+        .routes(routes!(preset::get_preset_handler))
+        .routes(routes!(preset::emit_preset_handler))
         .split_for_parts()
 }
 
