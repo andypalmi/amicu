@@ -16,6 +16,7 @@ use amicu_auth::reset::InMemoryResetStore;
 use amicu_auth::service::AuthService;
 use amicu_auth::user::InMemoryUserStore;
 use amicu_auth::verifier::{StaticJwksProvider, Verifier, VerifierConfig};
+use amicu_auth::verify::InMemoryVerifyStore;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
@@ -52,6 +53,7 @@ fn build_app(rate_max: u32, trusted: TrustedProxies, notifier: Arc<dyn Notifier>
         Arc::new(InMemoryUserStore::default()),
         Arc::new(InMemoryRefreshStore::default()),
         Arc::new(InMemoryResetStore::default()),
+        Arc::new(InMemoryVerifyStore::default()),
         notifier,
         "https://auth.amicu.dev",
     ));
@@ -64,6 +66,7 @@ fn build_app(rate_max: u32, trusted: TrustedProxies, notifier: Arc<dyn Notifier>
 #[derive(Default)]
 struct CapturingNotifier {
     reset_tokens: std::sync::Mutex<Vec<String>>,
+    verify_tokens: std::sync::Mutex<Vec<String>>,
 }
 
 impl CapturingNotifier {
@@ -80,16 +83,39 @@ impl CapturingNotifier {
         }
         panic!("timed out waiting for a captured reset token");
     }
+
+    /// Cooperatively wait for, then return, the most recently captured email
+    /// verification token. Sign-up dispatches the verification link on a detached
+    /// task (so its response time is account-independent), so the test yields to
+    /// let that task run before reading what it captured.
+    async fn wait_verify_token(&self) -> String {
+        for _ in 0..10_000 {
+            if let Some(t) = self.verify_tokens.lock().unwrap().last().cloned() {
+                return t;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("timed out waiting for a captured verify token");
+    }
 }
 
 #[async_trait::async_trait]
 impl Notifier for CapturingNotifier {
     async fn notify(&self, message: Notification) -> Result<(), amicu_auth::error::AuthError> {
-        if let NotificationKind::PasswordReset { reset_token } = message.kind {
-            self.reset_tokens
-                .lock()
-                .unwrap()
-                .push(reset_token.expose_secret_str().unwrap().to_string());
+        match message.kind {
+            NotificationKind::PasswordReset { reset_token } => {
+                self.reset_tokens
+                    .lock()
+                    .unwrap()
+                    .push(reset_token.expose_secret_str().unwrap().to_string());
+            }
+            NotificationKind::VerifyEmail { verify_token } => {
+                self.verify_tokens
+                    .lock()
+                    .unwrap()
+                    .push(verify_token.expose_secret_str().unwrap().to_string());
+            }
+            NotificationKind::AccountExists => {}
         }
         Ok(())
     }
@@ -644,4 +670,57 @@ async fn recover_and_reset_are_rate_limited() {
     }
     let status = call_peer(&app, "POST", "/reset", Some(reset_body), client, None).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn verify_with_valid_token_confirms_email() {
+    let (app, notifier) = app_capturing(100);
+    // Sign up; the verification link is dispatched on a detached task.
+    call(
+        &app,
+        "POST",
+        "/signup",
+        Some(json!({"email": "confirm@example.com", "password": "confirm-me-pw"})),
+        "6.6.6.6",
+    )
+    .await;
+    let token = notifier.wait_verify_token().await;
+
+    // A valid token confirms the email.
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/verify",
+        Some(json!({ "token": token })),
+        "6.6.6.6",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Replaying the same token is rejected generically (single-use).
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/verify",
+        Some(json!({ "token": token })),
+        "6.6.6.6",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn verify_with_bogus_token_is_generic_failure() {
+    let app = app(100);
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/verify",
+        Some(json!({ "token": "not-a-real-verify-token" })),
+        "7.7.7.7",
+    )
+    .await;
+    // Generic 400: never a 401/404 that would distinguish a bad token from a
+    // missing account.
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

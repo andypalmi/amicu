@@ -19,6 +19,7 @@ use crate::password::{check_password_policy, hash_password, verify_password};
 use crate::refresh::{self, RefreshStore};
 use crate::reset::{self, ResetStore};
 use crate::user::{User, UserStore};
+use crate::verify::{self, VerifyStore};
 
 /// Result of a sign-up attempt, reported truthfully to the (trusted) caller.
 ///
@@ -69,18 +70,24 @@ pub struct AuthService<C: Clock = SystemClock> {
     users: Arc<dyn UserStore>,
     refresh: Arc<dyn RefreshStore>,
     resets: Arc<dyn ResetStore>,
+    verifies: Arc<dyn VerifyStore>,
     notifier: Arc<dyn Notifier>,
     base_url: String,
 }
 
 impl<C: Clock> AuthService<C> {
     /// Assemble the service.
+    ///
+    /// Takes each persistence seam and the notifier explicitly; the argument
+    /// count is inherent to wiring the stores, not a design smell.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         keyring: Keyring,
         issuer: TokenIssuer<C>,
         users: Arc<dyn UserStore>,
         refresh: Arc<dyn RefreshStore>,
         resets: Arc<dyn ResetStore>,
+        verifies: Arc<dyn VerifyStore>,
         notifier: Arc<dyn Notifier>,
         base_url: impl Into<String>,
     ) -> Self {
@@ -90,6 +97,7 @@ impl<C: Clock> AuthService<C> {
             users,
             refresh,
             resets,
+            verifies,
             notifier,
             base_url: base_url.into(),
         }
@@ -133,14 +141,24 @@ impl<C: Clock> AuthService<C> {
             ))
             .await
         {
-            Ok(()) => Ok(SignUpOutcome::Created(id)),
+            Ok(()) => {
+                // Dispatch the verification link off the response path (see
+                // `spawn_email_verification`): mint + store-insert + delivery all
+                // run on a detached task, so the Created path does no more
+                // *synchronous* work than the AlreadyRegistered path below. Doing
+                // the mint/insert inline would make a fresh sign-up measurably
+                // slower than a collision (an account-enumeration timing oracle).
+                self.spawn_email_verification(id.clone(), email);
+                Ok(SignUpOutcome::Created(id))
+            }
             // Swallow the collision: surfacing it would enable enumeration.
             //
             // Instead notify the *real* owner out-of-band via the notification
             // seam (amicu-planning#102): an "account already exists / reset your
             // password" nudge that the requester never observes on the identical
-            // HTTP response. A verification link on `Created` still waits on the
-            // email-verification pipeline (amicu-planning#96).
+            // HTTP response. The Created path (above) dispatches a verification
+            // link over the same detached seam; both outcomes stay identical on
+            // the HTTP response and in timing.
             Err(AuthError::UserExists) => {
                 // Dispatch off the response path (see `spawn_notification`): the
                 // notice is sent only on the collision path, so awaiting it here
@@ -159,8 +177,19 @@ impl<C: Clock> AuthService<C> {
 
     /// Authenticate with email+password and issue a token pair.
     ///
+    /// Email-verification gate: when the `AMICU_REQUIRE_EMAIL_VERIFICATION`
+    /// environment gate is enabled, an account whose email is not yet verified is
+    /// rejected with [`AuthError::EmailUnverified`], but only AFTER the password
+    /// has verified. A wrong password therefore still returns the generic
+    /// [`AuthError::InvalidCredentials`], so the distinct `EmailUnverified` is
+    /// only ever observable by someone who already holds the correct password
+    /// (no new enumeration surface). The gate defaults OFF: no SMTP sender ships
+    /// in this PR.
+    ///
     /// # Errors
-    /// [`AuthError::InvalidCredentials`] on unknown user or wrong password.
+    /// [`AuthError::InvalidCredentials`] on unknown user or wrong password;
+    /// [`AuthError::EmailUnverified`] when the gate is on and the account's email
+    /// is unverified.
     pub async fn sign_in(&self, email: &str, password: &SecretValue) -> Result<TokenPair> {
         let email = normalize_email(email);
         let user = self.users.get_by_email(&email).await?;
@@ -170,6 +199,11 @@ impl<C: Clock> AuthService<C> {
             return Err(AuthError::InvalidCredentials);
         };
         verify_password(password, &user.password_hash)?;
+        // Gate AFTER the password check: a wrong password can never reach here,
+        // so the unverified-email signal is only ever shown to the true owner.
+        if require_email_verification() && !user.email_verified {
+            return Err(AuthError::EmailUnverified);
+        }
         self.issue_pair(&user).await
     }
 
@@ -342,6 +376,34 @@ impl<C: Clock> AuthService<C> {
         Ok(())
     }
 
+    /// Consume an email-verification token and mark the account's email verified.
+    ///
+    /// The token is consumed atomically and single-use: a reused, expired, or
+    /// unknown token is rejected with the generic [`AuthError::VerifyInvalid`]
+    /// (no enumeration: every rejected token looks identical). On success the
+    /// owning account's `email_verified` flag is set; re-verifying an already
+    /// verified account with a fresh live token is harmless (the flag set is
+    /// idempotent), but a *replayed* token is still rejected.
+    ///
+    /// # Errors
+    /// [`AuthError::VerifyInvalid`] if the token is unknown, expired, or already
+    /// used; propagates store errors from marking the account verified.
+    pub async fn verify_email(&self, token: &SecretValue) -> Result<()> {
+        let raw = token
+            .expose_secret_str()
+            .map_err(|_| AuthError::VerifyInvalid)?;
+        let hash = verify::hash_token(raw);
+        // Atomic single-use consume: exactly one caller can win `Consumed`.
+        let user_id = match self.verifies.consume(&hash, self.issuer.now_unix()).await? {
+            verify::VerifyConsume::Consumed { user_id } => user_id,
+            verify::VerifyConsume::NotFound
+            | verify::VerifyConsume::Reuse
+            | verify::VerifyConsume::Expired => return Err(AuthError::VerifyInvalid),
+        };
+        self.users.set_email_verified(&user_id).await?;
+        Ok(())
+    }
+
     /// Introduce a new active signing key; the previous key keeps verifying.
     pub fn rotate_keys(&self, new_active: SigningKey) {
         self.keyring
@@ -377,6 +439,40 @@ impl<C: Clock> AuthService<C> {
         });
     }
 
+    /// Mint + persist an email-verification token and deliver its link, all on a
+    /// detached task.
+    ///
+    /// Called only on the sign-up account-created path. Detaching the whole
+    /// sequence (mint, store insert, out-of-band send) is load-bearing for
+    /// anti-enumeration: the AlreadyRegistered path does none of this work
+    /// synchronously, so doing it inline on Created would make a fresh sign-up
+    /// measurably slower than a collision (an account-enumeration timing oracle).
+    /// Off the response path, both sign-up outcomes stay identical in body and
+    /// timing. Store and delivery failures are swallowed (best-effort), exactly
+    /// as `request_password_reset` treats them.
+    fn spawn_email_verification(&self, user_id: String, email: String) {
+        let verifies = self.verifies.clone();
+        let notifier = self.notifier.clone();
+        let expires_at = self.issuer.now_unix()
+            + i64::try_from(self.issuer.config().verify_ttl.as_secs()).unwrap_or(i64::MAX);
+        tokio::spawn(async move {
+            let minted = verify::mint(&user_id, expires_at);
+            if verifies.insert(minted.record).await.is_err() {
+                return; // best-effort: a store failure must not surface anywhere
+            }
+            // Best-effort delivery: a transport failure changes nothing
+            // observable (it already changed nothing on the response path).
+            let _ = notifier
+                .notify(Notification {
+                    recipient: email,
+                    kind: NotificationKind::VerifyEmail {
+                        verify_token: minted.token,
+                    },
+                })
+                .await;
+        });
+    }
+
     /// Issue a token pair opening a brand-new refresh family (fresh sign-in).
     async fn issue_pair(&self, user: &User) -> Result<TokenPair> {
         self.issue_pair_in_family(user, &refresh::new_family_id())
@@ -407,6 +503,22 @@ impl<C: Clock> AuthService<C> {
 
 fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
+}
+
+/// Whether sign-in must reject accounts whose email is unverified.
+///
+/// Read from `AMICU_REQUIRE_EMAIL_VERIFICATION` on every call (no caching, so a
+/// test or deployment can flip it). DEFAULT OFF: the value must be a recognized
+/// truthy token (`1`, `true`, `yes`, `on`, case-insensitive) to enable the gate;
+/// anything else, including an unset variable, leaves it off. Off is correct
+/// for this PR, which ships no SMTP sender, so no user could verify yet.
+fn require_email_verification() -> bool {
+    std::env::var("AMICU_REQUIRE_EMAIL_VERIFICATION").is_ok_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn new_user_id() -> String {

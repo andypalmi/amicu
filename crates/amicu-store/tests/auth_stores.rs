@@ -83,6 +83,24 @@ async fn user_round_trips_through_subject_and_billing() {
     assert_eq!(by_email.email, email);
     assert_eq!(by_email.tier, Tier::Community);
     assert!(by_email.stripe_customer_id.is_none());
+    // A fresh account starts unverified.
+    assert!(!by_email.email_verified);
+
+    // Marking the email verified persists and is idempotent.
+    store
+        .set_email_verified(&subject)
+        .await
+        .expect("mark email verified");
+    store
+        .set_email_verified(&subject)
+        .await
+        .expect("idempotent re-verify");
+    let verified = store
+        .get_by_email(&email)
+        .await
+        .expect("lookup by email")
+        .expect("user present");
+    assert!(verified.email_verified);
 
     let by_id = store
         .get_by_id(&subject)

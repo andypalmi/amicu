@@ -21,6 +21,7 @@ use amicu_auth::refresh::InMemoryRefreshStore;
 use amicu_auth::reset::InMemoryResetStore;
 use amicu_auth::user::{InMemoryUserStore, User, UserStore};
 use amicu_auth::verifier::StaticJwksProvider;
+use amicu_auth::verify::InMemoryVerifyStore;
 use amicu_auth::{
     AuthService, IssuerConfig, Keyring, SigningKey, Tier, TokenIssuer, Verifier, VerifierConfig,
 };
@@ -84,6 +85,7 @@ async fn harness(tier: Tier, configure_stripe: bool) -> Harness {
         users.clone(),
         Arc::new(InMemoryRefreshStore::default()),
         Arc::new(InMemoryResetStore::default()),
+        Arc::new(InMemoryVerifyStore::default()),
         Arc::new(LoggingNotifier),
         ISS,
     ));

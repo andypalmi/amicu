@@ -82,6 +82,7 @@ use amicu_auth::reset::{InMemoryResetStore, ResetStore};
 use amicu_auth::service::AuthService;
 use amicu_auth::user::{InMemoryUserStore, UserStore};
 use amicu_auth::verifier::{StaticJwksProvider, Verifier, VerifierConfig};
+use amicu_auth::verify::InMemoryVerifyStore;
 use amicu_auth::{AuthError, Tier};
 use axum::Router;
 use clap::{Parser, ValueEnum};
@@ -279,12 +280,19 @@ pub async fn build_app(config: &Config) -> Result<Router, Error> {
         )
     };
 
+    // The verify store is in-memory on BOTH the in-memory and Postgres paths: a
+    // persistent verify store (and a real SMTP sender) are separate later PRs.
+    // State is lost on restart, which is acceptable while no mailer ships and the
+    // sign-in verification gate defaults off.
+    let verifies = Arc::new(InMemoryVerifyStore::default());
+
     let service = Arc::new(AuthService::new(
         keyring,
         issuer,
         users.clone(),
         refresh,
         resets,
+        verifies,
         Arc::new(LoggingNotifier),
         base_url,
     ));
