@@ -66,6 +66,17 @@ pub enum SmtpConfigError {
     /// `AMICU_SMTP_FROM` was not a valid mailbox. The address string is echoed
     /// (an address is not a secret); no password is ever involved here.
     InvalidFrom(String),
+    /// Exactly one of `AMICU_SMTP_USERNAME` / `AMICU_SMTP_PASSWORD` was set.
+    /// SMTP credentials are all-or-nothing: a lone username would submit an
+    /// empty password, and a lone password would be silently dropped and submit
+    /// unauthenticated. Only the variable *names* are reported; the password
+    /// value is never echoed.
+    IncompleteCredentials {
+        /// The credential variable that was present.
+        present: &'static str,
+        /// The credential variable that was missing.
+        missing: &'static str,
+    },
     /// The `lettre` SMTP transport could not be built (for example a bad host).
     Transport(lettre::transport::smtp::Error),
 }
@@ -85,6 +96,10 @@ impl std::fmt::Display for SmtpConfigError {
             SmtpConfigError::InvalidFrom(value) => {
                 write!(f, "AMICU_SMTP_FROM is not a valid mailbox: {value}")
             }
+            SmtpConfigError::IncompleteCredentials { present, missing } => write!(
+                f,
+                "SMTP credentials are all-or-nothing: {present} is set but {missing} is missing"
+            ),
             SmtpConfigError::Transport(e) => write!(f, "SMTP transport build failed: {e}"),
         }
     }
@@ -113,17 +128,36 @@ fn non_empty_env(name: &str) -> Option<String> {
     }
 }
 
-/// Returns `true` when the minimum SMTP configuration (host + from) is present
-/// and non-empty in the environment. Used by the bootstrap to choose the real
-/// mailer over the dev logger without attempting a full parse.
+/// Every `AMICU_SMTP_*` variable. Presence of ANY one signals the operator
+/// intends to configure SMTP, so the bootstrap must build the real mailer and
+/// let an incomplete required set fail loud, never silently fall back to the
+/// token-logging dev notifier. `AMICU_WEB_URL` is deliberately excluded: it is
+/// not an SMTP-specific signal (it can be set for other reasons), and a
+/// complete host+from set already fails loud when it is missing.
+const SMTP_ENV_VARS: [&str; 6] = [
+    "AMICU_SMTP_HOST",
+    "AMICU_SMTP_FROM",
+    "AMICU_SMTP_PORT",
+    "AMICU_SMTP_USERNAME",
+    "AMICU_SMTP_PASSWORD",
+    "AMICU_SMTP_STARTTLS",
+];
+
+/// Returns `true` when ANY `AMICU_SMTP_*` variable is present and non-empty in
+/// the environment. Used by the bootstrap to decide between the real mailer and
+/// the dev logger: any SMTP variable means the operator signaled intent to send
+/// real email, so an incomplete configuration must be a hard startup error
+/// rather than a silent fall back to the token-logging [`LoggingNotifier`].
+///
+/// [`LoggingNotifier`]: amicu_auth::notify::LoggingNotifier
 #[must_use]
-pub fn is_configured() -> bool {
-    is_configured_with(non_empty_env)
+pub fn any_smtp_var_set() -> bool {
+    any_smtp_var_set_with(non_empty_env)
 }
 
-/// [`is_configured`] against an arbitrary lookup (test seam).
-fn is_configured_with<F: Fn(&str) -> Option<String>>(lookup: F) -> bool {
-    lookup("AMICU_SMTP_HOST").is_some() && lookup("AMICU_SMTP_FROM").is_some()
+/// [`any_smtp_var_set`] against an arbitrary lookup (test seam).
+fn any_smtp_var_set_with<F: Fn(&str) -> Option<String>>(lookup: F) -> bool {
+    SMTP_ENV_VARS.iter().any(|var| lookup(var).is_some())
 }
 
 /// A [`Notifier`] that sends transactional auth emails over real SMTP.
@@ -166,12 +200,21 @@ impl SmtpNotifier {
     /// pass an in-memory map so no global state is touched and no network
     /// connection is opened.
     fn from_lookup<F: Fn(&str) -> Option<String>>(lookup: F) -> Result<Self, SmtpConfigError> {
-        let host =
-            lookup("AMICU_SMTP_HOST").ok_or(SmtpConfigError::MissingVar("AMICU_SMTP_HOST"))?;
-        let from_raw =
-            lookup("AMICU_SMTP_FROM").ok_or(SmtpConfigError::MissingVar("AMICU_SMTP_FROM"))?;
-        let web_url =
-            lookup("AMICU_WEB_URL").ok_or(SmtpConfigError::MissingVar("AMICU_WEB_URL"))?;
+        // Trim host/from/web_url so stray whitespace in an env value (for example
+        // AMICU_WEB_URL="https://app.test ") does not survive into a broken link
+        // or an unroutable host, matching the trimming AMICU_SMTP_PORT already does.
+        let host = lookup("AMICU_SMTP_HOST")
+            .ok_or(SmtpConfigError::MissingVar("AMICU_SMTP_HOST"))?
+            .trim()
+            .to_string();
+        let from_raw = lookup("AMICU_SMTP_FROM")
+            .ok_or(SmtpConfigError::MissingVar("AMICU_SMTP_FROM"))?
+            .trim()
+            .to_string();
+        let web_url = lookup("AMICU_WEB_URL")
+            .ok_or(SmtpConfigError::MissingVar("AMICU_WEB_URL"))?
+            .trim()
+            .to_string();
 
         let from: Mailbox = from_raw
             .parse()
@@ -203,12 +246,29 @@ impl SmtpNotifier {
         }
         .port(port);
 
-        // Credentials are optional: BYO-SMTP relays may accept unauthenticated
-        // submission on a trusted network, while provider relays (Resend) supply
-        // a username plus the API key as the password.
-        if let Some(username) = lookup("AMICU_SMTP_USERNAME") {
-            let password = lookup("AMICU_SMTP_PASSWORD").unwrap_or_default();
-            builder = builder.credentials(Credentials::new(username, password));
+        // Credentials are optional, but all-or-nothing when present: BYO-SMTP
+        // relays may accept unauthenticated submission on a trusted network,
+        // while provider relays (Resend) supply a username plus the API key as
+        // the password. Exactly one of the pair is a misconfiguration: a lone
+        // username would submit an empty password, and a lone password would be
+        // silently dropped and submit unauthenticated, so fail loud instead.
+        match (lookup("AMICU_SMTP_USERNAME"), lookup("AMICU_SMTP_PASSWORD")) {
+            (Some(username), Some(password)) => {
+                builder = builder.credentials(Credentials::new(username, password));
+            }
+            (None, None) => {}
+            (Some(_), None) => {
+                return Err(SmtpConfigError::IncompleteCredentials {
+                    present: "AMICU_SMTP_USERNAME",
+                    missing: "AMICU_SMTP_PASSWORD",
+                });
+            }
+            (None, Some(_)) => {
+                return Err(SmtpConfigError::IncompleteCredentials {
+                    present: "AMICU_SMTP_PASSWORD",
+                    missing: "AMICU_SMTP_USERNAME",
+                });
+            }
         }
 
         Ok(Self {
@@ -236,6 +296,8 @@ impl SmtpNotifier {
                 let token = verify_token
                     .expose_secret_str()
                     .map_err(|_| AuthError::Backend)?;
+                // Tokens are URL_SAFE_NO_PAD base64url, so they need no
+                // percent-encoding here; this interpolation relies on that.
                 let link = format!("{}/verify?token={token}", self.web_url);
                 RenderedEmail {
                     subject: "Confirm your email address",
@@ -317,11 +379,13 @@ impl Notifier for SmtpNotifier {
     async fn notify(&self, message: Notification) -> Result<(), AuthError> {
         let recipient = message.recipient.clone();
         let email = self.render(&message)?;
-        // On failure log a coarse note (recipient) only. The opaque token lives
-        // in the message body and must never reach a log; lettre's error is
-        // transport-level (connection/auth) and carries no body.
-        self.transport.send(email).await.map_err(|_| {
-            eprintln!("[notify] SMTP send failed for {recipient}");
+        // On failure log the recipient plus lettre's transport error. That error
+        // is connection/auth-level (it distinguishes DNS vs TLS vs auth failures)
+        // and carries no message body, so it is safe to log, unlike the opaque
+        // token, which lives in the body and must never reach a log, and the SMTP
+        // password, which lettre's error never contains.
+        self.transport.send(email).await.map_err(|err| {
+            eprintln!("[notify] SMTP send failed for {recipient}: {err}");
             AuthError::Backend
         })?;
         Ok(())
@@ -488,16 +552,112 @@ mod tests {
     }
 
     #[test]
-    fn is_configured_reflects_host_and_from() {
-        assert!(!is_configured_with(map_lookup(&[])));
-        assert!(!is_configured_with(map_lookup(&[(
+    fn any_smtp_var_set_detects_any_single_var() {
+        // No SMTP var at all: the bootstrap uses the dev LoggingNotifier.
+        assert!(!any_smtp_var_set_with(map_lookup(&[])));
+        // A non-SMTP var (AMICU_WEB_URL) alone does NOT signal SMTP intent.
+        assert!(!any_smtp_var_set_with(map_lookup(&[(
+            "AMICU_WEB_URL",
+            "https://app.example.test"
+        )])));
+        // Any single AMICU_SMTP_* var signals intent to configure SMTP.
+        assert!(any_smtp_var_set_with(map_lookup(&[(
             "AMICU_SMTP_HOST",
             "smtp.example.test"
         )])));
-        assert!(is_configured_with(map_lookup(&[
+        assert!(any_smtp_var_set_with(map_lookup(&[(
+            "AMICU_SMTP_STARTTLS",
+            "true"
+        )])));
+    }
+
+    #[test]
+    fn partial_config_host_without_from_is_hard_error_not_logging() {
+        // Host is set, so the operator signaled SMTP intent: selection would
+        // build the real notifier. The incomplete required set (missing FROM)
+        // must fail loud rather than silently fall back to the token-logging
+        // LoggingNotifier.
+        let lookup = map_lookup(&[
+            ("AMICU_SMTP_HOST", "smtp.example.test"),
+            ("AMICU_WEB_URL", "https://app.example.test"),
+        ]);
+        assert!(
+            any_smtp_var_set_with(&lookup),
+            "host present must select the real mailer path"
+        );
+        let err = SmtpNotifier::from_lookup(&lookup).expect_err("missing from must fail loud");
+        assert!(matches!(
+            err,
+            SmtpConfigError::MissingVar("AMICU_SMTP_FROM")
+        ));
+    }
+
+    #[test]
+    fn no_smtp_vars_selects_logging_notifier_path() {
+        // With zero SMTP vars the selection stays on the LoggingNotifier branch;
+        // there is nothing to build, and no hard error is raised.
+        assert!(!any_smtp_var_set_with(map_lookup(&[])));
+    }
+
+    #[test]
+    fn username_without_password_is_error() {
+        let err = SmtpNotifier::from_lookup(map_lookup(&[
             ("AMICU_SMTP_HOST", "smtp.example.test"),
             ("AMICU_SMTP_FROM", "no-reply@amicu.test"),
-        ])));
+            ("AMICU_WEB_URL", "https://app.example.test"),
+            ("AMICU_SMTP_USERNAME", "resend"),
+        ]))
+        .expect_err("username without password must fail");
+        assert!(matches!(
+            err,
+            SmtpConfigError::IncompleteCredentials {
+                present: "AMICU_SMTP_USERNAME",
+                missing: "AMICU_SMTP_PASSWORD",
+            }
+        ));
+    }
+
+    #[test]
+    fn password_without_username_is_error() {
+        let err = SmtpNotifier::from_lookup(map_lookup(&[
+            ("AMICU_SMTP_HOST", "smtp.example.test"),
+            ("AMICU_SMTP_FROM", "no-reply@amicu.test"),
+            ("AMICU_WEB_URL", "https://app.example.test"),
+            ("AMICU_SMTP_PASSWORD", "re_secret_key"),
+        ]))
+        .expect_err("password without username must fail");
+        assert!(matches!(
+            err,
+            SmtpConfigError::IncompleteCredentials {
+                present: "AMICU_SMTP_PASSWORD",
+                missing: "AMICU_SMTP_USERNAME",
+            }
+        ));
+    }
+
+    #[test]
+    fn trims_whitespace_on_web_url() {
+        // Leading/trailing whitespace on AMICU_WEB_URL must not survive into the
+        // verify link (it would otherwise break the URL).
+        let notifier = SmtpNotifier::from_lookup(map_lookup(&[
+            ("AMICU_SMTP_HOST", "smtp.example.test"),
+            ("AMICU_SMTP_FROM", "no-reply@amicu.test"),
+            ("AMICU_WEB_URL", "  https://app.example.test/  "),
+        ]))
+        .expect("whitespace-padded config should build");
+        let msg = notifier
+            .render(&Notification {
+                recipient: "user@example.test".to_string(),
+                kind: NotificationKind::VerifyEmail {
+                    verify_token: SecretValue::new(b"tok".to_vec()),
+                },
+            })
+            .expect("render verify");
+        let body = decoded_message(&msg);
+        assert!(
+            body.contains("https://app.example.test/verify?token=tok"),
+            "{body}"
+        );
     }
 
     #[test]

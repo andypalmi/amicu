@@ -232,12 +232,15 @@ impl From<std::io::Error> for Error {
 ///
 /// # Email delivery
 ///
-/// If the SMTP environment is configured (`AMICU_SMTP_HOST` + `AMICU_SMTP_FROM`
-/// present), a real [`SmtpNotifier`](smtp::SmtpNotifier) sends verification and
-/// reset emails over TLS. Otherwise the dev [`LoggingNotifier`] is wired, which
-/// prints reset/verify tokens to stderr and is explicitly NOT for production.
-/// Selecting the real mailer when it is configured is what stops those raw
-/// tokens reaching the logs of a genuine deployment.
+/// If ANY `AMICU_SMTP_*` variable is set, a real
+/// [`SmtpNotifier`](smtp::SmtpNotifier) sends verification and reset emails over
+/// TLS, and an incomplete required set (missing `AMICU_SMTP_HOST`,
+/// `AMICU_SMTP_FROM`, or `AMICU_WEB_URL`) is a hard startup error
+/// ([`Error::Smtp`]); never a silent fall back. Only when NO `AMICU_SMTP_*`
+/// variable is set at all is the dev [`LoggingNotifier`] wired, which prints
+/// reset/verify tokens to stderr and is explicitly NOT for production. Failing
+/// loud on a partial configuration is what stops those raw tokens reaching the
+/// logs of a deployment the operator believes is sending real SMTP email.
 ///
 /// The engine gate verifies bearer tokens against a **snapshot** of the freshly
 /// generated JWKS taken here at startup. Because this bootstrap never rotates
@@ -247,8 +250,10 @@ impl From<std::io::Error> for Error {
 ///
 /// # Errors
 /// Returns [`Error::Proxy`] if the trusted-proxy allowlist fails to parse,
-/// [`Error::Key`] if the signing key cannot be generated, or [`Error::Store`]
-/// if `DATABASE_URL` is set but the store cannot connect or migrate.
+/// [`Error::Key`] if the signing key cannot be generated, [`Error::Store`]
+/// if `DATABASE_URL` is set but the store cannot connect or migrate, or
+/// [`Error::Smtp`] if any `AMICU_SMTP_*` variable is set but the SMTP
+/// configuration is incomplete or invalid.
 pub async fn build_app(config: &Config) -> Result<Router, Error> {
     let trusted = TrustedProxies::from_strs(config.trusted_proxies.split(','))?;
     let base_url = config
@@ -301,10 +306,14 @@ pub async fn build_app(config: &Config) -> Result<Router, Error> {
     // the notifier selection below for why the gate is NOT auto-enabled here).
     let verify_store = Arc::new(InMemoryVerifyStore::default());
 
-    // Notifier selection. When the SMTP environment is configured, send real
-    // email over TLS; otherwise fall back to the dev logger. Wiring the real
-    // mailer in a configured deploy is what keeps the LoggingNotifier (which
-    // prints raw reset/verify tokens to stderr) out of production.
+    // Notifier selection. If ANY AMICU_SMTP_* variable is set, the operator has
+    // signaled intent to send real email: build the real mailer, and treat an
+    // incomplete required set (missing host or from) or a bad value as a HARD
+    // startup error via Error::Smtp. It must NOT silently fall back to the dev
+    // LoggingNotifier (which prints raw reset/verify tokens to stderr): that
+    // fallback in a deploy the operator believes is production SMTP is an
+    // account-takeover surface. Only when NO SMTP variable is set at all do we
+    // use the LoggingNotifier, for zero-config local runs and tests.
     //
     // The sign-in verification gate (AMICU_REQUIRE_EMAIL_VERIFICATION) is
     // deliberately NOT auto-enabled when SMTP is configured. Verify tokens still
@@ -312,7 +321,7 @@ pub async fn build_app(config: &Config) -> Result<Router, Error> {
     // endpoint yet, so auto-on could lock users out after a restart. Auto-on when
     // SMTP is configured is deferred until a persistent verify store and a resend
     // endpoint exist; until then the operator opts in explicitly via the gate.
-    let notifier: Arc<dyn Notifier> = if smtp::is_configured() {
+    let notifier: Arc<dyn Notifier> = if smtp::any_smtp_var_set() {
         eprintln!("amicu-server: SMTP notifier configured; sending real verification/reset email.");
         Arc::new(smtp::SmtpNotifier::from_env().map_err(Error::Smtp)?)
     } else {
