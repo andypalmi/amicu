@@ -18,8 +18,22 @@ path = "src/lib.rs"
 amicu-api = { path = "../amicu-api" }
 amicu-auth = { path = "../amicu-auth" }
 amicu-store = { path = "../amicu-store" }
+async-trait = "0.1"
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
+# Real SMTP sender for verification/reset emails. rustls (never native-tls) with
+# the ring crypto backend and bundled webpki roots keeps the TLS stack hermetic
+# and MSRV-friendly, matching the workspace convention (see amicu-providers /
+# amicu-api). Default features are off so no native-tls or OpenSSL is pulled in.
+lettre = { version = "0.11", default-features = false, features = [
+    "builder",
+    "smtp-transport",
+    "tokio1",
+    "tokio1-rustls",
+    "rustls",
+    "ring",
+    "webpki-roots",
+] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 
 [dev-dependencies]
@@ -28,6 +42,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 # (see the crate/test docs). No TLS: the test talks plain HTTP to 127.0.0.1.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 serde_json = "1"
+# The SMTP render tests construct SecretValue-carrying notifications directly.
+amicu-core = { path = "../amicu-core" }
 
 [lints]
 workspace = true
