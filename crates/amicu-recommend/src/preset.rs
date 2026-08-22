@@ -1,0 +1,816 @@
+//! Guided-wizard presets: a typed catalog of starting points that turn a few
+//! use-case answers into a concrete, editable [`Graph`].
+//!
+//! A [`Preset`] is a gallery card: a name, a tagline, who it fits, and the hard
+//! [`PresetConstraint`]s it commits to, plus the requirement defaults and a
+//! [`WorkloadEstimate`] shown before anything is generated. [`build_graph`]
+//! parametrizes a preset's candidate template with the wizard's
+//! [`WizardAnswers`] into a canonical [`Graph`] the user can then edit and
+//! validate. Nothing here applies a change to a stack; the output is data.
+//!
+//! The presets transcribe the shapes in the `amicu-presets` skill's
+//! `preset-catalog.md`: Local Dev Chat, Private EU Production, and
+//! Cost-Optimized Batch. Treat them as starting points, not fixed recipes.
+
+use std::sync::LazyLock;
+
+use amicu_core::estimate::{Confidence, EstimateRange, Provenance};
+use amicu_core::graph::Graph;
+use amicu_core::id::{DataClassId, GovernanceRuleId, UseCaseId};
+use amicu_core::resource::{
+    Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Budget, BudgetPeriod, DataClass,
+    Deployment, GovernanceRule, HardwareProfile, LlamaCppSettings, Modality, Model, ModelSource,
+    Money, Price, Quantization, Region, Residency, Runtime, Sensitivity, SourceRegistry, UseCase,
+    VllmSettings,
+};
+use amicu_core::units::ByteSize;
+use serde::{Deserialize, Serialize};
+
+use crate::{Tier, WorkloadEstimate};
+
+/// EU-resident providers a Private EU Production stack is allowed to place on.
+const EU_PROVIDERS: &[&str] = &["hetzner", "ovhcloud", "scaleway", "nebius"];
+/// EU region codes a governance rule pins `allowed_regions` to.
+const EU_REGIONS: &[&str] = &["eu-central-1", "eu-west-1"];
+
+/// A snake_case preset identifier, e.g. `"local_dev_chat"`.
+///
+/// Ids are validated to be non-empty, lowercase-ASCII `snake_case` starting
+/// with a letter, which also makes them round-trip-safe HCL identifiers.
+/// Serializes transparently as the underlying string.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PresetId(String);
+
+impl PresetId {
+    /// Construct a validated preset id. Returns [`PresetError::InvalidId`] if
+    /// `id` is not lowercase `snake_case` starting with a letter.
+    pub fn new(id: impl Into<String>) -> Result<Self, PresetError> {
+        let id = id.into();
+        if is_snake_case_ident(&id) {
+            Ok(Self(id))
+        } else {
+            Err(PresetError::InvalidId(id))
+        }
+    }
+
+    /// The id as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Construct from a compile-time-known literal that is guaranteed valid, for
+    /// the in-code [`catalog`]. Kept private so the validated [`PresetId::new`]
+    /// is the only public entry point.
+    fn from_known(id: &'static str) -> Self {
+        debug_assert!(is_snake_case_ident(id), "catalog id must be snake_case");
+        Self(id.to_string())
+    }
+}
+
+impl std::fmt::Display for PresetId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Whether `s` is a non-empty lowercase `snake_case` identifier that starts
+/// with a letter and contains only `a..=z`, `0..=9`, and `_`.
+fn is_snake_case_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// The serving runtime family a preset commits to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeFamily {
+    /// llama.cpp (GGUF weights, CPU / Apple Silicon friendly).
+    LlamaCpp,
+    /// vLLM (safetensors weights, NVIDIA GPUs).
+    Vllm,
+}
+
+/// A hard constraint a preset commits to, shown on its gallery card. These are
+/// the non-negotiable properties of the candidate stack, distinct from the soft
+/// preferences a preset may express through its defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresetConstraint {
+    /// Data and compute must stay within EU jurisdictions.
+    EuResidencyOnly,
+    /// Weights must be quantized (GGUF `q4`/`q5`, or INT4/INT8 safetensors).
+    QuantizationRequired,
+    /// The stack runs on-device only; nothing leaves first-party infrastructure.
+    LocalOnly,
+    /// External (third-party) providers are forbidden for this workload's data.
+    ExternalProvidersForbidden,
+    /// The serving runtime is fixed to this family.
+    RuntimeFamily(RuntimeFamily),
+}
+
+/// A guided-wizard preset: a gallery card plus the requirement defaults and
+/// estimate shown before generation, and enough shape for [`build_graph`] to
+/// emit a concrete [`Graph`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Preset {
+    /// Stable snake_case identifier.
+    pub id: PresetId,
+    /// Human-readable name, e.g. `"Local Dev Chat"`.
+    pub name: String,
+    /// One-line summary shown under the name.
+    pub tagline: String,
+    /// Who and what this preset fits, from the catalog's "Fit" line.
+    pub fit: String,
+    /// The hard constraints this preset commits to.
+    pub constraints: Vec<PresetConstraint>,
+    /// Requirement defaults pre-filled into the wizard.
+    pub requirement_defaults: UseCase,
+    /// The estimate shown on the card before any answers are collected.
+    pub default_estimate: WorkloadEstimate,
+    /// Minimum product tier required to use this preset.
+    pub min_tier: Tier,
+}
+
+/// The requirements the wizard collects, parametrizing a preset's candidate
+/// template. UseCase-shaped fields plus concurrency and an optional budget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WizardAnswers {
+    /// Context length (tokens) the runtime is configured for. Must be > 0.
+    pub context_length: u32,
+    /// Expected concurrent requests. Drives GPU count / `tensor_parallel_size`.
+    /// Must be > 0.
+    pub concurrency: u32,
+    /// Whether the workload must stay within EU jurisdictions. Always effective
+    /// for a preset carrying [`PresetConstraint::EuResidencyOnly`].
+    #[serde(default)]
+    pub eu_residency_required: bool,
+    /// Optional monthly spend ceiling; when set, becomes a [`Budget`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<Money>,
+    /// Optional latency ceiling (ms) carried into the graph's use case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_latency_ms: Option<u32>,
+}
+
+/// A failure building a graph from a preset and answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresetError {
+    /// A preset id was not a valid lowercase `snake_case` identifier.
+    InvalidId(String),
+    /// No candidate template is wired up for this preset id.
+    UnknownPreset(PresetId),
+    /// A wizard answer was outside the acceptable range.
+    InvalidAnswer(String),
+}
+
+impl std::fmt::Display for PresetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidId(id) => write!(
+                f,
+                "invalid preset id `{id}`: must be non-empty lowercase snake_case starting with a \
+                 letter"
+            ),
+            Self::UnknownPreset(id) => write!(f, "no candidate template for preset `{id}`"),
+            Self::InvalidAnswer(msg) => write!(f, "invalid wizard answer: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for PresetError {}
+
+/// The in-code preset catalog. See [`catalog`].
+static CATALOG: LazyLock<Vec<Preset>> = LazyLock::new(|| {
+    vec![
+        local_dev_chat(),
+        private_eu_production(),
+        cost_optimized_batch(),
+    ]
+});
+
+/// The hardcoded preset catalog: the three starting points transcribed from the
+/// `amicu-presets` skill's `preset-catalog.md`.
+#[must_use]
+pub fn catalog() -> &'static [Preset] {
+    &CATALOG
+}
+
+/// Build a concrete, editable [`Graph`] from a preset and the wizard's answers.
+///
+/// Parametrizes the preset's candidate template: context length flows into the
+/// runtime settings, concurrency into the GPU count / `tensor_parallel_size`, an
+/// EU-residency requirement into a governance rule pinning `allowed_regions` and
+/// a data class with `allow_external_providers = false`, and a budget into a
+/// [`Budget`]. The result is data; nothing is applied to a stack.
+///
+/// # Errors
+///
+/// Returns [`PresetError::InvalidAnswer`] for a zero context length or
+/// concurrency, or [`PresetError::UnknownPreset`] if the preset id has no
+/// candidate template.
+pub fn build_graph(preset: &Preset, answers: &WizardAnswers) -> Result<Graph, PresetError> {
+    if answers.context_length == 0 {
+        return Err(PresetError::InvalidAnswer(
+            "context_length must be greater than 0".to_string(),
+        ));
+    }
+    if answers.concurrency == 0 {
+        return Err(PresetError::InvalidAnswer(
+            "concurrency must be greater than 0".to_string(),
+        ));
+    }
+
+    match preset.id.as_str() {
+        "local_dev_chat" => Ok(build_local_dev_chat(preset, answers)),
+        "private_eu_production" => Ok(build_private_eu_production(preset, answers)),
+        "cost_optimized_batch" => Ok(build_cost_optimized_batch(preset, answers)),
+        _ => Err(PresetError::UnknownPreset(preset.id.clone())),
+    }
+}
+
+// --- catalog entries --------------------------------------------------------
+
+fn local_dev_chat() -> Preset {
+    Preset {
+        id: PresetId::from_known("local_dev_chat"),
+        name: "Local Dev Chat".to_string(),
+        tagline: "On-device experimentation with no cloud spend.".to_string(),
+        fit: "On-device experimentation, privacy-sensitive data, no cloud spend.".to_string(),
+        constraints: vec![
+            PresetConstraint::LocalOnly,
+            PresetConstraint::QuantizationRequired,
+            PresetConstraint::RuntimeFamily(RuntimeFamily::LlamaCpp),
+        ],
+        requirement_defaults: UseCase {
+            id: UseCaseId::new("local_dev_chat"),
+            description: Some("Local chat assistant for development.".to_string()),
+            modalities: vec![Modality::Text],
+            min_context_length: Some(8192),
+            max_latency_ms: None,
+            required_data_class: None,
+            priority: None,
+        },
+        // Zero marginal cost; latency depends on the Mac; high confidence.
+        default_estimate: estimate(
+            Assumed {
+                prompt: 512,
+                generation: 256,
+                concurrency: 1,
+            },
+            (120.0, 400.0),
+            (12.0, 40.0),
+            Confidence::High,
+        ),
+        min_tier: Tier::Community,
+    }
+}
+
+fn private_eu_production() -> Preset {
+    Preset {
+        id: PresetId::from_known("private_eu_production"),
+        name: "Private EU Production".to_string(),
+        tagline: "Confidential data with EU residency and throughput.".to_string(),
+        fit: "Confidential data with EU residency and throughput needs.".to_string(),
+        constraints: vec![
+            PresetConstraint::EuResidencyOnly,
+            PresetConstraint::ExternalProvidersForbidden,
+            PresetConstraint::RuntimeFamily(RuntimeFamily::Vllm),
+        ],
+        requirement_defaults: UseCase {
+            id: UseCaseId::new("private_eu_production"),
+            description: Some("Confidential production serving inside the EU.".to_string()),
+            modalities: vec![Modality::Text],
+            min_context_length: Some(8192),
+            max_latency_ms: Some(2000),
+            required_data_class: None,
+            priority: None,
+        },
+        // Cost from price.per_hour x GPUs x time; medium confidence pending
+        // concurrency data.
+        default_estimate: estimate(
+            Assumed {
+                prompt: 1024,
+                generation: 512,
+                concurrency: 8,
+            },
+            (150.0, 600.0),
+            (8.0, 25.0),
+            Confidence::Medium,
+        ),
+        min_tier: Tier::Community,
+    }
+}
+
+fn cost_optimized_batch() -> Preset {
+    Preset {
+        id: PresetId::from_known("cost_optimized_batch"),
+        name: "Cost-Optimized Batch".to_string(),
+        tagline: "Throughput-first, latency-tolerant, lowest cost per token.".to_string(),
+        fit: "Throughput-first, latency-tolerant workloads.".to_string(),
+        constraints: vec![
+            PresetConstraint::QuantizationRequired,
+            PresetConstraint::RuntimeFamily(RuntimeFamily::Vllm),
+        ],
+        requirement_defaults: UseCase {
+            id: UseCaseId::new("cost_optimized_batch"),
+            description: Some("High-throughput batch generation.".to_string()),
+            modalities: vec![Modality::Text],
+            min_context_length: Some(4096),
+            max_latency_ms: None,
+            required_data_class: None,
+            priority: None,
+        },
+        // Lowest cost/token; quality risk from aggressive quantization.
+        default_estimate: estimate(
+            Assumed {
+                prompt: 2048,
+                generation: 512,
+                concurrency: 16,
+            },
+            (400.0, 1500.0),
+            (15.0, 60.0),
+            Confidence::Estimated,
+        ),
+        min_tier: Tier::Community,
+    }
+}
+
+/// The assumed prompt/generation/concurrency figures a card's estimate is
+/// derived for.
+#[derive(Clone, Copy)]
+struct Assumed {
+    prompt: u32,
+    generation: u32,
+    concurrency: u32,
+}
+
+/// A default estimate for a card: the stated assumptions and the TTFT/TPOT
+/// ranges (each a `(low, high)` in ms), provenance a public-benchmark planning
+/// figure.
+fn estimate(
+    assumed: Assumed,
+    ttft_ms: (f64, f64),
+    tpot_ms: (f64, f64),
+    confidence: Confidence,
+) -> WorkloadEstimate {
+    WorkloadEstimate {
+        assumed_prompt_tokens: assumed.prompt,
+        assumed_generation_tokens: assumed.generation,
+        assumed_concurrency: assumed.concurrency,
+        expected_ttft_ms: EstimateRange::new(
+            ttft_ms.0,
+            ttft_ms.1,
+            Provenance::PublicBenchmark,
+            confidence,
+        ),
+        expected_tpot_ms: EstimateRange::new(
+            tpot_ms.0,
+            tpot_ms.1,
+            Provenance::PublicBenchmark,
+            confidence,
+        ),
+    }
+}
+
+// --- candidate templates ----------------------------------------------------
+
+fn build_local_dev_chat(preset: &Preset, answers: &WizardAnswers) -> Graph {
+    let mut graph = Graph::new();
+    let prefix = preset.id.as_str();
+    let model_id = format!("{prefix}_model");
+    let hw_id = "local_apple".to_string();
+    let dc_id = format!("{prefix}_data");
+
+    graph.models.push(Model {
+        id: model_id.as_str().into(),
+        source: ModelSource {
+            registry: SourceRegistry::HuggingFace,
+            reference: "Qwen/Qwen2.5-7B-Instruct-GGUF".to_string(),
+        },
+        architecture: "qwen2".to_string(),
+        modalities: vec![Modality::Text],
+        artifact: Artifact {
+            format: ArtifactFormat::Gguf,
+            quantization: Some(Quantization::Q4KM),
+        },
+        context_length: Some(answers.context_length),
+        variants: Vec::new(),
+    });
+
+    graph.hardware_profiles.push(HardwareProfile {
+        id: hw_id.as_str().into(),
+        provider: "local".to_string(),
+        region: None,
+        accelerator: Some(Accelerator {
+            kind: AcceleratorKind::AppleSilicon,
+            model: "m3_max".to_string(),
+            count: 1,
+            memory: ByteSize::from_bytes(48 * GIB),
+        }),
+        cpu: None,
+        memory: ByteSize::from_bytes(48 * GIB),
+        interconnect: None,
+        // Zero marginal cost: no rental price.
+        price: None,
+    });
+
+    graph.deployments.push(Deployment {
+        id: format!("{prefix}_deployment").as_str().into(),
+        model: model_id.as_str().into(),
+        hardware_profile: hw_id.as_str().into(),
+        runtime: Runtime::LlamaCpp(LlamaCppSettings {
+            context_length: answers.context_length,
+            port: 8000,
+            // Offload every layer to the accelerator.
+            n_gpu_layers: -1,
+        }),
+    });
+
+    // Local-only: the data never leaves first-party infrastructure.
+    graph.data_classes.push(DataClass {
+        id: dc_id.as_str().into(),
+        sensitivity: Sensitivity::Confidential,
+        residency: eu_residency(answers),
+        allow_external_providers: false,
+        handling: Vec::new(),
+    });
+
+    push_use_case(&mut graph, &preset.requirement_defaults, &dc_id, answers);
+    maybe_push_eu_governance(&mut graph, preset, answers, &dc_id);
+    maybe_push_budget(&mut graph, prefix, answers);
+
+    graph
+}
+
+fn build_private_eu_production(preset: &Preset, answers: &WizardAnswers) -> Graph {
+    let mut graph = Graph::new();
+    let prefix = preset.id.as_str();
+    let model_id = format!("{prefix}_model");
+    let hw_id = format!("{prefix}_gpu");
+    let dc_id = format!("{prefix}_data");
+    let gpu_count = gpus_for_concurrency(answers.concurrency);
+
+    graph.models.push(Model {
+        id: model_id.as_str().into(),
+        source: ModelSource {
+            registry: SourceRegistry::HuggingFace,
+            reference: "meta-llama/Llama-3.1-8B-Instruct".to_string(),
+        },
+        architecture: "llama".to_string(),
+        modalities: vec![Modality::Text],
+        artifact: Artifact {
+            format: ArtifactFormat::Safetensors,
+            quantization: None,
+        },
+        context_length: Some(answers.context_length),
+        variants: Vec::new(),
+    });
+
+    graph.hardware_profiles.push(HardwareProfile {
+        id: hw_id.as_str().into(),
+        provider: "hetzner".to_string(),
+        // Region code round-trips through HCL; residency is enforced by the
+        // governance rule and data class below, not carried on the region.
+        region: Some(Region::from_code("eu-central-1")),
+        accelerator: Some(Accelerator {
+            kind: AcceleratorKind::Gpu,
+            model: "h100".to_string(),
+            count: gpu_count,
+            memory: ByteSize::from_bytes(80 * GIB),
+        }),
+        cpu: None,
+        memory: ByteSize::from_bytes(180 * GIB),
+        interconnect: Some(amicu_core::resource::Interconnect::Nvlink),
+        price: Some(Price {
+            per_hour: Money::new(3.5 * f64::from(gpu_count), "EUR"),
+        }),
+    });
+
+    graph.deployments.push(Deployment {
+        id: format!("{prefix}_deployment").as_str().into(),
+        model: model_id.as_str().into(),
+        hardware_profile: hw_id.as_str().into(),
+        runtime: Runtime::Vllm(VllmSettings {
+            context_length: answers.context_length,
+            port: 8000,
+            // Shard across the GPU count derived from concurrency.
+            tensor_parallel_size: Some(gpu_count),
+            gpu_memory_utilization: Some(0.9),
+        }),
+    });
+
+    // Confidential, EU-resident, first-party only.
+    graph.data_classes.push(DataClass {
+        id: dc_id.as_str().into(),
+        sensitivity: Sensitivity::Confidential,
+        residency: vec![Residency::Eu],
+        allow_external_providers: false,
+        handling: Vec::new(),
+    });
+
+    // EU is a hard constraint here, regardless of the answer flag.
+    push_eu_governance(&mut graph, prefix, &dc_id);
+    push_use_case(&mut graph, &preset.requirement_defaults, &dc_id, answers);
+    maybe_push_budget(&mut graph, prefix, answers);
+
+    graph
+}
+
+fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph {
+    let mut graph = Graph::new();
+    let prefix = preset.id.as_str();
+    let model_id = format!("{prefix}_model");
+    let hw_id = format!("{prefix}_gpu");
+    let dc_id = format!("{prefix}_data");
+    let gpu_count = gpus_for_concurrency(answers.concurrency);
+
+    graph.models.push(Model {
+        id: model_id.as_str().into(),
+        source: ModelSource {
+            registry: SourceRegistry::HuggingFace,
+            reference: "TheBloke/Mistral-7B-Instruct-v0.2-AWQ".to_string(),
+        },
+        architecture: "mistral".to_string(),
+        modalities: vec![Modality::Text],
+        artifact: Artifact {
+            format: ArtifactFormat::Safetensors,
+            // Aggressive 4-bit quantization for cost per token.
+            quantization: Some(Quantization::Int4),
+        },
+        context_length: Some(answers.context_length),
+        variants: Vec::new(),
+    });
+
+    graph.hardware_profiles.push(HardwareProfile {
+        id: hw_id.as_str().into(),
+        provider: "runpod".to_string(),
+        region: None,
+        accelerator: Some(Accelerator {
+            kind: AcceleratorKind::Gpu,
+            // Cheaper accelerator for throughput-first, latency-tolerant work.
+            model: "a10g".to_string(),
+            count: gpu_count,
+            memory: ByteSize::from_bytes(24 * GIB),
+        }),
+        cpu: None,
+        memory: ByteSize::from_bytes(64 * GIB),
+        interconnect: None,
+        price: Some(Price {
+            per_hour: Money::new(0.75 * f64::from(gpu_count), "USD"),
+        }),
+    });
+
+    graph.deployments.push(Deployment {
+        id: format!("{prefix}_deployment").as_str().into(),
+        model: model_id.as_str().into(),
+        hardware_profile: hw_id.as_str().into(),
+        runtime: Runtime::Vllm(VllmSettings {
+            context_length: answers.context_length,
+            port: 8000,
+            tensor_parallel_size: Some(gpu_count),
+            // Pack the KV cache hard: throughput over headroom.
+            gpu_memory_utilization: Some(0.95),
+        }),
+    });
+
+    graph.data_classes.push(DataClass {
+        id: dc_id.as_str().into(),
+        sensitivity: Sensitivity::Internal,
+        residency: eu_residency(answers),
+        allow_external_providers: !answers.eu_residency_required,
+        handling: Vec::new(),
+    });
+
+    push_use_case(&mut graph, &preset.requirement_defaults, &dc_id, answers);
+    maybe_push_eu_governance(&mut graph, preset, answers, &dc_id);
+    maybe_push_budget(&mut graph, prefix, answers);
+
+    graph
+}
+
+// --- shared builder helpers -------------------------------------------------
+
+/// One binary gibibyte.
+const GIB: u64 = 1024 * 1024 * 1024;
+
+/// GPUs to shard across for a concurrency level: one per 8 concurrent requests,
+/// at least one.
+fn gpus_for_concurrency(concurrency: u32) -> u32 {
+    concurrency.div_ceil(8).max(1)
+}
+
+/// The residency list a data class should carry, given the answers: EU when the
+/// wizard requires it, else unrestricted.
+fn eu_residency(answers: &WizardAnswers) -> Vec<Residency> {
+    if answers.eu_residency_required {
+        vec![Residency::Eu]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Add the graph's use case, pointing it at the data class this build created so
+/// the reference resolves, and carrying the answers' latency ceiling.
+fn push_use_case(graph: &mut Graph, defaults: &UseCase, dc_id: &str, answers: &WizardAnswers) {
+    let mut use_case = defaults.clone();
+    use_case.required_data_class = Some(DataClassId::new(dc_id));
+    use_case.min_context_length = Some(answers.context_length);
+    if answers.max_latency_ms.is_some() {
+        use_case.max_latency_ms = answers.max_latency_ms;
+    }
+    graph.use_cases.push(use_case);
+}
+
+/// Add an EU governance rule only when the answers require EU residency (for
+/// presets where EU is optional).
+fn maybe_push_eu_governance(
+    graph: &mut Graph,
+    preset: &Preset,
+    answers: &WizardAnswers,
+    dc_id: &str,
+) {
+    // A preset carrying EuResidencyOnly wires its own rule; this covers the
+    // opt-in case for presets where EU is not a hard constraint.
+    let is_hard = preset
+        .constraints
+        .contains(&PresetConstraint::EuResidencyOnly);
+    if answers.eu_residency_required && !is_hard {
+        push_eu_governance(graph, preset.id.as_str(), dc_id);
+    }
+}
+
+/// Add a governance rule that allows the data class only on EU providers and
+/// regions. The paired data class carries `allow_external_providers = false`.
+fn push_eu_governance(graph: &mut Graph, prefix: &str, dc_id: &str) {
+    graph.governance_rules.push(GovernanceRule {
+        id: GovernanceRuleId::new(format!("{prefix}_eu_residency")),
+        description: Some("Pin data to EU providers and regions.".to_string()),
+        effect: amicu_core::resource::RuleEffect::Allow,
+        data_classes: vec![DataClassId::new(dc_id)],
+        allowed_providers: EU_PROVIDERS.iter().map(|p| (*p).to_string()).collect(),
+        allowed_regions: EU_REGIONS.iter().map(|r| (*r).to_string()).collect(),
+    });
+}
+
+/// Add a monthly budget from the answers' spend ceiling, if one was given.
+fn maybe_push_budget(graph: &mut Graph, prefix: &str, answers: &WizardAnswers) {
+    if let Some(limit) = &answers.budget {
+        graph.budgets.push(Budget {
+            id: format!("{prefix}_budget").as_str().into(),
+            tenant: None,
+            limit: limit.clone(),
+            period: BudgetPeriod::Monthly,
+            alert_thresholds: vec![0.8, 1.0],
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn answers() -> WizardAnswers {
+        WizardAnswers {
+            context_length: 8192,
+            concurrency: 16,
+            eu_residency_required: false,
+            budget: Some(Money::new(500.0, "EUR")),
+            max_latency_ms: Some(1500),
+        }
+    }
+
+    #[test]
+    fn catalog_is_non_empty_and_has_all_three_ids() {
+        let ids: Vec<&str> = catalog().iter().map(|p| p.id.as_str()).collect();
+        assert!(!catalog().is_empty());
+        assert!(ids.contains(&"local_dev_chat"));
+        assert!(ids.contains(&"private_eu_production"));
+        assert!(ids.contains(&"cost_optimized_batch"));
+    }
+
+    #[test]
+    fn every_preset_min_tier_is_community() {
+        for preset in catalog() {
+            assert_eq!(preset.min_tier, Tier::Community, "{}", preset.id);
+        }
+    }
+
+    #[test]
+    fn preset_id_validates_snake_case() {
+        assert!(PresetId::new("local_dev_chat").is_ok());
+        assert!(PresetId::new("cost_optimized_batch").is_ok());
+        for bad in [
+            "",
+            "1leading",
+            "Has_Upper",
+            "has.dot",
+            "has space",
+            "_leading",
+        ] {
+            assert!(
+                matches!(PresetId::new(bad), Err(PresetError::InvalidId(_))),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn build_graph_rejects_zero_answers() {
+        let preset = &catalog()[0];
+        let mut a = answers();
+        a.context_length = 0;
+        assert!(matches!(
+            build_graph(preset, &a),
+            Err(PresetError::InvalidAnswer(_))
+        ));
+        let mut a = answers();
+        a.concurrency = 0;
+        assert!(matches!(
+            build_graph(preset, &a),
+            Err(PresetError::InvalidAnswer(_))
+        ));
+    }
+
+    #[test]
+    fn build_graph_produces_resolvable_graphs_for_every_preset() {
+        for preset in catalog() {
+            let graph = build_graph(preset, &answers()).expect("build");
+            assert_eq!(graph.models.len(), 1, "{}", preset.id);
+            assert_eq!(graph.hardware_profiles.len(), 1, "{}", preset.id);
+            assert_eq!(graph.deployments.len(), 1, "{}", preset.id);
+            assert!(!graph.data_classes.is_empty(), "{}", preset.id);
+            assert!(!graph.budgets.is_empty(), "{}", preset.id);
+            assert!(
+                graph.missing_references().is_empty(),
+                "{} has dangling references: {:?}",
+                preset.id,
+                graph.missing_references()
+            );
+        }
+    }
+
+    #[test]
+    fn context_length_flows_into_runtime_settings() {
+        let mut a = answers();
+        a.context_length = 4096;
+        for preset in catalog() {
+            let graph = build_graph(preset, &a).expect("build");
+            let ctx = match &graph.deployments[0].runtime {
+                Runtime::LlamaCpp(s) => s.context_length,
+                Runtime::Vllm(s) => s.context_length,
+            };
+            assert_eq!(ctx, 4096, "{}", preset.id);
+        }
+    }
+
+    #[test]
+    fn concurrency_drives_tensor_parallel_size() {
+        let mut a = answers();
+        a.concurrency = 16;
+        let eu = catalog()
+            .iter()
+            .find(|p| p.id.as_str() == "private_eu_production")
+            .expect("eu preset");
+        let graph = build_graph(eu, &a).expect("build");
+        match &graph.deployments[0].runtime {
+            Runtime::Vllm(s) => assert_eq!(s.tensor_parallel_size, Some(2)),
+            Runtime::LlamaCpp(_) => panic!("expected vllm"),
+        }
+    }
+
+    #[test]
+    fn eu_preset_data_class_forbids_external_providers() {
+        let eu = catalog()
+            .iter()
+            .find(|p| p.id.as_str() == "private_eu_production")
+            .expect("eu preset");
+        let graph = build_graph(eu, &answers()).expect("build");
+        assert!(
+            graph
+                .data_classes
+                .iter()
+                .any(|dc| !dc.allow_external_providers),
+            "EU preset must have a data class forbidding external providers"
+        );
+        assert!(
+            !graph.governance_rules.is_empty(),
+            "EU preset must pin a governance rule"
+        );
+        let rule = &graph.governance_rules[0];
+        assert!(rule.allowed_regions.iter().all(|r| r.starts_with("eu-")));
+    }
+
+    #[test]
+    fn budget_is_omitted_when_no_ceiling_given() {
+        let mut a = answers();
+        a.budget = None;
+        let graph = build_graph(&catalog()[0], &a).expect("build");
+        assert!(graph.budgets.is_empty());
+    }
+}
