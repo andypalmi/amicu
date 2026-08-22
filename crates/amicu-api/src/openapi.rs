@@ -64,6 +64,7 @@ use utoipa::{Modify, OpenApi};
         (name = "engine", description = "Stateless, side-effect-free validate and plan endpoints (auth-gated)."),
         (name = "recommend", description = "Stateless advisory tuning recommendations from a metrics + estimate snapshot (auth-gated, tier-appropriate)."),
         (name = "monitor", description = "Stateless monitoring view (measured-vs-estimated): a normalized metric surface, estimate, and tier-appropriate advisory suggestions (auth-gated)."),
+        (name = "preset", description = "Stateless guided-wizard presets: gallery listing, per-preset detail, and deterministic HCL emit from wizard answers (auth-gated, Community-usable)."),
         (name = "billing", description = "Stripe-backed subscription billing: checkout, customer portal, status, and the signature-authenticated webhook."),
         (name = "org", description = "Enterprise-gated organization console: membership, role-based access control, and an append-only audit log."),
     ),

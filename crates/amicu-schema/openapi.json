@@ -565,6 +565,152 @@
         ]
       }
     },
+    "/presets": {
+      "get": {
+        "tags": [
+          "preset"
+        ],
+        "summary": "List the guided-wizard presets for the gallery.",
+        "description": "Returns every catalog entry as a gallery-card summary. Stateless: the\ncatalog is a fixed, in-code list.",
+        "operationId": "list_presets_handler",
+        "responses": {
+          "200": {
+            "description": "The preset gallery.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PresetSummaryDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/presets/{id}": {
+      "get": {
+        "tags": [
+          "preset"
+        ],
+        "summary": "Fetch one preset's detail to seed the wizard form.",
+        "description": "Returns the gallery summary plus the requirement defaults and the estimate\nshown before any answers are collected. A `404` if the id is unknown.",
+        "operationId": "get_preset_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The snake_case preset id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The preset detail.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresetDetailDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          },
+          "404": {
+            "description": "No preset exists with this id."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/presets/{id}/emit": {
+      "post": {
+        "tags": [
+          "preset"
+        ],
+        "summary": "Emit HCL for a preset from the wizard's answers.",
+        "description": "Deterministic: builds the preset's candidate [`Graph`](amicu_core::graph::Graph)\nfrom the answers and renders it to HCL. No diagnosis is run and no metrics\nare synthesized; the returned `estimate` is the preset's own\n`default_estimate`, for display. A `404` if the id is unknown, a `400` if a\nwizard answer is out of range.",
+        "operationId": "emit_preset_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The snake_case preset id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WizardAnswersDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The generated HCL plus the preset's estimate.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmitResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A wizard answer is out of range."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          },
+          "404": {
+            "description": "No preset exists with this id."
+          },
+          "422": {
+            "description": "The JSON body is well-formed but a field has the wrong type or is missing."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/recommend": {
       "post": {
         "tags": [
@@ -1308,6 +1454,24 @@
           }
         }
       },
+      "EmitResponseDto": {
+        "type": "object",
+        "description": "Response for `POST /presets/{id}/emit`: the generated HCL text plus the\npreset's estimate for display. The estimate is the preset's own\n`default_estimate`, carried through unchanged; the emit path synthesizes no\nmetrics.",
+        "required": [
+          "hcl",
+          "estimate"
+        ],
+        "properties": {
+          "estimate": {
+            "$ref": "#/components/schemas/WorkloadEstimateDto",
+            "description": "The preset's estimate, shown alongside the generated config."
+          },
+          "hcl": {
+            "type": "string",
+            "description": "The Amicu HCL configuration text produced from the preset and answers."
+          }
+        }
+      },
       "EstimateRangeDto": {
         "type": "object",
         "description": "An estimate range with the provenance and confidence behind it. On the\nrequest side `assumptions` may be omitted; on the response side it carries\nthe range's stated attribution.",
@@ -1480,6 +1644,16 @@
             "minimum": 0
           }
         }
+      },
+      "ModalityDto": {
+        "type": "string",
+        "description": "An input or output modality a use case requires. Mirrors\n[`amicu_core::resource::Modality`].",
+        "enum": [
+          "text",
+          "vision",
+          "audio",
+          "embedding"
+        ]
       },
       "MoneyDto": {
         "type": "object",
@@ -1722,6 +1896,119 @@
             "description": "Risks surfaced by policy evaluation."
           }
         }
+      },
+      "PresetConstraintDto": {
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "eu_residency_only"
+            ]
+          },
+          {
+            "type": "string",
+            "enum": [
+              "quantization_required"
+            ]
+          },
+          {
+            "type": "string",
+            "enum": [
+              "local_only"
+            ]
+          },
+          {
+            "type": "string",
+            "enum": [
+              "external_providers_forbidden"
+            ]
+          },
+          {
+            "type": "object",
+            "required": [
+              "runtime_family"
+            ],
+            "properties": {
+              "runtime_family": {
+                "$ref": "#/components/schemas/RuntimeFamilyDto"
+              }
+            }
+          }
+        ],
+        "description": "A hard constraint a preset commits to, shown on its gallery card. Mirrors\n[`amicu_recommend::PresetConstraint`]."
+      },
+      "PresetDetailDto": {
+        "type": "object",
+        "description": "The full detail for one preset, used to seed the wizard form: the gallery\nsummary plus the requirement defaults and the estimate shown before any\nanswers are collected. Returned by `GET /presets/{id}`.",
+        "required": [
+          "summary",
+          "requirement_defaults",
+          "default_estimate"
+        ],
+        "properties": {
+          "default_estimate": {
+            "$ref": "#/components/schemas/WorkloadEstimateDto",
+            "description": "The estimate shown before any answers are collected."
+          },
+          "requirement_defaults": {
+            "$ref": "#/components/schemas/UseCaseDto",
+            "description": "Requirement defaults pre-filled into the wizard."
+          },
+          "summary": {
+            "$ref": "#/components/schemas/PresetSummaryDto",
+            "description": "The gallery-card summary."
+          }
+        }
+      },
+      "PresetSummaryDto": {
+        "type": "object",
+        "description": "A gallery card: the identity, marketing copy, hard constraints, and minimum\ntier a preset commits to. Returned by `GET /presets`.",
+        "required": [
+          "id",
+          "name",
+          "tagline",
+          "fit",
+          "constraints",
+          "min_tier"
+        ],
+        "properties": {
+          "constraints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PresetConstraintDto"
+            },
+            "description": "The hard constraints this preset commits to."
+          },
+          "fit": {
+            "type": "string",
+            "description": "Who and what this preset fits."
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable snake_case identifier."
+          },
+          "min_tier": {
+            "$ref": "#/components/schemas/TierDto",
+            "description": "Minimum product tier required to use this preset."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable name."
+          },
+          "tagline": {
+            "type": "string",
+            "description": "One-line summary shown under the name."
+          }
+        }
+      },
+      "PriorityDto": {
+        "type": "string",
+        "description": "Relative importance of a use case. Mirrors\n[`amicu_core::resource::Priority`].",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ]
       },
       "ProvenanceDto": {
         "type": "string",
@@ -2028,6 +2315,14 @@
           }
         }
       },
+      "RuntimeFamilyDto": {
+        "type": "string",
+        "description": "The serving runtime family a preset commits to. Mirrors\n[`amicu_recommend::RuntimeFamily`].",
+        "enum": [
+          "llama_cpp",
+          "vllm"
+        ]
+      },
       "Setting": {
         "type": "object",
         "description": "An opaque runtime or launch setting.",
@@ -2313,6 +2608,62 @@
           }
         }
       },
+      "UseCaseDto": {
+        "type": "object",
+        "description": "A preset's requirement defaults, pre-filled into the wizard form. Mirrors\n[`amicu_core::resource::UseCase`].",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "max_latency_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "min_context_length": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "modalities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModalityDto"
+            }
+          },
+          "priority": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PriorityDto"
+              }
+            ]
+          },
+          "required_data_class": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "ValidateRequest": {
         "type": "object",
         "description": "Request body for `POST /validate`.",
@@ -2323,6 +2674,52 @@
           "config": {
             "type": "string",
             "description": "The Amicu HCL configuration text to validate."
+          }
+        }
+      },
+      "WizardAnswersDto": {
+        "type": "object",
+        "description": "Request body for `POST /presets/{id}/emit`: the requirements the wizard\ncollected. Mirrors [`amicu_recommend::WizardAnswers`].",
+        "required": [
+          "context_length",
+          "concurrency"
+        ],
+        "properties": {
+          "budget": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MoneyDto",
+                "description": "Optional monthly spend ceiling; when set, becomes a budget."
+              }
+            ]
+          },
+          "concurrency": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Expected concurrent requests. Drives GPU count. Must be > 0.",
+            "minimum": 0
+          },
+          "context_length": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Context length (tokens) the runtime is configured for. Must be > 0.",
+            "minimum": 0
+          },
+          "eu_residency_required": {
+            "type": "boolean",
+            "description": "Whether the workload must stay within EU jurisdictions."
+          },
+          "max_latency_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Optional latency ceiling (ms) carried into the graph's use case.",
+            "minimum": 0
           }
         }
       },
@@ -2392,6 +2789,10 @@
     {
       "name": "monitor",
       "description": "Stateless monitoring view (measured-vs-estimated): a normalized metric surface, estimate, and tier-appropriate advisory suggestions (auth-gated)."
+    },
+    {
+      "name": "preset",
+      "description": "Stateless guided-wizard presets: gallery listing, per-preset detail, and deterministic HCL emit from wizard answers (auth-gated, Community-usable)."
     },
     {
       "name": "billing",

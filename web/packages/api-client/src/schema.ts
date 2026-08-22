@@ -258,6 +258,72 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the guided-wizard presets for the gallery.
+         * @description Returns every catalog entry as a gallery-card summary. Stateless: the
+         *     catalog is a fixed, in-code list.
+         */
+        get: operations["list_presets_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/presets/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Fetch one preset's detail to seed the wizard form.
+         * @description Returns the gallery summary plus the requirement defaults and the estimate
+         *     shown before any answers are collected. A `404` if the id is unknown.
+         */
+        get: operations["get_preset_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/presets/{id}/emit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Emit HCL for a preset from the wizard's answers.
+         * @description Deterministic: builds the preset's candidate [`Graph`](amicu_core::graph::Graph)
+         *     from the answers and renders it to HCL. No diagnosis is run and no metrics
+         *     are synthesized; the returned `estimate` is the preset's own
+         *     `default_estimate`, for display. A `404` if the id is unknown, a `400` if a
+         *     wizard answer is out of range.
+         */
+        post: operations["emit_preset_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/recommend": {
         parameters: {
             query?: never;
@@ -620,6 +686,18 @@ export interface components {
             p99: number;
         };
         /**
+         * @description Response for `POST /presets/{id}/emit`: the generated HCL text plus the
+         *     preset's estimate for display. The estimate is the preset's own
+         *     `default_estimate`, carried through unchanged; the emit path synthesizes no
+         *     metrics.
+         */
+        EmitResponseDto: {
+            /** @description The preset's estimate, shown alongside the generated config. */
+            estimate: components["schemas"]["WorkloadEstimateDto"];
+            /** @description The Amicu HCL configuration text produced from the preset and answers. */
+            hcl: string;
+        };
+        /**
          * @description An estimate range with the provenance and confidence behind it. On the
          *     request side `assumptions` may be omitted; on the response side it carries
          *     the range's stated attribution.
@@ -689,6 +767,12 @@ export interface components {
             /** Format: int64 */
             recomputations: number;
         };
+        /**
+         * @description An input or output modality a use case requires. Mirrors
+         *     [`amicu_core::resource::Modality`].
+         * @enum {string}
+         */
+        ModalityDto: "text" | "vision" | "audio" | "embedding";
         /** @description A monetary amount in a given ISO currency. */
         MoneyDto: {
             /** Format: double */
@@ -800,6 +884,50 @@ export interface components {
             /** @description Risks surfaced by policy evaluation. */
             risks?: string[];
         };
+        /**
+         * @description A hard constraint a preset commits to, shown on its gallery card. Mirrors
+         *     [`amicu_recommend::PresetConstraint`].
+         */
+        PresetConstraintDto: "eu_residency_only" | "quantization_required" | "local_only" | "external_providers_forbidden" | {
+            runtime_family: components["schemas"]["RuntimeFamilyDto"];
+        };
+        /**
+         * @description The full detail for one preset, used to seed the wizard form: the gallery
+         *     summary plus the requirement defaults and the estimate shown before any
+         *     answers are collected. Returned by `GET /presets/{id}`.
+         */
+        PresetDetailDto: {
+            /** @description The estimate shown before any answers are collected. */
+            default_estimate: components["schemas"]["WorkloadEstimateDto"];
+            /** @description Requirement defaults pre-filled into the wizard. */
+            requirement_defaults: components["schemas"]["UseCaseDto"];
+            /** @description The gallery-card summary. */
+            summary: components["schemas"]["PresetSummaryDto"];
+        };
+        /**
+         * @description A gallery card: the identity, marketing copy, hard constraints, and minimum
+         *     tier a preset commits to. Returned by `GET /presets`.
+         */
+        PresetSummaryDto: {
+            /** @description The hard constraints this preset commits to. */
+            constraints: components["schemas"]["PresetConstraintDto"][];
+            /** @description Who and what this preset fits. */
+            fit: string;
+            /** @description Stable snake_case identifier. */
+            id: string;
+            /** @description Minimum product tier required to use this preset. */
+            min_tier: components["schemas"]["TierDto"];
+            /** @description Human-readable name. */
+            name: string;
+            /** @description One-line summary shown under the name. */
+            tagline: string;
+        };
+        /**
+         * @description Relative importance of a use case. Mirrors
+         *     [`amicu_core::resource::Priority`].
+         * @enum {string}
+         */
+        PriorityDto: "low" | "medium" | "high";
         /**
          * @description Where the evidence behind an estimate comes from. Mirrors
          *     [`amicu_core::estimate::Provenance`].
@@ -918,6 +1046,12 @@ export interface components {
             /** @description Every role, privilege-descending. */
             roles: components["schemas"]["RoleView"][];
         };
+        /**
+         * @description The serving runtime family a preset commits to. Mirrors
+         *     [`amicu_recommend::RuntimeFamily`].
+         * @enum {string}
+         */
+        RuntimeFamilyDto: "llama_cpp" | "vllm";
         /** @description An opaque runtime or launch setting. */
         Setting: {
             /** @description Setting key. */
@@ -1035,10 +1169,49 @@ export interface components {
              */
             recommendations: components["schemas"]["RecommendationDto"][];
         };
+        /**
+         * @description A preset's requirement defaults, pre-filled into the wizard form. Mirrors
+         *     [`amicu_core::resource::UseCase`].
+         */
+        UseCaseDto: {
+            description?: string | null;
+            id: string;
+            /** Format: int32 */
+            max_latency_ms?: number | null;
+            /** Format: int32 */
+            min_context_length?: number | null;
+            modalities?: components["schemas"]["ModalityDto"][];
+            priority?: null | components["schemas"]["PriorityDto"];
+            required_data_class?: string | null;
+        };
         /** @description Request body for `POST /validate`. */
         ValidateRequest: {
             /** @description The Amicu HCL configuration text to validate. */
             config: string;
+        };
+        /**
+         * @description Request body for `POST /presets/{id}/emit`: the requirements the wizard
+         *     collected. Mirrors [`amicu_recommend::WizardAnswers`].
+         */
+        WizardAnswersDto: {
+            budget?: null | components["schemas"]["MoneyDto"];
+            /**
+             * Format: int32
+             * @description Expected concurrent requests. Drives GPU count. Must be > 0.
+             */
+            concurrency: number;
+            /**
+             * Format: int32
+             * @description Context length (tokens) the runtime is configured for. Must be > 0.
+             */
+            context_length: number;
+            /** @description Whether the workload must stay within EU jurisdictions. */
+            eu_residency_required?: boolean;
+            /**
+             * Format: int32
+             * @description Optional latency ceiling (ms) carried into the graph's use case.
+             */
+            max_latency_ms?: number | null;
         };
         /**
          * @description Expected serving behavior and the assumptions behind it. On the response side
@@ -1085,6 +1258,7 @@ export type Credentials = components['schemas']['Credentials'];
 export type Diagnostic = components['schemas']['Diagnostic'];
 export type DiagnosticReport = components['schemas']['DiagnosticReport'];
 export type DistributionDto = components['schemas']['DistributionDto'];
+export type EmitResponseDto = components['schemas']['EmitResponseDto'];
 export type EstimateRangeDto = components['schemas']['EstimateRangeDto'];
 export type EvidenceDto = components['schemas']['EvidenceDto'];
 export type GpuMetricsDto = components['schemas']['GpuMetricsDto'];
@@ -1092,6 +1266,7 @@ export type LatencyMetricsDto = components['schemas']['LatencyMetricsDto'];
 export type MemberView = components['schemas']['MemberView'];
 export type MembersResponse = components['schemas']['MembersResponse'];
 export type MemoryKvMetricsDto = components['schemas']['MemoryKvMetricsDto'];
+export type ModalityDto = components['schemas']['ModalityDto'];
 export type MoneyDto = components['schemas']['MoneyDto'];
 export type MonitorRequest = components['schemas']['MonitorRequest'];
 export type MonitorViewDto = components['schemas']['MonitorViewDto'];
@@ -1100,6 +1275,10 @@ export type Plan = components['schemas']['Plan'];
 export type PlanRequest = components['schemas']['PlanRequest'];
 export type PlannedAction = components['schemas']['PlannedAction'];
 export type PolicyOutcome = components['schemas']['PolicyOutcome'];
+export type PresetConstraintDto = components['schemas']['PresetConstraintDto'];
+export type PresetDetailDto = components['schemas']['PresetDetailDto'];
+export type PresetSummaryDto = components['schemas']['PresetSummaryDto'];
+export type PriorityDto = components['schemas']['PriorityDto'];
 export type ProvenanceDto = components['schemas']['ProvenanceDto'];
 export type QueueMetricsDto = components['schemas']['QueueMetricsDto'];
 export type Range = components['schemas']['Range'];
@@ -1114,6 +1293,7 @@ export type ReliabilityMetricsDto = components['schemas']['ReliabilityMetricsDto
 export type ResetRequest = components['schemas']['ResetRequest'];
 export type RoleView = components['schemas']['RoleView'];
 export type RolesResponse = components['schemas']['RolesResponse'];
+export type RuntimeFamilyDto = components['schemas']['RuntimeFamilyDto'];
 export type Setting = components['schemas']['Setting'];
 export type Severity = components['schemas']['Severity'];
 export type SignUpResponse = components['schemas']['SignUpResponse'];
@@ -1126,7 +1306,9 @@ export type ThroughputMetricsDto = components['schemas']['ThroughputMetricsDto']
 export type TierDto = components['schemas']['TierDto'];
 export type TokenResponse = components['schemas']['TokenResponse'];
 export type TuningReportDto = components['schemas']['TuningReportDto'];
+export type UseCaseDto = components['schemas']['UseCaseDto'];
 export type ValidateRequest = components['schemas']['ValidateRequest'];
+export type WizardAnswersDto = components['schemas']['WizardAnswersDto'];
 export type WorkloadEstimateDto = components['schemas']['WorkloadEstimateDto'];
 export type $defs = Record<string, never>;
 export interface operations {
@@ -1729,6 +1911,146 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["DiagnosticReport"];
                 };
+            };
+        };
+    };
+    list_presets_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The preset gallery. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PresetSummaryDto"][];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_preset_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The snake_case preset id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The preset detail. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PresetDetailDto"];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No preset exists with this id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    emit_preset_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The snake_case preset id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WizardAnswersDto"];
+            };
+        };
+        responses: {
+            /** @description The generated HCL plus the preset's estimate. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmitResponseDto"];
+                };
+            };
+            /** @description A wizard answer is out of range. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No preset exists with this id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The JSON body is well-formed but a field has the wrong type or is missing. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
