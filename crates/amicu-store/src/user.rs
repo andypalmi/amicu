@@ -48,6 +48,7 @@ struct AccountRow {
     roles: Vec<String>,
     stripe_customer_id: Option<String>,
     stripe_subscription_id: Option<String>,
+    email_verified: bool,
 }
 
 impl AccountRow {
@@ -60,6 +61,7 @@ impl AccountRow {
             roles: self.roles,
             stripe_customer_id: self.stripe_customer_id,
             stripe_subscription_id: self.stripe_subscription_id,
+            email_verified: self.email_verified,
         })
     }
 }
@@ -74,8 +76,8 @@ impl UserStore for PostgresUserStore {
         let result = sqlx::query!(
             "INSERT INTO accounts \
              (workspace_id, subject, email, password_hash, tier, roles, \
-              stripe_customer_id, stripe_subscription_id, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+              stripe_customer_id, stripe_subscription_id, email_verified, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             wsid,
             user.id,
             user.email,
@@ -84,6 +86,7 @@ impl UserStore for PostgresUserStore {
             &user.roles,
             user.stripe_customer_id,
             user.stripe_subscription_id,
+            user.email_verified,
             created_at,
         )
         .execute(&mut *tx)
@@ -107,7 +110,7 @@ impl UserStore for PostgresUserStore {
         let row = sqlx::query_as!(
             AccountRow,
             "SELECT subject, email, password_hash, tier, roles, \
-             stripe_customer_id, stripe_subscription_id \
+             stripe_customer_id, stripe_subscription_id, email_verified \
              FROM accounts WHERE workspace_id = $1 AND email = $2",
             wsid,
             email,
@@ -125,7 +128,7 @@ impl UserStore for PostgresUserStore {
         let row = sqlx::query_as!(
             AccountRow,
             "SELECT subject, email, password_hash, tier, roles, \
-             stripe_customer_id, stripe_subscription_id \
+             stripe_customer_id, stripe_subscription_id, email_verified \
              FROM accounts WHERE workspace_id = $1 AND subject = $2",
             wsid,
             id,
@@ -143,7 +146,7 @@ impl UserStore for PostgresUserStore {
         let row = sqlx::query_as!(
             AccountRow,
             "SELECT subject, email, password_hash, tier, roles, \
-             stripe_customer_id, stripe_subscription_id \
+             stripe_customer_id, stripe_subscription_id, email_verified \
              FROM accounts WHERE workspace_id = $1 AND stripe_customer_id = $2",
             wsid,
             customer_id,
@@ -164,6 +167,22 @@ impl UserStore for PostgresUserStore {
             wsid,
             user_id,
             password_hash,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db)?;
+        tx.commit().await.map_err(map_db)?;
+        Ok(())
+    }
+
+    async fn set_email_verified(&self, user_id: &str) -> Result<()> {
+        let mut tx = begin_scoped(&self.pool, self.workspace).await?;
+        let wsid = self.workspace.as_uuid();
+        sqlx::query!(
+            "UPDATE accounts SET email_verified = true \
+             WHERE workspace_id = $1 AND subject = $2",
+            wsid,
+            user_id,
         )
         .execute(&mut *tx)
         .await

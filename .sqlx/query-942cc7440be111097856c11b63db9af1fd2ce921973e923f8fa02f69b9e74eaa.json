@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE accounts SET email_verified = true WHERE workspace_id = $1 AND subject = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "942cc7440be111097856c11b63db9af1fd2ce921973e923f8fa02f69b9e74eaa"
+}

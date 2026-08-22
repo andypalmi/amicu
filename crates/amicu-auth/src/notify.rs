@@ -38,6 +38,13 @@ pub enum NotificationKind {
         /// The opaque reset token (deliver once, over the reset link).
         reset_token: SecretValue,
     },
+    /// A new account was registered: carries the opaque verification token to
+    /// embed in the "confirm your email" link. Sent only on the account-created
+    /// path of sign-up.
+    VerifyEmail {
+        /// The opaque verify token (deliver once, over the verification link).
+        verify_token: SecretValue,
+    },
     /// A sign-up was attempted against an already-registered email. Nudges the
     /// real owner toward sign-in / password-reset without ever telling the
     /// *requester* that the account exists (this message is out-of-band).
@@ -78,6 +85,21 @@ impl Notifier for LoggingNotifier {
                     .unwrap_or("<non-utf8-token>");
                 eprintln!(
                     "[notify] password-reset to {}: reset_token={token}",
+                    message.recipient
+                );
+            }
+            NotificationKind::VerifyEmail { verify_token } => {
+                // DEV ONLY: a real mailer embeds this token in a "confirm your
+                // email" link mailed to the user; the dev logger prints it so a
+                // local developer can complete the flow without an email
+                // transport. This is the one place the opaque verify secret is
+                // intentionally rendered; never do this in a production
+                // Notifier.
+                let token = verify_token
+                    .expose_secret_str()
+                    .unwrap_or("<non-utf8-token>");
+                eprintln!(
+                    "[notify] email-verification to {}: verify_token={token}",
                     message.recipient
                 );
             }

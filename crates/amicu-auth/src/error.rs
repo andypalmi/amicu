@@ -53,6 +53,22 @@ pub enum AuthError {
     /// accounts) exist.
     #[error("reset token invalid")]
     ResetInvalid,
+    /// Email-verification token is unknown, expired, or already used.
+    ///
+    /// Deliberately generic, like [`ResetInvalid`](AuthError::ResetInvalid): the
+    /// verify flow renders every rejected token identically so it cannot be used
+    /// to probe which tokens (or accounts) exist.
+    #[error("verification token invalid")]
+    VerifyInvalid,
+    /// Credentials were correct but the account's email is not yet verified.
+    ///
+    /// Raised only when email verification is required (the
+    /// `AMICU_REQUIRE_EMAIL_VERIFICATION` gate) and only AFTER the password has
+    /// verified, so it never distinguishes a wrong password from an unverified
+    /// account: a wrong password still yields the generic
+    /// [`InvalidCredentials`](AuthError::InvalidCredentials).
+    #[error("email not verified")]
+    EmailUnverified,
     /// Password hashing/verification failed internally.
     #[error("password hashing failure")]
     PasswordHash,

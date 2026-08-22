@@ -68,6 +68,7 @@ pub fn auth_router(state: AuthApiState) -> Router {
         .route("/logout", post(logout))
         .route("/recover", post(recover))
         .route("/reset", post(reset))
+        .route("/verify", post(verify))
         .layer(from_fn_with_state(state.clone(), rate_limit));
 
     well_known.merge(credentials).with_state(state)
@@ -131,6 +132,15 @@ pub(crate) struct ResetRequest {
     reset_token: String,
     /// The new account password (must satisfy the password policy).
     new_password: String,
+}
+
+/// An email-verification completion (`POST /verify`): the opaque verification
+/// token delivered out-of-band at sign-up.
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct VerifyRequest {
+    /// The opaque verification token delivered out-of-band (e.g. via the
+    /// "confirm your email" link).
+    token: String,
 }
 
 #[utoipa::path(
@@ -325,6 +335,34 @@ pub(crate) async fn reset(
     Ok(StatusCode::OK)
 }
 
+/// Confirm an email address by consuming a verification token.
+///
+/// The token is consumed atomically and single-use. Every rejected token
+/// (unknown, expired, or already used) returns the same generic `400`, never a
+/// `401`/`404`, so a rejection cannot be used to probe which tokens or accounts
+/// exist. On success the account's email is marked verified.
+#[utoipa::path(
+    post,
+    path = "/verify",
+    tag = "auth",
+    request_body = VerifyRequest,
+    responses(
+        (status = 200, description = "Email verified: the account's email is now confirmed."),
+        (status = 400, description = "The verification token is unknown, expired, or already used (generic message, no enumeration)."),
+        (status = 429, description = "Rate limited."),
+    ),
+)]
+pub(crate) async fn verify(
+    State(state): State<AuthApiState>,
+    Json(body): Json<VerifyRequest>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .service
+        .verify_email(&SecretValue::new(body.token.into_bytes()))
+        .await?;
+    Ok(StatusCode::OK)
+}
+
 /// Render a token pair for the wire. This is the one legitimate place the
 /// opaque refresh secret is serialized: to its owner, over TLS.
 fn to_response(pair: &TokenPair) -> Result<TokenResponse, ApiError> {
@@ -399,7 +437,19 @@ impl IntoResponse for ApiError {
             // bodies, but that is safe: the password policy is enforced before the
             // token is ever looked up, so the weak-password message cannot signal
             // token validity.
-            AuthError::WeakPassword | AuthError::ResetInvalid => StatusCode::BAD_REQUEST,
+            // `VerifyInvalid` joins the generic 400 bucket: an unknown, expired,
+            // or already-used verification token is indistinguishable from any
+            // other rejected token (never a 401/404), so it leaks nothing about
+            // which tokens or accounts exist.
+            AuthError::WeakPassword | AuthError::ResetInvalid | AuthError::VerifyInvalid => {
+                StatusCode::BAD_REQUEST
+            }
+            // Credentials were correct but the email is unverified (only reachable
+            // once the verification gate is enabled). Distinct from the generic
+            // 401 so a verified-but-wrong-password attempt cannot be told from an
+            // unverified one: the gate is checked only after the password
+            // verifies.
+            AuthError::EmailUnverified => StatusCode::FORBIDDEN,
             // Internal-only; sign-up never surfaces it (anti-enumeration).
             AuthError::UserExists => StatusCode::CONFLICT,
             AuthError::RateLimited => StatusCode::TOO_MANY_REQUESTS,

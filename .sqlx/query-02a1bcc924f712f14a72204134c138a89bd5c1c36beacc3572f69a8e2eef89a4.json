@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT subject, email, password_hash, tier, roles, stripe_customer_id, stripe_subscription_id FROM accounts WHERE workspace_id = $1 AND stripe_customer_id = $2",
+  "query": "SELECT subject, email, password_hash, tier, roles, stripe_customer_id, stripe_subscription_id, email_verified FROM accounts WHERE workspace_id = $1 AND stripe_customer_id = $2",
   "describe": {
     "columns": [
       {
@@ -37,6 +37,11 @@
         "ordinal": 6,
         "name": "stripe_subscription_id",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "email_verified",
+        "type_info": "Bool"
       }
     ],
     "parameters": {
@@ -52,8 +57,9 @@
       false,
       false,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "38923baebf6220743b822f9a09972deb5a27f1df4e0cdf8628c1f301b06d7b3e"
+  "hash": "02a1bcc924f712f14a72204134c138a89bd5c1c36beacc3572f69a8e2eef89a4"
 }

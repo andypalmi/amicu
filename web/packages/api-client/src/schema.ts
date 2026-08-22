@@ -479,6 +479,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm an email address by consuming a verification token.
+         * @description The token is consumed atomically and single-use. Every rejected token
+         *     (unknown, expired, or already used) returns the same generic `400`, never a
+         *     `401`/`404`, so a rejection cannot be used to probe which tokens or accounts
+         *     exist. On success the account's email is marked verified.
+         */
+        post: operations["verify"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1190,6 +1213,17 @@ export interface components {
             config: string;
         };
         /**
+         * @description An email-verification completion (`POST /verify`): the opaque verification
+         *     token delivered out-of-band at sign-up.
+         */
+        VerifyRequest: {
+            /**
+             * @description The opaque verification token delivered out-of-band (e.g. via the
+             *     "confirm your email" link).
+             */
+            token: string;
+        };
+        /**
          * @description Request body for `POST /presets/{id}/emit`: the requirements the wizard
          *     collected. Mirrors [`amicu_recommend::WizardAnswers`].
          */
@@ -1308,6 +1342,7 @@ export type TokenResponse = components['schemas']['TokenResponse'];
 export type TuningReportDto = components['schemas']['TuningReportDto'];
 export type UseCaseDto = components['schemas']['UseCaseDto'];
 export type ValidateRequest = components['schemas']['ValidateRequest'];
+export type VerifyRequest = components['schemas']['VerifyRequest'];
 export type WizardAnswersDto = components['schemas']['WizardAnswersDto'];
 export type WorkloadEstimateDto = components['schemas']['WorkloadEstimateDto'];
 export type $defs = Record<string, never>;
@@ -2325,6 +2360,42 @@ export interface operations {
             };
             /** @description Access tier insufficient. */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    verify: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VerifyRequest"];
+            };
+        };
+        responses: {
+            /** @description Email verified: the account's email is now confirmed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The verification token is unknown, expired, or already used (generic message, no enumeration). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rate limited. */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };

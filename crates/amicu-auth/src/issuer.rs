@@ -38,10 +38,14 @@ pub struct IssuerConfig {
     /// Password-reset-token lifetime. Deliberately short: a reset link should be
     /// usable soon after it is requested and not linger.
     pub reset_ttl: Duration,
+    /// Email-verification-token lifetime. Longer than a reset link: a "confirm
+    /// your email" link is often opened hours after sign-up.
+    pub verify_ttl: Duration,
 }
 
 impl IssuerConfig {
-    /// Config with 15-minute access, 30-day refresh, and 1-hour reset lifetimes.
+    /// Config with 15-minute access, 30-day refresh, 1-hour reset, and 24-hour
+    /// email-verification lifetimes.
     #[must_use]
     pub fn new(issuer: impl Into<String>, audience: impl Into<String>) -> Self {
         Self {
@@ -50,6 +54,7 @@ impl IssuerConfig {
             access_ttl: Duration::from_secs(900),
             refresh_ttl: Duration::from_secs(2_592_000),
             reset_ttl: Duration::from_secs(3_600),
+            verify_ttl: Duration::from_secs(86_400),
         }
     }
 }

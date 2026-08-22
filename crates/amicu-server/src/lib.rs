@@ -1,6 +1,6 @@
 //! Runnable bootstrap for the Amicu Management API.
 //!
-//! `amicu-api` is a library — it hands back a [`Router`] from
+//! `amicu-api` is a library - it hands back a [`Router`] from
 //! `api_router(auth_state, engine_state, billing_state, org_state)` but binds no socket. This crate is the
 //! thin glue that a deployment actually runs: it constructs the auth + engine
 //! state, reads its configuration from the environment (or flags), binds a
@@ -16,7 +16,7 @@
 //! lost on restart** and the process cannot be horizontally scaled (each replica
 //! would sign with a different key and hold its own user table). Persistent,
 //! shared-store backing (Postgres user/refresh/reset stores, a KMS-held or
-//! rotated keyring, a distributed rate limiter) is future work — see the
+//! rotated keyring, a distributed rate limiter) is future work - see the
 //! `amicu-auth` store traits, which this bootstrap is the seam for.
 //!
 //! # Connect-info is load-bearing
@@ -44,7 +44,7 @@
 //! | `rate_limit_max` | `--rate-limit-max` | `AMICU_RATE_LIMIT_MAX` | `30` |
 //! | `rate_limit_window_secs` | `--rate-limit-window-secs` | `AMICU_RATE_LIMIT_WINDOW_SECS` | `60` |
 //!
-//! # Billing (Stripe) — env only
+//! # Billing (Stripe) - env only
 //!
 //! Billing is a real Stripe integration that activates only when its secrets are
 //! present in the environment (there are no flags). Absent them, `/billing/*`
@@ -82,6 +82,7 @@ use amicu_auth::reset::{InMemoryResetStore, ResetStore};
 use amicu_auth::service::AuthService;
 use amicu_auth::user::{InMemoryUserStore, UserStore};
 use amicu_auth::verifier::{StaticJwksProvider, Verifier, VerifierConfig};
+use amicu_auth::verify::InMemoryVerifyStore;
 use amicu_auth::{AuthError, Tier};
 use axum::Router;
 use clap::{Parser, ValueEnum};
@@ -279,12 +280,19 @@ pub async fn build_app(config: &Config) -> Result<Router, Error> {
         )
     };
 
+    // The verify store is in-memory on BOTH the in-memory and Postgres paths: a
+    // persistent verify store (and a real SMTP sender) are separate later PRs.
+    // State is lost on restart, which is acceptable while no mailer ships and the
+    // sign-in verification gate defaults off.
+    let verify_store = Arc::new(InMemoryVerifyStore::default());
+
     let service = Arc::new(AuthService::new(
         keyring,
         issuer,
         users.clone(),
         refresh,
         resets,
+        verify_store,
         Arc::new(LoggingNotifier),
         base_url,
     ));
@@ -319,7 +327,7 @@ pub async fn build_app(config: &Config) -> Result<Router, Error> {
     // store is in-memory and single-node like the auth/billing stores: state is
     // lost on restart. The first Enterprise caller bootstraps the org as its
     // Owner; everyone after is invited. SSO federation is deliberately deferred
-    // (post-v1) — see andypalmi/amicu-planning#92.
+    // (post-v1) - see andypalmi/amicu-planning#92.
     let org_store = Arc::new(InMemoryOrgStore::new());
     let org_state = OrgApiState::new(verifier, org_store);
 
@@ -338,7 +346,7 @@ pub async fn build_app(config: &Config) -> Result<Router, Error> {
 /// so `ConnectInfo<SocketAddr>` is populated on every request. The credential
 /// rate limiter derives its per-client key from that peer address; without this
 /// wiring it has no identity to key on and fails open (letting every credential
-/// request through). All callers — including the smoke test — go through this
+/// request through). All callers - including the smoke test - go through this
 /// function so the connect-info path is always exercised over a real socket.
 ///
 /// # Errors
@@ -369,7 +377,7 @@ pub async fn run(config: Config) -> Result<(), Error> {
     // LoggingNotifier that writes password-reset tokens to stderr. Shout so a
     // run that faces real users can never mistake it for a production deploy.
     eprintln!(
-        "amicu-server: WARNING — development server (in-memory state, ephemeral \
+        "amicu-server: WARNING - development server (in-memory state, ephemeral \
          signing key, reset tokens logged to stderr). NOT for production use."
     );
     eprintln!("amicu-server listening on http://{addr}");
@@ -378,7 +386,7 @@ pub async fn run(config: Config) -> Result<(), Error> {
     Ok(())
 }
 
-/// A future that resolves on the first SIGINT (Ctrl-C) or, on Unix, SIGTERM —
+/// A future that resolves on the first SIGINT (Ctrl-C) or, on Unix, SIGTERM -
 /// the signal a container runtime sends to ask for a graceful stop.
 pub async fn shutdown_signal() {
     let ctrl_c = async {

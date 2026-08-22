@@ -13,8 +13,9 @@ use amicu_auth::notify::{LoggingNotifier, Notification, NotificationKind, Notifi
 use amicu_auth::refresh::InMemoryRefreshStore;
 use amicu_auth::reset::InMemoryResetStore;
 use amicu_auth::service::{AuthService, SignUpOutcome};
-use amicu_auth::user::InMemoryUserStore;
+use amicu_auth::user::{InMemoryUserStore, UserStore};
 use amicu_auth::verifier::{StaticJwksProvider, Verifier, VerifierConfig};
+use amicu_auth::verify::InMemoryVerifyStore;
 use amicu_core::secret::SecretValue;
 use async_trait::async_trait;
 
@@ -58,14 +59,26 @@ fn build(clock: TestClock) -> AuthService<TestClock> {
 }
 
 fn build_with_notifier(clock: TestClock, notifier: Arc<dyn Notifier>) -> AuthService<TestClock> {
+    build_with_users(clock, Arc::new(InMemoryUserStore::default()), notifier)
+}
+
+/// Build a service over a caller-provided user store, so a test can inspect the
+/// stored `email_verified` flag directly (rather than through the env-gated
+/// sign-in path, which would race the process-global env var across tests).
+fn build_with_users(
+    clock: TestClock,
+    users: Arc<dyn UserStore>,
+    notifier: Arc<dyn Notifier>,
+) -> AuthService<TestClock> {
     let keyring = Keyring::new(SigningKey::generate().unwrap());
     let issuer = TokenIssuer::with_clock(IssuerConfig::new(ISS, AUD), clock);
     AuthService::new(
         keyring,
         issuer,
-        Arc::new(InMemoryUserStore::default()),
+        users,
         Arc::new(InMemoryRefreshStore::default()),
         Arc::new(InMemoryResetStore::default()),
+        Arc::new(InMemoryVerifyStore::default()),
         notifier,
         "https://auth.amicu.dev",
     )
@@ -82,29 +95,13 @@ struct CapturingNotifier {
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum CapturedKind {
     PasswordReset(String),
+    VerifyEmail(String),
     AccountExists,
 }
 
 impl CapturingNotifier {
     fn captured(&self) -> Vec<(String, CapturedKind)> {
         self.sent.lock().unwrap().clone()
-    }
-
-    /// Cooperatively wait until at least `n` messages have been captured.
-    ///
-    /// Delivery now runs on a detached `tokio::spawn` task (so `/recover` returns
-    /// in account-independent time), so a test must yield to let that task run
-    /// before reading what it captured. On the current-thread test runtime the
-    /// spawned task makes progress at these yield points; the in-memory seams
-    /// complete in a handful of polls, and the bound only guards against a hang.
-    async fn wait_for_count(&self, n: usize) {
-        for _ in 0..10_000 {
-            if self.sent.lock().unwrap().len() >= n {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-        panic!("timed out waiting for {n} captured notification(s)");
     }
 
     /// Wait for, then return, the token from the most recent password-reset
@@ -119,7 +116,7 @@ impl CapturingNotifier {
                 .rev()
                 .find_map(|(_, k)| match k {
                     CapturedKind::PasswordReset(t) => Some(t.clone()),
-                    CapturedKind::AccountExists => None,
+                    CapturedKind::VerifyEmail(_) | CapturedKind::AccountExists => None,
                 })
             {
                 return SecretValue::new(t.into_bytes());
@@ -127,6 +124,38 @@ impl CapturingNotifier {
             tokio::task::yield_now().await;
         }
         panic!("timed out waiting for a password-reset notification");
+    }
+
+    /// Wait for, then return, the token from the most recent email-verification
+    /// message.
+    async fn last_verify_token(&self) -> SecretValue {
+        for _ in 0..10_000 {
+            if let Some(t) = self
+                .sent
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find_map(|(_, k)| match k {
+                    CapturedKind::VerifyEmail(t) => Some(t.clone()),
+                    CapturedKind::PasswordReset(_) | CapturedKind::AccountExists => None,
+                })
+            {
+                return SecretValue::new(t.into_bytes());
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("timed out waiting for an email-verification notification");
+    }
+
+    /// Count captured messages of a given predicate.
+    fn count(&self, pred: impl Fn(&CapturedKind) -> bool) -> usize {
+        self.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, k)| pred(k))
+            .count()
     }
 }
 
@@ -136,6 +165,9 @@ impl Notifier for CapturingNotifier {
         let kind = match message.kind {
             NotificationKind::PasswordReset { reset_token } => {
                 CapturedKind::PasswordReset(reset_token.expose_secret_str().unwrap().to_string())
+            }
+            NotificationKind::VerifyEmail { verify_token } => {
+                CapturedKind::VerifyEmail(verify_token.expose_secret_str().unwrap().to_string())
             }
             NotificationKind::AccountExists => CapturedKind::AccountExists,
         };
@@ -288,38 +320,62 @@ async fn recover_notifies_only_when_account_exists() {
         .await
         .unwrap();
 
-    // Wait for the real account's message. The ghost request captures nothing, so
-    // the count settles at exactly one.
-    notifier.wait_for_count(1).await;
-    let captured = notifier.captured();
+    // Wait for the real account's reset message to land (sign-up also emits a
+    // verify notification on its own detached task; we count only resets here).
+    let _ = notifier.last_reset_token().await;
+    let resets: Vec<_> = notifier
+        .captured()
+        .into_iter()
+        .filter(|(_, k)| matches!(k, CapturedKind::PasswordReset(_)))
+        .collect();
     assert_eq!(
-        captured.len(),
+        resets.len(),
         1,
-        "exactly one message: only the real account"
+        "exactly one reset message: only the real account"
     );
-    assert_eq!(captured[0].0, "real@example.com");
-    assert!(matches!(captured[0].1, CapturedKind::PasswordReset(_)));
+    assert_eq!(resets[0].0, "real@example.com");
 }
 
 #[tokio::test]
 async fn duplicate_signup_notifies_account_owner() {
     let notifier = Arc::new(CapturingNotifier::default());
     let svc = build_with_notifier(TestClock::at(real_now()), notifier.clone());
-    // First sign-up creates; no account-exists notice.
+    // First sign-up creates: it emits a verification link (detached), but never
+    // an account-exists notice.
     svc.sign_up("owner@example.com", &pw("owner-password"))
         .await
         .unwrap();
-    assert!(notifier.captured().is_empty());
-    // A duplicate sign-up nudges the real owner out-of-band (detached task).
+    let _ = notifier.last_verify_token().await; // the created account's verify link
+    assert_eq!(
+        notifier.count(|k| matches!(k, CapturedKind::AccountExists)),
+        0,
+        "a fresh account must not get an account-exists notice"
+    );
+
+    // A duplicate sign-up nudges the real owner out-of-band (detached task) and
+    // emits NO verification link.
     svc.sign_up("owner@example.com", &pw("attacker-guess"))
         .await
         .unwrap();
-    notifier.wait_for_count(1).await;
-    let captured = notifier.captured();
-    assert_eq!(captured.len(), 1);
+    for _ in 0..10_000 {
+        if notifier.count(|k| matches!(k, CapturedKind::AccountExists)) >= 1 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let existing: Vec<_> = notifier
+        .captured()
+        .into_iter()
+        .filter(|(_, k)| matches!(k, CapturedKind::AccountExists))
+        .collect();
+    assert_eq!(existing.len(), 1, "exactly one account-exists notice");
+    assert_eq!(existing[0].0, "owner@example.com");
+    // The duplicate emitted exactly one verify link total (from the first, real
+    // sign-up); the collision path never mints another.
     assert_eq!(
-        captured[0],
-        ("owner@example.com".to_string(), CapturedKind::AccountExists)
+        notifier.count(|k| matches!(k, CapturedKind::VerifyEmail(_))),
+        1,
+        "only the created account emits a verification link"
     );
 }
 
@@ -643,6 +699,52 @@ async fn key_rotation_publishes_two_kids_and_old_tokens_verify() {
         .verify(&new_pair.access_token)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn sign_up_issues_verification_and_verify_email_flips_flag_once() {
+    let notifier = Arc::new(CapturingNotifier::default());
+    // Keep a handle to the user store so we can read `email_verified` directly,
+    // sidestepping the process-global env gate (which would race other tests).
+    let users = Arc::new(InMemoryUserStore::default());
+    let svc = build_with_users(TestClock::at(real_now()), users.clone(), notifier.clone());
+
+    svc.sign_up("verify@example.com", &pw("verify-me-please"))
+        .await
+        .unwrap();
+    // The verification link is dispatched on a detached task; grab its token.
+    let token = notifier.last_verify_token().await;
+
+    // The flag starts false.
+    let before = users
+        .get_by_email("verify@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!before.email_verified);
+
+    // Consuming the token flips the flag.
+    svc.verify_email(&token).await.unwrap();
+    let after = users
+        .get_by_email("verify@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(after.email_verified);
+
+    // Single-use: replaying the same token is rejected generically.
+    assert!(matches!(
+        svc.verify_email(&token).await.unwrap_err(),
+        AuthError::VerifyInvalid
+    ));
+
+    // An entirely unknown token is likewise rejected generically.
+    assert!(matches!(
+        svc.verify_email(&SecretValue::new(b"not-a-real-verify-token".to_vec()))
+            .await
+            .unwrap_err(),
+        AuthError::VerifyInvalid
+    ));
 }
 
 #[tokio::test]

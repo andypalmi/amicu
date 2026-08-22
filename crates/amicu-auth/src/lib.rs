@@ -54,6 +54,8 @@ pub mod reset;
 pub mod service;
 #[cfg(feature = "issuer")]
 pub mod user;
+#[cfg(feature = "issuer")]
+pub mod verify;
 
 #[cfg(feature = "issuer")]
 pub use issuer::{Clock, IssuerConfig, SystemClock, TokenIssuer};
@@ -67,3 +69,5 @@ pub use notify::{LoggingNotifier, Notification, NotificationKind, Notifier};
 pub use reset::{InMemoryResetStore, MintedReset, ResetConsume, ResetRecord, ResetStore};
 #[cfg(feature = "issuer")]
 pub use service::{AuthService, SignUpOutcome, TokenPair};
+#[cfg(feature = "issuer")]
+pub use verify::{InMemoryVerifyStore, MintedVerify, VerifyConsume, VerifyRecord, VerifyStore};

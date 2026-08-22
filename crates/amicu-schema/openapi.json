@@ -980,6 +980,37 @@
           }
         ]
       }
+    },
+    "/verify": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Confirm an email address by consuming a verification token.",
+        "description": "The token is consumed atomically and single-use. Every rejected token\n(unknown, expired, or already used) returns the same generic `400`, never a\n`401`/`404`, so a rejection cannot be used to probe which tokens or accounts\nexist. On success the account's email is marked verified.",
+        "operationId": "verify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Email verified: the account's email is now confirmed."
+          },
+          "400": {
+            "description": "The verification token is unknown, expired, or already used (generic message, no enumeration)."
+          },
+          "429": {
+            "description": "Rate limited."
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2674,6 +2705,19 @@
           "config": {
             "type": "string",
             "description": "The Amicu HCL configuration text to validate."
+          }
+        }
+      },
+      "VerifyRequest": {
+        "type": "object",
+        "description": "An email-verification completion (`POST /verify`): the opaque verification\ntoken delivered out-of-band at sign-up.",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "The opaque verification token delivered out-of-band (e.g. via the\n\"confirm your email\" link)."
           }
         }
       },

@@ -31,10 +31,15 @@ pub struct User {
     /// Stripe subscription id (`sub_…`) of the user's current active subscription,
     /// set when a subscription is created/updated and cleared when it is deleted.
     pub stripe_subscription_id: Option<String>,
+    /// Whether the user has confirmed ownership of [`email`](User::email) by
+    /// consuming a verification token. `false` until the email-verification flow
+    /// completes (see [`crate::verify`]).
+    pub email_verified: bool,
 }
 
 impl User {
-    /// A newly-registered user: no billing relationship yet.
+    /// A newly-registered user: no billing relationship yet and an unverified
+    /// email.
     #[must_use]
     pub fn new(id: String, email: String, password_hash: String, tier: Tier) -> Self {
         Self {
@@ -45,6 +50,7 @@ impl User {
             roles: Vec::new(),
             stripe_customer_id: None,
             stripe_subscription_id: None,
+            email_verified: false,
         }
     }
 }
@@ -65,6 +71,9 @@ pub trait UserStore: Send + Sync {
     /// Replace a user's password hash (used by password reset). A no-op if the
     /// user id is unknown.
     async fn update_password(&self, user_id: &str, password_hash: String) -> Result<()>;
+    /// Mark a user's email as verified (used by email verification). Idempotent
+    /// and a no-op if the user id is unknown.
+    async fn set_email_verified(&self, user_id: &str) -> Result<()>;
     /// Record (or update) a user's Stripe customer id. Called the first time a
     /// checkout or portal session is created so later webhooks can be mapped back
     /// to the user. A no-op if the user id is unknown.
@@ -137,6 +146,19 @@ impl UserStore for InMemoryUserStore {
             .find(|u| u.id == user_id)
         {
             user.password_hash = password_hash;
+        }
+        Ok(())
+    }
+
+    async fn set_email_verified(&self, user_id: &str) -> Result<()> {
+        if let Some(user) = self
+            .inner
+            .lock()
+            .expect("user store poisoned")
+            .values_mut()
+            .find(|u| u.id == user_id)
+        {
+            user.email_verified = true;
         }
         Ok(())
     }
