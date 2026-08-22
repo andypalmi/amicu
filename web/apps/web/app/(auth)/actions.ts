@@ -100,6 +100,27 @@ export async function forgotAction(
   };
 }
 
+// Outcome of an email-verification attempt, surfaced to the /verify page.
+//   - 'success': the token was consumed and the email is now confirmed.
+//   - 'invalid': the backend rejected the token (unknown/expired/already used) with
+//     the generic `400` - indistinguishable by design (anti-enumeration).
+//   - 'error':  transient failure (rate limit / 5xx / network) - worth a retry.
+export type VerifyStatus = 'success' | 'invalid' | 'error';
+
+// Confirm an email address from the verification link's token. Called on load by
+// the /verify page (a GET landing), not from a form. The token is opaque and may
+// be absent or garbage; callers guard the empty case before invoking this.
+export async function verifyAction(token: string): Promise<VerifyStatus> {
+  if (!token) return 'invalid';
+
+  const result = await authClient.verify({ token });
+  if (result.ok) return 'success';
+
+  // 400 is the only "this link is bad" signal; treat rate-limit/5xx/network as a
+  // transient error the user can retry, not a permanently invalid link.
+  return result.status === 400 ? 'invalid' : 'error';
+}
+
 export async function logoutAction(): Promise<void> {
   // Revoke the refresh token server-side, then clear both cookies. Revocation is
   // best-effort — the cookies are cleared regardless so the browser session ends.
