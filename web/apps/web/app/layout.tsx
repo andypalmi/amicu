@@ -4,15 +4,30 @@ import 'sonner/dist/styles.css';
 import { Inter } from 'next/font/google';
 import type { Metadata } from 'next';
 import { Toaster } from '@/components/common/toaster';
+import { appName, appTagline, siteUrl } from '@/lib/shared';
 
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
+  metadataBase: new URL(siteUrl),
   title: {
-    default: 'Amicu',
-    template: '%s — Amicu',
+    default: appName,
+    template: `%s - ${appName}`,
   },
-  description: 'A thin client over the Amicu Rust Management API.',
+  description: appTagline,
+  applicationName: appName,
+  openGraph: {
+    type: 'website',
+    siteName: appName,
+    title: appName,
+    description: appTagline,
+    url: '/',
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: appName,
+    description: appTagline,
+  },
 };
 
 export default function Layout({ children }: LayoutProps<'/'>) {

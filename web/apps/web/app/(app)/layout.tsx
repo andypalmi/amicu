@@ -1,9 +1,15 @@
+import type { Metadata } from 'next';
 import { HomeLayout } from 'fumadocs-ui/layouts/home';
 import { Badge } from '@amicu/ui';
 import { TIER_LABELS } from '@amicu/auth';
 import { baseOptions } from '@/lib/layout.shared';
 import { requireSession } from '@/lib/auth/session';
 import { SessionProvider } from '@/components/session-provider';
+
+// The authed product surface is private: keep it out of search indexes.
+export const metadata: Metadata = {
+  robots: { index: false, follow: false },
+};
 
 // Authed product surface. The session is resolved (and silently refreshed by the
 // BFF middleware in proxy.ts) before render; unauthenticated visitors are sent to

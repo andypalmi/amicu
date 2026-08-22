@@ -11,12 +11,14 @@ import {
 } from '@amicu/ui';
 import { Container, PageHeader } from '../_components/marketing';
 import { providers } from '../_lib/content';
+import { pageMetadata } from '../_lib/seo';
 
-export const metadata: Metadata = {
+export const metadata: Metadata = pageMetadata({
   title: 'Providers',
   description:
     'EU-first provider coverage: Hetzner, OVHcloud, Scaleway, Nebius, RunPod, AWS, Azure, GCP, and self-hosted / SSH. Residency and region are first-class planning inputs.',
-};
+  path: '/providers',
+});
 
 export default function ProvidersPage() {
   return (

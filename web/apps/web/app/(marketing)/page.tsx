@@ -1,3 +1,4 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { ArrowRight, Compass, FileCode2 } from 'lucide-react';
 import {
@@ -9,12 +10,48 @@ import {
   CardHeader,
   CardTitle,
 } from '@amicu/ui';
+import { appName, appTagline, gitConfig, siteUrl } from '@/lib/shared';
 import { Container } from './_components/marketing';
 import { landingFeatures, providers } from './_lib/content';
+import { pageMetadata } from './_lib/seo';
+
+export const metadata: Metadata = pageMetadata({
+  title: 'Design, deploy, and operate LLM serving stacks',
+  description: appTagline,
+  path: '/',
+});
+
+// SoftwareApplication structured data for the marketing home. Rendered as an
+// inline application/ld+json script (the pattern Next.js recommends); it is
+// inert data, not executable JS, and the app CSP allows 'unsafe-inline' in
+// script-src regardless, so it is not blocked. `<` is escaped to avoid any
+// possibility of breaking out of the script context.
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareApplication',
+  name: appName,
+  description: appTagline,
+  url: siteUrl,
+  applicationCategory: 'DeveloperApplication',
+  operatingSystem: 'Web, Linux, macOS',
+  offers: {
+    '@type': 'Offer',
+    price: '0',
+    priceCurrency: 'EUR',
+  },
+  license: 'https://www.gnu.org/licenses/agpl-3.0.html',
+  sameAs: [`https://github.com/${gitConfig.user}/${gitConfig.repo}`],
+};
 
 export default function LandingPage() {
   return (
     <main className="flex flex-1 flex-col">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify(jsonLd).replace(/</g, '\\u003c'),
+        }}
+      />
       {/* Hero */}
       <section className="border-b border-border">
         <Container className="flex flex-col items-center gap-6 py-24 text-center sm:py-32">

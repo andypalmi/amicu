@@ -18,12 +18,14 @@ import {
   type Tier,
   tiers,
 } from '../_lib/content';
+import { pageMetadata } from '../_lib/seo';
 
-export const metadata: Metadata = {
+export const metadata: Metadata = pageMetadata({
   title: 'Pricing',
   description:
-    'Amicu tiers — Community, Pro, Enterprise, and Hosted — gated on an individual-vs-team axis. Compare the full feature matrix.',
-};
+    'Amicu tiers - Community, Pro, Enterprise, and Hosted - gated on an individual-vs-team axis. Compare the full feature matrix.',
+  path: '/pricing',
+});
 
 function AvailabilityCell({ value }: { value: Availability }) {
   switch (value) {

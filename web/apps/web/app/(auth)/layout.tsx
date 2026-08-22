@@ -1,6 +1,12 @@
+import type { Metadata } from 'next';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { getSession } from '@/lib/auth/session';
+
+// Auth screens carry no indexable content: keep them out of search indexes.
+export const metadata: Metadata = {
+  robots: { index: false, follow: false },
+};
 
 // Public auth surface (/login, /signup, /forgot). Already-authenticated visitors
 // are bounced to the app.
