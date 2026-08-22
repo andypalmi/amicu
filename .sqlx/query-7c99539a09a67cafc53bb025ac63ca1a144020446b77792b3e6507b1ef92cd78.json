@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO refresh_families (workspace_id, family_id, compromised) VALUES ($1, $2, true) ON CONFLICT (workspace_id, family_id) DO UPDATE SET compromised = true",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7c99539a09a67cafc53bb025ac63ca1a144020446b77792b3e6507b1ef92cd78"
+}

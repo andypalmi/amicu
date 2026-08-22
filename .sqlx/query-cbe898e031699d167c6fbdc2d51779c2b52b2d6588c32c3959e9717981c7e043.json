@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE reset_tokens SET consumed = true WHERE workspace_id = $1 AND token_hash = $2 AND NOT consumed AND expires_at > $3 RETURNING user_subject",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_subject",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cbe898e031699d167c6fbdc2d51779c2b52b2d6588c32c3959e9717981c7e043"
+}

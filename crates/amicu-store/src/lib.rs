@@ -6,24 +6,44 @@
 //! the real query surface on top of this scaffold.
 //!
 //! This crate is Postgres-only and uses `sqlx`. Queries are always
-//! parameterized; SQL is never string-built. Timestamps are stored as Unix
-//! seconds (`i64`), matching the codebase's `expires_at` convention (no
-//! chrono).
+//! parameterized through the compile-time-checked `sqlx::query!` / `query_as!`
+//! macros; SQL is never string-built. Timestamps are stored as Unix seconds
+//! (`i64`), matching the codebase's `expires_at` convention (no chrono).
 //!
-//! # Database-free scaffold
+//! # Offline query cache
 //!
-//! This module intentionally avoids the compile-time-checked `sqlx::query!` /
-//! `query_as!` macros: those require a live database or an offline cache. Only
-//! pool construction and [`sqlx::migrate!`] (which embeds the migration files
-//! at compile time and needs no connection) are used here. The real query
-//! surface lands in PR-2.
+//! The `query!`/`query_as!` macros verify every statement against the live
+//! schema at build time. To keep CI buildable with no database, the checked
+//! metadata is committed to `.sqlx/` (via `cargo sqlx prepare`); a build with
+//! no `DATABASE_URL` falls back to that cache. Only pool construction and
+//! [`sqlx::migrate!`] (which embeds the migration files at compile time) need
+//! no connection at all.
+//!
+//! # Auth stores (PR-2)
+//!
+//! [`user`], [`refresh`], and [`reset`] provide the Postgres implementations of
+//! the `amicu-auth` store traits. Each is workspace-scoped: every query carries
+//! a `workspace_id` predicate and runs inside a transaction that sets the
+//! `app.current_workspace` GUC so the row-level-security policies apply. A real
+//! multi-tenant deployment threads a per-request [`WorkspaceId`]; until
+//! login-routing exists, the self-host default ([`WorkspaceId::DEFAULT`]) is
+//! used everywhere.
 
+use amicu_auth::AuthError;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
+
+pub mod refresh;
+pub mod reset;
+pub mod user;
+
+pub use refresh::PostgresRefreshStore;
+pub use reset::PostgresResetStore;
+pub use user::PostgresUserStore;
 
 /// The control-plane isolation boundary: a workspace (unified with the
 /// Enterprise org). Every persisted resource is scoped to a workspace, so a
@@ -132,6 +152,70 @@ pub async fn connect(database_url: &str) -> Result<PgPool, StoreError> {
 pub async fn run_migrations(pool: &PgPool) -> Result<(), StoreError> {
     sqlx::migrate!("./migrations").run(pool).await?;
     Ok(())
+}
+
+/// Maps a Postgres [`Tier`](amicu_auth::Tier) to its stored text form. Mirrors
+/// the `#[serde(rename_all = "snake_case")]` on `Tier` so a value written here
+/// round-trips through the token claims unchanged.
+pub(crate) fn tier_to_str(tier: amicu_auth::Tier) -> &'static str {
+    use amicu_auth::Tier;
+    match tier {
+        Tier::Community => "community",
+        Tier::Pro => "pro",
+        Tier::Enterprise => "enterprise",
+        Tier::Hosted => "hosted",
+    }
+}
+
+/// Parses the stored text form back into a [`Tier`](amicu_auth::Tier). An
+/// unrecognized value is a data-integrity fault (the store is the only writer),
+/// surfaced as [`AuthError::Backend`].
+pub(crate) fn tier_from_str(text: &str) -> Result<amicu_auth::Tier, AuthError> {
+    use amicu_auth::Tier;
+    match text {
+        "community" => Ok(Tier::Community),
+        "pro" => Ok(Tier::Pro),
+        "enterprise" => Ok(Tier::Enterprise),
+        "hosted" => Ok(Tier::Hosted),
+        _ => Err(AuthError::Backend),
+    }
+}
+
+/// Coarse mapper from a driver error to the auth taxonomy. Deliberately drops
+/// the underlying detail: [`AuthError`] is intentionally opaque (no query text,
+/// key, or token material) and this becomes a 500 at the API boundary.
+pub(crate) fn map_db(_err: sqlx::Error) -> AuthError {
+    AuthError::Backend
+}
+
+/// Current wall-clock time as Unix seconds. Saturates rather than panicking if
+/// the clock is before the epoch (it never is on a sane host).
+pub(crate) fn now_unix_seconds() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// Begins a transaction and binds the workspace GUC (`app.current_workspace`)
+/// for its lifetime, so the row-level-security policies on the scoped tables
+/// admit exactly this workspace's rows. Every store operation runs its queries
+/// inside the returned transaction and commits it.
+pub(crate) async fn begin_scoped(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, AuthError> {
+    let mut tx = pool.begin().await.map_err(map_db)?;
+    let wsid = workspace.to_string();
+    // `set_config(_, _, true)` is the transaction-local (SET LOCAL) form; it
+    // takes a bind parameter, unlike a bare `SET LOCAL`.
+    // `set_config` returns the applied value as a row; we only need the side
+    // effect, so fetch and discard it.
+    sqlx::query!("SELECT set_config('app.current_workspace', $1, true)", wsid)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_db)?;
+    Ok(tx)
 }
 
 #[cfg(test)]

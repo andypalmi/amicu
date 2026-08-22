@@ -7,10 +7,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-# Postgres-only persistence. Parameterized queries only; the compile-time
-# `query!`/`query_as!` macros are deliberately NOT pulled in yet (they need a
-# live DB or an offline cache). This scaffold uses only pool construction and
-# `migrate!()`, which embeds the .sql files at compile time and needs no DB.
+# Postgres-only persistence. Parameterized queries only, via the compile-time
+# `query!`/`query_as!` macros: they verify SQL against the schema at build time
+# (using a live DB or the committed `.sqlx/` offline cache) and forbid
+# string-built SQL by construction. Pool construction and `migrate!()` (which
+# embeds the .sql files at compile time) need no DB.
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "tls-rustls",
@@ -19,6 +20,11 @@ sqlx = { version = "0.8", default-features = false, features = [
     "migrate",
     "uuid",
 ] }
+# The auth store traits (UserStore/RefreshStore/ResetStore) and their record
+# types live behind amicu-auth's `issuer` feature (on by default); the Postgres
+# stores here implement them.
+amicu-auth = { path = "../amicu-auth" }
+async-trait = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

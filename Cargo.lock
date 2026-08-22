@@ -264,6 +264,7 @@ version = "0.1.0"
 dependencies = [
  "amicu-api",
  "amicu-auth",
+ "amicu-store",
  "axum",
  "clap",
  "reqwest 0.13.4",
@@ -288,6 +289,8 @@ dependencies = [
 name = "amicu-store"
 version = "0.1.0"
 dependencies = [
+ "amicu-auth",
+ "async-trait",
  "serde",
  "serde_json",
  "sqlx",

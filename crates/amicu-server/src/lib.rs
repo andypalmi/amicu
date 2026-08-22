@@ -77,10 +77,10 @@ use amicu_auth::issuer::{IssuerConfig, TokenIssuer};
 use amicu_auth::key::SigningKey;
 use amicu_auth::keyring::Keyring;
 use amicu_auth::notify::LoggingNotifier;
-use amicu_auth::refresh::InMemoryRefreshStore;
-use amicu_auth::reset::InMemoryResetStore;
+use amicu_auth::refresh::{InMemoryRefreshStore, RefreshStore};
+use amicu_auth::reset::{InMemoryResetStore, ResetStore};
 use amicu_auth::service::AuthService;
-use amicu_auth::user::InMemoryUserStore;
+use amicu_auth::user::{InMemoryUserStore, UserStore};
 use amicu_auth::verifier::{StaticJwksProvider, Verifier, VerifierConfig};
 use amicu_auth::{AuthError, Tier};
 use axum::Router;
@@ -171,6 +171,9 @@ pub enum Error {
     Proxy(ProxyParseError),
     /// The startup signing key could not be generated.
     Key(AuthError),
+    /// The persistent store could not connect or migrate (only reachable when
+    /// `DATABASE_URL` is set).
+    Store(amicu_store::StoreError),
     /// Binding or serving the socket failed.
     Io(std::io::Error),
 }
@@ -180,6 +183,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::Proxy(e) => write!(f, "trusted-proxy config: {e}"),
             Error::Key(e) => write!(f, "signing-key generation: {e}"),
+            Error::Store(e) => write!(f, "persistent store: {e}"),
             Error::Io(e) => write!(f, "server socket: {e}"),
         }
     }
@@ -190,6 +194,7 @@ impl std::error::Error for Error {
         match self {
             Error::Proxy(e) => Some(e),
             Error::Key(e) => Some(e),
+            Error::Store(e) => Some(e),
             Error::Io(e) => Some(e),
         }
     }
@@ -207,8 +212,16 @@ impl From<std::io::Error> for Error {
     }
 }
 
-/// Assemble the full API [`Router`] from `config`, wiring the dev/single-node
-/// in-memory auth stores, a freshly generated signing key, and the engine gate.
+/// Assemble the full API [`Router`] from `config`, wiring the auth stores, a
+/// freshly generated signing key, and the engine gate.
+///
+/// # Store selection
+///
+/// If `DATABASE_URL` is set, durable Postgres stores are constructed (connect +
+/// run migrations) and used for users, refresh tokens, and reset tokens;
+/// otherwise the dev/single-node in-memory stores are used so local runs, tests,
+/// and pre-database self-host work with zero configuration. Email delivery stays
+/// on the [`LoggingNotifier`] regardless (a later PR wires real delivery).
 ///
 /// The engine gate verifies bearer tokens against a **snapshot** of the freshly
 /// generated JWKS taken here at startup. Because this bootstrap never rotates
@@ -217,9 +230,10 @@ impl From<std::io::Error> for Error {
 /// provider instead.
 ///
 /// # Errors
-/// Returns [`Error::Proxy`] if the trusted-proxy allowlist fails to parse, or
-/// [`Error::Key`] if the signing key cannot be generated.
-pub fn build_app(config: &Config) -> Result<Router, Error> {
+/// Returns [`Error::Proxy`] if the trusted-proxy allowlist fails to parse,
+/// [`Error::Key`] if the signing key cannot be generated, or [`Error::Store`]
+/// if `DATABASE_URL` is set but the store cannot connect or migrate.
+pub async fn build_app(config: &Config) -> Result<Router, Error> {
     let trusted = TrustedProxies::from_strs(config.trusted_proxies.split(','))?;
     let base_url = config
         .base_url
@@ -233,16 +247,44 @@ pub fn build_app(config: &Config) -> Result<Router, Error> {
     let jwks = keyring.jwks();
 
     let issuer = TokenIssuer::new(IssuerConfig::new(&config.issuer, &config.audience));
-    // The user store is shared: the auth service and the billing surface write to
-    // the same records, so a webhook-driven tier change lands on the user the
-    // auth service will re-read on the next sign-in/refresh.
-    let users = Arc::new(InMemoryUserStore::default());
+
+    // Store selection. When DATABASE_URL is set, use the durable Postgres stores
+    // (connect + migrate); otherwise fall back to the dev/single-node in-memory
+    // stores so local runs and tests need zero configuration. The user store is
+    // shared between the auth service and the billing surface (below), so a
+    // webhook-driven tier change lands on the user the auth service re-reads on
+    // the next sign-in/refresh.
+    let (users, refresh, resets): (
+        Arc<dyn UserStore>,
+        Arc<dyn RefreshStore>,
+        Arc<dyn ResetStore>,
+    ) = if let Ok(database_url) = std::env::var("DATABASE_URL") {
+        let pool = amicu_store::connect(&database_url)
+            .await
+            .map_err(Error::Store)?;
+        amicu_store::run_migrations(&pool)
+            .await
+            .map_err(Error::Store)?;
+        eprintln!("amicu-server: using Postgres auth stores (DATABASE_URL set).");
+        (
+            Arc::new(amicu_store::PostgresUserStore::new(pool.clone())),
+            Arc::new(amicu_store::PostgresRefreshStore::new(pool.clone())),
+            Arc::new(amicu_store::PostgresResetStore::new(pool)),
+        )
+    } else {
+        (
+            Arc::new(InMemoryUserStore::default()),
+            Arc::new(InMemoryRefreshStore::default()),
+            Arc::new(InMemoryResetStore::default()),
+        )
+    };
+
     let service = Arc::new(AuthService::new(
         keyring,
         issuer,
         users.clone(),
-        Arc::new(InMemoryRefreshStore::default()),
-        Arc::new(InMemoryResetStore::default()),
+        refresh,
+        resets,
         Arc::new(LoggingNotifier),
         base_url,
     ));
@@ -319,7 +361,7 @@ where
 /// Returns [`Error`] if the state cannot be assembled, the socket cannot be
 /// bound, or the accept loop fails.
 pub async fn run(config: Config) -> Result<(), Error> {
-    let app = build_app(&config)?;
+    let app = build_app(&config).await?;
     let listener = TcpListener::bind(config.bind).await?;
     let addr = listener.local_addr()?;
     // This bootstrap is a DEV/single-node target: in-memory stores, a fresh

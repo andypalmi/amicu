@@ -32,7 +32,9 @@ fn test_config() -> Config {
 #[tokio::test]
 async fn real_socket_end_to_end() {
     let config = test_config();
-    let app = amicu_server::build_app(&config).expect("assemble app");
+    let app = amicu_server::build_app(&config)
+        .await
+        .expect("assemble app");
 
     // Bind a real ephemeral port and start the real server on it.
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -120,12 +122,14 @@ async fn real_socket_end_to_end() {
 }
 
 /// A bad trusted-proxy allowlist is surfaced as a build error, not a panic.
-#[test]
-fn rejects_bad_trusted_proxy() {
+/// The proxy allowlist is parsed before any store construction, so this returns
+/// early without needing a database even when `DATABASE_URL` is set.
+#[tokio::test]
+async fn rejects_bad_trusted_proxy() {
     let mut config = test_config();
     config.trusted_proxies = "not-a-cidr".to_string();
     assert!(matches!(
-        amicu_server::build_app(&config),
+        amicu_server::build_app(&config).await,
         Err(amicu_server::Error::Proxy(_))
     ));
 }

@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 amicu-api = { path = "../amicu-api" }
 amicu-auth = { path = "../amicu-auth" }
+amicu-store = { path = "../amicu-store" }
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
