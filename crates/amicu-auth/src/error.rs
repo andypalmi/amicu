@@ -65,6 +65,16 @@ pub enum AuthError {
     /// Signing failed.
     #[error("token signing failure")]
     Signing,
+    /// A persistence/backend operation failed (database unreachable, query
+    /// error, and so on).
+    ///
+    /// Deliberately coarse and carries no query text, key, or token material.
+    /// The persistent stores (see `amicu-store`) map driver errors to this; it
+    /// maps to a 500 at the API boundary. Distinct from the domain rejections
+    /// (`InvalidCredentials`, `RefreshInvalid`, ...) so an infrastructure
+    /// outage is never mistaken for an authentication decision.
+    #[error("storage backend error")]
+    Backend,
 }
 
 /// Crate result alias.

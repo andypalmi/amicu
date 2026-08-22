@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO refresh_tokens (workspace_id, token_hash, user_subject, family_id, expires_at, revoked) VALUES ($1, $2, $3, $4, $5, $6)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bytea",
+        "Text",
+        "Text",
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "14e493e6363b1db7fe2b0e7a072443d1b80af0436116b1db3d8d3292e0985f83"
+}
