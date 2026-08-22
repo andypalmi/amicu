@@ -64,6 +64,8 @@
 //! A subscription change takes effect on the user's **next token issuance**
 //! (sign-in or refresh); live access JWTs are never revoked.
 
+pub mod smtp;
+
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -76,7 +78,7 @@ use amicu_api::{
 use amicu_auth::issuer::{IssuerConfig, TokenIssuer};
 use amicu_auth::key::SigningKey;
 use amicu_auth::keyring::Keyring;
-use amicu_auth::notify::LoggingNotifier;
+use amicu_auth::notify::{LoggingNotifier, Notifier};
 use amicu_auth::refresh::{InMemoryRefreshStore, RefreshStore};
 use amicu_auth::reset::{InMemoryResetStore, ResetStore};
 use amicu_auth::service::AuthService;
@@ -175,6 +177,9 @@ pub enum Error {
     /// The persistent store could not connect or migrate (only reachable when
     /// `DATABASE_URL` is set).
     Store(amicu_store::StoreError),
+    /// The SMTP notifier could not be configured (only reachable when the
+    /// `AMICU_SMTP_*` environment is present).
+    Smtp(smtp::SmtpConfigError),
     /// Binding or serving the socket failed.
     Io(std::io::Error),
 }
@@ -185,6 +190,7 @@ impl std::fmt::Display for Error {
             Error::Proxy(e) => write!(f, "trusted-proxy config: {e}"),
             Error::Key(e) => write!(f, "signing-key generation: {e}"),
             Error::Store(e) => write!(f, "persistent store: {e}"),
+            Error::Smtp(e) => write!(f, "smtp notifier config: {e}"),
             Error::Io(e) => write!(f, "server socket: {e}"),
         }
     }
@@ -196,6 +202,7 @@ impl std::error::Error for Error {
             Error::Proxy(e) => Some(e),
             Error::Key(e) => Some(e),
             Error::Store(e) => Some(e),
+            Error::Smtp(e) => Some(e),
             Error::Io(e) => Some(e),
         }
     }
@@ -221,8 +228,16 @@ impl From<std::io::Error> for Error {
 /// If `DATABASE_URL` is set, durable Postgres stores are constructed (connect +
 /// run migrations) and used for users, refresh tokens, and reset tokens;
 /// otherwise the dev/single-node in-memory stores are used so local runs, tests,
-/// and pre-database self-host work with zero configuration. Email delivery stays
-/// on the [`LoggingNotifier`] regardless (a later PR wires real delivery).
+/// and pre-database self-host work with zero configuration.
+///
+/// # Email delivery
+///
+/// If the SMTP environment is configured (`AMICU_SMTP_HOST` + `AMICU_SMTP_FROM`
+/// present), a real [`SmtpNotifier`](smtp::SmtpNotifier) sends verification and
+/// reset emails over TLS. Otherwise the dev [`LoggingNotifier`] is wired, which
+/// prints reset/verify tokens to stderr and is explicitly NOT for production.
+/// Selecting the real mailer when it is configured is what stops those raw
+/// tokens reaching the logs of a genuine deployment.
 ///
 /// The engine gate verifies bearer tokens against a **snapshot** of the freshly
 /// generated JWKS taken here at startup. Because this bootstrap never rotates
@@ -281,10 +296,33 @@ pub async fn build_app(config: &Config) -> Result<Router, Error> {
     };
 
     // The verify store is in-memory on BOTH the in-memory and Postgres paths: a
-    // persistent verify store (and a real SMTP sender) are separate later PRs.
-    // State is lost on restart, which is acceptable while no mailer ships and the
-    // sign-in verification gate defaults off.
+    // persistent verify store is a separate later PR. State is lost on restart,
+    // which is acceptable while the sign-in verification gate defaults off (see
+    // the notifier selection below for why the gate is NOT auto-enabled here).
     let verify_store = Arc::new(InMemoryVerifyStore::default());
+
+    // Notifier selection. When the SMTP environment is configured, send real
+    // email over TLS; otherwise fall back to the dev logger. Wiring the real
+    // mailer in a configured deploy is what keeps the LoggingNotifier (which
+    // prints raw reset/verify tokens to stderr) out of production.
+    //
+    // The sign-in verification gate (AMICU_REQUIRE_EMAIL_VERIFICATION) is
+    // deliberately NOT auto-enabled when SMTP is configured. Verify tokens still
+    // live in the in-memory store (lost on restart) and there is no resend
+    // endpoint yet, so auto-on could lock users out after a restart. Auto-on when
+    // SMTP is configured is deferred until a persistent verify store and a resend
+    // endpoint exist; until then the operator opts in explicitly via the gate.
+    let notifier: Arc<dyn Notifier> = if smtp::is_configured() {
+        eprintln!("amicu-server: SMTP notifier configured; sending real verification/reset email.");
+        Arc::new(smtp::SmtpNotifier::from_env().map_err(Error::Smtp)?)
+    } else {
+        eprintln!(
+            "amicu-server: SMTP NOT configured (set AMICU_SMTP_HOST + AMICU_SMTP_FROM to \
+             activate); using the dev LoggingNotifier, which prints reset/verify tokens to \
+             stderr. NOT for production use."
+        );
+        Arc::new(LoggingNotifier)
+    };
 
     let service = Arc::new(AuthService::new(
         keyring,
@@ -293,7 +331,7 @@ pub async fn build_app(config: &Config) -> Result<Router, Error> {
         refresh,
         resets,
         verify_store,
-        Arc::new(LoggingNotifier),
+        notifier,
         base_url,
     ));
     let limiter = Arc::new(RateLimiter::new(
