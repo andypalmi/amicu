@@ -222,7 +222,9 @@ name = "amicu-recommend"
 version = "0.1.0"
 dependencies = [
  "amicu-core",
+ "amicu-engine",
  "amicu-hcl",
+ "amicu-providers",
  "amicu-telemetry",
  "serde",
  "serde_json",

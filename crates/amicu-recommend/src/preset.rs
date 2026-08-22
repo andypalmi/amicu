@@ -29,9 +29,14 @@ use serde::{Deserialize, Serialize};
 use crate::{Tier, WorkloadEstimate};
 
 /// EU-resident providers a Private EU Production stack is allowed to place on.
+/// Restricting to EU-only providers already guarantees EU residency, so no
+/// region-code allowlist is pinned (a code allowlist would fight a user who
+/// edits to a different genuine EU region on an allowed provider).
 const EU_PROVIDERS: &[&str] = &["hetzner", "ovhcloud", "scaleway", "nebius"];
-/// EU region codes a governance rule pins `allowed_regions` to.
-const EU_REGIONS: &[&str] = &["eu-central-1", "eu-west-1"];
+
+/// The largest concurrency the wizard accepts, guarding
+/// [`gpus_for_concurrency`] against an absurd GPU count.
+const MAX_CONCURRENCY: u32 = 100_000;
 
 /// A snake_case preset identifier, e.g. `"local_dev_chat"`.
 ///
@@ -205,15 +210,21 @@ pub fn catalog() -> &'static [Preset] {
 ///
 /// Parametrizes the preset's candidate template: context length flows into the
 /// runtime settings, concurrency into the GPU count / `tensor_parallel_size`, an
-/// EU-residency requirement into a governance rule pinning `allowed_regions` and
-/// a data class with `allow_external_providers = false`, and a budget into a
-/// [`Budget`]. The result is data; nothing is applied to a stack.
+/// EU-residency requirement into a governance rule allowing only EU providers
+/// plus a data class pinned to EU residency, and a budget into a [`Budget`]. The
+/// result is data; nothing is applied to a stack.
+///
+/// Residency enforcement rides on the provider allowlist and the data class's
+/// EU `residency` (both read by the planner's residency checks). The data
+/// class's `allow_external_providers = false` is an advisory intent flag that
+/// the current planner does not yet read (a pre-existing engine gap); it records
+/// the preset's stance but is not, on its own, the enforced mechanism.
 ///
 /// # Errors
 ///
-/// Returns [`PresetError::InvalidAnswer`] for a zero context length or
-/// concurrency, or [`PresetError::UnknownPreset`] if the preset id has no
-/// candidate template.
+/// Returns [`PresetError::InvalidAnswer`] for a zero or over-large context
+/// length or concurrency, or a non-finite / negative budget amount; or
+/// [`PresetError::UnknownPreset`] if the preset id has no candidate template.
 pub fn build_graph(preset: &Preset, answers: &WizardAnswers) -> Result<Graph, PresetError> {
     if answers.context_length == 0 {
         return Err(PresetError::InvalidAnswer(
@@ -224,6 +235,20 @@ pub fn build_graph(preset: &Preset, answers: &WizardAnswers) -> Result<Graph, Pr
         return Err(PresetError::InvalidAnswer(
             "concurrency must be greater than 0".to_string(),
         ));
+    }
+    if answers.concurrency > MAX_CONCURRENCY {
+        return Err(PresetError::InvalidAnswer(format!(
+            "concurrency {} exceeds the maximum of {MAX_CONCURRENCY}",
+            answers.concurrency
+        )));
+    }
+    if let Some(budget) = &answers.budget
+        && (!budget.amount.is_finite() || budget.amount < 0.0)
+    {
+        return Err(PresetError::InvalidAnswer(format!(
+            "budget amount must be finite and non-negative, got {}",
+            budget.amount
+        )));
     }
 
     match preset.id.as_str() {
@@ -475,9 +500,11 @@ fn build_private_eu_production(preset: &Preset, answers: &WizardAnswers) -> Grap
     graph.hardware_profiles.push(HardwareProfile {
         id: hw_id.as_str().into(),
         provider: "hetzner".to_string(),
-        // Region code round-trips through HCL; residency is enforced by the
-        // governance rule and data class below, not carried on the region.
-        region: Some(Region::from_code("eu-central-1")),
+        // A real hetzner EU region (Falkenstein, DE): `resolve_residency`
+        // resolves `fsn1` to Residency::Eu, so the data class's EU residency
+        // check is a live comparison rather than a silent no-op. The bare code
+        // round-trips through HCL; jurisdiction is resolved from the catalog.
+        region: Some(Region::from_code("fsn1")),
         accelerator: Some(Accelerator {
             kind: AcceleratorKind::Gpu,
             model: "h100".to_string(),
@@ -573,6 +600,10 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
         runtime: Runtime::Vllm(VllmSettings {
             context_length: answers.context_length,
             port: 8000,
+            // TODO(amicu-planning): mapping concurrency to tensor_parallel_size
+            // is a documented approximation. For throughput-first batch work the
+            // correct scaling model is replica count, not tensor parallelism;
+            // switch this to replicas once `Deployment` gains a replicas field.
             tensor_parallel_size: Some(gpu_count),
             // Pack the KV cache hard: throughput over headroom.
             gpu_memory_utilization: Some(0.95),
@@ -645,16 +676,20 @@ fn maybe_push_eu_governance(
     }
 }
 
-/// Add a governance rule that allows the data class only on EU providers and
-/// regions. The paired data class carries `allow_external_providers = false`.
+/// Add a governance rule that allows the data class only on EU-resident
+/// providers. Deliberately pins no `allowed_regions`: the EU-only provider set
+/// already guarantees EU residency, and a region-code allowlist would reject a
+/// user who edits to a different genuine EU region on an allowed provider. The
+/// paired data class carries EU `residency`, which the planner checks against
+/// the region's resolved jurisdiction.
 fn push_eu_governance(graph: &mut Graph, prefix: &str, dc_id: &str) {
     graph.governance_rules.push(GovernanceRule {
         id: GovernanceRuleId::new(format!("{prefix}_eu_residency")),
-        description: Some("Pin data to EU providers and regions.".to_string()),
+        description: Some("Allow this data only on EU-resident providers.".to_string()),
         effect: amicu_core::resource::RuleEffect::Allow,
         data_classes: vec![DataClassId::new(dc_id)],
         allowed_providers: EU_PROVIDERS.iter().map(|p| (*p).to_string()).collect(),
-        allowed_regions: EU_REGIONS.iter().map(|r| (*r).to_string()).collect(),
+        allowed_regions: Vec::new(),
     });
 }
 
@@ -803,7 +838,54 @@ mod tests {
             "EU preset must pin a governance rule"
         );
         let rule = &graph.governance_rules[0];
-        assert!(rule.allowed_regions.iter().all(|r| r.starts_with("eu-")));
+        // The rule allows only EU providers and pins NO region codes: an
+        // EU-only provider set already guarantees residency, and a code
+        // allowlist would fight a valid edit to another genuine EU region.
+        assert!(
+            rule.allowed_regions.is_empty(),
+            "EU preset must not pin an allowed_regions code allowlist"
+        );
+        assert!(!rule.allowed_providers.is_empty());
+        for provider in &rule.allowed_providers {
+            assert!(
+                EU_PROVIDERS.contains(&provider.as_str()),
+                "provider {provider:?} is not in the EU-only allowlist"
+            );
+        }
+    }
+
+    #[test]
+    fn build_graph_rejects_absurd_concurrency() {
+        let eu = catalog()
+            .iter()
+            .find(|p| p.id.as_str() == "private_eu_production")
+            .expect("eu preset");
+        let mut a = answers();
+        a.concurrency = MAX_CONCURRENCY + 1;
+        assert!(matches!(
+            build_graph(eu, &a),
+            Err(PresetError::InvalidAnswer(_))
+        ));
+        // The cap itself is accepted.
+        a.concurrency = MAX_CONCURRENCY;
+        assert!(build_graph(eu, &a).is_ok());
+    }
+
+    #[test]
+    fn build_graph_rejects_non_finite_or_negative_budget() {
+        let preset = &catalog()[0];
+        for bad in [f64::NAN, f64::INFINITY, -1.0] {
+            let mut a = answers();
+            a.budget = Some(Money::new(bad, "EUR"));
+            assert!(
+                matches!(build_graph(preset, &a), Err(PresetError::InvalidAnswer(_))),
+                "budget amount {bad} should be rejected"
+            );
+        }
+        // Zero is a valid ceiling.
+        let mut a = answers();
+        a.budget = Some(Money::new(0.0, "EUR"));
+        assert!(build_graph(preset, &a).is_ok());
     }
 
     #[test]
