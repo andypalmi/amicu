@@ -87,6 +87,19 @@ cargo build --release -p amicu-cli
 - **Production runtime (vLLM):** NVIDIA CUDA, AMD ROCm, and Intel XPU GPUs, deployed via Kubernetes/Helm or k3s.
 - **Provider adapters:** AWS, Azure, GCP, Hetzner, OVHcloud, Scaleway, RunPod, Nebius, and self-hosted (SSH) targets.
 
+### Development database
+
+The persistence layer (`amicu-store`) is Postgres-only. For local development and
+self-host, bring up the bundled Postgres with Docker Compose:
+
+```bash
+docker compose up -d postgres
+export DATABASE_URL=postgres://amicu:amicu@localhost:5432/amicu
+```
+
+That `DATABASE_URL` is the dev/self-host connection string used by the store and its
+migration integration test.
+
 ## Status
 
 Early stage. Working today: the HCL DSL and parser, the CLI (`init`, `fmt`, `validate`, `plan`, `apply`, `doctor`, `skill export`), the planner and local state, and the provider adapters listed above. Not yet built: the browser UI, hosted service, and performance-intelligence dataset. Expect breaking changes to the DSL and CLI.

@@ -1,0 +1,26 @@
+# Local/self-host development database for amicu-store.
+#
+#   docker compose up -d postgres
+#   DATABASE_URL=postgres://amicu:amicu@localhost:5432/amicu
+#
+# The DATABASE_URL above is the self-host/dev connection string used by the
+# store and its (ignored) migration integration test.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: amicu
+      POSTGRES_USER: amicu
+      POSTGRES_PASSWORD: amicu
+    ports:
+      - "5432:5432"
+    volumes:
+      - amicu_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amicu -d amicu"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  amicu_pgdata:
