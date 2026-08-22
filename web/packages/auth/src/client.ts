@@ -51,6 +51,17 @@ export interface AuthClient {
    * (anti-enumeration), which the BFF treats uniformly as success.
    */
   requestPasswordReset(input: { email: string }): Promise<AuthResult<void>>;
+  /**
+   * Confirm an email address by consuming a verification token. Maps to
+   * `POST /verify`.
+   *
+   * The token is single-use and consumed atomically. Every rejected token
+   * (unknown, expired, or already used) returns the same generic `400` (never a
+   * `401`/`404`), so a rejection cannot be used to probe which tokens or accounts
+   * exist. On success (`200`) the account's email is marked verified; the response
+   * carries no body.
+   */
+  verify(input: { token: string }): Promise<AuthResult<void>>;
 }
 
 export function createAuthClient(options: AuthClientOptions): AuthClient {
@@ -93,5 +104,6 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
     logout: (refreshToken) =>
       toResult(api.POST('/logout', { body: { refresh_token: refreshToken } }), () => undefined),
     requestPasswordReset: (input) => toResult(api.POST('/recover', { body: input }), () => undefined),
+    verify: (input) => toResult(api.POST('/verify', { body: input }), () => undefined),
   };
 }
