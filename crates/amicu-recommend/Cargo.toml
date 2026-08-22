@@ -12,6 +12,9 @@ amicu-telemetry = { path = "../amicu-telemetry" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+amicu-engine = { path = "../amicu-engine" }
+amicu-hcl = { path = "../amicu-hcl" }
+amicu-providers = { path = "../amicu-providers" }
 serde_json = "1"
 
 [lints]
