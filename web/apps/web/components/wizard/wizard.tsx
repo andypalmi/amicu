@@ -157,10 +157,12 @@ export function Wizard() {
       return;
     }
 
+    // Hard-EU presets lock the residency requirement on: OR it in explicitly here
+    // rather than trusting a disabled control's submitted value.
     const answers: WizardAnswersDto = {
       context_length: Math.trunc(contextLength),
       concurrency: Math.trunc(concurrency),
-      eu_residency_required: form.euResidency,
+      eu_residency_required: presetRequiresEuResidency(selected) || form.euResidency,
     };
     if (form.maxLatency.trim()) {
       const ms = Number(form.maxLatency);
@@ -305,6 +307,9 @@ function RequirementsStep({
   const detail = detailState.kind === 'ready' ? detailState.detail : null;
   const modalities = detail?.requirement_defaults.modalities ?? [];
   const dataClass = detail?.requirement_defaults.required_data_class ?? null;
+  // A hard-EU preset commits to EU residency: lock the control on so a user cannot
+  // untick it and emit non-EU HCL from an EU preset. submit() enforces the same.
+  const euLocked = presetRequiresEuResidency(selected);
 
   return (
     <div className="space-y-5">
@@ -401,7 +406,8 @@ function RequirementsStep({
               <Label htmlFor="euResidency">Data residency</Label>
               <Select
                 id="euResidency"
-                value={form.euResidency ? 'eu' : 'any'}
+                value={euLocked || form.euResidency ? 'eu' : 'any'}
+                disabled={euLocked}
                 onChange={(e) =>
                   setForm((p) => ({ ...p, euResidency: e.target.value === 'eu' }))
                 }
@@ -410,7 +416,9 @@ function RequirementsStep({
                 <option value="eu">EU jurisdictions only</option>
               </Select>
               <p className="text-xs text-muted-foreground">
-                Whether the workload must stay within EU jurisdictions.
+                {euLocked
+                  ? 'This preset requires EU residency, so this is locked on.'
+                  : 'Whether the workload must stay within EU jurisdictions.'}
               </p>
             </div>
 
