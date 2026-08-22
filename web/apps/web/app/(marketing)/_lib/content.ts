@@ -2,7 +2,7 @@
 //
 // Tier names mirror the source of truth in `crates/amicu-auth` (Tier enum:
 // Community / Pro / Enterprise / Hosted). The gating matrix mirrors RFC 0001
-// §5 "Tier Gating Map". Enforcement lives in the API — this surface only
+// §5 "Tier Gating Map". Enforcement lives in the API - this surface only
 // mirrors it for UX. Pricing numbers are intentionally omitted (RFC §1
 // non-goal): tiers carry qualitative positioning and a CTA, not a price.
 
@@ -13,7 +13,7 @@ export interface Tier {
   name: string;
   /** One-line positioning on the individual-vs-team axis. */
   tagline: string;
-  /** Neutral price label — no invented numbers (RFC §1 non-goal). */
+  /** Neutral price label - no invented numbers (RFC §1 non-goal). */
   priceLabel: string;
   description: string;
   cta: { label: string; href: string };
@@ -202,15 +202,15 @@ export interface Provider {
   name: string;
   /** Short qualifier shown under the name. */
   kind: string;
-  /** EU-first residency note. */
+  /** Residency note for this provider. */
   residency: string;
-  /** True for European-headquartered providers (EU-first emphasis). */
+  /** True for European-headquartered providers (drives the EU-native badge). */
   euNative?: boolean;
 }
 
-// Adapter coverage. EU-first: European-native providers are highlighted, the
-// hyperscalers are supported via their EU regions, and self-hosted/SSH closes
-// the list for full residency control.
+// Adapter coverage, provider-agnostic: one declarative model spans EU-native
+// providers, the hyperscalers via their regions, and self-hosted/SSH. EU-only is
+// one stack you can pin, alongside air-gapped, cost-optimized, or multi-cloud.
 export const providers: Provider[] = [
   {
     name: 'Hetzner',
@@ -259,7 +259,7 @@ export const providers: Provider[] = [
   {
     name: 'Self-hosted / SSH',
     kind: 'Your own hardware',
-    residency: 'Wherever you run it — full residency control',
+    residency: 'Wherever you run it - full residency control',
   },
 ];
 
@@ -271,7 +271,7 @@ export interface LandingFeature {
 export const landingFeatures: LandingFeature[] = [
   {
     title: 'Thin client, open core',
-    body: 'A thin, open-source client over the Rust Management API. Planning, recommendations, policy, and capability logic live in the API — the web app renders them, it does not own them.',
+    body: 'A thin, open-source client over the Rust Management API. Planning, recommendations, policy, and capability logic live in the API - the web app renders them, it does not own them.',
   },
   {
     title: 'Dual-mode entry',
@@ -282,12 +282,12 @@ export const landingFeatures: LandingFeature[] = [
     body: 'Every suggestion shows its reasoning and the numbers behind it. Compare measured-vs-estimated on day 2 and apply suggested changes with the trade-offs in view.',
   },
   {
-    title: 'EU-first coverage',
-    body: 'European-native providers first, hyperscalers via their EU regions, and self-hosted/SSH for full residency control. Residency and region are first-class planning inputs.',
+    title: 'Provider-agnostic coverage',
+    body: 'One declarative model across EU-native clouds, hyperscaler regions, and self-hosted/SSH. Pin a fully EU-only stack - or air-gapped, cost-optimized, or multi-cloud. Residency and region are first-class planning inputs.',
   },
   {
     title: 'HCL as the source of truth',
-    body: 'Author, validate, and plan/apply declarative HCL. Version it, review it, and keep solo or team remote state — the stack is code, not click-ops.',
+    body: 'Author, validate, and plan/apply declarative HCL. Version it, review it, and keep solo or team remote state - the stack is code, not click-ops.',
   },
   {
     title: 'Day-2 operations',

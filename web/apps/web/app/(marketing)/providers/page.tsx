@@ -16,7 +16,7 @@ import { pageMetadata } from '../_lib/seo';
 export const metadata: Metadata = pageMetadata({
   title: 'Providers',
   description:
-    'EU-first provider coverage: Hetzner, OVHcloud, Scaleway, Nebius, RunPod, AWS, Azure, GCP, and self-hosted / SSH. Residency and region are first-class planning inputs.',
+    'Provider-agnostic coverage: Hetzner, OVHcloud, Scaleway, Nebius, RunPod, AWS, Azure, GCP, and self-hosted / SSH - declare your stack once, run it anywhere. Residency and region are first-class planning inputs.',
   path: '/providers',
 });
 
@@ -26,8 +26,8 @@ export default function ProvidersPage() {
       <Container className="py-20 sm:py-24">
         <PageHeader
           eyebrow="Providers"
-          title="EU-first coverage, your residency."
-          description="Amicu plans against European-native providers first, reaches the hyperscalers through their EU regions, and supports self-hosted / SSH for full residency control. Residency and region are planning inputs — an optional adapter-owned zone is the third level when a provider needs it."
+          title="Provider-agnostic coverage, your rules."
+          description="Amicu plans against any provider through one declarative model - EU-native clouds, hyperscaler regions, or your own hardware over SSH. Pin a fully EU-only stack, an air-gapped one, or a cost-optimized multi-cloud one; residency and region are first-class planning inputs."
         />
 
         <div className="mt-14 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
@@ -65,7 +65,7 @@ export default function ProvidersPage() {
           </h2>
           <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
             Residency and region are the only required planning inputs. Zone is an
-            optional, adapter-owned third level — resolved region-to-zone for
+            optional, adapter-owned third level - resolved region-to-zone for
             zone-addressed provider APIs, with an advanced override when you need it.
             Multi-AZ redundancy is an Enterprise HA policy, not a base primitive.
           </p>
