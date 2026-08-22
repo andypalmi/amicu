@@ -86,6 +86,27 @@ fn valid_edit_to_another_eu_region_is_not_rejected() {
 }
 
 #[test]
+fn non_eu_edit_is_rejected() {
+    // Editing the EU preset's hardware to a non-EU provider and region must be
+    // rejected by the planner: the data class pins EU residency and the
+    // governance rule allows only EU providers, so a US placement violates both.
+    assert_eq!(
+        resolve_residency("aws", "us-east-1"),
+        Some(Residency::Us),
+        "us-east-1 on aws should resolve to the US jurisdiction"
+    );
+    let mut graph = eu_preset_graph();
+    graph.hardware_profiles[0].provider = "aws".to_string();
+    graph.hardware_profiles[0].region = Some(Region::from_code("us-east-1"));
+    let report = report_for(&graph);
+    assert!(
+        !report.valid,
+        "a non-EU (aws/us-east-1) placement must be rejected, got: {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
 fn eu_preset_pins_no_region_code_allowlist() {
     // Belt-and-braces on top of the engine check: the governance rule must rely
     // on the EU-only provider set, not a region-code allowlist.
