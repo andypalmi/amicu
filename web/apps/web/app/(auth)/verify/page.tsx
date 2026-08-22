@@ -89,7 +89,9 @@ export default async function VerifyPage({
         </CardHeader>
         <CardContent className="space-y-4">
           <Button asChild className="w-full">
-            <Link href="/verify">Try again</Link>
+            <Link href={`/verify?token=${encodeURIComponent(rawToken)}`}>
+              Try again
+            </Link>
           </Button>
           <p className="text-center text-sm text-muted-foreground">
             If it keeps failing, contact support.
