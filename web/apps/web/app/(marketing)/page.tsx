@@ -57,15 +57,15 @@ export default function LandingPage() {
         <Container className="flex flex-col items-center gap-6 py-24 text-center sm:py-32">
           <Badge variant="outline" className="gap-1.5">
             <span className="inline-block size-1.5 rounded-full bg-primary" />
-            Open-source · EU-first inference
+            Open-source · declarative AI infrastructure
           </Badge>
           <h1 className="max-w-3xl text-balance text-4xl font-bold tracking-tight sm:text-6xl">
             Design, deploy, and operate LLM serving stacks.
           </h1>
           <p className="max-w-2xl text-pretty text-lg text-muted-foreground">
-            Amicu is a thin, open client over the Rust Management API — guided stack
-            design, transparent recommendations, and day-2 operations for EU-first
-            inference.
+            Amicu is a thin, open client over the Rust Management API - guided stack
+            design, transparent recommendations, and day-2 operations for inference
+            infrastructure you declare once and run on any provider.
           </p>
           <div className="flex flex-wrap items-center justify-center gap-3">
             <Button asChild size="lg">
@@ -88,7 +88,7 @@ export default function LandingPage() {
               Two ways in. Both open to everyone.
             </h2>
             <p className="mt-3 text-muted-foreground">
-              The tier split is about depth of recommendation and team collaboration —
+              The tier split is about depth of recommendation and team collaboration -
               never about access to the wizard. Community gets the guided flow too.
             </p>
           </div>
@@ -98,8 +98,8 @@ export default function LandingPage() {
                 <Compass className="size-6 text-primary" aria-hidden />
                 <CardTitle className="text-xl">Help me choose</CardTitle>
                 <CardDescription>
-                  A guided wizard turns your outcome — model, latency, budget,
-                  residency — into a recommended stack, with the reasoning shown.
+                  A guided wizard turns your outcome - model, latency, budget,
+                  residency - into a recommended stack, with the reasoning shown.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -116,7 +116,7 @@ export default function LandingPage() {
                 <CardTitle className="text-xl">I know my stack</CardTitle>
                 <CardDescription>
                   Drop straight into the HCL editor. Author, validate, and plan / apply
-                  declarative infrastructure — the stack is code, not click-ops.
+                  declarative infrastructure - the stack is code, not click-ops.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -151,7 +151,7 @@ export default function LandingPage() {
       <section className="border-b border-border bg-muted/30">
         <Container className="py-16">
           <p className="text-center text-sm font-medium uppercase tracking-widest text-muted-foreground">
-            Deploy across EU-first providers
+            Deploy across any provider
           </p>
           <div className="mt-6 flex flex-wrap items-center justify-center gap-x-3 gap-y-3">
             {providers.map((provider) => (

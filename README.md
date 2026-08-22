@@ -4,14 +4,14 @@ Terraform for AI inference infrastructure: a declarative HCL DSL plus a Rust pla
 
 ## The problem
 
-Standing up an inference stack today means hand-wiring model downloads, runtime flags, GPU provisioning, traffic routing, and data-residency rules — differently on a laptop than in production, and differently again per provider. Amicu makes that stack declarative, diffable, and reviewable: define it, `plan` the changes, `apply` them. EU-first data residency and governance are first-class resources, not an afterthought.
+Standing up an inference stack today means hand-wiring model downloads, runtime flags, GPU provisioning, traffic routing, and data-residency rules - differently on a laptop than in production, and differently again per provider. Amicu makes that stack declarative, diffable, and reviewable: define it, `plan` the changes, `apply` them. Residency and governance are first-class resources you can pin - EU-only is one policy among many (air-gapped, cost-optimized, multi-cloud).
 
 ## What you get
 
-- **One file, laptop to production** — the same HCL describes a local llama.cpp run and a multi-GPU vLLM cluster; `plan` and `apply` reconcile the difference.
-- **Diffable, reviewable infrastructure** — every change is a plan against tracked state you can read before it runs, not a pile of imperative scripts.
-- **EU-first residency and governance** — data-class, residency, and routing policies are first-class resources, checked at plan time rather than bolted on later.
-- **Provider-portable** — AWS, Azure, GCP, Hetzner, OVHcloud, Scaleway, RunPod, Nebius, or your own SSH hosts, behind a single model.
+- **One file, laptop to production** - the same HCL describes a local llama.cpp run and a multi-GPU vLLM cluster; `plan` and `apply` reconcile the difference.
+- **Diffable, reviewable infrastructure** - every change is a plan against tracked state you can read before it runs, not a pile of imperative scripts.
+- **Residency and governance as code** - data-class, residency, and routing policies are first-class resources, checked at plan time rather than bolted on later; pin a fully EU-only stack, or air-gapped, cost-optimized, or multi-cloud.
+- **Provider-portable** - AWS, Azure, GCP, Hetzner, OVHcloud, Scaleway, RunPod, Nebius, or your own SSH hosts, behind a single model.
 
 ## Quickstart
 
@@ -22,7 +22,7 @@ cargo build --release -p amicu-cli
 ./target/release/amicu init      # scaffolds amicu.hcl in the current directory
 ```
 
-`init` writes a minimal, complete config — model, hardware, and the deployment that binds them:
+`init` writes a minimal, complete config - model, hardware, and the deployment that binds them:
 
 ```hcl
 resource "model" "starter_chat" {
@@ -73,11 +73,11 @@ resource "deployment" "starter_chat_local" {
 ./target/release/amicu apply     # executes the plan (prompts for approval)
 ```
 
-Six other resource kinds — `routing_policy`, `data_class`, `governance_rule`, `budget`, `tenant`, `use_case` — extend the same graph with traffic splitting, residency/sensitivity constraints, and spend limits. Full reference lives in the docs site (below).
+Six other resource kinds - `routing_policy`, `data_class`, `governance_rule`, `budget`, `tenant`, `use_case` - extend the same graph with traffic splitting, residency/sensitivity constraints, and spend limits. Full reference lives in the docs site (below).
 
 ## Install & platforms
 
-No published binary yet — build from source with Rust 1.97+:
+No published binary yet - build from source with Rust 1.97+:
 
 ```bash
 cargo build --release -p amicu-cli
@@ -106,7 +106,7 @@ Early stage. Working today: the HCL DSL and parser, the CLI (`init`, `fmt`, `val
 
 ## Learn more
 
-- Full documentation site — coming soon.
+- Full documentation site - coming soon.
 
 ## License
 
