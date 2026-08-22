@@ -28,6 +28,7 @@ export default async function Layout({ children }: LayoutProps<'/'>) {
         // foreground shift (muted-foreground -> fd-primary, hsl 0 0% 9%) — no accent.
         links={[
           { text: 'Console', url: '/app', active: 'nested-url' },
+          { text: 'Wizard', url: '/wizard', active: 'nested-url' },
           { text: 'Recommendations', url: '/recommend', active: 'nested-url' },
           { text: 'Monitoring', url: '/monitor', active: 'nested-url' },
           { text: 'Docs', url: '/docs', active: 'nested-url' },
