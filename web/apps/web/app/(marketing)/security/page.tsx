@@ -16,6 +16,7 @@ import {
   CardTitle,
 } from '@amicu/ui';
 import { Container, PageHeader } from '../_components/marketing';
+import { pageMetadata } from '../_lib/seo';
 
 const pillars = [
   {
@@ -50,11 +51,12 @@ const pillars = [
   },
 ];
 
-export const metadata: Metadata = {
+export const metadata: Metadata = pageMetadata({
   title: 'Security',
   description:
     'How Amicu handles trust: API-enforced tier gating, asymmetric verifiable sessions, secrets by reference, EU data residency, and a fully open-source auditable frontend.',
-};
+  path: '/security',
+});
 
 export default function SecurityPage() {
   return (
