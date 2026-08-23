@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE configs SET current_version = current_version + 1, updated_at = $3 WHERE workspace_id = $1 AND id = $2 RETURNING current_version",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "current_version",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7a9270628174a2c2f779ad7baa430bfee980178ebd0bd3d17c84fc9bf94ffc56"
+}

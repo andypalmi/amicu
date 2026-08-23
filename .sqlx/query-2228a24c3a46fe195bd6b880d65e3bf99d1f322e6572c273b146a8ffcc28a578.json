@@ -1,0 +1,54 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT version_no, content, content_sha256, created_at, created_by, message FROM config_versions WHERE workspace_id = $1 AND config_id = $2 AND version_no = $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version_no",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "content",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "content_sha256",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "created_by",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "message",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "2228a24c3a46fe195bd6b880d65e3bf99d1f322e6572c273b146a8ffcc28a578"
+}
