@@ -72,8 +72,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use amicu_api::{
-    AuthApiState, BillingApiState, EngineApiState, InMemoryOrgStore, OrgApiState, ProxyParseError,
-    RateLimiter, TrustedProxies, api_router, stripe_config_from_env,
+    AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore, OrgApiState,
+    ProxyParseError, RateLimiter, TrustedProxies, api_router, stripe_config_from_env,
 };
 use amicu_auth::issuer::{IssuerConfig, TokenIssuer};
 use amicu_auth::key::SigningKey;
@@ -86,6 +86,8 @@ use amicu_auth::user::{InMemoryUserStore, UserStore};
 use amicu_auth::verifier::{StaticJwksProvider, Verifier, VerifierConfig};
 use amicu_auth::verify::{InMemoryVerifyStore, VerifyStore};
 use amicu_auth::{AuthError, Tier};
+use amicu_store::config::ConfigStore;
+use amicu_store::{InMemoryConfigStore, PostgresConfigStore};
 use axum::Router;
 use clap::{Parser, ValueEnum};
 use tokio::net::TcpListener;
@@ -382,11 +384,34 @@ pub async fn build_app(config: &Config) -> Result<Router, Error> {
     let org_store = Arc::new(InMemoryOrgStore::new());
     let org_state = OrgApiState::new(verifier, org_store);
 
+    // Config storage + version history (`/configs/*`): the same
+    // Postgres-when-`DATABASE_URL`-else-in-memory selection as the auth store
+    // quartet above, but connected independently (its own pool) since
+    // `ConfigStore` is a single trait object, not a quartet sharing one
+    // constructor call. Kept as its own small, self-contained block (not
+    // folded into `AuthStores`) so it stays additive and easy to rebase
+    // sibling store-wiring changes (e.g. the state-backend adapter) on top of.
+    let config_store: Arc<dyn ConfigStore> = if let Ok(database_url) = std::env::var("DATABASE_URL")
+    {
+        let pool = amicu_store::connect(&database_url)
+            .await
+            .map_err(Error::Store)?;
+        amicu_store::run_migrations(&pool)
+            .await
+            .map_err(Error::Store)?;
+        eprintln!("amicu-server: using the Postgres config store (DATABASE_URL set).");
+        Arc::new(PostgresConfigStore::new(pool))
+    } else {
+        Arc::new(InMemoryConfigStore::new())
+    };
+    let config_state = ConfigApiState::new(config_store);
+
     Ok(api_router(
         auth_state,
         engine_state,
         billing_state,
         org_state,
+        config_state,
     ))
 }
 

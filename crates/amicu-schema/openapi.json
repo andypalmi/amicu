@@ -183,6 +183,418 @@
         }
       }
     },
+    "/configs": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "summary": "List every config in the workspace.",
+        "operationId": "list_configs_handler",
+        "responses": {
+          "200": {
+            "description": "Every config in the workspace, by name.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ConfigSummaryDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "config"
+        ],
+        "summary": "Create a config from submitted HCL, canonicalizing it first.",
+        "operationId": "create_config_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The created config's first version, content included.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigDetailDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The submitted HCL failed to parse."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          },
+          "409": {
+            "description": "A config with this name already exists."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/configs/{id}": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "summary": "Fetch a config's current version, content included.",
+        "operationId": "get_config_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The config's id (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The current version, content included.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigDetailDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          },
+          "404": {
+            "description": "No config exists with this id."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/configs/{id}/diff": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "summary": "Compute a unified diff between two versions' canonical HCL content.",
+        "operationId": "diff_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The config's id (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "The version number to diff from.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "The version number to diff to.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A unified diff from `from`'s content to `to`'s.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigDiffDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing or malformed `from`/`to` query parameters."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          },
+          "404": {
+            "description": "No config, or no such version (from or to), exists."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/configs/{id}/rollback/{no}": {
+      "post": {
+        "tags": [
+          "config"
+        ],
+        "summary": "Roll back a config to an earlier version's content.",
+        "description": "History is append-only: this mints a brand-new version whose content\ncopies version `{no}`; it never rewrites or removes any prior version.",
+        "operationId": "rollback_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The config's id (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "no",
+            "in": "path",
+            "description": "The version number to roll back to.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The freshly-minted version copying `no`'s content.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionMetaDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          },
+          "404": {
+            "description": "No config, or no such version, exists."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/configs/{id}/versions": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "summary": "List every version of a config, oldest first (metadata only, no content).",
+        "operationId": "list_versions_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The config's id (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every version, oldest first. Empty (not 404) for an unknown config id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/VersionMetaDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "config"
+        ],
+        "summary": "Append a new version onto a config, canonicalizing its content first.",
+        "operationId": "append_version_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The config's id (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AppendVersionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The newly-appended version's metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionMetaDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The submitted HCL failed to parse."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          },
+          "404": {
+            "description": "No config exists with this id."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/configs/{id}/versions/{no}": {
+      "get": {
+        "tags": [
+          "config"
+        ],
+        "summary": "Fetch one specific version's content and metadata.",
+        "operationId": "get_version_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The config's id (UUID).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "no",
+            "in": "path",
+            "description": "The version number.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "That version's full content and metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionContentDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          },
+          "404": {
+            "description": "No config, or no such version, exists."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/logout": {
       "post": {
         "tags": [
@@ -1080,6 +1492,26 @@
           }
         }
       },
+      "AppendVersionRequest": {
+        "type": "object",
+        "description": "Request body for `POST /configs/{id}/versions`.",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "The HCL configuration text. Canonicalized before it is stored."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An optional human note describing this version."
+          }
+        }
+      },
       "Artifact": {
         "type": "object",
         "description": "A selected model artifact and its download characteristics.",
@@ -1320,6 +1752,101 @@
           "estimated"
         ]
       },
+      "ConfigDetailDto": {
+        "type": "object",
+        "description": "A config's current version, content included. Returned by `POST /configs`\nand `GET /configs/{id}`. Mirrors [`ConfigWithContent`].",
+        "required": [
+          "id",
+          "name",
+          "current_version",
+          "content",
+          "content_sha256",
+          "updated_at"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "The current version's canonical HCL content."
+          },
+          "content_sha256": {
+            "type": "string",
+            "description": "Hex-encoded SHA-256 digest of `content`."
+          },
+          "current_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The current version number."
+          },
+          "id": {
+            "type": "string",
+            "description": "The config's id (UUID text)."
+          },
+          "name": {
+            "type": "string",
+            "description": "The config's name."
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the current version was last touched, Unix seconds."
+          }
+        }
+      },
+      "ConfigDiffDto": {
+        "type": "object",
+        "description": "Response for `GET /configs/{id}/diff`: a unified diff between two\nversions' canonical HCL content.",
+        "required": [
+          "from",
+          "to",
+          "diff"
+        ],
+        "properties": {
+          "diff": {
+            "type": "string",
+            "description": "A standard unified diff (`---`/`+++` headers, `@@` hunks) from\n`from`'s content to `to`'s."
+          },
+          "from": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The version number diffed from."
+          },
+          "to": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The version number diffed to."
+          }
+        }
+      },
+      "ConfigSummaryDto": {
+        "type": "object",
+        "description": "A config's identity and pointer metadata, without content. Returned by\n`GET /configs`. Mirrors [`ConfigSummary`].",
+        "required": [
+          "id",
+          "name",
+          "current_version",
+          "updated_at"
+        ],
+        "properties": {
+          "current_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The current version number."
+          },
+          "id": {
+            "type": "string",
+            "description": "The config's id (UUID text)."
+          },
+          "name": {
+            "type": "string",
+            "description": "The config's name."
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the current version was last touched, Unix seconds."
+          }
+        }
+      },
       "CostMetricsDto": {
         "type": "object",
         "description": "Cost surface, including utilization-adjusted idle burn.",
@@ -1394,6 +1921,31 @@
               "null"
             ],
             "description": "Where the estimate came from (e.g. `benchmark`, `heuristic`)."
+          }
+        }
+      },
+      "CreateConfigRequest": {
+        "type": "object",
+        "description": "Request body for `POST /configs`.",
+        "required": [
+          "name",
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "The HCL configuration text. Canonicalized (parsed and reformatted)\nbefore it is stored."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An optional human note describing this version."
+          },
+          "name": {
+            "type": "string",
+            "description": "The config's name (unique per workspace)."
           }
         }
       },
@@ -2782,6 +3334,89 @@
           }
         }
       },
+      "VersionContentDto": {
+        "type": "object",
+        "description": "One version's full content plus its metadata. Returned by\n`GET /configs/{id}/versions/{no}`. Mirrors [`VersionContent`].",
+        "required": [
+          "version_no",
+          "content",
+          "content_sha256",
+          "created_at"
+        ],
+        "properties": {
+          "content": {
+            "type": "string",
+            "description": "This version's canonical HCL content."
+          },
+          "content_sha256": {
+            "type": "string",
+            "description": "Hex-encoded SHA-256 digest of `content`."
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When this version was created, Unix seconds."
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The account id (UUID text) that created this version, if any."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An optional human note describing this version."
+          },
+          "version_no": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The version number (1-based, monotonic per config)."
+          }
+        }
+      },
+      "VersionMetaDto": {
+        "type": "object",
+        "description": "One version's metadata, without its content. Returned by\n`GET /configs/{id}/versions` and as the result of an append or rollback.\nMirrors [`VersionMeta`].",
+        "required": [
+          "version_no",
+          "created_at",
+          "content_sha256"
+        ],
+        "properties": {
+          "content_sha256": {
+            "type": "string",
+            "description": "Hex-encoded SHA-256 digest of this version's content."
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When this version was created, Unix seconds."
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The account id (UUID text) that created this version, if any. See\n[`created_by_for`] for how this is derived from the caller's token."
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An optional human note describing this version."
+          },
+          "version_no": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The version number (1-based, monotonic per config)."
+          }
+        }
+      },
       "WizardAnswersDto": {
         "type": "object",
         "description": "Request body for `POST /presets/{id}/emit`: the requirements the wizard\ncollected. Mirrors [`amicu_recommend::WizardAnswers`].",
@@ -2906,6 +3541,10 @@
     {
       "name": "org",
       "description": "Enterprise-gated organization console: membership, role-based access control, and an append-only audit log."
+    },
+    {
+      "name": "config",
+      "description": "HCL config storage and version history: create/list/get, append-only version history, rollback (mints a new version, never rewrites), and a server-computed unified diff. Content is canonicalized before it is stored (auth-gated, Community-usable)."
     }
   ]
 }

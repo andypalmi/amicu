@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use amicu_api::{
-    AuthApiState, BillingApiState, EngineApiState, InMemoryOrgStore, OrgApiState, RateLimiter,
-    api_router,
+    AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore, OrgApiState,
+    RateLimiter, api_router,
 };
 use amicu_auth::notify::LoggingNotifier;
 use amicu_auth::refresh::InMemoryRefreshStore;
@@ -111,9 +111,16 @@ fn harness() -> Harness {
 
     let store = Arc::new(InMemoryOrgStore::new());
     let org_state = OrgApiState::new(verifier, store.clone());
+    let config_state = ConfigApiState::new(Arc::new(amicu_store::InMemoryConfigStore::new()));
 
     Harness {
-        app: api_router(auth_state, engine_state, billing_state, org_state),
+        app: api_router(
+            auth_state,
+            engine_state,
+            billing_state,
+            org_state,
+            config_state,
+        ),
         store,
         tokens,
     }

@@ -32,11 +32,13 @@
 //!
 //! # Config store
 //!
-//! [`config`] provides [`PostgresConfigStore`], a workspace-scoped store for
-//! HCL configs and their immutable version history. It follows the same
-//! GUC-bound-transaction and workspace-predicate pattern as the auth stores,
-//! but is not one of the `amicu-auth` traits: it has its own error type
-//! ([`config::ConfigError`]).
+//! [`config`] provides [`config::ConfigStore`], the HCL config +
+//! version-history persistence seam `amicu-api`'s Management API is wired
+//! against, plus two implementations: [`PostgresConfigStore`] (workspace-scoped,
+//! same GUC-bound-transaction pattern as the auth stores) and
+//! [`InMemoryConfigStore`] (dev/tests/pre-database self-host, mirroring the
+//! auth stores' in-memory fallback). It is not one of the `amicu-auth` traits:
+//! it has its own error type ([`config::ConfigError`]).
 //!
 //! # State backend
 //!
@@ -61,7 +63,7 @@ pub mod state;
 pub mod user;
 pub mod verify;
 
-pub use config::PostgresConfigStore;
+pub use config::{ConfigStore, InMemoryConfigStore, PostgresConfigStore};
 pub use refresh::PostgresRefreshStore;
 pub use reset::PostgresResetStore;
 pub use state::PostgresStateBackend;
