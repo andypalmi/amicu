@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use amicu_api::{
-    AuthApiState, BillingApiState, EngineApiState, InMemoryOrgStore, OrgApiState, RateLimiter,
-    api_router,
+    AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore, OrgApiState,
+    RateLimiter, api_router,
 };
 use amicu_auth::notify::LoggingNotifier;
 use amicu_auth::refresh::InMemoryRefreshStore;
@@ -64,9 +64,16 @@ fn app_with(tier: Tier) -> (Router, String) {
     let billing_state =
         BillingApiState::unconfigured(verifier.clone(), Arc::new(InMemoryUserStore::default()));
     let org_state = OrgApiState::new(verifier, Arc::new(InMemoryOrgStore::new()));
+    let config_state = ConfigApiState::new(Arc::new(amicu_store::InMemoryConfigStore::new()));
 
     (
-        api_router(auth_state, engine_state, billing_state, org_state),
+        api_router(
+            auth_state,
+            engine_state,
+            billing_state,
+            org_state,
+            config_state,
+        ),
         token,
     )
 }

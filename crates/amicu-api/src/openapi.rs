@@ -39,6 +39,14 @@ use utoipa::{Modify, OpenApi};
         crate::org::remove_member_handler,
         crate::org::list_roles_handler,
         crate::org::audit_handler,
+        crate::config::create_config_handler,
+        crate::config::list_configs_handler,
+        crate::config::get_config_handler,
+        crate::config::list_versions_handler,
+        crate::config::get_version_handler,
+        crate::config::append_version_handler,
+        crate::config::rollback_handler,
+        crate::config::diff_handler,
     ),
     components(schemas(
         crate::auth::Credentials,
@@ -62,6 +70,13 @@ use utoipa::{Modify, OpenApi};
         crate::org::RolesResponse,
         crate::org::AuditEntryView,
         crate::org::AuditResponse,
+        crate::config::CreateConfigRequest,
+        crate::config::AppendVersionRequest,
+        crate::config::ConfigSummaryDto,
+        crate::config::ConfigDetailDto,
+        crate::config::VersionMetaDto,
+        crate::config::VersionContentDto,
+        crate::config::ConfigDiffDto,
     )),
     modifiers(&SecurityAddon),
     tags(
@@ -72,6 +87,7 @@ use utoipa::{Modify, OpenApi};
         (name = "preset", description = "Stateless guided-wizard presets: gallery listing, per-preset detail, and deterministic HCL emit from wizard answers (auth-gated, Community-usable)."),
         (name = "billing", description = "Stripe-backed subscription billing: checkout, customer portal, status, and the signature-authenticated webhook."),
         (name = "org", description = "Enterprise-gated organization console: membership, role-based access control, and an append-only audit log."),
+        (name = "config", description = "HCL config storage and version history: create/list/get, append-only version history, rollback (mints a new version, never rewrites), and a server-computed unified diff. Content is canonicalized before it is stored (auth-gated, Community-usable)."),
     ),
 )]
 pub struct ApiDoc;

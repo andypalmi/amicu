@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use amicu_store::config::ConfigError;
-use amicu_store::{PostgresConfigStore, WorkspaceId, connect, run_migrations};
+use amicu_store::{ConfigStore, PostgresConfigStore, WorkspaceId, connect, run_migrations};
 use sha2::Digest;
 use sqlx::PgPool;
 use uuid::Uuid;

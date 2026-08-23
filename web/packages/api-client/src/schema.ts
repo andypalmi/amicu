@@ -122,6 +122,114 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/configs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List every config in the workspace. */
+        get: operations["list_configs_handler"];
+        put?: never;
+        /** Create a config from submitted HCL, canonicalizing it first. */
+        post: operations["create_config_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/configs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Fetch a config's current version, content included. */
+        get: operations["get_config_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/configs/{id}/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Compute a unified diff between two versions' canonical HCL content. */
+        get: operations["diff_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/configs/{id}/rollback/{no}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Roll back a config to an earlier version's content.
+         * @description History is append-only: this mints a brand-new version whose content
+         *     copies version `{no}`; it never rewrites or removes any prior version.
+         */
+        post: operations["rollback_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/configs/{id}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List every version of a config, oldest first (metadata only, no content). */
+        get: operations["list_versions_handler"];
+        put?: never;
+        /** Append a new version onto a config, canonicalizing its content first. */
+        post: operations["append_version_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/configs/{id}/versions/{no}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Fetch one specific version's content and metadata. */
+        get: operations["get_version_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/logout": {
         parameters: {
             query?: never;
@@ -549,6 +657,13 @@ export interface components {
              */
             user_id: string;
         };
+        /** @description Request body for `POST /configs/{id}/versions`. */
+        AppendVersionRequest: {
+            /** @description The HCL configuration text. Canonicalized before it is stored. */
+            content: string;
+            /** @description An optional human note describing this version. */
+            message?: string | null;
+        };
         /** @description A selected model artifact and its download characteristics. */
         Artifact: {
             /**
@@ -670,6 +785,71 @@ export interface components {
          * @enum {string}
          */
         ConfidenceDto: "high" | "medium" | "low" | "estimated";
+        /**
+         * @description A config's current version, content included. Returned by `POST /configs`
+         *     and `GET /configs/{id}`. Mirrors [`ConfigWithContent`].
+         */
+        ConfigDetailDto: {
+            /** @description The current version's canonical HCL content. */
+            content: string;
+            /** @description Hex-encoded SHA-256 digest of `content`. */
+            content_sha256: string;
+            /**
+             * Format: int32
+             * @description The current version number.
+             */
+            current_version: number;
+            /** @description The config's id (UUID text). */
+            id: string;
+            /** @description The config's name. */
+            name: string;
+            /**
+             * Format: int64
+             * @description When the current version was last touched, Unix seconds.
+             */
+            updated_at: number;
+        };
+        /**
+         * @description Response for `GET /configs/{id}/diff`: a unified diff between two
+         *     versions' canonical HCL content.
+         */
+        ConfigDiffDto: {
+            /**
+             * @description A standard unified diff (`---`/`+++` headers, `@@` hunks) from
+             *     `from`'s content to `to`'s.
+             */
+            diff: string;
+            /**
+             * Format: int32
+             * @description The version number diffed from.
+             */
+            from: number;
+            /**
+             * Format: int32
+             * @description The version number diffed to.
+             */
+            to: number;
+        };
+        /**
+         * @description A config's identity and pointer metadata, without content. Returned by
+         *     `GET /configs`. Mirrors [`ConfigSummary`].
+         */
+        ConfigSummaryDto: {
+            /**
+             * Format: int32
+             * @description The current version number.
+             */
+            current_version: number;
+            /** @description The config's id (UUID text). */
+            id: string;
+            /** @description The config's name. */
+            name: string;
+            /**
+             * Format: int64
+             * @description When the current version was last touched, Unix seconds.
+             */
+            updated_at: number;
+        };
         /** @description Cost surface, including utilization-adjusted idle burn. */
         CostMetricsDto: {
             per_hour: components["schemas"]["MoneyDto"];
@@ -686,6 +866,18 @@ export interface components {
             performance?: null | components["schemas"]["Range"];
             /** @description Where the estimate came from (e.g. `benchmark`, `heuristic`). */
             provenance?: string | null;
+        };
+        /** @description Request body for `POST /configs`. */
+        CreateConfigRequest: {
+            /**
+             * @description The HCL configuration text. Canonicalized (parsed and reformatted)
+             *     before it is stored.
+             */
+            content: string;
+            /** @description An optional human note describing this version. */
+            message?: string | null;
+            /** @description The config's name (unique per workspace). */
+            name: string;
         };
         /** @description Email + password credentials for sign-up and sign-in. */
         Credentials: {
@@ -1259,6 +1451,56 @@ export interface components {
             token: string;
         };
         /**
+         * @description One version's full content plus its metadata. Returned by
+         *     `GET /configs/{id}/versions/{no}`. Mirrors [`VersionContent`].
+         */
+        VersionContentDto: {
+            /** @description This version's canonical HCL content. */
+            content: string;
+            /** @description Hex-encoded SHA-256 digest of `content`. */
+            content_sha256: string;
+            /**
+             * Format: int64
+             * @description When this version was created, Unix seconds.
+             */
+            created_at: number;
+            /** @description The account id (UUID text) that created this version, if any. */
+            created_by?: string | null;
+            /** @description An optional human note describing this version. */
+            message?: string | null;
+            /**
+             * Format: int32
+             * @description The version number (1-based, monotonic per config).
+             */
+            version_no: number;
+        };
+        /**
+         * @description One version's metadata, without its content. Returned by
+         *     `GET /configs/{id}/versions` and as the result of an append or rollback.
+         *     Mirrors [`VersionMeta`].
+         */
+        VersionMetaDto: {
+            /** @description Hex-encoded SHA-256 digest of this version's content. */
+            content_sha256: string;
+            /**
+             * Format: int64
+             * @description When this version was created, Unix seconds.
+             */
+            created_at: number;
+            /**
+             * @description The account id (UUID text) that created this version, if any. See
+             *     [`created_by_for`] for how this is derived from the caller's token.
+             */
+            created_by?: string | null;
+            /** @description An optional human note describing this version. */
+            message?: string | null;
+            /**
+             * Format: int32
+             * @description The version number (1-based, monotonic per config).
+             */
+            version_no: number;
+        };
+        /**
          * @description Request body for `POST /presets/{id}/emit`: the requirements the wizard
          *     collected. Mirrors [`amicu_recommend::WizardAnswers`].
          */
@@ -1308,6 +1550,7 @@ export interface components {
 }
 export type ActionKind = components['schemas']['ActionKind'];
 export type AddMemberRequest = components['schemas']['AddMemberRequest'];
+export type AppendVersionRequest = components['schemas']['AppendVersionRequest'];
 export type Artifact = components['schemas']['Artifact'];
 export type AssumptionDto = components['schemas']['AssumptionDto'];
 export type AuditEntryView = components['schemas']['AuditEntryView'];
@@ -1321,8 +1564,12 @@ export type ComparisonDto = components['schemas']['ComparisonDto'];
 export type ConcurrencyMetricsDto = components['schemas']['ConcurrencyMetricsDto'];
 export type Confidence = components['schemas']['Confidence'];
 export type ConfidenceDto = components['schemas']['ConfidenceDto'];
+export type ConfigDetailDto = components['schemas']['ConfigDetailDto'];
+export type ConfigDiffDto = components['schemas']['ConfigDiffDto'];
+export type ConfigSummaryDto = components['schemas']['ConfigSummaryDto'];
 export type CostMetricsDto = components['schemas']['CostMetricsDto'];
 export type CostPerformance = components['schemas']['CostPerformance'];
+export type CreateConfigRequest = components['schemas']['CreateConfigRequest'];
 export type Credentials = components['schemas']['Credentials'];
 export type Diagnostic = components['schemas']['Diagnostic'];
 export type DiagnosticReport = components['schemas']['DiagnosticReport'];
@@ -1380,6 +1627,8 @@ export type TuningReportDto = components['schemas']['TuningReportDto'];
 export type UseCaseDto = components['schemas']['UseCaseDto'];
 export type ValidateRequest = components['schemas']['ValidateRequest'];
 export type VerifyRequest = components['schemas']['VerifyRequest'];
+export type VersionContentDto = components['schemas']['VersionContentDto'];
+export type VersionMetaDto = components['schemas']['VersionMetaDto'];
 export type WizardAnswersDto = components['schemas']['WizardAnswersDto'];
 export type WorkloadEstimateDto = components['schemas']['WorkloadEstimateDto'];
 export type $defs = Record<string, never>;
@@ -1577,6 +1826,376 @@ export interface operations {
             };
             /** @description Billing is not configured on this server. */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_configs_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every config in the workspace, by name. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigSummaryDto"][];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_config_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateConfigRequest"];
+            };
+        };
+        responses: {
+            /** @description The created config's first version, content included. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigDetailDto"];
+                };
+            };
+            /** @description The submitted HCL failed to parse. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description A config with this name already exists. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_config_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The config's id (UUID). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The current version, content included. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigDetailDto"];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No config exists with this id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    diff_handler: {
+        parameters: {
+            query: {
+                /** @description The version number to diff from. */
+                from: number;
+                /** @description The version number to diff to. */
+                to: number;
+            };
+            header?: never;
+            path: {
+                /** @description The config's id (UUID). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A unified diff from `from`'s content to `to`'s. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigDiffDto"];
+                };
+            };
+            /** @description Missing or malformed `from`/`to` query parameters. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No config, or no such version (from or to), exists. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    rollback_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The config's id (UUID). */
+                id: string;
+                /** @description The version number to roll back to. */
+                no: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The freshly-minted version copying `no`'s content. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionMetaDto"];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No config, or no such version, exists. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_versions_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The config's id (UUID). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every version, oldest first. Empty (not 404) for an unknown config id. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionMetaDto"][];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    append_version_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The config's id (UUID). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AppendVersionRequest"];
+            };
+        };
+        responses: {
+            /** @description The newly-appended version's metadata. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionMetaDto"];
+                };
+            };
+            /** @description The submitted HCL failed to parse. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No config exists with this id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_version_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The config's id (UUID). */
+                id: string;
+                /** @description The version number. */
+                no: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description That version's full content and metadata. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionContentDto"];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No config, or no such version, exists. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

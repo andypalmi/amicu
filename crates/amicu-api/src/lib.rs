@@ -13,14 +13,19 @@
 //!   endpoint, which normalizes a submitted metrics + estimate snapshot and
 //!   returns the monitoring view (metric surface + estimate + advisory
 //!   suggestions) the measured-vs-estimated dashboard renders.
+//! - Config: the auth-gated [`/configs/*`](config) surface (create/list/get,
+//!   version history, append, rollback, and a server-computed diff) backed by
+//!   `amicu-store`'s [`amicu_store::config::ConfigStore`], storing config
+//!   content canonicalized so it and every diff stay stable.
 //!
 //! [`api_router`] assembles both plus a live `GET /openapi.json`. The served
 //! spec and the committed `crates/amicu-schema/openapi.json` artifact both come
 //! from [`api_openapi`], so they can never drift.
 //!
 //! Deliberately **not** exposed: `/apply` (state-mutating; executes downloads
-//! and launches - needs an execution sandbox) and `/stacks` / `/config`
-//! persistence (need server-side multi-tenant state that does not exist yet).
+//! and launches - needs an execution sandbox) and any runtime *state*
+//! persistence (that stays in `amicu-state`; see the `config` module's own
+//! docs for the config/state split).
 
 // The suggested `Duration::from_mins`/`from_days` are unstable
 // (duration_constructors) on our MSRV 1.97; keep `from_secs`.
@@ -28,6 +33,7 @@
 
 pub mod auth;
 pub mod billing;
+pub mod config;
 pub mod dto;
 pub mod engine;
 pub mod monitor;
@@ -47,6 +53,7 @@ use utoipa_axum::routes;
 
 pub use auth::{AuthApiState, auth_router};
 pub use billing::{BillingApiState, StripeConfig, billing_router, stripe_config_from_env};
+pub use config::{ConfigApiState, config_router};
 pub use engine::{AccessVerifier, EngineApiState};
 pub use openapi::ApiDoc;
 pub use org::{InMemoryOrgStore, OrgApiState, OrgStore, org_router};
@@ -91,13 +98,14 @@ pub fn openapi_json() -> String {
 /// Assemble the full API router: the unauthenticated auth surface, a live
 /// `GET /openapi.json`, the auth-gated engine endpoints, the billing surface
 /// (auth-gated checkout/portal/status plus the signature-authenticated webhook),
-/// and the Enterprise-gated organization console (`/org/*`: membership, RBAC,
-/// audit log).
+/// the Enterprise-gated organization console (`/org/*`: membership, RBAC,
+/// audit log), and the auth-gated config storage surface (`/configs/*`).
 pub fn api_router(
     auth_state: AuthApiState,
     engine_state: EngineApiState,
     billing_state: BillingApiState,
     org_state: OrgApiState,
+    config_state: ConfigApiState,
 ) -> Router {
     let (engine_router, spec) = engine_parts();
     let engine_router = engine_router
@@ -106,7 +114,7 @@ pub fn api_router(
         // any body is buffered.
         .layer(DefaultBodyLimit::max(engine::MAX_ENGINE_BODY_BYTES))
         .layer(from_fn_with_state(engine_state.clone(), engine::auth_gate))
-        .with_state(engine_state);
+        .with_state(engine_state.clone());
 
     Router::new()
         .route(
@@ -120,4 +128,5 @@ pub fn api_router(
         .merge(engine_router)
         .merge(billing_router(billing_state))
         .merge(org_router(org_state))
+        .merge(config_router(config_state, engine_state))
 }
