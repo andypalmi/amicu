@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO state_locks (workspace_id, stack_id, holder, lock_token, acquired_at, expires_at)\n            VALUES (\n                $1, $2, $3, $4,\n                extract(epoch FROM clock_timestamp())::bigint,\n                extract(epoch FROM clock_timestamp())::bigint + $5\n            )\n            ON CONFLICT (workspace_id, stack_id) DO UPDATE\n              SET holder = EXCLUDED.holder,\n                  lock_token = EXCLUDED.lock_token,\n                  acquired_at = EXCLUDED.acquired_at,\n                  expires_at = EXCLUDED.expires_at\n              WHERE state_locks.expires_at <= extract(epoch FROM clock_timestamp())::bigint\n            RETURNING lock_token\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "lock_token",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "db608025953f29244aedbf931c9aa1ddf0057cf414997208569eb3e8f8cd81ee"
+}

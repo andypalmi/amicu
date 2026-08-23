@@ -13,8 +13,9 @@
 //! share one database and one workspace without colliding: `stack_id` scopes
 //! `state_snapshots`/`state_current`/`state_locks` alongside `workspace_id`.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use amicu_core::Graph;
 use amicu_core::adapter::AdapterId;
@@ -215,6 +216,130 @@ async fn push_appends_history_without_mutating_prior_snapshots() {
         restored.graph, g1,
         "the first push's content is intact, unmutated by the second push or the rollback"
     );
+}
+
+/// Regression test for the CRITICAL TOCTOU race in `authorize()` (found by
+/// adversarial review of PR #108): a plain `SELECT` (no row lock) let a lease
+/// that expired *while a push transaction was still open* be legitimately
+/// reacquired and pushed by another holder before the first transaction
+/// committed; when the first transaction later resumed and committed (under
+/// READ COMMITTED, so its later statements observed the interim commit), it
+/// could silently rewrite `state_current` back over the second holder's
+/// change - discarding it without any error.
+///
+/// h1 acquires a short-lived (1s) lease and starts a push via the
+/// `push_with_delay_for_test` seam, which authorizes (the lease is still live
+/// at that instant) and then sleeps for 2s with the transaction - and the
+/// `state_locks` row lock `authorize` took - still open. h2 attempts to
+/// reacquire the lease partway through that sleep, well after the 1s lease
+/// has genuinely expired (per Postgres's own clock).
+///
+/// The CRITICAL assertion is that h2's `lock()` cannot complete while h1's
+/// transaction is open: it must block behind the `FOR UPDATE` row lock, not
+/// race in and interleave. Without the fix, h2 would complete immediately;
+/// `!lock2_task.is_finished()` after a generous wait catches that. Once h1's
+/// (validly-authorized) push commits, h2's blocked call unblocks and, the
+/// lease now being genuinely stale, succeeds - and its subsequent push
+/// chains cleanly after h1's, with neither silently lost nor overwritten.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn authorize_blocks_a_concurrent_reacquire_until_the_open_push_transaction_ends() {
+    let pool = pool().await;
+    let stack = unique("stack");
+
+    // A 1s lease: short enough to genuinely expire (per Postgres's own clock)
+    // while h1's push transaction is deliberately held open past it.
+    let h1 = backend(pool.clone(), WorkspaceId::DEFAULT, &stack).with_lease_ttl_seconds(1);
+    let lock1 = h1.lock().await.expect("h1 acquires the lease");
+
+    let mut g1 = sample_graph();
+    g1.deployments.clear();
+    let g1_check = g1.clone();
+
+    // h1's push authorizes (the lease is still live at this instant), then -
+    // simulating slow work - sleeps for 2s with the transaction, and the
+    // `state_locks` row lock `authorize` took, still open. This comfortably
+    // outlives the 1s lease.
+    let push1 = tokio::spawn(async move {
+        h1.push_with_delay_for_test(&snapshot(g1), &lock1, Duration::from_millis(2000))
+            .await
+    });
+
+    // Give h1 time to acquire the lease and enter (and pass) authorize()
+    // before h2 tries to race in.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // h2 attempts to reacquire the (by now, per Postgres's clock) genuinely
+    // expired lease. Spawned - and never cancelled - so it can be left
+    // blocked and observed without disturbing it.
+    let h2 = Arc::new(backend(pool.clone(), WorkspaceId::DEFAULT, &stack));
+    let h2_for_task = Arc::clone(&h2);
+    let lock2_task = tokio::spawn(async move { h2_for_task.lock().await });
+
+    // h1 is still sleeping (it does not wake until ~2s after acquiring the
+    // lease), so its push transaction - and the FOR UPDATE row lock
+    // `authorize` took - is still open. CRITICAL invariant under test: h2's
+    // `lock()` must not be able to complete during this window, even though
+    // the lease has genuinely expired. It must block on the row lock, not
+    // race ahead as in the original bug.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(
+        !lock2_task.is_finished(),
+        "h2's lock() must still be blocked behind h1's open push transaction \
+         (the exact TOCTOU window from the reported race): it must not be \
+         able to reacquire and race ahead while h1 has not yet committed"
+    );
+
+    // h1's push completes normally: it validly held the lease throughout, so
+    // nothing prevents its own commit.
+    push1
+        .await
+        .expect("task join")
+        .expect("h1's push, authorized before expiry, still succeeds");
+
+    // Only now that h1 has committed does h2's previously-blocked lock()
+    // unblock - and, the lease being genuinely stale, succeed.
+    let lock2 = lock2_task
+        .await
+        .expect("task join")
+        .expect("h2 reacquires only after h1's transaction ends");
+
+    let mut g2 = sample_graph();
+    g2.models.clear();
+    h2.push(&snapshot(g2.clone()), &lock2)
+        .await
+        .expect("h2 pushes after legitimately reacquiring");
+    h2.unlock(lock2).await.expect("unlock");
+
+    // No corruption: h1's push was not silently superseded or lost - both
+    // pushes are present in history, correctly chained in commit order - and
+    // h2's push, being the later one, is current.
+    let history = h2.history().await.expect("history");
+    assert_eq!(history.len(), 2, "both pushes are recorded");
+    assert_eq!(history[0].parent, None, "h1's push has no parent");
+    assert_eq!(
+        history[1].parent.as_deref(),
+        Some(history[0].id.as_str()),
+        "h2's push chains after h1's, not the other way around"
+    );
+
+    let current = h2.pull().await.expect("pull");
+    assert_eq!(
+        current.graph, g2,
+        "h2's push - the later, legitimately-authorized one - is current"
+    );
+
+    // h1's content is intact in history: never mutated, never lost.
+    let lock3 = h2.lock().await.expect("lock for the content check");
+    h2.rollback(&history[0], &lock3)
+        .await
+        .expect("roll back to h1's version to inspect it");
+    let h1_content = h2.pull().await.expect("pull h1's content");
+    assert_eq!(
+        h1_content.graph, g1_check,
+        "h1's content is intact and unmutated"
+    );
+    h2.unlock(lock3).await.expect("unlock");
 }
 
 #[tokio::test]

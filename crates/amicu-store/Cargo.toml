@@ -40,6 +40,11 @@ sha2 = "0.10"
 # amicu_state::lock::LockHandle's security note) - never a sequential or
 # derived counter.
 rand = "0.8"
+# Already a mandatory transitive dependency via sqlx's runtime-tokio feature;
+# named directly so `PostgresStateBackend::push_with_delay_for_test` (a
+# `#[doc(hidden)]` seam used only by the lock/TOCTOU regression test) can
+# sleep. Production callers always pass a zero delay, which never awaits.
+tokio = { version = "1", default-features = false, features = ["time"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

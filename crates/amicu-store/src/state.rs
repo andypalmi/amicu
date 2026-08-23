@@ -45,7 +45,24 @@
 //!
 //! `push` and `rollback` re-check the presented lock inside their own
 //! transaction (holder, token, and non-expired) before touching any row, so a
-//! stale or forged handle can never authorize a write.
+//! stale or forged handle can never authorize a write. That check
+//! (`authorize`) takes the `state_locks` row with `SELECT ... FOR UPDATE`,
+//! held until the enclosing transaction commits or rolls back: a concurrent
+//! `lock()` targeting the same row (its `INSERT ... ON CONFLICT DO UPDATE`)
+//! must acquire that same row lock to proceed, so it blocks until the
+//! authorizing push/rollback finishes. Without this, a plain `SELECT` would
+//! let a lease that expires *during* an open push/rollback transaction be
+//! legitimately reacquired and pushed by another holder while the first
+//! transaction is still in flight; when it later resumed and committed (still
+//! under READ COMMITTED, so its later statements see the interim commit) it
+//! could silently rewrite `state_current` back over the second holder's
+//! change. The row lock closes that window: a stale lease cannot be
+//! reacquired by anyone else until the transaction that authorized against it
+//! has fully finished.
+//!
+//! Lease staleness is judged by Postgres's own clock (`clock_timestamp()`),
+//! not each caller's local wall clock, so multi-instance clock skew cannot
+//! let a fast-clocked node treat a still-live lease as expired.
 
 use amicu_core::Graph;
 use amicu_core::adapter::{Adapter, AdapterError, AdapterId, DescribeCapabilities, HealthStatus};
@@ -55,6 +72,7 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::time::Duration;
 
 use crate::{WorkspaceId, begin_scoped, now_unix_seconds};
 
@@ -124,8 +142,16 @@ impl PostgresStateBackend {
     }
 
     /// Confirms `lock` matches the lease currently held for this backend's
-    /// (workspace, stack) and that it has not expired. Read-only: callers
-    /// still hold `tx` and can roll back cheaply on failure.
+    /// (workspace, stack) and that it has not expired, and holds a row lock
+    /// on it (`FOR UPDATE`) through the rest of the caller's transaction.
+    ///
+    /// The row lock is load-bearing, not incidental: without it, a concurrent
+    /// `lock()` could reacquire this exact lease (once genuinely stale) and
+    /// complete its own push/rollback and commit *while this transaction is
+    /// still open*, and this transaction's later statements (under READ
+    /// COMMITTED) would then observe that interim commit and could silently
+    /// clobber it. Taking the lock here forces any concurrent `lock()` on the
+    /// same row to block until this transaction ends, closing that window.
     async fn authorize(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -133,13 +159,19 @@ impl PostgresStateBackend {
     ) -> Result<(), AdapterError> {
         let wsid = self.workspace.as_uuid();
         let stack = self.stack_id();
-        let now = now_unix_seconds();
         let token_col = lock.token().cast_signed();
         let holder = lock.holder().as_str();
 
+        // `FOR UPDATE` blocks a concurrent `lock()` targeting the same row
+        // until this transaction commits or rolls back (see the doc comment
+        // above). Staleness is judged by Postgres's own clock
+        // (`clock_timestamp()`), not this process's local clock, so
+        // multi-instance clock skew cannot matter here.
         let held = sqlx::query!(
-            "SELECT holder, lock_token, expires_at FROM state_locks \
-             WHERE workspace_id = $1 AND stack_id = $2",
+            r#"SELECT holder, lock_token, expires_at,
+                      extract(epoch FROM clock_timestamp())::bigint AS "now!"
+               FROM state_locks WHERE workspace_id = $1 AND stack_id = $2
+               FOR UPDATE"#,
             wsid,
             stack,
         )
@@ -147,15 +179,125 @@ impl PostgresStateBackend {
         .await
         .map_err(|_| backend_err("failed to read lock"))?;
 
-        let authorized = held
-            .as_ref()
-            .is_some_and(|r| r.holder == holder && r.lock_token == token_col && r.expires_at > now);
+        let authorized = held.as_ref().is_some_and(|r| {
+            r.holder == holder && r.lock_token == token_col && r.expires_at > r.now
+        });
 
         if authorized {
             Ok(())
         } else {
             Err(StateError::LockNotHeld.into())
         }
+    }
+
+    /// Core of [`push`](StateBackendAdapter::push): authorizes `lock`,
+    /// appends a snapshot, and advances the current-version pointer, all in
+    /// one transaction. `delay`, slept immediately after authorizing (with
+    /// that transaction's `state_locks` row lock still held), lets a test
+    /// deterministically hold the transaction open across a concurrent
+    /// `lock()` attempt from another handle. Production callers always pass
+    /// [`Duration::ZERO`], which never awaits.
+    async fn push_impl(
+        &self,
+        snapshot: &StateSnapshot,
+        lock: &LockHandle,
+        delay: Duration,
+    ) -> Result<(), AdapterError> {
+        let mut tx = self.begin_tx().await?;
+        let wsid = self.workspace.as_uuid();
+        let stack = self.stack_id();
+
+        // Never overwrite without the exact, still-live lock guarding the state.
+        self.authorize(&mut tx, lock).await?;
+
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+
+        let next = sqlx::query!(
+            r#"SELECT (COALESCE(MAX(seq), -1) + 1) AS "next_seq!"
+               FROM state_snapshots WHERE workspace_id = $1 AND stack_id = $2"#,
+            wsid,
+            stack,
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| backend_err("failed to compute next version"))?;
+        let seq = next.next_seq;
+
+        let current = sqlx::query!(
+            "SELECT version FROM state_current WHERE workspace_id = $1 AND stack_id = $2",
+            wsid,
+            stack,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| backend_err("failed to read current version"))?;
+        let parent_version = current.map(|r| r.version);
+
+        // Mint our own version id and recompute the checksum fresh, exactly
+        // like the fake reference backend: the caller-supplied
+        // `snapshot.version` is a placeholder and is discarded.
+        let recorded = StateSnapshot::new(
+            format!("v{seq}"),
+            &snapshot.recorded_at,
+            snapshot.graph.clone(),
+        )?;
+        let content =
+            serde_json::to_value(&recorded.graph).map_err(|source| StateError::Corrupted {
+                detail: format!("graph failed to serialize: {source}"),
+            })?;
+        let created_at = now_unix_seconds();
+
+        sqlx::query!(
+            "INSERT INTO state_snapshots \
+             (workspace_id, stack_id, seq, version, parent_version, label, recorded_at, checksum, content, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            wsid,
+            stack,
+            seq,
+            recorded.version,
+            parent_version,
+            "push",
+            recorded.recorded_at,
+            recorded.checksum,
+            content,
+            created_at,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| backend_err("failed to append snapshot"))?;
+
+        sqlx::query!(
+            "INSERT INTO state_current (workspace_id, stack_id, version) VALUES ($1, $2, $3) \
+             ON CONFLICT (workspace_id, stack_id) DO UPDATE SET version = EXCLUDED.version",
+            wsid,
+            stack,
+            recorded.version,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| backend_err("failed to advance current version"))?;
+
+        tx.commit()
+            .await
+            .map_err(|_| backend_err("failed to commit push"))?;
+        Ok(())
+    }
+
+    /// Test-only seam over [`push_impl`](Self::push_impl), exposing its
+    /// injectable delay. Not part of the [`StateBackendAdapter`] contract;
+    /// exists solely so the lock/TOCTOU regression test can deterministically
+    /// hold a push transaction open across a concurrent `lock()` from another
+    /// handle. `#[doc(hidden)]` because it is not meant for production use.
+    #[doc(hidden)]
+    pub async fn push_with_delay_for_test(
+        &self,
+        snapshot: &StateSnapshot,
+        lock: &LockHandle,
+        delay: Duration,
+    ) -> Result<(), AdapterError> {
+        self.push_impl(snapshot, lock, delay).await
     }
 }
 
@@ -250,90 +392,14 @@ impl StateBackendAdapter for PostgresStateBackend {
     }
 
     async fn push(&self, snapshot: &StateSnapshot, lock: &LockHandle) -> Result<(), AdapterError> {
-        let mut tx = self.begin_tx().await?;
-        let wsid = self.workspace.as_uuid();
-        let stack = self.stack_id();
-
-        // Never overwrite without the exact, still-live lock guarding the state.
-        self.authorize(&mut tx, lock).await?;
-
-        let next = sqlx::query!(
-            r#"SELECT (COALESCE(MAX(seq), -1) + 1) AS "next_seq!"
-               FROM state_snapshots WHERE workspace_id = $1 AND stack_id = $2"#,
-            wsid,
-            stack,
-        )
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|_| backend_err("failed to compute next version"))?;
-        let seq = next.next_seq;
-
-        let current = sqlx::query!(
-            "SELECT version FROM state_current WHERE workspace_id = $1 AND stack_id = $2",
-            wsid,
-            stack,
-        )
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|_| backend_err("failed to read current version"))?;
-        let parent_version = current.map(|r| r.version);
-
-        // Mint our own version id and recompute the checksum fresh, exactly
-        // like the fake reference backend: the caller-supplied
-        // `snapshot.version` is a placeholder and is discarded.
-        let recorded = StateSnapshot::new(
-            format!("v{seq}"),
-            &snapshot.recorded_at,
-            snapshot.graph.clone(),
-        )?;
-        let content =
-            serde_json::to_value(&recorded.graph).map_err(|source| StateError::Corrupted {
-                detail: format!("graph failed to serialize: {source}"),
-            })?;
-        let created_at = now_unix_seconds();
-
-        sqlx::query!(
-            "INSERT INTO state_snapshots \
-             (workspace_id, stack_id, seq, version, parent_version, label, recorded_at, checksum, content, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-            wsid,
-            stack,
-            seq,
-            recorded.version,
-            parent_version,
-            "push",
-            recorded.recorded_at,
-            recorded.checksum,
-            content,
-            created_at,
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| backend_err("failed to append snapshot"))?;
-
-        sqlx::query!(
-            "INSERT INTO state_current (workspace_id, stack_id, version) VALUES ($1, $2, $3) \
-             ON CONFLICT (workspace_id, stack_id) DO UPDATE SET version = EXCLUDED.version",
-            wsid,
-            stack,
-            recorded.version,
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| backend_err("failed to advance current version"))?;
-
-        tx.commit()
-            .await
-            .map_err(|_| backend_err("failed to commit push"))?;
-        Ok(())
+        self.push_impl(snapshot, lock, Duration::ZERO).await
     }
 
     async fn lock(&self) -> Result<LockHandle, AdapterError> {
         let mut tx = self.begin_tx().await?;
         let wsid = self.workspace.as_uuid();
         let stack = self.stack_id();
-        let now = now_unix_seconds();
-        let expires_at = now + self.lease_ttl_seconds;
+        let ttl = self.lease_ttl_seconds;
         // Unpredictable by construction (OS CSPRNG), never a sequential or
         // derived counter - see `LockHandle`'s anti-forgery requirement.
         let token = OsRng.next_u64();
@@ -342,25 +408,35 @@ impl StateBackendAdapter for PostgresStateBackend {
 
         // Atomic upsert: only wins the row when absent or stale (expired).
         // Postgres resolves the ON CONFLICT under a row lock, so concurrent
-        // callers cannot both win.
+        // callers cannot both win, and this blocks entirely while a push or
+        // rollback holds this row via `authorize`'s `FOR UPDATE` (see the
+        // module docs). Staleness and the new lease's `expires_at` are both
+        // computed from Postgres's own clock (`clock_timestamp()`), not this
+        // process's, so multi-instance clock skew cannot matter here; the DO
+        // UPDATE branch's `WHERE` is only evaluated once any such contending
+        // lock is released, so it reflects the actual current time then, not
+        // whenever this statement was first issued.
         let acquired = sqlx::query!(
             r#"
             INSERT INTO state_locks (workspace_id, stack_id, holder, lock_token, acquired_at, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES (
+                $1, $2, $3, $4,
+                extract(epoch FROM clock_timestamp())::bigint,
+                extract(epoch FROM clock_timestamp())::bigint + $5
+            )
             ON CONFLICT (workspace_id, stack_id) DO UPDATE
               SET holder = EXCLUDED.holder,
                   lock_token = EXCLUDED.lock_token,
                   acquired_at = EXCLUDED.acquired_at,
                   expires_at = EXCLUDED.expires_at
-              WHERE state_locks.expires_at <= $5
+              WHERE state_locks.expires_at <= extract(epoch FROM clock_timestamp())::bigint
             RETURNING lock_token
             "#,
             wsid,
             stack,
             holder,
             token_col,
-            now,
-            expires_at,
+            ttl,
         )
         .fetch_optional(&mut *tx)
         .await
