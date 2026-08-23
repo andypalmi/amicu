@@ -116,7 +116,7 @@ impl InMemoryStateBackend {
     /// [`StateBackendAdapter`] contract.
     #[doc(hidden)]
     pub fn set_corrupt_for_test(&self) {
-        self.inner.lock().unwrap().corrupt = true;
+        self.inner.lock().expect("state backend poisoned").corrupt = true;
     }
 }
 
@@ -145,7 +145,7 @@ impl DescribeCapabilities for InMemoryStateBackend {
 #[async_trait]
 impl StateBackendAdapter for InMemoryStateBackend {
     async fn pull(&self) -> Result<StateSnapshot, AdapterError> {
-        let inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().expect("state backend poisoned");
         if inner.corrupt {
             return Err(StateError::Corrupted {
                 detail: "backend flagged the store as corrupt".into(),
@@ -168,7 +168,7 @@ impl StateBackendAdapter for InMemoryStateBackend {
     }
 
     async fn push(&self, snapshot: &StateSnapshot, lock: &LockHandle) -> Result<(), AdapterError> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().expect("state backend poisoned");
         if inner.corrupt {
             return Err(StateError::Corrupted {
                 detail: "refusing to overwrite corrupt state".into(),
@@ -194,7 +194,7 @@ impl StateBackendAdapter for InMemoryStateBackend {
     }
 
     async fn lock(&self) -> Result<LockHandle, AdapterError> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().expect("state backend poisoned");
         if let Some(held) = inner.lock {
             return Err(StateError::LockContention {
                 holder: format!("{}#{held}", self.id),
@@ -210,7 +210,7 @@ impl StateBackendAdapter for InMemoryStateBackend {
     }
 
     async fn unlock(&self, handle: LockHandle) -> Result<(), AdapterError> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().expect("state backend poisoned");
         match inner.lock {
             Some(held) if held == handle.token() && handle.holder() == &self.id => {
                 inner.lock = None;
@@ -221,7 +221,12 @@ impl StateBackendAdapter for InMemoryStateBackend {
     }
 
     async fn history(&self) -> Result<Vec<StateVersion>, AdapterError> {
-        Ok(self.inner.lock().unwrap().history.clone())
+        Ok(self
+            .inner
+            .lock()
+            .expect("state backend poisoned")
+            .history
+            .clone())
     }
 
     async fn rollback(
@@ -229,7 +234,7 @@ impl StateBackendAdapter for InMemoryStateBackend {
         version: &StateVersion,
         lock: &LockHandle,
     ) -> Result<(), AdapterError> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().expect("state backend poisoned");
         if inner.corrupt {
             return Err(StateError::Corrupted {
                 detail: "refusing to roll back corrupt state".into(),

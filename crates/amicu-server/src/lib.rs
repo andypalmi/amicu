@@ -417,10 +417,16 @@ pub async fn build_app(config: &Config) -> Result<Router, Error> {
     // rebase-ability reason documented on that block. `id` names the single
     // state stream this dev/single-node bootstrap manages; a multi-tenant
     // deployment would scope one instance per workspace/stack instead.
-    // `amicu-api` does not yet expose an HTTP surface for state (that is
-    // separate future work under #116), so nothing downstream consumes this
-    // today - this wiring exists so the backend is provably selectable and
-    // constructible now, ahead of that surface landing.
+    //
+    // TODO(amicu-planning#116): `amicu-api` does not yet expose an HTTP
+    // surface for state, so there is no `StateApiState`/`state_router`
+    // equivalent of `ConfigApiState`/`config_router` for this to attach to
+    // yet - inventing one here would be new consumer plumbing ahead of any
+    // actual consumer. Until that surface lands, this local variable is
+    // intentionally unused (hence the `_` prefix): it still runs migrations
+    // and proves the backend is selectable and constructible, and should be
+    // threaded into `api_router`/`AppState` the same way `config_store` is
+    // as soon as a route needs it.
     let _state_backend: Arc<dyn StateBackendAdapter> =
         if let Ok(database_url) = std::env::var("DATABASE_URL") {
             let pool = amicu_store::connect(&database_url)
