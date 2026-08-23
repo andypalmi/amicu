@@ -20,8 +20,10 @@ use amicu_auth::Tier;
 use amicu_auth::refresh::{RefreshConsume, RefreshStore, mint, mint_in_family, new_family_id};
 use amicu_auth::reset::{ResetConsume, ResetStore, mint as mint_reset};
 use amicu_auth::user::{User, UserStore};
+use amicu_auth::verify::{VerifyConsume, VerifyStore, mint as mint_verify};
 use amicu_store::{
-    PostgresRefreshStore, PostgresResetStore, PostgresUserStore, connect, run_migrations,
+    PostgresRefreshStore, PostgresResetStore, PostgresUserStore, PostgresVerifyStore, WorkspaceId,
+    connect, run_migrations,
 };
 use sqlx::PgPool;
 
@@ -281,5 +283,75 @@ async fn reset_is_single_use_and_rejects_expired_and_unknown() {
             .await
             .expect("consume unknown"),
         ResetConsume::NotFound
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn verify_is_single_use_and_rejects_expired_and_unknown() {
+    let store = PostgresVerifyStore::new(pool().await);
+    let user = unique("usr");
+
+    let minted = mint_verify(&user, FAR_FUTURE);
+    let hash = minted.record.token_hash;
+    store.insert(minted.record).await.expect("insert verify");
+
+    // First consume wins and reports the user to mark verified.
+    assert_eq!(
+        store.consume(&hash, 0).await.expect("consume"),
+        VerifyConsume::Consumed {
+            user_id: user.clone()
+        }
+    );
+    // Replay is rejected as reuse (the atomic compare-and-mark won only once).
+    assert_eq!(
+        store.consume(&hash, 0).await.expect("re-consume"),
+        VerifyConsume::Reuse
+    );
+
+    // Expired token is rejected as Expired, not Consumed.
+    let expired = mint_verify(&user, 100);
+    let expired_hash = expired.record.token_hash;
+    store.insert(expired.record).await.expect("insert expired");
+    assert_eq!(
+        store.consume(&expired_hash, 100).await.expect("consume"),
+        VerifyConsume::Expired
+    );
+
+    // Never-minted token is NotFound.
+    let unknown = mint_verify(&user, FAR_FUTURE);
+    assert_eq!(
+        store
+            .consume(&unknown.record.token_hash, 0)
+            .await
+            .expect("consume unknown"),
+        VerifyConsume::NotFound
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn verify_token_is_invisible_to_another_workspace() {
+    let shared = pool().await;
+    // Mint into the default (single-tenant) workspace.
+    let default_store = PostgresVerifyStore::new(shared.clone());
+    let user = unique("usr");
+    let minted = mint_verify(&user, FAR_FUTURE);
+    let hash = minted.record.token_hash;
+    default_store.insert(minted.record).await.expect("insert");
+
+    // A store bound to a different workspace shares the same token hash space but
+    // must not see the other tenant's row: the workspace_id predicate (and the
+    // RLS backstop) scope it out, so consuming reports NotFound, not Consumed.
+    let other_store = PostgresVerifyStore::with_workspace(shared, WorkspaceId::new());
+    assert_eq!(
+        other_store.consume(&hash, 0).await.expect("cross-tenant"),
+        VerifyConsume::NotFound
+    );
+
+    // The token is still live for its own workspace.
+    assert_eq!(
+        default_store.consume(&hash, 0).await.expect("consume"),
+        VerifyConsume::Consumed { user_id: user }
     );
 }
