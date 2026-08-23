@@ -159,8 +159,11 @@ pub enum StoreError {
 
 /// Opens a connection pool to the given Postgres `database_url`.
 ///
-/// The pool is created lazily: this returns once options are validated, without
-/// requiring an eager connection.
+/// [`PgPoolOptions::connect`] connects **eagerly**: this awaits a real
+/// connection (and validates the credentials/network path) before returning,
+/// rather than deferring the first connection to the pool's first use. That is
+/// the preferable behavior here - it turns a bad `DATABASE_URL` into an
+/// immediate startup error instead of a failure on the first request.
 pub async fn connect(database_url: &str) -> Result<PgPool, StoreError> {
     let pool = PgPoolOptions::new()
         .max_connections(10)

@@ -1,10 +1,25 @@
 # Local/self-host development database for amicu-store.
 #
 #   docker compose up -d postgres
-#   DATABASE_URL=postgres://amicu:amicu@localhost:5432/amicu
+#   DATABASE_URL=postgres://amicu_app:amicu_app@localhost:5432/amicu
 #
-# The DATABASE_URL above is the self-host/dev connection string used by the
-# store and its (ignored) migration integration test.
+# The DATABASE_URL above is the self-host/dev connection string the app (and
+# its ignored migration integration test) should use. `amicu`/`amicu`
+# (POSTGRES_USER/POSTGRES_PASSWORD below) is the Postgres bootstrap
+# superuser: it is used only by initdb and by
+# docker/postgres-init/01-app-role.sql, which provisions the ordinary,
+# non-superuser `amicu_app` role on first startup. The application must
+# connect as `amicu_app`, not `amicu`: `amicu-store`'s migrations enable
+# `FORCE ROW LEVEL SECURITY` as a backstop behind the query-level
+# workspace_id predicate, and a superuser (or a BYPASSRLS role) bypasses RLS
+# entirely - even with FORCE - which would make that backstop a permanent
+# no-op. See docker/postgres-init/01-app-role.sql and
+# crates/amicu-store/migrations/0003_refresh_tokens.sql for the full
+# rationale.
+#
+# Production/self-host deployments should provision their own equivalent
+# least-privilege role (never connect as a database superuser) - the
+# GRANTs in docker/postgres-init/01-app-role.sql are a template.
 services:
   postgres:
     image: postgres:16
@@ -16,6 +31,7 @@ services:
       - "5432:5432"
     volumes:
       - amicu_pgdata:/var/lib/postgresql/data
+      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U amicu -d amicu"]
       interval: 5s

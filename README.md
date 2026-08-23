@@ -94,11 +94,20 @@ self-host, bring up the bundled Postgres with Docker Compose:
 
 ```bash
 docker compose up -d postgres
-export DATABASE_URL=postgres://amicu:amicu@localhost:5432/amicu
+export DATABASE_URL=postgres://amicu_app:amicu_app@localhost:5432/amicu
 ```
 
 That `DATABASE_URL` is the dev/self-host connection string used by the store and its
-migration integration test.
+migration integration test. It connects as `amicu_app`, a dedicated non-superuser role
+provisioned by `docker/postgres-init/01-app-role.sql` on first container startup - not as
+`amicu`, the Postgres bootstrap superuser (`POSTGRES_USER`/`POSTGRES_PASSWORD` in
+`docker-compose.yml`). This matters: `amicu-store`'s migrations enable `FORCE ROW LEVEL
+SECURITY` on every workspace-scoped table as a backstop behind the query-level
+`workspace_id` predicate on every statement, but a superuser (or any role with
+`BYPASSRLS`) bypasses RLS entirely, even with `FORCE`. Connecting as the superuser would
+make that backstop a permanent no-op. A production/self-host deployment should provision
+its own equivalent least-privilege role rather than ever connecting as a database
+superuser - `docker/postgres-init/01-app-role.sql` is a template for the required GRANTs.
 
 Self-hosted state is control-plane metadata and secret *references* only - never plaintext
 secret values (see `amicu-core`'s `SecretValue`/`SecretRef` split). `amicu-store` does not
