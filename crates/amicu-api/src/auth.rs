@@ -411,8 +411,9 @@ pub(crate) async fn resend_verification(
 }
 
 /// Render a token pair for the wire. This is the one legitimate place the
-/// opaque refresh secret is serialized: to its owner, over TLS.
-fn to_response(pair: &TokenPair) -> Result<TokenResponse, ApiError> {
+/// opaque refresh secret is serialized: to its owner, over TLS. Shared with the
+/// session/workspace-switch surface, which mints the same pair shape.
+pub(crate) fn to_response(pair: &TokenPair) -> Result<TokenResponse, ApiError> {
     let refresh_token = pair
         .refresh_token
         .expose_secret_str()
@@ -496,7 +497,11 @@ impl IntoResponse for ApiError {
             // 401 so a verified-but-wrong-password attempt cannot be told from an
             // unverified one: the gate is checked only after the password
             // verifies.
-            AuthError::EmailUnverified => StatusCode::FORBIDDEN,
+            // `Forbidden`: not a member of the target workspace - a switch (or any
+            // mint path's server-side membership re-check) found no
+            // `workspace_members` row; no token is minted. Shares the 403 with the
+            // unverified-email gate.
+            AuthError::EmailUnverified | AuthError::Forbidden => StatusCode::FORBIDDEN,
             // Internal-only; sign-up never surfaces it (anti-enumeration).
             AuthError::UserExists => StatusCode::CONFLICT,
             AuthError::RateLimited => StatusCode::TOO_MANY_REQUESTS,

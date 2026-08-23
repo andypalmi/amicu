@@ -509,6 +509,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/session/workspace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Switch the active workspace: mint a fresh token pair scoped to the target.
+         * @description The caller names a target workspace; the server mints a new pair ONLY IF
+         *     `workspace_members(target, sub)` exists (re-checked here, never trusted from
+         *     the request), and returns `403` otherwise with no token minted. The new pair
+         *     opens a fresh refresh family scoped to the target.
+         */
+        post: operations["switch_workspace_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/signup": {
         parameters: {
             query?: never;
@@ -629,6 +652,27 @@ export interface paths {
          *     yet verified. Mirrors the identical-response defense on `/recover`.
          */
         post: operations["resend_verification"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/workspaces": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the workspaces the authenticated caller belongs to.
+         * @description Scoped to the caller's OWN memberships (keyed by the verified `sub`): a
+         *     caller can only ever see their own.
+         */
+        get: operations["list_workspaces_handler"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1361,6 +1405,14 @@ export interface components {
             /** @description The proposed patch. */
             patch: components["schemas"]["Patch"];
         };
+        /** @description A request to switch the active workspace. */
+        SwitchWorkspaceRequest: {
+            /**
+             * @description The workspace to switch to (UUID). The caller must be a member; the
+             *     server re-checks and refuses (`403`) otherwise.
+             */
+            workspace_id: string;
+        };
         /**
          * @description Rule trigger points. Every field is optional and independent: provide any
          *     subset and the omitted fields fall back to the engine's conservative
@@ -1541,6 +1593,20 @@ export interface components {
             expected_tpot_ms: components["schemas"]["EstimateRangeDto"];
             expected_ttft_ms: components["schemas"]["EstimateRangeDto"];
         };
+        /** @description One workspace the caller belongs to. */
+        WorkspaceView: {
+            /** @description The workspace's human-facing name. */
+            name: string;
+            /** @description The caller's role in the workspace (`owner`/`admin`/`member`/`viewer`). */
+            role: string;
+            /** @description The workspace id (UUID). */
+            workspace_id: string;
+        };
+        /** @description The list-my-workspaces response. */
+        WorkspacesResponse: {
+            /** @description Every workspace the authenticated caller is a member of. */
+            workspaces: components["schemas"]["WorkspaceView"][];
+        };
     };
     responses: never;
     parameters: never;
@@ -1619,6 +1685,7 @@ export type SourceLocation = components['schemas']['SourceLocation'];
 export type StackMetricsDto = components['schemas']['StackMetricsDto'];
 export type SuggestedChangeDto = components['schemas']['SuggestedChangeDto'];
 export type SuggestedFix = components['schemas']['SuggestedFix'];
+export type SwitchWorkspaceRequest = components['schemas']['SwitchWorkspaceRequest'];
 export type ThresholdsDto = components['schemas']['ThresholdsDto'];
 export type ThroughputMetricsDto = components['schemas']['ThroughputMetricsDto'];
 export type TierDto = components['schemas']['TierDto'];
@@ -1631,6 +1698,8 @@ export type VersionContentDto = components['schemas']['VersionContentDto'];
 export type VersionMetaDto = components['schemas']['VersionMetaDto'];
 export type WizardAnswersDto = components['schemas']['WizardAnswersDto'];
 export type WorkloadEstimateDto = components['schemas']['WorkloadEstimateDto'];
+export type WorkspaceView = components['schemas']['WorkspaceView'];
+export type WorkspacesResponse = components['schemas']['WorkspacesResponse'];
 export type $defs = Record<string, never>;
 export interface operations {
     jwks: {
@@ -2910,6 +2979,51 @@ export interface operations {
             };
         };
     };
+    switch_workspace_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SwitchWorkspaceRequest"];
+            };
+        };
+        responses: {
+            /** @description Switched: a fresh access + refresh token pair scoped to the target workspace. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenResponse"];
+                };
+            };
+            /** @description The workspace_id is not a valid workspace id. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The caller is not a member of the target workspace; no token is minted. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     sign_up: {
         parameters: {
             query?: never;
@@ -3129,6 +3243,33 @@ export interface operations {
             };
             /** @description Rate limited. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_workspaces_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The authenticated caller's workspace memberships. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspacesResponse"];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };

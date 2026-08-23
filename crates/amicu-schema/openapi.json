@@ -1330,6 +1330,52 @@
         }
       }
     },
+    "/session/workspace": {
+      "post": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Switch the active workspace: mint a fresh token pair scoped to the target.",
+        "description": "The caller names a target workspace; the server mints a new pair ONLY IF\n`workspace_members(target, sub)` exists (re-checked here, never trusted from\nthe request), and returns `403` otherwise with no token minted. The new pair\nopens a fresh refresh family scoped to the target.",
+        "operationId": "switch_workspace_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SwitchWorkspaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Switched: a fresh access + refresh token pair scoped to the target workspace.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The workspace_id is not a valid workspace id."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "The caller is not a member of the target workspace; no token is minted."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/signup": {
       "post": {
         "tags": [
@@ -1549,6 +1595,36 @@
             "description": "Rate limited."
           }
         }
+      }
+    },
+    "/workspaces": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "summary": "List the workspaces the authenticated caller belongs to.",
+        "description": "Scoped to the caller's OWN memberships (keyed by the verified `sub`): a\ncaller can only ever see their own.",
+        "operationId": "list_workspaces_handler",
+        "responses": {
+          "200": {
+            "description": "The authenticated caller's workspace memberships.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspacesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     }
   },
@@ -3214,6 +3290,19 @@
           }
         }
       },
+      "SwitchWorkspaceRequest": {
+        "type": "object",
+        "description": "A request to switch the active workspace.",
+        "required": [
+          "workspace_id"
+        ],
+        "properties": {
+          "workspace_id": {
+            "type": "string",
+            "description": "The workspace to switch to (UUID). The caller must be a member; the\nserver re-checks and refuses (`403`) otherwise."
+          }
+        }
+      },
       "ThresholdsDto": {
         "type": "object",
         "description": "Rule trigger points. Every field is optional and independent: provide any\nsubset and the omitted fields fall back to the engine's conservative\ndefaults. Sending `{ \"gpu_util_high\": 0.9 }` overrides only that one trigger\npoint and leaves the rest at their defaults.",
@@ -3595,6 +3684,45 @@
             "$ref": "#/components/schemas/EstimateRangeDto"
           }
         }
+      },
+      "WorkspaceView": {
+        "type": "object",
+        "description": "One workspace the caller belongs to.",
+        "required": [
+          "workspace_id",
+          "name",
+          "role"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The workspace's human-facing name."
+          },
+          "role": {
+            "type": "string",
+            "description": "The caller's role in the workspace (`owner`/`admin`/`member`/`viewer`)."
+          },
+          "workspace_id": {
+            "type": "string",
+            "description": "The workspace id (UUID)."
+          }
+        }
+      },
+      "WorkspacesResponse": {
+        "type": "object",
+        "description": "The list-my-workspaces response.",
+        "required": [
+          "workspaces"
+        ],
+        "properties": {
+          "workspaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceView"
+            },
+            "description": "Every workspace the authenticated caller is a member of."
+          }
+        }
       }
     },
     "securitySchemes": {
@@ -3637,6 +3765,10 @@
     {
       "name": "config",
       "description": "HCL config storage and version history: create/list/get, append-only version history, rollback (mints a new version, never rewrites), and a server-computed unified diff. Content is canonicalized before it is stored (auth-gated, Community-usable)."
+    },
+    {
+      "name": "session",
+      "description": "Workspace claim in tokens: list the authenticated caller's workspace memberships and switch the active workspace (mints a fresh token pair scoped to the target only if the caller is a member; 403 otherwise)."
     }
   ]
 }

@@ -11,10 +11,12 @@ use crate::issuer::{Clock, SystemClock, TokenIssuer};
 use crate::jwks::{Jwks, OpenIdConfiguration};
 use crate::key::SigningKey;
 use crate::keyring::Keyring;
+use crate::membership::{MembershipStore, PersonalMembershipStore, WorkspaceMembership};
 use crate::notify::{Notification, NotificationKind, Notifier};
 use crate::password::{check_password_policy, hash_password, verify_password};
 use crate::refresh::{self, RefreshStore};
 use crate::reset::{self, ResetStore};
+use crate::tenant::WorkspaceId;
 use crate::user::{User, UserStore};
 use crate::verify::{self, VerifyStore};
 
@@ -68,6 +70,13 @@ pub struct AuthService<C: Clock = SystemClock> {
     refresh: Arc<dyn RefreshStore>,
     resets: Arc<dyn ResetStore>,
     verifies: Arc<dyn VerifyStore>,
+    /// The workspace-membership authority: resolves `wsrole`/`tier` at mint time
+    /// and re-validates membership on refresh rotation and workspace switch.
+    /// Defaults to a [`PersonalMembershipStore`] over the user store (the
+    /// zero-config dev/in-memory path); the Postgres deployment installs the
+    /// real multi-workspace store via
+    /// [`with_membership_store`](AuthService::with_membership_store).
+    memberships: Arc<dyn MembershipStore>,
     notifier: Arc<dyn Notifier>,
     base_url: String,
 }
@@ -88,6 +97,11 @@ impl<C: Clock> AuthService<C> {
         notifier: Arc<dyn Notifier>,
         base_url: impl Into<String>,
     ) -> Self {
+        // Default membership authority: each user's single personal workspace,
+        // derived from the user store. The Postgres deployment overrides this
+        // with the real multi-workspace store via `with_membership_store`.
+        let memberships: Arc<dyn MembershipStore> =
+            Arc::new(PersonalMembershipStore::new(users.clone()));
         Self {
             keyring: RwLock::new(keyring),
             issuer,
@@ -95,9 +109,21 @@ impl<C: Clock> AuthService<C> {
             refresh,
             resets,
             verifies,
+            memberships,
             notifier,
             base_url: base_url.into(),
         }
+    }
+
+    /// Install the workspace-membership authority (the real multi-workspace
+    /// store on the Postgres path). Without this, the service uses a
+    /// [`PersonalMembershipStore`] that knows only each user's personal
+    /// workspace - correct for zero-config dev, but it cannot switch to shared
+    /// workspaces or reflect invites/removals.
+    #[must_use]
+    pub fn with_membership_store(mut self, memberships: Arc<dyn MembershipStore>) -> Self {
+        self.memberships = memberships;
+        self
     }
 
     /// Register a new user.
@@ -201,7 +227,12 @@ impl<C: Clock> AuthService<C> {
         if require_email_verification() && !user.email_verified {
             return Err(AuthError::EmailUnverified);
         }
-        self.issue_pair(&user).await
+        // Fresh sign-in defaults to the user's personal workspace (their Owner
+        // home). A multi-workspace user switches afterwards via
+        // `switch_workspace`. Membership/role/tier are resolved server-side
+        // inside `issue_pair_for_workspace`.
+        self.issue_pair_for_workspace(&user, user.personal_workspace_id)
+            .await
     }
 
     /// Rotate a refresh token: validate it, revoke it, and issue a fresh pair
@@ -236,14 +267,30 @@ impl<C: Clock> AuthService<C> {
                 self.refresh.compromise_family(&family_id).await?;
                 Err(AuthError::RefreshInvalid)
             }
-            // This caller won the rotation; mint the successor into the family.
-            refresh::RefreshConsume::Consumed { user_id, family_id } => {
+            // This caller won the rotation; re-validate membership in the SAME
+            // workspace the token was minted for, then mint the successor into
+            // the family. Removed member -> the mint refuses (Forbidden), which
+            // we surface as a failed refresh: the old token is already consumed
+            // and nothing new is minted, so the session dies within the access
+            // TTL. Role/tier change -> the successor carries the fresh values
+            // (`issue_pair_in_family_for_workspace` re-reads them server-side).
+            refresh::RefreshConsume::Consumed {
+                user_id,
+                workspace_id,
+                family_id,
+            } => {
                 let user = self
                     .users
                     .get_by_id(&user_id)
                     .await?
                     .ok_or(AuthError::RefreshInvalid)?;
-                self.issue_pair_in_family(&user, &family_id).await
+                self.issue_pair_in_family_for_workspace(&user, workspace_id, &family_id)
+                    .await
+                    .map_err(|e| match e {
+                        // No longer a member of wsid: the refresh fails outright.
+                        AuthError::Forbidden => AuthError::RefreshInvalid,
+                        other => other,
+                    })
             }
         }
     }
@@ -537,24 +584,83 @@ impl<C: Clock> AuthService<C> {
         });
     }
 
-    /// Issue a token pair opening a brand-new refresh family (fresh sign-in).
-    async fn issue_pair(&self, user: &User) -> Result<TokenPair> {
-        self.issue_pair_in_family(user, &refresh::new_family_id())
+    /// List the workspaces the authenticated user belongs to (id, name, role).
+    ///
+    /// Scoped to the SUBJECT's own memberships: a caller sees only their own.
+    /// Backs `GET /workspaces`.
+    ///
+    /// # Errors
+    /// Propagates store errors.
+    pub async fn list_workspaces(&self, user_id: &str) -> Result<Vec<WorkspaceMembership>> {
+        self.memberships.list_for_user(user_id).await
+    }
+
+    /// Switch the active workspace: mint a fresh token pair scoped to `target`,
+    /// opening a NEW refresh family - but ONLY IF the subject is a member of
+    /// `target` (re-checked server-side against `workspace_members`).
+    ///
+    /// The client never asserts a workspace it isn't a member of: membership is
+    /// resolved here, from the store of record, using only the verified `sub`
+    /// and the requested `target`.
+    ///
+    /// # Errors
+    /// [`AuthError::Forbidden`] if the subject is not a member of `target` (the
+    /// API maps this to `403`, and no token is minted); propagates store errors.
+    pub async fn switch_workspace(&self, user_id: &str, target: WorkspaceId) -> Result<TokenPair> {
+        // The subject comes from a verified token, so the user exists; a missing
+        // row here is treated as "cannot switch" (no token), not a 500.
+        let user = self
+            .users
+            .get_by_id(user_id)
+            .await?
+            .ok_or(AuthError::Forbidden)?;
+        self.issue_pair_for_workspace(&user, target).await
+    }
+
+    /// Issue a token pair scoped to `wsid`, opening a brand-new refresh family
+    /// (fresh sign-in / workspace switch). Membership in `wsid` is re-checked
+    /// server-side; a non-member is refused with [`AuthError::Forbidden`].
+    async fn issue_pair_for_workspace(&self, user: &User, wsid: WorkspaceId) -> Result<TokenPair> {
+        self.issue_pair_in_family_for_workspace(user, wsid, &refresh::new_family_id())
             .await
     }
 
-    /// Issue a token pair whose refresh token joins `family_id` (rotation).
-    async fn issue_pair_in_family(&self, user: &User, family_id: &str) -> Result<TokenPair> {
+    /// Issue a token pair scoped to `wsid` whose refresh token joins `family_id`
+    /// (rotation). The `wsrole` and the workspace `tier` baked into the access
+    /// token, and the workspace the refresh token remembers, all come from a
+    /// SERVER-SIDE membership lookup - never from a stale client value.
+    ///
+    /// Returns [`AuthError::Forbidden`] if the subject is not (or is no longer)
+    /// a member of `wsid`.
+    async fn issue_pair_in_family_for_workspace(
+        &self,
+        user: &User,
+        wsid: WorkspaceId,
+        family_id: &str,
+    ) -> Result<TokenPair> {
+        // The single membership check every mint path funnels through: the role
+        // and the workspace tier are authoritative as of THIS instant.
+        let ctx = self
+            .memberships
+            .context(wsid, &user.id)
+            .await?
+            .ok_or(AuthError::Forbidden)?;
         let config = self.issuer.config();
         let access_ttl = i64::try_from(config.access_ttl.as_secs()).unwrap_or(i64::MAX);
         let access_token = {
             let keyring = self.keyring.read().expect("keyring poisoned");
-            self.issuer
-                .issue_access(keyring.active(), &user.id, user.tier, user.roles.clone())?
+            self.issuer.issue_access(
+                keyring.active(),
+                &user.id,
+                wsid,
+                ctx.role,
+                ctx.tier,
+                user.roles.clone(),
+            )?
         };
         let expires_at = self.issuer.now_unix()
             + i64::try_from(config.refresh_ttl.as_secs()).unwrap_or(i64::MAX);
-        let minted = refresh::mint_in_family(&user.id, family_id, expires_at);
+        let minted = refresh::mint_in_family(&user.id, wsid, family_id, expires_at);
         self.refresh.insert(minted.record).await?;
         Ok(TokenPair {
             access_token,

@@ -37,6 +37,7 @@ use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 
 use crate::error::Result;
+use crate::tenant::WorkspaceId;
 
 /// A freshly minted refresh token: the opaque secret handed to the client and
 /// the server-side record to persist.
@@ -54,6 +55,12 @@ pub struct RefreshRecord {
     pub token_hash: [u8; 32],
     /// Owning user id.
     pub user_id: String,
+    /// The workspace this session is scoped to. A refresh token REMEMBERS which
+    /// workspace it was minted for so rotation can re-validate membership in
+    /// exactly that workspace and re-mint the access token scoped to it
+    /// (andypalmi/amicu-planning#129). Switching workspaces opens a NEW family
+    /// scoped to the target; it never mutates an existing row's workspace.
+    pub workspace_id: WorkspaceId,
     /// Rotation-family id. Shared by a sign-in token and every token rotated
     /// from it; the unit of reuse-detection revocation.
     pub family_id: String,
@@ -63,17 +70,24 @@ pub struct RefreshRecord {
     pub revoked: bool,
 }
 
-/// Mint a fresh opaque refresh token into a brand-new family (sign-in).
+/// Mint a fresh opaque refresh token into a brand-new family (sign-in), scoped
+/// to `workspace_id`.
 #[must_use]
-pub fn mint(user_id: &str, expires_at: i64) -> MintedRefresh {
-    mint_in_family(user_id, &new_family_id(), expires_at)
+pub fn mint(user_id: &str, workspace_id: WorkspaceId, expires_at: i64) -> MintedRefresh {
+    mint_in_family(user_id, workspace_id, &new_family_id(), expires_at)
 }
 
 /// Mint an opaque refresh token (32 random bytes, base64url) into a specific
-/// family. Rotation reuses the presented token's family so the whole chain
-/// shares a single reuse-detection unit.
+/// family, scoped to `workspace_id`. Rotation reuses the presented token's
+/// family AND its workspace so the whole chain shares a single reuse-detection
+/// unit and stays pinned to one workspace.
 #[must_use]
-pub fn mint_in_family(user_id: &str, family_id: &str, expires_at: i64) -> MintedRefresh {
+pub fn mint_in_family(
+    user_id: &str,
+    workspace_id: WorkspaceId,
+    family_id: &str,
+    expires_at: i64,
+) -> MintedRefresh {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     let token = URL_SAFE_NO_PAD.encode(bytes);
@@ -83,6 +97,7 @@ pub fn mint_in_family(user_id: &str, family_id: &str, expires_at: i64) -> Minted
         record: RefreshRecord {
             token_hash,
             user_id: user_id.to_string(),
+            workspace_id,
             family_id: family_id.to_string(),
             expires_at,
             revoked: false,
@@ -115,10 +130,14 @@ pub enum RefreshConsume {
     /// No such token.
     NotFound,
     /// The token was live and THIS caller atomically revoked it; proceed to
-    /// mint a successor into `family_id` for `user_id`.
+    /// mint a successor into `family_id` for `user_id`, scoped to the same
+    /// `workspace_id` (after re-validating membership).
     Consumed {
         /// Owning user id.
         user_id: String,
+        /// Workspace the consumed token was scoped to; the successor re-mints
+        /// for this same workspace once membership is re-confirmed.
+        workspace_id: WorkspaceId,
         /// Family the successor must join.
         family_id: String,
     },
@@ -234,13 +253,18 @@ impl RefreshStore for InMemoryRefreshStore {
             return Ok(RefreshConsume::Expired);
         }
         let user_id = record.user_id.clone();
+        let workspace_id = record.workspace_id;
         // Win the race: revoke before releasing the lock.
         state
             .tokens
             .get_mut(token_hash)
             .expect("token present under lock")
             .revoked = true;
-        Ok(RefreshConsume::Consumed { user_id, family_id })
+        Ok(RefreshConsume::Consumed {
+            user_id,
+            workspace_id,
+            family_id,
+        })
     }
 
     async fn revoke(&self, token_hash: &[u8; 32]) -> Result<()> {
@@ -294,9 +318,10 @@ mod tests {
     #[tokio::test]
     async fn compromise_family_revokes_all_members_and_flags() {
         let store = InMemoryRefreshStore::default();
-        let a = mint_in_family("usr_1", "fam_x", 9_999_999_999);
-        let b = mint_in_family("usr_1", "fam_x", 9_999_999_999);
-        let other = mint_in_family("usr_1", "fam_y", 9_999_999_999);
+        let ws = WorkspaceId::new();
+        let a = mint_in_family("usr_1", ws, "fam_x", 9_999_999_999);
+        let b = mint_in_family("usr_1", ws, "fam_x", 9_999_999_999);
+        let other = mint_in_family("usr_1", ws, "fam_y", 9_999_999_999);
         let (a_hash, b_hash, other_hash) = (
             a.record.token_hash,
             b.record.token_hash,

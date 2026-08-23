@@ -61,11 +61,8 @@
 //! a second `stack_id` predicate (see the module docs).
 
 use amicu_auth::AuthError;
-use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
-use std::fmt;
-use std::str::FromStr;
 use uuid::Uuid;
 
 pub mod config;
@@ -89,79 +86,14 @@ pub use verify::PostgresVerifyStore;
 pub use workspace::{PostgresWorkspaceStore, Workspace};
 
 /// The control-plane isolation boundary: a workspace (unified with the
-/// Enterprise org). Every persisted resource is scoped to a workspace, so a
-/// solo self-host deployment is simply a workspace-of-one.
+/// Enterprise org).
 ///
-/// Serializes transparently as the underlying UUID string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct WorkspaceId(Uuid);
-
-impl WorkspaceId {
-    /// The well-known workspace for single-tenant self-host: the nil UUID.
-    ///
-    /// A self-host deployment that has not provisioned distinct workspaces
-    /// operates entirely within this one, so it is the sensible default.
-    pub const DEFAULT: Self = Self(Uuid::nil());
-
-    /// Creates a fresh, random workspace id (UUID v4).
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-
-    /// Wraps an existing UUID as a workspace id.
-    #[must_use]
-    pub const fn from_uuid(id: Uuid) -> Self {
-        Self(id)
-    }
-
-    /// The well-known single-tenant workspace (the nil UUID). Equivalent to
-    /// [`WorkspaceId::DEFAULT`].
-    #[must_use]
-    pub const fn nil() -> Self {
-        Self::DEFAULT
-    }
-
-    /// Returns the underlying UUID.
-    #[must_use]
-    pub const fn as_uuid(&self) -> Uuid {
-        self.0
-    }
-}
-
-impl Default for WorkspaceId {
-    /// The single-tenant self-host workspace (the nil UUID).
-    fn default() -> Self {
-        Self::DEFAULT
-    }
-}
-
-impl fmt::Display for WorkspaceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
-    }
-}
-
-impl FromStr for WorkspaceId {
-    type Err = uuid::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Uuid::from_str(s).map(Self)
-    }
-}
-
-impl From<Uuid> for WorkspaceId {
-    fn from(id: Uuid) -> Self {
-        Self(id)
-    }
-}
-
-impl From<WorkspaceId> for Uuid {
-    fn from(id: WorkspaceId) -> Self {
-        id.0
-    }
-}
+/// The type moved to `amicu-auth` (`amicu_auth::tenant`) in
+/// andypalmi/amicu-planning#129 so the always-compiled `Claims` can carry a
+/// `wsid` without `amicu-auth` depending on `amicu-store` (the dependency runs
+/// the other way). It is re-exported here unchanged, so `amicu_store::WorkspaceId`
+/// keeps resolving for every existing call site.
+pub use amicu_auth::WorkspaceId;
 
 /// Errors surfaced by the store.
 #[derive(Debug, thiserror::Error)]

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use amicu_api::{
     AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore, OrgApiState,
-    RateLimiter, api_router,
+    RateLimiter, SessionApiState, api_router,
 };
 use amicu_auth::notify::LoggingNotifier;
 use amicu_auth::refresh::InMemoryRefreshStore;
@@ -19,6 +19,7 @@ use amicu_auth::verify::InMemoryVerifyStore;
 use amicu_auth::{
     AuthService, IssuerConfig, Keyring, SigningKey, Tier, TokenIssuer, Verifier, VerifierConfig,
 };
+use amicu_auth::{Role, WorkspaceId};
 use amicu_core::diagnostic::DiagnosticReport;
 use amicu_plan::Plan;
 use axum::Router;
@@ -131,7 +132,14 @@ fn app_with(tier: Tier, min_tier: Tier) -> (Router, String) {
 
     let jwks = keyring.jwks();
     let token = issuer
-        .issue_access(keyring.active(), "usr_test", tier, Vec::new())
+        .issue_access(
+            keyring.active(),
+            "usr_test",
+            WorkspaceId::new(),
+            Role::Owner,
+            tier,
+            Vec::new(),
+        )
         .expect("mint token");
 
     let service = Arc::new(AuthService::new(
@@ -145,7 +153,7 @@ fn app_with(tier: Tier, min_tier: Tier) -> (Router, String) {
         ISS,
     ));
     let auth_state = AuthApiState::new(
-        service,
+        service.clone(),
         Arc::new(RateLimiter::new(100, Duration::from_secs(60))),
     );
 
@@ -157,7 +165,7 @@ fn app_with(tier: Tier, min_tier: Tier) -> (Router, String) {
     // Billing is not under test here; wire it unconfigured so /billing/* answer 503.
     let billing_state =
         BillingApiState::unconfigured(verifier.clone(), Arc::new(InMemoryUserStore::default()));
-    let org_state = OrgApiState::new(verifier, Arc::new(InMemoryOrgStore::new()));
+    let org_state = OrgApiState::new(verifier.clone(), Arc::new(InMemoryOrgStore::new()));
     let config_state = ConfigApiState::new(Arc::new(amicu_store::InMemoryConfigStore::new()));
 
     (
@@ -167,6 +175,7 @@ fn app_with(tier: Tier, min_tier: Tier) -> (Router, String) {
             billing_state,
             org_state,
             config_state,
+            SessionApiState::new(service, verifier),
         ),
         token,
     )

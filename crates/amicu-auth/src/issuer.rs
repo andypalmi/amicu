@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::claims::{Claims, Tier};
 use crate::error::{AuthError, Result};
 use crate::key::SigningKey;
+use crate::tenant::{Role, WorkspaceId};
 
 /// A source of wall-clock time, injectable for deterministic expiry tests.
 pub trait Clock: Send + Sync {
@@ -44,14 +45,20 @@ pub struct IssuerConfig {
 }
 
 impl IssuerConfig {
-    /// Config with 15-minute access, 30-day refresh, 1-hour reset, and 24-hour
+    /// Config with 5-minute access, 30-day refresh, 1-hour reset, and 24-hour
     /// email-verification lifetimes.
+    ///
+    /// The access TTL is deliberately SHORT (andypalmi/amicu-planning#129): the
+    /// active-workspace claim (`wsid`/`wsrole`/`tier`) is only re-validated
+    /// against `workspace_members` on refresh rotation, so this is the window
+    /// within which a removal or role change (revocation) lands. 5 minutes keeps
+    /// that window tight while refresh stays long-lived (30 days).
     #[must_use]
     pub fn new(issuer: impl Into<String>, audience: impl Into<String>) -> Self {
         Self {
             issuer: issuer.into(),
             audience: audience.into(),
-            access_ttl: Duration::from_secs(900),
+            access_ttl: Duration::from_secs(300),
             refresh_ttl: Duration::from_secs(2_592_000),
             reset_ttl: Duration::from_secs(3_600),
             verify_ttl: Duration::from_secs(86_400),
@@ -94,9 +101,21 @@ impl<C: Clock> TokenIssuer<C> {
         self.clock.now_unix()
     }
 
-    /// Build the claim set for a subject at the current clock time.
+    /// Build the claim set for a subject at the current clock time, scoped to
+    /// the active workspace `wsid` at role `wsrole` and the workspace's `tier`.
+    ///
+    /// `wsid`/`wsrole`/`tier` are always caller-supplied from a SERVER-SIDE
+    /// membership lookup (see [`crate::service::AuthService`]); there is no
+    /// default-workspace path.
     #[must_use]
-    pub fn build_claims(&self, sub: &str, tier: Tier, roles: Vec<String>) -> Claims {
+    pub fn build_claims(
+        &self,
+        sub: &str,
+        wsid: WorkspaceId,
+        wsrole: Role,
+        tier: Tier,
+        roles: Vec<String>,
+    ) -> Claims {
         let now = self.clock.now_unix();
         Claims {
             iss: self.config.issuer.clone(),
@@ -105,12 +124,15 @@ impl<C: Clock> TokenIssuer<C> {
             iat: now,
             nbf: now,
             exp: now + i64::try_from(self.config.access_ttl.as_secs()).unwrap_or(i64::MAX),
+            wsid,
+            wsrole,
             tier,
             roles,
         }
     }
 
-    /// Sign an access token for `sub` with the given key.
+    /// Sign an access token for `sub` scoped to workspace `wsid` with the given
+    /// key.
     ///
     /// # Errors
     /// Returns [`AuthError::Signing`] if encoding fails.
@@ -118,10 +140,12 @@ impl<C: Clock> TokenIssuer<C> {
         &self,
         key: &SigningKey,
         sub: &str,
+        wsid: WorkspaceId,
+        wsrole: Role,
         tier: Tier,
         roles: Vec<String>,
     ) -> Result<String> {
-        let claims = self.build_claims(sub, tier, roles);
+        let claims = self.build_claims(sub, wsid, wsrole, tier, roles);
         self.sign(key, &claims)
     }
 

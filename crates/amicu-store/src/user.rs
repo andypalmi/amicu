@@ -32,7 +32,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    begin_scoped, begin_scoped_user, map_db, now_unix_seconds, tier_from_str, tier_to_str,
+    WorkspaceId, begin_scoped, begin_scoped_user, map_db, now_unix_seconds, tier_from_str,
+    tier_to_str,
 };
 
 /// Postgres implementation of [`UserStore`] (global identity).
@@ -62,6 +63,7 @@ struct UserRow {
     email: String,
     password_hash: String,
     tier: String,
+    personal_workspace_id: Uuid,
     stripe_customer_id: Option<String>,
     stripe_subscription_id: Option<String>,
     email_verified: bool,
@@ -81,6 +83,7 @@ impl UserRow {
             stripe_customer_id: self.stripe_customer_id,
             stripe_subscription_id: self.stripe_subscription_id,
             email_verified: self.email_verified,
+            personal_workspace_id: WorkspaceId::from_uuid(self.personal_workspace_id),
         })
     }
 }
@@ -91,7 +94,11 @@ impl UserStore for PostgresUserStore {
         // The domain id (token `sub`) is the users.id UUID. The service mints a
         // UUID; anything else is a programming error, surfaced as Backend.
         let user_id = parse_user_id(&user.id).ok_or(AuthError::Backend)?;
-        let workspace_id = Uuid::new_v4();
+        // The personal-workspace id is SERVER-generated (by the auth service, at
+        // `User::new`) and carried on the record, so the id the token's `wsid`
+        // will name is decided once and persisted here - reads return the same
+        // id. Still never caller-influenced: the HTTP layer never sets it.
+        let workspace_id = user.personal_workspace_id.as_uuid();
         let tier = tier_to_str(user.tier);
         let now = now_unix_seconds();
         // A globally-unique slug derived from the server-generated id (never
@@ -165,7 +172,7 @@ impl UserStore for PostgresUserStore {
     async fn get_by_email(&self, email: &str) -> Result<Option<User>> {
         let row = sqlx::query_as!(
             UserRow,
-            "SELECT u.id, u.email, u.password_hash, \
+            "SELECT u.id, u.email, u.password_hash, u.personal_workspace_id, \
                     (u.email_verified_at IS NOT NULL) AS \"email_verified!\", \
                     w.tier, w.stripe_customer_id, w.stripe_subscription_id \
              FROM users u \
@@ -185,7 +192,7 @@ impl UserStore for PostgresUserStore {
         };
         let row = sqlx::query_as!(
             UserRow,
-            "SELECT u.id, u.email, u.password_hash, \
+            "SELECT u.id, u.email, u.password_hash, u.personal_workspace_id, \
                     (u.email_verified_at IS NOT NULL) AS \"email_verified!\", \
                     w.tier, w.stripe_customer_id, w.stripe_subscription_id \
              FROM users u \
@@ -202,7 +209,7 @@ impl UserStore for PostgresUserStore {
     async fn get_by_stripe_customer(&self, customer_id: &str) -> Result<Option<User>> {
         let row = sqlx::query_as!(
             UserRow,
-            "SELECT u.id, u.email, u.password_hash, \
+            "SELECT u.id, u.email, u.password_hash, u.personal_workspace_id, \
                     (u.email_verified_at IS NOT NULL) AS \"email_verified!\", \
                     w.tier, w.stripe_customer_id, w.stripe_subscription_id \
              FROM users u \

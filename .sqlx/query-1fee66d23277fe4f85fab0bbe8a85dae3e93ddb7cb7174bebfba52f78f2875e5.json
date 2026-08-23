@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT u.id, u.email, u.password_hash, (u.email_verified_at IS NOT NULL) AS \"email_verified!\", w.tier, w.stripe_customer_id, w.stripe_subscription_id FROM users u JOIN workspaces w ON w.id = u.personal_workspace_id WHERE u.email = $1",
+  "query": "SELECT u.id, u.email, u.password_hash, u.personal_workspace_id, (u.email_verified_at IS NOT NULL) AS \"email_verified!\", w.tier, w.stripe_customer_id, w.stripe_subscription_id FROM users u JOIN workspaces w ON w.id = u.personal_workspace_id WHERE w.stripe_customer_id = $1",
   "describe": {
     "columns": [
       {
@@ -20,21 +20,26 @@
       },
       {
         "ordinal": 3,
+        "name": "personal_workspace_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 4,
         "name": "email_verified!",
         "type_info": "Bool"
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "tier",
         "type_info": "Text"
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "stripe_customer_id",
         "type_info": "Text"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "stripe_subscription_id",
         "type_info": "Text"
       }
@@ -48,11 +53,12 @@
       false,
       false,
       false,
+      false,
       null,
       false,
       true,
       true
     ]
   },
-  "hash": "43bf4bf55f83e3411bff22f67d46289399477b3ef119a9bcf7ed1874c7c59c4d"
+  "hash": "1fee66d23277fe4f85fab0bbe8a85dae3e93ddb7cb7174bebfba52f78f2875e5"
 }

@@ -71,6 +71,93 @@ fn token_hash(seed: u8) -> [u8; 32] {
     h
 }
 
+/// andypalmi/amicu-planning#129: the token issuer's membership seam over
+/// Postgres. `context` resolves the caller's role + the WORKSPACE's tier for a
+/// mint/refresh; `list_for_user` backs `GET /workspaces`. Both are the
+/// server-side authority - a removal/role-change is visible immediately, which
+/// is what refresh re-validation relies on.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn membership_context_and_list_resolve_role_and_tier() {
+    use amicu_auth::membership::MembershipStore as _;
+
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared.clone());
+    let workspaces = PostgresWorkspaceStore::new(shared);
+
+    let user = seed_user(&users).await;
+    let personal = personal_ws(&members, &user).await;
+
+    // context: Owner of the personal workspace, at that workspace's tier.
+    let ctx = members
+        .context(personal, &user)
+        .await
+        .expect("context")
+        .expect("member of personal");
+    assert_eq!(ctx.role, Role::Owner);
+    assert_eq!(ctx.tier, Tier::Community);
+
+    // Not a member of an unrelated workspace -> None (no token would be minted).
+    let other = workspaces
+        .create("Team", Tier::Pro)
+        .await
+        .expect("create ws");
+    assert!(
+        members
+            .context(other, &user)
+            .await
+            .expect("context")
+            .is_none()
+    );
+
+    // Joined as Admin: context reflects the role AND the target workspace's tier.
+    members
+        .add(other, &user, Role::Admin, None)
+        .await
+        .expect("add member");
+    let ctx2 = members
+        .context(other, &user)
+        .await
+        .expect("context")
+        .expect("member of other");
+    assert_eq!(ctx2.role, Role::Admin);
+    assert_eq!(ctx2.tier, Tier::Pro);
+
+    // A role change is visible at once (refresh would re-mint with it).
+    members
+        .set_role(other, &user, Role::Viewer)
+        .await
+        .expect("set role");
+    assert_eq!(
+        members
+            .context(other, &user)
+            .await
+            .expect("context")
+            .expect("still a member")
+            .role,
+        Role::Viewer
+    );
+
+    // list_for_user: exactly the caller's two memberships, carrying names.
+    let mine = members.list_for_user(&user).await.expect("list");
+    assert_eq!(mine.len(), 2);
+    assert!(mine.iter().all(|m| !m.name.is_empty()));
+
+    // Removal drops it from context and the list (refresh would then fail).
+    members.remove(other, &user).await.expect("remove");
+    assert!(
+        members
+            .context(other, &user)
+            .await
+            .expect("context")
+            .is_none()
+    );
+    let after = members.list_for_user(&user).await.expect("list");
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].workspace_id, personal);
+}
+
 #[tokio::test]
 #[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
 async fn signup_provisions_personal_owner_workspace_atomically() {
@@ -332,7 +419,7 @@ async fn delete_plain_single_workspace_user_succeeds_and_cascades_tokens() {
     let ws = personal_ws(&members, &user).await;
 
     // Give them a refresh token so we can confirm the cascade.
-    let token = mint(&user, FAR_FUTURE);
+    let token = mint(&user, ws, FAR_FUTURE);
     let hash = token.record.token_hash;
     refresh.insert(token.record).await.expect("insert refresh");
 
