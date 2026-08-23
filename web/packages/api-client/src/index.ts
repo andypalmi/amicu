@@ -40,4 +40,11 @@ export type {
   RolesResponse,
   AuditEntryView,
   AuditResponse,
+  ConfigSummaryDto,
+  ConfigDetailDto,
+  ConfigDiffDto,
+  CreateConfigRequest,
+  AppendVersionRequest,
+  VersionMetaDto,
+  VersionContentDto,
 } from './schema';
