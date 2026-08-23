@@ -268,6 +268,7 @@ dependencies = [
  "amicu-api",
  "amicu-auth",
  "amicu-core",
+ "amicu-state",
  "amicu-store",
  "async-trait",
  "axum",
@@ -284,6 +285,7 @@ version = "0.1.0"
 dependencies = [
  "amicu-core",
  "async-trait",
+ "rand 0.8.7",
  "rustversion",
  "serde",
  "serde_json",

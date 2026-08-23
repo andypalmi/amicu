@@ -16,12 +16,19 @@
 //! default [`IdentityCipher`]) a backend can wire in at the point snapshot
 //! bytes cross the persistence boundary - see that module's docs for scope
 //! and the self-host operator's own encryption-at-rest responsibility.
+//!
+//! [`InMemoryStateBackend`] is the zero-configuration, process-local
+//! implementation used for local runs, tests, and pre-database self-host.
+//! `amicu-store`'s `PostgresStateBackend` is the durable, production
+//! implementation selected instead whenever `DATABASE_URL` is set - see
+//! `amicu-server`'s `build_app`.
 
 mod adapter;
 mod cipher;
 mod drift;
 mod error;
 mod lock;
+mod memory;
 mod snapshot;
 
 pub use adapter::StateBackendAdapter;
@@ -32,6 +39,7 @@ pub use error::{
     StateError,
 };
 pub use lock::LockHandle;
+pub use memory::InMemoryStateBackend;
 pub use snapshot::{StateSnapshot, StateVersion};
 
 #[cfg(test)]

@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 amicu-api = { path = "../amicu-api" }
 amicu-auth = { path = "../amicu-auth" }
+amicu-state = { path = "../amicu-state" }
 amicu-store = { path = "../amicu-store" }
 async-trait = "0.1"
 axum = "0.8"
