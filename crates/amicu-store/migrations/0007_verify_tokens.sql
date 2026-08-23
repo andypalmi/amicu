@@ -6,6 +6,11 @@
 -- Workspace-scoped with the same RLS backstop as reset_tokens.
 --
 -- expires_at is Unix seconds (BIGINT). No chrono.
+--
+-- user_subject is deliberately NOT a foreign key to accounts(subject), for the
+-- same reason as refresh_tokens.user_subject: no account-deletion path exists
+-- yet. Add the FK (and a deletion cleanup sweep) once it does - see
+-- andypalmi/amicu-planning#114.
 CREATE TABLE verify_tokens (
     workspace_id UUID    NOT NULL REFERENCES workspaces(id),
     token_hash   BYTEA   NOT NULL,

@@ -262,6 +262,34 @@ impl From<std::io::Error> for Error {
 /// [`Error::Smtp`] if any `AMICU_SMTP_*` variable is set but the SMTP
 /// configuration is incomplete or invalid.
 pub async fn build_app(config: &Config) -> Result<Router, Error> {
+    build_app_with_database_url(config, std::env::var("DATABASE_URL").ok().as_deref()).await
+}
+
+/// Like [`build_app`], but forces the in-memory stores regardless of any
+/// `DATABASE_URL` set in the process environment.
+///
+/// `build_app` reads `DATABASE_URL` straight from the process environment,
+/// which is the right default for `run` (a real deployment). It is the wrong
+/// default for tests: `std::env::var` is ambient, process-wide state, so a
+/// shell that happens to export `DATABASE_URL` (e.g. after following the dev
+/// Postgres setup in the README) would silently flip in-process smoke/unit
+/// tests onto Postgres instead of the zero-config in-memory stores they
+/// expect. Tests that want the in-memory path unconditionally - i.e. nearly
+/// all of them - should call this instead of `build_app` so an ambient
+/// `DATABASE_URL` can never hijack them.
+pub async fn build_app_in_memory(config: &Config) -> Result<Router, Error> {
+    build_app_with_database_url(config, None).await
+}
+
+/// Shared implementation behind [`build_app`] and [`build_app_in_memory`].
+/// `database_url` is an explicit override rather than an environment read, so
+/// callers control store selection precisely: `Some(url)` selects the
+/// Postgres stores, `None` selects the in-memory stores, with no ambient
+/// environment lookup at all.
+async fn build_app_with_database_url(
+    config: &Config,
+    database_url: Option<&str>,
+) -> Result<Router, Error> {
     /// The auth store quartet (user, refresh, reset, verify), selected together:
     /// all Postgres when `DATABASE_URL` is set, else all in-memory.
     type AuthStores = (
@@ -294,8 +322,8 @@ pub async fn build_app(config: &Config) -> Result<Router, Error> {
     // The auth store quartet (see `AuthStores`), selected together so the
     // Postgres path shares one pool and the in-memory path stays zero-config.
     let (users, refresh, resets, verify_store): AuthStores =
-        if let Ok(database_url) = std::env::var("DATABASE_URL") {
-            let pool = amicu_store::connect(&database_url)
+        if let Some(database_url) = database_url {
+            let pool = amicu_store::connect(database_url)
                 .await
                 .map_err(Error::Store)?;
             amicu_store::run_migrations(&pool)
@@ -396,9 +424,8 @@ pub async fn build_app(config: &Config) -> Result<Router, Error> {
     // constructor call. Kept as its own small, self-contained block (not
     // folded into `AuthStores`) so it stays additive and easy to rebase
     // sibling store-wiring changes (e.g. the state-backend adapter) on top of.
-    let config_store: Arc<dyn ConfigStore> = if let Ok(database_url) = std::env::var("DATABASE_URL")
-    {
-        let pool = amicu_store::connect(&database_url)
+    let config_store: Arc<dyn ConfigStore> = if let Some(database_url) = database_url {
+        let pool = amicu_store::connect(database_url)
             .await
             .map_err(Error::Store)?;
         amicu_store::run_migrations(&pool)
@@ -427,19 +454,18 @@ pub async fn build_app(config: &Config) -> Result<Router, Error> {
     // and proves the backend is selectable and constructible, and should be
     // threaded into `api_router`/`AppState` the same way `config_store` is
     // as soon as a route needs it.
-    let _state_backend: Arc<dyn StateBackendAdapter> =
-        if let Ok(database_url) = std::env::var("DATABASE_URL") {
-            let pool = amicu_store::connect(&database_url)
-                .await
-                .map_err(Error::Store)?;
-            amicu_store::run_migrations(&pool)
-                .await
-                .map_err(Error::Store)?;
-            eprintln!("amicu-server: using the Postgres state backend (DATABASE_URL set).");
-            Arc::new(PostgresStateBackend::new(pool, "default"))
-        } else {
-            Arc::new(InMemoryStateBackend::new("default"))
-        };
+    let _state_backend: Arc<dyn StateBackendAdapter> = if let Some(database_url) = database_url {
+        let pool = amicu_store::connect(database_url)
+            .await
+            .map_err(Error::Store)?;
+        amicu_store::run_migrations(&pool)
+            .await
+            .map_err(Error::Store)?;
+        eprintln!("amicu-server: using the Postgres state backend (DATABASE_URL set).");
+        Arc::new(PostgresStateBackend::new(pool, "default"))
+    } else {
+        Arc::new(InMemoryStateBackend::new("default"))
+    };
 
     Ok(api_router(
         auth_state,

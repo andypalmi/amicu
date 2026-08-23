@@ -32,7 +32,12 @@ fn test_config() -> Config {
 #[tokio::test]
 async fn real_socket_end_to_end() {
     let config = test_config();
-    let app = amicu_server::build_app(&config)
+    // `build_app_in_memory`, not `build_app`: this test must exercise the
+    // zero-config in-memory stores regardless of any `DATABASE_URL` a
+    // developer's shell happens to have exported (e.g. after following the
+    // README's dev Postgres setup), so it can't be silently hijacked onto
+    // Postgres.
+    let app = amicu_server::build_app_in_memory(&config)
         .await
         .expect("assemble app");
 
@@ -129,7 +134,7 @@ async fn rejects_bad_trusted_proxy() {
     let mut config = test_config();
     config.trusted_proxies = "not-a-cidr".to_string();
     assert!(matches!(
-        amicu_server::build_app(&config).await,
+        amicu_server::build_app_in_memory(&config).await,
         Err(amicu_server::Error::Proxy(_))
     ));
 }

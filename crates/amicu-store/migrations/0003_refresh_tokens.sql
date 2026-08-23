@@ -12,6 +12,13 @@
 -- mints its successor into the same family. Re-presenting an already-revoked
 -- token is a reuse/theft signal that compromises the whole family (see
 -- refresh_families).
+--
+-- user_subject is deliberately NOT a foreign key to accounts(subject). There
+-- is no account-deletion path yet, so a real FK (and the cascade/cleanup
+-- policy it would force a decision on) is premature; the workspace_id
+-- predicate + RLS already give tenant isolation. Add the FK (and a deletion
+-- cleanup sweep for the referencing token tables) once account deletion
+-- exists - see andypalmi/amicu-planning#114.
 CREATE TABLE refresh_tokens (
     workspace_id UUID   NOT NULL REFERENCES workspaces(id),
     token_hash   BYTEA  NOT NULL,
@@ -43,11 +50,15 @@ CREATE TABLE refresh_families (
 -- RLS).
 --
 -- IMPORTANT: a SUPERUSER or a role with BYPASSRLS bypasses RLS entirely, even
--- with FORCE. The default dev/self-host compose role (POSTGRES_USER) is a
--- superuser, so the backstop does NOT engage there; it engages only when the
--- app connects as a non-superuser, non-BYPASSRLS role (the production posture).
--- Because of that, the query-level workspace_id predicate on every statement is
--- the PRIMARY, always-on defense; RLS is defense in depth.
+-- with FORCE. `POSTGRES_USER` in docker-compose.yml is the Postgres bootstrap
+-- superuser and must NOT be the role the application connects as; the
+-- dev/self-host compose instead provisions a dedicated non-superuser,
+-- non-BYPASSRLS `amicu_app` role (see docker/postgres-init/01-app-role.sql)
+-- for the app to connect as, so this backstop actually engages. A production
+-- deployment must do the same. Because a misconfigured connection can still
+-- silently disable this backstop, the query-level workspace_id predicate on
+-- every statement remains the PRIMARY, always-on defense; RLS is defense in
+-- depth.
 ALTER TABLE refresh_tokens ENABLE ROW LEVEL SECURITY;
 ALTER TABLE refresh_tokens FORCE ROW LEVEL SECURITY;
 CREATE POLICY refresh_tokens_workspace_isolation ON refresh_tokens
