@@ -20,7 +20,7 @@ use amicu_core::id::{DataClassId, GovernanceRuleId, UseCaseId};
 use amicu_core::resource::{
     Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Budget, BudgetPeriod, DataClass,
     Deployment, GovernanceRule, HardwareProfile, LlamaCppSettings, Modality, Model, ModelSource,
-    Money, Price, Quantization, Region, Residency, Runtime, Sensitivity, SourceRegistry, UseCase,
+    Money, Quantization, Region, Residency, Runtime, Sensitivity, SourceRegistry, UseCase,
     VllmSettings,
 };
 use amicu_core::units::ByteSize;
@@ -316,8 +316,9 @@ fn private_eu_production() -> Preset {
             required_data_class: None,
             priority: None,
         },
-        // Cost from price.per_hour x GPUs x time; medium confidence pending
-        // concurrency data.
+        // Latency (TTFT/TPOT) planning figures from public benchmarks; medium
+        // confidence pending concurrency data. No cost figure is asserted here:
+        // a rental rate is provider-sourced at plan/apply time, not fabricated.
         default_estimate: estimate(
             Assumed {
                 prompt: 1024,
@@ -514,9 +515,11 @@ fn build_private_eu_production(preset: &Preset, answers: &WizardAnswers) -> Grap
         cpu: None,
         memory: ByteSize::from_bytes(180 * GIB),
         interconnect: Some(amicu_core::resource::Interconnect::Nvlink),
-        price: Some(Price {
-            per_hour: Money::new(3.5 * f64::from(gpu_count), "EUR"),
-        }),
+        // No price is baked into the emitted HCL: a rental rate is a provider
+        // concern resolved from the provider catalog at plan/apply time, not a
+        // figure the wizard fabricates into the user's downloaded config. See
+        // `amicu_providers::cost::estimate_cost` for the provider-sourced path.
+        price: None,
     });
 
     graph.deployments.push(Deployment {
@@ -588,9 +591,11 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
         cpu: None,
         memory: ByteSize::from_bytes(64 * GIB),
         interconnect: None,
-        price: Some(Price {
-            per_hour: Money::new(0.75 * f64::from(gpu_count), "USD"),
-        }),
+        // No price is baked into the emitted HCL: a rental rate is a provider
+        // concern resolved from the provider catalog at plan/apply time, not a
+        // figure the wizard fabricates into the user's downloaded config. See
+        // `amicu_providers::cost::estimate_cost` for the provider-sourced path.
+        price: None,
     });
 
     graph.deployments.push(Deployment {
