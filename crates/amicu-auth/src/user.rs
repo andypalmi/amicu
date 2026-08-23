@@ -89,6 +89,10 @@ pub trait UserStore: Send + Sync {
         tier: Tier,
         stripe_subscription_id: Option<String>,
     ) -> Result<()>;
+    /// Delete a user and every record keyed to their global identity (workspace
+    /// memberships and refresh/reset/verify tokens cascade). A no-op if the user
+    /// id is unknown.
+    async fn delete(&self, user_id: &str) -> Result<()>;
 }
 
 /// In-memory user store (tests, single-node dev).
@@ -192,6 +196,14 @@ impl UserStore for InMemoryUserStore {
             user.tier = tier;
             user.stripe_subscription_id = stripe_subscription_id;
         }
+        Ok(())
+    }
+
+    async fn delete(&self, user_id: &str) -> Result<()> {
+        self.inner
+            .lock()
+            .expect("user store poisoned")
+            .retain(|_, u| u.id != user_id);
         Ok(())
     }
 }

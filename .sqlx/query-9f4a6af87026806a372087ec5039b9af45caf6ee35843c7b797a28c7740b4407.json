@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workspaces SET stripe_customer_id = $2 WHERE id = (SELECT personal_workspace_id FROM users WHERE id = $1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9f4a6af87026806a372087ec5039b9af45caf6ee35843c7b797a28c7740b4407"
+}

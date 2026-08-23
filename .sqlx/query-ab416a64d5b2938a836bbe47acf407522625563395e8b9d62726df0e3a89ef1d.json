@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.revoked, r.expires_at, r.family_id, COALESCE(f.compromised, false) AS \"compromised!\" FROM refresh_tokens r LEFT JOIN refresh_families f ON f.family_id = r.family_id WHERE r.token_hash = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "revoked",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "expires_at",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "family_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "compromised!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "ab416a64d5b2938a836bbe47acf407522625563395e8b9d62726df0e3a89ef1d"
+}

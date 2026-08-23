@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE verify_tokens SET consumed = true WHERE token_hash = $1 AND NOT consumed AND expires_at > $2 RETURNING user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c8972196ec6c771f4aa09d32892a838422d4759b3abceafa6545ad16c0ea8b48"
+}

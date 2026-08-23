@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO refresh_families (family_id, compromised) VALUES ($1, true) ON CONFLICT (family_id) DO UPDATE SET compromised = true",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "430517b5f8d8005a73a45fd5bca38d73d04dd2cb58398ecbcfd236b7c821e9e8"
+}

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO verify_tokens (token_hash, user_id, expires_at, consumed) VALUES ($1, $2, $3, $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Uuid",
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "08ec0672ae98de274bd3c8fd1e82ddbc265faa7ed40ee09c9e88d30865ae15cc"
+}

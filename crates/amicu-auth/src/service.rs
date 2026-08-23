@@ -4,9 +4,6 @@
 use std::sync::{Arc, OnceLock, RwLock};
 
 use amicu_core::secret::SecretValue;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rand_core::{OsRng, RngCore};
 
 use crate::claims::Tier;
 use crate::error::{AuthError, Result};
@@ -588,10 +585,12 @@ fn require_email_verification() -> bool {
     })
 }
 
+/// A fresh global user id: a random UUID rendered as text. This is the token
+/// subject (`sub`) AND the `users.id` primary key the Postgres store and every
+/// auth token table foreign-key to, so it must be a real UUID (not the old
+/// opaque `usr_...` surrogate).
 fn new_user_id() -> String {
-    let mut bytes = [0u8; 12];
-    OsRng.fill_bytes(&mut bytes);
-    format!("usr_{}", URL_SAFE_NO_PAD.encode(bytes))
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// A stable dummy PHC hash used to equalize sign-in timing for unknown users.

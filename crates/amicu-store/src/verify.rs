@@ -4,75 +4,65 @@
 //! is one conditional `UPDATE ... WHERE ... AND NOT consumed ... RETURNING`, so a
 //! verify token cannot be redeemed twice even under a race.
 //!
-//! Every statement is workspace-scoped and runs inside a GUC-bound transaction
-//! (see [`crate::begin_scoped`]).
+//! GLOBAL, not workspace-scoped: email verification confirms the global user's
+//! email (`email_verified_at` lives on `users`), keyed by a real `user_id` UUID
+//! foreign key into `users` (`ON DELETE CASCADE`). No workspace GUC/RLS applies.
 
-use amicu_auth::Result;
 use amicu_auth::verify::{VerifyConsume, VerifyRecord, VerifyStore};
+use amicu_auth::{AuthError, Result};
 use async_trait::async_trait;
 use sqlx::PgPool;
+use uuid::Uuid;
 
-use crate::{WorkspaceId, begin_scoped, map_db};
+use crate::map_db;
 
 /// Postgres implementation of [`VerifyStore`].
 pub struct PostgresVerifyStore {
     pool: PgPool,
-    workspace: WorkspaceId,
 }
 
 impl PostgresVerifyStore {
-    /// A store bound to the single-tenant default workspace.
+    /// A verify-token store over `pool`.
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self {
-            pool,
-            workspace: WorkspaceId::DEFAULT,
-        }
+        Self { pool }
     }
+}
 
-    /// A store bound to a specific workspace (multi-tenant, future use).
-    #[must_use]
-    pub fn with_workspace(pool: PgPool, workspace: WorkspaceId) -> Self {
-        Self { pool, workspace }
-    }
+/// Parse a domain user id into the `users.id` UUID (see [`crate::refresh`]).
+fn parse_user_id(id: &str) -> Result<Uuid> {
+    Uuid::parse_str(id).map_err(|_| AuthError::Backend)
 }
 
 #[async_trait]
 impl VerifyStore for PostgresVerifyStore {
     async fn insert(&self, record: VerifyRecord) -> Result<()> {
-        let mut tx = begin_scoped(&self.pool, self.workspace).await?;
-        let wsid = self.workspace.as_uuid();
+        let user_id = parse_user_id(&record.user_id)?;
         let hash = record.token_hash.as_slice();
         sqlx::query!(
-            "INSERT INTO verify_tokens \
-             (workspace_id, token_hash, user_subject, expires_at, consumed) \
-             VALUES ($1, $2, $3, $4, $5)",
-            wsid,
+            "INSERT INTO verify_tokens (token_hash, user_id, expires_at, consumed) \
+             VALUES ($1, $2, $3, $4)",
             hash,
-            record.user_id,
+            user_id,
             record.expires_at,
             record.consumed,
         )
-        .execute(&mut *tx)
+        .execute(&self.pool)
         .await
         .map_err(map_db)?;
-        tx.commit().await.map_err(map_db)?;
         Ok(())
     }
 
     async fn consume(&self, token_hash: &[u8; 32], now: i64) -> Result<VerifyConsume> {
-        let mut tx = begin_scoped(&self.pool, self.workspace).await?;
-        let wsid = self.workspace.as_uuid();
+        let mut tx = self.pool.begin().await.map_err(map_db)?;
         let hash = token_hash.as_slice();
 
         // Atomic compare-and-mark: only a present, unconsumed, unexpired token is
         // marked here, and exactly one caller can win it.
         let won = sqlx::query!(
             "UPDATE verify_tokens SET consumed = true \
-             WHERE workspace_id = $1 AND token_hash = $2 \
-               AND NOT consumed AND expires_at > $3 \
-             RETURNING user_subject",
-            wsid,
+             WHERE token_hash = $1 AND NOT consumed AND expires_at > $2 \
+             RETURNING user_id",
             hash,
             now,
         )
@@ -83,16 +73,14 @@ impl VerifyStore for PostgresVerifyStore {
         if let Some(w) = won {
             tx.commit().await.map_err(map_db)?;
             return Ok(VerifyConsume::Consumed {
-                user_id: w.user_subject,
+                user_id: w.user_id.to_string(),
             });
         }
 
         // Classify the non-winning outcome. Reuse (already consumed) is checked
         // before expiry, matching the in-memory contract.
         let state = sqlx::query!(
-            "SELECT consumed, expires_at FROM verify_tokens \
-             WHERE workspace_id = $1 AND token_hash = $2",
-            wsid,
+            "SELECT consumed, expires_at FROM verify_tokens WHERE token_hash = $1",
             hash,
         )
         .fetch_optional(&mut *tx)

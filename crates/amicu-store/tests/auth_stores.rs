@@ -1,4 +1,5 @@
-//! Live-database integration tests for the Postgres auth stores.
+//! Live-database integration tests for the Postgres auth stores (global
+//! identity + the session token tables).
 //!
 //! These are `#[ignore]`d so `cargo test --workspace` skips them when no
 //! Postgres is available (as in CI). Run them against a live database with:
@@ -9,9 +10,15 @@
 //!     cargo test -p amicu-store -- --ignored
 //! ```
 //!
-//! Every test uses freshly-random subjects/emails (and random token hashes via
-//! the amicu-auth mint helpers) so they can share one database without
-//! colliding.
+//! Connect as the non-superuser, non-BYPASSRLS `amicu_app` role (see
+//! andypalmi/amicu-planning#114) to also exercise the row-level-security
+//! backstop on the workspace-scoped tables; the always-on query predicates make
+//! these tests pass under any role, but only `amicu_app` engages RLS too.
+//!
+//! In the new model, identity is GLOBAL and every auth token table has a real
+//! `user_id` foreign key into `users`, so each test creates a user first (via
+//! the identity store) and mints tokens for that user's UUID id. Tests use
+//! freshly-random emails so they can share one database without colliding.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,10 +29,11 @@ use amicu_auth::reset::{ResetConsume, ResetStore, mint as mint_reset};
 use amicu_auth::user::{User, UserStore};
 use amicu_auth::verify::{VerifyConsume, VerifyStore, mint as mint_verify};
 use amicu_store::{
-    PostgresRefreshStore, PostgresResetStore, PostgresUserStore, PostgresVerifyStore, WorkspaceId,
-    connect, run_migrations,
+    PostgresRefreshStore, PostgresResetStore, PostgresUserStore, PostgresVerifyStore, connect,
+    run_migrations,
 };
 use sqlx::PgPool;
+use uuid::Uuid;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -49,24 +57,32 @@ async fn pool() -> PgPool {
     pool
 }
 
+/// Create a fresh global user (with their personal Owner workspace) and return
+/// their UUID id as text - the `sub` the token tables foreign-key to.
+async fn seed_user(store: &PostgresUserStore, tier: Tier) -> (String, String) {
+    let id = Uuid::new_v4().to_string();
+    let email = format!("{}@example.test", unique("mail"));
+    store
+        .create(User::new(
+            id.clone(),
+            email.clone(),
+            "argon2-phc-string".to_string(),
+            tier,
+        ))
+        .await
+        .expect("create user");
+    (id, email)
+}
+
 #[tokio::test]
 #[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
-async fn user_round_trips_through_subject_and_billing() {
+async fn user_round_trips_identity_and_workspace_billing() {
     let store = PostgresUserStore::new(pool().await);
-    let subject = unique("usr");
-    let email = format!("{}@example.test", unique("mail"));
+    let (id, email) = seed_user(&store, Tier::Community).await;
 
-    let user = User::new(
-        subject.clone(),
-        email.clone(),
-        "argon2-phc-string".to_string(),
-        Tier::Community,
-    );
-    store.create(user).await.expect("create user");
-
-    // A duplicate email in the same workspace is rejected.
+    // A duplicate email is rejected globally (not per workspace).
     let dup = User::new(
-        unique("usr"),
+        Uuid::new_v4().to_string(),
         email.clone(),
         "other".to_string(),
         Tier::Community,
@@ -81,50 +97,47 @@ async fn user_round_trips_through_subject_and_billing() {
         .await
         .expect("lookup by email")
         .expect("user present");
-    assert_eq!(by_email.id, subject);
+    assert_eq!(by_email.id, id);
     assert_eq!(by_email.email, email);
+    // Tier is resolved from the user's personal workspace.
     assert_eq!(by_email.tier, Tier::Community);
     assert!(by_email.stripe_customer_id.is_none());
     // A fresh account starts unverified.
     assert!(!by_email.email_verified);
 
     // Marking the email verified persists and is idempotent.
-    store
-        .set_email_verified(&subject)
-        .await
-        .expect("mark email verified");
-    store
-        .set_email_verified(&subject)
-        .await
-        .expect("idempotent re-verify");
+    store.set_email_verified(&id).await.expect("mark verified");
+    store.set_email_verified(&id).await.expect("idempotent");
     let verified = store
-        .get_by_email(&email)
-        .await
-        .expect("lookup by email")
-        .expect("user present");
-    assert!(verified.email_verified);
-
-    let by_id = store
-        .get_by_id(&subject)
+        .get_by_id(&id)
         .await
         .expect("lookup by id")
         .expect("user present");
-    assert_eq!(by_id.email, email);
+    assert!(verified.email_verified);
 
-    // Unknown lookups are Ok(None), not errors.
+    // Unknown / non-UUID lookups are Ok(None), not errors.
     assert!(store.get_by_id("nope").await.expect("lookup").is_none());
+    assert!(
+        store
+            .get_by_id(&Uuid::new_v4().to_string())
+            .await
+            .expect("lookup")
+            .is_none()
+    );
 
     store
-        .update_password(&subject, "new-phc".to_string())
+        .update_password(&id, "new-phc".to_string())
         .await
         .expect("update password");
+
+    // Billing lands on the personal workspace and round-trips through the user.
     let cust = format!("cus_{}", unique("c"));
     store
-        .set_stripe_customer(&subject, cust.clone())
+        .set_stripe_customer(&id, cust.clone())
         .await
         .expect("set stripe customer");
     store
-        .set_billing(&subject, Tier::Pro, Some("sub_123".to_string()))
+        .set_billing(&id, Tier::Pro, Some("sub_123".to_string()))
         .await
         .expect("set billing");
 
@@ -133,23 +146,31 @@ async fn user_round_trips_through_subject_and_billing() {
         .await
         .expect("lookup by customer")
         .expect("user present");
-    assert_eq!(by_cust.id, subject);
+    assert_eq!(by_cust.id, id);
     assert_eq!(by_cust.password_hash, "new-phc");
     assert_eq!(by_cust.tier, Tier::Pro);
     assert_eq!(by_cust.stripe_subscription_id.as_deref(), Some("sub_123"));
 
     // Updates to unknown ids are no-ops, not errors.
     store
-        .update_password("ghost", "x".to_string())
+        .update_password(&Uuid::new_v4().to_string(), "x".to_string())
         .await
         .expect("no-op update");
+
+    // Deletion removes the user; a later lookup misses.
+    store.delete(&id).await.expect("delete user");
+    assert!(store.get_by_id(&id).await.expect("lookup").is_none());
+    assert!(store.get_by_email(&email).await.expect("lookup").is_none());
 }
 
 #[tokio::test]
 #[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
 async fn refresh_rotates_once_and_detects_reuse() {
-    let store = PostgresRefreshStore::new(pool().await);
-    let user = unique("usr");
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let store = PostgresRefreshStore::new(shared);
+    let (user, _) = seed_user(&users, Tier::Community).await;
+
     let token = mint(&user, FAR_FUTURE);
     let hash = token.record.token_hash;
     let family = token.record.family_id.clone();
@@ -211,8 +232,10 @@ async fn refresh_rotates_once_and_detects_reuse() {
 #[tokio::test]
 #[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
 async fn refresh_expired_is_rejected_and_revoke_all_works() {
-    let store = PostgresRefreshStore::new(pool().await);
-    let user = unique("usr");
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let store = PostgresRefreshStore::new(shared);
+    let (user, _) = seed_user(&users, Tier::Community).await;
 
     // Expired token: live but past expiry at consume time.
     let expired = mint(&user, 100);
@@ -245,9 +268,30 @@ async fn refresh_expired_is_rejected_and_revoke_all_works() {
 
 #[tokio::test]
 #[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn deleting_a_user_cascades_their_tokens() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let refresh = PostgresRefreshStore::new(shared);
+    let (user, _) = seed_user(&users, Tier::Community).await;
+
+    let token = mint(&user, FAR_FUTURE);
+    let hash = token.record.token_hash;
+    refresh.insert(token.record).await.expect("insert refresh");
+    assert!(refresh.get(&hash).await.expect("get").is_some());
+
+    // Deleting the user must cascade the refresh token (real FK, ON DELETE
+    // CASCADE) - the soft-FK note in andypalmi/amicu-planning#114 is resolved.
+    users.delete(&user).await.expect("delete user");
+    assert!(refresh.get(&hash).await.expect("get").is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
 async fn reset_is_single_use_and_rejects_expired_and_unknown() {
-    let store = PostgresResetStore::new(pool().await);
-    let user = unique("usr");
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let store = PostgresResetStore::new(shared);
+    let (user, _) = seed_user(&users, Tier::Community).await;
 
     let minted = mint_reset(&user, FAR_FUTURE);
     let hash = minted.record.token_hash;
@@ -289,8 +333,10 @@ async fn reset_is_single_use_and_rejects_expired_and_unknown() {
 #[tokio::test]
 #[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
 async fn verify_is_single_use_and_rejects_expired_and_unknown() {
-    let store = PostgresVerifyStore::new(pool().await);
-    let user = unique("usr");
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let store = PostgresVerifyStore::new(shared);
+    let (user, _) = seed_user(&users, Tier::Community).await;
 
     let minted = mint_verify(&user, FAR_FUTURE);
     let hash = minted.record.token_hash;
@@ -326,32 +372,5 @@ async fn verify_is_single_use_and_rejects_expired_and_unknown() {
             .await
             .expect("consume unknown"),
         VerifyConsume::NotFound
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
-async fn verify_token_is_invisible_to_another_workspace() {
-    let shared = pool().await;
-    // Mint into the default (single-tenant) workspace.
-    let default_store = PostgresVerifyStore::new(shared.clone());
-    let user = unique("usr");
-    let minted = mint_verify(&user, FAR_FUTURE);
-    let hash = minted.record.token_hash;
-    default_store.insert(minted.record).await.expect("insert");
-
-    // A store bound to a different workspace shares the same token hash space but
-    // must not see the other tenant's row: the workspace_id predicate (and the
-    // RLS backstop) scope it out, so consuming reports NotFound, not Consumed.
-    let other_store = PostgresVerifyStore::with_workspace(shared, WorkspaceId::new());
-    assert_eq!(
-        other_store.consume(&hash, 0).await.expect("cross-tenant"),
-        VerifyConsume::NotFound
-    );
-
-    // The token is still live for its own workspace.
-    assert_eq!(
-        default_store.consume(&hash, 0).await.expect("consume"),
-        VerifyConsume::Consumed { user_id: user }
     );
 }

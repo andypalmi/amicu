@@ -19,16 +19,28 @@
 //! [`sqlx::migrate!`] (which embeds the migration files at compile time) need
 //! no connection at all.
 //!
-//! # Auth stores (PR-2)
+//! # Identity, membership, and auth stores
 //!
-//! [`user`], [`refresh`], [`reset`], and [`verify`] provide the Postgres
-//! implementations of the `amicu-auth` store traits. Each is workspace-scoped:
-//! every query carries
-//! a `workspace_id` predicate and runs inside a transaction that sets the
-//! `app.current_workspace` GUC so the row-level-security policies apply. A real
-//! multi-tenant deployment threads a per-request [`WorkspaceId`]; until
-//! login-routing exists, the self-host default ([`WorkspaceId::DEFAULT`]) is
-//! used everywhere.
+//! Identity is GLOBAL; membership is the join (see
+//! andypalmi/amicu-planning#127). [`user`] ([`PostgresUserStore`]) is the global
+//! identity store, keyed by email/id with no workspace scoping; [`workspace`]
+//! ([`PostgresWorkspaceStore`]) owns the workspace registry (tier + billing),
+//! also global. [`membership`] ([`PostgresMembershipStore`]) and [`invite`]
+//! ([`PostgresInviteStore`]) are the tenant-scoped stores: their queries run
+//! inside a [`begin_scoped`]/[`begin_scoped_user`]/[`begin_scoped_invite`]
+//! transaction that binds the matching GUC so the row-level-security policies
+//! apply, and they take the workspace (or user/token) per call rather than being
+//! pinned to one.
+//!
+//! [`refresh`], [`reset`], and [`verify`] provide the Postgres implementations
+//! of the remaining `amicu-auth` store traits. These are session artifacts of
+//! the global user identity (a real `user_id` foreign key into `users`, with
+//! `ON DELETE CASCADE`), so - like `users` itself - they are control-plane and
+//! carry no workspace scoping.
+//!
+//! There is no `WorkspaceId::DEFAULT` fallback in any of these reworked stores;
+//! [`WorkspaceId::DEFAULT`] survives only for the not-yet-reworked self-host
+//! config/state stores (andypalmi/amicu-planning#116).
 //!
 //! # Config store
 //!
@@ -57,18 +69,24 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 pub mod config;
+pub mod invite;
+pub mod membership;
 pub mod refresh;
 pub mod reset;
 pub mod state;
 pub mod user;
 pub mod verify;
+pub mod workspace;
 
 pub use config::{ConfigStore, InMemoryConfigStore, PostgresConfigStore};
+pub use invite::{Invite, PostgresInviteStore};
+pub use membership::{Member, PostgresMembershipStore, Role};
 pub use refresh::PostgresRefreshStore;
 pub use reset::PostgresResetStore;
 pub use state::PostgresStateBackend;
 pub use user::PostgresUserStore;
 pub use verify::PostgresVerifyStore;
+pub use workspace::{PostgresWorkspaceStore, Workspace};
 
 /// The control-plane isolation boundary: a workspace (unified with the
 /// Enterprise org). Every persisted resource is scoped to a workspace, so a
@@ -244,6 +262,62 @@ pub(crate) async fn begin_scoped(
         .await
         .map_err(map_db)?;
     Ok(tx)
+}
+
+/// Begins a transaction bound to a USER context (`app.current_user`), for the
+/// one legitimately cross-workspace membership read: "which workspaces is this
+/// user in?" (list-my-workspaces / workspace switching). The
+/// `workspace_members` RLS policy admits a row whose `user_id` equals this GUC,
+/// so a user always sees their own memberships across workspaces; the policy's
+/// WITH CHECK is workspace-only, so this read-only context can never write.
+/// `app.current_workspace` is left unset here, so no other tenant's rows leak.
+pub(crate) async fn begin_scoped_user(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, AuthError> {
+    let mut tx = pool.begin().await.map_err(map_db)?;
+    let uid = user_id.to_string();
+    sqlx::query!("SELECT set_config('app.current_user', $1, true)", uid)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_db)?;
+    Ok(tx)
+}
+
+/// Begins a transaction bound to an INVITE-TOKEN context
+/// (`app.current_invite_token`), for the one legitimately cross-workspace invite
+/// read: redeeming a token whose workspace is not yet known. The unguessable
+/// 32-byte token hash IS the capability; the `workspace_invites` RLS policy
+/// admits exactly the invite row whose `token_hash` matches (compared as
+/// lowercase hex). `app.current_workspace` is left unset, so no other invite
+/// leaks, and the policy's WITH CHECK is workspace-only so this read-only
+/// context cannot write.
+pub(crate) async fn begin_scoped_invite<'a>(
+    pool: &'a PgPool,
+    token_hash: &[u8; 32],
+) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, AuthError> {
+    let mut tx = pool.begin().await.map_err(map_db)?;
+    let hex = hex_lower(token_hash);
+    sqlx::query!(
+        "SELECT set_config('app.current_invite_token', $1, true)",
+        hex
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_db)?;
+    Ok(tx)
+}
+
+/// Lowercase-hex encoding of a byte slice, for the invite-token RLS GUC (which
+/// Postgres decodes with `decode(..., 'hex')`). Kept local to avoid pulling in a
+/// hex crate for one 32-byte value.
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 #[cfg(test)]

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT set_config('app.current_invite_token', $1, true)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "set_config",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8f0ec86630065bc3599b2253dcd83cde117e990c40a8022a9a86f2936e51881c"
+}
