@@ -301,6 +301,7 @@ dependencies = [
  "amicu-core",
  "amicu-state",
  "async-trait",
+ "base64 0.22.1",
  "rand 0.8.7",
  "serde",
  "serde_json",

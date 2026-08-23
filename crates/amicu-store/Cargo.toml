@@ -40,6 +40,10 @@ sha2 = "0.10"
 # amicu_state::lock::LockHandle's security note) - never a sequential or
 # derived counter.
 rand = "0.8"
+# Encodes the encryption-at-rest seam's ciphertext as text inside the
+# state_snapshots.content JSONB column (see amicu_store::state's "Encryption
+# at rest" docs) - avoids a schema/column-type change to add encryption.
+base64 = "0.22"
 # Already a mandatory transitive dependency via sqlx's runtime-tokio feature;
 # named directly so `PostgresStateBackend::push_with_delay_for_test` (a
 # `#[doc(hidden)]` seam used only by the lock/TOCTOU regression test) can

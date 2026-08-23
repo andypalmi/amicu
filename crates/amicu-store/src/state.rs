@@ -63,18 +63,180 @@
 //! Lease staleness is judged by Postgres's own clock (`clock_timestamp()`),
 //! not each caller's local wall clock, so multi-instance clock skew cannot
 //! let a fast-clocked node treat a still-live lease as expired.
+//!
+//! # Encryption at rest
+//!
+//! [`PostgresStateBackend`] accepts an optional
+//! [`StateCipher`](amicu_state::StateCipher) (via
+//! [`with_cipher`](PostgresStateBackend::with_cipher)), applied at the exact
+//! point a snapshot's `content` crosses the persistence boundary:
+//! `push_impl` encrypts the graph's canonical JSON before the `INSERT`, and
+//! `pull` decrypts it after the `SELECT`. See [`encode_content`]/
+//! [`decode_content`] for the on-disk wrapper format, chosen so `content`
+//! stays `JSONB` with no migration - encrypted and plaintext rows are told
+//! apart by a marker key, never by a schema difference.
+//!
+//! With no cipher configured - the default, and every self-host deployment -
+//! this backend never calls into the seam at all, so `content` is written
+//! and read exactly as it always has been. **Self-host operators are
+//! responsible for their own database's encryption at rest** (disk/volume
+//! encryption, filesystem encryption, or their Postgres provider's own
+//! offering); this crate does not provide it. The seam exists so a
+//! SaaS-hosted deployment can plug in envelope/KMS encryption (per-workspace
+//! data keys) without touching this self-host path - see
+//! `amicu_state::cipher`'s module docs for the full scope, including why
+//! this protects control-plane metadata and secret *references*, never
+//! plaintext secret material (state can never carry a `SecretValue`, only a
+//! `SecretRef` pointer).
 
 use amicu_core::Graph;
 use amicu_core::adapter::{Adapter, AdapterError, AdapterId, DescribeCapabilities, HealthStatus};
-use amicu_state::{LockHandle, StateBackendAdapter, StateError, StateSnapshot, StateVersion};
+use amicu_state::{
+    LockHandle, StateBackendAdapter, StateCipher, StateError, StateSnapshot, StateVersion,
+};
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{WorkspaceId, begin_scoped, now_unix_seconds};
+
+/// Marker key present only on the JSON wrapper [`encode_content`] writes
+/// when a [`StateCipher`] is configured. Its presence, not any schema/column
+/// difference, is what tells encrypted content apart from a plain graph on
+/// read - chosen to never collide with a real `Graph` field name.
+const CIPHER_MARKER_KEY: &str = "__amicu_state_ciphertext__";
+
+/// The wrapper format version [`encode_content`] currently writes.
+const CIPHER_WRAPPER_VERSION: u8 = 1;
+
+/// The wrapper [`encode_content`] writes into `state_snapshots.content` in
+/// place of the plain graph JSON when a [`StateCipher`] is configured.
+/// `content` remains `JSONB` either way; only the JSON value inside it
+/// changes shape, so no column type or query change is needed to add
+/// encryption.
+#[derive(Debug, Serialize, Deserialize)]
+struct EncryptedContent {
+    /// Wrapper format version, so a future incompatible change is
+    /// detectable rather than silently misread.
+    #[serde(rename = "__amicu_state_cipher_v__")]
+    version: u8,
+    /// Base64 (standard, padded) encoding of the ciphertext the configured
+    /// [`StateCipher`] produced. Its key ([`CIPHER_MARKER_KEY`]) is the
+    /// marker that identifies this JSON value as wrapped ciphertext rather
+    /// than a plain graph.
+    #[serde(rename = "__amicu_state_ciphertext__")]
+    ciphertext: String,
+}
+
+/// Serializes `graph` to the JSON value stored in `state_snapshots.content`,
+/// transparently encrypting it through `cipher` when one is configured.
+///
+/// With `cipher: None` (the default, self-host path) this returns exactly
+/// `serde_json::to_value(graph)` - byte-for-byte what every version of this
+/// backend before the encryption seam wrote, so existing rows and tests are
+/// unaffected.
+async fn encode_content(
+    graph: &Graph,
+    cipher: Option<&Arc<dyn StateCipher>>,
+) -> Result<serde_json::Value, AdapterError> {
+    let Some(cipher) = cipher else {
+        return serde_json::to_value(graph).map_err(|source| {
+            backend_state_err(StateError::Corrupted {
+                detail: format!("graph failed to serialize: {source}"),
+            })
+        });
+    };
+
+    let plaintext = serde_json::to_vec(graph).map_err(|source| {
+        backend_state_err(StateError::Corrupted {
+            detail: format!("graph failed to serialize: {source}"),
+        })
+    })?;
+    let ciphertext = cipher
+        .encrypt(&plaintext)
+        .await
+        .map_err(backend_state_err)?;
+    let wrapper = EncryptedContent {
+        version: CIPHER_WRAPPER_VERSION,
+        ciphertext: BASE64.encode(ciphertext),
+    };
+    serde_json::to_value(wrapper).map_err(|source| {
+        backend_state_err(StateError::Corrupted {
+            detail: format!("encrypted content wrapper failed to serialize: {source}"),
+        })
+    })
+}
+
+/// Recovers the [`Graph`] from a `state_snapshots.content` value, decrypting
+/// it through `cipher` first when it carries [`CIPHER_MARKER_KEY`] (i.e. was
+/// written by [`encode_content`] with a cipher configured).
+///
+/// A row with no marker is read as a plain graph regardless of whether a
+/// cipher is configured now, so pre-encryption history stays readable after
+/// a cipher is turned on. A row that *is* wrapped but no cipher is
+/// configured to decrypt it is reported as [`StateError::Corrupted`] -
+/// explicit, non-retryable failure, never a silent misread.
+async fn decode_content(
+    content: serde_json::Value,
+    cipher: Option<&Arc<dyn StateCipher>>,
+) -> Result<Graph, AdapterError> {
+    if !content
+        .as_object()
+        .is_some_and(|obj| obj.contains_key(CIPHER_MARKER_KEY))
+    {
+        return serde_json::from_value(content).map_err(|source| {
+            backend_state_err(StateError::Corrupted {
+                detail: format!("stored graph failed to deserialize: {source}"),
+            })
+        });
+    }
+
+    let Some(cipher) = cipher else {
+        return Err(backend_state_err(StateError::Corrupted {
+            detail: "snapshot content is encrypted but no StateCipher is configured".to_string(),
+        }));
+    };
+
+    let wrapper: EncryptedContent = serde_json::from_value(content).map_err(|source| {
+        backend_state_err(StateError::Corrupted {
+            detail: format!("encrypted content wrapper failed to deserialize: {source}"),
+        })
+    })?;
+    if wrapper.version != CIPHER_WRAPPER_VERSION {
+        return Err(backend_state_err(StateError::Corrupted {
+            detail: format!(
+                "encrypted content wrapper version {} is not supported (expected {})",
+                wrapper.version, CIPHER_WRAPPER_VERSION
+            ),
+        }));
+    }
+    let ciphertext = BASE64.decode(wrapper.ciphertext).map_err(|source| {
+        backend_state_err(StateError::Corrupted {
+            detail: format!("encrypted content ciphertext is not valid base64: {source}"),
+        })
+    })?;
+    let plaintext = cipher
+        .decrypt(&ciphertext)
+        .await
+        .map_err(backend_state_err)?;
+    serde_json::from_slice(&plaintext).map_err(|source| {
+        backend_state_err(StateError::Corrupted {
+            detail: format!("decrypted graph failed to deserialize: {source}"),
+        })
+    })
+}
+
+/// Folds a [`StateError`] into an [`AdapterError`], for use from the
+/// (de)serialization/encryption helpers above.
+fn backend_state_err(error: StateError) -> AdapterError {
+    error.into()
+}
 
 /// Default lock lease TTL: long enough to cover a plan/apply cycle, short
 /// enough that a crashed holder does not wedge the stack indefinitely.
@@ -99,6 +261,11 @@ pub struct PostgresStateBackend {
     workspace: WorkspaceId,
     id: AdapterId,
     lease_ttl_seconds: i64,
+    /// Optional encryption-at-rest seam for `state_snapshots.content` - see
+    /// the module docs' "Encryption at rest" section. `None` (the default)
+    /// means this backend never touches the seam: content is written and
+    /// read exactly as it always has been.
+    cipher: Option<Arc<dyn StateCipher>>,
 }
 
 impl PostgresStateBackend {
@@ -117,6 +284,7 @@ impl PostgresStateBackend {
             workspace,
             id: id.into(),
             lease_ttl_seconds: DEFAULT_LEASE_TTL_SECONDS,
+            cipher: None,
         }
     }
 
@@ -126,6 +294,16 @@ impl PostgresStateBackend {
     #[must_use]
     pub fn with_lease_ttl_seconds(mut self, seconds: i64) -> Self {
         self.lease_ttl_seconds = seconds;
+        self
+    }
+
+    /// Configures the encryption-at-rest seam: `push`/`pull` transparently
+    /// encrypt/decrypt `state_snapshots.content` through `cipher` (see the
+    /// module docs' "Encryption at rest" section). Not called by self-host
+    /// deployments, which get the no-op default (`cipher: None`) instead.
+    #[must_use]
+    pub fn with_cipher(mut self, cipher: Arc<dyn StateCipher>) -> Self {
+        self.cipher = Some(cipher);
         self
     }
 
@@ -243,10 +421,7 @@ impl PostgresStateBackend {
             &snapshot.recorded_at,
             snapshot.graph.clone(),
         )?;
-        let content =
-            serde_json::to_value(&recorded.graph).map_err(|source| StateError::Corrupted {
-                detail: format!("graph failed to serialize: {source}"),
-            })?;
+        let content = encode_content(&recorded.graph, self.cipher.as_ref()).await?;
         let created_at = now_unix_seconds();
 
         sqlx::query!(
@@ -377,10 +552,7 @@ impl StateBackendAdapter for PostgresStateBackend {
             )?);
         };
 
-        let graph: Graph =
-            serde_json::from_value(row.content).map_err(|source| StateError::Corrupted {
-                detail: format!("stored graph failed to deserialize: {source}"),
-            })?;
+        let graph = decode_content(row.content, self.cipher.as_ref()).await?;
         let snapshot = StateSnapshot {
             version: row.version,
             recorded_at: row.recorded_at,
@@ -569,5 +741,201 @@ impl StateBackendAdapter for PostgresStateBackend {
             .await
             .map_err(|_| backend_err("failed to commit rollback"))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod content_cipher_tests {
+    //! Pure, DB-free tests for the `encode_content`/`decode_content`
+    //! encryption-at-rest seam (see the module docs' "Encryption at rest"
+    //! section). Live-database round trips through `PostgresStateBackend`
+    //! itself live in `tests/state_backend.rs` alongside the crate's other
+    //! `#[ignore]`d integration tests.
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use amicu_core::Graph;
+    use amicu_core::id::ModelId;
+    use amicu_core::resource::{
+        Artifact, ArtifactFormat, Modality, Model, ModelSource, SourceRegistry,
+    };
+    use amicu_state::StateCipher;
+    use async_trait::async_trait;
+
+    use super::{CIPHER_MARKER_KEY, decode_content, encode_content};
+
+    fn sample_graph() -> Graph {
+        Graph {
+            models: vec![Model {
+                id: ModelId::new("m1"),
+                source: ModelSource {
+                    registry: SourceRegistry::HuggingFace,
+                    reference: "org/model".into(),
+                },
+                architecture: "llama".into(),
+                modalities: vec![Modality::Text],
+                artifact: Artifact {
+                    format: ArtifactFormat::Gguf,
+                    quantization: None,
+                },
+                context_length: None,
+                variants: vec![],
+            }],
+            ..Graph::new()
+        }
+    }
+
+    /// A reversible (XOR, not real cryptography) test-only [`StateCipher`],
+    /// good enough to prove the seam actually transforms bytes on the way in
+    /// and reverses that transform on the way out - a cipher that merely
+    /// echoed its input, like [`amicu_state::IdentityCipher`], could not
+    /// distinguish "the seam runs" from "the seam is a no-op". Also counts
+    /// calls, so tests can confirm the seam is invoked exactly when a cipher
+    /// is configured and never otherwise.
+    struct XorTestCipher {
+        key: u8,
+        encrypt_calls: AtomicUsize,
+        decrypt_calls: AtomicUsize,
+    }
+
+    impl XorTestCipher {
+        fn new(key: u8) -> Self {
+            Self {
+                key,
+                encrypt_calls: AtomicUsize::new(0),
+                decrypt_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl StateCipher for XorTestCipher {
+        async fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, amicu_state::StateError> {
+            self.encrypt_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(plaintext.iter().map(|b| b ^ self.key).collect())
+        }
+
+        async fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, amicu_state::StateError> {
+            self.decrypt_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ciphertext.iter().map(|b| b ^ self.key).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn no_cipher_encodes_identically_to_pre_seam_serde_json_to_value() {
+        let graph = sample_graph();
+        let via_seam = encode_content(&graph, None).await.unwrap();
+        let pre_seam_equivalent = serde_json::to_value(&graph).unwrap();
+        assert_eq!(
+            via_seam, pre_seam_equivalent,
+            "with no cipher configured, encode_content must be byte-for-byte what \
+             every version of this backend wrote before the encryption seam existed"
+        );
+        // And it round-trips straight back with no cipher, exactly as `pull`
+        // always has.
+        let decoded = decode_content(via_seam, None).await.unwrap();
+        assert_eq!(decoded, graph);
+    }
+
+    #[tokio::test]
+    async fn cipher_round_trip_encrypt_store_decrypt_is_identical_to_original() {
+        let cipher: Arc<dyn StateCipher> = Arc::new(XorTestCipher::new(0x5A));
+        let graph = sample_graph();
+
+        let stored = encode_content(&graph, Some(&cipher)).await.unwrap();
+
+        // The wrapper is genuinely opaque: the plain graph's own fields
+        // (e.g. the model id/reference) must not appear verbatim in what
+        // gets persisted.
+        let stored_str = stored.to_string();
+        assert!(
+            !stored_str.contains("org/model"),
+            "encrypted content must not leak plaintext graph fields: {stored_str}"
+        );
+        assert!(
+            stored.get(CIPHER_MARKER_KEY).is_some(),
+            "encrypted content must carry the cipher marker key"
+        );
+
+        let recovered = decode_content(stored, Some(&cipher)).await.unwrap();
+        assert_eq!(
+            recovered, graph,
+            "encrypt -> store -> decrypt must recover the exact original graph"
+        );
+    }
+
+    #[tokio::test]
+    async fn cipher_is_only_invoked_when_configured() {
+        let cipher = Arc::new(XorTestCipher::new(0x11));
+        let dyn_cipher: Arc<dyn StateCipher> = cipher.clone();
+        let graph = sample_graph();
+
+        let _ = encode_content(&graph, None).await.unwrap();
+        assert_eq!(
+            cipher.encrypt_calls.load(Ordering::SeqCst),
+            0,
+            "no cipher configured must never invoke encrypt"
+        );
+
+        let stored = encode_content(&graph, Some(&dyn_cipher)).await.unwrap();
+        assert_eq!(cipher.encrypt_calls.load(Ordering::SeqCst), 1);
+
+        let _ = decode_content(stored, Some(&dyn_cipher)).await.unwrap();
+        assert_eq!(cipher.decrypt_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn wrapped_content_without_a_configured_cipher_is_a_corrupted_error_not_a_silent_misread()
+    {
+        let cipher: Arc<dyn StateCipher> = Arc::new(XorTestCipher::new(0x42));
+        let graph = sample_graph();
+        let stored = encode_content(&graph, Some(&cipher)).await.unwrap();
+
+        // Same content, but now decoded with no cipher configured - e.g. the
+        // backend's cipher was removed/misconfigured after these rows were
+        // written. This must fail loudly, never silently return garbage or
+        // the wrapper's raw fields mistaken for a graph.
+        let err = decode_content(stored, None).await.unwrap_err();
+        assert!(
+            err.to_string().contains("no StateCipher is configured")
+                || format!("{err:?}").contains("no StateCipher is configured"),
+            "must explain the encrypted-but-no-cipher condition: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_legacy_content_still_decodes_when_a_cipher_is_configured() {
+        // A row written before encryption was ever turned on (or by a
+        // no-cipher instance) has no wrapper at all. A later instance with a
+        // cipher configured must still read it as a plain graph, not fail or
+        // try to decrypt it.
+        let graph = sample_graph();
+        let legacy_content = serde_json::to_value(&graph).unwrap();
+
+        let cipher: Arc<dyn StateCipher> = Arc::new(XorTestCipher::new(0x99));
+        let decoded = decode_content(legacy_content, Some(&cipher))
+            .await
+            .expect("unwrapped legacy content must decode as a plain graph");
+        assert_eq!(decoded, graph);
+    }
+
+    #[tokio::test]
+    async fn wrapper_with_an_unsupported_version_is_a_corrupted_error_not_a_silent_misread() {
+        // A wrapper carrying the marker key but a version this backend does
+        // not understand (e.g. written by a future, incompatible format)
+        // must fail loudly rather than being blindly base64-decoded and
+        // decrypted under the current format's assumptions.
+        let cipher: Arc<dyn StateCipher> = Arc::new(XorTestCipher::new(0x77));
+        let graph = sample_graph();
+        let mut stored = encode_content(&graph, Some(&cipher)).await.unwrap();
+        stored["__amicu_state_cipher_v__"] = serde_json::json!(u8::MAX);
+
+        let err = decode_content(stored, Some(&cipher)).await.unwrap_err();
+        assert!(
+            err.to_string().contains("not supported")
+                || format!("{err:?}").contains("not supported"),
+            "must explain the unsupported-version condition: {err}"
+        );
     }
 }

@@ -11,14 +11,21 @@
 //! silent overwrite: lock contention and state corruption. Both surface as
 //! `AMICU-STATE-*` [`AdapterError`](amicu_core::adapter::AdapterError)s via
 //! [`StateError`].
+//!
+//! [`cipher`] defines the optional encryption-at-rest seam ([`StateCipher`],
+//! default [`IdentityCipher`]) a backend can wire in at the point snapshot
+//! bytes cross the persistence boundary - see that module's docs for scope
+//! and the self-host operator's own encryption-at-rest responsibility.
 
 mod adapter;
+mod cipher;
 mod drift;
 mod error;
 mod lock;
 mod snapshot;
 
 pub use adapter::StateBackendAdapter;
+pub use cipher::{IdentityCipher, StateCipher};
 pub use drift::{DriftReport, detect_drift};
 pub use error::{
     STATE_BACKEND, STATE_CORRUPTED, STATE_LOCK_NOT_HELD, STATE_LOCKED, STATE_VERSION_NOT_FOUND,
