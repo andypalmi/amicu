@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO state_current (workspace_id, stack_id, version) VALUES ($1, $2, $3) ON CONFLICT (workspace_id, stack_id) DO UPDATE SET version = EXCLUDED.version",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "160e5d1c761545e8779f06d000a3218caf3be93e34d58814973dd4ea2935ef8a"
+}

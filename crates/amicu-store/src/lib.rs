@@ -37,6 +37,14 @@
 //! GUC-bound-transaction and workspace-predicate pattern as the auth stores,
 //! but is not one of the `amicu-auth` traits: it has its own error type
 //! ([`config::ConfigError`]).
+//!
+//! # State backend
+//!
+//! [`state`] provides [`PostgresStateBackend`], the first production
+//! `amicu_state::StateBackendAdapter` implementation: canonical graph
+//! snapshots, history, and the lock lease that mediates concurrent writes.
+//! It follows the same workspace-scoping convention as the auth stores, plus
+//! a second `stack_id` predicate (see the module docs).
 
 use amicu_auth::AuthError;
 use serde::{Deserialize, Serialize};
@@ -49,12 +57,14 @@ use uuid::Uuid;
 pub mod config;
 pub mod refresh;
 pub mod reset;
+pub mod state;
 pub mod user;
 pub mod verify;
 
 pub use config::PostgresConfigStore;
 pub use refresh::PostgresRefreshStore;
 pub use reset::PostgresResetStore;
+pub use state::PostgresStateBackend;
 pub use user::PostgresUserStore;
 pub use verify::PostgresVerifyStore;
 

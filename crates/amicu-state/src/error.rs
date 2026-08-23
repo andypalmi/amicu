@@ -24,6 +24,10 @@ pub const STATE_LOCK_NOT_HELD: DiagnosticCode = DiagnosticCode::new(Category::St
 pub const STATE_CORRUPTED: DiagnosticCode = DiagnosticCode::new(Category::State, 3);
 /// `AMICU-STATE-004` - the requested history version does not exist.
 pub const STATE_VERSION_NOT_FOUND: DiagnosticCode = DiagnosticCode::new(Category::State, 4);
+/// `AMICU-STATE-005` - the backend's underlying storage failed (connectivity,
+/// driver error). Distinct from `STATE_CORRUPTED`: the recorded state itself
+/// is not known to be bad, the backend simply could not be reached right now.
+pub const STATE_BACKEND: DiagnosticCode = DiagnosticCode::new(Category::State, 5);
 
 /// Failures a state backend can surface, each mapped to an `AMICU-STATE-*` code.
 #[derive(Debug, thiserror::Error)]
@@ -56,6 +60,16 @@ pub enum StateError {
         /// The version id that could not be found.
         version: String,
     },
+
+    /// The backend's underlying storage failed (connectivity, driver error).
+    /// Unlike [`StateError::Corrupted`], the recorded state itself is not
+    /// known to be bad; the backend simply could not be reached right now, so
+    /// callers may retry.
+    #[error("state backend error: {detail}")]
+    Backend {
+        /// Safe, secret-free summary of the failure.
+        detail: String,
+    },
 }
 
 impl AdapterErrorKind for StateError {
@@ -65,6 +79,7 @@ impl AdapterErrorKind for StateError {
             StateError::LockNotHeld => STATE_LOCK_NOT_HELD,
             StateError::Corrupted { .. } => STATE_CORRUPTED,
             StateError::VersionNotFound { .. } => STATE_VERSION_NOT_FOUND,
+            StateError::Backend { .. } => STATE_BACKEND,
         }
     }
 
@@ -73,9 +88,13 @@ impl AdapterErrorKind for StateError {
     }
 
     fn retryable(&self) -> bool {
-        // Contention may clear once the holder releases the lock; a missing lock,
-        // corruption, and an unknown version all require deliberate action first.
-        matches!(self, StateError::LockContention { .. })
+        // Contention may clear once the holder releases the lock, and a backend
+        // hiccup (connectivity) may clear on retry; a missing lock, corruption,
+        // and an unknown version all require deliberate action first.
+        matches!(
+            self,
+            StateError::LockContention { .. } | StateError::Backend { .. }
+        )
     }
 }
 

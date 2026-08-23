@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT holder, lock_token, expires_at FROM state_locks WHERE workspace_id = $1 AND stack_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "holder",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "lock_token",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "expires_at",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "75db34affa3603058e239bf6e30633ccf2152d0d2cb25689798a539bf7c8aac3"
+}

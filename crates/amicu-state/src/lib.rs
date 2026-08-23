@@ -21,7 +21,8 @@ mod snapshot;
 pub use adapter::StateBackendAdapter;
 pub use drift::{DriftReport, detect_drift};
 pub use error::{
-    STATE_CORRUPTED, STATE_LOCK_NOT_HELD, STATE_LOCKED, STATE_VERSION_NOT_FOUND, StateError,
+    STATE_BACKEND, STATE_CORRUPTED, STATE_LOCK_NOT_HELD, STATE_LOCKED, STATE_VERSION_NOT_FOUND,
+    StateError,
 };
 pub use lock::LockHandle;
 pub use snapshot::{StateSnapshot, StateVersion};
