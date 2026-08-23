@@ -31,7 +31,9 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{begin_scoped, map_db, now_unix_seconds, tier_from_str, tier_to_str};
+use crate::{
+    begin_scoped, begin_scoped_user, map_db, now_unix_seconds, tier_from_str, tier_to_str,
+};
 
 /// Postgres implementation of [`UserStore`] (global identity).
 pub struct PostgresUserStore {
@@ -286,33 +288,96 @@ impl UserStore for PostgresUserStore {
         Ok(())
     }
 
+    /// Delete a user, fail-CLOSED.
+    ///
+    /// This is DELIBERATELY conservative and refuses anything that could orphan
+    /// or corrupt a workspace (no production caller yet; a future
+    /// account-deletion feature with explicit ownership transfer can relax it):
+    ///
+    /// 1. The user must own EXACTLY their personal workspace and belong to no
+    ///    other workspace. If they are a member (or sole Owner) of any other
+    ///    workspace, [`AuthError::SoleOwner`] is returned and nothing is
+    ///    deleted - so the cascade never silently tears down a membership in a
+    ///    shared workspace, nor leaves one ownerless.
+    /// 2. Their personal workspace must have no OTHER members. This is enforced
+    ///    by the `workspace_members.workspace_id ON DELETE RESTRICT` foreign key:
+    ///    the personal-workspace DELETE fails (surfacing as
+    ///    [`AuthError::SoleOwner`]) if any other member remains - even one that
+    ///    is invisible under this operation's single RLS context - instead of
+    ///    cascading that other user's membership away.
+    ///
+    /// The whole thing runs in ONE transaction under a SINGLE (user) context, so
+    /// it upholds the single-context invariant the `workspace_members` policy
+    /// depends on: enumerating the deleter's own memberships needs the user
+    /// context, and the "personal workspace not shared" check is delegated to the
+    /// RESTRICT foreign key rather than a second (workspace) context that would
+    /// break the invariant.
+    ///
+    /// A no-op (`Ok`) if the user id is unknown or unparseable. The user's
+    /// refresh/reset/verify tokens cascade on the user delete (the `#114`
+    /// cleanup path).
     async fn delete(&self, user_id: &str) -> Result<()> {
         let Some(uid) = parse_user_id(user_id) else {
             return Ok(());
         };
-        let mut tx = self.pool.begin().await.map_err(map_db)?;
-        // Capture the personal workspace before the user row (and its FK) go.
-        let ws = sqlx::query!("SELECT personal_workspace_id FROM users WHERE id = $1", uid,)
+        // Single context (user): the guard enumerates the user's own memberships
+        // across workspaces, which only the user context makes visible.
+        let mut tx = begin_scoped_user(&self.pool, uid).await?;
+
+        // users has no RLS, so the personal-workspace lookup needs no context.
+        let ws = sqlx::query!("SELECT personal_workspace_id FROM users WHERE id = $1", uid)
             .fetch_optional(&mut *tx)
             .await
             .map_err(map_db)?;
         let Some(ws) = ws else {
             return Ok(()); // unknown user: no-op
         };
-        // Deleting the user cascades their workspace_members rows and every
+        let personal = ws.personal_workspace_id;
+
+        // Guard 1: the user must own exactly their personal workspace and belong
+        // to no other. Any other membership -> refuse (fail-closed).
+        let g = sqlx::query!(
+            "SELECT COUNT(*) AS \"total!\", \
+                    COUNT(*) FILTER (WHERE workspace_id = $2 AND role = 'owner') \
+                        AS \"personal_owner!\" \
+             FROM workspace_members WHERE user_id = $1",
+            uid,
+            personal,
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_db)?;
+        if g.total != 1 || g.personal_owner != 1 {
+            return Err(AuthError::SoleOwner);
+        }
+
+        // Delete the user: cascades their single personal membership and every
         // refresh/reset/verify token (the ON DELETE CASCADE the FKs declare).
         sqlx::query!("DELETE FROM users WHERE id = $1", uid)
             .execute(&mut *tx)
             .await
             .map_err(map_db)?;
-        // Then the now-memberless personal workspace itself.
-        sqlx::query!(
-            "DELETE FROM workspaces WHERE id = $1",
-            ws.personal_workspace_id,
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(map_db)?;
+
+        // Guard 2: delete the now-vacated personal workspace. RESTRICT on
+        // workspace_members.workspace_id makes this fail if ANY other member
+        // remains (even one invisible under this RLS context), so a shared
+        // personal workspace is refused rather than silently cascaded. A RESTRICT
+        // violation is SQLSTATE 23001 (`restrict_violation`) - distinct from a
+        // plain foreign-key violation 23503; treat either as the "shared
+        // workspace" refusal. Any other DB error is an infrastructure fault.
+        match sqlx::query!("DELETE FROM workspaces WHERE id = $1", personal)
+            .execute(&mut *tx)
+            .await
+        {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(db))
+                if matches!(db.code().as_deref(), Some("23001" | "23503")) =>
+            {
+                return Err(AuthError::SoleOwner);
+            }
+            Err(other) => return Err(map_db(other)),
+        }
+
         tx.commit().await.map_err(map_db)?;
         Ok(())
     }

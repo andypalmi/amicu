@@ -243,10 +243,24 @@ pub(crate) fn now_unix_seconds() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
+// SINGLE-CONTEXT INVARIANT (upheld by all three helpers below).
+//
+// The `workspace_members`/`workspace_invites` RLS policies are OR-policies over
+// two context GUCs (see 0003/0004). Their tenant isolation depends on AT MOST
+// ONE context GUC being set per transaction: each helper below binds EXACTLY ONE
+// (`app.current_workspace`, `app.current_user`, or `app.current_invite_token`)
+// via SET LOCAL and touches no other, and SET LOCAL reverts it at transaction
+// end so it cannot bleed into the next transaction on a pooled connection.
+// Setting two at once would let a bare `SELECT` union two tenants' rows. Every
+// query additionally carries its own explicit WHERE predicate as the primary
+// filter; the RLS OR-policy is the backstop. The regression test
+// `scoped_helpers_bind_exactly_one_context_guc` asserts the one-GUC property.
+
 /// Begins a transaction and binds the workspace GUC (`app.current_workspace`)
 /// for its lifetime, so the row-level-security policies on the scoped tables
 /// admit exactly this workspace's rows. Every store operation runs its queries
-/// inside the returned transaction and commits it.
+/// inside the returned transaction and commits it. Binds ONLY
+/// `app.current_workspace` (see the single-context invariant above).
 pub(crate) async fn begin_scoped(
     pool: &PgPool,
     workspace: WorkspaceId,
@@ -361,5 +375,88 @@ mod tests {
     #[test]
     fn from_str_rejects_garbage() {
         assert!("not-a-uuid".parse::<WorkspaceId>().is_err());
+    }
+
+    /// Reads the three context GUCs inside `tx`, each coerced NULL -> "" so an
+    /// unset (or reverted-to-empty) GUC reads as the empty string.
+    #[cfg(test)]
+    async fn read_context_gucs(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> (String, String, String) {
+        let row = sqlx::query!(
+            "SELECT \
+               COALESCE(current_setting('app.current_workspace', true), '')    AS \"ws!\", \
+               COALESCE(current_setting('app.current_user', true), '')         AS \"usr!\", \
+               COALESCE(current_setting('app.current_invite_token', true), '') AS \"inv!\"",
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .expect("read context gucs");
+        (row.ws, row.usr, row.inv)
+    }
+
+    /// FIX N1 regression: each `begin_scoped_*` helper must bind EXACTLY ONE
+    /// context GUC and leave the other two empty within its transaction. The
+    /// `workspace_members`/`workspace_invites` OR-policies rely on this
+    /// single-context invariant for tenant isolation (see the note above
+    /// `begin_scoped` and the policy comments in 0003/0004). Running the three
+    /// helpers in sequence on the same pool also proves SET LOCAL does not bleed
+    /// one context into the next transaction.
+    #[tokio::test]
+    #[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+    async fn scoped_helpers_bind_exactly_one_context_guc() {
+        let url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for the ignored tests");
+        let pool = connect(&url).await.expect("connect to Postgres");
+        run_migrations(&pool).await.expect("apply migrations");
+
+        // Workspace context: only app.current_workspace is set.
+        let mut tx = begin_scoped(&pool, WorkspaceId::new())
+            .await
+            .expect("begin_scoped");
+        let (ws, usr, inv) = read_context_gucs(&mut tx).await;
+        assert!(!ws.is_empty(), "workspace GUC set");
+        assert!(
+            usr.is_empty(),
+            "user GUC must stay empty under workspace scope"
+        );
+        assert!(
+            inv.is_empty(),
+            "invite GUC must stay empty under workspace scope"
+        );
+        tx.rollback().await.expect("rollback");
+
+        // User context: only app.current_user is set (and the workspace GUC from
+        // the prior transaction did not bleed through).
+        let mut tx = begin_scoped_user(&pool, Uuid::new_v4())
+            .await
+            .expect("begin_scoped_user");
+        let (ws, usr, inv) = read_context_gucs(&mut tx).await;
+        assert!(
+            ws.is_empty(),
+            "workspace GUC must stay empty under user scope"
+        );
+        assert!(!usr.is_empty(), "user GUC set");
+        assert!(
+            inv.is_empty(),
+            "invite GUC must stay empty under user scope"
+        );
+        tx.rollback().await.expect("rollback");
+
+        // Invite-token context: only app.current_invite_token is set.
+        let mut tx = begin_scoped_invite(&pool, &[7u8; 32])
+            .await
+            .expect("begin_scoped_invite");
+        let (ws, usr, inv) = read_context_gucs(&mut tx).await;
+        assert!(
+            ws.is_empty(),
+            "workspace GUC must stay empty under invite scope"
+        );
+        assert!(
+            usr.is_empty(),
+            "user GUC must stay empty under invite scope"
+        );
+        assert!(!inv.is_empty(), "invite GUC set");
+        tx.rollback().await.expect("rollback");
     }
 }

@@ -17,11 +17,12 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use amicu_auth::Tier;
+use amicu_auth::refresh::{RefreshStore, mint};
 use amicu_auth::user::{User, UserStore};
+use amicu_auth::{AuthError, Tier};
 use amicu_store::{
-    PostgresInviteStore, PostgresMembershipStore, PostgresUserStore, PostgresWorkspaceStore, Role,
-    WorkspaceId, connect, run_migrations,
+    PostgresInviteStore, PostgresMembershipStore, PostgresRefreshStore, PostgresUserStore,
+    PostgresWorkspaceStore, Role, WorkspaceId, connect, run_migrations,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -301,5 +302,115 @@ async fn invite_store_create_find_accept_expire() {
             .await
             .expect("find")
             .is_none()
+    );
+}
+
+/// The personal workspace id a freshly-seeded user is Owner of.
+async fn personal_ws(members: &PostgresMembershipStore, user: &str) -> WorkspaceId {
+    let mut mine = members
+        .list_workspaces(user)
+        .await
+        .expect("list workspaces");
+    assert_eq!(mine.len(), 1, "fresh user has exactly one workspace");
+    mine.pop().expect("one workspace").workspace_id
+}
+
+// ---------------------------------------------------------------------------
+// FIX S1: UserStore::delete is fail-CLOSED.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn delete_plain_single_workspace_user_succeeds_and_cascades_tokens() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared.clone());
+    let workspaces = PostgresWorkspaceStore::new(shared.clone());
+    let refresh = PostgresRefreshStore::new(shared);
+
+    let user = seed_user(&users).await;
+    let ws = personal_ws(&members, &user).await;
+
+    // Give them a refresh token so we can confirm the cascade.
+    let token = mint(&user, FAR_FUTURE);
+    let hash = token.record.token_hash;
+    refresh.insert(token.record).await.expect("insert refresh");
+
+    // A user who only owns their own (unshared) personal workspace deletes fine.
+    users.delete(&user).await.expect("delete succeeds");
+
+    // User, their token, and the vacated personal workspace are all gone.
+    assert!(users.get_by_id(&user).await.expect("lookup").is_none());
+    assert!(refresh.get(&hash).await.expect("get").is_none());
+    assert!(workspaces.get(ws).await.expect("get").is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn delete_is_refused_when_user_owns_a_second_shared_workspace() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let workspaces = PostgresWorkspaceStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared);
+
+    let owner = seed_user(&users).await;
+    let other = seed_user(&users).await;
+
+    // A second, SHARED workspace the user is sole Owner of.
+    let team = workspaces
+        .create(&unique("Team"), Tier::Pro)
+        .await
+        .expect("create workspace");
+    members
+        .add(team, &owner, Role::Owner, None)
+        .await
+        .expect("owner of team");
+    members
+        .add(team, &other, Role::Member, Some(&owner))
+        .await
+        .expect("other member");
+
+    // Deleting the owner would orphan the shared workspace -> refused, nothing
+    // deleted. The user and the other member's membership both survive.
+    assert!(matches!(
+        users.delete(&owner).await,
+        Err(AuthError::SoleOwner)
+    ));
+    assert!(users.get_by_id(&owner).await.expect("lookup").is_some());
+    assert_eq!(
+        members.role_of(team, &other).await.expect("role_of"),
+        Some(Role::Member),
+        "the other member must NOT be cascade-deleted"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn delete_is_refused_when_personal_workspace_has_another_member() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared);
+
+    let user = seed_user(&users).await;
+    let guest = seed_user(&users).await;
+    let ws = personal_ws(&members, &user).await;
+
+    // Someone else was added into the user's personal workspace.
+    members
+        .add(ws, &guest, Role::Member, Some(&user))
+        .await
+        .expect("guest joins personal ws");
+
+    // Deleting the user would cascade the guest's membership away (and drop a
+    // still-occupied workspace) -> refused by the RESTRICT FK, nothing deleted.
+    assert!(matches!(
+        users.delete(&user).await,
+        Err(AuthError::SoleOwner)
+    ));
+    assert!(users.get_by_id(&user).await.expect("lookup").is_some());
+    assert_eq!(
+        members.role_of(ws, &guest).await.expect("role_of"),
+        Some(Role::Member),
+        "the guest's membership must NOT be cascade-deleted"
     );
 }

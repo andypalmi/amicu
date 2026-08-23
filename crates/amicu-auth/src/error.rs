@@ -91,6 +91,16 @@ pub enum AuthError {
     /// outage is never mistaken for an authentication decision.
     #[error("storage backend error")]
     Backend,
+    /// Deleting a user was refused because it would orphan or corrupt a
+    /// workspace: the user still belongs to a workspace other than their own
+    /// personal one (they may be its sole Owner), or their personal workspace
+    /// still has other members. The delete path is deliberately fail-CLOSED
+    /// here - it never silently cascades away another user's membership or
+    /// leaves a shared workspace ownerless. A future account-deletion feature
+    /// (with explicit ownership transfer) can relax this. See
+    /// `UserStore::delete`.
+    #[error("cannot delete a user who still owns or shares a workspace")]
+    SoleOwner,
 }
 
 /// Crate result alias.
