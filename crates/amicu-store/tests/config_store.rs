@@ -180,12 +180,24 @@ async fn config_rollback_creates_new_version_and_preserves_history() {
     assert_eq!(before.len(), 3);
 
     // Roll back to v1's content: this must mint a brand-new version 4, not
-    // touch or remove versions 1-3.
+    // touch or remove versions 1-3. created_by attributes who triggered the
+    // rollback itself, not the copied content's original author.
+    let rollback_actor = Uuid::new_v4();
     let rolled = store
-        .rollback(created.id, 1)
+        .rollback(created.id, 1, Some(rollback_actor))
         .await
         .expect("rollback to version 1");
     assert_eq!(rolled.version_no, 4);
+    assert_eq!(rolled.created_by, Some(rollback_actor));
+
+    // The attribution is durably recorded on the new version row, not just
+    // returned in-memory.
+    let v4 = store
+        .get_version(created.id, 4)
+        .await
+        .expect("get_version 4")
+        .expect("v4 present");
+    assert_eq!(v4.created_by, Some(rollback_actor));
 
     let after = store
         .list_versions(created.id)
@@ -217,7 +229,7 @@ async fn config_rollback_creates_new_version_and_preserves_history() {
 
     // Rolling back to a version that never existed is a distinct error.
     assert!(matches!(
-        store.rollback(created.id, 99).await.unwrap_err(),
+        store.rollback(created.id, 99, None).await.unwrap_err(),
         ConfigError::VersionNotFound(99)
     ));
 }
@@ -292,7 +304,7 @@ async fn config_is_invisible_to_another_workspace() {
     // since no such row exists here, it fails closed as VersionNotFound
     // rather than ever reading the other tenant's content.
     assert!(matches!(
-        other_store.rollback(created.id, 1).await.unwrap_err(),
+        other_store.rollback(created.id, 1, None).await.unwrap_err(),
         ConfigError::VersionNotFound(1)
     ));
 

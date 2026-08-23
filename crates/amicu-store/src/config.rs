@@ -430,14 +430,20 @@ impl PostgresConfigStore {
     /// brand-new version that copies it. History is never rewritten: `
     /// to_version` and every version in between stay in place, and the
     /// returned [`VersionMeta`] describes the freshly-appended version, not
-    /// `to_version` itself.
+    /// `to_version` itself. `created_by` attributes the rollback action itself
+    /// (who triggered it), exactly like [`Self::append_version`].
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError::VersionNotFound`] if `to_version` has no row for
     /// this config, or [`ConfigError::NotFound`] if `id` has no row in this
     /// workspace.
-    pub async fn rollback(&self, id: Uuid, to_version: i32) -> Result<VersionMeta> {
+    pub async fn rollback(
+        &self,
+        id: Uuid,
+        to_version: i32,
+        created_by: Option<Uuid>,
+    ) -> Result<VersionMeta> {
         let mut tx = self.begin().await?;
         let wsid = self.workspace.as_uuid();
 
@@ -477,7 +483,6 @@ impl PostgresConfigStore {
         let version_no = bumped.current_version;
 
         let message = format!("rollback to version {to_version}");
-        let created_by: Option<Uuid> = None;
         sqlx::query!(
             "INSERT INTO config_versions \
              (workspace_id, config_id, version_no, content, content_sha256, \
@@ -500,7 +505,7 @@ impl PostgresConfigStore {
         Ok(VersionMeta {
             version_no,
             created_at: now,
-            created_by: None,
+            created_by,
             message: Some(message),
             content_sha256: sha,
         })

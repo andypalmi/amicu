@@ -45,8 +45,10 @@ CREATE TABLE config_versions (
     FOREIGN KEY (workspace_id, config_id) REFERENCES configs (workspace_id, id)
 );
 
--- Every list_versions / get_current lookup filters by (workspace_id, config_id).
-CREATE INDEX config_versions_config_idx ON config_versions (workspace_id, config_id);
+-- No separate index for (workspace_id, config_id) lookups (list_versions,
+-- get_current): the PRIMARY KEY (workspace_id, config_id, version_no) already
+-- covers that leftmost prefix, so a dedicated index would only add write
+-- overhead.
 
 -- Row-level security backstop (see 0003 for the rationale on FORCE + the GUC).
 ALTER TABLE configs ENABLE ROW LEVEL SECURITY;
