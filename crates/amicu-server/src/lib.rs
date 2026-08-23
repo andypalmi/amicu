@@ -86,8 +86,9 @@ use amicu_auth::user::{InMemoryUserStore, UserStore};
 use amicu_auth::verifier::{StaticJwksProvider, Verifier, VerifierConfig};
 use amicu_auth::verify::{InMemoryVerifyStore, VerifyStore};
 use amicu_auth::{AuthError, Tier};
+use amicu_state::{InMemoryStateBackend, StateBackendAdapter};
 use amicu_store::config::ConfigStore;
-use amicu_store::{InMemoryConfigStore, PostgresConfigStore};
+use amicu_store::{InMemoryConfigStore, PostgresConfigStore, PostgresStateBackend};
 use axum::Router;
 use clap::{Parser, ValueEnum};
 use tokio::net::TcpListener;
@@ -230,7 +231,11 @@ impl From<std::io::Error> for Error {
 /// If `DATABASE_URL` is set, durable Postgres stores are constructed (connect +
 /// run migrations) and used for users, refresh tokens, and reset tokens;
 /// otherwise the dev/single-node in-memory stores are used so local runs, tests,
-/// and pre-database self-host work with zero configuration.
+/// and pre-database self-host work with zero configuration. The config store
+/// and the state backend ([`PostgresStateBackend`] /
+/// [`InMemoryStateBackend`](amicu_state::InMemoryStateBackend), see
+/// amicu-planning#125) follow the same selection, each over its own
+/// independently connected pool.
 ///
 /// # Email delivery
 ///
@@ -405,6 +410,36 @@ pub async fn build_app(config: &Config) -> Result<Router, Error> {
         Arc::new(InMemoryConfigStore::new())
     };
     let config_state = ConfigApiState::new(config_store);
+
+    // State backend (amicu-planning#125, part of the #116 epic): the same
+    // Postgres-when-`DATABASE_URL`-else-in-memory selection as the config
+    // store above, connected independently (its own pool), for the same
+    // rebase-ability reason documented on that block. `id` names the single
+    // state stream this dev/single-node bootstrap manages; a multi-tenant
+    // deployment would scope one instance per workspace/stack instead.
+    //
+    // TODO(amicu-planning#116): `amicu-api` does not yet expose an HTTP
+    // surface for state, so there is no `StateApiState`/`state_router`
+    // equivalent of `ConfigApiState`/`config_router` for this to attach to
+    // yet - inventing one here would be new consumer plumbing ahead of any
+    // actual consumer. Until that surface lands, this local variable is
+    // intentionally unused (hence the `_` prefix): it still runs migrations
+    // and proves the backend is selectable and constructible, and should be
+    // threaded into `api_router`/`AppState` the same way `config_store` is
+    // as soon as a route needs it.
+    let _state_backend: Arc<dyn StateBackendAdapter> =
+        if let Ok(database_url) = std::env::var("DATABASE_URL") {
+            let pool = amicu_store::connect(&database_url)
+                .await
+                .map_err(Error::Store)?;
+            amicu_store::run_migrations(&pool)
+                .await
+                .map_err(Error::Store)?;
+            eprintln!("amicu-server: using the Postgres state backend (DATABASE_URL set).");
+            Arc::new(PostgresStateBackend::new(pool, "default"))
+        } else {
+            Arc::new(InMemoryStateBackend::new("default"))
+        };
 
     Ok(api_router(
         auth_state,

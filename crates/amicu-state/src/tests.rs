@@ -1,11 +1,13 @@
-//! A fake in-memory [`StateBackendAdapter`] and the contract tests it exercises.
+//! Contract tests for [`StateBackendAdapter`], exercised against
+//! [`InMemoryStateBackend`] - the crate's own zero-configuration reference
+//! implementation, also what `amicu-server`'s `build_app` falls back to when
+//! `DATABASE_URL` is unset. Exercising the tests directly against it (rather
+//! than a test-local duplicate) keeps this suite an honest proof that the
+//! production fallback satisfies the contract.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use amicu_core::adapter::{
-    Adapter, AdapterError, AdapterId, DescribeCapabilities, HealthStatus, Registry,
-};
+use amicu_core::adapter::{AdapterError, AdapterId, Registry};
 use amicu_core::id::{DeploymentId, HardwareProfileId, ModelId};
 use amicu_core::resource::{
     Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Deployment, GgufVariant,
@@ -14,13 +16,11 @@ use amicu_core::resource::{
 };
 use amicu_core::units::ByteSize;
 use amicu_core::{Graph, diagnostic::Severity};
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::{
-    LockHandle, STATE_CORRUPTED, STATE_LOCK_NOT_HELD, STATE_LOCKED, STATE_VERSION_NOT_FOUND,
-    StateBackendAdapter, StateError, StateSnapshot, StateVersion,
+    InMemoryStateBackend, LockHandle, STATE_CORRUPTED, STATE_LOCK_NOT_HELD, STATE_LOCKED,
+    STATE_VERSION_NOT_FOUND, StateBackendAdapter, StateSnapshot, StateVersion,
 };
 
 // --- sample graph builders (mirroring amicu-core's test fixtures) -----------
@@ -93,189 +93,26 @@ fn snapshot(version: &str, graph: Graph) -> StateSnapshot {
     StateSnapshot::new(version, "2026-08-19T00:00:00Z", graph).expect("stamp checksum")
 }
 
-// --- fake in-memory backend --------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct FakeCapabilities {
-    versioned_history: bool,
-    supports_rollback: bool,
-}
-
-struct Inner {
-    current: StateSnapshot,
-    history: Vec<StateVersion>,
-    snapshots: HashMap<String, StateSnapshot>,
-    lock: Option<u64>,
-    token_counter: u64,
-    next_version: u64,
-    corrupt: bool,
-}
-
-struct FakeStateBackend {
-    id: AdapterId,
-    salt: u64,
-    inner: Mutex<Inner>,
-}
-
-/// Derive a non-sequential lock token from the backend identity, its salt, and a
-/// monotonic counter via SHA-256. Real backends must use true randomness; this
-/// keeps the fake unpredictable yet deterministic for tests (see `LockHandle`).
-fn mint_token(id: &AdapterId, salt: u64, counter: u64) -> u64 {
-    let mut hasher = Sha256::new();
-    hasher.update(id.to_string().as_bytes());
-    hasher.update(salt.to_le_bytes());
-    hasher.update(counter.to_le_bytes());
-    let digest = hasher.finalize();
-    u64::from_le_bytes(digest[..8].try_into().unwrap())
-}
-
-impl FakeStateBackend {
-    fn new(id: &str, initial: StateSnapshot) -> Self {
-        let version = initial.version.clone();
-        let mut snapshots = HashMap::new();
-        snapshots.insert(version.clone(), initial.clone());
-        let salt = u64::from_le_bytes(Sha256::digest(id.as_bytes())[..8].try_into().unwrap());
-        Self {
-            id: AdapterId::new(id),
-            salt,
-            inner: Mutex::new(Inner {
-                current: initial,
-                history: vec![StateVersion::new(version, None, "initial")],
-                snapshots,
-                lock: None,
-                token_counter: 0,
-                next_version: 1,
-                corrupt: false,
-            }),
-        }
-    }
-
-    fn set_corrupt(&self) {
-        self.inner.lock().unwrap().corrupt = true;
-    }
-}
-
-#[async_trait]
-impl Adapter for FakeStateBackend {
-    fn id(&self) -> AdapterId {
-        self.id.clone()
-    }
-
-    async fn health(&self) -> Result<HealthStatus, AdapterError> {
-        Ok(HealthStatus::Healthy)
-    }
-}
-
-impl DescribeCapabilities for FakeStateBackend {
-    fn describe(&self) -> serde_json::Value {
-        serde_json::to_value(FakeCapabilities {
-            versioned_history: true,
-            supports_rollback: true,
-        })
-        .unwrap_or_default()
-    }
-}
-
-#[async_trait]
-impl StateBackendAdapter for FakeStateBackend {
-    async fn pull(&self) -> Result<StateSnapshot, AdapterError> {
-        let inner = self.inner.lock().unwrap();
-        if inner.corrupt {
-            return Err(StateError::Corrupted {
-                detail: "backend flagged the store as corrupt".into(),
-            }
-            .into());
-        }
-        inner.current.verify()?;
-        Ok(inner.current.clone())
-    }
-
-    async fn push(&self, snapshot: &StateSnapshot, lock: &LockHandle) -> Result<(), AdapterError> {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.corrupt {
-            return Err(StateError::Corrupted {
-                detail: "refusing to overwrite corrupt state".into(),
-            }
-            .into());
-        }
-        // Never overwrite without the exact lock guarding the state.
-        let held = inner.lock.ok_or(StateError::LockNotHeld)?;
-        if lock.holder() != &self.id || lock.token() != held {
-            return Err(StateError::LockNotHeld.into());
-        }
-
-        let version = format!("v{}", inner.next_version);
-        inner.next_version += 1;
-        let parent = Some(inner.current.version.clone());
-        let recorded = StateSnapshot::new(&version, &snapshot.recorded_at, snapshot.graph.clone())?;
-        inner.snapshots.insert(version.clone(), recorded.clone());
-        inner
-            .history
-            .push(StateVersion::new(version, parent, "push"));
-        inner.current = recorded;
-        Ok(())
-    }
-
-    async fn lock(&self) -> Result<LockHandle, AdapterError> {
-        let mut inner = self.inner.lock().unwrap();
-        if let Some(held) = inner.lock {
-            return Err(StateError::LockContention {
-                holder: format!("{}#{held}", self.id),
-            }
-            .into());
-        }
-        let token = mint_token(&self.id, self.salt, inner.token_counter);
-        inner.token_counter += 1;
-        inner.lock = Some(token);
-        Ok(LockHandle::new(self.id.clone(), token))
-    }
-
-    async fn unlock(&self, handle: LockHandle) -> Result<(), AdapterError> {
-        let mut inner = self.inner.lock().unwrap();
-        match inner.lock {
-            Some(held) if held == handle.token() && handle.holder() == &self.id => {
-                inner.lock = None;
-                Ok(())
-            }
-            _ => Err(StateError::LockNotHeld.into()),
-        }
-    }
-
-    async fn history(&self) -> Result<Vec<StateVersion>, AdapterError> {
-        Ok(self.inner.lock().unwrap().history.clone())
-    }
-
-    async fn rollback(
-        &self,
-        version: &StateVersion,
-        lock: &LockHandle,
-    ) -> Result<(), AdapterError> {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.corrupt {
-            return Err(StateError::Corrupted {
-                detail: "refusing to roll back corrupt state".into(),
-            }
-            .into());
-        }
-        // Never roll back without the exact lock guarding the state.
-        let held = inner.lock.ok_or(StateError::LockNotHeld)?;
-        if lock.holder() != &self.id || lock.token() != held {
-            return Err(StateError::LockNotHeld.into());
-        }
-        let target = inner.snapshots.get(&version.id).cloned().ok_or_else(|| {
-            StateError::VersionNotFound {
-                version: version.id.clone(),
-            }
-        })?;
-        inner.current = target;
-        Ok(())
-    }
-}
-
 // --- tests -------------------------------------------------------------------
 
-fn backend() -> FakeStateBackend {
-    FakeStateBackend::new("primary", snapshot("v0", sample_graph()))
+fn backend() -> InMemoryStateBackend {
+    InMemoryStateBackend::with_initial_snapshot_for_test("primary", snapshot("v0", sample_graph()))
+}
+
+/// A fresh backend built with the same zero-config constructor
+/// `amicu-server`'s `build_app` uses (no seeded state) reports an empty,
+/// unpersisted `v0` graph rather than an error - matching
+/// `PostgresStateBackend`'s "no state yet" convention so callers cannot tell
+/// the two backends apart from this behavior alone.
+#[tokio::test]
+async fn fresh_backend_pulls_empty_v0_graph() {
+    let backend = InMemoryStateBackend::new("primary");
+    let pulled = backend.pull().await.expect("pull with no prior push");
+    assert_eq!(pulled.version, "v0");
+    assert_eq!(pulled.graph, Graph::new());
+    pulled
+        .verify()
+        .expect("fresh empty snapshot is internally consistent");
 }
 
 #[tokio::test]
@@ -417,7 +254,7 @@ fn checksum_uses_versioned_format_and_is_deterministic() {
 #[tokio::test]
 async fn corruption_is_non_retryable_and_needs_recovery() {
     let backend = backend();
-    backend.set_corrupt();
+    backend.set_corrupt_for_test();
     let err = backend.pull().await.expect_err("corrupt store");
     assert_eq!(err.code(), STATE_CORRUPTED);
     assert_eq!(err.code().to_string(), "AMICU-STATE-003");
