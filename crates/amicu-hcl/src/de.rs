@@ -8,10 +8,11 @@ use serde::de::DeserializeOwned;
 
 use amicu_core::graph::Graph;
 use amicu_core::resource::{
-    Accelerator, Artifact, Budget, Cpu, DataClass, Deployment, GgufVariant, GovernanceRule,
-    HardwareProfile, LlamaCppSettings, Model, ModelSource, Money, Price, Quota, Region, Residency,
-    RoutingPolicy, RoutingTarget, Runtime, Tenant, UseCase, VllmSettings,
+    Accelerator, Artifact, Budget, Cpu, Credential, DataClass, Deployment, GgufVariant,
+    GovernanceRule, HardwareProfile, LlamaCppSettings, Model, ModelSource, Money, Price, Quota,
+    Region, Residency, RoutingPolicy, RoutingTarget, Runtime, Tenant, UseCase, VllmSettings,
 };
+use amicu_core::secret::SecretRef;
 use amicu_core::units::ByteSize;
 
 use crate::error::HclError;
@@ -49,6 +50,7 @@ pub fn parse_graph(src: &str) -> Result<Graph> {
             "budget" => graph.budgets.push(budget(name, &f)?),
             "tenant" => graph.tenants.push(tenant(name, &f)?),
             "use_case" => graph.use_cases.push(use_case(name, &f)?),
+            "credential" => graph.credentials.push(credential(name, &f)?),
             other => return Err(HclError::schema(format!("unknown resource kind `{other}`"))),
         }
     }
@@ -257,6 +259,20 @@ fn use_case(name: &str, f: &Fields) -> Result<UseCase> {
     })
 }
 
+/// A `credential` resource: a named bundle of secret-designated fields
+/// (amicu-planning#119). Every field here is structurally enforced to be a
+/// `secret(...)` reference by [`Fields::opt_secret_ref`] / [`Fields::secret_map`];
+/// a literal is a hard parse-time rejection.
+fn credential(name: &str, f: &Fields) -> Result<Credential> {
+    Ok(Credential {
+        id: name.into(),
+        api_key: f.opt_secret_ref("api_key")?,
+        token: f.opt_secret_ref("token")?,
+        password: f.opt_secret_ref("password")?,
+        env: f.secret_map("env")?,
+    })
+}
+
 fn money(f: &Fields) -> Result<Money> {
     Ok(Money {
         amount: f.f64("amount")?,
@@ -447,6 +463,45 @@ impl<'a> Fields<'a> {
             .collect()
     }
 
+    /// A secret-designated attribute: only a `secret("<ref>")` function-call
+    /// expression is accepted (amicu-planning#119). A raw string literal, or
+    /// anything else, is a hard parse-time rejection with
+    /// `AMICU-POLICY-004` - not a heuristic, since the field is
+    /// schema-directed. See [`secret_ref_from_expr`].
+    fn secret_ref(&self, key: &str) -> Result<SecretRef> {
+        let expr = self.req(key)?;
+        secret_ref_from_expr(expr).ok_or_else(|| self.secret_literal(key))
+    }
+
+    fn opt_secret_ref(&self, key: &str) -> Result<Option<SecretRef>> {
+        self.attr(key)
+            .map_or(Ok(None), |_| self.secret_ref(key).map(Some))
+    }
+
+    fn secret_literal(&self, key: &str) -> HclError {
+        HclError::secret_literal(self.ctx.clone(), key)
+    }
+
+    /// A nested block whose every attribute value must be a `secret(...)`
+    /// reference, e.g. `env { HF_TOKEN = secret("vault://...") }`. Used for
+    /// credential-bearing `env` maps (amicu-planning#119): every *value* is
+    /// secret-designated the same way a bare `api_key`/`token`/`password`
+    /// attribute is.
+    fn secret_map(&self, key: &str) -> Result<BTreeMap<String, SecretRef>> {
+        let Some(block) = self.opt_block(key) else {
+            return Ok(BTreeMap::new());
+        };
+        block
+            .body
+            .attributes()
+            .map(|a| {
+                let v =
+                    secret_ref_from_expr(a.expr()).ok_or_else(|| block.secret_literal(a.key()))?;
+                Ok((a.key().to_string(), v))
+            })
+            .collect()
+    }
+
     fn opt_block(&self, key: &str) -> Option<Fields<'a>> {
         self.body
             .blocks()
@@ -480,6 +535,30 @@ impl<'a> Fields<'a> {
 /// Deserialize a `snake_case` enum variant from its DSL spelling.
 fn from_variant<T: DeserializeOwned>(s: &str) -> Option<T> {
     serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
+}
+
+/// Extract a `secret("<ref>")` reference expression (amicu-planning#119).
+///
+/// Only a single-argument call to the bare, unnamespaced function `secret`
+/// with a string-literal argument counts; anything else - including a raw
+/// string literal, a different function, or a namespaced call - returns
+/// `None` so the caller reports the field as a rejected literal. This is the
+/// one grammar extension the structural enforcement relies on: it fits the
+/// existing HCL expression grammar (`hcl::Expression::FuncCall`) with no new
+/// parser changes.
+fn secret_ref_from_expr(expr: &Expression) -> Option<SecretRef> {
+    let Expression::FuncCall(call) = expr else {
+        return None;
+    };
+    if call.name.is_namespaced() || call.name.name.as_str() != "secret" {
+        return None;
+    }
+    match call.args.as_slice() {
+        [Expression::String(reference)] if !reference.is_empty() => {
+            Some(SecretRef::new(reference.clone()))
+        }
+        _ => None,
+    }
 }
 
 /// Extract the referenced id from either a quoted string or a traversal such

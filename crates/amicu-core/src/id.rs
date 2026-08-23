@@ -8,8 +8,13 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Discriminates the nine canonical resource kinds. Useful for generic
+/// Discriminates the ten canonical resource kinds. Useful for generic
 /// addressing and for reporting dangling references by kind.
+///
+/// `Credential` (amicu-planning#119) is a named bundle of secret-designated
+/// fields (`api_key`, `token`, `password`, an `env` map); it holds only
+/// [`crate::secret::SecretRef`] pointers, never secret bytes, so it carries no
+/// outgoing references and is exempt from [`crate::graph::Graph::missing_references`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
@@ -22,6 +27,7 @@ pub enum ResourceKind {
     Budget,
     Tenant,
     UseCase,
+    Credential,
 }
 
 impl ResourceKind {
@@ -37,6 +43,7 @@ impl ResourceKind {
             Self::Budget => "budget",
             Self::Tenant => "tenant",
             Self::UseCase => "use_case",
+            Self::Credential => "credential",
         }
     }
 }
@@ -123,6 +130,10 @@ resource_id!(
 resource_id!(
     /// Identifier for a `use_case` resource.
     UseCaseId => ResourceKind::UseCase
+);
+resource_id!(
+    /// Identifier for a `credential` resource.
+    CredentialId => ResourceKind::Credential
 );
 
 /// A resource reference that has failed existence checking, reported by

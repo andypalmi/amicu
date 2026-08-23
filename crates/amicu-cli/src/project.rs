@@ -150,6 +150,7 @@ fn merge_into(dst: &mut Graph, mut src: Graph) {
     dst.budgets.append(&mut src.budgets);
     dst.tenants.append(&mut src.tenants);
     dst.use_cases.append(&mut src.use_cases);
+    dst.credentials.append(&mut src.credentials);
 }
 
 /// Whether a graph carries no resources (e.g. a comments-only variables file).
@@ -163,4 +164,5 @@ pub(crate) fn is_empty_graph(graph: &Graph) -> bool {
         && graph.budgets.is_empty()
         && graph.tenants.is_empty()
         && graph.use_cases.is_empty()
+        && graph.credentials.is_empty()
 }

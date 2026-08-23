@@ -1,13 +1,14 @@
 //! Canonical [`Graph`] -> HCL text.
 
-use hcl::expr::{Traversal, TraversalOperator, Variable};
+use hcl::expr::{FuncCall, Traversal, TraversalOperator, Variable};
 use hcl::{Block, Body, Expression, Identifier};
 use serde::Serialize;
 
 use amicu_core::graph::Graph;
 use amicu_core::resource::{
-    Deployment, HardwareProfile, Model, Money, Residency, Runtime, Tenant, VllmSettings,
+    Credential, Deployment, HardwareProfile, Model, Money, Residency, Runtime, Tenant, VllmSettings,
 };
+use amicu_core::secret::SecretRef;
 
 use crate::error::HclError;
 
@@ -66,6 +67,9 @@ pub fn format_graph(graph: &Graph) -> Result<String, HclError> {
     for u in &graph.use_cases {
         body = body.add_block(use_case_block(u));
     }
+    for c in &graph.credentials {
+        body = body.add_block(credential_block(c));
+    }
     Ok(hcl::to_string(&body.build()).expect("HCL body always serializes"))
 }
 
@@ -109,7 +113,13 @@ fn validate_identifiers(graph: &Graph) -> Result<(), HclError> {
         )
         .chain(graph.budgets.iter().map(|b| ("budget", b.id.as_str())))
         .chain(graph.tenants.iter().map(|t| ("tenant", t.id.as_str())))
-        .chain(graph.use_cases.iter().map(|u| ("use_case", u.id.as_str())));
+        .chain(graph.use_cases.iter().map(|u| ("use_case", u.id.as_str())))
+        .chain(
+            graph
+                .credentials
+                .iter()
+                .map(|c| ("credential", c.id.as_str())),
+        );
 
     for (kind, id) in ids {
         if Identifier::new(id).is_err() {
@@ -432,6 +442,38 @@ fn use_case_block(u: &amicu_core::resource::UseCase) -> Block {
         body = body.add_attribute(("priority", variant(p)));
     }
     resource("use_case", u.id.as_str(), body.build())
+}
+
+/// A `credential` resource (amicu-planning#119): every secret-designated
+/// field always emits a `secret(...)` reference, matching what
+/// `amicu_hcl::de` accepts back on parse (see `secret_ref_from_expr`).
+fn credential_block(c: &Credential) -> Block {
+    let mut body = Body::builder();
+    if let Some(v) = &c.api_key {
+        body = body.add_attribute(("api_key", secret_call(v)));
+    }
+    if let Some(v) = &c.token {
+        body = body.add_attribute(("token", secret_call(v)));
+    }
+    if let Some(v) = &c.password {
+        body = body.add_attribute(("password", secret_call(v)));
+    }
+    if !c.env.is_empty() {
+        let mut eb = Block::builder("env");
+        for (k, v) in &c.env {
+            eb = eb.add_attribute((Identifier::unchecked(k), secret_call(v)));
+        }
+        body = body.add_block(eb.build());
+    }
+    resource("credential", c.id.as_str(), body.build())
+}
+
+/// Render a `SecretRef` as the `secret("<ref>")` reference expression that
+/// `amicu_hcl::de::secret_ref_from_expr` parses back.
+fn secret_call(secret: &SecretRef) -> Expression {
+    Expression::FuncCall(Box::new(
+        FuncCall::builder("secret").arg(secret.name.clone()).build(),
+    ))
 }
 
 fn money_block(ident: &str, m: &Money) -> Block {

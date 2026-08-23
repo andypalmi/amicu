@@ -310,6 +310,22 @@ pub mod catalog {
     /// a deny rule's provider).
     pub const POLICY_PROVIDER_NOT_ALLOWED: DiagnosticCode =
         DiagnosticCode::new(Category::Policy, 3);
+    // --- amicu-planning#119: HCL secret safety ---
+    /// `AMICU-POLICY-004` - a secret-designated field (`api_key`, `token`,
+    /// `password`, or an `env` map value) was given as a literal instead of a
+    /// `secret(...)` reference. Structural, zero-false-positive: this is a
+    /// hard parse-time rejection, surfaced through [`crate::graph::Graph`]'s
+    /// HCL front end (`amicu-hcl::HclError::SecretLiteral`) rather than as a
+    /// `Diagnostic`, since it blocks parsing itself.
+    pub const POLICY_SECRET_LITERAL_REJECTED: DiagnosticCode =
+        DiagnosticCode::new(Category::Policy, 4);
+    /// `AMICU-POLICY-005` - a genuinely free-text field (`description`,
+    /// `display_name`) or a comment contains a high-confidence secret shape
+    /// (AWS access key, OpenAI-style key, PEM header, JWT, or a high-entropy
+    /// token). Warning only, never blocks; suppressible with a trailing
+    /// `# amicu:allow` comment on the same line.
+    pub const POLICY_SECRET_PATTERN_SUSPECTED: DiagnosticCode =
+        DiagnosticCode::new(Category::Policy, 5);
     /// `AMICU-STATE-001` - state is locked by another operation.
     pub const STATE_LOCKED: DiagnosticCode = DiagnosticCode::new(Category::State, 1);
     /// `AMICU-PROVIDER-001` - requested capacity is unavailable in region.
@@ -341,7 +357,7 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 18] {
+    pub const fn all() -> [DiagnosticCode; 20] {
         [
             PARSE_UNCLOSED_BLOCK,
             SCHEMA_MISSING_REQUIRED,
@@ -353,6 +369,9 @@ pub mod catalog {
             // amicu-planning#24 additions:
             POLICY_REGION_RESIDENCY,
             POLICY_PROVIDER_NOT_ALLOWED,
+            // amicu-planning#119 additions:
+            POLICY_SECRET_LITERAL_REJECTED,
+            POLICY_SECRET_PATTERN_SUSPECTED,
             STATE_LOCKED,
             PROVIDER_CAPACITY_UNAVAILABLE,
             PROVIDER_DOWNLOAD_FAILED,

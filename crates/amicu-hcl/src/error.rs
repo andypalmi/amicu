@@ -1,5 +1,7 @@
 use std::fmt;
 
+use amicu_core::diagnostic::{DiagnosticCode, catalog};
+
 /// Failure translating between HCL text and the canonical [`Graph`].
 ///
 /// [`Graph`]: amicu_core::graph::Graph
@@ -14,6 +16,16 @@ pub enum HclError {
     /// silent corruption. `resource` locates the offender; `value` is the
     /// offending string.
     InvalidIdentifier { resource: String, value: String },
+    /// A secret-designated field (`api_key`, `token`, `password`, or an
+    /// `env` map value) was given as a literal instead of a `secret(...)`
+    /// reference (amicu-planning#119). Structural, hard rejection: `code` is
+    /// [`catalog::POLICY_SECRET_LITERAL_REJECTED`], `resource` locates the
+    /// block, `field` names the offending attribute.
+    SecretLiteral {
+        code: DiagnosticCode,
+        resource: String,
+        field: String,
+    },
 }
 
 impl HclError {
@@ -30,6 +42,23 @@ impl HclError {
             value: value.into(),
         }
     }
+
+    pub(crate) fn secret_literal(resource: impl Into<String>, field: impl Into<String>) -> Self {
+        Self::SecretLiteral {
+            code: catalog::POLICY_SECRET_LITERAL_REJECTED,
+            resource: resource.into(),
+            field: field.into(),
+        }
+    }
+
+    /// The standardized diagnostic code for this error, when it has one.
+    #[must_use]
+    pub const fn code(&self) -> Option<DiagnosticCode> {
+        match self {
+            Self::SecretLiteral { code, .. } => Some(*code),
+            Self::Parse(_) | Self::Schema(_) | Self::InvalidIdentifier { .. } => None,
+        }
+    }
 }
 
 impl fmt::Display for HclError {
@@ -43,6 +72,15 @@ impl fmt::Display for HclError {
                  identifier (it must be non-empty, start with a letter or underscore, and \
                  contain no `.` or whitespace)"
             ),
+            Self::SecretLiteral {
+                code,
+                resource,
+                field,
+            } => write!(
+                f,
+                "{code}: {resource}: `{field}` is a secret-designated field and must be a \
+                 secret reference, e.g. `{field} = secret(\"vault://...\")`, not a literal value"
+            ),
         }
     }
 }
@@ -51,7 +89,7 @@ impl std::error::Error for HclError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Parse(e) => Some(e),
-            Self::Schema(_) | Self::InvalidIdentifier { .. } => None,
+            Self::Schema(_) | Self::InvalidIdentifier { .. } | Self::SecretLiteral { .. } => None,
         }
     }
 }

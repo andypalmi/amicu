@@ -9,10 +9,12 @@
 
 mod de;
 mod error;
+mod secret_scan;
 mod ser;
 
 pub use de::parse_graph;
 pub use error::HclError;
+pub use secret_scan::scan_secret_leaks;
 pub use ser::format_graph;
 
 #[cfg(test)]
@@ -343,5 +345,121 @@ mod tests {
     fn unknown_kind_is_a_schema_error() {
         let src = "resource \"widget\" \"w\" {}";
         assert!(matches!(parse_graph(src), Err(HclError::Schema(_))));
+    }
+
+    // --- amicu-planning#119: HCL secret safety ---
+
+    #[test]
+    fn literal_in_secret_designated_field_is_rejected() {
+        let src = r#"
+            resource "credential" "openai" {
+              api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"
+            }
+        "#;
+        let err = parse_graph(src).expect_err("a literal api_key must be rejected");
+        let HclError::SecretLiteral { code, field, .. } = &err else {
+            panic!("expected HclError::SecretLiteral, got {err:?}");
+        };
+        assert_eq!(code.to_string(), "AMICU-POLICY-004");
+        assert_eq!(field, "api_key");
+        assert_eq!(err.code().unwrap().to_string(), "AMICU-POLICY-004");
+    }
+
+    #[test]
+    fn literal_in_env_map_value_is_rejected() {
+        let src = r#"
+            resource "credential" "runtime" {
+              env {
+                HF_TOKEN = "hf_abcdefghijklmnopqrstuvwxyz"
+              }
+            }
+        "#;
+        assert!(matches!(
+            parse_graph(src),
+            Err(HclError::SecretLiteral { .. })
+        ));
+    }
+
+    #[test]
+    fn secret_reference_is_accepted() {
+        let src = r#"
+            resource "credential" "openai" {
+              api_key = secret("vault://kv/openai#api_key")
+              token   = secret("vault://kv/openai#token")
+              env {
+                HF_TOKEN = secret("vault://kv/hf#token")
+              }
+            }
+        "#;
+        let graph = parse_graph(src).unwrap();
+        let cred = &graph.credentials[0];
+        assert_eq!(cred.id.as_str(), "openai");
+        assert_eq!(
+            cred.api_key,
+            Some(amicu_core::secret::SecretRef::new(
+                "vault://kv/openai#api_key"
+            ))
+        );
+        assert_eq!(
+            cred.token,
+            Some(amicu_core::secret::SecretRef::new(
+                "vault://kv/openai#token"
+            ))
+        );
+        assert!(cred.password.is_none());
+        assert_eq!(
+            cred.env.get("HF_TOKEN"),
+            Some(&amicu_core::secret::SecretRef::new("vault://kv/hf#token"))
+        );
+    }
+
+    #[test]
+    fn credential_round_trips_through_format_graph() {
+        let src = r#"
+            resource "credential" "openai" {
+              api_key = secret("vault://kv/openai#api_key")
+              env {
+                HF_TOKEN = secret("vault://kv/hf#token")
+              }
+            }
+        "#;
+        let graph = parse_graph(src).unwrap();
+        let reparsed = parse_graph(&format_graph(&graph).unwrap()).unwrap();
+        assert_eq!(graph, reparsed);
+    }
+
+    #[test]
+    fn free_text_field_with_high_confidence_secret_warns() {
+        let src = "description = \"Remember to rotate AKIAIOSFODNN7EXAMPLE before shipping\"\n";
+        let warnings = scan_secret_leaks(src);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code.to_string(), "AMICU-POLICY-005");
+        assert_eq!(
+            warnings[0].severity,
+            amicu_core::diagnostic::Severity::Warning
+        );
+        // The diagnostic must never echo the matched secret verbatim.
+        assert!(!warnings[0].message.contains("AKIAIOSFODNN7EXAMPLE"));
+    }
+
+    #[test]
+    fn amicu_allow_comment_suppresses_the_warning() {
+        let src = "description = \"Remember to rotate AKIAIOSFODNN7EXAMPLE before shipping\" # amicu:allow\n";
+        assert!(scan_secret_leaks(src).is_empty());
+    }
+
+    #[test]
+    fn normal_free_text_value_does_not_warn() {
+        let src = "description = \"Customer PII must stay on EU infrastructure.\"\n";
+        assert!(scan_secret_leaks(src).is_empty());
+    }
+
+    #[test]
+    fn secret_call_in_free_text_scan_is_not_flagged() {
+        // A `secret(...)` reference value is not free text at all (it lives
+        // in a secret-designated field), but even scanned as raw text its
+        // URI-shaped argument should not trip the entropy heuristic.
+        let src = "api_key = secret(\"vault://kv/openai#api_key\")\n";
+        assert!(scan_secret_leaks(src).is_empty());
     }
 }
