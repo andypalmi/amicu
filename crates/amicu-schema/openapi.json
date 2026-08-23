@@ -1011,6 +1011,41 @@
           }
         }
       }
+    },
+    "/verify/resend": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Resend the email-verification link.",
+        "description": "Anti-enumeration: this ALWAYS returns the same generic `202 Accepted`,\nwhether or not the email is registered and whether or not it is already\nverified, with no account signal in the body or (all account-dependent work\nis detached) the timing. A fresh verification token is minted and delivered\nout-of-band via the notification seam only when the account exists AND is not\nyet verified. Mirrors the identical-response defense on `/recover`.",
+        "operationId": "resend_verification",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResendVerificationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted. If an unverified account exists for that email, a fresh verification link is sent out-of-band. Response is identical whether or not the account exists or is already verified (anti-enumeration).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResendVerificationResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limited."
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2282,6 +2317,32 @@
           "timeout_rate": {
             "type": "number",
             "format": "double"
+          }
+        }
+      },
+      "ResendVerificationRequest": {
+        "type": "object",
+        "description": "A request to resend the email-verification link (`POST /verify/resend`).",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The account email to send a fresh verification link to."
+          }
+        }
+      },
+      "ResendVerificationResponse": {
+        "type": "object",
+        "description": "The generic, anti-enumeration resend-verification acknowledgement.",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "A message that reveals nothing about whether an unverified account exists."
           }
         }
       },

@@ -13,7 +13,7 @@ use amicu_auth::notify::{LoggingNotifier, Notification, NotificationKind, Notifi
 use amicu_auth::refresh::InMemoryRefreshStore;
 use amicu_auth::reset::InMemoryResetStore;
 use amicu_auth::service::{AuthService, SignUpOutcome};
-use amicu_auth::user::{InMemoryUserStore, UserStore};
+use amicu_auth::user::{InMemoryUserStore, User, UserStore};
 use amicu_auth::verifier::{StaticJwksProvider, Verifier, VerifierConfig};
 use amicu_auth::verify::InMemoryVerifyStore;
 use amicu_core::secret::SecretValue;
@@ -334,6 +334,68 @@ async fn recover_notifies_only_when_account_exists() {
         "exactly one reset message: only the real account"
     );
     assert_eq!(resets[0].0, "real@example.com");
+}
+
+#[tokio::test]
+async fn resend_verification_notifies_only_unverified_existing_accounts() {
+    let notifier = Arc::new(CapturingNotifier::default());
+    // A caller-provided store so we can seed accounts directly (bypassing
+    // sign-up, which would itself emit a verification link and muddy the count)
+    // and mark one already-verified.
+    let users = Arc::new(InMemoryUserStore::default());
+    let svc = build_with_users(TestClock::at(real_now()), users.clone(), notifier.clone());
+
+    // An existing, still-unverified account.
+    users
+        .create(User::new(
+            "usr_unverified".to_string(),
+            "unverified@example.com".to_string(),
+            "hash".to_string(),
+            Tier::Community,
+        ))
+        .await
+        .unwrap();
+    // An existing account whose email is already verified.
+    users
+        .create(User::new(
+            "usr_verified".to_string(),
+            "verified@example.com".to_string(),
+            "hash".to_string(),
+            Tier::Community,
+        ))
+        .await
+        .unwrap();
+    users.set_email_verified("usr_verified").await.unwrap();
+
+    // All three requests return the SAME Ok outcome (anti-enumeration): the HTTP
+    // boundary renders one identical response regardless.
+    svc.resend_verification("Unverified@Example.com ") // existing + unverified
+        .await
+        .unwrap();
+    svc.resend_verification("verified@example.com") // existing + already verified
+        .await
+        .unwrap();
+    svc.resend_verification("ghost@example.com") // unknown account
+        .await
+        .unwrap();
+
+    // Wait for the one account that warrants a link to receive it; this positive
+    // fence also gives the other two detached tasks ample time to have run (and
+    // sent nothing).
+    let _ = notifier.last_verify_token().await;
+    let verifies: Vec<_> = notifier
+        .captured()
+        .into_iter()
+        .filter(|(_, k)| matches!(k, CapturedKind::VerifyEmail(_)))
+        .collect();
+    assert_eq!(
+        verifies.len(),
+        1,
+        "exactly one verification link: only the existing unverified account \
+         (already-verified and unknown accounts send nothing)"
+    );
+    // Normalized recipient: the mixed-case/whitespace input is lowercased/trimmed.
+    assert_eq!(verifies[0].0, "unverified@example.com");
 }
 
 #[tokio::test]

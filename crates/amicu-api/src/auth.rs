@@ -69,6 +69,7 @@ pub fn auth_router(state: AuthApiState) -> Router {
         .route("/recover", post(recover))
         .route("/reset", post(reset))
         .route("/verify", post(verify))
+        .route("/verify/resend", post(resend_verification))
         .layer(from_fn_with_state(state.clone(), rate_limit));
 
     well_known.merge(credentials).with_state(state)
@@ -141,6 +142,20 @@ pub(crate) struct VerifyRequest {
     /// The opaque verification token delivered out-of-band (e.g. via the
     /// "confirm your email" link).
     token: String,
+}
+
+/// A request to resend the email-verification link (`POST /verify/resend`).
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct ResendVerificationRequest {
+    /// The account email to send a fresh verification link to.
+    email: String,
+}
+
+/// The generic, anti-enumeration resend-verification acknowledgement.
+#[derive(Serialize, ToSchema)]
+pub(crate) struct ResendVerificationResponse {
+    /// A message that reveals nothing about whether an unverified account exists.
+    message: &'static str,
 }
 
 #[utoipa::path(
@@ -361,6 +376,38 @@ pub(crate) async fn verify(
         .verify_email(&SecretValue::new(body.token.into_bytes()))
         .await?;
     Ok(StatusCode::OK)
+}
+
+/// Resend the email-verification link.
+///
+/// Anti-enumeration: this ALWAYS returns the same generic `202 Accepted`,
+/// whether or not the email is registered and whether or not it is already
+/// verified, with no account signal in the body or (all account-dependent work
+/// is detached) the timing. A fresh verification token is minted and delivered
+/// out-of-band via the notification seam only when the account exists AND is not
+/// yet verified. Mirrors the identical-response defense on `/recover`.
+#[utoipa::path(
+    post,
+    path = "/verify/resend",
+    tag = "auth",
+    request_body = ResendVerificationRequest,
+    responses(
+        (status = 202, description = "Accepted. If an unverified account exists for that email, a fresh verification link is sent out-of-band. Response is identical whether or not the account exists or is already verified (anti-enumeration).", body = ResendVerificationResponse),
+        (status = 429, description = "Rate limited."),
+    ),
+)]
+pub(crate) async fn resend_verification(
+    State(state): State<AuthApiState>,
+    Json(body): Json<ResendVerificationRequest>,
+) -> Result<Response, ApiError> {
+    state.service.resend_verification(&body.email).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ResendVerificationResponse {
+            message: "If an unverified account exists for that address, a new link is on its way.",
+        }),
+    )
+        .into_response())
 }
 
 /// Render a token pair for the wire. This is the one legitimate place the

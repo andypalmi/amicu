@@ -329,6 +329,73 @@ impl<C: Clock> AuthService<C> {
         Ok(())
     }
 
+    /// Resend the email-verification link for `email`.
+    ///
+    /// Anti-enumeration: this ALWAYS returns immediately with `Ok`, and the HTTP
+    /// boundary always returns the same generic response, whether or not the
+    /// email is registered and whether or not it is already verified. Exactly as
+    /// in [`request_password_reset`](Self::request_password_reset), ALL of the
+    /// account-dependent work (the user lookup, the "already verified?" check,
+    /// and, only when a fresh link is warranted, the token mint, store insert,
+    /// and out-of-band delivery) runs on a detached background task, so the
+    /// synchronous response time is the *same* on every path.
+    ///
+    /// Doing that work inline would be an account-enumeration timing oracle: the
+    /// exists-and-unverified path does strictly more synchronous work than the
+    /// miss / already-verified paths, and the gap becomes a strong signal the
+    /// moment a synchronous mailer replaces the dev logger. A fresh verification
+    /// token is minted and delivered only when the account exists AND its email
+    /// is not yet verified; otherwise nothing is sent and nothing is stored.
+    ///
+    /// # Errors
+    /// Never returns an error: background failures are swallowed (surfacing them
+    /// would itself be an existence signal). Kept `Result` for a uniform handler
+    /// signature.
+    // Intentionally `async` with no `.await` on the response path: detaching all
+    // account-dependent work is the whole anti-enumeration point (see above). The
+    // `async` signature is part of the `AuthService` contract, mirroring
+    // `request_password_reset`, so keep it.
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+    pub async fn resend_verification(&self, email: &str) -> Result<()> {
+        let email = normalize_email(email);
+        // Empty email is a request-level no-op (not an account signal); the
+        // exists/miss paths are already equalized by the detached task below.
+        if email.is_empty() {
+            return Ok(());
+        }
+        // Move the seams into a detached task. The response returns now, in
+        // account-independent time; the (possibly network-bound) lookup + mint +
+        // store + send happen off the response path. See the doc comment.
+        let users = self.users.clone();
+        let verifies = self.verifies.clone();
+        let notifier = self.notifier.clone();
+        let expires_at = self.issuer.now_unix()
+            + i64::try_from(self.issuer.config().verify_ttl.as_secs()).unwrap_or(i64::MAX);
+        tokio::spawn(async move {
+            let Ok(Some(user)) = users.get_by_email(&email).await else {
+                return; // unknown account: send nothing, store nothing
+            };
+            if user.email_verified {
+                return; // already verified: a fresh link is neither needed nor sent
+            }
+            let minted = verify::mint(&user.id, expires_at);
+            if verifies.insert(minted.record).await.is_err() {
+                return; // best-effort: a store failure must not surface anywhere
+            }
+            // Best-effort delivery: a transport failure must not change anything
+            // observable (it already changed nothing on the response path).
+            let _ = notifier
+                .notify(Notification {
+                    recipient: email,
+                    kind: NotificationKind::VerifyEmail {
+                        verify_token: minted.token,
+                    },
+                })
+                .await;
+        });
+        Ok(())
+    }
+
     /// Consume a reset token and set a new password.
     ///
     /// The password policy is enforced first (a request-level check that reveals

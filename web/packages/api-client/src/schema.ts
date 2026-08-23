@@ -502,6 +502,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/verify/resend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resend the email-verification link.
+         * @description Anti-enumeration: this ALWAYS returns the same generic `202 Accepted`,
+         *     whether or not the email is registered and whether or not it is already
+         *     verified, with no account signal in the body or (all account-dependent work
+         *     is detached) the timing. A fresh verification token is minted and delivered
+         *     out-of-band via the notification seam only when the account exists AND is not
+         *     yet verified. Mirrors the identical-response defense on `/recover`.
+         */
+        post: operations["resend_verification"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1042,6 +1067,16 @@ export interface components {
             /** Format: double */
             timeout_rate: number;
         };
+        /** @description A request to resend the email-verification link (`POST /verify/resend`). */
+        ResendVerificationRequest: {
+            /** @description The account email to send a fresh verification link to. */
+            email: string;
+        };
+        /** @description The generic, anti-enumeration resend-verification acknowledgement. */
+        ResendVerificationResponse: {
+            /** @description A message that reveals nothing about whether an unverified account exists. */
+            message: string;
+        };
         /**
          * @description A password-reset completion (`POST /reset`): the opaque reset token plus the
          *     new password to install.
@@ -1324,6 +1359,8 @@ export type RedirectResponse = components['schemas']['RedirectResponse'];
 export type RefreshRequest = components['schemas']['RefreshRequest'];
 export type RejectedAlternativeDto = components['schemas']['RejectedAlternativeDto'];
 export type ReliabilityMetricsDto = components['schemas']['ReliabilityMetricsDto'];
+export type ResendVerificationRequest = components['schemas']['ResendVerificationRequest'];
+export type ResendVerificationResponse = components['schemas']['ResendVerificationResponse'];
 export type ResetRequest = components['schemas']['ResetRequest'];
 export type RoleView = components['schemas']['RoleView'];
 export type RolesResponse = components['schemas']['RolesResponse'];
@@ -2393,6 +2430,37 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Rate limited. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    resend_verification: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResendVerificationRequest"];
+            };
+        };
+        responses: {
+            /** @description Accepted. If an unverified account exists for that email, a fresh verification link is sent out-of-band. Response is identical whether or not the account exists or is already verified (anti-enumeration). */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResendVerificationResponse"];
+                };
             };
             /** @description Rate limited. */
             429: {

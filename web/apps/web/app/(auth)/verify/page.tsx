@@ -11,6 +11,7 @@ import {
   CardTitle,
 } from '@amicu/ui';
 import { verifyAction } from '@/app/(auth)/actions';
+import { ResendVerificationForm } from '@/components/auth/resend-verification-form';
 
 export const metadata: Metadata = { title: 'Verify email' };
 
@@ -41,11 +42,12 @@ export default async function VerifyPage({
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          <ResendVerificationForm />
           <Button asChild variant="outline" className="w-full">
             <Link href="/login">Go to sign in</Link>
           </Button>
           <p className="text-center text-sm text-muted-foreground">
-            Still stuck? Try signing up again or contact support.
+            Still stuck? Contact support.
           </p>
         </CardContent>
       </Card>
@@ -113,12 +115,12 @@ export default async function VerifyPage({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        <ResendVerificationForm />
         <Button asChild variant="outline" className="w-full">
           <Link href="/login">Go to sign in</Link>
         </Button>
         <p className="text-center text-sm text-muted-foreground">
-          Already confirmed? Just sign in. Otherwise sign up again or contact
-          support.
+          Already confirmed? Just sign in. Otherwise contact support.
         </p>
       </CardContent>
     </Card>

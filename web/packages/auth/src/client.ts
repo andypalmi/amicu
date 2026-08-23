@@ -62,6 +62,13 @@ export interface AuthClient {
    * carries no body.
    */
   verify(input: { token: string }): Promise<AuthResult<void>>;
+  /**
+   * Resend the email-verification link. Maps to `POST /verify/resend`; the
+   * backend replies `202` with a generic `{ message }` whether or not an
+   * unverified account exists for that email (anti-enumeration), which the BFF
+   * treats uniformly as success. Public endpoint: no session bearer needed.
+   */
+  resendVerification(input: { email: string }): Promise<AuthResult<void>>;
 }
 
 export function createAuthClient(options: AuthClientOptions): AuthClient {
@@ -105,5 +112,7 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
       toResult(api.POST('/logout', { body: { refresh_token: refreshToken } }), () => undefined),
     requestPasswordReset: (input) => toResult(api.POST('/recover', { body: input }), () => undefined),
     verify: (input) => toResult(api.POST('/verify', { body: input }), () => undefined),
+    resendVerification: (input) =>
+      toResult(api.POST('/verify/resend', { body: input }), () => undefined),
   };
 }
