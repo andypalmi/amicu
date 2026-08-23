@@ -21,8 +21,9 @@
 //!
 //! # Auth stores (PR-2)
 //!
-//! [`user`], [`refresh`], and [`reset`] provide the Postgres implementations of
-//! the `amicu-auth` store traits. Each is workspace-scoped: every query carries
+//! [`user`], [`refresh`], [`reset`], and [`verify`] provide the Postgres
+//! implementations of the `amicu-auth` store traits. Each is workspace-scoped:
+//! every query carries
 //! a `workspace_id` predicate and runs inside a transaction that sets the
 //! `app.current_workspace` GUC so the row-level-security policies apply. A real
 //! multi-tenant deployment threads a per-request [`WorkspaceId`]; until
@@ -40,10 +41,12 @@ use uuid::Uuid;
 pub mod refresh;
 pub mod reset;
 pub mod user;
+pub mod verify;
 
 pub use refresh::PostgresRefreshStore;
 pub use reset::PostgresResetStore;
 pub use user::PostgresUserStore;
+pub use verify::PostgresVerifyStore;
 
 /// The control-plane isolation boundary: a workspace (unified with the
 /// Enterprise org). Every persisted resource is scoped to a workspace, so a

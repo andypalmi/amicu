@@ -84,7 +84,7 @@ use amicu_auth::reset::{InMemoryResetStore, ResetStore};
 use amicu_auth::service::AuthService;
 use amicu_auth::user::{InMemoryUserStore, UserStore};
 use amicu_auth::verifier::{StaticJwksProvider, Verifier, VerifierConfig};
-use amicu_auth::verify::InMemoryVerifyStore;
+use amicu_auth::verify::{InMemoryVerifyStore, VerifyStore};
 use amicu_auth::{AuthError, Tier};
 use axum::Router;
 use clap::{Parser, ValueEnum};
@@ -255,6 +255,15 @@ impl From<std::io::Error> for Error {
 /// [`Error::Smtp`] if any `AMICU_SMTP_*` variable is set but the SMTP
 /// configuration is incomplete or invalid.
 pub async fn build_app(config: &Config) -> Result<Router, Error> {
+    /// The auth store quartet (user, refresh, reset, verify), selected together:
+    /// all Postgres when `DATABASE_URL` is set, else all in-memory.
+    type AuthStores = (
+        Arc<dyn UserStore>,
+        Arc<dyn RefreshStore>,
+        Arc<dyn ResetStore>,
+        Arc<dyn VerifyStore>,
+    );
+
     let trusted = TrustedProxies::from_strs(config.trusted_proxies.split(','))?;
     let base_url = config
         .base_url
@@ -275,36 +284,31 @@ pub async fn build_app(config: &Config) -> Result<Router, Error> {
     // shared between the auth service and the billing surface (below), so a
     // webhook-driven tier change lands on the user the auth service re-reads on
     // the next sign-in/refresh.
-    let (users, refresh, resets): (
-        Arc<dyn UserStore>,
-        Arc<dyn RefreshStore>,
-        Arc<dyn ResetStore>,
-    ) = if let Ok(database_url) = std::env::var("DATABASE_URL") {
-        let pool = amicu_store::connect(&database_url)
-            .await
-            .map_err(Error::Store)?;
-        amicu_store::run_migrations(&pool)
-            .await
-            .map_err(Error::Store)?;
-        eprintln!("amicu-server: using Postgres auth stores (DATABASE_URL set).");
-        (
-            Arc::new(amicu_store::PostgresUserStore::new(pool.clone())),
-            Arc::new(amicu_store::PostgresRefreshStore::new(pool.clone())),
-            Arc::new(amicu_store::PostgresResetStore::new(pool)),
-        )
-    } else {
-        (
-            Arc::new(InMemoryUserStore::default()),
-            Arc::new(InMemoryRefreshStore::default()),
-            Arc::new(InMemoryResetStore::default()),
-        )
-    };
-
-    // The verify store is in-memory on BOTH the in-memory and Postgres paths: a
-    // persistent verify store is a separate later PR. State is lost on restart,
-    // which is acceptable while the sign-in verification gate defaults off (see
-    // the notifier selection below for why the gate is NOT auto-enabled here).
-    let verify_store = Arc::new(InMemoryVerifyStore::default());
+    // The auth store quartet (see `AuthStores`), selected together so the
+    // Postgres path shares one pool and the in-memory path stays zero-config.
+    let (users, refresh, resets, verify_store): AuthStores =
+        if let Ok(database_url) = std::env::var("DATABASE_URL") {
+            let pool = amicu_store::connect(&database_url)
+                .await
+                .map_err(Error::Store)?;
+            amicu_store::run_migrations(&pool)
+                .await
+                .map_err(Error::Store)?;
+            eprintln!("amicu-server: using Postgres auth stores (DATABASE_URL set).");
+            (
+                Arc::new(amicu_store::PostgresUserStore::new(pool.clone())),
+                Arc::new(amicu_store::PostgresRefreshStore::new(pool.clone())),
+                Arc::new(amicu_store::PostgresResetStore::new(pool.clone())),
+                Arc::new(amicu_store::PostgresVerifyStore::new(pool)),
+            )
+        } else {
+            (
+                Arc::new(InMemoryUserStore::default()),
+                Arc::new(InMemoryRefreshStore::default()),
+                Arc::new(InMemoryResetStore::default()),
+                Arc::new(InMemoryVerifyStore::default()),
+            )
+        };
 
     // Notifier selection. If ANY AMICU_SMTP_* variable is set, the operator has
     // signaled intent to send real email: build the real mailer, and treat an
