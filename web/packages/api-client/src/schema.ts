@@ -2287,7 +2287,10 @@ export interface operations {
     audit_handler: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent. */
+                "x-amicu-workspace-id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -2301,6 +2304,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["AuditResponse"];
                 };
+            };
+            /** @description Malformed organization header. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Missing or invalid access token. */
             401: {
@@ -2321,7 +2331,10 @@ export interface operations {
     list_members_handler: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent. */
+                "x-amicu-workspace-id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -2335,6 +2348,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["MembersResponse"];
                 };
+            };
+            /** @description Malformed organization header. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Missing or invalid access token. */
             401: {
@@ -2355,7 +2375,10 @@ export interface operations {
     add_member_handler: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent. */
+                "x-amicu-workspace-id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -2374,7 +2397,7 @@ export interface operations {
                     "application/json": components["schemas"]["MemberView"];
                 };
             };
-            /** @description Empty user id or unknown role. */
+            /** @description Empty user id, unknown role, or malformed organization header. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2407,7 +2430,10 @@ export interface operations {
     remove_member_handler: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent. */
+                "x-amicu-workspace-id"?: string | null;
+            };
             path: {
                 /** @description The member's user id. */
                 id: string;
@@ -2424,6 +2450,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["MemberView"];
                 };
+            };
+            /** @description Malformed organization header. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Missing or invalid access token. */
             401: {
@@ -2458,7 +2491,10 @@ export interface operations {
     change_role_handler: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent. */
+                "x-amicu-workspace-id"?: string | null;
+            };
             path: {
                 /** @description The member's user id. */
                 id: string;
@@ -2480,7 +2516,7 @@ export interface operations {
                     "application/json": components["schemas"]["MemberView"];
                 };
             };
-            /** @description Unknown role. */
+            /** @description Unknown role, or malformed organization header. */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2520,7 +2556,10 @@ export interface operations {
     list_roles_handler: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent. */
+                "x-amicu-workspace-id"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
@@ -2534,6 +2573,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["RolesResponse"];
                 };
+            };
+            /** @description Malformed organization header. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Missing or invalid access token. */
             401: {

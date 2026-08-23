@@ -677,6 +677,20 @@
         ],
         "summary": "The audit log, most-recent first. Requires the `view_audit` permission\n(Owner/Admin).",
         "operationId": "audit_handler",
+        "parameters": [
+          {
+            "name": "x-amicu-workspace-id",
+            "in": "header",
+            "description": "The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "The audit log, most-recent first.",
@@ -687,6 +701,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Malformed organization header."
           },
           "401": {
             "description": "Missing or invalid access token."
@@ -709,6 +726,20 @@
         ],
         "summary": "List the organization's members and their roles.",
         "operationId": "list_members_handler",
+        "parameters": [
+          {
+            "name": "x-amicu-workspace-id",
+            "in": "header",
+            "description": "The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "The members and the caller's own role.",
@@ -719,6 +750,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Malformed organization header."
           },
           "401": {
             "description": "Missing or invalid access token."
@@ -739,6 +773,20 @@
         ],
         "summary": "Invite/add a member with a role.",
         "operationId": "add_member_handler",
+        "parameters": [
+          {
+            "name": "x-amicu-workspace-id",
+            "in": "header",
+            "description": "The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -761,7 +809,7 @@
             }
           },
           "400": {
-            "description": "Empty user id or unknown role."
+            "description": "Empty user id, unknown role, or malformed organization header."
           },
           "401": {
             "description": "Missing or invalid access token."
@@ -796,6 +844,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "x-amicu-workspace-id",
+            "in": "header",
+            "description": "The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
@@ -808,6 +868,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Malformed organization header."
           },
           "401": {
             "description": "Missing or invalid access token."
@@ -843,6 +906,18 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "x-amicu-workspace-id",
+            "in": "header",
+            "description": "The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "requestBody": {
@@ -867,7 +942,7 @@
             }
           },
           "400": {
-            "description": "Unknown role."
+            "description": "Unknown role, or malformed organization header."
           },
           "401": {
             "description": "Missing or invalid access token."
@@ -896,6 +971,20 @@
         ],
         "summary": "The RBAC catalog: every role and the permissions it grants.",
         "operationId": "list_roles_handler",
+        "parameters": [
+          {
+            "name": "x-amicu-workspace-id",
+            "in": "header",
+            "description": "The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent.",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "The role → permission catalog.",
@@ -906,6 +995,9 @@
                 }
               }
             }
+          },
+          "400": {
+            "description": "Malformed organization header."
           },
           "401": {
             "description": "Missing or invalid access token."
