@@ -28,10 +28,12 @@ use amicu_core::resource::{
 use amicu_core::units::ByteSize;
 use amicu_state::{
     LockHandle, STATE_LOCK_NOT_HELD, STATE_LOCKED, STATE_VERSION_NOT_FOUND, StateBackendAdapter,
-    StateSnapshot, StateVersion,
+    StateCipher, StateError, StateSnapshot, StateVersion,
 };
 use amicu_store::{PostgresStateBackend, WorkspaceId, connect, run_migrations};
+use async_trait::async_trait;
 use sqlx::PgPool;
+use sqlx::Row as _;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -139,6 +141,26 @@ fn snapshot(graph: Graph) -> StateSnapshot {
 
 fn backend(pool: PgPool, workspace: WorkspaceId, stack: &str) -> PostgresStateBackend {
     PostgresStateBackend::with_workspace(pool, workspace, AdapterId::new(stack))
+}
+
+/// A reversible (XOR, not real cryptography) test-only [`StateCipher`] for
+/// the encryption-at-rest seam (amicu-planning#126). Good enough to prove
+/// `PostgresStateBackend` actually routes snapshot content through a
+/// configured cipher on the way to and from Postgres, and that the round
+/// trip recovers the exact original graph.
+struct XorTestCipher {
+    key: u8,
+}
+
+#[async_trait]
+impl StateCipher for XorTestCipher {
+    async fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, StateError> {
+        Ok(plaintext.iter().map(|b| b ^ self.key).collect())
+    }
+
+    async fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, StateError> {
+        Ok(ciphertext.iter().map(|b| b ^ self.key).collect())
+    }
 }
 
 #[tokio::test]
@@ -521,4 +543,100 @@ async fn detect_drift_reports_added_removed_changed_against_pulled_state() {
         vec!["deployment.support_chat_prod".to_string()]
     );
     assert!(report.has_drift());
+}
+
+/// amicu-planning#126: with a [`StateCipher`] configured, a push-then-pull
+/// round trip through a real `PostgresStateBackend`/Postgres still recovers
+/// the exact original graph, and what actually lands in the `content` column
+/// is genuinely opaque - not the plaintext graph JSON.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn push_pull_round_trip_with_cipher_encrypts_at_rest_and_recovers_original_graph() {
+    let pool = pool().await;
+    let stack = unique("stack");
+    let cipher: Arc<dyn StateCipher> = Arc::new(XorTestCipher { key: 0x5A });
+    let backend =
+        backend(pool.clone(), WorkspaceId::DEFAULT, &stack).with_cipher(Arc::clone(&cipher));
+
+    let lock = backend.lock().await.expect("acquire lock");
+    backend
+        .push(&snapshot(sample_graph()), &lock)
+        .await
+        .expect("push under lock, encrypted at rest");
+    backend.unlock(lock).await.expect("release lock");
+
+    // The round trip through the real backend recovers the exact graph.
+    let pulled = backend.pull().await.expect("pull, decrypted from rest");
+    assert_eq!(pulled.graph, sample_graph());
+    pulled.verify().expect("checksum matches recomputed hash");
+
+    // What is actually stored in Postgres is not the plaintext graph: a raw
+    // read of the column must not contain identifiable plaintext fields
+    // (e.g. the model id) from the graph. Uses the runtime `query()` API
+    // (not the `query!` macro) so this test needs no sqlx offline-cache
+    // entry, matching `PostgresStateBackend::health`'s existing convention.
+    let raw: serde_json::Value = sqlx::query(
+        "SELECT content FROM state_snapshots WHERE workspace_id = $1 AND stack_id = $2 \
+         ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(WorkspaceId::DEFAULT.as_uuid())
+    .bind(&stack)
+    .fetch_one(&pool)
+    .await
+    .expect("read raw stored content")
+    .try_get("content")
+    .expect("content column decodes as JSON");
+    let raw_str = raw.to_string();
+    assert!(
+        !raw_str.contains("support_chat"),
+        "stored content must be encrypted, not the plaintext graph JSON: {raw_str}"
+    );
+    assert!(
+        raw.get("__amicu_state_ciphertext__").is_some(),
+        "stored content must carry the cipher wrapper marker"
+    );
+}
+
+/// amicu-planning#126: with no cipher configured (the default), a backend's
+/// push writes the plaintext graph JSON to `content` exactly as every
+/// version of this backend did before the encryption seam existed - proving
+/// the no-op default preserves current on-disk behavior byte-for-byte, not
+/// just that `pull` still works.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn push_with_no_cipher_configured_writes_plaintext_content_unchanged() {
+    let pool = pool().await;
+    let stack = unique("stack");
+    let backend = backend(pool.clone(), WorkspaceId::DEFAULT, &stack);
+    let graph = sample_graph();
+
+    let lock = backend.lock().await.expect("acquire lock");
+    backend
+        .push(&snapshot(graph.clone()), &lock)
+        .await
+        .expect("push under lock");
+    backend.unlock(lock).await.expect("release lock");
+
+    let raw: serde_json::Value = sqlx::query(
+        "SELECT content FROM state_snapshots WHERE workspace_id = $1 AND stack_id = $2 \
+         ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(WorkspaceId::DEFAULT.as_uuid())
+    .bind(&stack)
+    .fetch_one(&pool)
+    .await
+    .expect("read raw stored content")
+    .try_get("content")
+    .expect("content column decodes as JSON");
+
+    assert_eq!(
+        raw,
+        serde_json::to_value(&graph).expect("serialize expected graph"),
+        "with no cipher configured, stored content must be exactly the plain graph JSON, \
+         byte-for-byte identical to pre-seam behavior"
+    );
+    assert!(
+        raw.get("__amicu_state_ciphertext__").is_none(),
+        "no cipher configured must never write the encrypted wrapper"
+    );
 }

@@ -100,6 +100,14 @@ export DATABASE_URL=postgres://amicu:amicu@localhost:5432/amicu
 That `DATABASE_URL` is the dev/self-host connection string used by the store and its
 migration integration test.
 
+Self-hosted state is control-plane metadata and secret *references* only - never plaintext
+secret values (see `amicu-core`'s `SecretValue`/`SecretRef` split). `amicu-store` does not
+encrypt it at the application layer by default: **self-host operators are responsible for
+their own database's encryption at rest** (disk/volume encryption, filesystem encryption, or
+your Postgres provider's own offering). The hosted SaaS backend plugs application-level
+envelope encryption into `PostgresStateBackend` via the `amicu_state::StateCipher` seam; see
+that module and `amicu-store`'s `state` module docs for details.
+
 ## Status
 
 Early stage. Working today: the HCL DSL and parser, the CLI (`init`, `fmt`, `validate`, `plan`, `apply`, `doctor`, `skill export`), the planner and local state, and the provider adapters listed above. Not yet built: the browser UI, hosted service, and performance-intelligence dataset. Expect breaking changes to the DSL and CLI.
