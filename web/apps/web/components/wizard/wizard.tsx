@@ -1,6 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import {
   Badge,
   Button,
@@ -23,6 +25,7 @@ import {
   type PresetSummaryDto,
   type WizardAnswersDto,
 } from '@/lib/wizard/format';
+import { errorMessage, looksLikeConfigDetail } from '@/lib/configs/format';
 
 const CURRENCIES = ['USD', 'EUR', 'GBP'] as const;
 
@@ -67,11 +70,108 @@ function looksLikeEmit(body: unknown): body is EmitResponseDto {
   );
 }
 
+// Loading a config into the wizard via `?configId=`: fetched once from
+// GET /api/configs/{id} and rendered straight into <HclResult> (skipping the
+// preset/requirements steps - there is no preset behind a loaded config, so
+// nothing is re-emitted or re-estimated).
+// Result of the last load attempt, keyed by the config id it belongs to - so a
+// stale result from a PREVIOUS `?configId=` is never shown while a new one is
+// in flight (see `isLoading` below, which compares `loaded.id` to the current
+// `loadConfigId` instead of tracking a separate "loading" boolean in state).
+type LoadedConfigResult =
+  | { kind: 'error'; id: string; message: string }
+  | { kind: 'ready'; id: string; name: string; hcl: string };
+
 // The guided wizard: a client stepper over the preset BFF routes. (1) pick a
 // preset from the gallery; (2) fill a short requirements form seeded from the
 // preset's detail; (3) emit the HCL and review it. No tier gating here - the
 // endpoints are Community-minimum and the API enforces tier by content.
+//
+// A `?configId=<id>` query param instead loads a saved configuration (from "My
+// Configs" - see components/configs/detail.tsx's "Load into wizard" link) and
+// renders it straight into the same review/editor/Save panel, bypassing the
+// preset flow entirely.
 export function Wizard() {
+  const searchParams = useSearchParams();
+  const loadConfigId = searchParams.get('configId');
+  const [loaded, setLoaded] = useState<LoadedConfigResult | null>(null);
+
+  useEffect(() => {
+    if (!loadConfigId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/configs/${encodeURIComponent(loadConfigId)}`);
+        const payload: unknown = await res.json().catch(() => null);
+        if (cancelled) return;
+        if (res.ok && looksLikeConfigDetail(payload)) {
+          setLoaded({ kind: 'ready', id: payload.id, name: payload.name, hcl: payload.content });
+          return;
+        }
+        setLoaded({ kind: 'error', id: loadConfigId, message: errorMessage(res.status, payload) });
+      } catch {
+        if (!cancelled) {
+          setLoaded({
+            kind: 'error',
+            id: loadConfigId,
+            message: 'The configuration service is unreachable.',
+          });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadConfigId]);
+
+  if (loadConfigId) {
+    const current = loaded && loaded.id === loadConfigId ? loaded : null;
+    return <LoadedConfig loading={current === null} result={current} />;
+  }
+
+  return <PresetWizard />;
+}
+
+function LoadedConfig({
+  loading,
+  result,
+}: {
+  loading: boolean;
+  result: LoadedConfigResult | null;
+}) {
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="space-y-1">
+          <h2 className="text-lg font-medium">
+            {result?.kind === 'ready' ? `Editing "${result.name}"` : 'Loading configuration…'}
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            Loaded from My Configs. Edit it below, then Save to add a new version.
+          </p>
+        </div>
+        <Button asChild variant="outline" size="sm">
+          <Link href="/wizard">Start the wizard from scratch</Link>
+        </Button>
+      </div>
+
+      {loading ? <LoadingState label="Loading configuration…" /> : null}
+      {result?.kind === 'error' ? <ErrorAlert message={result.message} /> : null}
+      {result?.kind === 'ready' ? (
+        <HclResult
+          result={{ hcl: result.hcl }}
+          sourceConfigId={result.id}
+          sourceConfigName={result.name}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+// The original three-step preset flow: pick a preset, fill requirements, emit
+// and review. Extracted so `Wizard` can branch to <LoadedConfig> without this
+// component's hooks running unconditionally.
+function PresetWizard() {
   const [step, setStep] = useState(0);
   const [selected, setSelected] = useState<PresetSummaryDto | null>(null);
   const [detailState, setDetailState] = useState<DetailState>({ kind: 'idle' });
