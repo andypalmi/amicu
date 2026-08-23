@@ -16,9 +16,9 @@
 
 ## Exit codes
 
-- `0` — success / valid / no error-severity diagnostics.
-- `1` — diagnostics with severity `error`, or `fmt --check` drift.
-- non-zero from `error:` line — an operational failure (I/O, parse).
+- `0` - success / valid / no error-severity diagnostics.
+- `1` - diagnostics with severity `error`, or `fmt --check` drift.
+- non-zero from `error:` line - an operational failure (I/O, parse).
 
 ## Diagnostic contract
 

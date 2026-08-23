@@ -5,7 +5,7 @@ import { logServerError, type ServerErrorContext } from '@/lib/observability/log
 
 // Shared plumbing for the /api/engine/* BFF routes. Each route requires a valid
 // session, forwards the bearer token upstream, and mirrors the Management API's
-// status + JSON straight back — the browser never sees the token or the API base.
+// status + JSON straight back - the browser never sees the token or the API base.
 
 /** A resolved bearer token, or a ready-to-return error Response when unauthorized. */
 export type Guard = { token: string } | { deny: Response };
@@ -22,7 +22,7 @@ export async function guardEngine(): Promise<Guard> {
 
 /**
  * Parse a JSON body and require a string `config` (plus an optional string
- * `prior`). Returns the fields or a 400 Response — mirroring the API's own
+ * `prior`). Returns the fields or a 400 Response - mirroring the API's own
  * shape so the client handles one error contract everywhere.
  */
 export async function readConfigBody(
@@ -46,7 +46,7 @@ export async function readConfigBody(
 /**
  * A 502 for when the Management API itself is unreachable.
  *
- * The client-facing body is intentionally generic — no internal message is ever
+ * The client-facing body is intentionally generic - no internal message is ever
  * echoed. When the caught `error` is passed, it is logged server-side (stderr
  * only) with the given `context` BEFORE the 502 is returned, so upstream outages
  * are visible to operators without leaking anything to the browser.

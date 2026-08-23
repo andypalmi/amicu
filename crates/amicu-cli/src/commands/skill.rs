@@ -1,7 +1,7 @@
-//! `amicu skill export` — render the canonical agent skills to a target layout.
+//! `amicu skill export` - render the canonical agent skills to a target layout.
 //!
 //! Runs without a project: it only reads the embedded manifest and writes files.
-//! Idempotent — re-running overwrites the generated files.
+//! Idempotent - re-running overwrites the generated files.
 
 use std::fs;
 use std::io::Write;

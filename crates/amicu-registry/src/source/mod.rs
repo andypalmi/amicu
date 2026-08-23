@@ -3,14 +3,14 @@
 //! A [`ModelSourceAdapter`] wraps a model source such as Hugging Face, Ollama,
 //! or a URL mirror. It extends the common [`Adapter`] contract with:
 //!
-//! - [`capabilities`](ModelSourceAdapter::capabilities) — a plain-data
+//! - [`capabilities`](ModelSourceAdapter::capabilities) - a plain-data
 //!   descriptor consumed without side effects.
 //! - [`search`](ModelSourceAdapter::search),
 //!   [`metadata`](ModelSourceAdapter::metadata) and
-//!   [`resolve_artifact`](ModelSourceAdapter::resolve_artifact) — **planning-time**
+//!   [`resolve_artifact`](ModelSourceAdapter::resolve_artifact) - **planning-time**
 //!   reads that never touch the destination filesystem. They are `async` only
 //!   because a real source performs network I/O.
-//! - [`download`](ModelSourceAdapter::download) — the single **apply-time**
+//! - [`download`](ModelSourceAdapter::download) - the single **apply-time**
 //!   method. It writes bytes to `dest` and supports resume/retry: a transfer
 //!   that stops partway leaves a partial file, and a retry resumes from that
 //!   offset rather than starting over (see [`DownloadResult`]).
@@ -154,7 +154,7 @@ pub trait ModelSourceAdapter: Adapter + DescribeCapabilities {
     /// Planning-time: find models matching `q`.
     async fn search(&self, q: &ModelQuery) -> Result<Vec<ModelSummary>, AdapterError>;
 
-    /// Planning-time: full metadata for a model — parameters, quantizations,
+    /// Planning-time: full metadata for a model - parameters, quantizations,
     /// GGUF variants and license.
     async fn metadata(&self, id: &ModelId) -> Result<ModelMetadata, AdapterError>;
 

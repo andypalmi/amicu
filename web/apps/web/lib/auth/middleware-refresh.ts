@@ -4,7 +4,7 @@ import { decodeExpUnsafe, type TokenResponse } from '@amicu/auth/server';
 import { authClient } from './client';
 import { ACCESS_COOKIE, REFRESH_COOKIE } from './config';
 
-// Silent refresh, performed in BFF middleware — the one request phase where the
+// Silent refresh, performed in BFF middleware - the one request phase where the
 // rotating refresh token can be swapped and written back as cookies (server
 // actions/route handlers are the others; RSC render is read-only). Runs only for
 // protected routes.
@@ -17,10 +17,10 @@ const REFRESH_SKEW_SECONDS = 60;
 
 /** Outcome of a refresh attempt, applied to cookies by the caller (proxy.ts). */
 export type RefreshOutcome =
-  | { kind: 'fresh' } // access token still valid — nothing to do
+  | { kind: 'fresh' } // access token still valid - nothing to do
   | { kind: 'none' } // no session to refresh
   | { kind: 'rotated'; tokens: TokenResponse } // new bundle to write
-  | { kind: 'revoked' }; // refresh rejected — clear cookies
+  | { kind: 'revoked' }; // refresh rejected - clear cookies
 
 function accessFresh(token: string | undefined): boolean {
   if (!token) return false;

@@ -229,7 +229,7 @@ impl Provider for FakeProvider {
             }));
         }
         // Apply-time credential resolution: value is used to authenticate and
-        // dropped inside `authenticate` — never stored on the handle.
+        // dropped inside `authenticate` - never stored on the handle.
         self.authenticate(resolver, request.credentials.as_ref())
             .await?;
 
@@ -354,7 +354,7 @@ mod tests {
         }
     }
 
-    /// A resolver seeded with nothing — for requests that carry no credential.
+    /// A resolver seeded with nothing - for requests that carry no credential.
     fn no_creds() -> TestResolver {
         TestResolver::default()
     }

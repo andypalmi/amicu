@@ -10,17 +10,17 @@ serialized graph carries the `schema_version` it was written against.
 
 `MAJOR.MINOR.PATCH` applied to the JSON shape of the graph and its resources:
 
-- **MAJOR** — a breaking change (see below). A reader for version `N` is not
+- **MAJOR** - a breaking change (see below). A reader for version `N` is not
   expected to parse a graph written for version `N+1`.
-- **MINOR** — a backward-compatible, additive change. Older readers ignore
+- **MINOR** - a backward-compatible, additive change. Older readers ignore
   what they do not recognize; newer readers accept older graphs unchanged.
-- **PATCH** — clarifications and non-normative fixes with no wire effect
+- **PATCH** - clarifications and non-normative fixes with no wire effect
   (documentation, comments, tightened validation that accepts the same
   inputs).
 
 ## Breaking vs. additive
 
-**Additive (MINOR)** — no migration required:
+**Additive (MINOR)** - no migration required:
 
 - Adding a new resource kind.
 - Adding an **optional** field (`Option<_>`, or one with `#[serde(default)]`).
@@ -28,7 +28,7 @@ serialized graph carries the `schema_version` it was written against.
   non-exhaustive.
 - Relaxing a constraint so previously-invalid inputs become valid.
 
-**Breaking (MAJOR)** — requires a migration:
+**Breaking (MAJOR)** - requires a migration:
 
 - Removing or renaming a field, resource kind, or enum variant.
 - Making an optional field required, or changing a field's type or units.

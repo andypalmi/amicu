@@ -1,7 +1,7 @@
 //! Product-tier boundary for recommendations.
 //!
-//! Basic monitoring — the [`StackMetrics`](amicu_telemetry::StackMetrics)
-//! surface — is [`Tier::Community`]. Advisory tuning recommendations diagnosed
+//! Basic monitoring - the [`StackMetrics`](amicu_telemetry::StackMetrics)
+//! surface - is [`Tier::Community`]. Advisory tuning recommendations diagnosed
 //! against estimates and the performance DB are [`Tier::Pro`]. This marks the
 //! boundary in the types; it does not implement billing.
 

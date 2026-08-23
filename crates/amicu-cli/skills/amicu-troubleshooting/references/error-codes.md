@@ -16,14 +16,14 @@ signal; the number identifies the specific check.
 
 ## Representative codes
 
-- `AMICU-PARSE-001` — HCL failed to parse.
-- `AMICU-SCHEMA-001` — structural/schema validation failed.
-- `AMICU-REF-001` — a referenced resource id was not found.
-- `AMICU-CAP-001` — capability mismatch (e.g. runtime cannot serve the artifact).
-- `AMICU-MEM-001` / `AMICU-MEM-002` — capacity/memory fit failures.
-- `AMICU-POLICY-001` — a governance/residency rule was violated.
-- `AMICU-STATE-001..004` — state lock/drift/read/write problems.
-- `AMICU-PROVIDER-001` / `AMICU-PROVIDER-002` — provider provisioning/availability.
+- `AMICU-PARSE-001` - HCL failed to parse.
+- `AMICU-SCHEMA-001` - structural/schema validation failed.
+- `AMICU-REF-001` - a referenced resource id was not found.
+- `AMICU-CAP-001` - capability mismatch (e.g. runtime cannot serve the artifact).
+- `AMICU-MEM-001` / `AMICU-MEM-002` - capacity/memory fit failures.
+- `AMICU-POLICY-001` - a governance/residency rule was violated.
+- `AMICU-STATE-001..004` - state lock/drift/read/write problems.
+- `AMICU-PROVIDER-001` / `AMICU-PROVIDER-002` - provider provisioning/availability.
 
 Severity, not just presence, decides pass/fail: only `error`-severity
 diagnostics fail a command. Warnings are advisory but worth resolving.

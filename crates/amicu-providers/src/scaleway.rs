@@ -6,7 +6,7 @@
 //! the EU regions from [`REGIONS`], and [`provision`](ScalewayProvider::provision)
 //! rejects any region outside that admitted set with
 //! [`ProviderError::UnknownRegion`]. Every Scaleway region is EU, so the EU filter
-//! admits all of them — but the filter is modeled identically to a mixed-residency
+//! admits all of them - but the filter is modeled identically to a mixed-residency
 //! provider, so widening past EU (e.g. to [`Residency::Us`]) correctly yields an
 //! empty region set. [`ScalewayProvider::for_residencies`] widens the admitted set
 //! explicitly when a caller genuinely needs other jurisdictions.
@@ -21,8 +21,8 @@
 //! (`{"action":"poweron"}`) to boot it, `GET /zones/{zone}/servers/{id}` for
 //! status, and `DELETE /zones/{zone}/servers/{id}` to tear down. Scaleway
 //! authenticates with an `X-Auth-Token` header (not `Authorization: Bearer`).
-//! The adapter never touches a concrete HTTP client — production uses
-//! [`ReqwestTransport`], tests inject a mock — so the provisioning path is
+//! The adapter never touches a concrete HTTP client - production uses
+//! [`ReqwestTransport`], tests inject a mock - so the provisioning path is
 //! exercised with no network, credentials, or spend. HTTP status codes map onto
 //! typed [`ProviderError`]s (`401`/`403` → credentials rejected, `404` → unknown
 //! instance/offering, `409`/`429` → capacity unavailable, other non-`2xx` →
@@ -75,7 +75,7 @@ struct ScwRegion {
     zone: &'static str,
 }
 
-/// Scaleway's regions — all EU. [`ScalewayProvider::new`] admits every one; the
+/// Scaleway's regions - all EU. [`ScalewayProvider::new`] admits every one; the
 /// filter is a no-op for the EU default but excludes them all when widened past
 /// EU. Uses a `fn` (not a `const`) because [`Residency::Other`] owns a `String`.
 fn regions() -> [ScwRegion; 3] {
@@ -120,7 +120,7 @@ struct GpuSpec {
 
 /// A representative slice of Scaleway's single-GPU catalog. Prices are
 /// illustrative catalog values in EUR/hr, not a live quote (real-time pricing is
-/// amicu-planning#23). On-demand only — Scaleway has no public spot market.
+/// amicu-planning#23). On-demand only - Scaleway has no public spot market.
 const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "gpu.h100.1x",
@@ -418,7 +418,7 @@ impl ScalewayProvider {
     /// The zone the Instance API path targets for `region`: the explicit
     /// `override_zone` when present, else the admitted region's default zone,
     /// else `region` itself (a region with no mapped zone addresses the region
-    /// directly). Adapter-owned — the zone never reaches the residency filter.
+    /// directly). Adapter-owned - the zone never reaches the residency filter.
     fn resolve_zone(&self, region: &str, override_zone: Option<&str>) -> String {
         self.capabilities
             .regions
@@ -721,7 +721,7 @@ mod tests {
     #[test]
     fn widening_past_eu_yields_no_regions() {
         // Scaleway has no non-EU regions, so widening the residency filter to a
-        // non-EU jurisdiction admits nothing — the filter is a real filter, not a
+        // non-EU jurisdiction admits nothing - the filter is a real filter, not a
         // hand-picked list.
         assert!(ScalewayProvider::region_codes(&Residency::Us).is_empty());
         let widened = ScalewayProvider::for_residencies(&[Residency::Us]);
@@ -1205,7 +1205,7 @@ mod tests {
     #[tokio::test]
     async fn admitted_region_still_gates_placement_before_zone_resolution() {
         // Residency filtering is unchanged: a region outside the admitted set is
-        // rejected before any zone is resolved — the zone never enters the filter.
+        // rejected before any zone is resolved - the zone never enters the filter.
         let err = ScalewayProvider::new()
             .provision(
                 &ProvisionRequest::new("gpu.l40s.1x", "us-east-1").with_zone("us-east-1a"),

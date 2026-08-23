@@ -10,8 +10,8 @@
 //!
 //! Today's capabilities come from each adapter's *static* hardcoded catalog
 //! (the pure [`Provider::capabilities`]), not a live provider fetch. Snapshots
-//! are therefore tagged honestly — [`Provenance::Formula`] +
-//! [`Confidence::Estimated`] — so catalog data is never presented as live
+//! are therefore tagged honestly - [`Provenance::Formula`] +
+//! [`Confidence::Estimated`] - so catalog data is never presented as live
 //! truth. amicu-planning#68 (live fetch) will upgrade this provenance/confidence.
 
 use amicu_core::adapter::{AdapterId, HealthStatus, Registry};
@@ -94,7 +94,7 @@ pub fn classify(health: &HealthStatus) -> Freshness {
 /// Pure snapshot builder: tag one provider's catalog `capabilities` by its
 /// `health` at `now`, returning the snapshot and any staleness diagnostic.
 ///
-/// An unreachable provider yields `None` capabilities — the `capabilities`
+/// An unreachable provider yields `None` capabilities - the `capabilities`
 /// argument is dropped, never fabricated into the report.
 #[must_use]
 pub fn snapshot(
@@ -147,7 +147,7 @@ fn stale_diagnostic(provider: &AdapterId, detail: &str) -> Diagnostic {
 /// Sync every registered provider: consult its health and snapshot its
 /// capabilities, surfacing stale/unavailable data instead of fabricating it.
 ///
-/// `now` (UNIX epoch seconds) is injected so the driver — not this logic —
+/// `now` (UNIX epoch seconds) is injected so the driver - not this logic -
 /// owns the wall clock. A provider whose `health()` call itself fails is
 /// treated as unavailable.
 pub async fn sync_all(registry: &Registry<dyn Provider>, now: u64) -> SyncReport {

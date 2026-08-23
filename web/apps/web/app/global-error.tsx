@@ -3,7 +3,7 @@
 import { useEffect } from 'react';
 import { reportClientError } from '@/lib/observability/report-error';
 
-// Root error boundary for CATASTROPHIC failures — thrown while rendering the
+// Root error boundary for CATASTROPHIC failures - thrown while rendering the
 // root layout itself. It replaces the whole document, so it must supply its own
 // <html>/<body> and cannot rely on the root layout or the app's global CSS
 // (which is imported by that layout). Styling is therefore self-contained and
@@ -28,7 +28,7 @@ export default function GlobalError({
             <p className="amicu-ge-eyebrow">Amicu</p>
             <h1 className="amicu-ge-title">Something went badly wrong</h1>
             <p className="amicu-ge-body">
-              The application hit an unrecoverable error while loading. Try reloading —
+              The application hit an unrecoverable error while loading. Try reloading -
               if the problem persists, please try again in a little while.
             </p>
             {error.digest ? (

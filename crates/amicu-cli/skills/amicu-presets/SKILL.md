@@ -1,6 +1,6 @@
 ---
 name: amicu-presets
-description: Use at the start of a guided Amicu stack design — gathering requirements (use case, sensitivity, geography, concurrency, latency, budget, existing hardware), then proposing candidate stacks with cost/performance estimates and confidence before writing HCL. Triggers on "help me set up", "recommend a stack", "which preset", or open-ended "I want to serve X".
+description: Use at the start of a guided Amicu stack design - gathering requirements (use case, sensitivity, geography, concurrency, latency, budget, existing hardware), then proposing candidate stacks with cost/performance estimates and confidence before writing HCL. Triggers on "help me set up", "recommend a stack", "which preset", or open-ended "I want to serve X".
 ---
 
 # Amicu Presets & Guided Design
@@ -49,4 +49,4 @@ their JSON output.
 
 ## Reference
 
-- `references/preset-catalog.md` — the initial preset shapes and when each fits.
+- `references/preset-catalog.md` - the initial preset shapes and when each fits.

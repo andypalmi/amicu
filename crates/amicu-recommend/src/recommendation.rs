@@ -24,7 +24,7 @@ pub enum ChangeDirection {
 }
 
 /// A described (never applied) tuning change: a knob or action, a direction,
-/// and a human-readable detail. Descriptive text only — nothing here is
+/// and a human-readable detail. Descriptive text only - nothing here is
 /// executable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SuggestedChange {
@@ -119,7 +119,7 @@ impl RejectedAlternative {
 ///
 /// # Advisory invariant
 /// A recommendation is descriptive data only: the guarantee that it is never
-/// auto-applied is structural — no method on this type, and no function in this
+/// auto-applied is structural - no method on this type, and no function in this
 /// crate, applies it to a running stack. The [`advisory`](Self::advisory) flag
 /// is set `true` by every constructor and reported to clients; the
 /// `advisory_is_always_true` test pins the constructed value.
@@ -200,7 +200,7 @@ impl Recommendation {
         self
     }
 
-    /// Whether this recommendation is advisory — always `true`; a
+    /// Whether this recommendation is advisory - always `true`; a
     /// recommendation is never applied automatically.
     #[must_use]
     pub const fn advisory(&self) -> bool {

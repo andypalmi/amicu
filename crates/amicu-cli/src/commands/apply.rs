@@ -1,4 +1,4 @@
-//! `amicu apply [--auto-approve]` — plan, approve, then start deployments.
+//! `amicu apply [--auto-approve]` - plan, approve, then start deployments.
 
 use std::io::Write;
 

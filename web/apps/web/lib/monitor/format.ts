@@ -1,7 +1,7 @@
 // Pure, framework-free helpers for rendering the monitoring dashboard
 // (measured-vs-estimated). Kept free of React so they can be unit-tested with
 // `node --test` (see format.test.ts). These helpers only *present* API-provided
-// values — they never compute a divergence verdict, rank, or invent data. The
+// values - they never compute a divergence verdict, rank, or invent data. The
 // measured distribution and the estimate range are laid out side by side; any
 // analysis is the engine's (in `suggestions`), never here.
 
@@ -92,7 +92,7 @@ export function formatRange(range: EstimateRange, unit = ''): string {
 /**
  * The estimate's stated assumptions as plain strings. Prefers the engine-derived
  * `assumptions` echoed back; falls back to the assumed_* fields so the
- * attribution is always shown even for an older API. Pure formatting — no verdict.
+ * attribution is always shown even for an older API. Pure formatting - no verdict.
  */
 export function estimateAssumptions(estimate: WorkloadEstimate): string[] {
   if (estimate.assumptions && estimate.assumptions.length > 0) {

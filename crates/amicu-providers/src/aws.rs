@@ -6,7 +6,7 @@
 //! Amicu targets EU workloads, so this adapter is **residency filtering by
 //! construction**: [`AwsProvider::new`] admits only the EU regions from
 //! [`regions`], and [`provision`](AwsProvider::provision) rejects any region
-//! outside that admitted set with [`ProviderError::UnknownRegion`] — an instance
+//! outside that admitted set with [`ProviderError::UnknownRegion`] - an instance
 //! can never be placed in a non-EU region (`us-east-1`, `ap-southeast-1`, …)
 //! through this adapter. [`AwsProvider::for_residencies`] widens the admitted set
 //! explicitly when a caller genuinely needs other jurisdictions.
@@ -93,7 +93,7 @@ fn regions() -> [AwsRegion; 8] {
             country: "FR",
             location: "Paris",
         },
-        // Non-EU — excluded by the residency filter.
+        // Non-EU - excluded by the residency filter.
         AwsRegion {
             code: "us-east-1",
             residency: Residency::Us,
@@ -133,7 +133,7 @@ struct GpuSpec {
 
 /// A representative slice of AWS's GPU EC2 catalog. Prices are illustrative
 /// catalog values in USD/hr, not a live quote (real-time pricing is amicu-planning#23).
-/// Each offering carries both an on-demand and a spot rate — AWS runs a real spot
+/// Each offering carries both an on-demand and a spot rate - AWS runs a real spot
 /// market.
 const GPUS: &[GpuSpec] = &[
     GpuSpec {
@@ -426,8 +426,8 @@ impl Provider for AwsProvider {
             }));
         }
         // Residency filter: only admitted (EU by default) regions can host an
-        // instance. A real AWS region outside the admitted set — us-east-1,
-        // ap-southeast-1, … — is rejected here.
+        // instance. A real AWS region outside the admitted set - us-east-1,
+        // ap-southeast-1, … - is rejected here.
         if !self.admits_region(&request.region) {
             return Err(AdapterError::from_kind(ProviderError::UnknownRegion {
                 region: request.region.clone(),

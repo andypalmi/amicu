@@ -25,7 +25,7 @@ utoipa-axum = { version = "0.2" }
 # Billing (Stripe): a thin typed reqwest client against the Stripe REST API
 # (form-encoded requests, JSON responses) plus HMAC-SHA256 webhook-signature
 # verification. rustls keeps the TLS stack hermetic and MSRV-1.97-friendly; a
-# full Stripe SDK is deliberately avoided (heavier, MSRV risk) — see billing.rs.
+# full Stripe SDK is deliberately avoided (heavier, MSRV risk) - see billing.rs.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 serde_urlencoded = "0.7"
 hmac = "0.12"

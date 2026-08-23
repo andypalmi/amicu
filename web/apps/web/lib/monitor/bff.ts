@@ -7,7 +7,7 @@ import type { MonitorRequest } from '@amicu/api-client';
 
 /**
  * Parse a JSON body and require the `metrics` + `estimate` objects the
- * `/monitor` endpoint needs. Returns the typed body or a 400 Response —
+ * `/monitor` endpoint needs. Returns the typed body or a 400 Response -
  * mirroring the API's own error shape so the client handles one contract
  * everywhere. The deep field validation is the API's job; here we only reject
  * bodies that are structurally not a monitor request.

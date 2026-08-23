@@ -14,7 +14,7 @@
 //! - **Planning vs apply.** Read/estimate methods are pure synchronous `fn`s
 //!   returning owned data ([`Planned`]) and run during `plan`; side-effecting
 //!   methods are `async fn`s that run only during `apply`. The type of a
-//!   method — sync-and-owned vs `async` — is the load-bearing signal.
+//!   method - sync-and-owned vs `async` - is the load-bearing signal.
 //! - **Uniform errors.** Every method returns the concrete [`AdapterError`]
 //!   carrying a stable `AMICU-<CATEGORY>-<NUMBER>` code, severity, and a
 //!   `retryable` flag; adapters never panic. See [`AdapterErrorKind`] for the

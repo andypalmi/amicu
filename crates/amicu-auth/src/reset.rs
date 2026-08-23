@@ -2,8 +2,8 @@
 //!
 //! Mirrors the refresh-token store's hygiene: the user holds a high-entropy
 //! opaque token; the server persists only its SHA-256 hash plus an expiry.
-//! Consumption is atomic and single-use — a reused, expired, or unknown token is
-//! rejected — so a reset token cannot be replayed to set the password twice.
+//! Consumption is atomic and single-use - a reused, expired, or unknown token is
+//! rejected - so a reset token cannot be replayed to set the password twice.
 //!
 //! Unlike refresh tokens there is no family/rotation: a reset token is minted,
 //! used once, and dies. A successful reset separately revokes the user's refresh

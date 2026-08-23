@@ -6,7 +6,7 @@ import { readCheckoutBody } from '@/lib/billing/bff';
 // Session-guarded; attaches the bearer token server-side and mirrors the upstream
 // status + JSON (200 { url } to redirect to Stripe Checkout, 400 unknown plan,
 // 401 auth, 503 when billing is not configured on the server). No secret ever
-// reaches the browser — it only receives the hosted Stripe URL.
+// reaches the browser - it only receives the hosted Stripe URL.
 export async function POST(request: Request): Promise<Response> {
   const guard = await guardEngine();
   if ('deny' in guard) return guard.deny;

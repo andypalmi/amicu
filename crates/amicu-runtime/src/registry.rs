@@ -9,7 +9,7 @@
 //! Resolution is a pure lookup over registered state: an alias selects a
 //! [`RoutingPolicy`], whose weighted [`targets`](RoutingPolicy::targets) are
 //! filtered to the deployments that currently have a live endpoint. Weighted
-//! selection is deterministic — the caller supplies the pick — so routing is
+//! selection is deterministic - the caller supplies the pick - so routing is
 //! testable without a clock or RNG. Active health-probing / failover is a later
 //! milestone; the policy's `failover` metadata is carried but not acted on.
 
@@ -47,7 +47,7 @@ pub struct Resolved {
 
 impl Resolved {
     /// Build from a matched policy and its live targets, or `None` when
-    /// `candidates` is empty — upholding the non-empty invariant.
+    /// `candidates` is empty - upholding the non-empty invariant.
     #[must_use]
     fn new(policy: RoutingPolicyId, candidates: Vec<ResolvedTarget>) -> Option<Self> {
         if candidates.is_empty() {

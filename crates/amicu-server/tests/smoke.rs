@@ -7,7 +7,7 @@
 //! `into_make_service_with_connect_info::<SocketAddr>()`), and drives it with a
 //! genuine HTTP client over a live TCP connection. If that wiring is ever
 //! dropped, the peer address is `None`, the credential rate limiter fails open,
-//! and the rate-limit assertion below fails — which no in-process test can
+//! and the rate-limit assertion below fails - which no in-process test can
 //! detect.
 
 use amicu_server::Config;
@@ -79,7 +79,7 @@ async fn real_socket_end_to_end() {
     //    when the router was served with connect-info. `rate_limit_max` is 2, so
     //    the first two /token attempts are merely 401 (unknown user) and the
     //    third is throttled with 429. If connect-info were missing, the limiter
-    //    would fail open and every attempt would stay 401 — failing this.
+    //    would fail open and every attempt would stay 401 - failing this.
     for n in 0..2 {
         let resp = client
             .post(format!("{base}/token"))

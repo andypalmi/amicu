@@ -31,7 +31,7 @@ export default async function AccountPage() {
           <CardDescription>Read from your verified session.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
-          <Row label="Email">{user.email ?? '—'}</Row>
+          <Row label="Email">{user.email ?? '-'}</Row>
           <Row label="User ID">
             <span className="font-mono text-xs text-muted-foreground">{user.sub}</span>
           </Row>
@@ -45,7 +45,7 @@ export default async function AccountPage() {
                 ))}
               </span>
             ) : (
-              '—'
+              '-'
             )}
           </Row>
         </CardContent>
@@ -58,7 +58,7 @@ export default async function AccountPage() {
         <CardHeader>
           <CardTitle className="text-base">Plan</CardTitle>
           <CardDescription>
-            Your current tier. Gating is enforced by the API — this is display only.
+            Your current tier. Gating is enforced by the API - this is display only.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex items-center justify-between">

@@ -1,6 +1,6 @@
 ---
 name: amicu-local
-description: Use for local, on-device inference with Amicu — serving GGUF models via llama.cpp on Apple Silicon or CPU, choosing GPU-offload and context settings, and running deployments as launchd (macOS) or systemd (Linux) user services. Triggers on llama.cpp, GGUF, Apple Silicon, Metal, `local_apple`/`local_cpu`, or "run it on my machine".
+description: Use for local, on-device inference with Amicu - serving GGUF models via llama.cpp on Apple Silicon or CPU, choosing GPU-offload and context settings, and running deployments as launchd (macOS) or systemd (Linux) user services. Triggers on llama.cpp, GGUF, Apple Silicon, Metal, `local_apple`/`local_cpu`, or "run it on my machine".
 ---
 
 # Amicu Local
@@ -51,7 +51,7 @@ with the host supervisor; `doctor` reports whether the binary is discoverable.
   `0` only if memory is tight.
 - Keep `context_length` at or below the model's `context_length`; larger
   contexts cost more KV-cache memory.
-- Quantization trades quality for size — see
+- Quantization trades quality for size - see
   `references/gguf-quantization-guide.md`.
 
 ## Safety
@@ -61,5 +61,5 @@ with the host supervisor; `doctor` reports whether the binary is discoverable.
 
 ## References
 
-- `references/llama-server-args.md` — how deployment fields map to CLI args.
-- `references/gguf-quantization-guide.md` — quantization vs size/quality.
+- `references/llama-server-args.md` - how deployment fields map to CLI args.
+- `references/gguf-quantization-guide.md` - quantization vs size/quality.

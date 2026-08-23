@@ -80,7 +80,7 @@ export function summarizePlan(
 }
 
 /**
- * True when a BFF response status means the tier gate blocked the call (403) —
+ * True when a BFF response status means the tier gate blocked the call (403) -
  * distinct from an unauthenticated 401. Used to show an upgrade hint, not a crash.
  */
 export function isTierDenied(status: number): boolean {

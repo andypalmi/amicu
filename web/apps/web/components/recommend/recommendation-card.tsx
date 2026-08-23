@@ -9,7 +9,7 @@ import {
 
 // The shared advisory recommendation/suggestion card. The recommend console
 // (as a "recommendation") and the monitor dashboard (as a "suggestion") consume
-// the same RecommendationDto and rendered a byte-identical card each — this is
+// the same RecommendationDto and rendered a byte-identical card each - this is
 // the single presentation both now share so they cannot drift. Presentation
 // only: every badge, section, and conditional comes straight from the
 // API-derived recommendation; nothing here authors or reorders advice.
@@ -27,7 +27,7 @@ export function RecommendationCard({ rec }: { rec: Recommendation }) {
           </span>
         </header>
 
-        {/* Rationale — authored by the API, shown verbatim. */}
+        {/* Rationale - authored by the API, shown verbatim. */}
         <p>{rec.summary}</p>
 
         {rec.evidence.length > 0 ? (
@@ -67,7 +67,7 @@ export function RecommendationCard({ rec }: { rec: Recommendation }) {
                     </span>
                     <span>
                       <span className="font-medium">{meta.label}</span>{' '}
-                      <code className="font-mono text-xs">{change.action}</code> — {change.detail}
+                      <code className="font-mono text-xs">{change.action}</code> - {change.detail}
                     </span>
                   </li>
                 );
@@ -85,7 +85,7 @@ export function RecommendationCard({ rec }: { rec: Recommendation }) {
             <ul className="space-y-1">
               {rec.rejected.map((alt, i) => (
                 <li key={`${alt.change}-${i}`} className="text-muted-foreground">
-                  <span className="font-medium text-foreground">{alt.change}</span> — {alt.reason}
+                  <span className="font-medium text-foreground">{alt.change}</span> - {alt.reason}
                 </li>
               ))}
             </ul>

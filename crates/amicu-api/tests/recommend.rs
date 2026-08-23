@@ -97,7 +97,7 @@ fn post(path: &str, token: Option<&str>, body: &Value) -> Request<Body> {
 }
 
 /// A measured surface that fires the `under_provisioned` rule (hot queue, hot
-/// GPU, KV eviction) plus `preemption_recompute` — both Pro-gated.
+/// GPU, KV eviction) plus `preemption_recompute` - both Pro-gated.
 fn saturated_metrics() -> Value {
     json!({
         "deployment": "chat_prod",

@@ -1,6 +1,6 @@
 // Pure, framework-free helpers for rendering the advisory tuning report. Kept
 // free of React so they can be unit-tested with `node --test` (see
-// format.test.ts). These helpers only *present* API-provided data — they never
+// format.test.ts). These helpers only *present* API-provided data - they never
 // author, rank, or invent rationale, evidence, or confidence.
 
 import type { components } from '@amicu/api-client';
@@ -95,7 +95,7 @@ export function formatEvidence(evidence: Evidence): string {
 }
 
 /**
- * True when a BFF response status means the tier gate blocked the call (403) —
+ * True when a BFF response status means the tier gate blocked the call (403) -
  * distinct from an unauthenticated 401. Used to show an upsell, not a crash.
  */
 export function isTierDenied(status: number): boolean {

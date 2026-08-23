@@ -138,7 +138,7 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
                 )
             })?
             .to_vec();
-        // Secrets enter the process environment only — never argv or logs.
+        // Secrets enter the process environment only - never argv or logs.
         let env = secrets
             .iter()
             .map(|s| {

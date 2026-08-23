@@ -22,7 +22,7 @@ const pillars = [
   {
     icon: ShieldCheck,
     title: 'Enforced by the API, not the UI',
-    body: 'The frontend mirrors tier and role gating for UX — show, lock, upsell — but never enforces it. The Rust Management API re-checks every mutation server-side. Reading a claim never grants an action.',
+    body: 'The frontend mirrors tier and role gating for UX - show, lock, upsell - but never enforces it. The Rust Management API re-checks every mutation server-side. Reading a claim never grants an action.',
   },
   {
     icon: KeyRound,
@@ -42,7 +42,7 @@ const pillars = [
   {
     icon: Eye,
     title: 'Open source, auditable',
-    body: 'The entire frontend — marketing, app, and docs — is AGPL-3.0 in the open monorepo. There is no closed UI hiding paid features; anyone can read and audit exactly what runs in the browser.',
+    body: 'The entire frontend - marketing, app, and docs - is AGPL-3.0 in the open monorepo. There is no closed UI hiding paid features; anyone can read and audit exactly what runs in the browser.',
   },
   {
     icon: Building2,
@@ -65,7 +65,7 @@ export default function SecurityPage() {
         <PageHeader
           eyebrow="Security"
           title="Trust the boundary, not the browser."
-          description="Amicu is a thin client. Planning, policy, and capability logic live in the API — and so does enforcement. The web app renders decisions, it never makes the ones that guard your infrastructure."
+          description="Amicu is a thin client. Planning, policy, and capability logic live in the API - and so does enforcement. The web app renders decisions, it never makes the ones that guard your infrastructure."
         />
 
         <div className="mt-14 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
@@ -87,7 +87,7 @@ export default function SecurityPage() {
           <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
             The frontend reads <code className="text-foreground">tier</code> and{' '}
             <code className="text-foreground">roles</code> claims to decide what to show
-            or lock — but it never trusts them for enforcement. Every write goes to the
+            or lock - but it never trusts them for enforcement. Every write goes to the
             API, which verifies the session and re-checks authorization before acting.
             Compromising the browser cannot grant capabilities the server did not.
           </p>

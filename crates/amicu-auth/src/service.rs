@@ -26,7 +26,7 @@ use crate::verify::{self, VerifyStore};
 /// The HTTP boundary MUST collapse both variants to one identical response so a
 /// client cannot tell a new registration from a hit on an existing account
 /// (email enumeration). The distinction is retained here only for internal use:
-/// audit metrics today, and — once the email pipeline lands — deciding which
+/// audit metrics today, and - once the email pipeline lands - deciding which
 /// message to dispatch (a verification link vs. an "account already exists"
 /// notice), both delivered out-of-band so neither is observable on the HTTP
 /// response.
@@ -110,7 +110,7 @@ impl<C: Clock> AuthService<C> {
     /// [`SignUpOutcome`] variant (not an error), and the same password hashing
     /// runs on both paths so neither the result *nor the timing* distinguishes
     /// a new account from an existing one. The caller MUST render both outcomes
-    /// identically (see [`SignUpOutcome`]) — mirroring the sign-in
+    /// identically (see [`SignUpOutcome`]) - mirroring the sign-in
     /// dummy-hash defense.
     ///
     /// Input validation that concerns the *request itself* (empty email, weak
@@ -163,7 +163,7 @@ impl<C: Clock> AuthService<C> {
                 // Dispatch off the response path (see `spawn_notification`): the
                 // notice is sent only on the collision path, so awaiting it here
                 // would make the collision measurably slower than a fresh
-                // sign-up — an account-enumeration timing oracle. The response
+                // sign-up - an account-enumeration timing oracle. The response
                 // stays identical and same-timing on both paths.
                 self.spawn_notification(Notification {
                     recipient: email,
@@ -212,7 +212,7 @@ impl<C: Clock> AuthService<C> {
     ///
     /// Reuse/theft detection: presenting a token that is *already revoked*
     /// (typically an old token replayed after the family has rotated past it)
-    /// is treated as a compromise — the entire family is revoked and flagged,
+    /// is treated as a compromise - the entire family is revoked and flagged,
     /// killing both the attacker's rotated token and the victim's live one and
     /// forcing a fresh sign-in. See the [`refresh`] module docs.
     ///
@@ -266,9 +266,9 @@ impl<C: Clock> AuthService<C> {
     ///
     /// Anti-enumeration: this ALWAYS returns immediately with `Ok`, and the HTTP
     /// boundary always returns the same generic `202`, whether or not the email
-    /// is registered. Crucially, ALL of the account-dependent work — the user
+    /// is registered. Crucially, ALL of the account-dependent work - the user
     /// lookup, and (only when the account exists) the token mint, store insert,
-    /// and out-of-band delivery — runs on a detached background task, so the
+    /// and out-of-band delivery - runs on a detached background task, so the
     /// synchronous response time is the *same* on the exists and miss paths.
     ///
     /// Doing that work inline would be an account-enumeration timing oracle: the
@@ -285,8 +285,8 @@ impl<C: Clock> AuthService<C> {
     /// signature.
     // Intentionally `async` with no `.await` on the response path: detaching all
     // account-dependent work is the whole anti-enumeration point (see above). The
-    // `async` signature is part of the `AuthService` contract — a persistent
-    // store would enqueue via an awaited durable-queue write here — so keep it.
+    // `async` signature is part of the `AuthService` contract - a persistent
+    // store would enqueue via an awaited durable-queue write here - so keep it.
     // `unused_async_trait_impl` (clippy 1.98+) is the same intent as
     // `unused_async` for this signature-contract case: the `async` is kept
     // deliberately, not by accident.
@@ -435,7 +435,7 @@ impl<C: Clock> AuthService<C> {
         // are not atomic here (they would be one transaction in a persistent
         // store), so order them for fail-safety: if revocation fails, the token
         // is already consumed but the password is unchanged and sessions survive
-        // — the user simply requests another reset. The reverse order would leave
+        // - the user simply requests another reset. The reverse order would leave
         // the dangerous state (new password live, but old sessions still valid)
         // on a partial failure.
         self.refresh.revoke_all_for_user(&user_id).await?;
@@ -494,7 +494,7 @@ impl<C: Clock> AuthService<C> {
     /// Deliver a notification out-of-band without gating the caller's response.
     ///
     /// The (possibly network-bound) send runs on a detached task, so response
-    /// timing never depends on whether — or to whom — a message is dispatched.
+    /// timing never depends on whether - or to whom - a message is dispatched.
     /// This is load-bearing for anti-enumeration: awaiting a send that only
     /// happens on the account-exists path would be an enumeration timing oracle,
     /// trivially today and strongly once a synchronous mailer replaces the dev

@@ -7,7 +7,7 @@ export const metadata: Metadata = { title: 'Console' };
 
 // The authenticated product surface: an HCL editor that validates configs and
 // plans changes against the Management API (via the /api/engine/* BFF routes),
-// with an optional prior-config diff. Gating is enforced by the API — the UI just
+// with an optional prior-config diff. Gating is enforced by the API - the UI just
 // degrades gracefully on a 403.
 export default async function AppHomePage() {
   await requireSession();

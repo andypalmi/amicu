@@ -7,7 +7,7 @@
 //! workloads, so this adapter is **residency filtering by construction**:
 //! [`HetznerProvider::new`] admits only the EU data centers from
 //! [`datacenters`], and [`provision`](HetznerProvider::provision) rejects any
-//! region outside that admitted set with [`ProviderError::UnknownRegion`] — a
+//! region outside that admitted set with [`ProviderError::UnknownRegion`] - a
 //! server can never be placed in a non-compliant region through this adapter.
 //! [`HetznerProvider::for_residencies`] widens the admitted set explicitly when
 //! a caller genuinely needs other jurisdictions.
@@ -17,8 +17,8 @@
 //! the hcloud REST API (`https://api.hetzner.cloud/v1`) through the
 //! [`HttpTransport`] seam: `POST /servers` to create, `GET /servers/{id}` for
 //! status, and `DELETE /servers/{id}` to tear down, authenticated with
-//! `Authorization: Bearer`. The adapter never touches a concrete HTTP client —
-//! production uses [`ReqwestTransport`], tests inject a mock — so the
+//! `Authorization: Bearer`. The adapter never touches a concrete HTTP client -
+//! production uses [`ReqwestTransport`], tests inject a mock - so the
 //! provisioning path is exercised with no network, credentials, or spend. HTTP
 //! status codes map onto typed [`ProviderError`]s (`401`/`403` → credentials
 //! rejected, `404` → unknown instance/offering, `409`/`429` → capacity
@@ -83,7 +83,7 @@ struct DataCenter {
 /// because [`Residency::Other`] owns a `String`.
 fn datacenters() -> [DataCenter; 6] {
     [
-        // EU — GPU hardware lives here (DE / FI).
+        // EU - GPU hardware lives here (DE / FI).
         DataCenter {
             code: "nbg1",
             residency: Residency::Eu,
@@ -105,7 +105,7 @@ fn datacenters() -> [DataCenter; 6] {
             location: "Helsinki",
             gpu: true,
         },
-        // Non-EU — excluded by the residency filter, and no GPU hardware.
+        // Non-EU - excluded by the residency filter, and no GPU hardware.
         DataCenter {
             code: "ash",
             residency: Residency::Us,

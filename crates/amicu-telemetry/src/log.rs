@@ -10,7 +10,7 @@
 //! that accepts it. See [`RequestRecord`] for the enforced invariant.
 //!
 //! Emission is governed by a [`LoggingPolicy`]. Content is never a logging
-//! option at any level — the only choice is whether metadata is emitted at all.
+//! option at any level - the only choice is whether metadata is emitted at all.
 
 use std::sync::Mutex;
 
@@ -34,7 +34,7 @@ pub enum Outcome {
 ///
 /// # Privacy invariant
 /// By construction this type cannot retain prompt or completion text. Every
-/// field MUST be either an identifier ([`DeploymentId`]/[`ModelId`] — a name,
+/// field MUST be either an identifier ([`DeploymentId`]/[`ModelId`] - a name,
 /// not content, exactly as [`SecretRef`](amicu_core::secret::SecretRef) is), a
 /// numeric count/measurement, or the [`Outcome`] enum. There is deliberately
 /// **no `String`/`Vec<u8>`/free-text field** and no API that accepts request or
@@ -45,7 +45,7 @@ pub enum Outcome {
 /// evade the serialized-key-set test, so that test alone is not the guard. Two
 /// tests hold this line: `record_holds_only_counts_and_metadata` pins the key
 /// set, and `record_fields_are_exhaustively_content_free` destructures every
-/// field so any added field breaks the build until it is deliberately listed —
+/// field so any added field breaks the build until it is deliberately listed -
 /// forcing this invariant to be re-checked before a field can slip in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RequestRecord {
@@ -57,9 +57,9 @@ pub struct RequestRecord {
     /// Model the request targeted, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelId>,
-    /// Number of prompt tokens (count only — never the prompt itself).
+    /// Number of prompt tokens (count only - never the prompt itself).
     pub prompt_tokens: u32,
-    /// Number of generated tokens (count only — never the completion itself).
+    /// Number of generated tokens (count only - never the completion itself).
     pub completion_tokens: u32,
     /// End-to-end request latency, in milliseconds.
     pub latency_ms: f64,
@@ -122,7 +122,7 @@ pub enum LogLevel {
 /// Controls whether request metadata is logged.
 ///
 /// Defaults to [`LogLevel::Metadata`]: privacy-preserving by construction, since
-/// no level can ever emit prompt or completion content — the strongest setting,
+/// no level can ever emit prompt or completion content - the strongest setting,
 /// [`LogLevel::Off`], only suppresses the metadata as well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoggingPolicy {
@@ -232,7 +232,7 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        // Exactly the metadata fields — no prompt/completion/content of any kind.
+        // Exactly the metadata fields - no prompt/completion/content of any kind.
         let expected: std::collections::BTreeSet<&str> = [
             "timestamp_ms",
             "deployment",
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn record_fields_are_exhaustively_content_free() {
         // Compile-time guard for the no-content invariant (see `RequestRecord`
-        // docs): destructuring every field by name — with no `..` — forces any
+        // docs): destructuring every field by name - with no `..` - forces any
         // newly added field to be listed here before it compiles, even one
         // hidden from serialization via `#[serde(skip)]` that the key-set test
         // would miss. Each field below is a count/measurement/id/enum, never

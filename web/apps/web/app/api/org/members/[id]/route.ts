@@ -9,7 +9,7 @@ import { readChangeRoleBody } from '@/lib/org/bff';
 
 type Ctx = { params: Promise<{ id: string }> };
 
-// PATCH — change a member's role (200, 400 bad role, 403 tier/RBAC, 404 unknown,
+// PATCH - change a member's role (200, 400 bad role, 403 tier/RBAC, 404 unknown,
 // 409 last-Owner invariant).
 export async function PATCH(request: Request, ctx: Ctx): Promise<Response> {
   const guard = await guardEngine();
@@ -31,7 +31,7 @@ export async function PATCH(request: Request, ctx: Ctx): Promise<Response> {
   }
 }
 
-// DELETE — remove a member (200, 403 tier/RBAC, 404 unknown, 409 last-Owner).
+// DELETE - remove a member (200, 403 tier/RBAC, 404 unknown, 409 last-Owner).
 export async function DELETE(_request: Request, ctx: Ctx): Promise<Response> {
   const guard = await guardEngine();
   if ('deny' in guard) return guard.deny;

@@ -10,7 +10,7 @@ import {
   type ServerErrorReport,
 } from './log-server-error.ts';
 
-// Capture the single console.error the transport emits (NOT console.log — the
+// Capture the single console.error the transport emits (NOT console.log - the
 // logger must never write structured data to stdout) and return what it was handed.
 function capture(fn: () => void): { tag: unknown; report: ServerErrorReport; stdoutCalls: number } {
   const originalError = console.error;

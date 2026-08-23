@@ -1,6 +1,6 @@
 ---
 name: amicu-model-selection
-description: Use when choosing which model, artifact, and quantization to deploy with Amicu — searching the registry, checking whether a model fits given hardware, and weighing quality against cost and latency. Triggers on "which model should I use", model/artifact/quantization choice, hardware-fit questions, or quality/cost trade-offs.
+description: Use when choosing which model, artifact, and quantization to deploy with Amicu - searching the registry, checking whether a model fits given hardware, and weighing quality against cost and latency. Triggers on "which model should I use", model/artifact/quantization choice, hardware-fit questions, or quality/cost trade-offs.
 ---
 
 # Amicu Model Selection
@@ -37,5 +37,5 @@ choice plus alternatives with their trade-offs.
 
 ## Reference
 
-- `references/quality-cost-guide.md` — size classes, quantization trade-offs,
+- `references/quality-cost-guide.md` - size classes, quantization trade-offs,
   and how to frame cost/latency ranges with confidence.

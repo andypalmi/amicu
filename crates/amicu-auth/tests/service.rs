@@ -594,7 +594,7 @@ async fn concurrent_refresh_yields_exactly_one_successor() {
     // rejected (tripping family compromise). Never two live successors.
     //
     // Looped to actually exercise the interleaving window under real
-    // parallelism — the pre-fix `get`/check/`revoke` split would let some
+    // parallelism - the pre-fix `get`/check/`revoke` split would let some
     // iteration mint two live successors.
     let svc = Arc::new(build(TestClock::at(real_now())));
     svc.sign_up("race@example.com", &pw("race-secret-pw"))

@@ -287,54 +287,54 @@ impl DiagnosticReport {
 pub mod catalog {
     use super::{Category, DiagnosticCode};
 
-    /// `AMICU-PARSE-001` — HCL block is not closed.
+    /// `AMICU-PARSE-001` - HCL block is not closed.
     pub const PARSE_UNCLOSED_BLOCK: DiagnosticCode = DiagnosticCode::new(Category::Parse, 1);
-    /// `AMICU-SCHEMA-001` — required attribute is missing.
+    /// `AMICU-SCHEMA-001` - required attribute is missing.
     pub const SCHEMA_MISSING_REQUIRED: DiagnosticCode = DiagnosticCode::new(Category::Schema, 1);
-    /// `AMICU-REF-001` — reference points at an unknown resource.
+    /// `AMICU-REF-001` - reference points at an unknown resource.
     pub const REF_UNKNOWN_RESOURCE: DiagnosticCode = DiagnosticCode::new(Category::Ref, 1);
-    /// `AMICU-CAP-001` — runtime requires a GGUF model artifact.
+    /// `AMICU-CAP-001` - runtime requires a GGUF model artifact.
     pub const CAP_RUNTIME_ARTIFACT_MISMATCH: DiagnosticCode = DiagnosticCode::new(Category::Cap, 1);
-    /// `AMICU-MEM-001` — model does not fit in available VRAM.
+    /// `AMICU-MEM-001` - model does not fit in available VRAM.
     pub const MEM_VRAM_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Mem, 1);
-    /// `AMICU-MEM-002` — a single artifact/weight file exceeds the available
+    /// `AMICU-MEM-002` - a single artifact/weight file exceeds the available
     /// size budget, independent of aggregate VRAM.
     pub const MEM_ARTIFACT_OVERSIZE: DiagnosticCode = DiagnosticCode::new(Category::Mem, 2);
-    /// `AMICU-POLICY-001` — deployment exceeds the configured budget.
+    /// `AMICU-POLICY-001` - deployment exceeds the configured budget.
     pub const POLICY_BUDGET_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Policy, 1);
     // --- amicu-planning#24: region / data-residency validation ---
-    /// `AMICU-POLICY-002` — a deployment's region violates the configured
+    /// `AMICU-POLICY-002` - a deployment's region violates the configured
     /// residency / region allowlist (or matches a deny rule's region).
     pub const POLICY_REGION_RESIDENCY: DiagnosticCode = DiagnosticCode::new(Category::Policy, 2);
-    /// `AMICU-POLICY-003` — a deployment's provider is not allowed (or matches
+    /// `AMICU-POLICY-003` - a deployment's provider is not allowed (or matches
     /// a deny rule's provider).
     pub const POLICY_PROVIDER_NOT_ALLOWED: DiagnosticCode =
         DiagnosticCode::new(Category::Policy, 3);
-    /// `AMICU-STATE-001` — state is locked by another operation.
+    /// `AMICU-STATE-001` - state is locked by another operation.
     pub const STATE_LOCKED: DiagnosticCode = DiagnosticCode::new(Category::State, 1);
-    /// `AMICU-PROVIDER-001` — requested capacity is unavailable in region.
+    /// `AMICU-PROVIDER-001` - requested capacity is unavailable in region.
     pub const PROVIDER_CAPACITY_UNAVAILABLE: DiagnosticCode =
         DiagnosticCode::new(Category::Provider, 1);
-    /// `AMICU-PROVIDER-002` — a provider/model artifact download failed
+    /// `AMICU-PROVIDER-002` - a provider/model artifact download failed
     /// transiently; retrying resumes the transfer.
     pub const PROVIDER_DOWNLOAD_FAILED: DiagnosticCode = DiagnosticCode::new(Category::Provider, 2);
-    /// `AMICU-PROVIDER-003` — provider capability/pricing data is stale or could
+    /// `AMICU-PROVIDER-003` - provider capability/pricing data is stale or could
     /// not be refreshed; the last snapshot is surfaced, never fabricated.
     pub const PROVIDER_METADATA_STALE: DiagnosticCode = DiagnosticCode::new(Category::Provider, 3);
-    /// `AMICU-PROVIDER-010` — the request names an offering the provider does
+    /// `AMICU-PROVIDER-010` - the request names an offering the provider does
     /// not offer.
     pub const PROVIDER_UNKNOWN_OFFERING: DiagnosticCode =
         DiagnosticCode::new(Category::Provider, 10);
-    /// `AMICU-PROVIDER-011` — the request names a region the provider does not
+    /// `AMICU-PROVIDER-011` - the request names a region the provider does not
     /// serve.
     pub const PROVIDER_UNKNOWN_REGION: DiagnosticCode = DiagnosticCode::new(Category::Provider, 11);
-    /// `AMICU-PROVIDER-012` — the handle refers to no known provisioned
+    /// `AMICU-PROVIDER-012` - the handle refers to no known provisioned
     /// instance.
     pub const PROVIDER_UNKNOWN_INSTANCE: DiagnosticCode =
         DiagnosticCode::new(Category::Provider, 12);
-    /// `AMICU-PROVIDER-013` — the provider backend failed transiently.
+    /// `AMICU-PROVIDER-013` - the provider backend failed transiently.
     pub const PROVIDER_BACKEND: DiagnosticCode = DiagnosticCode::new(Category::Provider, 13);
-    /// `AMICU-PROVIDER-014` — the resolved credential was rejected by the
+    /// `AMICU-PROVIDER-014` - the resolved credential was rejected by the
     /// provider.
     pub const PROVIDER_CREDENTIALS_REJECTED: DiagnosticCode =
         DiagnosticCode::new(Category::Provider, 14);

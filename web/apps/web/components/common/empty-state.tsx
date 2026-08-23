@@ -4,7 +4,7 @@ import { cn } from '@amicu/ui';
 // Presentational empty-state block for the authenticated consoles. Deliberately
 // unwrapped (no `Card`) so callers can drop it inside their own surface, matching
 // the ad-hoc "no results" blocks the recommend/monitor consoles already render.
-// Styling stays on the shared `@amicu/ui` tokens — no new colors.
+// Styling stays on the shared `@amicu/ui` tokens - no new colors.
 export interface EmptyStateProps {
   /** Optional decorative icon (e.g. a lucide icon element) shown above the title. */
   icon?: ReactNode;

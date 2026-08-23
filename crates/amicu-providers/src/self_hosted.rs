@@ -2,8 +2,8 @@
 //! hardware.
 //!
 //! Unlike the cloud adapters, self-hosted has **no cloud API and no fixed
-//! catalog**. It represents existing hardware — bare-metal boxes and existing
-//! clusters — that an operator declares directly: each [`DeclaredHost`] carries
+//! catalog**. It represents existing hardware - bare-metal boxes and existing
+//! clusters - that an operator declares directly: each [`DeclaredHost`] carries
 //! the machine's resources and, crucially, the [`Region`] the operator states
 //! their hardware physically sits in. **Data residency is therefore derived
 //! straight from the declared location metadata**, not from a cloud catalog: a
@@ -13,7 +13,7 @@
 //!
 //! Because the operator vouches for the jurisdiction, there is **no residency
 //! filter**: self-hosted hardware can sit in any jurisdiction the operator
-//! declares. The descriptor reflects exactly the declared hosts — every host
+//! declares. The descriptor reflects exactly the declared hosts - every host
 //! becomes a [`ComputeOffering`] sold in that host's declared region.
 //!
 //! Hosts are provisioned over SSH ([`ProvisioningMethod::Ssh`],
@@ -23,8 +23,8 @@
 //! transiently, then runs the host prep/registration command over SSH;
 //! [`status`](SelfHostedProvider::status) queries host liveness and
 //! [`teardown`](SelfHostedProvider::teardown) runs deregistration/cleanup. The
-//! adapter never touches a concrete SSH client — production uses
-//! [`RusshTransport`], tests inject a mock — so the provisioning path is
+//! adapter never touches a concrete SSH client - production uses
+//! [`RusshTransport`], tests inject a mock - so the provisioning path is
 //! exercised with no network, credentials, or spend. A failed SSH exchange
 //! ([`SshTransportError`]) is distinct from a command that ran and returned a
 //! non-zero exit status: auth failure maps to
@@ -95,7 +95,7 @@ pub enum SelfHostedConfigError {
 pub struct DeclaredHost {
     /// Operator-assigned host id; also the [`ComputeOffering`] id it becomes.
     id: String,
-    /// The region the operator declares the hardware sits in — the source of
+    /// The region the operator declares the hardware sits in - the source of
     /// this host's residency.
     region: Region,
     /// Accelerator (GPU model / count / VRAM), if the host has one.
@@ -887,7 +887,7 @@ mod tests {
         let caps = two_region_provider().capabilities();
         assert_eq!(caps.provider, AdapterId::new("self-hosted"));
 
-        // Each declared region carries the residency the operator stated —
+        // Each declared region carries the residency the operator stated -
         // residency is derived from the declaration, not a cloud catalog.
         let de = caps
             .regions

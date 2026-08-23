@@ -40,7 +40,7 @@ function AvailabilityCell({ value }: { value: Availability }) {
       return (
         <>
           <Lock className="mx-auto size-4 text-muted-foreground/60" aria-hidden />
-          <span className="sr-only">Locked — upgrade required</span>
+          <span className="sr-only">Locked - upgrade required</span>
         </>
       );
     case 'asApplicable':
@@ -116,7 +116,7 @@ export default function PricingPage() {
           <h2 className="text-2xl font-semibold tracking-tight">Compare every tier</h2>
           <p className="mt-2 text-sm text-muted-foreground">
             <Lock className="mr-1 inline size-3.5 align-[-2px]" aria-hidden />
-            Locked features are rendered with an upsell, not hidden — the API rejects
+            Locked features are rendered with an upsell, not hidden - the API rejects
             the action regardless of what the UI shows.
           </p>
 
@@ -170,9 +170,9 @@ export default function PricingPage() {
               <Check className="size-3.5 text-primary" aria-hidden /> Included
             </span>
             <span className="flex items-center gap-1.5">
-              <Lock className="size-3.5" aria-hidden /> Locked — upgrade to unlock
+              <Lock className="size-3.5" aria-hidden /> Locked - upgrade to unlock
             </span>
-            <span className="flex items-center gap-1.5">as applicable — per plan</span>
+            <span className="flex items-center gap-1.5">as applicable - per plan</span>
           </div>
         </section>
       </Container>

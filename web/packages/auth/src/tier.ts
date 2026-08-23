@@ -1,7 +1,7 @@
-// Tier model — mirrors the API tier enum (RFC 0001 §5, TASK-078 `tier` claim).
+// Tier model - mirrors the API tier enum (RFC 0001 §5, TASK-078 `tier` claim).
 //
 // IMPORTANT: this is presentational/UX logic only. Tier gating in the UI exists
-// solely to show/lock/upsell features. It is NEVER an enforcement boundary — the
+// solely to show/lock/upsell features. It is NEVER an enforcement boundary - the
 // Rust Management API re-checks the tier on every mutation and rejects
 // unauthorized actions regardless of what the frontend renders. Do not add any
 // security-relevant decision that trusts these values.
@@ -51,7 +51,7 @@ export function isTier(value: unknown): value is Tier {
  * - When `required` is an array, it is an explicit allow-list (exact membership),
  *   for non-linear gates.
  *
- * Presentational only — never use the result to authorize a real action.
+ * Presentational only - never use the result to authorize a real action.
  */
 export function tierSatisfies(current: Tier, required: Tier | readonly Tier[]): boolean {
   if (Array.isArray(required)) {

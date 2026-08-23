@@ -25,7 +25,7 @@ use crate::plan::LaunchPlan;
 ///   [`metrics`](RuntimeAdapter::metrics), [`logs`](RuntimeAdapter::logs) and
 ///   [`stop`](RuntimeAdapter::stop) are **apply/runtime-time**: `async fn`s that
 ///   touch the backend. `apply` resolves any referenced secret through the
-///   [`SecretResolver`] — the only place secret values enter.
+///   [`SecretResolver`] - the only place secret values enter.
 #[async_trait]
 pub trait RuntimeAdapter: Adapter + DescribeCapabilities {
     /// This runtime's plain-data capability descriptor.

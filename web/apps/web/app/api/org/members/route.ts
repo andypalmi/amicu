@@ -4,10 +4,10 @@ import { readAddMemberBody } from '@/lib/org/bff';
 
 // BFF: /api/org/members → Management API /org/members.
 // Session-guarded; attaches the bearer token server-side and mirrors the upstream
-// status + JSON. The Enterprise tier gate and every RBAC rule live in the API —
+// status + JSON. The Enterprise tier gate and every RBAC rule live in the API -
 // the browser never sees the token or the API base.
 
-// GET — list the organization's members and the caller's own role.
+// GET - list the organization's members and the caller's own role.
 export async function GET(): Promise<Response> {
   const guard = await guardEngine();
   if ('deny' in guard) return guard.deny;
@@ -22,7 +22,7 @@ export async function GET(): Promise<Response> {
   }
 }
 
-// POST — invite/add a member with a role (200/201, 400 bad input, 403 tier/RBAC,
+// POST - invite/add a member with a role (200/201, 400 bad input, 403 tier/RBAC,
 // 409 already a member).
 export async function POST(request: Request): Promise<Response> {
   const guard = await guardEngine();

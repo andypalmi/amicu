@@ -1,4 +1,4 @@
-// Thin, well-typed auth client for the BFF — a small ergonomic surface over the
+// Thin, well-typed auth client for the BFF - a small ergonomic surface over the
 // generated `@amicu/api-client` (OpenAPI-derived, from `crates/amicu-schema/
 // openapi.json`).
 //
@@ -35,7 +35,7 @@ export interface AuthClient {
    * Register a new account. Maps to `POST /signup`.
    *
    * The backend ALWAYS responds `202` (with a generic `{ message }` we discard) and
-   * never 409 — it does not reveal whether the email already exists
+   * never 409 - it does not reveal whether the email already exists
    * (anti-enumeration). So this is a fire-and-forget acknowledgement: it does NOT
    * log the user in. The account is confirmed out-of-band (email), after which the
    * user signs in.
@@ -76,7 +76,7 @@ export function createAuthClient(options: AuthClientOptions): AuthClient {
 
   // Normalize openapi-fetch's `{ data, error, response }` into `AuthResult`, and
   // turn a thrown fetch (network/DNS failure) into a 503-like result the caller can
-  // genericize — never a rejected promise.
+  // genericize - never a rejected promise.
   async function toResult<T>(
     call: Promise<{ data?: unknown; error?: unknown; response: Response }>,
     map: (data: unknown) => T,

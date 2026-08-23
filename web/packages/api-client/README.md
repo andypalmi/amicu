@@ -21,8 +21,8 @@ documents the auth routes (`/signup`, `/token`, `/token/refresh`, `/logout`,
 
 ## Tooling (pinned)
 
-- [`openapi-typescript`](https://openapi-ts.dev) `7.13.0` — spec → `src/schema.ts`.
-- [`openapi-fetch`](https://openapi-ts.dev/openapi-fetch/) `0.17.0` — the runtime
+- [`openapi-typescript`](https://openapi-ts.dev) `7.13.0` - spec → `src/schema.ts`.
+- [`openapi-fetch`](https://openapi-ts.dev/openapi-fetch/) `0.17.0` - the runtime
   client (`createApiClient`), fully typed from `paths`.
 
 ## Regenerating after an API change
@@ -33,7 +33,7 @@ When the Rust API changes the spec, rerun:
 pnpm --filter @amicu/api-client generate
 ```
 
-Then commit the updated `src/schema.ts`. That's it — the committed file is a pure
+Then commit the updated `src/schema.ts`. That's it - the committed file is a pure
 function of the spec.
 
 ## CI drift check
@@ -58,6 +58,6 @@ const { data, error, response } = await api.POST('/token', {
 });
 ```
 
-The base URL is a **server-only** value — never a `NEXT_PUBLIC_*` env, and these
+The base URL is a **server-only** value - never a `NEXT_PUBLIC_*` env, and these
 calls must never run in the browser. In `apps/web`, the BFF's `@amicu/auth/server`
 auth client is built on top of this package.

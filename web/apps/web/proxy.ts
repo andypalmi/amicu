@@ -13,7 +13,7 @@ const { rewrite: rewriteSuffix } = rewritePath(
   `${docsContentRoute}{/*path}/content.md`,
 );
 
-// Prefixes that trigger SILENT TOKEN REFRESH ONLY — this is NOT an access-control
+// Prefixes that trigger SILENT TOKEN REFRESH ONLY - this is NOT an access-control
 // gate. The middleware never blocks or redirects unauthenticated requests; it
 // merely rotates a soon-to-expire access token so authed surfaces don't 401 mid
 // session. Real authorization lives in requireSession() (each (app) server
@@ -21,7 +21,7 @@ const { rewrite: rewriteSuffix } = rewritePath(
 // routes so a session idle past the access-token TTL is rotated before the route
 // handler runs (attemptRefresh writes the new cookie onto the forwarded request
 // via NextResponse.next({ request }), so the same-request guardEngine() sees it)
-// — no spurious 401 on Validate/Plan.
+// - no spurious 401 on Validate/Plan.
 const REFRESH_PREFIXES = [
   '/app',
   '/account',
@@ -80,7 +80,7 @@ async function handleAuth(request: NextRequest): Promise<NextResponse> {
 export default async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Docs content negotiation (markdown rewrites) — unchanged.
+  // Docs content negotiation (markdown rewrites) - unchanged.
   const suffix = rewriteSuffix(pathname);
   if (suffix) {
     return NextResponse.rewrite(new URL(suffix, request.nextUrl));

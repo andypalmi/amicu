@@ -3,7 +3,7 @@
 //! The [`ServiceManager`] trait is the injectable seam the supervisor drives;
 //! real impls shell out through a [`CommandExec`] (itself injectable) and write
 //! service definitions to disk, so unit tests stay hermetic. Secrets are passed
-//! through the process environment only — never into argv or a log.
+//! through the process environment only - never into argv or a log.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -370,7 +370,7 @@ fn ensure_dir(dir: &Path) -> Result<(), LlamaCppError> {
         .map_err(|e| LlamaCppError::Supervisor(format!("create {}: {e}", dir.display())))
 }
 
-/// Write `bytes` to `path` (creating `dir`), owner-readable only — the plist can
+/// Write `bytes` to `path` (creating `dir`), owner-readable only - the plist can
 /// hold `EnvironmentVariables`, so it must not be world-readable.
 fn write_private(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), LlamaCppError> {
     use std::io::Write as _;

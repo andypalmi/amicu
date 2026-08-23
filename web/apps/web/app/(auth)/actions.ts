@@ -29,7 +29,7 @@ const GENERIC_CREDS = 'Invalid email or password.';
 const GENERIC_UNAVAILABLE = 'Something went wrong. Please try again.';
 
 function safeNext(raw: FormDataEntryValue | null): string {
-  // Only allow local, absolute in-app paths — never an open redirect.
+  // Only allow local, absolute in-app paths - never an open redirect.
   const value = typeof raw === 'string' ? raw : '';
   return value.startsWith('/') && !value.startsWith('//') ? value : '/app';
 }
@@ -145,7 +145,7 @@ export async function verifyAction(token: string): Promise<VerifyStatus> {
 
 export async function logoutAction(): Promise<void> {
   // Revoke the refresh token server-side, then clear both cookies. Revocation is
-  // best-effort — the cookies are cleared regardless so the browser session ends.
+  // best-effort - the cookies are cleared regardless so the browser session ends.
   const refresh = await readRefreshToken();
   if (refresh) {
     await authClient.logout(refresh);

@@ -3,7 +3,7 @@
 // Every App Router error boundary funnels through `reportClientError` so that
 // future telemetry (see amicu-planning#108, where the BFF grows a logging
 // endpoint) has exactly ONE place to converge on. For now this is a structured
-// `console.error` stub — swap the body for a real transport (BFF beacon, Sentry,
+// `console.error` stub - swap the body for a real transport (BFF beacon, Sentry,
 // etc.) without touching any call site.
 
 /** Normalized shape a transport can serialize. Kept generic on purpose. */

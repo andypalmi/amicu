@@ -87,7 +87,7 @@ export function EngineConsole() {
         setResult({ kind: 'diagnostics', report: payload });
         return;
       }
-      // 400 parse error, 502 upstream, etc. — surface the API's own message.
+      // 400 parse error, 502 upstream, etc. - surface the API's own message.
       const message =
         (payload as { error?: string })?.error ?? `Request failed (${res.status}).`;
       setResult({ kind: 'error', message });

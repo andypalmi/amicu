@@ -28,7 +28,7 @@ pub struct Notification {
 ///
 /// Kept small on purpose; grow it as flows need it. Secret material (a reset
 /// token) is carried as a [`SecretValue`] so it never lands in logs or telemetry
-/// by accident — only a transport that deliberately exposes it (a real mailer, or
+/// by accident - only a transport that deliberately exposes it (a real mailer, or
 /// the dev logger) ever reads the bytes.
 #[derive(Debug)]
 pub enum NotificationKind {
@@ -66,7 +66,7 @@ pub trait Notifier: Send + Sync {
 
 /// Dev/test [`Notifier`] that writes messages to stderr instead of sending them.
 ///
-/// No SMTP, no network — enough to exercise the seam locally and in tests.
+/// No SMTP, no network - enough to exercise the seam locally and in tests.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LoggingNotifier;
 
@@ -78,7 +78,7 @@ impl Notifier for LoggingNotifier {
                 // DEV ONLY: a real mailer embeds this token in a link mailed to
                 // the user; the dev logger prints it so a local developer can
                 // complete the flow without an email transport. This is the one
-                // place the opaque reset secret is intentionally rendered — never
+                // place the opaque reset secret is intentionally rendered - never
                 // do this in a production Notifier.
                 let token = reset_token
                     .expose_secret_str()

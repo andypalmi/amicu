@@ -8,7 +8,7 @@ import type { RecommendRequest } from '@amicu/api-client';
 /**
  * Parse a JSON body and require the `metrics` + `estimate` objects the
  * `/recommend` endpoint needs (thresholds are optional). Returns the typed body
- * or a 400 Response — mirroring the API's own error shape so the client handles
+ * or a 400 Response - mirroring the API's own error shape so the client handles
  * one contract everywhere. The deep field validation is the API's job; here we
  * only reject bodies that are structurally not a recommend request.
  */

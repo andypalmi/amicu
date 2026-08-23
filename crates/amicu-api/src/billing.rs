@@ -11,7 +11,7 @@
 //!   subscription, and returns its URL.
 //! - [`GET /billing/status`](status_handler): auth-gated. Reports whether billing
 //!   is configured server-side and the user's authoritative current plan and
-//!   whether they hold an active subscription — so the UI shows a real plan and
+//!   whether they hold an active subscription - so the UI shows a real plan and
 //!   the right CTA (upgrade vs. manage) instead of guessing.
 //! - [`POST /billing/webhook`](webhook_handler): **unauthenticated by the bearer
 //!   gate** (Stripe cannot send a first-party JWT). It authenticates instead by
@@ -21,13 +21,13 @@
 //! # Real, but gated behind env
 //! Stripe is a real integration, activated only when the secret material is
 //! present ([`StripeConfig`]). With no keys configured every endpoint returns a
-//! clean, documented `503 { "error": "billing is not configured" }` — never a
+//! clean, documented `503 { "error": "billing is not configured" }` - never a
 //! panic and never a faked success. Signature verification is never skipped.
 //!
 //! # Tier takes effect on next token issuance
 //! A billing change updates the user's tier in the [`UserStore`]; it does **not**
 //! revoke live access JWTs. The new tier is carried by the next token the user is
-//! issued (sign-in or refresh). This is deliberate — see the crate docs.
+//! issued (sign-in or refresh). This is deliberate - see the crate docs.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -265,7 +265,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 
 /// Auth middleware for the user-facing billing endpoints (checkout, portal,
 /// status). Any authenticated user (min tier Community) may manage their own
-/// billing — a Community user upgrading is the primary flow. On success the
+/// billing - a Community user upgrading is the primary flow. On success the
 /// verified [`Claims`] are stashed in the request extensions.
 ///
 /// The webhook route is deliberately **not** wrapped by this gate: Stripe

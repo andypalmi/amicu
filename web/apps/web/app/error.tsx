@@ -37,7 +37,7 @@ export default function Error({
           <AlertTriangle className="size-6 text-destructive" aria-hidden />
           <CardTitle className="text-2xl">Something went wrong</CardTitle>
           <CardDescription>
-            An unexpected error interrupted this page. You can try again — if it keeps
+            An unexpected error interrupted this page. You can try again - if it keeps
             happening, head back to the console or reach out.
           </CardDescription>
         </CardHeader>

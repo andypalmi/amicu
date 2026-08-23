@@ -1,11 +1,11 @@
 //! The Azure [`Provider`] adapter, with EU data-residency filtering.
 //!
 //! Azure is a global hyperscaler offering GPU virtual machines and managed
-//! Kubernetes (AKS) across regions worldwide — EU, UK, and non-EU alike. Amicu
+//! Kubernetes (AKS) across regions worldwide - EU, UK, and non-EU alike. Amicu
 //! targets EU workloads, so this adapter is **residency filtering by
 //! construction**: [`AzureProvider::new`] admits only the EU regions from
 //! [`regions`], and [`provision`](AzureProvider::provision) rejects any region
-//! outside that admitted set with [`ProviderError::UnknownRegion`] — an instance
+//! outside that admitted set with [`ProviderError::UnknownRegion`] - an instance
 //! can never be placed in a non-compliant region (including the UK) through this
 //! adapter. [`AzureProvider::for_residencies`] widens the admitted set explicitly
 //! when a caller genuinely needs other jurisdictions.
@@ -91,14 +91,14 @@ fn regions() -> [AzRegion; 8] {
             country: "FR",
             location: "Paris",
         },
-        // UK — excluded by the EU filter (not EU/EEA).
+        // UK - excluded by the EU filter (not EU/EEA).
         AzRegion {
             code: "uksouth",
             residency: Residency::Uk,
             country: "GB",
             location: "London",
         },
-        // Non-EU — excluded by the residency filter.
+        // Non-EU - excluded by the residency filter.
         AzRegion {
             code: "eastus",
             residency: Residency::Us,
@@ -131,7 +131,7 @@ struct GpuSpec {
 
 /// A representative slice of Azure's GPU VM catalog. Prices are illustrative
 /// catalog values in USD/hr, not a live quote (real-time pricing is amicu-planning#23).
-/// Every VM carries a Spot rate — Azure runs a public Spot VM market.
+/// Every VM carries a Spot rate - Azure runs a public Spot VM market.
 const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "Standard_ND96isr_H100_v5",
@@ -412,8 +412,8 @@ impl Provider for AzureProvider {
             }));
         }
         // Residency filter: only admitted (EU by default) regions can host an
-        // instance. A real Azure region outside the admitted set — including the
-        // UK — is rejected here.
+        // instance. A real Azure region outside the admitted set - including the
+        // UK - is rejected here.
         if !self.admits_region(&request.region) {
             return Err(AdapterError::from_kind(ProviderError::UnknownRegion {
                 region: request.region.clone(),

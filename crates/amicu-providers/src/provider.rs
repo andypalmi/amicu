@@ -12,14 +12,14 @@
 //! - [`provision`](Provider::provision) and [`teardown`](Provider::teardown)
 //!   are **apply-time**: `async fn`s that touch the backend and run only during
 //!   `apply`.
-//! - Health is inherited from [`Adapter::health`] — reachability without side
+//! - Health is inherited from [`Adapter::health`] - reachability without side
 //!   effects.
 //!
 //! Credentials are bound by reference: [`ProvisionRequest`] and
 //! [`ProvisioningHandle`] carry only a [`SecretRef`] (a name, safe to plan and
 //! log), never the [`SecretValue`]. The value is resolved transiently through a
 //! [`SecretResolver`] at apply time, used to authenticate the backend call, and
-//! dropped — it is never stored on the handle nor serialized. Every fallible
+//! dropped - it is never stored on the handle nor serialized. Every fallible
 //! method returns [`AdapterError`]; adapters never panic.
 //!
 //! [`SecretValue`]: amicu_core::secret::SecretValue
@@ -38,7 +38,7 @@ use crate::capability::ProviderCapabilities;
 ///
 /// It names *what* to provision by referencing a [`ComputeOffering`] id and a
 /// [`Region`] code from the provider's [`ProviderCapabilities`], and binds the
-/// backend credential by [`SecretRef`] — a name only. No [`SecretValue`] ever
+/// backend credential by [`SecretRef`] - a name only. No [`SecretValue`] ever
 /// appears here, so the request is safe to serialize into a plan.
 ///
 /// [`ComputeOffering`]: crate::capability::ComputeOffering
@@ -54,7 +54,7 @@ pub struct ProvisionRequest {
     pub region: String,
     /// Optional advanced override for the zone (AZ) a zone-addressed provider API
     /// targets, e.g. `"fr-par-2"`. `None` lets the adapter resolve the region's
-    /// default zone; the planner never sets this — it is not a planning input.
+    /// default zone; the planner never sets this - it is not a planning input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zone: Option<String>,
     /// Reference to the credential authenticating the backend call, matching
@@ -312,7 +312,7 @@ pub trait Provider: Adapter + DescribeCapabilities {
     /// have; [`ProviderError::CapacityUnavailable`] when there is no capacity;
     /// [`ProviderError::CredentialsRejected`] when the credential is rejected;
     /// or the resolver's error (an `AMICU-POLICY-*` code) when the referenced
-    /// secret is unavailable — each folded into an [`AdapterError`].
+    /// secret is unavailable - each folded into an [`AdapterError`].
     async fn provision(
         &self,
         request: &ProvisionRequest,
@@ -325,7 +325,7 @@ pub trait Provider: Adapter + DescribeCapabilities {
     ///
     /// # Errors
     /// [`ProviderError::UnknownInstance`] when `handle` refers to no known
-    /// instance, or the resolver's error when the credential is unavailable —
+    /// instance, or the resolver's error when the credential is unavailable -
     /// folded into an [`AdapterError`].
     async fn status(
         &self,
@@ -339,7 +339,7 @@ pub trait Provider: Adapter + DescribeCapabilities {
     ///
     /// # Errors
     /// [`ProviderError::UnknownInstance`] when `handle` refers to no known
-    /// instance, or the resolver's error when the credential is unavailable —
+    /// instance, or the resolver's error when the credential is unavailable -
     /// folded into an [`AdapterError`].
     async fn teardown(
         &self,

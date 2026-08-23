@@ -200,10 +200,10 @@ impl TrustedProxies {
     /// through rather than share a bucket.
     ///
     /// The key is `"<route>|<client>"`. The client identity is:
-    /// * the peer socket IP when the peer is **not** a trusted proxy — its
+    /// * the peer socket IP when the peer is **not** a trusted proxy - its
     ///   `X-Forwarded-For` is not believed at all; otherwise
     /// * the first untrusted address found walking the `X-Forwarded-For` chain
-    ///   **right-to-left**, peeling off trusted-proxy hops — i.e. the real
+    ///   **right-to-left**, peeling off trusted-proxy hops - i.e. the real
     ///   client as seen by the outermost trusted hop. Parsing right-to-left is
     ///   what makes this unspoofable: with append-style proxies the header is
     ///   `"<attacker-supplied>, <real-client>"`, and only the right-hand,
@@ -211,7 +211,7 @@ impl TrustedProxies {
     ///   the chain holds only trusted hops or an unparseable entry (so a proxy
     ///   forwarding junk can never mint an unbounded set of keys).
     ///
-    /// Returns `None` when there is no peer address — connect-info was not wired
+    /// Returns `None` when there is no peer address - connect-info was not wired
     /// on the serving socket. The caller must fail open on `None`; collapsing
     /// such requests into one shared bucket would be a lockout vector.
     #[must_use]
@@ -238,7 +238,7 @@ impl TrustedProxies {
     /// Walk the `X-Forwarded-For` chain right-to-left, peeling off trusted-proxy
     /// hops, and return the first untrusted address (the real client as seen by
     /// the outermost trusted hop). Returns `None` when the chain is empty,
-    /// entirely trusted, or hits an unparseable entry — in every such case the
+    /// entirely trusted, or hits an unparseable entry - in every such case the
     /// caller falls back to the peer IP rather than key on attacker-supplied
     /// junk. Called only when the peer itself is a trusted proxy.
     fn real_client_from_chain(&self, header: &str) -> Option<IpAddr> {

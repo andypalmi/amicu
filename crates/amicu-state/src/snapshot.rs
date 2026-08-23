@@ -15,7 +15,7 @@ use crate::error::StateError;
 /// canonical JSON, prefixed with the algorithm tag (see [`checksum_of`]). Because
 /// it is a fixed algorithm rather than a toolchain-dependent hasher, a snapshot
 /// persisted under one Rust build recomputes to the same checksum under another,
-/// so [`verify`] only fails on genuine tampering — never spuriously across builds.
+/// so [`verify`] only fails on genuine tampering - never spuriously across builds.
 ///
 /// [`verify`]: StateSnapshot::verify
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

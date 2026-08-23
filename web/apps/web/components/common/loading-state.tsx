@@ -3,7 +3,7 @@ import { cn } from '@amicu/ui';
 
 // Token-styled loading indicator for Suspense fallbacks and pending regions,
 // replacing bare "Loading…" text. A labeled, spinning lucide `Loader2` on the
-// muted foreground token — no new colors, no external deps.
+// muted foreground token - no new colors, no external deps.
 export interface LoadingStateProps {
   /** Accessible, visible label shown beside the spinner. */
   label?: string;

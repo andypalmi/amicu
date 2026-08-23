@@ -21,7 +21,7 @@
 //! (e.g. a `Member` trying to remove someone). The messages differ so the two
 //! are never confused.
 //!
-//! # In-memory, single-node (dev) — same caveat as auth/billing
+//! # In-memory, single-node (dev) - same caveat as auth/billing
 //! The store is a `Mutex`-guarded in-memory map ([`InMemoryOrgStore`]); all state
 //! is lost on restart and cannot be shared across replicas. It is shaped behind
 //! the [`OrgStore`] trait so a real (Postgres) implementation can follow. Data
@@ -38,7 +38,7 @@
 //!
 //! # SSO is out of scope (deferred post-v1)
 //! Single sign-on (SAML/OIDC federation, SCIM provisioning) is intentionally not
-//! built here — see the `andypalmi/amicu-planning#92` SSO follow-up. Members are
+//! built here - see the `andypalmi/amicu-planning#92` SSO follow-up. Members are
 //! keyed by their first-party user id.
 
 use std::collections::BTreeMap;
@@ -96,7 +96,7 @@ pub enum Permission {
     ChangeRole,
     /// Remove a member.
     RemoveMember,
-    /// Grant or modify a privileged (Owner/Admin) member — Owner only.
+    /// Grant or modify a privileged (Owner/Admin) member - Owner only.
     AssignPrivilegedRole,
 }
 
@@ -195,7 +195,7 @@ impl Permission {
     }
 }
 
-/// Every role, privilege-descending — the catalog and store iteration order.
+/// Every role, privilege-descending - the catalog and store iteration order.
 const ALL_ROLES: [Role; 4] = [Role::Owner, Role::Admin, Role::Member, Role::Viewer];
 
 // ---------------------------------------------------------------------------
@@ -556,7 +556,7 @@ pub(crate) enum OrgError {
     /// Malformed input, e.g. an empty user id or an unknown role name (`400`).
     BadRequest(String),
     /// The caller's org role does not permit the action, or they are not a member
-    /// (`403` — distinct from the tier gate's `403`).
+    /// (`403` - distinct from the tier gate's `403`).
     Forbidden(String),
     /// The targeted member does not exist (`404`).
     NotFound(String),
@@ -594,7 +594,7 @@ pub(crate) struct MemberView {
 /// Response for `GET /org/members`.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub(crate) struct MembersResponse {
-    /// The calling user's own role — so a client can render exactly the controls
+    /// The calling user's own role - so a client can render exactly the controls
     /// their role allows (the API still enforces every action).
     #[schema(example = "owner")]
     pub caller_role: String,

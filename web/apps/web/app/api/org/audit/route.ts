@@ -3,7 +3,7 @@ import { guardEngine, upstreamUnreachable } from '@/lib/engine/bff';
 
 // BFF: GET /api/org/audit → Management API GET /org/audit.
 // Session-guarded; returns the append-only audit log (most-recent first). Viewing
-// the log requires the view_audit permission (Owner/Admin) — enforced by the API,
+// the log requires the view_audit permission (Owner/Admin) - enforced by the API,
 // which answers 403 for a role without it. The token and API base never reach the
 // browser.
 export async function GET(): Promise<Response> {

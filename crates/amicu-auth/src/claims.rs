@@ -25,9 +25,9 @@ pub enum Tier {
 pub struct Claims {
     /// Issuer (`iss`).
     pub iss: String,
-    /// Audience (`aud`) — a single service identifier.
+    /// Audience (`aud`) - a single service identifier.
     pub aud: String,
-    /// Subject (`sub`) — the user id.
+    /// Subject (`sub`) - the user id.
     pub sub: String,
     /// Expiry, seconds since the Unix epoch.
     pub exp: i64,

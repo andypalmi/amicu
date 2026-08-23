@@ -1,6 +1,6 @@
 ---
 name: amicu-dsl
-description: Use when authoring, editing, or reviewing Amicu HCL (`amicu.hcl`, `*.amicu.hcl`) — writing resource blocks, wiring references between model/hardware/deployment, declaring variables or secret references, and formatting. Triggers when the user asks to write, change, or review Amicu configuration.
+description: Use when authoring, editing, or reviewing Amicu HCL (`amicu.hcl`, `*.amicu.hcl`) - writing resource blocks, wiring references between model/hardware/deployment, declaring variables or secret references, and formatting. Triggers when the user asks to write, change, or review Amicu configuration.
 ---
 
 # Amicu DSL
@@ -18,9 +18,9 @@ preserve existing structure.
 
 ## The three core blocks
 
-- `model` — what to serve (source, architecture, artifact, variants).
-- `hardware_profile` — where it runs (provider, accelerator/cpu, memory).
-- `deployment` — binds a model id to a hardware id and a runtime block.
+- `model` - what to serve (source, architecture, artifact, variants).
+- `hardware_profile` - where it runs (provider, accelerator/cpu, memory).
+- `deployment` - binds a model id to a hardware id and a runtime block.
 
 See `references/model-examples.md`, `references/hardware-examples.md`, and
 `references/deployment-examples.md` for concrete, valid blocks.
@@ -42,7 +42,7 @@ Referencing an id that no resource defines yields `AMICU-REF-001`.
 
 Put reusable values in `variables.amicu.hcl`. Never inline a secret value:
 secrets are typed references (name + optional scope/version) resolved only at
-apply time — they must never appear in HCL, plans, logs, or state. If a real
+apply time - they must never appear in HCL, plans, logs, or state. If a real
 credential shows up in a config, stop and tell the user to move it to a secret
 reference.
 

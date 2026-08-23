@@ -1,4 +1,4 @@
-// @amicu/auth — client-safe entry point.
+// @amicu/auth - client-safe entry point.
 //
 // Holds the tier model, claim/session types, and form validation used by both the
 // browser (client components) and the BFF. Anything requiring `jose`, network

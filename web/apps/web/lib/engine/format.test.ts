@@ -50,7 +50,7 @@ test('summarizePlan counts by kind in a stable order', () => {
     action('create', 'c'),
     action('update', 'd'),
   ]);
-  // create, update, replace, destroy — replace absent so it's omitted.
+  // create, update, replace, destroy - replace absent so it's omitted.
   assert.deepEqual(summary, [
     { kind: 'create', count: 2 },
     { kind: 'update', count: 1 },

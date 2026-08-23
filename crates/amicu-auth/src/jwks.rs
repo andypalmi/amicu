@@ -16,14 +16,14 @@ pub const CRV: &str = "Ed25519";
 /// A single public JWK (Ed25519 / OKP, public half only).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Jwk {
-    /// Key type — always `OKP`.
+    /// Key type - always `OKP`.
     pub kty: String,
-    /// Curve — always `Ed25519`.
+    /// Curve - always `Ed25519`.
     pub crv: String,
-    /// Intended use — `sig`.
+    /// Intended use - `sig`.
     #[serde(rename = "use")]
     pub use_: String,
-    /// Algorithm — `EdDSA`.
+    /// Algorithm - `EdDSA`.
     pub alg: String,
     /// Stable key id, matching the JWT `kid` header.
     pub kid: String,
@@ -46,7 +46,7 @@ impl Jwk {
     }
 }
 
-/// A JSON Web Key Set — the public keys served at `/.well-known/jwks.json`.
+/// A JSON Web Key Set - the public keys served at `/.well-known/jwks.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Jwks {
     /// Active + retiring public keys.

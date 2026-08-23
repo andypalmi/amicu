@@ -19,14 +19,14 @@ for GPU serving and autoscaling; Amicu derives them from the HCL.
   copy of the model, so scale for concurrency, not for model size.
 - Set sensible min/max replicas; scaling to zero is appropriate for bursty
   internal workloads, not for latency-critical paths.
-- GPU nodes are the scaling bottleneck — ensure the cluster/provider has GPU
+- GPU nodes are the scaling bottleneck - ensure the cluster/provider has GPU
   capacity in the required region before raising max replicas.
 
 ## Residency
 
 Node selection must honor `data_class` residency and `governance_rule`
 `allowed_providers`/`allowed_regions`. A residency-violating stack is rejected
-at plan time (`AMICU-POLICY-*`) and never reaches apply — see amicu-routing.
+at plan time (`AMICU-POLICY-*`) and never reaches apply - see amicu-routing.
 
 Note: rendering to a running cluster is a later milestone; today, validate and
 plan describe the intended delivery.

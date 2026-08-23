@@ -1,4 +1,4 @@
-//! `amicu fmt [--check]` — canonically reformat the project's HCL.
+//! `amicu fmt [--check]` - canonically reformat the project's HCL.
 
 use std::fs;
 use std::io::Write;

@@ -3,7 +3,7 @@
 //! Every provider adapter exposes a [`ProviderCapabilities`]: a plain-data,
 //! serde-serializable snapshot the planner and recommendation engine consume to
 //! filter, rank, and validate stacks against residency, budget, availability,
-//! and governance constraints. It carries no credentials — only the credential
+//! and governance constraints. It carries no credentials - only the credential
 //! *model* ([`CredentialsModel`]); secret values are resolved at apply time.
 //!
 //! This module is data models only (amicu-planning#13): no provider trait or adapter

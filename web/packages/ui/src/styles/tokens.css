@@ -1,4 +1,4 @@
-/* Amicu design tokens — shadcn/ui base, Tailwind v4, theme-aware (light + dark). */
+/* Amicu design tokens - shadcn/ui base, Tailwind v4, theme-aware (light + dark). */
 
 @theme inline {
   --color-background: var(--background);

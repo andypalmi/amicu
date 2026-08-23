@@ -8,14 +8,14 @@ import { TIER_LABELS, tierSatisfies, type Tier } from '@amicu/auth';
 import { useTier } from './session-provider';
 
 // ============================================================================
-// PRESENTATIONAL ONLY — NOT A SECURITY BOUNDARY.
+// PRESENTATIONAL ONLY - NOT A SECURITY BOUNDARY.
 //
 // <TierGate> decides whether to SHOW a feature or render an upsell. It is NEVER
 // an enforcement mechanism. The tier it reads comes from a claim the frontend
 // does not control, and the whole component tree is shipped to the browser. The
 // Rust Management API re-checks the caller's tier on every mutation and rejects
 // unauthorized actions regardless of what is rendered here. Do not gate anything
-// that must be secure behind this — gate it on the API.
+// that must be secure behind this - gate it on the API.
 // ============================================================================
 
 export interface TierGateProps {

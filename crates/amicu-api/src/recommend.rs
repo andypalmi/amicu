@@ -6,7 +6,7 @@
 //! judged against (and, optionally, custom rule thresholds); the handler runs the
 //! advisory [`diagnose`](amicu_recommend::diagnose) rule engine and returns the
 //! [`TuningReport`](amicu_recommend::TuningReport). It reads no server state and
-//! applies nothing — recommendations are advisory data only.
+//! applies nothing - recommendations are advisory data only.
 //!
 //! Access is gated by [`auth_gate`](crate::engine::auth_gate). Tier is honored by
 //! *content*, not by rejection: the verified caller's tier is mapped onto the
@@ -92,7 +92,7 @@ pub struct RecommendRequest {
 /// workload estimate, then returns the [`TuningReport`] *for the caller's tier*:
 /// recommendations the caller has not unlocked are withheld (a Community token
 /// gets `200` with an empty list, Pro+ gets the full depth). Stateless and
-/// side-effect-free: nothing is applied — recommendations are advisory data.
+/// side-effect-free: nothing is applied - recommendations are advisory data.
 #[utoipa::path(
     post,
     path = "/recommend",
