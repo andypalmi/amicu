@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO configs (workspace_id, id, name, created_at, updated_at, current_version) VALUES ($1, $2, $3, $4, $4, 1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f276dc8094a9f271ac418712dbf3286724b0d2cb4351433d7cb33f649617d4de"
+}

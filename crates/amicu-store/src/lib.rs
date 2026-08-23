@@ -29,6 +29,14 @@
 //! multi-tenant deployment threads a per-request [`WorkspaceId`]; until
 //! login-routing exists, the self-host default ([`WorkspaceId::DEFAULT`]) is
 //! used everywhere.
+//!
+//! # Config store
+//!
+//! [`config`] provides [`PostgresConfigStore`], a workspace-scoped store for
+//! HCL configs and their immutable version history. It follows the same
+//! GUC-bound-transaction and workspace-predicate pattern as the auth stores,
+//! but is not one of the `amicu-auth` traits: it has its own error type
+//! ([`config::ConfigError`]).
 
 use amicu_auth::AuthError;
 use serde::{Deserialize, Serialize};
@@ -38,11 +46,13 @@ use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
 
+pub mod config;
 pub mod refresh;
 pub mod reset;
 pub mod user;
 pub mod verify;
 
+pub use config::PostgresConfigStore;
 pub use refresh::PostgresRefreshStore;
 pub use reset::PostgresResetStore;
 pub use user::PostgresUserStore;
