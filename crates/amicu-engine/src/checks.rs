@@ -214,6 +214,11 @@ fn duplicate_ids(graph: &Graph) -> Vec<Diagnostic> {
         "use_case",
         graph.use_cases.iter().map(|u| u.id.as_str()),
     );
+    collect_dups(
+        &mut out,
+        "credential",
+        graph.credentials.iter().map(|c| c.id.as_str()),
+    );
     out
 }
 

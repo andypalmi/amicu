@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::{MissingReference, ResourceKind};
 use crate::resource::{
-    Budget, DataClass, Deployment, GovernanceRule, HardwareProfile, Model, RoutingPolicy, Tenant,
-    UseCase,
+    Budget, Credential, DataClass, Deployment, GovernanceRule, HardwareProfile, Model,
+    RoutingPolicy, Tenant, UseCase,
 };
 
 /// Schema version of the canonical graph, following semantic versioning.
@@ -39,6 +39,10 @@ pub struct Graph {
     pub tenants: Vec<Tenant>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub use_cases: Vec<UseCase>,
+    /// Named credential bundles (amicu-planning#119); see [`Credential`] for
+    /// why this holds only [`crate::secret::SecretRef`] pointers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<Credential>,
 }
 
 fn default_schema_version() -> String {
@@ -66,6 +70,7 @@ impl Graph {
             budgets: Vec::new(),
             tenants: Vec::new(),
             use_cases: Vec::new(),
+            credentials: Vec::new(),
         }
     }
 

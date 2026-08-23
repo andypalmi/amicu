@@ -1,4 +1,5 @@
-//! Faithful Rust representations of the nine canonical DSL resource kinds.
+//! Faithful Rust representations of the canonical DSL resource kinds: the
+//! original nine plus `credential` (amicu-planning#119).
 //!
 //! Every type derives `Serialize`, `Deserialize`, `Debug`, `Clone` and
 //! `PartialEq`, uses `snake_case` field names to match the DSL/JSON, and
@@ -7,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 mod budget;
+mod credential;
 mod data_class;
 mod deployment;
 mod governance;
@@ -18,6 +20,7 @@ mod tenant;
 mod use_case;
 
 pub use budget::{Budget, BudgetPeriod};
+pub use credential::Credential;
 pub use data_class::{DataClass, Sensitivity};
 pub use deployment::{Deployment, LlamaCppSettings, Runtime, VllmSettings};
 pub use governance::{GovernanceRule, RuleEffect};

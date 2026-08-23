@@ -66,8 +66,8 @@ pub fn detect_drift(desired: &Graph, actual: &StateSnapshot) -> DriftReport {
 /// The `BTreeMap` keeps every produced address list sorted and deterministic.
 fn flatten(graph: &Graph) -> BTreeMap<String, serde_json::Value> {
     use amicu_core::id::{
-        BudgetId, DataClassId, DeploymentId, GovernanceRuleId, HardwareProfileId, ModelId,
-        RoutingPolicyId, TenantId, UseCaseId,
+        BudgetId, CredentialId, DataClassId, DeploymentId, GovernanceRuleId, HardwareProfileId,
+        ModelId, RoutingPolicyId, TenantId, UseCaseId,
     };
 
     macro_rules! index {
@@ -90,6 +90,10 @@ fn flatten(graph: &Graph) -> BTreeMap<String, serde_json::Value> {
     index!(map, graph.budgets, BudgetId);
     index!(map, graph.tenants, TenantId);
     index!(map, graph.use_cases, UseCaseId);
+    // Credentials carry only `SecretRef` pointers (name/scope/version
+    // metadata), never secret bytes, so indexing them into drift is safe:
+    // see amicu_core::resource::Credential.
+    index!(map, graph.credentials, CredentialId);
 
     map
 }
