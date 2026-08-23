@@ -667,13 +667,7 @@ async fn distinct_workspaces_are_isolated_in_the_store() {
     assert!(store.add_member(ws_b, "usr_b_owner", Role::Owner).await);
 
     store
-        .add_member_audited(
-            ws_a,
-            Role::Owner,
-            "usr_a_owner",
-            "usr_a_member",
-            Role::Member,
-        )
+        .add_member_audited(ws_a, "usr_a_owner", "usr_a_member", Role::Member)
         .await
         .expect("add into workspace a");
 
@@ -726,6 +720,21 @@ async fn malformed_workspace_header_is_400() {
     assert!(body["error"].as_str().unwrap().contains("workspace"));
 }
 
+#[tokio::test]
+async fn invalid_token_with_malformed_workspace_header_is_401_not_400() {
+    let h = harness();
+    // Cryptographic token verification runs before the workspace-header
+    // format check (auth-before-request-shape): an invalid/expired token
+    // must win with 401 even when the header is also malformed, never a 400
+    // that leaks "your header was wrong" ahead of "you aren't authenticated".
+    let (status, _) = send(
+        &h.app,
+        get_ws_raw("/org/members", "not-a-real-token", "not-a-uuid"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
 // ---------------------------------------------------------------------------
 // Concurrency: atomic mutation+audit, and RBAC checked under the same lock
 // ---------------------------------------------------------------------------
@@ -739,11 +748,7 @@ async fn concurrent_removes_of_same_member_are_atomic_with_audit() {
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..32 {
         let store = store.clone();
-        tasks.spawn(async move {
-            store
-                .remove_member_audited(ORG, Role::Owner, OWNER, MEMBER)
-                .await
-        });
+        tasks.spawn(async move { store.remove_member_audited(ORG, OWNER, MEMBER).await });
     }
     let mut oks = 0usize;
     let mut not_found = 0usize;
@@ -823,15 +828,14 @@ async fn concurrent_admin_remove_races_owner_promotion_closes_the_toctou() {
         seed(&store, MEMBER, Role::Member).await;
 
         let remove_store = store.clone();
-        let remove = tokio::spawn(async move {
-            remove_store
-                .remove_member_audited(ORG, Role::Admin, ADMIN, MEMBER)
-                .await
-        });
+        let remove =
+            tokio::spawn(
+                async move { remove_store.remove_member_audited(ORG, ADMIN, MEMBER).await },
+            );
         let promote_store = store.clone();
         let promote = tokio::spawn(async move {
             promote_store
-                .set_role_audited(ORG, Role::Owner, OWNER, MEMBER, Role::Admin)
+                .set_role_audited(ORG, OWNER, MEMBER, Role::Admin)
                 .await
         });
 
@@ -859,5 +863,72 @@ async fn concurrent_admin_remove_races_owner_promotion_closes_the_toctou() {
                  both succeed or both fail: {other:?}"
             ),
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_owner_removal_races_actors_own_privileged_mutation_closes_the_actor_toctou() {
+    // Regression for the actor-role TOCTOU: an Owner revokes a (compromised)
+    // Admin at the same moment that Admin's own already-in-flight privileged
+    // mutation (adding a new Member) is landing. Because the store re-reads
+    // the *actor's* current role fresh under the same lock as the mutation
+    // (rather than trusting a `Role` resolved before the request ever reached
+    // the store), the add can only ever succeed by observing the Admin role
+    // that was still valid at the instant it was serialized - it can never
+    // execute *after* the removal has landed while still carrying the
+    // Admin's stale, pre-removal authorization.
+    for i in 0..200 {
+        let store = Arc::new(InMemoryOrgStore::new());
+        seed(&store, OWNER, Role::Owner).await;
+        seed(&store, ADMIN, Role::Admin).await;
+        let new_member = format!("usr_new_{i}");
+
+        let remove_store = store.clone();
+        let remove =
+            tokio::spawn(
+                async move { remove_store.remove_member_audited(ORG, OWNER, ADMIN).await },
+            );
+        let add_store = store.clone();
+        let new_member_for_add = new_member.clone();
+        let add = tokio::spawn(async move {
+            add_store
+                .add_member_audited(ORG, ADMIN, &new_member_for_add, Role::Member)
+                .await
+        });
+
+        let (remove_res, add_res) = tokio::join!(remove, add);
+        let remove_res = remove_res.expect("remove task panicked");
+        let add_res = add_res.expect("add task panicked");
+
+        // The Owner's removal of the Admin is authorized regardless of
+        // ordering (the Owner stays a member throughout), so it always
+        // succeeds.
+        assert_eq!(
+            remove_res,
+            Ok(Role::Admin),
+            "an Owner removing an Admin must always succeed"
+        );
+
+        let add_succeeded = add_res.is_ok();
+        match &add_res {
+            // Serialized before the removal landed: the Admin was still a
+            // real member at that instant, so the add is legitimately
+            // authorized.
+            Ok(role) => assert_eq!(*role, Role::Member),
+            // Serialized after the removal landed: the actor is no longer a
+            // member at all, so the add must be refused - never silently
+            // authorized against the stale, pre-removal Admin role. This is
+            // exactly the case the old "pass a pre-resolved `Role` into the
+            // store" code could get wrong.
+            Err(amicu_api::org::OrgStoreError::Forbidden(msg)) => {
+                assert!(msg.contains("not a member"));
+            }
+            Err(other) => panic!("unexpected add outcome: {other:?}"),
+        }
+
+        // Whichever ordering occurred, the new member exists iff the add's
+        // own result said so - never orphaned, never phantom.
+        let is_member = store.role_of(ORG, &new_member).await.is_some();
+        assert_eq!(is_member, add_succeeded);
     }
 }

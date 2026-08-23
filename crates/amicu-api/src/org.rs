@@ -40,14 +40,22 @@
 //!   *and* the audit entry before releasing it. A task cancelled at any point
 //!   either did nothing or did both; it can never leave a membership change
 //!   with no audit trail.
-//! - **RBAC authorization is checked against a role read under the same lock
-//!   as the mutation.** The handlers resolve the *actor's* role once (outside
-//!   the lock, via [`resolve_caller_role`]) and pass it into the store method;
-//!   the store then re-reads the *target's* current role and authorizes the
-//!   action against it inside the same critical section that performs the
-//!   mutation. This closes the TOCTOU where a concurrent role change on the
-//!   target (e.g. a racing Owner promoting them) could otherwise slip between
-//!   an earlier authorization check and the mutation that trusted it.
+//! - **RBAC authorization is checked against *both* roles read under the same
+//!   lock as the mutation.** The handlers only resolve *whether* the caller is
+//!   a member at all up front (via [`resolve_caller_role`], which also does
+//!   the first-Owner bootstrap); they never pass a pre-resolved `Role` into a
+//!   mutation. Instead the `*_audited` store methods take the actor's *id* and
+//!   re-read the actor's *and* the target's current roles from the map inside
+//!   the same critical section that performs the mutation, and authorize
+//!   against those freshly-read roles. This closes two TOCTOUs: a concurrent
+//!   role change on the *target* (e.g. a racing Owner promoting them) can no
+//!   longer slip between an earlier authorization check and the mutation that
+//!   trusted it, and neither can a concurrent change to the *actor's own*
+//!   role or membership (e.g. an Owner revoking a compromised Admin at the
+//!   same moment that Admin's own already-in-flight mutation is landing) - if
+//!   the actor has been removed or demoted by the time their mutation is
+//!   actually serialized, it is authorized against who they are *now*, not
+//!   who they were when the request started.
 //!
 //! # Multi-tenant scoping (organization id)
 //! Every store method takes an [`amicu_store::WorkspaceId`] - the same type
@@ -367,45 +375,46 @@ pub trait OrgStore: Send + Sync {
     /// members, atomically with the `org.bootstrapped` audit record. Returns
     /// `true` if it did the bootstrap.
     async fn bootstrap_owner(&self, org: WorkspaceId, user_id: &str) -> bool;
-    /// Add `target_id` with `role`, RBAC-authorized as `actor` (`actor_id` is
-    /// the audit actor), atomically with its `member.added` audit record.
-    /// Errors with [`OrgStoreError::Forbidden`] if `actor` may not grant
+    /// Add `target_id` with `role`, RBAC-authorized against `actor_id`'s
+    /// *current* role - re-read from the map, and `actor_id` is also the audit
+    /// actor - under the same lock as the mutation, atomically with its
+    /// `member.added` audit record. Errors with [`OrgStoreError::Forbidden`]
+    /// if `actor_id` is not (or is no longer) a member, or may not grant
     /// `role`, or [`OrgStoreError::AlreadyMember`] if `target_id` already
     /// belongs to `org`.
     async fn add_member_audited(
         &self,
         org: WorkspaceId,
-        actor: Role,
         actor_id: &str,
         target_id: &str,
         role: Role,
     ) -> Result<Role, OrgStoreError>;
-    /// Change `target_id`'s role to `new_role`, RBAC-authorized as `actor`
-    /// against `target_id`'s *current* role read under the same lock as the
-    /// mutation, atomically with its `member.role_changed` audit record.
-    /// Returns the previous role. Errors with [`OrgStoreError::NotFound`] if
-    /// `target_id` is not a member, [`OrgStoreError::Forbidden`] if `actor` may
-    /// not make this change, or [`OrgStoreError::LastOwner`] if it would
-    /// demote the only remaining Owner.
+    /// Change `target_id`'s role to `new_role`, RBAC-authorized against both
+    /// `actor_id`'s and `target_id`'s *current* roles - both re-read from the
+    /// map under the same lock as the mutation - atomically with its
+    /// `member.role_changed` audit record. Returns the previous role. Errors
+    /// with [`OrgStoreError::NotFound`] if `target_id` is not a member,
+    /// [`OrgStoreError::Forbidden`] if `actor_id` is not (or is no longer) a
+    /// member, or may not make this change, or [`OrgStoreError::LastOwner`] if
+    /// it would demote the only remaining Owner.
     async fn set_role_audited(
         &self,
         org: WorkspaceId,
-        actor: Role,
         actor_id: &str,
         target_id: &str,
         new_role: Role,
     ) -> Result<Role, OrgStoreError>;
-    /// Remove `target_id`, RBAC-authorized as `actor` against `target_id`'s
-    /// *current* role read under the same lock as the mutation, atomically
-    /// with its `member.removed` audit record. Returns the removed role.
-    /// Errors with [`OrgStoreError::NotFound`] if `target_id` is not a member,
-    /// [`OrgStoreError::Forbidden`] if `actor` may not remove them, or
-    /// [`OrgStoreError::LastOwner`] if it would remove the only remaining
-    /// Owner.
+    /// Remove `target_id`, RBAC-authorized against both `actor_id`'s and
+    /// `target_id`'s *current* roles - both re-read from the map under the
+    /// same lock as the mutation - atomically with its `member.removed` audit
+    /// record. Returns the removed role. Errors with
+    /// [`OrgStoreError::NotFound`] if `target_id` is not a member,
+    /// [`OrgStoreError::Forbidden`] if `actor_id` is not (or is no longer) a
+    /// member, or may not remove them, or [`OrgStoreError::LastOwner`] if it
+    /// would remove the only remaining Owner.
     async fn remove_member_audited(
         &self,
         org: WorkspaceId,
-        actor: Role,
         actor_id: &str,
         target_id: &str,
     ) -> Result<Role, OrgStoreError>;
@@ -530,13 +539,13 @@ impl OrgStore for InMemoryOrgStore {
     async fn add_member_audited(
         &self,
         org: WorkspaceId,
-        actor: Role,
         actor_id: &str,
         target_id: &str,
         role: Role,
     ) -> Result<Role, OrgStoreError> {
         let mut state = self.inner.lock().expect("org store poisoned");
         let org_state = state.entry(org).or_default();
+        let actor = org_state.members.get(actor_id).copied();
         authorize_membership_mutation(actor, None, Some(role))?;
         if org_state.members.contains_key(target_id) {
             return Err(OrgStoreError::AlreadyMember);
@@ -557,7 +566,6 @@ impl OrgStore for InMemoryOrgStore {
     async fn set_role_audited(
         &self,
         org: WorkspaceId,
-        actor: Role,
         actor_id: &str,
         target_id: &str,
         new_role: Role,
@@ -567,6 +575,7 @@ impl OrgStore for InMemoryOrgStore {
         let Some(current) = org_state.members.get(target_id).copied() else {
             return Err(OrgStoreError::NotFound);
         };
+        let actor = org_state.members.get(actor_id).copied();
         authorize_membership_mutation(actor, Some(current), Some(new_role))?;
         // Refuse to demote the last remaining Owner.
         if current == Role::Owner && new_role != Role::Owner && org_state.owner_count() == 1 {
@@ -588,7 +597,6 @@ impl OrgStore for InMemoryOrgStore {
     async fn remove_member_audited(
         &self,
         org: WorkspaceId,
-        actor: Role,
         actor_id: &str,
         target_id: &str,
     ) -> Result<Role, OrgStoreError> {
@@ -597,6 +605,7 @@ impl OrgStore for InMemoryOrgStore {
         let Some(current) = org_state.members.get(target_id).copied() else {
             return Err(OrgStoreError::NotFound);
         };
+        let actor = org_state.members.get(actor_id).copied();
         authorize_membership_mutation(actor, Some(current), None)?;
         // Refuse to remove the last remaining Owner.
         if current == Role::Owner && org_state.owner_count() == 1 {
@@ -701,9 +710,13 @@ fn workspace_id_from_headers(headers: &HeaderMap) -> Result<WorkspaceId, OrgErro
 ///
 /// Rejects requests without a valid token (`401`) and authenticated requests
 /// below Enterprise (`403`, tier), and a malformed organization header
-/// (`400`). On success the verified [`Claims`] and the resolved [`WorkspaceId`]
-/// are stashed in the request extensions. The per-role RBAC checks happen
-/// *inside* the handlers (a second, distinct `403`).
+/// (`400`). Cryptographic token verification always runs *before* the
+/// workspace-header format check, so an invalid/expired token is reported as
+/// `401` even when the header is also malformed - request *shape* is never
+/// validated ahead of *identity*. On success the verified [`Claims`] and the
+/// resolved [`WorkspaceId`] are stashed in the request extensions. The
+/// per-role RBAC checks happen *inside* the handlers (a second, distinct
+/// `403`).
 async fn org_auth_gate(
     State(state): State<OrgApiState>,
     mut request: Request,
@@ -712,19 +725,18 @@ async fn org_auth_gate(
     let Some(token) = bearer_token(request.headers()) else {
         return unauthorized("missing or malformed bearer token");
     };
+    let claims = match state.verifier.verify(token).await {
+        Ok(claims) if tier_rank(claims.tier) >= tier_rank(ORG_MIN_TIER) => claims,
+        Ok(_) => return forbidden_tier(),
+        Err(_) => return unauthorized("invalid or expired access token"),
+    };
     let workspace = match workspace_id_from_headers(request.headers()) {
         Ok(workspace) => workspace,
         Err(err) => return err.into_response(),
     };
-    match state.verifier.verify(token).await {
-        Ok(claims) if tier_rank(claims.tier) >= tier_rank(ORG_MIN_TIER) => {
-            request.extensions_mut().insert(claims);
-            request.extensions_mut().insert(workspace);
-            next.run(request).await
-        }
-        Ok(_) => forbidden_tier(),
-        Err(_) => unauthorized("invalid or expired access token"),
-    }
+    request.extensions_mut().insert(claims);
+    request.extensions_mut().insert(workspace);
+    next.run(request).await
 }
 
 fn unauthorized(message: &str) -> Response {
@@ -923,18 +935,28 @@ impl From<AuditEntry> for AuditEntryView {
 /// Authorize a membership mutation by the actor's role against the target's
 /// current role and (for add/change) the requested new role.
 ///
+/// - `actor` must currently be a member (`None` - not, or no longer, a
+///   member - is always refused).
 /// - Only Owner/Admin may manage membership at all.
 /// - Only an **Owner** may grant a privileged role (Owner/Admin) or modify/remove
 ///   an existing privileged member. (An Admin manages Members/Viewers only.)
 ///
 /// Called from inside the store's mutation methods, under the same lock
-/// acquisition as the mutation itself, so `target_current` is always freshly
-/// read (see the module docs' "Atomicity" section).
+/// acquisition as the mutation itself, so both `actor` and `target_current`
+/// are always freshly read (see the module docs' "Atomicity" section) - a
+/// concurrent removal or demotion of the actor themselves, mid-flight, is
+/// authorized against who they are *now*, not who they were when the
+/// request started.
 fn authorize_membership_mutation(
-    actor: Role,
+    actor: Option<Role>,
     target_current: Option<Role>,
     new_role: Option<Role>,
 ) -> Result<(), OrgStoreError> {
+    let Some(actor) = actor else {
+        return Err(OrgStoreError::Forbidden(
+            "you are not a member of this organization".to_owned(),
+        ));
+    };
     if !actor.can_manage_members() {
         return Err(OrgStoreError::Forbidden(
             "your role may not manage organization membership".to_owned(),
@@ -1055,7 +1077,11 @@ pub(crate) async fn add_member_handler(
     Extension(workspace): Extension<WorkspaceId>,
     Json(body): Json<AddMemberRequest>,
 ) -> Result<(StatusCode, Json<MemberView>), OrgError> {
-    let actor = resolve_caller_role(&state, workspace, &claims.sub).await?;
+    // Establishes membership (bootstrapping the first Owner if the org is
+    // empty and eligible) and turns away a non-member fast. The mutation
+    // itself re-checks the actor's role fresh under the store's lock (see the
+    // module docs' "Atomicity" section) rather than trusting this snapshot.
+    resolve_caller_role(&state, workspace, &claims.sub).await?;
 
     let user_id = body.user_id.trim();
     if user_id.is_empty() {
@@ -1068,7 +1094,7 @@ pub(crate) async fn add_member_handler(
 
     let assigned = state
         .store
-        .add_member_audited(workspace, actor, &claims.sub, user_id, role)
+        .add_member_audited(workspace, &claims.sub, user_id, role)
         .await
         .map_err(|e| map_store_error(e, user_id, "cannot demote the last remaining Owner"))?;
 
@@ -1108,13 +1134,15 @@ pub(crate) async fn change_role_handler(
     Path(target_id): Path<String>,
     Json(body): Json<ChangeRoleRequest>,
 ) -> Result<Json<MemberView>, OrgError> {
-    let actor = resolve_caller_role(&state, workspace, &claims.sub).await?;
+    // See add_member_handler: the resolved role is not trusted for
+    // authorization - only membership/bootstrap is established here.
+    resolve_caller_role(&state, workspace, &claims.sub).await?;
     let new_role = Role::parse(&body.role)
         .ok_or_else(|| OrgError::BadRequest(format!("unknown role: {}", body.role)))?;
 
     state
         .store
-        .set_role_audited(workspace, actor, &claims.sub, &target_id, new_role)
+        .set_role_audited(workspace, &claims.sub, &target_id, new_role)
         .await
         .map_err(|e| map_store_error(e, &target_id, "cannot demote the last remaining Owner"))?;
 
@@ -1149,11 +1177,13 @@ pub(crate) async fn remove_member_handler(
     Extension(workspace): Extension<WorkspaceId>,
     Path(target_id): Path<String>,
 ) -> Result<Json<MemberView>, OrgError> {
-    let actor = resolve_caller_role(&state, workspace, &claims.sub).await?;
+    // See add_member_handler: the resolved role is not trusted for
+    // authorization - only membership/bootstrap is established here.
+    resolve_caller_role(&state, workspace, &claims.sub).await?;
 
     let removed = state
         .store
-        .remove_member_audited(workspace, actor, &claims.sub, &target_id)
+        .remove_member_audited(workspace, &claims.sub, &target_id)
         .await
         .map_err(|e| map_store_error(e, &target_id, "cannot remove the last remaining Owner"))?;
 
