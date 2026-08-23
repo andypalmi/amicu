@@ -131,6 +131,26 @@ fn scan_text(text: &str, line: u32, path: &str, out: &mut Vec<Diagnostic>) {
     }
 }
 
+/// Whether `text` itself has a high-confidence secret *shape* (AWS key,
+/// OpenAI-style key, JWT, PEM header, or high-entropy token) - the same
+/// detectors [`scan_secret_leaks`] uses on free text.
+///
+/// Used by [`crate::de::secret_ref_from_expr`] to catch a literal secret
+/// smuggled inside a `secret(...)` call argument: the structural check alone
+/// only verifies the *syntax* is `secret("...")`, not that the string inside
+/// is actually a reference rather than the raw secret value itself
+/// (amicu-planning#119 review hardening). This still cannot be zero-false-
+/// positive in the abstract - any bare reference name could coincidentally
+/// match - but reusing the same narrow, tuned detectors that gate the
+/// free-text *warning* keeps genuine references (`vault://kv/...`,
+/// `HF_TOKEN`, `hetzner_token`, ...) well clear of the bar while catching the
+/// obvious cases: wrapping a real key/token/PEM block in `secret(...)`
+/// verbatim.
+#[must_use]
+pub(crate) fn looks_like_secret_value(text: &str) -> bool {
+    pem_header(text).is_some() || tokenize(text).any(|token| classify_token(token).is_some())
+}
+
 /// Split text into maximal runs of characters a secret token would plausibly
 /// use (alphanumerics plus `+/=_.-`), treating everything else (whitespace,
 /// quotes, other punctuation) as a separator.

@@ -546,6 +546,14 @@ fn from_variant<T: DeserializeOwned>(s: &str) -> Option<T> {
 /// one grammar extension the structural enforcement relies on: it fits the
 /// existing HCL expression grammar (`hcl::Expression::FuncCall`) with no new
 /// parser changes.
+///
+/// The syntax check alone is not sufficient: `secret("sk-live-...")` has the
+/// right *shape* even though the argument is a raw secret, not a reference.
+/// [`crate::secret_scan::looks_like_secret_value`] runs the same
+/// high-confidence detectors the free-text warning uses against the
+/// argument itself and also returns `None` (hard reject, same
+/// `AMICU-POLICY-004` path) when it matches, closing that smuggling route
+/// without flagging ordinary reference names (`vault://kv/...`, `HF_TOKEN`).
 fn secret_ref_from_expr(expr: &Expression) -> Option<SecretRef> {
     let Expression::FuncCall(call) = expr else {
         return None;
@@ -554,7 +562,9 @@ fn secret_ref_from_expr(expr: &Expression) -> Option<SecretRef> {
         return None;
     }
     match call.args.as_slice() {
-        [Expression::String(reference)] if !reference.is_empty() => {
+        [Expression::String(reference)]
+            if !reference.is_empty() && !crate::secret_scan::looks_like_secret_value(reference) =>
+        {
             Some(SecretRef::new(reference.clone()))
         }
         _ => None,

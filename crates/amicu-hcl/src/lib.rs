@@ -455,6 +455,56 @@ mod tests {
     }
 
     #[test]
+    fn literal_secret_wrapped_in_secret_call_is_still_rejected() {
+        // A `secret(...)` call has the right *syntax*, but wrapping a raw
+        // secret value in it (rather than an actual reference) must not
+        // bypass AMICU-POLICY-004: the argument itself is checked against
+        // the same high-confidence shapes the free-text scanner uses.
+        let openai = r#"
+            resource "credential" "openai" {
+              api_key = secret("sk-abcdefghijklmnopqrstuvwxyz123456")
+            }
+        "#;
+        assert!(matches!(
+            parse_graph(openai),
+            Err(HclError::SecretLiteral { .. })
+        ));
+
+        let aws = r#"
+            resource "credential" "aws" {
+              token = secret("AKIAIOSFODNN7EXAMPLE")
+            }
+        "#;
+        assert!(matches!(
+            parse_graph(aws),
+            Err(HclError::SecretLiteral { .. })
+        ));
+
+        let env_map = r#"
+            resource "credential" "runtime" {
+              env {
+                HF_TOKEN = secret("sk-abcdefghijklmnopqrstuvwxyz123456")
+              }
+            }
+        "#;
+        assert!(matches!(
+            parse_graph(env_map),
+            Err(HclError::SecretLiteral { .. })
+        ));
+
+        // Genuine bare-name and URI-shaped references must still work (this
+        // is the actual `SecretRef` convention used elsewhere in the repo,
+        // e.g. `EnvSecretResolver` resolves by plain env-var name).
+        let genuine = r#"
+            resource "credential" "openai" {
+              api_key = secret("HF_TOKEN")
+              token   = secret("vault://kv/openai#token")
+            }
+        "#;
+        assert!(parse_graph(genuine).is_ok());
+    }
+
+    #[test]
     fn secret_call_in_free_text_scan_is_not_flagged() {
         // A `secret(...)` reference value is not free text at all (it lives
         // in a secret-designated field), but even scanned as raw text its
