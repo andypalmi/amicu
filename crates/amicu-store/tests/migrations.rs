@@ -5,7 +5,7 @@
 //!
 //! ```sh
 //! docker compose up -d postgres
-//! DATABASE_URL=postgres://amicu:amicu@localhost:5432/amicu \
+//! DATABASE_URL=postgres://amicu_app:amicu_app@localhost:5432/amicu \
 //!     cargo test -p amicu-store -- --ignored
 //! ```
 

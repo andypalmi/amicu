@@ -20,6 +20,21 @@
 # Production/self-host deployments should provision their own equivalent
 # least-privilege role (never connect as a database superuser) - the
 # GRANTs in docker/postgres-init/01-app-role.sql are a template.
+#
+# EXISTING amicu_pgdata VOLUME from before amicu_app existed? The init script
+# above only runs against an EMPTY volume (the postgres image's
+# docker-entrypoint-initdb.d convention), so it will NOT create amicu_app for
+# you. See the big comment block in docker/postgres-init/01-app-role.sql for
+# the two options: (1) keep your data, via `REASSIGN OWNED BY amicu TO
+# amicu_app` run by hand as the superuser, or (2) `docker compose down -v` to
+# start clean. WARNING: `down -v` DESTROYS the amicu_pgdata volume - every
+# workspace/account/token/config/state row it holds - so only do that with
+# disposable local data.
+#
+# `./docker/postgres-init` below is a path relative to this compose file; if
+# you ever vendor/ship docker-compose.yml without the rest of the repo, take
+# that directory (or an equivalent init script) with it, or the mount is
+# simply empty and amicu_app is never created.
 services:
   postgres:
     image: postgres:16

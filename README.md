@@ -109,6 +109,17 @@ make that backstop a permanent no-op. A production/self-host deployment should p
 its own equivalent least-privilege role rather than ever connecting as a database
 superuser - `docker/postgres-init/01-app-role.sql` is a template for the required GRANTs.
 
+**Already have an `amicu_pgdata` volume from before `amicu_app` existed?** The init
+script only runs against an empty volume, so it will not retroactively create the role
+or transfer ownership of your existing tables. Either:
+
+- keep your data: connect as the superuser (`psql postgres://amicu:amicu@localhost:5432/amicu`)
+  and run the `CREATE ROLE` / `ALTER SCHEMA ... OWNER TO` / `REASSIGN OWNED BY amicu TO
+  amicu_app` sequence documented at the top of `docker/postgres-init/01-app-role.sql`, or
+- start clean: `docker compose down -v && docker compose up -d postgres`. **`down -v`
+  destroys the `amicu_pgdata` volume** - every workspace, account, token, config, and
+  state snapshot in it - so only do this with disposable local/dev data.
+
 Self-hosted state is control-plane metadata and secret *references* only - never plaintext
 secret values (see `amicu-core`'s `SecretValue`/`SecretRef` split). `amicu-store` does not
 encrypt it at the application layer by default: **self-host operators are responsible for
