@@ -35,6 +35,40 @@ fn every_preset_graph_round_trips_through_hcl() {
 }
 
 #[test]
+fn emitted_hcl_bakes_no_fabricated_price_for_any_preset() {
+    // A rental rate is a provider concern resolved from the provider catalog at
+    // plan/apply time, never a figure the wizard fabricates into the user's
+    // downloaded config. Every preset's emitted HCL must therefore contain no
+    // `price { per_hour { ... } }` block. (The serializer omits the block when
+    // `HardwareProfile::price` is `None`; the parser still tolerates an author's
+    // own optional price, exercised by `amicu-hcl`'s own fixtures.)
+    for preset in catalog() {
+        let graph = build_graph(preset, &answers()).expect("build graph");
+        // No hardware profile carries a price.
+        for hw in &graph.hardware_profiles {
+            assert!(
+                hw.price.is_none(),
+                "preset `{}` fabricated a price on hardware `{}`",
+                preset.id,
+                hw.id
+            );
+        }
+        // And nothing surfaces in the emitted text.
+        let text = format_graph(&graph).expect("format to HCL");
+        assert!(
+            !text.contains("price"),
+            "preset `{}` emitted a `price` block into HCL:\n{text}",
+            preset.id
+        );
+        assert!(
+            !text.contains("per_hour"),
+            "preset `{}` emitted a `per_hour` rate into HCL:\n{text}",
+            preset.id
+        );
+    }
+}
+
+#[test]
 fn eu_preset_graph_forbids_external_providers_after_round_trip() {
     let eu = catalog()
         .iter()
