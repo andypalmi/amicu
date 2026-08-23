@@ -5,7 +5,8 @@
 //! Every endpoint is auth-gated **and** Enterprise-tier-gated (see
 //! [`org_auth_gate`]): a caller below Enterprise is turned away with a `403`
 //! *before* any org state is read or serialized. The caller's organization role
-//! is then derived from their identity (`sub`) against the [`OrgStore`].
+//! is then derived from their identity (`sub`) against the [`OrgStore`],
+//! **scoped to the caller's organization** (see "Multi-tenant scoping" below).
 //!
 //! - [`GET /org/members`](list_members_handler): list members and their roles.
 //! - [`POST /org/members`](add_member_handler): invite/add a member with a role.
@@ -26,15 +27,71 @@
 //! is lost on restart and cannot be shared across replicas. It is shaped behind
 //! the [`OrgStore`] trait so a real (Postgres) implementation can follow. Data
 //! invariants that a real backend would enforce in a transaction (member
-//! uniqueness, "at least one Owner must remain") are enforced atomically inside
-//! the store methods here.
+//! uniqueness, "at least one Owner must remain", *and* that a mutation is never
+//! persisted without its audit record) are enforced atomically inside single
+//! store methods (one lock acquisition each) - see "Atomicity" below.
+//!
+//! # Atomicity: mutation + audit, and RBAC, under one lock
+//! Two correctness properties are held by construction rather than by
+//! convention:
+//! - **A mutation and its audit record are never split.** `add_member_audited`,
+//!   `set_role_audited`, `remove_member_audited`, and `bootstrap_owner` each
+//!   take the store's mutex exactly once and write both the membership change
+//!   *and* the audit entry before releasing it. A task cancelled at any point
+//!   either did nothing or did both; it can never leave a membership change
+//!   with no audit trail.
+//! - **RBAC authorization is checked against a role read under the same lock
+//!   as the mutation.** The handlers resolve the *actor's* role once (outside
+//!   the lock, via [`resolve_caller_role`]) and pass it into the store method;
+//!   the store then re-reads the *target's* current role and authorizes the
+//!   action against it inside the same critical section that performs the
+//!   mutation. This closes the TOCTOU where a concurrent role change on the
+//!   target (e.g. a racing Owner promoting them) could otherwise slip between
+//!   an earlier authorization check and the mutation that trusted it.
+//!
+//! # Multi-tenant scoping (organization id)
+//! Every store method takes an [`amicu_store::WorkspaceId`] - the same type
+//! that unifies "workspace" and "Enterprise org" elsewhere in the codebase -
+//! and all membership/audit state is partitioned by it. A caller selects their
+//! organization with the `X-Amicu-Workspace-Id` request header (a UUID); when
+//! the header is absent, [`amicu_store::WorkspaceId::DEFAULT`] is used, which
+//! is exactly today's single-tenant behavior (and is what every caller that
+//! predates this header gets, unchanged).
+//!
+//! **What this does and does not fix.** Distinct workspace ids now get fully
+//! separate member lists and audit logs - a request scoped to workspace A can
+//! never read or mutate workspace B's state, because every store lookup is
+//! keyed by the workspace id and RBAC still requires the caller to be a member
+//! of *that* workspace. What remains open, and is **not** solved here, is
+//! *authenticating* which workspace a caller may act as: the header is
+//! client-supplied and not derived from the caller's identity, because
+//! [`amicu_auth::Claims`] carries no workspace/org claim and there is no
+//! login-routing or org-provisioning flow anywhere in the codebase yet (the
+//! same gap `amicu-store`'s own `WorkspaceId` docs call out for the Postgres
+//! auth/config stores: "until login-routing exists, the self-host default is
+//! used everywhere"). Concretely:
+//! - For the default workspace (no header, today's only real deployment
+//!   shape) nothing changes: same single-tenant behavior as before.
+//! - For any other workspace id, the first-Owner bootstrap (see below) is
+//!   disabled entirely - not merely "gated off reads" but off *every*
+//!   endpoint - so a caller who merely guesses or is handed a workspace id
+//!   can never silently seize it as Owner. Populating a non-default
+//!   workspace's very first member currently requires calling
+//!   [`OrgStore::add_member`] directly (e.g. a future admin/provisioning path
+//!   or a DB migration) rather than any HTTP endpoint. This is the piece that
+//!   genuinely needs the not-yet-built persistence/tenancy plumbing (an
+//!   authenticated org claim, or an org-provisioning API) to close; until then
+//!   this vertical deliberately leaves non-default workspaces reachable only
+//!   by that out-of-band seeding, rather than pretending an unauthenticated
+//!   header is a security boundary for *creating* organizations.
 //!
 //! # First-Owner bootstrap
 //! For a single-node dev deployment nobody is a member until someone is added.
 //! The first Enterprise caller to reach the console when the org has **no
 //! members** is enrolled as its [`Role::Owner`] (an audited `org.bootstrapped`
 //! action); everyone after that must be invited. This makes the console usable
-//! out of the box without faking data.
+//! out of the box without faking data. As described above, this bootstrap only
+//! fires for the default (single-tenant) workspace; see "Multi-tenant scoping".
 //!
 //! # SSO is out of scope (deferred post-v1)
 //! Single sign-on (SAML/OIDC federation, SCIM provisioning) is intentionally not
@@ -46,6 +103,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use amicu_auth::{Claims, Tier};
+use amicu_store::WorkspaceId;
 use async_trait::async_trait;
 use axum::extract::{Extension, Path, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -199,7 +257,7 @@ impl Permission {
 const ALL_ROLES: [Role; 4] = [Role::Owner, Role::Admin, Role::Member, Role::Viewer];
 
 // ---------------------------------------------------------------------------
-// Store: members + append-only audit log
+// Store: members + append-only audit log, partitioned by organization
 // ---------------------------------------------------------------------------
 
 /// A member of the organization: a first-party user id and their assigned role.
@@ -215,7 +273,7 @@ pub struct Member {
 /// the id and time so the log's ordering and clock are the store's own.
 #[derive(Debug, Clone)]
 pub struct AuditEntry {
-    /// Monotonic sequence id (1-based) within this store.
+    /// Monotonic sequence id (1-based) within this organization's log.
     pub id: u64,
     /// When the action was recorded (Unix seconds).
     pub timestamp: i64,
@@ -256,67 +314,113 @@ impl AuditAction {
 
 /// A new audit record to append (the store assigns its id and timestamp).
 #[derive(Debug, Clone)]
-pub struct NewAuditEntry {
+struct NewAuditEntry {
     /// The user id that performed the action.
-    pub actor_id: String,
+    actor_id: String,
     /// What happened.
-    pub action: AuditAction,
+    action: AuditAction,
     /// The member the action targeted, if any.
-    pub target_id: Option<String>,
+    target_id: Option<String>,
     /// A human-readable detail.
-    pub detail: Option<String>,
+    detail: Option<String>,
 }
 
-/// A store invariant a mutation would violate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A store invariant a mutation would violate, or an RBAC check performed
+/// atomically with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrgStoreError {
+    /// No member with that user id exists in this organization.
+    NotFound,
+    /// The actor's role does not permit this action, checked against the
+    /// target's role under the same lock as the mutation (see the module
+    /// docs' "Atomicity" section).
+    Forbidden(String),
     /// The mutation would leave the organization with no Owner.
     LastOwner,
+    /// (`add_member_audited` only) the user is already a member.
+    AlreadyMember,
 }
 
-/// Organization persistence seam (single dev organization).
+/// Organization persistence seam (multi-tenant: every method is scoped to a
+/// [`WorkspaceId`]).
 ///
 /// Shaped so a real multi-tenant, Postgres-backed implementation can follow: the
-/// data invariants (`add` is a no-op on a duplicate; `set_role`/`remove_member`
-/// refuse to drop the last Owner) are enforced atomically per call, exactly what
-/// a transactional backend would do.
+/// data invariants (`add_member_audited` is a no-op on a duplicate;
+/// `set_role_audited`/`remove_member_audited` refuse to drop the last Owner,
+/// and check RBAC against a freshly-read target role) are enforced atomically
+/// per call - the mutation and its audit record are written under one lock
+/// acquisition, exactly what a transactional backend would do.
 #[async_trait]
 pub trait OrgStore: Send + Sync {
-    /// All members, in a stable (user-id) order.
-    async fn members(&self) -> Vec<Member>;
-    /// The role of `user_id`, or `None` if they are not a member.
-    async fn role_of(&self, user_id: &str) -> Option<Role>;
-    /// The current number of members.
-    async fn member_count(&self) -> usize;
-    /// Add a member. Returns `true` if inserted, `false` if `user_id` was already
-    /// a member (no change).
-    async fn add_member(&self, user_id: &str, role: Role) -> bool;
-    /// Enroll `user_id` as [`Role::Owner`] **iff** the org currently has no
-    /// members. Returns `true` if it did the bootstrap. Atomic.
-    async fn bootstrap_owner(&self, user_id: &str) -> bool;
-    /// Change a member's role. Returns the previous role, or `None` if `user_id`
-    /// is not a member. Errors with [`OrgStoreError::LastOwner`] if the change
-    /// would demote the only remaining Owner.
-    async fn set_role(&self, user_id: &str, role: Role) -> Result<Option<Role>, OrgStoreError>;
-    /// Remove a member. Returns the removed role, or `None` if `user_id` is not a
-    /// member. Errors with [`OrgStoreError::LastOwner`] if removing the member
-    /// would leave no Owner.
-    async fn remove_member(&self, user_id: &str) -> Result<Option<Role>, OrgStoreError>;
-    /// Append an audit record, stamping it with the next id and the current time.
-    /// Returns the stored entry.
-    async fn append_audit(&self, entry: NewAuditEntry) -> AuditEntry;
-    /// The audit log, most-recent first.
-    async fn audit(&self) -> Vec<AuditEntry>;
+    /// All members of `org`, in a stable (user-id) order.
+    async fn members(&self, org: WorkspaceId) -> Vec<Member>;
+    /// The role of `user_id` within `org`, or `None` if they are not a member.
+    async fn role_of(&self, org: WorkspaceId, user_id: &str) -> Option<Role>;
+    /// The current number of members of `org`.
+    async fn member_count(&self, org: WorkspaceId) -> usize;
+    /// Add a member directly, bypassing RBAC and without an audit record.
+    /// Used to seed org state (tests; a future admin/provisioning path can use
+    /// the same primitive to populate a non-default workspace's first member).
+    /// Returns `true` if inserted, `false` if `user_id` was already a member.
+    async fn add_member(&self, org: WorkspaceId, user_id: &str, role: Role) -> bool;
+    /// Enroll `user_id` as [`Role::Owner`] **iff** `org` currently has no
+    /// members, atomically with the `org.bootstrapped` audit record. Returns
+    /// `true` if it did the bootstrap.
+    async fn bootstrap_owner(&self, org: WorkspaceId, user_id: &str) -> bool;
+    /// Add `target_id` with `role`, RBAC-authorized as `actor` (`actor_id` is
+    /// the audit actor), atomically with its `member.added` audit record.
+    /// Errors with [`OrgStoreError::Forbidden`] if `actor` may not grant
+    /// `role`, or [`OrgStoreError::AlreadyMember`] if `target_id` already
+    /// belongs to `org`.
+    async fn add_member_audited(
+        &self,
+        org: WorkspaceId,
+        actor: Role,
+        actor_id: &str,
+        target_id: &str,
+        role: Role,
+    ) -> Result<Role, OrgStoreError>;
+    /// Change `target_id`'s role to `new_role`, RBAC-authorized as `actor`
+    /// against `target_id`'s *current* role read under the same lock as the
+    /// mutation, atomically with its `member.role_changed` audit record.
+    /// Returns the previous role. Errors with [`OrgStoreError::NotFound`] if
+    /// `target_id` is not a member, [`OrgStoreError::Forbidden`] if `actor` may
+    /// not make this change, or [`OrgStoreError::LastOwner`] if it would
+    /// demote the only remaining Owner.
+    async fn set_role_audited(
+        &self,
+        org: WorkspaceId,
+        actor: Role,
+        actor_id: &str,
+        target_id: &str,
+        new_role: Role,
+    ) -> Result<Role, OrgStoreError>;
+    /// Remove `target_id`, RBAC-authorized as `actor` against `target_id`'s
+    /// *current* role read under the same lock as the mutation, atomically
+    /// with its `member.removed` audit record. Returns the removed role.
+    /// Errors with [`OrgStoreError::NotFound`] if `target_id` is not a member,
+    /// [`OrgStoreError::Forbidden`] if `actor` may not remove them, or
+    /// [`OrgStoreError::LastOwner`] if it would remove the only remaining
+    /// Owner.
+    async fn remove_member_audited(
+        &self,
+        org: WorkspaceId,
+        actor: Role,
+        actor_id: &str,
+        target_id: &str,
+    ) -> Result<Role, OrgStoreError>;
+    /// The audit log for `org`, most-recent first.
+    async fn audit(&self, org: WorkspaceId) -> Vec<AuditEntry>;
 }
 
-/// Mutable state behind the in-memory store's mutex.
+/// Mutable state behind the in-memory store's mutex, for one organization.
 #[derive(Default)]
 struct OrgState {
     /// user_id → role. `BTreeMap` for a deterministic member order.
     members: BTreeMap<String, Role>,
     /// Append-only log (oldest first internally; reversed on read).
     audit: Vec<AuditEntry>,
-    /// Next audit id to assign (1-based).
+    /// Next audit id to assign (1-based), scoped to this organization.
     next_id: u64,
 }
 
@@ -327,11 +431,31 @@ impl OrgState {
     }
 }
 
+/// Append `entry` to `org_state`'s log under the caller's already-held lock.
+/// Never called on its own - always paired with the membership mutation that
+/// motivated it, inside the same critical section (see the module docs'
+/// "Atomicity" section).
+fn append_audit_locked(org_state: &mut OrgState, entry: NewAuditEntry) -> AuditEntry {
+    org_state.next_id += 1;
+    let stored = AuditEntry {
+        id: org_state.next_id,
+        timestamp: now_unix(),
+        actor_id: entry.actor_id,
+        action: entry.action,
+        target_id: entry.target_id,
+        detail: entry.detail,
+    };
+    org_state.audit.push(stored.clone());
+    stored
+}
+
 /// In-memory [`OrgStore`] for tests and single-node dev. All state is lost on
-/// restart.
+/// restart. Organizations are partitioned by [`WorkspaceId`] behind a single
+/// mutex; a real backend would instead scope each transaction to the
+/// workspace (see `amicu-store`'s workspace-scoped stores).
 #[derive(Default)]
 pub struct InMemoryOrgStore {
-    inner: Mutex<OrgState>,
+    inner: Mutex<BTreeMap<WorkspaceId, OrgState>>,
 }
 
 impl InMemoryOrgStore {
@@ -344,94 +468,156 @@ impl InMemoryOrgStore {
 
 #[async_trait]
 impl OrgStore for InMemoryOrgStore {
-    async fn members(&self) -> Vec<Member> {
-        self.inner
-            .lock()
-            .expect("org store poisoned")
-            .members
-            .iter()
-            .map(|(id, role)| Member {
-                user_id: id.clone(),
-                role: *role,
-            })
-            .collect()
+    async fn members(&self, org: WorkspaceId) -> Vec<Member> {
+        let state = self.inner.lock().expect("org store poisoned");
+        state.get(&org).map_or_else(Vec::new, |s| {
+            s.members
+                .iter()
+                .map(|(id, role)| Member {
+                    user_id: id.clone(),
+                    role: *role,
+                })
+                .collect()
+        })
     }
 
-    async fn role_of(&self, user_id: &str) -> Option<Role> {
+    async fn role_of(&self, org: WorkspaceId, user_id: &str) -> Option<Role> {
         self.inner
             .lock()
             .expect("org store poisoned")
-            .members
-            .get(user_id)
+            .get(&org)
+            .and_then(|s| s.members.get(user_id))
             .copied()
     }
 
-    async fn member_count(&self) -> usize {
-        self.inner.lock().expect("org store poisoned").members.len()
+    async fn member_count(&self, org: WorkspaceId) -> usize {
+        self.inner
+            .lock()
+            .expect("org store poisoned")
+            .get(&org)
+            .map_or(0, |s| s.members.len())
     }
 
-    async fn add_member(&self, user_id: &str, role: Role) -> bool {
+    async fn add_member(&self, org: WorkspaceId, user_id: &str, role: Role) -> bool {
         let mut state = self.inner.lock().expect("org store poisoned");
-        if state.members.contains_key(user_id) {
+        let org_state = state.entry(org).or_default();
+        if org_state.members.contains_key(user_id) {
             return false;
         }
-        state.members.insert(user_id.to_owned(), role);
+        org_state.members.insert(user_id.to_owned(), role);
         true
     }
 
-    async fn bootstrap_owner(&self, user_id: &str) -> bool {
+    async fn bootstrap_owner(&self, org: WorkspaceId, user_id: &str) -> bool {
         let mut state = self.inner.lock().expect("org store poisoned");
-        if state.members.is_empty() {
-            state.members.insert(user_id.to_owned(), Role::Owner);
-            true
-        } else {
-            false
+        let org_state = state.entry(org).or_default();
+        if !org_state.members.is_empty() {
+            return false;
         }
+        org_state.members.insert(user_id.to_owned(), Role::Owner);
+        append_audit_locked(
+            org_state,
+            NewAuditEntry {
+                actor_id: user_id.to_owned(),
+                action: AuditAction::OrgBootstrapped,
+                target_id: Some(user_id.to_owned()),
+                detail: Some("bootstrapped as first owner".to_owned()),
+            },
+        );
+        true
     }
 
-    async fn set_role(&self, user_id: &str, role: Role) -> Result<Option<Role>, OrgStoreError> {
+    async fn add_member_audited(
+        &self,
+        org: WorkspaceId,
+        actor: Role,
+        actor_id: &str,
+        target_id: &str,
+        role: Role,
+    ) -> Result<Role, OrgStoreError> {
         let mut state = self.inner.lock().expect("org store poisoned");
-        let Some(current) = state.members.get(user_id).copied() else {
-            return Ok(None);
+        let org_state = state.entry(org).or_default();
+        authorize_membership_mutation(actor, None, Some(role))?;
+        if org_state.members.contains_key(target_id) {
+            return Err(OrgStoreError::AlreadyMember);
+        }
+        org_state.members.insert(target_id.to_owned(), role);
+        append_audit_locked(
+            org_state,
+            NewAuditEntry {
+                actor_id: actor_id.to_owned(),
+                action: AuditAction::MemberAdded,
+                target_id: Some(target_id.to_owned()),
+                detail: Some(format!("added as {}", role.as_str())),
+            },
+        );
+        Ok(role)
+    }
+
+    async fn set_role_audited(
+        &self,
+        org: WorkspaceId,
+        actor: Role,
+        actor_id: &str,
+        target_id: &str,
+        new_role: Role,
+    ) -> Result<Role, OrgStoreError> {
+        let mut state = self.inner.lock().expect("org store poisoned");
+        let org_state = state.entry(org).or_default();
+        let Some(current) = org_state.members.get(target_id).copied() else {
+            return Err(OrgStoreError::NotFound);
         };
+        authorize_membership_mutation(actor, Some(current), Some(new_role))?;
         // Refuse to demote the last remaining Owner.
-        if current == Role::Owner && role != Role::Owner && state.owner_count() == 1 {
+        if current == Role::Owner && new_role != Role::Owner && org_state.owner_count() == 1 {
             return Err(OrgStoreError::LastOwner);
         }
-        state.members.insert(user_id.to_owned(), role);
-        Ok(Some(current))
+        org_state.members.insert(target_id.to_owned(), new_role);
+        append_audit_locked(
+            org_state,
+            NewAuditEntry {
+                actor_id: actor_id.to_owned(),
+                action: AuditAction::RoleChanged,
+                target_id: Some(target_id.to_owned()),
+                detail: Some(format!("{} → {}", current.as_str(), new_role.as_str())),
+            },
+        );
+        Ok(current)
     }
 
-    async fn remove_member(&self, user_id: &str) -> Result<Option<Role>, OrgStoreError> {
+    async fn remove_member_audited(
+        &self,
+        org: WorkspaceId,
+        actor: Role,
+        actor_id: &str,
+        target_id: &str,
+    ) -> Result<Role, OrgStoreError> {
         let mut state = self.inner.lock().expect("org store poisoned");
-        let Some(current) = state.members.get(user_id).copied() else {
-            return Ok(None);
+        let org_state = state.entry(org).or_default();
+        let Some(current) = org_state.members.get(target_id).copied() else {
+            return Err(OrgStoreError::NotFound);
         };
+        authorize_membership_mutation(actor, Some(current), None)?;
         // Refuse to remove the last remaining Owner.
-        if current == Role::Owner && state.owner_count() == 1 {
+        if current == Role::Owner && org_state.owner_count() == 1 {
             return Err(OrgStoreError::LastOwner);
         }
-        state.members.remove(user_id);
-        Ok(Some(current))
+        org_state.members.remove(target_id);
+        append_audit_locked(
+            org_state,
+            NewAuditEntry {
+                actor_id: actor_id.to_owned(),
+                action: AuditAction::MemberRemoved,
+                target_id: Some(target_id.to_owned()),
+                detail: Some(format!("removed ({})", current.as_str())),
+            },
+        );
+        Ok(current)
     }
 
-    async fn append_audit(&self, entry: NewAuditEntry) -> AuditEntry {
-        let mut state = self.inner.lock().expect("org store poisoned");
-        state.next_id += 1;
-        let stored = AuditEntry {
-            id: state.next_id,
-            timestamp: now_unix(),
-            actor_id: entry.actor_id,
-            action: entry.action,
-            target_id: entry.target_id,
-            detail: entry.detail,
-        };
-        state.audit.push(stored.clone());
-        stored
-    }
-
-    async fn audit(&self) -> Vec<AuditEntry> {
-        let mut entries = self.inner.lock().expect("org store poisoned").audit.clone();
+    async fn audit(&self, org: WorkspaceId) -> Vec<AuditEntry> {
+        let state = self.inner.lock().expect("org store poisoned");
+        let mut entries = state.get(&org).map_or_else(Vec::new, |s| s.audit.clone());
         entries.reverse(); // most-recent first
         entries
     }
@@ -451,6 +637,12 @@ fn now_unix() -> i64 {
 
 /// The minimum tier required to reach the org console.
 const ORG_MIN_TIER: Tier = Tier::Enterprise;
+
+/// The request header carrying the caller's organization id (a UUID, parsed
+/// into a [`WorkspaceId`]). Absent means [`WorkspaceId::DEFAULT`] - see the
+/// module docs' "Multi-tenant scoping" section for what this does and does
+/// not secure today.
+const ORG_WORKSPACE_HEADER: &str = "x-amicu-workspace-id";
 
 /// Shared state for the org endpoints: the access-token verifier that backs the
 /// Enterprise gate, and the org store.
@@ -490,12 +682,28 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
         .filter(|t| !t.is_empty())
 }
 
+/// Extract the caller's organization id from the [`ORG_WORKSPACE_HEADER`], or
+/// [`WorkspaceId::DEFAULT`] if it is absent. Rejects a malformed header
+/// (non-ASCII, or not a UUID) with [`OrgError::BadRequest`].
+fn workspace_id_from_headers(headers: &HeaderMap) -> Result<WorkspaceId, OrgError> {
+    let Some(value) = headers.get(ORG_WORKSPACE_HEADER) else {
+        return Ok(WorkspaceId::DEFAULT);
+    };
+    let text = value.to_str().map_err(|_| {
+        OrgError::BadRequest(format!("the {ORG_WORKSPACE_HEADER} header must be ASCII"))
+    })?;
+    text.trim().parse::<WorkspaceId>().map_err(|_| {
+        OrgError::BadRequest(format!("the {ORG_WORKSPACE_HEADER} header must be a UUID"))
+    })
+}
+
 /// Auth + Enterprise-tier gate for the org endpoints.
 ///
 /// Rejects requests without a valid token (`401`) and authenticated requests
-/// below Enterprise (`403`, tier). On success the verified [`Claims`] are stashed
-/// in the request extensions. The per-role RBAC checks happen *inside* the
-/// handlers (a second, distinct `403`).
+/// below Enterprise (`403`, tier), and a malformed organization header
+/// (`400`). On success the verified [`Claims`] and the resolved [`WorkspaceId`]
+/// are stashed in the request extensions. The per-role RBAC checks happen
+/// *inside* the handlers (a second, distinct `403`).
 async fn org_auth_gate(
     State(state): State<OrgApiState>,
     mut request: Request,
@@ -504,9 +712,14 @@ async fn org_auth_gate(
     let Some(token) = bearer_token(request.headers()) else {
         return unauthorized("missing or malformed bearer token");
     };
+    let workspace = match workspace_id_from_headers(request.headers()) {
+        Ok(workspace) => workspace,
+        Err(err) => return err.into_response(),
+    };
     match state.verifier.verify(token).await {
         Ok(claims) if tier_rank(claims.tier) >= tier_rank(ORG_MIN_TIER) => {
             request.extensions_mut().insert(claims);
+            request.extensions_mut().insert(workspace);
             next.run(request).await
         }
         Ok(_) => forbidden_tier(),
@@ -553,7 +766,8 @@ pub fn org_router(state: OrgApiState) -> Router {
 /// Errors surfaced by the org handlers, each mapped to a clean HTTP status with a
 /// body that leaks no server internals. (`401`/tier-`403` come from the gate.)
 pub(crate) enum OrgError {
-    /// Malformed input, e.g. an empty user id or an unknown role name (`400`).
+    /// Malformed input, e.g. an empty user id, an unknown role name, or a
+    /// malformed organization header (`400`).
     BadRequest(String),
     /// The caller's org role does not permit the action, or they are not a member
     /// (`403` - distinct from the tier gate's `403`).
@@ -574,6 +788,21 @@ impl IntoResponse for OrgError {
             OrgError::Conflict(m) => (StatusCode::CONFLICT, m),
         };
         (status, Json(json!({ "error": message }))).into_response()
+    }
+}
+
+/// Map a store-level error onto the handler's [`OrgError`]. `target_id` fills
+/// in the `NotFound`/`AlreadyMember` messages; `last_owner_message` is the
+/// operation-specific wording for [`OrgStoreError::LastOwner`] ("demoted" vs.
+/// "removed").
+fn map_store_error(err: OrgStoreError, target_id: &str, last_owner_message: &str) -> OrgError {
+    match err {
+        OrgStoreError::NotFound => OrgError::NotFound(format!("no such member: {target_id}")),
+        OrgStoreError::Forbidden(m) => OrgError::Forbidden(m),
+        OrgStoreError::LastOwner => OrgError::Conflict(last_owner_message.to_owned()),
+        OrgStoreError::AlreadyMember => {
+            OrgError::Conflict(format!("user {target_id} is already a member"))
+        }
     }
 }
 
@@ -697,24 +926,28 @@ impl From<AuditEntry> for AuditEntryView {
 /// - Only Owner/Admin may manage membership at all.
 /// - Only an **Owner** may grant a privileged role (Owner/Admin) or modify/remove
 ///   an existing privileged member. (An Admin manages Members/Viewers only.)
+///
+/// Called from inside the store's mutation methods, under the same lock
+/// acquisition as the mutation itself, so `target_current` is always freshly
+/// read (see the module docs' "Atomicity" section).
 fn authorize_membership_mutation(
     actor: Role,
     target_current: Option<Role>,
     new_role: Option<Role>,
-) -> Result<(), OrgError> {
+) -> Result<(), OrgStoreError> {
     if !actor.can_manage_members() {
-        return Err(OrgError::Forbidden(
+        return Err(OrgStoreError::Forbidden(
             "your role may not manage organization membership".to_owned(),
         ));
     }
     if actor == Role::Admin {
         if new_role.is_some_and(Role::is_privileged) {
-            return Err(OrgError::Forbidden(
+            return Err(OrgStoreError::Forbidden(
                 "only an Owner may grant the Owner or Admin role".to_owned(),
             ));
         }
         if target_current.is_some_and(Role::is_privileged) {
-            return Err(OrgError::Forbidden(
+            return Err(OrgStoreError::Forbidden(
                 "only an Owner may modify or remove an Owner or Admin".to_owned(),
             ));
         }
@@ -723,32 +956,40 @@ fn authorize_membership_mutation(
 }
 
 /// Resolve the caller's org role, bootstrapping them as the first Owner when the
-/// org is empty. Returns `403` when the caller is (an Enterprise user but) not a
-/// member of the established organization.
-async fn resolve_caller_role(state: &OrgApiState, caller: &str) -> Result<Role, OrgError> {
-    if let Some(role) = state.store.role_of(caller).await {
+/// org is empty **and** eligible for bootstrap (see [`bootstrap_eligible`]).
+/// Returns `403` when the caller is (an Enterprise user but) not a member of
+/// the established organization.
+async fn resolve_caller_role(
+    state: &OrgApiState,
+    org: WorkspaceId,
+    caller: &str,
+) -> Result<Role, OrgError> {
+    if let Some(role) = state.store.role_of(org, caller).await {
         return Ok(role);
     }
-    // Nobody is a member yet: the first Enterprise caller claims the org as Owner.
-    if state.store.bootstrap_owner(caller).await {
-        state
-            .store
-            .append_audit(NewAuditEntry {
-                actor_id: caller.to_owned(),
-                action: AuditAction::OrgBootstrapped,
-                target_id: Some(caller.to_owned()),
-                detail: Some("bootstrapped as first owner".to_owned()),
-            })
-            .await;
+    // Nobody is a member yet: the first Enterprise caller claims the org as
+    // Owner - but only for the default (single-tenant) workspace. A caller
+    // that names any other workspace can never silently seize it this way;
+    // see the module docs' "Multi-tenant scoping" section.
+    if bootstrap_eligible(org) && state.store.bootstrap_owner(org, caller).await {
         return Ok(Role::Owner);
     }
-    // Lost the bootstrap race, or the org exists and the caller is not in it.
-    match state.store.role_of(caller).await {
+    // Lost the bootstrap race, or the org exists (or is bootstrap-ineligible)
+    // and the caller is not in it.
+    match state.store.role_of(org, caller).await {
         Some(role) => Ok(role),
         None => Err(OrgError::Forbidden(
             "you are not a member of this organization".to_owned(),
         )),
     }
+}
+
+/// Whether `org` may be silently bootstrapped by its first caller. Only the
+/// default (single-tenant, self-host) workspace is eligible; any explicitly
+/// named workspace must be populated out-of-band (see the module docs'
+/// "Multi-tenant scoping" section for why).
+fn bootstrap_eligible(org: WorkspaceId) -> bool {
+    org == WorkspaceId::DEFAULT
 }
 
 // ---------------------------------------------------------------------------
@@ -760,8 +1001,12 @@ async fn resolve_caller_role(state: &OrgApiState, caller: &str) -> Result<Role, 
     get,
     path = "/org/members",
     tag = "org",
+    params(
+        ("x-amicu-workspace-id" = Option<String>, Header, description = "The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent."),
+    ),
     responses(
         (status = 200, description = "The members and the caller's own role.", body = MembersResponse),
+        (status = 400, description = "Malformed organization header."),
         (status = 401, description = "Missing or invalid access token."),
         (status = 403, description = "Below the Enterprise tier, or not a member of the organization."),
     ),
@@ -770,11 +1015,12 @@ async fn resolve_caller_role(state: &OrgApiState, caller: &str) -> Result<Role, 
 pub(crate) async fn list_members_handler(
     State(state): State<OrgApiState>,
     Extension(claims): Extension<Claims>,
+    Extension(workspace): Extension<WorkspaceId>,
 ) -> Result<Json<MembersResponse>, OrgError> {
-    let role = resolve_caller_role(&state, &claims.sub).await?;
+    let role = resolve_caller_role(&state, workspace, &claims.sub).await?;
     let members = state
         .store
-        .members()
+        .members(workspace)
         .await
         .into_iter()
         .map(MemberView::from)
@@ -790,10 +1036,13 @@ pub(crate) async fn list_members_handler(
     post,
     path = "/org/members",
     tag = "org",
+    params(
+        ("x-amicu-workspace-id" = Option<String>, Header, description = "The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent."),
+    ),
     request_body = AddMemberRequest,
     responses(
         (status = 201, description = "The member was added.", body = MemberView),
-        (status = 400, description = "Empty user id or unknown role."),
+        (status = 400, description = "Empty user id, unknown role, or malformed organization header."),
         (status = 401, description = "Missing or invalid access token."),
         (status = 403, description = "Below Enterprise, not a member, or your role may not add this member."),
         (status = 409, description = "That user is already a member."),
@@ -803,9 +1052,10 @@ pub(crate) async fn list_members_handler(
 pub(crate) async fn add_member_handler(
     State(state): State<OrgApiState>,
     Extension(claims): Extension<Claims>,
+    Extension(workspace): Extension<WorkspaceId>,
     Json(body): Json<AddMemberRequest>,
 ) -> Result<(StatusCode, Json<MemberView>), OrgError> {
-    let actor = resolve_caller_role(&state, &claims.sub).await?;
+    let actor = resolve_caller_role(&state, workspace, &claims.sub).await?;
 
     let user_id = body.user_id.trim();
     if user_id.is_empty() {
@@ -816,29 +1066,17 @@ pub(crate) async fn add_member_handler(
     let role = Role::parse(&body.role)
         .ok_or_else(|| OrgError::BadRequest(format!("unknown role: {}", body.role)))?;
 
-    authorize_membership_mutation(actor, None, Some(role))?;
-
-    if !state.store.add_member(user_id, role).await {
-        return Err(OrgError::Conflict(format!(
-            "user {user_id} is already a member"
-        )));
-    }
-
-    state
+    let assigned = state
         .store
-        .append_audit(NewAuditEntry {
-            actor_id: claims.sub.clone(),
-            action: AuditAction::MemberAdded,
-            target_id: Some(user_id.to_owned()),
-            detail: Some(format!("added as {}", role.as_str())),
-        })
-        .await;
+        .add_member_audited(workspace, actor, &claims.sub, user_id, role)
+        .await
+        .map_err(|e| map_store_error(e, user_id, "cannot demote the last remaining Owner"))?;
 
     Ok((
         StatusCode::CREATED,
         Json(MemberView {
             user_id: user_id.to_owned(),
-            role: role.as_str().to_owned(),
+            role: assigned.as_str().to_owned(),
         }),
     ))
 }
@@ -848,11 +1086,14 @@ pub(crate) async fn add_member_handler(
     patch,
     path = "/org/members/{id}",
     tag = "org",
-    params(("id" = String, Path, description = "The member's user id.")),
+    params(
+        ("id" = String, Path, description = "The member's user id."),
+        ("x-amicu-workspace-id" = Option<String>, Header, description = "The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent."),
+    ),
     request_body = ChangeRoleRequest,
     responses(
         (status = 200, description = "The member's new role.", body = MemberView),
-        (status = 400, description = "Unknown role."),
+        (status = 400, description = "Unknown role, or malformed organization header."),
         (status = 401, description = "Missing or invalid access token."),
         (status = 403, description = "Below Enterprise, not a member, or your role may not make this change."),
         (status = 404, description = "No such member."),
@@ -863,42 +1104,24 @@ pub(crate) async fn add_member_handler(
 pub(crate) async fn change_role_handler(
     State(state): State<OrgApiState>,
     Extension(claims): Extension<Claims>,
+    Extension(workspace): Extension<WorkspaceId>,
     Path(target_id): Path<String>,
     Json(body): Json<ChangeRoleRequest>,
 ) -> Result<Json<MemberView>, OrgError> {
-    let actor = resolve_caller_role(&state, &claims.sub).await?;
+    let actor = resolve_caller_role(&state, workspace, &claims.sub).await?;
     let new_role = Role::parse(&body.role)
         .ok_or_else(|| OrgError::BadRequest(format!("unknown role: {}", body.role)))?;
 
-    let current = state
+    state
         .store
-        .role_of(&target_id)
+        .set_role_audited(workspace, actor, &claims.sub, &target_id, new_role)
         .await
-        .ok_or_else(|| OrgError::NotFound(format!("no such member: {target_id}")))?;
+        .map_err(|e| map_store_error(e, &target_id, "cannot demote the last remaining Owner"))?;
 
-    authorize_membership_mutation(actor, Some(current), Some(new_role))?;
-
-    match state.store.set_role(&target_id, new_role).await {
-        Ok(Some(prev)) => {
-            state
-                .store
-                .append_audit(NewAuditEntry {
-                    actor_id: claims.sub.clone(),
-                    action: AuditAction::RoleChanged,
-                    target_id: Some(target_id.clone()),
-                    detail: Some(format!("{} → {}", prev.as_str(), new_role.as_str())),
-                })
-                .await;
-            Ok(Json(MemberView {
-                user_id: target_id,
-                role: new_role.as_str().to_owned(),
-            }))
-        }
-        Ok(None) => Err(OrgError::NotFound(format!("no such member: {target_id}"))),
-        Err(OrgStoreError::LastOwner) => Err(OrgError::Conflict(
-            "cannot demote the last remaining Owner".to_owned(),
-        )),
-    }
+    Ok(Json(MemberView {
+        user_id: target_id,
+        role: new_role.as_str().to_owned(),
+    }))
 }
 
 /// Remove a member.
@@ -906,9 +1129,13 @@ pub(crate) async fn change_role_handler(
     delete,
     path = "/org/members/{id}",
     tag = "org",
-    params(("id" = String, Path, description = "The member's user id.")),
+    params(
+        ("id" = String, Path, description = "The member's user id."),
+        ("x-amicu-workspace-id" = Option<String>, Header, description = "The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent."),
+    ),
     responses(
         (status = 200, description = "The removed member.", body = MemberView),
+        (status = 400, description = "Malformed organization header."),
         (status = 401, description = "Missing or invalid access token."),
         (status = 403, description = "Below Enterprise, not a member, or your role may not remove this member."),
         (status = 404, description = "No such member."),
@@ -919,39 +1146,21 @@ pub(crate) async fn change_role_handler(
 pub(crate) async fn remove_member_handler(
     State(state): State<OrgApiState>,
     Extension(claims): Extension<Claims>,
+    Extension(workspace): Extension<WorkspaceId>,
     Path(target_id): Path<String>,
 ) -> Result<Json<MemberView>, OrgError> {
-    let actor = resolve_caller_role(&state, &claims.sub).await?;
+    let actor = resolve_caller_role(&state, workspace, &claims.sub).await?;
 
-    let current = state
+    let removed = state
         .store
-        .role_of(&target_id)
+        .remove_member_audited(workspace, actor, &claims.sub, &target_id)
         .await
-        .ok_or_else(|| OrgError::NotFound(format!("no such member: {target_id}")))?;
+        .map_err(|e| map_store_error(e, &target_id, "cannot remove the last remaining Owner"))?;
 
-    authorize_membership_mutation(actor, Some(current), None)?;
-
-    match state.store.remove_member(&target_id).await {
-        Ok(Some(removed)) => {
-            state
-                .store
-                .append_audit(NewAuditEntry {
-                    actor_id: claims.sub.clone(),
-                    action: AuditAction::MemberRemoved,
-                    target_id: Some(target_id.clone()),
-                    detail: Some(format!("removed ({})", removed.as_str())),
-                })
-                .await;
-            Ok(Json(MemberView {
-                user_id: target_id,
-                role: removed.as_str().to_owned(),
-            }))
-        }
-        Ok(None) => Err(OrgError::NotFound(format!("no such member: {target_id}"))),
-        Err(OrgStoreError::LastOwner) => Err(OrgError::Conflict(
-            "cannot remove the last remaining Owner".to_owned(),
-        )),
-    }
+    Ok(Json(MemberView {
+        user_id: target_id,
+        role: removed.as_str().to_owned(),
+    }))
 }
 
 /// The RBAC catalog: every role and the permissions it grants.
@@ -959,8 +1168,12 @@ pub(crate) async fn remove_member_handler(
     get,
     path = "/org/roles",
     tag = "org",
+    params(
+        ("x-amicu-workspace-id" = Option<String>, Header, description = "The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent."),
+    ),
     responses(
         (status = 200, description = "The role → permission catalog.", body = RolesResponse),
+        (status = 400, description = "Malformed organization header."),
         (status = 401, description = "Missing or invalid access token."),
         (status = 403, description = "Below the Enterprise tier, or not a member of the organization."),
     ),
@@ -969,9 +1182,10 @@ pub(crate) async fn remove_member_handler(
 pub(crate) async fn list_roles_handler(
     State(state): State<OrgApiState>,
     Extension(claims): Extension<Claims>,
+    Extension(workspace): Extension<WorkspaceId>,
 ) -> Result<Json<RolesResponse>, OrgError> {
     // Membership (any role) is required to read the catalog.
-    resolve_caller_role(&state, &claims.sub).await?;
+    resolve_caller_role(&state, workspace, &claims.sub).await?;
     let roles = ALL_ROLES
         .iter()
         .map(|r| RoleView {
@@ -993,8 +1207,12 @@ pub(crate) async fn list_roles_handler(
     get,
     path = "/org/audit",
     tag = "org",
+    params(
+        ("x-amicu-workspace-id" = Option<String>, Header, description = "The caller's organization id (a UUID). Defaults to the single-tenant workspace when absent."),
+    ),
     responses(
         (status = 200, description = "The audit log, most-recent first.", body = AuditResponse),
+        (status = 400, description = "Malformed organization header."),
         (status = 401, description = "Missing or invalid access token."),
         (status = 403, description = "Below Enterprise, not a member, or your role may not view the audit log."),
     ),
@@ -1003,8 +1221,9 @@ pub(crate) async fn list_roles_handler(
 pub(crate) async fn audit_handler(
     State(state): State<OrgApiState>,
     Extension(claims): Extension<Claims>,
+    Extension(workspace): Extension<WorkspaceId>,
 ) -> Result<Json<AuditResponse>, OrgError> {
-    let role = resolve_caller_role(&state, &claims.sub).await?;
+    let role = resolve_caller_role(&state, workspace, &claims.sub).await?;
     if !role.can_view_audit() {
         return Err(OrgError::Forbidden(
             "your role may not view the audit log".to_owned(),
@@ -1012,7 +1231,7 @@ pub(crate) async fn audit_handler(
     }
     let entries = state
         .store
-        .audit()
+        .audit(workspace)
         .await
         .into_iter()
         .map(AuditEntryView::from)

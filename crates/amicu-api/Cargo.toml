@@ -37,7 +37,9 @@ sha2 = "0.10"
 hex = "0.4"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
+# `rt-multi-thread` backs the org-store concurrency stress tests (real OS-thread
+# parallelism, not just cooperative single-thread interleaving).
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # HTTP tests implement the Notifier trait to capture the out-of-band reset token.
