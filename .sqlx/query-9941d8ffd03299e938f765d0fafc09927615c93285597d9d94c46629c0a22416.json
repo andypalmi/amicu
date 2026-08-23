@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM state_locks WHERE workspace_id = $1 AND stack_id = $2 AND holder = $3 AND lock_token = $4",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9941d8ffd03299e938f765d0fafc09927615c93285597d9d94c46629c0a22416"
+}

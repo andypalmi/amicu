@@ -293,7 +293,10 @@ name = "amicu-store"
 version = "0.1.0"
 dependencies = [
  "amicu-auth",
+ "amicu-core",
+ "amicu-state",
  "async-trait",
+ "rand 0.8.7",
  "serde",
  "serde_json",
  "sha2 0.10.9",

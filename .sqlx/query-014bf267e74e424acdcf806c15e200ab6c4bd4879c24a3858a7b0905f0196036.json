@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT holder, lock_token, expires_at,\n                      extract(epoch FROM clock_timestamp())::bigint AS \"now!\"\n               FROM state_locks WHERE workspace_id = $1 AND stack_id = $2\n               FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "holder",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "lock_token",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "expires_at",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "now!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "014bf267e74e424acdcf806c15e200ab6c4bd4879c24a3858a7b0905f0196036"
+}

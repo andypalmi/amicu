@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (COALESCE(MAX(seq), -1) + 1) AS \"next_seq!\"\n               FROM state_snapshots WHERE workspace_id = $1 AND stack_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "next_seq!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "24ccbd01a0acd64f961b3921c9eff11f4b56f6a88d205cac1e084ad0d3dca31d"
+}
