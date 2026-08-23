@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workspace_invites SET accepted_at = COALESCE(accepted_at, $3) WHERE workspace_id = $1 AND id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d6ab96378c5b0b604c699e88e7940d7de8ad1de9224bdbbaba350bbd6a9da5a4"
+}

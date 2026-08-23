@@ -19,16 +19,28 @@
 //! [`sqlx::migrate!`] (which embeds the migration files at compile time) need
 //! no connection at all.
 //!
-//! # Auth stores (PR-2)
+//! # Identity, membership, and auth stores
 //!
-//! [`user`], [`refresh`], [`reset`], and [`verify`] provide the Postgres
-//! implementations of the `amicu-auth` store traits. Each is workspace-scoped:
-//! every query carries
-//! a `workspace_id` predicate and runs inside a transaction that sets the
-//! `app.current_workspace` GUC so the row-level-security policies apply. A real
-//! multi-tenant deployment threads a per-request [`WorkspaceId`]; until
-//! login-routing exists, the self-host default ([`WorkspaceId::DEFAULT`]) is
-//! used everywhere.
+//! Identity is GLOBAL; membership is the join (see
+//! andypalmi/amicu-planning#127). [`user`] ([`PostgresUserStore`]) is the global
+//! identity store, keyed by email/id with no workspace scoping; [`workspace`]
+//! ([`PostgresWorkspaceStore`]) owns the workspace registry (tier + billing),
+//! also global. [`membership`] ([`PostgresMembershipStore`]) and [`invite`]
+//! ([`PostgresInviteStore`]) are the tenant-scoped stores: their queries run
+//! inside a [`begin_scoped`]/[`begin_scoped_user`]/[`begin_scoped_invite`]
+//! transaction that binds the matching GUC so the row-level-security policies
+//! apply, and they take the workspace (or user/token) per call rather than being
+//! pinned to one.
+//!
+//! [`refresh`], [`reset`], and [`verify`] provide the Postgres implementations
+//! of the remaining `amicu-auth` store traits. These are session artifacts of
+//! the global user identity (a real `user_id` foreign key into `users`, with
+//! `ON DELETE CASCADE`), so - like `users` itself - they are control-plane and
+//! carry no workspace scoping.
+//!
+//! There is no `WorkspaceId::DEFAULT` fallback in any of these reworked stores;
+//! [`WorkspaceId::DEFAULT`] survives only for the not-yet-reworked self-host
+//! config/state stores (andypalmi/amicu-planning#116).
 //!
 //! # Config store
 //!
@@ -57,18 +69,24 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 pub mod config;
+pub mod invite;
+pub mod membership;
 pub mod refresh;
 pub mod reset;
 pub mod state;
 pub mod user;
 pub mod verify;
+pub mod workspace;
 
 pub use config::{ConfigStore, InMemoryConfigStore, PostgresConfigStore};
+pub use invite::{Invite, PostgresInviteStore};
+pub use membership::{Member, PostgresMembershipStore, Role};
 pub use refresh::PostgresRefreshStore;
 pub use reset::PostgresResetStore;
 pub use state::PostgresStateBackend;
 pub use user::PostgresUserStore;
 pub use verify::PostgresVerifyStore;
+pub use workspace::{PostgresWorkspaceStore, Workspace};
 
 /// The control-plane isolation boundary: a workspace (unified with the
 /// Enterprise org). Every persisted resource is scoped to a workspace, so a
@@ -225,10 +243,24 @@ pub(crate) fn now_unix_seconds() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
+// SINGLE-CONTEXT INVARIANT (upheld by all three helpers below).
+//
+// The `workspace_members`/`workspace_invites` RLS policies are OR-policies over
+// two context GUCs (see 0003/0004). Their tenant isolation depends on AT MOST
+// ONE context GUC being set per transaction: each helper below binds EXACTLY ONE
+// (`app.current_workspace`, `app.current_user`, or `app.current_invite_token`)
+// via SET LOCAL and touches no other, and SET LOCAL reverts it at transaction
+// end so it cannot bleed into the next transaction on a pooled connection.
+// Setting two at once would let a bare `SELECT` union two tenants' rows. Every
+// query additionally carries its own explicit WHERE predicate as the primary
+// filter; the RLS OR-policy is the backstop. The regression test
+// `scoped_helpers_bind_exactly_one_context_guc` asserts the one-GUC property.
+
 /// Begins a transaction and binds the workspace GUC (`app.current_workspace`)
 /// for its lifetime, so the row-level-security policies on the scoped tables
 /// admit exactly this workspace's rows. Every store operation runs its queries
-/// inside the returned transaction and commits it.
+/// inside the returned transaction and commits it. Binds ONLY
+/// `app.current_workspace` (see the single-context invariant above).
 pub(crate) async fn begin_scoped(
     pool: &PgPool,
     workspace: WorkspaceId,
@@ -244,6 +276,62 @@ pub(crate) async fn begin_scoped(
         .await
         .map_err(map_db)?;
     Ok(tx)
+}
+
+/// Begins a transaction bound to a USER context (`app.current_user`), for the
+/// one legitimately cross-workspace membership read: "which workspaces is this
+/// user in?" (list-my-workspaces / workspace switching). The
+/// `workspace_members` RLS policy admits a row whose `user_id` equals this GUC,
+/// so a user always sees their own memberships across workspaces; the policy's
+/// WITH CHECK is workspace-only, so this read-only context can never write.
+/// `app.current_workspace` is left unset here, so no other tenant's rows leak.
+pub(crate) async fn begin_scoped_user(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, AuthError> {
+    let mut tx = pool.begin().await.map_err(map_db)?;
+    let uid = user_id.to_string();
+    sqlx::query!("SELECT set_config('app.current_user', $1, true)", uid)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_db)?;
+    Ok(tx)
+}
+
+/// Begins a transaction bound to an INVITE-TOKEN context
+/// (`app.current_invite_token`), for the one legitimately cross-workspace invite
+/// read: redeeming a token whose workspace is not yet known. The unguessable
+/// 32-byte token hash IS the capability; the `workspace_invites` RLS policy
+/// admits exactly the invite row whose `token_hash` matches (compared as
+/// lowercase hex). `app.current_workspace` is left unset, so no other invite
+/// leaks, and the policy's WITH CHECK is workspace-only so this read-only
+/// context cannot write.
+pub(crate) async fn begin_scoped_invite<'a>(
+    pool: &'a PgPool,
+    token_hash: &[u8; 32],
+) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, AuthError> {
+    let mut tx = pool.begin().await.map_err(map_db)?;
+    let hex = hex_lower(token_hash);
+    sqlx::query!(
+        "SELECT set_config('app.current_invite_token', $1, true)",
+        hex
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_db)?;
+    Ok(tx)
+}
+
+/// Lowercase-hex encoding of a byte slice, for the invite-token RLS GUC (which
+/// Postgres decodes with `decode(..., 'hex')`). Kept local to avoid pulling in a
+/// hex crate for one 32-byte value.
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 #[cfg(test)]
@@ -287,5 +375,88 @@ mod tests {
     #[test]
     fn from_str_rejects_garbage() {
         assert!("not-a-uuid".parse::<WorkspaceId>().is_err());
+    }
+
+    /// Reads the three context GUCs inside `tx`, each coerced NULL -> "" so an
+    /// unset (or reverted-to-empty) GUC reads as the empty string.
+    #[cfg(test)]
+    async fn read_context_gucs(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> (String, String, String) {
+        let row = sqlx::query!(
+            "SELECT \
+               COALESCE(current_setting('app.current_workspace', true), '')    AS \"ws!\", \
+               COALESCE(current_setting('app.current_user', true), '')         AS \"usr!\", \
+               COALESCE(current_setting('app.current_invite_token', true), '') AS \"inv!\"",
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .expect("read context gucs");
+        (row.ws, row.usr, row.inv)
+    }
+
+    /// FIX N1 regression: each `begin_scoped_*` helper must bind EXACTLY ONE
+    /// context GUC and leave the other two empty within its transaction. The
+    /// `workspace_members`/`workspace_invites` OR-policies rely on this
+    /// single-context invariant for tenant isolation (see the note above
+    /// `begin_scoped` and the policy comments in 0003/0004). Running the three
+    /// helpers in sequence on the same pool also proves SET LOCAL does not bleed
+    /// one context into the next transaction.
+    #[tokio::test]
+    #[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+    async fn scoped_helpers_bind_exactly_one_context_guc() {
+        let url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for the ignored tests");
+        let pool = connect(&url).await.expect("connect to Postgres");
+        run_migrations(&pool).await.expect("apply migrations");
+
+        // Workspace context: only app.current_workspace is set.
+        let mut tx = begin_scoped(&pool, WorkspaceId::new())
+            .await
+            .expect("begin_scoped");
+        let (ws, usr, inv) = read_context_gucs(&mut tx).await;
+        assert!(!ws.is_empty(), "workspace GUC set");
+        assert!(
+            usr.is_empty(),
+            "user GUC must stay empty under workspace scope"
+        );
+        assert!(
+            inv.is_empty(),
+            "invite GUC must stay empty under workspace scope"
+        );
+        tx.rollback().await.expect("rollback");
+
+        // User context: only app.current_user is set (and the workspace GUC from
+        // the prior transaction did not bleed through).
+        let mut tx = begin_scoped_user(&pool, Uuid::new_v4())
+            .await
+            .expect("begin_scoped_user");
+        let (ws, usr, inv) = read_context_gucs(&mut tx).await;
+        assert!(
+            ws.is_empty(),
+            "workspace GUC must stay empty under user scope"
+        );
+        assert!(!usr.is_empty(), "user GUC set");
+        assert!(
+            inv.is_empty(),
+            "invite GUC must stay empty under user scope"
+        );
+        tx.rollback().await.expect("rollback");
+
+        // Invite-token context: only app.current_invite_token is set.
+        let mut tx = begin_scoped_invite(&pool, &[7u8; 32])
+            .await
+            .expect("begin_scoped_invite");
+        let (ws, usr, inv) = read_context_gucs(&mut tx).await;
+        assert!(
+            ws.is_empty(),
+            "workspace GUC must stay empty under invite scope"
+        );
+        assert!(
+            usr.is_empty(),
+            "user GUC must stay empty under invite scope"
+        );
+        assert!(!inv.is_empty(), "invite GUC set");
+        tx.rollback().await.expect("rollback");
     }
 }

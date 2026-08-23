@@ -19,6 +19,7 @@ issuer = [
     "dep:sha2",
     "dep:zeroize",
     "dep:tokio",
+    "dep:uuid",
 ]
 # reqwest-backed JWKS fetcher for the verifier. Off by default so embedders pick
 # their own transport; the cache/refetch logic is transport-agnostic.
@@ -46,6 +47,9 @@ zeroize = { version = "1", features = ["derive"], optional = true }
 # dispatch the (possibly network-bound) out-of-band send off the response path
 # via `tokio::spawn`, so response timing never depends on account existence.
 tokio = { version = "1", default-features = false, features = ["rt"], optional = true }
+# Global user ids are UUIDs (the token `sub` and the users.id PK the store and
+# every auth token table foreign-key to). Issuer-only: only sign-up mints them.
+uuid = { version = "1", default-features = false, features = ["v4"], optional = true }
 
 # verifier http transport
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"], optional = true }

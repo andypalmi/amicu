@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT consumed, expires_at FROM verify_tokens WHERE token_hash = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "consumed",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "expires_at",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5aa8dd89ed525dc86c50f2a4a95639fb1728ab50d852de64cacf850ae8f43697"
+}
