@@ -100,6 +100,28 @@ export async function forgotAction(
   };
 }
 
+export async function resendVerificationAction(
+  _prev: AuthFormState,
+  formData: FormData,
+): Promise<AuthFormState> {
+  // The verification link carries only an email; reuse the forgot-flow schema
+  // (email-only, same shape).
+  const parsed = forgotSchema.safeParse({ email: formData.get('email') });
+  if (!parsed.success) {
+    return { fieldErrors: fieldErrors(parsed.error) };
+  }
+
+  // Fire-and-forget from the UI's perspective: the outcome is intentionally
+  // opaque. We always return the same confirmation so an attacker cannot probe
+  // which emails have an unverified account. The backend likewise responds `202`
+  // whether the account is unknown, already verified, or freshly re-linked.
+  await authClient.resendVerification(parsed.data);
+  return {
+    notice:
+      'If an unverified account exists for that address, a new link is on its way.',
+  };
+}
+
 // Outcome of an email-verification attempt, surfaced to the /verify page.
 //   - 'success': the token was consumed and the email is now confirmed.
 //   - 'invalid': the backend rejected the token (unknown/expired/already used) with
