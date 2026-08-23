@@ -23,7 +23,7 @@ run('pnpm', ['run', 'generate']);
 
 // `git status --porcelain` reports the file as dirty whether it was *modified*
 // (regeneration changed committed bytes) or *untracked* (the generated file was
-// never committed at all) — `git diff` alone would silently miss the untracked
+// never committed at all) - `git diff` alone would silently miss the untracked
 // case. Scoped to the generated file so unrelated edits never trip (or mask) it.
 const status = run('git', ['status', '--porcelain', '--', schema]).trim();
 if (status === '') {

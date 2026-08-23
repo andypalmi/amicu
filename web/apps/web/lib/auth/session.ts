@@ -11,7 +11,7 @@ import { readAccessToken } from './cookies';
  * user (never the raw token) or null when unauthenticated / expired.
  *
  * Read-only and RSC-safe: it does NOT rotate cookies. Proactive silent refresh
- * (which rotates the refresh token) happens in the BFF middleware — see proxy.ts —
+ * (which rotates the refresh token) happens in the BFF middleware - see proxy.ts -
  * so by the time a page renders, the access cookie is already fresh.
  */
 export async function getSession(): Promise<SessionUser | null> {

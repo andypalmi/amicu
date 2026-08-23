@@ -1,11 +1,11 @@
 // Pure, framework-free helpers for the organization console. Kept free of React
 // (so they can be unit-tested with `node --test`, see format.test.ts) and free of
-// runtime cross-imports so the type-stripped runner can execute them — only
+// runtime cross-imports so the type-stripped runner can execute them - only
 // *type* imports from `@amicu/api-client` are used, and those are erased.
 //
 // These helpers only present what the API confirms; they never invent a member,
 // role, permission, or audit entry. The Rust Management API is the sole authority
-// on membership and RBAC — the console renders its responses and nothing more.
+// on membership and RBAC - the console renders its responses and nothing more.
 //
 // Deliberately no Date/timestamp formatting here: `new Date` is avoided in this
 // testable, potentially-prerendered module. Audit timestamps are rendered in the
@@ -24,7 +24,7 @@ export type AuditEntryView = components['schemas']['AuditEntryView'];
 export const ROLE_NAMES = ['owner', 'admin', 'member', 'viewer'] as const;
 export type RoleName = (typeof ROLE_NAMES)[number];
 
-/** Presentational labels for role names. Display only — never an entitlement. */
+/** Presentational labels for role names. Display only - never an entitlement. */
 const ROLE_LABELS: Record<string, string> = {
   owner: 'Owner',
   admin: 'Admin',
@@ -56,7 +56,7 @@ export function permissionLabel(permission: string): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
-/** A 403 means the caller may not do this — either their tier or their org role.
+/** A 403 means the caller may not do this - either their tier or their org role.
  *  The console gates the tier case with <TierGate>; a 403 from an action here is
  *  an RBAC denial shown inline (never an upsell). */
 export function isTierDenied(status: number): boolean {
@@ -113,7 +113,7 @@ export function looksLikeAuditResponse(body: unknown): body is AuditResponse {
 }
 
 /**
- * The roles the caller may assign, given their own role — so the UI offers only
+ * The roles the caller may assign, given their own role - so the UI offers only
  * valid choices (the API still enforces). Mirrors the server rule: Owners may
  * assign any role; Admins may assign only the non-privileged Member/Viewer;
  * anyone else may assign nothing.
@@ -138,7 +138,7 @@ export function canViewAudit(callerRole: string): boolean {
  * Whether the caller may modify or remove a member holding `targetRole`. Mirrors
  * the server rule: an Owner may act on anyone; an Admin may act only on
  * non-privileged (Member/Viewer) members; anyone else may act on no one. The API
- * still enforces this — the UI uses it only to disable controls that would 403.
+ * still enforces this - the UI uses it only to disable controls that would 403.
  */
 export function canActOnTarget(callerRole: string, targetRole: string): boolean {
   if (callerRole === 'owner') return true;

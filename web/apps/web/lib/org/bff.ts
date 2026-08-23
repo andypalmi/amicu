@@ -4,7 +4,7 @@ import type { AddMemberRequest, ChangeRoleRequest } from '@amicu/api-client';
 // Body validation for the /api/org/* BFF routes. Session guarding and the
 // upstream-unreachable helper are shared with the engine routes (see
 // lib/engine/bff.ts); this only checks request shapes. Role validity and every
-// RBAC rule are the Management API's job — the BFF forwards, it does not decide.
+// RBAC rule are the Management API's job - the BFF forwards, it does not decide.
 
 /**
  * Parse a JSON body for `POST /api/org/members`: require a non-empty string

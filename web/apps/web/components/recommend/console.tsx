@@ -25,7 +25,7 @@ function looksLikeReport(body: unknown): body is TuningReport {
 
 // The advisory recommendation console: paste a measured metrics + estimate
 // snapshot, POST it to the /api/recommend BFF, and render the returned tuning
-// report with full transparency. All ranking/rationale comes from the API — this
+// report with full transparency. All ranking/rationale comes from the API - this
 // component only presents it and never authors advice.
 export function RecommendConsole() {
   const tier = useTier();
@@ -75,7 +75,7 @@ export function RecommendConsole() {
       if (res.status === 422) {
         // A well-formed-JSON body whose nested fields have the wrong type reaches
         // the API's extractor, which answers 422 with a plain-text (non-JSON)
-        // body — so don't rely on payload.error here.
+        // body - so don't rely on payload.error here.
         setResult({
           kind: 'error',
           message:
@@ -83,7 +83,7 @@ export function RecommendConsole() {
         });
         return;
       }
-      // 400 malformed body, 502 upstream, etc. — surface the API's own message.
+      // 400 malformed body, 502 upstream, etc. - surface the API's own message.
       const message =
         (payload as { error?: string })?.error ?? `Request failed (${res.status}).`;
       setResult({ kind: 'error', message });
@@ -129,7 +129,7 @@ export function RecommendConsole() {
             {pending ? 'Diagnosing…' : 'Diagnose'}
           </Button>
           <span className="text-xs text-muted-foreground">
-            Advisory only — recommendations are never auto-applied.
+            Advisory only - recommendations are never auto-applied.
           </span>
         </div>
       </section>

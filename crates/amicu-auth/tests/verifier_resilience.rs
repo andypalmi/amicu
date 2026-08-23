@@ -17,7 +17,7 @@ use async_trait::async_trait;
 const ISS: &str = "https://auth.amicu.dev";
 const AUD: &str = "amicu-api";
 
-/// Advanceable monotonic clock — deterministic, no real sleeps. Cloned into the
+/// Advanceable monotonic clock - deterministic, no real sleeps. Cloned into the
 /// verifier while the test keeps a handle to advance it.
 #[derive(Clone)]
 struct TestClock {

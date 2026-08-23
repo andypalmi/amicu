@@ -7,7 +7,7 @@
 
 import { isTier, type Tier } from './tier';
 
-/** Roles claim — free-form strings assigned by the auth service. */
+/** Roles claim - free-form strings assigned by the auth service. */
 export type Role = string;
 
 /**
@@ -15,7 +15,7 @@ export type Role = string;
  * Standard JWT registered claims plus the Amicu app claims (`tier`, `roles`).
  */
 export interface AccessClaims {
-  /** Subject — the user id. */
+  /** Subject - the user id. */
   sub: string;
   /** Amicu tier claim. */
   tier: Tier;
@@ -35,7 +35,7 @@ export interface AccessClaims {
 
 /**
  * The session object exposed to the app (server helpers + client context).
- * Deliberately excludes the raw token — components never receive it.
+ * Deliberately excludes the raw token - components never receive it.
  */
 export interface SessionUser {
   sub: string;
@@ -56,7 +56,7 @@ export function toSessionUser(claims: AccessClaims): SessionUser {
 
 /**
  * Normalize a raw JWT payload into typed claims, or return null if it is missing
- * required fields / has an unknown tier. Does NOT verify the signature — callers
+ * required fields / has an unknown tier. Does NOT verify the signature - callers
  * must have verified first (see `verifyAccessToken`).
  */
 export function normalizeClaims(payload: Record<string, unknown>): AccessClaims | null {

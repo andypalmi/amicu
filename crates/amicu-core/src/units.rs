@@ -20,10 +20,10 @@ use std::str::FromStr;
 /// back to raw bytes (`"…B"`).
 ///
 /// Family preservation is a *tendency*, not a guarantee: for realistic
-/// magnitudes a decimal-authored value renders back in the decimal family —
-/// `"16GB"` displays as `"16GB"`, not the equal-but-surprising `"15625000KiB"`
-/// — but a value that is an exact multiple of both a decimal unit and a larger
-/// binary unit crosses families (still losslessly).
+/// magnitudes a decimal-authored value renders back in the decimal family - `"16GB"`
+/// displays as `"16GB"`, not the equal-but-surprising `"15625000KiB"` - but a value
+/// that is an exact multiple of both a decimal unit and a larger binary unit
+/// crosses families (still losslessly).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ByteSize(u64);
 

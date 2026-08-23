@@ -97,7 +97,7 @@ fn post(path: &str, token: Option<&str>, body: &Value) -> Request<Body> {
 }
 
 /// A measured surface that fires the `under_provisioned` rule (hot queue, hot
-/// GPU, KV eviction) plus `preemption_recompute` — both Pro-gated. `vram_used`
+/// GPU, KV eviction) plus `preemption_recompute` - both Pro-gated. `vram_used`
 /// is deliberately non-canonical (`"40960MiB"`) so the normalized echo can be
 /// asserted to fold it to `"40GiB"`.
 fn saturated_metrics() -> Value {
@@ -188,7 +188,7 @@ async fn monitor_pro_returns_metrics_estimate_and_suggestions() {
 
 #[tokio::test]
 async fn monitor_community_gets_metrics_but_gated_suggestions() {
-    // Community unlocks basic monitoring — the full metric surface — but not the
+    // Community unlocks basic monitoring - the full metric surface - but not the
     // Pro-gated advisory suggestions: a 200 with metrics present and an empty
     // suggestion list, never a 403.
     let (app, token) = app_with(Tier::Community);

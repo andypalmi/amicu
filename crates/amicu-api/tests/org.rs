@@ -351,7 +351,7 @@ async fn admin_cannot_grant_privileged_role_403() {
 async fn admin_cannot_remove_an_owner_403() {
     let h = harness();
     seed(&h.store, OWNER, Role::Owner).await;
-    // A second owner so this is not blocked by the last-Owner invariant — it must
+    // A second owner so this is not blocked by the last-Owner invariant - it must
     // be blocked by RBAC (Admin may not touch a privileged member).
     seed(&h.store, "usr_owner2", Role::Owner).await;
     seed(&h.store, ADMIN, Role::Admin).await;

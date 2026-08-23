@@ -1,6 +1,6 @@
 ---
 name: amicu-production
-description: Use for production, GPU-served inference with Amicu — vLLM on NVIDIA GPUs, Kubernetes/Helm delivery, cloud providers, tensor-parallel sharding, GPU memory utilization, and autoscaling. Triggers on vLLM, Kubernetes, Helm, safetensors serving, `tensor_parallel_size`, A100/H100, or multi-GPU/cloud deployment.
+description: Use for production, GPU-served inference with Amicu - vLLM on NVIDIA GPUs, Kubernetes/Helm delivery, cloud providers, tensor-parallel sharding, GPU memory utilization, and autoscaling. Triggers on vLLM, Kubernetes, Helm, safetensors serving, `tensor_parallel_size`, A100/H100, or multi-GPU/cloud deployment.
 ---
 
 # Amicu Production
@@ -54,5 +54,5 @@ Never `apply` a production change without a reviewed plan and user approval.
 
 ## References
 
-- `references/vllm-args.md` — vLLM engine args and how fields map.
-- `references/helm-chart-config.md` — Kubernetes/Helm delivery and autoscaling.
+- `references/vllm-args.md` - vLLM engine args and how fields map.
+- `references/helm-chart-config.md` - Kubernetes/Helm delivery and autoscaling.

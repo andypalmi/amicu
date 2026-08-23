@@ -563,7 +563,7 @@ fn apply_json_stdout_is_a_single_json_value() {
     let td = TempDir::new();
     let project = Project::new(&td.path);
     // Prior state holds a deployment the new config drops, yielding a destroy
-    // plan that starts nothing (no handle held) — so no process is spawned.
+    // plan that starts nothing (no handle held) - so no process is spawned.
     write(&td.path, "amicu.hcl", VALID_CONFIG);
     let prior = project.load_graph().unwrap();
     project

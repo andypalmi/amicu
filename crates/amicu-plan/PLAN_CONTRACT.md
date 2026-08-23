@@ -1,6 +1,6 @@
 # Amicu Plan Contract
 
-`amicu plan` renders a single, stable JSON object — the **plan contract** —
+`amicu plan` renders a single, stable JSON object - the **plan contract** -
 that the CLI displays and that the API and UI consume unchanged. This document
 describes that contract and its stability guarantee.
 

@@ -3,7 +3,7 @@
 //! [`MetricsCollector`] folds content-free [`RequestRecord`]s into per-deployment
 //! aggregates and reports a [`MetricsSnapshot`] that aligns with
 //! [`RuntimeMetrics`](amicu_runtime::RuntimeMetrics). Only counts, latencies,
-//! and token totals are kept — never request or response content. Aggregation
+//! and token totals are kept - never request or response content. Aggregation
 //! is deliberately simple and clock-free: latency samples are retained so the
 //! median is exact, and throughput is total generated tokens over total latency.
 

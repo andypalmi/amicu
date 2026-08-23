@@ -1,4 +1,4 @@
-//! `amicu doctor [--output json]` — environment and project diagnostics.
+//! `amicu doctor [--output json]` - environment and project diagnostics.
 
 use std::io::Write;
 

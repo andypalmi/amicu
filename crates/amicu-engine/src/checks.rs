@@ -13,7 +13,7 @@ use amicu_runtime::RuntimeAdapter;
 
 use crate::catalog::build_catalog;
 
-/// `AMICU-SCHEMA-002` — the same id is declared in more than one config file.
+/// `AMICU-SCHEMA-002` - the same id is declared in more than one config file.
 const DUPLICATE_ID: DiagnosticCode = DiagnosticCode::new(Category::Schema, 2);
 
 /// Run reference and per-deployment runtime checks over `graph`.

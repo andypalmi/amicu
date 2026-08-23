@@ -203,7 +203,7 @@ pub(crate) async fn sign_up(
 ) -> Result<Response, ApiError> {
     // Deliberately discard the Created/AlreadyRegistered distinction: the
     // response must be identical on both paths (anti-enumeration). We still
-    // await the call so its Argon2 work — the timing equalizer — runs.
+    // await the call so its Argon2 work - the timing equalizer - runs.
     state
         .service
         .sign_up(&body.email, &SecretValue::new(body.password.into_bytes()))
@@ -322,7 +322,7 @@ pub(crate) async fn recover(
 /// Both failure modes return `400`, but they are deliberately *not* the same
 /// message: a weak new password gets a distinct, helpful policy message, while
 /// an unknown/expired/already-used token gets a generic one. This leaks nothing,
-/// because the password policy is checked *before* the token is looked up — so
+/// because the password policy is checked *before* the token is looked up - so
 /// the weak-password message can never depend on (and never signals) whether the
 /// token is valid or which account it belongs to.
 #[utoipa::path(

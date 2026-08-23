@@ -33,7 +33,7 @@ pub trait StateBackendAdapter: Adapter + DescribeCapabilities {
     /// Record `snapshot`, authorized by the held `lock`.
     ///
     /// Implementations MUST reject the push when `lock` does not match the lock
-    /// currently guarding the state — the state is never overwritten without
+    /// currently guarding the state - the state is never overwritten without
     /// its lock.
     async fn push(&self, snapshot: &StateSnapshot, lock: &LockHandle) -> Result<(), AdapterError>;
 
@@ -53,7 +53,7 @@ pub trait StateBackendAdapter: Adapter + DescribeCapabilities {
     ///
     /// Like [`push`](Self::push), this mutates recorded state, so implementations
     /// MUST reject the rollback when `lock` does not match the lock currently
-    /// guarding the state — a rollback can never race a concurrent push.
+    /// guarding the state - a rollback can never race a concurrent push.
     async fn rollback(&self, version: &StateVersion, lock: &LockHandle)
     -> Result<(), AdapterError>;
 

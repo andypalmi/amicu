@@ -1,13 +1,13 @@
 ---
 name: amicu-core
-description: Use when starting any work on an Amicu project — setting it up, discovering what resources and commands exist, or running the core validate/plan/apply workflow. Always load this first; it carries the safety rules every other Amicu skill depends on. Triggers on amicu.hcl, `amicu` CLI usage, or "Terraform for AI inference".
+description: Use when starting any work on an Amicu project - setting it up, discovering what resources and commands exist, or running the core validate/plan/apply workflow. Always load this first; it carries the safety rules every other Amicu skill depends on. Triggers on amicu.hcl, `amicu` CLI usage, or "Terraform for AI inference".
 ---
 
 # Amicu Core
 
 Amicu is declarative infrastructure for AI inference: you describe models,
 hardware, and deployments in HCL, then `validate` → `plan` → `apply`. It is
-agent-native but not vendor-locked — discover the schema and capabilities
+agent-native but not vendor-locked - discover the schema and capabilities
 through the CLI rather than guessing configuration.
 
 ## Safety rules (non-negotiable)

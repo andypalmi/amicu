@@ -3,12 +3,12 @@
 //! Implements [`RuntimeAdapter`](amicu_runtime::RuntimeAdapter) for the
 //! `llama-server` local path (PRD "llama.cpp Local Path" steps 2–4):
 //!
-//! - **Binary detection** ([`binary`]) — locate `llama-server`, probe
+//! - **Binary detection** ([`binary`]) - locate `llama-server`, probe
 //!   `--version`, and gate on a minimum. Command execution is injectable behind
 //!   [`CommandRunner`](binary::CommandRunner) for hermetic tests.
-//! - **GGUF download** ([`download`]) — resumable/retryable fetch layered on the
+//! - **GGUF download** ([`download`]) - resumable/retryable fetch layered on the
 //!   registry's [`ModelSourceAdapter`](amicu_registry::ModelSourceAdapter).
-//! - **Command generation** ([`command`]) — render the visible, secret-free
+//! - **Command generation** ([`command`]) - render the visible, secret-free
 //!   `llama-server` command line.
 //!
 //! Planning (`capabilities`/`validate`/`plan_launch`) is pure and resolves the

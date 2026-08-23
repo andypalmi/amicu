@@ -20,11 +20,11 @@ use amicu_core::secret::{SecretRef, SecretValue};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-/// `AMICU-POLICY-010` — a referenced secret is unavailable; blocks new applies.
+/// `AMICU-POLICY-010` - a referenced secret is unavailable; blocks new applies.
 const SECRET_UNAVAILABLE: DiagnosticCode = DiagnosticCode::new(Category::Policy, 10);
-/// `AMICU-POLICY-011` — the backend does not support the requested operation.
+/// `AMICU-POLICY-011` - the backend does not support the requested operation.
 const SECRET_UNSUPPORTED: DiagnosticCode = DiagnosticCode::new(Category::Policy, 11);
-/// `AMICU-POLICY-012` — the secret backend failed transiently.
+/// `AMICU-POLICY-012` - the secret backend failed transiently.
 const SECRET_BACKEND: DiagnosticCode = DiagnosticCode::new(Category::Policy, 12);
 
 /// Plain-data descriptor of what a secret manager supports.
@@ -112,7 +112,7 @@ pub trait SecretManagerAdapter: Adapter + DescribeCapabilities {
     /// [`SecretError::Unavailable`] for an unknown secret.
     async fn rotate(&self, r: &SecretRef) -> Result<(), AdapterError>;
 
-    /// List references to every known secret — metadata only, never values.
+    /// List references to every known secret - metadata only, never values.
     ///
     /// # Errors
     /// A backend error if the listing cannot be produced.

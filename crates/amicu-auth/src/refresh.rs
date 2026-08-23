@@ -11,7 +11,7 @@
 //! a time (its current leaf). Re-presenting an already-revoked token is
 //! therefore anomalous: either a client replayed an old token, or a stolen
 //! token is being replayed after the legitimate client already rotated past it.
-//! Either way it is treated as a compromise signal — the whole family is
+//! Either way it is treated as a compromise signal - the whole family is
 //! revoked and flagged (see [`RefreshStore::compromise_family`]) so the
 //! attacker's rotated token and the victim's live token both die, forcing a
 //! fresh authentication. This mirrors the OAuth 2.0 refresh-token rotation
@@ -123,7 +123,7 @@ pub enum RefreshConsume {
         family_id: String,
     },
     /// The token existed but was already revoked, or its family was already
-    /// flagged compromised — a reuse/theft signal. The caller must compromise
+    /// flagged compromised - a reuse/theft signal. The caller must compromise
     /// the family (idempotent) and reject.
     Reuse {
         /// Family to compromise.
@@ -172,13 +172,13 @@ pub trait RefreshStore: Send + Sync {
     // `family_id`). The user-facing "suspicious sign-in" notice can now ride the
     // notification seam added in amicu-planning#102
     // (`crate::notify::Notifier`); it is not wired here because
-    // `compromise_family` sees only a `family_id`, not the owning user's email —
+    // `compromise_family` sees only a `family_id`, not the owning user's email -
     // resolving that needs a family→user lookup this in-memory store does not
     // index yet. Wire it at the service call site once the persistent store
     // exposes that mapping.
     async fn compromise_family(&self, family_id: &str) -> Result<()>;
     /// Whether a family has been flagged compromised by reuse detection.
-    /// Primarily an observability/audit hook — enforcement already follows from
+    /// Primarily an observability/audit hook - enforcement already follows from
     /// every token in the family having been revoked.
     async fn is_family_compromised(&self, family_id: &str) -> Result<bool>;
 }

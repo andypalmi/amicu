@@ -3,7 +3,7 @@
 //! [`CapabilitySyncWorker`] is the async driver behind the pure
 //! [`amicu_providers::sync`] logic: on a fixed interval it runs one
 //! capability/pricing sync over the registered providers and stores the latest
-//! [`SyncReport`] for readers. The wall clock lives only at this edge — each
+//! [`SyncReport`] for readers. The wall clock lives only at this edge - each
 //! tick mints `now` from [`SystemTime`] and hands it to the pure `sync_all`, so
 //! the sync logic stays deterministic and testable.
 //!
@@ -118,7 +118,7 @@ mod tests {
         let reader = worker.clone();
 
         worker.tick().await;
-        // The clone observes the report the original stored — the store is shared.
+        // The clone observes the report the original stored - the store is shared.
         assert_eq!(reader.latest().expect("shared report").entries.len(), 1);
     }
 }

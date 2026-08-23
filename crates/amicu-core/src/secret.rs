@@ -1,11 +1,11 @@
 //! Foundational secret types shared across adapter families.
 //!
-//! A [`SecretRef`] is metadata — a typed pointer to a secret by name/scope —
+//! A [`SecretRef`] is metadata - a typed pointer to a secret by name/scope -
 //! and is safe to serialize into plans, logs, and telemetry. A [`SecretValue`]
 //! wraps the sensitive bytes, zeroizes them on drop, and is deliberately not
 //! `Display`/`Serialize`; its redacted [`Debug`] never reveals the contents.
 //! The [`SecretResolver`] abstraction is what the apply layer uses to turn a
-//! `SecretRef` into a `SecretValue` at apply time — never during `plan`.
+//! `SecretRef` into a `SecretValue` at apply time - never during `plan`.
 
 use std::str::Utf8Error;
 

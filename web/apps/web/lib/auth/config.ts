@@ -29,7 +29,7 @@ export const AUTH_AUDIENCE = env.AUTH_AUDIENCE;
 export const IS_PROD = process.env.NODE_ENV === 'production';
 
 // httpOnly cookie names. BOTH tokens are httpOnly + Secure + SameSite and are held
-// by the BFF only — the browser's JS never reads either. The refresh token in
+// by the BFF only - the browser's JS never reads either. The refresh token in
 // particular never reaches client code (RFC 0001 §11.6).
 export const ACCESS_COOKIE = 'amicu_at';
 export const REFRESH_COOKIE = 'amicu_rt';

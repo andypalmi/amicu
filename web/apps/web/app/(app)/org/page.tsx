@@ -15,7 +15,7 @@ export const metadata: Metadata = { title: 'Organization' };
 // each request regardless of what is rendered here.
 //
 // Note: SSO/SCIM federation is deliberately out of scope for v1 (deferred
-// post-v1 — see andypalmi/amicu-planning#92); members are managed by user id.
+// post-v1 - see andypalmi/amicu-planning#92); members are managed by user id.
 export default async function OrgPage() {
   await requireSession();
 

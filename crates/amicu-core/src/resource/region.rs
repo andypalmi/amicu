@@ -55,7 +55,7 @@ impl Residency {
     /// [`Residency::Other`]. Inverse of [`Residency::as_token`]; used where the
     /// DSL supplies a bare string with no enum tagging. Not a total inverse:
     /// a named token always parses to its named variant, so `Other("eu")` is
-    /// not reproduced — such values never reach this path (the parser only
+    /// not reproduced - such values never reach this path (the parser only
     /// emits `Other` for genuinely unknown tokens).
     #[must_use]
     pub fn from_token(token: impl Into<String>) -> Self {
@@ -78,7 +78,7 @@ impl Residency {
 ///
 /// `default_zone` is an optional third level the adapter owns: the sub-region
 /// zone (AZ) a zone-addressed provider API targets by default, e.g. `"fr-par-1"`
-/// for `"fr-par"`. It is a placement detail, never a planning input — the DSL
+/// for `"fr-par"`. It is a placement detail, never a planning input - the DSL
 /// and planner stay at residency + region, and the zone never reaches the
 /// residency filter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,7 +152,7 @@ impl Region {
 
     /// Resolve the zone a zone-addressed provider API should target: the explicit
     /// `override_zone` when the caller supplied one, else this region's
-    /// [`default_zone`](Self::default_zone). `None` when neither is set — the API
+    /// [`default_zone`](Self::default_zone). `None` when neither is set - the API
     /// addresses the region directly.
     #[must_use]
     pub fn resolve_zone<'a>(&'a self, override_zone: Option<&'a str>) -> Option<&'a str> {

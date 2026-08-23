@@ -19,7 +19,7 @@
 //! from [`api_openapi`], so they can never drift.
 //!
 //! Deliberately **not** exposed: `/apply` (state-mutating; executes downloads
-//! and launches — needs an execution sandbox) and `/stacks` / `/config`
+//! and launches - needs an execution sandbox) and `/stacks` / `/config`
 //! persistence (need server-side multi-tenant state that does not exist yet).
 
 // The suggested `Duration::from_mins`/`from_days` are unstable

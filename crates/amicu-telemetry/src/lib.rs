@@ -6,7 +6,7 @@
 //!   gauge per deployment into a [`MetricsSnapshot`] aligned with
 //!   [`RuntimeMetrics`](amicu_runtime::RuntimeMetrics).
 //! - [`RequestRecord`] captures only metadata (ids, token **counts**, latency,
-//!   outcome) — it has no field able to hold prompt or completion text, mirroring
+//!   outcome) - it has no field able to hold prompt or completion text, mirroring
 //!   [`SecretValue`](amicu_core::secret::SecretValue)'s leak-prevention by
 //!   omission. [`LoggingPolicy`] governs whether that metadata is emitted;
 //!   content is never a logging option.

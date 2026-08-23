@@ -5,7 +5,7 @@
 //! so this adapter is **residency filtering by construction**:
 //! [`NebiusProvider::new`] admits only the EU regions from [`REGIONS`], and
 //! [`provision`](NebiusProvider::provision) rejects any region outside that
-//! admitted set with [`ProviderError::UnknownRegion`] — an instance can never be
+//! admitted set with [`ProviderError::UnknownRegion`] - an instance can never be
 //! placed in a non-compliant region through this adapter.
 //! [`NebiusProvider::for_residencies`] widens the admitted set explicitly when a
 //! caller genuinely needs other jurisdictions.
@@ -73,7 +73,7 @@ fn regions() -> [NebiusRegion; 3] {
             country: "FR",
             location: "Paris",
         },
-        // Non-EU — excluded by the residency filter.
+        // Non-EU - excluded by the residency filter.
         NebiusRegion {
             code: "us-central1",
             residency: Residency::Us,

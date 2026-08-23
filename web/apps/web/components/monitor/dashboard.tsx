@@ -44,7 +44,7 @@ type Result =
 // The monitoring dashboard (measured-vs-estimated): paste a measured metrics +
 // estimate snapshot, POST it to the /api/monitor BFF, and render the returned
 // metric surface next to the estimate and the engine's advisory suggestions. It
-// renders only — every distribution, range, and suggestion comes from the API;
+// renders only - every distribution, range, and suggestion comes from the API;
 // this component computes no divergence verdict.
 export function MonitorDashboard() {
   const tier = useTier();
@@ -142,7 +142,7 @@ export function MonitorDashboard() {
             {pending ? 'Loading…' : 'Show dashboard'}
           </Button>
           <span className="text-xs text-muted-foreground">
-            Renders only — the measured distributions are shown beside the estimate; nothing is
+            Renders only - the measured distributions are shown beside the estimate; nothing is
             recomputed.
           </span>
         </div>
@@ -194,7 +194,7 @@ function LatencyVsEstimate({
 }) {
   const assumptions = estimateAssumptions(estimate);
   return (
-    <MetricCard title="Latency — measured vs. estimated">
+    <MetricCard title="Latency - measured vs. estimated">
       <div className="grid gap-4 md:grid-cols-2">
         <MeasuredVsEstimated
           label="TTFT"
@@ -230,7 +230,7 @@ function LatencyVsEstimate({
         </ul>
         <p className="text-xs text-muted-foreground">
           The estimate is a range with a stated confidence, not a single target. A measured value
-          outside the band is attributable to these assumptions — read them before drawing a
+          outside the band is attributable to these assumptions - read them before drawing a
           conclusion.
         </p>
       </div>
@@ -370,7 +370,7 @@ function ScalarRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-// A distribution shown as its three percentiles — never a single point as truth.
+// A distribution shown as its three percentiles - never a single point as truth.
 function DistributionRow({ dist, unit }: { dist: Distribution; unit?: string }) {
   const points = distributionPoints(dist, unit);
   return (
@@ -389,7 +389,7 @@ function DistributionRow({ dist, unit }: { dist: Distribution; unit?: string }) 
 }
 
 // ---------------------------------------------------------------------------
-// Advisory suggestions (the engine's — not automatic — changes)
+// Advisory suggestions (the engine's - not automatic - changes)
 // ---------------------------------------------------------------------------
 
 function SuggestionsPanel({ report, isPro }: { report: TuningReport; isPro: boolean }) {
@@ -424,7 +424,7 @@ function SuggestionsPanel({ report, isPro }: { report: TuningReport; isPro: bool
       <h2 className="text-sm font-semibold">
         Suggested changes{' '}
         <span className="font-normal text-muted-foreground">
-          ({report.recommendations.length} — advisory, never auto-applied)
+          ({report.recommendations.length} - advisory, never auto-applied)
         </span>
       </h2>
       <ul className="space-y-4">

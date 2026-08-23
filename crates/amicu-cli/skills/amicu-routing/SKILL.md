@@ -1,6 +1,6 @@
 ---
 name: amicu-routing
-description: Use for Amicu traffic and policy resources — routing policies across deployments, failover, data-residency and governance rules, tenant quotas, and budgets. Triggers on routing_policy, data_class, governance_rule, budget, tenant, residency/EU constraints, quotas, or "route/split traffic between models".
+description: Use for Amicu traffic and policy resources - routing policies across deployments, failover, data-residency and governance rules, tenant quotas, and budgets. Triggers on routing_policy, data_class, governance_rule, budget, tenant, residency/EU constraints, quotas, or "route/split traffic between models".
 ---
 
 # Amicu Routing & Policy
@@ -41,7 +41,7 @@ Weights split traffic; failover shifts away from unhealthy targets.
 - `governance_rule` allows/denies by `data_classes`, `allowed_providers`, and
   `allowed_regions` (region codes, not jurisdictions).
 - The planner rejects any provider/region that violates declared residency or
-  allowlists with an `AMICU-POLICY-*` diagnostic — a violating stack never
+  allowlists with an `AMICU-POLICY-*` diagnostic - a violating stack never
   reaches apply. Keep EU-residency constraints first-class when required.
 
 ## Tenants & budgets
@@ -56,5 +56,5 @@ Weights split traffic; failover shifts away from unhealthy targets.
 
 ## Reference
 
-- `references/routing-examples.md` — weighted routing, failover, residency, and
+- `references/routing-examples.md` - weighted routing, failover, residency, and
   budget/tenant examples.

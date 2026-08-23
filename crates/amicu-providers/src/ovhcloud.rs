@@ -6,7 +6,7 @@
 //! adapter is **residency filtering by construction**: [`OvhCloudProvider::new`]
 //! admits only the EU data centers from [`datacenters`], and
 //! [`provision`](OvhCloudProvider::provision) rejects any region outside that
-//! admitted set with [`ProviderError::UnknownRegion`] — an instance can never be
+//! admitted set with [`ProviderError::UnknownRegion`] - an instance can never be
 //! placed in a non-compliant region (including the UK) through this adapter.
 //! [`OvhCloudProvider::for_residencies`] widens the admitted set explicitly when
 //! a caller genuinely needs other jurisdictions.
@@ -20,7 +20,7 @@
 //! `/cloud/project/{serviceName}/instance`) through the [`HttpTransport`] seam:
 //! `POST .../instance` to create, `GET .../instance/{id}` for status, and
 //! `DELETE .../instance/{id}` to tear down. The adapter never touches a concrete
-//! HTTP client — production uses [`ReqwestTransport`], tests inject a mock — so
+//! HTTP client - production uses [`ReqwestTransport`], tests inject a mock - so
 //! the provisioning path is exercised with no network, credentials, or spend.
 //! HTTP status codes map onto typed [`ProviderError`]s (`401`/`403` → credentials
 //! rejected, `404` → unknown instance/offering, `409`/`429` → capacity
@@ -109,14 +109,14 @@ fn datacenters() -> [DataCenter; 9] {
             country: "PL",
             location: "Warsaw",
         },
-        // UK — excluded by the EU filter (not EU/EEA).
+        // UK - excluded by the EU filter (not EU/EEA).
         DataCenter {
             code: "UK1",
             residency: Residency::Uk,
             country: "GB",
             location: "London",
         },
-        // Non-EU — excluded by the residency filter.
+        // Non-EU - excluded by the residency filter.
         DataCenter {
             code: "BHS",
             residency: Residency::Ca,
@@ -532,8 +532,8 @@ impl Provider for OvhCloudProvider {
             }));
         }
         // Residency filter: only admitted (EU by default) regions can host an
-        // instance. A real OVH data center outside the admitted set — including
-        // the UK — is rejected here.
+        // instance. A real OVH data center outside the admitted set - including
+        // the UK - is rejected here.
         if !self.admits_region(&request.region) {
             return Err(AdapterError::from_kind(ProviderError::UnknownRegion {
                 region: request.region.clone(),

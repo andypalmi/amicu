@@ -5,7 +5,7 @@
 //! adapter is **residency filtering by construction**: [`GcpProvider::new`] admits
 //! only the EU regions from [`regions`], and [`provision`](GcpProvider::provision)
 //! rejects any region outside that admitted set with
-//! [`ProviderError::UnknownRegion`] — an instance can never be placed in a non-EU
+//! [`ProviderError::UnknownRegion`] - an instance can never be placed in a non-EU
 //! region (e.g. `us-central1`) through this adapter.
 //! [`GcpProvider::for_residencies`] widens the admitted set explicitly when a
 //! caller genuinely needs other jurisdictions.
@@ -97,7 +97,7 @@ fn regions() -> [GcpRegion; 8] {
             location: "Paris",
             zone: "europe-west9-a",
         },
-        // Non-EU — excluded by the residency filter.
+        // Non-EU - excluded by the residency filter.
         GcpRegion {
             code: "us-central1",
             residency: Residency::Us,
@@ -360,7 +360,7 @@ impl GcpProvider {
 
     /// The zone a zone-addressed GCP call targets for `region`: the explicit
     /// `override_zone` when present, else the admitted region's default zone.
-    /// Adapter-owned — the zone never reaches the residency filter.
+    /// Adapter-owned - the zone never reaches the residency filter.
     fn resolve_zone(&self, region: &str, override_zone: Option<&str>) -> Option<String> {
         self.capabilities
             .regions

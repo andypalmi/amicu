@@ -1,4 +1,4 @@
-//! `amicu init` — scaffold a new project. Idempotent; never overwrites.
+//! `amicu init` - scaffold a new project. Idempotent; never overwrites.
 
 use std::fs;
 use std::io::Write;

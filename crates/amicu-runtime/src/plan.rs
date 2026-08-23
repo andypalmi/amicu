@@ -16,7 +16,7 @@ pub enum RenderedLaunch {
     /// A command to exec directly: the structured argument vector (`argv[0]` is
     /// the program) plus a shell-quoted `text` for display only.
     ///
-    /// Supervisors spawn from `argv` — never by shell-splitting `text` — so a
+    /// Supervisors spawn from `argv` - never by shell-splitting `text` - so a
     /// path with spaces or metacharacters can neither mis-split nor inject.
     Command { argv: Vec<String>, text: String },
     /// A declarative manifest to submit to a scheduler.

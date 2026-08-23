@@ -3,7 +3,7 @@
 //! Turns a provider price list plus a usage input into an
 //! [`EstimateRange<Money>`]: the on-demand rate drives the upper bound and, when
 //! the offering is interruptible, the spot rate drives the lower bound. Every
-//! estimate is a formula over a price list — no direct observation — so it
+//! estimate is a formula over a price list - no direct observation - so it
 //! carries [`Provenance::ProviderPrice`] and [`Confidence::Estimated`], and
 //! records the assumptions it rests on. These are planning estimates, never
 //! guarantees.

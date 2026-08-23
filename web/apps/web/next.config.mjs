@@ -12,7 +12,7 @@ const isProd = process.env.NODE_ENV === 'production';
 // the stricter alternative, but it must be threaded through middleware and read
 // back from the request CSP header; our proxy.ts already runs auth-refresh on
 // /api/* routes and rewrites docs requests, and Next warns the nonce disables
-// caching of prefetched RSC payloads — reconciling that with the existing
+// caching of prefetched RSC payloads - reconciling that with the existing
 // middleware branches (and verifying it produces no runtime CSP violations
 // across the fumadocs docs area, Tailwind v4 and next/font) was not safely
 // achievable without browser verification. We deliberately avoid 'unsafe-eval'.
@@ -20,7 +20,7 @@ const isProd = process.env.NODE_ENV === 'production';
 // Notes on the host allowlists:
 //  - Fonts are self-hosted by next/font/google (downloaded at build time and
 //    served same-origin), so no fonts.googleapis.com / fonts.gstatic.com hosts
-//    are needed — `font-src 'self'` and `style-src 'self'` suffice.
+//    are needed - `font-src 'self'` and `style-src 'self'` suffice.
 //  - The browser only ever calls same-origin /api/* (BFF pattern); the server
 //    talks to the upstream API. So `connect-src 'self'` is correct and the
 //    upstream origin is intentionally NOT listed.

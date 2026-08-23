@@ -7,7 +7,7 @@ import type { CheckoutRequest } from '@amicu/api-client';
 
 /**
  * Parse a JSON body and require a non-empty string `plan` (a tier name the API
- * maps to a Stripe price). Returns the typed body or a 400 Response — mirroring
+ * maps to a Stripe price). Returns the typed body or a 400 Response - mirroring
  * the API's own error shape so the client handles one contract everywhere. The
  * plan→price mapping and its validity are the API's job.
  */

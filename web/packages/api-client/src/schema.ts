@@ -339,7 +339,7 @@ export interface paths {
          *     workload estimate, then returns the [`TuningReport`] *for the caller's tier*:
          *     recommendations the caller has not unlocked are withheld (a Community token
          *     gets `200` with an empty list, Pro+ gets the full depth). Stateless and
-         *     side-effect-free: nothing is applied — recommendations are advisory data.
+         *     side-effect-free: nothing is applied - recommendations are advisory data.
          */
         post: operations["recommend_handler"];
         delete?: never;
@@ -390,7 +390,7 @@ export interface paths {
          *     Both failure modes return `400`, but they are deliberately *not* the same
          *     message: a weak new password gets a distinct, helpful policy message, while
          *     an unknown/expired/already-used token gets a generic one. This leaks nothing,
-         *     because the password policy is checked *before* the token is looked up — so
+         *     because the password policy is checked *before* the token is looked up - so
          *     the weak-password message can never depend on (and never signals) whether the
          *     token is valid or which account it belongs to.
          */
@@ -796,7 +796,7 @@ export interface components {
         /** @description Response for `GET /org/members`. */
         MembersResponse: {
             /**
-             * @description The calling user's own role — so a client can render exactly the controls
+             * @description The calling user's own role - so a client can render exactly the controls
              *     their role allows (the API still enforces every action).
              * @example owner
              */
@@ -844,7 +844,7 @@ export interface components {
         /**
          * @description What the monitoring dashboard renders: the server-normalized metric surface,
          *     the normalized estimate (with its stated assumptions and confidence), and the
-         *     engine's advisory — never automatic — suggested changes.
+         *     engine's advisory - never automatic - suggested changes.
          *
          *     The measured-vs-estimated comparison is *presentation*: the frontend places
          *     the measured distributions next to the estimate's ranges and stated

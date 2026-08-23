@@ -8,7 +8,7 @@ export const metadata: Metadata = { title: 'Recommendations' };
 // The advisory recommendations surface: paste a measured metrics + estimate
 // snapshot and get back tuning recommendations, each with the evidence,
 // confidence, suggested changes, and rejected alternatives behind it (via the
-// /api/recommend BFF route). Tier is enforced by the API — a Community caller
+// /api/recommend BFF route). Tier is enforced by the API - a Community caller
 // still gets a 200 with an empty report, and the UI degrades gracefully.
 export default async function RecommendPage() {
   await requireSession();

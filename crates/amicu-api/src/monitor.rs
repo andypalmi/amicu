@@ -1,8 +1,8 @@
 //! HTTP surface for the stateless monitoring endpoint: `POST /monitor`.
 //!
 //! The server holds no live metric collection and no per-stack state (that is
-//! future work, TASK-079), so — exactly like `/validate`, `/plan`, and
-//! `/recommend` — this endpoint is a pure function of its request body. The
+//! future work, TASK-079), so - exactly like `/validate`, `/plan`, and
+//! `/recommend` - this endpoint is a pure function of its request body. The
 //! client submits the measured [`StackMetrics`](amicu_telemetry::StackMetrics)
 //! snapshot plus the [`WorkloadEstimate`](amicu_recommend::WorkloadEstimate) it
 //! is judged against; the handler validates and normalizes them and returns the
@@ -52,7 +52,7 @@ pub struct MonitorRequest {
 
 /// What the monitoring dashboard renders: the server-normalized metric surface,
 /// the normalized estimate (with its stated assumptions and confidence), and the
-/// engine's advisory — never automatic — suggested changes.
+/// engine's advisory - never automatic - suggested changes.
 ///
 /// The measured-vs-estimated comparison is *presentation*: the frontend places
 /// the measured distributions next to the estimate's ranges and stated

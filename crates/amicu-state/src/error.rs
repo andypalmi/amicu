@@ -9,7 +9,7 @@
 use amicu_core::adapter::{AdapterError, AdapterErrorKind};
 use amicu_core::diagnostic::{Category, DiagnosticCode, Severity};
 
-/// `AMICU-STATE-001` — state is locked by another operation.
+/// `AMICU-STATE-001` - state is locked by another operation.
 ///
 /// Re-exported from the core catalog rather than re-declared, so this crate and
 /// core cannot drift on the shared code.
@@ -18,11 +18,11 @@ pub use amicu_core::diagnostic::catalog::STATE_LOCKED;
 // `AMICU-STATE-002/003/004` have no core catalog entry yet; these are an
 // intentional local mirror pending a core seed. Keep them numerically aligned
 // with `Category::State`.
-/// `AMICU-STATE-002` — a push or rollback was presented without the lock guarding the state.
+/// `AMICU-STATE-002` - a push or rollback was presented without the lock guarding the state.
 pub const STATE_LOCK_NOT_HELD: DiagnosticCode = DiagnosticCode::new(Category::State, 2);
-/// `AMICU-STATE-003` — recorded state is corrupt and needs manual recovery.
+/// `AMICU-STATE-003` - recorded state is corrupt and needs manual recovery.
 pub const STATE_CORRUPTED: DiagnosticCode = DiagnosticCode::new(Category::State, 3);
-/// `AMICU-STATE-004` — the requested history version does not exist.
+/// `AMICU-STATE-004` - the requested history version does not exist.
 pub const STATE_VERSION_NOT_FOUND: DiagnosticCode = DiagnosticCode::new(Category::State, 4);
 
 /// Failures a state backend can surface, each mapped to an `AMICU-STATE-*` code.

@@ -5,7 +5,7 @@ import { useTheme } from 'next-themes';
 import { Toaster as SonnerToaster } from 'sonner';
 
 // The single mounted toast host for the app (see `app/layout.tsx`). It follows
-// the same class-based theme fumadocs/next-themes toggles on `<html>` — reading
+// the same class-based theme fumadocs/next-themes toggles on `<html>` - reading
 // the active theme from next-themes rather than the OS `prefers-color-scheme`
 // so a toast matches whatever the in-app theme switch is set to.
 //

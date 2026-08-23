@@ -1,7 +1,7 @@
 // Single attach point for SERVER-side error logging.
 //
 // The BFF's upstream catches return `502 upstreamUnreachable()` and NEVER echo an
-// internal message to the client — good. But a bare `catch {}` also discards the
+// internal message to the client - good. But a bare `catch {}` also discards the
 // error, so upstream outages/bugs are invisible in prod logs. `logServerError` is
 // the server counterpart of the client hook `report-error.ts`: same structured,
 // single-sink philosophy, but it writes to server stderr only (never the client).
@@ -28,7 +28,7 @@ export interface ServerErrorReport {
   route?: string;
   /** Operation tag, when provided. */
   op?: string;
-  /** Error stack, when available. Server-side only — never sent to the client. */
+  /** Error stack, when available. Server-side only - never sent to the client. */
   stack?: string;
   /** ISO timestamp the report was created. */
   timestamp: string;
@@ -49,14 +49,14 @@ function describe(error: unknown): { message: string; name?: string; stack?: str
     const json = JSON.stringify(error);
     return { message: json ?? String(error) };
   } catch {
-    // e.g. circular structure — fall back to a plain string cast.
+    // e.g. circular structure - fall back to a plain string cast.
     return { message: String(error) };
   }
 }
 
 /**
  * Build the structured report for `error`/`context`. Exported for unit tests.
- * Only tags and error metadata are included — no request body, tokens, or PII.
+ * Only tags and error metadata are included - no request body, tokens, or PII.
  */
 export function buildServerErrorReport(
   error: unknown,
@@ -75,7 +75,7 @@ export function buildServerErrorReport(
 
 /**
  * Log a server-side error to stderr as a structured record. Call from a BFF
- * catch BEFORE returning the client-facing 502 — this is purely for operators.
+ * catch BEFORE returning the client-facing 502 - this is purely for operators.
  *
  * @param error   The caught throwable; may be any type.
  * @param context Optional `{ route, op }` tags identifying the call site.

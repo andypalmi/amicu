@@ -53,7 +53,7 @@ export async function verifyAccessToken(
 
 /**
  * Read the `exp` from a token WITHOUT verifying its signature. Only for the cheap
- * "should the BFF proactively refresh this?" decision in middleware — never trust
+ * "should the BFF proactively refresh this?" decision in middleware - never trust
  * the result for anything security-relevant. Returns seconds-since-epoch or null.
  */
 export function decodeExpUnsafe(token: string): number | null {

@@ -1,7 +1,7 @@
 //! Serving-metric surface exposed by `GET /stacks/:id/metrics`.
 //!
 //! Typed, content-free measurements the Management API serializes and the UI
-//! renders (the frontend computes nothing — see web RFC 0001 §4.4). Latency is
+//! renders (the frontend computes nothing - see web RFC 0001 §4.4). Latency is
 //! reported as [`Distribution`]s of percentiles, never means. Utilizations are
 //! fractions in `[0, 1]`; token counts and event counts are exact. These types
 //! are the measured half of the recommendation engine's input.
@@ -133,7 +133,7 @@ pub struct CostMetrics {
     pub per_hour: Money,
     pub per_million_tokens: Money,
     pub per_request: Money,
-    /// Per-hour cost divided by useful utilization — surfaces idle burn.
+    /// Per-hour cost divided by useful utilization - surfaces idle burn.
     pub utilization_adjusted_per_hour: Money,
 }
 

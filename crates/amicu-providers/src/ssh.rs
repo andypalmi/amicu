@@ -7,8 +7,8 @@
 //! with no network, credentials, or spend.
 //!
 //! The split mirrors the [HTTP seam](crate::transport): an [`SshTransportError`]
-//! means the exchange never completed (connection failure, auth failure, timeout)
-//! — the analogue of a `reqwest` error, never a status code — while a command
+//! means the exchange never completed (connection failure, auth failure, timeout) -
+//! the analogue of a `reqwest` error, never a status code - while a command
 //! that *ran* and returned any exit status (zero or not) is an
 //! `Ok(CommandOutput)` for the adapter to interpret, exactly as an HTTP `4xx`/
 //! `5xx` is an `Ok(HttpResponse)`. Auth failure is the one permanent variant (it
@@ -51,7 +51,7 @@ impl SshTarget {
 /// A completed remote command: its exit status and the raw `stdout`/`stderr`
 /// bytes.
 ///
-/// Returned for every command that ran, whatever its exit status — the adapter
+/// Returned for every command that ran, whatever its exit status - the adapter
 /// inspects [`exit_status`](Self::exit_status) (via [`is_success`](Self::is_success))
 /// to decide success or which [`ProviderError`](crate::provider::ProviderError)
 /// applies, the way it inspects an HTTP status code.
@@ -82,7 +82,7 @@ impl CommandOutput {
         self.exit_status == 0
     }
 
-    /// `stderr` decoded lossily as UTF-8, trimmed — a secret-free summary safe to
+    /// `stderr` decoded lossily as UTF-8, trimmed - a secret-free summary safe to
     /// fold into an error `detail`.
     #[must_use]
     pub fn stderr_summary(&self) -> String {
@@ -133,7 +133,7 @@ pub trait SshTransport: Send + Sync {
     ) -> Result<CommandOutput, SshTransportError>;
 }
 
-/// The production [`SshTransport`], backed by [`russh`] — a pure-Rust async SSH
+/// The production [`SshTransport`], backed by [`russh`] - a pure-Rust async SSH
 /// client.
 ///
 /// `russh` (with its `ring` crypto backend) keeps the build hermetic: like the
@@ -275,7 +275,7 @@ pub(crate) struct MockSshTransport {
 }
 
 /// A command a [`MockSshTransport`] observed: the target host/user/port and the
-/// command string. The key is never recorded — the mock ignores it — so a test
+/// command string. The key is never recorded - the mock ignores it - so a test
 /// can assert the key never leaks.
 #[cfg(test)]
 pub(crate) struct SeenCommand {

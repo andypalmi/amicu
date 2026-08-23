@@ -14,7 +14,7 @@ export const metadata: Metadata = {
 // Authed product surface. The session is resolved (and silently refreshed by the
 // BFF middleware in proxy.ts) before render; unauthenticated visitors are sent to
 // /login. The verified claims are handed to client components via SessionProvider
-// as plain data — the raw access/refresh tokens never cross into the browser.
+// as plain data - the raw access/refresh tokens never cross into the browser.
 export default async function Layout({ children }: LayoutProps<'/'>) {
   const user = await requireSession();
 
@@ -25,7 +25,7 @@ export default async function Layout({ children }: LayoutProps<'/'>) {
         // `active: 'nested-url'` lets fumadocs mark a nav item active for its whole
         // section (exact URL or any nested route) using its own client-side
         // usePathname match. In the neutral theme the active state is a neutral
-        // foreground shift (muted-foreground -> fd-primary, hsl 0 0% 9%) — no accent.
+        // foreground shift (muted-foreground -> fd-primary, hsl 0 0% 9%) - no accent.
         links={[
           { text: 'Console', url: '/app', active: 'nested-url' },
           { text: 'Wizard', url: '/wizard', active: 'nested-url' },
@@ -38,7 +38,7 @@ export default async function Layout({ children }: LayoutProps<'/'>) {
           // Display-only tier badge, sourced from the server-verified session (so it
           // never flashes a wrong/unknown value). `secondary: true` places it in the
           // header's right-hand group next to the account/theme controls. This is
-          // presentation only — real tier gating is enforced by the API.
+          // presentation only - real tier gating is enforced by the API.
           {
             type: 'custom',
             secondary: true,

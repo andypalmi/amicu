@@ -1,6 +1,6 @@
 # Amicu web
 
-The Amicu frontend — marketing site, product app, and documentation — as a single
+The Amicu frontend - marketing site, product app, and documentation - as a single
 Next.js (App Router) application, plus its shared packages. A **thin client** over
 the Rust Management API: it renders questions, candidates, plans, and metrics, but
 owns no planning, recommendation, policy, or capability logic (RFC 0001 §6).
@@ -19,13 +19,13 @@ web/                          # pnpm workspace root (Turborepo)
 │       ├── app/(app)/        # authed product shell (placeholder; amicu-planning#78 wires auth)
 │       ├── app/docs/         # Fumadocs, single-app (multi-zone deferred)
 │       ├── app/api/          # thin BFF route handlers (no domain logic)
-│       ├── app/llms.txt/     # + llms-full.txt, llms.mdx — AI-agent exports
+│       ├── app/llms.txt/     # + llms-full.txt, llms.mdx - AI-agent exports
 │       └── content/docs/     # MDX docs (intro, getting-started, reference)
 ├── packages/
 │   ├── ui/                   # shared shadcn design system + Tailwind v4 tokens
 │   ├── config/               # shared tsconfig + eslint presets
-│   ├── api-client/           # STUB — generated-only client (see its README)
-│   └── auth/                 # STUB — JWKS verify + session (amicu-planning#78)
+│   ├── api-client/           # STUB - generated-only client (see its README)
+│   └── auth/                 # STUB - JWKS verify + session (amicu-planning#78)
 ├── turbo.json
 └── pnpm-workspace.yaml
 ```
@@ -38,7 +38,7 @@ Turborepo + pnpm. Theme-aware; restrained motion (dev-infra audience).
 ## Prerequisites
 
 - Node.js >= 20.9.0
-- pnpm — `corepack enable pnpm`
+- pnpm - `corepack enable pnpm`
 
 ## Commands
 
@@ -46,7 +46,7 @@ Run from `web/`:
 
 ```bash
 pnpm install
-pnpm dev         # turbo dev — apps/web on http://localhost:3000
+pnpm dev         # turbo dev - apps/web on http://localhost:3000
 pnpm build       # turbo build (includes the /docs route + llms.txt)
 pnpm lint
 pnpm typecheck
@@ -57,7 +57,7 @@ Routes: `/` (marketing), `/app` (product shell), `/docs` (documentation),
 
 ## Notes
 
-- `packages/api-client` and `packages/auth` are intentional **stubs** — see their
+- `packages/api-client` and `packages/auth` are intentional **stubs** - see their
   READMEs. Do not implement them here.
 - The docs live in a single app at `/docs`; a `docs.amicu.io` split / Vercel
   multi-zone is deferred (RFC 0001 §7).

@@ -8,7 +8,7 @@
 //
 // Server-only intent: the base URL and any credentials carried on these calls must
 // never reach the browser. Callers (the BFF) are responsible for keeping it that
-// way — see `@amicu/auth/server`.
+// way - see `@amicu/auth/server`.
 
 import createOpenApiClient, { type Client } from 'openapi-fetch';
 import type { paths } from './schema';
@@ -16,7 +16,7 @@ import type { paths } from './schema';
 export interface ApiClientOptions {
   /**
    * Base URL of the Rust Management API (server-only env, e.g. `API_URL`). Never a
-   * `NEXT_PUBLIC_*` value — nothing here is safe to expose to the browser.
+   * `NEXT_PUBLIC_*` value - nothing here is safe to expose to the browser.
    */
   baseUrl: string;
   /** Optional `fetch` override (tests / instrumentation). */

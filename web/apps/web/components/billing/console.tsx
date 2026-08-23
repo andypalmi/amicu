@@ -33,8 +33,8 @@ type Load =
 
 // The billing console. Reads the user's real billing status from the API (is
 // Stripe configured, what is the current plan, is there an active subscription)
-// and offers exactly the action that status supports — Upgrade (checkout) or
-// Manage (portal) — hitting the /api/billing/* BFF routes. When billing is not
+// and offers exactly the action that status supports - Upgrade (checkout) or
+// Manage (portal) - hitting the /api/billing/* BFF routes. When billing is not
 // configured server-side it says so honestly rather than showing buttons that
 // would 503. No plan or price is displayed that the API did not confirm.
 export function BillingConsole() {
@@ -143,7 +143,7 @@ export function BillingConsole() {
           <CardTitle className="text-base">Current plan</CardTitle>
           <CardDescription>
             Read from your account. A plan change applies the next time you sign in or your session
-            refreshes — active sessions keep their current access until then.
+            refreshes - active sessions keep their current access until then.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex items-center gap-2">
@@ -234,6 +234,6 @@ function errorMessage(status: number, payload: unknown): string {
       : null;
   if (status === 503) return 'Billing is not configured on this instance yet.';
   if (status === 401) return 'Your session has expired. Reload the page or sign in again.';
-  if (status === 409) return 'You have no billing account yet — start a checkout first.';
+  if (status === 409) return 'You have no billing account yet - start a checkout first.';
   return apiError ?? `Request failed (${status}).`;
 }

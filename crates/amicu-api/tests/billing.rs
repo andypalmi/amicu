@@ -53,7 +53,7 @@ struct Harness {
 }
 
 /// Build the app. When `configure_stripe` is true the billing state carries a
-/// live [`StripeConfig`] (known webhook secret, one Pro price) — enough to
+/// live [`StripeConfig`] (known webhook secret, one Pro price) - enough to
 /// exercise webhook verification; its API base is unused by these tests. When
 /// false, billing is unconfigured and endpoints must answer `503`.
 async fn harness(tier: Tier, configure_stripe: bool) -> Harness {

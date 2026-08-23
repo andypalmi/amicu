@@ -3,7 +3,7 @@
 import { createContext, useContext, type ReactNode } from 'react';
 import type { SessionUser, Tier } from '@amicu/auth';
 
-// Carries the server-resolved session (claims only — never the raw token) to
+// Carries the server-resolved session (claims only - never the raw token) to
 // client components. The value originates from `getSession()` in a Server
 // Component and is passed down as a prop, so the browser only ever sees the
 // derived `sub`/`tier`/`roles`.

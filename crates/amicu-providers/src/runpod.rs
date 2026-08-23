@@ -5,14 +5,14 @@
 //! construction**: [`RunPodProvider::new`] admits only the EU/EEA data centers
 //! from [`datacenters`], and [`provision`](RunPodProvider::provision) rejects any
 //! region outside that admitted set with [`ProviderError::UnknownRegion`] before
-//! any backend call — a pod can never be placed in a non-compliant region through
+//! any backend call - a pod can never be placed in a non-compliant region through
 //! this adapter. [`RunPodProvider::for_residencies`] widens the admitted set
 //! explicitly when a caller genuinely needs other jurisdictions.
 //!
 //! Provisioning drives RunPod's REST API (`https://rest.runpod.io/v1`) through the
 //! [`HttpTransport`] seam: `POST /pods` to create, `GET /pods/{id}` for status,
 //! and `DELETE /pods/{id}` to tear down. The adapter never touches a concrete HTTP
-//! client — production uses [`ReqwestTransport`], tests inject a mock — so the
+//! client - production uses [`ReqwestTransport`], tests inject a mock - so the
 //! provisioning path is exercised with no network, credentials, or spend. HTTP
 //! status codes map onto typed [`ProviderError`]s (`401`/`403` → credentials
 //! rejected, `404` → unknown instance/offering, `409`/`429` → capacity
@@ -106,7 +106,7 @@ fn datacenters() -> [DataCenter; 12] {
             country: "NO",
             location: "Norway",
         },
-        // Non-EU — excluded by the residency filter.
+        // Non-EU - excluded by the residency filter.
         DataCenter {
             code: "US-CA-1",
             residency: Residency::Us,

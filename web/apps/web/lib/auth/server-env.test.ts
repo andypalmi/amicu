@@ -45,14 +45,14 @@ test('development applies the localhost default when API_URL is unset', () => {
 test('the localhost default is NOT applied in production (prod must be explicit)', () => {
   // Same missing API_URL as the dev case above, but production refuses to default.
   assert.throws(() => parseServerEnv({ NODE_ENV: 'production' } as NodeJS.ProcessEnv));
-  // ...and dev, given the SAME input, succeeds with the default — proving the
+  // ...and dev, given the SAME input, succeeds with the default - proving the
   // default is gated to non-production only.
   assert.doesNotThrow(() => parseServerEnv({ NODE_ENV: 'development' } as NodeJS.ProcessEnv));
 });
 
 test('the next build phase is exempt from the prod requirement (build has no secrets)', () => {
   // NODE_ENV=production but during `next build`, so API_URL is not required and
-  // the dev default fills in — the check only bites when actually serving.
+  // the dev default fills in - the check only bites when actually serving.
   const env = parseServerEnv({
     NODE_ENV: 'production',
     NEXT_PHASE: 'phase-production-build',

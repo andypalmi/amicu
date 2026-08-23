@@ -2,7 +2,7 @@
 //
 // This module holds NO `server-only` import on purpose: it is a pure, side-effect
 // free schema so it can be unit-tested under `node --test` with crafted inputs.
-// `lib/auth/config.ts` is the single caller — it invokes `parseServerEnv(process.env)`
+// `lib/auth/config.ts` is the single caller - it invokes `parseServerEnv(process.env)`
 // on first module evaluation (middleware / first auth request), so a misconfigured
 // production deploy fails LOUDLY instead of silently targeting localhost. Nothing
 // here is exposed to the browser.
@@ -30,7 +30,7 @@ export interface ServerEnv {
  * `API_URL` is the floor: it is REQUIRED and must be a valid URL when serving in
  * production, and throws a clear boot-time error when missing/invalid there.
  * Outside production it defaults to `DEV_API_URL` so the app boots without a
- * backend. The other vars stay optional everywhere — each has a safe derivation
+ * backend. The other vars stay optional everywhere - each has a safe derivation
  * from `API_URL` (JWKS/issuer) or a stable default (audience), so forcing them
  * would be needlessly strict.
  *

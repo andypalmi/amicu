@@ -33,7 +33,7 @@ test('allow-list: satisfies only on exact membership', () => {
   assert.ok(tierSatisfies('pro', ['pro', 'enterprise']));
   assert.ok(tierSatisfies('hosted', ['hosted']));
   assert.equal(tierSatisfies('community', ['pro', 'enterprise']), false);
-  // enterprise is NOT in the list even though it out-ranks pro — exact membership.
+  // enterprise is NOT in the list even though it out-ranks pro - exact membership.
   assert.equal(tierSatisfies('enterprise', ['pro']), false);
 });
 

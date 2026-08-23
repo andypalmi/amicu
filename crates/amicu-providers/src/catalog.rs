@@ -48,7 +48,7 @@ fn provider_regions(provider: &str) -> Option<Vec<Region>> {
 /// Resolve the residency jurisdiction of `region_code` under `provider`.
 ///
 /// Returns `None` when the provider is not catalogued or the region code is
-/// unknown to it — the caller cannot then prove a residency constraint and
+/// unknown to it - the caller cannot then prove a residency constraint and
 /// should not manufacture a jurisdiction.
 #[must_use]
 pub fn resolve_residency(provider: &str, region_code: &str) -> Option<Residency> {

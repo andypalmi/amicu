@@ -3,7 +3,7 @@ import { Alert, AlertTitle, AlertDescription, Badge, Button } from '@amicu/ui';
 
 // Shared, PERSISTENT in-context error surface for the authenticated consoles
 // (engine / recommend / monitor). Unlike a toast, this stays on screen until the
-// underlying request succeeds — the user is meant to read the message and retry
+// underlying request succeeds - the user is meant to read the message and retry
 // in place. Built on the `@amicu/ui` `<Alert>` (destructive variant) so all
 // three consoles render identical markup and pull from the shared design tokens.
 //

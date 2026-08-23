@@ -1,7 +1,7 @@
 //! HTTP surface for the stateless engine endpoints: `POST /validate` and
 //! `POST /plan`.
 //!
-//! Both are pure functions of their request body — they parse the submitted
+//! Both are pure functions of their request body - they parse the submitted
 //! config, run the shared [`amicu_engine`] parse → validate → plan orchestration,
 //! and return the JSON contract. They read no server state, touch no filesystem,
 //! resolve no secrets, and launch nothing. Applying a plan (which *does* execute

@@ -16,7 +16,7 @@ that clears the quality bar for the task.
 - Local GGUF: `q4_k_m` is the default balance; step to `q5_k_m`/`q6_k` when
   quality matters and memory allows; `q8_0` for near-FP16 at large size.
 - Production: FP16/BF16 for reference quality; AWQ/GPTQ 4-bit roughly halves
-  VRAM with a modest quality cost — worth it when VRAM-bound.
+  VRAM with a modest quality cost - worth it when VRAM-bound.
 
 ## Framing cost and latency
 

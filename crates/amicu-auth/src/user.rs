@@ -81,7 +81,7 @@ pub trait UserStore: Send + Sync {
     /// Persist the outcome of a billing event: the user's new tier plus the
     /// subscription id backing it (`None` clears it, e.g. on cancellation). This
     /// is the durable store of a user's plan; the change takes effect on the
-    /// user's next token issuance (sign-in or refresh) — live JWTs are not
+    /// user's next token issuance (sign-in or refresh) - live JWTs are not
     /// revoked. A no-op if the user id is unknown.
     async fn set_billing(
         &self,

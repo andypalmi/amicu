@@ -1,4 +1,4 @@
-// @amicu/api-client — the generated TypeScript client for the Amicu Management API.
+// @amicu/api-client - the generated TypeScript client for the Amicu Management API.
 //
 // Source of truth: `crates/amicu-schema/openapi.json`. The types in `./schema` are
 // GENERATED (never hand-edited); regenerate with `pnpm --filter @amicu/api-client

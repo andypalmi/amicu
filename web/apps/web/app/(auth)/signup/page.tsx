@@ -16,7 +16,7 @@ export default function SignupPage() {
       <CardHeader>
         <CardTitle>Create your account</CardTitle>
         <CardDescription>
-          Start on Community — no card required. Upgrade any time.
+          Start on Community - no card required. Upgrade any time.
         </CardDescription>
       </CardHeader>
       <CardContent>

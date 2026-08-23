@@ -717,7 +717,7 @@
           "recommend"
         ],
         "summary": "Diagnose a stack and return advisory recommendations.",
-        "description": "Runs the advisory rule engine over the submitted measured metrics and the\nworkload estimate, then returns the [`TuningReport`] *for the caller's tier*:\nrecommendations the caller has not unlocked are withheld (a Community token\ngets `200` with an empty list, Pro+ gets the full depth). Stateless and\nside-effect-free: nothing is applied — recommendations are advisory data.",
+        "description": "Runs the advisory rule engine over the submitted measured metrics and the\nworkload estimate, then returns the [`TuningReport`] *for the caller's tier*:\nrecommendations the caller has not unlocked are withheld (a Community token\ngets `200` with an empty list, Pro+ gets the full depth). Stateless and\nside-effect-free: nothing is applied - recommendations are advisory data.",
         "operationId": "recommend_handler",
         "requestBody": {
           "content": {
@@ -801,7 +801,7 @@
           "auth"
         ],
         "summary": "Complete a password reset: consume a valid reset token and install a new\npassword.",
-        "description": "On success the password hash is replaced and every refresh-token family the\nuser holds is revoked, forcing a fresh sign-in on all devices.\n\nBoth failure modes return `400`, but they are deliberately *not* the same\nmessage: a weak new password gets a distinct, helpful policy message, while\nan unknown/expired/already-used token gets a generic one. This leaks nothing,\nbecause the password policy is checked *before* the token is looked up — so\nthe weak-password message can never depend on (and never signals) whether the\ntoken is valid or which account it belongs to.",
+        "description": "On success the password hash is replaced and every refresh-token family the\nuser holds is revoked, forcing a fresh sign-in on all devices.\n\nBoth failure modes return `400`, but they are deliberately *not* the same\nmessage: a weak new password gets a distinct, helpful policy message, while\nan unknown/expired/already-used token gets a generic one. This leaks nothing,\nbecause the password policy is checked *before* the token is looked up - so\nthe weak-password message can never depend on (and never signals) whether the\ntoken is valid or which account it belongs to.",
         "operationId": "reset",
         "requestBody": {
           "content": {
@@ -1668,7 +1668,7 @@
         "properties": {
           "caller_role": {
             "type": "string",
-            "description": "The calling user's own role — so a client can render exactly the controls\ntheir role allows (the API still enforces every action).",
+            "description": "The calling user's own role - so a client can render exactly the controls\ntheir role allows (the API still enforces every action).",
             "example": "owner"
           },
           "members": {
@@ -1758,7 +1758,7 @@
       },
       "MonitorViewDto": {
         "type": "object",
-        "description": "What the monitoring dashboard renders: the server-normalized metric surface,\nthe normalized estimate (with its stated assumptions and confidence), and the\nengine's advisory — never automatic — suggested changes.\n\nThe measured-vs-estimated comparison is *presentation*: the frontend places\nthe measured distributions next to the estimate's ranges and stated\nassumptions. This DTO computes no verdict.",
+        "description": "What the monitoring dashboard renders: the server-normalized metric surface,\nthe normalized estimate (with its stated assumptions and confidence), and the\nengine's advisory - never automatic - suggested changes.\n\nThe measured-vs-estimated comparison is *presentation*: the frontend places\nthe measured distributions next to the estimate's ranges and stated\nassumptions. This DTO computes no verdict.",
         "required": [
           "metrics",
           "estimate",

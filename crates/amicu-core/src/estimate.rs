@@ -71,7 +71,7 @@ impl<S: Into<String>> From<S> for Assumption {
 ///
 /// `T` is the estimated quantity (money, latency, throughput, …). The range is
 /// inclusive; `low` and `high` are equal for a point estimate. Ordering
-/// (`low <= high`) is not enforced by construction — use [`is_ordered`] to
+/// (`low <= high`) is not enforced by construction - use [`is_ordered`] to
 /// check it for orderable `T`.
 ///
 /// [`is_ordered`]: EstimateRange::is_ordered

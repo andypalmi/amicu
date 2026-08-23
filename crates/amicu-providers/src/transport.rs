@@ -8,7 +8,7 @@
 //!
 //! The split is deliberate: a [`TransportError`] means the exchange never
 //! completed (timeout, connection/TLS failure) and is transient; any HTTP
-//! response — including `4xx`/`5xx` — is returned as an [`HttpResponse`] for the
+//! response - including `4xx`/`5xx` - is returned as an [`HttpResponse`] for the
 //! adapter to map onto a typed [`ProviderError`](crate::provider::ProviderError).
 
 use async_trait::async_trait;
@@ -80,7 +80,7 @@ impl HttpRequest {
 
 /// A completed HTTP response: the status code and raw body bytes.
 ///
-/// A response is returned for every completed exchange, `2xx` or not — the
+/// A response is returned for every completed exchange, `2xx` or not - the
 /// adapter inspects [`status`](Self::status) to decide success or which
 /// [`ProviderError`](crate::provider::ProviderError) applies.
 #[derive(Debug, Clone)]

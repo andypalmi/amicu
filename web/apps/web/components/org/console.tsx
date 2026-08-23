@@ -41,14 +41,14 @@ import {
 
 // The organization console. Reads REAL data from the Management API through the
 // /api/org/* BFF: the member list (with the caller's own role), the RBAC catalog,
-// and the audit log. It offers exactly the actions the caller's role allows —
-// add/remove/change-role — and surfaces the API's 403 (RBAC) / 404 / 409
+// and the audit log. It offers exactly the actions the caller's role allows -
+// add/remove/change-role - and surfaces the API's 403 (RBAC) / 404 / 409
 // responses inline rather than pretending an action succeeded. The API is the
 // sole authority; this component never invents membership or an entitlement.
 //
 // Tier gating is done by the page (via <TierGate required="enterprise">), so this
 // component only renders for Enterprise sessions. A 403 seen HERE is therefore an
-// org-role (RBAC) denial, shown as an inline error — not a tier upsell.
+// org-role (RBAC) denial, shown as an inline error - not a tier upsell.
 
 type MembersLoad =
   | { kind: 'loading' }
@@ -331,7 +331,7 @@ function MembersTable({
                     Remove
                   </Button>
                 ) : (
-                  <span className="text-xs text-muted-foreground">—</span>
+                  <span className="text-xs text-muted-foreground">-</span>
                 )}
               </TableCell>
             </TableRow>
@@ -403,7 +403,7 @@ function RolesCard({ roles }: { roles: RoleView[] | null }) {
         <CardTitle className="text-base">Roles &amp; permissions</CardTitle>
         <CardDescription>
           The organization&apos;s RBAC model, served by the API. These are the permissions each
-          role holds — the API checks them on every request.
+          role holds - the API checks them on every request.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -476,7 +476,7 @@ function AuditCard({ entries, note }: { entries: AuditEntryView[] | null; note: 
 }
 
 /** Format a Unix-seconds timestamp for display. Runs only in the browser, after
- *  the audit log is fetched client-side — never during prerender. */
+ *  the audit log is fetched client-side - never during prerender. */
 function formatWhen(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toLocaleString();
 }

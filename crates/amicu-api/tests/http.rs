@@ -301,7 +301,7 @@ async fn duplicate_signup_is_indistinguishable() {
     let app = app(100);
     let creds = json!({"email": "dup@example.com", "password": "some-password"});
     // Both the first (new account) and second (collision) sign-up return the
-    // exact same status and body — an attacker cannot enumerate registered
+    // exact same status and body - an attacker cannot enumerate registered
     // emails through /signup.
     let (s1, b1) = call(&app, "POST", "/signup", Some(creds.clone()), "3.3.3.3").await;
     let (s2, b2) = call(&app, "POST", "/signup", Some(creds), "3.3.3.3").await;
@@ -537,7 +537,7 @@ async fn recover_is_always_202_and_indistinguishable() {
     .await;
 
     // A recover for the KNOWN account and for an UNKNOWN one return the exact
-    // same status and body — no enumeration signal.
+    // same status and body - no enumeration signal.
     let (s1, b1) = call(
         &app,
         "POST",
