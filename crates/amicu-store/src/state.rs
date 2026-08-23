@@ -208,6 +208,14 @@ async fn decode_content(
             detail: format!("encrypted content wrapper failed to deserialize: {source}"),
         })
     })?;
+    if wrapper.version != CIPHER_WRAPPER_VERSION {
+        return Err(backend_state_err(StateError::Corrupted {
+            detail: format!(
+                "encrypted content wrapper version {} is not supported (expected {})",
+                wrapper.version, CIPHER_WRAPPER_VERSION
+            ),
+        }));
+    }
     let ciphertext = BASE64.decode(wrapper.ciphertext).map_err(|source| {
         backend_state_err(StateError::Corrupted {
             detail: format!("encrypted content ciphertext is not valid base64: {source}"),
@@ -910,5 +918,24 @@ mod content_cipher_tests {
             .await
             .expect("unwrapped legacy content must decode as a plain graph");
         assert_eq!(decoded, graph);
+    }
+
+    #[tokio::test]
+    async fn wrapper_with_an_unsupported_version_is_a_corrupted_error_not_a_silent_misread() {
+        // A wrapper carrying the marker key but a version this backend does
+        // not understand (e.g. written by a future, incompatible format)
+        // must fail loudly rather than being blindly base64-decoded and
+        // decrypted under the current format's assumptions.
+        let cipher: Arc<dyn StateCipher> = Arc::new(XorTestCipher::new(0x77));
+        let graph = sample_graph();
+        let mut stored = encode_content(&graph, Some(&cipher)).await.unwrap();
+        stored["__amicu_state_cipher_v__"] = serde_json::json!(u8::MAX);
+
+        let err = decode_content(stored, Some(&cipher)).await.unwrap_err();
+        assert!(
+            err.to_string().contains("not supported")
+                || format!("{err:?}").contains("not supported"),
+            "must explain the unsupported-version condition: {err}"
+        );
     }
 }
