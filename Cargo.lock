@@ -281,11 +281,13 @@ version = "0.1.0"
 dependencies = [
  "amicu-core",
  "async-trait",
+ "rustversion",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror",
  "tokio",
+ "trybuild",
 ]
 
 [[package]]

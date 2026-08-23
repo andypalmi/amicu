@@ -1,4 +1,17 @@
 //! The recorded canonical state and its history entries.
+//!
+//! # Secret-refs-by-type
+//!
+//! [`StateSnapshot`] wraps [`Graph`] directly and [`checksum_of`] serializes it
+//! to canonical JSON for persistence and integrity checking. Because
+//! `#[derive(Serialize)]` requires every field of a serialized type to
+//! implement `Serialize`, and [`SecretValue`](amicu_core::secret::SecretValue)
+//! deliberately does not, no field anywhere inside [`Graph`] can ever hold a
+//! `SecretValue` without breaking the build - the whole crate simply fails to
+//! compile. A secret-bearing field in state must instead be typed
+//! [`SecretRef`](amicu_core::secret::SecretRef) (a pointer, safe to persist);
+//! the plaintext lives only in a `SecretResolver` at apply time, never here.
+//! See `tests/compile_fail/` for a guard that proves this holds.
 
 use std::fmt::Write as _;
 

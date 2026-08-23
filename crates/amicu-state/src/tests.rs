@@ -363,6 +363,36 @@ async fn lock_tokens_are_not_sequential() {
     }
 }
 
+/// Secret-refs-by-type (see `tests/compile_fail/secret_value_in_persisted_field.rs`
+/// for the negative half of this proof): a state-shaped field that needs to
+/// reference a secret must be typed `SecretRef`, never `SecretValue`. `SecretRef`
+/// is metadata only (a name/scope/version pointer) and is `Serialize`, so it
+/// persists and round-trips exactly like any other state field, while the
+/// plaintext it points to never appears here.
+#[test]
+fn secret_ref_is_representable_and_round_trips_in_a_state_shaped_type() {
+    use amicu_core::secret::SecretRef;
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct PersistedResource {
+        id: String,
+        credential: SecretRef,
+    }
+
+    let resource = PersistedResource {
+        id: "example".to_string(),
+        credential: SecretRef::new("db_password").with_scope("prod"),
+    };
+
+    let json = serde_json::to_string(&resource).expect("SecretRef serializes");
+    assert!(json.contains("db_password"));
+    assert_eq!(
+        serde_json::from_str::<PersistedResource>(&json).unwrap(),
+        resource,
+        "a SecretRef-typed field round-trips like any other persisted-state field"
+    );
+}
+
 #[test]
 fn checksum_uses_versioned_format_and_is_deterministic() {
     let snap = snapshot("v0", sample_graph());
