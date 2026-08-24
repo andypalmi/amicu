@@ -882,6 +882,7 @@
           "org"
         ],
         "summary": "List the organization's members and their roles.",
+        "description": "Requires the `view_members` permission - Owner/Admin/Member hold it; a\n**Viewer does not** and is refused with `403` (andypalmi/amicu-planning#133:\nthe enforced distinction that makes Viewer a real, more-restricted role).",
         "operationId": "list_members_handler",
         "responses": {
           "200": {
@@ -898,7 +899,7 @@
             "description": "Missing or invalid access token."
           },
           "403": {
-            "description": "Below the Enterprise tier."
+            "description": "Below the Enterprise tier, or your role may not view the member roster."
           }
         },
         "security": [

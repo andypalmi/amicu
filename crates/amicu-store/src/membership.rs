@@ -13,6 +13,7 @@
 
 use amicu_auth::AuthError;
 use amicu_auth::membership::{MembershipContext, MembershipStore, WorkspaceMembership};
+use amicu_auth::{Permission, authorize_membership_mutation};
 use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -142,38 +143,21 @@ impl From<AuthError> for OrgMutationError {
 }
 
 /// Authorize a membership mutation by the actor's role against the target's
-/// current role and (for add/change) the requested new role. Mirrors the
-/// in-memory `authorize_membership_mutation` (andypalmi/amicu-planning#117); the
-/// caller has read `actor`/`target_current` under the mutation's own transaction
-/// and row locks, so both are fresh.
-fn authorize_membership_mutation(
+/// current role and (for add/change) the requested new role, against
+/// `required` (the base capability - `InviteMember`/`ChangeRole`/
+/// `RemoveMember`). Delegates to the SHARED
+/// [`amicu_auth::authorize_membership_mutation`] - the SAME function the
+/// in-memory `OrgStore` calls (andypalmi/amicu-planning#133) - so the two
+/// backends can never drift. The caller has read `actor`/`target_current`
+/// under the mutation's own transaction and row locks, so both are fresh.
+fn check_membership_mutation(
     actor: Option<Role>,
+    required: Permission,
     target_current: Option<Role>,
     new_role: Option<Role>,
 ) -> Result<(), OrgMutationError> {
-    let Some(actor) = actor else {
-        return Err(OrgMutationError::Forbidden(
-            "you are not a member of this organization".to_owned(),
-        ));
-    };
-    if !actor.can_manage_members() {
-        return Err(OrgMutationError::Forbidden(
-            "your role may not manage organization membership".to_owned(),
-        ));
-    }
-    if actor == Role::Admin {
-        if new_role.is_some_and(Role::is_privileged) {
-            return Err(OrgMutationError::Forbidden(
-                "only an Owner may grant the Owner or Admin role".to_owned(),
-            ));
-        }
-        if target_current.is_some_and(Role::is_privileged) {
-            return Err(OrgMutationError::Forbidden(
-                "only an Owner may modify or remove an Owner or Admin".to_owned(),
-            ));
-        }
-    }
-    Ok(())
+    authorize_membership_mutation(actor, required, target_current, new_role)
+        .map_err(|m| OrgMutationError::Forbidden(m.to_owned()))
 }
 
 /// Postgres implementation of the membership store.
@@ -532,7 +516,7 @@ impl PostgresMembershipStore {
         Self::lock_workspace_mutations(&mut tx, workspace).await?;
         let (actor_role, target_role) =
             Self::locked_roles(&mut tx, workspace, actor_id, target_id).await?;
-        authorize_membership_mutation(actor_role, None, Some(role))?;
+        check_membership_mutation(actor_role, Permission::InviteMember, None, Some(role))?;
         if target_role.is_some() {
             return Err(OrgMutationError::AlreadyMember);
         }
@@ -590,7 +574,12 @@ impl PostgresMembershipStore {
         let Some(current) = target_role else {
             return Err(OrgMutationError::NotFound);
         };
-        authorize_membership_mutation(actor_role, Some(current), Some(new_role))?;
+        check_membership_mutation(
+            actor_role,
+            Permission::ChangeRole,
+            Some(current),
+            Some(new_role),
+        )?;
         if current == Role::Owner
             && new_role != Role::Owner
             && Self::owner_count(&mut tx, workspace).await? == 1
@@ -641,7 +630,7 @@ impl PostgresMembershipStore {
         let Some(current) = target_role else {
             return Err(OrgMutationError::NotFound);
         };
-        authorize_membership_mutation(actor_role, Some(current), None)?;
+        check_membership_mutation(actor_role, Permission::RemoveMember, Some(current), None)?;
         if current == Role::Owner && Self::owner_count(&mut tx, workspace).await? == 1 {
             return Err(OrgMutationError::LastOwner);
         }

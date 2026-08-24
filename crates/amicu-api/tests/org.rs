@@ -246,6 +246,47 @@ async fn owner_lists_members_with_own_claim_role() {
     assert_eq!(members[0]["role"], "owner");
 }
 
+#[tokio::test]
+async fn member_lists_members() {
+    // A Member holds `view_members`, so `GET /org/members` succeeds - the
+    // permission-gated distinction (andypalmi/amicu-planning#133) that a
+    // Viewer specifically does NOT get (see `viewer_cannot_list_members_403`).
+    let h = harness();
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *ORG, MEMBER, Role::Member);
+    let (status, body) = send(&h.app, get("/org/members", Some(&h.tokens.member))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["caller_role"], "member");
+    assert_eq!(body["members"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn viewer_cannot_list_members_403() {
+    // The enforced Viewer-vs-Member distinction this slice introduces: a
+    // Viewer does NOT hold `view_members`, unlike a Member, so `GET
+    // /org/members` is refused with a permission 403 (distinct from the tier
+    // gate's 403). This assertion would FAIL under the old coarse role match
+    // (which treated Member and Viewer identically for read access).
+    let h = harness();
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *ORG, VIEWER, Role::Viewer);
+    let (status, body) = send(&h.app, get("/org/members", Some(&h.tokens.viewer))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(body["error"].as_str().unwrap().contains("member roster"));
+}
+
+#[tokio::test]
+async fn viewer_can_view_roles_catalog() {
+    // A Viewer holds `view_roles` (every role does), so `GET /org/roles`
+    // succeeds even though `GET /org/members` (above) does not - the same
+    // caller, two different outcomes, driven by two different permissions.
+    let h = harness();
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *ORG, VIEWER, Role::Viewer);
+    let (status, _) = send(&h.app, get("/org/roles", Some(&h.tokens.viewer))).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 // ---------------------------------------------------------------------------
 // The store is authoritative for mutations, even when a claim disagrees
 // ---------------------------------------------------------------------------
@@ -697,7 +738,8 @@ async fn roles_catalog_lists_permissions() {
         .map(|p| p.as_str().unwrap())
         .collect();
     assert!(perms.contains(&"assign_privileged_role"));
-    // A Viewer must not carry management permissions.
+    // A Viewer must not carry management permissions, NOR `view_members` - the
+    // enforced distinction from Member (andypalmi/amicu-planning#133).
     let viewer = roles.iter().find(|r| r["role"] == "viewer").unwrap();
     let vperms: Vec<&str> = viewer["permissions"]
         .as_array()
@@ -706,6 +748,18 @@ async fn roles_catalog_lists_permissions() {
         .map(|p| p.as_str().unwrap())
         .collect();
     assert!(!vperms.contains(&"remove_member"));
+    assert!(!vperms.contains(&"view_members"));
+    assert!(vperms.contains(&"view_roles"));
+    // A Member DOES carry `view_members` - the catalog reflects the same
+    // matrix `GET /org/members` enforces.
+    let member = roles.iter().find(|r| r["role"] == "member").unwrap();
+    let mperms: Vec<&str> = member["permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    assert!(mperms.contains(&"view_members"));
 }
 
 // ---------------------------------------------------------------------------

@@ -154,18 +154,13 @@ impl Role {
     }
 
     /// Whether this role is privileged (Owner or Admin). Privileged members may
-    /// only be created, modified, or removed by an Owner. The authority for the
-    /// org console's RBAC (both the in-memory store and the Postgres membership
-    /// store re-check against this, so the rule lives in exactly one place).
+    /// only be created, modified, or removed by an actor holding
+    /// [`crate::authz::Permission::AssignPrivilegedRole`] (Owner only). A
+    /// role-classification helper consulted by [`crate::authz`]'s shared
+    /// authorization functions - the actor's actual authority flows through
+    /// [`Role::grants`](crate::authz), not this.
     #[must_use]
     pub fn is_privileged(self) -> bool {
-        matches!(self, Role::Owner | Role::Admin)
-    }
-
-    /// Whether this role may manage membership at all (invite / remove / change
-    /// role). Owner and Admin may; Member and Viewer may not.
-    #[must_use]
-    pub fn can_manage_members(self) -> bool {
         matches!(self, Role::Owner | Role::Admin)
     }
 }
