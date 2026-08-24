@@ -22,8 +22,8 @@ use amicu_auth::user::{User, UserStore};
 use amicu_auth::{AuthError, Tier};
 use amicu_store::{
     InviteError, OrgMutationError, PostgresInviteStore, PostgresMembershipStore,
-    PostgresRefreshStore, PostgresUserStore, PostgresWorkspaceStore, Role, WorkspaceId, connect,
-    run_migrations,
+    PostgresRefreshStore, PostgresUserStore, PostgresWorkspaceStore, Role, WorkspaceError,
+    WorkspaceId, connect, run_migrations,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -1408,4 +1408,240 @@ async fn concurrent_self_removal_never_orphans_the_last_owner() {
             "the losing self-removal must be refused with LastOwner (r1={r1:?}, r2={r2:?})"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// N1: per-user workspace-creation cap (andypalmi/amicu-planning#132). There is
+// no `DELETE /workspaces`, so this cap is a hard ceiling, enforced INSIDE
+// `create_with_owner`'s own transaction under a per-owner advisory lock so it
+// is exact under concurrency.
+// ---------------------------------------------------------------------------
+
+/// Creating up to the cap succeeds; the (cap+1)th `create_with_owner` for the
+/// SAME owner is refused with `LimitReached` and inserts nothing; a DIFFERENT
+/// owner is entirely unaffected by the first owner's cap.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn create_with_owner_enforces_the_per_user_cap() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared.clone());
+    // A small cap (2) to exercise the limit cheaply.
+    let workspaces = PostgresWorkspaceStore::new(shared).with_max_workspaces_per_user(2);
+
+    // Sign-up already made `owner` the founding Owner of ONE (personal)
+    // workspace, so they start at 1/2.
+    let owner = seed_user(&users).await;
+    let other = seed_user(&users).await;
+
+    // One more additional workspace brings the owner to exactly the cap (2/2)
+    // and must still succeed.
+    let second = workspaces
+        .create_with_owner(&unique("Team"), &owner)
+        .await
+        .expect("create up to the cap");
+    assert_eq!(
+        members.role_of(second, &owner).await.expect("role_of"),
+        Some(Role::Owner)
+    );
+
+    // The (cap+1)th create for the SAME owner is refused, and NOTHING is
+    // inserted - `LimitReached` rolls the whole transaction back.
+    let before = members.list_workspaces(&owner).await.expect("list before");
+    assert_eq!(
+        workspaces
+            .create_with_owner(&unique("Team"), &owner)
+            .await
+            .unwrap_err(),
+        WorkspaceError::LimitReached { max: 2 }
+    );
+    let after = members.list_workspaces(&owner).await.expect("list after");
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "a refused create must insert nothing"
+    );
+
+    // A DIFFERENT owner (0/2 of their own) is entirely unaffected.
+    let other_ws = workspaces
+        .create_with_owner(&unique("Other"), &other)
+        .await
+        .expect("a different owner is unaffected by the first owner's cap");
+    assert_eq!(
+        members.role_of(other_ws, &other).await.expect("role_of"),
+        Some(Role::Owner)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// N3: close the tier-downgrade staleness window on org MUTATIONS
+// (andypalmi/amicu-planning#132). The claim-based Enterprise gate keys on the
+// access token's `claims.tier`, so a workspace DOWNGRADED from Enterprise
+// still passes it until the token expires (<=5 min). Every audited mutation
+// re-reads the workspace's CURRENT tier inside its own transaction and rejects
+// with Forbidden if it no longer meets Enterprise - even for the Owner.
+// `accept_and_enroll` is deliberately untested here: it is NOT gated (joining
+// via invite must not depend on the workspace's tier).
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+#[allow(clippy::too_many_lines)] // one end-to-end walk of all five audited mutations
+async fn audited_mutations_reject_on_a_downgraded_workspace_tier() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared.clone());
+    let workspaces = PostgresWorkspaceStore::new(shared.clone());
+    let invites = PostgresInviteStore::new(shared.clone());
+
+    let ws = workspaces
+        .create(&unique("Org"), Tier::Enterprise)
+        .await
+        .expect("create enterprise workspace");
+    let owner = seed_user(&users).await;
+    let target = seed_user(&users).await;
+    members
+        .add(ws, &owner, Role::Owner, None)
+        .await
+        .expect("seed owner");
+    members
+        .add(ws, &target, Role::Member, Some(&owner))
+        .await
+        .expect("seed target");
+
+    // Still Enterprise: the Owner's audited mutations all succeed normally.
+    let newbie = seed_user(&users).await;
+    members
+        .add_member_audited(ws, &owner, &newbie, Role::Member)
+        .await
+        .expect("enterprise: add succeeds");
+    let stale_invite = invites
+        .create_authorized(
+            ws,
+            &owner,
+            "still-pending@example.test",
+            Role::Member,
+            &token_hash(0x50),
+            FAR_FUTURE,
+        )
+        .await
+        .expect("enterprise: invite create succeeds");
+    let revoked_invite = invites
+        .create_authorized(
+            ws,
+            &owner,
+            "revoked@example.test",
+            Role::Member,
+            &token_hash(0x51),
+            FAR_FUTURE,
+        )
+        .await
+        .expect("enterprise: second invite create succeeds");
+    invites
+        .revoke_authorized(ws, &owner, revoked_invite)
+        .await
+        .expect("enterprise: revoke succeeds");
+
+    // Downgrade the workspace's tier directly in the DB - simulating a stale
+    // Enterprise access token whose claim has not yet expired (the accepted
+    // <=5-min window on the claim-based gate).
+    sqlx::query!(
+        "UPDATE workspaces SET tier = 'pro' WHERE id = $1",
+        ws.as_uuid(),
+    )
+    .execute(&shared)
+    .await
+    .expect("downgrade to pro");
+
+    // Every audited mutation is now refused - even for the Owner - and
+    // workspace state is left unchanged.
+    let candidate = seed_user(&users).await;
+    assert!(matches!(
+        members
+            .add_member_audited(ws, &owner, &candidate, Role::Member)
+            .await
+            .unwrap_err(),
+        OrgMutationError::Forbidden(_)
+    ));
+    assert_eq!(
+        members.role_of(ws, &candidate).await.expect("role_of"),
+        None
+    );
+
+    assert!(matches!(
+        members
+            .set_role_audited(ws, &owner, &target, Role::Admin)
+            .await
+            .unwrap_err(),
+        OrgMutationError::Forbidden(_)
+    ));
+    assert_eq!(
+        members.role_of(ws, &target).await.expect("role_of"),
+        Some(Role::Member),
+        "the refused role change must not have landed"
+    );
+
+    assert!(matches!(
+        members
+            .remove_member_audited(ws, &owner, &target)
+            .await
+            .unwrap_err(),
+        OrgMutationError::Forbidden(_)
+    ));
+    assert_eq!(
+        members.role_of(ws, &target).await.expect("role_of"),
+        Some(Role::Member),
+        "the refused removal must not have landed"
+    );
+
+    assert!(matches!(
+        invites
+            .create_authorized(
+                ws,
+                &owner,
+                "late@example.test",
+                Role::Member,
+                &token_hash(0x52),
+                FAR_FUTURE,
+            )
+            .await
+            .unwrap_err(),
+        InviteError::Forbidden(_)
+    ));
+
+    assert!(matches!(
+        invites
+            .revoke_authorized(ws, &owner, stale_invite)
+            .await
+            .unwrap_err(),
+        InviteError::Forbidden(_)
+    ));
+    assert_eq!(
+        invites.list_pending(ws).await.expect("list pending").len(),
+        1,
+        "the refused revoke must not have landed - still exactly one pending invite"
+    );
+
+    // Re-upgrading to Hosted (>= Enterprise) restores mutation access.
+    sqlx::query!(
+        "UPDATE workspaces SET tier = 'hosted' WHERE id = $1",
+        ws.as_uuid(),
+    )
+    .execute(&shared)
+    .await
+    .expect("upgrade to hosted");
+    members
+        .set_role_audited(ws, &owner, &target, Role::Admin)
+        .await
+        .expect("hosted: role change succeeds again");
+    invites
+        .revoke_authorized(ws, &owner, stale_invite)
+        .await
+        .expect("hosted: revoke succeeds again");
+    assert!(
+        invites
+            .list_pending(ws)
+            .await
+            .expect("list pending")
+            .is_empty()
+    );
 }

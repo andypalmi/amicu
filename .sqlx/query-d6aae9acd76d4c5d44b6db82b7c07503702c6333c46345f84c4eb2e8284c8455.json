@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workspaces SET tier = 'hosted' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d6aae9acd76d4c5d44b6db82b7c07503702c6333c46345f84c4eb2e8284c8455"
+}

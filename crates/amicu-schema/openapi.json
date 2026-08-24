@@ -1742,6 +1742,9 @@
           "401": {
             "description": "Missing or invalid access token."
           },
+          "403": {
+            "description": "The caller has reached the per-user workspace-creation cap."
+          },
           "503": {
             "description": "Provisioning requires the database backend."
           }

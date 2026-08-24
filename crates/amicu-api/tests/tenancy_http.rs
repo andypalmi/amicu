@@ -123,6 +123,13 @@ impl Harness {
 }
 
 async fn harness() -> Harness {
+    harness_with_workspace_cap(amicu_store::DEFAULT_MAX_WORKSPACES_PER_USER).await
+}
+
+/// Like [`harness`], but with the per-user workspace-creation cap
+/// (andypalmi/amicu-planning#132) overridden - a small cap exercises the `403`
+/// cheaply without provisioning dozens of workspaces.
+async fn harness_with_workspace_cap(max_workspaces_per_user: u32) -> Harness {
     let url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for the ignored HTTP tests");
     let pool = connect(&url).await.expect("connect to Postgres");
@@ -160,7 +167,8 @@ async fn harness() -> Harness {
     ));
 
     let tenancy = Arc::new(PostgresTenancyStore::new(
-        PostgresWorkspaceStore::new(pool.clone()),
+        PostgresWorkspaceStore::new(pool.clone())
+            .with_max_workspaces_per_user(max_workspaces_per_user),
         PostgresInviteStore::new(pool.clone()),
     ));
 
@@ -176,7 +184,8 @@ async fn harness() -> Harness {
         mint_keyring,
         users: PostgresUserStore::new(pool.clone()),
         members: PostgresMembershipStore::new(pool.clone()),
-        workspaces: PostgresWorkspaceStore::new(pool),
+        workspaces: PostgresWorkspaceStore::new(pool)
+            .with_max_workspaces_per_user(max_workspaces_per_user),
     }
 }
 
@@ -267,6 +276,46 @@ async fn create_workspace_ignores_caller_supplied_id_and_owns_the_result() {
             .expect("role_of"),
         None,
         "the caller never lands in the id they asked for"
+    );
+}
+
+/// N1 (andypalmi/amicu-planning#132): `POST /workspaces` enforces the per-user
+/// workspace-creation cap and answers `403` once reached (there is no
+/// `DELETE /workspaces`, so this is a hard ceiling).
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn create_workspace_enforces_the_per_user_cap() {
+    // A small cap of 2: sign-up already grants the user their personal
+    // workspace (1/2), so exactly one more `POST /workspaces` succeeds and the
+    // next is refused.
+    let h = harness_with_workspace_cap(2).await;
+    let user = h.new_user().await;
+    let personal = h.personal_ws(&user).await;
+    let token = h.token(&user, personal, Role::Owner, Tier::Community);
+
+    let (status, _) = send(
+        &h.app,
+        post("/workspaces", &token, &json!({ "name": "Second" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "up to the cap succeeds");
+
+    let (status, body) = send(
+        &h.app,
+        post("/workspaces", &token, &json!({ "name": "Third" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the (cap+1)th create is refused"
+    );
+    assert!(
+        body["error"]
+            .as_str()
+            .expect("error message")
+            .contains("limit"),
+        "the error message should mention the limit: {body}"
     );
 }
 
