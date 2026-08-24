@@ -43,6 +43,7 @@ pub mod preset;
 pub mod ratelimit;
 pub mod recommend;
 pub mod session;
+pub mod tenancy;
 
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn_with_state;
@@ -60,6 +61,7 @@ pub use openapi::ApiDoc;
 pub use org::{InMemoryOrgStore, OrgApiState, OrgStore, org_router};
 pub use ratelimit::{ProxyParseError, RateLimiter, TrustedProxies};
 pub use session::{SessionApiState, session_router};
+pub use tenancy::{PostgresTenancyStore, TenancyStore};
 
 /// Build the engine sub-router (validate/plan, state not yet bound) together
 /// with the aggregated OpenAPI document. Both the live spec endpoint and the

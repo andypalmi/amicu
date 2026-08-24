@@ -41,13 +41,34 @@ use crate::engine::AccessVerifier;
 pub struct SessionApiState {
     service: Arc<AuthService>,
     verifier: Arc<dyn AccessVerifier>,
+    /// The durable provisioning/invite authority backing `POST /workspaces` and
+    /// `POST /org/invites/accept`. `None` on the in-memory dev path (those routes
+    /// then return `503`); see [`crate::tenancy`].
+    tenancy: Option<Arc<dyn crate::tenancy::TenancyStore>>,
 }
 
 impl SessionApiState {
     /// Assemble state from the auth service and the access-token verifier.
     #[must_use]
     pub fn new(service: Arc<AuthService>, verifier: Arc<dyn AccessVerifier>) -> Self {
-        Self { service, verifier }
+        Self {
+            service,
+            verifier,
+            tenancy: None,
+        }
+    }
+
+    /// Install the durable tenancy store, enabling `POST /workspaces` and
+    /// `POST /org/invites/accept` (the Postgres deployment path).
+    #[must_use]
+    pub fn with_tenancy(mut self, tenancy: Arc<dyn crate::tenancy::TenancyStore>) -> Self {
+        self.tenancy = Some(tenancy);
+        self
+    }
+
+    /// The durable tenancy store, if wired.
+    pub(crate) fn tenancy(&self) -> Option<&Arc<dyn crate::tenancy::TenancyStore>> {
+        self.tenancy.as_ref()
     }
 }
 
@@ -80,8 +101,15 @@ pub(crate) struct SwitchWorkspaceRequest {
 /// Build the session router: both routes behind the authentication gate.
 pub fn session_router(state: SessionApiState) -> Router {
     Router::new()
-        .route("/workspaces", get(list_workspaces_handler))
+        .route(
+            "/workspaces",
+            get(list_workspaces_handler).post(crate::tenancy::create_workspace_handler),
+        )
         .route("/session/workspace", post(switch_workspace_handler))
+        .route(
+            "/org/invites/accept",
+            post(crate::tenancy::accept_invite_handler),
+        )
         .layer(from_fn_with_state(state.clone(), session_auth_gate))
         .with_state(state)
 }

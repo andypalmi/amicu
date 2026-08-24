@@ -733,6 +733,72 @@ async fn a_token_only_ever_sees_its_own_workspace() {
     assert_eq!(other_members[0]["user_id"], OTHER_OWNER);
 }
 
+/// andypalmi/amicu-planning#131 exit criterion: the workspace is claim-derived
+/// EVERYWHERE and no request header can influence it. A caller attaches a bogus
+/// `X-Amicu-Workspace-Id` (and a stray `X-Workspace-Id`) naming OTHER while
+/// holding an ORG-scoped token; the request still acts on ORG (the claim), and
+/// OTHER's data is never reached. There is no header path by construction - the
+/// gate reads only the verified `Authorization` bearer - so the bogus headers
+/// are inert.
+#[tokio::test]
+async fn a_bogus_workspace_header_cannot_redirect_the_claim() {
+    let h = harness();
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *ORG, MEMBER, Role::Member);
+    // OTHER has a single, distinct member; if a header could redirect scope, the
+    // ORG token would "see" OTHER's one member instead of ORG's two.
+    seed(&h.store, *OTHER, OTHER_OWNER, Role::Owner);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/org/members")
+        .header(header::AUTHORIZATION, format!("Bearer {}", h.tokens.owner))
+        .header("X-Amicu-Workspace-Id", OTHER.to_string())
+        .header("X-Workspace-Id", OTHER.to_string())
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = send(&h.app, req).await;
+    assert_eq!(status, StatusCode::OK);
+    // Still ORG (two members), never OTHER (one): the header was ignored.
+    let members = body["members"].as_array().unwrap();
+    assert_eq!(members.len(), 2, "claim workspace ORG wins over any header");
+    let ids: Vec<&str> = members
+        .iter()
+        .map(|m| m["user_id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&OWNER) && ids.contains(&MEMBER));
+    assert!(
+        !ids.contains(&OTHER_OWNER),
+        "OTHER's member must never appear"
+    );
+}
+
+/// Companion exit criterion: a mutation cannot be redirected by a header either.
+/// The ORG owner adds a member while attaching a header naming OTHER; the member
+/// lands in ORG (the claim), and OTHER is untouched.
+#[tokio::test]
+async fn a_bogus_workspace_header_cannot_redirect_a_mutation() {
+    let h = harness();
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *OTHER, OTHER_OWNER, Role::Owner);
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/org/members")
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {}", h.tokens.owner))
+        .header("X-Amicu-Workspace-Id", OTHER.to_string())
+        .body(Body::from(
+            json!({ "user_id": NEW_MEMBER, "role": "member" }).to_string(),
+        ))
+        .unwrap();
+    let (status, _) = send(&h.app, req).await;
+    assert_eq!(status, StatusCode::CREATED);
+    // Landed in ORG (the claim), not OTHER (the header).
+    assert_eq!(h.store.role_of(*ORG, NEW_MEMBER), Some(Role::Member));
+    assert_eq!(h.store.role_of(*OTHER, NEW_MEMBER), None);
+}
+
 #[tokio::test]
 async fn a_mutation_lands_only_in_the_tokens_workspace() {
     let h = harness();

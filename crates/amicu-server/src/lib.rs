@@ -73,8 +73,8 @@ use std::time::Duration;
 
 use amicu_api::{
     AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore, OrgApiState,
-    OrgStore, ProxyParseError, RateLimiter, SessionApiState, TrustedProxies, api_router,
-    stripe_config_from_env,
+    OrgStore, PostgresTenancyStore, ProxyParseError, RateLimiter, SessionApiState, TenancyStore,
+    TrustedProxies, api_router, stripe_config_from_env,
 };
 use amicu_auth::issuer::{IssuerConfig, TokenIssuer};
 use amicu_auth::key::SigningKey;
@@ -91,7 +91,8 @@ use amicu_auth::{AuthError, Tier};
 use amicu_state::{InMemoryStateBackend, StateBackendAdapter};
 use amicu_store::config::ConfigStore;
 use amicu_store::{
-    InMemoryConfigStore, PostgresConfigStore, PostgresMembershipStore, PostgresStateBackend,
+    InMemoryConfigStore, PostgresConfigStore, PostgresInviteStore, PostgresMembershipStore,
+    PostgresStateBackend, PostgresWorkspaceStore,
 };
 use axum::Router;
 use clap::{Parser, ValueEnum};
@@ -414,8 +415,10 @@ async fn build_app_with_database_url(
     let engine_state = EngineApiState::new(verifier.clone()).with_min_tier(config.min_tier.into());
 
     // Session/workspace surface (list-my-workspaces + switch): authenticates via
-    // the same verifier and mints switched pairs through the auth service.
-    let session_state = SessionApiState::new(service, verifier.clone());
+    // the same verifier and mints switched pairs through the auth service. Its
+    // tenancy store (for `POST /workspaces` and `POST /org/invites/accept`) is
+    // installed below, once constructed on the Postgres path.
+    let mut session_state = SessionApiState::new(service, verifier.clone());
 
     // Billing is a real Stripe integration, activated only when its secrets are
     // present in the environment. Absent them, the endpoints return a clean 503
@@ -452,7 +455,35 @@ async fn build_app_with_database_url(
     } else {
         Arc::new(InMemoryOrgStore::new())
     };
-    let org_state = OrgApiState::new(verifier, org_store);
+    // Multi-tenant provisioning + invites (andypalmi/amicu-planning#131):
+    // `POST /workspaces` (additional-workspace provisioning),
+    // `POST /org/invites` + `GET /org/invites` (mint/list), and
+    // `POST /org/invites/accept` (redeem). These are inherently multi-tenant
+    // (additional workspaces, shared invites), so they are wired ONLY on the
+    // Postgres path; the in-memory dev path is single-personal-workspace by
+    // construction and those routes return a clean 503. Its own pool, like the
+    // config/state blocks, for rebase-ability.
+    let tenancy: Option<Arc<dyn TenancyStore>> = if let Some(database_url) = database_url {
+        let pool = amicu_store::connect(database_url)
+            .await
+            .map_err(Error::Store)?;
+        amicu_store::run_migrations(&pool)
+            .await
+            .map_err(Error::Store)?;
+        eprintln!("amicu-server: using the Postgres tenancy store (DATABASE_URL set).");
+        Some(Arc::new(PostgresTenancyStore::new(
+            PostgresWorkspaceStore::new(pool.clone()),
+            PostgresInviteStore::new(pool),
+        )))
+    } else {
+        None
+    };
+
+    let mut org_state = OrgApiState::new(verifier, org_store);
+    if let Some(tenancy) = tenancy.clone() {
+        org_state = org_state.with_tenancy(tenancy.clone());
+        session_state = session_state.with_tenancy(tenancy);
+    }
 
     // Config storage + version history (`/configs/*`): the same
     // Postgres-when-`DATABASE_URL`-else-in-memory selection as the auth store

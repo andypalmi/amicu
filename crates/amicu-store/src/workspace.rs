@@ -9,7 +9,7 @@ use amicu_auth::{AuthError, Result, Tier};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{WorkspaceId, map_db, now_unix_seconds, tier_from_str, tier_to_str};
+use crate::{WorkspaceId, begin_scoped, map_db, now_unix_seconds, tier_from_str, tier_to_str};
 
 /// A workspace record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +60,66 @@ impl PostgresWorkspaceStore {
         .execute(&self.pool)
         .await
         .map_err(map_db)?;
+        Ok(WorkspaceId::from_uuid(id))
+    }
+
+    /// Provision an ADDITIONAL workspace and enroll `owner_id` as its founding
+    /// Owner, atomically, returning the SERVER-GENERATED workspace id.
+    ///
+    /// This is the multi-tenant analogue of sign-up's personal-workspace
+    /// provisioning ([`PostgresUserStore::create`](crate::user)): a logged-in user
+    /// creating a second/Nth workspace. Both the `workspaces` row and the founding
+    /// `workspace_members(owner, Owner)` row are written in ONE transaction (the
+    /// caller is immediately the Owner of a usable workspace, or nothing is
+    /// written). The workspace id is generated here and never caller-influenced,
+    /// so a caller can never land in an existing or other workspace.
+    ///
+    /// The new workspace starts at [`Tier::Community`]; billing upgrades are a
+    /// separate, subscription-driven concern (the org console / Stripe surface).
+    // `owner_id`/`owner_uid` are the `&str` and parsed-`Uuid` forms of the SAME
+    // id; `clippy::similar_names` reads them as confusable, but keeping the shared
+    // stem is the clearer naming (as in `membership.rs`).
+    #[allow(clippy::similar_names)]
+    pub async fn create_with_owner(&self, name: &str, owner_id: &str) -> Result<WorkspaceId> {
+        // The owner id (a token `sub`) is a UUID in the identity model; anything
+        // else is a programming error at the API boundary, surfaced as Backend.
+        let owner_uid = Uuid::parse_str(owner_id).map_err(|_| AuthError::Backend)?;
+        let id = Uuid::new_v4();
+        // A globally-unique slug derived from the server-generated id (never
+        // caller-influenced), so it can never collide on the slug UNIQUE
+        // constraint - mirroring personal-workspace provisioning.
+        let slug = format!("ws-{}", id.simple());
+        let now = now_unix_seconds();
+
+        // Bind the new workspace so the workspace_members INSERT satisfies the RLS
+        // WITH CHECK (workspace_id = app.current_workspace). `workspaces` is a
+        // no-RLS control-plane table, so the GUC is inert for it; it matters only
+        // for the founding-membership row. ONE context (workspace) is bound, so
+        // the single-context invariant holds.
+        let mut tx = begin_scoped(&self.pool, WorkspaceId::from_uuid(id)).await?;
+        sqlx::query!(
+            "INSERT INTO workspaces (id, slug, name, tier, created_at) \
+             VALUES ($1, $2, $3, 'community', $4)",
+            id,
+            slug,
+            name,
+            now,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db)?;
+        sqlx::query!(
+            "INSERT INTO workspace_members \
+             (workspace_id, user_id, role, invited_by, joined_at) \
+             VALUES ($1, $2, 'owner', NULL, $3)",
+            id,
+            owner_uid,
+            now,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db)?;
+        tx.commit().await.map_err(map_db)?;
         Ok(WorkspaceId::from_uuid(id))
     }
 

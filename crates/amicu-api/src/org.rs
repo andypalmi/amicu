@@ -215,6 +215,12 @@ pub enum AuditAction {
     RoleChanged,
     /// A member was removed.
     MemberRemoved,
+    /// A pending invite was created.
+    InviteCreated,
+    /// An invite was accepted, enrolling the redeemer as a member.
+    InviteAccepted,
+    /// A pending invite was revoked before acceptance.
+    InviteRevoked,
 }
 
 impl AuditAction {
@@ -224,6 +230,9 @@ impl AuditAction {
             AuditAction::MemberAdded => "member.added",
             AuditAction::RoleChanged => "member.role_changed",
             AuditAction::MemberRemoved => "member.removed",
+            AuditAction::InviteCreated => "invite.created",
+            AuditAction::InviteAccepted => "invite.accepted",
+            AuditAction::InviteRevoked => "invite.revoked",
         }
     }
 }
@@ -234,6 +243,9 @@ impl From<OrgAuditAction> for AuditAction {
             OrgAuditAction::MemberAdded => AuditAction::MemberAdded,
             OrgAuditAction::RoleChanged => AuditAction::RoleChanged,
             OrgAuditAction::MemberRemoved => AuditAction::MemberRemoved,
+            OrgAuditAction::InviteCreated => AuditAction::InviteCreated,
+            OrgAuditAction::InviteAccepted => AuditAction::InviteAccepted,
+            OrgAuditAction::InviteRevoked => AuditAction::InviteRevoked,
         }
     }
 }
@@ -623,13 +635,34 @@ const ORG_MIN_TIER: Tier = Tier::Enterprise;
 pub struct OrgApiState {
     verifier: Arc<dyn AccessVerifier>,
     store: Arc<dyn OrgStore>,
+    /// The durable provisioning/invite authority backing `POST /org/invites` and
+    /// `GET /org/invites`. `None` on the in-memory dev path (those routes then
+    /// return `503`); see [`crate::tenancy`].
+    tenancy: Option<Arc<dyn crate::tenancy::TenancyStore>>,
 }
 
 impl OrgApiState {
     /// Assemble org state from a verifier and a store.
     #[must_use]
     pub fn new(verifier: Arc<dyn AccessVerifier>, store: Arc<dyn OrgStore>) -> Self {
-        Self { verifier, store }
+        Self {
+            verifier,
+            store,
+            tenancy: None,
+        }
+    }
+
+    /// Install the durable tenancy store, enabling `POST /org/invites` and
+    /// `GET /org/invites` (the Postgres deployment path).
+    #[must_use]
+    pub fn with_tenancy(mut self, tenancy: Arc<dyn crate::tenancy::TenancyStore>) -> Self {
+        self.tenancy = Some(tenancy);
+        self
+    }
+
+    /// The durable tenancy store, if wired.
+    pub(crate) fn tenancy(&self) -> Option<&Arc<dyn crate::tenancy::TenancyStore>> {
+        self.tenancy.as_ref()
     }
 }
 
@@ -703,6 +736,14 @@ pub fn org_router(state: OrgApiState) -> Router {
         .route(
             "/org/members/{id}",
             patch(change_role_handler).delete(remove_member_handler),
+        )
+        .route(
+            "/org/invites",
+            get(crate::tenancy::list_invites_handler).post(crate::tenancy::create_invite_handler),
+        )
+        .route(
+            "/org/invites/{id}",
+            axum::routing::delete(crate::tenancy::revoke_invite_handler),
         )
         .route("/org/roles", get(list_roles_handler))
         .route("/org/audit", get(audit_handler))

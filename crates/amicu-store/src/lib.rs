@@ -76,7 +76,7 @@ pub mod verify;
 pub mod workspace;
 
 pub use config::{ConfigStore, InMemoryConfigStore, PostgresConfigStore};
-pub use invite::{Invite, PostgresInviteStore};
+pub use invite::{AcceptedInvite, Invite, InviteError, PostgresInviteStore};
 pub use membership::{
     Member, OrgAuditAction, OrgAuditEntry, OrgMutationError, PostgresMembershipStore, Role,
 };
