@@ -55,7 +55,7 @@ use utoipa_axum::routes;
 pub use auth::{AuthApiState, auth_router};
 pub use billing::{BillingApiState, StripeConfig, billing_router, stripe_config_from_env};
 pub use config::{ConfigApiState, config_router};
-pub use engine::{AccessVerifier, EngineApiState};
+pub use engine::{AccessVerifier, EngineApiState, WorkspaceContext};
 pub use openapi::ApiDoc;
 pub use org::{InMemoryOrgStore, OrgApiState, OrgStore, org_router};
 pub use ratelimit::{ProxyParseError, RateLimiter, TrustedProxies};

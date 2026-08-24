@@ -70,6 +70,40 @@ async fn provision_workspace(pool: &PgPool, workspace: WorkspaceId) {
     .expect("provision workspace");
 }
 
+/// Reads the raw stored `content` for the latest snapshot of `(workspace,
+/// stack)` directly from `state_snapshots`, binding `app.current_workspace` so
+/// the row is visible under the non-superuser `amicu_app` role's row-level
+/// security. Since migration 0012 the state policies fail CLOSED (an unbound or
+/// empty-string workspace GUC matches nothing via NULLIF), so a raw read that
+/// wants to inspect a specific tenant's at-rest bytes must bind that workspace -
+/// it can no longer rely on a superuser connection silently bypassing RLS. Uses
+/// the runtime `query()` API so no sqlx offline-cache entry is needed.
+async fn raw_stored_content(
+    pool: &PgPool,
+    workspace: WorkspaceId,
+    stack: &str,
+) -> serde_json::Value {
+    let mut tx = pool.begin().await.expect("begin raw read");
+    sqlx::query("SELECT set_config('app.current_workspace', $1, true)")
+        .bind(workspace.as_uuid().to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("bind workspace for raw read");
+    let raw: serde_json::Value = sqlx::query(
+        "SELECT content FROM state_snapshots WHERE workspace_id = $1 AND stack_id = $2 \
+         ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(workspace.as_uuid())
+    .bind(stack)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("read raw stored content")
+    .try_get("content")
+    .expect("content column decodes as JSON");
+    tx.rollback().await.expect("rollback raw read");
+    raw
+}
+
 fn sample_model() -> Model {
     Model {
         id: ModelId::new("support_chat"),
@@ -572,20 +606,9 @@ async fn push_pull_round_trip_with_cipher_encrypts_at_rest_and_recovers_original
 
     // What is actually stored in Postgres is not the plaintext graph: a raw
     // read of the column must not contain identifiable plaintext fields
-    // (e.g. the model id) from the graph. Uses the runtime `query()` API
-    // (not the `query!` macro) so this test needs no sqlx offline-cache
-    // entry, matching `PostgresStateBackend::health`'s existing convention.
-    let raw: serde_json::Value = sqlx::query(
-        "SELECT content FROM state_snapshots WHERE workspace_id = $1 AND stack_id = $2 \
-         ORDER BY seq DESC LIMIT 1",
-    )
-    .bind(WorkspaceId::DEFAULT.as_uuid())
-    .bind(&stack)
-    .fetch_one(&pool)
-    .await
-    .expect("read raw stored content")
-    .try_get("content")
-    .expect("content column decodes as JSON");
+    // (e.g. the model id) from the graph. The read binds the workspace so the
+    // row is visible under amicu_app's row-level security (see helper).
+    let raw = raw_stored_content(&pool, WorkspaceId::DEFAULT, &stack).await;
     let raw_str = raw.to_string();
     assert!(
         !raw_str.contains("support_chat"),
@@ -617,17 +640,7 @@ async fn push_with_no_cipher_configured_writes_plaintext_content_unchanged() {
         .expect("push under lock");
     backend.unlock(lock).await.expect("release lock");
 
-    let raw: serde_json::Value = sqlx::query(
-        "SELECT content FROM state_snapshots WHERE workspace_id = $1 AND stack_id = $2 \
-         ORDER BY seq DESC LIMIT 1",
-    )
-    .bind(WorkspaceId::DEFAULT.as_uuid())
-    .bind(&stack)
-    .fetch_one(&pool)
-    .await
-    .expect("read raw stored content")
-    .try_get("content")
-    .expect("content column decodes as JSON");
+    let raw = raw_stored_content(&pool, WorkspaceId::DEFAULT, &stack).await;
 
     assert_eq!(
         raw,

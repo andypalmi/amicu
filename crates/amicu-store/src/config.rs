@@ -197,6 +197,12 @@ fn content_sha256(content: &str) -> [u8; 32] {
 /// exactly the pattern `amicu-server`'s `build_app` already uses for the auth
 /// stores. The surface mirrors [`PostgresConfigStore`]'s original methods
 /// one-for-one.
+///
+/// Every method is scoped to a [`WorkspaceId`] passed per call (rather than the
+/// store instance being pinned to one workspace), so a single store handle
+/// serves every request and each call runs its queries under a `begin_scoped`
+/// transaction bound to the caller's *claim* workspace
+/// (andypalmi/amicu-planning#130).
 #[async_trait]
 pub trait ConfigStore: Send + Sync {
     /// Creates a new config together with its first version (`version_no =
@@ -207,24 +213,34 @@ pub trait ConfigStore: Send + Sync {
     /// Returns [`ConfigError::DuplicateName`] if `name` is already taken.
     async fn create(
         &self,
+        workspace: WorkspaceId,
         name: &str,
         content: &str,
         created_by: Option<Uuid>,
         message: Option<&str>,
     ) -> Result<Config>;
 
-    /// Lists every config, ordered by name.
-    async fn list(&self) -> Result<Vec<ConfigSummary>>;
+    /// Lists every config in `workspace`, ordered by name.
+    async fn list(&self, workspace: WorkspaceId) -> Result<Vec<ConfigSummary>>;
 
     /// Fetches a config's current version, content included.
-    async fn get_current(&self, id: Uuid) -> Result<Option<ConfigWithContent>>;
+    async fn get_current(
+        &self,
+        workspace: WorkspaceId,
+        id: Uuid,
+    ) -> Result<Option<ConfigWithContent>>;
 
     /// Lists every version of a config (metadata only, no content), oldest
     /// first. Returns an empty list for an unknown config id.
-    async fn list_versions(&self, id: Uuid) -> Result<Vec<VersionMeta>>;
+    async fn list_versions(&self, workspace: WorkspaceId, id: Uuid) -> Result<Vec<VersionMeta>>;
 
     /// Fetches one specific version's content and metadata.
-    async fn get_version(&self, id: Uuid, version_no: i32) -> Result<Option<VersionContent>>;
+    async fn get_version(
+        &self,
+        workspace: WorkspaceId,
+        id: Uuid,
+        version_no: i32,
+    ) -> Result<Option<VersionContent>>;
 
     /// Appends a new version onto a config.
     ///
@@ -232,6 +248,7 @@ pub trait ConfigStore: Send + Sync {
     /// Returns [`ConfigError::NotFound`] if `id` is unknown.
     async fn append_version(
         &self,
+        workspace: WorkspaceId,
         id: Uuid,
         content: &str,
         created_by: Option<Uuid>,
@@ -247,6 +264,7 @@ pub trait ConfigStore: Send + Sync {
     /// or [`ConfigError::NotFound`] if `id` is unknown.
     async fn rollback(
         &self,
+        workspace: WorkspaceId,
         id: Uuid,
         to_version: i32,
         created_by: Option<Uuid>,
@@ -254,30 +272,25 @@ pub trait ConfigStore: Send + Sync {
 }
 
 /// Postgres implementation of [`ConfigStore`].
+///
+/// Not pinned to any workspace: each method opens a `begin_scoped` transaction
+/// bound to the [`WorkspaceId`] it is passed, so one store handle serves every
+/// tenant and the row-level-security policy (fail-closed via NULLIF, see
+/// migration 0012) applies the caller's claim workspace per request.
 pub struct PostgresConfigStore {
     pool: PgPool,
-    workspace: WorkspaceId,
 }
 
 impl PostgresConfigStore {
-    /// A store bound to the single-tenant default workspace.
+    /// A config store over `pool`. The workspace is supplied per call.
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self {
-            pool,
-            workspace: WorkspaceId::DEFAULT,
-        }
+        Self { pool }
     }
 
-    /// A store bound to a specific workspace (multi-tenant, future use).
-    #[must_use]
-    pub fn with_workspace(pool: PgPool, workspace: WorkspaceId) -> Self {
-        Self { pool, workspace }
-    }
-
-    /// Begins a GUC-bound transaction scoped to this store's workspace.
-    async fn begin(&self) -> Result<sqlx::Transaction<'_, sqlx::Postgres>> {
-        begin_scoped(&self.pool, self.workspace)
+    /// Begins a GUC-bound transaction scoped to `workspace`.
+    async fn begin(&self, workspace: WorkspaceId) -> Result<sqlx::Transaction<'_, sqlx::Postgres>> {
+        begin_scoped(&self.pool, workspace)
             .await
             .map_err(|_| ConfigError::Backend)
     }
@@ -290,13 +303,14 @@ impl ConfigStore for PostgresConfigStore {
     /// given.
     async fn create(
         &self,
+        workspace: WorkspaceId,
         name: &str,
         content: &str,
         created_by: Option<Uuid>,
         message: Option<&str>,
     ) -> Result<Config> {
-        let mut tx = self.begin().await?;
-        let wsid = self.workspace.as_uuid();
+        let mut tx = self.begin(workspace).await?;
+        let wsid = workspace.as_uuid();
         let id = Uuid::new_v4();
         let now = now_unix_seconds();
         let sha = content_sha256(content);
@@ -349,9 +363,9 @@ impl ConfigStore for PostgresConfigStore {
     }
 
     /// Lists every config in this workspace, ordered by name.
-    async fn list(&self) -> Result<Vec<ConfigSummary>> {
-        let mut tx = self.begin().await?;
-        let wsid = self.workspace.as_uuid();
+    async fn list(&self, workspace: WorkspaceId) -> Result<Vec<ConfigSummary>> {
+        let mut tx = self.begin(workspace).await?;
+        let wsid = workspace.as_uuid();
         let rows = sqlx::query_as!(
             ConfigSummary,
             "SELECT id, name, current_version, updated_at \
@@ -365,9 +379,13 @@ impl ConfigStore for PostgresConfigStore {
     }
 
     /// Fetches a config's current version, content included.
-    async fn get_current(&self, id: Uuid) -> Result<Option<ConfigWithContent>> {
-        let mut tx = self.begin().await?;
-        let wsid = self.workspace.as_uuid();
+    async fn get_current(
+        &self,
+        workspace: WorkspaceId,
+        id: Uuid,
+    ) -> Result<Option<ConfigWithContent>> {
+        let mut tx = self.begin(workspace).await?;
+        let wsid = workspace.as_uuid();
         let row = sqlx::query_as!(
             ConfigWithContentRow,
             "SELECT c.id, c.name, c.current_version, cv.content, cv.content_sha256, \
@@ -388,9 +406,9 @@ impl ConfigStore for PostgresConfigStore {
 
     /// Lists every version of a config (metadata only, no content), oldest
     /// first. Returns an empty list for an unknown config id.
-    async fn list_versions(&self, id: Uuid) -> Result<Vec<VersionMeta>> {
-        let mut tx = self.begin().await?;
-        let wsid = self.workspace.as_uuid();
+    async fn list_versions(&self, workspace: WorkspaceId, id: Uuid) -> Result<Vec<VersionMeta>> {
+        let mut tx = self.begin(workspace).await?;
+        let wsid = workspace.as_uuid();
         let rows = sqlx::query_as!(
             VersionMetaRow,
             "SELECT version_no, created_at, created_by, message, content_sha256 \
@@ -406,9 +424,14 @@ impl ConfigStore for PostgresConfigStore {
     }
 
     /// Fetches one specific version's content and metadata.
-    async fn get_version(&self, id: Uuid, version_no: i32) -> Result<Option<VersionContent>> {
-        let mut tx = self.begin().await?;
-        let wsid = self.workspace.as_uuid();
+    async fn get_version(
+        &self,
+        workspace: WorkspaceId,
+        id: Uuid,
+        version_no: i32,
+    ) -> Result<Option<VersionContent>> {
+        let mut tx = self.begin(workspace).await?;
+        let wsid = workspace.as_uuid();
         let row = sqlx::query_as!(
             VersionContentRow,
             "SELECT version_no, content, content_sha256, created_at, created_by, message \
@@ -430,13 +453,14 @@ impl ConfigStore for PostgresConfigStore {
     /// exactly as given.
     async fn append_version(
         &self,
+        workspace: WorkspaceId,
         id: Uuid,
         content: &str,
         created_by: Option<Uuid>,
         message: Option<&str>,
     ) -> Result<VersionMeta> {
-        let mut tx = self.begin().await?;
-        let wsid = self.workspace.as_uuid();
+        let mut tx = self.begin(workspace).await?;
+        let wsid = workspace.as_uuid();
         let now = now_unix_seconds();
         let sha = content_sha256(content);
 
@@ -495,12 +519,13 @@ impl ConfigStore for PostgresConfigStore {
     /// (who triggered it), exactly like [`Self::append_version`].
     async fn rollback(
         &self,
+        workspace: WorkspaceId,
         id: Uuid,
         to_version: i32,
         created_by: Option<Uuid>,
     ) -> Result<VersionMeta> {
-        let mut tx = self.begin().await?;
-        let wsid = self.workspace.as_uuid();
+        let mut tx = self.begin(workspace).await?;
+        let wsid = workspace.as_uuid();
 
         let source = sqlx::query!(
             "SELECT content FROM config_versions \
@@ -617,9 +642,13 @@ impl InMemoryConfigRecord {
 /// on restart; mirrors [`PostgresConfigStore`]'s semantics (duplicate names
 /// rejected, append-only history, rollback mints a new version) without a
 /// database.
+///
+/// Partitioned by [`WorkspaceId`] exactly as the Postgres store's rows are, so a
+/// config created under one workspace claim is invisible under another - the
+/// tenant boundary holds in the zero-config path too, not only under RLS.
 #[derive(Default)]
 pub struct InMemoryConfigStore {
-    inner: std::sync::Mutex<Vec<InMemoryConfigRecord>>,
+    inner: std::sync::Mutex<std::collections::HashMap<WorkspaceId, Vec<InMemoryConfigRecord>>>,
 }
 
 impl InMemoryConfigStore {
@@ -634,12 +663,14 @@ impl InMemoryConfigStore {
 impl ConfigStore for InMemoryConfigStore {
     async fn create(
         &self,
+        workspace: WorkspaceId,
         name: &str,
         content: &str,
         created_by: Option<Uuid>,
         message: Option<&str>,
     ) -> Result<Config> {
-        let mut records = self.inner.lock().expect("config store poisoned");
+        let mut all = self.inner.lock().expect("config store poisoned");
+        let records = all.entry(workspace).or_default();
         if records.iter().any(|r| r.name == name) {
             return Err(ConfigError::DuplicateName(name.to_string()));
         }
@@ -668,35 +699,37 @@ impl ConfigStore for InMemoryConfigStore {
         })
     }
 
-    async fn list(&self) -> Result<Vec<ConfigSummary>> {
-        let mut records: Vec<ConfigSummary> = self
-            .inner
-            .lock()
-            .expect("config store poisoned")
-            .iter()
-            .map(InMemoryConfigRecord::summary)
-            .collect();
+    async fn list(&self, workspace: WorkspaceId) -> Result<Vec<ConfigSummary>> {
+        let all = self.inner.lock().expect("config store poisoned");
+        let mut records: Vec<ConfigSummary> = all
+            .get(&workspace)
+            .map(|recs| recs.iter().map(InMemoryConfigRecord::summary).collect())
+            .unwrap_or_default();
         records.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(records)
     }
 
-    async fn get_current(&self, id: Uuid) -> Result<Option<ConfigWithContent>> {
+    async fn get_current(
+        &self,
+        workspace: WorkspaceId,
+        id: Uuid,
+    ) -> Result<Option<ConfigWithContent>> {
         Ok(self
             .inner
             .lock()
             .expect("config store poisoned")
-            .iter()
-            .find(|r| r.id == id)
+            .get(&workspace)
+            .and_then(|recs| recs.iter().find(|r| r.id == id))
             .map(InMemoryConfigRecord::with_content))
     }
 
-    async fn list_versions(&self, id: Uuid) -> Result<Vec<VersionMeta>> {
+    async fn list_versions(&self, workspace: WorkspaceId, id: Uuid) -> Result<Vec<VersionMeta>> {
         Ok(self
             .inner
             .lock()
             .expect("config store poisoned")
-            .iter()
-            .find(|r| r.id == id)
+            .get(&workspace)
+            .and_then(|recs| recs.iter().find(|r| r.id == id))
             .map(|r| {
                 r.versions
                     .iter()
@@ -712,28 +745,34 @@ impl ConfigStore for InMemoryConfigStore {
             .unwrap_or_default())
     }
 
-    async fn get_version(&self, id: Uuid, version_no: i32) -> Result<Option<VersionContent>> {
+    async fn get_version(
+        &self,
+        workspace: WorkspaceId,
+        id: Uuid,
+        version_no: i32,
+    ) -> Result<Option<VersionContent>> {
         Ok(self
             .inner
             .lock()
             .expect("config store poisoned")
-            .iter()
-            .find(|r| r.id == id)
+            .get(&workspace)
+            .and_then(|recs| recs.iter().find(|r| r.id == id))
             .and_then(|r| r.versions.iter().find(|v| v.version_no == version_no))
             .cloned())
     }
 
     async fn append_version(
         &self,
+        workspace: WorkspaceId,
         id: Uuid,
         content: &str,
         created_by: Option<Uuid>,
         message: Option<&str>,
     ) -> Result<VersionMeta> {
-        let mut records = self.inner.lock().expect("config store poisoned");
-        let record = records
-            .iter_mut()
-            .find(|r| r.id == id)
+        let mut all = self.inner.lock().expect("config store poisoned");
+        let record = all
+            .get_mut(&workspace)
+            .and_then(|recs| recs.iter_mut().find(|r| r.id == id))
             .ok_or(ConfigError::NotFound)?;
         let now = now_unix_seconds();
         let version_no = record.current_version_no() + 1;
@@ -758,14 +797,15 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn rollback(
         &self,
+        workspace: WorkspaceId,
         id: Uuid,
         to_version: i32,
         created_by: Option<Uuid>,
     ) -> Result<VersionMeta> {
-        let mut records = self.inner.lock().expect("config store poisoned");
-        let record = records
-            .iter_mut()
-            .find(|r| r.id == id)
+        let mut all = self.inner.lock().expect("config store poisoned");
+        let record = all
+            .get_mut(&workspace)
+            .and_then(|recs| recs.iter_mut().find(|r| r.id == id))
             .ok_or(ConfigError::NotFound)?;
         let source_content = record
             .versions
@@ -801,32 +841,35 @@ impl ConfigStore for InMemoryConfigStore {
 mod in_memory_tests {
     use super::*;
 
+    /// A fixed workspace for the single-tenant in-memory tests.
+    const WS: WorkspaceId = WorkspaceId::DEFAULT;
+
     #[tokio::test]
     async fn create_get_append_and_list_versions() {
         let store = InMemoryConfigStore::new();
         let author = Uuid::new_v4();
 
         let created = store
-            .create("cfg", "hcl v1", Some(author), Some("initial"))
+            .create(WS, "cfg", "hcl v1", Some(author), Some("initial"))
             .await
             .expect("create config");
         assert_eq!(created.current_version, 1);
 
         let current = store
-            .get_current(created.id)
+            .get_current(WS, created.id)
             .await
             .expect("get_current")
             .expect("present");
         assert_eq!(current.content, "hcl v1");
 
         let appended = store
-            .append_version(created.id, "hcl v2", Some(author), Some("second"))
+            .append_version(WS, created.id, "hcl v2", Some(author), Some("second"))
             .await
             .expect("append_version");
         assert_eq!(appended.version_no, 2);
 
         let versions = store
-            .list_versions(created.id)
+            .list_versions(WS, created.id)
             .await
             .expect("list_versions");
         assert_eq!(versions.len(), 2);
@@ -834,14 +877,14 @@ mod in_memory_tests {
         let unknown = Uuid::new_v4();
         assert!(
             store
-                .get_current(unknown)
+                .get_current(WS, unknown)
                 .await
                 .expect("get_current unknown")
                 .is_none()
         );
         assert!(matches!(
             store
-                .append_version(unknown, "x", None, None)
+                .append_version(WS, unknown, "x", None, None)
                 .await
                 .unwrap_err(),
             ConfigError::NotFound
@@ -852,43 +895,70 @@ mod in_memory_tests {
     async fn duplicate_name_is_rejected() {
         let store = InMemoryConfigStore::new();
         store
-            .create("cfg", "hcl", None, None)
+            .create(WS, "cfg", "hcl", None, None)
             .await
             .expect("create config");
         assert!(matches!(
-            store.create("cfg", "other", None, None).await.unwrap_err(),
+            store
+                .create(WS, "cfg", "other", None, None)
+                .await
+                .unwrap_err(),
             ConfigError::DuplicateName(n) if n == "cfg"
         ));
+    }
+
+    #[tokio::test]
+    async fn distinct_workspaces_are_isolated() {
+        // A config created under workspace A is invisible under workspace B, and
+        // the same name is free to reuse in B.
+        let store = InMemoryConfigStore::new();
+        let ws_a = WorkspaceId::new();
+        let ws_b = WorkspaceId::new();
+
+        let a = store
+            .create(ws_a, "shared-name", "a", None, None)
+            .await
+            .expect("create in A");
+        // B cannot see A's config by id, and A's config does not appear in B's list.
+        assert!(store.get_current(ws_b, a.id).await.expect("get").is_none());
+        assert!(store.list(ws_b).await.expect("list B").is_empty());
+        // The name is free in B (no cross-tenant uniqueness collision).
+        store
+            .create(ws_b, "shared-name", "b", None, None)
+            .await
+            .expect("create in B reuses the name");
+        assert_eq!(store.list(ws_a).await.expect("list A").len(), 1);
+        assert_eq!(store.list(ws_b).await.expect("list B").len(), 1);
     }
 
     #[tokio::test]
     async fn rollback_creates_new_version_and_preserves_history() {
         let store = InMemoryConfigStore::new();
         let created = store
-            .create("cfg", "hcl v1", None, Some("v1"))
+            .create(WS, "cfg", "hcl v1", None, Some("v1"))
             .await
             .expect("create config");
         store
-            .append_version(created.id, "hcl v2", None, Some("v2"))
+            .append_version(WS, created.id, "hcl v2", None, Some("v2"))
             .await
             .expect("append v2");
 
         let rollback_actor = Uuid::new_v4();
         let rolled = store
-            .rollback(created.id, 1, Some(rollback_actor))
+            .rollback(WS, created.id, 1, Some(rollback_actor))
             .await
             .expect("rollback");
         assert_eq!(rolled.version_no, 3);
         assert_eq!(rolled.created_by, Some(rollback_actor));
 
         let versions = store
-            .list_versions(created.id)
+            .list_versions(WS, created.id)
             .await
             .expect("list_versions");
         assert_eq!(versions.len(), 3);
 
         let current = store
-            .get_current(created.id)
+            .get_current(WS, created.id)
             .await
             .expect("get_current")
             .expect("present");
@@ -896,7 +966,7 @@ mod in_memory_tests {
         assert_eq!(current.current_version, 3);
 
         assert!(matches!(
-            store.rollback(created.id, 99, None).await.unwrap_err(),
+            store.rollback(WS, created.id, 99, None).await.unwrap_err(),
             ConfigError::VersionNotFound(99)
         ));
     }

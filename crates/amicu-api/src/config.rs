@@ -44,7 +44,7 @@ use similar::TextDiff;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::engine::{self, EngineApiState, MAX_ENGINE_BODY_BYTES};
+use crate::engine::{self, EngineApiState, MAX_ENGINE_BODY_BYTES, WorkspaceContext};
 
 // ---------------------------------------------------------------------------
 // State
@@ -351,6 +351,7 @@ fn canonicalize(content: &str) -> Result<String, ConfigHttpError> {
 pub(crate) async fn create_config_handler(
     State(state): State<ConfigApiState>,
     Extension(claims): Extension<Claims>,
+    Extension(ctx): Extension<WorkspaceContext>,
     Json(body): Json<CreateConfigRequest>,
 ) -> Result<(StatusCode, Json<ConfigDetailDto>), ConfigHttpError> {
     let content = canonicalize(&body.content)?;
@@ -358,6 +359,7 @@ pub(crate) async fn create_config_handler(
     let created = state
         .store
         .create(
+            ctx.workspace,
             &body.name,
             &content,
             Some(created_by),
@@ -366,7 +368,7 @@ pub(crate) async fn create_config_handler(
         .await?;
     let detail = state
         .store
-        .get_current(created.id)
+        .get_current(ctx.workspace, created.id)
         .await?
         .ok_or(ConfigHttpError::Backend)?;
     Ok((StatusCode::CREATED, Json(ConfigDetailDto::from(detail))))
@@ -386,8 +388,9 @@ pub(crate) async fn create_config_handler(
 )]
 pub(crate) async fn list_configs_handler(
     State(state): State<ConfigApiState>,
+    Extension(ctx): Extension<WorkspaceContext>,
 ) -> Result<Json<Vec<ConfigSummaryDto>>, ConfigHttpError> {
-    let configs = state.store.list().await?;
+    let configs = state.store.list(ctx.workspace).await?;
     Ok(Json(
         configs.into_iter().map(ConfigSummaryDto::from).collect(),
     ))
@@ -409,11 +412,12 @@ pub(crate) async fn list_configs_handler(
 )]
 pub(crate) async fn get_config_handler(
     State(state): State<ConfigApiState>,
+    Extension(ctx): Extension<WorkspaceContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ConfigDetailDto>, ConfigHttpError> {
     let config = state
         .store
-        .get_current(id)
+        .get_current(ctx.workspace, id)
         .await?
         .ok_or_else(|| ConfigHttpError::NotFound(format!("no config with id `{id}`")))?;
     Ok(Json(ConfigDetailDto::from(config)))
@@ -434,9 +438,10 @@ pub(crate) async fn get_config_handler(
 )]
 pub(crate) async fn list_versions_handler(
     State(state): State<ConfigApiState>,
+    Extension(ctx): Extension<WorkspaceContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<VersionMetaDto>>, ConfigHttpError> {
-    let versions = state.store.list_versions(id).await?;
+    let versions = state.store.list_versions(ctx.workspace, id).await?;
     Ok(Json(
         versions.into_iter().map(VersionMetaDto::from).collect(),
     ))
@@ -461,12 +466,14 @@ pub(crate) async fn list_versions_handler(
 )]
 pub(crate) async fn get_version_handler(
     State(state): State<ConfigApiState>,
+    Extension(ctx): Extension<WorkspaceContext>,
     Path((id, no)): Path<(Uuid, i32)>,
 ) -> Result<Json<VersionContentDto>, ConfigHttpError> {
-    let version =
-        state.store.get_version(id, no).await?.ok_or_else(|| {
-            ConfigHttpError::NotFound(format!("no version {no} for config `{id}`"))
-        })?;
+    let version = state
+        .store
+        .get_version(ctx.workspace, id, no)
+        .await?
+        .ok_or_else(|| ConfigHttpError::NotFound(format!("no version {no} for config `{id}`")))?;
     Ok(Json(VersionContentDto::from(version)))
 }
 
@@ -489,6 +496,7 @@ pub(crate) async fn get_version_handler(
 pub(crate) async fn append_version_handler(
     State(state): State<ConfigApiState>,
     Extension(claims): Extension<Claims>,
+    Extension(ctx): Extension<WorkspaceContext>,
     Path(id): Path<Uuid>,
     Json(body): Json<AppendVersionRequest>,
 ) -> Result<(StatusCode, Json<VersionMetaDto>), ConfigHttpError> {
@@ -496,7 +504,13 @@ pub(crate) async fn append_version_handler(
     let created_by = created_by_for(&claims);
     let version = state
         .store
-        .append_version(id, &content, Some(created_by), body.message.as_deref())
+        .append_version(
+            ctx.workspace,
+            id,
+            &content,
+            Some(created_by),
+            body.message.as_deref(),
+        )
         .await?;
     Ok((StatusCode::CREATED, Json(VersionMetaDto::from(version))))
 }
@@ -524,10 +538,14 @@ pub(crate) async fn append_version_handler(
 pub(crate) async fn rollback_handler(
     State(state): State<ConfigApiState>,
     Extension(claims): Extension<Claims>,
+    Extension(ctx): Extension<WorkspaceContext>,
     Path((id, no)): Path<(Uuid, i32)>,
 ) -> Result<(StatusCode, Json<VersionMetaDto>), ConfigHttpError> {
     let created_by = created_by_for(&claims);
-    let version = state.store.rollback(id, no, Some(created_by)).await?;
+    let version = state
+        .store
+        .rollback(ctx.workspace, id, no, Some(created_by))
+        .await?;
     Ok((StatusCode::CREATED, Json(VersionMetaDto::from(version))))
 }
 
@@ -552,19 +570,20 @@ pub(crate) async fn rollback_handler(
 )]
 pub(crate) async fn diff_handler(
     State(state): State<ConfigApiState>,
+    Extension(ctx): Extension<WorkspaceContext>,
     Path(id): Path<Uuid>,
     Query(query): Query<DiffQuery>,
 ) -> Result<Json<ConfigDiffDto>, ConfigHttpError> {
     let from = state
         .store
-        .get_version(id, query.from)
+        .get_version(ctx.workspace, id, query.from)
         .await?
         .ok_or_else(|| {
             ConfigHttpError::NotFound(format!("no version {} for config `{id}`", query.from))
         })?;
     let to = state
         .store
-        .get_version(id, query.to)
+        .get_version(ctx.workspace, id, query.to)
         .await?
         .ok_or_else(|| {
             ConfigHttpError::NotFound(format!("no version {} for config `{id}`", query.to))

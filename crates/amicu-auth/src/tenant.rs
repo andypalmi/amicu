@@ -143,6 +143,31 @@ impl Role {
             _ => Err(AuthError::Backend),
         }
     }
+
+    /// Parse a case-insensitive, surrounding-whitespace-tolerant wire role name
+    /// (as accepted on the org-console membership API), returning `None` for an
+    /// unrecognized value. Unlike [`Role::parse`] this never errors and admits
+    /// mixed case (`"Owner"`, `" admin "`).
+    #[must_use]
+    pub fn parse_wire(text: &str) -> Option<Self> {
+        Self::parse(text.trim().to_ascii_lowercase().as_str()).ok()
+    }
+
+    /// Whether this role is privileged (Owner or Admin). Privileged members may
+    /// only be created, modified, or removed by an Owner. The authority for the
+    /// org console's RBAC (both the in-memory store and the Postgres membership
+    /// store re-check against this, so the rule lives in exactly one place).
+    #[must_use]
+    pub fn is_privileged(self) -> bool {
+        matches!(self, Role::Owner | Role::Admin)
+    }
+
+    /// Whether this role may manage membership at all (invite / remove / change
+    /// role). Owner and Admin may; Member and Viewer may not.
+    #[must_use]
+    pub fn can_manage_members(self) -> bool {
+        matches!(self, Role::Owner | Role::Admin)
+    }
 }
 
 #[cfg(test)]
