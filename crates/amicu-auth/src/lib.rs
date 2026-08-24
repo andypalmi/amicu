@@ -16,11 +16,16 @@
 // (duration_constructors) on our MSRV 1.97; keep `from_secs`.
 #![allow(clippy::duration_suboptimal_units)]
 
+pub mod authz;
 pub mod claims;
 pub mod error;
 pub mod jwks;
 pub mod tenant;
 
+pub use authz::{
+    ALL_PERMISSIONS, Permission, authorize_invite_create, authorize_invite_revoke,
+    authorize_membership_mutation,
+};
 pub use claims::{Claims, Tier};
 pub use error::{AuthError, Result};
 pub use jwks::{Jwk, Jwks, OpenIdConfiguration};

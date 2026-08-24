@@ -67,7 +67,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use amicu_auth::{Role, Tier};
+use amicu_auth::{Permission, Role, Tier};
 use amicu_store::WorkspaceId;
 use amicu_store::{OrgAuditAction, OrgAuditEntry, OrgMutationError, PostgresMembershipStore};
 use async_trait::async_trait;
@@ -86,48 +86,14 @@ use crate::engine::{AccessVerifier, WorkspaceContext};
 // ---------------------------------------------------------------------------
 // RBAC domain: the role catalog (roles + permissions)
 //
-// The role type itself is `amicu_auth::Role` (owner/admin/member/viewer) - the
-// SAME type the `wsrole` claim and the store carry, so there is exactly one
-// definition of a role in the codebase. The console-specific permission catalog
-// (which controls a client renders) lives here as free functions over that
-// shared role.
+// The role type is `amicu_auth::Role` (owner/admin/member/viewer) and the
+// permission type is `amicu_auth::Permission` - the SAME types the `wsrole`
+// claim, the store, and every enforcement call site use, so there is exactly
+// one definition of a role, a permission, and the role -> permission matrix
+// (`Role::grants`/`Role::permissions`) in the codebase
+// (andypalmi/amicu-planning#133). This module surfaces that shared matrix as
+// the `GET /org/roles` catalog DTO; it holds no permission logic of its own.
 // ---------------------------------------------------------------------------
-
-/// A discrete capability a [`Role`] may hold. The catalog endpoint surfaces the
-/// role -> permission mapping so a client can render exactly the controls a role
-/// is allowed to use (the API remains the enforcement point regardless).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Permission {
-    /// See the member list and each member's role.
-    ViewMembers,
-    /// See the role/permission catalog.
-    ViewRoles,
-    /// See the audit log.
-    ViewAudit,
-    /// Invite/add a member.
-    InviteMember,
-    /// Change a member's role.
-    ChangeRole,
-    /// Remove a member.
-    RemoveMember,
-    /// Grant or modify a privileged (Owner/Admin) member - Owner only.
-    AssignPrivilegedRole,
-}
-
-impl Permission {
-    /// The wire name for this permission.
-    fn as_str(self) -> &'static str {
-        match self {
-            Permission::ViewMembers => "view_members",
-            Permission::ViewRoles => "view_roles",
-            Permission::ViewAudit => "view_audit",
-            Permission::InviteMember => "invite_member",
-            Permission::ChangeRole => "change_role",
-            Permission::RemoveMember => "remove_member",
-            Permission::AssignPrivilegedRole => "assign_privileged_role",
-        }
-    }
-}
 
 /// A short human description of `role`, for the RBAC catalog.
 fn role_description(role: Role) -> &'static str {
@@ -137,39 +103,10 @@ fn role_description(role: Role) -> &'static str {
         }
         Role::Admin => "Manages membership, but cannot grant or modify Owner/Admin members.",
         Role::Member => "Regular member with read-only visibility into membership.",
-        Role::Viewer => "Read-only visibility into membership.",
-    }
-}
-
-/// The full permission set `role` holds, for the RBAC catalog.
-fn role_permissions(role: Role) -> Vec<Permission> {
-    match role {
-        Role::Owner => vec![
-            Permission::ViewMembers,
-            Permission::ViewRoles,
-            Permission::ViewAudit,
-            Permission::InviteMember,
-            Permission::ChangeRole,
-            Permission::RemoveMember,
-            Permission::AssignPrivilegedRole,
-        ],
-        Role::Admin => vec![
-            Permission::ViewMembers,
-            Permission::ViewRoles,
-            Permission::ViewAudit,
-            Permission::InviteMember,
-            Permission::ChangeRole,
-            Permission::RemoveMember,
-        ],
-        Role::Member | Role::Viewer => {
-            vec![Permission::ViewMembers, Permission::ViewRoles]
+        Role::Viewer => {
+            "Read-only visibility into the role catalog. Cannot view the member roster."
         }
     }
-}
-
-/// May `role` read the audit log? (Owner/Admin only.)
-fn can_view_audit(role: Role) -> bool {
-    matches!(role, Role::Owner | Role::Admin)
 }
 
 /// Every role, privilege-descending - the catalog and store iteration order.
@@ -464,7 +401,7 @@ impl OrgStore for InMemoryOrgStore {
         let mut state = self.inner.lock().expect("org store poisoned");
         let org_state = state.entry(org).or_default();
         let actor = org_state.members.get(actor_id).copied();
-        authorize_membership_mutation(actor, None, Some(role))?;
+        authorize_membership_mutation(actor, Permission::InviteMember, None, Some(role))?;
         if org_state.members.contains_key(target_id) {
             return Err(OrgStoreError::AlreadyMember);
         }
@@ -494,7 +431,12 @@ impl OrgStore for InMemoryOrgStore {
             return Err(OrgStoreError::NotFound);
         };
         let actor = org_state.members.get(actor_id).copied();
-        authorize_membership_mutation(actor, Some(current), Some(new_role))?;
+        authorize_membership_mutation(
+            actor,
+            Permission::ChangeRole,
+            Some(current),
+            Some(new_role),
+        )?;
         // Refuse to demote the last remaining Owner.
         if current == Role::Owner && new_role != Role::Owner && org_state.owner_count() == 1 {
             return Err(OrgStoreError::LastOwner);
@@ -524,7 +466,7 @@ impl OrgStore for InMemoryOrgStore {
             return Err(OrgStoreError::NotFound);
         };
         let actor = org_state.members.get(actor_id).copied();
-        authorize_membership_mutation(actor, Some(current), None)?;
+        authorize_membership_mutation(actor, Permission::RemoveMember, Some(current), None)?;
         // Refuse to remove the last remaining Owner.
         if current == Role::Owner && org_state.owner_count() == 1 {
             return Err(OrgStoreError::LastOwner);
@@ -922,47 +864,26 @@ impl From<AuditEntry> for AuditEntryView {
 // ---------------------------------------------------------------------------
 
 /// Authorize a membership mutation by the actor's role against the target's
-/// current role and (for add/change) the requested new role.
+/// current role and (for add/change) the requested new role, against
+/// `required` (the base capability - [`Permission::InviteMember`] /
+/// [`Permission::ChangeRole`] / [`Permission::RemoveMember`]).
 ///
-/// - `actor` must currently be a member (`None` - not, or no longer, a
-///   member - is always refused).
-/// - Only Owner/Admin may manage membership at all.
-/// - Only an **Owner** may grant a privileged role (Owner/Admin) or modify/remove
-///   an existing privileged member. (An Admin manages Members/Viewers only.)
+/// Delegates to the SHARED [`amicu_auth::authorize_membership_mutation`]
+/// (andypalmi/amicu-planning#133) - the SAME function
+/// `amicu_store::PostgresMembershipStore` calls for the Postgres backend - so
+/// the two backends can never drift.
 ///
 /// Called from inside the in-memory store's mutation methods, under the same
-/// lock as the mutation itself, so both `actor` and `target_current` are freshly
-/// read. The Postgres backend enforces the identical rule inside its own
-/// transaction; both consult [`amicu_auth::Role::is_privileged`] /
-/// [`amicu_auth::Role::can_manage_members`], the single source of the rule.
+/// lock as the mutation itself, so both `actor` and `target_current` are
+/// freshly read.
 fn authorize_membership_mutation(
     actor: Option<Role>,
+    required: Permission,
     target_current: Option<Role>,
     new_role: Option<Role>,
 ) -> Result<(), OrgStoreError> {
-    let Some(actor) = actor else {
-        return Err(OrgStoreError::Forbidden(
-            "you are not a member of this organization".to_owned(),
-        ));
-    };
-    if !actor.can_manage_members() {
-        return Err(OrgStoreError::Forbidden(
-            "your role may not manage organization membership".to_owned(),
-        ));
-    }
-    if actor == Role::Admin {
-        if new_role.is_some_and(Role::is_privileged) {
-            return Err(OrgStoreError::Forbidden(
-                "only an Owner may grant the Owner or Admin role".to_owned(),
-            ));
-        }
-        if target_current.is_some_and(Role::is_privileged) {
-            return Err(OrgStoreError::Forbidden(
-                "only an Owner may modify or remove an Owner or Admin".to_owned(),
-            ));
-        }
-    }
-    Ok(())
+    amicu_auth::authorize_membership_mutation(actor, required, target_current, new_role)
+        .map_err(|m| OrgStoreError::Forbidden(m.to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -970,6 +891,10 @@ fn authorize_membership_mutation(
 // ---------------------------------------------------------------------------
 
 /// List the organization's members and their roles.
+///
+/// Requires the `view_members` permission - Owner/Admin/Member hold it; a
+/// **Viewer does not** and is refused with `403` (andypalmi/amicu-planning#133:
+/// the enforced distinction that makes Viewer a real, more-restricted role).
 #[utoipa::path(
     get,
     path = "/org/members",
@@ -977,7 +902,7 @@ fn authorize_membership_mutation(
     responses(
         (status = 200, description = "The members and the caller's own role.", body = MembersResponse),
         (status = 401, description = "Missing or invalid access token."),
-        (status = 403, description = "Below the Enterprise tier."),
+        (status = 403, description = "Below the Enterprise tier, or your role may not view the member roster."),
     ),
     security(("bearer" = [])),
 )]
@@ -985,6 +910,11 @@ pub(crate) async fn list_members_handler(
     State(state): State<OrgApiState>,
     Extension(ctx): Extension<WorkspaceContext>,
 ) -> Result<Json<MembersResponse>, OrgError> {
+    if !ctx.role.grants(Permission::ViewMembers) {
+        return Err(OrgError::Forbidden(
+            "your role may not view the member roster".to_owned(),
+        ));
+    }
     let members = state
         .store
         .members(ctx.workspace)
@@ -1137,15 +1067,25 @@ pub(crate) async fn remove_member_handler(
 )]
 pub(crate) async fn list_roles_handler(
     State(_state): State<OrgApiState>,
-    Extension(_ctx): Extension<WorkspaceContext>,
+    Extension(ctx): Extension<WorkspaceContext>,
 ) -> Result<Json<RolesResponse>, OrgError> {
-    // Any Enterprise member (proven by the token) may read the catalog.
+    // Every role holds `view_roles` (see the matrix on `Role::permissions`),
+    // so this is enforced identically to every other endpoint even though it
+    // never currently refuses anyone.
+    if !ctx.role.grants(Permission::ViewRoles) {
+        return Err(OrgError::Forbidden(
+            "your role may not view the role catalog".to_owned(),
+        ));
+    }
     let roles = ALL_ROLES
         .iter()
         .map(|r| RoleView {
             role: r.as_str().to_owned(),
             description: role_description(*r).to_owned(),
-            permissions: role_permissions(*r)
+            // The SAME matrix (`Role::permissions`) enforcement consults - the
+            // catalog can never drift from what is actually enforced.
+            permissions: r
+                .permissions()
                 .iter()
                 .map(|p| p.as_str().to_owned())
                 .collect(),
@@ -1171,7 +1111,7 @@ pub(crate) async fn audit_handler(
     State(state): State<OrgApiState>,
     Extension(ctx): Extension<WorkspaceContext>,
 ) -> Result<Json<AuditResponse>, OrgError> {
-    if !can_view_audit(ctx.role) {
+    if !ctx.role.grants(Permission::ViewAudit) {
         return Err(OrgError::Forbidden(
             "your role may not view the audit log".to_owned(),
         ));

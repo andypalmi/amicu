@@ -13,6 +13,10 @@
 //! is the capability that reveals exactly its one invite.
 
 use amicu_auth::Result;
+use amicu_auth::{
+    authorize_invite_create as shared_authorize_invite_create,
+    authorize_invite_revoke as shared_authorize_invite_revoke,
+};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -65,50 +69,26 @@ pub struct AcceptedInvite {
 /// Authorize creating an invite that GRANTS `granted` by an actor whose CURRENT
 /// role is `actor` (re-read under the mutation's own transaction and row lock).
 ///
-/// Mirrors the membership-mutation rule (see
-/// `membership::authorize_membership_mutation`): only Owner/Admin may invite at
-/// all, and only an Owner may invite a privileged (Owner/Admin) role. Consults
-/// the shared [`Role::can_manage_members`] / [`Role::is_privileged`], so there is
-/// one definition of the rule.
+/// Delegates to the SHARED [`amicu_auth::authorize_invite_create`]
+/// (andypalmi/amicu-planning#133) - the same function `amicu-api`'s handlers
+/// consult for their cheap pre-check - so there is exactly one definition of
+/// the rule: only an actor holding `InviteMember` may invite at all, and only
+/// one holding `AssignPrivilegedRole` (Owner) may invite a privileged
+/// (Owner/Admin) role.
 fn authorize_invite_create(
     actor: Option<Role>,
     granted: Role,
 ) -> std::result::Result<(), InviteError> {
-    let Some(actor) = actor else {
-        return Err(InviteError::Forbidden(
-            "you are not a member of this workspace".to_owned(),
-        ));
-    };
-    if !actor.can_manage_members() {
-        return Err(InviteError::Forbidden(
-            "your role may not invite members".to_owned(),
-        ));
-    }
-    if actor == Role::Admin && granted.is_privileged() {
-        return Err(InviteError::Forbidden(
-            "only an Owner may invite an Owner or Admin".to_owned(),
-        ));
-    }
-    Ok(())
+    shared_authorize_invite_create(actor, granted).map_err(|m| InviteError::Forbidden(m.to_owned()))
 }
 
 /// Authorize revoking a pending invite by an actor whose CURRENT role is `actor`
-/// (re-read under the mutation's own transaction and row lock). Owner/Admin only
-/// via the same coarse membership-management gate that guards invite CREATE
-/// ([`Role::can_manage_members`]), so a concurrently-demoted or -removed actor
-/// cannot revoke on a stale role.
+/// (re-read under the mutation's own transaction and row lock). Delegates to the
+/// SHARED [`amicu_auth::authorize_invite_revoke`], gated on the same
+/// `InviteMember` permission that guards invite CREATE, so a concurrently
+/// demoted or removed actor cannot revoke on a stale role.
 fn authorize_invite_revoke(actor: Option<Role>) -> std::result::Result<(), InviteError> {
-    let Some(actor) = actor else {
-        return Err(InviteError::Forbidden(
-            "you are not a member of this workspace".to_owned(),
-        ));
-    };
-    if !actor.can_manage_members() {
-        return Err(InviteError::Forbidden(
-            "your role may not revoke invites".to_owned(),
-        ));
-    }
-    Ok(())
+    shared_authorize_invite_revoke(actor).map_err(|m| InviteError::Forbidden(m.to_owned()))
 }
 
 /// Re-read `workspace`'s CURRENT tier inside `tx` and reject the invite

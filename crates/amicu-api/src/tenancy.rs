@@ -45,7 +45,7 @@ use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use amicu_auth::{Claims, Role, WorkspaceId};
+use amicu_auth::{Claims, Permission, Role, WorkspaceId};
 
 use crate::engine::WorkspaceContext;
 use crate::org::OrgApiState;
@@ -539,7 +539,7 @@ pub(crate) async fn create_invite_handler(
     };
     // Cheap claim-role pre-check (fail fast, no store round-trip); the store
     // re-checks the actor's CURRENT role in-transaction as the authority.
-    if !ctx.role.can_manage_members() {
+    if !ctx.role.grants(Permission::InviteMember) {
         return TenancyError::Forbidden("your role may not invite members".to_owned())
             .into_response();
     }
@@ -591,7 +591,7 @@ pub(crate) async fn list_invites_handler(
     State(state): State<OrgApiState>,
     Extension(ctx): Extension<WorkspaceContext>,
 ) -> Response {
-    if !ctx.role.can_manage_members() {
+    if !ctx.role.grants(Permission::InviteMember) {
         return TenancyError::Forbidden("your role may not view invites".to_owned())
             .into_response();
     }
@@ -643,7 +643,7 @@ pub(crate) async fn revoke_invite_handler(
 ) -> Response {
     // Cheap claim-role pre-check (fail fast); the store re-checks the actor's
     // CURRENT role in-transaction as the authority.
-    if !ctx.role.can_manage_members() {
+    if !ctx.role.grants(Permission::InviteMember) {
         return TenancyError::Forbidden("your role may not revoke invites".to_owned())
             .into_response();
     }

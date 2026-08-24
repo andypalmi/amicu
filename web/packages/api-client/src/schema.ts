@@ -370,7 +370,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** List the organization's members and their roles. */
+        /**
+         * List the organization's members and their roles.
+         * @description Requires the `view_members` permission - Owner/Admin/Member hold it; a
+         *     **Viewer does not** and is refused with `403` (andypalmi/amicu-planning#133:
+         *     the enforced distinction that makes Viewer a real, more-restricted role).
+         */
         get: operations["list_members_handler"];
         put?: never;
         /** Invite/add a member with a role. */
@@ -2799,7 +2804,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Below the Enterprise tier. */
+            /** @description Below the Enterprise tier, or your role may not view the member roster. */
             403: {
                 headers: {
                     [name: string]: unknown;

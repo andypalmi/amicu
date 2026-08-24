@@ -1338,6 +1338,90 @@ async fn org_console_audited_mutations_recheck_roles_and_audit_atomically() {
 }
 
 // ---------------------------------------------------------------------------
+// Org console: the Postgres membership store's authorized mutations delegate
+// to the SAME `amicu_auth::authorize_membership_mutation` the in-memory
+// `OrgStore` calls (andypalmi/amicu-planning#133), so a Viewer/Member actor is
+// refused identically to the in-memory backend - table-driven over every
+// non-managing role.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn viewer_and_member_cannot_manage_membership() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared.clone());
+    let workspaces = PostgresWorkspaceStore::new(shared);
+
+    let ws = workspaces
+        .create(&unique("Org"), Tier::Enterprise)
+        .await
+        .expect("create org workspace");
+    let owner = seed_user(&users).await;
+    members
+        .add(ws, &owner, Role::Owner, None)
+        .await
+        .expect("seed owner");
+
+    for non_manager_role in [Role::Member, Role::Viewer] {
+        let actor = seed_user(&users).await;
+        members
+            .add(ws, &actor, non_manager_role, Some(&owner))
+            .await
+            .expect("seed non-manager actor");
+
+        // Neither Member nor Viewer may add a member...
+        let candidate = seed_user(&users).await;
+        assert!(
+            matches!(
+                members
+                    .add_member_audited(ws, &actor, &candidate, Role::Member)
+                    .await
+                    .unwrap_err(),
+                OrgMutationError::Forbidden(_)
+            ),
+            "{non_manager_role:?} must not add a member"
+        );
+        assert_eq!(
+            members.role_of(ws, &candidate).await.expect("role_of"),
+            None
+        );
+
+        // ...change a role...
+        assert!(
+            matches!(
+                members
+                    .set_role_audited(ws, &actor, &actor, Role::Admin)
+                    .await
+                    .unwrap_err(),
+                OrgMutationError::Forbidden(_)
+            ),
+            "{non_manager_role:?} must not change a role"
+        );
+
+        // ...or remove a member.
+        let target = seed_user(&users).await;
+        members
+            .add(ws, &target, Role::Member, Some(&owner))
+            .await
+            .expect("seed removal target");
+        assert!(
+            matches!(
+                members
+                    .remove_member_audited(ws, &actor, &target)
+                    .await
+                    .unwrap_err(),
+                OrgMutationError::Forbidden(_)
+            ),
+            "{non_manager_role:?} must not remove a member"
+        );
+        assert_eq!(
+            members.role_of(ws, &target).await.expect("role_of"),
+            Some(Role::Member)
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Org console: the last-Owner invariant holds under CONCURRENT self-mutations
 // (andypalmi/amicu-planning#130). Two Owners self-removing at the same instant
 // lock DISJOINT membership rows, so without the per-workspace serializing
