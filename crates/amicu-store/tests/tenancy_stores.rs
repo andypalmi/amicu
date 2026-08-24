@@ -888,6 +888,323 @@ async fn invites_are_isolated_across_workspaces() {
     assert_eq!(found_b.workspace_id, ws_b);
 }
 
+/// Invite REVOCATION (andypalmi/amicu-planning#131): an Owner/Admin may revoke a
+/// PENDING invite in their own workspace, re-checked against the actor's CURRENT
+/// role in the store's transaction; after revocation the token no longer
+/// redeems; a non-manager is refused; and a revoke targeting another workspace's
+/// invite, an unknown id, or an already-accepted invite is `NotFound`. Every
+/// lifecycle step (create/accept/revoke) also writes its `org_audit` row.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+#[allow(clippy::too_many_lines)] // one end-to-end walk of the revoke lifecycle
+async fn invite_revoke_is_authorized_workspace_scoped_and_audited() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared.clone());
+    let workspaces = PostgresWorkspaceStore::new(shared.clone());
+    let invites = PostgresInviteStore::new(shared);
+
+    let ws = workspaces
+        .create(&unique("Org"), Tier::Enterprise)
+        .await
+        .expect("create workspace");
+    let owner = seed_user(&users).await;
+    let admin = seed_user(&users).await;
+    let member = seed_user(&users).await;
+    members
+        .add(ws, &owner, Role::Owner, None)
+        .await
+        .expect("seed owner");
+    members
+        .add(ws, &admin, Role::Admin, Some(&owner))
+        .await
+        .expect("seed admin");
+    members
+        .add(ws, &member, Role::Member, Some(&owner))
+        .await
+        .expect("seed member");
+
+    // Owner mints an invite; a Member may NOT revoke it (403), then the Owner can.
+    let hash = token_hash(0x71);
+    let owner_invite = invites
+        .create_authorized(
+            ws,
+            &owner,
+            "a@example.test",
+            Role::Member,
+            &hash,
+            FAR_FUTURE,
+        )
+        .await
+        .expect("owner invites");
+    assert!(matches!(
+        invites
+            .revoke_authorized(ws, &member, owner_invite)
+            .await
+            .unwrap_err(),
+        InviteError::Forbidden(_)
+    ));
+    // Still pending after the refused revoke.
+    assert_eq!(invites.list_pending(ws).await.expect("pending").len(), 1);
+
+    invites
+        .revoke_authorized(ws, &owner, owner_invite)
+        .await
+        .expect("owner revokes");
+    // Gone from the pending list, and the token no longer redeems.
+    assert!(invites.list_pending(ws).await.expect("pending").is_empty());
+    let joiner = seed_user(&users).await;
+    assert!(matches!(
+        invites
+            .accept_and_enroll(&joiner, &hash, 1_000)
+            .await
+            .unwrap_err(),
+        InviteError::Invalid
+    ));
+
+    // An Admin may also revoke a pending invite in their workspace.
+    let admin_hash = token_hash(0x72);
+    let admin_invite = invites
+        .create_authorized(
+            ws,
+            &admin,
+            "b@example.test",
+            Role::Member,
+            &admin_hash,
+            FAR_FUTURE,
+        )
+        .await
+        .expect("admin invites");
+    invites
+        .revoke_authorized(ws, &admin, admin_invite)
+        .await
+        .expect("admin revokes");
+
+    // Revoking an unknown id, or one already accepted, is NotFound.
+    assert!(matches!(
+        invites
+            .revoke_authorized(ws, &owner, Uuid::new_v4())
+            .await
+            .unwrap_err(),
+        InviteError::NotFound
+    ));
+    let accepted_hash = token_hash(0x73);
+    let accepted_invite = invites
+        .create_authorized(
+            ws,
+            &owner,
+            "c@example.test",
+            Role::Member,
+            &accepted_hash,
+            FAR_FUTURE,
+        )
+        .await
+        .expect("owner invites c");
+    let comer = seed_user(&users).await;
+    invites
+        .accept_and_enroll(&comer, &accepted_hash, 1_000)
+        .await
+        .expect("accept c");
+    assert!(
+        matches!(
+            invites
+                .revoke_authorized(ws, &owner, accepted_invite)
+                .await
+                .unwrap_err(),
+            InviteError::NotFound
+        ),
+        "an already-accepted invite is not a pending invite to revoke"
+    );
+
+    // A demoted actor cannot revoke on their stale role (in-tx re-check).
+    let demoted_hash = token_hash(0x74);
+    let demoted_invite = invites
+        .create_authorized(
+            ws,
+            &owner,
+            "d@example.test",
+            Role::Member,
+            &demoted_hash,
+            FAR_FUTURE,
+        )
+        .await
+        .expect("owner invites d");
+    members
+        .set_role(ws, &admin, Role::Member)
+        .await
+        .expect("demote admin");
+    assert!(matches!(
+        invites
+            .revoke_authorized(ws, &admin, demoted_invite)
+            .await
+            .unwrap_err(),
+        InviteError::Forbidden(_)
+    ));
+
+    // The whole lifecycle was audited: create(a,b,c,d) + accept(c) + revoke(a,b).
+    let audit = members.org_audit(ws).await.expect("audit");
+    let created = audit
+        .iter()
+        .filter(|e| e.action == amicu_store::OrgAuditAction::InviteCreated)
+        .count();
+    let accepted = audit
+        .iter()
+        .filter(|e| e.action == amicu_store::OrgAuditAction::InviteAccepted)
+        .count();
+    let revoked = audit
+        .iter()
+        .filter(|e| e.action == amicu_store::OrgAuditAction::InviteRevoked)
+        .count();
+    assert_eq!(created, 4, "four invites created were each audited");
+    assert_eq!(accepted, 1, "the one acceptance was audited");
+    assert_eq!(revoked, 2, "the two revocations were audited");
+}
+
+/// RLS BACKSTOP for revocation: a revoke scoped to workspace A can NEVER remove
+/// workspace B's invite. B's invite stays pending and still redeems, and the
+/// A-scoped call reports the same indistinct `NotFound` it would for any unknown
+/// id (no cross-tenant existence leak).
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn invite_revoke_cannot_touch_another_workspaces_invite() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared.clone());
+    let workspaces = PostgresWorkspaceStore::new(shared.clone());
+    let invites = PostgresInviteStore::new(shared);
+
+    let owner_a = seed_user(&users).await;
+    let owner_b = seed_user(&users).await;
+    let ws_a = workspaces
+        .create(&unique("A"), Tier::Enterprise)
+        .await
+        .expect("ws a");
+    let ws_b = workspaces
+        .create(&unique("B"), Tier::Enterprise)
+        .await
+        .expect("ws b");
+    members
+        .add(ws_a, &owner_a, Role::Owner, None)
+        .await
+        .expect("owner a");
+    members
+        .add(ws_b, &owner_b, Role::Owner, None)
+        .await
+        .expect("owner b");
+
+    let hash_b = token_hash(0x81);
+    let invite_b = invites
+        .create_authorized(
+            ws_b,
+            &owner_b,
+            "b@example.test",
+            Role::Member,
+            &hash_b,
+            FAR_FUTURE,
+        )
+        .await
+        .expect("invite into b");
+
+    // A's Owner tries to revoke B's invite (naming B's real invite id) while
+    // scoped to A: nothing is deleted, reported as NotFound.
+    assert!(matches!(
+        invites
+            .revoke_authorized(ws_a, &owner_a, invite_b)
+            .await
+            .unwrap_err(),
+        InviteError::NotFound
+    ));
+
+    // B's invite is untouched: still pending and still redeems.
+    assert_eq!(
+        invites.list_pending(ws_b).await.expect("pending b").len(),
+        1
+    );
+    let comer = seed_user(&users).await;
+    let accepted = invites
+        .accept_and_enroll(&comer, &hash_b, 1_000)
+        .await
+        .expect("B's invite still redeems");
+    assert_eq!(accepted.workspace_id, ws_b);
+}
+
+/// CONCURRENCY (andypalmi/amicu-planning#131): two redemptions of the SAME token
+/// fired at once (each its own connection/transaction from the pool) must resolve
+/// to EXACTLY ONE `Ok` - the other losing the atomic
+/// `UPDATE ... WHERE accepted_at IS NULL ... RETURNING` claim (`Invalid`) or the
+/// membership uniqueness (`AlreadyMember`) - and the joiner must end with
+/// EXACTLY ONE membership row. Looped so a regression of the single-use claim
+/// trips reliably.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn concurrent_double_accept_enrolls_exactly_once() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared.clone());
+    let workspaces = PostgresWorkspaceStore::new(shared.clone());
+    let invites = PostgresInviteStore::new(shared);
+
+    let ws = workspaces
+        .create(&unique("Race"), Tier::Enterprise)
+        .await
+        .expect("create workspace");
+    let owner = seed_user(&users).await;
+    members
+        .add(ws, &owner, Role::Owner, None)
+        .await
+        .expect("seed owner");
+
+    for i in 0..10u8 {
+        // A fresh invite + token + joiner each iteration.
+        let hash = token_hash(0x90 ^ i);
+        invites
+            .create_authorized(
+                ws,
+                &owner,
+                "race@example.test",
+                Role::Member,
+                &hash,
+                FAR_FUTURE,
+            )
+            .await
+            .expect("create invite");
+        let joiner = seed_user(&users).await;
+
+        // Two concurrent redemptions of the SAME token, each its own tx.
+        let (r1, r2) = tokio::join!(
+            invites.accept_and_enroll(&joiner, &hash, 1_000),
+            invites.accept_and_enroll(&joiner, &hash, 1_000),
+        );
+
+        // Exactly one succeeds; the other is refused (Invalid = lost the claim, or
+        // AlreadyMember = lost the membership insert).
+        let successes = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(
+            successes, 1,
+            "exactly one concurrent accept must succeed (r1={r1:?}, r2={r2:?})"
+        );
+        assert!(
+            [&r1, &r2]
+                .iter()
+                .any(|r| matches!(r, Err(InviteError::Invalid | InviteError::AlreadyMember))),
+            "the losing accept must be Invalid or AlreadyMember (r1={r1:?}, r2={r2:?})"
+        );
+
+        // The joiner has EXACTLY ONE membership row in the invite's workspace.
+        let member_rows = members
+            .list_members(ws)
+            .await
+            .expect("list members")
+            .into_iter()
+            .filter(|m| m.user_id == joiner)
+            .count();
+        assert_eq!(
+            member_rows, 1,
+            "the joiner must be enrolled exactly once (r1={r1:?}, r2={r2:?})"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Org console: audited mutations re-check RBAC in the mutation's own
 // transaction, write their audit record atomically, and stay workspace-scoped

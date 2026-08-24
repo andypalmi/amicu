@@ -211,6 +211,15 @@ fn post(path: &str, token: &str, body: &Value) -> Request<Body> {
         .unwrap()
 }
 
+fn delete(path: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(path)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
 // ---------------------------------------------------------------------------
 // POST /workspaces: server-generated id; caller-supplied id is ignored.
 // ---------------------------------------------------------------------------
@@ -404,6 +413,159 @@ async fn invite_create_denied_below_enterprise_and_for_non_managers() {
     let owner_token = h.token(&owner, ws, Role::Owner, Tier::Enterprise);
     let (_, list) = send(&h.app, get("/org/invites", &owner_token)).await;
     assert!(list["invites"].as_array().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /org/invites/{id}: Owner/Admin revoke a pending invite; the token then
+// no longer redeems; a non-manager is refused; already-accepted/unknown -> 404.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn revoke_invite_by_owner_and_admin_then_token_no_longer_redeems() {
+    let h = harness().await;
+    let owner = h.new_user().await;
+    let ws = h.enterprise_ws_owned_by(&owner).await;
+    let owner_token = h.token(&owner, ws, Role::Owner, Tier::Enterprise);
+
+    // Owner mints an invite, then revokes it: 204, and the pending list empties.
+    let (c, created) = send(
+        &h.app,
+        post(
+            "/org/invites",
+            &owner_token,
+            &json!({ "email": "gone@example.test", "role": "member" }),
+        ),
+    )
+    .await;
+    assert_eq!(c, StatusCode::CREATED);
+    let invite_id = created["invite_id"]
+        .as_str()
+        .expect("invite_id")
+        .to_string();
+    let token = created["token"].as_str().expect("token").to_string();
+
+    let (rev, _) = send(
+        &h.app,
+        delete(&format!("/org/invites/{invite_id}"), &owner_token),
+    )
+    .await;
+    assert_eq!(rev, StatusCode::NO_CONTENT);
+
+    let (_, list) = send(&h.app, get("/org/invites", &owner_token)).await;
+    assert!(list["invites"].as_array().unwrap().is_empty());
+
+    // The revoked token no longer redeems (invalid/expired/used -> 400).
+    let joiner = h.new_user().await;
+    let joiner_personal = h.personal_ws(&joiner).await;
+    let joiner_token = h.token(&joiner, joiner_personal, Role::Owner, Tier::Community);
+    let (acc, _) = send(
+        &h.app,
+        post(
+            "/org/invites/accept",
+            &joiner_token,
+            &json!({ "token": token }),
+        ),
+    )
+    .await;
+    assert_eq!(acc, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        h.members.role_of(ws, &joiner).await.expect("role_of"),
+        None,
+        "a revoked invite enrolls nobody"
+    );
+
+    // Re-revoking (now unknown) -> 404; an Admin can also revoke their own invite.
+    let (again, _) = send(
+        &h.app,
+        delete(&format!("/org/invites/{invite_id}"), &owner_token),
+    )
+    .await;
+    assert_eq!(again, StatusCode::NOT_FOUND);
+
+    let admin = h.new_user().await;
+    h.members
+        .add(ws, &admin, Role::Admin, Some(&owner))
+        .await
+        .expect("seed admin");
+    let admin_token = h.token(&admin, ws, Role::Admin, Tier::Enterprise);
+    let (ac, admin_created) = send(
+        &h.app,
+        post(
+            "/org/invites",
+            &admin_token,
+            &json!({ "email": "adm@example.test", "role": "member" }),
+        ),
+    )
+    .await;
+    assert_eq!(ac, StatusCode::CREATED);
+    let admin_invite = admin_created["invite_id"].as_str().expect("invite_id");
+    let (ar, _) = send(
+        &h.app,
+        delete(&format!("/org/invites/{admin_invite}"), &admin_token),
+    )
+    .await;
+    assert_eq!(ar, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn revoke_invite_denied_for_non_managers_and_scoped_to_own_workspace() {
+    let h = harness().await;
+    let owner_a = h.new_user().await;
+    let owner_b = h.new_user().await;
+    let ws_a = h.enterprise_ws_owned_by(&owner_a).await;
+    let ws_b = h.enterprise_ws_owned_by(&owner_b).await;
+    let token_a = h.token(&owner_a, ws_a, Role::Owner, Tier::Enterprise);
+    let token_b = h.token(&owner_b, ws_b, Role::Owner, Tier::Enterprise);
+
+    // B mints an invite.
+    let (c, created_b) = send(
+        &h.app,
+        post(
+            "/org/invites",
+            &token_b,
+            &json!({ "email": "b@example.test", "role": "member" }),
+        ),
+    )
+    .await;
+    assert_eq!(c, StatusCode::CREATED);
+    let invite_b = created_b["invite_id"]
+        .as_str()
+        .expect("invite_id")
+        .to_string();
+
+    // A's Owner (a different workspace) cannot revoke B's invite: 404 (indistinct
+    // from unknown), and B's invite survives.
+    let (cross, _) = send(
+        &h.app,
+        delete(&format!("/org/invites/{invite_b}"), &token_a),
+    )
+    .await;
+    assert_eq!(cross, StatusCode::NOT_FOUND);
+    let (_, b_list) = send(&h.app, get("/org/invites", &token_b)).await;
+    assert_eq!(
+        b_list["invites"].as_array().unwrap().len(),
+        1,
+        "B's invite survives"
+    );
+
+    // A Member of B may not revoke: 403.
+    let member = h.new_user().await;
+    h.members
+        .add(ws_b, &member, Role::Member, Some(&owner_b))
+        .await
+        .expect("seed member");
+    let member_token = h.token(&member, ws_b, Role::Member, Tier::Enterprise);
+    let (forbidden, _) = send(
+        &h.app,
+        delete(&format!("/org/invites/{invite_b}"), &member_token),
+    )
+    .await;
+    assert_eq!(forbidden, StatusCode::FORBIDDEN);
+    // Still pending after both refused attempts.
+    let (_, b_list2) = send(&h.app, get("/org/invites", &token_b)).await;
+    assert_eq!(b_list2["invites"].as_array().unwrap().len(), 1);
 }
 
 // ---------------------------------------------------------------------------
