@@ -17,7 +17,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::membership::{OrgAuditAction, Role};
-use crate::{WorkspaceId, begin_scoped, begin_scoped_invite, map_db, now_unix_seconds};
+use crate::{
+    WorkspaceId, begin_scoped, begin_scoped_invite, map_db, meets_enterprise, now_unix_seconds,
+    read_workspace_tier,
+};
 
 /// The failure modes of the authorized invite-lifecycle operations
 /// ([`create_authorized`](PostgresInviteStore::create_authorized) /
@@ -103,6 +106,30 @@ fn authorize_invite_revoke(actor: Option<Role>) -> std::result::Result<(), Invit
     if !actor.can_manage_members() {
         return Err(InviteError::Forbidden(
             "your role may not revoke invites".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Re-read `workspace`'s CURRENT tier inside `tx` and reject the invite
+/// mutation if it no longer meets Enterprise (andypalmi/amicu-planning#132):
+/// the claim-based Enterprise gate keys on the access token's `claims.tier`,
+/// so a workspace DOWNGRADED from Enterprise still passes it until the token
+/// expires (<=5 min). Re-reading here, inside the SAME transaction as the
+/// mutation, closes that staleness window for state-changing operations
+/// without an extra round-trip or waiting on token expiry. Not applied to
+/// [`PostgresInviteStore::accept_and_enroll`] - joining a workspace you were
+/// invited to must not depend on the workspace's CURRENT tier.
+async fn require_current_enterprise_tier(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace: WorkspaceId,
+) -> std::result::Result<(), InviteError> {
+    let tier = read_workspace_tier(tx, workspace)
+        .await
+        .map_err(|_| InviteError::Backend)?;
+    if !meets_enterprise(tier) {
+        return Err(InviteError::Forbidden(
+            "this workspace's plan no longer permits org administration".to_owned(),
         ));
     }
     Ok(())
@@ -285,6 +312,7 @@ impl PostgresInviteStore {
         let mut tx = begin_scoped(&self.pool, workspace)
             .await
             .map_err(|_| InviteError::Backend)?;
+        require_current_enterprise_tier(&mut tx, workspace).await?;
         // Re-read the actor's CURRENT role under a row lock, in this transaction,
         // rather than trusting the caller's claim role.
         let actor_row = sqlx::query!(
@@ -486,6 +514,7 @@ impl PostgresInviteStore {
         let mut tx = begin_scoped(&self.pool, workspace)
             .await
             .map_err(|_| InviteError::Backend)?;
+        require_current_enterprise_tier(&mut tx, workspace).await?;
         // Re-read the actor's CURRENT role under a row lock, in this transaction,
         // rather than trusting the caller's claim role.
         let actor_row = sqlx::query!(

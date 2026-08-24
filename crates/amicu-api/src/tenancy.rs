@@ -67,6 +67,12 @@ pub enum TenancyError {
     /// The actor's current role does not permit the action (re-checked in the
     /// store's own transaction): `403`.
     Forbidden(String),
+    /// The caller has reached `AMICU_MAX_WORKSPACES_PER_USER` - the TOTAL
+    /// number of workspaces they may OWN, across every workspace including
+    /// their personal one (a hard ceiling - there is no `DELETE /workspaces`),
+    /// checked and enforced INSIDE the creating transaction: `403`
+    /// (andypalmi/amicu-planning#132).
+    LimitReached(u32),
     /// The presented invite token maps to no live invite - unknown, expired, or
     /// already accepted (kept deliberately indistinct): `400`.
     InvalidInvite,
@@ -87,6 +93,10 @@ impl IntoResponse for TenancyError {
         let (status, message) = match self {
             TenancyError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             TenancyError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
+            TenancyError::LimitReached(max) => (
+                StatusCode::FORBIDDEN,
+                format!("workspace creation limit reached ({max} per user)"),
+            ),
             TenancyError::InvalidInvite => (
                 StatusCode::BAD_REQUEST,
                 "the invite token is invalid, expired, or already used".to_owned(),
@@ -211,6 +221,15 @@ impl PostgresTenancyStore {
     }
 }
 
+impl From<amicu_store::WorkspaceError> for TenancyError {
+    fn from(e: amicu_store::WorkspaceError) -> Self {
+        match e {
+            amicu_store::WorkspaceError::LimitReached { max } => TenancyError::LimitReached(max),
+            amicu_store::WorkspaceError::Backend => TenancyError::Backend,
+        }
+    }
+}
+
 impl From<amicu_store::InviteError> for TenancyError {
     fn from(e: amicu_store::InviteError) -> Self {
         match e {
@@ -236,7 +255,7 @@ impl TenancyStore for PostgresTenancyStore {
             .workspaces
             .create_with_owner(name, owner_id)
             .await
-            .map_err(|_| TenancyError::Backend)?;
+            .map_err(TenancyError::from)?;
         Ok(CreatedWorkspace {
             id,
             name: name.to_owned(),
@@ -452,6 +471,7 @@ pub struct AcceptInviteResponse {
         (status = 201, description = "The new workspace (server-generated id); caller is Owner.", body = CreateWorkspaceResponse),
         (status = 400, description = "Empty name."),
         (status = 401, description = "Missing or invalid access token."),
+        (status = 403, description = "The caller has reached the per-user workspace-creation cap."),
         (status = 503, description = "Provisioning requires the database backend."),
     ),
     security(("bearer" = [])),

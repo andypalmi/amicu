@@ -9,7 +9,7 @@ use amicu_auth::{AuthError, Result, Tier};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{WorkspaceId, begin_scoped, map_db, now_unix_seconds, tier_from_str, tier_to_str};
+use crate::{WorkspaceId, map_db, now_unix_seconds, tier_from_str, tier_to_str};
 
 /// A workspace record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,16 +30,62 @@ pub struct Workspace {
     pub created_at: i64,
 }
 
+/// Default cap on the TOTAL number of workspaces a user may OWN (`role =
+/// 'owner'` in `workspace_members`, across every workspace - including the
+/// personal workspace sign-up provisions), enforced by
+/// [`PostgresWorkspaceStore::create_with_owner`] (andypalmi/amicu-planning#132).
+/// There is no `DELETE /workspaces`, so this is a hard ceiling per owner;
+/// `amicu-server` overrides it from `AMICU_MAX_WORKSPACES_PER_USER` via
+/// [`PostgresWorkspaceStore::with_max_workspaces_per_user`].
+pub const DEFAULT_MAX_WORKSPACES_PER_USER: u32 = 50;
+
+/// The failure modes of [`PostgresWorkspaceStore::create_with_owner`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceError {
+    /// The owner already owns `max` workspaces (the configured
+    /// `AMICU_MAX_WORKSPACES_PER_USER` cap), checked and enforced INSIDE the
+    /// creating transaction under a per-owner advisory lock so it is exact
+    /// under concurrency - see andypalmi/amicu-planning#132.
+    LimitReached {
+        /// The cap that was reached.
+        max: u32,
+    },
+    /// A backend/data-integrity fault.
+    Backend,
+}
+
+impl From<AuthError> for WorkspaceError {
+    fn from(_: AuthError) -> Self {
+        WorkspaceError::Backend
+    }
+}
+
 /// Postgres implementation of the workspace store.
 pub struct PostgresWorkspaceStore {
     pool: PgPool,
+    max_workspaces_per_user: u32,
 }
 
 impl PostgresWorkspaceStore {
-    /// A workspace store over `pool`.
+    /// A workspace store over `pool`, capped at
+    /// [`DEFAULT_MAX_WORKSPACES_PER_USER`] total workspaces owned per user.
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            max_workspaces_per_user: DEFAULT_MAX_WORKSPACES_PER_USER,
+        }
+    }
+
+    /// Override the per-user workspace-creation cap enforced by
+    /// [`create_with_owner`](Self::create_with_owner) (default
+    /// [`DEFAULT_MAX_WORKSPACES_PER_USER`]). `amicu-server` wires this from
+    /// `AMICU_MAX_WORKSPACES_PER_USER`; tests use a small cap to exercise the
+    /// limit cheaply.
+    #[must_use]
+    pub fn with_max_workspaces_per_user(mut self, max: u32) -> Self {
+        self.max_workspaces_per_user = max;
+        self
     }
 
     /// Create a workspace at `name`/`tier` and return its SERVER-GENERATED id.
@@ -76,14 +122,28 @@ impl PostgresWorkspaceStore {
     ///
     /// The new workspace starts at [`Tier::Community`]; billing upgrades are a
     /// separate, subscription-driven concern (the org console / Stripe surface).
+    ///
+    /// # Per-user cap (andypalmi/amicu-planning#132)
+    /// There is no `DELETE /workspaces`, so a per-user cap on how many
+    /// workspaces one user may OWN is a hard ceiling. Enforced INSIDE this
+    /// transaction, before either insert: a `pg_advisory_xact_lock` keyed on
+    /// `owner_id` is taken first (mirroring
+    /// `PostgresMembershipStore::lock_workspace_mutations`), so two concurrent
+    /// creates by the SAME owner serialize and cannot both observe a
+    /// pre-increment count and both pass. Reaching the cap returns
+    /// [`WorkspaceError::LimitReached`] and rolls back - nothing is inserted.
     // `owner_id`/`owner_uid` are the `&str` and parsed-`Uuid` forms of the SAME
     // id; `clippy::similar_names` reads them as confusable, but keeping the shared
     // stem is the clearer naming (as in `membership.rs`).
     #[allow(clippy::similar_names)]
-    pub async fn create_with_owner(&self, name: &str, owner_id: &str) -> Result<WorkspaceId> {
+    pub async fn create_with_owner(
+        &self,
+        name: &str,
+        owner_id: &str,
+    ) -> std::result::Result<WorkspaceId, WorkspaceError> {
         // The owner id (a token `sub`) is a UUID in the identity model; anything
         // else is a programming error at the API boundary, surfaced as Backend.
-        let owner_uid = Uuid::parse_str(owner_id).map_err(|_| AuthError::Backend)?;
+        let owner_uid = Uuid::parse_str(owner_id).map_err(|_| WorkspaceError::Backend)?;
         let id = Uuid::new_v4();
         // A globally-unique slug derived from the server-generated id (never
         // caller-influenced), so it can never collide on the slug UNIQUE
@@ -91,12 +151,65 @@ impl PostgresWorkspaceStore {
         let slug = format!("ws-{}", id.simple());
         let now = now_unix_seconds();
 
-        // Bind the new workspace so the workspace_members INSERT satisfies the RLS
-        // WITH CHECK (workspace_id = app.current_workspace). `workspaces` is a
-        // no-RLS control-plane table, so the GUC is inert for it; it matters only
-        // for the founding-membership row. ONE context (workspace) is bound, so
-        // the single-context invariant holds.
-        let mut tx = begin_scoped(&self.pool, WorkspaceId::from_uuid(id)).await?;
+        let mut tx = self.pool.begin().await.map_err(map_db)?;
+
+        // Serialize concurrent provisioning by the SAME owner FIRST (before any
+        // cap read), keyed on the owner's user id - see the method docs.
+        sqlx::query!(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))::text AS lock",
+            owner_uid.to_string(),
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_db)?;
+
+        // How many workspaces does this owner ALREADY own, across every
+        // workspace? Bind the USER context (never simultaneously with the
+        // workspace context bound below - see the single-context invariant in
+        // `lib.rs`) so the workspace_members RLS admits this user's own rows in
+        // every workspace; the explicit `user_id = $1` predicate below is the
+        // primary filter regardless.
+        sqlx::query!(
+            "SELECT set_config('app.current_user', $1, true)",
+            owner_uid.to_string(),
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_db)?;
+        let owned = sqlx::query!(
+            "SELECT count(*) AS \"count!\" FROM workspace_members \
+             WHERE user_id = $1 AND role = 'owner'",
+            owner_uid,
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_db)?
+        .count;
+        if owned >= i64::from(self.max_workspaces_per_user) {
+            // Dropping `tx` here rolls it back: nothing is inserted.
+            return Err(WorkspaceError::LimitReached {
+                max: self.max_workspaces_per_user,
+            });
+        }
+
+        // Clear the user context before binding the workspace context for the
+        // inserts below - the two are never set at once (single-context
+        // invariant). Then bind the new workspace so the workspace_members
+        // INSERT satisfies the RLS WITH CHECK (workspace_id =
+        // app.current_workspace); `workspaces` is a no-RLS control-plane table,
+        // so the GUC is inert for it.
+        sqlx::query!("SELECT set_config('app.current_user', '', true)")
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_db)?;
+        sqlx::query!(
+            "SELECT set_config('app.current_workspace', $1, true)",
+            WorkspaceId::from_uuid(id).to_string(),
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_db)?;
+
         sqlx::query!(
             "INSERT INTO workspaces (id, slug, name, tier, created_at) \
              VALUES ($1, $2, $3, 'community', $4)",

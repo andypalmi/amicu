@@ -85,7 +85,9 @@ pub use reset::PostgresResetStore;
 pub use state::PostgresStateBackend;
 pub use user::PostgresUserStore;
 pub use verify::PostgresVerifyStore;
-pub use workspace::{PostgresWorkspaceStore, Workspace};
+pub use workspace::{
+    DEFAULT_MAX_WORKSPACES_PER_USER, PostgresWorkspaceStore, Workspace, WorkspaceError,
+};
 
 /// The control-plane isolation boundary: a workspace (unified with the
 /// Enterprise org).
@@ -159,6 +161,56 @@ pub(crate) fn tier_from_str(text: &str) -> Result<amicu_auth::Tier, AuthError> {
         "hosted" => Ok(Tier::Hosted),
         _ => Err(AuthError::Backend),
     }
+}
+
+/// Whether `tier` meets the Enterprise gate: [`Tier::Enterprise`] or
+/// [`Tier::Hosted`](amicu_auth::Tier::Hosted). Mirrors `amicu-api`'s
+/// `tier_rank` ordering (Community < Pro < Enterprise < Hosted).
+///
+/// Used by the org-console audited mutations' in-transaction tier re-check
+/// (andypalmi/amicu-planning#132): the claim-based Enterprise gate keys on the
+/// access token's `claims.tier`, so a workspace DOWNGRADED from Enterprise
+/// still passes it until the token expires (<=5 min). Re-reading the
+/// workspace's CURRENT tier inside the mutation's own transaction closes that
+/// window for state-changing operations, without waiting on token expiry.
+pub(crate) fn meets_enterprise(tier: amicu_auth::Tier) -> bool {
+    use amicu_auth::Tier;
+    matches!(tier, Tier::Enterprise | Tier::Hosted)
+}
+
+/// Reads a workspace's CURRENT tier inside `tx`. `workspaces` carries no RLS
+/// (see the crate docs), so this is safe to call regardless of which context
+/// GUC (if any) the surrounding transaction has bound. Used by the
+/// [`meets_enterprise`] in-transaction re-check.
+///
+/// This is a plain `SELECT`, not `SELECT ... FOR UPDATE`: the row is
+/// deliberately NOT locked. A billing downgrade that commits between this read
+/// and the caller's mutation could still let that single mutation through on a
+/// tier that has just changed underneath it. That is an accepted, narrow race,
+/// because the goal here is closing the <=5-minute stale-claim window (a
+/// downgraded workspace no longer usable at all once its Owner's next request
+/// lands), not making the tier check billing-atomic; locking `workspaces`
+/// would also serialize unrelated tier reads/writes (e.g. Stripe webhooks)
+/// against every org mutation for no material benefit.
+pub(crate) async fn read_workspace_tier(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace: WorkspaceId,
+) -> Result<amicu_auth::Tier, AuthError> {
+    let row = sqlx::query!(
+        "SELECT tier FROM workspaces WHERE id = $1",
+        workspace.as_uuid(),
+    )
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(map_db)?;
+    // A workspace-scoped mutation running against a workspace whose row is
+    // gone would be a data-integrity fault (workspaces are never hard-deleted
+    // while members remain - see 0003_workspace_members.sql's ON DELETE
+    // RESTRICT), surfaced as Backend like everywhere else in this module.
+    let Some(row) = row else {
+        return Err(AuthError::Backend);
+    };
+    tier_from_str(&row.tier)
 }
 
 /// Coarse mapper from a driver error to the auth taxonomy. Deliberately drops

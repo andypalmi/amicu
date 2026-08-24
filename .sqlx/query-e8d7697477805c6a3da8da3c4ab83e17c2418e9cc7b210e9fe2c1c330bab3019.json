@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workspaces SET tier = 'pro' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e8d7697477805c6a3da8da3c4ab83e17c2418e9cc7b210e9fe2c1c330bab3019"
+}

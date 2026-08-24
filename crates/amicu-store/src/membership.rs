@@ -18,7 +18,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    WorkspaceId, begin_scoped, begin_scoped_user, map_db, now_unix_seconds, tier_from_str,
+    WorkspaceId, begin_scoped, begin_scoped_user, map_db, meets_enterprise, now_unix_seconds,
+    read_workspace_tier, tier_from_str,
 };
 
 /// A workspace role, in descending privilege. Stored as lowercase text.
@@ -461,6 +462,26 @@ impl PostgresMembershipStore {
         Ok(())
     }
 
+    /// Re-read `workspace`'s CURRENT tier inside `tx` and reject the mutation if
+    /// it no longer meets Enterprise (andypalmi/amicu-planning#132): the
+    /// claim-based Enterprise gate keys on the access token's `claims.tier`, so
+    /// a workspace DOWNGRADED from Enterprise still passes it until the token
+    /// expires (<=5 min). Re-reading here, inside the SAME transaction as the
+    /// mutation, closes that staleness window for state-changing operations
+    /// without an extra round-trip or waiting on token expiry.
+    async fn require_current_enterprise_tier(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        workspace: WorkspaceId,
+    ) -> Result<(), OrgMutationError> {
+        let tier = read_workspace_tier(tx, workspace).await?;
+        if !meets_enterprise(tier) {
+            return Err(OrgMutationError::Forbidden(
+                "this workspace's plan no longer permits org administration".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Append one `org_audit` record inside `tx` (paired with its mutation).
     async fn append_audit(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -504,6 +525,7 @@ impl PostgresMembershipStore {
         // non-UUID would be an internal-contract violation, so map it to Backend.
         let target_uid = Uuid::parse_str(target_id).map_err(|_| OrgMutationError::Backend)?;
         let mut tx = begin_scoped(&self.pool, workspace).await?;
+        Self::require_current_enterprise_tier(&mut tx, workspace).await?;
         // Serialize all mutations on this workspace FIRST (before any role/owner
         // reads) so the last-Owner guard cannot race - see
         // `lock_workspace_mutations`.
@@ -558,6 +580,7 @@ impl PostgresMembershipStore {
         new_role: Role,
     ) -> Result<Role, OrgMutationError> {
         let mut tx = begin_scoped(&self.pool, workspace).await?;
+        Self::require_current_enterprise_tier(&mut tx, workspace).await?;
         // Serialize all mutations on this workspace FIRST (before any role/owner
         // reads) so the last-Owner guard cannot race - see
         // `lock_workspace_mutations`.
@@ -608,6 +631,7 @@ impl PostgresMembershipStore {
         target_id: &str,
     ) -> Result<Role, OrgMutationError> {
         let mut tx = begin_scoped(&self.pool, workspace).await?;
+        Self::require_current_enterprise_tier(&mut tx, workspace).await?;
         // Serialize all mutations on this workspace FIRST (before any role/owner
         // reads) so the last-Owner guard cannot race - see
         // `lock_workspace_mutations`.

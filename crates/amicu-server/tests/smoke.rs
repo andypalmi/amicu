@@ -26,6 +26,7 @@ fn test_config() -> Config {
         min_tier: amicu_server::MinTier::Community,
         rate_limit_max: 2,
         rate_limit_window_secs: 60,
+        max_workspaces_per_user: amicu_store::DEFAULT_MAX_WORKSPACES_PER_USER,
     }
 }
 

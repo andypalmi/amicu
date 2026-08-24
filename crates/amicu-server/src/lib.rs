@@ -43,6 +43,7 @@
 //! | `min_tier` | `--min-tier` | `AMICU_MIN_TIER` | `community` |
 //! | `rate_limit_max` | `--rate-limit-max` | `AMICU_RATE_LIMIT_MAX` | `30` |
 //! | `rate_limit_window_secs` | `--rate-limit-window-secs` | `AMICU_RATE_LIMIT_WINDOW_SECS` | `60` |
+//! | `max_workspaces_per_user` | `--max-workspaces-per-user` | `AMICU_MAX_WORKSPACES_PER_USER` | `50` |
 //!
 //! # Billing (Stripe) - env only
 //!
@@ -149,6 +150,20 @@ pub struct Config {
     /// Credential-route rate-limit window, in seconds.
     #[arg(long, env = "AMICU_RATE_LIMIT_WINDOW_SECS", default_value_t = 60)]
     pub rate_limit_window_secs: u64,
+
+    /// Cap on the TOTAL number of workspaces a user may OWN (across every
+    /// workspace, including the personal workspace sign-up provisions), enforced
+    /// on `POST /workspaces`. There is no `DELETE /workspaces`, so this is a hard
+    /// ceiling per owner, enforced inside the creating transaction
+    /// (andypalmi/amicu-planning#132). Only reachable on the Postgres path
+    /// (`DATABASE_URL` set); the in-memory dev path is single-personal-workspace
+    /// by construction.
+    #[arg(
+        long,
+        env = "AMICU_MAX_WORKSPACES_PER_USER",
+        default_value_t = amicu_store::DEFAULT_MAX_WORKSPACES_PER_USER
+    )]
+    pub max_workspaces_per_user: u32,
 }
 
 /// The engine-gate minimum tier, as a CLI/env value.
@@ -472,7 +487,8 @@ async fn build_app_with_database_url(
             .map_err(Error::Store)?;
         eprintln!("amicu-server: using the Postgres tenancy store (DATABASE_URL set).");
         Some(Arc::new(PostgresTenancyStore::new(
-            PostgresWorkspaceStore::new(pool.clone()),
+            PostgresWorkspaceStore::new(pool.clone())
+                .with_max_workspaces_per_user(config.max_workspaces_per_user),
             PostgresInviteStore::new(pool),
         )))
     } else {
