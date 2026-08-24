@@ -983,6 +983,14 @@ pub(crate) async fn add_member_handler(
             "`user_id` must not be empty".to_owned(),
         ));
     }
+    // `user_id` is client input (the request body). A user id is a UUID (the
+    // token `sub`), so a non-UUID value is a malformed request: reject it here
+    // with 400 rather than letting the store surface it as a 500.
+    if uuid::Uuid::parse_str(user_id).is_err() {
+        return Err(OrgError::BadRequest(
+            "`user_id` must be a valid UUID".to_owned(),
+        ));
+    }
     let role = Role::parse_wire(&body.role)
         .ok_or_else(|| OrgError::BadRequest(format!("unknown role: {}", body.role)))?;
 

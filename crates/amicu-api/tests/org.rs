@@ -58,11 +58,18 @@ static OTHER: LazyLock<WorkspaceId> = LazyLock::new(WorkspaceId::new);
 const ISS: &str = "https://issuer.test";
 const AUD: &str = "amicu-api";
 
-const OWNER: &str = "usr_owner";
-const ADMIN: &str = "usr_admin";
-const MEMBER: &str = "usr_member";
-const VIEWER: &str = "usr_viewer";
-const OTHER_OWNER: &str = "usr_other_owner";
+// User ids are UUIDs in production (the token `sub`, per `new_user_id`), and the
+// add-member handler now rejects a non-UUID `user_id` with 400, so the cast uses
+// real UUIDs. The in-memory store treats ids as opaque strings, so the values
+// are otherwise arbitrary.
+const OWNER: &str = "00000000-0000-0000-0000-0000000000a1";
+const ADMIN: &str = "00000000-0000-0000-0000-0000000000a2";
+const MEMBER: &str = "00000000-0000-0000-0000-0000000000a3";
+const VIEWER: &str = "00000000-0000-0000-0000-0000000000a4";
+const OTHER_OWNER: &str = "00000000-0000-0000-0000-0000000000a5";
+/// A well-formed (UUID) user id that is not seeded anywhere: the target of an
+/// add that either succeeds or is refused by RBAC, never by input validation.
+const NEW_MEMBER: &str = "00000000-0000-0000-0000-0000000000b1";
 
 /// Tokens for the fixed test cast, all signed by the harness's one key. Each is
 /// minted for `ORG` at the actor's role (so the claim matches the seeded store
@@ -439,12 +446,12 @@ async fn viewer_cannot_mutate_membership_403() {
             "POST",
             "/org/members",
             &h.tokens.viewer,
-            &json!({ "user_id": "usr_new", "role": "member" }),
+            &json!({ "user_id": NEW_MEMBER, "role": "member" }),
         ),
     )
     .await;
     assert_eq!(add_status, StatusCode::FORBIDDEN);
-    assert_eq!(h.store.role_of(*ORG, "usr_new"), None);
+    assert_eq!(h.store.role_of(*ORG, NEW_MEMBER), None);
 
     let (change_status, _) = send(
         &h.app,
@@ -605,6 +612,43 @@ async fn unknown_role_is_400() {
     assert!(body["error"].as_str().unwrap().contains("unknown role"));
 }
 
+/// A malformed (non-UUID) `user_id` is client input, so it is a 400 - it must
+/// NOT reach the store and surface as a 500. A well-formed-but-unknown UUID
+/// still behaves as before (here: the Owner adds it and it is created).
+#[tokio::test]
+async fn malformed_user_id_is_400() {
+    let h = harness();
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+
+    let (status, body) = send(
+        &h.app,
+        body_req(
+            "POST",
+            "/org/members",
+            &h.tokens.owner,
+            &json!({ "user_id": "not-a-uuid", "role": "member" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("UUID"));
+
+    // A well-formed but unknown user id is accepted (201), unchanged behavior.
+    let (ok_status, ok_body) = send(
+        &h.app,
+        body_req(
+            "POST",
+            "/org/members",
+            &h.tokens.owner,
+            &json!({ "user_id": NEW_MEMBER, "role": "member" }),
+        ),
+    )
+    .await;
+    assert_eq!(ok_status, StatusCode::CREATED);
+    assert_eq!(ok_body["user_id"], NEW_MEMBER);
+    assert_eq!(h.store.role_of(*ORG, NEW_MEMBER), Some(Role::Member));
+}
+
 #[tokio::test]
 async fn change_role_unknown_member_is_404() {
     let h = harness();
@@ -701,14 +745,14 @@ async fn a_mutation_lands_only_in_the_tokens_workspace() {
             "POST",
             "/org/members",
             &h.tokens.other_owner,
-            &json!({ "user_id": "usr_new", "role": "member" }),
+            &json!({ "user_id": NEW_MEMBER, "role": "member" }),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    assert_eq!(h.store.role_of(*OTHER, "usr_new"), Some(Role::Member));
+    assert_eq!(h.store.role_of(*OTHER, NEW_MEMBER), Some(Role::Member));
     // ORG is untouched (the token could not name it).
-    assert_eq!(h.store.role_of(*ORG, "usr_new"), None);
+    assert_eq!(h.store.role_of(*ORG, NEW_MEMBER), None);
     assert_eq!(h.store.member_count(*ORG), 0);
 }
 
