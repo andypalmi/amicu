@@ -47,6 +47,8 @@ use utoipa::{Modify, OpenApi};
         crate::config::append_version_handler,
         crate::config::rollback_handler,
         crate::config::diff_handler,
+        crate::session::list_workspaces_handler,
+        crate::session::switch_workspace_handler,
     ),
     components(schemas(
         crate::auth::Credentials,
@@ -77,6 +79,9 @@ use utoipa::{Modify, OpenApi};
         crate::config::VersionMetaDto,
         crate::config::VersionContentDto,
         crate::config::ConfigDiffDto,
+        crate::session::WorkspaceView,
+        crate::session::WorkspacesResponse,
+        crate::session::SwitchWorkspaceRequest,
     )),
     modifiers(&SecurityAddon),
     tags(
@@ -88,6 +93,7 @@ use utoipa::{Modify, OpenApi};
         (name = "billing", description = "Stripe-backed subscription billing: checkout, customer portal, status, and the signature-authenticated webhook."),
         (name = "org", description = "Enterprise-gated organization console: membership, role-based access control, and an append-only audit log."),
         (name = "config", description = "HCL config storage and version history: create/list/get, append-only version history, rollback (mints a new version, never rewrites), and a server-computed unified diff. Content is canonicalized before it is stored (auth-gated, Community-usable)."),
+        (name = "session", description = "Workspace claim in tokens: list the authenticated caller's workspace memberships and switch the active workspace (mints a fresh token pair scoped to the target only if the caller is a member; 403 otherwise)."),
     ),
 )]
 pub struct ApiDoc;

@@ -42,6 +42,7 @@ pub mod org;
 pub mod preset;
 pub mod ratelimit;
 pub mod recommend;
+pub mod session;
 
 use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn_with_state;
@@ -58,6 +59,7 @@ pub use engine::{AccessVerifier, EngineApiState};
 pub use openapi::ApiDoc;
 pub use org::{InMemoryOrgStore, OrgApiState, OrgStore, org_router};
 pub use ratelimit::{ProxyParseError, RateLimiter, TrustedProxies};
+pub use session::{SessionApiState, session_router};
 
 /// Build the engine sub-router (validate/plan, state not yet bound) together
 /// with the aggregated OpenAPI document. Both the live spec endpoint and the
@@ -99,13 +101,16 @@ pub fn openapi_json() -> String {
 /// `GET /openapi.json`, the auth-gated engine endpoints, the billing surface
 /// (auth-gated checkout/portal/status plus the signature-authenticated webhook),
 /// the Enterprise-gated organization console (`/org/*`: membership, RBAC,
-/// audit log), and the auth-gated config storage surface (`/configs/*`).
+/// audit log), the auth-gated config storage surface (`/configs/*`), and the
+/// auth-gated session surface (`GET /workspaces`, `POST /session/workspace`:
+/// list-my-workspaces and workspace switching).
 pub fn api_router(
     auth_state: AuthApiState,
     engine_state: EngineApiState,
     billing_state: BillingApiState,
     org_state: OrgApiState,
     config_state: ConfigApiState,
+    session_state: SessionApiState,
 ) -> Router {
     let (engine_router, spec) = engine_parts();
     let engine_router = engine_router
@@ -129,4 +134,5 @@ pub fn api_router(
         .merge(billing_router(billing_state))
         .merge(org_router(org_state))
         .merge(config_router(config_state, engine_state))
+        .merge(session_router(session_state))
 }

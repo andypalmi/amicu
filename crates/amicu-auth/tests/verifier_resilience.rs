@@ -12,6 +12,7 @@ use amicu_auth::issuer::{IssuerConfig, TokenIssuer};
 use amicu_auth::jwks::{Jwk, Jwks};
 use amicu_auth::key::SigningKey;
 use amicu_auth::verifier::{JwksProvider, MonoClock, Verifier, VerifierConfig};
+use amicu_auth::{Role, WorkspaceId};
 use async_trait::async_trait;
 
 const ISS: &str = "https://auth.amicu.dev";
@@ -87,7 +88,14 @@ fn issuer() -> TokenIssuer {
 
 fn token_for(key: &SigningKey) -> String {
     issuer()
-        .issue_access(key, "u", Tier::Community, vec![])
+        .issue_access(
+            key,
+            "u",
+            WorkspaceId::new(),
+            Role::Owner,
+            Tier::Community,
+            vec![],
+        )
         .unwrap()
 }
 
@@ -153,7 +161,14 @@ async fn transient_error_serves_stale_for_cached_kid() {
     let verifier = Verifier::with_clock(provider, VerifierConfig::new(ISS, AUD), clock.clone());
 
     let token = issuer()
-        .issue_access(&key, "u", Tier::Pro, vec!["admin".into()])
+        .issue_access(
+            &key,
+            "u",
+            WorkspaceId::new(),
+            Role::Owner,
+            Tier::Pro,
+            vec!["admin".into()],
+        )
         .unwrap();
 
     // Prime the cache successfully.

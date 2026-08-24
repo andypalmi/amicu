@@ -19,10 +19,12 @@
 pub mod claims;
 pub mod error;
 pub mod jwks;
+pub mod tenant;
 
 pub use claims::{Claims, Tier};
 pub use error::{AuthError, Result};
 pub use jwks::{Jwk, Jwks, OpenIdConfiguration};
+pub use tenant::{Role, WorkspaceId};
 
 #[cfg(feature = "verifier")]
 pub mod verifier;
@@ -42,6 +44,8 @@ pub mod issuer;
 pub mod key;
 #[cfg(feature = "issuer")]
 pub mod keyring;
+#[cfg(feature = "issuer")]
+pub mod membership;
 #[cfg(feature = "issuer")]
 pub mod notify;
 #[cfg(feature = "issuer")]
@@ -63,6 +67,10 @@ pub use issuer::{Clock, IssuerConfig, SystemClock, TokenIssuer};
 pub use key::SigningKey;
 #[cfg(feature = "issuer")]
 pub use keyring::Keyring;
+#[cfg(feature = "issuer")]
+pub use membership::{
+    MembershipContext, MembershipStore, PersonalMembershipStore, WorkspaceMembership,
+};
 #[cfg(feature = "issuer")]
 pub use notify::{LoggingNotifier, Notification, NotificationKind, Notifier};
 #[cfg(feature = "issuer")]

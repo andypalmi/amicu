@@ -23,11 +23,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use amicu_auth::Tier;
 use amicu_auth::refresh::{RefreshConsume, RefreshStore, mint, mint_in_family, new_family_id};
 use amicu_auth::reset::{ResetConsume, ResetStore, mint as mint_reset};
 use amicu_auth::user::{User, UserStore};
 use amicu_auth::verify::{VerifyConsume, VerifyStore, mint as mint_verify};
+use amicu_auth::{Tier, WorkspaceId};
 use amicu_store::{
     PostgresRefreshStore, PostgresResetStore, PostgresUserStore, PostgresVerifyStore, connect,
     run_migrations,
@@ -59,26 +59,27 @@ async fn pool() -> PgPool {
 
 /// Create a fresh global user (with their personal Owner workspace) and return
 /// their UUID id as text - the `sub` the token tables foreign-key to.
-async fn seed_user(store: &PostgresUserStore, tier: Tier) -> (String, String) {
+async fn seed_user(store: &PostgresUserStore, tier: Tier) -> (String, String, WorkspaceId) {
     let id = Uuid::new_v4().to_string();
     let email = format!("{}@example.test", unique("mail"));
-    store
-        .create(User::new(
-            id.clone(),
-            email.clone(),
-            "argon2-phc-string".to_string(),
-            tier,
-        ))
-        .await
-        .expect("create user");
-    (id, email)
+    let user = User::new(
+        id.clone(),
+        email.clone(),
+        "argon2-phc-string".to_string(),
+        tier,
+    );
+    // The server-generated personal workspace the create provisions; refresh
+    // tokens FK to it, so a mint needs this id.
+    let workspace_id = user.personal_workspace_id;
+    store.create(user).await.expect("create user");
+    (id, email, workspace_id)
 }
 
 #[tokio::test]
 #[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
 async fn user_round_trips_identity_and_workspace_billing() {
     let store = PostgresUserStore::new(pool().await);
-    let (id, email) = seed_user(&store, Tier::Community).await;
+    let (id, email, _) = seed_user(&store, Tier::Community).await;
 
     // A duplicate email is rejected globally (not per workspace).
     let dup = User::new(
@@ -169,9 +170,9 @@ async fn refresh_rotates_once_and_detects_reuse() {
     let shared = pool().await;
     let users = PostgresUserStore::new(shared.clone());
     let store = PostgresRefreshStore::new(shared);
-    let (user, _) = seed_user(&users, Tier::Community).await;
+    let (user, _, ws) = seed_user(&users, Tier::Community).await;
 
-    let token = mint(&user, FAR_FUTURE);
+    let token = mint(&user, ws, FAR_FUTURE);
     let hash = token.record.token_hash;
     let family = token.record.family_id.clone();
     store.insert(token.record).await.expect("insert refresh");
@@ -183,7 +184,9 @@ async fn refresh_rotates_once_and_detects_reuse() {
 
     // First consume wins and reports the family to rotate into.
     match store.consume(&hash, 0).await.expect("consume") {
-        RefreshConsume::Consumed { user_id, family_id } => {
+        RefreshConsume::Consumed {
+            user_id, family_id, ..
+        } => {
             assert_eq!(user_id, user);
             assert_eq!(family_id, family);
         }
@@ -204,7 +207,7 @@ async fn refresh_rotates_once_and_detects_reuse() {
     assert!(store.is_family_compromised(&family).await.expect("flag"));
 
     // A fresh live token minted into the compromised family cannot be consumed.
-    let poisoned = mint_in_family(&user, &family, FAR_FUTURE);
+    let poisoned = mint_in_family(&user, ws, &family, FAR_FUTURE);
     let poisoned_hash = poisoned.record.token_hash;
     store.insert(poisoned.record).await.expect("insert");
     store
@@ -219,7 +222,7 @@ async fn refresh_rotates_once_and_detects_reuse() {
     );
 
     // Unknown token is NotFound.
-    let unknown = mint(&user, FAR_FUTURE);
+    let unknown = mint(&user, ws, FAR_FUTURE);
     assert_eq!(
         store
             .consume(&unknown.record.token_hash, 0)
@@ -235,10 +238,10 @@ async fn refresh_expired_is_rejected_and_revoke_all_works() {
     let shared = pool().await;
     let users = PostgresUserStore::new(shared.clone());
     let store = PostgresRefreshStore::new(shared);
-    let (user, _) = seed_user(&users, Tier::Community).await;
+    let (user, _, ws) = seed_user(&users, Tier::Community).await;
 
     // Expired token: live but past expiry at consume time.
-    let expired = mint(&user, 100);
+    let expired = mint(&user, ws, 100);
     let expired_hash = expired.record.token_hash;
     store.insert(expired.record).await.expect("insert");
     assert_eq!(
@@ -247,8 +250,8 @@ async fn refresh_expired_is_rejected_and_revoke_all_works() {
     );
 
     // revoke_all_for_user kills every live token across families.
-    let a = mint(&user, FAR_FUTURE);
-    let b = mint_in_family(&user, &new_family_id(), FAR_FUTURE);
+    let a = mint(&user, ws, FAR_FUTURE);
+    let b = mint_in_family(&user, ws, &new_family_id(), FAR_FUTURE);
     let (ah, bh) = (a.record.token_hash, b.record.token_hash);
     store.insert(a.record).await.expect("insert a");
     store.insert(b.record).await.expect("insert b");
@@ -272,9 +275,9 @@ async fn deleting_a_user_cascades_their_tokens() {
     let shared = pool().await;
     let users = PostgresUserStore::new(shared.clone());
     let refresh = PostgresRefreshStore::new(shared);
-    let (user, _) = seed_user(&users, Tier::Community).await;
+    let (user, _, ws) = seed_user(&users, Tier::Community).await;
 
-    let token = mint(&user, FAR_FUTURE);
+    let token = mint(&user, ws, FAR_FUTURE);
     let hash = token.record.token_hash;
     refresh.insert(token.record).await.expect("insert refresh");
     assert!(refresh.get(&hash).await.expect("get").is_some());
@@ -291,7 +294,7 @@ async fn reset_is_single_use_and_rejects_expired_and_unknown() {
     let shared = pool().await;
     let users = PostgresUserStore::new(shared.clone());
     let store = PostgresResetStore::new(shared);
-    let (user, _) = seed_user(&users, Tier::Community).await;
+    let (user, _, _) = seed_user(&users, Tier::Community).await;
 
     let minted = mint_reset(&user, FAR_FUTURE);
     let hash = minted.record.token_hash;
@@ -336,7 +339,7 @@ async fn verify_is_single_use_and_rejects_expired_and_unknown() {
     let shared = pool().await;
     let users = PostgresUserStore::new(shared.clone());
     let store = PostgresVerifyStore::new(shared);
-    let (user, _) = seed_user(&users, Tier::Community).await;
+    let (user, _, _) = seed_user(&users, Tier::Community).await;
 
     let minted = mint_verify(&user, FAR_FUTURE);
     let hash = minted.record.token_hash;

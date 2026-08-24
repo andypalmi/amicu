@@ -12,48 +12,22 @@
 //! their own memberships across workspaces and nothing else.
 
 use amicu_auth::AuthError;
+use amicu_auth::membership::{MembershipContext, MembershipStore, WorkspaceMembership};
+use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{WorkspaceId, begin_scoped, begin_scoped_user, map_db, now_unix_seconds};
+use crate::{
+    WorkspaceId, begin_scoped, begin_scoped_user, map_db, now_unix_seconds, tier_from_str,
+};
 
 /// A workspace role, in descending privilege. Stored as lowercase text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    /// Full control, including membership and billing.
-    Owner,
-    /// Manages membership below Owner.
-    Admin,
-    /// A regular member.
-    Member,
-    /// Read-only.
-    Viewer,
-}
-
-impl Role {
-    /// The stored lowercase text form.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Role::Owner => "owner",
-            Role::Admin => "admin",
-            Role::Member => "member",
-            Role::Viewer => "viewer",
-        }
-    }
-
-    /// Parse the stored text form. An unrecognized value is a data-integrity
-    /// fault (the store is the only writer), surfaced as [`AuthError::Backend`].
-    pub fn parse(text: &str) -> Result<Self, AuthError> {
-        match text {
-            "owner" => Ok(Role::Owner),
-            "admin" => Ok(Role::Admin),
-            "member" => Ok(Role::Member),
-            "viewer" => Ok(Role::Viewer),
-            _ => Err(AuthError::Backend),
-        }
-    }
-}
+///
+/// Defined in `amicu-auth` (`amicu_auth::tenant::Role`) since
+/// andypalmi/amicu-planning#129 so the access-token `wsrole` claim can carry it
+/// without a store dependency; re-exported here unchanged, so
+/// `amicu_store::membership::Role` keeps resolving.
+pub use amicu_auth::Role;
 
 /// A membership row: the join of a user into a workspace at a role.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,6 +220,75 @@ impl PostgresMembershipStore {
                     role: Role::parse(&r.role)?,
                     invited_by: r.invited_by.map(|u| u.to_string()),
                     joined_at: r.joined_at,
+                })
+            })
+            .collect()
+    }
+}
+
+/// The real, multi-workspace membership authority the token issuer consults
+/// (andypalmi/amicu-planning#129): [`context`](MembershipStore::context) resolves
+/// the `wsrole` + workspace `tier` for a mint/refresh, and
+/// [`list_for_user`](MembershipStore::list_for_user) backs `GET /workspaces`.
+/// Both resolve state SERVER-SIDE from `workspace_members` + `workspaces`;
+/// neither trusts a client-supplied workspace or role.
+#[async_trait]
+impl MembershipStore for PostgresMembershipStore {
+    async fn context(
+        &self,
+        workspace: WorkspaceId,
+        user_id: &str,
+    ) -> Result<Option<MembershipContext>, AuthError> {
+        let uid = parse_uid(user_id)?;
+        // Workspace context: the workspace_members RLS admits exactly this
+        // workspace's rows, and the explicit predicate is the primary filter.
+        // `workspaces` has no RLS, so the join reads the tier freely.
+        let mut tx = begin_scoped(&self.pool, workspace).await?;
+        let row = sqlx::query!(
+            "SELECT m.role, w.tier \
+             FROM workspace_members m \
+             JOIN workspaces w ON w.id = m.workspace_id \
+             WHERE m.workspace_id = $1 AND m.user_id = $2",
+            workspace.as_uuid(),
+            uid,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_db)?;
+        tx.commit().await.map_err(map_db)?;
+        row.map(|r| {
+            Ok::<MembershipContext, AuthError>(MembershipContext {
+                role: Role::parse(&r.role)?,
+                tier: tier_from_str(&r.tier)?,
+            })
+        })
+        .transpose()
+    }
+
+    async fn list_for_user(&self, user_id: &str) -> Result<Vec<WorkspaceMembership>, AuthError> {
+        let uid = parse_uid(user_id)?;
+        // User context: the workspace_members RLS admits the caller's OWN rows
+        // across workspaces (and nothing else), so a caller lists only their own
+        // memberships. `workspaces` has no RLS, so the name join is free.
+        let mut tx = begin_scoped_user(&self.pool, uid).await?;
+        let rows = sqlx::query!(
+            "SELECT m.workspace_id, w.name, m.role \
+             FROM workspace_members m \
+             JOIN workspaces w ON w.id = m.workspace_id \
+             WHERE m.user_id = $1 \
+             ORDER BY m.joined_at, m.workspace_id",
+            uid,
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_db)?;
+        tx.commit().await.map_err(map_db)?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(WorkspaceMembership {
+                    workspace_id: WorkspaceId::from_uuid(r.workspace_id),
+                    name: r.name,
+                    role: Role::parse(&r.role)?,
                 })
             })
             .collect()

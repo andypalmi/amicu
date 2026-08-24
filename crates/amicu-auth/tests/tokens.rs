@@ -10,6 +10,7 @@ use amicu_auth::issuer::{Clock, IssuerConfig, TokenIssuer};
 use amicu_auth::jwks::{Jwk, Jwks};
 use amicu_auth::key::SigningKey;
 use amicu_auth::verifier::{JwksProvider, StaticJwksProvider, Verifier, VerifierConfig};
+use amicu_auth::{Role, WorkspaceId};
 use async_trait::async_trait;
 
 const ISS: &str = "https://auth.amicu.dev";
@@ -69,7 +70,14 @@ fn verifier_config() -> VerifierConfig {
 async fn issue_and_verify_happy_path() {
     let key = SigningKey::generate().unwrap();
     let token = issuer()
-        .issue_access(&key, "usr_1", Tier::Pro, vec!["admin".into()])
+        .issue_access(
+            &key,
+            "usr_1",
+            WorkspaceId::new(),
+            Role::Owner,
+            Tier::Pro,
+            vec!["admin".into()],
+        )
         .unwrap();
 
     let verifier = Verifier::new(StaticJwksProvider::new(jwks_of(&[&key])), verifier_config());
@@ -85,7 +93,14 @@ async fn issue_and_verify_happy_path() {
 async fn tampered_signature_rejected() {
     let key = SigningKey::generate().unwrap();
     let token = issuer()
-        .issue_access(&key, "usr_1", Tier::Community, vec![])
+        .issue_access(
+            &key,
+            "usr_1",
+            WorkspaceId::new(),
+            Role::Owner,
+            Tier::Community,
+            vec![],
+        )
         .unwrap();
 
     // Flip the first char of the signature segment (a full byte) to keep the
@@ -106,7 +121,14 @@ async fn expired_token_rejected() {
     // Sign at a fixed time far in the past so exp is already elapsed.
     let past = TokenIssuer::with_clock(IssuerConfig::new(ISS, AUD), FixedClock(1_000));
     let token = past
-        .issue_access(&key, "usr_1", Tier::Community, vec![])
+        .issue_access(
+            &key,
+            "usr_1",
+            WorkspaceId::new(),
+            Role::Owner,
+            Tier::Community,
+            vec![],
+        )
         .unwrap();
 
     let verifier = Verifier::new(StaticJwksProvider::new(jwks_of(&[&key])), verifier_config());
@@ -120,7 +142,14 @@ async fn not_yet_valid_token_rejected() {
     // Sign far in the future so nbf has not arrived.
     let future = TokenIssuer::with_clock(IssuerConfig::new(ISS, AUD), FixedClock(4_000_000_000));
     let token = future
-        .issue_access(&key, "usr_1", Tier::Community, vec![])
+        .issue_access(
+            &key,
+            "usr_1",
+            WorkspaceId::new(),
+            Role::Owner,
+            Tier::Community,
+            vec![],
+        )
         .unwrap();
 
     let verifier = Verifier::new(StaticJwksProvider::new(jwks_of(&[&key])), verifier_config());
@@ -136,7 +165,14 @@ async fn unknown_kid_triggers_single_refetch() {
 
     // First verify: cache empty -> 1 fetch.
     let t1 = issuer()
-        .issue_access(&key1, "u", Tier::Community, vec![])
+        .issue_access(
+            &key1,
+            "u",
+            WorkspaceId::new(),
+            Role::Owner,
+            Tier::Community,
+            vec![],
+        )
         .unwrap();
     verifier.verify(&t1).await.unwrap();
     assert_eq!(verifier.provider().count(), 1);
@@ -149,7 +185,14 @@ async fn unknown_kid_triggers_single_refetch() {
     let key2 = SigningKey::generate().unwrap();
     verifier.provider().set(jwks_of(&[&key1, &key2]));
     let t2 = issuer()
-        .issue_access(&key2, "u", Tier::Community, vec![])
+        .issue_access(
+            &key2,
+            "u",
+            WorkspaceId::new(),
+            Role::Owner,
+            Tier::Community,
+            vec![],
+        )
         .unwrap();
     verifier.verify(&t2).await.unwrap();
     assert_eq!(verifier.provider().count(), 2);
@@ -163,7 +206,14 @@ async fn key_rotation_old_kid_still_verifies() {
 
     // Token signed by the retiring key.
     let old_token = issuer()
-        .issue_access(&old, "u", Tier::Enterprise, vec![])
+        .issue_access(
+            &old,
+            "u",
+            WorkspaceId::new(),
+            Role::Owner,
+            Tier::Enterprise,
+            vec![],
+        )
         .unwrap();
 
     // JWKS publishes both kids after rotation.
@@ -176,7 +226,14 @@ async fn key_rotation_old_kid_still_verifies() {
     assert_eq!(claims.tier, Tier::Enterprise);
     // New-kid token verifies too.
     let new_token = issuer()
-        .issue_access(&new, "u", Tier::Enterprise, vec![])
+        .issue_access(
+            &new,
+            "u",
+            WorkspaceId::new(),
+            Role::Owner,
+            Tier::Enterprise,
+            vec![],
+        )
         .unwrap();
     verifier.verify(&new_token).await.unwrap();
 }
@@ -185,7 +242,14 @@ async fn key_rotation_old_kid_still_verifies() {
 async fn wrong_audience_rejected() {
     let key = SigningKey::generate().unwrap();
     let token = issuer()
-        .issue_access(&key, "u", Tier::Community, vec![])
+        .issue_access(
+            &key,
+            "u",
+            WorkspaceId::new(),
+            Role::Owner,
+            Tier::Community,
+            vec![],
+        )
         .unwrap();
 
     let verifier = Verifier::new(
@@ -200,7 +264,14 @@ async fn wrong_audience_rejected() {
 async fn wrong_issuer_rejected() {
     let key = SigningKey::generate().unwrap();
     let token = issuer()
-        .issue_access(&key, "u", Tier::Community, vec![])
+        .issue_access(
+            &key,
+            "u",
+            WorkspaceId::new(),
+            Role::Owner,
+            Tier::Community,
+            vec![],
+        )
         .unwrap();
 
     let verifier = Verifier::new(

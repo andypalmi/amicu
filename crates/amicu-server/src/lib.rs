@@ -73,11 +73,13 @@ use std::time::Duration;
 
 use amicu_api::{
     AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore, OrgApiState,
-    ProxyParseError, RateLimiter, TrustedProxies, api_router, stripe_config_from_env,
+    ProxyParseError, RateLimiter, SessionApiState, TrustedProxies, api_router,
+    stripe_config_from_env,
 };
 use amicu_auth::issuer::{IssuerConfig, TokenIssuer};
 use amicu_auth::key::SigningKey;
 use amicu_auth::keyring::Keyring;
+use amicu_auth::membership::MembershipStore;
 use amicu_auth::notify::{LoggingNotifier, Notifier};
 use amicu_auth::refresh::{InMemoryRefreshStore, RefreshStore};
 use amicu_auth::reset::{InMemoryResetStore, ResetStore};
@@ -290,13 +292,18 @@ async fn build_app_with_database_url(
     config: &Config,
     database_url: Option<&str>,
 ) -> Result<Router, Error> {
-    /// The auth store quartet (user, refresh, reset, verify), selected together:
-    /// all Postgres when `DATABASE_URL` is set, else all in-memory.
+    /// The auth store quartet (user, refresh, reset, verify) plus the optional
+    /// membership authority, selected together: all Postgres when `DATABASE_URL`
+    /// is set, else all in-memory. The membership store is `None` in-memory - the
+    /// service then derives each user's personal workspace from the user store
+    /// (its `PersonalMembershipStore` default) - and the real multi-workspace
+    /// `PostgresMembershipStore` on the database path.
     type AuthStores = (
         Arc<dyn UserStore>,
         Arc<dyn RefreshStore>,
         Arc<dyn ResetStore>,
         Arc<dyn VerifyStore>,
+        Option<Arc<dyn MembershipStore>>,
     );
 
     let trusted = TrustedProxies::from_strs(config.trusted_proxies.split(','))?;
@@ -321,7 +328,7 @@ async fn build_app_with_database_url(
     // the next sign-in/refresh.
     // The auth store quartet (see `AuthStores`), selected together so the
     // Postgres path shares one pool and the in-memory path stays zero-config.
-    let (users, refresh, resets, verify_store): AuthStores =
+    let (users, refresh, resets, verify_store, memberships): AuthStores =
         if let Some(database_url) = database_url {
             let pool = amicu_store::connect(database_url)
                 .await
@@ -334,7 +341,8 @@ async fn build_app_with_database_url(
                 Arc::new(amicu_store::PostgresUserStore::new(pool.clone())),
                 Arc::new(amicu_store::PostgresRefreshStore::new(pool.clone())),
                 Arc::new(amicu_store::PostgresResetStore::new(pool.clone())),
-                Arc::new(amicu_store::PostgresVerifyStore::new(pool)),
+                Arc::new(amicu_store::PostgresVerifyStore::new(pool.clone())),
+                Some(Arc::new(amicu_store::PostgresMembershipStore::new(pool))),
             )
         } else {
             (
@@ -342,6 +350,7 @@ async fn build_app_with_database_url(
                 Arc::new(InMemoryRefreshStore::default()),
                 Arc::new(InMemoryResetStore::default()),
                 Arc::new(InMemoryVerifyStore::default()),
+                None,
             )
         };
 
@@ -372,7 +381,7 @@ async fn build_app_with_database_url(
         Arc::new(LoggingNotifier)
     };
 
-    let service = Arc::new(AuthService::new(
+    let mut service = AuthService::new(
         keyring,
         issuer,
         users.clone(),
@@ -381,18 +390,30 @@ async fn build_app_with_database_url(
         verify_store,
         notifier,
         base_url,
-    ));
+    );
+    // On the Postgres path, install the real multi-workspace membership
+    // authority so token issuance/refresh-revalidation/switch consult
+    // `workspace_members`. In-memory, the service keeps its
+    // `PersonalMembershipStore` default (each user's single personal workspace).
+    if let Some(memberships) = memberships {
+        service = service.with_membership_store(memberships);
+    }
+    let service = Arc::new(service);
     let limiter = Arc::new(RateLimiter::new(
         config.rate_limit_max,
         Duration::from_secs(config.rate_limit_window_secs),
     ));
-    let auth_state = AuthApiState::new(service, limiter).with_trusted_proxies(trusted);
+    let auth_state = AuthApiState::new(service.clone(), limiter).with_trusted_proxies(trusted);
 
     let verifier = Arc::new(Verifier::new(
         StaticJwksProvider::new(jwks),
         VerifierConfig::new(&config.issuer, &config.audience),
     ));
     let engine_state = EngineApiState::new(verifier.clone()).with_min_tier(config.min_tier.into());
+
+    // Session/workspace surface (list-my-workspaces + switch): authenticates via
+    // the same verifier and mints switched pairs through the auth service.
+    let session_state = SessionApiState::new(service, verifier.clone());
 
     // Billing is a real Stripe integration, activated only when its secrets are
     // present in the environment. Absent them, the endpoints return a clean 503
@@ -473,6 +494,7 @@ async fn build_app_with_database_url(
         billing_state,
         org_state,
         config_state,
+        session_state,
     ))
 }
 

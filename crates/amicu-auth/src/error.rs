@@ -101,6 +101,15 @@ pub enum AuthError {
     /// `UserStore::delete`.
     #[error("cannot delete a user who still owns or shares a workspace")]
     SoleOwner,
+
+    /// The caller is not a member of the target workspace, so no token can be
+    /// minted for it. Raised when a workspace switch (or the membership
+    /// re-validation any mint path performs) finds no `workspace_members` row
+    /// for `(wsid, sub)`. Membership is ALWAYS re-checked server-side against the
+    /// store of record, never trusted from the request
+    /// (andypalmi/amicu-planning#129). Maps to `403` at the API boundary.
+    #[error("not a member of the target workspace")]
+    Forbidden,
 }
 
 /// Crate result alias.

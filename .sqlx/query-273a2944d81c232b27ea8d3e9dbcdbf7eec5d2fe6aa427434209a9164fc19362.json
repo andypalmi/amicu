@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE refresh_tokens AS r SET revoked = true WHERE r.token_hash = $1 AND NOT r.revoked AND r.expires_at > $2 AND NOT EXISTS ( SELECT 1 FROM refresh_families f WHERE f.family_id = r.family_id AND f.compromised ) RETURNING user_id, workspace_id, family_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "workspace_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "family_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "273a2944d81c232b27ea8d3e9dbcdbf7eec5d2fe6aa427434209a9164fc19362"
+}

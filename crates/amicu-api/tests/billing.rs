@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use amicu_api::{
     AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore, OrgApiState,
-    RateLimiter, StripeConfig, api_router,
+    RateLimiter, SessionApiState, StripeConfig, api_router,
 };
 use amicu_auth::notify::LoggingNotifier;
 use amicu_auth::refresh::InMemoryRefreshStore;
@@ -25,6 +25,7 @@ use amicu_auth::verify::InMemoryVerifyStore;
 use amicu_auth::{
     AuthService, IssuerConfig, Keyring, SigningKey, Tier, TokenIssuer, Verifier, VerifierConfig,
 };
+use amicu_auth::{Role, WorkspaceId};
 use amicu_core::secret::SecretValue;
 use axum::Router;
 use axum::body::Body;
@@ -63,7 +64,14 @@ async fn harness(tier: Tier, configure_stripe: bool) -> Harness {
 
     let jwks = keyring.jwks();
     let token = issuer
-        .issue_access(keyring.active(), USER_ID, tier, Vec::new())
+        .issue_access(
+            keyring.active(),
+            USER_ID,
+            WorkspaceId::new(),
+            Role::Owner,
+            tier,
+            Vec::new(),
+        )
         .expect("mint token");
 
     let users = Arc::new(InMemoryUserStore::default());
@@ -90,7 +98,7 @@ async fn harness(tier: Tier, configure_stripe: bool) -> Harness {
         ISS,
     ));
     let auth_state = AuthApiState::new(
-        service,
+        service.clone(),
         Arc::new(RateLimiter::new(100, Duration::from_secs(60))),
     );
 
@@ -113,7 +121,7 @@ async fn harness(tier: Tier, configure_stripe: bool) -> Harness {
     } else {
         BillingApiState::unconfigured(verifier.clone(), users.clone())
     };
-    let org_state = OrgApiState::new(verifier, Arc::new(InMemoryOrgStore::new()));
+    let org_state = OrgApiState::new(verifier.clone(), Arc::new(InMemoryOrgStore::new()));
     let config_state = ConfigApiState::new(Arc::new(amicu_store::InMemoryConfigStore::new()));
 
     Harness {
@@ -123,6 +131,7 @@ async fn harness(tier: Tier, configure_stripe: bool) -> Harness {
             billing_state,
             org_state,
             config_state,
+            SessionApiState::new(service, verifier),
         ),
         users,
         token,

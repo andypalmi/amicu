@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use amicu_api::{
     AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore, OrgApiState,
-    RateLimiter, api_router,
+    RateLimiter, SessionApiState, api_router,
 };
 use amicu_auth::notify::LoggingNotifier;
 use amicu_auth::refresh::InMemoryRefreshStore;
@@ -80,7 +80,14 @@ fn harness() -> Harness {
     // Mint every token before the keyring moves into the auth service.
     let mint = |sub: &str, tier: Tier| {
         issuer
-            .issue_access(keyring.active(), sub, tier, Vec::new())
+            .issue_access(
+                keyring.active(),
+                sub,
+                WorkspaceId::new(),
+                amicu_auth::Role::Owner,
+                tier,
+                Vec::new(),
+            )
             .expect("mint token")
     };
     let tokens = Tokens {
@@ -103,7 +110,7 @@ fn harness() -> Harness {
         ISS,
     ));
     let auth_state = AuthApiState::new(
-        service,
+        service.clone(),
         Arc::new(RateLimiter::new(1000, Duration::from_secs(60))),
     );
 
@@ -116,7 +123,7 @@ fn harness() -> Harness {
         BillingApiState::unconfigured(verifier.clone(), Arc::new(InMemoryUserStore::default()));
 
     let store = Arc::new(InMemoryOrgStore::new());
-    let org_state = OrgApiState::new(verifier, store.clone());
+    let org_state = OrgApiState::new(verifier.clone(), store.clone());
     let config_state = ConfigApiState::new(Arc::new(amicu_store::InMemoryConfigStore::new()));
 
     Harness {
@@ -126,6 +133,7 @@ fn harness() -> Harness {
             billing_state,
             org_state,
             config_state,
+            SessionApiState::new(service, verifier),
         ),
         store,
         tokens,

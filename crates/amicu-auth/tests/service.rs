@@ -1,7 +1,9 @@
 //! Service-level acceptance: sign-up/in, refresh rotation, revocation, key
 //! rotation, and the private-key-never-leaks invariant.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use amicu_auth::claims::Tier;
@@ -9,6 +11,7 @@ use amicu_auth::error::AuthError;
 use amicu_auth::issuer::{Clock, IssuerConfig, TokenIssuer};
 use amicu_auth::key::SigningKey;
 use amicu_auth::keyring::Keyring;
+use amicu_auth::membership::{MembershipContext, MembershipStore, WorkspaceMembership};
 use amicu_auth::notify::{LoggingNotifier, Notification, NotificationKind, Notifier};
 use amicu_auth::refresh::InMemoryRefreshStore;
 use amicu_auth::reset::InMemoryResetStore;
@@ -16,6 +19,7 @@ use amicu_auth::service::{AuthService, SignUpOutcome};
 use amicu_auth::user::{InMemoryUserStore, User, UserStore};
 use amicu_auth::verifier::{StaticJwksProvider, Verifier, VerifierConfig};
 use amicu_auth::verify::InMemoryVerifyStore;
+use amicu_auth::{Role, WorkspaceId};
 use amicu_core::secret::SecretValue;
 use async_trait::async_trait;
 
@@ -829,4 +833,225 @@ async fn private_key_never_appears_in_serialized_or_logged_output() {
         "JWKS must not contain a private scalar"
     );
     assert!(!json.contains("PRIVATE"));
+}
+
+// ---------------------------------------------------------------------------
+// andypalmi/amicu-planning#129: workspace claim in tokens.
+//
+// A controllable membership authority so a test can seed / mutate / revoke a
+// user's membership in an arbitrary workspace and assert the issuer's
+// server-side resolution, switch authorization, and refresh re-validation.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct MockMembership {
+    // (workspace, user) -> (role, workspace tier)
+    rows: Mutex<HashMap<(WorkspaceId, String), (Role, Tier)>>,
+}
+
+impl MockMembership {
+    fn set(&self, ws: WorkspaceId, user: &str, role: Role, tier: Tier) {
+        self.rows
+            .lock()
+            .unwrap()
+            .insert((ws, user.to_string()), (role, tier));
+    }
+    fn remove(&self, ws: WorkspaceId, user: &str) {
+        self.rows.lock().unwrap().remove(&(ws, user.to_string()));
+    }
+}
+
+#[async_trait]
+impl MembershipStore for MockMembership {
+    async fn context(
+        &self,
+        workspace: WorkspaceId,
+        user_id: &str,
+    ) -> Result<Option<MembershipContext>, AuthError> {
+        Ok(self
+            .rows
+            .lock()
+            .unwrap()
+            .get(&(workspace, user_id.to_string()))
+            .map(|&(role, tier)| MembershipContext { role, tier }))
+    }
+
+    async fn list_for_user(&self, user_id: &str) -> Result<Vec<WorkspaceMembership>, AuthError> {
+        Ok(self
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((_, u), _)| u == user_id)
+            .map(|((ws, _), &(role, _))| WorkspaceMembership {
+                workspace_id: *ws,
+                name: "workspace".to_string(),
+                role,
+            })
+            .collect())
+    }
+}
+
+fn build_with_memberships(
+    clock: TestClock,
+    users: Arc<dyn UserStore>,
+    memberships: Arc<dyn MembershipStore>,
+) -> AuthService<TestClock> {
+    let keyring = Keyring::new(SigningKey::generate().unwrap());
+    let issuer = TokenIssuer::with_clock(IssuerConfig::new(ISS, AUD), clock);
+    AuthService::new(
+        keyring,
+        issuer,
+        users,
+        Arc::new(InMemoryRefreshStore::default()),
+        Arc::new(InMemoryResetStore::default()),
+        Arc::new(InMemoryVerifyStore::default()),
+        Arc::new(LoggingNotifier),
+        "https://auth.amicu.dev",
+    )
+    .with_membership_store(memberships)
+}
+
+/// A fresh sign-in mints a token scoped to the user's PERSONAL workspace, as
+/// Owner, carrying that workspace's tier - all resolved server-side.
+#[tokio::test]
+async fn sign_in_scopes_token_to_personal_workspace_as_owner() {
+    let users = Arc::new(InMemoryUserStore::default());
+    let svc = build_with_users(
+        TestClock::at(real_now()),
+        users.clone(),
+        Arc::new(LoggingNotifier),
+    );
+    svc.sign_up("solo@example.com", &pw("correct horse staple"))
+        .await
+        .unwrap();
+    let user = users
+        .get_by_email("solo@example.com")
+        .await
+        .unwrap()
+        .expect("user present");
+
+    let pair = svc
+        .sign_in("solo@example.com", &pw("correct horse staple"))
+        .await
+        .unwrap();
+    let claims = verifier_for(&svc).verify(&pair.access_token).await.unwrap();
+
+    assert_eq!(claims.wsid, user.personal_workspace_id);
+    assert_eq!(claims.wsrole, Role::Owner);
+    assert_eq!(claims.tier, Tier::Community);
+}
+
+/// Switching to a workspace you are NOT a member of is refused (403-mapped
+/// `Forbidden`) and mints no token; switching to one you ARE a member of mints a
+/// token carrying that workspace's role and tier - both re-checked server-side.
+#[tokio::test]
+async fn switch_authorization_is_membership_bound() {
+    let users = Arc::new(InMemoryUserStore::default());
+    let mock = Arc::new(MockMembership::default());
+    let svc = build_with_memberships(TestClock::at(real_now()), users.clone(), mock.clone());
+
+    let id = match svc
+        .sign_up("multi@example.com", &pw("correct horse staple"))
+        .await
+        .unwrap()
+    {
+        SignUpOutcome::Created(id) => id,
+        SignUpOutcome::AlreadyRegistered => panic!("first sign-up should create"),
+    };
+    let personal = users
+        .get_by_email("multi@example.com")
+        .await
+        .unwrap()
+        .unwrap()
+        .personal_workspace_id;
+    mock.set(personal, &id, Role::Owner, Tier::Community);
+
+    // A workspace the user is NOT a member of: refused, no token.
+    let stranger = WorkspaceId::new();
+    assert!(matches!(
+        svc.switch_workspace(&id, stranger).await,
+        Err(AuthError::Forbidden)
+    ));
+
+    // A workspace the user IS a member of (Admin, Pro): mints a scoped token.
+    let shared = WorkspaceId::new();
+    mock.set(shared, &id, Role::Admin, Tier::Pro);
+    let pair = svc.switch_workspace(&id, shared).await.unwrap();
+    let claims = verifier_for(&svc).verify(&pair.access_token).await.unwrap();
+    assert_eq!(claims.wsid, shared);
+    assert_eq!(claims.wsrole, Role::Admin);
+    assert_eq!(claims.tier, Tier::Pro);
+}
+
+/// Refresh rotation re-validates membership in the token's workspace: a role
+/// change is reflected in the new token; a removal fails the refresh outright
+/// (the session dies within the access TTL).
+#[tokio::test]
+async fn refresh_revalidates_membership_on_rotation() {
+    let users = Arc::new(InMemoryUserStore::default());
+    let mock = Arc::new(MockMembership::default());
+    let svc = build_with_memberships(TestClock::at(real_now()), users.clone(), mock.clone());
+
+    let id = match svc
+        .sign_up("rot@example.com", &pw("correct horse staple"))
+        .await
+        .unwrap()
+    {
+        SignUpOutcome::Created(id) => id,
+        SignUpOutcome::AlreadyRegistered => panic!("first sign-up should create"),
+    };
+    let ws = WorkspaceId::new();
+    mock.set(ws, &id, Role::Member, Tier::Pro);
+
+    // Open a session scoped to `ws` (Member).
+    let pair = svc.switch_workspace(&id, ws).await.unwrap();
+    let c0 = verifier_for(&svc).verify(&pair.access_token).await.unwrap();
+    assert_eq!(c0.wsrole, Role::Member);
+
+    // Role change: the rotated token carries the NEW role/tier, same workspace.
+    mock.set(ws, &id, Role::Owner, Tier::Enterprise);
+    let rotated = svc.refresh(&pair.refresh_token).await.unwrap();
+    let c1 = verifier_for(&svc)
+        .verify(&rotated.access_token)
+        .await
+        .unwrap();
+    assert_eq!(c1.wsid, ws);
+    assert_eq!(c1.wsrole, Role::Owner);
+    assert_eq!(c1.tier, Tier::Enterprise);
+
+    // Removal: the next refresh of this session fails (removed member).
+    mock.remove(ws, &id);
+    assert!(matches!(
+        svc.refresh(&rotated.refresh_token).await,
+        Err(AuthError::RefreshInvalid)
+    ));
+}
+
+/// `list_workspaces` returns exactly the caller's own memberships (id + role).
+#[tokio::test]
+async fn list_workspaces_returns_only_callers_memberships() {
+    let users = Arc::new(InMemoryUserStore::default());
+    let mock = Arc::new(MockMembership::default());
+    let svc = build_with_memberships(TestClock::at(real_now()), users.clone(), mock.clone());
+
+    let id = match svc
+        .sign_up("lister@example.com", &pw("correct horse staple"))
+        .await
+        .unwrap()
+    {
+        SignUpOutcome::Created(id) => id,
+        SignUpOutcome::AlreadyRegistered => panic!("first sign-up should create"),
+    };
+    let (a, b) = (WorkspaceId::new(), WorkspaceId::new());
+    mock.set(a, &id, Role::Owner, Tier::Community);
+    mock.set(b, &id, Role::Viewer, Tier::Pro);
+    // Another user's membership must never appear in this caller's list.
+    mock.set(WorkspaceId::new(), "someone-else", Role::Owner, Tier::Pro);
+
+    let mut mine = svc.list_workspaces(&id).await.unwrap();
+    mine.sort_by_key(|m| m.workspace_id);
+    assert_eq!(mine.len(), 2);
+    let ids: Vec<_> = mine.iter().map(|m| m.workspace_id).collect();
+    assert!(ids.contains(&a) && ids.contains(&b));
 }

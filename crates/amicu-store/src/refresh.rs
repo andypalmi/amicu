@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::map_db;
+use crate::{WorkspaceId, map_db};
 
 /// Postgres implementation of [`RefreshStore`].
 pub struct PostgresRefreshStore {
@@ -51,10 +51,11 @@ impl RefreshStore for PostgresRefreshStore {
         let hash = record.token_hash.as_slice();
         sqlx::query!(
             "INSERT INTO refresh_tokens \
-             (token_hash, user_id, family_id, expires_at, revoked) \
-             VALUES ($1, $2, $3, $4, $5)",
+             (token_hash, user_id, workspace_id, family_id, expires_at, revoked) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
             hash,
             user_id,
+            record.workspace_id.as_uuid(),
             record.family_id,
             record.expires_at,
             record.revoked,
@@ -68,7 +69,7 @@ impl RefreshStore for PostgresRefreshStore {
     async fn get(&self, token_hash: &[u8; 32]) -> Result<Option<RefreshRecord>> {
         let hash = token_hash.as_slice();
         let row = sqlx::query!(
-            "SELECT token_hash, user_id, family_id, expires_at, revoked \
+            "SELECT token_hash, user_id, workspace_id, family_id, expires_at, revoked \
              FROM refresh_tokens WHERE token_hash = $1",
             hash,
         )
@@ -80,6 +81,7 @@ impl RefreshStore for PostgresRefreshStore {
             Some(r) => Ok(Some(RefreshRecord {
                 token_hash: hash_from_bytes(r.token_hash)?,
                 user_id: r.user_id.to_string(),
+                workspace_id: WorkspaceId::from_uuid(r.workspace_id),
                 family_id: r.family_id,
                 expires_at: r.expires_at,
                 revoked: r.revoked,
@@ -102,7 +104,7 @@ impl RefreshStore for PostgresRefreshStore {
                    SELECT 1 FROM refresh_families f \
                    WHERE f.family_id = r.family_id AND f.compromised \
                ) \
-             RETURNING user_id, family_id",
+             RETURNING user_id, workspace_id, family_id",
             hash,
             now,
         )
@@ -114,6 +116,7 @@ impl RefreshStore for PostgresRefreshStore {
             tx.commit().await.map_err(map_db)?;
             return Ok(RefreshConsume::Consumed {
                 user_id: w.user_id.to_string(),
+                workspace_id: WorkspaceId::from_uuid(w.workspace_id),
                 family_id: w.family_id,
             });
         }
