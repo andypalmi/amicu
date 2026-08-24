@@ -633,3 +633,76 @@ async fn org_console_audited_mutations_recheck_roles_and_audit_atomically() {
         .expect("create ws2");
     assert!(members.org_audit(ws2).await.expect("audit ws2").is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Org console: the last-Owner invariant holds under CONCURRENT self-mutations
+// (andypalmi/amicu-planning#130). Two Owners self-removing at the same instant
+// lock DISJOINT membership rows, so without the per-workspace serializing
+// advisory lock both `owner_count()` reads see 2, both pass the `== 1` guard,
+// and both commit -> 0 Owners, workspace orphaned. The advisory lock taken
+// first in every audited mutation forces the two read-modify-writes to run one
+// at a time, so at most one self-removal succeeds. Looped so the timing-
+// dependent race trips reliably if the lock regresses.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn concurrent_self_removal_never_orphans_the_last_owner() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared.clone());
+    let workspaces = PostgresWorkspaceStore::new(shared);
+
+    for _ in 0..10 {
+        // A fresh workspace with EXACTLY two Owners.
+        let ws = workspaces
+            .create(&unique("Race"), Tier::Enterprise)
+            .await
+            .expect("create org workspace");
+        let o1 = seed_user(&users).await;
+        let o2 = seed_user(&users).await;
+        members
+            .add(ws, &o1, Role::Owner, None)
+            .await
+            .expect("seed owner 1");
+        members
+            .add(ws, &o2, Role::Owner, Some(&o1))
+            .await
+            .expect("seed owner 2");
+
+        // Both Owners try to remove THEMSELVES at the same time. Each call opens
+        // its own transaction/connection from the pool.
+        let (r1, r2) = tokio::join!(
+            members.remove_member_audited(ws, &o1, &o1),
+            members.remove_member_audited(ws, &o2, &o2),
+        );
+
+        // At least one Owner must remain: at most one self-removal succeeds, the
+        // other is refused with `LastOwner`. (Without the advisory lock, both can
+        // commit and this reaches 0.)
+        let remaining_owners = members
+            .list_members(ws)
+            .await
+            .expect("list members")
+            .into_iter()
+            .filter(|m| m.role == Role::Owner)
+            .count();
+        assert!(
+            remaining_owners >= 1,
+            "the workspace was orphaned: {remaining_owners} Owners remain (r1={r1:?}, r2={r2:?})"
+        );
+
+        // Exactly one succeeded and exactly one saw LastOwner (both cannot
+        // succeed, and both cannot fail - the workspace started with two Owners).
+        let successes = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(
+            successes, 1,
+            "exactly one self-removal must succeed (r1={r1:?}, r2={r2:?})"
+        );
+        assert!(
+            [&r1, &r2]
+                .iter()
+                .any(|r| matches!(r, Err(OrgMutationError::LastOwner))),
+            "the losing self-removal must be refused with LastOwner (r1={r1:?}, r2={r2:?})"
+        );
+    }
+}

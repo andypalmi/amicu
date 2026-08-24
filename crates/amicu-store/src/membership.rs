@@ -414,6 +414,41 @@ impl PostgresMembershipStore {
         Ok(row.count)
     }
 
+    /// Serialize ALL audited membership mutations on `workspace` by taking a
+    /// transaction-scoped advisory lock keyed on the workspace id. This MUST be
+    /// the first statement in each audited-mutation transaction, before any
+    /// role/owner reads, so that concurrent mutations on the same workspace run
+    /// their read-modify-write one at a time - mirroring the in-memory store's
+    /// single-mutex semantics.
+    ///
+    /// Why it is needed (andypalmi/amicu-planning#130): the last-Owner guard
+    /// reads an UNLOCKED `owner_count`. When actor == target (self-demotion or
+    /// self-removal) only that one row is locked `FOR UPDATE`, so two Owners
+    /// self-mutating concurrently hold DISJOINT row locks; under READ COMMITTED
+    /// both read `owner_count == 2`, both pass the `== 1` guard, and both commit
+    /// -> 0 Owners. Acquiring the SAME advisory lock first on every mutation
+    /// removes that overlap-free window, so `owner_count` can no longer be read
+    /// stale.
+    ///
+    /// Deadlock-free: the advisory lock is always taken before the row
+    /// `FOR UPDATE` locks, and it is the same key for every mutation on the
+    /// workspace, so there is no lock-ordering cycle. A hash collision between
+    /// two different workspaces only causes rare unnecessary serialization,
+    /// never a correctness problem.
+    async fn lock_workspace_mutations(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        workspace: WorkspaceId,
+    ) -> Result<(), OrgMutationError> {
+        sqlx::query!(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))::text AS lock",
+            workspace.as_uuid().to_string(),
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|_| OrgMutationError::Backend)?;
+        Ok(())
+    }
+
     /// Append one `org_audit` record inside `tx` (paired with its mutation).
     async fn append_audit(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -451,10 +486,16 @@ impl PostgresMembershipStore {
         target_id: &str,
         role: Role,
     ) -> Result<Role, OrgMutationError> {
-        // On the Postgres path every user id is the caller's verified UUID `sub`;
-        // a non-UUID target is an internal-contract violation, not client input.
+        // `target_id` originates as client input (the add-member request body),
+        // but the API handler validates it as a UUID and returns 400 on a
+        // malformed value before ever calling here; reaching this method with a
+        // non-UUID would be an internal-contract violation, so map it to Backend.
         let target_uid = Uuid::parse_str(target_id).map_err(|_| OrgMutationError::Backend)?;
         let mut tx = begin_scoped(&self.pool, workspace).await?;
+        // Serialize all mutations on this workspace FIRST (before any role/owner
+        // reads) so the last-Owner guard cannot race - see
+        // `lock_workspace_mutations`.
+        Self::lock_workspace_mutations(&mut tx, workspace).await?;
         let (actor_role, target_role) =
             Self::locked_roles(&mut tx, workspace, actor_id, target_id).await?;
         authorize_membership_mutation(actor_role, None, Some(role))?;
@@ -505,6 +546,10 @@ impl PostgresMembershipStore {
         new_role: Role,
     ) -> Result<Role, OrgMutationError> {
         let mut tx = begin_scoped(&self.pool, workspace).await?;
+        // Serialize all mutations on this workspace FIRST (before any role/owner
+        // reads) so the last-Owner guard cannot race - see
+        // `lock_workspace_mutations`.
+        Self::lock_workspace_mutations(&mut tx, workspace).await?;
         let (actor_role, target_role) =
             Self::locked_roles(&mut tx, workspace, actor_id, target_id).await?;
         let Some(current) = target_role else {
@@ -551,6 +596,10 @@ impl PostgresMembershipStore {
         target_id: &str,
     ) -> Result<Role, OrgMutationError> {
         let mut tx = begin_scoped(&self.pool, workspace).await?;
+        // Serialize all mutations on this workspace FIRST (before any role/owner
+        // reads) so the last-Owner guard cannot race - see
+        // `lock_workspace_mutations`.
+        Self::lock_workspace_mutations(&mut tx, workspace).await?;
         let (actor_role, target_role) =
             Self::locked_roles(&mut tx, workspace, actor_id, target_id).await?;
         let Some(current) = target_role else {
