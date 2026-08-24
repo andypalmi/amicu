@@ -21,8 +21,9 @@ use amicu_auth::refresh::{RefreshStore, mint};
 use amicu_auth::user::{User, UserStore};
 use amicu_auth::{AuthError, Tier};
 use amicu_store::{
-    OrgMutationError, PostgresInviteStore, PostgresMembershipStore, PostgresRefreshStore,
-    PostgresUserStore, PostgresWorkspaceStore, Role, WorkspaceId, connect, run_migrations,
+    InviteError, OrgMutationError, PostgresInviteStore, PostgresMembershipStore,
+    PostgresRefreshStore, PostgresUserStore, PostgresWorkspaceStore, Role, WorkspaceId, connect,
+    run_migrations,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -63,11 +64,14 @@ async fn seed_user(store: &PostgresUserStore) -> String {
     id
 }
 
-/// A distinct 32-byte token hash per call.
+/// A distinct 32-byte token hash per call, unique even ACROSS process runs
+/// against the same persistent test database: the leading 16 bytes are random
+/// (a fresh v4 UUID), so a new run never regenerates a prior run's hash and
+/// trips the global `workspace_invites_token_hash` UNIQUE constraint. `seed`
+/// tags the remaining bytes for readability at call sites.
 fn token_hash(seed: u8) -> [u8; 32] {
     let mut h = [seed; 32];
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    h[..8].copy_from_slice(&n.to_le_bytes());
+    h[..16].copy_from_slice(Uuid::new_v4().as_bytes());
     h
 }
 
@@ -500,6 +504,388 @@ async fn delete_is_refused_when_personal_workspace_has_another_member() {
         Some(Role::Member),
         "the guest's membership must NOT be cascade-deleted"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Additional-workspace provisioning + invitations
+// (andypalmi/amicu-planning#131). Server-authoritative ids, in-transaction actor
+// RBAC re-checks, and invite acceptance that binds membership to the INVITE's
+// workspace/role only. The RLS backstop (workspace_invites / workspace_members
+// under the non-superuser amicu_app role) is exercised alongside the always-on
+// workspace_id predicates.
+// ---------------------------------------------------------------------------
+
+/// `create_with_owner` provisions an ADDITIONAL workspace with a
+/// SERVER-GENERATED id and enrolls the caller as founding Owner, atomically.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn create_with_owner_provisions_an_additional_owned_workspace() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared.clone());
+    let workspaces = PostgresWorkspaceStore::new(shared);
+
+    let user = seed_user(&users).await;
+    let personal = personal_ws(&members, &user).await;
+
+    let created = workspaces
+        .create_with_owner(&unique("Team"), &user)
+        .await
+        .expect("create additional workspace");
+
+    // The id is freshly server-generated - never the personal one.
+    assert_ne!(created, personal, "a distinct, server-generated workspace");
+
+    // The caller is Owner, at the new workspace's default Community tier.
+    let record = workspaces
+        .get(created)
+        .await
+        .expect("get")
+        .expect("present");
+    assert_eq!(record.tier, Tier::Community);
+    assert_eq!(
+        members.role_of(created, &user).await.expect("role_of"),
+        Some(Role::Owner)
+    );
+
+    // list_workspaces now shows both (personal + the additional one).
+    let mine = members.list_workspaces(&user).await.expect("list");
+    let ids: Vec<WorkspaceId> = mine.iter().map(|m| m.workspace_id).collect();
+    assert!(ids.contains(&personal) && ids.contains(&created));
+    assert_eq!(mine.len(), 2);
+}
+
+/// Invite creation re-checks the ACTOR's CURRENT role inside the mutation's own
+/// transaction (the #130 actor re-check, applied to invites): an Owner may
+/// invite anyone; an Admin may not invite a privileged role; a
+/// demoted-or-removed actor is refused even though they were privileged when the
+/// request began.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn invite_create_rechecks_the_actor_role_in_transaction() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared.clone());
+    let workspaces = PostgresWorkspaceStore::new(shared.clone());
+    let invites = PostgresInviteStore::new(shared);
+
+    let ws = workspaces
+        .create(&unique("Org"), Tier::Enterprise)
+        .await
+        .expect("create workspace");
+    let owner = seed_user(&users).await;
+    let admin = seed_user(&users).await;
+    members
+        .add(ws, &owner, Role::Owner, None)
+        .await
+        .expect("seed owner");
+    members
+        .add(ws, &admin, Role::Admin, Some(&owner))
+        .await
+        .expect("seed admin");
+
+    // Owner may invite a plain Member.
+    invites
+        .create_authorized(
+            ws,
+            &owner,
+            "member@example.test",
+            Role::Member,
+            &token_hash(0x31),
+            FAR_FUTURE,
+        )
+        .await
+        .expect("owner invites a member");
+
+    // Admin may invite a Member, but NOT a privileged (Owner/Admin) role.
+    invites
+        .create_authorized(
+            ws,
+            &admin,
+            "member2@example.test",
+            Role::Member,
+            &token_hash(0x32),
+            FAR_FUTURE,
+        )
+        .await
+        .expect("admin invites a member");
+    assert!(matches!(
+        invites
+            .create_authorized(
+                ws,
+                &admin,
+                "boss@example.test",
+                Role::Admin,
+                &token_hash(0x33),
+                FAR_FUTURE,
+            )
+            .await
+            .unwrap_err(),
+        InviteError::Forbidden(_)
+    ));
+
+    // Demote the admin to Member: their in-flight invite attempt is now refused
+    // by the fresh in-transaction role read (a stale caller role would let it
+    // through).
+    members
+        .set_role(ws, &admin, Role::Member)
+        .await
+        .expect("demote admin");
+    assert!(matches!(
+        invites
+            .create_authorized(
+                ws,
+                &admin,
+                "late@example.test",
+                Role::Member,
+                &token_hash(0x34),
+                FAR_FUTURE,
+            )
+            .await
+            .unwrap_err(),
+        InviteError::Forbidden(_)
+    ));
+
+    // A REMOVED actor is refused entirely ("not a member").
+    members.remove(ws, &admin).await.expect("remove ex-admin");
+    match invites
+        .create_authorized(
+            ws,
+            &admin,
+            "later@example.test",
+            Role::Member,
+            &token_hash(0x35),
+            FAR_FUTURE,
+        )
+        .await
+        .unwrap_err()
+    {
+        InviteError::Forbidden(msg) => assert!(msg.contains("not a member")),
+        other => panic!("expected Forbidden(not a member), got {other:?}"),
+    }
+}
+
+/// Acceptance binds membership to the INVITE's workspace and role ONLY - never a
+/// value the redeemer could assert - and is single-use (a second redemption of
+/// the same token is refused).
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn invite_accept_binds_membership_to_the_invites_workspace_and_role() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared.clone());
+    let workspaces = PostgresWorkspaceStore::new(shared.clone());
+    let invites = PostgresInviteStore::new(shared);
+
+    let ws = workspaces
+        .create(&unique("Invited"), Tier::Enterprise)
+        .await
+        .expect("create workspace");
+    let owner = seed_user(&users).await;
+    members
+        .add(ws, &owner, Role::Owner, None)
+        .await
+        .expect("seed owner");
+    let newcomer = seed_user(&users).await;
+
+    let hash = token_hash(0x41);
+    invites
+        .create_authorized(
+            ws,
+            &owner,
+            "invitee@example.test",
+            Role::Admin,
+            &hash,
+            FAR_FUTURE,
+        )
+        .await
+        .expect("owner invites an admin");
+
+    // The invitee redeems the token (knowing only the token) and is enrolled into
+    // the invite's workspace at the invite's role.
+    let accepted = invites
+        .accept_and_enroll(&newcomer, &hash, 1_000)
+        .await
+        .expect("accept");
+    assert_eq!(accepted.workspace_id, ws);
+    assert_eq!(accepted.role, Role::Admin);
+    assert_eq!(
+        members.role_of(ws, &newcomer).await.expect("role_of"),
+        Some(Role::Admin),
+        "membership bound to the invite's workspace + role"
+    );
+
+    // Single-use: the token no longer redeems (it is now accepted).
+    assert!(matches!(
+        invites
+            .accept_and_enroll(&newcomer, &hash, 1_000)
+            .await
+            .unwrap_err(),
+        InviteError::Invalid
+    ));
+
+    // The pending list no longer shows the accepted invite.
+    assert!(
+        invites
+            .list_pending(ws)
+            .await
+            .expect("list pending")
+            .is_empty()
+    );
+}
+
+/// An expired invite cannot be redeemed, and a user already in the workspace
+/// cannot re-join via an invite (the whole redemption rolls back, leaving the
+/// invite pending).
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn invite_accept_rejects_expired_and_already_member() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared.clone());
+    let workspaces = PostgresWorkspaceStore::new(shared.clone());
+    let invites = PostgresInviteStore::new(shared);
+
+    let ws = workspaces
+        .create(&unique("Org"), Tier::Enterprise)
+        .await
+        .expect("create workspace");
+    let owner = seed_user(&users).await;
+    members
+        .add(ws, &owner, Role::Owner, None)
+        .await
+        .expect("seed owner");
+
+    // Expired invite -> Invalid.
+    let expired = token_hash(0x51);
+    invites
+        .create_authorized(ws, &owner, "late@example.test", Role::Member, &expired, 500)
+        .await
+        .expect("create expiring invite");
+    let joiner = seed_user(&users).await;
+    assert!(matches!(
+        invites
+            .accept_and_enroll(&joiner, &expired, 1_000)
+            .await
+            .unwrap_err(),
+        InviteError::Invalid
+    ));
+    assert_eq!(members.role_of(ws, &joiner).await.expect("role_of"), None);
+
+    // Already a member -> AlreadyMember, invite stays pending (rolled back).
+    let member = seed_user(&users).await;
+    members
+        .add(ws, &member, Role::Member, Some(&owner))
+        .await
+        .expect("seed member");
+    let live = token_hash(0x52);
+    let id = invites
+        .create_authorized(
+            ws,
+            &owner,
+            "dup@example.test",
+            Role::Member,
+            &live,
+            FAR_FUTURE,
+        )
+        .await
+        .expect("create live invite");
+    assert!(matches!(
+        invites
+            .accept_and_enroll(&member, &live, 1_000)
+            .await
+            .unwrap_err(),
+        InviteError::AlreadyMember
+    ));
+    // Still pending (accepted_at was rolled back with the failed member insert).
+    let pending = invites.list_pending(ws).await.expect("list pending");
+    assert!(
+        pending
+            .iter()
+            .any(|i| i.id == id && i.accepted_at.is_none())
+    );
+}
+
+/// RLS BACKSTOP: pending invites are workspace-scoped even under the
+/// non-superuser `amicu_app` role. A listing scoped to workspace A never returns
+/// workspace B's invites (the workspace_id predicate + FORCE RLS on
+/// workspace_invites), and redemption still finds the one invite the token maps
+/// to across workspaces.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn invites_are_isolated_across_workspaces() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared.clone());
+    let workspaces = PostgresWorkspaceStore::new(shared.clone());
+    let invites = PostgresInviteStore::new(shared);
+
+    let owner_a = seed_user(&users).await;
+    let owner_b = seed_user(&users).await;
+    let ws_a = workspaces
+        .create(&unique("A"), Tier::Enterprise)
+        .await
+        .expect("ws a");
+    let ws_b = workspaces
+        .create(&unique("B"), Tier::Enterprise)
+        .await
+        .expect("ws b");
+    members
+        .add(ws_a, &owner_a, Role::Owner, None)
+        .await
+        .expect("owner a");
+    members
+        .add(ws_b, &owner_b, Role::Owner, None)
+        .await
+        .expect("owner b");
+
+    let hash_a = token_hash(0x61);
+    let hash_b = token_hash(0x62);
+    invites
+        .create_authorized(
+            ws_a,
+            &owner_a,
+            "a@example.test",
+            Role::Member,
+            &hash_a,
+            FAR_FUTURE,
+        )
+        .await
+        .expect("invite into a");
+    invites
+        .create_authorized(
+            ws_b,
+            &owner_b,
+            "b@example.test",
+            Role::Member,
+            &hash_b,
+            FAR_FUTURE,
+        )
+        .await
+        .expect("invite into b");
+
+    // A's pending list shows only A's invite; B's shows only B's.
+    let a_pending = invites.list_pending(ws_a).await.expect("list a");
+    assert_eq!(a_pending.len(), 1);
+    assert_eq!(a_pending[0].email, "a@example.test");
+    let b_pending = invites.list_pending(ws_b).await.expect("list b");
+    assert_eq!(b_pending.len(), 1);
+    assert_eq!(b_pending[0].email, "b@example.test");
+
+    // Redemption by token alone finds exactly the one invite it maps to, and its
+    // workspace is the correct one - never the other tenant's.
+    let found_a = invites
+        .find_by_token_hash(&hash_a)
+        .await
+        .expect("find")
+        .expect("present");
+    assert_eq!(found_a.workspace_id, ws_a);
+    let found_b = invites
+        .find_by_token_hash(&hash_b)
+        .await
+        .expect("find")
+        .expect("present");
+    assert_eq!(found_b.workspace_id, ws_b);
 }
 
 // ---------------------------------------------------------------------------

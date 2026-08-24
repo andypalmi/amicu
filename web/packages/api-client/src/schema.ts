@@ -289,6 +289,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/org/invites": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the caller's claim-bound workspace's pending invites (Owner/Admin only).
+         *     Never leaks token plaintext or hashes, nor invites of any other workspace.
+         */
+        get: operations["list_invites_handler"];
+        put?: never;
+        /**
+         * Mint a pending invite to the caller's claim-bound workspace.
+         * @description Owner/Admin only, re-checked against the actor's CURRENT role inside the
+         *     store transaction. The plaintext token is returned once; only its hash is
+         *     stored.
+         */
+        post: operations["create_invite_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/org/invites/accept": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Redeem an invite token and join its workspace.
+         * @description Any authenticated user may accept. The server hashes the presented token,
+         *     looks up the single invite it maps to, and - in one transaction - enrolls the
+         *     caller into the INVITE's workspace at the INVITE's role and marks it accepted.
+         *     The membership binds to the invite's workspace/role only; a tampered body
+         *     cannot redirect it or escalate the role.
+         */
+        post: operations["accept_invite_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/org/members": {
         parameters: {
             query?: never;
@@ -672,7 +722,13 @@ export interface paths {
          */
         get: operations["list_workspaces_handler"];
         put?: never;
-        post?: never;
+        /**
+         * Provision an additional workspace, enrolling the caller as its Owner.
+         * @description The id is server-generated; any `workspace_id` in the body is ignored, so a
+         *     caller can never choose or land in an existing/other workspace. The caller
+         *     then switches into it via `POST /session/workspace` to obtain scoped tokens.
+         */
+        post: operations["create_workspace_handler"];
         delete?: never;
         options?: never;
         head?: never;
@@ -683,6 +739,24 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description Request body for `POST /org/invites/accept`. */
+        AcceptInviteRequest: {
+            /** @description The one-time plaintext invite token. */
+            token: string;
+        };
+        /** @description Response for `POST /org/invites/accept`: the workspace the caller joined. */
+        AcceptInviteResponse: {
+            /**
+             * @description The INVITE's role - what was granted, never a client-asserted value.
+             * @example member
+             */
+            role: string;
+            /**
+             * @description The INVITE's workspace - what the membership was bound to, never a
+             *     client-asserted value.
+             */
+            workspace_id: string;
+        };
         /**
          * @description The kind of change a [`PlannedAction`] represents.
          * @enum {string}
@@ -923,6 +997,71 @@ export interface components {
             /** @description The config's name (unique per workspace). */
             name: string;
         };
+        /** @description Request body for `POST /org/invites`. */
+        CreateInviteRequest: {
+            /**
+             * @description The invitee's email (delivery is out-of-band / BYO-SMTP).
+             * @example teammate@example.com
+             */
+            email: string;
+            /**
+             * @description The role the invite grants on acceptance
+             *     (`owner` | `admin` | `member` | `viewer`).
+             * @example member
+             */
+            role: string;
+        };
+        /**
+         * @description Response for `POST /org/invites`. The plaintext `token` is returned exactly
+         *     once - the server stores only its hash and can never show it again.
+         */
+        CreateInviteResponse: {
+            /** @description The invited email. */
+            email: string;
+            /**
+             * Format: int64
+             * @description Expiry, Unix seconds.
+             */
+            expires_at: number;
+            /** @description The server-generated invite id. */
+            invite_id: string;
+            /**
+             * @description The role the invite grants.
+             * @example member
+             */
+            role: string;
+            /**
+             * @description The one-time plaintext invite token. Deliver it out-of-band; it is never
+             *     retrievable again.
+             */
+            token: string;
+        };
+        /** @description Request body for `POST /workspaces`. */
+        CreateWorkspaceRequest: {
+            /**
+             * @description The new workspace's display name.
+             * @example Acme Team
+             */
+            name: string;
+            /**
+             * @description IGNORED. A workspace id is always server-generated; any value supplied
+             *     here is discarded so a caller can never choose or land in an existing or
+             *     other workspace. Present only to document that it carries no authority.
+             */
+            readonly workspace_id?: string | null;
+        };
+        /** @description Response for `POST /workspaces`. */
+        CreateWorkspaceResponse: {
+            /** @description The workspace's display name. */
+            name: string;
+            /**
+             * @description The caller's role in the new workspace (always `owner`).
+             * @example owner
+             */
+            role: string;
+            /** @description The SERVER-GENERATED workspace id. */
+            workspace_id: string;
+        };
         /** @description Email + password credentials for sign-up and sign-in. */
         Credentials: {
             /** @description Account email. */
@@ -1012,6 +1151,28 @@ export interface components {
             sm_utilization: number;
             /** @example 40GiB */
             vram_used: string;
+        };
+        /** @description One pending invite in the Owner/Admin listing (never carries the token). */
+        InviteView: {
+            /** @description The invited email. */
+            email: string;
+            /**
+             * Format: int64
+             * @description Expiry, Unix seconds.
+             */
+            expires_at: number;
+            /** @description The invite id. */
+            invite_id: string;
+            /**
+             * @description The role the invite grants.
+             * @example member
+             */
+            role: string;
+        };
+        /** @description Response for `GET /org/invites`. */
+        InvitesResponse: {
+            /** @description The workspace's pending invites, soonest-expiring first. */
+            invites: components["schemas"]["InviteView"][];
         };
         /** @description Latency surface: TTFT, TPOT, end-to-end (ms), each a percentile distribution. */
         LatencyMetricsDto: {
@@ -1614,6 +1775,8 @@ export interface components {
     headers: never;
     pathItems: never;
 }
+export type AcceptInviteRequest = components['schemas']['AcceptInviteRequest'];
+export type AcceptInviteResponse = components['schemas']['AcceptInviteResponse'];
 export type ActionKind = components['schemas']['ActionKind'];
 export type AddMemberRequest = components['schemas']['AddMemberRequest'];
 export type AppendVersionRequest = components['schemas']['AppendVersionRequest'];
@@ -1636,6 +1799,10 @@ export type ConfigSummaryDto = components['schemas']['ConfigSummaryDto'];
 export type CostMetricsDto = components['schemas']['CostMetricsDto'];
 export type CostPerformance = components['schemas']['CostPerformance'];
 export type CreateConfigRequest = components['schemas']['CreateConfigRequest'];
+export type CreateInviteRequest = components['schemas']['CreateInviteRequest'];
+export type CreateInviteResponse = components['schemas']['CreateInviteResponse'];
+export type CreateWorkspaceRequest = components['schemas']['CreateWorkspaceRequest'];
+export type CreateWorkspaceResponse = components['schemas']['CreateWorkspaceResponse'];
 export type Credentials = components['schemas']['Credentials'];
 export type Diagnostic = components['schemas']['Diagnostic'];
 export type DiagnosticReport = components['schemas']['DiagnosticReport'];
@@ -1644,6 +1811,8 @@ export type EmitResponseDto = components['schemas']['EmitResponseDto'];
 export type EstimateRangeDto = components['schemas']['EstimateRangeDto'];
 export type EvidenceDto = components['schemas']['EvidenceDto'];
 export type GpuMetricsDto = components['schemas']['GpuMetricsDto'];
+export type InviteView = components['schemas']['InviteView'];
+export type InvitesResponse = components['schemas']['InvitesResponse'];
 export type LatencyMetricsDto = components['schemas']['LatencyMetricsDto'];
 export type MemberView = components['schemas']['MemberView'];
 export type MembersResponse = components['schemas']['MembersResponse'];
@@ -2380,6 +2549,151 @@ export interface operations {
             };
             /** @description Below Enterprise, or your role may not view the audit log. */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_invites_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The workspace's pending invites. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InvitesResponse"];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Below Enterprise, or your role may not view invites. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invites require the database backend. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_invite_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateInviteRequest"];
+            };
+        };
+        responses: {
+            /** @description The invite, including its one-time plaintext token. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateInviteResponse"];
+                };
+            };
+            /** @description Empty email or unknown role. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Below Enterprise, or your role may not invite this member. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invites require the database backend. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    accept_invite_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AcceptInviteRequest"];
+            };
+        };
+        responses: {
+            /** @description Joined: the invite's workspace and granted role. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcceptInviteResponse"];
+                };
+            };
+            /** @description Missing token, or the token is invalid/expired/used. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description You are already a member of that workspace. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invites require the database backend. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3224,6 +3538,51 @@ export interface operations {
             };
             /** @description Missing or invalid access token. */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_workspace_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateWorkspaceRequest"];
+            };
+        };
+        responses: {
+            /** @description The new workspace (server-generated id); caller is Owner. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateWorkspaceResponse"];
+                };
+            };
+            /** @description Empty name. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Provisioning requires the database backend. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

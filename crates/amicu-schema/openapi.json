@@ -702,6 +702,137 @@
         ]
       }
     },
+    "/org/invites": {
+      "get": {
+        "tags": [
+          "tenancy"
+        ],
+        "summary": "List the caller's claim-bound workspace's pending invites (Owner/Admin only).\nNever leaks token plaintext or hashes, nor invites of any other workspace.",
+        "operationId": "list_invites_handler",
+        "responses": {
+          "200": {
+            "description": "The workspace's pending invites.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvitesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Below Enterprise, or your role may not view invites."
+          },
+          "503": {
+            "description": "Invites require the database backend."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "tenancy"
+        ],
+        "summary": "Mint a pending invite to the caller's claim-bound workspace.",
+        "description": "Owner/Admin only, re-checked against the actor's CURRENT role inside the\nstore transaction. The plaintext token is returned once; only its hash is\nstored.",
+        "operationId": "create_invite_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInviteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The invite, including its one-time plaintext token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateInviteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty email or unknown role."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Below Enterprise, or your role may not invite this member."
+          },
+          "503": {
+            "description": "Invites require the database backend."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/org/invites/accept": {
+      "post": {
+        "tags": [
+          "tenancy"
+        ],
+        "summary": "Redeem an invite token and join its workspace.",
+        "description": "Any authenticated user may accept. The server hashes the presented token,\nlooks up the single invite it maps to, and - in one transaction - enrolls the\ncaller into the INVITE's workspace at the INVITE's role and marks it accepted.\nThe membership binds to the invite's workspace/role only; a tampered body\ncannot redirect it or escalate the role.",
+        "operationId": "accept_invite_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptInviteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Joined: the invite's workspace and granted role.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptInviteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing token, or the token is invalid/expired/used."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "409": {
+            "description": "You are already a member of that workspace."
+          },
+          "503": {
+            "description": "Invites require the database backend."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/org/members": {
       "get": {
         "tags": [
@@ -1533,11 +1664,87 @@
             "bearer": []
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "tenancy"
+        ],
+        "summary": "Provision an additional workspace, enrolling the caller as its Owner.",
+        "description": "The id is server-generated; any `workspace_id` in the body is ignored, so a\ncaller can never choose or land in an existing/other workspace. The caller\nthen switches into it via `POST /session/workspace` to obtain scoped tokens.",
+        "operationId": "create_workspace_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWorkspaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new workspace (server-generated id); caller is Owner.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateWorkspaceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Empty name."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "503": {
+            "description": "Provisioning requires the database backend."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
       }
     }
   },
   "components": {
     "schemas": {
+      "AcceptInviteRequest": {
+        "type": "object",
+        "description": "Request body for `POST /org/invites/accept`.",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "The one-time plaintext invite token."
+          }
+        }
+      },
+      "AcceptInviteResponse": {
+        "type": "object",
+        "description": "Response for `POST /org/invites/accept`: the workspace the caller joined.",
+        "required": [
+          "workspace_id",
+          "role"
+        ],
+        "properties": {
+          "role": {
+            "type": "string",
+            "description": "The INVITE's role - what was granted, never a client-asserted value.",
+            "example": "member"
+          },
+          "workspace_id": {
+            "type": "string",
+            "description": "The INVITE's workspace - what the membership was bound to, never a\nclient-asserted value."
+          }
+        }
+      },
       "ActionKind": {
         "type": "string",
         "description": "The kind of change a [`PlannedAction`] represents.",
@@ -2025,6 +2232,107 @@
           }
         }
       },
+      "CreateInviteRequest": {
+        "type": "object",
+        "description": "Request body for `POST /org/invites`.",
+        "required": [
+          "email",
+          "role"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The invitee's email (delivery is out-of-band / BYO-SMTP).",
+            "example": "teammate@example.com"
+          },
+          "role": {
+            "type": "string",
+            "description": "The role the invite grants on acceptance\n(`owner` | `admin` | `member` | `viewer`).",
+            "example": "member"
+          }
+        }
+      },
+      "CreateInviteResponse": {
+        "type": "object",
+        "description": "Response for `POST /org/invites`. The plaintext `token` is returned exactly\nonce - the server stores only its hash and can never show it again.",
+        "required": [
+          "invite_id",
+          "email",
+          "role",
+          "token",
+          "expires_at"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The invited email."
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Expiry, Unix seconds."
+          },
+          "invite_id": {
+            "type": "string",
+            "description": "The server-generated invite id."
+          },
+          "role": {
+            "type": "string",
+            "description": "The role the invite grants.",
+            "example": "member"
+          },
+          "token": {
+            "type": "string",
+            "description": "The one-time plaintext invite token. Deliver it out-of-band; it is never\nretrievable again."
+          }
+        }
+      },
+      "CreateWorkspaceRequest": {
+        "type": "object",
+        "description": "Request body for `POST /workspaces`.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The new workspace's display name.",
+            "example": "Acme Team"
+          },
+          "workspace_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "IGNORED. A workspace id is always server-generated; any value supplied\nhere is discarded so a caller can never choose or land in an existing or\nother workspace. Present only to document that it carries no authority.",
+            "readOnly": true
+          }
+        }
+      },
+      "CreateWorkspaceResponse": {
+        "type": "object",
+        "description": "Response for `POST /workspaces`.",
+        "required": [
+          "workspace_id",
+          "name",
+          "role"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The workspace's display name."
+          },
+          "role": {
+            "type": "string",
+            "description": "The caller's role in the new workspace (always `owner`).",
+            "example": "owner"
+          },
+          "workspace_id": {
+            "type": "string",
+            "description": "The SERVER-GENERATED workspace id."
+          }
+        }
+      },
       "Credentials": {
         "type": "object",
         "description": "Email + password credentials for sign-up and sign-in.",
@@ -2244,6 +2552,52 @@
           "vram_used": {
             "type": "string",
             "example": "40GiB"
+          }
+        }
+      },
+      "InviteView": {
+        "type": "object",
+        "description": "One pending invite in the Owner/Admin listing (never carries the token).",
+        "required": [
+          "invite_id",
+          "email",
+          "role",
+          "expires_at"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The invited email."
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Expiry, Unix seconds."
+          },
+          "invite_id": {
+            "type": "string",
+            "description": "The invite id."
+          },
+          "role": {
+            "type": "string",
+            "description": "The role the invite grants.",
+            "example": "member"
+          }
+        }
+      },
+      "InvitesResponse": {
+        "type": "object",
+        "description": "Response for `GET /org/invites`.",
+        "required": [
+          "invites"
+        ],
+        "properties": {
+          "invites": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InviteView"
+            },
+            "description": "The workspace's pending invites, soonest-expiring first."
           }
         }
       },
@@ -3677,6 +4031,10 @@
     {
       "name": "session",
       "description": "Workspace claim in tokens: list the authenticated caller's workspace memberships and switch the active workspace (mints a fresh token pair scoped to the target only if the caller is a member; 403 otherwise)."
+    },
+    {
+      "name": "tenancy",
+      "description": "Multi-tenant provisioning and invitations: create additional workspaces (server-generated id) and mint/list/accept workspace invites. Membership binds server-side to the invite's workspace and role only."
     }
   ]
 }

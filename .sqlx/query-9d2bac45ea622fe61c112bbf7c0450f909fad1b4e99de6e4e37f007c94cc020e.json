@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE workspace_invites SET accepted_at = $3 WHERE id = $1 AND workspace_id = $2 AND accepted_at IS NULL AND expires_at > $3 RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9d2bac45ea622fe61c112bbf7c0450f909fad1b4e99de6e4e37f007c94cc020e"
+}

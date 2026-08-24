@@ -19,6 +19,72 @@ use uuid::Uuid;
 use crate::membership::Role;
 use crate::{WorkspaceId, begin_scoped, begin_scoped_invite, map_db};
 
+/// The failure modes of the authorized invite-lifecycle operations
+/// ([`create_authorized`](PostgresInviteStore::create_authorized) /
+/// [`accept_and_enroll`](PostgresInviteStore::accept_and_enroll)).
+///
+/// Distinct from the coarse [`AuthError`](amicu_auth::AuthError) the raw CRUD
+/// methods return, because these operations layer RBAC and redemption semantics
+/// on top of the store: the API maps each variant to a precise HTTP status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InviteError {
+    /// The actor's CURRENT role (re-read in the mutation's own transaction) does
+    /// not permit creating this invite - e.g. they are not a member, may not
+    /// manage membership, or an Admin tried to invite a privileged role.
+    Forbidden(String),
+    /// The presented token maps to no live invite: unknown, expired, or already
+    /// accepted (kept deliberately indistinct so a redeemer learns nothing about
+    /// which tokens exist).
+    Invalid,
+    /// (accept only) the redeeming user is already a member of the invite's
+    /// workspace.
+    AlreadyMember,
+    /// A backend/data-integrity fault.
+    Backend,
+}
+
+/// The workspace + role a redeemed invite enrolled the user into
+/// (returned by [`accept_and_enroll`](PostgresInviteStore::accept_and_enroll)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedInvite {
+    /// The workspace the membership was bound to - the INVITE's workspace, never
+    /// anything the redeemer asserted.
+    pub workspace_id: WorkspaceId,
+    /// The role granted - the INVITE's role, never anything the redeemer
+    /// asserted.
+    pub role: Role,
+}
+
+/// Authorize creating an invite that GRANTS `granted` by an actor whose CURRENT
+/// role is `actor` (re-read under the mutation's own transaction and row lock).
+///
+/// Mirrors the membership-mutation rule (see
+/// `membership::authorize_membership_mutation`): only Owner/Admin may invite at
+/// all, and only an Owner may invite a privileged (Owner/Admin) role. Consults
+/// the shared [`Role::can_manage_members`] / [`Role::is_privileged`], so there is
+/// one definition of the rule.
+fn authorize_invite_create(
+    actor: Option<Role>,
+    granted: Role,
+) -> std::result::Result<(), InviteError> {
+    let Some(actor) = actor else {
+        return Err(InviteError::Forbidden(
+            "you are not a member of this workspace".to_owned(),
+        ));
+    };
+    if !actor.can_manage_members() {
+        return Err(InviteError::Forbidden(
+            "your role may not invite members".to_owned(),
+        ));
+    }
+    if actor == Role::Admin && granted.is_privileged() {
+        return Err(InviteError::Forbidden(
+            "only an Owner may invite an Owner or Admin".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// A pending or accepted invite (never carries the token itself).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invite {
@@ -137,5 +203,180 @@ impl PostgresInviteStore {
         .map_err(map_db)?;
         tx.commit().await.map_err(map_db)?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Authorized invite lifecycle (andypalmi/amicu-planning#131): create with an
+    // in-transaction actor RBAC re-check, list the workspace's pending invites,
+    // and redeem-and-enroll atomically.
+    // -----------------------------------------------------------------------
+
+    /// Create a pending invite to `workspace`, authorized against `actor_id`'s
+    /// CURRENT role - re-read and locked `FOR UPDATE` inside the SAME transaction
+    /// as the insert (the #130 actor re-check applied to invites): a
+    /// concurrently-demoted or -removed actor cannot land an invite on a stale
+    /// role. Stores only `token_hash`. Returns the server-generated invite id.
+    // `actor_id`/`actor_uid` are the `&str` and parsed-`Uuid` forms of the SAME
+    // id (see `membership.rs`); the shared stem is the clearer naming.
+    #[allow(clippy::similar_names)]
+    pub async fn create_authorized(
+        &self,
+        workspace: WorkspaceId,
+        actor_id: &str,
+        email: &str,
+        role: Role,
+        token_hash: &[u8; 32],
+        expires_at: i64,
+    ) -> std::result::Result<Uuid, InviteError> {
+        let actor_uid = Uuid::parse_str(actor_id).map_err(|_| InviteError::Backend)?;
+        let id = Uuid::new_v4();
+        let mut tx = begin_scoped(&self.pool, workspace)
+            .await
+            .map_err(|_| InviteError::Backend)?;
+        // Re-read the actor's CURRENT role under a row lock, in this transaction,
+        // rather than trusting the caller's claim role.
+        let actor_row = sqlx::query!(
+            "SELECT role FROM workspace_members \
+             WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE",
+            workspace.as_uuid(),
+            actor_uid,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| InviteError::Backend)?;
+        let actor_role = actor_row
+            .map(|r| Role::parse(&r.role).map_err(|_| InviteError::Backend))
+            .transpose()?;
+        authorize_invite_create(actor_role, role)?;
+
+        sqlx::query!(
+            "INSERT INTO workspace_invites \
+             (id, workspace_id, email, role, token_hash, expires_at, accepted_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, NULL)",
+            id,
+            workspace.as_uuid(),
+            email,
+            role.as_str(),
+            token_hash.as_slice(),
+            expires_at,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| InviteError::Backend)?;
+        tx.commit().await.map_err(|_| InviteError::Backend)?;
+        Ok(id)
+    }
+
+    /// Every PENDING (not-yet-accepted) invite for `workspace`, soonest-expiring
+    /// first. Never returns token material (only the hash is stored, and it is not
+    /// selected).
+    pub async fn list_pending(&self, workspace: WorkspaceId) -> Result<Vec<Invite>> {
+        let mut tx = begin_scoped(&self.pool, workspace).await?;
+        let rows = sqlx::query!(
+            "SELECT id, workspace_id, email, role, expires_at, accepted_at \
+             FROM workspace_invites \
+             WHERE workspace_id = $1 AND accepted_at IS NULL \
+             ORDER BY expires_at, id",
+            workspace.as_uuid(),
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_db)?;
+        tx.commit().await.map_err(map_db)?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(Invite {
+                    id: r.id,
+                    workspace_id: WorkspaceId::from_uuid(r.workspace_id),
+                    email: r.email,
+                    role: Role::parse(&r.role)?,
+                    expires_at: r.expires_at,
+                    accepted_at: r.accepted_at,
+                })
+            })
+            .collect()
+    }
+
+    /// Redeem `token_hash` and enroll `user_id` into the INVITE's workspace at the
+    /// INVITE's role - the two bindings a redeemer can never influence.
+    ///
+    /// The redemption READ (which workspace does this token map to?) runs under
+    /// the invite-token context. The enrolling MUTATION then runs in ONE
+    /// workspace-scoped transaction that atomically (a) claims the invite - an
+    /// `UPDATE ... WHERE accepted_at IS NULL AND expires_at > now` that a
+    /// concurrent redeemer or an expiry can only lose - and (b) inserts the
+    /// `workspace_members` row. Either both land or neither does; a lost claim or
+    /// an already-accepted/expired invite is [`InviteError::Invalid`], and an
+    /// already-enrolled user is [`InviteError::AlreadyMember`] (the whole
+    /// transaction rolls back, leaving the invite pending).
+    // `user_id`/`user_uid` are the `&str` and parsed-`Uuid` forms of the SAME id
+    // (see `membership.rs`); the shared stem is the clearer naming.
+    #[allow(clippy::similar_names)]
+    pub async fn accept_and_enroll(
+        &self,
+        user_id: &str,
+        token_hash: &[u8; 32],
+        now: i64,
+    ) -> std::result::Result<AcceptedInvite, InviteError> {
+        let user_uid = Uuid::parse_str(user_id).map_err(|_| InviteError::Backend)?;
+        // Phase 1 - redeem the token to learn its (single) workspace. The token IS
+        // the capability; the redeemer does not assert the workspace or role.
+        let invite = self
+            .find_by_token_hash(token_hash)
+            .await
+            .map_err(|_| InviteError::Backend)?
+            .ok_or(InviteError::Invalid)?;
+        // Coarse pre-check (the authoritative check is the atomic claim below).
+        if invite.accepted_at.is_some() || invite.expires_at <= now {
+            return Err(InviteError::Invalid);
+        }
+
+        // Phase 2 - one workspace-scoped transaction: atomically claim the invite
+        // and enroll the membership, both bound to the INVITE's workspace.
+        let mut tx = begin_scoped(&self.pool, invite.workspace_id)
+            .await
+            .map_err(|_| InviteError::Backend)?;
+        let claimed = sqlx::query!(
+            "UPDATE workspace_invites SET accepted_at = $3 \
+             WHERE id = $1 AND workspace_id = $2 \
+               AND accepted_at IS NULL AND expires_at > $3 \
+             RETURNING id",
+            invite.id,
+            invite.workspace_id.as_uuid(),
+            now,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| InviteError::Backend)?;
+        if claimed.is_none() {
+            // Lost the race, or it expired between phase 1 and here.
+            return Err(InviteError::Invalid);
+        }
+
+        let insert = sqlx::query!(
+            "INSERT INTO workspace_members \
+             (workspace_id, user_id, role, invited_by, joined_at) \
+             VALUES ($1, $2, $3, NULL, $4)",
+            invite.workspace_id.as_uuid(),
+            user_uid,
+            invite.role.as_str(),
+            now,
+        )
+        .execute(&mut *tx)
+        .await;
+        match insert {
+            Ok(_) => {}
+            // Already a member: roll the whole transaction back (so the invite
+            // stays pending, not falsely marked accepted).
+            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
+                return Err(InviteError::AlreadyMember);
+            }
+            Err(_) => return Err(InviteError::Backend),
+        }
+        tx.commit().await.map_err(|_| InviteError::Backend)?;
+        Ok(AcceptedInvite {
+            workspace_id: invite.workspace_id,
+            role: invite.role,
+        })
     }
 }
