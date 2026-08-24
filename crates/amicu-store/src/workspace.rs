@@ -30,7 +30,9 @@ pub struct Workspace {
     pub created_at: i64,
 }
 
-/// Default per-user cap on ADDITIONAL-workspace creation via
+/// Default cap on the TOTAL number of workspaces a user may OWN (`role =
+/// 'owner'` in `workspace_members`, across every workspace - including the
+/// personal workspace sign-up provisions), enforced by
 /// [`PostgresWorkspaceStore::create_with_owner`] (andypalmi/amicu-planning#132).
 /// There is no `DELETE /workspaces`, so this is a hard ceiling per owner;
 /// `amicu-server` overrides it from `AMICU_MAX_WORKSPACES_PER_USER` via
@@ -66,7 +68,7 @@ pub struct PostgresWorkspaceStore {
 
 impl PostgresWorkspaceStore {
     /// A workspace store over `pool`, capped at
-    /// [`DEFAULT_MAX_WORKSPACES_PER_USER`] additional workspaces per owner.
+    /// [`DEFAULT_MAX_WORKSPACES_PER_USER`] total workspaces owned per user.
     #[must_use]
     pub fn new(pool: PgPool) -> Self {
         Self {

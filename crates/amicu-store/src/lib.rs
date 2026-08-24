@@ -182,6 +182,16 @@ pub(crate) fn meets_enterprise(tier: amicu_auth::Tier) -> bool {
 /// (see the crate docs), so this is safe to call regardless of which context
 /// GUC (if any) the surrounding transaction has bound. Used by the
 /// [`meets_enterprise`] in-transaction re-check.
+///
+/// This is a plain `SELECT`, not `SELECT ... FOR UPDATE`: the row is
+/// deliberately NOT locked. A billing downgrade that commits between this read
+/// and the caller's mutation could still let that single mutation through on a
+/// tier that has just changed underneath it. That is an accepted, narrow race,
+/// because the goal here is closing the <=5-minute stale-claim window (a
+/// downgraded workspace no longer usable at all once its Owner's next request
+/// lands), not making the tier check billing-atomic; locking `workspaces`
+/// would also serialize unrelated tier reads/writes (e.g. Stripe webhooks)
+/// against every org mutation for no material benefit.
 pub(crate) async fn read_workspace_tier(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     workspace: WorkspaceId,

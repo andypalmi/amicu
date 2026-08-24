@@ -151,11 +151,13 @@ pub struct Config {
     #[arg(long, env = "AMICU_RATE_LIMIT_WINDOW_SECS", default_value_t = 60)]
     pub rate_limit_window_secs: u64,
 
-    /// Per-user cap on ADDITIONAL-workspace creation (`POST /workspaces`).
-    /// There is no `DELETE /workspaces`, so this is a hard ceiling per owner,
-    /// enforced inside the creating transaction (andypalmi/amicu-planning#132).
-    /// Only reachable on the Postgres path (`DATABASE_URL` set); the in-memory
-    /// dev path is single-personal-workspace by construction.
+    /// Cap on the TOTAL number of workspaces a user may OWN (across every
+    /// workspace, including the personal workspace sign-up provisions), enforced
+    /// on `POST /workspaces`. There is no `DELETE /workspaces`, so this is a hard
+    /// ceiling per owner, enforced inside the creating transaction
+    /// (andypalmi/amicu-planning#132). Only reachable on the Postgres path
+    /// (`DATABASE_URL` set); the in-memory dev path is single-personal-workspace
+    /// by construction.
     #[arg(
         long,
         env = "AMICU_MAX_WORKSPACES_PER_USER",

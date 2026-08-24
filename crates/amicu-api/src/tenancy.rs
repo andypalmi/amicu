@@ -67,9 +67,11 @@ pub enum TenancyError {
     /// The actor's current role does not permit the action (re-checked in the
     /// store's own transaction): `403`.
     Forbidden(String),
-    /// The caller has reached `AMICU_MAX_WORKSPACES_PER_USER` (a hard ceiling -
-    /// there is no `DELETE /workspaces`), checked and enforced INSIDE the
-    /// creating transaction: `403` (andypalmi/amicu-planning#132).
+    /// The caller has reached `AMICU_MAX_WORKSPACES_PER_USER` - the TOTAL
+    /// number of workspaces they may OWN, across every workspace including
+    /// their personal one (a hard ceiling - there is no `DELETE /workspaces`),
+    /// checked and enforced INSIDE the creating transaction: `403`
+    /// (andypalmi/amicu-planning#132).
     LimitReached(u32),
     /// The presented invite token maps to no live invite - unknown, expired, or
     /// already accepted (kept deliberately indistinct): `400`.

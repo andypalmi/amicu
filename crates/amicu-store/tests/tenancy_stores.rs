@@ -1633,6 +1633,15 @@ async fn audited_mutations_reject_on_a_downgraded_workspace_tier() {
         .set_role_audited(ws, &owner, &target, Role::Admin)
         .await
         .expect("hosted: role change succeeds again");
+    // `newbie` was added while still Enterprise (see above) and never touched
+    // since - removing them now exercises the ALLOW direction for
+    // `remove_member_audited` too (the other four mutations already have an
+    // ALLOW assertion above, either pre-downgrade or here).
+    members
+        .remove_member_audited(ws, &owner, &newbie)
+        .await
+        .expect("hosted: remove succeeds again");
+    assert_eq!(members.role_of(ws, &newbie).await.expect("role_of"), None);
     invites
         .revoke_authorized(ws, &owner, stale_invite)
         .await

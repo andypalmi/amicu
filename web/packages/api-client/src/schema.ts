@@ -3654,6 +3654,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description The caller has reached the per-user workspace-creation cap. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Provisioning requires the database backend. */
             503: {
                 headers: {
