@@ -52,6 +52,7 @@ use utoipa::{Modify, OpenApi};
         crate::tenancy::create_workspace_handler,
         crate::tenancy::create_invite_handler,
         crate::tenancy::list_invites_handler,
+        crate::tenancy::revoke_invite_handler,
         crate::tenancy::accept_invite_handler,
     ),
     components(schemas(

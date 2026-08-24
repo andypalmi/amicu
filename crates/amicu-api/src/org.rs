@@ -215,6 +215,12 @@ pub enum AuditAction {
     RoleChanged,
     /// A member was removed.
     MemberRemoved,
+    /// A pending invite was created.
+    InviteCreated,
+    /// An invite was accepted, enrolling the redeemer as a member.
+    InviteAccepted,
+    /// A pending invite was revoked before acceptance.
+    InviteRevoked,
 }
 
 impl AuditAction {
@@ -224,6 +230,9 @@ impl AuditAction {
             AuditAction::MemberAdded => "member.added",
             AuditAction::RoleChanged => "member.role_changed",
             AuditAction::MemberRemoved => "member.removed",
+            AuditAction::InviteCreated => "invite.created",
+            AuditAction::InviteAccepted => "invite.accepted",
+            AuditAction::InviteRevoked => "invite.revoked",
         }
     }
 }
@@ -234,6 +243,9 @@ impl From<OrgAuditAction> for AuditAction {
             OrgAuditAction::MemberAdded => AuditAction::MemberAdded,
             OrgAuditAction::RoleChanged => AuditAction::RoleChanged,
             OrgAuditAction::MemberRemoved => AuditAction::MemberRemoved,
+            OrgAuditAction::InviteCreated => AuditAction::InviteCreated,
+            OrgAuditAction::InviteAccepted => AuditAction::InviteAccepted,
+            OrgAuditAction::InviteRevoked => AuditAction::InviteRevoked,
         }
     }
 }
@@ -728,6 +740,10 @@ pub fn org_router(state: OrgApiState) -> Router {
         .route(
             "/org/invites",
             get(crate::tenancy::list_invites_handler).post(crate::tenancy::create_invite_handler),
+        )
+        .route(
+            "/org/invites/{id}",
+            axum::routing::delete(crate::tenancy::revoke_invite_handler),
         )
         .route("/org/roles", get(list_roles_handler))
         .route("/org/audit", get(audit_handler))

@@ -36,7 +36,7 @@
 
 use async_trait::async_trait;
 use axum::Json;
-use axum::extract::{Extension, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
@@ -72,6 +72,10 @@ pub enum TenancyError {
     InvalidInvite,
     /// The redeeming user is already a member of the invite's workspace: `409`.
     AlreadyMember,
+    /// (revoke only) no pending invite with that id exists in the caller's
+    /// claim-bound workspace - unknown, already accepted, or another
+    /// workspace's (kept indistinct so nothing about other tenants leaks): `404`.
+    NotFound(String),
     /// The durable tenancy store is not wired (in-memory dev path): `503`.
     Unavailable,
     /// An unexpected store failure: `500`.
@@ -91,6 +95,7 @@ impl IntoResponse for TenancyError {
                 StatusCode::CONFLICT,
                 "you are already a member of that workspace".to_owned(),
             ),
+            TenancyError::NotFound(m) => (StatusCode::NOT_FOUND, m),
             TenancyError::Unavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "workspace provisioning and invites require the database backend".to_owned(),
@@ -172,6 +177,17 @@ pub trait TenancyStore: Send + Sync {
         token_hash: &[u8; 32],
         now: i64,
     ) -> Result<JoinedWorkspace, TenancyError>;
+
+    /// Revoke a PENDING invite `invite_id` in `workspace`, authorized against
+    /// `actor_id`'s current role re-read in the store's own transaction. Only an
+    /// invite belonging to `workspace` is revocable; an unknown/accepted/other-
+    /// workspace id yields [`TenancyError::NotFound`].
+    async fn revoke_invite(
+        &self,
+        workspace: WorkspaceId,
+        actor_id: &str,
+        invite_id: Uuid,
+    ) -> Result<(), TenancyError>;
 }
 
 /// Postgres-backed [`TenancyStore`] over the durable `workspaces` /
@@ -201,6 +217,9 @@ impl From<amicu_store::InviteError> for TenancyError {
             amicu_store::InviteError::Forbidden(m) => TenancyError::Forbidden(m),
             amicu_store::InviteError::Invalid => TenancyError::InvalidInvite,
             amicu_store::InviteError::AlreadyMember => TenancyError::AlreadyMember,
+            amicu_store::InviteError::NotFound => {
+                TenancyError::NotFound("no such pending invite".to_owned())
+            }
             amicu_store::InviteError::Backend => TenancyError::Backend,
         }
     }
@@ -274,6 +293,18 @@ impl TenancyStore for PostgresTenancyStore {
             workspace_id: accepted.workspace_id,
             role: accepted.role,
         })
+    }
+
+    async fn revoke_invite(
+        &self,
+        workspace: WorkspaceId,
+        actor_id: &str,
+        invite_id: Uuid,
+    ) -> Result<(), TenancyError> {
+        self.invites
+            .revoke_authorized(workspace, actor_id, invite_id)
+            .await
+            .map_err(TenancyError::from)
     }
 }
 
@@ -560,6 +591,53 @@ pub(crate) async fn list_invites_handler(
                 .collect(),
         })
         .into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Revoke a pending invite in the caller's claim-bound workspace.
+///
+/// Owner/Admin only, re-checked against the actor's CURRENT role inside the store
+/// transaction (a just-demoted actor cannot revoke). Only a PENDING invite that
+/// belongs to `ctx.workspace` is revocable; an invite in another workspace, an
+/// unknown id, or an already-accepted invite is reported as `404` identically, so
+/// nothing about other tenants leaks. Revocation is audited (`invite.revoked`).
+#[utoipa::path(
+    delete,
+    path = "/org/invites/{id}",
+    tag = "tenancy",
+    params(("id" = String, Path, description = "The pending invite's id.")),
+    responses(
+        (status = 204, description = "The pending invite was revoked."),
+        (status = 401, description = "Missing or invalid access token."),
+        (status = 403, description = "Below Enterprise, or your role may not revoke invites."),
+        (status = 404, description = "No such pending invite in your workspace."),
+        (status = 503, description = "Invites require the database backend."),
+    ),
+    security(("bearer" = [])),
+)]
+pub(crate) async fn revoke_invite_handler(
+    State(state): State<OrgApiState>,
+    Extension(ctx): Extension<WorkspaceContext>,
+    Path(invite_id): Path<String>,
+) -> Response {
+    // Cheap claim-role pre-check (fail fast); the store re-checks the actor's
+    // CURRENT role in-transaction as the authority.
+    if !ctx.role.can_manage_members() {
+        return TenancyError::Forbidden("your role may not revoke invites".to_owned())
+            .into_response();
+    }
+    let Some(tenancy) = state.tenancy() else {
+        return TenancyError::Unavailable.into_response();
+    };
+    // A malformed id cannot name a pending invite in this workspace; report it as
+    // not-found (identical to a cross-workspace/unknown id) rather than leaking a
+    // distinct 400 shape.
+    let Ok(id) = Uuid::parse_str(invite_id.trim()) else {
+        return TenancyError::NotFound("no such pending invite".to_owned()).into_response();
+    };
+    match tenancy.revoke_invite(ctx.workspace, &ctx.user_id, id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => e.into_response(),
     }
 }

@@ -63,6 +63,12 @@ pub enum OrgAuditAction {
     RoleChanged,
     /// A member was removed.
     MemberRemoved,
+    /// A pending invite was created (an offer to join at a role).
+    InviteCreated,
+    /// An invite was accepted, enrolling the redeemer as a member.
+    InviteAccepted,
+    /// A pending invite was revoked before acceptance.
+    InviteRevoked,
 }
 
 impl OrgAuditAction {
@@ -73,6 +79,9 @@ impl OrgAuditAction {
             OrgAuditAction::MemberAdded => "member.added",
             OrgAuditAction::RoleChanged => "member.role_changed",
             OrgAuditAction::MemberRemoved => "member.removed",
+            OrgAuditAction::InviteCreated => "invite.created",
+            OrgAuditAction::InviteAccepted => "invite.accepted",
+            OrgAuditAction::InviteRevoked => "invite.revoked",
         }
     }
 
@@ -83,6 +92,9 @@ impl OrgAuditAction {
             "member.added" => Ok(OrgAuditAction::MemberAdded),
             "member.role_changed" => Ok(OrgAuditAction::RoleChanged),
             "member.removed" => Ok(OrgAuditAction::MemberRemoved),
+            "invite.created" => Ok(OrgAuditAction::InviteCreated),
+            "invite.accepted" => Ok(OrgAuditAction::InviteAccepted),
+            "invite.revoked" => Ok(OrgAuditAction::InviteRevoked),
             _ => Err(AuthError::Backend),
         }
     }

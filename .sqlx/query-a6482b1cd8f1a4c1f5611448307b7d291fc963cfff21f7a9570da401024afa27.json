@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM workspace_invites WHERE workspace_id = $1 AND id = $2 AND accepted_at IS NULL RETURNING role",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a6482b1cd8f1a4c1f5611448307b7d291fc963cfff21f7a9570da401024afa27"
+}

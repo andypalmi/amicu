@@ -16,8 +16,8 @@ use amicu_auth::Result;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::membership::Role;
-use crate::{WorkspaceId, begin_scoped, begin_scoped_invite, map_db};
+use crate::membership::{OrgAuditAction, Role};
+use crate::{WorkspaceId, begin_scoped, begin_scoped_invite, map_db, now_unix_seconds};
 
 /// The failure modes of the authorized invite-lifecycle operations
 /// ([`create_authorized`](PostgresInviteStore::create_authorized) /
@@ -39,6 +39,10 @@ pub enum InviteError {
     /// (accept only) the redeeming user is already a member of the invite's
     /// workspace.
     AlreadyMember,
+    /// (revoke only) no PENDING invite with that id exists in the actor's
+    /// workspace - unknown, already accepted, or belonging to another workspace
+    /// (kept deliberately indistinct so nothing about other tenants leaks).
+    NotFound,
     /// A backend/data-integrity fault.
     Backend,
 }
@@ -82,6 +86,54 @@ fn authorize_invite_create(
             "only an Owner may invite an Owner or Admin".to_owned(),
         ));
     }
+    Ok(())
+}
+
+/// Authorize revoking a pending invite by an actor whose CURRENT role is `actor`
+/// (re-read under the mutation's own transaction and row lock). Owner/Admin only
+/// via the same coarse membership-management gate that guards invite CREATE
+/// ([`Role::can_manage_members`]), so a concurrently-demoted or -removed actor
+/// cannot revoke on a stale role.
+fn authorize_invite_revoke(actor: Option<Role>) -> std::result::Result<(), InviteError> {
+    let Some(actor) = actor else {
+        return Err(InviteError::Forbidden(
+            "you are not a member of this workspace".to_owned(),
+        ));
+    };
+    if !actor.can_manage_members() {
+        return Err(InviteError::Forbidden(
+            "your role may not revoke invites".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Append one `org_audit` row inside `tx`, paired with the invite-lifecycle
+/// mutation that motivated it (create / accept / revoke), so the audit record and
+/// the mutation land or roll back together. Mirrors the `org_audit` write shape
+/// used by the membership store's audited mutations.
+async fn append_invite_audit(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    workspace: WorkspaceId,
+    actor_uid: Uuid,
+    action: OrgAuditAction,
+    target_uid: Option<Uuid>,
+    detail: &str,
+) -> std::result::Result<(), InviteError> {
+    sqlx::query!(
+        "INSERT INTO org_audit \
+         (workspace_id, recorded_at, actor_id, action, target_id, detail) \
+         VALUES ($1, $2, $3, $4, $5, $6)",
+        workspace.as_uuid(),
+        now_unix_seconds(),
+        actor_uid,
+        action.as_str(),
+        target_uid,
+        detail,
+    )
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| InviteError::Backend)?;
     Ok(())
 }
 
@@ -263,6 +315,19 @@ impl PostgresInviteStore {
         .execute(&mut *tx)
         .await
         .map_err(|_| InviteError::Backend)?;
+        // Audit the invite creation atomically with the invite row (same tx): a
+        // rollback drops both, so an invite can never land without its record.
+        // The invite has no member target yet, so `target_id` is NULL and the
+        // invite id + granted role live in `detail`.
+        append_invite_audit(
+            &mut tx,
+            workspace,
+            actor_uid,
+            OrgAuditAction::InviteCreated,
+            None,
+            &format!("invited {email} as {} (invite {id})", role.as_str()),
+        )
+        .await?;
         tx.commit().await.map_err(|_| InviteError::Backend)?;
         Ok(id)
     }
@@ -373,10 +438,98 @@ impl PostgresInviteStore {
             }
             Err(_) => return Err(InviteError::Backend),
         }
+        // Audit the enrollment atomically with the membership insert (same tx,
+        // bound to the INVITE's workspace so RLS admits it). The actor and the
+        // target are the joining user; the granted role + invite id are recorded.
+        append_invite_audit(
+            &mut tx,
+            invite.workspace_id,
+            user_uid,
+            OrgAuditAction::InviteAccepted,
+            Some(user_uid),
+            &format!(
+                "joined as {} via invite {}",
+                invite.role.as_str(),
+                invite.id
+            ),
+        )
+        .await?;
         tx.commit().await.map_err(|_| InviteError::Backend)?;
         Ok(AcceptedInvite {
             workspace_id: invite.workspace_id,
             role: invite.role,
         })
+    }
+
+    /// Revoke a PENDING invite `invite_id` in `workspace`, authorized against
+    /// `actor_id`'s CURRENT role - re-read and locked `FOR UPDATE` in the SAME
+    /// transaction as the delete (the #130 actor re-check, applied to
+    /// revocation): a concurrently-demoted or -removed actor cannot revoke on a
+    /// stale role. Deletes the invite and appends its `invite.revoked` audit row
+    /// atomically.
+    ///
+    /// Only a pending invite that BELONGS to `workspace` is revocable. An unknown
+    /// id, an already-accepted invite, or one belonging to another workspace
+    /// deletes nothing and yields [`InviteError::NotFound`] (kept indistinct so
+    /// nothing about other tenants leaks); the RLS policy on `workspace_invites`
+    /// is the backstop behind the always-on `workspace_id` predicate.
+    // `actor_id`/`actor_uid` are the `&str` and parsed-`Uuid` forms of the SAME
+    // id (see `membership.rs`); the shared stem is the clearer naming.
+    #[allow(clippy::similar_names)]
+    pub async fn revoke_authorized(
+        &self,
+        workspace: WorkspaceId,
+        actor_id: &str,
+        invite_id: Uuid,
+    ) -> std::result::Result<(), InviteError> {
+        let actor_uid = Uuid::parse_str(actor_id).map_err(|_| InviteError::Backend)?;
+        let mut tx = begin_scoped(&self.pool, workspace)
+            .await
+            .map_err(|_| InviteError::Backend)?;
+        // Re-read the actor's CURRENT role under a row lock, in this transaction,
+        // rather than trusting the caller's claim role.
+        let actor_row = sqlx::query!(
+            "SELECT role FROM workspace_members \
+             WHERE workspace_id = $1 AND user_id = $2 FOR UPDATE",
+            workspace.as_uuid(),
+            actor_uid,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| InviteError::Backend)?;
+        let actor_role = actor_row
+            .map(|r| Role::parse(&r.role).map_err(|_| InviteError::Backend))
+            .transpose()?;
+        authorize_invite_revoke(actor_role)?;
+
+        // Delete only a PENDING invite in THIS workspace; RETURNING confirms it
+        // existed (and yields its granted role for the audit detail). A
+        // cross-workspace/unknown/already-accepted id deletes nothing.
+        let deleted = sqlx::query!(
+            "DELETE FROM workspace_invites \
+             WHERE workspace_id = $1 AND id = $2 AND accepted_at IS NULL \
+             RETURNING role",
+            workspace.as_uuid(),
+            invite_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| InviteError::Backend)?;
+        let Some(row) = deleted else {
+            return Err(InviteError::NotFound);
+        };
+        let role = Role::parse(&row.role).map_err(|_| InviteError::Backend)?;
+
+        append_invite_audit(
+            &mut tx,
+            workspace,
+            actor_uid,
+            OrgAuditAction::InviteRevoked,
+            None,
+            &format!("revoked invite {invite_id} (granted {})", role.as_str()),
+        )
+        .await?;
+        tx.commit().await.map_err(|_| InviteError::Backend)?;
+        Ok(())
     }
 }

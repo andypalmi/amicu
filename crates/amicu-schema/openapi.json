@@ -833,6 +833,49 @@
         ]
       }
     },
+    "/org/invites/{id}": {
+      "delete": {
+        "tags": [
+          "tenancy"
+        ],
+        "summary": "Revoke a pending invite in the caller's claim-bound workspace.",
+        "description": "Owner/Admin only, re-checked against the actor's CURRENT role inside the store\ntransaction (a just-demoted actor cannot revoke). Only a PENDING invite that\nbelongs to `ctx.workspace` is revocable; an invite in another workspace, an\nunknown id, or an already-accepted invite is reported as `404` identically, so\nnothing about other tenants leaks. Revocation is audited (`invite.revoked`).",
+        "operationId": "revoke_invite_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The pending invite's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The pending invite was revoked."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Below Enterprise, or your role may not revoke invites."
+          },
+          "404": {
+            "description": "No such pending invite in your workspace."
+          },
+          "503": {
+            "description": "Invites require the database backend."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/org/members": {
       "get": {
         "tags": [

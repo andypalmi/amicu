@@ -339,6 +339,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/org/invites/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke a pending invite in the caller's claim-bound workspace.
+         * @description Owner/Admin only, re-checked against the actor's CURRENT role inside the store
+         *     transaction (a just-demoted actor cannot revoke). Only a PENDING invite that
+         *     belongs to `ctx.workspace` is revocable; an invite in another workspace, an
+         *     unknown id, or an already-accepted invite is reported as `404` identically, so
+         *     nothing about other tenants leaks. Revocation is audited (`invite.revoked`).
+         */
+        delete: operations["revoke_invite_handler"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/org/members": {
         parameters: {
             query?: never;
@@ -2687,6 +2711,55 @@ export interface operations {
             };
             /** @description You are already a member of that workspace. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invites require the database backend. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    revoke_invite_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The pending invite's id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The pending invite was revoked. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Below Enterprise, or your role may not revoke invites. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No such pending invite in your workspace. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
