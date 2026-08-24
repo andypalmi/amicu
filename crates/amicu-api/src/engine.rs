@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use amicu_auth::verifier::{JwksProvider, MonoClock, Verifier};
-use amicu_auth::{AuthError, Claims, Tier};
+use amicu_auth::{AuthError, Claims, Role, Tier, WorkspaceId};
 use amicu_core::diagnostic::DiagnosticReport;
 use amicu_hcl::HclError;
 use amicu_plan::Plan;
@@ -75,6 +75,40 @@ impl EngineApiState {
     }
 }
 
+/// The verified per-request tenancy context, derived ENTIRELY from the access
+/// token's claims - never from a request header
+/// (andypalmi/amicu-planning#130). Every auth gate stashes one of these in the
+/// request extensions after verifying the token, so a handler always scopes its
+/// work to the workspace the token was minted for (`claims.wsid`), acting as the
+/// subject (`claims.sub`) with the role and tier the claim carries. The client
+/// cannot assert any of it: the issuer resolved `wsid`/`wsrole`/`tier`
+/// server-side from `workspace_members` at mint time and re-validates them on
+/// every refresh rotation.
+#[derive(Debug, Clone)]
+pub struct WorkspaceContext {
+    /// The subject (token `sub`) acting in this request.
+    pub user_id: String,
+    /// The active workspace this token is scoped to (`claims.wsid`).
+    pub workspace: WorkspaceId,
+    /// The subject's role in [`workspace`](Self::workspace) (`claims.wsrole`).
+    pub role: Role,
+    /// The active workspace's billing tier (`claims.tier`).
+    pub tier: Tier,
+}
+
+impl WorkspaceContext {
+    /// Derive the tenancy context from verified claims.
+    #[must_use]
+    pub fn from_claims(claims: &Claims) -> Self {
+        Self {
+            user_id: claims.sub.clone(),
+            workspace: claims.wsid,
+            role: claims.wsrole,
+            tier: claims.tier,
+        }
+    }
+}
+
 /// Ordinal ranking of tiers for the "at least" gate.
 fn tier_rank(tier: Tier) -> u8 {
     match tier {
@@ -111,6 +145,12 @@ pub async fn auth_gate(
     };
     match state.verifier.verify(token).await {
         Ok(claims) if tier_rank(claims.tier) >= tier_rank(state.min_tier) => {
+            // The verified claim is the sole source of tenancy: stash both the
+            // full claims and the derived WorkspaceContext so config handlers
+            // scope to claims.wsid without ever reading a header.
+            request
+                .extensions_mut()
+                .insert(WorkspaceContext::from_claims(&claims));
             request.extensions_mut().insert(claims);
             next.run(request).await
         }

@@ -77,7 +77,9 @@ pub mod workspace;
 
 pub use config::{ConfigStore, InMemoryConfigStore, PostgresConfigStore};
 pub use invite::{Invite, PostgresInviteStore};
-pub use membership::{Member, PostgresMembershipStore, Role};
+pub use membership::{
+    Member, OrgAuditAction, OrgAuditEntry, OrgMutationError, PostgresMembershipStore, Role,
+};
 pub use refresh::PostgresRefreshStore;
 pub use reset::PostgresResetStore;
 pub use state::PostgresStateBackend;

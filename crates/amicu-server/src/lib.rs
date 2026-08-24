@@ -73,7 +73,7 @@ use std::time::Duration;
 
 use amicu_api::{
     AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore, OrgApiState,
-    ProxyParseError, RateLimiter, SessionApiState, TrustedProxies, api_router,
+    OrgStore, ProxyParseError, RateLimiter, SessionApiState, TrustedProxies, api_router,
     stripe_config_from_env,
 };
 use amicu_auth::issuer::{IssuerConfig, TokenIssuer};
@@ -90,7 +90,9 @@ use amicu_auth::verify::{InMemoryVerifyStore, VerifyStore};
 use amicu_auth::{AuthError, Tier};
 use amicu_state::{InMemoryStateBackend, StateBackendAdapter};
 use amicu_store::config::ConfigStore;
-use amicu_store::{InMemoryConfigStore, PostgresConfigStore, PostgresStateBackend};
+use amicu_store::{
+    InMemoryConfigStore, PostgresConfigStore, PostgresMembershipStore, PostgresStateBackend,
+};
 use axum::Router;
 use clap::{Parser, ValueEnum};
 use tokio::net::TcpListener;
@@ -430,12 +432,26 @@ async fn build_app_with_database_url(
         BillingApiState::unconfigured(verifier.clone(), users)
     };
 
-    // The Enterprise organization console (membership + RBAC + audit log). The
-    // store is in-memory and single-node like the auth/billing stores: state is
-    // lost on restart. The first Enterprise caller bootstraps the org as its
-    // Owner; everyone after is invited. SSO federation is deliberately deferred
-    // (post-v1) - see andypalmi/amicu-planning#92.
-    let org_store = Arc::new(InMemoryOrgStore::new());
+    // The Enterprise organization console (membership + RBAC + audit log). On the
+    // Postgres path it runs on the durable, multi-workspace `workspace_members` +
+    // `org_audit` tables via `PostgresMembershipStore` (which implements
+    // `OrgStore`), so a mutation re-checks RBAC and writes its audit record inside
+    // one workspace-scoped transaction (andypalmi/amicu-planning#130). In-memory
+    // (no DATABASE_URL) it falls back to the single-node `InMemoryOrgStore`, state
+    // lost on restart. Its own pool, like the config/state blocks, for
+    // rebase-ability. SSO federation is deferred (post-v1) - see #92.
+    let org_store: Arc<dyn OrgStore> = if let Some(database_url) = database_url {
+        let pool = amicu_store::connect(database_url)
+            .await
+            .map_err(Error::Store)?;
+        amicu_store::run_migrations(&pool)
+            .await
+            .map_err(Error::Store)?;
+        eprintln!("amicu-server: using the Postgres org console store (DATABASE_URL set).");
+        Arc::new(PostgresMembershipStore::new(pool))
+    } else {
+        Arc::new(InMemoryOrgStore::new())
+    };
     let org_state = OrgApiState::new(verifier, org_store);
 
     // Config storage + version history (`/configs/*`): the same

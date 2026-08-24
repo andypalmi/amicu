@@ -21,8 +21,8 @@ use amicu_auth::refresh::{RefreshStore, mint};
 use amicu_auth::user::{User, UserStore};
 use amicu_auth::{AuthError, Tier};
 use amicu_store::{
-    PostgresInviteStore, PostgresMembershipStore, PostgresRefreshStore, PostgresUserStore,
-    PostgresWorkspaceStore, Role, WorkspaceId, connect, run_migrations,
+    OrgMutationError, PostgresInviteStore, PostgresMembershipStore, PostgresRefreshStore,
+    PostgresUserStore, PostgresWorkspaceStore, Role, WorkspaceId, connect, run_migrations,
 };
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -500,4 +500,136 @@ async fn delete_is_refused_when_personal_workspace_has_another_member() {
         Some(Role::Member),
         "the guest's membership must NOT be cascade-deleted"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Org console: audited mutations re-check RBAC in the mutation's own
+// transaction, write their audit record atomically, and stay workspace-scoped
+// (andypalmi/amicu-planning#130). Carries the #117 in-memory TOCTOU fix onto
+// Postgres.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn org_console_audited_mutations_recheck_roles_and_audit_atomically() {
+    let shared = pool().await;
+    let users = PostgresUserStore::new(shared.clone());
+    let members = PostgresMembershipStore::new(shared.clone());
+    let workspaces = PostgresWorkspaceStore::new(shared);
+
+    let ws = workspaces
+        .create(&unique("Org"), Tier::Enterprise)
+        .await
+        .expect("create org workspace");
+    let owner = seed_user(&users).await;
+    let admin = seed_user(&users).await;
+    let target = seed_user(&users).await;
+    members
+        .add(ws, &owner, Role::Owner, None)
+        .await
+        .expect("seed owner");
+    members
+        .add(ws, &admin, Role::Admin, Some(&owner))
+        .await
+        .expect("seed admin");
+    members
+        .add(ws, &target, Role::Member, Some(&owner))
+        .await
+        .expect("seed target member");
+
+    // Admin may add a plain Member (authorized against the freshly-read Admin
+    // role), and it is audited.
+    let newbie = seed_user(&users).await;
+    let assigned = members
+        .add_member_audited(ws, &admin, &newbie, Role::Member)
+        .await
+        .expect("admin adds a member");
+    assert_eq!(assigned, Role::Member);
+    assert_eq!(
+        members.role_of(ws, &newbie).await.expect("role_of"),
+        Some(Role::Member)
+    );
+
+    // Admin may NOT grant a privileged role.
+    let candidate = seed_user(&users).await;
+    assert!(matches!(
+        members
+            .add_member_audited(ws, &admin, &candidate, Role::Admin)
+            .await
+            .unwrap_err(),
+        OrgMutationError::Forbidden(_)
+    ));
+
+    // The mutation re-reads the ACTOR fresh: demote the admin to member, then
+    // their in-flight privileged mutation is refused - the in-transaction
+    // re-read, not a stale caller role, decides.
+    members
+        .set_role(ws, &admin, Role::Member)
+        .await
+        .expect("demote admin");
+    assert!(matches!(
+        members
+            .add_member_audited(ws, &admin, &candidate, Role::Member)
+            .await
+            .unwrap_err(),
+        OrgMutationError::Forbidden(_)
+    ));
+
+    // A REMOVED actor is refused entirely ("not a member").
+    members.remove(ws, &admin).await.expect("remove ex-admin");
+    match members
+        .add_member_audited(ws, &admin, &candidate, Role::Member)
+        .await
+        .unwrap_err()
+    {
+        OrgMutationError::Forbidden(msg) => assert!(msg.contains("not a member")),
+        other => panic!("expected Forbidden(not a member), got {other:?}"),
+    }
+
+    // Owner promotes the target to Admin (audited), then the last-Owner guard
+    // refuses demoting/removing the sole Owner.
+    members
+        .set_role_audited(ws, &owner, &target, Role::Admin)
+        .await
+        .expect("owner promotes target");
+    assert!(matches!(
+        members
+            .set_role_audited(ws, &owner, &owner, Role::Member)
+            .await
+            .unwrap_err(),
+        OrgMutationError::LastOwner
+    ));
+    assert!(matches!(
+        members
+            .remove_member_audited(ws, &owner, &owner)
+            .await
+            .unwrap_err(),
+        OrgMutationError::LastOwner
+    ));
+
+    // Exactly the two SUCCESSFUL audited mutations landed a record (the admin's
+    // add of `newbie`, and the owner's promotion of `target`); every refused
+    // mutation wrote nothing. Most-recent first, so the promotion leads.
+    let audit = members.org_audit(ws).await.expect("audit");
+    assert_eq!(
+        audit.len(),
+        2,
+        "only the two successful audited mutations recorded"
+    );
+    assert_eq!(
+        audit.first().unwrap().action,
+        amicu_store::OrgAuditAction::RoleChanged
+    );
+    assert_eq!(audit[1].action, amicu_store::OrgAuditAction::MemberAdded);
+    assert!(
+        audit
+            .iter()
+            .all(|e| e.actor_id == owner || e.actor_id == admin)
+    );
+
+    // A different workspace's audit log is empty (workspace_id predicate + RLS).
+    let ws2 = workspaces
+        .create(&unique("Org2"), Tier::Enterprise)
+        .await
+        .expect("create ws2");
+    assert!(members.org_audit(ws2).await.expect("audit ws2").is_empty());
 }

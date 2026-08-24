@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, recorded_at, actor_id, action, target_id, detail FROM org_audit WHERE workspace_id = $1 ORDER BY id DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "recorded_at",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "actor_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "action",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "target_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "detail",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "739d899f1c819f00334fe71c3c12c68e05e1e314917bd5d05f6913e9635c5aab"
+}

@@ -44,11 +44,136 @@ pub struct Member {
     pub joined_at: i64,
 }
 
+// ---------------------------------------------------------------------------
+// Org-console audited mutations (andypalmi/amicu-planning#130)
+//
+// The Enterprise organization console runs its privileged membership mutations
+// through this store so authorization is re-checked against the ACTOR's and
+// TARGET's *current* roles, read under the same transaction (and the same row
+// locks) as the mutation - carrying the #117 in-memory TOCTOU fix onto Postgres
+// - and so each mutation's audit record is written atomically alongside it.
+// ---------------------------------------------------------------------------
+
+/// A privileged org-console action, as recorded in `org_audit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrgAuditAction {
+    /// A member was added.
+    MemberAdded,
+    /// A member's role was changed.
+    RoleChanged,
+    /// A member was removed.
+    MemberRemoved,
+}
+
+impl OrgAuditAction {
+    /// The stored wire name for this action.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OrgAuditAction::MemberAdded => "member.added",
+            OrgAuditAction::RoleChanged => "member.role_changed",
+            OrgAuditAction::MemberRemoved => "member.removed",
+        }
+    }
+
+    /// Parse the stored wire name. An unrecognized value is a data-integrity
+    /// fault (the store is the only writer).
+    fn parse(text: &str) -> Result<Self, AuthError> {
+        match text {
+            "member.added" => Ok(OrgAuditAction::MemberAdded),
+            "member.role_changed" => Ok(OrgAuditAction::RoleChanged),
+            "member.removed" => Ok(OrgAuditAction::MemberRemoved),
+            _ => Err(AuthError::Backend),
+        }
+    }
+}
+
+/// One append-only org-console audit record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrgAuditEntry {
+    /// Opaque, monotonic id (used only for ordering, most-recent-first).
+    pub id: i64,
+    /// When the action was recorded, Unix seconds.
+    pub recorded_at: i64,
+    /// The user id that performed the action (UUID text).
+    pub actor_id: String,
+    /// What happened.
+    pub action: OrgAuditAction,
+    /// The member the action targeted (UUID text), if any.
+    pub target_id: Option<String>,
+    /// A short human-readable detail (e.g. `"member -> admin"`).
+    pub detail: Option<String>,
+}
+
+/// The failure modes of an audited org-console membership mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OrgMutationError {
+    /// The target user is not a member of the workspace.
+    NotFound,
+    /// The actor's role does not permit the action, checked against both the
+    /// actor's and the target's *current* roles read under the mutation's own
+    /// transaction and row locks.
+    Forbidden(String),
+    /// The mutation would leave the workspace with no Owner.
+    LastOwner,
+    /// (add only) the target user is already a member.
+    AlreadyMember,
+    /// A backend/data-integrity fault.
+    Backend,
+}
+
+impl From<AuthError> for OrgMutationError {
+    fn from(_: AuthError) -> Self {
+        OrgMutationError::Backend
+    }
+}
+
+/// Authorize a membership mutation by the actor's role against the target's
+/// current role and (for add/change) the requested new role. Mirrors the
+/// in-memory `authorize_membership_mutation` (andypalmi/amicu-planning#117); the
+/// caller has read `actor`/`target_current` under the mutation's own transaction
+/// and row locks, so both are fresh.
+fn authorize_membership_mutation(
+    actor: Option<Role>,
+    target_current: Option<Role>,
+    new_role: Option<Role>,
+) -> Result<(), OrgMutationError> {
+    let Some(actor) = actor else {
+        return Err(OrgMutationError::Forbidden(
+            "you are not a member of this organization".to_owned(),
+        ));
+    };
+    if !actor.can_manage_members() {
+        return Err(OrgMutationError::Forbidden(
+            "your role may not manage organization membership".to_owned(),
+        ));
+    }
+    if actor == Role::Admin {
+        if new_role.is_some_and(Role::is_privileged) {
+            return Err(OrgMutationError::Forbidden(
+                "only an Owner may grant the Owner or Admin role".to_owned(),
+            ));
+        }
+        if target_current.is_some_and(Role::is_privileged) {
+            return Err(OrgMutationError::Forbidden(
+                "only an Owner may modify or remove an Owner or Admin".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Postgres implementation of the membership store.
 pub struct PostgresMembershipStore {
     pool: PgPool,
 }
 
+// Several methods below hold both an id in its `&str` form (`actor_id`,
+// `target_id`) and its parsed `Uuid` form (`actor_uid`, `target_uid`) at once;
+// `clippy::similar_names` (pedantic) reads those as confusable, but they are two
+// representations of the SAME id and keeping the shared stem is the clearer
+// naming here.
+#[allow(clippy::similar_names)]
 impl PostgresMembershipStore {
     /// A membership store over `pool`.
     #[must_use]
@@ -220,6 +345,268 @@ impl PostgresMembershipStore {
                     role: Role::parse(&r.role)?,
                     invited_by: r.invited_by.map(|u| u.to_string()),
                     joined_at: r.joined_at,
+                })
+            })
+            .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Org-console audited mutations (andypalmi/amicu-planning#130).
+    //
+    // Each of the three mutations opens ONE `begin_scoped` transaction, locks the
+    // actor's and target's membership rows `FOR UPDATE`, re-reads their *current*
+    // roles under that lock, authorizes against those fresh reads, performs the
+    // mutation, and appends its `org_audit` record - all before commit. The row
+    // locks serialize a concurrent role change on the actor or target, so a
+    // mutation is always authorized against who the actor/target are at the
+    // instant it is serialized, never a stale snapshot (the #117 TOCTOU
+    // closure). A cancelled task either committed both the membership change and
+    // its audit record, or neither.
+    // -----------------------------------------------------------------------
+
+    /// The current roles of `actor_id` and `target_id` in `workspace`, read and
+    /// locked `FOR UPDATE` (in canonical id order to avoid deadlocks) inside
+    /// `tx`. A non-member (or a non-UUID id) reads as `None`.
+    async fn locked_roles(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        workspace: WorkspaceId,
+        actor_id: &str,
+        target_id: &str,
+    ) -> Result<(Option<Role>, Option<Role>), OrgMutationError> {
+        let actor_uid = Uuid::parse_str(actor_id).ok();
+        let target_uid = Uuid::parse_str(target_id).ok();
+        let mut ids: Vec<Uuid> = actor_uid.into_iter().chain(target_uid).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let rows = sqlx::query!(
+            "SELECT user_id, role FROM workspace_members \
+             WHERE workspace_id = $1 AND user_id = ANY($2) \
+             ORDER BY user_id FOR UPDATE",
+            workspace.as_uuid(),
+            &ids[..],
+        )
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|_| OrgMutationError::Backend)?;
+        let role_of = |want: Option<Uuid>| -> Result<Option<Role>, OrgMutationError> {
+            let Some(want) = want else { return Ok(None) };
+            rows.iter()
+                .find(|r| r.user_id == want)
+                .map(|r| Role::parse(&r.role).map_err(|_| OrgMutationError::Backend))
+                .transpose()
+        };
+        Ok((role_of(actor_uid)?, role_of(target_uid)?))
+    }
+
+    /// The number of Owners currently in `workspace`, read inside `tx`.
+    async fn owner_count(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        workspace: WorkspaceId,
+    ) -> Result<i64, OrgMutationError> {
+        let row = sqlx::query!(
+            "SELECT COUNT(*) AS \"count!\" FROM workspace_members \
+             WHERE workspace_id = $1 AND role = 'owner'",
+            workspace.as_uuid(),
+        )
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|_| OrgMutationError::Backend)?;
+        Ok(row.count)
+    }
+
+    /// Append one `org_audit` record inside `tx` (paired with its mutation).
+    async fn append_audit(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        workspace: WorkspaceId,
+        actor_id: &str,
+        action: OrgAuditAction,
+        target_id: Option<&str>,
+        detail: Option<&str>,
+    ) -> Result<(), OrgMutationError> {
+        let actor_uid = Uuid::parse_str(actor_id).map_err(|_| OrgMutationError::Backend)?;
+        let target_uid = target_id.and_then(|t| Uuid::parse_str(t).ok());
+        sqlx::query!(
+            "INSERT INTO org_audit \
+             (workspace_id, recorded_at, actor_id, action, target_id, detail) \
+             VALUES ($1, $2, $3, $4, $5, $6)",
+            workspace.as_uuid(),
+            now_unix_seconds(),
+            actor_uid,
+            action.as_str(),
+            target_uid,
+            detail,
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|_| OrgMutationError::Backend)?;
+        Ok(())
+    }
+
+    /// Add `target_id` at `role`, authorized against `actor_id`'s current role
+    /// (re-read + locked), atomically with its `member.added` audit record.
+    pub async fn add_member_audited(
+        &self,
+        workspace: WorkspaceId,
+        actor_id: &str,
+        target_id: &str,
+        role: Role,
+    ) -> Result<Role, OrgMutationError> {
+        // On the Postgres path every user id is the caller's verified UUID `sub`;
+        // a non-UUID target is an internal-contract violation, not client input.
+        let target_uid = Uuid::parse_str(target_id).map_err(|_| OrgMutationError::Backend)?;
+        let mut tx = begin_scoped(&self.pool, workspace).await?;
+        let (actor_role, target_role) =
+            Self::locked_roles(&mut tx, workspace, actor_id, target_id).await?;
+        authorize_membership_mutation(actor_role, None, Some(role))?;
+        if target_role.is_some() {
+            return Err(OrgMutationError::AlreadyMember);
+        }
+        let inviter = Uuid::parse_str(actor_id).ok();
+        let insert = sqlx::query!(
+            "INSERT INTO workspace_members \
+             (workspace_id, user_id, role, invited_by, joined_at) \
+             VALUES ($1, $2, $3, $4, $5)",
+            workspace.as_uuid(),
+            target_uid,
+            role.as_str(),
+            inviter,
+            now_unix_seconds(),
+        )
+        .execute(&mut *tx)
+        .await;
+        match insert {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
+                return Err(OrgMutationError::AlreadyMember);
+            }
+            Err(_) => return Err(OrgMutationError::Backend),
+        }
+        Self::append_audit(
+            &mut tx,
+            workspace,
+            actor_id,
+            OrgAuditAction::MemberAdded,
+            Some(target_id),
+            Some(&format!("added as {}", role.as_str())),
+        )
+        .await?;
+        tx.commit().await.map_err(|_| OrgMutationError::Backend)?;
+        Ok(role)
+    }
+
+    /// Change `target_id`'s role to `new_role`, authorized against both the
+    /// actor's and the target's current (re-read + locked) roles, atomically with
+    /// its `member.role_changed` audit record. Returns the previous role.
+    pub async fn set_role_audited(
+        &self,
+        workspace: WorkspaceId,
+        actor_id: &str,
+        target_id: &str,
+        new_role: Role,
+    ) -> Result<Role, OrgMutationError> {
+        let mut tx = begin_scoped(&self.pool, workspace).await?;
+        let (actor_role, target_role) =
+            Self::locked_roles(&mut tx, workspace, actor_id, target_id).await?;
+        let Some(current) = target_role else {
+            return Err(OrgMutationError::NotFound);
+        };
+        authorize_membership_mutation(actor_role, Some(current), Some(new_role))?;
+        if current == Role::Owner
+            && new_role != Role::Owner
+            && Self::owner_count(&mut tx, workspace).await? == 1
+        {
+            return Err(OrgMutationError::LastOwner);
+        }
+        let target_uid = Uuid::parse_str(target_id).map_err(|_| OrgMutationError::Backend)?;
+        sqlx::query!(
+            "UPDATE workspace_members SET role = $3 \
+             WHERE workspace_id = $1 AND user_id = $2",
+            workspace.as_uuid(),
+            target_uid,
+            new_role.as_str(),
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| OrgMutationError::Backend)?;
+        Self::append_audit(
+            &mut tx,
+            workspace,
+            actor_id,
+            OrgAuditAction::RoleChanged,
+            Some(target_id),
+            Some(&format!("{} -> {}", current.as_str(), new_role.as_str())),
+        )
+        .await?;
+        tx.commit().await.map_err(|_| OrgMutationError::Backend)?;
+        Ok(current)
+    }
+
+    /// Remove `target_id`, authorized against both the actor's and the target's
+    /// current (re-read + locked) roles, atomically with its `member.removed`
+    /// audit record. Returns the removed role.
+    pub async fn remove_member_audited(
+        &self,
+        workspace: WorkspaceId,
+        actor_id: &str,
+        target_id: &str,
+    ) -> Result<Role, OrgMutationError> {
+        let mut tx = begin_scoped(&self.pool, workspace).await?;
+        let (actor_role, target_role) =
+            Self::locked_roles(&mut tx, workspace, actor_id, target_id).await?;
+        let Some(current) = target_role else {
+            return Err(OrgMutationError::NotFound);
+        };
+        authorize_membership_mutation(actor_role, Some(current), None)?;
+        if current == Role::Owner && Self::owner_count(&mut tx, workspace).await? == 1 {
+            return Err(OrgMutationError::LastOwner);
+        }
+        let target_uid = Uuid::parse_str(target_id).map_err(|_| OrgMutationError::Backend)?;
+        sqlx::query!(
+            "DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2",
+            workspace.as_uuid(),
+            target_uid,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| OrgMutationError::Backend)?;
+        Self::append_audit(
+            &mut tx,
+            workspace,
+            actor_id,
+            OrgAuditAction::MemberRemoved,
+            Some(target_id),
+            Some(&format!("removed ({})", current.as_str())),
+        )
+        .await?;
+        tx.commit().await.map_err(|_| OrgMutationError::Backend)?;
+        Ok(current)
+    }
+
+    /// The org-console audit log for `workspace`, most-recent first.
+    pub async fn org_audit(
+        &self,
+        workspace: WorkspaceId,
+    ) -> Result<Vec<OrgAuditEntry>, OrgMutationError> {
+        let mut tx = begin_scoped(&self.pool, workspace).await?;
+        let rows = sqlx::query!(
+            "SELECT id, recorded_at, actor_id, action, target_id, detail \
+             FROM org_audit WHERE workspace_id = $1 ORDER BY id DESC",
+            workspace.as_uuid(),
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|_| OrgMutationError::Backend)?;
+        tx.commit().await.map_err(|_| OrgMutationError::Backend)?;
+        rows.into_iter()
+            .map(|r| {
+                Ok(OrgAuditEntry {
+                    id: r.id,
+                    recorded_at: r.recorded_at,
+                    actor_id: r.actor_id.to_string(),
+                    action: OrgAuditAction::parse(&r.action)
+                        .map_err(|_| OrgMutationError::Backend)?,
+                    target_id: r.target_id.map(|u| u.to_string()),
+                    detail: r.detail,
                 })
             })
             .collect()

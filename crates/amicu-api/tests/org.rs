@@ -1,18 +1,30 @@
 //! Integration tests for the Enterprise organization console (`/org/*`):
-//! membership, RBAC, and the audit log.
+//! membership, RBAC, and the audit log, under CLAIM-BOUND tenancy
+//! (andypalmi/amicu-planning#130).
+//!
+//! The workspace a caller acts in, and the coarse role they hold there, come
+//! entirely from the verified access token (`claims.wsid` / `claims.wsrole`) -
+//! there is no client-supplied workspace request header. Every token in the harness is
+//! minted for the shared test workspace `ORG` at the role that matches the actor
+//! seeded into the store, so the claim (read authorization) and the store
+//! (mutation authorization, re-checked in the store's own critical section)
+//! agree - except where a test deliberately makes them disagree to prove the
+//! store is authoritative for mutations.
 //!
 //! These exercise the full contract over the assembled `api_router`: the auth
-//! gate (401), the Enterprise tier gate (403), the first-Owner bootstrap, the
-//! happy-path membership CRUD, the per-role RBAC denials (a second, distinct
-//! 403), the last-Owner invariant (409), duplicate/unknown handling, and that
-//! every mutation lands a structured audit record.
+//! gate (401), the Enterprise tier gate (403), the happy-path membership CRUD,
+//! the per-role RBAC denials (a second, distinct 403), the last-Owner invariant
+//! (409), duplicate/unknown handling, that every mutation lands a structured
+//! audit record, and that a token minted for one workspace can only ever see
+//! that workspace.
 
 // `Duration::from_mins` is unstable on our MSRV 1.97; keep `from_secs`.
 #![allow(clippy::duration_suboptimal_units)]
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use amicu_api::org::{AuditAction, OrgStore, OrgStoreError};
 use amicu_api::{
     AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore, OrgApiState,
     RateLimiter, SessionApiState, api_router,
@@ -24,7 +36,8 @@ use amicu_auth::user::InMemoryUserStore;
 use amicu_auth::verifier::StaticJwksProvider;
 use amicu_auth::verify::InMemoryVerifyStore;
 use amicu_auth::{
-    AuthService, IssuerConfig, Keyring, SigningKey, Tier, TokenIssuer, Verifier, VerifierConfig,
+    AuthService, IssuerConfig, Keyring, Role, SigningKey, Tier, TokenIssuer, Verifier,
+    VerifierConfig,
 };
 use amicu_store::WorkspaceId;
 use axum::Router;
@@ -34,10 +47,13 @@ use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-/// The single-tenant workspace every test in this file operates in unless it
-/// explicitly exercises multi-tenant scoping (in which case it sends the
-/// `X-Amicu-Workspace-Id` header and constructs its own distinct ids).
-const ORG: WorkspaceId = WorkspaceId::DEFAULT;
+/// The shared test workspace every token in the harness is scoped to, and where
+/// the harness seeds its member cast. Stable within a process run (which is all
+/// the harness needs: it mints the tokens and seeds the store with the same id).
+static ORG: LazyLock<WorkspaceId> = LazyLock::new(WorkspaceId::new);
+/// A DISTINCT workspace, for the cross-tenant isolation tests: a token minted
+/// for `OTHER` can only ever see `OTHER`, never `ORG`.
+static OTHER: LazyLock<WorkspaceId> = LazyLock::new(WorkspaceId::new);
 
 const ISS: &str = "https://issuer.test";
 const AUD: &str = "amicu-api";
@@ -46,18 +62,19 @@ const OWNER: &str = "usr_owner";
 const ADMIN: &str = "usr_admin";
 const MEMBER: &str = "usr_member";
 const VIEWER: &str = "usr_viewer";
-const OUTSIDER: &str = "usr_outsider";
+const OTHER_OWNER: &str = "usr_other_owner";
 
-/// Tokens for the fixed test cast, all signed by the harness's one key. The
-/// `*_tok` fields are Enterprise tokens (they pass the tier gate); `pro_tok` is a
-/// Pro token used to prove the tier gate turns a non-Enterprise caller away.
+/// Tokens for the fixed test cast, all signed by the harness's one key. Each is
+/// minted for `ORG` at the actor's role (so the claim matches the seeded store
+/// role), except `pro` (a Pro token that must fail the tier gate) and
+/// `other_owner` (an Enterprise Owner token scoped to `OTHER`).
 struct Tokens {
     owner: String,
     admin: String,
     member: String,
     viewer: String,
-    outsider: String,
     pro: String,
+    other_owner: String,
 }
 
 /// The assembled app plus the shared org store (so a test can seed members and
@@ -69,34 +86,27 @@ struct Harness {
 }
 
 /// Build the app with a fresh, empty org store. Tests seed the store through
-/// `store` before issuing requests; an empty store triggers the first-Owner
-/// bootstrap on first access.
+/// `store` before issuing requests.
 fn harness() -> Harness {
     let key = SigningKey::generate().expect("generate key");
     let keyring = Keyring::new(key);
     let issuer = TokenIssuer::new(IssuerConfig::new(ISS, AUD));
     let jwks = keyring.jwks();
 
-    // Mint every token before the keyring moves into the auth service.
-    let mint = |sub: &str, tier: Tier| {
+    // Mint every token before the keyring moves into the auth service. The
+    // workspace + role in each token are what the claim-bound gate trusts.
+    let mint = |sub: &str, ws: WorkspaceId, role: Role, tier: Tier| {
         issuer
-            .issue_access(
-                keyring.active(),
-                sub,
-                WorkspaceId::new(),
-                amicu_auth::Role::Owner,
-                tier,
-                Vec::new(),
-            )
+            .issue_access(keyring.active(), sub, ws, role, tier, Vec::new())
             .expect("mint token")
     };
     let tokens = Tokens {
-        owner: mint(OWNER, Tier::Enterprise),
-        admin: mint(ADMIN, Tier::Enterprise),
-        member: mint(MEMBER, Tier::Enterprise),
-        viewer: mint(VIEWER, Tier::Enterprise),
-        outsider: mint(OUTSIDER, Tier::Enterprise),
-        pro: mint("usr_pro", Tier::Pro),
+        owner: mint(OWNER, *ORG, Role::Owner, Tier::Enterprise),
+        admin: mint(ADMIN, *ORG, Role::Admin, Tier::Enterprise),
+        member: mint(MEMBER, *ORG, Role::Member, Tier::Enterprise),
+        viewer: mint(VIEWER, *ORG, Role::Viewer, Tier::Enterprise),
+        pro: mint("usr_pro", *ORG, Role::Owner, Tier::Pro),
+        other_owner: mint(OTHER_OWNER, *OTHER, Role::Owner, Tier::Enterprise),
     };
 
     let service = Arc::new(AuthService::new(
@@ -140,12 +150,10 @@ fn harness() -> Harness {
     }
 }
 
-use amicu_api::org::{OrgStore, Role};
-
-/// Seed a member directly into the default-workspace store (bypassing RBAC),
-/// for arranging a test.
-async fn seed(store: &InMemoryOrgStore, user_id: &str, role: Role) {
-    assert!(store.add_member(ORG, user_id, role).await, "seed {user_id}");
+/// Seed a member directly into a workspace's store (bypassing RBAC), for
+/// arranging a test.
+fn seed(store: &InMemoryOrgStore, ws: WorkspaceId, user_id: &str, role: Role) {
+    assert!(store.add_member_seed(ws, user_id, role), "seed {user_id}");
 }
 
 async fn send(app: &Router, req: Request<Body>) -> (StatusCode, Value) {
@@ -187,28 +195,6 @@ fn delete(path: &str, token: &str) -> Request<Body> {
         .unwrap()
 }
 
-/// A `GET` request naming a specific organization via the workspace header.
-fn get_ws(path: &str, token: &str, ws: WorkspaceId) -> Request<Body> {
-    Request::builder()
-        .method("GET")
-        .uri(path)
-        .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .header("x-amicu-workspace-id", ws.to_string())
-        .body(Body::empty())
-        .unwrap()
-}
-
-/// A request with a raw (possibly malformed) workspace header value.
-fn get_ws_raw(path: &str, token: &str, raw: &str) -> Request<Body> {
-    Request::builder()
-        .method("GET")
-        .uri(path)
-        .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .header("x-amicu-workspace-id", raw)
-        .body(Body::empty())
-        .unwrap()
-}
-
 // ---------------------------------------------------------------------------
 // Auth + tier gate
 // ---------------------------------------------------------------------------
@@ -217,6 +203,13 @@ fn get_ws_raw(path: &str, token: &str, raw: &str) -> Request<Body> {
 async fn members_unauthenticated_is_401() {
     let h = harness();
     let (status, _) = send(&h.app, get("/org/members", None)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn invalid_token_is_401() {
+    let h = harness();
+    let (status, _) = send(&h.app, get("/org/members", Some("not-a-real-token"))).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
@@ -230,12 +223,13 @@ async fn members_below_enterprise_is_403_tier() {
 }
 
 // ---------------------------------------------------------------------------
-// First-Owner bootstrap + happy-path list
+// Happy-path list (the caller's claim role is surfaced as caller_role)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn first_enterprise_caller_bootstraps_as_owner() {
-    let h = harness(); // empty store
+async fn owner_lists_members_with_own_claim_role() {
+    let h = harness();
+    seed(&h.store, *ORG, OWNER, Role::Owner);
     let (status, body) = send(&h.app, get("/org/members", Some(&h.tokens.owner))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["caller_role"], "owner");
@@ -243,21 +237,31 @@ async fn first_enterprise_caller_bootstraps_as_owner() {
     assert_eq!(members.len(), 1);
     assert_eq!(members[0]["user_id"], OWNER);
     assert_eq!(members[0]["role"], "owner");
-    // The bootstrap was audited.
-    let (_, audit) = send(&h.app, get("/org/audit", Some(&h.tokens.owner))).await;
-    let entries = audit["entries"].as_array().unwrap();
-    assert!(entries.iter().any(|e| e["action"] == "org.bootstrapped"));
 }
 
+// ---------------------------------------------------------------------------
+// The store is authoritative for mutations, even when a claim disagrees
+// ---------------------------------------------------------------------------
+
 #[tokio::test]
-async fn enterprise_non_member_is_403_rbac() {
+async fn mutation_is_refused_when_actor_absent_from_store() {
+    // The owner token claims role=Owner in ORG, but the store has no such
+    // member: the mutation re-reads the actor fresh under its own lock and
+    // refuses (the claim never authorizes a mutation on its own).
     let h = harness();
-    // Org already has an Owner, so the outsider is NOT bootstrapped and is not a
-    // member: an RBAC 403 (distinct message from the tier 403).
-    seed(&h.store, OWNER, Role::Owner).await;
-    let (status, body) = send(&h.app, get("/org/members", Some(&h.tokens.outsider))).await;
+    let (status, body) = send(
+        &h.app,
+        body_req(
+            "POST",
+            "/org/members",
+            &h.tokens.owner,
+            &json!({ "user_id": MEMBER, "role": "member" }),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(body["error"].as_str().unwrap().contains("not a member"));
+    assert_eq!(h.store.role_of(*ORG, MEMBER), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +271,7 @@ async fn enterprise_non_member_is_403_rbac() {
 #[tokio::test]
 async fn owner_adds_member_then_lists_and_audits() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
 
     let (status, body) = send(
         &h.app,
@@ -286,7 +290,7 @@ async fn owner_adds_member_then_lists_and_audits() {
     // The list now has both, and the store agrees.
     let (_, list) = send(&h.app, get("/org/members", Some(&h.tokens.owner))).await;
     assert_eq!(list["members"].as_array().unwrap().len(), 2);
-    assert_eq!(h.store.role_of(ORG, MEMBER).await, Some(Role::Member));
+    assert_eq!(h.store.role_of(*ORG, MEMBER), Some(Role::Member));
 
     // The add was audited (most-recent first).
     let (_, audit) = send(&h.app, get("/org/audit", Some(&h.tokens.owner))).await;
@@ -299,8 +303,8 @@ async fn owner_adds_member_then_lists_and_audits() {
 #[tokio::test]
 async fn owner_changes_role() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
-    seed(&h.store, MEMBER, Role::Member).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *ORG, MEMBER, Role::Member);
 
     let (status, body) = send(
         &h.app,
@@ -314,14 +318,14 @@ async fn owner_changes_role() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["role"], "admin");
-    assert_eq!(h.store.role_of(ORG, MEMBER).await, Some(Role::Admin));
+    assert_eq!(h.store.role_of(*ORG, MEMBER), Some(Role::Admin));
 }
 
 #[tokio::test]
 async fn owner_removes_member() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
-    seed(&h.store, MEMBER, Role::Member).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *ORG, MEMBER, Role::Member);
 
     let (status, body) = send(
         &h.app,
@@ -330,21 +334,21 @@ async fn owner_removes_member() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["user_id"], MEMBER);
-    assert_eq!(h.store.role_of(ORG, MEMBER).await, None);
+    assert_eq!(h.store.role_of(*ORG, MEMBER), None);
 }
 
 // ---------------------------------------------------------------------------
-// RBAC denials (a second, distinct 403)
+// RBAC denials (a second, distinct 403), re-checked against the store
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn member_cannot_remove_anyone_403() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
-    seed(&h.store, MEMBER, Role::Member).await;
-    seed(&h.store, VIEWER, Role::Viewer).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *ORG, MEMBER, Role::Member);
+    seed(&h.store, *ORG, VIEWER, Role::Viewer);
 
-    // A Member has no membership-management permission.
+    // A Member has no membership-management permission (re-checked in the store).
     let (status, body) = send(
         &h.app,
         delete(&format!("/org/members/{VIEWER}"), &h.tokens.member),
@@ -352,15 +356,14 @@ async fn member_cannot_remove_anyone_403() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(body["error"].as_str().unwrap().contains("may not manage"));
-    // Nothing was removed.
-    assert_eq!(h.store.role_of(ORG, VIEWER).await, Some(Role::Viewer));
+    assert_eq!(h.store.role_of(*ORG, VIEWER), Some(Role::Viewer));
 }
 
 #[tokio::test]
 async fn admin_cannot_grant_privileged_role_403() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
-    seed(&h.store, ADMIN, Role::Admin).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *ORG, ADMIN, Role::Admin);
 
     // An Admin may manage Members/Viewers but may not create an Admin/Owner.
     let (status, body) = send(
@@ -375,7 +378,7 @@ async fn admin_cannot_grant_privileged_role_403() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(body["error"].as_str().unwrap().contains("only an Owner"));
-    assert_eq!(h.store.role_of(ORG, MEMBER).await, None);
+    assert_eq!(h.store.role_of(*ORG, MEMBER), None);
 
     // But adding a plain Member is allowed.
     let (ok, _) = send(
@@ -394,11 +397,11 @@ async fn admin_cannot_grant_privileged_role_403() {
 #[tokio::test]
 async fn admin_cannot_remove_an_owner_403() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
     // A second owner so this is not blocked by the last-Owner invariant - it must
     // be blocked by RBAC (Admin may not touch a privileged member).
-    seed(&h.store, "usr_owner2", Role::Owner).await;
-    seed(&h.store, ADMIN, Role::Admin).await;
+    seed(&h.store, *ORG, "usr_owner2", Role::Owner);
+    seed(&h.store, *ORG, ADMIN, Role::Admin);
 
     let (status, _) = send(
         &h.app,
@@ -406,15 +409,16 @@ async fn admin_cannot_remove_an_owner_403() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(h.store.role_of(ORG, OWNER).await, Some(Role::Owner));
+    assert_eq!(h.store.role_of(*ORG, OWNER), Some(Role::Owner));
 }
 
 #[tokio::test]
 async fn member_cannot_view_audit_403() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
-    seed(&h.store, MEMBER, Role::Member).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *ORG, MEMBER, Role::Member);
 
+    // The audit gate uses the caller's claim role (Member) directly.
     let (status, body) = send(&h.app, get("/org/audit", Some(&h.tokens.member))).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(body["error"].as_str().unwrap().contains("audit log"));
@@ -423,9 +427,9 @@ async fn member_cannot_view_audit_403() {
 #[tokio::test]
 async fn viewer_cannot_mutate_membership_403() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
-    seed(&h.store, VIEWER, Role::Viewer).await;
-    seed(&h.store, MEMBER, Role::Member).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *ORG, VIEWER, Role::Viewer);
+    seed(&h.store, *ORG, MEMBER, Role::Member);
 
     // A Viewer has read-only access: every mutating action is a 403, and none
     // of them change the store.
@@ -440,7 +444,7 @@ async fn viewer_cannot_mutate_membership_403() {
     )
     .await;
     assert_eq!(add_status, StatusCode::FORBIDDEN);
-    assert_eq!(h.store.role_of(ORG, "usr_new").await, None);
+    assert_eq!(h.store.role_of(*ORG, "usr_new"), None);
 
     let (change_status, _) = send(
         &h.app,
@@ -453,7 +457,7 @@ async fn viewer_cannot_mutate_membership_403() {
     )
     .await;
     assert_eq!(change_status, StatusCode::FORBIDDEN);
-    assert_eq!(h.store.role_of(ORG, MEMBER).await, Some(Role::Member));
+    assert_eq!(h.store.role_of(*ORG, MEMBER), Some(Role::Member));
 
     let (remove_status, _) = send(
         &h.app,
@@ -461,14 +465,14 @@ async fn viewer_cannot_mutate_membership_403() {
     )
     .await;
     assert_eq!(remove_status, StatusCode::FORBIDDEN);
-    assert_eq!(h.store.role_of(ORG, MEMBER).await, Some(Role::Member));
+    assert_eq!(h.store.role_of(*ORG, MEMBER), Some(Role::Member));
 }
 
 #[tokio::test]
 async fn viewer_cannot_view_audit_403() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
-    seed(&h.store, VIEWER, Role::Viewer).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *ORG, VIEWER, Role::Viewer);
 
     let (status, body) = send(&h.app, get("/org/audit", Some(&h.tokens.viewer))).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -478,8 +482,8 @@ async fn viewer_cannot_view_audit_403() {
 #[tokio::test]
 async fn admin_cannot_self_escalate_to_owner_403() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
-    seed(&h.store, ADMIN, Role::Admin).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *ORG, ADMIN, Role::Admin);
 
     // An Admin granting themselves Owner is exactly the "grant a privileged
     // role" case an Admin may never perform, regardless of the target being
@@ -496,7 +500,7 @@ async fn admin_cannot_self_escalate_to_owner_403() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert!(body["error"].as_str().unwrap().contains("only an Owner"));
-    assert_eq!(h.store.role_of(ORG, ADMIN).await, Some(Role::Admin));
+    assert_eq!(h.store.role_of(*ORG, ADMIN), Some(Role::Admin));
 }
 
 // ---------------------------------------------------------------------------
@@ -506,7 +510,7 @@ async fn admin_cannot_self_escalate_to_owner_403() {
 #[tokio::test]
 async fn last_owner_cannot_be_removed_409() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
 
     let (status, body) = send(
         &h.app,
@@ -520,13 +524,13 @@ async fn last_owner_cannot_be_removed_409() {
             .unwrap()
             .contains("last remaining Owner")
     );
-    assert_eq!(h.store.role_of(ORG, OWNER).await, Some(Role::Owner));
+    assert_eq!(h.store.role_of(*ORG, OWNER), Some(Role::Owner));
 }
 
 #[tokio::test]
 async fn last_owner_cannot_be_demoted_409() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
 
     let (status, _) = send(
         &h.app,
@@ -539,14 +543,14 @@ async fn last_owner_cannot_be_demoted_409() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(h.store.role_of(ORG, OWNER).await, Some(Role::Owner));
+    assert_eq!(h.store.role_of(*ORG, OWNER), Some(Role::Owner));
 }
 
 #[tokio::test]
 async fn two_owners_allow_demoting_one() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
-    seed(&h.store, "usr_owner2", Role::Owner).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *ORG, "usr_owner2", Role::Owner);
 
     let (status, _) = send(
         &h.app,
@@ -559,14 +563,14 @@ async fn two_owners_allow_demoting_one() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(h.store.role_of(ORG, "usr_owner2").await, Some(Role::Member));
+    assert_eq!(h.store.role_of(*ORG, "usr_owner2"), Some(Role::Member));
 }
 
 #[tokio::test]
 async fn add_duplicate_member_is_409() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
-    seed(&h.store, MEMBER, Role::Member).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *ORG, MEMBER, Role::Member);
 
     let (status, body) = send(
         &h.app,
@@ -585,7 +589,7 @@ async fn add_duplicate_member_is_409() {
 #[tokio::test]
 async fn unknown_role_is_400() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
 
     let (status, body) = send(
         &h.app,
@@ -604,7 +608,7 @@ async fn unknown_role_is_400() {
 #[tokio::test]
 async fn change_role_unknown_member_is_404() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
 
     let (status, _) = send(
         &h.app,
@@ -622,7 +626,7 @@ async fn change_role_unknown_member_is_404() {
 #[tokio::test]
 async fn remove_unknown_member_is_404() {
     let h = harness();
-    seed(&h.store, OWNER, Role::Owner).await;
+    seed(&h.store, *ORG, OWNER, Role::Owner);
 
     let (status, _) = send(&h.app, delete("/org/members/usr_ghost", &h.tokens.owner)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -635,9 +639,8 @@ async fn remove_unknown_member_is_404() {
 #[tokio::test]
 async fn roles_catalog_lists_permissions() {
     let h = harness();
-    seed(&h.store, VIEWER, Role::Viewer).await;
 
-    // Any member (even a Viewer) may read the RBAC catalog.
+    // Any Enterprise token (even a Viewer's) may read the RBAC catalog.
     let (status, body) = send(&h.app, get("/org/roles", Some(&h.tokens.viewer))).await;
     assert_eq!(status, StatusCode::OK);
     let roles = body["roles"].as_array().unwrap();
@@ -662,7 +665,55 @@ async fn roles_catalog_lists_permissions() {
 }
 
 // ---------------------------------------------------------------------------
-// Multi-tenant scoping (organization id)
+// Claim-bound cross-tenant isolation (no header: a token names its own ws)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_token_only_ever_sees_its_own_workspace() {
+    let h = harness();
+    // ORG has two members; OTHER has one, seeded independently.
+    seed(&h.store, *ORG, OWNER, Role::Owner);
+    seed(&h.store, *ORG, MEMBER, Role::Member);
+    seed(&h.store, *OTHER, OTHER_OWNER, Role::Owner);
+
+    // The ORG-scoped owner token sees exactly ORG's two members.
+    let (status, body) = send(&h.app, get("/org/members", Some(&h.tokens.owner))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["members"].as_array().unwrap().len(), 2);
+
+    // The OTHER-scoped owner token sees exactly OTHER's one member - never ORG's.
+    let (status_b, body_b) = send(&h.app, get("/org/members", Some(&h.tokens.other_owner))).await;
+    assert_eq!(status_b, StatusCode::OK);
+    let other_members = body_b["members"].as_array().unwrap();
+    assert_eq!(other_members.len(), 1);
+    assert_eq!(other_members[0]["user_id"], OTHER_OWNER);
+}
+
+#[tokio::test]
+async fn a_mutation_lands_only_in_the_tokens_workspace() {
+    let h = harness();
+    seed(&h.store, *OTHER, OTHER_OWNER, Role::Owner);
+
+    // The OTHER-scoped owner adds a member; it can only ever land in OTHER.
+    let (status, _) = send(
+        &h.app,
+        body_req(
+            "POST",
+            "/org/members",
+            &h.tokens.other_owner,
+            &json!({ "user_id": "usr_new", "role": "member" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(h.store.role_of(*OTHER, "usr_new"), Some(Role::Member));
+    // ORG is untouched (the token could not name it).
+    assert_eq!(h.store.role_of(*ORG, "usr_new"), None);
+    assert_eq!(h.store.member_count(*ORG), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Store-level tenant isolation
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -671,8 +722,8 @@ async fn distinct_workspaces_are_isolated_in_the_store() {
     let ws_a = WorkspaceId::new();
     let ws_b = WorkspaceId::new();
 
-    assert!(store.add_member(ws_a, "usr_a_owner", Role::Owner).await);
-    assert!(store.add_member(ws_b, "usr_b_owner", Role::Owner).await);
+    assert!(store.add_member_seed(ws_a, "usr_a_owner", Role::Owner));
+    assert!(store.add_member_seed(ws_b, "usr_b_owner", Role::Owner));
 
     store
         .add_member_audited(ws_a, "usr_a_owner", "usr_a_member", Role::Member)
@@ -680,67 +731,15 @@ async fn distinct_workspaces_are_isolated_in_the_store() {
         .expect("add into workspace a");
 
     // Workspace B never sees workspace A's members or audit trail.
-    assert_eq!(store.member_count(ws_a).await, 2);
-    assert_eq!(store.member_count(ws_b).await, 1);
-    assert_eq!(store.role_of(ws_b, "usr_a_member").await, None);
+    assert_eq!(store.member_count(ws_a), 2);
+    assert_eq!(store.member_count(ws_b), 1);
+    assert_eq!(store.role_of(ws_b, "usr_a_member"), None);
     assert!(store.audit(ws_b).await.is_empty());
     assert_eq!(store.audit(ws_a).await.len(), 1);
 
     // A caller who is a member of A is not automatically a member of B, even
     // with the same user id.
-    assert_eq!(store.role_of(ws_b, "usr_a_owner").await, None);
-}
-
-#[tokio::test]
-async fn non_default_workspace_header_scopes_the_api_and_disables_bootstrap() {
-    let h = harness();
-    let ws_a = WorkspaceId::new();
-    let ws_b = WorkspaceId::new();
-
-    // Seed workspace A only, out-of-band (as documented: a non-default
-    // workspace's first member cannot be created via HTTP bootstrap).
-    assert!(h.store.add_member(ws_a, OWNER, Role::Owner).await);
-
-    // The Enterprise caller can see workspace A's membership through the
-    // header.
-    let (status, body) = send(&h.app, get_ws("/org/members", &h.tokens.owner, ws_a)).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["members"].as_array().unwrap().len(), 1);
-
-    // The *same* caller, naming empty workspace B, is not silently
-    // bootstrapped into Owner there - the read-endpoint 403 is the same "not
-    // a member" RBAC denial as any other non-member, not a tier error.
-    let (status_b, body_b) = send(&h.app, get_ws("/org/members", &h.tokens.owner, ws_b)).await;
-    assert_eq!(status_b, StatusCode::FORBIDDEN);
-    assert!(body_b["error"].as_str().unwrap().contains("not a member"));
-    assert_eq!(h.store.member_count(ws_b).await, 0);
-}
-
-#[tokio::test]
-async fn malformed_workspace_header_is_400() {
-    let h = harness();
-    let (status, body) = send(
-        &h.app,
-        get_ws_raw("/org/members", &h.tokens.owner, "not-a-uuid"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(body["error"].as_str().unwrap().contains("workspace"));
-}
-
-#[tokio::test]
-async fn invalid_token_with_malformed_workspace_header_is_401_not_400() {
-    let h = harness();
-    // Cryptographic token verification runs before the workspace-header
-    // format check (auth-before-request-shape): an invalid/expired token
-    // must win with 401 even when the header is also malformed, never a 400
-    // that leaks "your header was wrong" ahead of "you aren't authenticated".
-    let (status, _) = send(
-        &h.app,
-        get_ws_raw("/org/members", "not-a-real-token", "not-a-uuid"),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(store.role_of(ws_b, "usr_a_owner"), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -749,14 +748,15 @@ async fn invalid_token_with_malformed_workspace_header_is_401_not_400() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_removes_of_same_member_are_atomic_with_audit() {
+    let ws = WorkspaceId::new();
     let store = Arc::new(InMemoryOrgStore::new());
-    seed(&store, OWNER, Role::Owner).await;
-    seed(&store, MEMBER, Role::Member).await;
+    seed(&store, ws, OWNER, Role::Owner);
+    seed(&store, ws, MEMBER, Role::Member);
 
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..32 {
         let store = store.clone();
-        tasks.spawn(async move { store.remove_member_audited(ORG, OWNER, MEMBER).await });
+        tasks.spawn(async move { store.remove_member_audited(ws, OWNER, MEMBER).await });
     }
     let mut oks = 0usize;
     let mut not_found = 0usize;
@@ -766,7 +766,7 @@ async fn concurrent_removes_of_same_member_are_atomic_with_audit() {
                 assert_eq!(role, Role::Member);
                 oks += 1;
             }
-            Err(amicu_api::org::OrgStoreError::NotFound) => not_found += 1,
+            Err(OrgStoreError::NotFound) => not_found += 1,
             Err(other) => panic!("unexpected store error: {other:?}"),
         }
     }
@@ -776,48 +776,18 @@ async fn concurrent_removes_of_same_member_are_atomic_with_audit() {
     // state.
     assert_eq!(oks, 1, "exactly one concurrent remove should succeed");
     assert_eq!(not_found, 31);
-    assert_eq!(store.role_of(ORG, MEMBER).await, None);
+    assert_eq!(store.role_of(ws, MEMBER), None);
 
     // No mutation without an audit record, and no audit record without the
     // matching mutation: exactly one, never zero, never doubled.
-    let audit = store.audit(ORG).await;
+    let audit = store.audit(ws).await;
     let removals = audit
         .iter()
         .filter(|e| {
-            e.action == amicu_api::org::AuditAction::MemberRemoved
-                && e.target_id.as_deref() == Some(MEMBER)
+            e.action == AuditAction::MemberRemoved && e.target_id.as_deref() == Some(MEMBER)
         })
         .count();
     assert_eq!(removals, 1, "exactly one audit record for the one removal");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_bootstrap_is_atomic_with_audit() {
-    let store = Arc::new(InMemoryOrgStore::new());
-
-    let mut tasks = tokio::task::JoinSet::new();
-    for _ in 0..32 {
-        let store = store.clone();
-        tasks.spawn(async move { store.bootstrap_owner(ORG, OWNER).await });
-    }
-    let mut wins = 0usize;
-    while let Some(res) = tasks.join_next().await {
-        if res.expect("task panicked") {
-            wins += 1;
-        }
-    }
-    assert_eq!(wins, 1, "exactly one concurrent bootstrap should win");
-    assert_eq!(store.member_count(ORG).await, 1);
-
-    let audit = store.audit(ORG).await;
-    let bootstraps = audit
-        .iter()
-        .filter(|e| e.action == amicu_api::org::AuditAction::OrgBootstrapped)
-        .count();
-    assert_eq!(
-        bootstraps, 1,
-        "exactly one audit record for the one bootstrap"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -830,20 +800,21 @@ async fn concurrent_admin_remove_races_owner_promotion_closes_the_toctou() {
     // two admissible outcomes - it can never observe the pre-promotion role
     // to authorize a removal that actually executes post-promotion.
     for _ in 0..200 {
+        let ws = WorkspaceId::new();
         let store = Arc::new(InMemoryOrgStore::new());
-        seed(&store, OWNER, Role::Owner).await;
-        seed(&store, ADMIN, Role::Admin).await;
-        seed(&store, MEMBER, Role::Member).await;
+        seed(&store, ws, OWNER, Role::Owner);
+        seed(&store, ws, ADMIN, Role::Admin);
+        seed(&store, ws, MEMBER, Role::Member);
 
         let remove_store = store.clone();
         let remove =
             tokio::spawn(
-                async move { remove_store.remove_member_audited(ORG, ADMIN, MEMBER).await },
+                async move { remove_store.remove_member_audited(ws, ADMIN, MEMBER).await },
             );
         let promote_store = store.clone();
         let promote = tokio::spawn(async move {
             promote_store
-                .set_role_audited(ORG, OWNER, MEMBER, Role::Admin)
+                .set_role_audited(ws, OWNER, MEMBER, Role::Admin)
                 .await
         });
 
@@ -855,14 +826,14 @@ async fn concurrent_admin_remove_races_owner_promotion_closes_the_toctou() {
             // Remove was serialized first: it correctly removed the
             // still-unprivileged Member, and the promotion correctly finds no
             // such member afterward.
-            (Ok(removed_role), Err(amicu_api::org::OrgStoreError::NotFound)) => {
+            (Ok(removed_role), Err(OrgStoreError::NotFound)) => {
                 assert_eq!(removed_role, Role::Member);
             }
-            // Promote was serialized first: it landed (Member → Admin), and
+            // Promote was serialized first: it landed (Member -> Admin), and
             // the remove correctly observed the now-privileged target and
             // refused it - this is the exact case the old two-phase
             // lock+lock code could get wrong.
-            (Err(amicu_api::org::OrgStoreError::Forbidden(_)), Ok(prev_role)) => {
+            (Err(OrgStoreError::Forbidden(_)), Ok(prev_role)) => {
                 assert_eq!(prev_role, Role::Member);
             }
             other => panic!(
@@ -886,21 +857,20 @@ async fn concurrent_owner_removal_races_actors_own_privileged_mutation_closes_th
     // execute *after* the removal has landed while still carrying the
     // Admin's stale, pre-removal authorization.
     for i in 0..200 {
+        let ws = WorkspaceId::new();
         let store = Arc::new(InMemoryOrgStore::new());
-        seed(&store, OWNER, Role::Owner).await;
-        seed(&store, ADMIN, Role::Admin).await;
+        seed(&store, ws, OWNER, Role::Owner);
+        seed(&store, ws, ADMIN, Role::Admin);
         let new_member = format!("usr_new_{i}");
 
         let remove_store = store.clone();
         let remove =
-            tokio::spawn(
-                async move { remove_store.remove_member_audited(ORG, OWNER, ADMIN).await },
-            );
+            tokio::spawn(async move { remove_store.remove_member_audited(ws, OWNER, ADMIN).await });
         let add_store = store.clone();
         let new_member_for_add = new_member.clone();
         let add = tokio::spawn(async move {
             add_store
-                .add_member_audited(ORG, ADMIN, &new_member_for_add, Role::Member)
+                .add_member_audited(ws, ADMIN, &new_member_for_add, Role::Member)
                 .await
         });
 
@@ -925,10 +895,8 @@ async fn concurrent_owner_removal_races_actors_own_privileged_mutation_closes_th
             Ok(role) => assert_eq!(*role, Role::Member),
             // Serialized after the removal landed: the actor is no longer a
             // member at all, so the add must be refused - never silently
-            // authorized against the stale, pre-removal Admin role. This is
-            // exactly the case the old "pass a pre-resolved `Role` into the
-            // store" code could get wrong.
-            Err(amicu_api::org::OrgStoreError::Forbidden(msg)) => {
+            // authorized against the stale, pre-removal Admin role.
+            Err(OrgStoreError::Forbidden(msg)) => {
                 assert!(msg.contains("not a member"));
             }
             Err(other) => panic!("unexpected add outcome: {other:?}"),
@@ -936,7 +904,7 @@ async fn concurrent_owner_removal_races_actors_own_privileged_mutation_closes_th
 
         // Whichever ordering occurred, the new member exists iff the add's
         // own result said so - never orphaned, never phantom.
-        let is_member = store.role_of(ORG, &new_member).await.is_some();
+        let is_member = store.role_of(ws, &new_member).is_some();
         assert_eq!(is_member, add_succeeded);
     }
 }
