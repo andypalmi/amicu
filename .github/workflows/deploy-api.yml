@@ -5,15 +5,17 @@ name: Deploy API (Cloud Run)
 # amicu's names from amicu-infra's envs/prod/outputs.tf (see
 # docs/deploy/cloud-run.md for the full vars/secrets table).
 on:
-  push:
-    branches: [main]
-    paths:
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "Dockerfile"
-      - ".github/workflows/deploy-api.yml"
   workflow_dispatch:
+  # Runs after CI (.github/workflows/ci.yml, `name: CI`) finishes on `main`,
+  # rather than on push directly — deploys only ever ship a commit CI has
+  # already validated (build/clippy/test/audit/docker build). workflow_run
+  # doesn't support `paths:` filters (see docs/deploy/cloud-run.md), so this
+  # runs on every successful `main` CI run, not just ones touching
+  # crates/**/Cargo.*/Dockerfile.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
 
 concurrency:
   # Repo-wide, not per-ref: only one Cloud Run rollout (migrate + deploy) in
@@ -31,6 +33,7 @@ jobs:
     name: Build, migrate, deploy
     runs-on: ubuntu-latest
     environment: production
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     env:
       REGION: ${{ vars.GCP_REGION }}
       # amicu-infra's module.gcp_project.artifact_registry_path output, e.g.
@@ -41,8 +44,16 @@ jobs:
       # resources use. Hardcoded, not a repo variable: this is a fixed
       # Terraform-module default, not something meant to vary per deploy.
       IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/amicu/amicu-api
+      # Under workflow_run, plain `github.sha` is the default branch's HEAD
+      # at event time, not necessarily the exact commit CI validated (usually
+      # the same, but not guaranteed) — head_sha is that exact commit.
+      # workflow_dispatch has no workflow_run context, hence the fallback.
+      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
 
       - id: auth
         name: Authenticate to GCP (Workload Identity Federation)
@@ -65,10 +76,10 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:${{ env.SHA }}
             ${{ env.IMAGE }}:latest
           build-args: |
-            GIT_REVISION=${{ github.sha }}
+            GIT_REVISION=${{ env.SHA }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -87,7 +98,7 @@ jobs:
         run: |
           gcloud run jobs update amicu-migrate \
             --region "${REGION}" \
-            --image "${{ env.IMAGE }}:${{ github.sha }}"
+            --image "${{ env.IMAGE }}:${{ env.SHA }}"
           gcloud run jobs execute amicu-migrate \
             --region "${REGION}" \
             --wait
@@ -105,4 +116,4 @@ jobs:
         run: |
           gcloud run deploy amicu-api \
             --region "${REGION}" \
-            --image "${{ env.IMAGE }}:${{ github.sha }}"
+            --image "${{ env.IMAGE }}:${{ env.SHA }}"

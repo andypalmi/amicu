@@ -12,12 +12,17 @@ name: Deploy Web (Cloudflare Workers)
 # `production` GitHub environment as deploy-api.yml (required reviewer),
 # where safecheck-frontend's own deploy job has no environment gate at all.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "web/**"
-      - ".github/workflows/deploy-web.yml"
   workflow_dispatch:
+  # Runs after CI (.github/workflows/ci.yml, `name: CI`) finishes on `main`,
+  # rather than on push directly — deploys only ever ship a commit CI has
+  # already validated (build/clippy/test/audit/docker build, plus the `web`
+  # job's lint/typecheck/build). workflow_run doesn't support `paths:`
+  # filters (see docs/deploy/cloud-run.md), so this runs on every successful
+  # `main` CI run, not just ones touching web/**.
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
 
 concurrency:
   group: deploy-web
@@ -31,11 +36,15 @@ jobs:
     name: Build & deploy OpenNext Worker
     runs-on: ubuntu-latest
     environment: production
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     defaults:
       run:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
 
       # Activates the `packageManager` pin in web/package.json
       # ("pnpm@11.22.0") via Node 22's built-in corepack, same pin CI's

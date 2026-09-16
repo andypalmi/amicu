@@ -49,10 +49,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=planner /app/recipe.json recipe.json
-# The repo commits crates/*/.sqlx (`cargo sqlx prepare --workspace`), so
-# `sqlx::query!`/`query_as!` verify against that offline cache instead of
-# connecting to a live Postgres at build time — required here since the
-# build has no DATABASE_URL and no network path to one.
+# The repo commits the root-level .sqlx/ cache (`cargo sqlx prepare
+# --workspace`), so `sqlx::query!`/`query_as!` verify against that offline
+# cache instead of connecting to a live Postgres at build time — required
+# here since the build has no DATABASE_URL and no network path to one.
 ENV SQLX_OFFLINE=true
 # Dependency-only layer: cached across builds whose recipe.json (i.e.
 # Cargo.lock + every crate's Cargo.toml) is unchanged, independent of source
