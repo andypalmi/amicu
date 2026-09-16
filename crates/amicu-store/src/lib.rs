@@ -59,6 +59,16 @@
 //! snapshots, history, and the lock lease that mediates concurrent writes.
 //! It follows the same workspace-scoping convention as the auth stores, plus
 //! a second `stack_id` predicate (see the module docs).
+//!
+//! # Email outbox
+//!
+//! [`outbox`] is the durable transactional outbox behind every verification /
+//! password-reset / account-exists email (andypalmi/amicu-planning#141). The
+//! request path only ever *enqueues* (one constant-cost `INSERT`, joinable to
+//! the caller's own transaction via [`outbox::enqueue`]); the SMTP send happens
+//! later inside `POST /internal/outbox/drain`, driven by Cloud Scheduler, where
+//! Cloud Run actually allocates CPU. Like the auth token tables it is GLOBAL and
+//! carries no row-level security - see `migrations/0015_email_outbox.sql`.
 
 use std::time::Duration;
 
@@ -74,6 +84,7 @@ use uuid::Uuid;
 pub mod config;
 pub mod invite;
 pub mod membership;
+pub mod outbox;
 pub mod ratelimit;
 pub mod refresh;
 pub mod reset;
@@ -86,6 +97,10 @@ pub use config::{ConfigStore, InMemoryConfigStore, PostgresConfigStore};
 pub use invite::{AcceptedInvite, Invite, InviteError, PostgresInviteStore};
 pub use membership::{
     Member, OrgAuditAction, OrgAuditEntry, OrgMutationError, PostgresMembershipStore, Role,
+};
+pub use outbox::{
+    ClaimedEmail, FailureOutcome, NewOutboxEmail, OutboxStore, PostgresOutboxNotifier,
+    PostgresOutboxStore,
 };
 pub use ratelimit::PostgresRateLimitStore;
 pub use refresh::PostgresRefreshStore;

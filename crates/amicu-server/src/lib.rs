@@ -117,6 +117,10 @@
 //! | `signing_key_pem_file` | `--signing-key-pem-file` | `AMICU_SIGNING_KEY_PEM_FILE` | none |
 //! | `signing_keys_retiring_pem` | `--signing-keys-retiring-pem` | `AMICU_SIGNING_KEYS_RETIRING_PEM` | none |
 //! | `signing_keys_retiring_pem_file` | `--signing-keys-retiring-pem-file` | `AMICU_SIGNING_KEYS_RETIRING_PEM_FILE` | none |
+//! | `internal_audience` | `--internal-audience` | `AMICU_INTERNAL_AUDIENCE` | the effective `base_url` |
+//! | `internal_caller_emails` | `--internal-caller-emails` | `AMICU_INTERNAL_CALLER_EMAILS` | empty (OIDC drain auth OFF) |
+//! | `outbox_drain_batch_size` | `--outbox-drain-batch-size` | `AMICU_OUTBOX_DRAIN_BATCH_SIZE` | `50` |
+//! | `outbox_drain_budget_ms` | `--outbox-drain-budget-ms` | `AMICU_OUTBOX_DRAIN_BUDGET_MS` | `20000` |
 //!
 //! `environment` (see [`Environment`]) gates production safety checks: a
 //! missing `DATABASE_URL` and an RLS-bypassing connected role are hard startup
@@ -139,6 +143,40 @@
 //! common case outside "cargo run on your own machine". Restore the old
 //! loopback-only default explicitly with `AMICU_BIND=127.0.0.1:8080` (or
 //! `--bind`) if you want it back.
+//!
+//! # Email outbox + the scheduler contract (andypalmi/amicu-planning#141)
+//!
+//! Cloud Run throttles a container's CPU to near-zero the moment a response is
+//! written, so the old pattern of `tokio::spawn`-ing the SMTP send after the
+//! response returned lost mail. Transactional email is now PERSISTED at request
+//! time into `email_outbox` (see [`amicu_store::outbox`]) - on the Postgres
+//! path the auth flows' notifier IS that queue - and actually delivered by
+//! `POST /internal/outbox/drain`, INSIDE a request, where CPU is allocated.
+//!
+//! The scheduler contract, matching `amicu-infra/modules/scheduler`:
+//!
+//! | | |
+//! |---|---|
+//! | Method + path | `POST {service_url}/internal/outbox/drain` |
+//! | Cadence | every minute (`* * * * *`), 30s attempt deadline |
+//! | Auth | `Authorization: Bearer <Google-signed OIDC ID token>` |
+//! | `iss` | `https://accounts.google.com` (or the bare `accounts.google.com`) |
+//! | `aud` | `AMICU_INTERNAL_AUDIENCE`, defaulting to the effective `base_url` - the Cloud Run SERVICE URL, **not** the `/internal/outbox/drain` path |
+//! | Caller | the token's verified `email` must be listed in `AMICU_INTERNAL_CALLER_EMAILS` |
+//! | Response | `200` + JSON counts (`claimed`/`sent`/`failed`/`dead_lettered`/`budget_exhausted`) |
+//!
+//! A self-hoster with no Google identity can instead set the
+//! `AMICU_INTERNAL_TOKEN` **environment variable** (env only - never a flag: a
+//! flag value is visible in the process argument list) and present it as a
+//! static bearer token; it is compared in constant time. Both mechanisms may be
+//! configured at once. With NEITHER configured the endpoint answers `503` and
+//! the bootstrap says so loudly at startup - in `production` it additionally
+//! warns that queued mail will pile up undelivered. The route is deliberately
+//! absent from the generated OpenAPI document, exactly like `/healthz`.
+//!
+//! `amicu-server outbox-drain` runs one pass from the command line through the
+//! same [`amicu_api::drain_once`], for local development or a cron-driven
+//! self-host. See [`outbox_drain`].
 //!
 //! # Billing (Stripe) - env only
 //!
@@ -202,13 +240,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use amicu_api::{
-    AuthApiState, BillingApiState, ConfigApiState, EdgeGateState, EdgeTrust, EngineApiState,
-    HealthApiState, InMemoryOrgStore, InMemoryRateLimiter, OrgApiState, OrgStore,
-    PostgresRateLimiter, PostgresTenancyStore, ProxyParseError, RateLimiter, SessionApiState,
-    TenancyStore, TrustedProxies, api_router, edge_token_gate, health_router,
-    stripe_config_from_env,
+    AuthApiState, BillingApiState, ConfigApiState, DrainAuth, EdgeGateState, EdgeTrust,
+    EngineApiState, HealthApiState, InMemoryOrgStore, InMemoryRateLimiter, OrgApiState, OrgStore,
+    OutboxApiState, PostgresRateLimiter, PostgresTenancyStore, ProxyParseError, RateLimiter,
+    SessionApiState, TenancyStore, TrustedProxies, api_router, edge_token_gate, health_router,
+    outbox_router, stripe_config_from_env,
 };
 use amicu_auth::Tier;
+use amicu_auth::google::{GoogleIdTokenConfig, GoogleIdTokenVerifier, HttpGoogleCertsSource};
 use amicu_auth::issuer::{IssuerConfig, TokenIssuer};
 use amicu_auth::membership::MembershipStore;
 use amicu_auth::notify::{LoggingNotifier, Notifier};
@@ -396,6 +435,45 @@ pub struct Config {
         hide_env_values = true
     )]
     pub signing_keys_retiring_pem_file: Option<String>,
+
+    /// Required `aud` claim on the Google-issued OIDC ID token that
+    /// authenticates `POST /internal/outbox/drain`
+    /// (andypalmi/amicu-planning#141). Defaults to the effective `base_url`
+    /// when unset, which is what `amicu-infra`'s `modules/scheduler` mints by
+    /// default (the Cloud Run SERVICE URL - not the `/internal/outbox/drain`
+    /// path - matching Google's own documented pattern).
+    #[arg(long, env = "AMICU_INTERNAL_AUDIENCE")]
+    pub internal_audience: Option<String>,
+
+    /// Comma-separated allowlist of `email` claims accepted on that OIDC
+    /// token: the Cloud Scheduler invoker service account(s), e.g.
+    /// `amicu-scheduler@<project>.iam.gserviceaccount.com`. Empty (the
+    /// default) disables the OIDC path entirely - it never means "accept
+    /// anyone".
+    #[arg(long, env = "AMICU_INTERNAL_CALLER_EMAILS", default_value = "")]
+    pub internal_caller_emails: String,
+
+    /// Maximum number of queued emails one `POST /internal/outbox/drain`
+    /// request claims and attempts. Clamped to a sane range by
+    /// [`amicu_api::OutboxApiState::with_batch_size`]; whatever is left over
+    /// is picked up by the next invocation a minute later.
+    #[arg(
+        long,
+        env = "AMICU_OUTBOX_DRAIN_BATCH_SIZE",
+        default_value_t = amicu_api::DEFAULT_DRAIN_BATCH_SIZE
+    )]
+    pub outbox_drain_batch_size: u32,
+
+    /// Wall-clock budget for one `POST /internal/outbox/drain` request, in
+    /// milliseconds. The drain stops claiming and sending once this is spent
+    /// and returns partial counts, so it always answers well inside Cloud
+    /// Scheduler's 30s attempt deadline.
+    #[arg(
+        long,
+        env = "AMICU_OUTBOX_DRAIN_BUDGET_MS",
+        default_value_t = amicu_api::DEFAULT_DRAIN_BUDGET_MS
+    )]
+    pub outbox_drain_budget_ms: u64,
 }
 
 /// Deployment environment gate (`AMICU_ENV`): whether production safety
@@ -964,7 +1042,9 @@ pub async fn build_app_with_database_url(
     }
     let edge_trust = EdgeTrust::new(edge_token, require_edge_token);
 
-    let base_url = config
+    // Also the default `aud` the outbox-drain OIDC verifier enforces (see
+    // `drain_auth`), so it is kept around rather than moved into the service.
+    let effective_base_url = config
         .base_url
         .clone()
         .unwrap_or_else(|| config.issuer.clone());
@@ -1010,32 +1090,16 @@ pub async fn build_app_with_database_url(
             )
         };
 
-    // Notifier selection. If ANY AMICU_SMTP_* variable is set, the operator has
-    // signaled intent to send real email: build the real mailer, and treat an
-    // incomplete required set (missing host or from) or a bad value as a HARD
-    // startup error via Error::Smtp. It must NOT silently fall back to the dev
-    // LoggingNotifier (which prints raw reset/verify tokens to stderr): that
-    // fallback in a deploy the operator believes is production SMTP is an
-    // account-takeover surface. Only when NO SMTP variable is set at all do we
-    // use the LoggingNotifier, for zero-config local runs and tests.
+    // Two notifiers, deliberately: the MAILER that actually sends (see
+    // `select_mailer`), and the notifier the AUTH FLOWS call, which on the
+    // Postgres path is the durable outbox rather than the mailer (see
+    // `select_auth_notifier`).
     //
     // The sign-in verification gate (AMICU_REQUIRE_EMAIL_VERIFICATION) is
-    // deliberately NOT auto-enabled when SMTP is configured. Verify tokens still
-    // live in the in-memory store (lost on restart) and there is no resend
-    // endpoint yet, so auto-on could lock users out after a restart. Auto-on when
-    // SMTP is configured is deferred until a persistent verify store and a resend
-    // endpoint exist; until then the operator opts in explicitly via the gate.
-    let notifier: Arc<dyn Notifier> = if smtp::any_smtp_var_set() {
-        eprintln!("amicu-server: SMTP notifier configured; sending real verification/reset email.");
-        Arc::new(smtp::SmtpNotifier::from_env().map_err(Error::Smtp)?)
-    } else {
-        eprintln!(
-            "amicu-server: SMTP NOT configured (set AMICU_SMTP_HOST + AMICU_SMTP_FROM to \
-             activate); using the dev LoggingNotifier, which prints reset/verify tokens to \
-             stderr. NOT for production use."
-        );
-        Arc::new(LoggingNotifier)
-    };
+    // deliberately NOT auto-enabled when SMTP is configured. Auto-on when SMTP is
+    // configured is deferred; until then the operator opts in explicitly.
+    let mailer = select_mailer()?;
+    let notifier = select_auth_notifier(pool.as_ref(), &mailer);
 
     let mut service = AuthService::new(
         keyring,
@@ -1045,7 +1109,7 @@ pub async fn build_app_with_database_url(
         resets,
         verify_store,
         notifier,
-        base_url,
+        effective_base_url.clone(),
     );
     // On the Postgres path, install the real multi-workspace membership
     // authority so token issuance/refresh-revalidation/switch consult
@@ -1193,9 +1257,231 @@ pub async fn build_app_with_database_url(
         EdgeGateState { trust: edge_trust },
         edge_token_gate,
     ));
-    let router = api.merge(health_router(health_state));
+    let mut router = api.merge(health_router(health_state));
+
+    // The internal outbox drain (andypalmi/amicu-planning#141), merged AFTER the
+    // edge-token gate above so it sits outside it - see `mount_outbox_drain`.
+    if let Some(pool) = pool.clone() {
+        router = mount_outbox_drain(router, config, pool, &mailer, &effective_base_url);
+    }
 
     Ok(BuiltApp { router, pool })
+}
+
+/// The MAILER: the transport that actually puts a message on the wire.
+///
+/// If ANY `AMICU_SMTP_*` variable is set, the operator has signaled intent to
+/// send real email: build the real mailer, and treat an incomplete required set
+/// (missing host or from) or a bad value as a HARD startup error
+/// ([`Error::Smtp`]). It must NOT silently fall back to the dev
+/// [`LoggingNotifier`] (which prints raw reset/verify tokens to stderr): that
+/// fallback in a deploy the operator believes is production SMTP is an
+/// account-takeover surface. Only when NO SMTP variable is set at all is the
+/// `LoggingNotifier` used, for zero-config local runs and tests.
+///
+/// On the Postgres path this is NOT what the auth flows call - see
+/// [`select_auth_notifier`]; it is what the outbox drain calls, later, inside a
+/// request.
+fn select_mailer() -> Result<Arc<dyn Notifier>, Error> {
+    if smtp::any_smtp_var_set() {
+        eprintln!("amicu-server: SMTP notifier configured; sending real verification/reset email.");
+        Ok(Arc::new(
+            smtp::SmtpNotifier::from_env().map_err(Error::Smtp)?,
+        ))
+    } else {
+        eprintln!(
+            "amicu-server: SMTP NOT configured (set AMICU_SMTP_HOST + AMICU_SMTP_FROM to \
+             activate); using the dev LoggingNotifier, which prints reset/verify tokens to \
+             stderr. NOT for production use."
+        );
+        Ok(Arc::new(LoggingNotifier))
+    }
+}
+
+/// The notifier the AUTH FLOWS use, which is not necessarily the mailer.
+///
+/// On the Postgres path it is the durable outbox (andypalmi/amicu-planning#141):
+/// the request path writes one `email_outbox` row - joined to the token-mint
+/// transaction where the store supports it - and `mailer` is used later, by
+/// `POST /internal/outbox/drain`, inside a request where Cloud Run actually
+/// allocates CPU. Without a database there is nowhere to queue, so the auth
+/// flows talk to the mailer directly, exactly as before.
+fn select_auth_notifier(pool: Option<&PgPool>, mailer: &Arc<dyn Notifier>) -> Arc<dyn Notifier> {
+    let Some(pool) = pool else {
+        if smtp::any_smtp_var_set() {
+            eprintln!(
+                "amicu-server: WARNING - SMTP is configured but DATABASE_URL is not, so \
+                 there is no email outbox to queue into: verification/reset mail is sent \
+                 inline on the request path and is lost on restart. This combination is \
+                 for local/self-host experimentation only (AMICU_ENV=production already \
+                 refuses to start without DATABASE_URL)."
+            );
+        }
+        return mailer.clone();
+    };
+    Arc::new(amicu_store::PostgresOutboxNotifier::new(pool.clone()))
+}
+
+/// Mount `POST /internal/outbox/drain` onto `router`
+/// (andypalmi/amicu-planning#141).
+///
+/// Called only on the Postgres path - there is no queue without a database, so
+/// the dev in-memory path simply does not route it (404). Where it IS routed
+/// but no caller-authentication mechanism is configured, [`DrainAuth`] refuses
+/// every request with a `503` rather than exposing an unauthenticated way to
+/// make the deployment send mail; this warns about that at startup, loudly in
+/// production.
+///
+/// Merged alongside `health_router` and never through `api_router`, so it stays
+/// out of the generated OpenAPI document - and merged AFTER the edge-token gate
+/// so, exactly like the health probes, it sits OUTSIDE it: Cloud Scheduler
+/// calls the Cloud Run service URL directly rather than through the Cloudflare
+/// Worker, so it carries no `X-Amicu-Edge-Token` and would be refused by that
+/// gate under `AMICU_REQUIRE_EDGE_TOKEN=true`. It is not unauthenticated: it
+/// enforces its own Google-OIDC / static-bearer check (see [`drain_auth`]).
+fn mount_outbox_drain(
+    router: Router,
+    config: &Config,
+    pool: PgPool,
+    mailer: &Arc<dyn Notifier>,
+    effective_base_url: &str,
+) -> Router {
+    let auth = drain_auth(config, effective_base_url);
+    if !auth.is_configured() {
+        let complaint = "amicu-server: outbox drain DISABLED (set \
+             AMICU_INTERNAL_CALLER_EMAILS for the Cloud Scheduler OIDC path, or \
+             AMICU_INTERNAL_TOKEN for a static-bearer cron caller); \
+             POST /internal/outbox/drain will return 503 and NO queued email will \
+             ever be delivered.";
+        match config.environment {
+            Environment::Production => eprintln!(
+                "{complaint} WARNING: this is a production deploy - verification and \
+                 password-reset email will silently pile up undelivered until one of \
+                 those is set."
+            ),
+            Environment::Development => eprintln!(
+                "{complaint} Meanwhile `amicu-server outbox-drain` runs one pass by \
+                 hand, which is usually what you want locally."
+            ),
+        }
+    }
+    let outbox_state = OutboxApiState::new(
+        Arc::new(amicu_store::PostgresOutboxStore::new(pool)),
+        mailer.clone(),
+        auth,
+    )
+    .with_batch_size(config.outbox_drain_batch_size)
+    .with_budget(Duration::from_millis(config.outbox_drain_budget_ms));
+    router.merge(outbox_router(outbox_state))
+}
+
+/// Assemble the caller-authentication policy for `POST /internal/outbox/drain`
+/// (andypalmi/amicu-planning#141).
+///
+/// Two independent, optional mechanisms - configure either, or both:
+///
+/// - **Google OIDC** (production on Cloud Run). Enabled by a non-empty
+///   `AMICU_INTERNAL_CALLER_EMAILS`; the required `aud` is
+///   `AMICU_INTERNAL_AUDIENCE`, defaulting to `effective_base_url`. Cloud
+///   Scheduler mints a Google-signed ID token as its invoker service account
+///   and this verifies issuer, signature (against Google's live certs), `aud`,
+///   and the allowlisted, verified `email`. An EMPTY allowlist leaves the path
+///   OFF rather than accepting any Google identity - a misconfiguration must
+///   fail closed.
+/// - **A static bearer token**, `AMICU_INTERNAL_TOKEN`, for self-hosters
+///   driving the drain from cron + curl. Read from the environment ONLY, never
+///   a CLI flag: a flag value is visible in the process argument list. The
+///   token is hashed immediately and compared in constant time; this function
+///   never logs it and never retains the plaintext.
+///
+/// With neither configured the returned policy is
+/// [`DrainAuth::is_configured`]`== false` and every drain request is refused
+/// with `503`.
+fn drain_auth(config: &Config, effective_base_url: &str) -> DrainAuth {
+    let mut auth = DrainAuth::disabled();
+
+    if let Some(token) = smtp::non_empty_env("AMICU_INTERNAL_TOKEN") {
+        auth = auth.with_static_token(&token);
+    }
+
+    let allowed_emails: Vec<String> = config
+        .internal_caller_emails
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect();
+    if !allowed_emails.is_empty() {
+        let audience = config
+            .internal_audience
+            .clone()
+            .unwrap_or_else(|| effective_base_url.to_string());
+        auth = auth.with_google_oidc(GoogleIdTokenVerifier::new(
+            HttpGoogleCertsSource::new(),
+            GoogleIdTokenConfig::new(audience, allowed_emails),
+        ));
+    }
+
+    auth
+}
+
+/// Run ONE outbox drain pass against `DATABASE_URL` and exit - this is
+/// `amicu-server outbox-drain` (see `main.rs`'s `Command::OutboxDrain`).
+///
+/// A thin wrapper around exactly the same [`amicu_api::drain_once`] the HTTP
+/// endpoint calls, with the same mailer selection as [`build_app`], so a manual
+/// or cron-driven drain can never diverge from the scheduled one. Runs no
+/// migrations and no RLS-bypass guard: it is expected to connect as the same
+/// non-owning runtime role the service uses.
+///
+/// # Errors
+/// [`Error::MissingDatabaseUrl`] if `DATABASE_URL` is unset or empty,
+/// [`Error::Store`] if the pool cannot connect or the queue cannot be read or
+/// updated, or [`Error::Smtp`] if `AMICU_SMTP_*` is set but incomplete.
+pub async fn outbox_drain(config: &Config) -> Result<(), Error> {
+    let url = std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or(Error::MissingDatabaseUrl)?;
+
+    let pool = amicu_store::connect_with(
+        &url,
+        PoolConfig {
+            max_connections: config.db_max_connections,
+            min_connections: config.db_min_connections,
+            acquire_timeout: Duration::from_secs(config.db_acquire_timeout_secs),
+        },
+    )
+    .await
+    .map_err(Error::Store)?;
+
+    let mailer: Arc<dyn Notifier> = if smtp::any_smtp_var_set() {
+        Arc::new(smtp::SmtpNotifier::from_env().map_err(Error::Smtp)?)
+    } else {
+        eprintln!(
+            "amicu-server outbox-drain: SMTP NOT configured; queued messages will be \
+             'delivered' by the dev LoggingNotifier (stderr). NOT for production use."
+        );
+        Arc::new(LoggingNotifier)
+    };
+
+    let store = amicu_store::PostgresOutboxStore::new(pool.clone());
+    let report = amicu_api::drain_once(
+        &store,
+        mailer.as_ref(),
+        config.outbox_drain_batch_size,
+        Duration::from_millis(config.outbox_drain_budget_ms),
+    )
+    .await
+    .map_err(Error::Store)?;
+    pool.close().await;
+
+    eprintln!(
+        "amicu-server outbox-drain: claimed={} sent={} failed={} dead_lettered={} \
+         budget_exhausted={}",
+        report.claimed, report.sent, report.failed, report.dead_lettered, report.budget_exhausted,
+    );
+    Ok(())
 }
 
 /// Serve `app` on an already-bound `listener` until `shutdown` resolves.
@@ -1461,6 +1747,32 @@ mod tests {
     fn resolve_bind_allows_explicit_ephemeral_port() {
         let explicit = addr("127.0.0.1:0");
         assert_eq!(resolve_bind_with(Some(explicit), no_env).unwrap(), explicit);
+    }
+
+    /// A non-empty caller allowlist switches the OIDC drain path on; an empty
+    /// one leaves it off (it never means "accept any Google identity").
+    ///
+    /// Only the OIDC half is asserted here: the static-token half reads
+    /// `AMICU_INTERNAL_TOKEN` from the ambient process environment, which a
+    /// test cannot control (this workspace forbids `unsafe`, so
+    /// `std::env::set_var` is unavailable). That half is covered by
+    /// `amicu-api`'s `DrainAuth` unit tests, which take the token directly.
+    #[test]
+    fn drain_auth_oidc_requires_a_non_empty_caller_allowlist() {
+        let mut config = Config::parse_from(["amicu-server"]);
+        config.internal_caller_emails = "  ,  ".to_string();
+        assert!(
+            !drain_auth(&config, "https://api.example.test").is_configured()
+                || std::env::var("AMICU_INTERNAL_TOKEN").is_ok(),
+            "a blank allowlist must not enable the OIDC path"
+        );
+
+        config.internal_caller_emails =
+            "amicu-scheduler@amicu-prod.iam.gserviceaccount.com".to_string();
+        assert!(
+            drain_auth(&config, "https://api.example.test").is_configured(),
+            "an allowlisted caller must enable the OIDC path"
+        );
     }
 
     /// The production banner is the exact one-line message, with no dev

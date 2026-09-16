@@ -30,6 +30,11 @@
 //!   (andypalmi/amicu-planning#139). Deliberately kept out of the OpenAPI
 //!   document - infra plumbing, not client-facing API - so wire it in via
 //!   [`health_router`] alongside [`api_router`], not through it.
+//! - Outbox: the authenticated [`POST /internal/outbox/drain`](outbox) that
+//!   Cloud Scheduler calls once a minute to actually send the queued
+//!   transactional email (andypalmi/amicu-planning#141). Kept out of the
+//!   OpenAPI document for the same reason as the health routes, and wired in
+//!   the same way - via [`outbox_router`] alongside [`api_router`].
 //!
 //! [`api_router`] assembles both plus a live `GET /openapi.json`. The served
 //! spec and the committed `crates/amicu-schema/openapi.json` artifact both come
@@ -54,6 +59,7 @@ pub mod health;
 pub mod monitor;
 pub mod openapi;
 pub mod org;
+pub mod outbox;
 pub mod preset;
 pub mod ratelimit;
 pub mod recommend;
@@ -79,6 +85,10 @@ pub use engine::{AccessVerifier, EngineApiState, WorkspaceContext};
 pub use health::{HealthApiState, health_router};
 pub use openapi::ApiDoc;
 pub use org::{InMemoryOrgStore, OrgApiState, OrgStore, org_router};
+pub use outbox::{
+    DEFAULT_DRAIN_BATCH_SIZE, DEFAULT_DRAIN_BUDGET_MS, DrainAuth, DrainReport, OutboxApiState,
+    drain_once, outbox_router,
+};
 pub use ratelimit::{
     InMemoryRateLimiter, PostgresRateLimiter, ProxyParseError, RateLimiter, TrustedProxies,
 };
