@@ -13,6 +13,13 @@
 //!   endpoint, which normalizes a submitted metrics + estimate snapshot and
 //!   returns the monitoring view (metric surface + estimate + advisory
 //!   suggestions) the measured-vs-estimated dashboard renders.
+//! - Preset: the stateless, auth-gated [`/presets/*`](preset) guided-wizard
+//!   surface (gallery listing, per-preset detail, deterministic HCL emit) and
+//!   [`/recommend/questions` and `/recommend/candidates`](recommend_wizard)
+//!   (a preset's typed core questions, and 2-4 scored, hard-constraint-filtered
+//!   candidates ranked from the wizard's answers). Distinct from `POST
+//!   /recommend`'s advisory tuning diagnosis: nothing here reads a measured
+//!   metrics snapshot.
 //! - Config: the auth-gated [`/configs/*`](config) surface (create/list/get,
 //!   version history, append, rollback, and a server-computed diff) backed by
 //!   `amicu-store`'s [`amicu_store::config::ConfigStore`], storing config
@@ -50,6 +57,7 @@ pub mod org;
 pub mod preset;
 pub mod ratelimit;
 pub mod recommend;
+pub mod recommend_wizard;
 pub mod session;
 pub mod tenancy;
 
@@ -89,6 +97,8 @@ fn engine_parts() -> (Router<EngineApiState>, utoipa::openapi::OpenApi) {
         .routes(routes!(preset::list_presets_handler))
         .routes(routes!(preset::get_preset_handler))
         .routes(routes!(preset::emit_preset_handler))
+        .routes(routes!(recommend_wizard::questions_handler))
+        .routes(routes!(recommend_wizard::candidates_handler))
         .split_for_parts()
 }
 

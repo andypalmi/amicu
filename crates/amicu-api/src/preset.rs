@@ -19,7 +19,7 @@
 //! `403`). An unknown preset id is a `404`; an out-of-range wizard answer is a
 //! `400`.
 
-use amicu_recommend::{Preset, PresetError, WizardAnswers, build_graph, catalog};
+use amicu_recommend::{Preset, PresetError, WizardAnswers, WizardPriority, build_graph, catalog};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -118,6 +118,43 @@ impl From<amicu_core::resource::Priority> for PriorityDto {
             P::Low => PriorityDto::Low,
             P::Medium => PriorityDto::Medium,
             P::High => PriorityDto::High,
+        }
+    }
+}
+
+/// Which soft-constraint axis to weight most heavily when ranking candidates.
+/// Mirrors [`amicu_recommend::WizardPriority`]. Distinct from [`PriorityDto`]
+/// (a use case's Low/Medium/High importance).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WizardPriorityDto {
+    Cost,
+    Latency,
+    Quality,
+    Privacy,
+    Simplicity,
+}
+
+impl From<WizardPriorityDto> for WizardPriority {
+    fn from(p: WizardPriorityDto) -> Self {
+        match p {
+            WizardPriorityDto::Cost => WizardPriority::Cost,
+            WizardPriorityDto::Latency => WizardPriority::Latency,
+            WizardPriorityDto::Quality => WizardPriority::Quality,
+            WizardPriorityDto::Privacy => WizardPriority::Privacy,
+            WizardPriorityDto::Simplicity => WizardPriority::Simplicity,
+        }
+    }
+}
+
+impl From<WizardPriority> for WizardPriorityDto {
+    fn from(p: WizardPriority) -> Self {
+        match p {
+            WizardPriority::Cost => WizardPriorityDto::Cost,
+            WizardPriority::Latency => WizardPriorityDto::Latency,
+            WizardPriority::Quality => WizardPriorityDto::Quality,
+            WizardPriority::Privacy => WizardPriorityDto::Privacy,
+            WizardPriority::Simplicity => WizardPriorityDto::Simplicity,
         }
     }
 }
@@ -245,6 +282,12 @@ pub struct WizardAnswersDto {
     /// Optional latency ceiling (ms) carried into the graph's use case.
     #[serde(default)]
     pub max_latency_ms: Option<u32>,
+    /// Which soft-constraint axis to weight most heavily when ranking
+    /// candidates via `POST /recommend/candidates`. Ignored by
+    /// `POST /presets/{id}/emit`, which builds a single graph and does no
+    /// ranking. Omitted or `null` means balanced weighting.
+    #[serde(default)]
+    pub priority: Option<WizardPriorityDto>,
 }
 
 impl From<WizardAnswersDto> for WizardAnswers {
@@ -255,6 +298,7 @@ impl From<WizardAnswersDto> for WizardAnswers {
             eu_residency_required: a.eu_residency_required,
             budget: a.budget.map(Into::into),
             max_latency_ms: a.max_latency_ms,
+            priority: a.priority.map(Into::into),
         }
     }
 }
@@ -320,7 +364,10 @@ impl IntoResponse for PresetHttpError {
 // ---------------------------------------------------------------------------
 
 /// The catalog entry whose id matches `id`, if any.
-fn find_preset(id: &str) -> Option<&'static Preset> {
+///
+/// `pub(crate)` so [`crate::recommend_wizard`]'s questions/candidates
+/// handlers resolve a preset id the same way these handlers do.
+pub(crate) fn find_preset(id: &str) -> Option<&'static Preset> {
     catalog().iter().find(|p| p.id.as_str() == id)
 }
 
