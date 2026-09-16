@@ -1,0 +1,48 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH due AS ( SELECT id FROM email_outbox WHERE sent_at IS NULL AND dead_at IS NULL AND next_attempt_at <= $1 AND (locked_until IS NULL OR locked_until <= $1) ORDER BY next_attempt_at LIMIT $2 FOR UPDATE SKIP LOCKED ) UPDATE email_outbox o SET locked_until = $1 + $3, attempts = o.attempts + 1 FROM due WHERE o.id = due.id RETURNING o.id, o.recipient, o.kind, o.token, o.attempts",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "recipient",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "kind",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "token",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "attempts",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "14cb943a841eddcf4df3537898eaf963ebfc8c23d51cede042ebd6d399d8e498"
+}

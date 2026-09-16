@@ -83,32 +83,35 @@ struct CapturingNotifier {
 }
 
 impl CapturingNotifier {
-    /// Cooperatively wait for, then return, the most recently captured reset
-    /// token. `/recover` dispatches delivery on a detached `tokio::spawn` task
-    /// (so its response time is account-independent), so the test yields to let
-    /// that task run before reading what it captured.
-    async fn wait_reset_token(&self) -> String {
-        for _ in 0..10_000 {
-            if let Some(t) = self.reset_tokens.lock().unwrap().last().cloned() {
-                return t;
-            }
-            tokio::task::yield_now().await;
-        }
-        panic!("timed out waiting for a captured reset token");
+    /// The most recently captured reset token.
+    ///
+    /// Read SYNCHRONOUSLY, with no yielding: since
+    /// andypalmi/amicu-planning#141 the delivery hand-off happens ON the
+    /// request path (it is a durable enqueue, not an SMTP send), so by the time
+    /// `/recover` has responded the notifier has already been called. This used
+    /// to poll `yield_now` in a loop because the work was detached onto
+    /// `tokio::spawn` - which Cloud Run's post-response CPU throttling made
+    /// unreliable. That this is now a plain read is itself the regression test.
+    fn last_reset_token(&self) -> Option<String> {
+        self.reset_tokens.lock().unwrap().last().cloned()
     }
 
-    /// Cooperatively wait for, then return, the most recently captured email
-    /// verification token. Sign-up dispatches the verification link on a detached
-    /// task (so its response time is account-independent), so the test yields to
-    /// let that task run before reading what it captured.
-    async fn wait_verify_token(&self) -> String {
-        for _ in 0..10_000 {
-            if let Some(t) = self.verify_tokens.lock().unwrap().last().cloned() {
-                return t;
-            }
-            tokio::task::yield_now().await;
-        }
-        panic!("timed out waiting for a captured verify token");
+    /// [`Self::last_reset_token`], panicking if nothing was captured.
+    fn reset_token(&self) -> String {
+        self.last_reset_token()
+            .expect("a reset token must be captured before /recover responds")
+    }
+
+    /// The most recently captured email-verification token. Synchronous for the
+    /// same reason as [`Self::last_reset_token`].
+    fn last_verify_token(&self) -> Option<String> {
+        self.verify_tokens.lock().unwrap().last().cloned()
+    }
+
+    /// [`Self::last_verify_token`], panicking if nothing was captured.
+    fn verify_token(&self) -> String {
+        self.last_verify_token()
+            .expect("a verify token must be captured before the response returns")
     }
 }
 
@@ -643,7 +646,7 @@ async fn reset_with_valid_token_changes_password_and_revokes_sessions() {
     )
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
-    let reset_token = notifier.wait_reset_token().await;
+    let reset_token = notifier.reset_token();
 
     // Complete the reset.
     let (status, _) = call(
@@ -747,7 +750,7 @@ async fn verify_with_valid_token_confirms_email() {
         "6.6.6.6",
     )
     .await;
-    let token = notifier.wait_verify_token().await;
+    let token = notifier.verify_token();
 
     // A valid token confirms the email.
     let (status, _) = call(
@@ -786,4 +789,182 @@ async fn verify_with_bogus_token_is_generic_failure() {
     // Generic 400: never a 401/404 that would distinguish a bad token from a
     // missing account.
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// Durable outbox hand-off (andypalmi/amicu-planning#141)
+//
+// These flows used to detach the whole lookup -> mint -> store -> send sequence
+// onto `tokio::spawn`, which Cloud Run freezes once the response is written. The
+// work now runs ON the request path and ends in a durable enqueue, with a fixed
+// response-time floor preserving the anti-enumeration property the detach used
+// to provide. The tests below pin both halves of that.
+// ---------------------------------------------------------------------------
+
+/// The minimum response time `/recover` and `/verify/resend` are documented to
+/// take (`amicu_auth::service`'s `ANTI_ENUMERATION_FLOOR`). Asserted rather than
+/// imported because it is an internal constant of the service.
+const ANTI_ENUMERATION_FLOOR: Duration = Duration::from_millis(250);
+
+/// `/recover` hands the reset token to the notifier BEFORE it responds - it is
+/// a durable enqueue now, not a detached background send. Read synchronously,
+/// with no yielding: if the work were still detached this would be empty.
+#[tokio::test]
+async fn recover_enqueues_delivery_before_responding() {
+    let (app, notifier) = app_capturing(100);
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/signup",
+        Some(json!({ "email": "outbox@example.com", "password": "correct horse battery staple" })),
+        "10.0.0.1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/recover",
+        Some(json!({ "email": "outbox@example.com" })),
+        "10.0.0.1",
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(
+        notifier.last_reset_token().is_some(),
+        "the reset link must be handed off on the request path, not spawned"
+    );
+}
+
+/// Sign-up likewise queues the verification link inline.
+#[tokio::test]
+async fn signup_enqueues_verification_before_responding() {
+    let (app, notifier) = app_capturing(100);
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/signup",
+        Some(json!({ "email": "inline@example.com", "password": "correct horse battery staple" })),
+        "10.0.0.2",
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(
+        notifier.last_verify_token().is_some(),
+        "the verification link must be handed off on the request path, not spawned"
+    );
+}
+
+/// `/verify/resend` likewise queues inline for an existing, unverified account.
+#[tokio::test]
+async fn resend_verification_enqueues_before_responding() {
+    let (app, notifier) = app_capturing(100);
+    call(
+        &app,
+        "POST",
+        "/signup",
+        Some(json!({ "email": "resend@example.com", "password": "correct horse battery staple" })),
+        "10.0.0.3",
+    )
+    .await;
+    let queued_at_signup = notifier.last_verify_token();
+
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/verify/resend",
+        Some(json!({ "email": "resend@example.com" })),
+        "10.0.0.3",
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let after_resend = notifier.last_verify_token();
+    assert!(after_resend.is_some());
+    assert_ne!(
+        queued_at_signup, after_resend,
+        "resend must queue a FRESH verification token, on the request path"
+    );
+}
+
+/// The anti-enumeration property, restated for the inline world: `/recover`
+/// takes the same (floored) time whether or not the account exists. Both
+/// branches must clear the floor - a branch that returned early would be an
+/// account-existence oracle.
+#[tokio::test]
+async fn recover_response_time_is_floored_on_both_branches() {
+    let (app, _notifier) = app_capturing(100);
+    call(
+        &app,
+        "POST",
+        "/signup",
+        Some(json!({ "email": "timed@example.com", "password": "correct horse battery staple" })),
+        "10.0.0.4",
+    )
+    .await;
+
+    for email in ["timed@example.com", "nobody-here@example.com", ""] {
+        let started = std::time::Instant::now();
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/recover",
+            Some(json!({ "email": email })),
+            "10.0.0.4",
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(
+            elapsed >= ANTI_ENUMERATION_FLOOR,
+            "/recover for {email:?} returned in {elapsed:?}, under the \
+             anti-enumeration floor of {ANTI_ENUMERATION_FLOOR:?}"
+        );
+    }
+}
+
+/// Same floor on `/verify/resend`, across all three of its branches (unknown
+/// account, known-and-unverified, known-and-already-verified).
+#[tokio::test]
+async fn resend_verification_response_time_is_floored_on_every_branch() {
+    let (app, notifier) = app_capturing(100);
+    call(
+        &app,
+        "POST",
+        "/signup",
+        Some(json!({ "email": "floor@example.com", "password": "correct horse battery staple" })),
+        "10.0.0.5",
+    )
+    .await;
+    // Consume the verification link so the third branch (already verified) is
+    // reachable below.
+    let token = notifier.verify_token();
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/verify",
+        Some(json!({ "token": token })),
+        "10.0.0.5",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    for email in ["floor@example.com", "unknown@example.com"] {
+        let started = std::time::Instant::now();
+        let (status, _) = call(
+            &app,
+            "POST",
+            "/verify/resend",
+            Some(json!({ "email": email })),
+            "10.0.0.5",
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(
+            elapsed >= ANTI_ENUMERATION_FLOOR,
+            "/verify/resend for {email:?} returned in {elapsed:?}, under the \
+             anti-enumeration floor of {ANTI_ENUMERATION_FLOOR:?}"
+        );
+    }
 }

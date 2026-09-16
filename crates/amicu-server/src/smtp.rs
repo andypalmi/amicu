@@ -30,6 +30,13 @@
 //! match the workspace's hermetic, no-native-tls convention. Secret material
 //! (the SMTP password, the opaque tokens) is carried only inside the TLS
 //! session and is never written to a log.
+//!
+//! # What reaches the logs
+//!
+//! Nothing that identifies a person. A delivery failure logs the recipient's
+//! DOMAIN only (see [`recipient_domain`]) plus `lettre`'s connection-level
+//! error - never the address, the message body, the opaque token, or the SMTP
+//! password.
 
 use std::sync::Arc;
 
@@ -120,8 +127,10 @@ impl From<lettre::transport::smtp::Error> for SmtpConfigError {
     }
 }
 
-/// Read an env var, treating an unset OR empty value as absent.
-fn non_empty_env(name: &str) -> Option<String> {
+/// Read an env var, treating an unset OR empty value as absent. Shared with
+/// the bootstrap, which reads `AMICU_INTERNAL_TOKEN` the same way (env-only,
+/// never a CLI flag: a secret must not be visible in the process argument list).
+pub(crate) fn non_empty_env(name: &str) -> Option<String> {
     match std::env::var(name) {
         Ok(v) if !v.trim().is_empty() => Some(v),
         _ => None,
@@ -377,18 +386,40 @@ struct RenderedEmail {
 #[async_trait]
 impl Notifier for SmtpNotifier {
     async fn notify(&self, message: Notification) -> Result<(), AuthError> {
-        let recipient = message.recipient.clone();
+        // Only the recipient's DOMAIN, never the address - see
+        // `recipient_domain`.
+        let domain = recipient_domain(&message.recipient).to_string();
         let email = self.render(&message)?;
-        // On failure log the recipient plus lettre's transport error. That error
-        // is connection/auth-level (it distinguishes DNS vs TLS vs auth failures)
-        // and carries no message body, so it is safe to log, unlike the opaque
-        // token, which lives in the body and must never reach a log, and the SMTP
-        // password, which lettre's error never contains.
+        // On failure log that domain plus lettre's transport error. The error is
+        // connection/auth-level (it distinguishes DNS vs TLS vs auth failures)
+        // and carries no message body, so it is safe to log verbatim - unlike
+        // the opaque token, which lives in the body and must never reach a log,
+        // and the SMTP password, which lettre's error never contains.
         self.transport.send(email).await.map_err(|err| {
-            eprintln!("[notify] SMTP send failed for {recipient}: {err}");
+            eprintln!("[notify] SMTP send failed for a recipient at {domain}: {err}");
             AuthError::Backend
         })?;
         Ok(())
+    }
+}
+
+/// The domain half of an email address, for logging - never the whole address.
+///
+/// A delivery failure is logged every time it is attempted, and since
+/// andypalmi/amicu-planning#141 the outbox drain RETRIES a failing message on a
+/// schedule (it used to be one best-effort, spawn-and-forget attempt). A full
+/// address would therefore be written to the logs repeatedly, turning a
+/// misconfigured mail server into a steady leak of who has an account here -
+/// the same enumeration surface the rest of these flows work hard to close.
+///
+/// The domain is what actually helps an operator triage ("every send to
+/// `corp.example` is bouncing" vs "everything is bouncing"), and it identifies
+/// nobody. An address with no `@` yields `"<no-domain>"`; the address itself is
+/// never echoed, not even as a fallback.
+fn recipient_domain(recipient: &str) -> &str {
+    match recipient.rsplit_once('@') {
+        Some((_, domain)) if !domain.is_empty() => domain,
+        _ => "<no-domain>",
     }
 }
 
@@ -444,6 +475,36 @@ mod tests {
             .replace("=\r\n", "")
             .replace("=\n", "")
             .replace("=3D", "=")
+    }
+
+    /// A delivery-failure log line must never carry the full recipient address:
+    /// the drain retries on a schedule, so that would repeatedly write "this
+    /// person has an account here" into the logs.
+    #[test]
+    fn recipient_domain_keeps_only_the_domain() {
+        assert_eq!(recipient_domain("user@example.test"), "example.test");
+        // Local parts may themselves contain '@' when quoted; the LAST one
+        // separates the domain.
+        assert_eq!(
+            recipient_domain("\"odd@local\"@example.test"),
+            "example.test"
+        );
+    }
+
+    /// A malformed address falls back to a placeholder - never to echoing the
+    /// address itself.
+    #[test]
+    fn recipient_domain_never_falls_back_to_the_address() {
+        for malformed in ["not-an-address", "trailing@", "", "@leading"] {
+            let rendered = recipient_domain(malformed);
+            assert!(
+                rendered == "<no-domain>" || !rendered.contains(malformed),
+                "{malformed:?} leaked as {rendered:?}"
+            );
+        }
+        assert_eq!(recipient_domain("not-an-address"), "<no-domain>");
+        assert_eq!(recipient_domain("trailing@"), "<no-domain>");
+        assert_eq!(recipient_domain("@leading"), "leading");
     }
 
     #[test]

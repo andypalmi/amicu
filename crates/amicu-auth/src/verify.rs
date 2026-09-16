@@ -21,6 +21,7 @@ use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 
 use crate::error::Result;
+use crate::notify::{Notification, Notifier};
 
 /// A freshly minted verify token: the opaque secret handed to the user and the
 /// server-side record to persist.
@@ -96,6 +97,26 @@ pub enum VerifyConsume {
 pub trait VerifyStore: Send + Sync {
     /// Persist a new record.
     async fn insert(&self, record: VerifyRecord) -> Result<()>;
+
+    /// Persist `record` AND durably hand `message` off for out-of-band
+    /// delivery, atomically where the implementation can manage it. The
+    /// verification-link twin of
+    /// [`ResetStore::insert_and_notify`](crate::reset::ResetStore::insert_and_notify)
+    /// - see that method's docs for the full rationale
+    /// (andypalmi/amicu-planning#141).
+    ///
+    /// # Errors
+    /// Store errors from the insert, or transport errors from the delivery.
+    async fn insert_and_notify(
+        &self,
+        record: VerifyRecord,
+        message: Notification,
+        notifier: &dyn Notifier,
+    ) -> Result<()> {
+        self.insert(record).await?;
+        notifier.notify(message).await
+    }
+
     /// Atomically consume a presented token: in a single indivisible step, check
     /// that it is live (present, not consumed, not expired at `now`) and, if so,
     /// mark it consumed and report [`VerifyConsume::Consumed`].

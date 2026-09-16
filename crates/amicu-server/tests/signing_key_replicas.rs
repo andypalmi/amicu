@@ -44,6 +44,10 @@ fn test_config(signing_key_pem: Option<&str>, signing_keys_retiring_pem: Option<
         signing_key_pem_file: None,
         signing_keys_retiring_pem: signing_keys_retiring_pem.map(RedactedEnvString::new),
         signing_keys_retiring_pem_file: None,
+        internal_audience: None,
+        internal_caller_emails: String::new(),
+        outbox_drain_batch_size: amicu_api::DEFAULT_DRAIN_BATCH_SIZE,
+        outbox_drain_budget_ms: amicu_api::DEFAULT_DRAIN_BUDGET_MS,
     }
 }
 

@@ -21,6 +21,7 @@ use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 
 use crate::error::Result;
+use crate::notify::{Notification, Notifier};
 
 /// A freshly minted reset token: the opaque secret handed to the user and the
 /// server-side record to persist.
@@ -94,6 +95,36 @@ pub enum ResetConsume {
 pub trait ResetStore: Send + Sync {
     /// Persist a new record.
     async fn insert(&self, record: ResetRecord) -> Result<()>;
+
+    /// Persist `record` AND durably hand `message` off for out-of-band
+    /// delivery, atomically where the implementation can manage it.
+    ///
+    /// This is the seam andypalmi/amicu-planning#141 needs: a durable store
+    /// (the Postgres one) writes the token row and the outbox row inside ONE
+    /// transaction, so a minted reset token and the email that carries it
+    /// commit together or not at all - there is no window in which a token
+    /// exists that nothing will ever deliver, nor one in which an email is
+    /// queued for a token that was rolled back.
+    ///
+    /// A store with no transaction to join falls back to this default: insert,
+    /// then deliver through `notifier`. An implementation that enqueues
+    /// transactionally is expected to IGNORE `notifier` - it *is* the queue;
+    /// one that cannot must still deliver through it, which is what keeps the
+    /// dev/in-memory path working with the
+    /// [`LoggingNotifier`](crate::notify::LoggingNotifier).
+    ///
+    /// # Errors
+    /// Store errors from the insert, or transport errors from the delivery.
+    async fn insert_and_notify(
+        &self,
+        record: ResetRecord,
+        message: Notification,
+        notifier: &dyn Notifier,
+    ) -> Result<()> {
+        self.insert(record).await?;
+        notifier.notify(message).await
+    }
+
     /// Atomically consume a presented token: in a single indivisible step, check
     /// that it is live (present, not consumed, not expired at `now`) and, if so,
     /// mark it consumed and report [`ResetConsume::Consumed`].

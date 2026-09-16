@@ -2,6 +2,7 @@
 //! JWKS/discovery publication.
 
 use std::sync::{Arc, OnceLock, RwLock};
+use std::time::Duration;
 
 use amicu_core::secret::SecretValue;
 
@@ -19,6 +20,41 @@ use crate::reset::{self, ResetStore};
 use crate::tenant::WorkspaceId;
 use crate::user::{User, UserStore};
 use crate::verify::{self, VerifyStore};
+
+/// Minimum wall-clock duration of the two account-lookup flows that would
+/// otherwise be an account-enumeration timing oracle: `/recover`
+/// ([`AuthService::request_password_reset`]) and `/verify/resend`
+/// ([`AuthService::resend_verification`]).
+///
+/// # Why a floor replaced `tokio::spawn`
+///
+/// These flows used to detach ALL account-dependent work (lookup, token mint,
+/// store insert, out-of-band send) onto a background task, so the response
+/// returned in account-independent time. On Cloud Run that is fatal: CPU is
+/// throttled to near-zero the moment the response is written, so the detached
+/// task stalls or dies and the email is silently dropped
+/// (andypalmi/amicu-planning#141). The work therefore moved back ON to the
+/// request path - where CPU is allocated - and is now durable (it ends in an
+/// `email_outbox` row, not an SMTP round trip).
+///
+/// That reintroduces the timing oracle the detach existed to close: the
+/// account-EXISTS branch does two extra `INSERT`s that the MISS branch does not.
+/// This floor closes it again by construction: BOTH branches sleep until the
+/// same fixed deadline measured from entry, so the observable response time is a
+/// constant, independent of everything the handler did or did not do.
+///
+/// 250ms is chosen to sit comfortably above the exists branch's actual cost (a
+/// lookup plus one two-statement transaction - single-digit milliseconds against
+/// a pooled Postgres, even through a connection pooler), so the floor binds and
+/// the padding, not the work, is what the caller measures. Both flows are
+/// human-initiated, rare, and already rate-limited, so a fixed quarter-second is
+/// free in practice.
+///
+/// The residual gap: if the exists branch ever takes LONGER than the floor
+/// (a database in serious trouble), the floor stops binding and the difference
+/// becomes observable again - but a database that slow degrades the lookup both
+/// branches share too, so the signal is buried in noise rather than clean.
+const ANTI_ENUMERATION_FLOOR: Duration = Duration::from_millis(250);
 
 /// Result of a sign-up attempt, reported truthfully to the (trusted) caller.
 ///
@@ -165,13 +201,13 @@ impl<C: Clock> AuthService<C> {
             .await
         {
             Ok(()) => {
-                // Dispatch the verification link off the response path (see
-                // `spawn_email_verification`): mint + store-insert + delivery all
-                // run on a detached task, so the Created path does no more
-                // *synchronous* work than the AlreadyRegistered path below. Doing
-                // the mint/insert inline would make a fresh sign-up measurably
-                // slower than a collision (an account-enumeration timing oracle).
-                self.spawn_email_verification(id.clone(), email);
+                // Queue the verification link DURABLY, inline (see
+                // `queue_email_verification`): the mint + store-insert + enqueue
+                // run on the request path, where Cloud Run allocates CPU, and the
+                // actual SMTP send happens later in the outbox drain. The
+                // unconditional Argon2id hash above is what equalizes Created vs
+                // AlreadyRegistered timing; this extra insert is noise beside it.
+                self.queue_email_verification(&id, email).await;
                 Ok(SignUpOutcome::Created(id))
             }
             // Swallow the collision: surfacing it would enable enumeration.
@@ -179,19 +215,22 @@ impl<C: Clock> AuthService<C> {
             // Instead notify the *real* owner out-of-band via the notification
             // seam (amicu-planning#102): an "account already exists / reset your
             // password" nudge that the requester never observes on the identical
-            // HTTP response. The Created path (above) dispatches a verification
-            // link over the same detached seam; both outcomes stay identical on
-            // the HTTP response and in timing.
+            // HTTP response. The Created path (above) queues a verification link
+            // over the same seam; both outcomes stay identical on the HTTP
+            // response and in timing.
             Err(AuthError::UserExists) => {
-                // Dispatch off the response path (see `spawn_notification`): the
-                // notice is sent only on the collision path, so awaiting it here
-                // would make the collision measurably slower than a fresh
-                // sign-up - an account-enumeration timing oracle. The response
-                // stays identical and same-timing on both paths.
-                self.spawn_notification(Notification {
-                    recipient: email,
-                    kind: NotificationKind::AccountExists,
-                });
+                // Queue the notice DURABLY, inline: one `email_outbox` insert
+                // against the Created path's two, both dwarfed by the
+                // unconditional Argon2id hash above (see
+                // `queue_email_verification`'s docs). Best-effort: a queueing
+                // failure must not change anything observable.
+                let _ = self
+                    .notifier
+                    .notify(Notification {
+                        recipient: email,
+                        kind: NotificationKind::AccountExists,
+                    })
+                    .await;
                 Ok(SignUpOutcome::AlreadyRegistered)
             }
             Err(other) => Err(other),
@@ -308,136 +347,120 @@ impl<C: Clock> AuthService<C> {
 
     /// Request a password reset for `email`.
     ///
-    /// Anti-enumeration: this ALWAYS returns immediately with `Ok`, and the HTTP
-    /// boundary always returns the same generic `202`, whether or not the email
-    /// is registered. Crucially, ALL of the account-dependent work - the user
-    /// lookup, and (only when the account exists) the token mint, store insert,
-    /// and out-of-band delivery - runs on a detached background task, so the
-    /// synchronous response time is the *same* on the exists and miss paths.
+    /// Anti-enumeration: the HTTP boundary always returns the same generic
+    /// `202`, whether or not the email is registered, and this call always takes
+    /// the same wall-clock time - see [`ANTI_ENUMERATION_FLOOR`] for exactly how
+    /// and why (it replaced a `tokio::spawn` that Cloud Run's post-response CPU
+    /// throttling made unreliable, andypalmi/amicu-planning#141).
     ///
-    /// Doing that work inline would be an account-enumeration timing oracle: the
-    /// exists path does strictly more synchronous work than the miss path, and
-    /// the gap becomes a strong signal the moment a synchronous mailer replaces
-    /// the dev logger (recover would block on SMTP only for real accounts).
-    /// Detaching it removes the send (and the store I/O) from the response path
-    /// entirely. A reset token is still minted and delivered only when the
-    /// account exists; on a miss nothing is sent and nothing is stored.
+    /// All of the account-dependent work now runs INLINE, on the request path,
+    /// where CPU is guaranteed: the lookup, and - only when the account exists -
+    /// the token mint plus a single transaction that writes the reset-token row
+    /// and durably queues the email TOGETHER (see
+    /// [`ResetStore::insert_and_notify`](crate::reset::ResetStore::insert_and_notify)).
+    /// The (possibly network-bound) SMTP send happens later, inside the
+    /// authenticated `POST /internal/outbox/drain` request. On a miss nothing is
+    /// minted, stored, or queued.
     ///
     /// # Errors
-    /// Never returns an error: background failures are swallowed (surfacing them
+    /// Never returns an error: backend failures are swallowed (surfacing them
     /// would itself be an existence signal). Kept `Result` for a uniform handler
     /// signature.
-    // Intentionally `async` with no `.await` on the response path: detaching all
-    // account-dependent work is the whole anti-enumeration point (see above). The
-    // `async` signature is part of the `AuthService` contract - a persistent
-    // store would enqueue via an awaited durable-queue write here - so keep it.
-    // `unused_async_trait_impl` (clippy 1.98+) is the same intent as
-    // `unused_async` for this signature-contract case: the `async` is kept
-    // deliberately, not by accident.
-    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn request_password_reset(&self, email: &str) -> Result<()> {
+        // Take the deadline FIRST, before any branch: every path below returns
+        // at exactly this instant regardless of what it did.
+        let deadline = tokio::time::Instant::now() + ANTI_ENUMERATION_FLOOR;
         let email = normalize_email(email);
-        // Empty email is a request-level no-op (not an account signal); returning
-        // here changes nothing observable since the exists/miss paths are already
-        // equalized by the detached task below.
-        if email.is_empty() {
-            return Ok(());
+        // An empty email is a request-level no-op (not an account signal), but it
+        // still waits out the floor so it is not distinguishable either.
+        if !email.is_empty() {
+            self.deliver_password_reset(&email).await;
         }
-        // Move the seams into a detached task. The response returns now, in
-        // account-independent time; the (possibly network-bound) lookup + mint +
-        // store + send happen off the response path. See the doc comment.
-        let users = self.users.clone();
-        let resets = self.resets.clone();
-        let notifier = self.notifier.clone();
+        tokio::time::sleep_until(deadline).await;
+        Ok(())
+    }
+
+    /// Mint, persist, and durably queue a password-reset link for `email`, if
+    /// that account exists. Every failure is swallowed: on this flow a backend
+    /// error must change nothing observable (the caller pads to a fixed
+    /// deadline regardless).
+    async fn deliver_password_reset(&self, email: &str) {
+        let Ok(Some(user)) = self.users.get_by_email(email).await else {
+            return; // unknown account: mint nothing, store nothing, queue nothing
+        };
         let expires_at = self.issuer.now_unix()
             + i64::try_from(self.issuer.config().reset_ttl.as_secs()).unwrap_or(i64::MAX);
-        tokio::spawn(async move {
-            let Ok(Some(user)) = users.get_by_email(&email).await else {
-                return; // unknown account: send nothing, store nothing
-            };
-            let minted = reset::mint(&user.id, expires_at);
-            if resets.insert(minted.record).await.is_err() {
-                return; // best-effort: a store failure must not surface anywhere
-            }
-            // Best-effort delivery: a transport failure must not change anything
-            // observable (it already changed nothing on the response path).
-            let _ = notifier
-                .notify(Notification {
-                    recipient: email,
+        let minted = reset::mint(&user.id, expires_at);
+        // One transaction on the durable path: the token row and the queued
+        // email commit together or not at all.
+        let _ = self
+            .resets
+            .insert_and_notify(
+                minted.record,
+                Notification {
+                    recipient: email.to_string(),
                     kind: NotificationKind::PasswordReset {
                         reset_token: minted.token,
                     },
-                })
-                .await;
-        });
-        Ok(())
+                },
+                self.notifier.as_ref(),
+            )
+            .await;
     }
 
     /// Resend the email-verification link for `email`.
     ///
-    /// Anti-enumeration: this ALWAYS returns immediately with `Ok`, and the HTTP
-    /// boundary always returns the same generic response, whether or not the
-    /// email is registered and whether or not it is already verified. Exactly as
-    /// in [`request_password_reset`](Self::request_password_reset), ALL of the
-    /// account-dependent work (the user lookup, the "already verified?" check,
-    /// and, only when a fresh link is warranted, the token mint, store insert,
-    /// and out-of-band delivery) runs on a detached background task, so the
-    /// synchronous response time is the *same* on every path.
+    /// Anti-enumeration: the HTTP boundary always returns the same generic
+    /// `202`, whether or not the email is registered and whether or not it is
+    /// already verified, and this call always takes the same wall-clock time -
+    /// exactly as in
+    /// [`request_password_reset`](Self::request_password_reset); see
+    /// [`ANTI_ENUMERATION_FLOOR`].
     ///
-    /// Doing that work inline would be an account-enumeration timing oracle: the
-    /// exists-and-unverified path does strictly more synchronous work than the
-    /// miss / already-verified paths, and the gap becomes a strong signal the
-    /// moment a synchronous mailer replaces the dev logger. A fresh verification
-    /// token is minted and delivered only when the account exists AND its email
-    /// is not yet verified; otherwise nothing is sent and nothing is stored.
+    /// A fresh verification token is minted, persisted, and queued only when the
+    /// account exists AND its email is not yet verified; otherwise nothing is
+    /// stored and nothing is queued.
     ///
     /// # Errors
-    /// Never returns an error: background failures are swallowed (surfacing them
+    /// Never returns an error: backend failures are swallowed (surfacing them
     /// would itself be an existence signal). Kept `Result` for a uniform handler
     /// signature.
-    // Intentionally `async` with no `.await` on the response path: detaching all
-    // account-dependent work is the whole anti-enumeration point (see above). The
-    // `async` signature is part of the `AuthService` contract, mirroring
-    // `request_password_reset`, so keep it.
-    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     pub async fn resend_verification(&self, email: &str) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + ANTI_ENUMERATION_FLOOR;
         let email = normalize_email(email);
-        // Empty email is a request-level no-op (not an account signal); the
-        // exists/miss paths are already equalized by the detached task below.
-        if email.is_empty() {
-            return Ok(());
+        if !email.is_empty() {
+            self.deliver_verification_resend(&email).await;
         }
-        // Move the seams into a detached task. The response returns now, in
-        // account-independent time; the (possibly network-bound) lookup + mint +
-        // store + send happen off the response path. See the doc comment.
-        let users = self.users.clone();
-        let verifies = self.verifies.clone();
-        let notifier = self.notifier.clone();
+        tokio::time::sleep_until(deadline).await;
+        Ok(())
+    }
+
+    /// Mint, persist, and durably queue a fresh verification link for `email`,
+    /// if that account exists and is still unverified. Failures are swallowed
+    /// for the same reason as [`Self::deliver_password_reset`].
+    async fn deliver_verification_resend(&self, email: &str) {
+        let Ok(Some(user)) = self.users.get_by_email(email).await else {
+            return; // unknown account: mint nothing, store nothing, queue nothing
+        };
+        if user.email_verified {
+            return; // already verified: a fresh link is neither needed nor sent
+        }
         let expires_at = self.issuer.now_unix()
             + i64::try_from(self.issuer.config().verify_ttl.as_secs()).unwrap_or(i64::MAX);
-        tokio::spawn(async move {
-            let Ok(Some(user)) = users.get_by_email(&email).await else {
-                return; // unknown account: send nothing, store nothing
-            };
-            if user.email_verified {
-                return; // already verified: a fresh link is neither needed nor sent
-            }
-            let minted = verify::mint(&user.id, expires_at);
-            if verifies.insert(minted.record).await.is_err() {
-                return; // best-effort: a store failure must not surface anywhere
-            }
-            // Best-effort delivery: a transport failure must not change anything
-            // observable (it already changed nothing on the response path).
-            let _ = notifier
-                .notify(Notification {
-                    recipient: email,
+        let minted = verify::mint(&user.id, expires_at);
+        let _ = self
+            .verifies
+            .insert_and_notify(
+                minted.record,
+                Notification {
+                    recipient: email.to_string(),
                     kind: NotificationKind::VerifyEmail {
                         verify_token: minted.token,
                     },
-                })
-                .await;
-        });
-        Ok(())
+                },
+                self.notifier.as_ref(),
+            )
+            .await;
     }
 
     /// Consume a reset token and set a new password.
@@ -549,53 +572,43 @@ impl<C: Clock> AuthService<C> {
         OpenIdConfiguration::new(self.issuer.config().issuer.clone(), &self.base_url)
     }
 
-    /// Deliver a notification out-of-band without gating the caller's response.
+    /// Mint + persist an email-verification token and queue its link, inline.
     ///
-    /// The (possibly network-bound) send runs on a detached task, so response
-    /// timing never depends on whether - or to whom - a message is dispatched.
-    /// This is load-bearing for anti-enumeration: awaiting a send that only
-    /// happens on the account-exists path would be an enumeration timing oracle,
-    /// trivially today and strongly once a synchronous mailer replaces the dev
-    /// logger. Delivery is best-effort; a transport failure is swallowed.
-    fn spawn_notification(&self, notification: Notification) {
-        let notifier = self.notifier.clone();
-        tokio::spawn(async move {
-            let _ = notifier.notify(notification).await;
-        });
-    }
-
-    /// Mint + persist an email-verification token and deliver its link, all on a
-    /// detached task.
+    /// Called only on the sign-up account-created path. This used to be a
+    /// detached `tokio::spawn`, which Cloud Run's post-response CPU throttling
+    /// makes unreliable (andypalmi/amicu-planning#141); it now runs on the
+    /// request path and ends in a durable `email_outbox` row rather than an SMTP
+    /// round trip, with the token row and the queued email committed in ONE
+    /// transaction on the Postgres path (see
+    /// [`VerifyStore::insert_and_notify`](crate::verify::VerifyStore::insert_and_notify)).
     ///
-    /// Called only on the sign-up account-created path. Detaching the whole
-    /// sequence (mint, store insert, out-of-band send) is load-bearing for
-    /// anti-enumeration: the AlreadyRegistered path does none of this work
-    /// synchronously, so doing it inline on Created would make a fresh sign-up
-    /// measurably slower than a collision (an account-enumeration timing oracle).
-    /// Off the response path, both sign-up outcomes stay identical in body and
-    /// timing. Store and delivery failures are swallowed (best-effort), exactly
-    /// as `request_password_reset` treats them.
-    fn spawn_email_verification(&self, user_id: String, email: String) {
-        let verifies = self.verifies.clone();
-        let notifier = self.notifier.clone();
+    /// Anti-enumeration is preserved WITHOUT a timing floor here, unlike
+    /// `/recover` and `/verify/resend`: `sign_up` unconditionally runs one full
+    /// Argon2id hash on BOTH the Created and the AlreadyRegistered path (see
+    /// [`Self::sign_up`]), which is deliberately expensive - tens to hundreds of
+    /// milliseconds - and dwarfs the one extra `INSERT` (the verify-token row)
+    /// that separates the two paths here. The existing dummy-hash equalizer is
+    /// what carries the property; this queueing work is noise beside it.
+    ///
+    /// Store and delivery failures are swallowed (best-effort), exactly as
+    /// `request_password_reset` treats them.
+    async fn queue_email_verification(&self, user_id: &str, email: String) {
         let expires_at = self.issuer.now_unix()
             + i64::try_from(self.issuer.config().verify_ttl.as_secs()).unwrap_or(i64::MAX);
-        tokio::spawn(async move {
-            let minted = verify::mint(&user_id, expires_at);
-            if verifies.insert(minted.record).await.is_err() {
-                return; // best-effort: a store failure must not surface anywhere
-            }
-            // Best-effort delivery: a transport failure changes nothing
-            // observable (it already changed nothing on the response path).
-            let _ = notifier
-                .notify(Notification {
+        let minted = verify::mint(user_id, expires_at);
+        let _ = self
+            .verifies
+            .insert_and_notify(
+                minted.record,
+                Notification {
                     recipient: email,
                     kind: NotificationKind::VerifyEmail {
                         verify_token: minted.token,
                     },
-                })
-                .await;
-        });
+                },
+                self.notifier.as_ref(),
+            )
+            .await;
     }
 
     /// List the workspaces the authenticated user belongs to (id, name, role).
