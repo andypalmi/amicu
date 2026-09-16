@@ -120,8 +120,10 @@ impl From<lettre::transport::smtp::Error> for SmtpConfigError {
     }
 }
 
-/// Read an env var, treating an unset OR empty value as absent.
-fn non_empty_env(name: &str) -> Option<String> {
+/// Read an env var, treating an unset OR empty value as absent. Shared with
+/// the bootstrap, which reads `AMICU_INTERNAL_TOKEN` the same way (env-only,
+/// never a CLI flag: a secret must not be visible in the process argument list).
+pub(crate) fn non_empty_env(name: &str) -> Option<String> {
     match std::env::var(name) {
         Ok(v) if !v.trim().is_empty() => Some(v),
         _ => None,

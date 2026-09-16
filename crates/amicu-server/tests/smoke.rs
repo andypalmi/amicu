@@ -32,6 +32,10 @@ fn test_config() -> Config {
         db_min_connections: 0,
         db_acquire_timeout_secs: 10,
         readyz_timeout_ms: 2_000,
+        internal_audience: None,
+        internal_caller_emails: String::new(),
+        outbox_drain_batch_size: amicu_api::DEFAULT_DRAIN_BATCH_SIZE,
+        outbox_drain_budget_ms: amicu_api::DEFAULT_DRAIN_BUDGET_MS,
     }
 }
 
