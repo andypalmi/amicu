@@ -612,9 +612,20 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
         variants: Vec::new(),
     });
 
+    // When the wizard requires EU residency, `maybe_push_eu_governance` below
+    // pins a governance rule allowing only `EU_PROVIDERS`. The default
+    // "runpod" is not in that set, so the provider must switch to an EU one
+    // to keep the resulting graph valid - otherwise a `true` answer here
+    // would silently emit a graph `amicu_engine::report_for` rejects.
+    let provider = if answers.eu_residency_required {
+        "hetzner"
+    } else {
+        "runpod"
+    };
+
     graph.hardware_profiles.push(HardwareProfile {
         id: hw_id.as_str().into(),
-        provider: "runpod".to_string(),
+        provider: provider.to_string(),
         region: None,
         accelerator: Some(Accelerator {
             kind: AcceleratorKind::Gpu,
@@ -713,7 +724,18 @@ fn maybe_push_eu_governance(
     let is_hard = preset
         .constraints
         .contains(&PresetConstraint::EuResidencyOnly);
-    if answers.eu_residency_required && !is_hard {
+    // A LocalOnly preset's hardware provider is always the literal string
+    // "local" - not a cloud provider `amicu-providers` has any residency
+    // mapping for (`resolve_residency("local", ..)` is always `None`), and
+    // never a member of `EU_PROVIDERS`. Pinning the EU-only-providers
+    // governance rule here would therefore make *every* LocalOnly graph
+    // invalid regardless of the answer, since `report_for`'s provider-allow
+    // check is a flat string match with no on-device exemption. On-device
+    // execution never leaves first-party infrastructure by construction
+    // (stronger than "stays within the EU"), so the requirement is already
+    // satisfied without a governance rule to enforce it.
+    let is_local_only = preset.constraints.contains(&PresetConstraint::LocalOnly);
+    if answers.eu_residency_required && !is_hard && !is_local_only {
         push_eu_governance(graph, preset.id.as_str(), dc_id);
     }
 }
@@ -950,5 +972,68 @@ mod tests {
         a.budget = None;
         let graph = build_graph(&catalog()[0], &a).expect("build");
         assert!(graph.budgets.is_empty());
+    }
+
+    #[test]
+    fn local_dev_chat_honors_eu_residency_required_without_an_invalid_graph() {
+        // Regression: `maybe_push_eu_governance` used to pin an EU-only
+        // provider allowlist even for LocalOnly presets, whose hardware
+        // provider is always the literal "local" - never a member of
+        // `EU_PROVIDERS` - which made `report_for` reject this graph outright
+        // whenever the wizard answered `eu_residency_required = true`.
+        let local = catalog()
+            .iter()
+            .find(|p| p.id.as_str() == "local_dev_chat")
+            .expect("local_dev_chat in catalog");
+        let mut a = answers();
+        a.eu_residency_required = true;
+        let graph = build_graph(local, &a).expect("build");
+        let report = amicu_engine::report_for(&graph);
+        assert!(
+            report.valid,
+            "local_dev_chat with eu_residency_required=true should validate cleanly, got {:?}",
+            report.diagnostics
+        );
+        assert_eq!(graph.hardware_profiles[0].provider, "local");
+    }
+
+    #[test]
+    fn cost_optimized_batch_honors_eu_residency_required_with_an_eu_provider() {
+        // Regression: the hardware provider stayed hardcoded to "runpod"
+        // (not EU-resident) even when the wizard set
+        // `eu_residency_required = true`, which pins an EU-only provider
+        // allowlist via `maybe_push_eu_governance` - so `report_for` rejected
+        // the resulting graph.
+        let batch = catalog()
+            .iter()
+            .find(|p| p.id.as_str() == "cost_optimized_batch")
+            .expect("cost_optimized_batch in catalog");
+        let mut a = answers();
+        a.eu_residency_required = true;
+        let graph = build_graph(batch, &a).expect("build");
+        let report = amicu_engine::report_for(&graph);
+        assert!(
+            report.valid,
+            "cost_optimized_batch with eu_residency_required=true should validate cleanly, got \
+             {:?}",
+            report.diagnostics
+        );
+        assert!(
+            EU_PROVIDERS.contains(&graph.hardware_profiles[0].provider.as_str()),
+            "provider {:?} should be EU-resident when eu_residency_required=true",
+            graph.hardware_profiles[0].provider
+        );
+    }
+
+    #[test]
+    fn cost_optimized_batch_stays_on_runpod_when_eu_residency_is_not_required() {
+        // The provider switch is conditional: the default (non-EU-required)
+        // shape must not regress to the EU provider.
+        let batch = catalog()
+            .iter()
+            .find(|p| p.id.as_str() == "cost_optimized_batch")
+            .expect("cost_optimized_batch in catalog");
+        let graph = build_graph(batch, &answers()).expect("build");
+        assert_eq!(graph.hardware_profiles[0].provider, "runpod");
     }
 }

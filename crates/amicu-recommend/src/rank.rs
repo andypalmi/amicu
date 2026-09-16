@@ -9,10 +9,14 @@
 //! 2. Generate a small, fixed set of graph variants by varying the preset's
 //!    free knobs (hardware tier/accelerator, quantization, GPU count) inside
 //!    the hard constraints the preset already commits to.
-//! 3. Filter: a variant that would violate one of the preset's
+//! 3. Filter: [`enforce_hard_constraints`] runs [`hard_violation`] against
+//!    *every* generated variant (not just the deliberately-illegal EU decoy
+//!    below) - a variant that would violate one of the preset's
 //!    [`PresetConstraint`]s is never proposed as its own candidate. Its
-//!    rejection reason is folded into the sibling candidate that stands in
-//!    its place, so the "considered and ruled out" trail is not lost.
+//!    rejection reason is folded into a surviving candidate, so the
+//!    "considered and ruled out" trail is not lost. If every variant
+//!    violates a constraint, `rank` returns [`PresetError::InvalidAnswer`]
+//!    rather than a candidate list with nothing compliant in it.
 //! 4. Score the surviving variants against the five [`SoftConstraint`] axes,
 //!    weighted by `answers.priority` (balanced when absent), and order by the
 //!    weighted total.
@@ -46,7 +50,8 @@ const MAX_CANDIDATES: usize = 4;
 /// built from).
 pub fn rank(preset: &Preset, answers: &WizardAnswers) -> Result<Vec<Candidate>, PresetError> {
     let base = build_graph(preset, answers)?;
-    let mut specs = variant_specs(preset, &base);
+    let specs = variant_specs(preset, &base);
+    let mut specs = enforce_hard_constraints(preset, specs)?;
     // Distinct archetypes only, cap at MAX_CANDIDATES, preserve declared order
     // (highest-priority variant per preset is declared first) before scoring
     // re-sorts by weighted total.
@@ -129,6 +134,49 @@ impl VariantSpec {
             confidence,
         }
     }
+}
+
+/// Run [`hard_violation`] against every generated variant: a variant whose
+/// graph violates one of `preset`'s hard [`PresetConstraint`]s is removed and
+/// never itself returned as a candidate. Its rejection reason is folded into
+/// the first surviving variant (declared-first, i.e. the preset's own
+/// preferred archetype), so the "considered and ruled out" trail is never
+/// silently dropped - it lands somewhere a caller can see it, alongside any
+/// rejection a variant already carried from its own construction (e.g. the
+/// EU decoy in `private_eu_production_variants`).
+///
+/// # Errors
+/// Returns [`PresetError::InvalidAnswer`] if every generated variant
+/// violates a hard constraint, leaving nothing compliant to return.
+fn enforce_hard_constraints(
+    preset: &Preset,
+    specs: Vec<VariantSpec>,
+) -> Result<Vec<VariantSpec>, PresetError> {
+    let mut survivors = Vec::with_capacity(specs.len());
+    let mut violations = Vec::new();
+    for spec in specs {
+        match hard_violation(preset, &spec.graph) {
+            Some(reason) => violations.push((spec.archetype, reason)),
+            None => survivors.push(spec),
+        }
+    }
+
+    if survivors.is_empty() {
+        return Err(PresetError::InvalidAnswer(format!(
+            "no candidate for preset `{}` satisfies its own hard constraints with these answers",
+            preset.id
+        )));
+    }
+
+    if let Some(first) = survivors.first_mut() {
+        first
+            .rejected
+            .extend(violations.into_iter().map(|(archetype, reason)| {
+                RejectedAlternative::new(format!("{archetype:?} variant"), reason)
+            }));
+    }
+
+    Ok(survivors)
 }
 
 /// Whether `graph` violates one of `preset`'s hard [`PresetConstraint`]s.
@@ -553,6 +601,130 @@ mod tests {
         for candidate in &candidates {
             for hw in &candidate.graph.hardware_profiles {
                 assert_eq!(hw.provider, "local");
+            }
+        }
+    }
+
+    #[test]
+    fn every_candidate_satisfies_every_hard_constraint_of_its_preset() {
+        // Generalizes `eu_preset_never_yields_an_external_provider_candidate`
+        // to every PresetConstraint kind (RuntimeFamily, QuantizationRequired,
+        // LocalOnly, ExternalProvidersForbidden, EuResidencyOnly), not just
+        // the provider allowlist, and to every catalog preset.
+        for preset in catalog() {
+            let candidates = rank(preset, &answers()).expect("rank");
+            for candidate in &candidates {
+                assert!(
+                    hard_violation(preset, &candidate.graph).is_none(),
+                    "{} {:?} candidate violates a hard constraint: {:?}",
+                    preset.id,
+                    candidate.archetype,
+                    hard_violation(preset, &candidate.graph)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn enforce_hard_constraints_filters_a_deliberately_violating_variant() {
+        // Mutation-style: construct a variant that violates
+        // cost_optimized_batch's QuantizationRequired constraint alongside a
+        // compliant one, and confirm the enforcement step removes only the
+        // violator - never silently - folding its reason into the survivor.
+        let batch = preset("cost_optimized_batch");
+        let base = build_graph(batch, &answers()).expect("base graph");
+
+        let mut violating = base.clone();
+        if let Some(model) = violating.models.first_mut() {
+            model.artifact.quantization = None;
+        }
+        assert!(
+            hard_violation(batch, &violating).is_some(),
+            "the mutated graph should actually violate QuantizationRequired"
+        );
+
+        let specs = vec![
+            VariantSpec {
+                archetype: CandidateArchetype::Balanced,
+                graph: base.clone(),
+                rationale: vec!["ok".to_string()],
+                rejected: Vec::new(),
+                axes: [0.5, 0.5, 0.5, 0.5, 0.5],
+            },
+            VariantSpec {
+                archetype: CandidateArchetype::CostOptimized,
+                graph: violating,
+                rationale: vec!["deliberately unquantized".to_string()],
+                rejected: Vec::new(),
+                axes: [0.9, 0.5, 0.5, 0.5, 0.5],
+            },
+        ];
+
+        let survivors = enforce_hard_constraints(batch, specs).expect("one survivor");
+        assert_eq!(survivors.len(), 1);
+        assert_eq!(survivors[0].archetype, CandidateArchetype::Balanced);
+        assert!(
+            survivors[0]
+                .rejected
+                .iter()
+                .any(|r| r.reason.contains("not quantized")),
+            "the violation reason should be folded into the survivor, got {:?}",
+            survivors[0].rejected
+        );
+    }
+
+    #[test]
+    fn enforce_hard_constraints_errors_when_every_variant_violates() {
+        let batch = preset("cost_optimized_batch");
+        let base = build_graph(batch, &answers()).expect("base graph");
+        let mut violating = base;
+        if let Some(model) = violating.models.first_mut() {
+            model.artifact.quantization = None;
+        }
+        let specs = vec![VariantSpec {
+            archetype: CandidateArchetype::Balanced,
+            graph: violating,
+            rationale: vec!["deliberately unquantized".to_string()],
+            rejected: Vec::new(),
+            axes: [0.5, 0.5, 0.5, 0.5, 0.5],
+        }];
+        assert!(matches!(
+            enforce_hard_constraints(batch, specs),
+            Err(PresetError::InvalidAnswer(_))
+        ));
+    }
+
+    #[test]
+    fn every_candidate_passes_report_for_across_priorities_and_residency() {
+        // Cross-product regression for the eu_residency_required=true bug:
+        // every preset, every priority (including balanced/None), and both
+        // residency answers must always yield only report_for-valid
+        // candidates.
+        const PRIORITIES: [Option<WizardPriority>; 6] = [
+            None,
+            Some(WizardPriority::Cost),
+            Some(WizardPriority::Latency),
+            Some(WizardPriority::Quality),
+            Some(WizardPriority::Privacy),
+            Some(WizardPriority::Simplicity),
+        ];
+        for preset in catalog() {
+            for priority in PRIORITIES {
+                for eu_residency_required in [false, true] {
+                    let mut a = answers();
+                    a.priority = priority;
+                    a.eu_residency_required = eu_residency_required;
+                    let candidates = rank(preset, &a).expect("rank");
+                    for candidate in candidates {
+                        let report = amicu_engine::report_for(&candidate.graph);
+                        assert!(
+                            report.valid,
+                            "{} priority={priority:?} eu_residency_required={eu_residency_required} \
+                             {:?} candidate failed report_for: {:?}",
+                            preset.id, candidate.archetype, report.diagnostics
+                        );
+                    }
+                }
             }
         }
     }

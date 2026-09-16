@@ -347,3 +347,32 @@ async fn community_token_can_call_both_wizard_endpoints() {
     assert_eq!(candidates, StatusCode::OK);
     assert_ne!(candidates, StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn eu_residency_required_never_produces_an_invalid_candidate_for_any_preset() {
+    // Regression: `local_dev_chat` and `cost_optimized_batch` used to emit a
+    // graph that fails plan-time validation whenever the wizard answered
+    // `eu_residency_required: true` (an EU-only provider allowlist was pinned
+    // against a hardcoded non-EU provider). Every preset must still return
+    // 200 with only report_for-valid candidates.
+    let (app, token) = app_with(Tier::Community);
+    for id in PRESET_IDS {
+        let mut body = candidates_body(id);
+        body["answers"]["eu_residency_required"] = json!(true);
+        let (status, response) =
+            send(&app, post("/recommend/candidates", Some(&token), &body)).await;
+        assert_eq!(status, StatusCode::OK, "{id}");
+        let candidates = response["candidates"].as_array().expect("candidates array");
+        assert!(!candidates.is_empty(), "{id}");
+        for candidate in candidates {
+            let hcl = candidate["hcl"].as_str().expect("hcl string");
+            let graph = amicu_hcl::parse_graph(hcl).expect("emitted HCL parses");
+            let report = amicu_engine::report_for(&graph);
+            assert!(
+                report.valid,
+                "{id} candidate with eu_residency_required=true failed report_for: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+}
