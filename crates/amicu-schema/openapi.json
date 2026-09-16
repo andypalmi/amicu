@@ -1399,6 +1399,62 @@
         ]
       }
     },
+    "/recommend/customize": {
+      "post": {
+        "tags": [
+          "wizard"
+        ],
+        "summary": "Customize (re-parse, validate, and plan) a wizard candidate's HCL.",
+        "description": "The deterministic customize flow: parse `hcl`, deserialize the optional\nopaque `base_graph`, validate the parsed graph\n([`amicu_engine::report_for`]), then diff it against `base_graph`\n([`amicu_engine::build_plan`]) exactly as `POST /plan` does for its\n`config`/`prior`. See the module doc-comment for the full `422`-vs-`400`\nrationale, the SSE-shape-compatibility note, and the v1\nno-estimate/confidence limitation.\n\nResponse status by outcome:\n- `hcl` does not parse, or parses but carries a resource id/reference that\n  is not a valid, round-trip-safe HCL identifier: `422`, `report` carries\n  one [`catalog::PARSE_INVALID_SYNTAX`] diagnostic, `plan`/`graph` absent,\n  `hcl` echoes the raw submission.\n- `base_graph` is present but not a valid `Graph`: `400`,\n  `{\"error\": \"...\"}`.\n- `hcl` parses but fails structural/per-deployment validation: `422`,\n  `report.valid == false`, `plan`/`graph` absent, `hcl` is the\n  canonically-reformatted text.\n- `hcl` parses and validates but planning surfaces an error-severity\n  diagnostic (e.g. an adapter-level capability mismatch): `422`, `report`\n  carries the planning diagnostics, `plan`/`graph` absent.\n- Otherwise: `200`, `report` (its diagnostics, if any, are all\n  non-error), `plan`, and `graph` all present.",
+        "operationId": "customize_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomizeRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The submitted HCL parsed, validated, and planned cleanly.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomizeResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`base_graph` is present but is not valid JSON for a Graph."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          },
+          "422": {
+            "description": "The HCL did not parse, failed validation, or failed to plan; body carries the blocking DiagnosticReport.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomizeResponseDto"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/recommend/questions": {
       "get": {
         "tags": [
@@ -2629,6 +2685,61 @@
           "password": {
             "type": "string",
             "description": "Account password."
+          }
+        }
+      },
+      "CustomizeRequestDto": {
+        "type": "object",
+        "description": "Request body for `POST /recommend/customize`.",
+        "required": [
+          "hcl"
+        ],
+        "properties": {
+          "base_graph": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The base graph to diff against (the candidate's original graph, as\nopaque canonical JSON - see `CandidateDto::graph`). Omitted plans\nagainst an empty prior, i.e. every resource is a create."
+          },
+          "hcl": {
+            "type": "string",
+            "description": "The (possibly user-edited) Amicu HCL to re-parse, validate, and plan."
+          }
+        }
+      },
+      "CustomizeResponseDto": {
+        "type": "object",
+        "description": "Response for `POST /recommend/customize`.",
+        "required": [
+          "report",
+          "hcl"
+        ],
+        "properties": {
+          "graph": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The parsed graph as canonical JSON, `None` under the same conditions\nas `plan`."
+          },
+          "hcl": {
+            "type": "string",
+            "description": "The submitted HCL, canonically re-formatted when it parsed; echoed\nverbatim (unformatted) when it did not parse at all."
+          },
+          "plan": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Plan",
+                "description": "`None` when `report.valid` is false or planning itself hit an error -\nmatching `/plan`'s convention of omitting the plan on failure."
+              }
+            ]
+          },
+          "report": {
+            "$ref": "#/components/schemas/DiagnosticReport"
           }
         }
       },

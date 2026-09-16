@@ -289,6 +289,16 @@ pub mod catalog {
 
     /// `AMICU-PARSE-001` - HCL block is not closed.
     pub const PARSE_UNCLOSED_BLOCK: DiagnosticCode = DiagnosticCode::new(Category::Parse, 1);
+    // --- amicu-planning#35: generated HCL customize/plan display ---
+    /// `AMICU-PARSE-002` - HCL text is not syntactically valid; see the
+    /// diagnostic message for detail. A generic parse-failure code, distinct
+    /// from the more specific [`PARSE_UNCLOSED_BLOCK`], used whenever an
+    /// `amicu_hcl::HclError` (any variant) needs to be surfaced as a
+    /// [`super::Diagnostic`] inside a [`super::DiagnosticReport`] rather than
+    /// as a raw HTTP error - e.g. `POST /recommend/customize`, whose
+    /// `DiagnosticsPanel`-first UI never wants a separate error-string code
+    /// path for a malformed submission.
+    pub const PARSE_INVALID_SYNTAX: DiagnosticCode = DiagnosticCode::new(Category::Parse, 2);
     /// `AMICU-SCHEMA-001` - required attribute is missing.
     pub const SCHEMA_MISSING_REQUIRED: DiagnosticCode = DiagnosticCode::new(Category::Schema, 1);
     /// `AMICU-REF-001` - reference points at an unknown resource.
@@ -357,9 +367,10 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 20] {
+    pub const fn all() -> [DiagnosticCode; 21] {
         [
             PARSE_UNCLOSED_BLOCK,
+            PARSE_INVALID_SYNTAX,
             SCHEMA_MISSING_REQUIRED,
             REF_UNKNOWN_RESOURCE,
             CAP_RUNTIME_ARTIFACT_MISMATCH,

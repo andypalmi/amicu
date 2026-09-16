@@ -769,3 +769,44 @@ impl From<TuningReport> for TuningReportDto {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// `POST /recommend/customize` (andypalmi/amicu-planning#35)
+// ---------------------------------------------------------------------------
+//
+// The customize DTOs below are unrelated to the `/recommend`+`/monitor`
+// measured-metrics surface documented at the top of this file; they live here
+// anyway to keep every wire DTO in one place per this crate's convention (see
+// `crate::customize` for the handler). Types are fully qualified rather than
+// added to the top `use` block, since they're only referenced here.
+
+/// Request body for `POST /recommend/customize`.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct CustomizeRequestDto {
+    /// The (possibly user-edited) Amicu HCL to re-parse, validate, and plan.
+    pub hcl: String,
+    /// The base graph to diff against (the candidate's original graph, as
+    /// opaque canonical JSON - see `CandidateDto::graph`). Omitted plans
+    /// against an empty prior, i.e. every resource is a create.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub base_graph: Option<serde_json::Value>,
+}
+
+/// Response for `POST /recommend/customize`.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct CustomizeResponseDto {
+    pub report: amicu_core::diagnostic::DiagnosticReport,
+    /// `None` when `report.valid` is false or planning itself hit an error -
+    /// matching `/plan`'s convention of omitting the plan on failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<amicu_plan::Plan>,
+    /// The parsed graph as canonical JSON, `None` under the same conditions
+    /// as `plan`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
+    pub graph: Option<serde_json::Value>,
+    /// The submitted HCL, canonically re-formatted when it parsed; echoed
+    /// verbatim (unformatted) when it did not parse at all.
+    pub hcl: String,
+}
