@@ -17,6 +17,11 @@ path = "src/lib.rs"
 [dependencies]
 amicu-api = { path = "../amicu-api" }
 amicu-auth = { path = "../amicu-auth" }
+# SecretValue, to read AMICU_EDGE_TOKEN without ever letting it flow through a
+# clap flag (see the crate docs' "Cloudflare edge trust" section,
+# andypalmi/amicu-planning#142). Previously a dev-only dependency (the SMTP
+# render tests already used it); promoted to a real dependency here.
+amicu-core = { path = "../amicu-core" }
 amicu-state = { path = "../amicu-state" }
 amicu-store = { path = "../amicu-store" }
 async-trait = "0.1"
@@ -43,8 +48,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 # (see the crate/test docs). No TLS: the test talks plain HTTP to 127.0.0.1.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 serde_json = "1"
-# The SMTP render tests construct SecretValue-carrying notifications directly.
-amicu-core = { path = "../amicu-core" }
+# Unique per-test rate-limit keys in the live Postgres limiter tests (same
+# version already used workspace-wide, e.g. amicu-store's Cargo.toml).
+uuid = { version = "1", features = ["v4"] }
 
 [lints]
 workspace = true

@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use amicu_api::{
-    AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore, OrgApiState,
-    RateLimiter, SessionApiState, StripeConfig, api_router,
+    AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore,
+    InMemoryRateLimiter, OrgApiState, SessionApiState, StripeConfig, api_router,
 };
 use amicu_auth::notify::LoggingNotifier;
 use amicu_auth::refresh::InMemoryRefreshStore;
@@ -99,7 +99,7 @@ async fn harness(tier: Tier, configure_stripe: bool) -> Harness {
     ));
     let auth_state = AuthApiState::new(
         service.clone(),
-        Arc::new(RateLimiter::new(100, Duration::from_secs(60))),
+        Arc::new(InMemoryRateLimiter::new(100, Duration::from_secs(60))),
     );
 
     let verifier = Arc::new(Verifier::new(

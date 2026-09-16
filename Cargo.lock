@@ -278,6 +278,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

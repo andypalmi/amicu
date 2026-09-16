@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use amicu_api::{AuthApiState, RateLimiter, TrustedProxies, auth_router};
+use amicu_api::{AuthApiState, InMemoryRateLimiter, TrustedProxies, auth_router};
 use amicu_auth::issuer::{IssuerConfig, TokenIssuer};
 use amicu_auth::jwks::Jwks;
 use amicu_auth::key::SigningKey;
@@ -57,7 +57,7 @@ fn build_app(rate_max: u32, trusted: TrustedProxies, notifier: Arc<dyn Notifier>
         notifier,
         "https://auth.amicu.dev",
     ));
-    let limiter = Arc::new(RateLimiter::new(rate_max, Duration::from_secs(60)));
+    let limiter = Arc::new(InMemoryRateLimiter::new(rate_max, Duration::from_secs(60)));
     auth_router(AuthApiState::new(service, limiter).with_trusted_proxies(trusted))
 }
 

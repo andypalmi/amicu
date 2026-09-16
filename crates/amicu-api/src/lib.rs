@@ -41,6 +41,7 @@ pub mod auth;
 pub mod billing;
 pub mod config;
 pub mod dto;
+pub mod edge;
 pub mod engine;
 pub mod health;
 pub mod monitor;
@@ -63,11 +64,16 @@ use utoipa_axum::routes;
 pub use auth::{AuthApiState, auth_router};
 pub use billing::{BillingApiState, StripeConfig, billing_router, stripe_config_from_env};
 pub use config::{ConfigApiState, config_router};
+pub use edge::{
+    CF_CONNECTING_IP_HEADER, EDGE_TOKEN_HEADER, EdgeGateState, EdgeTrust, edge_token_gate,
+};
 pub use engine::{AccessVerifier, EngineApiState, WorkspaceContext};
 pub use health::{HealthApiState, health_router};
 pub use openapi::ApiDoc;
 pub use org::{InMemoryOrgStore, OrgApiState, OrgStore, org_router};
-pub use ratelimit::{ProxyParseError, RateLimiter, TrustedProxies};
+pub use ratelimit::{
+    InMemoryRateLimiter, PostgresRateLimiter, ProxyParseError, RateLimiter, TrustedProxies,
+};
 pub use session::{SessionApiState, session_router};
 pub use tenancy::{PostgresTenancyStore, TenancyStore};
 

@@ -74,6 +74,7 @@ use uuid::Uuid;
 pub mod config;
 pub mod invite;
 pub mod membership;
+pub mod ratelimit;
 pub mod refresh;
 pub mod reset;
 pub mod state;
@@ -86,6 +87,7 @@ pub use invite::{AcceptedInvite, Invite, InviteError, PostgresInviteStore};
 pub use membership::{
     Member, OrgAuditAction, OrgAuditEntry, OrgMutationError, PostgresMembershipStore, Role,
 };
+pub use ratelimit::PostgresRateLimitStore;
 pub use refresh::PostgresRefreshStore;
 pub use reset::PostgresResetStore;
 pub use state::PostgresStateBackend;

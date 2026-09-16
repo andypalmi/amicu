@@ -26,8 +26,8 @@ use std::time::Duration;
 
 use amicu_api::org::{AuditAction, OrgStore, OrgStoreError};
 use amicu_api::{
-    AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore, OrgApiState,
-    RateLimiter, SessionApiState, api_router,
+    AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore,
+    InMemoryRateLimiter, OrgApiState, SessionApiState, api_router,
 };
 use amicu_auth::notify::LoggingNotifier;
 use amicu_auth::refresh::InMemoryRefreshStore;
@@ -128,7 +128,7 @@ fn harness() -> Harness {
     ));
     let auth_state = AuthApiState::new(
         service.clone(),
-        Arc::new(RateLimiter::new(1000, Duration::from_secs(60))),
+        Arc::new(InMemoryRateLimiter::new(1000, Duration::from_secs(60))),
     );
 
     let verifier = Arc::new(Verifier::new(
