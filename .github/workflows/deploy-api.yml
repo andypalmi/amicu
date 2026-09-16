@@ -1,0 +1,108 @@
+name: Deploy API (Cloud Run)
+
+# Mirrors geometra/safecheck-backend's backend.yml `deploy` job shape
+# (WIF auth -> build/push -> migrate Job -> deploy service), adapted to
+# amicu's names from amicu-infra's envs/prod/outputs.tf (see
+# docs/deploy/cloud-run.md for the full vars/secrets table).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".github/workflows/deploy-api.yml"
+  workflow_dispatch:
+
+concurrency:
+  # Repo-wide, not per-ref: only one Cloud Run rollout (migrate + deploy) in
+  # flight at a time — a second push landing mid-rollout must wait, not race
+  # the first one's migrate-then-deploy ordering.
+  group: deploy-api
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Build, migrate, deploy
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      REGION: ${{ vars.GCP_REGION }}
+      # amicu-infra's module.gcp_project.artifact_registry_path output, e.g.
+      # europe-west1-docker.pkg.dev/amicu-prod/amicu — one Artifact Registry
+      # repo (id "amicu", modules/gcp-project/variables.tf's
+      # artifact_registry_repo_id default, not overridden in
+      # envs/prod/terraform.tfvars) holds the single image both Cloud Run
+      # resources use. Hardcoded, not a repo variable: this is a fixed
+      # Terraform-module default, not something meant to vary per deploy.
+      IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/amicu/amicu-api
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          build-args: |
+            GIT_REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Migrate FIRST — fail the whole deploy before anything user-facing
+      # changes if the migration fails, rather than rolling amicu-api
+      # forward onto a schema it doesn't match (same order as
+      # safecheck-backend's deploy job). Job name "amicu-migrate" is
+      # amicu-infra's envs/prod/variables.tf `migrate_job_name` default
+      # (hardcoded here, not a repo variable, for the same reason as the AR
+      # repo id above). That Job's `command` is Terraform-managed
+      # (amicu-infra's module.cloud_run_job_migrate.command =
+      # ["/usr/local/bin/amicu-server", "migrate"]) — only the image is
+      # updated here, never the command/env, so this workflow can never
+      # fight Terraform's ownership of that Job's invocation or config.
+      - name: Run database migration (amicu-migrate job)
+        run: |
+          gcloud run jobs update amicu-migrate \
+            --region "${REGION}" \
+            --image "${{ env.IMAGE }}:${{ github.sha }}"
+          gcloud run jobs execute amicu-migrate \
+            --region "${REGION}" \
+            --wait
+
+      # `--image` only, deliberately — every other setting (env vars, secret
+      # refs, scaling, probes, ingress) is Terraform-managed
+      # (amicu-infra/modules/cloud-run-api) and explicitly `ignore_changes`d
+      # on `template[0].containers[0].image`/`client`/`client_version` ONLY,
+      # so this deploy and a later `terraform apply` never fight over
+      # anything else. Never add --set-env-vars / --set-secrets here. Service
+      # name "amicu-api" is amicu-infra's envs/prod/variables.tf
+      # `api_service_name` default (hardcoded here for the same reason as
+      # the AR repo id / job name above).
+      - name: Deploy amicu-api
+        run: |
+          gcloud run deploy amicu-api \
+            --region "${REGION}" \
+            --image "${{ env.IMAGE }}:${{ github.sha }}"

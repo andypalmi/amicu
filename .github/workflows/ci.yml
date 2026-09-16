@@ -50,6 +50,32 @@ jobs:
       - name: Audit
         run: cargo audit
 
+  docker:
+    name: docker (build only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Verifies the multi-stage Dockerfile actually builds (cargo-chef
+      # plan/cook, SQLX_OFFLINE against the committed .sqlx/ cache, the
+      # --locked release build of amicu-server, distroless runtime) on every
+      # push/PR — this is the only build verification the image gets today
+      # (amicu-planning#143): Docker is unavailable on the maintainer's
+      # local machine, and `push: false` means no registry credentials are
+      # needed here at all. The real push+deploy happens in
+      # deploy-api.yml, gated on `main` only, with WIF auth.
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          build-args: |
+            GIT_REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   msrv:
     name: msrv (1.97)
     runs-on: ubuntu-latest

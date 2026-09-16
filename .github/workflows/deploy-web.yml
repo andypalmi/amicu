@@ -1,0 +1,71 @@
+name: Deploy Web (Cloudflare Workers)
+
+# Mirrors geometra/safecheck-frontend's frontend.yml `deploy` job shape
+# (pnpm install --frozen-lockfile -> build -> cloudflare/wrangler-action),
+# adapted for amicu's OpenNext Worker (a real server Worker with a `main`
+# script, not safecheck-frontend's pure-static-assets Vite/React SPA — see
+# web/apps/web/wrangler.jsonc and README-deploy-cloudflare.md, added by
+# amicu-planning#144).
+#
+# Deviates from frontend.yml in one way, on amicu-infra README's explicit
+# instruction ("What the amicu app repo must add"): gated behind the same
+# `production` GitHub environment as deploy-api.yml (required reviewer),
+# where safecheck-frontend's own deploy job has no environment gate at all.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/deploy-web.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-web
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Build & deploy OpenNext Worker
+    runs-on: ubuntu-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      # Activates the `packageManager` pin in web/package.json
+      # ("pnpm@11.22.0") via Node 22's built-in corepack, same pin CI's
+      # `web` job gets from pnpm/action-setup's package_json_file input —
+      # corepack is the more direct way to honor that pin from a plain
+      # actions/setup-node step.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `cf:deploy` (web/apps/web/package.json) is
+      # `opennextjs-cloudflare build && opennextjs-cloudflare deploy --
+      # --keep-vars` — `--keep-vars` preserves whatever non-secret `vars`
+      # and `wrangler secret put` values are already set on the Worker
+      # (Cloudflare dashboard / CLI) instead of resetting them to
+      # wrangler.jsonc's placeholder values on every deploy. Runtime
+      # secrets (a BFF session secret, etc.) are never set here — see
+      # docs/deploy/cloud-run.md and web/apps/web/README-deploy-cloudflare.md.
+      - name: Build & deploy
+        run: pnpm --filter @amicu/web cf:deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          # Public/build-time only (baked into the client bundle either
+          # way, per web/apps/web/README-deploy-cloudflare.md) — a repo
+          # variable, not a secret, same convention as safecheck-frontend's
+          # VITE_* build vars.
+          NEXT_PUBLIC_SITE_URL: ${{ vars.NEXT_PUBLIC_SITE_URL }}
