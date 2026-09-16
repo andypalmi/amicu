@@ -20,6 +20,12 @@
 //!   candidates ranked from the wizard's answers). Distinct from `POST
 //!   /recommend`'s advisory tuning diagnosis: nothing here reads a measured
 //!   metrics snapshot.
+//! - Customize: the stateless, auth-gated [`POST
+//!   /recommend/customize`](customize::customize_handler) endpoint
+//!   (andypalmi/amicu-planning#35), which re-parses a (possibly user-edited)
+//!   wizard candidate's HCL, validates it, and plans/diffs it against the
+//!   candidate's original graph - the same `amicu-engine` orchestration
+//!   `POST /plan` runs, reused rather than reimplemented.
 //! - Config: the auth-gated [`/configs/*`](config) surface (create/list/get,
 //!   version history, append, rollback, and a server-computed diff) backed by
 //!   `amicu-store`'s [`amicu_store::config::ConfigStore`], storing config
@@ -52,6 +58,7 @@
 pub mod auth;
 pub mod billing;
 pub mod config;
+pub mod customize;
 pub mod dto;
 pub mod edge;
 pub mod engine;
@@ -109,6 +116,7 @@ fn engine_parts() -> (Router<EngineApiState>, utoipa::openapi::OpenApi) {
         .routes(routes!(preset::emit_preset_handler))
         .routes(routes!(recommend_wizard::questions_handler))
         .routes(routes!(recommend_wizard::candidates_handler))
+        .routes(routes!(customize::customize_handler))
         .split_for_parts()
 }
 
