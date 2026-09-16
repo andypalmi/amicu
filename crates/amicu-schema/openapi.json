@@ -1347,6 +1347,108 @@
         ]
       }
     },
+    "/recommend/candidates": {
+      "post": {
+        "tags": [
+          "wizard"
+        ],
+        "summary": "Rank a preset's candidates from the wizard's answers.",
+        "description": "Generates a small fixed set of graph variants for the preset, filters out\nany that would violate one of the preset's hard constraints (never\nproposed - the exclusion is recorded as a `rejected` alternative on the\ncandidate that stands in its place), scores the survivors against the\nwizard's `priority` (balanced when omitted), and returns 2-4 in ranked\norder. Deterministic: the same request always returns byte-identical\noutput. A `404` if the preset id is unknown, a `400` if a wizard answer is\nout of range.",
+        "operationId": "candidates_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CandidatesRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "2-4 ranked, hard-constraint-filtered candidates.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CandidatesResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A wizard answer is out of range."
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          },
+          "404": {
+            "description": "No preset exists with this id."
+          },
+          "422": {
+            "description": "The JSON body is well-formed but a field has the wrong type or is missing."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/recommend/questions": {
+      "get": {
+        "tags": [
+          "wizard"
+        ],
+        "summary": "List the core wizard questions for a preset.",
+        "description": "Returns the ≤6 typed questions [`questions_for`] derives for the preset,\nso a client renders its form purely from engine-provided data - no\nquestion text or option list is authored in TypeScript. A `404` if the\npreset id is unknown.",
+        "operationId": "questions_handler",
+        "parameters": [
+          {
+            "name": "preset",
+            "in": "query",
+            "description": "The snake_case preset id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The preset's core wizard questions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/QuestionDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid access token."
+          },
+          "403": {
+            "description": "Access tier insufficient."
+          },
+          "404": {
+            "description": "No preset exists with this id."
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/recover": {
       "post": {
         "tags": [
@@ -1985,6 +2087,138 @@
           "decode_bound",
           "preemption_recompute"
         ]
+      },
+      "CandidateArchetypeDto": {
+        "type": "string",
+        "description": "The shape a ranked candidate represents. Mirrors\n[`amicu_recommend::CandidateArchetype`].",
+        "enum": [
+          "simplest",
+          "balanced",
+          "cost_optimized",
+          "performance_optimized",
+          "local_development"
+        ]
+      },
+      "CandidateDto": {
+        "type": "object",
+        "description": "One ranked candidate: the graph as canonical JSON, the same graph rendered\nto HCL (the input the `#35` customize flow edits), its score, rationale,\nrejected alternatives, estimate, and confidence.",
+        "required": [
+          "archetype",
+          "graph",
+          "hcl",
+          "score",
+          "rationale",
+          "estimate",
+          "confidence"
+        ],
+        "properties": {
+          "archetype": {
+            "$ref": "#/components/schemas/CandidateArchetypeDto"
+          },
+          "confidence": {
+            "$ref": "#/components/schemas/ConfidenceDto"
+          },
+          "estimate": {
+            "$ref": "#/components/schemas/WorkloadEstimateDto"
+          },
+          "graph": {
+            "type": "object",
+            "description": "The candidate's graph as canonical JSON - the same shape `amicu-hcl`\nparses/serializes and `amicu-engine` validates. Opaque JSON here\n(`amicu_core::graph::Graph`'s resource types are not part of this\ncrate's typed OpenAPI schema surface); `hcl` is the primary editable\nartifact."
+          },
+          "hcl": {
+            "type": "string",
+            "description": "The candidate's graph rendered to Amicu HCL."
+          },
+          "rationale": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Human-readable reasons this shape was proposed."
+          },
+          "rejected": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RejectedAlternativeDto"
+            },
+            "description": "Alternatives considered for this archetype and ruled out - including\nany that would have violated a hard constraint and was therefore never\nitself proposed as a candidate."
+          },
+          "score": {
+            "$ref": "#/components/schemas/CandidateScoreDto"
+          }
+        }
+      },
+      "CandidateScoreDto": {
+        "type": "object",
+        "description": "Per-axis soft-constraint scores plus the weighted total a candidate was\nordered by. Mirrors [`amicu_recommend::CandidateScore`].",
+        "required": [
+          "cost",
+          "latency",
+          "quality",
+          "privacy",
+          "simplicity",
+          "total"
+        ],
+        "properties": {
+          "cost": {
+            "type": "number",
+            "format": "double"
+          },
+          "latency": {
+            "type": "number",
+            "format": "double"
+          },
+          "privacy": {
+            "type": "number",
+            "format": "double"
+          },
+          "quality": {
+            "type": "number",
+            "format": "double"
+          },
+          "simplicity": {
+            "type": "number",
+            "format": "double"
+          },
+          "total": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "CandidatesRequestDto": {
+        "type": "object",
+        "description": "Request body for `POST /recommend/candidates`.",
+        "required": [
+          "preset_id",
+          "answers"
+        ],
+        "properties": {
+          "answers": {
+            "$ref": "#/components/schemas/WizardAnswersDto",
+            "description": "The wizard's answers to the preset's core questions."
+          },
+          "preset_id": {
+            "type": "string",
+            "description": "The snake_case preset id."
+          }
+        }
+      },
+      "CandidatesResponseDto": {
+        "type": "object",
+        "description": "Response for `POST /recommend/candidates`.",
+        "required": [
+          "candidates"
+        ],
+        "properties": {
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CandidateDto"
+            },
+            "description": "2-4 candidates in ranked order (highest-scoring first), or exactly 1\nwhen the preset defines only one candidate shape."
+          }
+        }
       },
       "ChangeDirectionDto": {
         "type": "string",
@@ -3115,6 +3349,143 @@
           "formula"
         ]
       },
+      "QuestionDto": {
+        "type": "object",
+        "description": "One wizard question. `id` names the [`WizardAnswersDto`] field this\nanswer feeds. Mirrors [`amicu_recommend::Question`].",
+        "required": [
+          "id",
+          "prompt",
+          "kind",
+          "required",
+          "hard"
+        ],
+        "properties": {
+          "hard": {
+            "type": "boolean",
+            "description": "Whether this answer, if given, becomes a hard (filtering) constraint\nrather than only a soft ranking preference."
+          },
+          "help": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/QuestionKindDto"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          }
+        }
+      },
+      "QuestionKindDto": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "max": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "min": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "number"
+                ]
+              },
+              "unit": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "options",
+              "type"
+            ],
+            "properties": {
+              "options": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "choice"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "boolean"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "money"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "The kind of answer a [`QuestionDto`] expects. Mirrors\n[`amicu_recommend::QuestionKind`]."
+      },
       "QueueMetricsDto": {
         "type": "object",
         "description": "Admission-queue surface.",
@@ -3950,8 +4321,30 @@
             "format": "int32",
             "description": "Optional latency ceiling (ms) carried into the graph's use case.",
             "minimum": 0
+          },
+          "priority": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/WizardPriorityDto",
+                "description": "Which soft-constraint axis to weight most heavily when ranking\ncandidates via `POST /recommend/candidates`. Ignored by\n`POST /presets/{id}/emit`, which builds a single graph and does no\nranking. Omitted or `null` means balanced weighting."
+              }
+            ]
           }
         }
+      },
+      "WizardPriorityDto": {
+        "type": "string",
+        "description": "Which soft-constraint axis to weight most heavily when ranking candidates.\nMirrors [`amicu_recommend::WizardPriority`]. Distinct from [`PriorityDto`]\n(a use case's Low/Medium/High importance).",
+        "enum": [
+          "cost",
+          "latency",
+          "quality",
+          "privacy",
+          "simplicity"
+        ]
       },
       "WorkloadEstimateDto": {
         "type": "object",
@@ -4062,6 +4455,10 @@
     {
       "name": "preset",
       "description": "Stateless guided-wizard presets: gallery listing, per-preset detail, and deterministic HCL emit from wizard answers (auth-gated, Community-usable)."
+    },
+    {
+      "name": "wizard",
+      "description": "Stateless guided-wizard requirements engine: a preset's typed core questions, and 2-4 scored, hard-constraint-filtered candidates ranked from the wizard's answers (auth-gated, Community-usable)."
     },
     {
       "name": "billing",
