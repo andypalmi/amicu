@@ -34,33 +34,53 @@
 //! instead of refusing to start when the connecting role happens to own the
 //! schema.
 //!
-//! ## Still blocked: true N-replica scaling
+//! ## Multi-replica signing key (andypalmi/amicu-planning#140)
 //!
-//! Everything above makes ONE replica safe to run on Cloud Run. Running
-//! MULTIPLE replicas of the SAME deployment concurrently is still blocked by
-//! [`build_app`] generating a fresh [`SigningKey`](amicu_auth::key::SigningKey)
-//! on every boot: each replica would sign access tokens with its own key and
-//! verify against its own JWKS snapshot, so a token minted by one replica
-//! would fail verification on another. A durable, shared signing key (or a
-//! live JWKS the verifier can poll) is tracked as
-//! andypalmi/amicu-planning#140; until it lands, treat this bootstrap as safe
-//! for exactly one Cloud Run replica (`autoscaling.knative.dev/maxScale:
-//! "1"`), not the `0..N` the epic (andypalmi/amicu-planning#145) targets.
+//! [`build_app`] no longer generates a signing key at boot. The ACTIVE key
+//! (and any RETIRING keys, kept for verification only during rotation) are
+//! loaded once from `AMICU_SIGNING_KEY_PEM` / `AMICU_SIGNING_KEYS_RETIRING_PEM`
+//! (or their `_FILE` variants — see the `signing_key` module docs and
+//! `docs/ops/signing-key-rotation.md`). Every replica that shares the same
+//! secret-injected env therefore signs and verifies with the identical key
+//! set and publishes an identical `/.well-known/jwks.json` — a token minted
+//! by one Cloud Run replica verifies on any other. The engine-gate verifier
+//! also no longer trusts a boot-time snapshot: it reads the SAME live,
+//! in-process keyring the auth service signs with
+//! ([`KeyringJwksProvider`](amicu_auth::verifier::KeyringJwksProvider)), so a
+//! runtime rotation (`AuthService::rotate_keys`) propagates with NO restart
+//! and NO network round-trip — bounded by the verifier's own cache, not
+//! instant: a new active key is picked up by the first token that carries
+//! it (worst case one `refetch_cooldown`, 60s, under a concurrent
+//! unknown-`kid` flood), and a retired key stops verifying within one JWKS
+//! `cache_ttl` (5 minutes) — well inside the 5-minute access-token lifetime
+//! those tokens would expire at regardless. `development` (no
+//! `AMICU_SIGNING_KEY_PEM` set) still
+//! falls back to an ephemeral `SigningKey::generate()` per boot, with a
+//! loud warning — correct for a single local process, wrong for anything
+//! with more than one replica or that must survive a restart; `production`
+//! refuses to start without a real key instead ([`Error::MissingSigningKey`]).
+//!
+//! Running MULTIPLE replicas of the SAME deployment concurrently on Cloud
+//! Run (`autoscaling.knative.dev/maxScale` above `"1"`) is therefore now
+//! safe with respect to signing keys, in `production`
+//! (`AMICU_ENV=production`, which requires the active key to be set).
 //!
 //! # Dev / single-node bootstrap
 //!
 //! Absent a `DATABASE_URL`, state is wired with the **in-memory** auth stores
-//! ([`InMemoryUserStore`](amicu_auth::user::InMemoryUserStore) and friends) and
-//! a freshly generated signing key, and the engine gate verifies tokens against
-//! a snapshot of that key taken at startup. That is sufficient for a single
+//! ([`InMemoryUserStore`](amicu_auth::user::InMemoryUserStore) and friends);
+//! absent `AMICU_SIGNING_KEY_PEM`, the signing keyring falls back to a
+//! freshly generated key each boot (see the "Multi-replica signing key"
+//! section above), and the engine gate verifies tokens against the same live
+//! keyring the auth service signs with. That is sufficient for a single
 //! node / local end-to-end testing, but it means **all state is lost on
-//! restart** and the process cannot be horizontally scaled (each replica would
-//! sign with a different key and hold its own user table). This is the
-//! `development` (default) `AMICU_ENV` path; `production` refuses to start
-//! without a real `DATABASE_URL` instead of silently falling back to it. A
-//! KMS-held or rotated keyring and a distributed rate limiter remain future
-//! work - see the `amicu-auth` store traits, which this bootstrap is the seam
-//! for.
+//! restart** and the process cannot be horizontally scaled without setting
+//! `AMICU_SIGNING_KEY_PEM` (each replica would otherwise sign with a
+//! different key and hold its own user table). This is the `development`
+//! (default) `AMICU_ENV` path; `production` refuses to start without a real
+//! `DATABASE_URL` or a real `AMICU_SIGNING_KEY_PEM` instead of silently
+//! falling back to either. A distributed rate limiter remains future work -
+//! see the `amicu-auth` store traits, which this bootstrap is the seam for.
 //!
 //! # Connect-info is load-bearing
 //!
@@ -92,6 +112,10 @@
 //! | `db_min_connections` | `--db-min-connections` | `AMICU_DB_MIN_CONNECTIONS` | `0` |
 //! | `db_acquire_timeout_secs` | `--db-acquire-timeout-secs` | `AMICU_DB_ACQUIRE_TIMEOUT_SECS` | `10` |
 //! | `readyz_timeout_ms` | `--readyz-timeout-ms` | `AMICU_READYZ_TIMEOUT_MS` | `2000` |
+//! | `signing_key_pem` | `--signing-key-pem` | `AMICU_SIGNING_KEY_PEM` | none (dev: ephemeral `generate()`; prod: hard error) |
+//! | `signing_key_pem_file` | `--signing-key-pem-file` | `AMICU_SIGNING_KEY_PEM_FILE` | none |
+//! | `signing_keys_retiring_pem` | `--signing-keys-retiring-pem` | `AMICU_SIGNING_KEYS_RETIRING_PEM` | none |
+//! | `signing_keys_retiring_pem_file` | `--signing-keys-retiring-pem-file` | `AMICU_SIGNING_KEYS_RETIRING_PEM_FILE` | none |
 //!
 //! `environment` (see [`Environment`]) gates production safety checks: a
 //! missing `DATABASE_URL` and an RLS-bypassing connected role are hard startup
@@ -99,6 +123,13 @@
 //! the single shared Postgres pool (see [`amicu_store::PoolConfig`]); their
 //! small defaults are sized for many autoscaled Cloud Run replicas sharing one
 //! Cloud SQL connection ceiling, not a single beefy long-lived process.
+//!
+//! The signing-key fields split into an ACTIVE key (`signing_key_pem`/`_file`;
+//! signs new tokens and is the primary JWKS entry) and zero or more RETIRING
+//! keys (`signing_keys_retiring_pem`/`_file`; verify-only, kept published so
+//! tokens they already signed keep verifying through rotation). See the
+//! `signing_key` module docs and `docs/ops/signing-key-rotation.md` for the
+//! full operational rotation procedure.
 //!
 //! `bind`'s default changed from `127.0.0.1:8080` to `0.0.0.0:8080` in
 //! andypalmi/amicu-planning#139 - a deliberate, dev-facing change (not just a
@@ -128,6 +159,7 @@
 //! A subscription change takes effect on the user's **next token issuance**
 //! (sign-in or refresh); live access JWTs are never revoked.
 
+pub mod signing_key;
 pub mod smtp;
 
 use std::future::Future;
@@ -141,18 +173,16 @@ use amicu_api::{
     SessionApiState, TenancyStore, TrustedProxies, api_router, health_router,
     stripe_config_from_env,
 };
+use amicu_auth::Tier;
 use amicu_auth::issuer::{IssuerConfig, TokenIssuer};
-use amicu_auth::key::SigningKey;
-use amicu_auth::keyring::Keyring;
 use amicu_auth::membership::MembershipStore;
 use amicu_auth::notify::{LoggingNotifier, Notifier};
 use amicu_auth::refresh::{InMemoryRefreshStore, RefreshStore};
 use amicu_auth::reset::{InMemoryResetStore, ResetStore};
 use amicu_auth::service::AuthService;
 use amicu_auth::user::{InMemoryUserStore, UserStore};
-use amicu_auth::verifier::{StaticJwksProvider, Verifier, VerifierConfig};
+use amicu_auth::verifier::{KeyringJwksProvider, Verifier, VerifierConfig};
 use amicu_auth::verify::{InMemoryVerifyStore, VerifyStore};
-use amicu_auth::{AuthError, Tier};
 use amicu_state::{InMemoryStateBackend, StateBackendAdapter};
 use amicu_store::config::ConfigStore;
 use amicu_store::{
@@ -267,6 +297,57 @@ pub struct Config {
     /// acquire timeout.
     #[arg(long, env = "AMICU_READYZ_TIMEOUT_MS", default_value_t = 2_000)]
     pub readyz_timeout_ms: u64,
+
+    /// PKCS#8 Ed25519 PEM for the ACTIVE signing key (mints access tokens and
+    /// is the primary key advertised in JWKS). Injected from a secret manager;
+    /// may contain either real newlines or literal `\n` escapes (both are
+    /// normalised — see the `signing_key` module docs). Mutually exclusive
+    /// with `signing_key_pem_file` (setting both is a startup error). In
+    /// `production` a missing key is a hard startup error
+    /// ([`Error::MissingSigningKey`]); in `development` (the default) it falls
+    /// back to an ephemeral `SigningKey::generate()`, with a loud warning —
+    /// unchanged dev UX.
+    ///
+    /// Wrapped in [`signing_key::RedactedEnvString`], not a bare `String`:
+    /// `Config` derives `Debug`/`Clone` like every other field, and this one
+    /// carries private key material — see that type's docs for why a bare
+    /// `String` here would be a leak vector.
+    #[arg(
+        long,
+        env = "AMICU_SIGNING_KEY_PEM",
+        hide_env_values = true,
+        hide = true
+    )]
+    pub signing_key_pem: Option<signing_key::RedactedEnvString>,
+
+    /// Path to a file containing the ACTIVE signing key PEM (a mounted secret
+    /// volume), as an alternative to `AMICU_SIGNING_KEY_PEM`. Mutually
+    /// exclusive with it.
+    #[arg(long, env = "AMICU_SIGNING_KEY_PEM_FILE", hide_env_values = true)]
+    pub signing_key_pem_file: Option<String>,
+
+    /// Zero or more PKCS#8 Ed25519 PEM blocks (concatenated, split on
+    /// `-----BEGIN`) for RETIRING keys: verify-only, never sign, kept
+    /// published in JWKS so tokens they already signed keep verifying until
+    /// they expire. Optional; empty/unset means no retiring keys. See
+    /// `docs/ops/signing-key-rotation.md`.
+    #[arg(
+        long,
+        env = "AMICU_SIGNING_KEYS_RETIRING_PEM",
+        hide_env_values = true,
+        hide = true
+    )]
+    pub signing_keys_retiring_pem: Option<signing_key::RedactedEnvString>,
+
+    /// Path to a file containing the RETIRING keys' concatenated PEM blocks,
+    /// as an alternative to `AMICU_SIGNING_KEYS_RETIRING_PEM`. Mutually
+    /// exclusive with it.
+    #[arg(
+        long,
+        env = "AMICU_SIGNING_KEYS_RETIRING_PEM_FILE",
+        hide_env_values = true
+    )]
+    pub signing_keys_retiring_pem_file: Option<String>,
 }
 
 /// Deployment environment gate (`AMICU_ENV`): whether production safety
@@ -313,8 +394,16 @@ impl From<MinTier> for Tier {
 pub enum Error {
     /// A trusted-proxy allowlist entry was not a valid CIDR or IP.
     Proxy(ProxyParseError),
-    /// The startup signing key could not be generated.
-    Key(AuthError),
+    /// `AMICU_ENV=production` but no active signing key was configured
+    /// (`AMICU_SIGNING_KEY_PEM` / `AMICU_SIGNING_KEY_PEM_FILE`). A production
+    /// deploy may never silently fall back to an ephemeral per-boot key that
+    /// would differ across replicas and not survive a restart.
+    MissingSigningKey,
+    /// A signing-key PEM (active or retiring) failed to load: not valid
+    /// PKCS#8 Ed25519, a `_FILE` path that could not be read, both the value
+    /// and file variant of the same key set, or a duplicate `kid` across the
+    /// active/retiring set. See the `signing_key` module docs.
+    SigningKeyConfig(signing_key::SigningKeyConfigError),
     /// The persistent store could not connect or migrate (only reachable when
     /// `DATABASE_URL` is set).
     Store(amicu_store::StoreError),
@@ -343,13 +432,23 @@ pub enum Error {
     MigratorLacksCreate(String),
     /// Binding or serving the socket failed.
     Io(std::io::Error),
+    /// `amicu-server gen-signing-key` could not generate a fresh key. In
+    /// practice unreachable outside an exhausted/broken OS RNG or a PKCS#8
+    /// encoding failure.
+    KeyGen(amicu_auth::error::AuthError),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Proxy(e) => write!(f, "trusted-proxy config: {e}"),
-            Error::Key(e) => write!(f, "signing-key generation: {e}"),
+            Error::MissingSigningKey => write!(
+                f,
+                "AMICU_ENV=production requires an active signing key: set AMICU_SIGNING_KEY_PEM or \
+                 AMICU_SIGNING_KEY_PEM_FILE (production may not silently fall back to an ephemeral \
+                 per-boot key)"
+            ),
+            Error::SigningKeyConfig(e) => write!(f, "signing key configuration: {e}"),
             Error::Store(e) => write!(f, "persistent store: {e}"),
             Error::Smtp(e) => write!(f, "smtp notifier config: {e}"),
             Error::Port(v) => write!(f, "PORT is not a valid port: {v}"),
@@ -371,6 +470,7 @@ impl std::fmt::Display for Error {
                  DATABASE_URL (see ops/sql/provision_app_role.sql)"
             ),
             Error::Io(e) => write!(f, "server socket: {e}"),
+            Error::KeyGen(e) => write!(f, "signing-key generation: {e}"),
         }
     }
 }
@@ -379,11 +479,13 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Proxy(e) => Some(e),
-            Error::Key(e) => Some(e),
+            Error::SigningKeyConfig(e) => Some(e),
             Error::Store(e) => Some(e),
             Error::Smtp(e) => Some(e),
             Error::Io(e) => Some(e),
+            Error::KeyGen(e) => Some(e),
             Error::Port(_)
+            | Error::MissingSigningKey
             | Error::MissingDatabaseUrl
             | Error::RlsBypass(_)
             | Error::PendingMigrations(_)
@@ -455,23 +557,30 @@ pub struct BuiltApp {
 /// loud on a partial configuration is what stops those raw tokens reaching the
 /// logs of a deployment the operator believes is sending real SMTP email.
 ///
-/// The engine gate verifies bearer tokens against a **snapshot** of the freshly
-/// generated JWKS taken here at startup. Because this bootstrap never rotates
-/// the key, the snapshot always matches what the auth service signs with; a
-/// deployment that rotates keys would back the verifier with a live JWKS
-/// provider instead.
+/// The engine gate verifies bearer tokens against a **live** [`KeyringJwksProvider`]
+/// backed by the exact same keyring the auth service signs with (see
+/// [`amicu_auth::service::AuthService::keyring_handle`]), so a runtime
+/// rotation (`AuthService::rotate_keys`) propagates with no restart and no
+/// JWKS round-trip — bounded by the verifier's own cache (worst case ~60s to
+/// pick up a new active key under an unknown-`kid` flood; up to 5 minutes,
+/// `VerifierConfig::cache_ttl`, for a retired key to stop verifying) rather
+/// than instant (andypalmi/amicu-planning#140).
 ///
 /// # Errors
 /// Returns [`Error::Proxy`] if the trusted-proxy allowlist fails to parse,
-/// [`Error::Key`] if the signing key cannot be generated, [`Error::Store`] if
-/// `DATABASE_URL` is set but the pool cannot connect (or, in `development`,
-/// migrate), [`Error::MissingDatabaseUrl`] if `AMICU_ENV=production` but no
-/// `DATABASE_URL` is set, [`Error::PendingMigrations`] if
-/// `AMICU_ENV=production` and the schema has migrations not yet applied by a
-/// separate `amicu-server migrate` run, [`Error::RlsBypass`] if
-/// `AMICU_ENV=production` and the connected role would bypass row-level
-/// security, or [`Error::Smtp`] if any `AMICU_SMTP_*` variable is set but the
-/// SMTP configuration is incomplete or invalid.
+/// [`Error::MissingSigningKey`] if `AMICU_ENV=production` and no active
+/// signing key is configured, or [`Error::SigningKeyConfig`] if a configured
+/// signing-key PEM is invalid, a `_FILE` path cannot be read, both a value
+/// and a file source are set for the same key, or two keys share a `kid`,
+/// [`Error::Store`] if `DATABASE_URL` is set but the pool cannot connect (or,
+/// in `development`, migrate), [`Error::MissingDatabaseUrl`] if
+/// `AMICU_ENV=production` but no `DATABASE_URL` is set,
+/// [`Error::PendingMigrations`] if `AMICU_ENV=production` and the schema has
+/// migrations not yet applied by a separate `amicu-server migrate` run,
+/// [`Error::RlsBypass`] if `AMICU_ENV=production` and the connected role
+/// would bypass row-level security, or [`Error::Smtp`] if any
+/// `AMICU_SMTP_*` variable is set but the SMTP configuration is incomplete or
+/// invalid.
 pub async fn build_app(config: &Config) -> Result<BuiltApp, Error> {
     build_app_with_database_url(config, std::env::var("DATABASE_URL").ok().as_deref()).await
 }
@@ -638,6 +747,32 @@ async fn connect_shared_pool(
     Ok(pool)
 }
 
+/// Generates a fresh Ed25519 PKCS#8 signing key and prints ONLY its PEM to
+/// stdout, then returns - `amicu-server gen-signing-key` (see `main.rs`'s
+/// `Command::GenSigningKey`). Nothing else touches stdout: the output is
+/// meant to be piped straight into a secret manager, e.g.
+///
+/// ```sh
+/// amicu-server gen-signing-key | gcloud secrets versions add \
+///     AMICU_SIGNING_KEY_PEM --data-file=-
+/// ```
+///
+/// See `docs/ops/signing-key-rotation.md` for the full operational rotation
+/// procedure (generate, set the old key as retiring, promote the new key to
+/// active, drop the old one once it has aged out).
+///
+/// # Errors
+/// Returns [`Error::KeyGen`] if key generation or PKCS#8 PEM encoding fails
+/// (in practice unreachable outside an exhausted/broken OS RNG).
+pub fn gen_signing_key() -> Result<(), Error> {
+    let pem = amicu_auth::generate_pkcs8_pem().map_err(Error::KeyGen)?;
+    let text = pem
+        .expose_secret_str()
+        .expect("generate_pkcs8_pem always returns valid UTF-8 PEM text");
+    print!("{text}");
+    Ok(())
+}
+
 /// Runs ONLY the embedded schema migrations against `DATABASE_URL`, as the
 /// schema-OWNING role, and exits - no RLS-bypass guard (the migrator is
 /// expected to own the schema; see the crate's "two-role production model"
@@ -736,11 +871,17 @@ pub async fn build_app_with_database_url(
         .clone()
         .unwrap_or_else(|| config.issuer.clone());
 
-    // Fresh signing key; snapshot its public JWKS before the keyring moves into
-    // the service, so the engine verifier trusts exactly what we sign with.
-    let key = SigningKey::generate().map_err(Error::Key)?;
-    let keyring = Keyring::new(key);
-    let jwks = keyring.jwks();
+    // Durable signing keyring (andypalmi/amicu-planning#140): the ACTIVE key
+    // (and any RETIRING keys) come from AMICU_SIGNING_KEY_PEM /
+    // AMICU_SIGNING_KEYS_RETIRING_PEM (or their _FILE variants) - identical
+    // across every replica that shares the same secret-injected env, so every
+    // replica signs and verifies with the same key set and advertises the
+    // same JWKS. See `signing_key` module docs and
+    // docs/ops/signing-key-rotation.md.
+    let keyring = signing_key::load_keyring(config).map_err(|e| match e {
+        signing_key::SigningKeyConfigError::MissingActiveKey => Error::MissingSigningKey,
+        other => Error::SigningKeyConfig(other),
+    })?;
 
     let issuer = TokenIssuer::new(IssuerConfig::new(&config.issuer, &config.audience));
 
@@ -815,6 +956,13 @@ pub async fn build_app_with_database_url(
     if let Some(memberships) = memberships {
         service = service.with_membership_store(memberships);
     }
+    // A live handle to the SAME keyring the service just took ownership of:
+    // wiring this into KeyringJwksProvider (below) means the engine-gate
+    // verifier observes rotate_keys()/retire() in-process, with no restart
+    // and no JWKS round-trip (bounded by the verifier's own cache, not
+    // instant - see KeyringJwksProvider's docs) - replacing the old
+    // boot-time StaticJwksProvider snapshot (andypalmi/amicu-planning#140).
+    let keyring_handle = service.keyring_handle();
     let service = Arc::new(service);
     let limiter = Arc::new(RateLimiter::new(
         config.rate_limit_max,
@@ -823,7 +971,7 @@ pub async fn build_app_with_database_url(
     let auth_state = AuthApiState::new(service.clone(), limiter).with_trusted_proxies(trusted);
 
     let verifier = Arc::new(Verifier::new(
-        StaticJwksProvider::new(jwks),
+        KeyringJwksProvider::new(keyring_handle),
         VerifierConfig::new(&config.issuer, &config.audience),
     ));
     let engine_state = EngineApiState::new(verifier.clone()).with_min_tier(config.min_tier.into());

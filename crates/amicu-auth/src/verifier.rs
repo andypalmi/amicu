@@ -308,3 +308,68 @@ fn map_jwt_error(err: &jsonwebtoken::errors::Error) -> AuthError {
         _ => AuthError::InvalidToken,
     }
 }
+
+#[cfg(feature = "issuer")]
+mod keyring_provider {
+    use std::sync::{Arc, RwLock};
+
+    use async_trait::async_trait;
+
+    use crate::error::Result;
+    use crate::jwks::Jwks;
+    use crate::keyring::Keyring;
+
+    use super::JwksProvider;
+
+    /// A [`JwksProvider`] backed by a live, shared keyring: every `fetch()`
+    /// reads the CURRENT state of `Keyring::rotate_in`/`retire` (e.g. via
+    /// [`crate::service::AuthService::rotate_keys`]), with no process
+    /// restart and no network round-trip — because it reads the exact same
+    /// `Arc<RwLock<Keyring>>` the signer mutates, not a copy or a snapshot.
+    ///
+    /// This does NOT make a [`Verifier`](super::Verifier) over this provider
+    /// instantaneous, though: `Verifier` still applies its own caching policy
+    /// in front of whatever `fetch()` returns (see
+    /// [`VerifierConfig`](super::VerifierConfig)/[`Verifier::verify`](super::Verifier::verify)),
+    /// so a change here is picked up on the NEXT fetch the verifier decides
+    /// to make, not synchronously with the mutation:
+    /// - a NEW active key's `kid` is unknown to the verifier's cache, so it's
+    ///   gated by [`refetch_cooldown`](super::VerifierConfig::refetch_cooldown)
+    ///   (60s default) — normally the very next token carrying it triggers
+    ///   an immediate refetch, but that cooldown is claimable by an
+    ///   unauthenticated flood of tokens bearing random `kid`s (the `kid` is
+    ///   read before signature verification), so the worst case is up to one
+    ///   cooldown window;
+    /// - a RETIRED key's cached `DecodingKey` is not proactively evicted —
+    ///   it keeps verifying until the verifier's next whole-cache refresh,
+    ///   gated by [`cache_ttl`](super::VerifierConfig::cache_ttl) (5 minutes
+    ///   default) — well inside the access-token lifetime those tokens would
+    ///   expire at regardless.
+    ///
+    /// Use this to back a verifier living in the SAME process as the
+    /// `AuthService` that owns the keyring (e.g. the engine gate in
+    /// `amicu-server`); a verifier in a DIFFERENT process/service should
+    /// keep using [`crate::http_provider::HttpJwksProvider`] (or another
+    /// transport), which is the only option across a process boundary.
+    pub struct KeyringJwksProvider {
+        keyring: Arc<RwLock<Keyring>>,
+    }
+
+    impl KeyringJwksProvider {
+        /// Wrap a shared keyring handle (e.g.
+        /// [`AuthService::keyring_handle`](crate::service::AuthService::keyring_handle)).
+        #[must_use]
+        pub fn new(keyring: Arc<RwLock<Keyring>>) -> Self {
+            Self { keyring }
+        }
+    }
+
+    #[async_trait]
+    impl JwksProvider for KeyringJwksProvider {
+        async fn fetch(&self) -> Result<Jwks> {
+            Ok(self.keyring.read().expect("keyring poisoned").jwks())
+        }
+    }
+}
+#[cfg(feature = "issuer")]
+pub use keyring_provider::KeyringJwksProvider;

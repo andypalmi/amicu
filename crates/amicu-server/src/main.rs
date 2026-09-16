@@ -22,13 +22,25 @@ struct Cli {
     config: Config,
 }
 
-/// Sub-commands. `migrate` is the only one today.
+/// Sub-commands.
 #[derive(Subcommand)]
 enum Command {
     /// Apply pending schema migrations, connecting as the schema-OWNING role
     /// via `DATABASE_URL`, then exit. Runs no RLS-bypass guard - the migrator
     /// is expected to own the schema (see `ops/sql/provision_app_role.sql`).
     Migrate,
+    /// Generate a fresh Ed25519 PKCS#8 signing key and print ONLY its PEM to
+    /// stdout, then exit (andypalmi/amicu-planning#140). Nothing else is
+    /// written to stdout, so the output is safe to pipe straight into a
+    /// secret manager, e.g.:
+    ///
+    /// `amicu-server gen-signing-key | gcloud secrets versions add \
+    /// AMICU_SIGNING_KEY_PEM --data-file=-`
+    ///
+    /// See `docs/ops/signing-key-rotation.md` for the full rotation
+    /// procedure (generate, set as retiring, promote to active, drop the old
+    /// one once it has aged out).
+    GenSigningKey,
 }
 
 #[tokio::main]
@@ -36,6 +48,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Some(Command::Migrate) => amicu_server::migrate().await,
+        Some(Command::GenSigningKey) => amicu_server::gen_signing_key(),
         None => amicu_server::run(cli.config).await,
     };
     match result {
