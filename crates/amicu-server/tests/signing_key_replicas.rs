@@ -33,6 +33,7 @@ fn test_config(signing_key_pem: Option<&str>, signing_keys_retiring_pem: Option<
         // trip the credential rate limiter.
         rate_limit_max: 1000,
         rate_limit_window_secs: 60,
+        rate_limit_timeout_ms: 1_000,
         max_workspaces_per_user: amicu_store::DEFAULT_MAX_WORKSPACES_PER_USER,
         environment: amicu_server::Environment::Development,
         db_max_connections: 5,

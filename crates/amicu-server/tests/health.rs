@@ -19,6 +19,7 @@ fn test_config() -> Config {
         min_tier: amicu_server::MinTier::Community,
         rate_limit_max: 30,
         rate_limit_window_secs: 60,
+        rate_limit_timeout_ms: 1_000,
         max_workspaces_per_user: amicu_store::DEFAULT_MAX_WORKSPACES_PER_USER,
         environment: Environment::Development,
         db_max_connections: 5,

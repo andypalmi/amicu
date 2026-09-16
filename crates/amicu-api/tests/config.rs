@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use amicu_api::{
-    AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore, OrgApiState,
-    RateLimiter, SessionApiState, api_router,
+    AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore,
+    InMemoryRateLimiter, OrgApiState, SessionApiState, api_router,
 };
 use amicu_auth::notify::LoggingNotifier;
 use amicu_auth::refresh::InMemoryRefreshStore;
@@ -140,7 +140,7 @@ fn app_with_token() -> (Router, String) {
     ));
     let auth_state = AuthApiState::new(
         service.clone(),
-        Arc::new(RateLimiter::new(100, Duration::from_secs(60))),
+        Arc::new(InMemoryRateLimiter::new(100, Duration::from_secs(60))),
     );
 
     let verifier = Arc::new(Verifier::new(

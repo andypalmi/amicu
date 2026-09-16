@@ -70,6 +70,53 @@ in-repo rationale (stable `kid` derivation, retention-window math, what
 breaks if a retiring key is dropped too early) lives in
 `docs/ops/signing-key-rotation.md`.
 
+## Shared rate limiter + Cloudflare edge trust (amicu-planning#142)
+
+Cloud Run autoscales `0..N` stateless replicas behind Google's own load
+balancer, which in turn sits behind the Cloudflare **api-proxy Worker**
+(`amicu-infra/fallback/api-proxy-worker`) fronting this service. Two
+consequences for anything keyed on "the client":
+
+- The credential-route rate limiter (`crates/amicu-api/src/ratelimit.rs`) is
+  **Postgres-backed and shared across every replica** whenever `DATABASE_URL`
+  is set — the same single shared pool every replica already opens
+  (amicu-planning#139) backs `PostgresRateLimitStore`'s one-round-trip atomic
+  upsert (`crates/amicu-store/migrations/0014_rate_limit_buckets.sql`).
+  `AMICU_ENV=production` requires this path: it already refuses to boot
+  without `DATABASE_URL` (amicu-planning#127's fail-fast gate), so the
+  in-memory limiter — kept only for dev/tests/DB-less self-host, where a
+  process-local counter resetting on every cold start is an accepted
+  trade-off — is never reachable in production. **Fails open** on a database
+  error, or on a hit that doesn't complete within `AMICU_RATE_LIMIT_TIMEOUT_MS`
+  (a sampled `WARNING` log line — first failure, then every 100th — plus an
+  exact in-process counter, not a hard failure): a transient Postgres hiccup,
+  or a saturated pool, must not turn into a total login/signup outage.
+- The request chain is `browser → Cloudflare edge → api-proxy Worker →
+  Google's LB → Cloud Run`. Cloud Run's own peer is Google's LB, and
+  `X-Forwarded-For` ends in Cloudflare's own egress IP — **not** the real
+  client. The real client IP is `CF-Connecting-IP`, set by the Cloudflare
+  edge itself, but that header is only trustworthy once a request is proven
+  to have actually passed through the Worker (`AMICU_TRUSTED_PROXIES` alone
+  cannot express "trust a header, not a peer address").
+
+### New env vars (document next to `AMICU_DB_MAX_CONNECTIONS` — see
+`crates/amicu-server/src/lib.rs`'s crate-level doc tables)
+
+| Env var | Secret? | Default | Purpose |
+| --- | --- | --- | --- |
+| `AMICU_EDGE_TOKEN` | **yes** | unset | Shared secret the api-proxy Worker attaches as `X-Amicu-Edge-Token` on every request it forwards. Store in Secret Manager for Cloud Run (`AMICU_EDGE_TOKEN`, see amicu-infra's `docs/env-matrix.md`) **and** as the Worker's `EDGE_TOKEN` secret (`wrangler secret put EDGE_TOKEN` in `amicu-infra/fallback/api-proxy-worker/`) — same value, provisioned independently on each side, never in Terraform state. Generate with `openssl rand -base64 32`. Compared constant-time; never logged. |
+| `AMICU_REQUIRE_EDGE_TOKEN` | no | `false` | When `true`, a request without a valid `X-Amicu-Edge-Token` is rejected `403` before any handler runs — closes the "raw `*.run.app` URL bypasses Cloudflare" gap outright. `GET /healthz`/`GET /readyz` are exempt (Cloud Run's own probes carry no such header). Requires `AMICU_EDGE_TOKEN` to also be set — booting with `true` and no token is a hard startup error (a deployment that would `403` every public request is refused rather than started). Defaults `false` in every environment, including production: turning it on is a deliberate operator step, gated behind amicu-infra's `optional_secrets_enabled.AMICU_EDGE_TOKEN`, taken once the Worker + token pair are actually provisioned — defaulting it on would break the very first production boot, before that provisioning step ever runs. |
+| `AMICU_RATE_LIMIT_TIMEOUT_MS` | no | `1000` | Upper bound the Postgres-backed rate limiter's `check` waits for the database hit before failing OPEN — its own dedicated budget, independent of `AMICU_DB_ACQUIRE_TIMEOUT_SECS`, mirroring `AMICU_READYZ_TIMEOUT_MS`'s relationship to that same acquire timeout. A timeout is treated exactly like a database error: it fails OPEN and counts toward the same sampled `WARNING`/`fail_open_count` reporting. Only consulted on the Postgres path — the in-memory limiter never awaits. |
+
+Independent of both: `AMICU_TRUSTED_PROXIES` keeps governing the
+non-Cloudflare `X-Forwarded-For` path unchanged — see
+`crates/amicu-server/src/lib.rs`'s existing table entry. The Cloud Run
+default recorded in amicu-infra's `docs/env-matrix.md` (`0.0.0.0/0`, flagged
+**UNVERIFIED** pending empirical confirmation of the actual ingress peer) is
+untouched by this change; once a valid edge token is presented,
+`CF-Connecting-IP` is used instead and `AMICU_TRUSTED_PROXIES` is not
+consulted for that request at all.
+
 ## Cloud Scheduler → outbox drain
 
 Cloud Run gives a container CPU only while a request is in flight, so

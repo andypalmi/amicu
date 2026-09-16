@@ -34,7 +34,7 @@
 //!
 //! `email_outbox` is GLOBAL and carries no row-level security, exactly like
 //! `users` / `reset_tokens` / `verify_tokens` - see migration
-//! `0014_email_outbox.sql` for the full rationale.
+//! `0015_email_outbox.sql` for the full rationale.
 
 use amicu_auth::notify::{Notification, NotificationKind, Notifier};
 use amicu_auth::{AuthError, Result as AuthResult};

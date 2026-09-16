@@ -68,7 +68,7 @@
 //! the caller's own transaction via [`outbox::enqueue`]); the SMTP send happens
 //! later inside `POST /internal/outbox/drain`, driven by Cloud Scheduler, where
 //! Cloud Run actually allocates CPU. Like the auth token tables it is GLOBAL and
-//! carries no row-level security - see `migrations/0014_email_outbox.sql`.
+//! carries no row-level security - see `migrations/0015_email_outbox.sql`.
 
 use std::time::Duration;
 
@@ -85,6 +85,7 @@ pub mod config;
 pub mod invite;
 pub mod membership;
 pub mod outbox;
+pub mod ratelimit;
 pub mod refresh;
 pub mod reset;
 pub mod state;
@@ -101,6 +102,7 @@ pub use outbox::{
     ClaimedEmail, FailureOutcome, NewOutboxEmail, OutboxStore, PostgresOutboxNotifier,
     PostgresOutboxStore,
 };
+pub use ratelimit::PostgresRateLimitStore;
 pub use refresh::PostgresRefreshStore;
 pub use reset::PostgresResetStore;
 pub use state::PostgresStateBackend;

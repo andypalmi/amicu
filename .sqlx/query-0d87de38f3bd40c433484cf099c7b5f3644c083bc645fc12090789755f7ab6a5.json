@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO rate_limit_buckets (key, window_start, count, expires_at)\n            VALUES (\n                $1,\n                extract(epoch FROM now())::bigint,\n                1,\n                extract(epoch FROM now())::bigint + $2\n            )\n            ON CONFLICT (key) DO UPDATE SET\n                count = CASE\n                    WHEN rate_limit_buckets.expires_at <= extract(epoch FROM now())::bigint THEN 1\n                    ELSE rate_limit_buckets.count + 1\n                END,\n                window_start = CASE\n                    WHEN rate_limit_buckets.expires_at <= extract(epoch FROM now())::bigint\n                        THEN extract(epoch FROM now())::bigint\n                    ELSE rate_limit_buckets.window_start\n                END,\n                expires_at = CASE\n                    WHEN rate_limit_buckets.expires_at <= extract(epoch FROM now())::bigint\n                        THEN extract(epoch FROM now())::bigint + $2\n                    ELSE rate_limit_buckets.expires_at\n                END\n            RETURNING count\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0d87de38f3bd40c433484cf099c7b5f3644c083bc645fc12090789755f7ab6a5"
+}

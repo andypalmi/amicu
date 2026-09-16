@@ -90,9 +90,17 @@
 //! `AMICU_PROD_APP_DATABASE_URL` at it) - or just tear down and start over,
 //! which is the point of an ephemeral cluster.
 
+use amicu_server::signing_key::RedactedEnvString;
 use amicu_server::{Config, Environment, Error};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+
+/// A disposable, test-only Ed25519 PKCS#8 PEM fixture (same one
+/// `signing_key_replicas.rs` uses as its "old" key) - andypalmi/amicu-planning#140's
+/// durable-signing-key production gate ([`Error::MissingSigningKey`]) means
+/// `two_role_production_topology`'s `Environment::Production` boots need a
+/// real key now, not just a real database.
+const TEST_SIGNING_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAGwK8jzAuW3roJK6/gne5fnNmdODLMeRlQnkzMBP/cU\n-----END PRIVATE KEY-----\n";
 
 fn test_config() -> Config {
     Config {
@@ -104,6 +112,7 @@ fn test_config() -> Config {
         min_tier: amicu_server::MinTier::Community,
         rate_limit_max: 30,
         rate_limit_window_secs: 60,
+        rate_limit_timeout_ms: 1_000,
         max_workspaces_per_user: amicu_store::DEFAULT_MAX_WORKSPACES_PER_USER,
         environment: Environment::Development,
         db_max_connections: 5,
@@ -340,6 +349,11 @@ async fn two_role_production_topology() {
 
     let mut prod_config = test_config();
     prod_config.environment = Environment::Production;
+    // `Environment::Production` refuses to boot without a real signing key
+    // (andypalmi/amicu-planning#140's `Error::MissingSigningKey` gate) - this
+    // test is about the RLS-bypass guard, not signing keys, so give it a
+    // disposable fixture key rather than exercise that gate here too.
+    prod_config.signing_key_pem = Some(RedactedEnvString::new(TEST_SIGNING_KEY_PEM));
 
     // 1. Nothing has migrated `amicu_prod` yet: production boot (as the
     //    eventual runtime role) must refuse with PendingMigrations, not

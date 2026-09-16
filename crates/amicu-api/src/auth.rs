@@ -19,25 +19,30 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use utoipa::ToSchema;
 
+use crate::edge::EdgeTrust;
 use crate::ratelimit::{RateLimiter, TrustedProxies};
 
 /// Shared HTTP state.
 #[derive(Clone)]
 pub struct AuthApiState {
     service: Arc<AuthService>,
-    limiter: Arc<RateLimiter>,
+    limiter: Arc<dyn RateLimiter>,
     trusted_proxies: TrustedProxies,
+    edge_trust: EdgeTrust,
 }
 
 impl AuthApiState {
     /// Assemble state from a service and a rate limiter. No proxies are trusted
-    /// by default; see [`AuthApiState::with_trusted_proxies`].
+    /// and no Cloudflare edge token is configured by default; see
+    /// [`AuthApiState::with_trusted_proxies`] and
+    /// [`AuthApiState::with_edge_trust`].
     #[must_use]
-    pub fn new(service: Arc<AuthService>, limiter: Arc<RateLimiter>) -> Self {
+    pub fn new(service: Arc<AuthService>, limiter: Arc<dyn RateLimiter>) -> Self {
         Self {
             service,
             limiter,
             trusted_proxies: TrustedProxies::default(),
+            edge_trust: EdgeTrust::default(),
         }
     }
 
@@ -46,6 +51,16 @@ impl AuthApiState {
     #[must_use]
     pub fn with_trusted_proxies(mut self, trusted_proxies: TrustedProxies) -> Self {
         self.trusted_proxies = trusted_proxies;
+        self
+    }
+
+    /// Configure the Cloudflare edge-trust policy (andypalmi/amicu-planning#142):
+    /// when a request presents a valid `X-Amicu-Edge-Token`, its
+    /// `CF-Connecting-IP` header is trusted as the rate-limit client identity
+    /// in place of the peer/`X-Forwarded-For` path. See [`crate::edge`].
+    #[must_use]
+    pub fn with_edge_trust(mut self, edge_trust: EdgeTrust) -> Self {
+        self.edge_trust = edge_trust;
         self
     }
 }
@@ -70,7 +85,16 @@ pub fn auth_router(state: AuthApiState) -> Router {
         .route("/reset", post(reset))
         .route("/verify", post(verify))
         .route("/verify/resend", post(resend_verification))
-        .layer(from_fn_with_state(state.clone(), rate_limit));
+        // `route_layer`, not `layer`: applies the middleware only to routes
+        // registered on THIS router, so a request for an unmatched path under
+        // the credential prefix (e.g. a bogus `POST /whatever`) 404s before
+        // ever reaching `rate_limit` - it never hits the limiter (and, on the
+        // Postgres backend, never writes a `rate_limit_buckets` row keyed on
+        // the unauthenticated caller's arbitrary path). `layer` would instead
+        // wrap the whole router including its fallback 404 handler, letting
+        // an attacker grow the bucket table without bound simply by varying
+        // the path.
+        .route_layer(from_fn_with_state(state.clone(), rate_limit));
 
     well_known.merge(credentials).with_state(state)
 }
@@ -432,12 +456,22 @@ pub(crate) fn to_response(pair: &TokenPair) -> Result<TokenResponse, ApiError> {
 
 /// Rate-limit middleware for credential routes.
 ///
-/// The bucket key is per route and per client. Client identity comes from the
-/// peer socket address by default; `X-Forwarded-For` is honored only when that
-/// peer is in the configured trusted-proxy allowlist, and then only the real
-/// client parsed right-to-left from the chain, so an attacker rotating the
-/// header cannot mint a fresh bucket per request. There is no single shared
-/// fallback bucket, so no one client can lock every other client out.
+/// The bucket key is per route and per client. Client identity, in order of
+/// preference:
+/// 1. `CF-Connecting-IP`, but ONLY when the request presents a valid
+///    `X-Amicu-Edge-Token` (andypalmi/amicu-planning#142 - see
+///    [`crate::edge::EdgeTrust`]): on Cloud Run behind Cloudflare, neither the
+///    peer address (Google's LB) nor `X-Forwarded-For` (ends in Cloudflare's
+///    own egress IP) is the real client, so this is the only trustworthy
+///    source there.
+/// 2. Otherwise, the peer socket address by default; `X-Forwarded-For` is
+///    honored only when that peer is in the configured trusted-proxy
+///    allowlist, and then only the real client parsed right-to-left from the
+///    chain, so an attacker rotating the header cannot mint a fresh bucket per
+///    request.
+///
+/// There is no single shared fallback bucket, so no one client can lock every
+/// other client out.
 ///
 /// For the peer address to be available the server must serve this router with
 /// `Router::into_make_service_with_connect_info::<SocketAddr>()`. If it is
@@ -452,13 +486,21 @@ async fn rate_limit(State(state): State<AuthApiState>, request: Request, next: N
         .headers()
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok());
-    let throttled = match state
-        .trusted_proxies
-        .client_key(request.uri().path(), peer, xff)
-    {
-        Some(key) => !state.limiter.check(&key),
-        None => false, // no trustworthy identity: fail open, never share a bucket
-    };
+    // andypalmi/amicu-planning#142: on Cloud Run behind Cloudflare, prefer the
+    // real client IP (`CF-Connecting-IP`) once the edge token proves the
+    // request actually passed through the api-proxy Worker; otherwise fall
+    // back to the existing peer/XFF logic unchanged. `trusted_client_ip`
+    // itself already refuses to trust the header without a valid token, so a
+    // request straight to the raw *.run.app URL can never spoof this.
+    let edge_ip = state.edge_trust.trusted_client_ip(request.headers());
+    let throttled =
+        match state
+            .trusted_proxies
+            .client_key_with_edge(request.uri().path(), edge_ip, peer, xff)
+        {
+            Some(key) => !state.limiter.check(&key).await,
+            None => false, // no trustworthy identity: fail open, never share a bucket
+        };
 
     if throttled {
         ApiError(AuthError::RateLimited).into_response()
