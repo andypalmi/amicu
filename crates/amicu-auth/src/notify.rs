@@ -8,7 +8,20 @@
 //! Anti-enumeration relies on delivery being *out-of-band*: whether a message is
 //! sent, and which kind, must never be observable on the HTTP response. Callers
 //! therefore invoke the notifier only on the account-exists path and always
-//! return the same generic response regardless of the outcome here.
+//! return the same generic response regardless of the outcome here - and, on the
+//! flows where the notifier call is the only account-dependent work, pad to a
+//! fixed response-time floor so the *timing* says nothing either (see
+//! [`crate::service`]).
+//!
+//! # Durable implementations
+//!
+//! The production Postgres wiring implements this trait as a durable ENQUEUE
+//! (`amicu_store::outbox::PostgresOutboxNotifier`): `notify` writes one
+//! `email_outbox` row and returns, and the real SMTP send happens later, inside
+//! the authenticated `POST /internal/outbox/drain` request - which is also a
+//! `Notifier` call, against the real mailer. That indirection is what makes
+//! delivery survive Cloud Run freezing an instance the moment it responds
+//! (andypalmi/amicu-planning#141).
 
 use amicu_core::secret::SecretValue;
 use async_trait::async_trait;
@@ -56,7 +69,8 @@ pub enum NotificationKind {
 pub trait Notifier: Send + Sync {
     /// Deliver one message. Implementations must not block the caller on a slow
     /// transport in a way that would make delivery observable on the triggering
-    /// HTTP response (queue if needed).
+    /// HTTP response - queue instead, which is exactly what the production
+    /// Postgres implementation does (see the module docs).
     ///
     /// # Errors
     /// Transport-specific failures. Callers on anti-enumeration paths treat a

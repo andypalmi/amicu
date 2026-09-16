@@ -47,10 +47,12 @@ argon2 = { version = "0.5", optional = true }
 rand_core = { version = "0.6", features = ["getrandom"], optional = true }
 sha2 = { version = "0.10", optional = true }
 zeroize = { version = "1", features = ["derive"], optional = true }
-# Detached background delivery: `/recover` and the duplicate-signup notice
-# dispatch the (possibly network-bound) out-of-band send off the response path
-# via `tokio::spawn`, so response timing never depends on account existence.
-tokio = { version = "1", default-features = false, features = ["rt"], optional = true }
+# Anti-enumeration response-timing floor. `/recover` and `/verify/resend` do
+# their account-dependent work INLINE now (Cloud Run freezes detached tasks once
+# the response is written - amicu-planning#141) and pad to a fixed deadline with
+# `tokio::time::sleep_until`, so response timing never depends on account
+# existence. `time` only: no runtime, no `spawn`.
+tokio = { version = "1", default-features = false, features = ["time"], optional = true }
 # Global user ids and workspace ids are UUIDs (the token `sub`/`wsid`, the
 # users.id PK, and every auth token table foreign key). Non-optional: the always
 # -compiled `tenant::WorkspaceId` carried in every `Claims` needs it on both the

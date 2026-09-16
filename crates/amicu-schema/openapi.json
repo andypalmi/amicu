@@ -1353,7 +1353,7 @@
           "auth"
         ],
         "summary": "Request a password reset.",
-        "description": "Anti-enumeration: this ALWAYS returns the same generic `202 Accepted`,\nwhether or not the email is registered, with no account-existence signal in\nthe body or (Argon2 runs on neither path) the timing. A reset token is minted\nand delivered out-of-band via the notification seam only when the account\nexists. Mirrors the identical-response defense on `/signup`.",
+        "description": "Anti-enumeration: this ALWAYS returns the same generic `202 Accepted`,\nwhether or not the email is registered, with no account-existence signal in\nthe body or in the timing - the service pads every branch to a fixed\nresponse-time floor (`amicu_auth::service`'s `ANTI_ENUMERATION_FLOOR`). A\nreset token is minted, persisted, and durably queued for out-of-band delivery\nonly when the account exists; the actual send happens later, in the outbox\ndrain. Mirrors the identical-response defense on `/signup`.",
         "operationId": "recover",
         "requestBody": {
           "content": {
@@ -1651,7 +1651,7 @@
           "auth"
         ],
         "summary": "Resend the email-verification link.",
-        "description": "Anti-enumeration: this ALWAYS returns the same generic `202 Accepted`,\nwhether or not the email is registered and whether or not it is already\nverified, with no account signal in the body or (all account-dependent work\nis detached) the timing. A fresh verification token is minted and delivered\nout-of-band via the notification seam only when the account exists AND is not\nyet verified. Mirrors the identical-response defense on `/recover`.",
+        "description": "Anti-enumeration: this ALWAYS returns the same generic `202 Accepted`,\nwhether or not the email is registered and whether or not it is already\nverified, with no account signal in the body or in the timing (every branch\nis padded to the same fixed response-time floor - see `/recover`). A fresh\nverification token is minted, persisted, and durably queued only when the\naccount exists AND is not yet verified. Mirrors the identical-response\ndefense on `/recover`.",
         "operationId": "resend_verification",
         "requestBody": {
           "content": {

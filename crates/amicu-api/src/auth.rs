@@ -286,9 +286,11 @@ pub(crate) async fn logout(
 ///
 /// Anti-enumeration: this ALWAYS returns the same generic `202 Accepted`,
 /// whether or not the email is registered, with no account-existence signal in
-/// the body or (Argon2 runs on neither path) the timing. A reset token is minted
-/// and delivered out-of-band via the notification seam only when the account
-/// exists. Mirrors the identical-response defense on `/signup`.
+/// the body or in the timing - the service pads every branch to a fixed
+/// response-time floor (`amicu_auth::service`'s `ANTI_ENUMERATION_FLOOR`). A
+/// reset token is minted, persisted, and durably queued for out-of-band delivery
+/// only when the account exists; the actual send happens later, in the outbox
+/// drain. Mirrors the identical-response defense on `/signup`.
 #[utoipa::path(
     post,
     path = "/recover",
@@ -382,10 +384,11 @@ pub(crate) async fn verify(
 ///
 /// Anti-enumeration: this ALWAYS returns the same generic `202 Accepted`,
 /// whether or not the email is registered and whether or not it is already
-/// verified, with no account signal in the body or (all account-dependent work
-/// is detached) the timing. A fresh verification token is minted and delivered
-/// out-of-band via the notification seam only when the account exists AND is not
-/// yet verified. Mirrors the identical-response defense on `/recover`.
+/// verified, with no account signal in the body or in the timing (every branch
+/// is padded to the same fixed response-time floor - see `/recover`). A fresh
+/// verification token is minted, persisted, and durably queued only when the
+/// account exists AND is not yet verified. Mirrors the identical-response
+/// defense on `/recover`.
 #[utoipa::path(
     post,
     path = "/verify/resend",
