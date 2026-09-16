@@ -60,6 +60,51 @@ test('the next build phase is exempt from the prod requirement (build has no sec
   assert.equal(env.API_URL, DEV_API_URL);
 });
 
+test('COOKIE_SECURE defaults to true in production', () => {
+  const env = parseServerEnv({
+    NODE_ENV: 'production',
+    API_URL: 'https://api.example.com',
+  } as NodeJS.ProcessEnv);
+  assert.equal(env.COOKIE_SECURE, true);
+});
+
+test('COOKIE_SECURE defaults to false only in local dev (NODE_ENV=development)', () => {
+  const env = parseServerEnv({ NODE_ENV: 'development' } as NodeJS.ProcessEnv);
+  assert.equal(env.COOKIE_SECURE, false);
+});
+
+test('COOKIE_SECURE defaults to true when NODE_ENV is unset/other (e.g. test runners)', () => {
+  const env = parseServerEnv({ API_URL: 'http://localhost:8080' } as NodeJS.ProcessEnv);
+  assert.equal(env.COOKIE_SECURE, true);
+});
+
+test('COOKIE_SECURE can be forced explicitly, overriding the NODE_ENV default', () => {
+  const forcedOff = parseServerEnv({
+    NODE_ENV: 'production',
+    API_URL: 'https://api.example.com',
+    COOKIE_SECURE: 'false',
+  } as NodeJS.ProcessEnv);
+  assert.equal(forcedOff.COOKIE_SECURE, false);
+
+  const forcedOn = parseServerEnv({
+    NODE_ENV: 'development',
+    COOKIE_SECURE: 'true',
+  } as NodeJS.ProcessEnv);
+  assert.equal(forcedOn.COOKIE_SECURE, true);
+});
+
+test('an invalid COOKIE_SECURE value throws a clear error', () => {
+  assert.throws(
+    () =>
+      parseServerEnv({
+        NODE_ENV: 'production',
+        API_URL: 'https://api.example.com',
+        COOKIE_SECURE: 'yes',
+      } as NodeJS.ProcessEnv),
+    (err: unknown) => err instanceof Error && /COOKIE_SECURE/.test(err.message),
+  );
+});
+
 test('explicit overrides for JWKS/issuer/audience are honored', () => {
   const env = parseServerEnv({
     NODE_ENV: 'production',

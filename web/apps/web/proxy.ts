@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { isMarkdownPreferred, rewritePath } from 'fumadocs-core/negotiation';
 import { docsContentRoute, docsRoute } from '@/lib/shared';
 import { attemptRefresh } from '@/lib/auth/middleware-refresh';
-import { ACCESS_COOKIE, REFRESH_COOKIE, REFRESH_MAX_AGE, IS_PROD } from '@/lib/auth/config';
+import { ACCESS_COOKIE, REFRESH_COOKIE, REFRESH_MAX_AGE, COOKIE_SECURE } from '@/lib/auth/config';
 
 const { rewrite: rewriteDocs } = rewritePath(
   `${docsRoute}{/*path}`,
@@ -36,11 +36,12 @@ const REFRESH_PREFIXES = [
   '/api/org',
 ];
 
-// secure tied to NODE_ENV so local HTTP dev works; a non-prod build over plain
-// HTTP would omit Secure. Real deployments run production mode behind TLS.
+// secure is explicit (COOKIE_SECURE, see server-env.ts) so local HTTP dev works
+// while every other environment defaults to Secure. Real deployments run behind
+// TLS regardless.
 const cookieAttrs = {
   httpOnly: true,
-  secure: IS_PROD,
+  secure: COOKIE_SECURE,
   sameSite: 'lax',
   path: '/',
 } as const;
