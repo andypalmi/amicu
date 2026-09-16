@@ -18,7 +18,7 @@ use tokio::sync::oneshot;
 /// the limiter trips within the test.
 fn test_config() -> Config {
     Config {
-        bind: "127.0.0.1:0".parse().unwrap(),
+        bind: Some("127.0.0.1:0".parse().unwrap()),
         issuer: "http://localhost:8080".to_string(),
         audience: "amicu".to_string(),
         base_url: None,
@@ -27,6 +27,11 @@ fn test_config() -> Config {
         rate_limit_max: 2,
         rate_limit_window_secs: 60,
         max_workspaces_per_user: amicu_store::DEFAULT_MAX_WORKSPACES_PER_USER,
+        environment: amicu_server::Environment::Development,
+        db_max_connections: 5,
+        db_min_connections: 0,
+        db_acquire_timeout_secs: 10,
+        readyz_timeout_ms: 2_000,
     }
 }
 
@@ -40,7 +45,8 @@ async fn real_socket_end_to_end() {
     // Postgres.
     let app = amicu_server::build_app_in_memory(&config)
         .await
-        .expect("assemble app");
+        .expect("assemble app")
+        .router;
 
     // Bind a real ephemeral port and start the real server on it.
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

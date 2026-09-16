@@ -1,5 +1,14 @@
 -- Provisions a dedicated, non-superuser application role for local/self-host
--- development.
+-- DEVELOPMENT.
+--
+-- This is the single-role dev shape: `amicu_app` both owns the schema and
+-- runs the server, which migrates at boot (`AMICU_ENV=development`, the
+-- default - the RLS-bypass startup guard only warns about that ownership,
+-- rather than refusing to start). PRODUCTION (`AMICU_ENV=production`) uses a
+-- two-role split instead - a separate schema-owning migrator role plus this
+-- kind of non-owning runtime role - which the guard actively enforces; see
+-- `ops/sql/provision_app_role.sql` and the README's "Production database
+-- (two-role split)" section (andypalmi/amicu-planning#139).
 --
 -- `amicu-store`'s migrations enable `FORCE ROW LEVEL SECURITY` on every
 -- workspace-scoped table (see e.g. 0003_refresh_tokens.sql) as a backstop

@@ -60,8 +60,14 @@
 //! It follows the same workspace-scoping convention as the auth stores, plus
 //! a second `stack_id` predicate (see the module docs).
 
+use std::time::Duration;
+
 use amicu_auth::AuthError;
-use sqlx::PgPool;
+// Re-exported so downstream crates (amicu-server, amicu-api) can name the
+// pool type - and pass it around - without taking their own `sqlx`
+// dependency; only this crate talks to Postgres directly (see the crate
+// docs).
+pub use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
@@ -111,19 +117,65 @@ pub enum StoreError {
     Migration(#[from] sqlx::migrate::MigrateError),
 }
 
-/// Opens a connection pool to the given Postgres `database_url`.
+/// Postgres connection-pool tuning, env-configurable at the amicu-server
+/// bootstrap boundary (`AMICU_DB_MAX_CONNECTIONS` / `AMICU_DB_MIN_CONNECTIONS`
+/// / `AMICU_DB_ACQUIRE_TIMEOUT_SECS`, see that crate's `Config`).
+///
+/// Defaults are deliberately small. Cloud Run autoscales 0..N *stateless*
+/// replicas, and (as of andypalmi/amicu-planning#139) each replica now holds
+/// exactly ONE shared pool for every store, so a generous per-replica ceiling
+/// multiplies against replica count: 100 replicas x a 50-connection pool would
+/// blow through a typical ~100-connection Cloud SQL ceiling on its own, before
+/// counting migrations, `psql`, or any other client.
+#[derive(Debug, Clone, Copy)]
+pub struct PoolConfig {
+    /// Maximum number of connections this pool ever opens.
+    pub max_connections: u32,
+    /// Connections the pool keeps warm even when idle.
+    pub min_connections: u32,
+    /// How long a caller waits for a connection to become available before
+    /// [`PgPoolOptions::connect`] (eager, at startup) or a later `acquire`
+    /// gives up.
+    pub acquire_timeout: Duration,
+}
+
+impl Default for PoolConfig {
+    /// `max_connections: 5`, `min_connections: 0`, `acquire_timeout: 10s` -
+    /// the same small-on-purpose defaults [`connect`] and amicu-server's
+    /// `Config` use.
+    fn default() -> Self {
+        Self {
+            max_connections: 5,
+            min_connections: 0,
+            acquire_timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+/// Opens a connection pool to the given Postgres `database_url` with explicit
+/// pool tuning.
 ///
 /// [`PgPoolOptions::connect`] connects **eagerly**: this awaits a real
 /// connection (and validates the credentials/network path) before returning,
 /// rather than deferring the first connection to the pool's first use. That is
 /// the preferable behavior here - it turns a bad `DATABASE_URL` into an
 /// immediate startup error instead of a failure on the first request.
-pub async fn connect(database_url: &str) -> Result<PgPool, StoreError> {
+pub async fn connect_with(database_url: &str, options: PoolConfig) -> Result<PgPool, StoreError> {
     let pool = PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(options.max_connections)
+        .min_connections(options.min_connections)
+        .acquire_timeout(options.acquire_timeout)
         .connect(database_url)
         .await?;
     Ok(pool)
+}
+
+/// [`connect_with`] using [`PoolConfig::default`]. Kept as a thin, zero-config
+/// entry point for tests (and any caller that does not need custom pool
+/// tuning); amicu-server's real bootstrap calls [`connect_with`] directly with
+/// its env-configured [`PoolConfig`].
+pub async fn connect(database_url: &str) -> Result<PgPool, StoreError> {
+    connect_with(database_url, PoolConfig::default()).await
 }
 
 /// Applies all embedded schema migrations to the database behind `pool`.
@@ -134,6 +186,166 @@ pub async fn connect(database_url: &str) -> Result<PgPool, StoreError> {
 pub async fn run_migrations(pool: &PgPool) -> Result<(), StoreError> {
     sqlx::migrate!("./migrations").run(pool).await?;
     Ok(())
+}
+
+/// Compares the embedded migration set (`sqlx::migrate!("./migrations")`)
+/// against what `_sqlx_migrations` on `pool` records as applied, and returns
+/// the versions that are NOT yet applied, in ascending order.
+///
+/// Deliberately does not call [`run_migrations`] or anything that might
+/// create `_sqlx_migrations`: this is read-only (`SELECT version FROM
+/// _sqlx_migrations`), so it works over a role that only has DML on
+/// pre-existing tables - exactly the non-owning production runtime role (see
+/// [`probe_rls_bypass_risk`] and amicu-server's two-role production model,
+/// andypalmi/amicu-planning#139). A missing `_sqlx_migrations` table (nothing
+/// has ever migrated this database) is reported as every embedded migration
+/// being pending, not an error.
+pub async fn pending_migrations(pool: &PgPool) -> Result<Vec<i64>, StoreError> {
+    let applied: Vec<i64> = match sqlx::query_scalar(
+        "SELECT version FROM _sqlx_migrations WHERE success = true ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(versions) => versions,
+        // undefined_table (42P01): no migrator has ever run against this
+        // database yet, so every embedded migration is pending.
+        Err(e) if is_undefined_table(&e) => Vec::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let applied: std::collections::HashSet<i64> = applied.into_iter().collect();
+
+    let pending = sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.migration_type.is_up_migration())
+        .map(|m| m.version)
+        .filter(|version| !applied.contains(version))
+        .collect();
+    Ok(pending)
+}
+
+/// `(current_user, has CREATE on the `public` schema)` for the role behind
+/// `pool` - i.e. whether it can actually apply a migration that adds a new
+/// table/index/etc., not merely connect. Used by amicu-server's `migrate` to
+/// fail with a friendly, specific error up front instead of a raw
+/// permission-denied surfacing from deep inside a migration transaction (see
+/// the two-role production model, andypalmi/amicu-planning#139: only the
+/// schema-OWNING role has this privilege by design; the runtime `amicu_app`
+/// role never does).
+///
+/// Runtime `query_as`, not the `query!` macro: `has_schema_privilege` needs
+/// no live schema to type-check, and this must still build with no
+/// `DATABASE_URL`.
+pub async fn can_create_in_public_schema(pool: &PgPool) -> Result<(String, bool), StoreError> {
+    let row: (String, bool) = sqlx::query_as(
+        "SELECT current_user, has_schema_privilege(current_user, 'public', 'CREATE')",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
+/// Trivial liveness probe: does `pool` answer `SELECT 1`? Schema-independent,
+/// like [`state::PostgresStateBackend::health`], so this never needs the sqlx
+/// offline cache - it is the `query()` runtime API, not the `query!` macro.
+/// Backs amicu-server's `GET /readyz`.
+pub async fn health_check(pool: &PgPool) -> Result<(), StoreError> {
+    sqlx::query("SELECT 1").fetch_one(pool).await?;
+    Ok(())
+}
+
+/// Whether the role behind `pool` would bypass row-level security.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RlsBypassRisk {
+    /// `current_user` for the connection behind `pool`.
+    pub current_user: String,
+    /// Names of every role with `rolsuper` or `rolbypassrls` that
+    /// `current_user` is a member of - directly, or transitively through any
+    /// chain of role grants (`current_user` itself is always trivially a
+    /// member of itself, so a directly-superuser/BYPASSRLS connection shows
+    /// up here too). Either attribute makes Postgres ignore row-level
+    /// security entirely, `FORCE` or not. Empty when none apply.
+    ///
+    /// Deliberately generic - no role names are hardcoded - so this also
+    /// catches a managed Postgres's front role (Cloud SQL's
+    /// `cloudsqlsuperuser`, Supabase's `postgres`/`supabase_admin`) granted
+    /// to the connecting role, not just a literal `SUPERUSER`/`BYPASSRLS`
+    /// grant on it.
+    pub bypass_via_roles: Vec<String>,
+    /// Every table with `FORCE ROW LEVEL SECURITY` set that `current_user`
+    /// OWNS (schema-qualified `schema.table`), found generically via
+    /// `pg_class`/`pg_namespace` - no table names are hardcoded, so this
+    /// covers every workspace-scoped table the migrations add, present and
+    /// future. An owner bypasses RLS on its own tables unless `FORCE` is set
+    /// (the migrations do set it) - but an owner can trivially `ALTER TABLE
+    /// ... NO FORCE ROW LEVEL SECURITY` and remove even that protection, so
+    /// ownership is still refused in production. Empty when `current_user`
+    /// owns no such table (including when no `FORCE RLS` table exists yet -
+    /// an unmigrated database is reported as "owns none", not an error).
+    pub owned_forced_rls_tables: Vec<String>,
+}
+
+impl RlsBypassRisk {
+    /// `true` if either condition holds: the connected role would bypass (or
+    /// could trivially disable) row-level security.
+    #[must_use]
+    pub fn bypasses_rls(&self) -> bool {
+        !self.bypass_via_roles.is_empty() || !self.owned_forced_rls_tables.is_empty()
+    }
+}
+
+/// Probes whether the role behind `pool` would bypass row-level security:
+/// see [`RlsBypassRisk`]'s field docs for exactly what each check covers. The
+/// RLS design (see the crate docs) assumes the running service connects as a
+/// role with neither `SUPERUSER` nor `BYPASSRLS` (direct or inherited) and
+/// that owns none of the `FORCE ROW LEVEL SECURITY` tables; this is the
+/// startup guard amicu-server runs in production to catch a misconfigured
+/// `DATABASE_URL` before it silently bypasses every FORCE RLS policy
+/// (andypalmi/amicu-planning#139).
+///
+/// Runtime `query`/`query_scalar`, not the `query!` macro: `pg_roles` /
+/// `pg_class` / `pg_namespace` are system catalogs outside the `.sqlx`
+/// offline cache, and this must still build with no `DATABASE_URL`.
+pub async fn probe_rls_bypass_risk(pool: &PgPool) -> Result<RlsBypassRisk, StoreError> {
+    let current_user: String = sqlx::query_scalar("SELECT current_user")
+        .fetch_one(pool)
+        .await?;
+
+    // `pg_has_role(role, role, 'member')` already resolves transitive
+    // membership (it walks the full role-grant graph, matching what actually
+    // governs privilege inheritance at query time), so this one query covers
+    // "is superuser/BYPASSRLS" AND "inherits superuser/BYPASSRLS from any
+    // granted role" with no recursive CTE and no hardcoded role names.
+    let bypass_via_roles: Vec<String> = sqlx::query_scalar(
+        "SELECT rolname FROM pg_roles \
+         WHERE (rolsuper OR rolbypassrls) AND pg_has_role(current_user, oid, 'member') \
+         ORDER BY rolname",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    // Every FORCE-RLS table `current_user` owns, anywhere outside the system
+    // schemas - no table list is hardcoded, so this covers every
+    // workspace-scoped table the migrations add, present and future. Yields
+    // no rows (not an error) when no such table exists yet.
+    let owned_forced_rls_tables: Vec<String> = sqlx::query_scalar(
+        "SELECT n.nspname || '.' || c.relname \
+         FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.relforcerowsecurity \
+           AND c.relkind = 'r' \
+           AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+           AND c.relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) \
+         ORDER BY 1",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(RlsBypassRisk {
+        current_user,
+        bypass_via_roles,
+        owned_forced_rls_tables,
+    })
 }
 
 /// Maps a Postgres [`Tier`](amicu_auth::Tier) to its stored text form. Mirrors
@@ -218,6 +430,17 @@ pub(crate) async fn read_workspace_tier(
 /// key, or token material) and this becomes a 500 at the API boundary.
 pub(crate) fn map_db(_err: sqlx::Error) -> AuthError {
     AuthError::Backend
+}
+
+/// `true` if `err` is Postgres's `undefined_table` (SQLSTATE `42P01`). Used
+/// by [`pending_migrations`] to treat a database nothing has ever migrated
+/// (no `_sqlx_migrations` table yet) as "every migration is pending" rather
+/// than a hard error.
+fn is_undefined_table(err: &sqlx::Error) -> bool {
+    err.as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .as_deref()
+        == Some("42P01")
 }
 
 /// Current wall-clock time as Unix seconds. Saturates rather than panicking if
