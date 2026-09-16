@@ -4,14 +4,18 @@
 //! transiently as a zeroizing PKCS#8 PEM, consumed to build an opaque signer
 //! handle, and the PEM is dropped/zeroized immediately. [`SigningKey`] has no
 //! `Serialize`/`Display`, its `Debug` is redacted, and it exposes only the
-//! public key and an opaque [`jsonwebtoken::EncodingKey`]. Nothing here can hand
-//! back the private bytes.
+//! public key and an opaque [`jsonwebtoken::EncodingKey`]. Nothing about the
+//! [`SigningKey`] type itself can hand back the private bytes. The one
+//! deliberate exception is the free function [`generate_pkcs8_pem`], which
+//! exists purely for operator tooling that must produce a fresh PEM to feed
+//! a secret manager — see its docs.
 
 use amicu_core::secret::SecretValue;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use pkcs8::LineEnding;
 use rand_core::OsRng;
 use sha2::{Digest, Sha256};
 
@@ -95,6 +99,30 @@ impl SigningKey {
     pub fn encoding_key(&self) -> &EncodingKey {
         &self.encoding
     }
+}
+
+/// Generate a fresh Ed25519 key and return its PKCS#8 PEM encoding.
+///
+/// Unlike every other function in this module, this DELIBERATELY hands back
+/// raw private key material — wrapped in [`SecretValue`] so it is never at
+/// risk of an accidental `Debug`/log leak between generation and the caller
+/// consuming it, but still ultimately a `String` the caller is expected to
+/// print. That is the entire point: this exists for operator tooling
+/// (`amicu-server gen-signing-key`, andypalmi/amicu-planning#140) that must
+/// emit a PEM an operator pipes straight into a secret manager (e.g.
+/// `gcloud secrets versions add AMICU_SIGNING_KEY_PEM --data-file=-`), which
+/// is fundamentally different from [`SigningKey`]'s job of using a key
+/// without ever re-exposing it.
+///
+/// # Errors
+/// Returns [`AuthError::KeyGen`] if key generation or PKCS#8 PEM encoding
+/// fails.
+pub fn generate_pkcs8_pem() -> Result<SecretValue> {
+    let dalek = ed25519_dalek::SigningKey::generate(&mut OsRng);
+    let pem = dalek
+        .to_pkcs8_pem(LineEnding::LF)
+        .map_err(|_| AuthError::KeyGen)?;
+    Ok(SecretValue::new(pem.to_string()))
 }
 
 /// Redacted: exposes only the (public) key id and algorithm.

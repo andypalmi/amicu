@@ -33,6 +33,8 @@ pub use tenant::{Role, WorkspaceId};
 
 #[cfg(feature = "verifier")]
 pub mod verifier;
+#[cfg(all(feature = "verifier", feature = "issuer"))]
+pub use verifier::KeyringJwksProvider;
 #[cfg(feature = "verifier")]
 pub use verifier::{
     JwksProvider, MonoClock, StaticJwksProvider, SystemMonoClock, Verifier, VerifierConfig,
@@ -69,7 +71,7 @@ pub mod verify;
 #[cfg(feature = "issuer")]
 pub use issuer::{Clock, IssuerConfig, SystemClock, TokenIssuer};
 #[cfg(feature = "issuer")]
-pub use key::SigningKey;
+pub use key::{SigningKey, generate_pkcs8_pem};
 #[cfg(feature = "issuer")]
 pub use keyring::Keyring;
 #[cfg(feature = "issuer")]

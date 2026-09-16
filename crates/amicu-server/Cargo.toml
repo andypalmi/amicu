@@ -17,6 +17,11 @@ path = "src/lib.rs"
 [dependencies]
 amicu-api = { path = "../amicu-api" }
 amicu-auth = { path = "../amicu-auth" }
+# Wraps the raw signing-key PEM read from AMICU_SIGNING_KEY_PEM /
+# AMICU_SIGNING_KEYS_RETIRING_PEM in a redacted, zeroizing SecretValue the
+# instant it would otherwise touch a bare String-typed Config field (see
+# src/signing_key.rs).
+amicu-core = { path = "../amicu-core" }
 amicu-state = { path = "../amicu-state" }
 amicu-store = { path = "../amicu-store" }
 async-trait = "0.1"
@@ -43,8 +48,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 # (see the crate/test docs). No TLS: the test talks plain HTTP to 127.0.0.1.
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 serde_json = "1"
-# The SMTP render tests construct SecretValue-carrying notifications directly.
-amicu-core = { path = "../amicu-core" }
+# Decodes the JWT header (to read `kid`) in the signing-key replica
+# integration tests. Matches the version pin amicu-auth/amicu-core already
+# use.
+base64 = "0.22"
 
 [lints]
 workspace = true

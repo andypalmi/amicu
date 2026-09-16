@@ -32,6 +32,10 @@ fn test_config() -> Config {
         db_min_connections: 0,
         db_acquire_timeout_secs: 10,
         readyz_timeout_ms: 2_000,
+        signing_key_pem: None,
+        signing_key_pem_file: None,
+        signing_keys_retiring_pem: None,
+        signing_keys_retiring_pem_file: None,
     }
 }
 
