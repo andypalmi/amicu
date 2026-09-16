@@ -85,7 +85,16 @@ pub fn auth_router(state: AuthApiState) -> Router {
         .route("/reset", post(reset))
         .route("/verify", post(verify))
         .route("/verify/resend", post(resend_verification))
-        .layer(from_fn_with_state(state.clone(), rate_limit));
+        // `route_layer`, not `layer`: applies the middleware only to routes
+        // registered on THIS router, so a request for an unmatched path under
+        // the credential prefix (e.g. a bogus `POST /whatever`) 404s before
+        // ever reaching `rate_limit` - it never hits the limiter (and, on the
+        // Postgres backend, never writes a `rate_limit_buckets` row keyed on
+        // the unauthenticated caller's arbitrary path). `layer` would instead
+        // wrap the whole router including its fallback 404 handler, letting
+        // an attacker grow the bucket table without bound simply by varying
+        // the path.
+        .route_layer(from_fn_with_state(state.clone(), rate_limit));
 
     well_known.merge(credentials).with_state(state)
 }

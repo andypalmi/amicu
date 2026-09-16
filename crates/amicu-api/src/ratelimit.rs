@@ -202,6 +202,22 @@ impl RateLimiter for InMemoryRateLimiter {
     }
 }
 
+/// Default per-`check` database budget, overridable via [`PostgresRateLimiter::with_timeout`]
+/// (`amicu-server`'s `AMICU_RATE_LIMIT_TIMEOUT_MS`). Independent of the pool's
+/// own (typically much longer) connection-acquire timeout
+/// (`AMICU_DB_ACQUIRE_TIMEOUT_SECS`) - mirrors the dedicated-budget pattern
+/// `AMICU_READYZ_TIMEOUT_MS` established for `GET /readyz`
+/// (`crates/amicu-api/src/health.rs`): a saturated pool should fail OPEN fast,
+/// not block a login/signup request up to the full acquire timeout.
+const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1_000);
+
+/// Log every Nth fail-open (after the first) instead of every single one, so
+/// a sustained outage doesn't flood stderr with one line per request -
+/// mirrors [`amicu_store::PostgresRateLimitStore`]'s `cleanup_every` sampling
+/// pattern. [`PostgresRateLimiter::fail_open_count`] stays exact regardless -
+/// only the log line is sampled.
+const WARN_SAMPLE_EVERY: u64 = 100;
+
 /// Shared fixed-window counter backed by
 /// [`amicu_store::PostgresRateLimitStore`] (andypalmi/amicu-planning#142) -
 /// see the module docs for the production-selection and fail-open rules.
@@ -209,75 +225,100 @@ pub struct PostgresRateLimiter {
     store: amicu_store::PostgresRateLimitStore,
     max: u32,
     window_secs: i64,
-    /// Count of `check` calls that failed open due to a database error.
-    /// Exposed via [`Self::fail_open_count`] as the "metric" the module docs'
-    /// fail-open section promises - this crate has no metrics/telemetry sink
-    /// wired to a rate limiter today, so an operator watching logs (each
-    /// fail-open also emits a `WARNING` line) or polling this counter through
-    /// their own instrumentation are the two ways to notice sustained
-    /// failures.
+    /// Upper bound `check` waits for the Postgres hit before failing OPEN;
+    /// see [`DEFAULT_TIMEOUT`] and [`Self::with_timeout`].
+    timeout: Duration,
+    /// Count of `check` calls that failed open due to a database error or
+    /// timeout. Exposed via [`Self::fail_open_count`] as the "metric" the
+    /// module docs' fail-open section promises - this crate has no
+    /// metrics/telemetry sink wired to a rate limiter today, so an operator
+    /// watching logs (a sampled `WARNING` line - see [`WARN_SAMPLE_EVERY`])
+    /// or polling this counter through their own instrumentation are the two
+    /// ways to notice sustained failures. Always incremented exactly once per
+    /// fail-open, independent of log sampling.
     fail_open_hits: AtomicU64,
 }
 
 impl PostgresRateLimiter {
     /// A limiter allowing `max` requests per `window`, sharing state with
-    /// every other replica through `store`'s pool.
+    /// every other replica through `store`'s pool. Uses [`DEFAULT_TIMEOUT`]
+    /// for the per-`check` database budget; override with
+    /// [`Self::with_timeout`].
     #[must_use]
     pub fn new(store: amicu_store::PostgresRateLimitStore, max: u32, window: Duration) -> Self {
         Self {
             store,
             max,
             window_secs: i64::try_from(window.as_secs()).unwrap_or(i64::MAX).max(1),
+            timeout: DEFAULT_TIMEOUT,
             fail_open_hits: AtomicU64::new(0),
         }
     }
 
+    /// Overrides the per-`check` database timeout (default [`DEFAULT_TIMEOUT`],
+    /// `AMICU_RATE_LIMIT_TIMEOUT_MS` in `amicu-server`). A `check` that
+    /// doesn't hear back from Postgres within `timeout` fails OPEN exactly
+    /// like a database error - see the module docs' "Fail-open on database
+    /// error" section.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     /// Number of `check` calls that fell back to fail-open because the
-    /// database hit errored. Monotonic for the lifetime of this instance;
-    /// primarily for tests/observability.
+    /// database hit errored or timed out. Monotonic for the lifetime of this
+    /// instance; primarily for tests/observability.
     #[must_use]
     pub fn fail_open_count(&self) -> u64 {
         self.fail_open_hits.load(Ordering::Relaxed)
+    }
+
+    /// Records one fail-open (bumping the exact counter) and logs a sampled
+    /// `WARNING` - the first failure, then every [`WARN_SAMPLE_EVERY`]th
+    /// after that, so a sustained outage doesn't flood stderr with one line
+    /// per request.
+    fn note_fail_open(&self, detail: impl std::fmt::Display) {
+        let n = self.fail_open_hits.fetch_add(1, Ordering::Relaxed) + 1;
+        if n == 1 || n.is_multiple_of(WARN_SAMPLE_EVERY) {
+            eprintln!(
+                "amicu-api: WARNING - Postgres rate limiter check failed for key \
+                 (key content withheld from this log line; keys embed the request path and \
+                 may embed a client IP or email), failing OPEN (request allowed): {detail}. \
+                 cumulative fail-open count for this limiter: {n} (this line is sampled: \
+                 logged on the 1st failure and then every {WARN_SAMPLE_EVERY}th thereafter).",
+            );
+        }
     }
 }
 
 #[async_trait]
 impl RateLimiter for PostgresRateLimiter {
     async fn check(&self, key: &str) -> bool {
-        match self
-            .store
-            .hit(key, self.window_secs, now_unix_seconds())
-            .await
-        {
-            Ok(count) => count <= i64::from(self.max),
-            Err(err) => {
-                // Fail OPEN: a transient database error must not turn into a
-                // total login/signup outage for the credential routes this
-                // backs (see the module docs' "Fail-open on database error"
-                // section for the full rationale). Never fail closed here.
-                self.fail_open_hits.fetch_add(1, Ordering::Relaxed);
-                eprintln!(
-                    "amicu-api: WARNING - Postgres rate limiter check failed for key \
-                     (key content withheld from this log line; keys embed the request path and \
-                     may embed a client IP or email), failing OPEN (request allowed): {err}. \
-                     cumulative fail-open count for this limiter: {}",
-                    self.fail_open_hits.load(Ordering::Relaxed),
-                );
+        match tokio::time::timeout(self.timeout, self.store.hit(key, self.window_secs)).await {
+            Ok(Ok(count)) => count <= i64::from(self.max),
+            // Fail OPEN: a transient database error must not turn into a
+            // total login/signup outage for the credential routes this backs
+            // (see the module docs' "Fail-open on database error" section for
+            // the full rationale). Never fail closed here.
+            Ok(Err(err)) => {
+                self.note_fail_open(err);
+                true
+            }
+            // The hit didn't finish within `self.timeout` - a saturated pool
+            // or a slow/hung database must not block (or eventually lock out)
+            // every credential request either; a timeout is just another
+            // shape of database unavailability, so it fails OPEN the same way.
+            Err(_) => {
+                self.note_fail_open(format_args!(
+                    "database hit did not complete within the configured {:?} rate-limit \
+                     timeout (AMICU_RATE_LIMIT_TIMEOUT_MS)",
+                    self.timeout
+                ));
                 true
             }
         }
     }
-}
-
-/// Current wall-clock time as Unix seconds, for [`PostgresRateLimiter`]'s
-/// window anchor. Saturates rather than panicking if the clock is somehow
-/// before the epoch (never happens on a sane host) - mirrors
-/// `amicu_store::now_unix_seconds`, which is crate-private there.
-fn now_unix_seconds() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 /// Configured allowlist of trusted reverse-proxy addresses, plus the logic for

@@ -18,10 +18,12 @@
 //! key - whether from the same replica or two different ones - serialize
 //! against each other and neither can read-then-write past the other; there
 //! is no separate SELECT-then-UPDATE round trip that could race. The CASE
-//! expressions decide, from the existing row's `expires_at` versus the
-//! caller-supplied `now`, whether the window has expired (reset to a fresh
-//! window, count 1) or is still open (increment in place) - all inside that
-//! same statement.
+//! expressions decide, from the existing row's `expires_at` versus
+//! Postgres's OWN clock (`extract(epoch from now())::bigint`, not a
+//! caller-supplied timestamp - see [`PostgresRateLimitStore::hit`]'s docs for
+//! why that matters across replicas), whether the window has expired (reset
+//! to a fresh window, count 1) or is still open (increment in place) - all
+//! inside that same statement.
 //!
 //! # Cleanup
 //!
@@ -73,11 +75,20 @@ impl PostgresRateLimitStore {
     }
 
     /// Atomically records one hit for `key` in a fixed window of
-    /// `window_secs` seconds anchored at `now` (Unix seconds), returning the
-    /// count WITHIN THE CURRENT WINDOW after this hit (i.e. `1` on a fresh or
-    /// just-reset window). The caller compares this against its configured
-    /// max to decide allow/deny - this method only counts, it does not know
-    /// the limit.
+    /// `window_secs` seconds, returning the count WITHIN THE CURRENT WINDOW
+    /// after this hit (i.e. `1` on a fresh or just-reset window). The caller
+    /// compares this against its configured max to decide allow/deny - this
+    /// method only counts, it does not know the limit.
+    ///
+    /// The window anchor is Postgres's OWN clock (`extract(epoch from
+    /// now())::bigint`, evaluated inside the upsert itself), not a timestamp
+    /// the caller supplies: every replica's `hit` therefore agrees on what
+    /// "now" is, so the window cannot drift with a replica's own wall clock
+    /// (VM clock skew, a slow/fast container clock, NTP still catching up
+    /// after a cold start). `now()` is fixed for the whole statement (a
+    /// single `INSERT` is one implicit transaction), so every occurrence
+    /// below - in the `VALUES` list and in each `CASE` branch of the `ON
+    /// CONFLICT` update - reads the exact same instant.
     ///
     /// `window_secs` is clamped to at least 1 so a misconfigured `0` cannot
     /// produce a window that is already expired the instant it is written.
@@ -89,32 +100,37 @@ impl PostgresRateLimitStore {
     /// login-availability-over-strict-limiting posture - see
     /// andypalmi/amicu-planning#142) should catch this at the call site rather
     /// than propagate it as a hard failure.
-    pub async fn hit(&self, key: &str, window_secs: i64, now: i64) -> Result<i64, StoreError> {
+    pub async fn hit(&self, key: &str, window_secs: i64) -> Result<i64, StoreError> {
         let window_secs = window_secs.max(1);
-        let expires_at = now.saturating_add(window_secs);
 
         let count: i64 = sqlx::query_scalar!(
             r#"
             INSERT INTO rate_limit_buckets (key, window_start, count, expires_at)
-            VALUES ($1, $2, 1, $3)
+            VALUES (
+                $1,
+                extract(epoch FROM now())::bigint,
+                1,
+                extract(epoch FROM now())::bigint + $2
+            )
             ON CONFLICT (key) DO UPDATE SET
                 count = CASE
-                    WHEN rate_limit_buckets.expires_at <= $2 THEN 1
+                    WHEN rate_limit_buckets.expires_at <= extract(epoch FROM now())::bigint THEN 1
                     ELSE rate_limit_buckets.count + 1
                 END,
                 window_start = CASE
-                    WHEN rate_limit_buckets.expires_at <= $2 THEN $2
+                    WHEN rate_limit_buckets.expires_at <= extract(epoch FROM now())::bigint
+                        THEN extract(epoch FROM now())::bigint
                     ELSE rate_limit_buckets.window_start
                 END,
                 expires_at = CASE
-                    WHEN rate_limit_buckets.expires_at <= $2 THEN $3
+                    WHEN rate_limit_buckets.expires_at <= extract(epoch FROM now())::bigint
+                        THEN extract(epoch FROM now())::bigint + $2
                     ELSE rate_limit_buckets.expires_at
                 END
             RETURNING count
             "#,
             key,
-            now,
-            expires_at,
+            window_secs,
         )
         .fetch_one(&self.pool)
         .await?;
@@ -126,25 +142,29 @@ impl PostgresRateLimitStore {
                 // triggered it, so this error is swallowed (a future sweep
                 // catches up). If callers need to observe sweep failures,
                 // call `cleanup_expired` directly instead.
-                let _ = self.cleanup_expired(now).await;
+                let _ = self.cleanup_expired().await;
             }
         }
 
         Ok(count)
     }
 
-    /// Deletes every row whose window has already expired as of `now` (Unix
-    /// seconds). Returns the number of rows removed. Idempotent and safe to
-    /// call concurrently from multiple replicas - the predicate matches the
-    /// same rows regardless of which replica's sweep gets there first, so a
-    /// second sweep over the same expired rows simply deletes zero.
+    /// Deletes every row whose window has already expired as of Postgres's
+    /// OWN clock (see [`Self::hit`]'s docs on why the anchor lives in the
+    /// database, not the caller). Returns the number of rows removed.
+    /// Idempotent and safe to call concurrently from multiple replicas - the
+    /// predicate matches the same rows regardless of which replica's sweep
+    /// gets there first, so a second sweep over the same expired rows simply
+    /// deletes zero.
     ///
     /// # Errors
     /// Returns [`StoreError::Database`] if the delete fails.
-    pub async fn cleanup_expired(&self, now: i64) -> Result<u64, StoreError> {
-        let result = sqlx::query!("DELETE FROM rate_limit_buckets WHERE expires_at <= $1", now)
-            .execute(&self.pool)
-            .await?;
+    pub async fn cleanup_expired(&self) -> Result<u64, StoreError> {
+        let result = sqlx::query!(
+            "DELETE FROM rate_limit_buckets WHERE expires_at <= extract(epoch FROM now())::bigint"
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected())
     }
 }
@@ -152,6 +172,24 @@ impl PostgresRateLimitStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Directly backdates `key`'s `expires_at` into the past, relative to
+    /// Postgres's own clock - simulating window expiry without waiting on
+    /// the real clock. `hit` no longer accepts a caller-supplied `now` (the
+    /// window anchor lives inside the atomic upsert, evaluated from
+    /// Postgres's clock - see [`PostgresRateLimitStore::hit`]'s docs), so
+    /// tests that need to force expiry deterministically reach around it with
+    /// a raw `UPDATE` instead.
+    async fn expire_now(pool: &PgPool, key: &str) {
+        sqlx::query!(
+            "UPDATE rate_limit_buckets SET expires_at = extract(epoch FROM now())::bigint - 1 \
+             WHERE key = $1",
+            key,
+        )
+        .execute(pool)
+        .await
+        .expect("backdate expires_at");
+    }
 
     /// Two `hit`s within the same window against the SAME store accumulate;
     /// requires a live Postgres, so this is `#[ignore]`d like the rest of the
@@ -166,14 +204,15 @@ mod tests {
 
         let store = PostgresRateLimitStore::new(pool).with_cleanup_every(0);
         let key = format!("test|hits_accumulate|{}", uuid::Uuid::new_v4());
-        let now = 1_000_000_i64;
 
-        assert_eq!(store.hit(&key, 60, now).await.unwrap(), 1);
-        assert_eq!(store.hit(&key, 60, now + 1).await.unwrap(), 2);
-        assert_eq!(store.hit(&key, 60, now + 2).await.unwrap(), 3);
+        // A generous 60s window comfortably outlasts the test's own runtime,
+        // so all three hits land inside the same window on the real clock.
+        assert_eq!(store.hit(&key, 60).await.unwrap(), 1);
+        assert_eq!(store.hit(&key, 60).await.unwrap(), 2);
+        assert_eq!(store.hit(&key, 60).await.unwrap(), 3);
     }
 
-    /// Once `now` passes the window's `expires_at`, the next hit resets the
+    /// Once the window's `expires_at` is in the past, the next hit resets the
     /// counter to 1 instead of continuing to accumulate.
     #[tokio::test]
     #[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
@@ -183,17 +222,19 @@ mod tests {
         let pool = crate::connect(&url).await.expect("connect");
         crate::run_migrations(&pool).await.expect("migrate");
 
-        let store = PostgresRateLimitStore::new(pool).with_cleanup_every(0);
+        let store = PostgresRateLimitStore::new(pool.clone()).with_cleanup_every(0);
         let key = format!("test|window_expiry|{}", uuid::Uuid::new_v4());
-        let now = 2_000_000_i64;
 
-        assert_eq!(store.hit(&key, 10, now).await.unwrap(), 1);
-        assert_eq!(store.hit(&key, 10, now + 5).await.unwrap(), 2);
-        // Past the 10s window: resets to a fresh window.
-        assert_eq!(store.hit(&key, 10, now + 11).await.unwrap(), 1);
+        assert_eq!(store.hit(&key, 10).await.unwrap(), 1);
+        assert_eq!(store.hit(&key, 10).await.unwrap(), 2);
+
+        expire_now(&pool, &key).await;
+
+        // Past the window: resets to a fresh window.
+        assert_eq!(store.hit(&key, 10).await.unwrap(), 1);
     }
 
-    /// `cleanup_expired` removes only rows whose window has ended by `now`,
+    /// `cleanup_expired` removes only rows whose window has already ended,
     /// leaving still-live windows untouched.
     #[tokio::test]
     #[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
@@ -206,16 +247,16 @@ mod tests {
         let store = PostgresRateLimitStore::new(pool.clone()).with_cleanup_every(0);
         let expired_key = format!("test|cleanup-expired|{}", uuid::Uuid::new_v4());
         let live_key = format!("test|cleanup-live|{}", uuid::Uuid::new_v4());
-        let now = 3_000_000_i64;
 
-        store.hit(&expired_key, 5, now).await.unwrap();
-        store.hit(&live_key, 500, now).await.unwrap();
+        store.hit(&expired_key, 500).await.unwrap();
+        store.hit(&live_key, 500).await.unwrap();
+        expire_now(&pool, &expired_key).await;
 
-        let deleted = store.cleanup_expired(now + 10).await.unwrap();
-        assert!(deleted >= 1, "the short-window key must be swept");
+        let deleted = store.cleanup_expired().await.unwrap();
+        assert!(deleted >= 1, "the backdated key must be swept");
 
         // The live key survives: a fresh hit still accumulates rather than
         // resetting to 1.
-        assert_eq!(store.hit(&live_key, 500, now + 10).await.unwrap(), 2);
+        assert_eq!(store.hit(&live_key, 500).await.unwrap(), 2);
     }
 }

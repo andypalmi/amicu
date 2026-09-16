@@ -106,6 +106,7 @@
 //! | `min_tier` | `--min-tier` | `AMICU_MIN_TIER` | `community` |
 //! | `rate_limit_max` | `--rate-limit-max` | `AMICU_RATE_LIMIT_MAX` | `30` |
 //! | `rate_limit_window_secs` | `--rate-limit-window-secs` | `AMICU_RATE_LIMIT_WINDOW_SECS` | `60` |
+//! | `rate_limit_timeout_ms` | `--rate-limit-timeout-ms` | `AMICU_RATE_LIMIT_TIMEOUT_MS` | `1000` - Postgres path only; a timeout fails OPEN like any other database error |
 //! | `max_workspaces_per_user` | `--max-workspaces-per-user` | `AMICU_MAX_WORKSPACES_PER_USER` | `50` |
 //! | `environment` | `--environment` | `AMICU_ENV` | `development` |
 //! | `db_max_connections` | `--db-max-connections` | `AMICU_DB_MAX_CONNECTIONS` | `5` |
@@ -286,6 +287,17 @@ pub struct Config {
     /// Credential-route rate-limit window, in seconds.
     #[arg(long, env = "AMICU_RATE_LIMIT_WINDOW_SECS", default_value_t = 60)]
     pub rate_limit_window_secs: u64,
+
+    /// How long the Postgres-backed rate limiter's `check` waits for the
+    /// database hit before failing OPEN, in milliseconds. Deliberately short
+    /// (and independent of `db_acquire_timeout_secs`, mirroring
+    /// `readyz_timeout_ms`'s relationship to it): a saturated pool or a
+    /// slow/hung database should fail a credential request's rate-limit
+    /// check fast, not block it up to the full connection-acquire timeout.
+    /// Only consulted on the Postgres path - the in-memory limiter never
+    /// awaits, so it has nothing to time out.
+    #[arg(long, env = "AMICU_RATE_LIMIT_TIMEOUT_MS", default_value_t = 1_000)]
+    pub rate_limit_timeout_ms: u64,
 
     /// Cap on the TOTAL number of workspaces a user may OWN (across every
     /// workspace, including the personal workspace sign-up provisions), enforced
@@ -881,6 +893,31 @@ pub async fn migrate_database_url(database_url: Option<&str>) -> Result<(), Erro
     Ok(())
 }
 
+/// Selects and constructs the credential-route rate limiter (see
+/// [`build_app_with_database_url`]'s "Rate limiter selection" comment):
+/// Postgres-backed and shared across every replica when `pool` is present,
+/// in-memory (dev/tests/DB-less) otherwise. Split out of
+/// [`build_app_with_database_url`] to keep that function under Clippy's
+/// line-count lint.
+fn build_rate_limiter(pool: Option<PgPool>, config: &Config) -> Arc<dyn RateLimiter> {
+    let rate_limit_window = Duration::from_secs(config.rate_limit_window_secs);
+    if let Some(pool) = pool {
+        Arc::new(
+            PostgresRateLimiter::new(
+                PostgresRateLimitStore::new(pool),
+                config.rate_limit_max,
+                rate_limit_window,
+            )
+            .with_timeout(Duration::from_millis(config.rate_limit_timeout_ms)),
+        )
+    } else {
+        Arc::new(InMemoryRateLimiter::new(
+            config.rate_limit_max,
+            rate_limit_window,
+        ))
+    }
+}
+
 /// Shared implementation behind [`build_app`] and [`build_app_in_memory`].
 /// `database_url` is an explicit override rather than an environment read, so
 /// callers control store selection precisely: `Some(url)` selects the
@@ -1033,19 +1070,7 @@ pub async fn build_app_with_database_url(
     // `Error::MissingDatabaseUrl` gate above), so production always gets the
     // Postgres limiter here - no separate check needed, mirroring how every
     // other Postgres-vs-in-memory store selection in this function works.
-    let rate_limit_window = Duration::from_secs(config.rate_limit_window_secs);
-    let limiter: Arc<dyn RateLimiter> = if let Some(pool) = pool.clone() {
-        Arc::new(PostgresRateLimiter::new(
-            PostgresRateLimitStore::new(pool),
-            config.rate_limit_max,
-            rate_limit_window,
-        ))
-    } else {
-        Arc::new(InMemoryRateLimiter::new(
-            config.rate_limit_max,
-            rate_limit_window,
-        ))
-    };
+    let limiter = build_rate_limiter(pool.clone(), config);
     let auth_state = AuthApiState::new(service.clone(), limiter)
         .with_trusted_proxies(trusted)
         .with_edge_trust(edge_trust.clone());

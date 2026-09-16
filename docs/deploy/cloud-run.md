@@ -83,9 +83,10 @@ consequences for anything keyed on "the client":
   in-memory limiter — kept only for dev/tests/DB-less self-host, where a
   process-local counter resetting on every cold start is an accepted
   trade-off — is never reachable in production. **Fails open** on a database
-  error (a `WARNING` log line plus an in-process counter, not a hard
-  failure): a transient Postgres hiccup must not turn into a total
-  login/signup outage.
+  error, or on a hit that doesn't complete within `AMICU_RATE_LIMIT_TIMEOUT_MS`
+  (a sampled `WARNING` log line — first failure, then every 100th — plus an
+  exact in-process counter, not a hard failure): a transient Postgres hiccup,
+  or a saturated pool, must not turn into a total login/signup outage.
 - The request chain is `browser → Cloudflare edge → api-proxy Worker →
   Google's LB → Cloud Run`. Cloud Run's own peer is Google's LB, and
   `X-Forwarded-For` ends in Cloudflare's own egress IP — **not** the real
@@ -101,6 +102,7 @@ consequences for anything keyed on "the client":
 | --- | --- | --- | --- |
 | `AMICU_EDGE_TOKEN` | **yes** | unset | Shared secret the api-proxy Worker attaches as `X-Amicu-Edge-Token` on every request it forwards. Store in Secret Manager for Cloud Run (`AMICU_EDGE_TOKEN`, see amicu-infra's `docs/env-matrix.md`) **and** as the Worker's `EDGE_TOKEN` secret (`wrangler secret put EDGE_TOKEN` in `amicu-infra/fallback/api-proxy-worker/`) — same value, provisioned independently on each side, never in Terraform state. Generate with `openssl rand -base64 32`. Compared constant-time; never logged. |
 | `AMICU_REQUIRE_EDGE_TOKEN` | no | `false` | When `true`, a request without a valid `X-Amicu-Edge-Token` is rejected `403` before any handler runs — closes the "raw `*.run.app` URL bypasses Cloudflare" gap outright. `GET /healthz`/`GET /readyz` are exempt (Cloud Run's own probes carry no such header). Requires `AMICU_EDGE_TOKEN` to also be set — booting with `true` and no token is a hard startup error (a deployment that would `403` every public request is refused rather than started). Defaults `false` in every environment, including production: turning it on is a deliberate operator step, gated behind amicu-infra's `optional_secrets_enabled.AMICU_EDGE_TOKEN`, taken once the Worker + token pair are actually provisioned — defaulting it on would break the very first production boot, before that provisioning step ever runs. |
+| `AMICU_RATE_LIMIT_TIMEOUT_MS` | no | `1000` | Upper bound the Postgres-backed rate limiter's `check` waits for the database hit before failing OPEN — its own dedicated budget, independent of `AMICU_DB_ACQUIRE_TIMEOUT_SECS`, mirroring `AMICU_READYZ_TIMEOUT_MS`'s relationship to that same acquire timeout. A timeout is treated exactly like a database error: it fails OPEN and counts toward the same sampled `WARNING`/`fail_open_count` reporting. Only consulted on the Postgres path — the in-memory limiter never awaits. |
 
 Independent of both: `AMICU_TRUSTED_PROXIES` keeps governing the
 non-Cloudflare `X-Forwarded-For` path unchanged — see

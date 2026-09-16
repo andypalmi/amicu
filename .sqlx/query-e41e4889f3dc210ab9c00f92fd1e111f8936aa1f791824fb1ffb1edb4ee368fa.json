@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM rate_limit_buckets WHERE expires_at <= extract(epoch FROM now())::bigint",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "e41e4889f3dc210ab9c00f92fd1e111f8936aa1f791824fb1ffb1edb4ee368fa"
+}

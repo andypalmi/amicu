@@ -45,6 +45,17 @@ fn app_capturing(rate_max: u32) -> (Router, Arc<CapturingNotifier>) {
 }
 
 fn build_app(rate_max: u32, trusted: TrustedProxies, notifier: Arc<dyn Notifier>) -> Router {
+    build_app_with_limiter(rate_max, trusted, notifier).0
+}
+
+/// Like [`build_app`], but also hands back the concrete [`InMemoryRateLimiter`]
+/// so a test can inspect its bucket count directly (the router only holds it
+/// behind `Arc<dyn RateLimiter>`).
+fn build_app_with_limiter(
+    rate_max: u32,
+    trusted: TrustedProxies,
+    notifier: Arc<dyn Notifier>,
+) -> (Router, Arc<InMemoryRateLimiter>) {
     let keyring = Keyring::new(SigningKey::generate().unwrap());
     let issuer = TokenIssuer::new(IssuerConfig::new(ISS, AUD));
     let service = Arc::new(AuthService::new(
@@ -58,7 +69,9 @@ fn build_app(rate_max: u32, trusted: TrustedProxies, notifier: Arc<dyn Notifier>
         "https://auth.amicu.dev",
     ));
     let limiter = Arc::new(InMemoryRateLimiter::new(rate_max, Duration::from_secs(60)));
-    auth_router(AuthApiState::new(service, limiter).with_trusted_proxies(trusted))
+    let router =
+        auth_router(AuthApiState::new(service, limiter.clone()).with_trusted_proxies(trusted));
+    (router, limiter)
 }
 
 /// A [`Notifier`] that captures the reset token a real mailer would embed in a
@@ -341,6 +354,56 @@ async fn rate_limit_trips_after_max() {
     // The unthrottled well-known endpoint still works from the same client.
     let status = call_peer(&app, "GET", "/.well-known/jwks.json", None, client, None).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+/// An unmatched path under the credential prefix 404s without ever touching
+/// the rate limiter: `auth_router` wires `rate_limit` with `route_layer`, not
+/// `layer`, so it only wraps routes actually registered on the `credentials`
+/// sub-router. Before that fix, an unauthenticated caller could grow the
+/// limiter's bucket map (and, on the Postgres backend, the
+/// `rate_limit_buckets` table) without bound simply by varying the path of a
+/// bogus request.
+#[tokio::test]
+async fn unmatched_credential_path_never_creates_a_bucket() {
+    let (app, limiter) = build_app_with_limiter(
+        3,
+        TrustedProxies::default(),
+        Arc::new(LoggingNotifier) as Arc<dyn Notifier>,
+    );
+    let client = peer("8.8.4.4");
+
+    assert_eq!(limiter.tracked(), 0, "no buckets before any request");
+
+    // Repeated hits against paths that don't match any registered route -
+    // more than `rate_max` of them, so a naive `layer`-based wiring would
+    // have thrown a 429 by the last one instead of a 404 every time.
+    for path in [
+        "/does-not-exist",
+        "/signup/extra",
+        "/token/extra/segment",
+        "/whatever",
+        "/whatever",
+    ] {
+        let status = call_peer(&app, "POST", path, None, client, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "path {path} must 404");
+    }
+
+    assert_eq!(
+        limiter.tracked(),
+        0,
+        "an unmatched path must never create a rate-limit bucket"
+    );
+
+    // A real, matched route from the same client is still limited normally -
+    // proving the fix didn't accidentally disable rate limiting altogether.
+    let body = json!({"email": "unmatched-path@example.com", "password": "bad"});
+    for _ in 0..3 {
+        let status = call_peer(&app, "POST", "/token", Some(body.clone()), client, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let status = call_peer(&app, "POST", "/token", Some(body), client, None).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limiter.tracked(), 1, "matched routes still get one bucket");
 }
 
 #[tokio::test]
