@@ -562,6 +562,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/recommend/customize": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Customize (re-parse, validate, and plan) a wizard candidate's HCL.
+         * @description The deterministic customize flow: parse `hcl`, deserialize the optional
+         *     opaque `base_graph`, validate the parsed graph
+         *     ([`amicu_engine::report_for`]), then diff it against `base_graph`
+         *     ([`amicu_engine::build_plan`]) exactly as `POST /plan` does for its
+         *     `config`/`prior`. See the module doc-comment for the full `422`-vs-`400`
+         *     rationale, the SSE-shape-compatibility note, and the v1
+         *     no-estimate/confidence limitation.
+         *
+         *     Response status by outcome:
+         *     - `hcl` does not parse, or parses but carries a resource id/reference that
+         *       is not a valid, round-trip-safe HCL identifier: `422`, `report` carries
+         *       one [`catalog::PARSE_INVALID_SYNTAX`] diagnostic, `plan`/`graph` absent,
+         *       `hcl` echoes the raw submission.
+         *     - `base_graph` is present but not a valid `Graph`: `400`,
+         *       `{"error": "..."}`.
+         *     - `hcl` parses but fails structural/per-deployment validation: `422`,
+         *       `report.valid == false`, `plan`/`graph` absent, `hcl` is the
+         *       canonically-reformatted text.
+         *     - `hcl` parses and validates but planning surfaces an error-severity
+         *       diagnostic (e.g. an adapter-level capability mismatch): `422`, `report`
+         *       carries the planning diagnostics, `plan`/`graph` absent.
+         *     - Otherwise: `200`, `report` (its diagnostics, if any, are all
+         *       non-error), `plan`, and `graph` all present.
+         */
+        post: operations["customize_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/recommend/questions": {
         parameters: {
             query?: never;
@@ -1218,6 +1260,32 @@ export interface components {
             email: string;
             /** @description Account password. */
             password: string;
+        };
+        /** @description Request body for `POST /recommend/customize`. */
+        CustomizeRequestDto: {
+            /**
+             * @description The base graph to diff against (the candidate's original graph, as
+             *     opaque canonical JSON - see `CandidateDto::graph`). Omitted plans
+             *     against an empty prior, i.e. every resource is a create.
+             */
+            base_graph?: Record<string, never> | null;
+            /** @description The (possibly user-edited) Amicu HCL to re-parse, validate, and plan. */
+            hcl: string;
+        };
+        /** @description Response for `POST /recommend/customize`. */
+        CustomizeResponseDto: {
+            /**
+             * @description The parsed graph as canonical JSON, `None` under the same conditions
+             *     as `plan`.
+             */
+            graph?: Record<string, never> | null;
+            /**
+             * @description The submitted HCL, canonically re-formatted when it parsed; echoed
+             *     verbatim (unformatted) when it did not parse at all.
+             */
+            hcl: string;
+            plan?: null | components["schemas"]["Plan"];
+            report: components["schemas"]["DiagnosticReport"];
         };
         /** @description A single diagnostic in a [`DiagnosticReport`]. */
         Diagnostic: {
@@ -2009,6 +2077,8 @@ export type CreateInviteResponse = components['schemas']['CreateInviteResponse']
 export type CreateWorkspaceRequest = components['schemas']['CreateWorkspaceRequest'];
 export type CreateWorkspaceResponse = components['schemas']['CreateWorkspaceResponse'];
 export type Credentials = components['schemas']['Credentials'];
+export type CustomizeRequestDto = components['schemas']['CustomizeRequestDto'];
+export type CustomizeResponseDto = components['schemas']['CustomizeResponseDto'];
 export type Diagnostic = components['schemas']['Diagnostic'];
 export type DiagnosticReport = components['schemas']['DiagnosticReport'];
 export type DistributionDto = components['schemas']['DistributionDto'];
@@ -3493,6 +3563,60 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    customize_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CustomizeRequestDto"];
+            };
+        };
+        responses: {
+            /** @description The submitted HCL parsed, validated, and planned cleanly. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CustomizeResponseDto"];
+                };
+            };
+            /** @description `base_graph` is present but is not valid JSON for a Graph. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The HCL did not parse, failed validation, or failed to plan; body carries the blocking DiagnosticReport. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CustomizeResponseDto"];
+                };
             };
         };
     };
