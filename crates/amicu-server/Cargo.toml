@@ -41,6 +41,13 @@ lettre = { version = "0.11", default-features = false, features = [
     "webpki-roots",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+# Zeroize-on-drop intermediates while normalizing/splitting the raw
+# signing-key PEM (src/signing_key.rs), so no un-zeroized copy of key
+# material survives a `.replace()`/`format!()` step longer than it has to.
+# Already pulled in transitively via amicu-core/amicu-auth; pinned here as a
+# direct dependency at the same version already resolved in Cargo.lock (no
+# version bump).
+zeroize = "1"
 
 [dev-dependencies]
 # Real-socket smoke test: a genuine HTTP client over a live TCP connection is

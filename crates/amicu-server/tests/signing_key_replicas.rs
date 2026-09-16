@@ -146,10 +146,11 @@ async fn same_pem_cross_replica_verification_and_identical_jwks() {
         .send()
         .await
         .expect("plan request against replica B");
-    assert_ne!(
+    assert_eq!(
         resp.status(),
-        reqwest::StatusCode::UNAUTHORIZED,
-        "replica B must accept a token signed by replica A (same shared key)"
+        reqwest::StatusCode::OK,
+        "replica B must accept a token signed by replica A (same shared key) and plan the \
+         (empty, but valid) config successfully"
     );
 
     let jwks_a: serde_json::Value = client
@@ -195,10 +196,11 @@ async fn retiring_key_still_verifies_new_key_gets_new_kid_jwks_lists_both() {
         .send()
         .await
         .expect("plan request with old token");
-    assert_ne!(
+    assert_eq!(
         resp.status(),
-        reqwest::StatusCode::UNAUTHORIZED,
-        "the retiring key must still verify tokens it signed"
+        reqwest::StatusCode::OK,
+        "the retiring key must still verify tokens it signed, and the (empty, but valid) config \
+         must plan successfully"
     );
 
     // (b) A fresh token minted on C is signed by the NEW active key: a

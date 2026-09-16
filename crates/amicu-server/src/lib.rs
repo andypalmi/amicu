@@ -312,13 +312,18 @@ pub struct Config {
     /// `Config` derives `Debug`/`Clone` like every other field, and this one
     /// carries private key material — see that type's docs for why a bare
     /// `String` here would be a leak vector.
-    #[arg(long, env = "AMICU_SIGNING_KEY_PEM")]
+    #[arg(
+        long,
+        env = "AMICU_SIGNING_KEY_PEM",
+        hide_env_values = true,
+        hide = true
+    )]
     pub signing_key_pem: Option<signing_key::RedactedEnvString>,
 
     /// Path to a file containing the ACTIVE signing key PEM (a mounted secret
     /// volume), as an alternative to `AMICU_SIGNING_KEY_PEM`. Mutually
     /// exclusive with it.
-    #[arg(long, env = "AMICU_SIGNING_KEY_PEM_FILE")]
+    #[arg(long, env = "AMICU_SIGNING_KEY_PEM_FILE", hide_env_values = true)]
     pub signing_key_pem_file: Option<String>,
 
     /// Zero or more PKCS#8 Ed25519 PEM blocks (concatenated, split on
@@ -326,13 +331,22 @@ pub struct Config {
     /// published in JWKS so tokens they already signed keep verifying until
     /// they expire. Optional; empty/unset means no retiring keys. See
     /// `docs/ops/signing-key-rotation.md`.
-    #[arg(long, env = "AMICU_SIGNING_KEYS_RETIRING_PEM")]
+    #[arg(
+        long,
+        env = "AMICU_SIGNING_KEYS_RETIRING_PEM",
+        hide_env_values = true,
+        hide = true
+    )]
     pub signing_keys_retiring_pem: Option<signing_key::RedactedEnvString>,
 
     /// Path to a file containing the RETIRING keys' concatenated PEM blocks,
     /// as an alternative to `AMICU_SIGNING_KEYS_RETIRING_PEM`. Mutually
     /// exclusive with it.
-    #[arg(long, env = "AMICU_SIGNING_KEYS_RETIRING_PEM_FILE")]
+    #[arg(
+        long,
+        env = "AMICU_SIGNING_KEYS_RETIRING_PEM_FILE",
+        hide_env_values = true
+    )]
     pub signing_keys_retiring_pem_file: Option<String>,
 }
 

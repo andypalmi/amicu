@@ -32,6 +32,7 @@ use amicu_auth::error::AuthError;
 use amicu_auth::key::SigningKey;
 use amicu_auth::keyring::Keyring;
 use amicu_core::secret::SecretValue;
+use zeroize::Zeroizing;
 
 use crate::{Config, Environment};
 
@@ -268,23 +269,41 @@ fn normalize_pem(
     let text = raw
         .expose_secret_str()
         .map_err(|_| SigningKeyConfigError::InvalidUtf8 { var })?;
-    let normalized = text
-        .replace("\\r\\n", "\n")
-        .replace("\\n", "\n")
-        .replace("\r\n", "\n")
-        .replace('\r', "\n");
-    Ok(SecretValue::new(normalized))
+    // N-1 fix: each `.replace()` step below used to produce a plain,
+    // never-zeroized `String` holding the (still-normalizing) key material,
+    // with every earlier copy simply leaked to freed-but-unwiped heap memory
+    // as the chain progressed. Reassigning through a `Zeroizing<String>`
+    // instead means each reassignment's implicit drop of the PREVIOUS value
+    // wipes it before the next copy is made. The final `.as_bytes().to_vec()`
+    // clones the finished, normalized bytes into the `SecretValue` that owns
+    // them from here on; `normalized` itself is then dropped (at the end of
+    // this function) and zeroized like every intermediate before it - no
+    // `unsafe` needed to move the bytes out without a final zeroize-defeating
+    // extraction.
+    let mut normalized = Zeroizing::new(text.replace("\\r\\n", "\n"));
+    normalized = Zeroizing::new(normalized.replace("\\n", "\n"));
+    normalized = Zeroizing::new(normalized.replace("\r\n", "\n"));
+    normalized = Zeroizing::new(normalized.replace('\r', "\n"));
+    Ok(SecretValue::new(normalized.as_bytes().to_vec()))
 }
 
 /// Split a normalised blob that may contain zero or more concatenated PKCS#8
 /// PEM blocks into individual block strings, splitting on `-----BEGIN`. Each
 /// returned block starts with `-----BEGIN` and is trimmed; empty fragments
 /// (e.g. leading boilerplate before the first block) are dropped.
-fn split_pem_blocks(normalized: &str) -> Vec<String> {
+///
+/// N-1 fix: each block is a `Zeroizing<String>` rather than a bare `String`,
+/// so the untrimmed intermediate `format!` copy is wiped the instant the
+/// trimmed final copy is built, and the returned blocks stay zeroize-on-drop
+/// end to end until each is handed to `SecretValue::new` in `load_keyring`.
+fn split_pem_blocks(normalized: &str) -> Vec<Zeroizing<String>> {
     normalized
         .split("-----BEGIN")
         .skip(1)
-        .map(|chunk| format!("-----BEGIN{chunk}").trim().to_string())
+        .map(|chunk| {
+            let untrimmed = Zeroizing::new(format!("-----BEGIN{chunk}"));
+            Zeroizing::new(untrimmed.trim().to_string())
+        })
         .filter(|s| !s.is_empty())
         .collect()
 }
@@ -368,7 +387,12 @@ pub(crate) fn load_keyring(config: &Config) -> Result<Keyring, SigningKeyConfigE
                 blocks
                     .into_iter()
                     .map(|block| {
-                        SigningKey::from_pkcs8_pem(&SecretValue::new(block)).map_err(|source| {
+                        // `block` (a `Zeroizing<String>`) is dropped - and
+                        // zeroized - at the end of this closure; only the
+                        // fresh `Vec<u8>` copy `SecretValue` takes ownership
+                        // of outlives it.
+                        let secret = SecretValue::new(block.as_bytes().to_vec());
+                        SigningKey::from_pkcs8_pem(&secret).map_err(|source| {
                             SigningKeyConfigError::InvalidKey {
                                 var: "AMICU_SIGNING_KEYS_RETIRING_PEM",
                                 source,
@@ -471,11 +495,11 @@ mod tests {
         let blocks = split_pem_blocks(&blob);
         assert_eq!(blocks.len(), 2);
         for block in &blocks {
-            assert!(block.starts_with("-----BEGIN"), "{block}");
+            assert!(block.starts_with("-----BEGIN"), "{}", block.as_str());
         }
-        let k1 = SigningKey::from_pkcs8_pem(&SecretValue::new(blocks[0].clone()))
+        let k1 = SigningKey::from_pkcs8_pem(&SecretValue::new(blocks[0].as_bytes().to_vec()))
             .expect("parse block 1");
-        let k2 = SigningKey::from_pkcs8_pem(&SecretValue::new(blocks[1].clone()))
+        let k2 = SigningKey::from_pkcs8_pem(&SecretValue::new(blocks[1].as_bytes().to_vec()))
             .expect("parse block 2");
         assert_ne!(k1.kid(), k2.kid());
     }
@@ -664,6 +688,52 @@ mod tests {
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("SENTINEL-MARKER-VALUE"), "{rendered}");
         assert!(!rendered.contains("OTHER-SENTINEL-VALUE"), "{rendered}");
+    }
+
+    /// HIGH-1 fix: `clap` renders `[env: VAR=<current value>]` in `--help`
+    /// unless `hide_env_values` is set on the arg - which would print the
+    /// live private key straight to stdout for anyone running
+    /// `amicu-server --help` with a secret already exported in the shell.
+    /// Asserts on the built `clap::Command` (the workspace forbids `unsafe`,
+    /// so this cannot use `std::env::set_var` + a real `--help` capture).
+    #[test]
+    fn help_output_never_renders_signing_key_env_values() {
+        use clap::CommandFactory;
+
+        let cmd = Config::command();
+        for name in [
+            "signing_key_pem",
+            "signing_key_pem_file",
+            "signing_keys_retiring_pem",
+            "signing_keys_retiring_pem_file",
+        ] {
+            let arg = cmd
+                .get_arguments()
+                .find(|a| a.get_id() == name)
+                .expect(name);
+            assert!(
+                arg.is_hide_env_values_set(),
+                "{name} must hide its env value in --help"
+            );
+        }
+    }
+
+    /// Companion to the above: the two VALUE args (not the `_FILE` args) are
+    /// also fully hidden from `--help` output, so passing key material via
+    /// argv is never advertised as a supported usage pattern - the flags
+    /// still work (clap needs them to bind `env`), they're just not listed.
+    #[test]
+    fn signing_key_value_args_are_hidden_from_help_listing() {
+        use clap::CommandFactory;
+
+        let cmd = Config::command();
+        for name in ["signing_key_pem", "signing_keys_retiring_pem"] {
+            let arg = cmd
+                .get_arguments()
+                .find(|a| a.get_id() == name)
+                .expect(name);
+            assert!(arg.is_hide_set(), "{name} must be hidden from --help");
+        }
     }
 
     /// A malformed-but-PEM-shaped value (has a `-----BEGIN`/`-----END` armor
