@@ -120,6 +120,41 @@ or transfer ownership of your existing tables. Either:
   destroys the `amicu_pgdata` volume** - every workspace, account, token, config, and
   state snapshot in it - so only do this with disposable local/dev data.
 
+This single-role shape - one role both owns the schema and runs the server, which
+migrates at boot - is a **dev/self-host convenience only**. `amicu-server` still accepts
+it (`AMICU_ENV=development`, the default: the RLS-bypass startup guard only warns), but
+production should use the two-role split below.
+
+### Production database (two-role split)
+
+`AMICU_ENV=production` (andypalmi/amicu-planning#139) changes two things from the dev
+shape above:
+
+1. `amicu-server` no longer migrates at boot. Apply migrations separately, as a
+   schema-OWNING role, with the new `amicu-server migrate` subcommand:
+   ```bash
+   DATABASE_URL=postgres://amicu_owner:...@host/amicu amicu-server migrate
+   ```
+   It connects, applies any pending migration, prints how many it applied, and exits -
+   no RLS guard runs (the migrator is expected to own the schema).
+2. The running service must connect as a **separate, non-owning** role - `amicu_app` -
+   with neither `SUPERUSER` nor `BYPASSRLS`, direct or inherited:
+   ```bash
+   DATABASE_URL=postgres://amicu_app:...@host/amicu AMICU_ENV=production amicu-server
+   ```
+   On boot it verifies the schema has no pending migrations (failing fast, rather than
+   racing concurrent replicas against each other or serving against a stale schema, if
+   step 1 was skipped) and refuses to start if the connected role would bypass row-level
+   security - superuser/`BYPASSRLS` (including inherited via role membership - this
+   generically catches a managed Postgres's own privileged front role, e.g. Cloud SQL's
+   `cloudsqlsuperuser` or Supabase's `postgres`/`supabase_admin`, with no role name
+   hardcoded), or ownership of any `FORCE ROW LEVEL SECURITY` table.
+
+`ops/sql/provision_app_role.sql` provisions both roles (`amicu_owner` + `amicu_app`) with
+exactly this split, including the `ALTER DEFAULT PRIVILEGES` grants so a later migration
+adding new tables does not need a manual re-grant. See its header comment for the full
+walkthrough and the managed-Postgres note above in more detail.
+
 Self-hosted state is control-plane metadata and secret *references* only - never plaintext
 secret values (see `amicu-core`'s `SecretValue`/`SecretRef` split). `amicu-store` does not
 encrypt it at the application layer by default: **self-host operators are responsible for

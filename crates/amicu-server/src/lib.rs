@@ -22,6 +22,31 @@
 //! `development` (the default) only warns, so local runs and pre-database
 //! self-host stay zero-config.
 //!
+//! ## Two-role production model
+//!
+//! In `production`, this bootstrap deliberately does NOT migrate at boot (see
+//! [`connect_shared_pool`]'s docs): run `amicu-server migrate` (see
+//! [`migrate`]) once, connected as a schema-OWNING role, before starting any
+//! replica; the replicas themselves connect as a SEPARATE, non-owning role
+//! that only ever does DML. `ops/sql/provision_app_role.sql` provisions both
+//! roles. `development` keeps the old single-role, migrate-at-boot
+//! convenience (`docker/postgres-init/01-app-role.sql`), and only warns
+//! instead of refusing to start when the connecting role happens to own the
+//! schema.
+//!
+//! ## Still blocked: true N-replica scaling
+//!
+//! Everything above makes ONE replica safe to run on Cloud Run. Running
+//! MULTIPLE replicas of the SAME deployment concurrently is still blocked by
+//! [`build_app`] generating a fresh [`SigningKey`](amicu_auth::key::SigningKey)
+//! on every boot: each replica would sign access tokens with its own key and
+//! verify against its own JWKS snapshot, so a token minted by one replica
+//! would fail verification on another. A durable, shared signing key (or a
+//! live JWKS the verifier can poll) is tracked as
+//! andypalmi/amicu-planning#140; until it lands, treat this bootstrap as safe
+//! for exactly one Cloud Run replica (`autoscaling.knative.dev/maxScale:
+//! "1"`), not the `0..N` the epic (andypalmi/amicu-planning#145) targets.
+//!
 //! # Dev / single-node bootstrap
 //!
 //! Absent a `DATABASE_URL`, state is wired with the **in-memory** auth stores
@@ -66,6 +91,7 @@
 //! | `db_max_connections` | `--db-max-connections` | `AMICU_DB_MAX_CONNECTIONS` | `5` |
 //! | `db_min_connections` | `--db-min-connections` | `AMICU_DB_MIN_CONNECTIONS` | `0` |
 //! | `db_acquire_timeout_secs` | `--db-acquire-timeout-secs` | `AMICU_DB_ACQUIRE_TIMEOUT_SECS` | `10` |
+//! | `readyz_timeout_ms` | `--readyz-timeout-ms` | `AMICU_READYZ_TIMEOUT_MS` | `2000` |
 //!
 //! `environment` (see [`Environment`]) gates production safety checks: a
 //! missing `DATABASE_URL` and an RLS-bypassing connected role are hard startup
@@ -73,6 +99,14 @@
 //! the single shared Postgres pool (see [`amicu_store::PoolConfig`]); their
 //! small defaults are sized for many autoscaled Cloud Run replicas sharing one
 //! Cloud SQL connection ceiling, not a single beefy long-lived process.
+//!
+//! `bind`'s default changed from `127.0.0.1:8080` to `0.0.0.0:8080` in
+//! andypalmi/amicu-planning#139 - a deliberate, dev-facing change (not just a
+//! Cloud Run one): loopback-only refused every container/VM/Docker Desktop
+//! setup that reaches the process over a non-loopback interface, which is the
+//! common case outside "cargo run on your own machine". Restore the old
+//! loopback-only default explicitly with `AMICU_BIND=127.0.0.1:8080` (or
+//! `--bind`) if you want it back.
 //!
 //! # Billing (Stripe) - env only
 //!
@@ -225,6 +259,14 @@ pub struct Config {
     /// before giving up, in seconds.
     #[arg(long, env = "AMICU_DB_ACQUIRE_TIMEOUT_SECS", default_value_t = 10)]
     pub db_acquire_timeout_secs: u64,
+
+    /// How long `GET /readyz` waits for the Postgres pool to answer `SELECT
+    /// 1` before reporting `503`, in milliseconds. Deliberately short (and
+    /// independent of `db_acquire_timeout_secs`): a saturated pool should
+    /// fail the readiness probe fast, not block it up to the full connection
+    /// acquire timeout.
+    #[arg(long, env = "AMICU_READYZ_TIMEOUT_MS", default_value_t = 2_000)]
+    pub readyz_timeout_ms: u64,
 }
 
 /// Deployment environment gate (`AMICU_ENV`): whether production safety
@@ -286,8 +328,14 @@ pub enum Error {
     /// deploy may never silently fall back to ephemeral in-memory stores.
     MissingDatabaseUrl,
     /// `AMICU_ENV=production` and the connected Postgres role would bypass
-    /// row-level security on the tenant tables (superuser, or owns them).
+    /// row-level security (superuser/BYPASSRLS, direct or inherited, or owns
+    /// a `FORCE ROW LEVEL SECURITY` table).
     RlsBypass(String),
+    /// `AMICU_ENV=production` and the schema has migrations the connected
+    /// (non-owning) role cannot apply itself - run `amicu-server migrate` as
+    /// the schema-owning role first (see the crate's two-role production
+    /// model docs).
+    PendingMigrations(usize),
     /// Binding or serving the socket failed.
     Io(std::io::Error),
 }
@@ -306,6 +354,12 @@ impl std::fmt::Display for Error {
                  silently fall back to ephemeral in-memory stores)"
             ),
             Error::RlsBypass(msg) => write!(f, "RLS-bypass startup guard: {msg}"),
+            Error::PendingMigrations(n) => write!(
+                f,
+                "{n} pending migration(s) - run `amicu-server migrate` with the schema-owning \
+                 role's credentials before starting in production (see \
+                 ops/sql/provision_app_role.sql)"
+            ),
             Error::Io(e) => write!(f, "server socket: {e}"),
         }
     }
@@ -319,7 +373,10 @@ impl std::error::Error for Error {
             Error::Store(e) => Some(e),
             Error::Smtp(e) => Some(e),
             Error::Io(e) => Some(e),
-            Error::Port(_) | Error::MissingDatabaseUrl | Error::RlsBypass(_) => None,
+            Error::Port(_)
+            | Error::MissingDatabaseUrl
+            | Error::RlsBypass(_)
+            | Error::PendingMigrations(_) => None,
         }
     }
 }
@@ -396,12 +453,14 @@ pub struct BuiltApp {
 /// # Errors
 /// Returns [`Error::Proxy`] if the trusted-proxy allowlist fails to parse,
 /// [`Error::Key`] if the signing key cannot be generated, [`Error::Store`] if
-/// `DATABASE_URL` is set but the pool cannot connect or migrate,
-/// [`Error::MissingDatabaseUrl`] if `AMICU_ENV=production` but no
-/// `DATABASE_URL` is set, [`Error::RlsBypass`] if `AMICU_ENV=production` and
-/// the connected role would bypass row-level security, or [`Error::Smtp`] if
-/// any `AMICU_SMTP_*` variable is set but the SMTP configuration is
-/// incomplete or invalid.
+/// `DATABASE_URL` is set but the pool cannot connect (or, in `development`,
+/// migrate), [`Error::MissingDatabaseUrl`] if `AMICU_ENV=production` but no
+/// `DATABASE_URL` is set, [`Error::PendingMigrations`] if
+/// `AMICU_ENV=production` and the schema has migrations not yet applied by a
+/// separate `amicu-server migrate` run, [`Error::RlsBypass`] if
+/// `AMICU_ENV=production` and the connected role would bypass row-level
+/// security, or [`Error::Smtp`] if any `AMICU_SMTP_*` variable is set but the
+/// SMTP configuration is incomplete or invalid.
 pub async fn build_app(config: &Config) -> Result<BuiltApp, Error> {
     build_app_with_database_url(config, std::env::var("DATABASE_URL").ok().as_deref()).await
 }
@@ -422,14 +481,9 @@ pub async fn build_app_in_memory(config: &Config) -> Result<BuiltApp, Error> {
     build_app_with_database_url(config, None).await
 }
 
-/// Shared implementation behind [`build_app`] and [`build_app_in_memory`].
-/// `database_url` is an explicit override rather than an environment read, so
-/// callers control store selection precisely: `Some(url)` selects the
-/// Postgres stores, `None` selects the in-memory stores, with no ambient
-/// environment lookup at all.
-/// Applies the production gate, opens and migrates the single shared
-/// Postgres pool if `database_url` is set, and runs the RLS-bypass startup
-/// guard against it (andypalmi/amicu-planning#139).
+/// Applies the production gate, opens the single shared Postgres pool if
+/// `database_url` is set, and runs the RLS-bypass startup guard against it
+/// (andypalmi/amicu-planning#139).
 ///
 /// # Production gate
 /// In `production` (see [`Environment`]), a missing `database_url` is a hard
@@ -438,18 +492,33 @@ pub async fn build_app_in_memory(config: &Config) -> Result<BuiltApp, Error> {
 /// `DATABASE_URL` was left unset by mistake. Checked FIRST, before any
 /// connection attempt.
 ///
-/// # Shared pool
-/// Connects and migrates ONCE; the returned `PgPool` is a cheap `Arc`-backed
-/// handle callers `clone()` for every store that needs it instead of each
-/// opening its own pool. Sized from `config`'s `db_*` fields (see
-/// [`PoolConfig`]'s docs): kept small by default, since many autoscaled Cloud
-/// Run replicas, each holding one pool, share one Cloud SQL connection
-/// ceiling.
+/// # Shared pool, and the two-role production model
+/// Connects ONCE; the returned `PgPool` is a cheap `Arc`-backed handle
+/// callers `clone()` for every store that needs it instead of each opening
+/// its own pool. Sized from `config`'s `db_*` fields (see [`PoolConfig`]'s
+/// docs): kept small by default, since many autoscaled Cloud Run replicas,
+/// each holding one pool, share one Cloud SQL connection ceiling.
+///
+/// Whether migrations run here depends on `environment`:
+/// - `development`: single-role convenience (see
+///   `docker/postgres-init/01-app-role.sql`) - the one connecting role also
+///   owns the schema, so migrations run right here, at boot, same as before
+///   andypalmi/amicu-planning#139.
+/// - `production`: two-role model (see [`migrate`] and
+///   `ops/sql/provision_app_role.sql`) - a separate `amicu-server migrate`
+///   run, connected as the schema-OWNING role, is expected to have already
+///   applied every migration. This function does NOT migrate; it only
+///   verifies nothing is pending ([`amicu_store::pending_migrations`]) and
+///   fails fast ([`Error::PendingMigrations`]) otherwise, so a forgotten
+///   migration step is a clear startup error instead of either racing
+///   concurrent replicas against each other or serving against a stale
+///   schema.
 ///
 /// # RLS-bypass guard
-/// The RLS design assumes the app connects as the non-superuser, non-owning
-/// `amicu_app` role (andypalmi/amicu-planning#114). A superuser, or a role
-/// that owns the tenant tables, silently bypasses every FORCE RLS policy
+/// The RLS design assumes the running service connects as a role with
+/// neither `SUPERUSER` nor `BYPASSRLS` (direct or inherited) and that owns no
+/// `FORCE ROW LEVEL SECURITY` table (andypalmi/amicu-planning#114); either
+/// condition silently bypasses every FORCE RLS policy
 /// ([`amicu_store::probe_rls_bypass_risk`]) - refuse to start on that in
 /// production ([`Error::RlsBypass`]); only warn in development.
 async fn connect_shared_pool(
@@ -470,16 +539,48 @@ async fn connect_shared_pool(
             let pool = amicu_store::connect_with(url, pool_config)
                 .await
                 .map_err(Error::Store)?;
-            amicu_store::run_migrations(&pool)
-                .await
-                .map_err(Error::Store)?;
-            eprintln!(
-                "amicu-server: connected the shared Postgres pool (DATABASE_URL set; \
-                 max_connections={}, min_connections={}, acquire_timeout={}s).",
-                pool_config.max_connections,
-                pool_config.min_connections,
-                pool_config.acquire_timeout.as_secs(),
-            );
+
+            match config.environment {
+                // Single-role dev convenience: the one connecting role also
+                // owns the schema (docker/postgres-init/01-app-role.sql), so
+                // migrate right here, at boot.
+                Environment::Development => {
+                    amicu_store::run_migrations(&pool)
+                        .await
+                        .map_err(Error::Store)?;
+                    eprintln!(
+                        "amicu-server: connected + migrated the shared Postgres pool \
+                         (development; max_connections={}, min_connections={}, \
+                         acquire_timeout={}s).",
+                        pool_config.max_connections,
+                        pool_config.min_connections,
+                        pool_config.acquire_timeout.as_secs(),
+                    );
+                }
+                // Two-role production model: `amicu-server migrate`, run
+                // separately as the schema-owning role, is responsible for
+                // applying migrations - the runtime here connects as a
+                // distinct, non-owning role and must NOT migrate at boot; it
+                // only verifies the schema is already up to date.
+                Environment::Production => {
+                    let pending = amicu_store::pending_migrations(&pool)
+                        .await
+                        .map_err(Error::Store)?;
+                    if !pending.is_empty() {
+                        return Err(Error::PendingMigrations(pending.len()));
+                    }
+                    eprintln!(
+                        "amicu-server: connected the shared Postgres pool (production; \
+                         schema up to date, NOT migrating at boot - see `amicu-server \
+                         migrate`; max_connections={}, min_connections={}, \
+                         acquire_timeout={}s).",
+                        pool_config.max_connections,
+                        pool_config.min_connections,
+                        pool_config.acquire_timeout.as_secs(),
+                    );
+                }
+            }
+
             Some(pool)
         }
         None => None,
@@ -490,16 +591,26 @@ async fn connect_shared_pool(
             .await
             .map_err(Error::Store)?;
         if risk.bypasses_rls() {
-            let reason = if risk.is_superuser {
-                "is a Postgres SUPERUSER"
-            } else {
-                "OWNS the workspace_members table"
-            };
+            let mut reasons = Vec::new();
+            if !risk.bypass_via_roles.is_empty() {
+                reasons.push(format!(
+                    "is a member of superuser/BYPASSRLS role(s) {:?}",
+                    risk.bypass_via_roles
+                ));
+            }
+            if !risk.owned_forced_rls_tables.is_empty() {
+                reasons.push(format!(
+                    "OWNS FORCE-RLS table(s) {:?}",
+                    risk.owned_forced_rls_tables
+                ));
+            }
             let msg = format!(
-                "connected role '{}' {reason}: FORCE RLS on the tenant tables would be \
-                 bypassed. Connect as the non-superuser, non-owning `amicu_app` role instead \
-                 (see andypalmi/amicu-planning#114).",
+                "connected role '{}' {}: row-level security would be bypassed. In production, \
+                 connect as a separate, non-owning role with neither SUPERUSER nor BYPASSRLS \
+                 (direct or inherited) - see ops/sql/provision_app_role.sql and \
+                 andypalmi/amicu-planning#114.",
                 risk.current_user,
+                reasons.join(" and "),
             );
             match config.environment {
                 Environment::Production => return Err(Error::RlsBypass(msg)),
@@ -516,7 +627,62 @@ async fn connect_shared_pool(
     Ok(pool)
 }
 
-async fn build_app_with_database_url(
+/// Runs ONLY the embedded schema migrations against `DATABASE_URL`, as the
+/// schema-OWNING role, and exits - no RLS-bypass guard (the migrator is
+/// expected to own the schema; see the crate's "two-role production model"
+/// docs and `ops/sql/provision_app_role.sql`). This is `amicu-server migrate`
+/// (see `main.rs`'s `Command::Migrate`).
+///
+/// # Errors
+/// Returns [`Error::MissingDatabaseUrl`] if `DATABASE_URL` is unset or empty,
+/// or [`Error::Store`] if the connection or migration fails.
+pub async fn migrate() -> Result<(), Error> {
+    let url = std::env::var("DATABASE_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    migrate_database_url(url.as_deref()).await
+}
+
+/// Like [`migrate`], but takes `database_url` explicitly rather than reading
+/// it from the ambient environment - the same env-avoidance pattern
+/// [`build_app_with_database_url`] uses, so tests can target a specific role
+/// without mutating global process state (this workspace forbids `unsafe`
+/// code, so `std::env::set_var` is unavailable to tests entirely).
+///
+/// # Errors
+/// Returns [`Error::MissingDatabaseUrl`] if `database_url` is `None`, or
+/// [`Error::Store`] if the connection or migration fails.
+pub async fn migrate_database_url(database_url: Option<&str>) -> Result<(), Error> {
+    let Some(url) = database_url else {
+        return Err(Error::MissingDatabaseUrl);
+    };
+    let pool = amicu_store::connect(url).await.map_err(Error::Store)?;
+    let pending_count = amicu_store::pending_migrations(&pool)
+        .await
+        .map_err(Error::Store)?
+        .len();
+    amicu_store::run_migrations(&pool)
+        .await
+        .map_err(Error::Store)?;
+    eprintln!(
+        "amicu-server migrate: applied {pending_count} pending migration(s); schema now up to \
+         date."
+    );
+    pool.close().await;
+    Ok(())
+}
+
+/// Shared implementation behind [`build_app`] and [`build_app_in_memory`].
+/// `database_url` is an explicit override rather than an environment read, so
+/// callers control store selection precisely: `Some(url)` selects the
+/// Postgres stores, `None` selects the in-memory stores, with no ambient
+/// environment lookup at all. Exposed (rather than crate-private) so tests
+/// can exercise a specific `database_url` - including the two-role
+/// production topology - through the exact same path `build_app` and
+/// `build_app_in_memory` use, without mutating the ambient environment (this
+/// workspace forbids `unsafe` code, so `std::env::set_var` is unavailable to
+/// tests entirely).
+pub async fn build_app_with_database_url(
     config: &Config,
     database_url: Option<&str>,
 ) -> Result<BuiltApp, Error> {
@@ -727,7 +893,10 @@ async fn build_app_with_database_url(
         Arc::new(InMemoryStateBackend::new("default"))
     };
 
-    let health_state = HealthApiState::new(pool.clone());
+    let health_state = HealthApiState::new(
+        pool.clone(),
+        Duration::from_millis(config.readyz_timeout_ms),
+    );
     let router = api_router(
         auth_state,
         engine_state,
@@ -792,6 +961,18 @@ fn resolve_bind_with<F: Fn(&str) -> Option<String>>(
         let port: u16 = trimmed
             .parse()
             .map_err(|_| Error::Port(trimmed.to_string()))?;
+        // Port 0 asks the OS for an arbitrary ephemeral port, chosen only
+        // after bind() - useless here, since Cloud Run (or any reverse proxy
+        // expecting a fixed PORT) already decided which port to route to
+        // before the container even starts. Reject it explicitly rather than
+        // silently binding somewhere nothing will ever connect.
+        if port == 0 {
+            return Err(Error::Port(
+                "0 (binds an OS-chosen ephemeral port; Cloud Run cannot route to it - use an \
+                 explicit --bind/AMICU_BIND if you really want an ephemeral port)"
+                    .to_string(),
+            ));
+        }
         return Ok(SocketAddr::from(([0, 0, 0, 0], port)));
     }
     Ok(DEFAULT_BIND
@@ -836,7 +1017,20 @@ pub async fn run(config: Config) -> Result<(), Error> {
     eprintln!("amicu-server listening on http://{addr}");
     serve(listener, built.router, shutdown_signal()).await?;
     if let Some(pool) = built.pool {
-        pool.close().await;
+        /// Upper bound on how long shutdown waits for in-flight connections
+        /// to drain before giving up on a clean pool close. Bounded so a
+        /// stuck connection cannot hang the process past its SIGTERM grace
+        /// period indefinitely.
+        const POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+        if tokio::time::timeout(POOL_CLOSE_TIMEOUT, pool.close())
+            .await
+            .is_err()
+        {
+            eprintln!(
+                "amicu-server: WARNING - closing the shared Postgres pool did not finish \
+                 within {POOL_CLOSE_TIMEOUT:?}; exiting anyway."
+            );
+        }
     }
     eprintln!("amicu-server shut down");
     Ok(())
@@ -933,6 +1127,26 @@ mod tests {
         let banner = startup_banner(Environment::Development);
         assert!(banner.contains("NOT for production use"), "{banner}");
         assert!(banner.contains("WARNING"), "{banner}");
+    }
+
+    /// `PORT=0` asks the OS for an ephemeral port, which Cloud Run cannot
+    /// route to - reject it explicitly instead of silently binding somewhere
+    /// unreachable.
+    #[test]
+    fn resolve_bind_rejects_port_zero() {
+        let err =
+            resolve_bind_with(None, |name| (name == "PORT").then(|| "0".to_string())).unwrap_err();
+        assert!(matches!(err, Error::Port(_)), "{err}");
+    }
+
+    /// An explicit `--bind`/`AMICU_BIND` ending in `:0` (an OS-chosen
+    /// ephemeral port for local tests, e.g. the smoke test) is NOT rejected -
+    /// only `PORT=0` is, since only `PORT` claims to be a fixed, routable
+    /// port a proxy already decided on.
+    #[test]
+    fn resolve_bind_allows_explicit_ephemeral_port() {
+        let explicit = addr("127.0.0.1:0");
+        assert_eq!(resolve_bind_with(Some(explicit), no_env).unwrap(), explicit);
     }
 
     /// The production banner is the exact one-line message, with no dev

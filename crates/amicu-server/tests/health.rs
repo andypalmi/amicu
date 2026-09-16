@@ -24,6 +24,7 @@ fn test_config() -> Config {
         db_max_connections: 5,
         db_min_connections: 0,
         db_acquire_timeout_secs: 10,
+        readyz_timeout_ms: 2_000,
     }
 }
 

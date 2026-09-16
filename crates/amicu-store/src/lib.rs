@@ -188,6 +188,42 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Compares the embedded migration set (`sqlx::migrate!("./migrations")`)
+/// against what `_sqlx_migrations` on `pool` records as applied, and returns
+/// the versions that are NOT yet applied, in ascending order.
+///
+/// Deliberately does not call [`run_migrations`] or anything that might
+/// create `_sqlx_migrations`: this is read-only (`SELECT version FROM
+/// _sqlx_migrations`), so it works over a role that only has DML on
+/// pre-existing tables - exactly the non-owning production runtime role (see
+/// [`probe_rls_bypass_risk`] and amicu-server's two-role production model,
+/// andypalmi/amicu-planning#139). A missing `_sqlx_migrations` table (nothing
+/// has ever migrated this database) is reported as every embedded migration
+/// being pending, not an error.
+pub async fn pending_migrations(pool: &PgPool) -> Result<Vec<i64>, StoreError> {
+    let applied: Vec<i64> = match sqlx::query_scalar(
+        "SELECT version FROM _sqlx_migrations WHERE success = true ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(versions) => versions,
+        // undefined_table (42P01): no migrator has ever run against this
+        // database yet, so every embedded migration is pending.
+        Err(e) if is_undefined_table(&e) => Vec::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let applied: std::collections::HashSet<i64> = applied.into_iter().collect();
+
+    let pending = sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.migration_type.is_up_migration())
+        .map(|m| m.version)
+        .filter(|version| !applied.contains(version))
+        .collect();
+    Ok(pending)
+}
+
 /// Trivial liveness probe: does `pool` answer `SELECT 1`? Schema-independent,
 /// like [`state::PostgresStateBackend::health`], so this never needs the sqlx
 /// offline cache - it is the `query()` runtime API, not the `query!` macro.
@@ -197,62 +233,97 @@ pub async fn health_check(pool: &PgPool) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Whether the role behind `pool` would bypass row-level security on the
-/// tenant tables.
+/// Whether the role behind `pool` would bypass row-level security.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RlsBypassRisk {
     /// `current_user` for the connection behind `pool`.
     pub current_user: String,
-    /// A Postgres SUPERUSER always bypasses RLS, FORCE or not.
-    pub is_superuser: bool,
-    /// The connected role OWNS `workspace_members`. An owning role bypasses
-    /// RLS unless the table has `FORCE ROW LEVEL SECURITY` set (which the
-    /// migration that creates it does set), so this is the narrower of the
-    /// two risks but still worth refusing on in production: an owner can
-    /// trivially `ALTER TABLE ... NO FORCE ROW LEVEL SECURITY` and remove even
-    /// that protection.
-    pub owns_tenant_tables: bool,
+    /// Names of every role with `rolsuper` or `rolbypassrls` that
+    /// `current_user` is a member of - directly, or transitively through any
+    /// chain of role grants (`current_user` itself is always trivially a
+    /// member of itself, so a directly-superuser/BYPASSRLS connection shows
+    /// up here too). Either attribute makes Postgres ignore row-level
+    /// security entirely, `FORCE` or not. Empty when none apply.
+    ///
+    /// Deliberately generic - no role names are hardcoded - so this also
+    /// catches a managed Postgres's front role (Cloud SQL's
+    /// `cloudsqlsuperuser`, Supabase's `postgres`/`supabase_admin`) granted
+    /// to the connecting role, not just a literal `SUPERUSER`/`BYPASSRLS`
+    /// grant on it.
+    pub bypass_via_roles: Vec<String>,
+    /// Every table with `FORCE ROW LEVEL SECURITY` set that `current_user`
+    /// OWNS (schema-qualified `schema.table`), found generically via
+    /// `pg_class`/`pg_namespace` - no table names are hardcoded, so this
+    /// covers every workspace-scoped table the migrations add, present and
+    /// future. An owner bypasses RLS on its own tables unless `FORCE` is set
+    /// (the migrations do set it) - but an owner can trivially `ALTER TABLE
+    /// ... NO FORCE ROW LEVEL SECURITY` and remove even that protection, so
+    /// ownership is still refused in production. Empty when `current_user`
+    /// owns no such table (including when no `FORCE RLS` table exists yet -
+    /// an unmigrated database is reported as "owns none", not an error).
+    pub owned_forced_rls_tables: Vec<String>,
 }
 
 impl RlsBypassRisk {
     /// `true` if either condition holds: the connected role would bypass (or
-    /// could trivially disable) row-level security on the tenant tables.
+    /// could trivially disable) row-level security.
     #[must_use]
     pub fn bypasses_rls(&self) -> bool {
-        self.is_superuser || self.owns_tenant_tables
+        !self.bypass_via_roles.is_empty() || !self.owned_forced_rls_tables.is_empty()
     }
 }
 
-/// Probes whether the role behind `pool` would bypass row-level security: is
-/// it a Postgres SUPERUSER (`SELECT rolsuper FROM pg_roles WHERE rolname =
-/// current_user`), or does it OWN `workspace_members` (`SELECT tableowner
-/// FROM pg_tables WHERE tablename = 'workspace_members'`)? The RLS design
-/// (see the crate docs) assumes the app connects as the non-superuser,
-/// non-owning `amicu_app` role; this is the startup guard amicu-server runs
-/// in production to catch a misconfigured `DATABASE_URL` before it silently
-/// bypasses every FORCE RLS policy (andypalmi/amicu-planning#139).
+/// Probes whether the role behind `pool` would bypass row-level security:
+/// see [`RlsBypassRisk`]'s field docs for exactly what each check covers. The
+/// RLS design (see the crate docs) assumes the running service connects as a
+/// role with neither `SUPERUSER` nor `BYPASSRLS` (direct or inherited) and
+/// that owns none of the `FORCE ROW LEVEL SECURITY` tables; this is the
+/// startup guard amicu-server runs in production to catch a misconfigured
+/// `DATABASE_URL` before it silently bypasses every FORCE RLS policy
+/// (andypalmi/amicu-planning#139).
 ///
 /// Runtime `query`/`query_scalar`, not the `query!` macro: `pg_roles` /
-/// `pg_tables` are system catalogs outside the `.sqlx` offline cache, and this
-/// must still build with no `DATABASE_URL`.
+/// `pg_class` / `pg_namespace` are system catalogs outside the `.sqlx`
+/// offline cache, and this must still build with no `DATABASE_URL`.
 pub async fn probe_rls_bypass_risk(pool: &PgPool) -> Result<RlsBypassRisk, StoreError> {
     let current_user: String = sqlx::query_scalar("SELECT current_user")
         .fetch_one(pool)
         .await?;
-    let is_superuser: bool =
-        sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
-            .fetch_one(pool)
-            .await?;
-    let owner: Option<String> = sqlx::query_scalar(
-        "SELECT tableowner FROM pg_tables WHERE tablename = 'workspace_members'",
+
+    // `pg_has_role(role, role, 'member')` already resolves transitive
+    // membership (it walks the full role-grant graph, matching what actually
+    // governs privilege inheritance at query time), so this one query covers
+    // "is superuser/BYPASSRLS" AND "inherits superuser/BYPASSRLS from any
+    // granted role" with no recursive CTE and no hardcoded role names.
+    let bypass_via_roles: Vec<String> = sqlx::query_scalar(
+        "SELECT rolname FROM pg_roles \
+         WHERE (rolsuper OR rolbypassrls) AND pg_has_role(current_user, oid, 'member') \
+         ORDER BY rolname",
     )
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await?;
-    let owns_tenant_tables = owner.as_deref() == Some(current_user.as_str());
+
+    // Every FORCE-RLS table `current_user` owns, anywhere outside the system
+    // schemas - no table list is hardcoded, so this covers every
+    // workspace-scoped table the migrations add, present and future. Yields
+    // no rows (not an error) when no such table exists yet.
+    let owned_forced_rls_tables: Vec<String> = sqlx::query_scalar(
+        "SELECT n.nspname || '.' || c.relname \
+         FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE c.relforcerowsecurity \
+           AND c.relkind = 'r' \
+           AND n.nspname NOT IN ('pg_catalog', 'information_schema') \
+           AND c.relowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) \
+         ORDER BY 1",
+    )
+    .fetch_all(pool)
+    .await?;
+
     Ok(RlsBypassRisk {
         current_user,
-        is_superuser,
-        owns_tenant_tables,
+        bypass_via_roles,
+        owned_forced_rls_tables,
     })
 }
 
@@ -338,6 +409,17 @@ pub(crate) async fn read_workspace_tier(
 /// key, or token material) and this becomes a 500 at the API boundary.
 pub(crate) fn map_db(_err: sqlx::Error) -> AuthError {
     AuthError::Backend
+}
+
+/// `true` if `err` is Postgres's `undefined_table` (SQLSTATE `42P01`). Used
+/// by [`pending_migrations`] to treat a database nothing has ever migrated
+/// (no `_sqlx_migrations` table yet) as "every migration is pending" rather
+/// than a hard error.
+fn is_undefined_table(err: &sqlx::Error) -> bool {
+    err.as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .as_deref()
+        == Some("42P01")
 }
 
 /// Current wall-clock time as Unix seconds. Saturates rather than panicking if

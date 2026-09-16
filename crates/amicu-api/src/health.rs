@@ -12,6 +12,8 @@
 //! infra plumbing, not part of the client-facing API surface, so wiring them
 //! in never forces a web codegen regen.
 
+use std::time::Duration;
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -26,15 +28,23 @@ use amicu_store::PgPool;
 #[derive(Clone)]
 pub struct HealthApiState {
     pool: Option<PgPool>,
+    /// Upper bound `GET /readyz` waits for [`amicu_store::health_check`]
+    /// before reporting `503`, independent of the pool's own acquire
+    /// timeout - see [`readyz`]'s docs.
+    readyz_timeout: Duration,
 }
 
 impl HealthApiState {
     /// `pool = Some(..)` on the Postgres path (readiness probes it with
-    /// [`amicu_store::health_check`]); `None` on the in-memory dev path, where
-    /// readiness is trivially `200` (there is no dependency to probe).
+    /// [`amicu_store::health_check`], bounded by `readyz_timeout`); `None` on
+    /// the in-memory dev path, where readiness is trivially `200` (there is
+    /// no dependency to probe, so `readyz_timeout` is unused).
     #[must_use]
-    pub fn new(pool: Option<PgPool>) -> Self {
-        Self { pool }
+    pub fn new(pool: Option<PgPool>, readyz_timeout: Duration) -> Self {
+        Self {
+            pool,
+            readyz_timeout,
+        }
     }
 }
 
@@ -61,7 +71,12 @@ async fn healthz() -> Json<HealthResponse> {
 
 /// Readiness probe: `200` once the Postgres pool answers `SELECT 1` (or
 /// trivially, on the in-memory dev path, where there is nothing to probe);
-/// `503` if a configured pool does not answer.
+/// `503` if a configured pool does not answer, OR does not answer within
+/// `state.readyz_timeout` - a short, dedicated bound (default 2s, see
+/// `amicu-server`'s `AMICU_READYZ_TIMEOUT_MS`) independent of the pool's own
+/// (typically much longer) connection-acquire timeout, so a saturated pool
+/// fails the probe fast instead of leaving the load balancer's health check
+/// hanging.
 async fn readyz(State(state): State<HealthApiState>) -> Response {
     let Some(pool) = state.pool.as_ref() else {
         return (
@@ -74,8 +89,8 @@ async fn readyz(State(state): State<HealthApiState>) -> Response {
             .into_response();
     };
 
-    match amicu_store::health_check(pool).await {
-        Ok(()) => (
+    match tokio::time::timeout(state.readyz_timeout, amicu_store::health_check(pool)).await {
+        Ok(Ok(())) => (
             StatusCode::OK,
             Json(ReadyResponse {
                 status: "ok",
@@ -83,7 +98,10 @@ async fn readyz(State(state): State<HealthApiState>) -> Response {
             }),
         )
             .into_response(),
-        Err(_) => (
+        // Either the query itself failed, or it didn't finish within
+        // `readyz_timeout` (the `Err` from `timeout`, discarded) - both mean
+        // "not ready", so both map to the same 503 body.
+        Ok(Err(_)) | Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ReadyResponse {
                 status: "error",

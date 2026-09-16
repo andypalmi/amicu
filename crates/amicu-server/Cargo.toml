@@ -35,7 +35,7 @@ lettre = { version = "0.11", default-features = false, features = [
     "ring",
     "webpki-roots",
 ] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
 
 [dev-dependencies]
 # Real-socket smoke test: a genuine HTTP client over a live TCP connection is
