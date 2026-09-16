@@ -22,6 +22,15 @@ export interface ServerEnv {
   AUTH_ISSUER: string;
   /** Expected token audience (`aud`). */
   AUTH_AUDIENCE: string;
+  /**
+   * Whether session cookies (`amicu_at`/`amicu_rt`) are marked `Secure`.
+   * Explicit rather than inferred from `NODE_ENV === 'production'` so a
+   * misconfigured or non-standard `NODE_ENV` value (e.g. under a runtime
+   * that doesn't set it, or a `NODE_ENV=test`) can't silently drop Secure in
+   * a real deployment. Defaults to `true` unless `NODE_ENV === 'development'`
+   * (local `next dev`), and can be overridden explicitly via `COOKIE_SECURE`.
+   */
+  COOKIE_SECURE: boolean;
 }
 
 /**
@@ -59,6 +68,7 @@ export function parseServerEnv(env: NodeJS.ProcessEnv): ServerEnv {
     AUTH_JWKS_URL: z.url('AUTH_JWKS_URL must be a valid URL').optional(),
     AUTH_ISSUER: z.string().min(1, 'AUTH_ISSUER must be non-empty').optional(),
     AUTH_AUDIENCE: z.string().min(1, 'AUTH_AUDIENCE must be non-empty').optional(),
+    COOKIE_SECURE: z.enum(['true', 'false']).optional(),
   });
 
   const parsed = schema.safeParse({
@@ -66,6 +76,7 @@ export function parseServerEnv(env: NodeJS.ProcessEnv): ServerEnv {
     AUTH_JWKS_URL: env.AUTH_JWKS_URL,
     AUTH_ISSUER: env.AUTH_ISSUER,
     AUTH_AUDIENCE: env.AUTH_AUDIENCE,
+    COOKIE_SECURE: env.COOKIE_SECURE,
   });
 
   if (!parsed.success) {
@@ -80,10 +91,19 @@ export function parseServerEnv(env: NodeJS.ProcessEnv): ServerEnv {
 
   const base = (parsed.data.API_URL ?? DEV_API_URL).replace(/\/+$/, '');
 
+  // Default: Secure unless explicitly running local dev (`NODE_ENV === 'development'`,
+  // which is what `next dev` sets). `COOKIE_SECURE` overrides the default either way,
+  // for environments where NODE_ENV isn't a reliable signal.
+  const cookieSecure =
+    parsed.data.COOKIE_SECURE !== undefined
+      ? parsed.data.COOKIE_SECURE === 'true'
+      : env.NODE_ENV !== 'development';
+
   return {
     API_URL: base,
     AUTH_JWKS_URL: parsed.data.AUTH_JWKS_URL ?? `${base}/.well-known/jwks.json`,
     AUTH_ISSUER: parsed.data.AUTH_ISSUER ?? base,
     AUTH_AUDIENCE: parsed.data.AUTH_AUDIENCE ?? 'amicu',
+    COOKIE_SECURE: cookieSecure,
   };
 }

@@ -25,8 +25,14 @@ export const AUTH_ISSUER = env.AUTH_ISSUER;
 /** Expected token audience (`aud`). */
 export const AUTH_AUDIENCE = env.AUTH_AUDIENCE;
 
-/** Cookies are marked Secure outside development. */
-export const IS_PROD = process.env.NODE_ENV === 'production';
+/**
+ * Whether session cookies are marked `Secure`. Explicit (see
+ * `server-env.ts`'s `COOKIE_SECURE`) rather than inferred from `NODE_ENV`
+ * directly, so the flag survives runtimes where `NODE_ENV` isn't a reliable
+ * production signal (e.g. Cloudflare Workers `vars`). Defaults to `true`
+ * unless `NODE_ENV === 'development'` (local `next dev`).
+ */
+export const COOKIE_SECURE = env.COOKIE_SECURE;
 
 // httpOnly cookie names. BOTH tokens are httpOnly + Secure + SameSite and are held
 // by the BFF only - the browser's JS never reads either. The refresh token in

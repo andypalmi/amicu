@@ -1,8 +1,13 @@
 packages:
   - apps/*
   - packages/*
+overrides:
+  js-yaml: ">=4.3.2"
 allowBuilds:
   esbuild: true
   unrs-resolver: true
+  workerd: true
 minimumReleaseAgeExclude:
   - lucide-react@1.33.0
+  - miniflare@5.20260915.0-alpha
+  - wrangler@4.132.0
