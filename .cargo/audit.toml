@@ -1,0 +1,32 @@
+# cargo-audit ignore list. Every entry below is a *known, accepted* advisory
+# with no available fix in the version range this workspace can currently
+# use — CI would otherwise be permanently red on `main` for issues we cannot
+# resolve today. Each entry states why it's safe to ignore and the condition
+# under which it should be removed. Do not add an entry here without both.
+
+[advisories]
+ignore = [
+    # h2 0.3.27 — unbounded empty DATA frames (h2 http/2 server DoS).
+    # Fixed only in h2 >=0.4.16; no patched 0.3.x release exists on crates.io
+    # (checked 2026-09-16). Pulled solely as a **dev-dependency**:
+    # jsonschema 0.17.1 (dev-dep of amicu-plan) -> reqwest 0.11.27 ->
+    # hyper 0.14.32 -> h2 0.3.27. Not present in any release binary.
+    # Removal condition: remove this ignore once jsonschema (or its reqwest/
+    # hyper chain) is upgraded past hyper 0.14, or amicu-plan's dev-dependency
+    # on jsonschema is dropped/replaced.
+    "RUSTSEC-2026-0258",
+
+    # rsa 0.9.10 — Marvin Attack timing sidechannel. No upstream fix exists.
+    # Pulled by jsonwebtoken 11's `rust_crypto` feature, which bundles `rsa`
+    # unconditionally alongside ed25519-dalek/hmac/p256/p384 (no finer-grained
+    # feature to exclude just RSA on this backend). amicu-auth only ever
+    # signs/verifies Algorithm::EdDSA (see crates/amicu-auth/src/key.rs and
+    # src/verifier.rs) — no RSA algorithm value is ever constructed, so the
+    # timing sidechannel is not reachable. See
+    # crates/amicu-auth/SECURITY-NOTES.md for the full writeup.
+    # Removal condition: jsonwebtoken ships a rust_crypto feature split that
+    # excludes rsa, the project adopts the aws_lc_rs backend instead (drops
+    # the rsa dep, adds a cmake build-time requirement), or jsonwebtoken is
+    # replaced with a non-RSA-coupled JWT crate.
+    "RUSTSEC-2023-0071",
+]
