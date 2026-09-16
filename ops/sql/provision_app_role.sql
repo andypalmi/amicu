@@ -39,10 +39,30 @@
 --   3. Run the service as the app role:
 --        DATABASE_URL=<amicu_app DSN> AMICU_ENV=production amicu-server
 --
+-- Roles are CLUSTER-GLOBAL in Postgres (not scoped to one database), so the
+-- `CREATE ROLE` statements below are guarded with an `IF NOT EXISTS` check
+-- (the same idiom `docker/postgres-init/01-app-role.sql` uses) and this
+-- script is safe to run again - under `psql -v ON_ERROR_STOP=1` included -
+-- against a SECOND database on a cluster where `amicu_owner`/`amicu_app`
+-- already exist from provisioning a first one: it will not error, it will
+-- just skip straight to the per-database `ALTER SCHEMA` / `GRANT` /
+-- `ALTER DEFAULT PRIVILEGES` statements for the new database.
+--
 -- Re-run step 1's GRANT/ALTER DEFAULT PRIVILEGES statements (steps 2-3 below)
 -- any time you provision a NEW database this way; you do NOT need to re-run
 -- them after a later `amicu-server migrate` adds more tables - the ALTER
 -- DEFAULT PRIVILEGES clauses make that automatic.
+
+-- psql's `:'var'` substitution does NOT reach inside a dollar-quoted (`$$
+-- ... $$`) function body - it is purely a client-side text substitution over
+-- the OUTER script, and a `DO $$ ... $$` block's body is opaque server-side
+-- PL/pgSQL text. So the two passwords are staged into session-local GUCs
+-- HERE, in plain (non-dollar-quoted) SQL where `:'var'` substitution does
+-- apply, and each `DO` block below reads its GUC back via `current_setting`
+-- and builds the `CREATE ROLE` dynamically with `EXECUTE format(...)`
+-- (`%L` safely quotes the password as a literal).
+SELECT set_config('provision.owner_password', :'amicu_owner_password', false);
+SELECT set_config('provision.app_password', :'amicu_app_password', false);
 
 -- 1. The migrator/owner role. LOGIN so `amicu-server migrate` can connect
 --    directly as it. CREATEDB/CREATEROLE are NOT needed and are withheld;
@@ -50,8 +70,17 @@
 --    bypasses RLS on its own tables unless FORCE is set, and granting
 --    BYPASSRLS besides would make this role a bypass risk on every OTHER
 --    table too).
-CREATE ROLE amicu_owner LOGIN PASSWORD :'amicu_owner_password'
-    NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'amicu_owner') THEN
+        EXECUTE format(
+            'CREATE ROLE amicu_owner LOGIN PASSWORD %L '
+            'NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS',
+            current_setting('provision.owner_password')
+        );
+    END IF;
+END
+$$;
 
 -- amicu_owner owns `public`, so it (and only it) can CREATE the
 -- tables/indexes `amicu-server migrate` applies, and therefore owns every
@@ -59,8 +88,17 @@ CREATE ROLE amicu_owner LOGIN PASSWORD :'amicu_owner_password'
 ALTER SCHEMA public OWNER TO amicu_owner;
 
 -- 2. The runtime, DML-only role the SERVICE connects as.
-CREATE ROLE amicu_app LOGIN PASSWORD :'amicu_app_password'
-    NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'amicu_app') THEN
+        EXECUTE format(
+            'CREATE ROLE amicu_app LOGIN PASSWORD %L '
+            'NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS',
+            current_setting('provision.app_password')
+        );
+    END IF;
+END
+$$;
 
 -- CONNECT is granted to PUBLIC by default; USAGE on the schema is required
 -- explicitly since amicu_app does not own it (without USAGE, amicu_app could

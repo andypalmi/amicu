@@ -224,6 +224,27 @@ pub async fn pending_migrations(pool: &PgPool) -> Result<Vec<i64>, StoreError> {
     Ok(pending)
 }
 
+/// `(current_user, has CREATE on the `public` schema)` for the role behind
+/// `pool` - i.e. whether it can actually apply a migration that adds a new
+/// table/index/etc., not merely connect. Used by amicu-server's `migrate` to
+/// fail with a friendly, specific error up front instead of a raw
+/// permission-denied surfacing from deep inside a migration transaction (see
+/// the two-role production model, andypalmi/amicu-planning#139: only the
+/// schema-OWNING role has this privilege by design; the runtime `amicu_app`
+/// role never does).
+///
+/// Runtime `query_as`, not the `query!` macro: `has_schema_privilege` needs
+/// no live schema to type-check, and this must still build with no
+/// `DATABASE_URL`.
+pub async fn can_create_in_public_schema(pool: &PgPool) -> Result<(String, bool), StoreError> {
+    let row: (String, bool) = sqlx::query_as(
+        "SELECT current_user, has_schema_privilege(current_user, 'public', 'CREATE')",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
 /// Trivial liveness probe: does `pool` answer `SELECT 1`? Schema-independent,
 /// like [`state::PostgresStateBackend::health`], so this never needs the sqlx
 /// offline cache - it is the `query()` runtime API, not the `query!` macro.

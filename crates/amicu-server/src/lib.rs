@@ -336,6 +336,11 @@ pub enum Error {
     /// the schema-owning role first (see the crate's two-role production
     /// model docs).
     PendingMigrations(usize),
+    /// `amicu-server migrate` connected as a role with no `CREATE` privilege
+    /// on the `public` schema - it cannot be the schema-owning migrator role
+    /// (see `ops/sql/provision_app_role.sql`). The role name is echoed (not
+    /// a secret).
+    MigratorLacksCreate(String),
     /// Binding or serving the socket failed.
     Io(std::io::Error),
 }
@@ -360,6 +365,11 @@ impl std::fmt::Display for Error {
                  role's credentials before starting in production (see \
                  ops/sql/provision_app_role.sql)"
             ),
+            Error::MigratorLacksCreate(role) => write!(
+                f,
+                "role '{role}' lacks CREATE on schema public - use the owner/migrator role's \
+                 DATABASE_URL (see ops/sql/provision_app_role.sql)"
+            ),
             Error::Io(e) => write!(f, "server socket: {e}"),
         }
     }
@@ -376,7 +386,8 @@ impl std::error::Error for Error {
             Error::Port(_)
             | Error::MissingDatabaseUrl
             | Error::RlsBypass(_)
-            | Error::PendingMigrations(_) => None,
+            | Error::PendingMigrations(_)
+            | Error::MigratorLacksCreate(_) => None,
         }
     }
 }
@@ -650,13 +661,28 @@ pub async fn migrate() -> Result<(), Error> {
 /// code, so `std::env::set_var` is unavailable to tests entirely).
 ///
 /// # Errors
-/// Returns [`Error::MissingDatabaseUrl`] if `database_url` is `None`, or
-/// [`Error::Store`] if the connection or migration fails.
+/// Returns [`Error::MissingDatabaseUrl`] if `database_url` is `None`,
+/// [`Error::MigratorLacksCreate`] if the connected role has no `CREATE`
+/// privilege on the `public` schema (it is not the schema-owning migrator
+/// role - see `ops/sql/provision_app_role.sql`), or [`Error::Store`] if the
+/// connection or migration fails.
 pub async fn migrate_database_url(database_url: Option<&str>) -> Result<(), Error> {
     let Some(url) = database_url else {
         return Err(Error::MissingDatabaseUrl);
     };
     let pool = amicu_store::connect(url).await.map_err(Error::Store)?;
+
+    // Fail with a specific, friendly error up front rather than a raw
+    // permission-denied surfacing from deep inside the migration
+    // transaction: a role with no CREATE on `public` cannot be the
+    // schema-owning migrator this command expects to run as.
+    let (current_user, can_create) = amicu_store::can_create_in_public_schema(&pool)
+        .await
+        .map_err(Error::Store)?;
+    if !can_create {
+        return Err(Error::MigratorLacksCreate(current_user));
+    }
+
     let pending_count = amicu_store::pending_migrations(&pool)
         .await
         .map_err(Error::Store)?
