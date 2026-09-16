@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
+import Link from 'next/link';
 import { Suspense } from 'react';
+import { Button } from '@amicu/ui';
 import { requireSession } from '@/lib/auth/session';
 import { Wizard } from '@/components/wizard/wizard';
 import { PageHeader } from '@/components/common/page-header';
@@ -20,6 +22,11 @@ export default async function WizardPage() {
       <PageHeader
         title="Guided wizard"
         description="Start from a preset that matches your use case, answer a few requirements, and get back a ready-to-run Amicu configuration. The wizard emits HCL deterministically from your answers - no metrics are synthesized, and nothing is applied. Copy it, download it, or validate it in place before you use it."
+        actions={
+          <Button asChild variant="outline" size="sm">
+            <Link href="/wizard/candidates">Try the candidate wizard</Link>
+          </Button>
+        }
       />
 
       <Suspense fallback={<LoadingState label="Loading wizard…" />}>
