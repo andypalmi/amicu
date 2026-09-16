@@ -64,7 +64,7 @@ impl std::fmt::Debug for TokenPair {
 
 /// The issuer service.
 pub struct AuthService<C: Clock = SystemClock> {
-    keyring: RwLock<Keyring>,
+    keyring: Arc<RwLock<Keyring>>,
     issuer: TokenIssuer<C>,
     users: Arc<dyn UserStore>,
     refresh: Arc<dyn RefreshStore>,
@@ -103,7 +103,7 @@ impl<C: Clock> AuthService<C> {
         let memberships: Arc<dyn MembershipStore> =
             Arc::new(PersonalMembershipStore::new(users.clone()));
         Self {
-            keyring: RwLock::new(keyring),
+            keyring: Arc::new(RwLock::new(keyring)),
             issuer,
             users,
             refresh,
@@ -527,6 +527,20 @@ impl<C: Clock> AuthService<C> {
     #[must_use]
     pub fn jwks(&self) -> Jwks {
         self.keyring.read().expect("keyring poisoned").jwks()
+    }
+
+    /// A shared handle to this service's keyring (`Arc<RwLock<Keyring>>`).
+    /// Wire this into [`crate::verifier::KeyringJwksProvider`] so an
+    /// in-process verifier (e.g. the engine gate) observes
+    /// [`Self::rotate_keys`] with NO restart and NO network round-trip —
+    /// because it shares the exact same lock this service mutates. Not
+    /// instant, though: the verifier's own cache still gates how fast a
+    /// change is actually picked up (see [`crate::verifier::KeyringJwksProvider`]'s
+    /// docs for the bound). Distinct from [`Self::jwks`], which returns a
+    /// point-in-time snapshot.
+    #[must_use]
+    pub fn keyring_handle(&self) -> Arc<RwLock<Keyring>> {
+        self.keyring.clone()
     }
 
     /// The discovery document for `/.well-known/openid-configuration`.
