@@ -7,7 +7,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-amicu-auth = { path = "../amicu-auth" }
+# `reqwest-provider` backs the Google-OIDC certs fetch that authenticates the
+# Cloud Scheduler caller of POST /internal/outbox/drain (amicu-planning#141).
+# reqwest is already a direct dependency of this crate (billing), on the same
+# rustls-only feature set - this adds no new crate to the tree.
+amicu-auth = { path = "../amicu-auth", features = ["reqwest-provider"] }
 amicu-core = { path = "../amicu-core", features = ["utoipa"] }
 amicu-engine = { path = "../amicu-engine" }
 amicu-hcl = { path = "../amicu-hcl" }

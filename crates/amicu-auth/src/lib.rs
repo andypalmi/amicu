@@ -10,7 +10,9 @@
 //! - `verifier` (default): the offline [`verifier::Verifier`] seam.
 //! - `issuer` (default): signing keys, rotation, token issuance, Argon2id
 //!   password hashing, and the [`service::AuthService`] orchestration.
-//! - `reqwest-provider`: a reqwest-backed [`JwksProvider`](verifier::JwksProvider).
+//! - `reqwest-provider`: reqwest-backed fetchers - a
+//!   [`JwksProvider`](verifier::JwksProvider) for the first-party issuer, and a
+//!   [`GoogleCertsSource`](google::GoogleCertsSource) for Google's OIDC certs.
 
 // The suggested `Duration::from_mins`/`from_days` are unstable
 // (duration_constructors) on our MSRV 1.97; keep `from_secs`.
@@ -38,8 +40,22 @@ pub use verifier::{
     JwksProvider, MonoClock, StaticJwksProvider, SystemMonoClock, Verifier, VerifierConfig,
 };
 
+/// Google-issued OIDC ID-token verification (the Cloud Scheduler caller of
+/// `POST /internal/outbox/drain`). Separate from [`verifier`] because Google
+/// signs RS256 over RSA JWKs while the first-party issuer is EdDSA/OKP - see
+/// the module docs.
+#[cfg(feature = "verifier")]
+pub mod google;
+#[cfg(feature = "verifier")]
+pub use google::{
+    GOOGLE_CERTS_URI, GOOGLE_ISSUERS, GoogleCertsSource, GoogleIdTokenClaims, GoogleIdTokenConfig,
+    GoogleIdTokenVerifier,
+};
+
 #[cfg(feature = "reqwest-provider")]
 pub mod http_provider;
+#[cfg(all(feature = "verifier", feature = "reqwest-provider"))]
+pub use google::HttpGoogleCertsSource;
 #[cfg(feature = "reqwest-provider")]
 pub use http_provider::HttpJwksProvider;
 
