@@ -15,10 +15,18 @@
     "global_fetch_strictly_public",
     // amicu's lib/auth/config.ts reads `process.env.API_URL` etc. at MODULE
     // EVALUATION time (not inside a request handler), so it can read the
-    // fail-fast config before the first request auth check runs. Cloudflare
-    // Workers normally only populate `process.env` once a request context
-    // exists; this flag makes `vars`/secrets importable at module-eval time
-    // too, so that pattern keeps working unmodified under OpenNext. See
+    // fail-fast config before the first request auth check runs. That keeps
+    // working under OpenNext NOT because of this flag (`allow_importable_env`
+    // is just the explicit spelling of the Workers default - it only matters
+    // paired with its opposite, `disallow_importable_env`, which we don't
+    // set), but because @opennextjs/cloudflare calls its own
+    // `populateProcessEnv()` per request, copying the `env` bindings onto
+    // `process.env` before the Next.js server code (including cached
+    // module-level reads from a prior request in the same isolate) runs.
+    // That population is itself gated by the separate
+    // `nodejs_compat_populate_process_env` flag, which is default-ON for any
+    // `compatibility_date` after 2025-04-01 (ours is well past that). Kept
+    // here for explicitness even though it's currently a no-op. See
     // README-deploy-cloudflare.md.
     "allow_importable_env",
   ],

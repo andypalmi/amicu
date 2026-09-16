@@ -24,8 +24,10 @@ pnpm --filter web cf:build
 # runtime, via wrangler) for manual verification.
 pnpm --filter web cf:preview
 
-# Build and deploy. DO NOT RUN until a Cloudflare account/zone is
-# provisioned and the vars/secrets below are set for real in that account.
+# Build and deploy (passes --keep-vars to `wrangler deploy` so it does NOT
+# overwrite dashboard-set vars with the committed placeholders - see the
+# warning below). DO NOT RUN until a Cloudflare account/zone is provisioned
+# and the vars/secrets below are set for real in that account.
 pnpm --filter web cf:deploy
 
 # Regenerate `cloudflare-env.d.ts` (typed `CloudflareEnv`) after changing
@@ -80,11 +82,19 @@ always, whenever either service's issuer/audience config changes.
 - **`allow_importable_env`**: `lib/auth/config.ts` reads `process.env` at
   *module evaluation time* (not inside a request handler) so the fail-fast
   config check (`server-env.ts`) runs before the first auth-touching route
-  executes. Cloudflare Workers only populate `process.env` from
-  bindings/vars once a request context exists by default; this
-  compatibility flag makes vars importable at module-eval time too, which is
-  what OpenNext's docs recommend for this exact pattern instead of
-  restructuring the config module to lazily read `process.env` per-request.
+  executes. That keeps working under OpenNext, but **not because of this
+  flag** - `allow_importable_env` is just the explicit spelling of the
+  Workers default (it only changes behavior paired with its opposite,
+  `disallow_importable_env`, which we don't set, so it's currently a no-op
+  here). The actual mechanism is `@opennextjs/cloudflare` calling its own
+  `populateProcessEnv()` on every request, which copies the Worker's `env`
+  bindings onto `process.env` before Next.js server code runs - including
+  code that only executes once per isolate (module-eval-time reads like
+  ours). That per-request population is itself gated by the
+  `nodejs_compat_populate_process_env` compatibility flag, which defaults to
+  ON for any `compatibility_date` after `2025-04-01` (ours is `2026-09-16`).
+  We keep `allow_importable_env` in `wrangler.jsonc` anyway for
+  explicitness, not because it's load-bearing.
 - **`COOKIE_SECURE`**: previously inferred as `NODE_ENV === 'production'`.
   Now an explicit `server-env.ts` field (`COOKIE_SECURE`, default `true`
   unless `NODE_ENV === 'development'`) so the `Secure` cookie attribute
@@ -97,6 +107,45 @@ always, whenever either service's issuer/audience config changes.
 - No KV/R2/D1/Durable Object bindings are configured - the app has no
   ISR/on-demand-revalidation or persistent-storage requirements today (see
   `open-next.config.ts`).
+- **Node.js middleware**: `proxy.ts` (the app's middleware, silent-refresh +
+  docs rewrites) runs as **Node.js middleware** under this adapter -
+  `opennextjs-cloudflare build` prints `WARN Node.js middleware support is
+  experimental in cloudflare, and not officially maintained by OpenNext
+  maintainers`. This is not a configuration choice: Next.js 16 does not
+  offer an edge-runtime option for `proxy.ts` at all (there is no `export
+  const runtime = 'edge'` to opt into for this file), so it always runs as
+  Node.js middleware, adapter or not. Both `cf:build` and `cf:preview`
+  worked correctly against this in testing, but treat it as an
+  upstream-tracked caveat rather than something this repo can "fix" by
+  choosing a different runtime.
+
+> [!WARNING]
+> **`wrangler deploy` (bare) DELETES every plain dashboard-set `vars` and
+> replaces them with whatever is committed in `wrangler.jsonc`'s `vars`
+> block** - i.e. the placeholder values above. This is standard Wrangler
+> behavior (each deploy's `vars` fully replaces the previous deploy's
+> `vars`), not something specific to this adapter, but it's an easy way to
+> accidentally overwrite a real `API_URL`/`AUTH_ISSUER`/etc. with
+> `https://REPLACE-ME.example.invalid` and take the whole app down.
+>
+> Two independent mitigations, both already in place:
+> - **`cf:deploy` passes `--keep-vars`** (`opennextjs-cloudflare deploy --
+>   --keep-vars`, which forwards straight through to `wrangler deploy
+>   --keep-vars`), which preserves whatever plain vars are already set on the
+>   Worker instead of overwriting them with the committed placeholders.
+> - **Prefer `wrangler secret put <NAME>` over dashboard "vars" for
+>   anything environment-specific** (`API_URL`, `AUTH_ISSUER`,
+>   `AUTH_AUDIENCE`, `AUTH_JWKS_URL`, `NEXT_PUBLIC_SITE_URL`\*). Secrets are
+>   **never** touched by `wrangler deploy`, `--keep-vars` or not - they're
+>   the safer default for anything that would be bad to accidentally reset.
+>   (\* `NEXT_PUBLIC_SITE_URL` is the one exception: since it must be present
+>   at *build* time, not just runtime, it can't be a Workers secret - it has
+>   to be set in the environment that runs `cf:build`/`cf:deploy`, e.g. CI
+>   secrets, not the Worker's own secret store.)
+>
+> If you ever do need to intentionally reset `vars` to the committed
+> placeholders (e.g. tearing down an environment), run bare `wrangler
+> deploy` deliberately - never as a reflex.
 
 ## Local verification (already run before this PR)
 

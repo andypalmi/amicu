@@ -9,7 +9,17 @@ const NO_BROWSER_DIALOG =
 const config = [
   ...next,
   {
-    ignores: ['.next/**', '.source/**', 'next-env.d.ts'],
+    // .open-next/ and .wrangler/ are OpenNext/Wrangler's generated Cloudflare
+    // Workers build output (bundled/minified server code, dev-server state) -
+    // gitignored (web/.gitignore) and not meant to be linted, same as .next/.
+    ignores: [
+      '.next/**',
+      '.source/**',
+      'next-env.d.ts',
+      '.open-next/**',
+      '.wrangler/**',
+      'cloudflare-env.d.ts',
+    ],
   },
   {
     // Hard guard: fail `lint` (and therefore CI's web job) on any use of the
