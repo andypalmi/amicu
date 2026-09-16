@@ -106,6 +106,7 @@
 //! | `min_tier` | `--min-tier` | `AMICU_MIN_TIER` | `community` |
 //! | `rate_limit_max` | `--rate-limit-max` | `AMICU_RATE_LIMIT_MAX` | `30` |
 //! | `rate_limit_window_secs` | `--rate-limit-window-secs` | `AMICU_RATE_LIMIT_WINDOW_SECS` | `60` |
+//! | `rate_limit_timeout_ms` | `--rate-limit-timeout-ms` | `AMICU_RATE_LIMIT_TIMEOUT_MS` | `1000` - Postgres path only; a timeout fails OPEN like any other database error |
 //! | `max_workspaces_per_user` | `--max-workspaces-per-user` | `AMICU_MAX_WORKSPACES_PER_USER` | `50` |
 //! | `environment` | `--environment` | `AMICU_ENV` | `development` |
 //! | `db_max_connections` | `--db-max-connections` | `AMICU_DB_MAX_CONNECTIONS` | `5` |
@@ -158,6 +159,39 @@
 //!
 //! A subscription change takes effect on the user's **next token issuance**
 //! (sign-in or refresh); live access JWTs are never revoked.
+//!
+//! # Cloudflare edge trust - env only (andypalmi/amicu-planning#142)
+//!
+//! Like the Stripe secrets above, `AMICU_EDGE_TOKEN` is read directly from the
+//! environment (never a flag, so it never appears in `--help` output or a
+//! process listing) rather than living on [`Config`]. `AMICU_REQUIRE_EDGE_TOKEN`
+//! is a plain boolean, read the same permissive-token way
+//! `AMICU_REQUIRE_EMAIL_VERIFICATION` is (`1`/`true`/`yes`/`on`,
+//! case-insensitive; anything else, including unset, is `false`).
+//!
+//! | Env var | Required | Purpose |
+//! |---------|----------|---------|
+//! | `AMICU_EDGE_TOKEN` | only if `AMICU_REQUIRE_EDGE_TOKEN=true` | Shared secret the Cloudflare api-proxy Worker attaches as `X-Amicu-Edge-Token` on every request it forwards (`wrangler secret put EDGE_TOKEN` on the Worker side; the same value goes in Secret Manager's `AMICU_EDGE_TOKEN` for Cloud Run - see `docs/deploy/cloud-run.md`). Never logged. |
+//! | `AMICU_REQUIRE_EDGE_TOKEN` | no (default `false`) | When `true`, every request without a valid `X-Amicu-Edge-Token` is rejected `403` before any handler runs (`GET /healthz`/`GET /readyz` exempt - Cloud Run's own probes carry no such header). When `false` (the default - this is "optional hardening" per the issue, not a hard requirement), a valid token still upgrades the credential rate limiter's client-IP source to `CF-Connecting-IP` (see below), but an invalid/missing one is simply ignored rather than rejected. |
+//!
+//! Default `false`, in EVERY environment including `AMICU_ENV=production`, not
+//! just dev: unlike `DATABASE_URL`/RLS-bypass, turning this on requires an
+//! operator to have actually provisioned the Worker + token pair first (it is
+//! explicitly gated behind `optional_secrets_enabled.AMICU_EDGE_TOKEN` in
+//! amicu-infra), so defaulting it to `true` would break the very first
+//! production boot before that provisioning step ever runs. Booting with
+//! `AMICU_REQUIRE_EDGE_TOKEN=true` and no `AMICU_EDGE_TOKEN` configured is a
+//! hard startup error ([`Error::MissingEdgeToken`]) in every environment - such
+//! a deployment could never serve a single public request, in dev or
+//! production alike, so refusing to boot is strictly better than serving 403
+//! to everything.
+//!
+//! Independent of the token: `AMICU_TRUSTED_PROXIES` (above) keeps governing
+//! the non-Cloudflare `X-Forwarded-For` path - the peer Cloud Run sees is
+//! always Google's own load balancer, which appends to `X-Forwarded-For`; the
+//! Worker sets `X-Amicu-Edge-Token` and lets `CF-Connecting-IP` (set by the
+//! Cloudflare edge itself, never the client) carry the real client IP instead
+//! - see [`amicu_api::edge`]'s docs for the full request-chain rationale.
 
 pub mod signing_key;
 pub mod smtp;
@@ -168,9 +202,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use amicu_api::{
-    AuthApiState, BillingApiState, ConfigApiState, EngineApiState, HealthApiState,
-    InMemoryOrgStore, OrgApiState, OrgStore, PostgresTenancyStore, ProxyParseError, RateLimiter,
-    SessionApiState, TenancyStore, TrustedProxies, api_router, health_router,
+    AuthApiState, BillingApiState, ConfigApiState, EdgeGateState, EdgeTrust, EngineApiState,
+    HealthApiState, InMemoryOrgStore, InMemoryRateLimiter, OrgApiState, OrgStore,
+    PostgresRateLimiter, PostgresTenancyStore, ProxyParseError, RateLimiter, SessionApiState,
+    TenancyStore, TrustedProxies, api_router, edge_token_gate, health_router,
     stripe_config_from_env,
 };
 use amicu_auth::Tier;
@@ -183,13 +218,15 @@ use amicu_auth::service::AuthService;
 use amicu_auth::user::{InMemoryUserStore, UserStore};
 use amicu_auth::verifier::{KeyringJwksProvider, Verifier, VerifierConfig};
 use amicu_auth::verify::{InMemoryVerifyStore, VerifyStore};
+use amicu_core::secret::SecretValue;
 use amicu_state::{InMemoryStateBackend, StateBackendAdapter};
 use amicu_store::config::ConfigStore;
 use amicu_store::{
     InMemoryConfigStore, PgPool, PoolConfig, PostgresConfigStore, PostgresInviteStore,
-    PostgresMembershipStore, PostgresStateBackend, PostgresWorkspaceStore,
+    PostgresMembershipStore, PostgresRateLimitStore, PostgresStateBackend, PostgresWorkspaceStore,
 };
 use axum::Router;
+use axum::middleware::from_fn_with_state;
 use clap::{Parser, ValueEnum};
 use tokio::net::TcpListener;
 
@@ -250,6 +287,17 @@ pub struct Config {
     /// Credential-route rate-limit window, in seconds.
     #[arg(long, env = "AMICU_RATE_LIMIT_WINDOW_SECS", default_value_t = 60)]
     pub rate_limit_window_secs: u64,
+
+    /// How long the Postgres-backed rate limiter's `check` waits for the
+    /// database hit before failing OPEN, in milliseconds. Deliberately short
+    /// (and independent of `db_acquire_timeout_secs`, mirroring
+    /// `readyz_timeout_ms`'s relationship to it): a saturated pool or a
+    /// slow/hung database should fail a credential request's rate-limit
+    /// check fast, not block it up to the full connection-acquire timeout.
+    /// Only consulted on the Postgres path - the in-memory limiter never
+    /// awaits, so it has nothing to time out.
+    #[arg(long, env = "AMICU_RATE_LIMIT_TIMEOUT_MS", default_value_t = 1_000)]
+    pub rate_limit_timeout_ms: u64,
 
     /// Cap on the TOTAL number of workspaces a user may OWN (across every
     /// workspace, including the personal workspace sign-up provisions), enforced
@@ -430,6 +478,12 @@ pub enum Error {
     /// (see `ops/sql/provision_app_role.sql`). The role name is echoed (not
     /// a secret).
     MigratorLacksCreate(String),
+    /// `AMICU_REQUIRE_EDGE_TOKEN=true` but `AMICU_EDGE_TOKEN` is unset (in ANY
+    /// environment, not just production - andypalmi/amicu-planning#142): a
+    /// deployment in this state would reject every public request
+    /// unconditionally, so refusing to boot is strictly better than serving
+    /// `403` to everything.
+    MissingEdgeToken,
     /// Binding or serving the socket failed.
     Io(std::io::Error),
     /// `amicu-server gen-signing-key` could not generate a fresh key. In
@@ -469,6 +523,11 @@ impl std::fmt::Display for Error {
                 "role '{role}' lacks CREATE on schema public - use the owner/migrator role's \
                  DATABASE_URL (see ops/sql/provision_app_role.sql)"
             ),
+            Error::MissingEdgeToken => write!(
+                f,
+                "AMICU_REQUIRE_EDGE_TOKEN=true requires AMICU_EDGE_TOKEN to be set (this \
+                 deployment would otherwise reject every public request with 403)"
+            ),
             Error::Io(e) => write!(f, "server socket: {e}"),
             Error::KeyGen(e) => write!(f, "signing-key generation: {e}"),
         }
@@ -489,7 +548,8 @@ impl std::error::Error for Error {
             | Error::MissingDatabaseUrl
             | Error::RlsBypass(_)
             | Error::PendingMigrations(_)
-            | Error::MigratorLacksCreate(_) => None,
+            | Error::MigratorLacksCreate(_)
+            | Error::MissingEdgeToken => None,
         }
     }
 }
@@ -833,6 +893,31 @@ pub async fn migrate_database_url(database_url: Option<&str>) -> Result<(), Erro
     Ok(())
 }
 
+/// Selects and constructs the credential-route rate limiter (see
+/// [`build_app_with_database_url`]'s "Rate limiter selection" comment):
+/// Postgres-backed and shared across every replica when `pool` is present,
+/// in-memory (dev/tests/DB-less) otherwise. Split out of
+/// [`build_app_with_database_url`] to keep that function under Clippy's
+/// line-count lint.
+fn build_rate_limiter(pool: Option<PgPool>, config: &Config) -> Arc<dyn RateLimiter> {
+    let rate_limit_window = Duration::from_secs(config.rate_limit_window_secs);
+    if let Some(pool) = pool {
+        Arc::new(
+            PostgresRateLimiter::new(
+                PostgresRateLimitStore::new(pool),
+                config.rate_limit_max,
+                rate_limit_window,
+            )
+            .with_timeout(Duration::from_millis(config.rate_limit_timeout_ms)),
+        )
+    } else {
+        Arc::new(InMemoryRateLimiter::new(
+            config.rate_limit_max,
+            rate_limit_window,
+        ))
+    }
+}
+
 /// Shared implementation behind [`build_app`] and [`build_app_in_memory`].
 /// `database_url` is an explicit override rather than an environment read, so
 /// callers control store selection precisely: `Some(url)` selects the
@@ -866,6 +951,19 @@ pub async fn build_app_with_database_url(
     let pool = connect_shared_pool(config, database_url).await?;
 
     let trusted = TrustedProxies::from_strs(config.trusted_proxies.split(','))?;
+
+    // Cloudflare edge trust (andypalmi/amicu-planning#142): env-only, like the
+    // Stripe/SMTP secrets above - see the crate docs' "Cloudflare edge trust"
+    // section for why these two never become `Config` flags. Checked early,
+    // before any store/signing-key work, alongside the other pure config
+    // validation (trusted-proxy parsing) above.
+    let edge_token = edge_token_from_env();
+    let require_edge_token = env_flag_is_truthy("AMICU_REQUIRE_EDGE_TOKEN");
+    if require_edge_token && edge_token.is_none() {
+        return Err(Error::MissingEdgeToken);
+    }
+    let edge_trust = EdgeTrust::new(edge_token, require_edge_token);
+
     let base_url = config
         .base_url
         .clone()
@@ -964,11 +1062,18 @@ pub async fn build_app_with_database_url(
     // boot-time StaticJwksProvider snapshot (andypalmi/amicu-planning#140).
     let keyring_handle = service.keyring_handle();
     let service = Arc::new(service);
-    let limiter = Arc::new(RateLimiter::new(
-        config.rate_limit_max,
-        Duration::from_secs(config.rate_limit_window_secs),
-    ));
-    let auth_state = AuthApiState::new(service.clone(), limiter).with_trusted_proxies(trusted);
+
+    // Rate limiter selection (andypalmi/amicu-planning#142): Postgres-backed
+    // and shared across every replica when the shared pool is present,
+    // in-memory (dev/tests/DB-less) otherwise. `AMICU_ENV=production` already
+    // refused to reach this line without a pool (see `connect_shared_pool`'s
+    // `Error::MissingDatabaseUrl` gate above), so production always gets the
+    // Postgres limiter here - no separate check needed, mirroring how every
+    // other Postgres-vs-in-memory store selection in this function works.
+    let limiter = build_rate_limiter(pool.clone(), config);
+    let auth_state = AuthApiState::new(service.clone(), limiter)
+        .with_trusted_proxies(trusted)
+        .with_edge_trust(edge_trust.clone());
 
     let verifier = Arc::new(Verifier::new(
         KeyringJwksProvider::new(keyring_handle),
@@ -1071,7 +1176,7 @@ pub async fn build_app_with_database_url(
         pool.clone(),
         Duration::from_millis(config.readyz_timeout_ms),
     );
-    let router = api_router(
+    let api = api_router(
         auth_state,
         engine_state,
         billing_state,
@@ -1079,7 +1184,16 @@ pub async fn build_app_with_database_url(
         config_state,
         session_state,
     )
-    .merge(health_router(health_state));
+    // andypalmi/amicu-planning#142: the edge-token gate wraps the WHOLE API
+    // surface - applied here, before `health_router` is merged below, so
+    // `GET /healthz`/`GET /readyz` stay outside it (Cloud Run's own
+    // liveness/readiness probes carry no `X-Amicu-Edge-Token`). A no-op layer
+    // when `AMICU_REQUIRE_EDGE_TOKEN=false` (the default).
+    .layer(from_fn_with_state(
+        EdgeGateState { trust: edge_trust },
+        edge_token_gate,
+    ));
+    let router = api.merge(health_router(health_state));
 
     Ok(BuiltApp { router, pool })
 }
@@ -1234,6 +1348,32 @@ pub async fn shutdown_signal() {
         () = ctrl_c => {},
         () = terminate => {},
     }
+}
+
+/// Reads `AMICU_EDGE_TOKEN` into a [`SecretValue`], or `None` if unset/empty.
+/// Read once at boot (unlike `AMICU_REQUIRE_EMAIL_VERIFICATION`'s
+/// read-on-every-call convention - see [`env_flag_is_truthy`]) and held inside
+/// [`amicu_api::EdgeTrust`] for the life of the process; never echoed in any
+/// log line (andypalmi/amicu-planning#142).
+fn edge_token_from_env() -> Option<SecretValue> {
+    std::env::var("AMICU_EDGE_TOKEN")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(SecretValue::new)
+}
+
+/// Whether env var `name` is set to a recognized truthy token (`1`, `true`,
+/// `yes`, `on`, case-insensitive); anything else, including unset, is `false`.
+/// Mirrors `amicu-auth`'s `require_email_verification` boolean-env convention
+/// exactly, so every `AMICU_*` boolean flag in this codebase parses the same
+/// way.
+fn env_flag_is_truthy(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 #[cfg(test)]

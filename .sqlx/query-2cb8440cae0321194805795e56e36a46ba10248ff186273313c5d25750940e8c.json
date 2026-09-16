@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE rate_limit_buckets SET expires_at = extract(epoch FROM now())::bigint - 1 WHERE key = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2cb8440cae0321194805795e56e36a46ba10248ff186273313c5d25750940e8c"
+}

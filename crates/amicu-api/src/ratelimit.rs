@@ -1,25 +1,61 @@
-//! In-memory fixed-window rate limiter for the auth credential routes.
+//! Rate limiting for the auth credential routes: a [`RateLimiter`] trait plus
+//! two implementations, selected by `amicu-server`'s bootstrap
+//! (andypalmi/amicu-planning#142).
 //!
-//! Single-node only; a distributed deployment should back this with a shared
-//! store. Two hardening properties matter here (see amicu-planning#94):
+//! * [`InMemoryRateLimiter`] - the original process-local fixed-window
+//!   counter. Single-node only: across N Cloud Run replicas each one grants
+//!   its own full quota (an effective Nx limit), and every counter resets on
+//!   every cold start. Kept for dev/tests and any DB-less deployment.
+//! * [`PostgresRateLimiter`] - a fixed-window counter shared by every replica
+//!   over the one Postgres pool each replica already holds
+//!   (andypalmi/amicu-planning#139), backed by
+//!   [`amicu_store::PostgresRateLimitStore`]'s single-round-trip atomic
+//!   upsert. This is the one `AMICU_ENV=production` requires (consistent with
+//!   the fail-fast posture andypalmi/amicu-planning#127 established for a
+//!   missing `DATABASE_URL`) - see `amicu-server`'s `Config` docs. There is no
+//!   Redis in this stack; Postgres is the only shared store available.
+//!
+//! # Fail-open on database error
+//!
+//! [`PostgresRateLimiter::check`] fails OPEN on a database error (allows the
+//! request through, logs a `WARNING`, and bumps an in-process counter -
+//! [`PostgresRateLimiter::fail_open_count`] - so an operator can alert on
+//! sustained failures): a transient Postgres hiccup must not turn into a
+//! total login/signup outage. This is a deliberate availability-over-strict-
+//! limiting trade-off for exactly the credential routes this backs - see the
+//! andypalmi/amicu-planning#142 PR description for the full rationale.
+//!
+//! Two hardening properties matter for both implementations (see
+//! amicu-planning#94, extended by #142 for the Cloudflare edge case - see
+//! [`crate::edge`]):
 //!
 //! * **Trustworthy client identity.** `X-Forwarded-For` is client-supplied and
 //!   trivially spoofed, so it is only honored when the *peer* socket address is
 //!   in a configured trusted-proxy allowlist ([`TrustedProxies`]), and then the
 //!   chain is parsed right-to-left (peeling trusted hops) so an attacker cannot
 //!   prepend a spoofed value. Otherwise the key is derived from the peer
-//!   address, which an attacker cannot rotate at will. Keys are additionally
-//!   scoped per route, so no single bucket can lock every client out of every
-//!   credential endpoint.
-//! * **Bounded memory.** The bucket map is capacity-limited and self-evicting
-//!   (expired windows are swept, then the least-recently-seen bucket is dropped),
-//!   so a key-rotating attacker cannot grow the map without bound.
+//!   address, which an attacker cannot rotate at will. On Cloud Run behind
+//!   Cloudflare, [`TrustedProxies::client_key_with_edge`] prefers
+//!   `CF-Connecting-IP` instead, but ONLY once the caller has verified the
+//!   `X-Amicu-Edge-Token` header (see [`crate::edge::EdgeTrust`]) - Google's LB
+//!   peer address and `X-Forwarded-For` chain are not the real client on that
+//!   topology (see the `edge` module docs). Keys are additionally scoped per
+//!   route, so no single bucket can lock every client out of every credential
+//!   endpoint.
+//! * **Bounded memory** (in-memory impl only). The bucket map is
+//!   capacity-limited and self-evicting (expired windows are swept, then the
+//!   least-recently-seen bucket is dropped), so a key-rotating attacker cannot
+//!   grow the map without bound. The Postgres impl has no such concern in
+//!   process memory; its table is swept opportunistically instead (see
+//!   [`amicu_store::ratelimit`]'s docs).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use ipnet::IpNet;
 
 /// Default cap on the number of distinct buckets held at once.
@@ -37,14 +73,14 @@ struct Bucket {
 
 /// Fixed-window counter: at most `max` requests per `window` per key, with a
 /// bounded, self-evicting key map.
-pub struct RateLimiter {
+pub struct InMemoryRateLimiter {
     max: u32,
     window: Duration,
     capacity: usize,
     buckets: Mutex<HashMap<String, Bucket>>,
 }
 
-impl RateLimiter {
+impl InMemoryRateLimiter {
     /// A limiter allowing `max` requests per `window`, with the default bucket
     /// capacity.
     #[must_use]
@@ -134,10 +170,154 @@ impl RateLimiter {
     }
 }
 
-impl Default for RateLimiter {
+impl Default for InMemoryRateLimiter {
     /// 30 requests per minute.
     fn default() -> Self {
         Self::new(30, Duration::from_secs(60))
+    }
+}
+
+/// A rate-limit backend: record a hit for `key`, returning whether it is
+/// within the configured limit. Implemented by [`InMemoryRateLimiter`]
+/// (process-local, dev/tests/DB-less) and [`PostgresRateLimiter`] (shared
+/// across every Cloud Run replica) - see the module docs for how
+/// `amicu-server` selects between them.
+///
+/// `async` (via `#[async_trait]`, already a workspace dependency) even though
+/// [`InMemoryRateLimiter`]'s own implementation never awaits: the trait must
+/// accommodate [`PostgresRateLimiter`], which does a real database round
+/// trip, and `amicu-api` has no `sqlx` dependency of its own (only
+/// `amicu-store` talks to Postgres directly - see that crate's docs), so this
+/// trait is the seam between them.
+#[async_trait]
+pub trait RateLimiter: Send + Sync {
+    /// Record a hit for `key`; returns `true` if it is within the limit.
+    async fn check(&self, key: &str) -> bool;
+}
+
+#[async_trait]
+impl RateLimiter for InMemoryRateLimiter {
+    async fn check(&self, key: &str) -> bool {
+        self.check(key)
+    }
+}
+
+/// Default per-`check` database budget, overridable via [`PostgresRateLimiter::with_timeout`]
+/// (`amicu-server`'s `AMICU_RATE_LIMIT_TIMEOUT_MS`). Independent of the pool's
+/// own (typically much longer) connection-acquire timeout
+/// (`AMICU_DB_ACQUIRE_TIMEOUT_SECS`) - mirrors the dedicated-budget pattern
+/// `AMICU_READYZ_TIMEOUT_MS` established for `GET /readyz`
+/// (`crates/amicu-api/src/health.rs`): a saturated pool should fail OPEN fast,
+/// not block a login/signup request up to the full acquire timeout.
+const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1_000);
+
+/// Log every Nth fail-open (after the first) instead of every single one, so
+/// a sustained outage doesn't flood stderr with one line per request -
+/// mirrors [`amicu_store::PostgresRateLimitStore`]'s `cleanup_every` sampling
+/// pattern. [`PostgresRateLimiter::fail_open_count`] stays exact regardless -
+/// only the log line is sampled.
+const WARN_SAMPLE_EVERY: u64 = 100;
+
+/// Shared fixed-window counter backed by
+/// [`amicu_store::PostgresRateLimitStore`] (andypalmi/amicu-planning#142) -
+/// see the module docs for the production-selection and fail-open rules.
+pub struct PostgresRateLimiter {
+    store: amicu_store::PostgresRateLimitStore,
+    max: u32,
+    window_secs: i64,
+    /// Upper bound `check` waits for the Postgres hit before failing OPEN;
+    /// see [`DEFAULT_TIMEOUT`] and [`Self::with_timeout`].
+    timeout: Duration,
+    /// Count of `check` calls that failed open due to a database error or
+    /// timeout. Exposed via [`Self::fail_open_count`] as the "metric" the
+    /// module docs' fail-open section promises - this crate has no
+    /// metrics/telemetry sink wired to a rate limiter today, so an operator
+    /// watching logs (a sampled `WARNING` line - see [`WARN_SAMPLE_EVERY`])
+    /// or polling this counter through their own instrumentation are the two
+    /// ways to notice sustained failures. Always incremented exactly once per
+    /// fail-open, independent of log sampling.
+    fail_open_hits: AtomicU64,
+}
+
+impl PostgresRateLimiter {
+    /// A limiter allowing `max` requests per `window`, sharing state with
+    /// every other replica through `store`'s pool. Uses [`DEFAULT_TIMEOUT`]
+    /// for the per-`check` database budget; override with
+    /// [`Self::with_timeout`].
+    #[must_use]
+    pub fn new(store: amicu_store::PostgresRateLimitStore, max: u32, window: Duration) -> Self {
+        Self {
+            store,
+            max,
+            window_secs: i64::try_from(window.as_secs()).unwrap_or(i64::MAX).max(1),
+            timeout: DEFAULT_TIMEOUT,
+            fail_open_hits: AtomicU64::new(0),
+        }
+    }
+
+    /// Overrides the per-`check` database timeout (default [`DEFAULT_TIMEOUT`],
+    /// `AMICU_RATE_LIMIT_TIMEOUT_MS` in `amicu-server`). A `check` that
+    /// doesn't hear back from Postgres within `timeout` fails OPEN exactly
+    /// like a database error - see the module docs' "Fail-open on database
+    /// error" section.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Number of `check` calls that fell back to fail-open because the
+    /// database hit errored or timed out. Monotonic for the lifetime of this
+    /// instance; primarily for tests/observability.
+    #[must_use]
+    pub fn fail_open_count(&self) -> u64 {
+        self.fail_open_hits.load(Ordering::Relaxed)
+    }
+
+    /// Records one fail-open (bumping the exact counter) and logs a sampled
+    /// `WARNING` - the first failure, then every [`WARN_SAMPLE_EVERY`]th
+    /// after that, so a sustained outage doesn't flood stderr with one line
+    /// per request.
+    fn note_fail_open(&self, detail: impl std::fmt::Display) {
+        let n = self.fail_open_hits.fetch_add(1, Ordering::Relaxed) + 1;
+        if n == 1 || n.is_multiple_of(WARN_SAMPLE_EVERY) {
+            eprintln!(
+                "amicu-api: WARNING - Postgres rate limiter check failed for key \
+                 (key content withheld from this log line; keys embed the request path and \
+                 may embed a client IP or email), failing OPEN (request allowed): {detail}. \
+                 cumulative fail-open count for this limiter: {n} (this line is sampled: \
+                 logged on the 1st failure and then every {WARN_SAMPLE_EVERY}th thereafter).",
+            );
+        }
+    }
+}
+
+#[async_trait]
+impl RateLimiter for PostgresRateLimiter {
+    async fn check(&self, key: &str) -> bool {
+        match tokio::time::timeout(self.timeout, self.store.hit(key, self.window_secs)).await {
+            Ok(Ok(count)) => count <= i64::from(self.max),
+            // Fail OPEN: a transient database error must not turn into a
+            // total login/signup outage for the credential routes this backs
+            // (see the module docs' "Fail-open on database error" section for
+            // the full rationale). Never fail closed here.
+            Ok(Err(err)) => {
+                self.note_fail_open(err);
+                true
+            }
+            // The hit didn't finish within `self.timeout` - a saturated pool
+            // or a slow/hung database must not block (or eventually lock out)
+            // every credential request either; a timeout is just another
+            // shape of database unavailability, so it fails OPEN the same way.
+            Err(_) => {
+                self.note_fail_open(format_args!(
+                    "database hit did not complete within the configured {:?} rate-limit \
+                     timeout (AMICU_RATE_LIMIT_TIMEOUT_MS)",
+                    self.timeout
+                ));
+                true
+            }
+        }
     }
 }
 
@@ -225,6 +405,31 @@ impl TrustedProxies {
         Some(format!("{route}|{ident}"))
     }
 
+    /// Like [`Self::client_key`], but prefers `edge_ip` - the
+    /// already-verified `CF-Connecting-IP` client (see
+    /// [`crate::edge::EdgeTrust::trusted_client_ip`]) - as the client identity
+    /// when present, instead of the peer/`X-Forwarded-For` path.
+    ///
+    /// This function does no header parsing or trust decision itself: `Some`
+    /// is only ever passed once the caller has independently verified
+    /// `X-Amicu-Edge-Token`, so it is safe to trust unconditionally here.
+    /// Falls back to [`Self::client_key`] (and its `None`-on-no-peer
+    /// fail-open behavior) when `edge_ip` is `None` - the non-Cloudflare or
+    /// no-valid-token path, unchanged from before andypalmi/amicu-planning#142.
+    #[must_use]
+    pub fn client_key_with_edge(
+        &self,
+        route: &str,
+        edge_ip: Option<IpAddr>,
+        peer: Option<SocketAddr>,
+        xff: Option<&str>,
+    ) -> Option<String> {
+        if let Some(ip) = edge_ip {
+            return Some(format!("{route}|{ip}"));
+        }
+        self.client_key(route, peer, xff)
+    }
+
     fn client_ident(&self, peer: SocketAddr, xff: Option<&str>) -> String {
         if !self.is_trusted(peer.ip()) {
             return peer.ip().to_string();
@@ -281,7 +486,7 @@ mod tests {
 
     #[test]
     fn allows_up_to_max_then_blocks() {
-        let limiter = RateLimiter::new(3, Duration::from_secs(60));
+        let limiter = InMemoryRateLimiter::new(3, Duration::from_secs(60));
         assert!(limiter.check("a"));
         assert!(limiter.check("a"));
         assert!(limiter.check("a"));
@@ -295,7 +500,7 @@ mod tests {
 
     #[test]
     fn window_resets_after_expiry() {
-        let limiter = RateLimiter::new(1, Duration::from_millis(20));
+        let limiter = InMemoryRateLimiter::new(1, Duration::from_millis(20));
         assert!(limiter.check("a"));
         assert!(!limiter.check("a"));
         std::thread::sleep(Duration::from_millis(40));
@@ -304,7 +509,7 @@ mod tests {
 
     #[test]
     fn map_is_bounded_and_evicts() {
-        let limiter = RateLimiter::with_capacity(5, Duration::from_secs(60), 4);
+        let limiter = InMemoryRateLimiter::with_capacity(5, Duration::from_secs(60), 4);
         for i in 0..50 {
             assert!(limiter.check(&format!("k{i}")));
         }
@@ -317,7 +522,7 @@ mod tests {
 
     #[test]
     fn expired_buckets_are_swept_on_pressure() {
-        let limiter = RateLimiter::with_capacity(5, Duration::from_millis(10), 2);
+        let limiter = InMemoryRateLimiter::with_capacity(5, Duration::from_millis(10), 2);
         assert!(limiter.check("old-1"));
         assert!(limiter.check("old-2"));
         std::thread::sleep(Duration::from_millis(25));
@@ -420,5 +625,48 @@ mod tests {
             TrustedProxies::from_strs(["nonsense"]).unwrap_err(),
             ProxyParseError("nonsense".to_string())
         );
+    }
+
+    /// [`RateLimiter::check`] (the async trait) agrees with the concrete
+    /// type's own sync `check` for [`InMemoryRateLimiter`] - proves the
+    /// trait-object path (`Arc<dyn RateLimiter>`, what `AuthApiState` actually
+    /// holds) behaves identically to calling the inherent method directly.
+    #[tokio::test]
+    async fn in_memory_limiter_trait_object_matches_inherent_method() {
+        let limiter: Arc<dyn RateLimiter> =
+            Arc::new(InMemoryRateLimiter::new(2, Duration::from_secs(60)));
+        assert!(limiter.check("a").await);
+        assert!(limiter.check("a").await);
+        assert!(!limiter.check("a").await, "3rd request over budget");
+    }
+
+    #[test]
+    fn client_key_with_edge_prefers_edge_ip_over_peer_and_xff() {
+        let tp = TrustedProxies::default();
+        // No trusted proxies configured at all, and a peer/XFF that would
+        // normally key on the peer address - edge_ip still wins.
+        let key = tp.client_key_with_edge(
+            "/signin",
+            Some("203.0.113.7".parse().unwrap()),
+            Some(sock("10.0.0.1")),
+            Some("1.1.1.1"),
+        );
+        assert_eq!(key.as_deref(), Some("/signin|203.0.113.7"));
+    }
+
+    #[test]
+    fn client_key_with_edge_falls_back_when_no_edge_ip() {
+        let tp = TrustedProxies::default();
+        let key = tp.client_key_with_edge("/signin", None, Some(sock("203.0.113.9")), None);
+        assert_eq!(key.as_deref(), Some("/signin|203.0.113.9"));
+    }
+
+    #[test]
+    fn client_key_with_edge_scopes_per_route_like_client_key() {
+        let tp = TrustedProxies::default();
+        let ip = Some("203.0.113.7".parse().unwrap());
+        let signin = tp.client_key_with_edge("/signin", ip, None, None);
+        let refresh = tp.client_key_with_edge("/token/refresh", ip, None, None);
+        assert_ne!(signin, refresh);
     }
 }
