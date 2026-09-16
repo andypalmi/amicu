@@ -36,17 +36,39 @@ amicu-infra provisions:
 - **Required env** — see amicu-infra's `docs/env-matrix.md` for the
   authoritative, component-by-component table (secret-backed vs plain, every
   Cloud Run resource, every gating flag). Short version: `DATABASE_URL` +
-  `AMICU_SIGNING_KEY_PEM` (amicu-planning#140 — **not yet consumed by
-  `amicu-server` as of this PR**; the server still generates an ephemeral
-  in-memory signing key at boot until #140 lands, ready to run alongside
-  #143 per epic #145's sequencing) are the only two secrets required before
-  the Cloud Run resources can even start; `AMICU_ISSUER`/`AMICU_AUDIENCE`/
-  `AMICU_WEB_URL`/`AMICU_TRUSTED_PROXIES` and the rest are plain env vars
-  Terraform sets directly. The outbox-drain settings
-  (`AMICU_INTERNAL_AUDIENCE`, `AMICU_INTERNAL_CALLER_EMAILS`,
+  `AMICU_SIGNING_KEY_PEM` (amicu-planning#140) are the only two secrets
+  required before the Cloud Run resources can even start;
+  `AMICU_ISSUER`/`AMICU_AUDIENCE`/`AMICU_WEB_URL`/`AMICU_TRUSTED_PROXIES` and
+  the rest are plain env vars Terraform sets directly. The outbox-drain
+  settings (`AMICU_INTERNAL_AUDIENCE`, `AMICU_INTERNAL_CALLER_EMAILS`,
   `AMICU_OUTBOX_DRAIN_BATCH_SIZE`, `AMICU_OUTBOX_DRAIN_BUDGET_MS`, plus the
   optional `AMICU_INTERNAL_TOKEN` secret) are covered in "Cloud Scheduler →
   outbox drain" below.
+
+## Signing key (amicu-planning#140)
+
+`amicu-server` no longer generates an ephemeral signing key at boot: the
+ACTIVE key comes from `AMICU_SIGNING_KEY_PEM` (Ed25519 PKCS#8 PEM), identical
+across every replica, so tokens minted by any one Cloud Run instance verify
+on every other. In `AMICU_ENV=production` a missing key is a hard startup
+error; only `development` (no `AMICU_SIGNING_KEY_PEM` set) falls back to a
+per-boot generated key, with a loud warning.
+
+Generate a fresh key with the operator subcommand this PR adds, and pipe it
+straight into Secret Manager — nothing else touches stdout:
+
+```sh
+amicu-server gen-signing-key | gcloud secrets versions add \
+    AMICU_SIGNING_KEY_PEM --data-file=-
+```
+
+Rotation (new active key, old key kept verify-only via
+`AMICU_SIGNING_KEYS_RETIRING_PEM` until every token it signed has expired,
+then dropped) is the full operational procedure in
+`amicu-infra/docs/runbook.md`'s "Rotate the signing key" section; the
+in-repo rationale (stable `kid` derivation, retention-window math, what
+breaks if a retiring key is dropped too early) lives in
+`docs/ops/signing-key-rotation.md`.
 
 ## Cloud Scheduler → outbox drain
 

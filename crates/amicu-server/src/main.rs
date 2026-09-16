@@ -1,9 +1,10 @@
 //! Thin binary wrapper: parse config from flags/env and run the server until a
 //! shutdown signal, or - given a subcommand - do one job and exit: `migrate`
 //! applies pending schema migrations (as the schema-owning role);
-//! `outbox-drain` runs one email-outbox drain pass. All logic lives in the
-//! library so it is testable over a real socket (see `tests/smoke.rs`) or, for
-//! the subcommands, over an explicit `DATABASE_URL` (see
+//! `gen-signing-key` prints a fresh Ed25519 PKCS#8 PEM; `outbox-drain` runs one
+//! email-outbox drain pass. All logic lives in the library so it is testable
+//! over a real socket (see `tests/smoke.rs`) or, for the database-backed
+//! subcommands, over an explicit `DATABASE_URL` (see
 //! `tests/rls_guard_live.rs`).
 
 use std::process::ExitCode;
@@ -30,6 +31,18 @@ enum Command {
     /// via `DATABASE_URL`, then exit. Runs no RLS-bypass guard - the migrator
     /// is expected to own the schema (see `ops/sql/provision_app_role.sql`).
     Migrate,
+    /// Generate a fresh Ed25519 PKCS#8 signing key and print ONLY its PEM to
+    /// stdout, then exit (andypalmi/amicu-planning#140). Nothing else is
+    /// written to stdout, so the output is safe to pipe straight into a
+    /// secret manager, e.g.:
+    ///
+    /// `amicu-server gen-signing-key | gcloud secrets versions add \
+    /// AMICU_SIGNING_KEY_PEM --data-file=-`
+    ///
+    /// See `docs/ops/signing-key-rotation.md` for the full rotation
+    /// procedure (generate, set as retiring, promote to active, drop the old
+    /// one once it has aged out).
+    GenSigningKey,
     /// Run one email-outbox drain pass against `DATABASE_URL` and exit.
     ///
     /// The same work `POST /internal/outbox/drain` does, through the same
@@ -46,6 +59,7 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Some(Command::Migrate) => amicu_server::migrate().await,
+        Some(Command::GenSigningKey) => amicu_server::gen_signing_key(),
         Some(Command::OutboxDrain) => amicu_server::outbox_drain(&cli.config).await,
         None => amicu_server::run(cli.config).await,
     };

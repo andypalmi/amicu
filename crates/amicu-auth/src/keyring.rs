@@ -20,6 +20,21 @@ impl Keyring {
         Self { keys: vec![active] }
     }
 
+    /// Build a keyring with one active key and zero or more already-retiring
+    /// keys (verify-only from the start; they never sign new tokens —
+    /// `active()` is always `active`). Order among `retiring` is preserved but
+    /// otherwise immaterial: every key in it is equally verify-only. Used at
+    /// boot to load a durable keyring where some retiring key(s) are already
+    /// known (rotation mid-flight) — see `amicu-server`'s `signing_key`
+    /// module.
+    #[must_use]
+    pub fn with_retiring(active: SigningKey, retiring: Vec<SigningKey>) -> Self {
+        let mut keys = Vec::with_capacity(1 + retiring.len());
+        keys.push(active);
+        keys.extend(retiring);
+        Self { keys }
+    }
+
     /// The key that signs new tokens.
     #[must_use]
     pub fn active(&self) -> &SigningKey {
@@ -91,5 +106,24 @@ mod tests {
         // Retiring the active key is a no-op.
         ring.retire(&b_kid);
         assert_eq!(ring.jwks().keys.len(), 1);
+    }
+
+    #[test]
+    fn with_retiring_builds_active_plus_retiring_set() {
+        let active = SigningKey::generate().unwrap();
+        let active_kid = active.kid().to_string();
+        let r1 = SigningKey::generate().unwrap();
+        let r1_kid = r1.kid().to_string();
+        let r2 = SigningKey::generate().unwrap();
+        let r2_kid = r2.kid().to_string();
+
+        let ring = Keyring::with_retiring(active, vec![r1, r2]);
+
+        assert_eq!(ring.active().kid(), active_kid);
+        assert_eq!(ring.jwks().keys.len(), 3);
+        let kids = ring.kids();
+        assert!(kids.contains(&active_kid));
+        assert!(kids.contains(&r1_kid));
+        assert!(kids.contains(&r2_kid));
     }
 }
