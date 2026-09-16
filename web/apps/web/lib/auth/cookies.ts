@@ -5,17 +5,17 @@ import {
   ACCESS_COOKIE,
   REFRESH_COOKIE,
   REFRESH_MAX_AGE,
-  IS_PROD,
+  COOKIE_SECURE,
 } from './config';
 
 // Shared cookie attributes. httpOnly keeps both tokens out of browser JS; SameSite
 // Lax is enough for a first-party BFF (top-level navigations carry the cookie).
-// Secure is tied to NODE_ENV so local HTTP dev works; note a non-prod build served
-// over plain HTTP would omit Secure - any real deployment must run production mode
-// behind TLS (it always does here).
+// Secure is an explicit flag (COOKIE_SECURE, see server-env.ts) so local HTTP dev
+// works while every other environment defaults to Secure; any real deployment
+// must run behind TLS regardless.
 const baseAttrs = {
   httpOnly: true,
-  secure: IS_PROD,
+  secure: COOKIE_SECURE,
   sameSite: 'lax',
   path: '/',
 } as const;
