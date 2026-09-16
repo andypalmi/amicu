@@ -7,7 +7,13 @@
 //! GLOBAL, not workspace-scoped: email verification confirms the global user's
 //! email (`email_verified_at` lives on `users`), keyed by a real `user_id` UUID
 //! foreign key into `users` (`ON DELETE CASCADE`). No workspace GUC/RLS applies.
+//!
+//! [`insert_and_notify`](VerifyStore::insert_and_notify) additionally writes the
+//! delivery into the `email_outbox` queue inside the SAME transaction as the
+//! token row (andypalmi/amicu-planning#141) - see [`crate::reset`] for the full
+//! rationale.
 
+use amicu_auth::notify::{Notification, Notifier};
 use amicu_auth::verify::{VerifyConsume, VerifyRecord, VerifyStore};
 use amicu_auth::{AuthError, Result};
 use async_trait::async_trait;
@@ -15,6 +21,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::map_db;
+use crate::outbox::{NewOutboxEmail, enqueue, now_unix};
 
 /// Postgres implementation of [`VerifyStore`].
 pub struct PostgresVerifyStore {
@@ -50,6 +57,38 @@ impl VerifyStore for PostgresVerifyStore {
         .execute(&self.pool)
         .await
         .map_err(map_db)?;
+        Ok(())
+    }
+
+    /// Writes the token row and the queued email in ONE transaction; ignores
+    /// `notifier` for the same reason
+    /// [`PostgresResetStore`](crate::reset::PostgresResetStore) does.
+    async fn insert_and_notify(
+        &self,
+        record: VerifyRecord,
+        message: Notification,
+        _notifier: &dyn Notifier,
+    ) -> Result<()> {
+        let user_id = parse_user_id(&record.user_id)?;
+        let hash = record.token_hash.as_slice();
+        let queued = NewOutboxEmail::from_notification(&message)?;
+
+        let mut tx = self.pool.begin().await.map_err(map_db)?;
+        sqlx::query!(
+            "INSERT INTO verify_tokens (token_hash, user_id, expires_at, consumed) \
+             VALUES ($1, $2, $3, $4)",
+            hash,
+            user_id,
+            record.expires_at,
+            record.consumed,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(map_db)?;
+        enqueue(&mut *tx, &queued, now_unix())
+            .await
+            .map_err(|_| AuthError::Backend)?;
+        tx.commit().await.map_err(map_db)?;
         Ok(())
     }
 
