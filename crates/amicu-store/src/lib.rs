@@ -60,8 +60,14 @@
 //! It follows the same workspace-scoping convention as the auth stores, plus
 //! a second `stack_id` predicate (see the module docs).
 
+use std::time::Duration;
+
 use amicu_auth::AuthError;
-use sqlx::PgPool;
+// Re-exported so downstream crates (amicu-server, amicu-api) can name the
+// pool type - and pass it around - without taking their own `sqlx`
+// dependency; only this crate talks to Postgres directly (see the crate
+// docs).
+pub use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
@@ -111,19 +117,65 @@ pub enum StoreError {
     Migration(#[from] sqlx::migrate::MigrateError),
 }
 
-/// Opens a connection pool to the given Postgres `database_url`.
+/// Postgres connection-pool tuning, env-configurable at the amicu-server
+/// bootstrap boundary (`AMICU_DB_MAX_CONNECTIONS` / `AMICU_DB_MIN_CONNECTIONS`
+/// / `AMICU_DB_ACQUIRE_TIMEOUT_SECS`, see that crate's `Config`).
+///
+/// Defaults are deliberately small. Cloud Run autoscales 0..N *stateless*
+/// replicas, and (as of andypalmi/amicu-planning#139) each replica now holds
+/// exactly ONE shared pool for every store, so a generous per-replica ceiling
+/// multiplies against replica count: 100 replicas x a 50-connection pool would
+/// blow through a typical ~100-connection Cloud SQL ceiling on its own, before
+/// counting migrations, `psql`, or any other client.
+#[derive(Debug, Clone, Copy)]
+pub struct PoolConfig {
+    /// Maximum number of connections this pool ever opens.
+    pub max_connections: u32,
+    /// Connections the pool keeps warm even when idle.
+    pub min_connections: u32,
+    /// How long a caller waits for a connection to become available before
+    /// [`PgPoolOptions::connect`] (eager, at startup) or a later `acquire`
+    /// gives up.
+    pub acquire_timeout: Duration,
+}
+
+impl Default for PoolConfig {
+    /// `max_connections: 5`, `min_connections: 0`, `acquire_timeout: 10s` -
+    /// the same small-on-purpose defaults [`connect`] and amicu-server's
+    /// `Config` use.
+    fn default() -> Self {
+        Self {
+            max_connections: 5,
+            min_connections: 0,
+            acquire_timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+/// Opens a connection pool to the given Postgres `database_url` with explicit
+/// pool tuning.
 ///
 /// [`PgPoolOptions::connect`] connects **eagerly**: this awaits a real
 /// connection (and validates the credentials/network path) before returning,
 /// rather than deferring the first connection to the pool's first use. That is
 /// the preferable behavior here - it turns a bad `DATABASE_URL` into an
 /// immediate startup error instead of a failure on the first request.
-pub async fn connect(database_url: &str) -> Result<PgPool, StoreError> {
+pub async fn connect_with(database_url: &str, options: PoolConfig) -> Result<PgPool, StoreError> {
     let pool = PgPoolOptions::new()
-        .max_connections(10)
+        .max_connections(options.max_connections)
+        .min_connections(options.min_connections)
+        .acquire_timeout(options.acquire_timeout)
         .connect(database_url)
         .await?;
     Ok(pool)
+}
+
+/// [`connect_with`] using [`PoolConfig::default`]. Kept as a thin, zero-config
+/// entry point for tests (and any caller that does not need custom pool
+/// tuning); amicu-server's real bootstrap calls [`connect_with`] directly with
+/// its env-configured [`PoolConfig`].
+pub async fn connect(database_url: &str) -> Result<PgPool, StoreError> {
+    connect_with(database_url, PoolConfig::default()).await
 }
 
 /// Applies all embedded schema migrations to the database behind `pool`.
@@ -134,6 +186,74 @@ pub async fn connect(database_url: &str) -> Result<PgPool, StoreError> {
 pub async fn run_migrations(pool: &PgPool) -> Result<(), StoreError> {
     sqlx::migrate!("./migrations").run(pool).await?;
     Ok(())
+}
+
+/// Trivial liveness probe: does `pool` answer `SELECT 1`? Schema-independent,
+/// like [`state::PostgresStateBackend::health`], so this never needs the sqlx
+/// offline cache - it is the `query()` runtime API, not the `query!` macro.
+/// Backs amicu-server's `GET /readyz`.
+pub async fn health_check(pool: &PgPool) -> Result<(), StoreError> {
+    sqlx::query("SELECT 1").fetch_one(pool).await?;
+    Ok(())
+}
+
+/// Whether the role behind `pool` would bypass row-level security on the
+/// tenant tables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RlsBypassRisk {
+    /// `current_user` for the connection behind `pool`.
+    pub current_user: String,
+    /// A Postgres SUPERUSER always bypasses RLS, FORCE or not.
+    pub is_superuser: bool,
+    /// The connected role OWNS `workspace_members`. An owning role bypasses
+    /// RLS unless the table has `FORCE ROW LEVEL SECURITY` set (which the
+    /// migration that creates it does set), so this is the narrower of the
+    /// two risks but still worth refusing on in production: an owner can
+    /// trivially `ALTER TABLE ... NO FORCE ROW LEVEL SECURITY` and remove even
+    /// that protection.
+    pub owns_tenant_tables: bool,
+}
+
+impl RlsBypassRisk {
+    /// `true` if either condition holds: the connected role would bypass (or
+    /// could trivially disable) row-level security on the tenant tables.
+    #[must_use]
+    pub fn bypasses_rls(&self) -> bool {
+        self.is_superuser || self.owns_tenant_tables
+    }
+}
+
+/// Probes whether the role behind `pool` would bypass row-level security: is
+/// it a Postgres SUPERUSER (`SELECT rolsuper FROM pg_roles WHERE rolname =
+/// current_user`), or does it OWN `workspace_members` (`SELECT tableowner
+/// FROM pg_tables WHERE tablename = 'workspace_members'`)? The RLS design
+/// (see the crate docs) assumes the app connects as the non-superuser,
+/// non-owning `amicu_app` role; this is the startup guard amicu-server runs
+/// in production to catch a misconfigured `DATABASE_URL` before it silently
+/// bypasses every FORCE RLS policy (andypalmi/amicu-planning#139).
+///
+/// Runtime `query`/`query_scalar`, not the `query!` macro: `pg_roles` /
+/// `pg_tables` are system catalogs outside the `.sqlx` offline cache, and this
+/// must still build with no `DATABASE_URL`.
+pub async fn probe_rls_bypass_risk(pool: &PgPool) -> Result<RlsBypassRisk, StoreError> {
+    let current_user: String = sqlx::query_scalar("SELECT current_user")
+        .fetch_one(pool)
+        .await?;
+    let is_superuser: bool =
+        sqlx::query_scalar("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+            .fetch_one(pool)
+            .await?;
+    let owner: Option<String> = sqlx::query_scalar(
+        "SELECT tableowner FROM pg_tables WHERE tablename = 'workspace_members'",
+    )
+    .fetch_optional(pool)
+    .await?;
+    let owns_tenant_tables = owner.as_deref() == Some(current_user.as_str());
+    Ok(RlsBypassRisk {
+        current_user,
+        is_superuser,
+        owns_tenant_tables,
+    })
 }
 
 /// Maps a Postgres [`Tier`](amicu_auth::Tier) to its stored text form. Mirrors

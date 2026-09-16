@@ -18,6 +18,12 @@
 //!   `amicu-store`'s [`amicu_store::config::ConfigStore`], storing config
 //!   content canonicalized so it and every diff stay stable.
 //!
+//! - Health: unauthenticated, unthrottled [`GET /healthz` and `GET
+//!   /readyz`](health) for the Cloud Run / load-balancer health contract
+//!   (andypalmi/amicu-planning#139). Deliberately kept out of the OpenAPI
+//!   document - infra plumbing, not client-facing API - so wire it in via
+//!   [`health_router`] alongside [`api_router`], not through it.
+//!
 //! [`api_router`] assembles both plus a live `GET /openapi.json`. The served
 //! spec and the committed `crates/amicu-schema/openapi.json` artifact both come
 //! from [`api_openapi`], so they can never drift.
@@ -36,6 +42,7 @@ pub mod billing;
 pub mod config;
 pub mod dto;
 pub mod engine;
+pub mod health;
 pub mod monitor;
 pub mod openapi;
 pub mod org;
@@ -57,6 +64,7 @@ pub use auth::{AuthApiState, auth_router};
 pub use billing::{BillingApiState, StripeConfig, billing_router, stripe_config_from_env};
 pub use config::{ConfigApiState, config_router};
 pub use engine::{AccessVerifier, EngineApiState, WorkspaceContext};
+pub use health::{HealthApiState, health_router};
 pub use openapi::ApiDoc;
 pub use org::{InMemoryOrgStore, OrgApiState, OrgStore, org_router};
 pub use ratelimit::{ProxyParseError, RateLimiter, TrustedProxies};
