@@ -19,9 +19,9 @@ use amicu_core::graph::Graph;
 use amicu_core::id::{DataClassId, GovernanceRuleId, UseCaseId};
 use amicu_core::resource::{
     Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Budget, BudgetPeriod, DataClass,
-    Deployment, GovernanceRule, HardwareProfile, LlamaCppSettings, Modality, Model, ModelSource,
-    Money, Quantization, Region, Residency, Runtime, Sensitivity, SourceRegistry, UseCase,
-    VllmSettings,
+    Deployment, GgufVariant, GovernanceRule, HardwareProfile, LlamaCppSettings, Modality, Model,
+    ModelSource, Money, Quantization, Region, Residency, Runtime, Sensitivity, SourceRegistry,
+    UseCase, VllmSettings,
 };
 use amicu_core::units::ByteSize;
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,10 @@ use crate::{Tier, WorkloadEstimate};
 /// Restricting to EU-only providers already guarantees EU residency, so no
 /// region-code allowlist is pinned (a code allowlist would fight a user who
 /// edits to a different genuine EU region on an allowed provider).
-const EU_PROVIDERS: &[&str] = &["hetzner", "ovhcloud", "scaleway", "nebius"];
+///
+/// `pub(crate)` so [`crate::rank`] can reuse it to detect (and reject) a
+/// candidate variant that would place on a non-EU-resident provider.
+pub(crate) const EU_PROVIDERS: &[&str] = &["hetzner", "ovhcloud", "scaleway", "nebius"];
 
 /// The largest concurrency the wizard accepts, guarding
 /// [`gpus_for_concurrency`] against an absurd GPU count.
@@ -142,8 +145,27 @@ pub struct Preset {
     pub min_tier: Tier,
 }
 
+/// Which soft-constraint axis [`crate::rank::rank`] should weight most heavily
+/// when scoring and ordering a preset's candidates. Distinct from
+/// [`amicu_core::resource::Priority`] (a *use case's* Low/Medium/High
+/// importance, carried through to the graph): this names the wizard's ranking
+/// axis itself and never appears on a [`amicu_core::resource::UseCase`].
+///
+/// Absent (`None` on [`WizardAnswers::priority`]) means balanced weighting
+/// across every axis - no single preference dominates the ranking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WizardPriority {
+    Cost,
+    Latency,
+    Quality,
+    Privacy,
+    Simplicity,
+}
+
 /// The requirements the wizard collects, parametrizing a preset's candidate
-/// template. UseCase-shaped fields plus concurrency and an optional budget.
+/// template. UseCase-shaped fields plus concurrency, an optional budget, and
+/// an optional ranking [`WizardPriority`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WizardAnswers {
     /// Context length (tokens) the runtime is configured for. Must be > 0.
@@ -161,6 +183,12 @@ pub struct WizardAnswers {
     /// Optional latency ceiling (ms) carried into the graph's use case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_latency_ms: Option<u32>,
+    /// Which soft-constraint axis to weight most heavily when ranking
+    /// candidates ([`crate::rank::rank`]). `None` means balanced weighting.
+    /// Ignored by [`build_graph`], which builds a single graph and does no
+    /// ranking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<WizardPriority>,
 }
 
 /// A failure building a graph from a preset and answers.
@@ -426,7 +454,14 @@ fn build_local_dev_chat(preset: &Preset, answers: &WizardAnswers) -> Graph {
             quantization: Some(Quantization::Q4KM),
         },
         context_length: Some(answers.context_length),
-        variants: Vec::new(),
+        // One declared GGUF variant matching the artifact's quantization, so
+        // the runtime's memory-fit check (`amicu_engine::report_for`) has a
+        // variant to resolve rather than erroring with "no GGUF variant".
+        variants: vec![GgufVariant {
+            quantization: Quantization::Q4KM,
+            file: "qwen2.5-7b-instruct-q4_k_m.gguf".to_string(),
+            size: None,
+        }],
     });
 
     graph.hardware_profiles.push(HardwareProfile {
@@ -632,12 +667,14 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
 
 // --- shared builder helpers -------------------------------------------------
 
-/// One binary gibibyte.
-const GIB: u64 = 1024 * 1024 * 1024;
+/// One binary gibibyte. `pub(crate)` so [`crate::rank`]'s candidate variants
+/// share the same unit.
+pub(crate) const GIB: u64 = 1024 * 1024 * 1024;
 
 /// GPUs to shard across for a concurrency level: one per 8 concurrent requests,
-/// at least one.
-fn gpus_for_concurrency(concurrency: u32) -> u32 {
+/// at least one. `pub(crate)` so [`crate::rank`]'s candidate variants derive
+/// the same base GPU count before varying it.
+pub(crate) fn gpus_for_concurrency(concurrency: u32) -> u32 {
     concurrency.div_ceil(8).max(1)
 }
 
@@ -722,6 +759,7 @@ mod tests {
             eu_residency_required: false,
             budget: Some(Money::new(500.0, "EUR")),
             max_latency_ms: Some(1500),
+            priority: None,
         }
     }
 
@@ -891,6 +929,19 @@ mod tests {
         let mut a = answers();
         a.budget = Some(Money::new(0.0, "EUR"));
         assert!(build_graph(preset, &a).is_ok());
+    }
+
+    #[test]
+    fn build_graph_produces_report_for_valid_graphs() {
+        for preset in catalog() {
+            let graph = build_graph(preset, &answers()).expect("build");
+            let report = amicu_engine::report_for(&graph);
+            assert!(
+                report.valid,
+                "{} should validate cleanly, got {:?}",
+                preset.id, report.diagnostics
+            );
+        }
     }
 
     #[test]

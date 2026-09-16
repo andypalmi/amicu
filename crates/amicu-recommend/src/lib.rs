@@ -13,19 +13,25 @@
 //!   boundary.
 
 mod bottleneck;
+mod candidate;
 mod engine;
 mod estimate;
 mod preset;
+mod question;
+mod rank;
 mod recommendation;
 mod tier;
 
 pub use bottleneck::BottleneckClass;
+pub use candidate::{Candidate, CandidateArchetype, CandidateScore, SoftConstraint};
 pub use engine::{Thresholds, TuningReport, diagnose};
 pub use estimate::WorkloadEstimate;
 pub use preset::{
-    Preset, PresetConstraint, PresetError, PresetId, RuntimeFamily, WizardAnswers, build_graph,
-    catalog,
+    Preset, PresetConstraint, PresetError, PresetId, RuntimeFamily, WizardAnswers, WizardPriority,
+    build_graph, catalog,
 };
+pub use question::{Question, QuestionKind, questions_for};
+pub use rank::rank;
 pub use recommendation::{
     ChangeDirection, Comparison, Evidence, Recommendation, RejectedAlternative, SuggestedChange,
 };

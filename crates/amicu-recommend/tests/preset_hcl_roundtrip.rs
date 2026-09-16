@@ -17,6 +17,7 @@ fn answers() -> WizardAnswers {
         eu_residency_required: false,
         budget: Some(Money::new(500.0, "EUR")),
         max_latency_ms: Some(1500),
+        priority: None,
     }
 }
 
