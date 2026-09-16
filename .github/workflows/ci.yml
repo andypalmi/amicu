@@ -36,6 +36,20 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `.cargo/audit.toml` carries the ignore list for advisories with no
+      # available fix (each entry documents why + its removal condition);
+      # `cargo audit` picks that file up automatically from the repo root.
+      - uses: taiki-e/install-action@cargo-audit
+
+      - name: Audit
+        run: cargo audit
+
   msrv:
     name: msrv (1.97)
     runs-on: ubuntu-latest
@@ -76,6 +90,10 @@ jobs:
 
       - name: Install
         run: pnpm install --frozen-lockfile
+
+      # Fails the job on any high/critical advisory in the web lockfile.
+      - name: Audit
+        run: pnpm audit --audit-level=high
 
       # Fails if the committed @amicu/api-client no longer matches
       # crates/amicu-schema/openapi.json (i.e. the spec changed but nobody

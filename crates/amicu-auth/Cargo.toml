@@ -34,6 +34,11 @@ base64 = "0.22"
 # EdDSA sign/verify. v10+ requires an explicit crypto backend: `rust_crypto`
 # (pure Rust, hermetic, holds MSRV 1.97). PEM is parsed by ed25519-dalek here, so
 # the default `use_pem` feature is dropped.
+#
+# `rust_crypto` unconditionally bundles the `rsa` crate (RUSTSEC-2023-0071,
+# no upstream fix) alongside ed25519-dalek/hmac/p256/p384 - there is no
+# finer-grained feature to opt RSA back out of on this backend, and this
+# crate only ever signs/verifies Algorithm::EdDSA. See SECURITY-NOTES.md.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 
 # issuer-only
