@@ -535,6 +535,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/recommend/candidates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rank a preset's candidates from the wizard's answers.
+         * @description Generates a small fixed set of graph variants for the preset, filters out
+         *     any that would violate one of the preset's hard constraints (never
+         *     proposed - the exclusion is recorded as a `rejected` alternative on the
+         *     candidate that stands in its place), scores the survivors against the
+         *     wizard's `priority` (balanced when omitted), and returns 2-4 in ranked
+         *     order. Deterministic: the same request always returns byte-identical
+         *     output. A `404` if the preset id is unknown, a `400` if a wizard answer is
+         *     out of range.
+         */
+        post: operations["candidates_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/recommend/questions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the core wizard questions for a preset.
+         * @description Returns the ≤6 typed questions [`questions_for`] derives for the preset,
+         *     so a client renders its form purely from engine-provided data - no
+         *     question text or option list is authored in TypeScript. A `404` if the
+         *     preset id is unknown.
+         */
+        get: operations["questions_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/recover": {
         parameters: {
             query?: never;
@@ -885,6 +935,74 @@ export interface components {
          * @enum {string}
          */
         BottleneckClassDto: "under_provisioned" | "over_provisioned" | "prefill_bound" | "decode_bound" | "preemption_recompute";
+        /**
+         * @description The shape a ranked candidate represents. Mirrors
+         *     [`amicu_recommend::CandidateArchetype`].
+         * @enum {string}
+         */
+        CandidateArchetypeDto: "simplest" | "balanced" | "cost_optimized" | "performance_optimized" | "local_development";
+        /**
+         * @description One ranked candidate: the graph as canonical JSON, the same graph rendered
+         *     to HCL (the input the `#35` customize flow edits), its score, rationale,
+         *     rejected alternatives, estimate, and confidence.
+         */
+        CandidateDto: {
+            archetype: components["schemas"]["CandidateArchetypeDto"];
+            confidence: components["schemas"]["ConfidenceDto"];
+            estimate: components["schemas"]["WorkloadEstimateDto"];
+            /**
+             * @description The candidate's graph as canonical JSON - the same shape `amicu-hcl`
+             *     parses/serializes and `amicu-engine` validates. Opaque JSON here
+             *     (`amicu_core::graph::Graph`'s resource types are not part of this
+             *     crate's typed OpenAPI schema surface); `hcl` is the primary editable
+             *     artifact.
+             */
+            graph: Record<string, never>;
+            /** @description The candidate's graph rendered to Amicu HCL. */
+            hcl: string;
+            /** @description Human-readable reasons this shape was proposed. */
+            rationale: string[];
+            /**
+             * @description Alternatives considered for this archetype and ruled out - including
+             *     any that would have violated a hard constraint and was therefore never
+             *     itself proposed as a candidate.
+             */
+            rejected?: components["schemas"]["RejectedAlternativeDto"][];
+            score: components["schemas"]["CandidateScoreDto"];
+        };
+        /**
+         * @description Per-axis soft-constraint scores plus the weighted total a candidate was
+         *     ordered by. Mirrors [`amicu_recommend::CandidateScore`].
+         */
+        CandidateScoreDto: {
+            /** Format: double */
+            cost: number;
+            /** Format: double */
+            latency: number;
+            /** Format: double */
+            privacy: number;
+            /** Format: double */
+            quality: number;
+            /** Format: double */
+            simplicity: number;
+            /** Format: double */
+            total: number;
+        };
+        /** @description Request body for `POST /recommend/candidates`. */
+        CandidatesRequestDto: {
+            /** @description The wizard's answers to the preset's core questions. */
+            answers: components["schemas"]["WizardAnswersDto"];
+            /** @description The snake_case preset id. */
+            preset_id: string;
+        };
+        /** @description Response for `POST /recommend/candidates`. */
+        CandidatesResponseDto: {
+            /**
+             * @description 2-4 candidates in ranked order (highest-scoring first), or exactly 1
+             *     when the preset defines only one candidate shape.
+             */
+            candidates: components["schemas"]["CandidateDto"][];
+        };
         /**
          * @description Direction of a suggested change. Mirrors
          *     [`amicu_recommend::ChangeDirection`].
@@ -1411,6 +1529,48 @@ export interface components {
          * @enum {string}
          */
         ProvenanceDto: "telemetry_aggregate" | "public_benchmark" | "provider_price" | "formula";
+        /**
+         * @description One wizard question. `id` names the [`WizardAnswersDto`] field this
+         *     answer feeds. Mirrors [`amicu_recommend::Question`].
+         */
+        QuestionDto: {
+            /**
+             * @description Whether this answer, if given, becomes a hard (filtering) constraint
+             *     rather than only a soft ranking preference.
+             */
+            hard: boolean;
+            help?: string | null;
+            id: string;
+            kind: components["schemas"]["QuestionKindDto"];
+            prompt: string;
+            required: boolean;
+        };
+        /**
+         * @description The kind of answer a [`QuestionDto`] expects. Mirrors
+         *     [`amicu_recommend::QuestionKind`].
+         */
+        QuestionKindDto: {
+            /** @enum {string} */
+            type: "text";
+        } | {
+            /** Format: double */
+            max?: number | null;
+            /** Format: double */
+            min?: number | null;
+            /** @enum {string} */
+            type: "number";
+            unit?: string | null;
+        } | {
+            options: string[];
+            /** @enum {string} */
+            type: "choice";
+        } | {
+            /** @enum {string} */
+            type: "boolean";
+        } | {
+            /** @enum {string} */
+            type: "money";
+        };
         /** @description Admission-queue surface. */
         QueueMetricsDto: {
             /** Format: int64 */
@@ -1768,7 +1928,15 @@ export interface components {
              * @description Optional latency ceiling (ms) carried into the graph's use case.
              */
             max_latency_ms?: number | null;
+            priority?: null | components["schemas"]["WizardPriorityDto"];
         };
+        /**
+         * @description Which soft-constraint axis to weight most heavily when ranking candidates.
+         *     Mirrors [`amicu_recommend::WizardPriority`]. Distinct from [`PriorityDto`]
+         *     (a use case's Low/Medium/High importance).
+         * @enum {string}
+         */
+        WizardPriorityDto: "cost" | "latency" | "quality" | "privacy" | "simplicity";
         /**
          * @description Expected serving behavior and the assumptions behind it. On the response side
          *     `assumptions` carries the estimate's stated attribution (prompt/generation
@@ -1818,6 +1986,11 @@ export type AuditEntryView = components['schemas']['AuditEntryView'];
 export type AuditResponse = components['schemas']['AuditResponse'];
 export type BillingStatusResponse = components['schemas']['BillingStatusResponse'];
 export type BottleneckClassDto = components['schemas']['BottleneckClassDto'];
+export type CandidateArchetypeDto = components['schemas']['CandidateArchetypeDto'];
+export type CandidateDto = components['schemas']['CandidateDto'];
+export type CandidateScoreDto = components['schemas']['CandidateScoreDto'];
+export type CandidatesRequestDto = components['schemas']['CandidatesRequestDto'];
+export type CandidatesResponseDto = components['schemas']['CandidatesResponseDto'];
 export type ChangeDirectionDto = components['schemas']['ChangeDirectionDto'];
 export type ChangeRoleRequest = components['schemas']['ChangeRoleRequest'];
 export type CheckoutRequest = components['schemas']['CheckoutRequest'];
@@ -1863,6 +2036,8 @@ export type PresetDetailDto = components['schemas']['PresetDetailDto'];
 export type PresetSummaryDto = components['schemas']['PresetSummaryDto'];
 export type PriorityDto = components['schemas']['PriorityDto'];
 export type ProvenanceDto = components['schemas']['ProvenanceDto'];
+export type QuestionDto = components['schemas']['QuestionDto'];
+export type QuestionKindDto = components['schemas']['QuestionKindDto'];
 export type QueueMetricsDto = components['schemas']['QueueMetricsDto'];
 export type Range = components['schemas']['Range'];
 export type RecommendRequest = components['schemas']['RecommendRequest'];
@@ -1898,6 +2073,7 @@ export type VerifyRequest = components['schemas']['VerifyRequest'];
 export type VersionContentDto = components['schemas']['VersionContentDto'];
 export type VersionMetaDto = components['schemas']['VersionMetaDto'];
 export type WizardAnswersDto = components['schemas']['WizardAnswersDto'];
+export type WizardPriorityDto = components['schemas']['WizardPriorityDto'];
 export type WorkloadEstimateDto = components['schemas']['WorkloadEstimateDto'];
 export type WorkspaceView = components['schemas']['WorkspaceView'];
 export type WorkspacesResponse = components['schemas']['WorkspacesResponse'];
@@ -3254,6 +3430,109 @@ export interface operations {
             };
             /** @description The JSON body is well-formed but a field has the wrong type or is missing; body is a plain-text decode error. */
             422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    candidates_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CandidatesRequestDto"];
+            };
+        };
+        responses: {
+            /** @description 2-4 ranked, hard-constraint-filtered candidates. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CandidatesResponseDto"];
+                };
+            };
+            /** @description A wizard answer is out of range. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No preset exists with this id. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The JSON body is well-formed but a field has the wrong type or is missing. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    questions_handler: {
+        parameters: {
+            query: {
+                /** @description The snake_case preset id. */
+                preset: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The preset's core wizard questions. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuestionDto"][];
+                };
+            };
+            /** @description Missing or invalid access token. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Access tier insufficient. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No preset exists with this id. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

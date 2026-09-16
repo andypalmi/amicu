@@ -21,6 +21,7 @@ fn answers() -> WizardAnswers {
         eu_residency_required: false,
         budget: None,
         max_latency_ms: Some(1500),
+        priority: None,
     }
 }
 

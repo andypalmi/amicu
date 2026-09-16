@@ -19,9 +19,9 @@ use amicu_core::graph::Graph;
 use amicu_core::id::{DataClassId, GovernanceRuleId, UseCaseId};
 use amicu_core::resource::{
     Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Budget, BudgetPeriod, DataClass,
-    Deployment, GovernanceRule, HardwareProfile, LlamaCppSettings, Modality, Model, ModelSource,
-    Money, Quantization, Region, Residency, Runtime, Sensitivity, SourceRegistry, UseCase,
-    VllmSettings,
+    Deployment, GgufVariant, GovernanceRule, HardwareProfile, LlamaCppSettings, Modality, Model,
+    ModelSource, Money, Quantization, Region, Residency, Runtime, Sensitivity, SourceRegistry,
+    UseCase, VllmSettings,
 };
 use amicu_core::units::ByteSize;
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,10 @@ use crate::{Tier, WorkloadEstimate};
 /// Restricting to EU-only providers already guarantees EU residency, so no
 /// region-code allowlist is pinned (a code allowlist would fight a user who
 /// edits to a different genuine EU region on an allowed provider).
-const EU_PROVIDERS: &[&str] = &["hetzner", "ovhcloud", "scaleway", "nebius"];
+///
+/// `pub(crate)` so [`crate::rank`] can reuse it to detect (and reject) a
+/// candidate variant that would place on a non-EU-resident provider.
+pub(crate) const EU_PROVIDERS: &[&str] = &["hetzner", "ovhcloud", "scaleway", "nebius"];
 
 /// The largest concurrency the wizard accepts, guarding
 /// [`gpus_for_concurrency`] against an absurd GPU count.
@@ -142,8 +145,27 @@ pub struct Preset {
     pub min_tier: Tier,
 }
 
+/// Which soft-constraint axis [`crate::rank::rank`] should weight most heavily
+/// when scoring and ordering a preset's candidates. Distinct from
+/// [`amicu_core::resource::Priority`] (a *use case's* Low/Medium/High
+/// importance, carried through to the graph): this names the wizard's ranking
+/// axis itself and never appears on a [`amicu_core::resource::UseCase`].
+///
+/// Absent (`None` on [`WizardAnswers::priority`]) means balanced weighting
+/// across every axis - no single preference dominates the ranking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WizardPriority {
+    Cost,
+    Latency,
+    Quality,
+    Privacy,
+    Simplicity,
+}
+
 /// The requirements the wizard collects, parametrizing a preset's candidate
-/// template. UseCase-shaped fields plus concurrency and an optional budget.
+/// template. UseCase-shaped fields plus concurrency, an optional budget, and
+/// an optional ranking [`WizardPriority`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WizardAnswers {
     /// Context length (tokens) the runtime is configured for. Must be > 0.
@@ -161,6 +183,12 @@ pub struct WizardAnswers {
     /// Optional latency ceiling (ms) carried into the graph's use case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_latency_ms: Option<u32>,
+    /// Which soft-constraint axis to weight most heavily when ranking
+    /// candidates ([`crate::rank::rank`]). `None` means balanced weighting.
+    /// Ignored by [`build_graph`], which builds a single graph and does no
+    /// ranking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<WizardPriority>,
 }
 
 /// A failure building a graph from a preset and answers.
@@ -426,7 +454,14 @@ fn build_local_dev_chat(preset: &Preset, answers: &WizardAnswers) -> Graph {
             quantization: Some(Quantization::Q4KM),
         },
         context_length: Some(answers.context_length),
-        variants: Vec::new(),
+        // One declared GGUF variant matching the artifact's quantization, so
+        // the runtime's memory-fit check (`amicu_engine::report_for`) has a
+        // variant to resolve rather than erroring with "no GGUF variant".
+        variants: vec![GgufVariant {
+            quantization: Quantization::Q4KM,
+            file: "qwen2.5-7b-instruct-q4_k_m.gguf".to_string(),
+            size: None,
+        }],
     });
 
     graph.hardware_profiles.push(HardwareProfile {
@@ -577,9 +612,20 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
         variants: Vec::new(),
     });
 
+    // When the wizard requires EU residency, `maybe_push_eu_governance` below
+    // pins a governance rule allowing only `EU_PROVIDERS`. The default
+    // "runpod" is not in that set, so the provider must switch to an EU one
+    // to keep the resulting graph valid - otherwise a `true` answer here
+    // would silently emit a graph `amicu_engine::report_for` rejects.
+    let provider = if answers.eu_residency_required {
+        "hetzner"
+    } else {
+        "runpod"
+    };
+
     graph.hardware_profiles.push(HardwareProfile {
         id: hw_id.as_str().into(),
-        provider: "runpod".to_string(),
+        provider: provider.to_string(),
         region: None,
         accelerator: Some(Accelerator {
             kind: AcceleratorKind::Gpu,
@@ -632,12 +678,14 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
 
 // --- shared builder helpers -------------------------------------------------
 
-/// One binary gibibyte.
-const GIB: u64 = 1024 * 1024 * 1024;
+/// One binary gibibyte. `pub(crate)` so [`crate::rank`]'s candidate variants
+/// share the same unit.
+pub(crate) const GIB: u64 = 1024 * 1024 * 1024;
 
 /// GPUs to shard across for a concurrency level: one per 8 concurrent requests,
-/// at least one.
-fn gpus_for_concurrency(concurrency: u32) -> u32 {
+/// at least one. `pub(crate)` so [`crate::rank`]'s candidate variants derive
+/// the same base GPU count before varying it.
+pub(crate) fn gpus_for_concurrency(concurrency: u32) -> u32 {
     concurrency.div_ceil(8).max(1)
 }
 
@@ -676,7 +724,18 @@ fn maybe_push_eu_governance(
     let is_hard = preset
         .constraints
         .contains(&PresetConstraint::EuResidencyOnly);
-    if answers.eu_residency_required && !is_hard {
+    // A LocalOnly preset's hardware provider is always the literal string
+    // "local" - not a cloud provider `amicu-providers` has any residency
+    // mapping for (`resolve_residency("local", ..)` is always `None`), and
+    // never a member of `EU_PROVIDERS`. Pinning the EU-only-providers
+    // governance rule here would therefore make *every* LocalOnly graph
+    // invalid regardless of the answer, since `report_for`'s provider-allow
+    // check is a flat string match with no on-device exemption. On-device
+    // execution never leaves first-party infrastructure by construction
+    // (stronger than "stays within the EU"), so the requirement is already
+    // satisfied without a governance rule to enforce it.
+    let is_local_only = preset.constraints.contains(&PresetConstraint::LocalOnly);
+    if answers.eu_residency_required && !is_hard && !is_local_only {
         push_eu_governance(graph, preset.id.as_str(), dc_id);
     }
 }
@@ -722,6 +781,7 @@ mod tests {
             eu_residency_required: false,
             budget: Some(Money::new(500.0, "EUR")),
             max_latency_ms: Some(1500),
+            priority: None,
         }
     }
 
@@ -894,10 +954,86 @@ mod tests {
     }
 
     #[test]
+    fn build_graph_produces_report_for_valid_graphs() {
+        for preset in catalog() {
+            let graph = build_graph(preset, &answers()).expect("build");
+            let report = amicu_engine::report_for(&graph);
+            assert!(
+                report.valid,
+                "{} should validate cleanly, got {:?}",
+                preset.id, report.diagnostics
+            );
+        }
+    }
+
+    #[test]
     fn budget_is_omitted_when_no_ceiling_given() {
         let mut a = answers();
         a.budget = None;
         let graph = build_graph(&catalog()[0], &a).expect("build");
         assert!(graph.budgets.is_empty());
+    }
+
+    #[test]
+    fn local_dev_chat_honors_eu_residency_required_without_an_invalid_graph() {
+        // Regression: `maybe_push_eu_governance` used to pin an EU-only
+        // provider allowlist even for LocalOnly presets, whose hardware
+        // provider is always the literal "local" - never a member of
+        // `EU_PROVIDERS` - which made `report_for` reject this graph outright
+        // whenever the wizard answered `eu_residency_required = true`.
+        let local = catalog()
+            .iter()
+            .find(|p| p.id.as_str() == "local_dev_chat")
+            .expect("local_dev_chat in catalog");
+        let mut a = answers();
+        a.eu_residency_required = true;
+        let graph = build_graph(local, &a).expect("build");
+        let report = amicu_engine::report_for(&graph);
+        assert!(
+            report.valid,
+            "local_dev_chat with eu_residency_required=true should validate cleanly, got {:?}",
+            report.diagnostics
+        );
+        assert_eq!(graph.hardware_profiles[0].provider, "local");
+    }
+
+    #[test]
+    fn cost_optimized_batch_honors_eu_residency_required_with_an_eu_provider() {
+        // Regression: the hardware provider stayed hardcoded to "runpod"
+        // (not EU-resident) even when the wizard set
+        // `eu_residency_required = true`, which pins an EU-only provider
+        // allowlist via `maybe_push_eu_governance` - so `report_for` rejected
+        // the resulting graph.
+        let batch = catalog()
+            .iter()
+            .find(|p| p.id.as_str() == "cost_optimized_batch")
+            .expect("cost_optimized_batch in catalog");
+        let mut a = answers();
+        a.eu_residency_required = true;
+        let graph = build_graph(batch, &a).expect("build");
+        let report = amicu_engine::report_for(&graph);
+        assert!(
+            report.valid,
+            "cost_optimized_batch with eu_residency_required=true should validate cleanly, got \
+             {:?}",
+            report.diagnostics
+        );
+        assert!(
+            EU_PROVIDERS.contains(&graph.hardware_profiles[0].provider.as_str()),
+            "provider {:?} should be EU-resident when eu_residency_required=true",
+            graph.hardware_profiles[0].provider
+        );
+    }
+
+    #[test]
+    fn cost_optimized_batch_stays_on_runpod_when_eu_residency_is_not_required() {
+        // The provider switch is conditional: the default (non-EU-required)
+        // shape must not regress to the EU provider.
+        let batch = catalog()
+            .iter()
+            .find(|p| p.id.as_str() == "cost_optimized_batch")
+            .expect("cost_optimized_batch in catalog");
+        let graph = build_graph(batch, &answers()).expect("build");
+        assert_eq!(graph.hardware_profiles[0].provider, "runpod");
     }
 }

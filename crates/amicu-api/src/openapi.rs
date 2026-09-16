@@ -103,6 +103,7 @@ use utoipa::{Modify, OpenApi};
         (name = "recommend", description = "Stateless advisory tuning recommendations from a metrics + estimate snapshot (auth-gated, tier-appropriate)."),
         (name = "monitor", description = "Stateless monitoring view (measured-vs-estimated): a normalized metric surface, estimate, and tier-appropriate advisory suggestions (auth-gated)."),
         (name = "preset", description = "Stateless guided-wizard presets: gallery listing, per-preset detail, and deterministic HCL emit from wizard answers (auth-gated, Community-usable)."),
+        (name = "wizard", description = "Stateless guided-wizard requirements engine: a preset's typed core questions, and 2-4 scored, hard-constraint-filtered candidates ranked from the wizard's answers (auth-gated, Community-usable)."),
         (name = "billing", description = "Stripe-backed subscription billing: checkout, customer portal, status, and the signature-authenticated webhook."),
         (name = "org", description = "Enterprise-gated organization console: membership, role-based access control, and an append-only audit log."),
         (name = "config", description = "HCL config storage and version history: create/list/get, append-only version history, rollback (mints a new version, never rewrites), and a server-computed unified diff. Content is canonicalized before it is stored (auth-gated, Community-usable)."),
