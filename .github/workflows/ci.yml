@@ -91,9 +91,7 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      # Fails on any high/critical advisory in web/pnpm-lock.yaml. Known to
-      # be currently red on main (Next.js/sharp/js-yaml advisories) pending
-      # the in-flight PR that owns the web lockfile.
+      # Fails the job on any high/critical advisory in the web lockfile.
       - name: Audit
         run: pnpm audit --audit-level=high
 
