@@ -8,9 +8,10 @@ use serde::de::DeserializeOwned;
 
 use amicu_core::graph::Graph;
 use amicu_core::resource::{
-    Accelerator, Artifact, Budget, Cpu, Credential, DataClass, Deployment, GgufVariant,
-    GovernanceRule, HardwareProfile, LlamaCppSettings, Model, ModelSource, Money, Price, Quota,
-    Region, Residency, RoutingPolicy, RoutingTarget, Runtime, Tenant, UseCase, VllmSettings,
+    Accelerator, Artifact, Budget, Cpu, Credential, DataClass, Deployment, FlashAttention,
+    GgufVariant, GovernanceRule, HardwareProfile, KvCacheType, LlamaCppSettings, Model,
+    ModelSource, Money, Price, Quota, Region, Residency, RoutingPolicy, RoutingTarget, Runtime,
+    Tenant, UseCase, VllmKvCacheDtype, VllmSettings,
 };
 use amicu_core::secret::SecretRef;
 use amicu_core::units::ByteSize;
@@ -87,6 +88,12 @@ fn model(name: &str, f: &Fields) -> Result<Model> {
                 })
             })
             .collect::<Result<_>>()?,
+        // Declared shape metadata feeding the KV-cache estimator
+        // (amicu-planning#151) - there is no GGUF header parser in-tree, so
+        // these are never derived.
+        n_layers: f.opt_u32("n_layers")?,
+        n_kv_heads: f.opt_u32("n_kv_heads")?,
+        head_dim: f.opt_u32("head_dim")?,
     })
 }
 
@@ -138,6 +145,17 @@ fn deployment(name: &str, f: &Fields) -> Result<Deployment> {
                 context_length: s.u32("context_length")?,
                 port: s.u16("port")?,
                 n_gpu_layers: s.i32("n_gpu_layers")?,
+                temperature: s.opt_f32("temperature")?,
+                top_p: s.opt_f32("top_p")?,
+                top_k: s.opt_u32("top_k")?,
+                min_p: s.opt_f32("min_p")?,
+                repeat_penalty: s.opt_f32("repeat_penalty")?,
+                cache_type_k: s.opt_enum::<KvCacheType>("cache_type_k")?,
+                cache_type_v: s.opt_enum::<KvCacheType>("cache_type_v")?,
+                batch_size: s.opt_u32("batch_size")?,
+                ubatch_size: s.opt_u32("ubatch_size")?,
+                parallel_slots: s.opt_u32("parallel_slots")?,
+                flash_attention: s.opt_enum::<FlashAttention>("flash_attention")?,
                 extra_args: s.string_vec("extra_args")?,
                 env: match s.opt_block("env") {
                     Some(e) => e.string_map()?,
@@ -152,6 +170,9 @@ fn deployment(name: &str, f: &Fields) -> Result<Deployment> {
                 port: s.u16("port")?,
                 tensor_parallel_size: s.opt_u32("tensor_parallel_size")?,
                 gpu_memory_utilization: s.opt_f32("gpu_memory_utilization")?,
+                kv_cache_dtype: s.opt_enum::<VllmKvCacheDtype>("kv_cache_dtype")?,
+                max_num_seqs: s.opt_u32("max_num_seqs")?,
+                max_num_batched_tokens: s.opt_u32("max_num_batched_tokens")?,
                 extra_args: s.string_vec("extra_args")?,
                 env: match s.opt_block("env") {
                     Some(e) => e.string_map()?,

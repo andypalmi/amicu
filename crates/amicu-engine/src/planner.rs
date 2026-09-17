@@ -249,6 +249,17 @@ fn runtime_settings(d: &Deployment) -> Vec<Setting> {
         context_length,
         port,
         n_gpu_layers,
+        temperature,
+        top_p,
+        top_k,
+        min_p,
+        repeat_penalty,
+        cache_type_k,
+        cache_type_v,
+        batch_size,
+        ubatch_size,
+        parallel_slots,
+        flash_attention,
         extra_args,
         env,
     } = s;
@@ -258,6 +269,39 @@ fn runtime_settings(d: &Deployment) -> Vec<Setting> {
         setting("context_length", context_length.to_string()),
         setting("n_gpu_layers", n_gpu_layers.to_string()),
     ];
+    if let Some(v) = temperature {
+        settings.push(setting("temperature", v.to_string()));
+    }
+    if let Some(v) = top_p {
+        settings.push(setting("top_p", v.to_string()));
+    }
+    if let Some(v) = top_k {
+        settings.push(setting("top_k", v.to_string()));
+    }
+    if let Some(v) = min_p {
+        settings.push(setting("min_p", v.to_string()));
+    }
+    if let Some(v) = repeat_penalty {
+        settings.push(setting("repeat_penalty", v.to_string()));
+    }
+    if let Some(v) = cache_type_k {
+        settings.push(setting("cache_type_k", v.to_string()));
+    }
+    if let Some(v) = cache_type_v {
+        settings.push(setting("cache_type_v", v.to_string()));
+    }
+    if let Some(v) = batch_size {
+        settings.push(setting("batch_size", v.to_string()));
+    }
+    if let Some(v) = ubatch_size {
+        settings.push(setting("ubatch_size", v.to_string()));
+    }
+    if let Some(v) = parallel_slots {
+        settings.push(setting("parallel_slots", v.to_string()));
+    }
+    if let Some(v) = flash_attention {
+        settings.push(setting("flash_attention", v.to_string()));
+    }
     if !extra_args.is_empty() {
         settings.push(setting("extra_args", extra_args.join(" ")));
     }
@@ -301,6 +345,9 @@ fn cost_performance(
     if extra_args_present(runtime) {
         assumptions.push("unverified: raw runtime flags present".to_owned());
     }
+    if let Some(assumption) = kv_cache_assumption(runtime, launch.estimate.kv_cache) {
+        assumptions.push(assumption);
+    }
     CostPerformance {
         cost,
         performance: None,
@@ -316,6 +363,32 @@ fn extra_args_present(runtime: &Runtime) -> bool {
         Runtime::LlamaCpp(s) => !s.extra_args.is_empty(),
         Runtime::Vllm(s) => !s.extra_args.is_empty(),
     }
+}
+
+/// A human-readable summary of the KV-cache estimate
+/// (`e.g. "KV cache: 4GiB at q8_0 for 32768 ctx"`), when [`kv_cache_params`]
+/// (`amicu_llamacpp::adapter`) found enough typed fields to compute one - see
+/// [`amicu_registry::fit::kv_cache_bytes`]. `None` when the estimator had
+/// nothing to fold in, matching `kv_bytes.is_none()`.
+fn kv_cache_assumption(
+    runtime: &Runtime,
+    kv_bytes: Option<amicu_core::ByteSize>,
+) -> Option<String> {
+    let Runtime::LlamaCpp(s) = runtime else {
+        return None;
+    };
+    let kv_bytes = kv_bytes?;
+    let dtype = match (s.cache_type_k, s.cache_type_v) {
+        (Some(k), Some(v)) if k == v => k.to_string(),
+        (Some(k), Some(v)) => format!("k={k} v={v}"),
+        (Some(k), None) => format!("k={k} v=f16"),
+        (None, Some(v)) => format!("k=f16 v={v}"),
+        (None, None) => "f16".to_owned(),
+    };
+    Some(format!(
+        "KV cache: {kv_bytes} at {dtype} for {} ctx",
+        s.context_length
+    ))
 }
 
 fn hardware_label(hardware: &HardwareProfile) -> String {
@@ -398,6 +471,9 @@ mod tests {
                 file: "m.q4_k_m.gguf".into(),
                 size: Some(ByteSize::from_bytes(GIB)),
             }],
+            n_layers: None,
+            n_kv_heads: None,
+            head_dim: None,
         }
     }
 
@@ -431,6 +507,7 @@ mod tests {
                 n_gpu_layers: -1,
                 extra_args,
                 env: BTreeMap::new(),
+                ..Default::default()
             }),
         }
     }
@@ -457,6 +534,66 @@ mod tests {
         let result = build_plan(&graph(Vec::new()), None).unwrap();
         let cp = result.items[0].action.cost_performance.as_ref().unwrap();
         assert!(!cp.assumptions.iter().any(|a| a == ASSUMPTION));
+    }
+
+    // --- amicu-planning#151: KV-cache estimator assumption string ----------
+
+    #[test]
+    fn kv_cache_assumption_present_when_shape_and_cache_type_are_set() {
+        let mut g = graph(Vec::new());
+        g.models[0].n_layers = Some(32);
+        g.models[0].n_kv_heads = Some(8);
+        g.models[0].head_dim = Some(128);
+        let Runtime::LlamaCpp(s) = &mut g.deployments[0].runtime else {
+            unreachable!("graph() always builds a llama_cpp deployment");
+        };
+        s.context_length = 32768;
+        s.cache_type_k = Some(amicu_core::resource::KvCacheType::Q8_0);
+        s.cache_type_v = Some(amicu_core::resource::KvCacheType::Q8_0);
+
+        let result = build_plan(&g, None).unwrap();
+        let cp = result.items[0].action.cost_performance.as_ref().unwrap();
+        assert!(
+            cp.assumptions
+                .iter()
+                .any(|a| a.starts_with("KV cache: ") && a.contains("q8_0") && a.contains("32768")),
+            "expected a KV cache assumption, got {:?}",
+            cp.assumptions
+        );
+    }
+
+    #[test]
+    fn kv_cache_assumption_absent_when_no_shape_metadata() {
+        let result = build_plan(&graph(Vec::new()), None).unwrap();
+        let cp = result.items[0].action.cost_performance.as_ref().unwrap();
+        assert!(!cp.assumptions.iter().any(|a| a.starts_with("KV cache: ")));
+    }
+
+    #[test]
+    fn new_llama_cpp_fields_threaded_into_runtime_settings() {
+        let mut g = graph(Vec::new());
+        let Runtime::LlamaCpp(s) = &mut g.deployments[0].runtime else {
+            unreachable!("graph() always builds a llama_cpp deployment");
+        };
+        s.temperature = Some(0.6);
+        s.flash_attention = Some(amicu_core::resource::FlashAttention::Auto);
+
+        let result = build_plan(&g, None).unwrap();
+        let settings = &result.items[0].action.runtime;
+        assert_eq!(
+            settings
+                .iter()
+                .find(|s| s.key == "temperature")
+                .map(|s| s.value.as_str()),
+            Some("0.6")
+        );
+        assert_eq!(
+            settings
+                .iter()
+                .find(|s| s.key == "flash_attention")
+                .map(|s| s.value.as_str()),
+            Some("auto")
+        );
     }
 
     #[test]

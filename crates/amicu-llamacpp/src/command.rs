@@ -10,16 +10,31 @@ use amicu_core::resource::LlamaCppSettings;
 /// emits). This table must stay exact - a spelling missing here is a spelling
 /// `extra_args` can use to silently re-assert (or override, via
 /// llama-server's own last-flag-wins argv parsing) a value amicu already
-/// rendered. `--port` has no short alias. Shared with
-/// [`crate::adapter`] diagnostics (`AMICU-CAP-002`), which flatten this via
-/// [`is_typed_flag`] so a duplicated flag in `extra_args` is detected
-/// against exactly what [`render_command`] renders, not a hand-maintained
-/// shadow list.
+/// rendered. `--port` has no short alias. Spellings verified against
+/// `common/arg.cpp` (amicu-planning#151): `--temp`/`--temperature` share one
+/// `add_opt`, `-ctk`/`-ctv` are the K/V cache-type short forms, `-b`/`-ub` are
+/// the batch/ubatch short forms, `-np` is `--parallel`, `-fa` is
+/// `--flash-attn`. `--top-k`/`--top-p`/`--min-p`/`--repeat-penalty` have no
+/// short alias. Shared with [`crate::adapter`] diagnostics (`AMICU-CAP-002`),
+/// which flatten this via [`is_typed_flag`] so a duplicated flag in
+/// `extra_args` is detected against exactly what [`render_command`] renders,
+/// not a hand-maintained shadow list.
 pub(crate) const TYPED_FLAGS: &[&[&str]] = &[
     &["--model", "-m"],
     &["--port"],
     &["--ctx-size", "-c"],
     &["--n-gpu-layers", "-ngl", "--gpu-layers"],
+    &["--temp", "--temperature"],
+    &["--top-p"],
+    &["--top-k"],
+    &["--min-p"],
+    &["--repeat-penalty"],
+    &["--cache-type-k", "-ctk"],
+    &["--cache-type-v", "-ctv"],
+    &["--batch-size", "-b"],
+    &["--ubatch-size", "-ub"],
+    &["--parallel", "-np"],
+    &["--flash-attn", "-fa"],
 ];
 
 /// Whether `flag` is any alias of any typed field's flag (see
@@ -56,17 +71,36 @@ pub(crate) const DENYLISTED_ENV_KEYS: &[&str] = &[
     "LD_LIBRARY_PATH",
 ];
 
+/// `LLAMA_ARG_<X>` env keys whose mirrored flag does not follow the
+/// mechanical "lowercase, `_` -> `-`" rule [`llama_arg_env_flag`] otherwise
+/// applies - llama-server's own `set_env("LLAMA_ARG_BATCH")`/
+/// `set_env("LLAMA_ARG_UBATCH")`/`set_env("LLAMA_ARG_N_PARALLEL")`
+/// (`common/arg.cpp`) name the env var after the *field*
+/// (`n_batch`/`n_ubatch`/`n_parallel`), not the flag spelling, so the
+/// mechanical rule would derive `--batch`/`--ubatch`/`--n-parallel` - none a
+/// real flag - and silently miss the conflict.
+const ENV_FLAG_OVERRIDES: &[(&str, &str)] = &[
+    ("LLAMA_ARG_BATCH", "--batch-size"),
+    ("LLAMA_ARG_UBATCH", "--ubatch-size"),
+    ("LLAMA_ARG_N_PARALLEL", "--parallel"),
+];
+
 /// Map a `LLAMA_ARG_<X>` environment variable name to the CLI flag
-/// llama-server treats it as equivalent to: lowercase the suffix, turn `_`
-/// into `-`, and prefix `--` (e.g. `LLAMA_ARG_CTX_SIZE` -> `--ctx-size`,
-/// `LLAMA_ARG_HOST` -> `--host`). llama-server reads `LLAMA_ARG_*` env vars
-/// as a mirror of its CLI flags, so a settings `env` entry can re-assert (or
-/// override) anything a typed field or the denylist governs just as
-/// effectively as an `extra_args` flag can - this closes that channel for
-/// [`crate::adapter`]'s `AMICU-CAP-002`/`AMICU-CAP-003` checks. Returns
-/// `None` for a key with no `LLAMA_ARG_` prefix (or an empty suffix).
+/// llama-server treats it as equivalent to: first check
+/// [`ENV_FLAG_OVERRIDES`] for a known exception, then fall back to
+/// lowercasing the suffix, turning `_` into `-`, and prefixing `--` (e.g.
+/// `LLAMA_ARG_CTX_SIZE` -> `--ctx-size`, `LLAMA_ARG_HOST` -> `--host`).
+/// llama-server reads `LLAMA_ARG_*` env vars as a mirror of its CLI flags, so
+/// a settings `env` entry can re-assert (or override) anything a typed field
+/// or the denylist governs just as effectively as an `extra_args` flag can -
+/// this closes that channel for [`crate::adapter`]'s
+/// `AMICU-CAP-002`/`AMICU-CAP-003` checks. Returns `None` for a key with no
+/// `LLAMA_ARG_` prefix (or an empty suffix).
 #[must_use]
 pub(crate) fn llama_arg_env_flag(key: &str) -> Option<String> {
+    if let Some((_, flag)) = ENV_FLAG_OVERRIDES.iter().find(|(k, _)| *k == key) {
+        return Some((*flag).to_owned());
+    }
     let suffix = key.strip_prefix("LLAMA_ARG_")?;
     if suffix.is_empty() {
         return None;
@@ -77,10 +111,13 @@ pub(crate) fn llama_arg_env_flag(key: &str) -> Option<String> {
 /// Render the `llama-server` launch for `model_path` under `settings`.
 ///
 /// Typed flags are emitted first (`-m`, `--port`, `--ctx-size`,
-/// `--n-gpu-layers`), then `settings.extra_args` verbatim, in declaration
-/// order - it is argv order. Duplicate/denylisted flags are caught as
-/// diagnostics before this ever runs (`crate::adapter`); this function
-/// itself renders whatever it is given.
+/// `--n-gpu-layers`, then any set sampling/KV-cache/batching/flash-attention
+/// field in field-declaration order), then `settings.extra_args` verbatim, in
+/// declaration order - it is argv order. Duplicate/denylisted flags are
+/// caught as diagnostics before this ever runs (`crate::adapter`); this
+/// function itself renders whatever it is given. `f32` fields render via
+/// `{}` (plain decimal, e.g. `0.6`), never scientific notation, at the
+/// magnitudes these settings take.
 ///
 /// Returns `(argv, text)`: `argv` is the real argument vector (`argv[0]` =
 /// `llama-server`) that supervisors exec directly, and `text` is a shell-quoted
@@ -100,6 +137,50 @@ pub fn render_command(model_path: &Path, settings: &LlamaCppSettings) -> (Vec<St
         "--n-gpu-layers".to_owned(),
         settings.n_gpu_layers.to_string(),
     ];
+    if let Some(v) = settings.temperature {
+        argv.push("--temp".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = settings.top_p {
+        argv.push("--top-p".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = settings.top_k {
+        argv.push("--top-k".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = settings.min_p {
+        argv.push("--min-p".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = settings.repeat_penalty {
+        argv.push("--repeat-penalty".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = settings.cache_type_k {
+        argv.push("--cache-type-k".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = settings.cache_type_v {
+        argv.push("--cache-type-v".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = settings.batch_size {
+        argv.push("--batch-size".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = settings.ubatch_size {
+        argv.push("--ubatch-size".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = settings.parallel_slots {
+        argv.push("--parallel".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = settings.flash_attention {
+        argv.push("--flash-attn".to_owned());
+        argv.push(v.to_string());
+    }
     argv.extend(settings.extra_args.iter().cloned());
     let text = shell_join(&argv);
     (argv, text)

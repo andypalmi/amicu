@@ -52,6 +52,9 @@ mod tests {
                 file: "mistral-7b-instruct.Q4_K_M.gguf".into(),
                 size: Some(ByteSize::from_bytes(4 * 1024 * 1024 * 1024)),
             }],
+            n_layers: None,
+            n_kv_heads: None,
+            head_dim: None,
         }
     }
 
@@ -85,8 +88,7 @@ mod tests {
                 context_length: 8192,
                 port: 8080,
                 n_gpu_layers: -1,
-                extra_args: Vec::new(),
-                env: std::collections::BTreeMap::new(),
+                ..Default::default()
             }),
         }
     }

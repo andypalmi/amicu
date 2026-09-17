@@ -20,6 +20,19 @@ pub struct Model {
     /// Available GGUF quantization variants, when the artifact is GGUF.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variants: Vec<GgufVariant>,
+    /// Transformer layer count, declared (not derived - there is no GGUF
+    /// header parser in-tree). Feeds the KV-cache estimator
+    /// (`amicu_registry::fit::kv_cache_bytes`) together with
+    /// [`Model::n_kv_heads`] and [`Model::head_dim`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_layers: Option<u32>,
+    /// Number of key/value attention heads (post-GQA, if applicable),
+    /// declared. See [`Model::n_layers`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_kv_heads: Option<u32>,
+    /// Per-head dimension, declared. See [`Model::n_layers`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_dim: Option<u32>,
 }
 
 /// Where a model's weights are fetched from.

@@ -134,6 +134,9 @@ mod tests {
             },
             context_length: Some(4096),
             variants,
+            n_layers: None,
+            n_kv_heads: None,
+            head_dim: None,
         }
     }
 

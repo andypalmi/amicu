@@ -695,6 +695,9 @@ fn build_local_dev_chat(preset: &Preset, answers: &WizardAnswers) -> Graph {
             file: "qwen2.5-7b-instruct-q4_k_m.gguf".to_string(),
             size: None,
         }],
+        n_layers: None,
+        n_kv_heads: None,
+        head_dim: None,
     });
 
     graph.hardware_profiles.push(HardwareProfile {
@@ -724,8 +727,7 @@ fn build_local_dev_chat(preset: &Preset, answers: &WizardAnswers) -> Graph {
             port: 8000,
             // Offload every layer to the accelerator.
             n_gpu_layers: -1,
-            extra_args: Vec::new(),
-            env: std::collections::BTreeMap::new(),
+            ..Default::default()
         }),
     });
 
@@ -767,6 +769,9 @@ fn build_private_eu_production(preset: &Preset, answers: &WizardAnswers) -> Grap
         },
         context_length: Some(answers.context_length),
         variants: Vec::new(),
+        n_layers: None,
+        n_kv_heads: None,
+        head_dim: None,
     });
 
     graph.hardware_profiles.push(HardwareProfile {
@@ -804,8 +809,7 @@ fn build_private_eu_production(preset: &Preset, answers: &WizardAnswers) -> Grap
             // Shard across the GPU count derived from concurrency.
             tensor_parallel_size: Some(gpu_count),
             gpu_memory_utilization: Some(0.9),
-            extra_args: Vec::new(),
-            env: std::collections::BTreeMap::new(),
+            ..Default::default()
         }),
     });
 
@@ -849,6 +853,9 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
         },
         context_length: Some(answers.context_length),
         variants: Vec::new(),
+        n_layers: None,
+        n_kv_heads: None,
+        head_dim: None,
     });
 
     // When the wizard requires EU residency, `maybe_push_eu_governance` below
@@ -898,8 +905,7 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
             tensor_parallel_size: Some(gpu_count),
             // Pack the KV cache hard: throughput over headroom.
             gpu_memory_utilization: Some(0.95),
-            extra_args: Vec::new(),
-            env: std::collections::BTreeMap::new(),
+            ..Default::default()
         }),
     });
 
@@ -940,6 +946,9 @@ fn build_internal_knowledge_chatbot(preset: &Preset, answers: &WizardAnswers) ->
         },
         context_length: Some(answers.context_length),
         variants: Vec::new(),
+        n_layers: None,
+        n_kv_heads: None,
+        head_dim: None,
     });
 
     // See `cost_optimized_batch`'s builder for why the provider switches when
@@ -978,8 +987,7 @@ fn build_internal_knowledge_chatbot(preset: &Preset, answers: &WizardAnswers) ->
             port: 8000,
             tensor_parallel_size: Some(gpu_count),
             gpu_memory_utilization: Some(0.9),
-            extra_args: Vec::new(),
-            env: std::collections::BTreeMap::new(),
+            ..Default::default()
         }),
     });
 
@@ -1021,6 +1029,9 @@ fn build_customer_support_assistant(preset: &Preset, answers: &WizardAnswers) ->
         },
         context_length: Some(answers.context_length),
         variants: Vec::new(),
+        n_layers: None,
+        n_kv_heads: None,
+        head_dim: None,
     });
 
     let provider = if answers.eu_residency_required {
@@ -1055,8 +1066,7 @@ fn build_customer_support_assistant(preset: &Preset, answers: &WizardAnswers) ->
             port: 8000,
             tensor_parallel_size: Some(gpu_count),
             gpu_memory_utilization: Some(0.9),
-            extra_args: Vec::new(),
-            env: std::collections::BTreeMap::new(),
+            ..Default::default()
         }),
     });
 
@@ -1098,6 +1108,9 @@ fn build_document_extraction_pipeline(preset: &Preset, answers: &WizardAnswers) 
         },
         context_length: Some(answers.context_length),
         variants: Vec::new(),
+        n_layers: None,
+        n_kv_heads: None,
+        head_dim: None,
     });
 
     let provider = if answers.eu_residency_required {
@@ -1134,8 +1147,7 @@ fn build_document_extraction_pipeline(preset: &Preset, answers: &WizardAnswers) 
             // Pack the KV cache hard: throughput over headroom, as with
             // cost_optimized_batch.
             gpu_memory_utilization: Some(0.95),
-            extra_args: Vec::new(),
-            env: std::collections::BTreeMap::new(),
+            ..Default::default()
         }),
     });
 
@@ -1176,6 +1188,9 @@ fn build_code_assistant_endpoint(preset: &Preset, answers: &WizardAnswers) -> Gr
         },
         context_length: Some(answers.context_length),
         variants: Vec::new(),
+        n_layers: None,
+        n_kv_heads: None,
+        head_dim: None,
     });
 
     let provider = if answers.eu_residency_required {
@@ -1210,8 +1225,7 @@ fn build_code_assistant_endpoint(preset: &Preset, answers: &WizardAnswers) -> Gr
             port: 8000,
             tensor_parallel_size: Some(gpu_count),
             gpu_memory_utilization: Some(0.9),
-            extra_args: Vec::new(),
-            env: std::collections::BTreeMap::new(),
+            ..Default::default()
         }),
     });
 
@@ -1252,6 +1266,9 @@ fn build_api_replacement_migration(preset: &Preset, answers: &WizardAnswers) -> 
         },
         context_length: Some(answers.context_length),
         variants: Vec::new(),
+        n_layers: None,
+        n_kv_heads: None,
+        head_dim: None,
     });
 
     let provider = if answers.eu_residency_required {
@@ -1286,8 +1303,7 @@ fn build_api_replacement_migration(preset: &Preset, answers: &WizardAnswers) -> 
             port: 8000,
             tensor_parallel_size: Some(gpu_count),
             gpu_memory_utilization: Some(0.9),
-            extra_args: Vec::new(),
-            env: std::collections::BTreeMap::new(),
+            ..Default::default()
         }),
     });
 
@@ -1328,6 +1344,9 @@ fn build_custom_stack(preset: &Preset, answers: &WizardAnswers) -> Graph {
         },
         context_length: Some(answers.context_length),
         variants: Vec::new(),
+        n_layers: None,
+        n_kv_heads: None,
+        head_dim: None,
     });
 
     let provider = if answers.eu_residency_required {
@@ -1362,8 +1381,7 @@ fn build_custom_stack(preset: &Preset, answers: &WizardAnswers) -> Graph {
             port: 8000,
             tensor_parallel_size: Some(gpu_count),
             gpu_memory_utilization: Some(0.9),
-            extra_args: Vec::new(),
-            env: std::collections::BTreeMap::new(),
+            ..Default::default()
         }),
     });
 
