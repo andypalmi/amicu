@@ -21,22 +21,31 @@
 // guaranteed in every sandbox: if the build fails, if `wrangler`/`npx` can't be
 // spawned, or if the dev server never becomes ready within the timeout, every test
 // in this file SKIPS itself (via `t.skip(...)`) with the captured reason instead of
-// failing the suite - see `probeEnvironment()` below for exactly what's attempted
-// and how failure is classified.
+// failing the suite - see `before()` below for exactly what's attempted and how
+// failure is classified.
 //
 // This file was authored and verified against a real, successful `wrangler dev`
-// run in the sandbox that produced it (real Set-Cookie rotation observed with
-// HttpOnly/Secure/SameSite=Lax attributes, and a real 500 from the production
-// API_URL fail-fast) - see the PR description for the transcript. Environments
-// without network/port access will legitimately skip.
+// run in the sandbox that produced it: real Set-Cookie rotation observed with
+// HttpOnly/Secure/SameSite=Lax attributes, a real 500 from the production API_URL
+// fail-fast, AND (added after an adversarial review flagged the risk) proof - via
+// `fixtures/refresh-stub.ts`, a stub with REAL single-use/reuse-detection semantics
+// matching crates/amicu-store/src/refresh.rs - that the real backend sees exactly
+// ONE `/token/refresh` call per inbound request. OpenNext's Node.js middleware
+// compat layer (explicitly flagged experimental) DOES duplicate the resulting
+// Set-Cookie pair in the raw response (4 headers, 2 identical pairs) but does NOT
+// call attemptRefresh()'s network path twice, so no token-family reuse/compromise
+// occurs - see the first test's inline comment for the full analysis and the exact
+// assertion that proves it. Environments without network/port access will
+// legitimately skip.
 
-import { test, before, after } from 'node:test';
+import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import http from 'node:http';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
+import { startStubAuthApi } from './fixtures/refresh-stub.ts';
 
 const APP_DIR = path.resolve(import.meta.dirname, '../..');
 const WRANGLER_BIN = path.join(APP_DIR, 'node_modules/.bin/wrangler');
@@ -155,8 +164,7 @@ async function startWranglerDev(
 }
 
 let skipReason: string | null = null;
-let stubApi: http.Server;
-let stubApiPort: number;
+let buildReady = false;
 
 before(async () => {
   if (!existsSync(WRANGLER_BIN) || !existsSync(OPENNEXT_BIN)) {
@@ -182,56 +190,43 @@ before(async () => {
     return;
   }
 
-  // Stub for the Rust Management API's POST /token/refresh.
-  stubApi = http.createServer((req, res) => {
-    let body = '';
-    req.on('data', (c) => (body += c));
-    req.on('end', () => {
-      if (req.method === 'POST' && req.url === '/token/refresh') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            access_token: 'live-test-new-access-token',
-            refresh_token: 'live-test-new-refresh-token',
-            expires_in: 900,
-            token_type: 'Bearer',
-          }),
-        );
-        return;
-      }
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'not_found' }));
-    });
-  });
+  // Verify a local port can actually be bound before trusting the rest of the
+  // suite to it (the stub API itself is started per-test, freshly, since each
+  // test needs its own clean token/family state).
   try {
-    await new Promise<void>((resolve, reject) => {
-      stubApi.once('error', reject);
-      stubApi.listen(0, '127.0.0.1', resolve);
-    });
-    stubApiPort = (stubApi.address() as AddressInfo).port;
+    const probe = await startStubAuthApi();
+    await probe.close();
   } catch (err) {
-    skipReason = `could not bind a local port for the stub API server: ${(err as Error).message} - this sandbox may not allow listening on TCP ports`;
+    skipReason = `could not bind a local port for a stub API server: ${(err as Error).message} - this sandbox may not allow listening on TCP ports`;
     return;
   }
+
+  buildReady = true;
 });
 
-after(async () => {
-  if (stubApi?.listening) {
-    await new Promise((resolve) => stubApi.close(resolve));
-  }
-});
-
-test('workerd (wrangler dev): rotates Set-Cookie with HttpOnly/Secure/SameSite=Lax on an expiring session', async (t) => {
-  if (skipReason) {
-    t.skip(skipReason);
+test('workerd (wrangler dev): rotates Set-Cookie with HttpOnly/Secure/SameSite=Lax, and the real backend sees exactly ONE refresh call (no reuse/family-compromise)', async (t) => {
+  if (skipReason || !buildReady) {
+    t.skip(skipReason ?? 'build did not complete');
     return;
   }
+
+  // Faithful stub (see fixtures/refresh-stub.ts): single-use refresh tokens,
+  // family-scoped reuse detection that compromises (revokes) the WHOLE family
+  // on a replay - mirroring crates/amicu-store/src/refresh.rs `consume()` and
+  // crates/amicu-auth/src/service.rs `refresh()`. This is what makes the
+  // question below answerable for real: an earlier version of this test used a
+  // stub that always minted the same canned pair regardless of input, which
+  // could not have detected a reuse/double-spend bug even if one existed.
+  const stubApi = await startStubAuthApi();
+  const ORIGINAL_REFRESH = 'original-refresh-token';
+  stubApi.seedRefreshToken(ORIGINAL_REFRESH);
 
   const server = await startWranglerDev({
-    API_URL: `http://127.0.0.1:${stubApiPort}`,
+    API_URL: `http://127.0.0.1:${stubApi.port}`,
     COOKIE_SECURE: 'true',
   });
   if (!server.ok) {
+    await stubApi.close();
     t.skip(`wrangler dev did not come up in this sandbox: ${server.reason}`);
     return;
   }
@@ -240,21 +235,48 @@ test('workerd (wrangler dev): rotates Set-Cookie with HttpOnly/Secure/SameSite=L
     const expiredAccess = craftJwt(Math.floor(Date.now() / 1000) - 30);
     const res = await fetch(`http://127.0.0.1:${server.port}/app`, {
       redirect: 'manual',
-      headers: { Cookie: `${ACCESS_COOKIE}=${expiredAccess}; ${REFRESH_COOKIE}=old-refresh-token` },
+      headers: { Cookie: `${ACCESS_COOKIE}=${expiredAccess}; ${REFRESH_COOKIE}=${ORIGINAL_REFRESH}` },
     });
 
-    // NOTE: under the full Next.js request pipeline (page render -> requireSession()
-    // rejects the unverifiable fake token -> redirect to /login) observed in this
-    // sandbox, OpenNext's (explicitly experimental - see the "Node.js middleware
-    // support is experimental in cloudflare" build warning) Node.js middleware
-    // support invokes handleAuth() TWICE for one inbound request, yielding two
-    // near-identical rotated cookie pairs (same values, ~1-2s apart) rather than
-    // one. The unit test (cookie-refresh.unit.test.ts) calls proxy() directly and
-    // observes exactly one pair, proving the double invocation is a quirk of the
-    // full experimental pipeline, not of proxy.ts/middleware-refresh.ts itself. We
-    // assert on "at least one correctly-attributed pair", which holds either way.
+    // THE QUESTION THIS TEST EXISTS TO ANSWER (raised in adversarial review of
+    // this PR): does OpenNext's Node.js middleware compat layer (explicitly
+    // flagged experimental in the build output) invoke handleAuth() -> a real
+    // second network round-trip to POST /token/refresh - for one inbound
+    // request? If it did, and that second call resubmitted the now-consumed
+    // ORIGINAL_REFRESH token, the real backend's reuse detection would
+    // compromise the whole token family, revoking even the successor token
+    // just minted by the first call - silently logging out (or "compromising")
+    // every legitimately refreshing user in production.
+    //
+    // OBSERVED (this assertion is the proof, not a claim): the faithful stub
+    // recorded exactly ONE /token/refresh request. The response DOES still
+    // carry the SAME rotated cookie pair twice (4 Set-Cookie headers, 2
+    // identical pairs) - that part of the earlier "double invocation"
+    // observation was real, but it is a RESPONSE-SERIALIZATION artifact (the
+    // same already-decided Set-Cookie pair duplicated somewhere in OpenNext's
+    // Node-compat -> Workers Response conversion), not a second invocation of
+    // attemptRefresh()/authClient.refresh(). No second network call means no
+    // reuse detection, no family compromise, and no risk of the failure mode
+    // above under the ACTUAL observed behavior of this build.
+    assert.equal(
+      stubApi.requests.length,
+      1,
+      `expected exactly 1 /token/refresh call reaching the API (proving no reuse/double-spend), got ${stubApi.requests.length}: ${JSON.stringify(stubApi.requests)}`,
+    );
+    assert.equal(stubApi.requests[0].outcome, 'consumed');
+    assert.equal(stubApi.requests[0].refreshToken, ORIGINAL_REFRESH);
+    assert.ok(!stubApi.isFamilyCompromised(ORIGINAL_REFRESH), 'the token family must not be compromised by a single legitimate refresh');
+
     const setCookies = res.headers.getSetCookie();
     assert.ok(setCookies.length >= 2, `expected at least 2 Set-Cookie headers from real workerd, got: ${setCookies.join(' | ')}`);
+    const atValues = new Set(setCookies.filter((c) => c.startsWith(`${ACCESS_COOKIE}=`)).map((c) => c.split(';')[0]));
+    const rtValues = new Set(setCookies.filter((c) => c.startsWith(`${REFRESH_COOKIE}=`)).map((c) => c.split(';')[0]));
+    // Every amicu_at (and amicu_rt) Set-Cookie header carries the SAME value -
+    // confirms the duplication is the same single rotation serialized twice,
+    // not two different token pairs from two different refresh calls.
+    assert.equal(atValues.size, 1, `all amicu_at Set-Cookie headers must carry the same value, got: ${[...atValues]}`);
+    assert.equal(rtValues.size, 1, `all amicu_rt Set-Cookie headers must carry the same value, got: ${[...rtValues]}`);
+
     const at = setCookies.find((c) => c.startsWith(`${ACCESS_COOKIE}=`));
     const rt = setCookies.find((c) => c.startsWith(`${REFRESH_COOKIE}=`));
     assert.ok(at, 'amicu_at Set-Cookie missing from real workerd response');
@@ -264,6 +286,9 @@ test('workerd (wrangler dev): rotates Set-Cookie with HttpOnly/Secure/SameSite=L
       assert.match(c!, /Secure/i);
       assert.match(c!, /SameSite=Lax/i);
     }
+    // The rotated refresh cookie is the one the stub actually issued for the
+    // single winning call - not the stale original, not a second mint.
+    assert.equal(rt!.split(';')[0], `${REFRESH_COOKIE}=${stubApi.requests[0].issuedRefreshToken}`);
 
     // Not cached by a shared/CDN cache: no `public`/positive-shared-max-age
     // Cache-Control, and (this being local wrangler, not the real edge) no
@@ -275,6 +300,7 @@ test('workerd (wrangler dev): rotates Set-Cookie with HttpOnly/Secure/SameSite=L
     assert.notEqual(res.headers.get('cf-cache-status'), 'HIT');
   } finally {
     killGroup(server.child);
+    await stubApi.close();
   }
 });
 
