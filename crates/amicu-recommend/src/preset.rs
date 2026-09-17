@@ -706,6 +706,7 @@ fn build_local_dev_chat(preset: &Preset, answers: &WizardAnswers) -> Graph {
             model: "m3_max".to_string(),
             count: 1,
             memory: ByteSize::from_bytes(48 * GIB),
+            memory_bandwidth_gbps: None,
         }),
         cpu: None,
         memory: ByteSize::from_bytes(48 * GIB),
@@ -781,6 +782,7 @@ fn build_private_eu_production(preset: &Preset, answers: &WizardAnswers) -> Grap
             model: "h100".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(80 * GIB),
+            memory_bandwidth_gbps: None,
         }),
         cpu: None,
         memory: ByteSize::from_bytes(180 * GIB),
@@ -870,6 +872,7 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
             model: "a10g".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(24 * GIB),
+            memory_bandwidth_gbps: None,
         }),
         cpu: None,
         memory: ByteSize::from_bytes(64 * GIB),
@@ -958,6 +961,7 @@ fn build_internal_knowledge_chatbot(preset: &Preset, answers: &WizardAnswers) ->
             model: "a100".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(80 * GIB),
+            memory_bandwidth_gbps: None,
         }),
         cpu: None,
         memory: ByteSize::from_bytes(160 * GIB),
@@ -974,6 +978,8 @@ fn build_internal_knowledge_chatbot(preset: &Preset, answers: &WizardAnswers) ->
             port: 8000,
             tensor_parallel_size: Some(gpu_count),
             gpu_memory_utilization: Some(0.9),
+            extra_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
         }),
     });
 
@@ -1032,6 +1038,7 @@ fn build_customer_support_assistant(preset: &Preset, answers: &WizardAnswers) ->
             model: "l40s".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(48 * GIB),
+            memory_bandwidth_gbps: None,
         }),
         cpu: None,
         memory: ByteSize::from_bytes(96 * GIB),
@@ -1048,6 +1055,8 @@ fn build_customer_support_assistant(preset: &Preset, answers: &WizardAnswers) ->
             port: 8000,
             tensor_parallel_size: Some(gpu_count),
             gpu_memory_utilization: Some(0.9),
+            extra_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
         }),
     });
 
@@ -1106,6 +1115,7 @@ fn build_document_extraction_pipeline(preset: &Preset, answers: &WizardAnswers) 
             model: "a10g".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(24 * GIB),
+            memory_bandwidth_gbps: None,
         }),
         cpu: None,
         memory: ByteSize::from_bytes(64 * GIB),
@@ -1124,6 +1134,8 @@ fn build_document_extraction_pipeline(preset: &Preset, answers: &WizardAnswers) 
             // Pack the KV cache hard: throughput over headroom, as with
             // cost_optimized_batch.
             gpu_memory_utilization: Some(0.95),
+            extra_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
         }),
     });
 
@@ -1181,6 +1193,7 @@ fn build_code_assistant_endpoint(preset: &Preset, answers: &WizardAnswers) -> Gr
             model: "a100".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(80 * GIB),
+            memory_bandwidth_gbps: None,
         }),
         cpu: None,
         memory: ByteSize::from_bytes(160 * GIB),
@@ -1197,6 +1210,8 @@ fn build_code_assistant_endpoint(preset: &Preset, answers: &WizardAnswers) -> Gr
             port: 8000,
             tensor_parallel_size: Some(gpu_count),
             gpu_memory_utilization: Some(0.9),
+            extra_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
         }),
     });
 
@@ -1254,6 +1269,7 @@ fn build_api_replacement_migration(preset: &Preset, answers: &WizardAnswers) -> 
             model: "l40s".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(48 * GIB),
+            memory_bandwidth_gbps: None,
         }),
         cpu: None,
         memory: ByteSize::from_bytes(96 * GIB),
@@ -1270,6 +1286,8 @@ fn build_api_replacement_migration(preset: &Preset, answers: &WizardAnswers) -> 
             port: 8000,
             tensor_parallel_size: Some(gpu_count),
             gpu_memory_utilization: Some(0.9),
+            extra_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
         }),
     });
 
@@ -1327,6 +1345,7 @@ fn build_custom_stack(preset: &Preset, answers: &WizardAnswers) -> Graph {
             model: "a10g".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(24 * GIB),
+            memory_bandwidth_gbps: None,
         }),
         cpu: None,
         memory: ByteSize::from_bytes(64 * GIB),
@@ -1343,6 +1362,8 @@ fn build_custom_stack(preset: &Preset, answers: &WizardAnswers) -> Graph {
             port: 8000,
             tensor_parallel_size: Some(gpu_count),
             gpu_memory_utilization: Some(0.9),
+            extra_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
         }),
     });
 

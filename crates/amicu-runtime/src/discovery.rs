@@ -169,6 +169,7 @@ fn parse_apple_silicon(text: &str) -> Result<HardwareProfile, DiscoveryError> {
             model,
             count: 1,
             memory,
+            memory_bandwidth_gbps: None,
         }),
         cpu: Some(Cpu { model: chip, cores }),
         memory,

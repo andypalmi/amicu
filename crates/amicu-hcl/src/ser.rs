@@ -260,14 +260,15 @@ fn hardware_block(h: &HardwareProfile) -> Block {
         body = body.add_attribute(("region", region.code.clone()));
     }
     if let Some(a) = &h.accelerator {
-        body = body.add_block(
-            Block::builder("accelerator")
-                .add_attribute(("kind", variant(&a.kind)))
-                .add_attribute(("model", a.model.clone()))
-                .add_attribute(("count", a.count))
-                .add_attribute(("memory", a.memory.to_string()))
-                .build(),
-        );
+        let mut ab = Block::builder("accelerator")
+            .add_attribute(("kind", variant(&a.kind)))
+            .add_attribute(("model", a.model.clone()))
+            .add_attribute(("count", a.count))
+            .add_attribute(("memory", a.memory.to_string()));
+        if let Some(bandwidth) = a.memory_bandwidth_gbps {
+            ab = ab.add_attribute(("bandwidth_gbps", bandwidth));
+        }
+        body = body.add_block(ab.build());
     }
     if let Some(c) = &h.cpu {
         body = body.add_block(

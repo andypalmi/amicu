@@ -389,6 +389,7 @@ impl RunPodProvider {
                     model: g.model.into(),
                     count: 1,
                     memory: format!("{}GiB", g.vram_gib).parse().expect("valid size"),
+                    memory_bandwidth_gbps: None,
                 }),
                 vcpus: Some(g.vcpus),
                 memory: Some(

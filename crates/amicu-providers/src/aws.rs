@@ -287,6 +287,7 @@ impl AwsProvider {
                     model: g.model.into(),
                     count: g.count,
                     memory: format!("{}GiB", g.vram_gib).parse().expect("valid size"),
+                    memory_bandwidth_gbps: None,
                 }),
                 vcpus: Some(g.vcpus),
                 memory: Some(
