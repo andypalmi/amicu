@@ -475,6 +475,105 @@ fn validate_reports_cap003_for_denylisted_flag() {
     );
 }
 
+// H1 regression: `-m`/`--model` was missing from the typed-flag table, so
+// `extra_args = ["--model", "/tmp/evil.gguf"]` only raised the informational
+// CAP-004 while llama-server's last-flag-wins argv parsing would silently
+// load an unresolved model instead of the one amicu selected.
+#[test]
+fn validate_reports_cap002_for_model_flag_duplicate() {
+    let diags =
+        fitting_adapter().validate(&deployment_with_extra_args(&["--model", "/tmp/evil.gguf"]));
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+                && d.severity == amicu_core::diagnostic::Severity::Error),
+        "expected AMICU-CAP-002 for --model, got {diags:?}"
+    );
+}
+
+// M1 regression: `flag_token` only recognized `--` (long) flags, so the
+// single-dash short aliases llama-server also accepts (`-c`, `-ngl`, `-m`)
+// bypassed CAP-002 entirely.
+#[test]
+fn validate_reports_cap002_for_short_flag_aliases() {
+    for short in [
+        vec!["-c".to_owned(), "999".to_owned()],
+        vec!["-ngl".to_owned(), "0".to_owned()],
+        vec!["-m".to_owned(), "x".to_owned()],
+    ] {
+        let args: Vec<&str> = short.iter().map(String::as_str).collect();
+        let diags = fitting_adapter().validate(&deployment_with_extra_args(&args));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+                    && d.severity == amicu_core::diagnostic::Severity::Error),
+            "expected AMICU-CAP-002 for {args:?}, got {diags:?}"
+        );
+    }
+}
+
+// ---- env key diagnostics (amicu-planning#150 review hardening: H2) ---------
+//
+// llama-server reads `LLAMA_ARG_<X>` environment variables as equivalent to
+// `--<x>` on the CLI, so a settings `env` entry is a second channel to
+// exactly the conflicts `extra_args` already guards against.
+
+#[test]
+fn validate_reports_cap003_for_llama_arg_host_env_key() {
+    let diags = fitting_adapter().validate(&deployment_with_env(&[("LLAMA_ARG_HOST", "0.0.0.0")]));
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == catalog::CAP_EXTRA_ARG_DENYLISTED
+                && d.severity == amicu_core::diagnostic::Severity::Error),
+        "expected AMICU-CAP-003 for LLAMA_ARG_HOST, got {diags:?}"
+    );
+}
+
+#[test]
+fn validate_reports_cap002_for_llama_arg_ctx_size_env_key() {
+    let diags = fitting_adapter().validate(&deployment_with_env(&[("LLAMA_ARG_CTX_SIZE", "1")]));
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+                && d.severity == amicu_core::diagnostic::Severity::Error),
+        "expected AMICU-CAP-002 for LLAMA_ARG_CTX_SIZE, got {diags:?}"
+    );
+}
+
+#[test]
+fn validate_reports_no_diagnostic_for_ordinary_env_key() {
+    let diags =
+        fitting_adapter().validate(&deployment_with_env(&[("GGML_CUDA_DISABLE_GRAPHS", "1")]));
+    assert!(
+        diags.is_empty(),
+        "GGML_CUDA_DISABLE_GRAPHS is not LLAMA_ARG_*-prefixed and isn't denylisted, \
+         expected no diagnostics, got {diags:?}"
+    );
+}
+
+#[test]
+fn validate_reports_cap003_for_denylisted_env_key() {
+    for key in [
+        "LD_PRELOAD",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "LD_LIBRARY_PATH",
+    ] {
+        let diags = fitting_adapter().validate(&deployment_with_env(&[(key, "/tmp/evil.so")]));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == catalog::CAP_EXTRA_ARG_DENYLISTED
+                    && d.severity == amicu_core::diagnostic::Severity::Error),
+            "expected AMICU-CAP-003 for {key}, got {diags:?}"
+        );
+    }
+}
+
 // ---- plan_launch ------------------------------------------------------------
 
 #[test]
@@ -541,6 +640,53 @@ fn plan_launch_succeeds_with_only_informational_extra_args() {
         panic!("expected a command");
     };
     assert!(argv.contains(&"--jinja".to_owned()));
+}
+
+#[test]
+fn plan_launch_errors_on_model_flag_duplicate() {
+    let err = fitting_adapter()
+        .plan_launch(&deployment_with_extra_args(&["--model", "/tmp/evil.gguf"]))
+        .expect_err("--model duplicate must be rejected");
+    assert_eq!(err.code(), catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED);
+}
+
+#[test]
+fn plan_launch_errors_on_short_flag_alias_duplicate() {
+    let err = fitting_adapter()
+        .plan_launch(&deployment_with_extra_args(&["-c", "1"]))
+        .expect_err("-c duplicate must be rejected");
+    assert_eq!(err.code(), catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED);
+}
+
+#[test]
+fn plan_launch_errors_on_llama_arg_env_key_mirroring_denylisted_flag() {
+    let err = fitting_adapter()
+        .plan_launch(&deployment_with_env(&[("LLAMA_ARG_HOST", "0.0.0.0")]))
+        .expect_err("LLAMA_ARG_HOST must be rejected");
+    assert_eq!(err.code(), catalog::CAP_EXTRA_ARG_DENYLISTED);
+}
+
+#[test]
+fn plan_launch_errors_on_llama_arg_env_key_mirroring_typed_flag() {
+    let err = fitting_adapter()
+        .plan_launch(&deployment_with_env(&[("LLAMA_ARG_CTX_SIZE", "1")]))
+        .expect_err("LLAMA_ARG_CTX_SIZE must be rejected");
+    assert_eq!(err.code(), catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED);
+}
+
+#[test]
+fn plan_launch_errors_on_denylisted_env_key() {
+    let err = fitting_adapter()
+        .plan_launch(&deployment_with_env(&[("LD_PRELOAD", "/tmp/evil.so")]))
+        .expect_err("LD_PRELOAD must be rejected");
+    assert_eq!(err.code(), catalog::CAP_EXTRA_ARG_DENYLISTED);
+}
+
+#[test]
+fn plan_launch_succeeds_with_ordinary_env_key() {
+    fitting_adapter()
+        .plan_launch(&deployment_with_env(&[("GGML_CUDA_DISABLE_GRAPHS", "1")]))
+        .expect("an ordinary tuning env var must not block plan_launch");
 }
 
 #[test]

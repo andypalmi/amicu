@@ -11,7 +11,7 @@ use crate::OutputFormat;
 use crate::catalog::build_catalog;
 use crate::checks::report_for;
 use crate::error::CliError;
-use crate::planner::{PlanResult, build_plan};
+use crate::planner::{PlanError, PlanResult, build_plan};
 use crate::project::{LocalState, Project};
 use crate::secret::EnvSecretResolver;
 use crate::write_json;
@@ -35,7 +35,15 @@ pub(crate) fn run(
 
     let prior_state = project.load_state()?;
     let prior_graph = prior_state.as_ref().map(|s| s.graph.clone());
-    let result = build_plan(&graph, prior_graph.as_ref())?;
+    let result = match build_plan(&graph, prior_graph.as_ref()) {
+        Ok(result) => result,
+        // See `commands::plan::run`'s matching arm: `build_plan` hands back
+        // every collected diagnostic instead of a bare adapter error.
+        Err(PlanError(report)) => {
+            emit_report(&report, output, out)?;
+            return Ok(1);
+        }
+    };
 
     if result.has_errors() {
         emit_report(

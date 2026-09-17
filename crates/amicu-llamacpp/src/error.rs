@@ -76,6 +76,31 @@ pub enum LlamaCppError {
     /// Maps to `AMICU-CAP-003`.
     #[error("extra_args flag `{0}` is not allowed (amicu owns this setting)")]
     ExtraArgDenylisted(String),
+
+    /// A settings `env` key is one of the fixed dynamic-loader-hook names
+    /// (`LD_PRELOAD` and friends; amicu review hardening, amicu-planning#150).
+    /// Maps to `AMICU-CAP-003`.
+    #[error("env var `{0}` is not allowed (can load arbitrary code into the process)")]
+    EnvKeyDenylisted(String),
+
+    /// A settings `env` key is a `LLAMA_ARG_<X>` mirror of a flag already
+    /// rendered by a typed field (amicu-planning#150 review hardening:
+    /// llama-server reads `LLAMA_ARG_*` env vars as CLI-flag equivalents, so
+    /// this is the same conflict as [`LlamaCppError::ExtraArgDuplicatesTyped`]
+    /// reached through `env` instead of `extra_args`). Maps to
+    /// `AMICU-CAP-002`.
+    #[error(
+        "env var `{key}` mirrors typed field flag `{flag}` (llama-server reads LLAMA_ARG_* as CLI flags)"
+    )]
+    EnvKeyMirrorsTypedFlag { key: String, flag: String },
+
+    /// A settings `env` key is a `LLAMA_ARG_<X>` mirror of a denylisted flag
+    /// (amicu-planning#150 review hardening; see
+    /// [`LlamaCppError::EnvKeyMirrorsTypedFlag`]). Maps to `AMICU-CAP-003`.
+    #[error(
+        "env var `{key}` mirrors denylisted flag `{flag}` (llama-server reads LLAMA_ARG_* as CLI flags)"
+    )]
+    EnvKeyMirrorsDenylistedFlag { key: String, flag: String },
 }
 
 impl AdapterErrorKind for LlamaCppError {
@@ -93,8 +118,15 @@ impl AdapterErrorKind for LlamaCppError {
             | LlamaCppError::Probe(_)
             | LlamaCppError::Supervisor(_) => catalog::PROVIDER_CAPACITY_UNAVAILABLE,
             LlamaCppError::DownloadFailed(_) => catalog::PROVIDER_DOWNLOAD_FAILED,
-            LlamaCppError::ExtraArgDuplicatesTyped(_) => catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED,
-            LlamaCppError::ExtraArgDenylisted(_) => catalog::CAP_EXTRA_ARG_DENYLISTED,
+            LlamaCppError::ExtraArgDuplicatesTyped(_)
+            | LlamaCppError::EnvKeyMirrorsTypedFlag { .. } => {
+                catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+            }
+            LlamaCppError::ExtraArgDenylisted(_)
+            | LlamaCppError::EnvKeyDenylisted(_)
+            | LlamaCppError::EnvKeyMirrorsDenylistedFlag { .. } => {
+                catalog::CAP_EXTRA_ARG_DENYLISTED
+            }
         }
     }
 

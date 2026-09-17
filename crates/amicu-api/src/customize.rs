@@ -74,21 +74,16 @@ use crate::engine::EngineApiState;
 /// Distinct from [`crate::engine::EngineHttpError`]: an `hcl` parse failure
 /// is *not* a variant here (it is folded into the `422` [`DiagnosticReport`]
 /// response body, per this module's doc-comment) - only failures that are
-/// not representable as a diagnostic reach this type.
+/// not representable as a diagnostic reach this type. A runtime adapter
+/// failure while planning is not one of those either (amicu-planning#150
+/// review hardening): see `EngineHttpError`'s doc-comment - the same
+/// [`amicu_engine::PlanError`] handling applies here.
 pub(crate) enum CustomizeHttpError {
     /// `base_graph` is present but is not valid JSON for a
     /// [`Graph`](amicu_core::graph::Graph) (bad request - the client's own
     /// malformed input, echoed back since it reveals nothing about server
     /// internals).
     BadBaseGraph(serde_json::Error),
-    /// A runtime adapter failed while planning (internal).
-    Plan(amicu_core::adapter::AdapterError),
-}
-
-impl From<amicu_core::adapter::AdapterError> for CustomizeHttpError {
-    fn from(e: amicu_core::adapter::AdapterError) -> Self {
-        Self::Plan(e)
-    }
 }
 
 impl IntoResponse for CustomizeHttpError {
@@ -96,16 +91,6 @@ impl IntoResponse for CustomizeHttpError {
         let (status, message) = match self {
             CustomizeHttpError::BadBaseGraph(e) => {
                 (StatusCode::BAD_REQUEST, format!("base_graph: {e}"))
-            }
-            // Internal failure: log the real cause server-side, return a
-            // fixed generic body so nothing about the internals leaks,
-            // mirroring `EngineHttpError::Plan`.
-            CustomizeHttpError::Plan(e) => {
-                eprintln!("amicu-api: customize plan failed: {e}");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal error".to_owned(),
-                )
             }
         };
         (status, Json(json!({ "error": message }))).into_response()
@@ -225,7 +210,24 @@ pub(crate) async fn customize_handler(
             .into_response());
     }
 
-    let result = amicu_engine::build_plan(&graph, base_graph.as_ref())?;
+    let result = match amicu_engine::build_plan(&graph, base_graph.as_ref()) {
+        Ok(result) => result,
+        // See `engine::plan_handler`'s matching arm: `build_plan` hands back
+        // every collected diagnostic instead of a bare adapter error
+        // (amicu-planning#150 review hardening), so this stays a `422`.
+        Err(amicu_engine::PlanError(report)) => {
+            return Ok((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(CustomizeResponseDto {
+                    report,
+                    plan: None,
+                    graph: None,
+                    hcl: canonical_hcl,
+                }),
+            )
+                .into_response());
+        }
+    };
     if result.has_errors() {
         return Ok((
             StatusCode::UNPROCESSABLE_ENTITY,

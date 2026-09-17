@@ -1,8 +1,7 @@
 //! Turn a graph into an `amicu_plan::Plan` plus the launch artifacts `apply`
 //! needs, diffing against prior state to choose the action kind.
 
-use amicu_core::adapter::AdapterError;
-use amicu_core::diagnostic::{Category, Diagnostic, DiagnosticCode, Severity};
+use amicu_core::diagnostic::{Category, Diagnostic, DiagnosticCode, DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
 use amicu_core::id::DeploymentId;
 use amicu_core::resource::{
@@ -45,11 +44,45 @@ impl PlanResult {
     }
 }
 
+/// Error returned by [`build_plan`] when it cannot produce a [`PlanResult`].
+///
+/// Carries every diagnostic collected before the failure (including the
+/// failing deployment's own [`RuntimeAdapter::validate`] diagnostics), plus
+/// the [`AdapterError`](amicu_core::adapter::AdapterError) that stopped
+/// planning, folded into its own [`Diagnostic`] via
+/// [`AdapterError::to_diagnostic`](amicu_core::adapter::AdapterError::to_diagnostic).
+///
+/// This exists so a caller that skips the prior [`crate::report_for`] gate
+/// (amicu-planning#150 review hardening: a `CAP-002`/`CAP-003`
+/// `extra_args`/`env` conflict makes
+/// [`RuntimeAdapter::plan_launch`](amicu_runtime::RuntimeAdapter::plan_launch)
+/// return `Err`, which used to propagate straight out of `build_plan` as a
+/// bare `AdapterError` - losing every diagnostic already collected and
+/// turning what should be a structured `422` into an opaque `500` for any
+/// caller that relied on `build_plan` alone to gate) still gets a full
+/// [`DiagnosticReport`] to act on.
+#[derive(Debug, Clone)]
+pub struct PlanError(pub DiagnosticReport);
+
+impl std::fmt::Display for PlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "planning failed: {} diagnostic(s)",
+            self.0.diagnostics.len()
+        )
+    }
+}
+
+impl std::error::Error for PlanError {}
+
 /// Build a plan for `graph`, diffing against `prior` when present.
 ///
 /// # Errors
-/// Returns [`AdapterError`] if a runtime adapter fails to render a launch plan.
-pub fn build_plan(graph: &Graph, prior: Option<&Graph>) -> Result<PlanResult, AdapterError> {
+/// Returns [`PlanError`] carrying every diagnostic collected so far (plus the
+/// triggering `AdapterError`, folded into a [`Diagnostic`]) if a runtime
+/// adapter fails to render a launch plan for some deployment.
+pub fn build_plan(graph: &Graph, prior: Option<&Graph>) -> Result<PlanResult, PlanError> {
     let adapter = LlamaCppAdapter::new(Box::new(build_catalog(graph)), host_supervisor());
     let mut diagnostics = Vec::new();
     let mut items = Vec::new();
@@ -75,7 +108,17 @@ pub fn build_plan(graph: &Graph, prior: Option<&Graph>) -> Result<PlanResult, Ad
             Some(_) => ActionKind::Update,
         };
 
-        let launch = adapter.plan_launch(d)?;
+        let launch = match adapter.plan_launch(d) {
+            Ok(launch) => launch,
+            Err(err) => {
+                // Fold the triggering error into the diagnostics already
+                // collected (this deployment's `validate` output included)
+                // and hand the caller the full report, rather than losing
+                // that context behind a bare `AdapterError`.
+                diagnostics.push(err.to_diagnostic());
+                return Err(PlanError(DiagnosticReport::new(diagnostics)));
+            }
+        };
         let rendered = launch.rendered.as_text().to_owned();
         let action = action_for(kind, d, &launch, graph);
         items.push(PlanItem {
@@ -439,5 +482,29 @@ mod tests {
         assert!(env_setting.value.contains("FOO"));
         // Values never leak into the plan display, only key names.
         assert!(!env_setting.value.contains("secretvalue"));
+    }
+
+    // L1 regression (amicu-planning#150 review hardening): a caller that
+    // calls `build_plan` directly, skipping the prior `report_for` gate every
+    // existing caller (CLI `plan`/`apply`, `/plan`, `/recommend/customize`)
+    // applies, must still get a structured diagnostic report back - not a
+    // bare adapter error that turns into an opaque 500 one layer up.
+    #[test]
+    fn build_plan_called_directly_with_a_cap003_graph_returns_diagnostics_not_a_bare_error() {
+        let g = graph(vec!["--host".to_owned(), "0.0.0.0".to_owned()]);
+
+        let report = match build_plan(&g, None) {
+            Ok(_) => panic!("a denylisted extra_args flag must not plan"),
+            Err(PlanError(report)) => report,
+        };
+
+        assert!(!report.valid);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code
+                == amicu_core::diagnostic::catalog::CAP_EXTRA_ARG_DENYLISTED
+                && d.severity == Severity::Error),
+            "expected AMICU-CAP-003 in the plan error's report, got {:?}",
+            report.diagnostics
+        );
     }
 }
