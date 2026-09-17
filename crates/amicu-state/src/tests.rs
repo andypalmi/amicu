@@ -43,6 +43,7 @@ fn sample_model() -> Model {
             quantization: Quantization::Q4KM,
             file: "mistral-7b-instruct.Q4_K_M.gguf".into(),
             size: Some(ByteSize::from_bytes(4 * 1024 * 1024 * 1024)),
+            sha256: None,
         }],
         n_layers: None,
         n_kv_heads: None,

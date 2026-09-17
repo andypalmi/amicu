@@ -261,8 +261,13 @@ fn llama_cpp_runtime_settings(s: &LlamaCppSettings) -> Vec<Setting> {
         ubatch_size,
         parallel_slots,
         flash_attention,
+        chat_template,
+        chat_template_file,
+        jinja,
+        reasoning_format,
         extra_args,
         env,
+        build,
     } = s;
     let mut settings = vec![
         setting("runtime", "llama_cpp"),
@@ -303,7 +308,22 @@ fn llama_cpp_runtime_settings(s: &LlamaCppSettings) -> Vec<Setting> {
     if let Some(v) = flash_attention {
         settings.push(setting("flash_attention", v.to_string()));
     }
+    if let Some(v) = chat_template {
+        settings.push(setting("chat_template", v.clone()));
+    }
+    if let Some(v) = chat_template_file {
+        settings.push(setting("chat_template_file", v.clone()));
+    }
+    if let Some(v) = jinja {
+        settings.push(setting("jinja", v.to_string()));
+    }
+    if let Some(v) = reasoning_format {
+        settings.push(setting("reasoning_format", v.to_string()));
+    }
     extend_with_extra_args_and_env(&mut settings, extra_args, env);
+    if let Some(v) = build {
+        settings.push(setting("build", v.clone()));
+    }
     settings
 }
 
@@ -517,6 +537,7 @@ mod tests {
                 quantization: Quantization::Q4KM,
                 file: "m.q4_k_m.gguf".into(),
                 size: Some(ByteSize::from_bytes(GIB)),
+                sha256: None,
             }],
             n_layers: None,
             n_kv_heads: None,
@@ -571,7 +592,7 @@ mod tests {
 
     #[test]
     fn assumption_present_when_extra_args_nonempty() {
-        let result = build_plan(&graph(vec!["--jinja".to_owned()]), None).unwrap();
+        let result = build_plan(&graph(vec!["--verbose".to_owned()]), None).unwrap();
         let cp = result.items[0].action.cost_performance.as_ref().unwrap();
         assert!(cp.assumptions.iter().any(|a| a == ASSUMPTION));
     }
@@ -645,7 +666,7 @@ mod tests {
 
     #[test]
     fn extra_args_and_env_threaded_into_runtime_settings() {
-        let mut g = graph(vec!["--jinja".to_owned()]);
+        let mut g = graph(vec!["--verbose".to_owned()]);
         let Runtime::LlamaCpp(s) = &mut g.deployments[0].runtime else {
             unreachable!("graph() always builds a llama_cpp deployment");
         };
@@ -658,7 +679,7 @@ mod tests {
             .iter()
             .find(|s| s.key == "extra_args")
             .expect("extra_args setting present");
-        assert!(extra_args_setting.value.contains("--jinja"));
+        assert!(extra_args_setting.value.contains("--verbose"));
 
         let env_setting = settings
             .iter()

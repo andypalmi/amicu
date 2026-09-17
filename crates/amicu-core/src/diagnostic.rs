@@ -328,6 +328,14 @@ pub mod catalog {
     /// verdict for this deployment is unverified. Mirrored in the plan's
     /// `CostPerformance.assumptions` (`amicu_engine::planner`).
     pub const CAP_EXTRA_ARGS_PRESENT: DiagnosticCode = DiagnosticCode::new(Category::Cap, 4);
+    // --- amicu-planning#151: typed chat template fields ---
+    /// `AMICU-CAP-005` - a `llama_cpp` settings block sets both
+    /// `chat_template` and `chat_template_file`. Error: they render mutually
+    /// exclusive flags (`--chat-template` vs `--chat-template-file`), so
+    /// having both set is ambiguous - `render_command` emits neither rather
+    /// than guessing which one should win, and `plan_launch` refuses to
+    /// build a launch at all.
+    pub const CAP_CHAT_TEMPLATE_CONFLICT: DiagnosticCode = DiagnosticCode::new(Category::Cap, 5);
     // --- amicu-planning#152: vLLM command renderer ---
     /// `AMICU-CAP-006` - a deployment's model artifact is GGUF but the
     /// runtime is vLLM. Warning, not an error: vLLM can load a single-file
@@ -411,7 +419,7 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 26] {
+    pub const fn all() -> [DiagnosticCode; 27] {
         [
             PARSE_UNCLOSED_BLOCK,
             PARSE_INVALID_SYNTAX,
@@ -422,6 +430,8 @@ pub mod catalog {
             CAP_EXTRA_ARG_DUPLICATES_TYPED,
             CAP_EXTRA_ARG_DENYLISTED,
             CAP_EXTRA_ARGS_PRESENT,
+            // amicu-planning#151 addition:
+            CAP_CHAT_TEMPLATE_CONFLICT,
             // amicu-planning#152 addition:
             CAP_VLLM_GGUF_EXPERIMENTAL,
             MEM_VRAM_EXCEEDED,
@@ -516,6 +526,10 @@ mod tests {
             "AMICU-CAP-003"
         );
         assert_eq!(catalog::CAP_EXTRA_ARGS_PRESENT.to_string(), "AMICU-CAP-004");
+        assert_eq!(
+            catalog::CAP_CHAT_TEMPLATE_CONFLICT.to_string(),
+            "AMICU-CAP-005"
+        );
         assert_eq!(
             catalog::CAP_VLLM_GGUF_EXPERIMENTAL.to_string(),
             "AMICU-CAP-006"

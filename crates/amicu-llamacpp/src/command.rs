@@ -15,10 +15,15 @@ use amicu_core::resource::LlamaCppSettings;
 /// `add_opt`, `-ctk`/`-ctv` are the K/V cache-type short forms, `-b`/`-ub` are
 /// the batch/ubatch short forms, `-np` is `--parallel`, `-fa` is
 /// `--flash-attn`. `--top-k`/`--top-p`/`--min-p`/`--repeat-penalty` have no
-/// short alias. Shared with [`crate::adapter`] diagnostics (`AMICU-CAP-002`),
-/// which flatten this via [`is_typed_flag`] so a duplicated flag in
-/// `extra_args` is detected against exactly what [`render_command`] renders,
-/// not a hand-maintained shadow list.
+/// short alias. `--chat-template` and `--chat-template-file` (amicu-planning#151,
+/// PR B) likewise have no documented short alias anywhere in this repo, so
+/// none is assumed. `--jinja`/`--no-jinja` are one `add_opt`'s paired
+/// spellings for the same boolean field (`common/arg.cpp`), grouped as one
+/// entry below; `--reasoning-format` has no short alias. Shared with
+/// [`crate::adapter`] diagnostics (`AMICU-CAP-002`), which flatten this via
+/// [`is_typed_flag`] so a duplicated flag in `extra_args` is detected against
+/// exactly what [`render_command`] renders, not a hand-maintained shadow
+/// list.
 pub(crate) const TYPED_FLAGS: &[&[&str]] = &[
     &["--model", "-m"],
     &["--port"],
@@ -35,6 +40,10 @@ pub(crate) const TYPED_FLAGS: &[&[&str]] = &[
     &["--ubatch-size", "-ub"],
     &["--parallel", "-np"],
     &["--flash-attn", "-fa"],
+    &["--chat-template"],
+    &["--chat-template-file"],
+    &["--jinja", "--no-jinja"],
+    &["--reasoning-format"],
 ];
 
 /// Whether `flag` is any alias of any typed field's flag (see
@@ -78,11 +87,18 @@ pub(crate) const DENYLISTED_ENV_KEYS: &[&str] = &[
 /// (`common/arg.cpp`) name the env var after the *field*
 /// (`n_batch`/`n_ubatch`/`n_parallel`), not the flag spelling, so the
 /// mechanical rule would derive `--batch`/`--ubatch`/`--n-parallel` - none a
-/// real flag - and silently miss the conflict.
+/// real flag - and silently miss the conflict. `LLAMA_ARG_THINK` is the same
+/// situation for `--reasoning-format` (amicu-planning#151 PR B, review
+/// hardening): `common/arg.cpp`'s `add_opt` for `--reasoning-format` calls
+/// `.set_env("LLAMA_ARG_THINK")` - named after the internal `params.think`
+/// field, not the flag - so the mechanical rule would derive
+/// `--reasoning-format` from the *wrong* env key (`LLAMA_ARG_REASONING_FORMAT`,
+/// which llama-server does not read at all) while missing the real one.
 const ENV_FLAG_OVERRIDES: &[(&str, &str)] = &[
     ("LLAMA_ARG_BATCH", "--batch-size"),
     ("LLAMA_ARG_UBATCH", "--ubatch-size"),
     ("LLAMA_ARG_N_PARALLEL", "--parallel"),
+    ("LLAMA_ARG_THINK", "--reasoning-format"),
 ];
 
 /// Map a `LLAMA_ARG_<X>` environment variable name to the CLI flag
@@ -111,13 +127,16 @@ pub(crate) fn llama_arg_env_flag(key: &str) -> Option<String> {
 /// Render the `llama-server` launch for `model_path` under `settings`.
 ///
 /// Typed flags are emitted first (`-m`, `--port`, `--ctx-size`,
-/// `--n-gpu-layers`, then any set sampling/KV-cache/batching/flash-attention
-/// field in field-declaration order), then `settings.extra_args` verbatim, in
-/// declaration order - it is argv order. Duplicate/denylisted flags are
-/// caught as diagnostics before this ever runs (`crate::adapter`); this
-/// function itself renders whatever it is given. `f32` fields render via
-/// `{}` (plain decimal, e.g. `0.6`), never scientific notation, at the
-/// magnitudes these settings take.
+/// `--n-gpu-layers`, then any set sampling/KV-cache/batching/flash-attention/
+/// chat-template/jinja/reasoning-format field in field-declaration order),
+/// then `settings.extra_args` verbatim, in declaration order - it is argv
+/// order. Duplicate/denylisted flags are caught as diagnostics before this
+/// ever runs (`crate::adapter`); this function itself renders whatever it is
+/// given. `f32` fields render via `{}` (plain decimal, e.g. `0.6`), never
+/// scientific notation, at the magnitudes these settings take.
+/// `chat_template`/`chat_template_file` are the one pair this function
+/// itself refuses to render together (see the match below) rather than
+/// leaving that entirely to the caller's pre-check.
 ///
 /// Returns `(argv, text)`: `argv` is the real argument vector (`argv[0]` =
 /// `llama-server`) that supervisors exec directly, and `text` is a shell-quoted
@@ -179,6 +198,34 @@ pub fn render_command(model_path: &Path, settings: &LlamaCppSettings) -> (Vec<St
     }
     if let Some(v) = settings.flash_attention {
         argv.push("--flash-attn".to_owned());
+        argv.push(v.to_string());
+    }
+    // `chat_template`/`chat_template_file` are mutually exclusive
+    // (`AMICU-CAP-005`, `crate::adapter::chat_template_conflict`): when both
+    // are set, this renders neither rather than guessing which one wins.
+    match (&settings.chat_template, &settings.chat_template_file) {
+        (Some(v), None) => {
+            argv.push("--chat-template".to_owned());
+            argv.push(v.clone());
+        }
+        (None, Some(v)) => {
+            argv.push("--chat-template-file".to_owned());
+            argv.push(v.clone());
+        }
+        (Some(_), Some(_)) | (None, None) => {}
+    }
+    // `--jinja`/`--no-jinja` is a paired bare-flag toggle (`common/arg.cpp`):
+    // `Some(true)`/`Some(false)` render the matching bare flag - an explicit
+    // `false` renders `--no-jinja` so it overrides an inherited
+    // `LLAMA_ARG_JINJA=1` rather than just omitting the flag - and `None`
+    // renders nothing, leaving llama-server's own default/environment as-is.
+    match settings.jinja {
+        Some(true) => argv.push("--jinja".to_owned()),
+        Some(false) => argv.push("--no-jinja".to_owned()),
+        None => {}
+    }
+    if let Some(v) = settings.reasoning_format {
+        argv.push("--reasoning-format".to_owned());
         argv.push(v.to_string());
     }
     argv.extend(settings.extra_args.iter().cloned());

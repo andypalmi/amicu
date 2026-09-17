@@ -62,6 +62,16 @@ pub enum LlamaCppError {
     #[error("download failed: {0}")]
     DownloadFailed(String),
 
+    /// The resolved artifact's checksum does not match the GGUF variant's
+    /// declared `sha256` (amicu-planning#151). Raised before
+    /// [`crate::download::download_gguf`] downloads any bytes - fail fast
+    /// rather than fetch a file already known to be wrong. Maps to
+    /// `AMICU-CAP-001`: like [`LlamaCppError::IncompatibleArtifact`], this is
+    /// "the resolved GGUF artifact is not the one this deployment requires",
+    /// just discovered by checksum instead of format.
+    #[error("artifact checksum mismatch: expected sha256:{expected}, resolved sha256:{actual}")]
+    ChecksumMismatch { expected: String, actual: String },
+
     /// The backend could not start the instance. Transient; maps to
     /// `AMICU-PROVIDER-001`.
     #[error("runtime backend failed: {0}")]
@@ -101,6 +111,12 @@ pub enum LlamaCppError {
         "env var `{key}` mirrors denylisted flag `{flag}` (llama-server reads LLAMA_ARG_* as CLI flags)"
     )]
     EnvKeyMirrorsDenylistedFlag { key: String, flag: String },
+
+    /// Both `chat_template` and `chat_template_file` are set on the same
+    /// settings block (amicu-planning#151): they render mutually exclusive
+    /// flags, so having both is ambiguous. Maps to `AMICU-CAP-005`.
+    #[error("chat_template and chat_template_file are mutually exclusive; set only one")]
+    ChatTemplateConflict,
 }
 
 impl AdapterErrorKind for LlamaCppError {
@@ -112,7 +128,8 @@ impl AdapterErrorKind for LlamaCppError {
             LlamaCppError::IncompatibleArtifact(_)
             | LlamaCppError::NoVariant(_)
             | LlamaCppError::WrongRuntime(_)
-            | LlamaCppError::VersionTooOld { .. } => catalog::CAP_RUNTIME_ARTIFACT_MISMATCH,
+            | LlamaCppError::VersionTooOld { .. }
+            | LlamaCppError::ChecksumMismatch { .. } => catalog::CAP_RUNTIME_ARTIFACT_MISMATCH,
             LlamaCppError::BinaryNotFound
             | LlamaCppError::UnparseableVersion(_)
             | LlamaCppError::Probe(_)
@@ -127,6 +144,7 @@ impl AdapterErrorKind for LlamaCppError {
             | LlamaCppError::EnvKeyMirrorsDenylistedFlag { .. } => {
                 catalog::CAP_EXTRA_ARG_DENYLISTED
             }
+            LlamaCppError::ChatTemplateConflict => catalog::CAP_CHAT_TEMPLATE_CONFLICT,
         }
     }
 

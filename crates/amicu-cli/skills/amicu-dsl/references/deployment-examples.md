@@ -71,6 +71,58 @@ These three fields are declared, not derived - amicu has no GGUF header
 parser - so leave them unset if you don't know them; the estimator falls back
 to the flat overhead band exactly as before.
 
+## llama.cpp: chat template, jinja, reasoning format, build pin, artifact checksum (amicu-planning#151 PR B)
+
+```hcl
+resource "model" "support_chat" {
+  # ... source, architecture, artifact ...
+  variant {
+    quantization = "q4_k_m"
+    file         = "support-chat.Q4_K_M.gguf"
+    # Verified against the resolved download artifact's checksum before any
+    # bytes are fetched - a mismatch fails fast, not after the download.
+    sha256       = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a1"
+  }
+}
+
+resource "deployment" "support_local_chat" {
+  model    = model.support_chat.id
+  hardware = hardware_profile.dev_mac.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 32768
+    port            = 8000
+    n_gpu_layers    = -1
+
+    # Exactly one of chat_template / chat_template_file - setting both is
+    # AMICU-CAP-005 and the launch is refused.
+    chat_template_file = "/models/support_chat/chat.jinja"
+
+    # Enable Jinja chat-template rendering. A paired bare-flag toggle:
+    # true -> --jinja, false -> --no-jinja (explicitly overrides an
+    # inherited LLAMA_ARG_JINJA=1), unset -> renders nothing.
+    jinja = true
+
+    # How reasoning/thinking blocks are extracted: "none" | "deepseek" |
+    # "deepseek_legacy" | "auto". Renders as --reasoning-format on argv;
+    # "deepseek_legacy" renders as the hyphenated "deepseek-legacy" (the
+    # other three values are spelled the same in HCL and argv).
+    reasoning_format = "deepseek"
+
+    # A build tag ("b4500") or git sha. Stored/validated only - not yet
+    # rendered into argv or enforced against the detected binary.
+    build = "b4500"
+  }
+}
+```
+
+`chat_template` (inline Jinja text) and `chat_template_file` (a path) render
+`--chat-template`/`--chat-template-file` respectively; setting both on the
+same block is a schema/capability conflict (`AMICU-CAP-005`) - `render_command`
+emits neither flag and `plan_launch` refuses to build the launch. All five
+fields above are optional and independent of each other and of the
+sampling/KV-cache/batching fields from PR A.
+
 ## vLLM deployment (production)
 
 ```hcl
@@ -119,16 +171,16 @@ resource "deployment" "vision_spec_local" {
     context_length = 32768
     port           = 8000
     n_gpu_layers   = -1
-    # Sampling, KV-cache dtype, batching, flash-attn and parallel slots are
-    # typed fields (see above) - put them there, not here. What remains
-    # untyped after amicu-planning#151's PR A (speculative decoding,
-    # multimodal projector, chat template/pins) still goes through
-    # extra_args, tracked as separate PRs against the same issue.
+    # Sampling, KV-cache dtype, batching, flash-attn, parallel slots, chat
+    # template, jinja, and reasoning-format are all typed fields (see above)
+    # - put them there, not here. What remains untyped after
+    # amicu-planning#151 (speculative decoding, multimodal projector) still
+    # goes through extra_args, tracked as separate PRs against the same
+    # issue.
     extra_args = [
       "--mmproj", "/models/vision/mmproj-f16.gguf",
       "--model-draft", "/models/vision/draft-q4.gguf",
       "--spec-type", "draft-dflash,ngram-map-k4v",
-      "--jinja", "--chat-template-file", "/models/vision/chat.jinja",
     ]
     env {
       GGML_CUDA_DISABLE_GRAPHS = "1"
@@ -142,11 +194,15 @@ Rules and caveats:
   `--ctx-size`, `--n-gpu-layers`, `--temp`/`--temperature`, `--top-p`,
   `--top-k`, `--min-p`, `--repeat-penalty`, `--cache-type-k`/`-ctk`,
   `--cache-type-v`/`-ctv`, `--batch-size`/`-b`, `--ubatch-size`/`-ub`,
-  `--parallel`/`-np`, `--flash-attn`/`-fa`, in either `--foo value` or
-  `--foo=value` form) is rejected with `AMICU-CAP-002` - fix the ambiguity by
-  removing one side, not by hoping the last one wins. The same check applies
-  to an `env` entry whose key is `LLAMA_ARG_<X>` and mirrors one of those
-  flags (e.g. `LLAMA_ARG_TEMP`, `LLAMA_ARG_CACHE_TYPE_K`).
+  `--parallel`/`-np`, `--flash-attn`/`-fa`, `--chat-template`,
+  `--chat-template-file`, `--jinja`/`--no-jinja`, `--reasoning-format`, in
+  either `--foo value` or `--foo=value` form) is rejected with
+  `AMICU-CAP-002` - fix the ambiguity by removing one side, not by hoping
+  the last one wins. The same check applies to an `env` entry whose key is
+  `LLAMA_ARG_<X>` and mirrors one of those flags (e.g. `LLAMA_ARG_TEMP`,
+  `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CHAT_TEMPLATE`, and `LLAMA_ARG_THINK`
+  for `--reasoning-format` - not `LLAMA_ARG_REASONING_FORMAT`, which
+  llama-server does not read).
 - A denylisted flag (`--host`, `--api-key`, `--api-key-file`,
   `--ssl-key-file`) is rejected with `AMICU-CAP-003`: amicu owns the bind
   address, and the others put secret material - or a path to it - directly
@@ -162,6 +218,10 @@ Rules and caveats:
   `AMICU-POLICY-006` warning nudging it toward a `credential` resource
   instead; this is a heuristic, not a hard rejection like `credential.env`'s
   `AMICU-POLICY-004`.
+- Setting both `chat_template` and `chat_template_file` on the same
+  `llama_cpp {}` block is `AMICU-CAP-005` (amicu-planning#151 PR B): they
+  render mutually exclusive flags, so `render_command` emits neither and
+  `plan_launch` refuses the launch - fix by removing one.
 - `extra_args`/`env` fields on the `vllm {}` block parse the same way, ahead
   of the vLLM command renderer that will consume them.
 

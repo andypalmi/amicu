@@ -93,6 +93,49 @@ impl std::fmt::Display for FlashAttention {
     }
 }
 
+/// `llama-server`'s `--reasoning-format` value: how reasoning/thinking
+/// blocks in the model's output are extracted and surfaced (amicu-planning#151).
+/// The four-value set `common/chat.cpp`'s `common_reasoning_format_name`/
+/// `common_reasoning_format_from_name` define: `none` (leave reasoning
+/// inline), `deepseek` (current DeepSeek-R1-style extraction, in
+/// `message.reasoning_content`), `deepseek_legacy` (the older extraction
+/// behavior, `<think>` tags kept in `message.content` while also populating
+/// `message.reasoning_content`), `auto` (runtime-detected, the CLI default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningFormat {
+    None,
+    Deepseek,
+    DeepseekLegacy,
+    Auto,
+}
+
+impl ReasoningFormat {
+    /// The exact spelling `llama-server` accepts for `--reasoning-format`.
+    /// Matches this type's `snake_case` serde/HCL form for every variant
+    /// except [`ReasoningFormat::DeepseekLegacy`]: `common_reasoning_format_name`
+    /// (`common/chat.cpp`) returns the CLI/argv value `"deepseek-legacy"`
+    /// (hyphenated) for it, not `"deepseek_legacy"` - the HCL schema value
+    /// stays underscored (matching every other `snake_case` enum in this
+    /// crate), but the rendered argv token must be the hyphenated spelling
+    /// or `llama-server` rejects it with "Unknown reasoning format".
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            ReasoningFormat::None => "none",
+            ReasoningFormat::Deepseek => "deepseek",
+            ReasoningFormat::DeepseekLegacy => "deepseek-legacy",
+            ReasoningFormat::Auto => "auto",
+        }
+    }
+}
+
+impl std::fmt::Display for ReasoningFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// vLLM's `--kv-cache-dtype` value set, distinct from [`KvCacheType`] (vLLM's
 /// spellings and options do not match llama.cpp's).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -181,6 +224,29 @@ pub struct LlamaCppSettings {
     /// Flash-attention mode (`--flash-attn`); a three-way toggle, not a bool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flash_attention: Option<FlashAttention>,
+    /// Inline Jinja chat template text (`--chat-template`, amicu-planning#151).
+    /// Mutually exclusive with [`LlamaCppSettings::chat_template_file`] -
+    /// setting both is `AMICU-CAP-005` and renders neither flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template: Option<String>,
+    /// Path to a Jinja chat template file (`--chat-template-file`,
+    /// amicu-planning#151). See [`LlamaCppSettings::chat_template`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template_file: Option<String>,
+    /// Enable Jinja chat-template rendering (`--jinja`/`--no-jinja`,
+    /// amicu-planning#151): a paired bare-flag toggle (`common/arg.cpp`'s
+    /// `add_opt` for these registers both spellings under one option), not a
+    /// value-having flag. `Some(true)` renders `--jinja`; `Some(false)`
+    /// renders `--no-jinja` (so an explicit `false` here overrides an
+    /// inherited `LLAMA_ARG_JINJA=1` from the environment rather than just
+    /// omitting the flag); `None` renders nothing, leaving llama-server's own
+    /// default/environment in effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jinja: Option<bool>,
+    /// Reasoning/thinking-block extraction format (`--reasoning-format`,
+    /// amicu-planning#151).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_format: Option<ReasoningFormat>,
     /// Raw `llama-server` flags appended verbatim after the typed flags
     /// (amicu-planning#150): the escape hatch for the ~98% of the flag
     /// surface with no typed field yet. Declaration order is preserved -
@@ -193,6 +259,10 @@ pub struct LlamaCppSettings {
     /// and `Credential.env`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Runtime build pin (e.g. `"b4500"` or a git sha, amicu-planning#151).
+    /// Stored/validated only; not yet rendered or enforced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
