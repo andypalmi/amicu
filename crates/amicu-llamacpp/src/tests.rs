@@ -16,7 +16,7 @@ use amicu_core::id::{DeploymentId, HardwareProfileId, ModelId};
 use amicu_core::resource::{
     Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Deployment, GgufVariant,
     HardwareProfile, LlamaCppSettings, Modality, Model, ModelSource, Quantization, Runtime,
-    SourceRegistry,
+    SourceRegistry, SpeculativeSettings,
 };
 use amicu_core::secret::{SecretRef, SecretResolver, SecretValue};
 use amicu_registry::{
@@ -792,7 +792,7 @@ fn render_command_emits_new_typed_flags_when_set() {
         flash_attention: Some(amicu_core::resource::FlashAttention::Auto),
         ..Default::default()
     };
-    let (argv, text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let (argv, text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
 
     let pairs = |flag: &str| -> Option<String> {
         argv.iter()
@@ -823,7 +823,7 @@ fn render_command_omits_unset_new_fields() {
         n_gpu_layers: -1,
         ..Default::default()
     };
-    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
     for flag in [
         "--temp",
         "--top-p",
@@ -853,7 +853,7 @@ fn render_command_formats_f32_as_plain_decimal_not_scientific() {
         temperature: Some(0.6),
         ..Default::default()
     };
-    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
     let i = argv.iter().position(|a| a == "--temp").unwrap();
     assert_eq!(argv[i + 1], "0.6");
 }
@@ -870,7 +870,7 @@ fn render_command_appends_extra_args_after_typed_flags() {
         };
         s
     };
-    let (argv, text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let (argv, text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
     // Typed flags first, then extra_args verbatim, in declaration order.
     let typed_end = argv
         .iter()
@@ -894,7 +894,7 @@ fn render_command_emits_chat_template_jinja_reasoning_format_when_set() {
         reasoning_format: Some(amicu_core::resource::ReasoningFormat::Deepseek),
         ..Default::default()
     };
-    let (argv, text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let (argv, text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
 
     let pairs = |flag: &str| -> Option<String> {
         argv.iter()
@@ -916,7 +916,7 @@ fn render_command_emits_chat_template_file_when_set() {
         chat_template_file: Some("/models/chat.jinja".to_owned()),
         ..Default::default()
     };
-    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
     let i = argv
         .iter()
         .position(|a| a == "--chat-template-file")
@@ -934,7 +934,7 @@ fn render_command_omits_both_jinja_flags_when_unset() {
         jinja: None,
         ..Default::default()
     };
-    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
     assert!(!argv.contains(&"--jinja".to_owned()));
     assert!(!argv.contains(&"--no-jinja".to_owned()));
 }
@@ -953,7 +953,7 @@ fn render_command_emits_no_jinja_when_explicitly_false() {
         jinja: Some(false),
         ..Default::default()
     };
-    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
     assert!(argv.contains(&"--no-jinja".to_owned()));
     assert!(!argv.contains(&"--jinja".to_owned()));
 }
@@ -972,7 +972,7 @@ fn render_command_emits_hyphenated_deepseek_legacy_reasoning_format() {
         reasoning_format: Some(amicu_core::resource::ReasoningFormat::DeepseekLegacy),
         ..Default::default()
     };
-    let (argv, text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let (argv, text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
     let i = argv
         .iter()
         .position(|a| a == "--reasoning-format")
@@ -993,7 +993,7 @@ fn render_command_renders_neither_chat_template_flag_when_both_are_set() {
         chat_template_file: Some("/models/chat.jinja".to_owned()),
         ..Default::default()
     };
-    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
     assert!(!argv.contains(&"--chat-template".to_owned()));
     assert!(!argv.contains(&"--chat-template-file".to_owned()));
 }
@@ -1006,7 +1006,7 @@ fn render_command_omits_unset_chat_template_jinja_reasoning_format_fields() {
         n_gpu_layers: -1,
         ..Default::default()
     };
-    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
     for flag in [
         "--chat-template",
         "--chat-template-file",
@@ -1035,7 +1035,7 @@ fn render_command_emits_multimodal_projector_and_offload_when_set() {
         }),
         ..Default::default()
     };
-    let (argv, text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let (argv, text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
     let i = argv
         .iter()
         .position(|a| a == "--mmproj")
@@ -1059,7 +1059,7 @@ fn render_command_emits_no_mmproj_offload_when_explicitly_false() {
         }),
         ..Default::default()
     };
-    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
     assert!(!argv.contains(&"--mmproj".to_owned()));
     assert!(argv.contains(&"--no-mmproj-offload".to_owned()));
     assert!(!argv.contains(&"--mmproj-offload".to_owned()));
@@ -1073,7 +1073,7 @@ fn render_command_omits_multimodal_flags_when_unset() {
         n_gpu_layers: -1,
         ..Default::default()
     };
-    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
     for flag in ["--mmproj", "-mm", "--mmproj-offload", "--no-mmproj-offload"] {
         assert!(
             !argv.contains(&flag.to_owned()),
@@ -1975,6 +1975,456 @@ fn systemd_logs_use_journalctl_with_tail() {
     let call = exec.last();
     assert_eq!(call[0], "journalctl");
     assert!(call.contains(&"--lines=5".to_owned()));
+}
+
+// ---- amicu-planning#151 PR C: speculative decoding --------------------------
+
+/// [`gguf_model`] under a caller-chosen id, so one catalog can hold both a
+/// primary and a draft model.
+fn gguf_model_named(id: &str, sizes: &[(Quantization, &str, u64)]) -> Model {
+    let mut m = gguf_model(sizes);
+    m.id = ModelId::new(id);
+    m
+}
+
+/// A draft-model reference with no draft parameters set.
+fn draft_spec(model: &str) -> SpeculativeSettings {
+    SpeculativeSettings {
+        model: ModelId::new(model),
+        n_max: None,
+        n_min: None,
+        p_min: None,
+        n_gpu_layers: None,
+    }
+}
+
+/// `deployment()` carrying `spec` as its `speculative {}` block.
+fn speculative_deployment(spec: SpeculativeSettings) -> Deployment {
+    let mut d = deployment();
+    let Runtime::LlamaCpp(s) = &mut d.runtime else {
+        unreachable!("deployment() always builds a llama_cpp runtime");
+    };
+    s.speculative = Some(spec);
+    d
+}
+
+/// [`fitting_adapter`] plus a `tiny_draft` model of `draft_bytes`.
+fn adapter_with_draft(draft_bytes: u64) -> LlamaCppAdapter {
+    let catalog = MapCatalog::new()
+        .with_model(
+            gguf_model(&[(Quantization::Q4KM, "tiny.Q4_K_M.gguf", 4 * GIB)]),
+            7_000_000_000,
+        )
+        .with_model(
+            gguf_model_named(
+                "tiny_draft",
+                &[(Quantization::Q4KM, "draft.Q4_K_M.gguf", draft_bytes)],
+            ),
+            1_000_000_000,
+        )
+        .with_hardware(apple_silicon(16));
+    LlamaCppAdapter::new(Box::new(catalog), Box::new(FakeSupervisor::default()))
+}
+
+/// A catalog whose draft model comfortably fits alongside the primary one.
+fn speculative_adapter() -> LlamaCppAdapter {
+    adapter_with_draft(GIB)
+}
+
+// -- renderer --
+
+#[test]
+fn render_command_emits_speculative_flags_when_set() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        speculative: Some(SpeculativeSettings {
+            model: ModelId::new("tiny_draft"),
+            n_max: Some(8),
+            n_min: Some(2),
+            p_min: Some(0.75),
+            n_gpu_layers: Some(99),
+        }),
+        ..Default::default()
+    };
+    let (argv, text) = render_command(
+        Path::new("/models/tiny.gguf"),
+        Some(Path::new("/models/draft.gguf")),
+        &settings,
+    );
+    let i = argv
+        .iter()
+        .position(|a| a == "--model-draft")
+        .expect("--model-draft present");
+    assert_eq!(
+        &argv[i..i + 10],
+        [
+            "--model-draft",
+            "/models/draft.gguf",
+            "--spec-draft-n-max",
+            "8",
+            "--spec-draft-n-min",
+            "2",
+            "--draft-p-min",
+            "0.75",
+            "--n-gpu-layers-draft",
+            "99",
+        ]
+    );
+    assert!(text.contains("--model-draft /models/draft.gguf"));
+    assert!(text.contains("--spec-draft-n-max 8"));
+}
+
+// `--draft`/`--draft-n`/`--draft-max` and `--draft-min`/`--draft-n-min` were
+// *removed* upstream (`common/arg.cpp`'s "removed params" section aborts on
+// them), so the renderer must emit the `--spec-draft-n-*` spellings instead -
+// and `--spec-type` is never emitted at all, since llama.cpp infers the
+// speculative type from the draft GGUF's own metadata when a draft path is
+// set and no type is requested.
+#[test]
+fn render_command_never_emits_removed_or_redundant_speculative_spellings() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        speculative: Some(SpeculativeSettings {
+            model: ModelId::new("tiny_draft"),
+            n_max: Some(8),
+            n_min: Some(2),
+            p_min: Some(0.75),
+            n_gpu_layers: Some(99),
+        }),
+        ..Default::default()
+    };
+    let (argv, _text) = render_command(
+        Path::new("/models/tiny.gguf"),
+        Some(Path::new("/models/draft.gguf")),
+        &settings,
+    );
+    for flag in [
+        "--draft",
+        "--draft-n",
+        "--draft-max",
+        "--draft-min",
+        "--draft-n-min",
+        "--spec-draft-model",
+        "-md",
+        "--spec-type",
+    ] {
+        assert!(
+            !argv.contains(&flag.to_owned()),
+            "unexpected {flag} in {argv:?}"
+        );
+    }
+}
+
+#[test]
+fn render_command_emits_only_model_draft_when_no_draft_params_are_set() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        speculative: Some(draft_spec("tiny_draft")),
+        ..Default::default()
+    };
+    let (argv, _text) = render_command(
+        Path::new("/models/tiny.gguf"),
+        Some(Path::new("/models/draft.gguf")),
+        &settings,
+    );
+    assert!(argv.contains(&"--model-draft".to_owned()));
+    for flag in [
+        "--spec-draft-n-max",
+        "--spec-draft-n-min",
+        "--draft-p-min",
+        "--n-gpu-layers-draft",
+    ] {
+        assert!(
+            !argv.contains(&flag.to_owned()),
+            "unexpected {flag} in {argv:?}"
+        );
+    }
+}
+
+#[test]
+fn render_command_omits_all_speculative_flags_when_block_is_absent() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        ..Default::default()
+    };
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
+    for flag in [
+        "--model-draft",
+        "--spec-draft-n-max",
+        "--spec-draft-n-min",
+        "--draft-p-min",
+        "--n-gpu-layers-draft",
+    ] {
+        assert!(
+            !argv.contains(&flag.to_owned()),
+            "unexpected {flag} in {argv:?}"
+        );
+    }
+}
+
+// The draft path and the block travel together: neither half alone renders
+// anything, so a caller that resolved no draft never emits orphaned draft
+// parameters llama-server would apply to nothing.
+#[test]
+fn render_command_omits_draft_params_without_a_resolved_draft_path() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        speculative: Some(SpeculativeSettings {
+            model: ModelId::new("tiny_draft"),
+            n_max: Some(8),
+            ..draft_spec("tiny_draft")
+        }),
+        ..Default::default()
+    };
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
+    assert!(!argv.contains(&"--model-draft".to_owned()));
+    assert!(!argv.contains(&"--spec-draft-n-max".to_owned()));
+}
+
+#[test]
+fn render_command_appends_extra_args_after_speculative_flags() {
+    let mut settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        speculative: Some(draft_spec("tiny_draft")),
+        ..Default::default()
+    };
+    settings.extra_args = vec!["--verbose".to_owned()];
+    let (argv, _text) = render_command(
+        Path::new("/models/tiny.gguf"),
+        Some(Path::new("/models/draft.gguf")),
+        &settings,
+    );
+    assert_eq!(argv.last().map(String::as_str), Some("--verbose"));
+}
+
+// -- AMICU-CAP-002: extra_args / env duplicating the new flags --
+
+#[test]
+fn validate_reports_cap002_for_every_speculative_flag_spelling() {
+    for args in [
+        vec!["--model-draft", "/tmp/d.gguf"],
+        vec!["--spec-draft-model", "/tmp/d.gguf"],
+        vec!["-md", "/tmp/d.gguf"],
+        vec!["--spec-draft-n-max", "8"],
+        vec!["--draft-max", "8"],
+        vec!["--draft-n", "8"],
+        vec!["--draft", "8"],
+        vec!["--spec-draft-n-min", "2"],
+        vec!["--draft-min", "2"],
+        vec!["--draft-n-min", "2"],
+        vec!["--draft-p-min", "0.5"],
+        vec!["--spec-draft-p-min", "0.5"],
+        vec!["--n-gpu-layers-draft", "10"],
+        vec!["--spec-draft-ngl", "10"],
+        vec!["--gpu-layers-draft", "10"],
+        vec!["-ngld", "10"],
+    ] {
+        let diags = fitting_adapter().validate(&deployment_with_extra_args(&args));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+                    && d.severity == amicu_core::diagnostic::Severity::Error),
+            "expected AMICU-CAP-002 for {args:?}, got {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn validate_reports_cap002_for_speculative_flag_equals_form() {
+    let diags = fitting_adapter().validate(&deployment_with_extra_args(&["--model-draft=/tmp/d"]));
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED),
+        "expected AMICU-CAP-002, got {diags:?}"
+    );
+}
+
+// Every speculative env var llama-server registers derives, under the
+// mechanical `LLAMA_ARG_<X>` -> `--<x>` rule, a spelling already listed in
+// `command::TYPED_FLAGS` - so none of them needs an `ENV_FLAG_OVERRIDES`
+// entry, and all of them must still be caught.
+#[test]
+fn validate_reports_cap002_for_speculative_llama_arg_env_keys() {
+    for key in [
+        "LLAMA_ARG_SPEC_DRAFT_MODEL",
+        "LLAMA_ARG_SPEC_DRAFT_N_MAX",
+        "LLAMA_ARG_SPEC_DRAFT_N_MIN",
+        "LLAMA_ARG_SPEC_DRAFT_P_MIN",
+        "LLAMA_ARG_N_GPU_LAYERS_DRAFT",
+        "LLAMA_ARG_DRAFT_MAX",
+        "LLAMA_ARG_DRAFT_MIN",
+    ] {
+        let diags = fitting_adapter().validate(&deployment_with_env(&[(key, "1")]));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+                    && d.severity == amicu_core::diagnostic::Severity::Error),
+            "expected AMICU-CAP-002 for {key}, got {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn plan_launch_errors_on_speculative_flag_duplicate_in_extra_args() {
+    let err = fitting_adapter()
+        .plan_launch(&deployment_with_extra_args(&["--model-draft", "/tmp/d"]))
+        .expect_err("--model-draft must be rejected");
+    assert_eq!(err.code(), catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED);
+}
+
+// -- AMICU-CAP-007: draft model is the primary model --
+
+#[test]
+fn validate_reports_cap007_when_draft_model_is_the_primary_model() {
+    let d = speculative_deployment(draft_spec("tiny_llama"));
+    let diags = speculative_adapter().validate(&d);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == catalog::CAP_SPECULATIVE_DRAFT_IS_PRIMARY
+                && d.severity == amicu_core::diagnostic::Severity::Error),
+        "expected AMICU-CAP-007, got {diags:?}"
+    );
+}
+
+#[test]
+fn plan_launch_errors_on_cap007_draft_model_is_the_primary_model() {
+    let d = speculative_deployment(draft_spec("tiny_llama"));
+    let err = speculative_adapter()
+        .plan_launch(&d)
+        .expect_err("a self-referential draft model must be rejected");
+    assert_eq!(err.code(), catalog::CAP_SPECULATIVE_DRAFT_IS_PRIMARY);
+}
+
+// -- missing draft reference: the same AMICU-REF-001 class the primary
+// `model` reference raises --
+
+#[test]
+fn validate_reports_ref001_for_an_unresolved_draft_model_reference() {
+    let d = speculative_deployment(draft_spec("no_such_draft"));
+    let diags = speculative_adapter().validate(&d);
+    assert!(
+        diags.iter().any(|d| d.code == catalog::REF_UNKNOWN_RESOURCE
+            && d.severity == amicu_core::diagnostic::Severity::Error),
+        "expected AMICU-REF-001, got {diags:?}"
+    );
+}
+
+#[test]
+fn plan_launch_errors_on_an_unresolved_draft_model_reference() {
+    let d = speculative_deployment(draft_spec("no_such_draft"));
+    let err = speculative_adapter()
+        .plan_launch(&d)
+        .expect_err("an unresolved draft reference must be rejected");
+    assert_eq!(err.code(), catalog::REF_UNKNOWN_RESOURCE);
+}
+
+// -- resolution / rendering through the adapter --
+
+#[test]
+fn validate_is_clean_for_a_resolvable_draft_model() {
+    let d = speculative_deployment(draft_spec("tiny_draft"));
+    let diags = speculative_adapter().validate(&d);
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+#[test]
+fn plan_launch_renders_the_resolved_draft_gguf_path() {
+    let d = speculative_deployment(SpeculativeSettings {
+        n_max: Some(5),
+        ..draft_spec("tiny_draft")
+    });
+    let plan = speculative_adapter().plan_launch(&d).expect("plan");
+    let RenderedLaunch::Command { argv, .. } = &plan.rendered else {
+        panic!("expected a command launch");
+    };
+    let i = argv
+        .iter()
+        .position(|a| a == "--model-draft")
+        .expect("--model-draft present");
+    // The draft GGUF is staged under its own model id, exactly like the
+    // primary model's - never the HCL reference.
+    assert!(
+        argv[i + 1].ends_with("tiny_draft/draft.Q4_K_M.gguf"),
+        "unexpected draft path {}",
+        argv[i + 1]
+    );
+    assert_ne!(argv[i + 1], "tiny_draft");
+    assert_eq!(argv[i + 2], "--spec-draft-n-max");
+    assert_eq!(argv[i + 3], "5");
+}
+
+// -- fit: draft weights count toward device memory --
+
+#[test]
+fn plan_launch_adds_draft_weights_to_the_memory_estimate() {
+    let without = fitting_adapter().plan_launch(&deployment()).expect("plan");
+    let with = speculative_adapter()
+        .plan_launch(&speculative_deployment(draft_spec("tiny_draft")))
+        .expect("plan");
+    assert!(
+        with.estimate.estimated_memory.bytes() > without.estimate.estimated_memory.bytes(),
+        "draft weights must raise the estimate: {} vs {}",
+        with.estimate.estimated_memory,
+        without.estimate.estimated_memory
+    );
+}
+
+// The point of the fit change: an otherwise-fitting deployment stops fitting
+// once the draft model's weights are counted against the same pool.
+#[test]
+fn draft_model_weights_can_push_an_otherwise_fitting_config_over_the_limit() {
+    // 16 GiB unified, 2 GiB reserve -> 14 GiB available. A 4 GiB primary fits
+    // alone; a 4 GiB primary plus an 11 GiB draft does not.
+    let d = speculative_deployment(draft_spec("tiny_draft"));
+    assert!(
+        adapter_with_draft(GIB).validate(&d).is_empty(),
+        "a 4 GiB + 1 GiB pair must still fit"
+    );
+    let diags = adapter_with_draft(11 * GIB).validate(&d);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == catalog::MEM_ARTIFACT_OVERSIZE
+                && d.severity == amicu_core::diagnostic::Severity::Error),
+        "expected a memory diagnostic once draft weights are counted, got {diags:?}"
+    );
+}
+
+#[test]
+fn a_non_gguf_draft_model_is_a_capability_error() {
+    let mut draft = safetensors_model();
+    draft.id = ModelId::new("tiny_draft");
+    let catalog = MapCatalog::new()
+        .with_model(
+            gguf_model(&[(Quantization::Q4KM, "tiny.Q4_K_M.gguf", 4 * GIB)]),
+            7_000_000_000,
+        )
+        .with_model(draft, 1_000_000_000)
+        .with_hardware(apple_silicon(16));
+    let adapter = LlamaCppAdapter::new(Box::new(catalog), Box::new(FakeSupervisor::default()));
+    let diags = adapter.validate(&speculative_deployment(draft_spec("tiny_draft")));
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == catalog::CAP_RUNTIME_ARTIFACT_MISMATCH),
+        "expected AMICU-CAP-001 for a safetensors draft, got {diags:?}"
+    );
 }
 
 // ---- real child process (ignored by default) --------------------------------

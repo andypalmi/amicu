@@ -6,7 +6,8 @@ use serde::Serialize;
 
 use amicu_core::graph::Graph;
 use amicu_core::resource::{
-    Credential, Deployment, HardwareProfile, Model, Money, Residency, Runtime, Tenant, VllmSettings,
+    Credential, Deployment, HardwareProfile, Model, Money, Residency, Runtime, SpeculativeSettings,
+    Tenant, VllmSettings,
 };
 use amicu_core::secret::SecretRef;
 
@@ -180,6 +181,17 @@ fn validate_references(graph: &Graph) -> Result<(), HclError> {
             format!("deployment `{id}` hardware reference"),
             d.hardware_profile.as_str(),
         )?;
+        // The llama.cpp `speculative {}` draft model is emitted as a
+        // `model.<id>.id` traversal like any other edge, so it needs the same
+        // identifier check (amicu-planning#151 PR C).
+        if let Runtime::LlamaCpp(s) = &d.runtime
+            && let Some(spec) = &s.speculative
+        {
+            check(
+                format!("deployment `{id}` speculative draft model reference"),
+                spec.model.as_str(),
+            )?;
+        }
     }
     for p in &graph.routing_policies {
         for t in &p.targets {
@@ -362,6 +374,9 @@ fn deployment_block(d: &Deployment) -> Block {
             if let Some(v) = &s.reasoning_format {
                 b = b.add_attribute(("reasoning_format", variant(v)));
             }
+            if let Some(spec) = &s.speculative {
+                b = b.add_block(speculative_block(spec));
+            }
             if !s.extra_args.is_empty() {
                 b = b.add_attribute(("extra_args", str_array(&s.extra_args)));
             }
@@ -392,6 +407,29 @@ fn deployment_block(d: &Deployment) -> Block {
         }
     }
     resource("deployment", d.id.as_str(), body.build())
+}
+
+/// A llama.cpp `speculative {}` block (amicu-planning#151 PR C). `model` is
+/// emitted as a `model.<id>.id` traversal - the same reference form the
+/// deployment's own `model` attribute uses - because it is a real graph edge,
+/// not a path string. Its identifier-safety is checked up front by
+/// [`validate_references`].
+fn speculative_block(s: &SpeculativeSettings) -> Block {
+    let mut b = Block::builder("speculative")
+        .add_attribute(("model", reference("model", s.model.as_str())));
+    if let Some(v) = s.n_max {
+        b = b.add_attribute(("n_max", v));
+    }
+    if let Some(v) = s.n_min {
+        b = b.add_attribute(("n_min", v));
+    }
+    if let Some(v) = s.p_min {
+        b = b.add_attribute(("p_min", f64::from(v)));
+    }
+    if let Some(v) = s.n_gpu_layers {
+        b = b.add_attribute(("n_gpu_layers", v));
+    }
+    b.build()
 }
 
 fn vllm_block(s: &VllmSettings) -> Block {

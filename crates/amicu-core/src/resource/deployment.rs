@@ -166,6 +166,68 @@ impl std::fmt::Display for VllmKvCacheDtype {
     }
 }
 
+/// Speculative-decoding configuration for a llama.cpp deployment
+/// (amicu-planning#151 PR C).
+///
+/// The draft model is a *reference to a second `model` resource*, not a path:
+/// it is a real graph edge (checked by
+/// [`crate::graph::Graph::missing_references`], resolved through the same
+/// catalog the primary [`Deployment::model`] goes through), so the draft
+/// GGUF's file path and weight size are derived from the registry exactly like
+/// the primary model's are.
+///
+/// ## Upstream flag spellings
+///
+/// Verified against `common/arg.cpp` and `common/common.h` on
+/// `ggml-org/llama.cpp@master`. llama.cpp renamed the speculative flag family
+/// to a `--spec-draft-*` prefix and kept the older spellings as aliases on the
+/// same `add_opt` - *except* `--draft`/`--draft-n`/`--draft-max` and
+/// `--draft-min`/`--draft-n-min`, which were **removed** and now abort with
+/// "the argument has been removed. use --spec-draft-n-max ...". So the
+/// renderer emits, per field, the spelling the widest range of `llama-server`
+/// builds accepts, preferring the current one wherever the legacy spelling
+/// would hard-error:
+///
+/// | field | rendered flag | aliases | env |
+/// |---|---|---|---|
+/// | `model` | `--model-draft` | `--spec-draft-model`, `-md` | `LLAMA_ARG_SPEC_DRAFT_MODEL` |
+/// | `n_max` | `--spec-draft-n-max` | *(legacy `--draft-max` removed)* | `LLAMA_ARG_SPEC_DRAFT_N_MAX` |
+/// | `n_min` | `--spec-draft-n-min` | *(legacy `--draft-min` removed)* | `LLAMA_ARG_SPEC_DRAFT_N_MIN` |
+/// | `p_min` | `--draft-p-min` | `--spec-draft-p-min` | `LLAMA_ARG_SPEC_DRAFT_P_MIN` |
+/// | `n_gpu_layers` | `--n-gpu-layers-draft` | `--spec-draft-ngl`, `--gpu-layers-draft`, `-ngld` | `LLAMA_ARG_N_GPU_LAYERS_DRAFT` |
+///
+/// There is deliberately **no draft context-size field**: current upstream
+/// exposes no draft context-size flag at all
+/// (`common_params_speculative_draft` in `common/common.h` has no `n_ctx`
+/// member, and `common/arg.cpp` registers no
+/// `--ctx-size-draft`/`-cd`/`--spec-draft-c` option), so a typed field for it
+/// could only render a flag `llama-server` would reject.
+///
+/// `--spec-type` is likewise not rendered: with the type left at its default,
+/// `common/arg.cpp` infers the speculative type from the draft GGUF's own
+/// metadata whenever a draft path is set, so passing the draft model alone is
+/// how draft-model speculative decoding is turned on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpeculativeSettings {
+    /// The draft model: a reference to a second `model` resource. Must not be
+    /// the deployment's own primary model (`AMICU-CAP-007`).
+    pub model: ModelId,
+    /// Maximum number of tokens drafted per step (`--spec-draft-n-max`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_max: Option<u32>,
+    /// Minimum number of draft tokens to use (`--spec-draft-n-min`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_min: Option<u32>,
+    /// Minimum draft probability, below which drafting stops
+    /// (`--draft-p-min`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p_min: Option<f32>,
+    /// Draft-model layers offloaded to the accelerator
+    /// (`--n-gpu-layers-draft`); `-1` is llama-server's own "auto" default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_gpu_layers: Option<i32>,
+}
+
 /// Binds a model to a hardware profile with runtime-specific settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Deployment {
@@ -247,6 +309,12 @@ pub struct LlamaCppSettings {
     /// amicu-planning#151).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_format: Option<ReasoningFormat>,
+    /// Speculative decoding with a draft model (amicu-planning#151 PR C).
+    /// `None` - the default - is today's behavior exactly: no draft model is
+    /// resolved, no `--model-draft` is rendered, and the fit check counts only
+    /// the primary model's weights. See [`SpeculativeSettings`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speculative: Option<SpeculativeSettings>,
     /// Raw `llama-server` flags appended verbatim after the typed flags
     /// (amicu-planning#150): the escape hatch for the ~98% of the flag
     /// surface with no typed field yet. Declaration order is preserved -

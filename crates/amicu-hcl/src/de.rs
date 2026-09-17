@@ -11,7 +11,8 @@ use amicu_core::resource::{
     Accelerator, Artifact, Budget, Cpu, Credential, DataClass, Deployment, FlashAttention,
     GgufVariant, GovernanceRule, HardwareProfile, KvCacheType, LlamaCppSettings, Model,
     ModelSource, Money, MultimodalSettings, Price, Quota, ReasoningFormat, Region, Residency,
-    RoutingPolicy, RoutingTarget, Runtime, Tenant, UseCase, VllmKvCacheDtype, VllmSettings,
+    RoutingPolicy, RoutingTarget, Runtime, SpeculativeSettings, Tenant, UseCase, VllmKvCacheDtype,
+    VllmSettings,
 };
 use amicu_core::secret::SecretRef;
 use amicu_core::units::ByteSize;
@@ -161,6 +162,22 @@ fn deployment(name: &str, f: &Fields) -> Result<Deployment> {
                 chat_template_file: s.opt_string("chat_template_file")?,
                 jinja: s.opt_bool("jinja")?,
                 reasoning_format: s.opt_enum::<ReasoningFormat>("reasoning_format")?,
+                // `speculative { model = model.<id>.id ... }` - the draft
+                // model is a reference expression, parsed with the same
+                // `reference` helper the deployment's primary `model` uses
+                // (amicu-planning#151 PR C), so it is a real graph edge.
+                speculative: s
+                    .opt_block("speculative")
+                    .map(|spec| -> Result<SpeculativeSettings> {
+                        Ok(SpeculativeSettings {
+                            model: spec.reference("model")?.into(),
+                            n_max: spec.opt_u32("n_max")?,
+                            n_min: spec.opt_u32("n_min")?,
+                            p_min: spec.opt_f32("p_min")?,
+                            n_gpu_layers: spec.opt_i32("n_gpu_layers")?,
+                        })
+                    })
+                    .transpose()?,
                 extra_args: s.string_vec("extra_args")?,
                 env: match s.opt_block("env") {
                     Some(e) => e.string_map()?,
@@ -411,6 +428,10 @@ impl<'a> Fields<'a> {
 
     fn opt_u32(&self, key: &str) -> Result<Option<u32>> {
         self.attr(key).map_or(Ok(None), |_| self.u32(key).map(Some))
+    }
+
+    fn opt_i32(&self, key: &str) -> Result<Option<i32>> {
+        self.attr(key).map_or(Ok(None), |_| self.i32(key).map(Some))
     }
 
     fn f64(&self, key: &str) -> Result<f64> {

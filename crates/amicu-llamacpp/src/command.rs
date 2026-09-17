@@ -50,6 +50,26 @@ pub(crate) const TYPED_FLAGS: &[&[&str]] = &[
     &["--reasoning-format"],
     &["--mmproj", "-mm"],
     &["--mmproj-offload", "--no-mmproj-offload"],
+    // amicu-planning#151 PR C - the `speculative {}` block. llama.cpp renamed
+    // this whole family to a `--spec-draft-*` prefix and kept the older
+    // spellings as aliases on the same `add_opt` (`common/arg.cpp`), except
+    // `--draft`/`--draft-n`/`--draft-max` and `--draft-min`/`--draft-n-min`,
+    // which were *removed* (they now abort with "the argument has been
+    // removed. use --spec-draft-n-max ..."). Every spelling is listed here,
+    // the removed ones included: an `extra_args` entry using a removed
+    // spelling still names a setting amicu owns, and reporting that as
+    // `AMICU-CAP-002` is more useful than letting llama-server abort on it at
+    // launch.
+    &["--model-draft", "--spec-draft-model", "-md"],
+    &["--spec-draft-n-max", "--draft-max", "--draft-n", "--draft"],
+    &["--spec-draft-n-min", "--draft-min", "--draft-n-min"],
+    &["--draft-p-min", "--spec-draft-p-min"],
+    &[
+        "--n-gpu-layers-draft",
+        "--spec-draft-ngl",
+        "--gpu-layers-draft",
+        "-ngld",
+    ],
 ];
 
 /// Whether `flag` is any alias of any typed field's flag (see
@@ -106,6 +126,18 @@ pub(crate) const DENYLISTED_ENV_KEYS: &[&str] = &[
 /// and `--mmproj-offload`/`--no-mmproj-offload` calls `.set_env(...)` with
 /// the env var named after the long flag itself, so the mechanical rule
 /// already derives the right flag for both.
+///
+/// The `speculative {}` block (amicu-planning#151 PR C) deliberately adds no
+/// entry here: each of its five env vars mechanically derives a flag spelling
+/// that is already listed as an alias in [`TYPED_FLAGS`], so the fallback rule
+/// alone catches them - `LLAMA_ARG_SPEC_DRAFT_MODEL` -> `--spec-draft-model`,
+/// `LLAMA_ARG_SPEC_DRAFT_N_MAX` -> `--spec-draft-n-max`,
+/// `LLAMA_ARG_SPEC_DRAFT_N_MIN` -> `--spec-draft-n-min`,
+/// `LLAMA_ARG_SPEC_DRAFT_P_MIN` -> `--spec-draft-p-min`,
+/// `LLAMA_ARG_N_GPU_LAYERS_DRAFT` -> `--n-gpu-layers-draft`. The two legacy
+/// env vars llama-server still registers on its *removed* draft args,
+/// `LLAMA_ARG_DRAFT_MAX` and `LLAMA_ARG_DRAFT_MIN`, likewise derive
+/// `--draft-max`/`--draft-min`, both listed.
 const ENV_FLAG_OVERRIDES: &[(&str, &str)] = &[
     ("LLAMA_ARG_BATCH", "--batch-size"),
     ("LLAMA_ARG_UBATCH", "--ubatch-size"),
@@ -140,15 +172,24 @@ pub(crate) fn llama_arg_env_flag(key: &str) -> Option<String> {
 ///
 /// Typed flags are emitted first (`-m`, `--port`, `--ctx-size`,
 /// `--n-gpu-layers`, then any set sampling/KV-cache/batching/flash-attention/
-/// chat-template/jinja/reasoning-format/multimodal field in field-declaration
-/// order), then `settings.extra_args` verbatim, in declaration order - it is argv
-/// order. Duplicate/denylisted flags are caught as diagnostics before this
-/// ever runs (`crate::adapter`); this function itself renders whatever it is
-/// given. `f32` fields render via `{}` (plain decimal, e.g. `0.6`), never
-/// scientific notation, at the magnitudes these settings take.
+/// chat-template/jinja/reasoning-format/multimodal/speculative field in
+/// field-declaration order), then `settings.extra_args` verbatim, in
+/// declaration order - it is argv order. Duplicate/denylisted flags are
+/// caught as diagnostics before this ever runs (`crate::adapter`); this
+/// function itself renders whatever it is given. `f32` fields render via `{}`
+/// (plain decimal, e.g. `0.6`), never scientific notation, at the magnitudes
+/// these settings take.
 /// `chat_template`/`chat_template_file` are the one pair this function
 /// itself refuses to render together (see the match below) rather than
 /// leaving that entirely to the caller's pre-check.
+///
+/// `draft_model_path` is the resolved GGUF path of the `speculative {}`
+/// block's draft model, resolved by the caller from the registry exactly like
+/// `model_path` is (amicu-planning#151 PR C). It is passed separately rather
+/// than read off `settings` because `settings.speculative.model` is a *model
+/// resource reference*, not a path. `Some(_)` with no `settings.speculative`
+/// (or `None` with one) renders no draft flags at all: the two travel
+/// together, and the adapter never produces that combination.
 ///
 /// Returns `(argv, text)`: `argv` is the real argument vector (`argv[0]` =
 /// `llama-server`) that supervisors exec directly, and `text` is a shell-quoted
@@ -156,7 +197,11 @@ pub(crate) fn llama_arg_env_flag(key: &str) -> Option<String> {
 /// launch flags; secrets enter only through the process environment at apply
 /// time (`ServiceSupervisor::start`).
 #[must_use]
-pub fn render_command(model_path: &Path, settings: &LlamaCppSettings) -> (Vec<String>, String) {
+pub fn render_command(
+    model_path: &Path,
+    draft_model_path: Option<&Path>,
+    settings: &LlamaCppSettings,
+) -> (Vec<String>, String) {
     let mut argv = vec![
         "llama-server".to_owned(),
         "-m".to_owned(),
@@ -240,25 +285,68 @@ pub fn render_command(model_path: &Path, settings: &LlamaCppSettings) -> (Vec<St
         argv.push("--reasoning-format".to_owned());
         argv.push(v.to_string());
     }
-    // Multimodal projector (amicu-planning#151 PR D): `projector` and
-    // `offload` are independent. `--mmproj-offload`/`--no-mmproj-offload` is
-    // a paired bare-flag toggle exactly like `--jinja`/`--no-jinja` above -
-    // `Some(false)` renders the negative flag explicitly rather than
-    // omitting it, so it overrides an inherited `LLAMA_ARG_MMPROJ_OFFLOAD=1`.
-    if let Some(m) = &settings.multimodal {
-        if let Some(v) = &m.projector {
-            argv.push("--mmproj".to_owned());
-            argv.push(v.clone());
-        }
-        match m.offload {
-            Some(true) => argv.push("--mmproj-offload".to_owned()),
-            Some(false) => argv.push("--no-mmproj-offload".to_owned()),
-            None => {}
-        }
-    }
+    push_multimodal_flags(&mut argv, settings);
+    push_speculative_flags(&mut argv, draft_model_path, settings);
     argv.extend(settings.extra_args.iter().cloned());
     let text = shell_join(&argv);
     (argv, text)
+}
+
+/// Append the `multimodal {}` block's flags (amicu-planning#151 PR D):
+/// `projector` and `offload` are independent. `--mmproj-offload`/
+/// `--no-mmproj-offload` is a paired bare-flag toggle exactly like
+/// `--jinja`/`--no-jinja` - `Some(false)` renders the negative flag
+/// explicitly rather than omitting it, so it overrides an inherited
+/// `LLAMA_ARG_MMPROJ_OFFLOAD=1`.
+fn push_multimodal_flags(argv: &mut Vec<String>, settings: &LlamaCppSettings) {
+    let Some(m) = &settings.multimodal else {
+        return;
+    };
+    if let Some(v) = &m.projector {
+        argv.push("--mmproj".to_owned());
+        argv.push(v.clone());
+    }
+    match m.offload {
+        Some(true) => argv.push("--mmproj-offload".to_owned()),
+        Some(false) => argv.push("--no-mmproj-offload".to_owned()),
+        None => {}
+    }
+}
+
+/// Append the `speculative {}` block's flags (amicu-planning#151 PR C). The
+/// draft path and the typed draft knobs render together: without a resolved
+/// draft model there is nothing for the draft parameters to apply to, and
+/// llama-server ignores them. See `SpeculativeSettings` for why each spelling
+/// below is the one emitted (`--spec-draft-n-max`/`-n-min` because their
+/// legacy `--draft-max`/`--draft-min` spellings were removed upstream and now
+/// abort; the others because their legacy spelling is still a live alias and
+/// works on more builds).
+fn push_speculative_flags(
+    argv: &mut Vec<String>,
+    draft_model_path: Option<&Path>,
+    settings: &LlamaCppSettings,
+) {
+    let (Some(path), Some(spec)) = (draft_model_path, settings.speculative.as_ref()) else {
+        return;
+    };
+    argv.push("--model-draft".to_owned());
+    argv.push(path.display().to_string());
+    if let Some(v) = spec.n_max {
+        argv.push("--spec-draft-n-max".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = spec.n_min {
+        argv.push("--spec-draft-n-min".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = spec.p_min {
+        argv.push("--draft-p-min".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = spec.n_gpu_layers {
+        argv.push("--n-gpu-layers-draft".to_owned());
+        argv.push(v.to_string());
+    }
 }
 
 /// Join `argv` into a display line, single-quoting any token that is not a

@@ -160,6 +160,84 @@ independent of each other. `multimodal {}` is llama.cpp-only: it backs the
 `multimodal` block on a `vllm {}` settings block is a schema error at parse
 time, not a capability diagnostic.
 
+## llama.cpp: speculative decoding with a draft model (amicu-planning#151 PR C)
+
+The draft model is a **second `model` resource**, referenced by a real graph
+edge - not a path string. Its GGUF is resolved and staged exactly like the
+primary model's, and its weights count toward the fit check.
+
+```hcl
+resource "model" "qwen3_8b" {
+  source {
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen3-8B-GGUF"
+  }
+  architecture = "qwen3"
+  artifact { format = "gguf" }
+  variant {
+    quantization = "q4_k_m"
+    file         = "Qwen3-8B-Q4_K_M.gguf"
+  }
+}
+
+# The draft model: a smaller sibling, declared as its own model resource.
+resource "model" "qwen3_0_6b_draft" {
+  source {
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen3-0.6B-GGUF"
+  }
+  architecture = "qwen3"
+  artifact { format = "gguf" }
+  variant {
+    quantization = "q4_k_m"
+    file         = "Qwen3-0.6B-Q4_K_M.gguf"
+  }
+}
+
+resource "deployment" "qwen3_local_spec" {
+  model    = model.qwen3_8b.id
+  hardware = hardware_profile.dev_mac.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 32768
+    port           = 8000
+    n_gpu_layers   = -1
+
+    speculative {
+      # Required: a reference to a *different* model resource. Naming this
+      # deployment's own model is AMICU-CAP-007 and the launch is refused.
+      model = model.qwen3_0_6b_draft.id
+
+      # All four draft parameters are optional and independent.
+      n_max        = 8    # --spec-draft-n-max: max tokens drafted per step
+      n_min        = 2    # --spec-draft-n-min: min draft tokens to use
+      p_min        = 0.75 # --draft-p-min: stop drafting below this probability
+      n_gpu_layers = 99   # --n-gpu-layers-draft: draft layers on the accelerator
+    }
+  }
+}
+```
+
+Behavior:
+
+- Omitting `speculative {}` is exactly today's behavior - nothing extra is
+  resolved, rendered, or counted.
+- `speculative.model` is validated like any other reference: a dangling id is
+  `AMICU-REF-001`; a non-GGUF draft artifact, or a draft model declaring no
+  GGUF variant, is `AMICU-CAP-001`; the deployment's own model is
+  `AMICU-CAP-007`.
+- The draft model's weights are added to the fit check's weights total, so a
+  config that fits alone can correctly stop fitting once a draft model is
+  declared. The plan records
+  `"speculative: draft model weights included, draft KV cache not estimated"`
+  in its assumptions - the draft model's KV cache is *not* estimated, since
+  that needs the draft model's own layer/head shape.
+- There is no draft context-size field: current upstream llama.cpp exposes no
+  draft context-size flag at all (`common_params_speculative_draft` has no
+  `n_ctx` member, and `common/arg.cpp` registers no `--ctx-size-draft`). See
+  `amicu-local/references/llama-server-args.md` for the full flag/env table
+  and the alias/removal details.
+
 ## vLLM deployment (production)
 
 ```hcl
@@ -209,15 +287,20 @@ resource "deployment" "vision_spec_local" {
     port           = 8000
     n_gpu_layers   = -1
     # Sampling, KV-cache dtype, batching, flash-attn, parallel slots, chat
-    # template, jinja, reasoning-format, and multimodal projector are all
-    # typed fields (see above) - put them there, not here. What remains
-    # untyped after amicu-planning#151 (speculative decoding) still goes
-    # through extra_args, tracked as a separate PR against the same issue.
+    # template, jinja, reasoning-format, multimodal projector, and
+    # speculative decoding are all typed fields (see above) - put them
+    # there, not here. Passing any of their flags (including --mmproj or
+    # --model-draft and friends) through extra_args is AMICU-CAP-002. What
+    # remains untyped after amicu-planning#151 (the speculative *type*/ngram
+    # knobs) still goes through extra_args, tracked as a separate PR against
+    # the same issue.
     multimodal {
       projector = "/models/vision/mmproj-f16.gguf"
     }
+    speculative {
+      model = model.vision_chat_draft.id
+    }
     extra_args = [
-      "--model-draft", "/models/vision/draft-q4.gguf",
       "--spec-type", "draft-dflash,ngram-map-k4v",
     ]
     env {
@@ -234,14 +317,19 @@ Rules and caveats:
   `--cache-type-v`/`-ctv`, `--batch-size`/`-b`, `--ubatch-size`/`-ub`,
   `--parallel`/`-np`, `--flash-attn`/`-fa`, `--chat-template`,
   `--chat-template-file`, `--jinja`/`--no-jinja`, `--reasoning-format`,
-  `--mmproj`/`-mm`, `--mmproj-offload`/`--no-mmproj-offload`, in either
-  `--foo value` or `--foo=value` form) is rejected with `AMICU-CAP-002` -
-  fix the ambiguity by removing one side, not by hoping the last one wins.
-  The same check applies to an `env` entry whose key is `LLAMA_ARG_<X>` and
-  mirrors one of those flags (e.g. `LLAMA_ARG_TEMP`, `LLAMA_ARG_CACHE_TYPE_K`,
-  `LLAMA_ARG_CHAT_TEMPLATE`, `LLAMA_ARG_MMPROJ`, `LLAMA_ARG_MMPROJ_OFFLOAD`,
-  and `LLAMA_ARG_THINK` for `--reasoning-format` - not
-  `LLAMA_ARG_REASONING_FORMAT`, which llama-server does not read).
+  `--mmproj`/`-mm`, `--mmproj-offload`/`--no-mmproj-offload`, and every
+  speculative spelling - `--model-draft`/`--spec-draft-model`/`-md`,
+  `--spec-draft-n-max`/`--draft-max`/`--draft-n`/`--draft`,
+  `--spec-draft-n-min`/`--draft-min`/`--draft-n-min`,
+  `--draft-p-min`/`--spec-draft-p-min`,
+  `--n-gpu-layers-draft`/`--spec-draft-ngl`/`--gpu-layers-draft`/`-ngld` - in
+  either `--foo value` or `--foo=value` form) is rejected with
+  `AMICU-CAP-002` - fix the ambiguity by removing one side, not by hoping
+  the last one wins. The same check applies to an `env` entry whose key is
+  `LLAMA_ARG_<X>` and mirrors one of those flags (e.g. `LLAMA_ARG_TEMP`,
+  `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CHAT_TEMPLATE`, `LLAMA_ARG_MMPROJ`,
+  `LLAMA_ARG_MMPROJ_OFFLOAD`, and `LLAMA_ARG_THINK` for `--reasoning-format` -
+  not `LLAMA_ARG_REASONING_FORMAT`, which llama-server does not read).
 - A denylisted flag (`--host`, `--api-key`, `--api-key-file`,
   `--ssl-key-file`) is rejected with `AMICU-CAP-003`: amicu owns the bind
   address, and the others put secret material - or a path to it - directly
@@ -250,8 +338,8 @@ Rules and caveats:
 - Any non-empty `extra_args` gets an informational `AMICU-CAP-004`, and the
   plan's cost/performance estimate is marked
   `"unverified: raw runtime flags present"` - the estimator cannot interpret
-  flags it doesn't have a typed model for (speculative decoding, chat
-  template, ...).
+  flags it doesn't have a typed model for (the speculative type/ngram knobs,
+  ...).
 - An `env` value that looks like a real secret (an AWS key, an OpenAI-style
   key, a PEM header, a JWT, or a long high-entropy token) gets a
   `AMICU-POLICY-006` warning nudging it toward a `credential` resource
@@ -261,6 +349,10 @@ Rules and caveats:
   `llama_cpp {}` block is `AMICU-CAP-005` (amicu-planning#151 PR B): they
   render mutually exclusive flags, so `render_command` emits neither and
   `plan_launch` refuses the launch - fix by removing one.
+- A `speculative {}` block whose draft `model` is the deployment's own model
+  is `AMICU-CAP-007` (amicu-planning#151 PR C): a draft model must be a
+  different, smaller model, or `llama-server` would load the same weights
+  twice for no speedup.
 - `extra_args`/`env` fields on the `vllm {}` block parse the same way, ahead
   of the vLLM command renderer that will consume them.
 - A `multimodal { ... }` block is only valid inside `llama_cpp {}`

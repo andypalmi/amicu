@@ -345,6 +345,15 @@ pub mod catalog {
     /// `CAP_CHAT_TEMPLATE_CONFLICT`, registered by the concurrently-landing
     /// amicu-planning#151 typed-fields PR (feat/typed-runtime-b, #146).
     pub const CAP_VLLM_GGUF_EXPERIMENTAL: DiagnosticCode = DiagnosticCode::new(Category::Cap, 6);
+    // --- amicu-planning#151 PR C: typed speculative-decoding block ---
+    /// `AMICU-CAP-007` - a `llama_cpp` deployment's `speculative { model = ... }`
+    /// draft reference names the deployment's own primary model. Error:
+    /// speculative decoding is only worth anything with a *smaller, cheaper*
+    /// draft model, so drafting with the target model itself is never intended -
+    /// `llama-server` would load the same weights a second time (doubling
+    /// memory for no speedup) and the fit check would count them twice.
+    pub const CAP_SPECULATIVE_DRAFT_IS_PRIMARY: DiagnosticCode =
+        DiagnosticCode::new(Category::Cap, 7);
     /// `AMICU-MEM-001` - model does not fit in available VRAM.
     pub const MEM_VRAM_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Mem, 1);
     /// `AMICU-MEM-002` - a single artifact/weight file exceeds the available
@@ -419,7 +428,7 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 27] {
+    pub const fn all() -> [DiagnosticCode; 28] {
         [
             PARSE_UNCLOSED_BLOCK,
             PARSE_INVALID_SYNTAX,
@@ -430,10 +439,12 @@ pub mod catalog {
             CAP_EXTRA_ARG_DUPLICATES_TYPED,
             CAP_EXTRA_ARG_DENYLISTED,
             CAP_EXTRA_ARGS_PRESENT,
-            // amicu-planning#151 addition:
+            // amicu-planning#151 additions:
             CAP_CHAT_TEMPLATE_CONFLICT,
             // amicu-planning#152 addition:
             CAP_VLLM_GGUF_EXPERIMENTAL,
+            // amicu-planning#151 PR C addition:
+            CAP_SPECULATIVE_DRAFT_IS_PRIMARY,
             MEM_VRAM_EXCEEDED,
             MEM_ARTIFACT_OVERSIZE,
             POLICY_BUDGET_EXCEEDED,
