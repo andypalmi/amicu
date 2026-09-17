@@ -27,7 +27,10 @@ import {
 } from '@/lib/wizard/format';
 import { errorMessage, looksLikeConfigDetail } from '@/lib/configs/format';
 
-const CURRENCIES = ['USD', 'EUR', 'GBP'] as const;
+// Exported so the guided wizard's <QuestionForm> (andypalmi/amicu-planning#85)
+// can reuse the same currency list for its money-question control instead of
+// re-declaring it.
+export const CURRENCIES = ['USD', 'EUR', 'GBP'] as const;
 
 const STEPS = ['Pick a preset', 'Requirements', 'Review & emit'] as const;
 
