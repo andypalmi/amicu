@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { requireSession } from '@/lib/auth/session';
 import { EngineConsole } from '@/components/engine/console';
 import { PageHeader } from '@/components/common/page-header';
+import { PageShell } from '@/components/common/page-shell';
 
 export const metadata: Metadata = { title: 'Console' };
 
@@ -13,13 +14,13 @@ export default async function AppHomePage() {
   await requireSession();
 
   return (
-    <main className="mx-auto w-full max-w-6xl space-y-6 px-6 py-10">
+    <PageShell size="lg">
       <PageHeader
         title="Console"
         description="Write your Amicu configuration, validate it, and plan the changes Amicu would apply. Toggle a prior configuration to see a diff."
       />
 
       <EngineConsole />
-    </main>
+    </PageShell>
   );
 }

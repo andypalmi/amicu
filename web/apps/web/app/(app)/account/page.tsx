@@ -15,6 +15,7 @@ import { requireSession } from '@/lib/auth/session';
 import { LogoutButton } from '@/components/logout-button';
 import { TierGate } from '@/components/tier-gate';
 import { PageHeader } from '@/components/common/page-header';
+import { PageShell } from '@/components/common/page-shell';
 
 export const metadata: Metadata = { title: 'Account' };
 
@@ -22,7 +23,7 @@ export default async function AccountPage() {
   const user = await requireSession();
 
   return (
-    <main className="mx-auto w-full max-w-2xl space-y-6 px-6 py-12">
+    <PageShell size="sm">
       <PageHeader title="Account" description="Your profile and plan." />
 
       <Card>
@@ -88,7 +89,7 @@ export default async function AccountPage() {
           </CardContent>
         </Card>
       </TierGate>
-    </main>
+    </PageShell>
   );
 }
 

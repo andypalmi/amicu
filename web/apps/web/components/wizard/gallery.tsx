@@ -13,6 +13,7 @@ import {
 import { ErrorAlert } from '@/components/common/error-alert';
 import { EmptyState } from '@/components/common/empty-state';
 import { LoadingState } from '@/components/common/loading-state';
+import { selectableCardClassName } from '@/components/common/selectable-card';
 import {
   constraintLabel,
   tierLabel,
@@ -96,10 +97,7 @@ export function Gallery({
       {state.presets.map((preset) => {
         const active = preset.id === selectedId;
         return (
-          <Card
-            key={preset.id}
-            className={active ? 'border-foreground/40 ring-1 ring-foreground/20' : undefined}
-          >
+          <Card key={preset.id} className={selectableCardClassName(active)}>
             <CardHeader>
               <div className="flex items-start justify-between gap-2">
                 <CardTitle>{preset.name}</CardTitle>

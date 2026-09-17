@@ -11,7 +11,7 @@ import { CandidateGrid } from '@/components/wizard/candidate-grid';
 import { CandidateReview } from '@/components/wizard/candidate-review';
 import { SaveConfigForm } from '@/components/configs/save-config-form';
 import { PlanPanel } from '@/components/engine/plan-panel';
-import { Stepper } from './stepper';
+import { Stepper } from '@/components/wizard/stepper';
 import {
   buildAnswers,
   type AnswerValue,
