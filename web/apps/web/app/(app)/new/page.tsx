@@ -56,9 +56,9 @@ export default async function NewConfigPage() {
       </div>
 
       <p className="text-sm text-muted-foreground">
-        Prefer the classic flow?{' '}
+        Prefer to start from a preset directly?{' '}
         <Link href="/wizard" className="underline underline-offset-2">
-          Use the preset wizard
+          Use the classic preset wizard
         </Link>
         .
       </p>
