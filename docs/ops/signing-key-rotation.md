@@ -14,8 +14,10 @@ signing key" section).
 `amicu-server` mints access tokens as Ed25519-signed JWTs and publishes the
 public half of every active/retiring key at `GET /.well-known/jwks.json`. Each
 key's `kid` is deterministically derived — `SHA256(public_key)` truncated to
-16 base64url characters — so the SAME key always produces the SAME `kid` on
-every replica, with no coordination or handshake required between them.
+22 base64url characters (132 bits, widened from an original 16/96 bits by
+andypalmi/amicu-planning#147) — so the SAME key always produces the SAME
+`kid` on every replica, with no coordination or handshake required between
+them.
 
 Two environment variables (each with a `_FILE` alternative) control the
 keyring:
@@ -141,7 +143,7 @@ gracefully, until that refresh happens.
 Identical `AMICU_SIGNING_KEY_PEM` / `AMICU_SIGNING_KEYS_RETIRING_PEM` env on
 every replica of a deployment implies an identical keyring, which implies an
 identical published JWKS on every replica. Because `kid` is deterministically
-derived from the public key (`SHA256(pubkey)` truncated to 16 base64url
+derived from the public key (`SHA256(pubkey)` truncated to 22 base64url
 characters), this holds with **zero coordination or handshake** between
 replicas — each one converges to the same key set purely by reading the same
 secret, independently. A token minted by one Cloud Run replica verifies on
