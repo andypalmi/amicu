@@ -428,7 +428,7 @@ fn validate_reports_ref_for_unknown_model() {
 
 #[test]
 fn validate_reports_cap004_when_extra_args_present() {
-    let diags = fitting_adapter().validate(&deployment_with_extra_args(&["--jinja"]));
+    let diags = fitting_adapter().validate(&deployment_with_extra_args(&["--verbose"]));
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].code, catalog::CAP_EXTRA_ARGS_PRESENT);
     assert_eq!(diags[0].severity, amicu_core::diagnostic::Severity::Info);
@@ -1005,12 +1005,12 @@ fn plan_launch_errors_on_cap003_denylisted_flag() {
 #[test]
 fn plan_launch_succeeds_with_only_informational_extra_args() {
     let plan = fitting_adapter()
-        .plan_launch(&deployment_with_extra_args(&["--jinja"]))
+        .plan_launch(&deployment_with_extra_args(&["--verbose"]))
         .expect("non-conflicting extra_args must not block plan_launch");
     let RenderedLaunch::Command { argv, .. } = &plan.rendered else {
         panic!("expected a command");
     };
-    assert!(argv.contains(&"--jinja".to_owned()));
+    assert!(argv.contains(&"--verbose".to_owned()));
 }
 
 #[test]
