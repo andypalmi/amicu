@@ -22,6 +22,9 @@
 use std::collections::HashMap;
 
 use amicu_core::diagnostic::{Diagnostic, Severity, SourceLocation, catalog};
+use amicu_core::graph::Graph;
+use amicu_core::id::DeploymentId;
+use amicu_core::resource::Runtime;
 
 /// Attribute keys whose string value is genuinely free text (as opposed to
 /// an id, enum token, or reference) and is therefore scanned. Kept
@@ -63,6 +66,61 @@ pub fn scan_secret_leaks(src: &str) -> Vec<Diagnostic> {
         }
     }
     out
+}
+
+/// Scan a runtime settings block's `env` map values (the llama.cpp / vLLM
+/// `extra_args`/`env` escape hatch, amicu-planning#150) for the same
+/// high-confidence secret shapes [`scan_secret_leaks`] looks for in free
+/// text, returning one `Warning`-severity [`Diagnostic`] (`AMICU-POLICY-006`)
+/// per match.
+///
+/// Unlike [`scan_secret_leaks`], this runs on the parsed [`Graph`] rather
+/// than raw source text: a runtime `env` value is a structured map, not
+/// free-form prose, so there is no comment to anchor a suppression marker to
+/// and no line number to report. The same structural-vs-heuristic split
+/// `credential.env` secret-designation draws (amicu-planning#119) applies
+/// here too, just one notch softer: unlike a `credential`, a runtime `env`
+/// map is not schema-directed to be secret-designated (it legitimately
+/// carries non-secret tuning knobs like `GGML_CUDA_DISABLE_GRAPHS=1`
+/// alongside the occasional pasted secret), so this is a nudge, not a
+/// rejection.
+#[must_use]
+pub fn scan_runtime_env_secrets(graph: &Graph) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for deployment in &graph.deployments {
+        let (block, env) = match &deployment.runtime {
+            Runtime::LlamaCpp(s) => ("llama_cpp", &s.env),
+            Runtime::Vllm(s) => ("vllm", &s.env),
+        };
+        for (key, value) in env {
+            if looks_like_secret_value(value) {
+                out.push(env_secret_finding(&deployment.id, block, key, value));
+            }
+        }
+    }
+    out
+}
+
+/// Build the `AMICU-POLICY-006` finding for one suspicious `env` value.
+fn env_secret_finding(
+    deployment_id: &DeploymentId,
+    block: &str,
+    key: &str,
+    value: &str,
+) -> Diagnostic {
+    let path = format!("{block}.env.{key}");
+    let mut d = Diagnostic::new(
+        catalog::POLICY_RUNTIME_ENV_SECRET_SUSPECTED,
+        Severity::Warning,
+        format!(
+            "deployment `{deployment_id}` {path} looks like it contains a secret value ({}). \
+             Move it to a `credential` resource's secret-designated `env` instead.",
+            redact(value)
+        ),
+    );
+    d.resource = Some(format!("deployment.{deployment_id}"));
+    d.path = Some(path);
+    d
 }
 
 /// A source line split into its code and (if any) trailing comment.

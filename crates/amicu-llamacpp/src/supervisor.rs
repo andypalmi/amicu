@@ -138,18 +138,33 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
                 )
             })?
             .to_vec();
-        // Secrets enter the process environment only - never argv or logs.
-        let env = secrets
+        let settings_env = match &plan.settings {
+            Runtime::LlamaCpp(s) => &s.env,
+            Runtime::Vllm(s) => &s.env,
+        };
+        // A settings `env` key that is also a resolved secret's name is
+        // ambiguous - refuse to guess which one the caller meant, rather than
+        // letting one silently shadow the other (amicu-planning#150).
+        if let Some(s) = secrets.iter().find(|s| settings_env.contains_key(&s.name)) {
+            return Err(LlamaCppError::Supervisor(format!(
+                "env var '{}' is set both by the deployment's `env` block and a resolved secret",
+                s.name
+            )));
+        }
+        // Merge order: settings.env first, then resolved secrets - never
+        // logged, and (per the collision check above) secrets never actually
+        // overwrite a settings value, only add distinct names.
+        let mut env: Vec<(String, String)> = settings_env
             .iter()
-            .map(|s| {
-                s.value
-                    .expose_secret_str()
-                    .map(|v| (s.name.clone(), v.to_owned()))
-                    .map_err(|_| {
-                        LlamaCppError::Supervisor(format!("secret '{}' is not valid utf-8", s.name))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        // Secrets enter the process environment only - never argv or logs.
+        for s in secrets {
+            let value = s.value.expose_secret_str().map_err(|_| {
+                LlamaCppError::Supervisor(format!("secret '{}' is not valid utf-8", s.name))
+            })?;
+            env.push((s.name.clone(), value.to_owned()));
+        }
         let label = format!("io.amicu.llama.{}", plan.deployment);
         let spec = ServiceSpec {
             label: label.clone(),

@@ -137,6 +137,11 @@ fn deployment(name: &str, f: &Fields) -> Result<Deployment> {
                 context_length: s.u32("context_length")?,
                 port: s.u16("port")?,
                 n_gpu_layers: s.i32("n_gpu_layers")?,
+                extra_args: s.string_vec("extra_args")?,
+                env: match s.opt_block("env") {
+                    Some(e) => e.string_map()?,
+                    None => BTreeMap::new(),
+                },
             })
         }
         "vllm" => {
@@ -146,6 +151,11 @@ fn deployment(name: &str, f: &Fields) -> Result<Deployment> {
                 port: s.u16("port")?,
                 tensor_parallel_size: s.opt_u32("tensor_parallel_size")?,
                 gpu_memory_utilization: s.opt_f32("gpu_memory_utilization")?,
+                extra_args: s.string_vec("extra_args")?,
+                env: match s.opt_block("env") {
+                    Some(e) => e.string_map()?,
+                    None => BTreeMap::new(),
+                },
             })
         }
         other => return Err(HclError::schema(format!("unknown runtime `{other}`"))),

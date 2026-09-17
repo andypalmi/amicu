@@ -282,6 +282,8 @@ fn llama_deployment(context_length: u32) -> Deployment {
             context_length,
             port: 8080,
             n_gpu_layers: -1,
+            extra_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
         }),
     }
 }
@@ -296,6 +298,8 @@ fn vllm_deployment() -> Deployment {
             port: 8000,
             tensor_parallel_size: Some(2),
             gpu_memory_utilization: Some(0.9),
+            extra_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
         }),
     }
 }

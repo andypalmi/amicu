@@ -7,7 +7,7 @@ use amicu_core::diagnostic::{DiagnosticReport, Severity};
 use crate::OutputFormat;
 use crate::checks::report_for;
 use crate::error::CliError;
-use crate::planner::{PlanResult, build_plan};
+use crate::planner::{PlanError, PlanResult, build_plan};
 use crate::project::Project;
 use crate::write_json;
 
@@ -28,7 +28,17 @@ pub(crate) fn run(
     }
 
     let prior = project.load_state()?.map(|s| s.graph);
-    let result = build_plan(&graph, prior.as_ref())?;
+    let result = match build_plan(&graph, prior.as_ref()) {
+        Ok(result) => result,
+        // A deployment failed to plan (e.g. a CAP-002/CAP-003 extra_args/env
+        // conflict); `build_plan` hands back everything it collected instead
+        // of a bare adapter error, so render it the same way as any other
+        // blocking report (amicu-planning#150 review hardening).
+        Err(PlanError(report)) => {
+            emit_report(&report, output, out)?;
+            return Ok(1);
+        }
+    };
 
     if result.has_errors() {
         // Cannot produce a reviewable plan for an invalid config.

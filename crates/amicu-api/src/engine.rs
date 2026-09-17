@@ -193,22 +193,20 @@ pub struct PlanRequest {
 }
 
 /// Error surfaced by the engine handlers.
+///
+/// A runtime adapter failure while planning is *not* a variant here
+/// (amicu-planning#150 review hardening): [`amicu_engine::build_plan`] folds
+/// any such failure into the [`amicu_engine::PlanError`] diagnostic report
+/// instead, which `plan_handler` handles directly as a `422` - there is no
+/// remaining path that needs to turn a bare `AdapterError` into a `500`.
 pub(crate) enum EngineHttpError {
     /// The submitted config text is not valid HCL (bad request).
     Parse(HclError),
-    /// A runtime adapter failed while planning (internal).
-    Plan(amicu_core::adapter::AdapterError),
 }
 
 impl From<HclError> for EngineHttpError {
     fn from(e: HclError) -> Self {
         Self::Parse(e)
-    }
-}
-
-impl From<amicu_core::adapter::AdapterError> for EngineHttpError {
-    fn from(e: amicu_core::adapter::AdapterError) -> Self {
-        Self::Plan(e)
     }
 }
 
@@ -219,16 +217,6 @@ impl IntoResponse for EngineHttpError {
             // syntax detail back is safe and useful, and reveals nothing about
             // the server internals.
             EngineHttpError::Parse(e) => (StatusCode::BAD_REQUEST, e.to_string()),
-            // An adapter/launch-render failure is internal detail. Log the real
-            // cause server-side and return a fixed, generic body so nothing
-            // about the runtime internals leaks to the client.
-            EngineHttpError::Plan(e) => {
-                eprintln!("amicu-api: engine plan failed: {e}");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "internal error".to_owned(),
-                )
-            }
         };
         (status, Json(json!({ "error": message }))).into_response()
     }
@@ -298,7 +286,17 @@ pub(crate) async fn plan_handler(
         return Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(report)).into_response());
     }
 
-    let result = amicu_engine::build_plan(&graph, prior.as_ref())?;
+    let result = match amicu_engine::build_plan(&graph, prior.as_ref()) {
+        Ok(result) => result,
+        // A deployment failed to plan (e.g. a CAP-002/CAP-003 extra_args/env
+        // conflict); `build_plan` hands back every diagnostic it collected
+        // instead of a bare adapter error, so this stays a structured `422`
+        // rather than falling through to `EngineHttpError::Plan`'s opaque
+        // `500` (amicu-planning#150 review hardening).
+        Err(amicu_engine::PlanError(report)) => {
+            return Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(report)).into_response());
+        }
+    };
     if result.has_errors() {
         let report = DiagnosticReport::new(result.diagnostics.clone());
         return Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(report)).into_response());
