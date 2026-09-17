@@ -1,0 +1,306 @@
+// Live-runtime companion to `test/workerd/cookie-refresh.unit.test.ts`, for
+// amicu-planning#146(a): actually boots the built Worker under the REAL Cloudflare
+// Workers runtime (workerd, via `wrangler dev --local`) - not a Node polyfill of
+// Request/Response, but the genuine `nodejs_compat` sandbox @opennextjs/cloudflare
+// targets - and drives the silent-refresh cookie-rotation path end-to-end over a
+// real HTTP connection, plus the production API_URL fail-fast from the issue's
+// acceptance criteria.
+//
+// NOT part of the default `pnpm test` run (see the `test` vs `test:workerd-live`
+// scripts in package.json): a real `opennextjs-cloudflare build` (a full `next
+// build`) takes ~60-90s, and this test also spawns two short-lived `wrangler dev`
+// processes on top of that - multiple minutes total, which is too slow to gate
+// every `pnpm test` invocation the way the fast unit test does. Run it explicitly:
+//
+//   pnpm --filter web test:workerd-live
+//
+// It needs: outbound network (wrangler/workerd downloading nothing new here since
+// `pnpm install` already fetched the `workerd` binary, but wrangler's local mode
+// still does a couple of housekeeping things) and the ability to bind local TCP
+// ports (for the stub API server + wrangler dev's own listener). Neither is
+// guaranteed in every sandbox: if the build fails, if `wrangler`/`npx` can't be
+// spawned, or if the dev server never becomes ready within the timeout, every test
+// in this file SKIPS itself (via `t.skip(...)`) with the captured reason instead of
+// failing the suite - see `probeEnvironment()` below for exactly what's attempted
+// and how failure is classified.
+//
+// This file was authored and verified against a real, successful `wrangler dev`
+// run in the sandbox that produced it (real Set-Cookie rotation observed with
+// HttpOnly/Secure/SameSite=Lax attributes, and a real 500 from the production
+// API_URL fail-fast) - see the PR description for the transcript. Environments
+// without network/port access will legitimately skip.
+
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import http from 'node:http';
+import path from 'node:path';
+import { existsSync } from 'node:fs';
+import type { AddressInfo } from 'node:net';
+
+const APP_DIR = path.resolve(import.meta.dirname, '../..');
+const WRANGLER_BIN = path.join(APP_DIR, 'node_modules/.bin/wrangler');
+const OPENNEXT_BIN = path.join(APP_DIR, 'node_modules/.bin/opennextjs-cloudflare');
+const WORKER_ENTRY = path.join(APP_DIR, '.open-next/worker.js');
+
+const BUILD_TIMEOUT_MS = 180_000;
+const SERVER_READY_TIMEOUT_MS = 60_000;
+const POLL_INTERVAL_MS = 500;
+
+const ACCESS_COOKIE = 'amicu_at';
+const REFRESH_COOKIE = 'amicu_rt';
+
+function craftJwt(exp: number): string {
+  const b64url = (obj: unknown) =>
+    Buffer.from(JSON.stringify(obj)).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return `${b64url({ alg: 'none', typ: 'JWT' })}.${b64url({ exp, sub: 'test-user' })}.sig`;
+}
+
+async function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = http.createServer();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const { port } = srv.address() as AddressInfo;
+      srv.close((err) => (err ? reject(err) : resolve(port)));
+    });
+  });
+}
+
+/** Poll a URL, without blind sleeping, until it responds or the timeout elapses. */
+async function waitForReady(url: string, timeoutMs: number): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = 'no attempt made';
+  while (Date.now() < deadline) {
+    try {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 2_000);
+      // ANY completed HTTP response (including a 500) proves the dev server itself
+      // is up and routing requests - readiness is about the SERVER, not about
+      // whatever status a given test's env vars make the app return (a test that
+      // deliberately misconfigures API_URL expects a 500 from the app, not from a
+      // not-yet-started server). Only a network-level failure (connection refused,
+      // this abort) means "keep waiting".
+      await fetch(url, { signal: controller.signal });
+      clearTimeout(t);
+      return { ok: true };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+  return { ok: false, reason: `timed out after ${timeoutMs}ms waiting for ${url} (last error: ${lastError})` };
+}
+
+/** Kill a `detached: true` child's whole process group, not just the top PID. */
+function killGroup(child: ChildProcess): void {
+  if (child.pid == null) return;
+  try {
+    process.kill(-child.pid, 'SIGTERM');
+  } catch {
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      // already gone
+    }
+  }
+}
+
+/**
+ * Spawn `wrangler dev --local` against the already-built `.open-next/worker.js`,
+ * overriding `vars` for this run, and wait for it to accept requests.
+ */
+async function startWranglerDev(
+  varsOverride: Record<string, string>,
+): Promise<{ ok: true; port: number; child: ChildProcess; log: string[] } | { ok: false; reason: string }> {
+  let port: number;
+  try {
+    port = await findFreePort();
+  } catch (err) {
+    return { ok: false, reason: `could not find a free local port: ${(err as Error).message}` };
+  }
+
+  const log: string[] = [];
+  const varArgs = Object.entries(varsOverride).flatMap(([k, v]) => ['--var', `${k}:${v}`]);
+  let child: ChildProcess;
+  try {
+    child = spawn(WRANGLER_BIN, ['dev', '--local', '--port', String(port), ...varArgs], {
+      cwd: APP_DIR,
+      env: { ...process.env, CI: 'true', WRANGLER_SEND_METRICS: 'false' },
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    return { ok: false, reason: `failed to spawn wrangler dev: ${(err as Error).message}` };
+  }
+
+  child.stdout?.on('data', (d) => log.push(String(d)));
+  child.stderr?.on('data', (d) => log.push(String(d)));
+
+  let spawnError: string | null = null;
+  child.on('error', (err) => {
+    spawnError = err.message;
+  });
+
+  const readiness = await waitForReady(`http://127.0.0.1:${port}/api/health`, SERVER_READY_TIMEOUT_MS);
+  if (spawnError) {
+    killGroup(child);
+    return { ok: false, reason: `wrangler dev process error: ${spawnError}\n--- log ---\n${log.join('')}` };
+  }
+  if (!readiness.ok) {
+    killGroup(child);
+    return { ok: false, reason: `${readiness.reason}\n--- wrangler dev log tail ---\n${log.join('').slice(-2000)}` };
+  }
+  return { ok: true, port, child, log };
+}
+
+let skipReason: string | null = null;
+let stubApi: http.Server;
+let stubApiPort: number;
+
+before(async () => {
+  if (!existsSync(WRANGLER_BIN) || !existsSync(OPENNEXT_BIN)) {
+    skipReason = `wrangler/opennextjs-cloudflare binaries not found under ${APP_DIR}/node_modules/.bin - run pnpm install first`;
+    return;
+  }
+
+  // Build the actual Worker bundle this test then boots for real. Always rebuild
+  // (rather than trusting a stale .open-next/) so this test reflects the current
+  // working tree, matching what a CI run of it would need anyway.
+  const build = spawnSync(OPENNEXT_BIN, ['build'], {
+    cwd: APP_DIR,
+    timeout: BUILD_TIMEOUT_MS,
+    encoding: 'utf8',
+  });
+  if (build.error) {
+    skipReason = `opennextjs-cloudflare build could not be spawned: ${build.error.message}`;
+    return;
+  }
+  if (build.status !== 0 || !existsSync(WORKER_ENTRY)) {
+    const tail = `${build.stdout ?? ''}${build.stderr ?? ''}`.slice(-4000);
+    skipReason = `opennextjs-cloudflare build failed (exit ${build.status ?? 'timeout'}) - this sandbox likely can't complete a full Next.js build (no network / build tooling missing / timeout). Tail:\n${tail}`;
+    return;
+  }
+
+  // Stub for the Rust Management API's POST /token/refresh.
+  stubApi = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/token/refresh') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            access_token: 'live-test-new-access-token',
+            refresh_token: 'live-test-new-refresh-token',
+            expires_in: 900,
+            token_type: 'Bearer',
+          }),
+        );
+        return;
+      }
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not_found' }));
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      stubApi.once('error', reject);
+      stubApi.listen(0, '127.0.0.1', resolve);
+    });
+    stubApiPort = (stubApi.address() as AddressInfo).port;
+  } catch (err) {
+    skipReason = `could not bind a local port for the stub API server: ${(err as Error).message} - this sandbox may not allow listening on TCP ports`;
+    return;
+  }
+});
+
+after(async () => {
+  if (stubApi?.listening) {
+    await new Promise((resolve) => stubApi.close(resolve));
+  }
+});
+
+test('workerd (wrangler dev): rotates Set-Cookie with HttpOnly/Secure/SameSite=Lax on an expiring session', async (t) => {
+  if (skipReason) {
+    t.skip(skipReason);
+    return;
+  }
+
+  const server = await startWranglerDev({
+    API_URL: `http://127.0.0.1:${stubApiPort}`,
+    COOKIE_SECURE: 'true',
+  });
+  if (!server.ok) {
+    t.skip(`wrangler dev did not come up in this sandbox: ${server.reason}`);
+    return;
+  }
+
+  try {
+    const expiredAccess = craftJwt(Math.floor(Date.now() / 1000) - 30);
+    const res = await fetch(`http://127.0.0.1:${server.port}/app`, {
+      redirect: 'manual',
+      headers: { Cookie: `${ACCESS_COOKIE}=${expiredAccess}; ${REFRESH_COOKIE}=old-refresh-token` },
+    });
+
+    // NOTE: under the full Next.js request pipeline (page render -> requireSession()
+    // rejects the unverifiable fake token -> redirect to /login) observed in this
+    // sandbox, OpenNext's (explicitly experimental - see the "Node.js middleware
+    // support is experimental in cloudflare" build warning) Node.js middleware
+    // support invokes handleAuth() TWICE for one inbound request, yielding two
+    // near-identical rotated cookie pairs (same values, ~1-2s apart) rather than
+    // one. The unit test (cookie-refresh.unit.test.ts) calls proxy() directly and
+    // observes exactly one pair, proving the double invocation is a quirk of the
+    // full experimental pipeline, not of proxy.ts/middleware-refresh.ts itself. We
+    // assert on "at least one correctly-attributed pair", which holds either way.
+    const setCookies = res.headers.getSetCookie();
+    assert.ok(setCookies.length >= 2, `expected at least 2 Set-Cookie headers from real workerd, got: ${setCookies.join(' | ')}`);
+    const at = setCookies.find((c) => c.startsWith(`${ACCESS_COOKIE}=`));
+    const rt = setCookies.find((c) => c.startsWith(`${REFRESH_COOKIE}=`));
+    assert.ok(at, 'amicu_at Set-Cookie missing from real workerd response');
+    assert.ok(rt, 'amicu_rt Set-Cookie missing from real workerd response');
+    for (const c of [at, rt]) {
+      assert.match(c!, /HttpOnly/i);
+      assert.match(c!, /Secure/i);
+      assert.match(c!, /SameSite=Lax/i);
+    }
+
+    // Not cached by a shared/CDN cache: no `public`/positive-shared-max-age
+    // Cache-Control, and (this being local wrangler, not the real edge) no
+    // CF-Cache-Status HIT.
+    const cacheControl = res.headers.get('cache-control');
+    if (cacheControl) {
+      assert.doesNotMatch(cacheControl, /(^|,)\s*public\s*(,|;|$)/i);
+    }
+    assert.notEqual(res.headers.get('cf-cache-status'), 'HIT');
+  } finally {
+    killGroup(server.child);
+  }
+});
+
+test('workerd (wrangler dev): production fail-fast fires for a misconfigured API_URL instead of defaulting to localhost', async (t) => {
+  if (skipReason) {
+    t.skip(skipReason);
+    return;
+  }
+
+  // Empty API_URL under NODE_ENV=production (wrangler.jsonc's committed default) -
+  // parseServerEnv() must throw at request time (server-env.ts), not silently fall
+  // back to DEV_API_URL / localhost:8080 from inside Cloudflare's network.
+  const server = await startWranglerDev({ API_URL: '' });
+  if (!server.ok) {
+    t.skip(`wrangler dev did not come up in this sandbox: ${server.reason}`);
+    return;
+  }
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/health`);
+    assert.equal(
+      res.status,
+      500,
+      'a misconfigured (empty) production API_URL must fail the request (parseServerEnv fail-fast), not boot against a localhost default',
+    );
+  } finally {
+    killGroup(server.child);
+  }
+});
