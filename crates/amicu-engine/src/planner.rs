@@ -265,6 +265,7 @@ fn llama_cpp_runtime_settings(s: &LlamaCppSettings) -> Vec<Setting> {
         chat_template_file,
         jinja,
         reasoning_format,
+        speculative,
         extra_args,
         env,
         build,
@@ -319,6 +320,21 @@ fn llama_cpp_runtime_settings(s: &LlamaCppSettings) -> Vec<Setting> {
     }
     if let Some(v) = reasoning_format {
         settings.push(setting("reasoning_format", v.to_string()));
+    }
+    if let Some(spec) = speculative {
+        settings.push(setting("speculative_model", spec.model.as_str()));
+        if let Some(v) = spec.n_max {
+            settings.push(setting("speculative_n_max", v.to_string()));
+        }
+        if let Some(v) = spec.n_min {
+            settings.push(setting("speculative_n_min", v.to_string()));
+        }
+        if let Some(v) = spec.p_min {
+            settings.push(setting("speculative_p_min", v.to_string()));
+        }
+        if let Some(v) = spec.n_gpu_layers {
+            settings.push(setting("speculative_n_gpu_layers", v.to_string()));
+        }
     }
     extend_with_extra_args_and_env(&mut settings, extra_args, env);
     if let Some(v) = build {
@@ -422,12 +438,31 @@ fn cost_performance(
     if let Some(assumption) = kv_cache_assumption(runtime, launch.estimate.kv_cache) {
         assumptions.push(assumption);
     }
+    if speculative_present(runtime) {
+        assumptions.push(SPECULATIVE_ASSUMPTION.to_owned());
+    }
     CostPerformance {
         cost,
         performance: None,
         assumptions,
         provenance: Some("heuristic".to_owned()),
         confidence: Some(amicu_plan::contract::Confidence::Low),
+    }
+}
+
+/// What a `speculative {}` block does and does not contribute to the memory
+/// estimate (amicu-planning#151 PR C): `amicu_registry::fit` adds the draft
+/// model's weights to the fit check's weights total, but does not estimate the
+/// draft model's own KV cache - that would need the draft model's layer/head
+/// shape, which the registry does not generally carry.
+const SPECULATIVE_ASSUMPTION: &str =
+    "speculative: draft model weights included, draft KV cache not estimated";
+
+/// Whether the deployment declares a llama.cpp speculative-decoding block.
+fn speculative_present(runtime: &Runtime) -> bool {
+    match runtime {
+        Runtime::LlamaCpp(s) => s.speculative.is_some(),
+        Runtime::Vllm(_) => false,
     }
 }
 
@@ -711,6 +746,85 @@ mod tests {
                 && d.severity == Severity::Error),
             "expected AMICU-CAP-003 in the plan error's report, got {:?}",
             report.diagnostics
+        );
+    }
+
+    // --- amicu-planning#151 PR C: speculative decoding ---------------------
+
+    /// [`graph`] plus a `draft` model, with the deployment drafting from it.
+    fn speculative_graph() -> Graph {
+        let mut g = graph(Vec::new());
+        let mut draft = model();
+        draft.id = "draft".into();
+        g.models.push(draft);
+        let Runtime::LlamaCpp(s) = &mut g.deployments[0].runtime else {
+            unreachable!("graph() always builds a llama_cpp deployment");
+        };
+        s.speculative = Some(amicu_core::resource::SpeculativeSettings {
+            model: "draft".into(),
+            n_max: Some(8),
+            n_min: Some(2),
+            p_min: Some(0.75),
+            n_gpu_layers: Some(99),
+        });
+        g
+    }
+
+    #[test]
+    fn speculative_assumption_present_when_a_draft_model_is_declared() {
+        let result = build_plan(&speculative_graph(), None).unwrap();
+        let cp = result.items[0].action.cost_performance.as_ref().unwrap();
+        assert!(
+            cp.assumptions.iter().any(|a| a == SPECULATIVE_ASSUMPTION),
+            "expected the speculative assumption, got {:?}",
+            cp.assumptions
+        );
+    }
+
+    #[test]
+    fn speculative_assumption_absent_without_a_speculative_block() {
+        let result = build_plan(&graph(Vec::new()), None).unwrap();
+        let cp = result.items[0].action.cost_performance.as_ref().unwrap();
+        assert!(!cp.assumptions.iter().any(|a| a == SPECULATIVE_ASSUMPTION));
+    }
+
+    #[test]
+    fn speculative_fields_threaded_into_runtime_settings() {
+        let result = build_plan(&speculative_graph(), None).unwrap();
+        let settings = &result.items[0].action.runtime;
+        let value = |key: &str| {
+            settings
+                .iter()
+                .find(|s| s.key == key)
+                .map(|s| s.value.clone())
+        };
+        assert_eq!(value("speculative_model").as_deref(), Some("draft"));
+        assert_eq!(value("speculative_n_max").as_deref(), Some("8"));
+        assert_eq!(value("speculative_n_min").as_deref(), Some("2"));
+        assert_eq!(value("speculative_p_min").as_deref(), Some("0.75"));
+        assert_eq!(value("speculative_n_gpu_layers").as_deref(), Some("99"));
+    }
+
+    #[test]
+    fn draft_model_weights_raise_the_planned_memory_estimate() {
+        let baseline = build_plan(&graph(Vec::new()), None).unwrap();
+        let with_draft = build_plan(&speculative_graph(), None).unwrap();
+        let memory = |r: &PlanResult| {
+            r.items[0]
+                .action
+                .cost_performance
+                .as_ref()
+                .unwrap()
+                .assumptions
+                .iter()
+                .find(|a| a.starts_with("estimated peak memory "))
+                .cloned()
+                .expect("peak memory assumption present")
+        };
+        assert_ne!(
+            memory(&baseline),
+            memory(&with_draft),
+            "the draft model's weights must move the estimate"
         );
     }
 }

@@ -240,10 +240,20 @@ pub fn check_variant_fit(
     hw: &HardwareProfile,
     cfg: &FitConfig,
 ) -> FitReport {
-    let weights = variant
+    evaluate(variant_weights(total_parameters, variant), hw, cfg)
+}
+
+/// The weights figure one GGUF variant contributes: its declared `size` when
+/// present, otherwise a size computed from `total_parameters` at the variant's
+/// quantization. Exposed so a caller that has to fold a second model's weights
+/// into one fit check - a speculative deployment's draft model
+/// (amicu-planning#151 PR C) - derives that figure exactly the way
+/// [`check_variant_fit`] derives the primary model's.
+#[must_use]
+pub fn variant_weights(total_parameters: u64, variant: &GgufVariant) -> ByteSize {
+    variant
         .size
-        .unwrap_or_else(|| weights_memory(total_parameters, variant.quantization));
-    evaluate(weights, hw, cfg)
+        .unwrap_or_else(|| weights_memory(total_parameters, variant.quantization))
 }
 
 fn evaluate(weights: ByteSize, hw: &HardwareProfile, cfg: &FitConfig) -> FitReport {
@@ -323,7 +333,40 @@ pub fn check_variant_fit_with_kv_cache(
     cfg: &FitConfig,
     kv: Option<KvCacheParams>,
 ) -> FitReport {
-    let mut report = check_variant_fit(total_parameters, variant, hw, cfg);
+    check_variant_fit_with_draft(total_parameters, variant, hw, cfg, kv, None)
+}
+
+/// As [`check_variant_fit_with_kv_cache`], additionally counting a speculative
+/// deployment's draft-model weights toward the same device-memory pool
+/// (amicu-planning#151 PR C).
+///
+/// `draft_weights` - typically [`variant_weights`] of the draft model's own
+/// GGUF variant - is simply added to [`FitReport::weights`], so the draft
+/// model competes for memory with the target model, as it does in reality:
+/// `llama-server` holds both sets of weights resident for the whole run.
+/// Everything else is unchanged, and `None` reproduces
+/// [`check_variant_fit_with_kv_cache`] byte for byte.
+///
+/// The draft model's *KV cache* is deliberately **not** estimated here. It
+/// needs the draft model's own layer/head shape, which the registry does not
+/// generally carry, and (unlike the weights) it is small relative to the
+/// uncertainty already in the overhead band. Callers surface that limit
+/// verbatim as a plan assumption.
+#[must_use]
+pub fn check_variant_fit_with_draft(
+    total_parameters: u64,
+    variant: &GgufVariant,
+    hw: &HardwareProfile,
+    cfg: &FitConfig,
+    kv: Option<KvCacheParams>,
+    draft_weights: Option<ByteSize>,
+) -> FitReport {
+    let weights = ByteSize::from_bytes(
+        variant_weights(total_parameters, variant)
+            .bytes()
+            .saturating_add(draft_weights.map_or(0, ByteSize::bytes)),
+    );
+    let mut report = evaluate(weights, hw, cfg);
     report.kv_cache = kv.map(|p| {
         kv_cache_bytes(
             p.context_length,
@@ -842,6 +885,89 @@ mod tests {
         assert_eq!(with_kv.headroom, baseline.headroom);
         assert_eq!(with_kv.overhead, baseline.overhead);
         assert_eq!(with_kv.weights, baseline.weights);
+    }
+
+    // --- amicu-planning#151 PR C: speculative draft-model weights ----------
+
+    fn sized_variant(bytes: u64) -> GgufVariant {
+        GgufVariant {
+            quantization: Quantization::Q4KM,
+            file: "m.Q4_K_M.gguf".into(),
+            size: Some(ByteSize::from_bytes(bytes)),
+            sha256: None,
+        }
+    }
+
+    #[test]
+    fn no_draft_weights_reproduces_the_kv_cache_report_exactly() {
+        let variant = sized_variant(4 * GIB);
+        let hw = apple_silicon(16);
+        let cfg = FitConfig::default();
+        let baseline = check_variant_fit_with_kv_cache(7_000_000_000, &variant, &hw, &cfg, None);
+        let with_none =
+            check_variant_fit_with_draft(7_000_000_000, &variant, &hw, &cfg, None, None);
+        assert_eq!(baseline, with_none);
+    }
+
+    #[test]
+    fn draft_weights_are_added_to_the_weights_total() {
+        let variant = sized_variant(4 * GIB);
+        let hw = apple_silicon(16);
+        let cfg = FitConfig::default();
+        let report = check_variant_fit_with_draft(
+            7_000_000_000,
+            &variant,
+            &hw,
+            &cfg,
+            None,
+            Some(ByteSize::from_bytes(GIB)),
+        );
+        assert_eq!(report.weights, ByteSize::from_bytes(5 * GIB));
+    }
+
+    // The point of the change: a config that fits on its own stops fitting
+    // once the draft model's weights compete for the same pool.
+    #[test]
+    fn draft_weights_push_an_otherwise_fitting_config_over_the_limit() {
+        // 16 GiB unified, 2 GiB reserve -> 14 GiB available.
+        let variant = sized_variant(4 * GIB);
+        let hw = apple_silicon(16);
+        let cfg = FitConfig::default();
+
+        let alone = check_variant_fit_with_draft(7_000_000_000, &variant, &hw, &cfg, None, None);
+        assert!(alone.fits, "4 GiB alone must fit in 14 GiB");
+        assert!(alone.diagnostic.is_none());
+
+        let with_draft = check_variant_fit_with_draft(
+            7_000_000_000,
+            &variant,
+            &hw,
+            &cfg,
+            None,
+            Some(ByteSize::from_bytes(11 * GIB)),
+        );
+        assert!(!with_draft.fits, "4 GiB + 11 GiB must not fit in 14 GiB");
+        assert_eq!(
+            with_draft.diagnostic.as_ref().map(|d| d.code),
+            Some(catalog::MEM_ARTIFACT_OVERSIZE)
+        );
+        assert_eq!(with_draft.headroom, ByteSize::from_bytes(0));
+    }
+
+    #[test]
+    fn variant_weights_prefers_a_declared_size_over_the_computed_one() {
+        assert_eq!(
+            variant_weights(7_000_000_000, &sized_variant(4 * GIB)),
+            ByteSize::from_bytes(4 * GIB)
+        );
+        let unsized_variant = GgufVariant {
+            size: None,
+            ..sized_variant(0)
+        };
+        assert_eq!(
+            variant_weights(7_000_000_000, &unsized_variant),
+            weights_memory(7_000_000_000, Quantization::Q4KM)
+        );
     }
 
     // --- amicu-planning#152: vLLM fit estimate ------------------------------

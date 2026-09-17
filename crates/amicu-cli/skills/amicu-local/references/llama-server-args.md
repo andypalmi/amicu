@@ -25,6 +25,11 @@ reason about behavior and diagnostics.
 | `chat_template_file` | `--chat-template-file <path>` | Path to a Jinja chat template file. Mutually exclusive with `chat_template`. |
 | `jinja` | `--jinja` (`true`) / `--no-jinja` (`false`) | Paired bare flags (no value); `Some(false)` renders `--no-jinja` explicitly (overrides an inherited `LLAMA_ARG_JINJA=1`), `None` renders nothing. |
 | `reasoning_format` | `--reasoning-format <none\|deepseek\|deepseek-legacy\|auto>` | Reasoning/thinking-block extraction format. HCL value `deepseek_legacy` renders as the hyphenated `deepseek-legacy` on argv - see below. |
+| `speculative.model` | `--model-draft <path>` | Resolved GGUF path of the *draft model resource* (a real graph edge), staged under its own model id exactly like the primary model's. |
+| `speculative.n_max` | `--spec-draft-n-max <n>` | Max tokens drafted per step. |
+| `speculative.n_min` | `--spec-draft-n-min <n>` | Min draft tokens to use. |
+| `speculative.p_min` | `--draft-p-min <n>` | Min draft probability, below which drafting stops. |
+| `speculative.n_gpu_layers` | `--n-gpu-layers-draft <n>` | Draft-model layers offloaded to the accelerator. |
 | `build` (model-level: `variant.sha256`) | *(not rendered)* | `build` is a stored/validated-only runtime build pin (amicu-planning#151 PR B); `sha256` verifies the resolved download artifact's checksum in `download_gguf`, before any bytes are fetched - neither appears in argv. |
 
 ## Sampling, KV cache, batching, flash-attn, parallel slots (amicu-planning#151)
@@ -89,6 +94,94 @@ the only memory-beyond-weights figure), and shows up in the plan's
 unset (there is no GGUF header parser in-tree to derive them) to keep the
 flat overhead band - nothing else about the fit check changes.
 
+## Speculative decoding (amicu-planning#151 PR C)
+
+`speculative {}` is an optional nested block inside `llama_cpp {}`. Omitting it
+is exactly today's behavior: no draft model is resolved, no draft flag is
+rendered, and the fit check counts only the primary model's weights.
+
+```hcl
+llama_cpp {
+  context_length = 8192
+  port           = 8080
+  n_gpu_layers   = -1
+
+  speculative {
+    model        = model.qwen3_0_6b_draft.id   # a second `model` resource
+    n_max        = 8
+    n_min        = 2
+    p_min        = 0.75
+    n_gpu_layers = 99
+  }
+}
+```
+
+`model` is the only required attribute; the four draft parameters are
+independently optional.
+
+### The draft model is a graph edge, not a path
+
+`speculative.model` points at a second `resource "model"` block, so it is
+checked and resolved exactly like the deployment's own `model` attribute:
+
+- a reference to an id no `model` declares is `AMICU-REF-001` (reported by
+  `amicu validate` through `Graph::missing_references`, and by the llama.cpp
+  adapter as "model '<id>' was not found in the catalog");
+- the draft model's GGUF variant is selected by the same `GgufResolver` and
+  staged at `models/<draft model id>/<variant file>` - that resolved path is
+  what `--model-draft` receives, never the HCL reference;
+- a non-GGUF draft artifact, or a draft model declaring no GGUF variant, is
+  `AMICU-CAP-001`, the same as for the primary model;
+- naming the deployment's **own** model as the draft is **`AMICU-CAP-007`**
+  (Error). Speculative decoding is only worth anything with a smaller,
+  cheaper draft model: drafting with the target model would load the same
+  weights twice for no speedup, and the fit check would count them twice.
+
+### Fit
+
+The draft model's weights are added to the fit check's weights total
+(`amicu_registry::fit::check_variant_fit_with_draft`), so a deployment that
+fits on its own can correctly stop fitting once a draft model is declared. The
+plan records this as the assumption:
+
+```
+speculative: draft model weights included, draft KV cache not estimated
+```
+
+The draft model's *KV cache* is deliberately not estimated: it needs the draft
+model's own layer/head shape, which the registry does not generally carry.
+
+### Upstream flag spellings
+
+Verified against `common/arg.cpp` and `common/common.h` on
+`ggml-org/llama.cpp@master`. llama.cpp renamed this family to a
+`--spec-draft-*` prefix and kept the older spellings as aliases on the same
+`add_opt` - **except** `--draft`/`--draft-n`/`--draft-max` and
+`--draft-min`/`--draft-n-min`, which were *removed* and now abort with "the
+argument has been removed. use --spec-draft-n-max ...". amicu therefore renders,
+per field, the spelling the widest range of `llama-server` builds accepts,
+preferring the current one wherever the legacy spelling would hard-error:
+
+| field | rendered | aliases llama-server also accepts | env var |
+|---|---|---|---|
+| `model` | `--model-draft` | `--spec-draft-model`, `-md` | `LLAMA_ARG_SPEC_DRAFT_MODEL` |
+| `n_max` | `--spec-draft-n-max` | *(legacy `--draft`/`--draft-n`/`--draft-max` removed)* | `LLAMA_ARG_SPEC_DRAFT_N_MAX` |
+| `n_min` | `--spec-draft-n-min` | *(legacy `--draft-min`/`--draft-n-min` removed)* | `LLAMA_ARG_SPEC_DRAFT_N_MIN` |
+| `p_min` | `--draft-p-min` | `--spec-draft-p-min` | `LLAMA_ARG_SPEC_DRAFT_P_MIN` |
+| `n_gpu_layers` | `--n-gpu-layers-draft` | `--spec-draft-ngl`, `--gpu-layers-draft`, `-ngld` | `LLAMA_ARG_N_GPU_LAYERS_DRAFT` |
+
+Two deliberate omissions:
+
+- **No draft context-size field.** Current upstream exposes no draft
+  context-size flag at all - `common_params_speculative_draft`
+  (`common/common.h`) has no `n_ctx` member, and `common/arg.cpp` registers no
+  `--ctx-size-draft`/`-cd`/`--spec-draft-c`. A typed field for it could only
+  render a flag `llama-server` rejects.
+- **`--spec-type` is never rendered.** With the type left at its default,
+  `common/arg.cpp` infers the speculative type from the draft GGUF's own
+  metadata whenever a draft path is set, so passing the draft model alone is
+  how draft-model speculative decoding is turned on.
+
 ## `extra_args` / `env` escape hatch (amicu-planning#150)
 
 Anything past the typed fields above goes in `extra_args` (raw
@@ -109,7 +202,15 @@ re-asserted:
   `-ctk`/`--cache-type-k`, `-ctv`/`--cache-type-v`, `-b`/`--batch-size`,
   `-ub`/`--ubatch-size`, `-np`/`--parallel`, `-fa`/`--flash-attn`,
   `--chat-template`, `--chat-template-file`, `--jinja`/`--no-jinja`,
-  `--reasoning-format`) - is `AMICU-CAP-002`.
+  `--reasoning-format`, and every speculative spelling:
+  `--model-draft`/`--spec-draft-model`/`-md`,
+  `--spec-draft-n-max`/`--draft-max`/`--draft-n`/`--draft`,
+  `--spec-draft-n-min`/`--draft-min`/`--draft-n-min`,
+  `--draft-p-min`/`--spec-draft-p-min`,
+  `--n-gpu-layers-draft`/`--spec-draft-ngl`/`--gpu-layers-draft`/`-ngld`) - is
+  `AMICU-CAP-002`. The removed `--draft-*` spellings are listed too: they still
+  name a setting amicu owns, and reporting the conflict beats letting
+  `llama-server` abort at launch.
 - A flag on the fixed denylist (`--host`, `--api-key`, `--api-key-file`,
   `--ssl-key-file`) is `AMICU-CAP-003`.
 - llama-server also reads `LLAMA_ARG_<X>` environment variables as
@@ -125,7 +226,13 @@ re-asserted:
   `--reasoning-format` `add_opt` calls `.set_env("LLAMA_ARG_THINK")` -
   named after the internal `params.think` field, not the flag; there is no
   `LLAMA_ARG_REASONING_FORMAT`) - amicu special-cases these four so
-  `AMICU-CAP-002` still catches them. A handful of dynamic-loader env vars
+  `AMICU-CAP-002` still catches them. The five speculative env vars
+  (`LLAMA_ARG_SPEC_DRAFT_MODEL`, `LLAMA_ARG_SPEC_DRAFT_N_MAX`,
+  `LLAMA_ARG_SPEC_DRAFT_N_MIN`, `LLAMA_ARG_SPEC_DRAFT_P_MIN`,
+  `LLAMA_ARG_N_GPU_LAYERS_DRAFT`), plus the two llama-server still registers on
+  its removed draft args (`LLAMA_ARG_DRAFT_MAX`, `LLAMA_ARG_DRAFT_MIN`), need
+  no special case: each mechanically derives a spelling already listed above.
+  A handful of dynamic-loader env vars
   (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`,
   `LD_LIBRARY_PATH`) are denylisted outright regardless of the `LLAMA_ARG_`
   prefix.
@@ -135,6 +242,8 @@ re-asserted:
   typed model for.
 - Setting both `chat_template` and `chat_template_file` is `AMICU-CAP-005`
   (amicu-planning#151 PR B) - see above.
+- A `speculative {}` block whose draft `model` is the deployment's own model is
+  `AMICU-CAP-007` (amicu-planning#151 PR C) - see above.
 
 ## Service supervision
 
