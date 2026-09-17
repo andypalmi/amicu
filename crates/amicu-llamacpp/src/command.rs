@@ -19,7 +19,11 @@ use amicu_core::resource::LlamaCppSettings;
 /// PR B) likewise have no documented short alias anywhere in this repo, so
 /// none is assumed. `--jinja`/`--no-jinja` are one `add_opt`'s paired
 /// spellings for the same boolean field (`common/arg.cpp`), grouped as one
-/// entry below; `--reasoning-format` has no short alias. Shared with
+/// entry below; `--reasoning-format` has no short alias. `-mm`/`--mmproj`
+/// and `--mmproj-offload`/`--no-mmproj-offload` (amicu-planning#151 PR D)
+/// are likewise each one `add_opt`'s paired spellings - verified against
+/// `tools/server/README.md`/`common/arg.cpp` via context7, not guessed (PR
+/// B's reviewer caught a wrong spelling here before). Shared with
 /// [`crate::adapter`] diagnostics (`AMICU-CAP-002`), which flatten this via
 /// [`is_typed_flag`] so a duplicated flag in `extra_args` is detected against
 /// exactly what [`render_command`] renders, not a hand-maintained shadow
@@ -44,6 +48,8 @@ pub(crate) const TYPED_FLAGS: &[&[&str]] = &[
     &["--chat-template-file"],
     &["--jinja", "--no-jinja"],
     &["--reasoning-format"],
+    &["--mmproj", "-mm"],
+    &["--mmproj-offload", "--no-mmproj-offload"],
     // amicu-planning#151 PR C - the `speculative {}` block. llama.cpp renamed
     // this whole family to a `--spec-draft-*` prefix and kept the older
     // spellings as aliases on the same `add_opt` (`common/arg.cpp`), except
@@ -115,6 +121,12 @@ pub(crate) const DENYLISTED_ENV_KEYS: &[&str] = &[
 /// `--reasoning-format` from the *wrong* env key (`LLAMA_ARG_REASONING_FORMAT`,
 /// which llama-server does not read at all) while missing the real one.
 ///
+/// `LLAMA_ARG_MMPROJ` and `LLAMA_ARG_MMPROJ_OFFLOAD` (amicu-planning#151 PR
+/// D) need no entry here: `common/arg.cpp`'s `add_opt` for `--mmproj`/`-mm`
+/// and `--mmproj-offload`/`--no-mmproj-offload` calls `.set_env(...)` with
+/// the env var named after the long flag itself, so the mechanical rule
+/// already derives the right flag for both.
+///
 /// The `speculative {}` block (amicu-planning#151 PR C) deliberately adds no
 /// entry here: each of its five env vars mechanically derives a flag spelling
 /// that is already listed as an alias in [`TYPED_FLAGS`], so the fallback rule
@@ -160,12 +172,13 @@ pub(crate) fn llama_arg_env_flag(key: &str) -> Option<String> {
 ///
 /// Typed flags are emitted first (`-m`, `--port`, `--ctx-size`,
 /// `--n-gpu-layers`, then any set sampling/KV-cache/batching/flash-attention/
-/// chat-template/jinja/reasoning-format/speculative field in field-declaration
-/// order), then `settings.extra_args` verbatim, in declaration order - it is
-/// argv order. Duplicate/denylisted flags are caught as diagnostics before
-/// this ever runs (`crate::adapter`); this function itself renders whatever it
-/// is given. `f32` fields render via `{}` (plain decimal, e.g. `0.6`), never
-/// scientific notation, at the magnitudes these settings take.
+/// chat-template/jinja/reasoning-format/multimodal/speculative field in
+/// field-declaration order), then `settings.extra_args` verbatim, in
+/// declaration order - it is argv order. Duplicate/denylisted flags are
+/// caught as diagnostics before this ever runs (`crate::adapter`); this
+/// function itself renders whatever it is given. `f32` fields render via `{}`
+/// (plain decimal, e.g. `0.6`), never scientific notation, at the magnitudes
+/// these settings take.
 /// `chat_template`/`chat_template_file` are the one pair this function
 /// itself refuses to render together (see the match below) rather than
 /// leaving that entirely to the caller's pre-check.
@@ -272,37 +285,68 @@ pub fn render_command(
         argv.push("--reasoning-format".to_owned());
         argv.push(v.to_string());
     }
-    // Speculative decoding (amicu-planning#151 PR C). The draft path and the
-    // typed draft knobs render together: without a resolved draft model there
-    // is nothing for the draft parameters to apply to, and llama-server
-    // ignores them. See `SpeculativeSettings` for why each spelling below is
-    // the one emitted (`--spec-draft-n-max`/`-n-min` because their legacy
-    // `--draft-max`/`--draft-min` spellings were removed upstream and now
-    // abort; the others because their legacy spelling is still a live alias
-    // and works on more builds).
-    if let (Some(path), Some(spec)) = (draft_model_path, settings.speculative.as_ref()) {
-        argv.push("--model-draft".to_owned());
-        argv.push(path.display().to_string());
-        if let Some(v) = spec.n_max {
-            argv.push("--spec-draft-n-max".to_owned());
-            argv.push(v.to_string());
-        }
-        if let Some(v) = spec.n_min {
-            argv.push("--spec-draft-n-min".to_owned());
-            argv.push(v.to_string());
-        }
-        if let Some(v) = spec.p_min {
-            argv.push("--draft-p-min".to_owned());
-            argv.push(v.to_string());
-        }
-        if let Some(v) = spec.n_gpu_layers {
-            argv.push("--n-gpu-layers-draft".to_owned());
-            argv.push(v.to_string());
-        }
-    }
+    push_multimodal_flags(&mut argv, settings);
+    push_speculative_flags(&mut argv, draft_model_path, settings);
     argv.extend(settings.extra_args.iter().cloned());
     let text = shell_join(&argv);
     (argv, text)
+}
+
+/// Append the `multimodal {}` block's flags (amicu-planning#151 PR D):
+/// `projector` and `offload` are independent. `--mmproj-offload`/
+/// `--no-mmproj-offload` is a paired bare-flag toggle exactly like
+/// `--jinja`/`--no-jinja` - `Some(false)` renders the negative flag
+/// explicitly rather than omitting it, so it overrides an inherited
+/// `LLAMA_ARG_MMPROJ_OFFLOAD=1`.
+fn push_multimodal_flags(argv: &mut Vec<String>, settings: &LlamaCppSettings) {
+    let Some(m) = &settings.multimodal else {
+        return;
+    };
+    if let Some(v) = &m.projector {
+        argv.push("--mmproj".to_owned());
+        argv.push(v.clone());
+    }
+    match m.offload {
+        Some(true) => argv.push("--mmproj-offload".to_owned()),
+        Some(false) => argv.push("--no-mmproj-offload".to_owned()),
+        None => {}
+    }
+}
+
+/// Append the `speculative {}` block's flags (amicu-planning#151 PR C). The
+/// draft path and the typed draft knobs render together: without a resolved
+/// draft model there is nothing for the draft parameters to apply to, and
+/// llama-server ignores them. See `SpeculativeSettings` for why each spelling
+/// below is the one emitted (`--spec-draft-n-max`/`-n-min` because their
+/// legacy `--draft-max`/`--draft-min` spellings were removed upstream and now
+/// abort; the others because their legacy spelling is still a live alias and
+/// works on more builds).
+fn push_speculative_flags(
+    argv: &mut Vec<String>,
+    draft_model_path: Option<&Path>,
+    settings: &LlamaCppSettings,
+) {
+    let (Some(path), Some(spec)) = (draft_model_path, settings.speculative.as_ref()) else {
+        return;
+    };
+    argv.push("--model-draft".to_owned());
+    argv.push(path.display().to_string());
+    if let Some(v) = spec.n_max {
+        argv.push("--spec-draft-n-max".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = spec.n_min {
+        argv.push("--spec-draft-n-min".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = spec.p_min {
+        argv.push("--draft-p-min".to_owned());
+        argv.push(v.to_string());
+    }
+    if let Some(v) = spec.n_gpu_layers {
+        argv.push("--n-gpu-layers-draft".to_owned());
+        argv.push(v.to_string());
+    }
 }
 
 /// Join `argv` into a display line, single-quoting any token that is not a
