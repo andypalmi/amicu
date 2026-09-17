@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { requireSession } from '@/lib/auth/session';
 import { PageHeader } from '@/components/common/page-header';
 import { HclResult } from '@/components/wizard/hcl-result';
+import { PageShell } from '@/components/common/page-shell';
 
 export const metadata: Metadata = { title: 'New configuration' };
 
@@ -14,13 +15,13 @@ export default async function ManualConfigPage() {
   await requireSession();
 
   return (
-    <main className="mx-auto w-full max-w-6xl space-y-6 px-6 py-10">
+    <PageShell size="lg">
       <PageHeader
         title="New configuration"
         description="Write your own Amicu HCL from scratch, validate it against the engine, and save it - nothing is applied."
       />
 
       <HclResult result={{ hcl: '' }} />
-    </main>
+    </PageShell>
   );
 }

@@ -4,6 +4,7 @@ import { requireSession } from '@/lib/auth/session';
 import { Wizard } from '@/components/wizard/wizard';
 import { PageHeader } from '@/components/common/page-header';
 import { LoadingState } from '@/components/common/loading-state';
+import { PageShell } from '@/components/common/page-shell';
 
 export const metadata: Metadata = { title: 'Wizard' };
 
@@ -21,7 +22,7 @@ export default async function WizardPage() {
   await requireSession();
 
   return (
-    <main className="mx-auto w-full max-w-6xl space-y-6 px-6 py-10">
+    <PageShell size="lg">
       <PageHeader
         title="Guided wizard"
         description="Start from a preset that matches your use case, answer a few requirements, and get back a ready-to-run Amicu configuration. The wizard emits HCL deterministically from your answers - no metrics are synthesized, and nothing is applied. Copy it, download it, or validate it in place before you use it."
@@ -30,6 +31,6 @@ export default async function WizardPage() {
       <Suspense fallback={<LoadingState label="Loading wizard…" />}>
         <Wizard />
       </Suspense>
-    </main>
+    </PageShell>
   );
 }

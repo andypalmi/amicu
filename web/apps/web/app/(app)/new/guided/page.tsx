@@ -4,6 +4,7 @@ import { requireSession } from '@/lib/auth/session';
 import { GuidedWizard } from '@/components/wizard/guided/guided-wizard';
 import { PageHeader } from '@/components/common/page-header';
 import { LoadingState } from '@/components/common/loading-state';
+import { PageShell } from '@/components/common/page-shell';
 
 export const metadata: Metadata = { title: 'Guided wizard' };
 
@@ -18,7 +19,7 @@ export default async function GuidedWizardPage() {
   await requireSession();
 
   return (
-    <main className="mx-auto w-full max-w-6xl space-y-6 px-6 py-10">
+    <PageShell size="lg">
       <PageHeader
         title="Guided wizard"
         description="Pick a preset, answer a few questions, and choose from a handful of ranked candidate stacks. Review and edit the resulting HCL, confirm its plan, then save it - nothing is applied."
@@ -27,6 +28,6 @@ export default async function GuidedWizardPage() {
       <Suspense fallback={<LoadingState label="Loading wizard…" />}>
         <GuidedWizard />
       </Suspense>
-    </main>
+    </PageShell>
   );
 }

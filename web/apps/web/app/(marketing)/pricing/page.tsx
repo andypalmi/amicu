@@ -10,6 +10,12 @@ import {
   CardHeader,
   CardTitle,
   cn,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
 } from '@amicu/ui';
 import { Container, PageHeader } from '../_components/marketing';
 import {
@@ -120,49 +126,48 @@ export default function PricingPage() {
             the action regardless of what the UI shows.
           </p>
 
-          <div className="mt-6 overflow-x-auto rounded-xl border border-border">
-            <table className="w-full min-w-[720px] border-collapse text-sm">
-              <thead>
-                <tr className="border-b border-border bg-muted/40 text-left">
-                  <th className="p-4 font-medium">Screen / feature</th>
+          <div className="mt-6 overflow-hidden rounded-xl border border-border">
+            <Table className="min-w-[720px]">
+              <TableHeader>
+                <TableRow className="bg-muted/40 hover:bg-muted/40">
+                  <TableHead className="p-4 text-sm font-medium normal-case tracking-normal text-foreground">
+                    Screen / feature
+                  </TableHead>
                   {tiers.map((tier) => (
-                    <th
+                    <TableHead
                       key={tier.id}
-                      className="p-4 text-center font-medium first:text-left"
+                      className="p-4 text-center text-sm font-medium normal-case tracking-normal text-foreground first:text-left"
                     >
                       {tier.name}
-                    </th>
+                    </TableHead>
                   ))}
-                </tr>
-              </thead>
-              <tbody>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {featureMatrix.map((row) => (
-                  <tr
-                    key={row.feature}
-                    className="border-b border-border last:border-0"
-                  >
-                    <th
+                  <TableRow key={row.feature} className="hover:bg-transparent">
+                    <TableHead
                       scope="row"
-                      className="p-4 text-left font-normal text-muted-foreground"
+                      className="p-4 text-left text-sm font-normal normal-case tracking-normal text-muted-foreground"
                     >
                       {row.feature}
-                    </th>
-                    <td className="p-4 text-center">
+                    </TableHead>
+                    <TableCell className="p-4 text-center">
                       <AvailabilityCell value={row.community} />
-                    </td>
-                    <td className="p-4 text-center">
+                    </TableCell>
+                    <TableCell className="p-4 text-center">
                       <AvailabilityCell value={row.pro} />
-                    </td>
-                    <td className="p-4 text-center">
+                    </TableCell>
+                    <TableCell className="p-4 text-center">
                       <AvailabilityCell value={row.enterprise} />
-                    </td>
-                    <td className="p-4 text-center">
+                    </TableCell>
+                    <TableCell className="p-4 text-center">
                       <AvailabilityCell value={row.hosted} />
-                    </td>
-                  </tr>
+                    </TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
+              </TableBody>
+            </Table>
           </div>
 
           <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-xs text-muted-foreground">

@@ -4,6 +4,7 @@ import { requireSession } from '@/lib/auth/session';
 import { TierGate } from '@/components/tier-gate';
 import { OrgConsole } from '@/components/org/console';
 import { PageHeader } from '@/components/common/page-header';
+import { PageShell } from '@/components/common/page-shell';
 
 export const metadata: Metadata = { title: 'Organization' };
 
@@ -20,7 +21,7 @@ export default async function OrgPage() {
   await requireSession();
 
   return (
-    <main className="mx-auto w-full max-w-3xl space-y-6 px-6 py-12">
+    <PageShell size="md">
       <PageHeader
         title="Organization"
         description="Manage members, roles, and review the audit log for your organization."
@@ -31,6 +32,6 @@ export default async function OrgPage() {
           <OrgConsole />
         </Suspense>
       </TierGate>
-    </main>
+    </PageShell>
   );
 }

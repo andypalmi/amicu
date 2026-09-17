@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { Button, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@amicu/ui';
 import { requireSession } from '@/lib/auth/session';
 import { PageHeader } from '@/components/common/page-header';
+import { PageShell } from '@/components/common/page-shell';
 
 export const metadata: Metadata = { title: 'New configuration' };
 
@@ -16,7 +17,7 @@ export default async function NewConfigPage() {
   await requireSession();
 
   return (
-    <main className="mx-auto w-full max-w-4xl space-y-8 px-6 py-12">
+    <PageShell size="lg">
       <PageHeader
         title="New configuration"
         description="Start from a guided flow that recommends a stack for your workload, or jump straight into writing HCL yourself."
@@ -61,6 +62,6 @@ export default async function NewConfigPage() {
         </Link>
         .
       </p>
-    </main>
+    </PageShell>
   );
 }

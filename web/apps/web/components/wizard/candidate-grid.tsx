@@ -2,6 +2,7 @@
 
 import { Badge, Button, Card, CardContent } from '@amicu/ui';
 import { EmptyState } from '@/components/common/empty-state';
+import { selectableCardClassName } from '@/components/common/selectable-card';
 import { archetypeLabel, type CandidateDto } from '@/lib/recommend/candidates';
 
 // The guided wizard's candidates step (andypalmi/amicu-planning#85): renders
@@ -33,10 +34,7 @@ export function CandidateGrid({
       {candidates.map((c, i) => {
         const active = selectedIndex === i;
         return (
-          <Card
-            key={i}
-            className={active ? 'border-foreground/40 ring-1 ring-foreground/20' : undefined}
-          >
+          <Card key={i} className={selectableCardClassName(active)}>
             <CardContent className="space-y-2 p-4">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-sm font-medium">{archetypeLabel(c.archetype)}</span>
