@@ -23,10 +23,10 @@ mod tests {
     use amicu_core::ByteSize;
     use amicu_core::graph::Graph;
     use amicu_core::resource::{
-        Artifact, ArtifactFormat, Budget, BudgetPeriod, DataClass, Deployment, FlashAttention,
-        GovernanceRule, HardwareProfile, KvCacheType, LlamaCppSettings, Model, ModelSource, Money,
-        Quantization, RoutingPolicy, RoutingTarget, RuleEffect, Runtime, Sensitivity,
-        SourceRegistry, Tenant, UseCase, VllmKvCacheDtype, VllmSettings,
+        Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Budget, BudgetPeriod, DataClass,
+        Deployment, FlashAttention, GovernanceRule, HardwareProfile, KvCacheType, LlamaCppSettings,
+        Model, ModelSource, Money, Quantization, RoutingPolicy, RoutingTarget, RuleEffect, Runtime,
+        Sensitivity, SourceRegistry, Tenant, UseCase, VllmKvCacheDtype, VllmSettings,
     };
     use std::collections::BTreeMap;
 
@@ -136,6 +136,67 @@ mod tests {
         let g = graph_with_model("some_model-2");
         let reparsed = parse_graph(&format_graph(&g).unwrap()).unwrap();
         assert_eq!(reparsed.models[0].id.as_str(), "some_model-2");
+    }
+
+    fn graph_with_hardware(bandwidth_gbps: Option<u32>) -> Graph {
+        let mut g = Graph::new();
+        g.hardware_profiles.push(HardwareProfile {
+            id: "rtx_5090".into(),
+            provider: "on_prem".to_string(),
+            region: None,
+            accelerator: Some(Accelerator {
+                kind: AcceleratorKind::Gpu,
+                model: "rtx_5090".to_string(),
+                count: 1,
+                memory: "32GiB".parse().unwrap(),
+                memory_bandwidth_gbps: bandwidth_gbps,
+            }),
+            cpu: None,
+            memory: "64GiB".parse().unwrap(),
+            interconnect: None,
+            price: None,
+        });
+        g
+    }
+
+    #[test]
+    fn accelerator_bandwidth_gbps_round_trips_when_present() {
+        let g = graph_with_hardware(Some(1792));
+        let formatted = format_graph(&g).unwrap();
+        assert!(
+            formatted.contains("bandwidth_gbps"),
+            "formatted HCL should carry the bandwidth_gbps attribute:\n{formatted}"
+        );
+        let reparsed = parse_graph(&formatted).unwrap();
+        assert_eq!(reparsed, g);
+        assert_eq!(
+            reparsed.hardware_profiles[0]
+                .accelerator
+                .as_ref()
+                .unwrap()
+                .memory_bandwidth_gbps,
+            Some(1792)
+        );
+    }
+
+    #[test]
+    fn accelerator_bandwidth_gbps_omitted_when_absent() {
+        let g = graph_with_hardware(None);
+        let formatted = format_graph(&g).unwrap();
+        assert!(
+            !formatted.contains("bandwidth_gbps"),
+            "formatted HCL should omit bandwidth_gbps when None:\n{formatted}"
+        );
+        let reparsed = parse_graph(&formatted).unwrap();
+        assert_eq!(reparsed, g);
+        assert_eq!(
+            reparsed.hardware_profiles[0]
+                .accelerator
+                .as_ref()
+                .unwrap()
+                .memory_bandwidth_gbps,
+            None
+        );
     }
 
     #[test]

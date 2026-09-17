@@ -184,6 +184,7 @@ mod tests {
                 model: "h100".into(),
                 count: 1,
                 memory: "80GiB".parse().unwrap(),
+                memory_bandwidth_gbps: None,
             }),
             vcpus: Some(32),
             memory: Some("128GiB".parse().unwrap()),

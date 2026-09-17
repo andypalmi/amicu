@@ -107,6 +107,7 @@ impl FakeProvider {
                 model: "h100".into(),
                 count: 1,
                 memory: "80GiB".parse().expect("valid size"),
+                memory_bandwidth_gbps: None,
             }),
             vcpus: Some(32),
             memory: Some("128GiB".parse().expect("valid size")),

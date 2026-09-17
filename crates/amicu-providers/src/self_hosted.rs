@@ -771,6 +771,7 @@ mod tests {
             model: "a100".into(),
             count: 1,
             memory: "80GiB".parse().unwrap(),
+            memory_bandwidth_gbps: None,
         })
         .with_resources(32, "256GiB".parse().unwrap())
         .with_hourly_cost(1.5)

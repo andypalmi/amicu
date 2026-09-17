@@ -111,6 +111,7 @@ fn hardware_profile(name: &str, f: &Fields) -> Result<HardwareProfile> {
                     model: a.string("model")?,
                     count: a.u32("count")?,
                     memory: a.byte_size("memory")?,
+                    memory_bandwidth_gbps: a.opt_u32("bandwidth_gbps")?,
                 })
             })
             .transpose()?,

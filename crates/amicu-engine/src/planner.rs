@@ -508,6 +508,7 @@ mod tests {
                 model: "m3_max".into(),
                 count: 1,
                 memory: ByteSize::from_bytes(48 * GIB),
+                memory_bandwidth_gbps: None,
             }),
             cpu: None,
             memory: ByteSize::from_bytes(48 * GIB),

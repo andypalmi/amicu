@@ -36,6 +36,11 @@ pub struct Accelerator {
     pub count: u32,
     /// Memory per accelerator.
     pub memory: ByteSize,
+    /// Memory bandwidth of a single accelerator, in GB/s. Forward-looking:
+    /// recorded for catalog/planning purposes but not yet read by the fit
+    /// check (`amicu_registry::fit`), which evaluates capacity only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bandwidth_gbps: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
