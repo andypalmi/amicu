@@ -120,7 +120,7 @@ fn diagnostic(error: &VllmError) -> Diagnostic {
     Diagnostic::new(error.code(), error.severity(), error.to_string())
 }
 
-/// `AMICU-CAP-005`: the model's artifact is GGUF, served by vLLM. Warning,
+/// `AMICU-CAP-006`: the model's artifact is GGUF, served by vLLM. Warning,
 /// not a block - vLLM can load a single-file GGUF checkpoint, but upstream
 /// documents the support as experimental, unlike llama.cpp where GGUF is the
 /// native format.

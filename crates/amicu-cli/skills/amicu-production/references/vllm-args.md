@@ -26,8 +26,10 @@ No typed `dtype` (model weight dtype) field exists yet in `VllmSettings` - use
 vLLM can load a single-file GGUF checkpoint, but the support is experimental
 upstream, unlike llama.cpp where GGUF is the native format. A deployment whose
 model artifact is GGUF but whose runtime is `vllm` gets a non-blocking
-`AMICU-CAP-005` warning at `validate`/plan time - the deployment still plans
-and applies, the warning is informational.
+`AMICU-CAP-006` warning at `validate`/plan time - the deployment still plans
+and applies, the warning is informational. (Numbered 006, not 005: `AMICU-
+CAP-005` is a llama.cpp chat-template conflict registered by
+amicu-planning#151's typed-fields PR.)
 
 ## `extra_args` / `env` escape hatch (amicu-planning#150, extended to vLLM by #152)
 

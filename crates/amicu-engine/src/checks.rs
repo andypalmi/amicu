@@ -525,7 +525,7 @@ mod vllm_dispatch_tests {
     }
 
     /// GGUF-on-vLLM: a warning, not a block (amicu-planning#152's
-    /// `AMICU-CAP-005`), reached the same way through the dispatcher.
+    /// `AMICU-CAP-006`), reached the same way through the dispatcher.
     #[test]
     fn vllm_deployment_with_gguf_artifact_warns_through_report_for() {
         let mut g = Graph::new();
