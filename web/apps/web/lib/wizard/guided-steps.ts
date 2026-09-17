@@ -46,7 +46,6 @@ export type GuidedAction =
   | { type: 'submit-answers'; answers: Record<string, unknown>; candidates: CandidateDto[] }
   | { type: 'select-candidate'; index: number }
   | { type: 'confirm-review'; hcl: string }
-  | { type: 'back' }
   | { type: 'go-to-step'; step: number };
 
 /** Clamp a step to the valid `[FIRST_STEP, LAST_STEP]` range. */
@@ -84,8 +83,6 @@ export function guidedReducer(state: GuidedState, action: GuidedAction): GuidedS
       return { ...resetFromStep(state, 3), candidateIndex: action.index };
     case 'confirm-review':
       return { ...resetFromStep(state, 4), confirmedHcl: action.hcl };
-    case 'back':
-      return resetFromStep(state, state.step - 1);
     case 'go-to-step':
       return resetFromStep(state, action.step);
     default:

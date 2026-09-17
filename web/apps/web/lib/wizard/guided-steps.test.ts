@@ -90,32 +90,6 @@ test('confirm-review moves to step 4 carrying the confirmed HCL', () => {
   assert.equal(next.confirmedHcl, 'resource "model" "m" {}');
 });
 
-test('back moves one step down and clears every field for steps after the new step', () => {
-  const state: GuidedState = {
-    step: 4,
-    presetId: 'p1',
-    answers: { context_length: 2048 },
-    candidates: fakeCandidates,
-    candidateIndex: 0,
-    confirmedHcl: 'resource "model" "m" {}',
-  };
-  const next = guidedReducer(state, { type: 'back' });
-  assert.deepEqual(next, {
-    step: 3,
-    presetId: 'p1',
-    answers: { context_length: 2048 },
-    candidates: fakeCandidates,
-    candidateIndex: 0,
-    confirmedHcl: null,
-  });
-});
-
-test('back never goes below the first step', () => {
-  const next = guidedReducer(INITIAL_GUIDED_STATE, { type: 'back' });
-  assert.equal(next.step, FIRST_STEP);
-  assert.deepEqual(next, INITIAL_GUIDED_STATE);
-});
-
 test('go-to-step clamps past the last step and clears state beyond the clamped target', () => {
   const state: GuidedState = {
     step: 3,

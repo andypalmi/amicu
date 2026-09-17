@@ -372,6 +372,10 @@ function ReviewStep({
   onConfirm: (hcl: string, plan: Plan) => void;
 }) {
   const estimate = candidate.estimate;
+  // Whether the editor's text currently differs from the candidate's original
+  // seed HCL - lifted from `CandidateReview` via `onDirtyChange`, called from
+  // its own edit handler (not an effect), so this never lags a render behind.
+  const [dirty, setDirty] = useState(false);
 
   return (
     <div className="space-y-5">
@@ -385,14 +389,14 @@ function ReviewStep({
       {/* The candidate's own estimate, shown purely for context. It is NEVER
           recomputed here - `POST /recommend/customize` deliberately returns no
           estimate for edited HCL, so this figure is only ever accurate for the
-          candidate exactly as proposed. Labeled as stale rather than silently
-          left looking current once the editor below has been touched. */}
+          candidate exactly as proposed. Labeled as stale once the editor below
+          has actually been touched, rather than unconditionally. */}
       {estimate ? (
         <Card>
           <CardContent className="space-y-2 p-4">
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-sm font-medium">Original candidate estimate</h3>
-              <Badge variant="outline">Stale after edits</Badge>
+              {dirty ? <Badge variant="outline">Stale after edits</Badge> : null}
             </div>
             <p className="text-xs text-muted-foreground">
               Computed for {archetypeLabel(candidate.archetype)} exactly as proposed. Editing the
@@ -413,7 +417,7 @@ function ReviewStep({
         </Card>
       ) : null}
 
-      <CandidateReview candidate={candidate} onConfirm={onConfirm} />
+      <CandidateReview candidate={candidate} onConfirm={onConfirm} onDirtyChange={setDirty} />
     </div>
   );
 }

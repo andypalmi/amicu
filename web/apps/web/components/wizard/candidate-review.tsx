@@ -41,9 +41,15 @@ type ReviewState =
 export function CandidateReview({
   candidate,
   onConfirm = () => {},
+  onDirtyChange,
 }: {
   candidate: CandidateReviewCandidate;
   onConfirm?: (hcl: string, plan: Plan) => void;
+  /** Called whenever the editor's text starts or stops matching the
+   *  candidate's original seed HCL, from the same handler that updates the
+   *  textarea state (not an effect, to avoid a setState-in-effect lint and an
+   *  extra render). */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [hcl, setHcl] = useState(candidate.hcl);
   const [reviewing, setReviewing] = useState(false);
@@ -61,6 +67,7 @@ export function CandidateReview({
   function editHcl(next: string) {
     setHcl(next);
     setConfirmed(false);
+    onDirtyChange?.(next !== candidate.hcl);
   }
 
   async function reviewChanges() {
