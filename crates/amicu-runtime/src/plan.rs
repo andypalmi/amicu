@@ -45,10 +45,18 @@ impl RenderedLaunch {
 /// A planning-time estimate of the resources a launch will consume.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceEstimate {
-    /// Estimated peak device memory (weights plus KV cache).
+    /// Estimated peak device memory (weights plus the flat overhead band, or
+    /// weights plus [`Self::kv_cache`] when the latter is known).
     pub estimated_memory: ByteSize,
     /// Number of accelerators the launch will occupy.
     pub gpu_count: u32,
+    /// A computed KV-cache memory estimate (`amicu_registry::fit::kv_cache_bytes`),
+    /// present only when the model declares full shape metadata and the
+    /// deployment sets at least one KV-cache dtype (amicu-planning#151).
+    /// `None` otherwise - the flat overhead band is the only estimate in that
+    /// case, unchanged from before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_cache: Option<ByteSize>,
 }
 
 /// The visible artifact of `plan_launch`: a rendered command/manifest, the

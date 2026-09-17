@@ -250,6 +250,15 @@ fn model_block(m: &Model) -> Block {
         }
         body = body.add_block(vb.build());
     }
+    if let Some(v) = m.n_layers {
+        body = body.add_attribute(("n_layers", v));
+    }
+    if let Some(v) = m.n_kv_heads {
+        body = body.add_attribute(("n_kv_heads", v));
+    }
+    if let Some(v) = m.head_dim {
+        body = body.add_attribute(("head_dim", v));
+    }
     resource("model", m.id.as_str(), body.build())
 }
 
@@ -304,6 +313,39 @@ fn deployment_block(d: &Deployment) -> Block {
                 .add_attribute(("context_length", s.context_length))
                 .add_attribute(("port", s.port))
                 .add_attribute(("n_gpu_layers", s.n_gpu_layers));
+            if let Some(v) = s.temperature {
+                b = b.add_attribute(("temperature", f64::from(v)));
+            }
+            if let Some(v) = s.top_p {
+                b = b.add_attribute(("top_p", f64::from(v)));
+            }
+            if let Some(v) = s.top_k {
+                b = b.add_attribute(("top_k", v));
+            }
+            if let Some(v) = s.min_p {
+                b = b.add_attribute(("min_p", f64::from(v)));
+            }
+            if let Some(v) = s.repeat_penalty {
+                b = b.add_attribute(("repeat_penalty", f64::from(v)));
+            }
+            if let Some(v) = &s.cache_type_k {
+                b = b.add_attribute(("cache_type_k", variant(v)));
+            }
+            if let Some(v) = &s.cache_type_v {
+                b = b.add_attribute(("cache_type_v", variant(v)));
+            }
+            if let Some(v) = s.batch_size {
+                b = b.add_attribute(("batch_size", v));
+            }
+            if let Some(v) = s.ubatch_size {
+                b = b.add_attribute(("ubatch_size", v));
+            }
+            if let Some(v) = s.parallel_slots {
+                b = b.add_attribute(("parallel_slots", v));
+            }
+            if let Some(v) = &s.flash_attention {
+                b = b.add_attribute(("flash_attention", variant(v)));
+            }
             if !s.extra_args.is_empty() {
                 b = b.add_attribute(("extra_args", str_array(&s.extra_args)));
             }
@@ -332,6 +374,15 @@ fn vllm_block(s: &VllmSettings) -> Block {
     }
     if let Some(util) = s.gpu_memory_utilization {
         b = b.add_attribute(("gpu_memory_utilization", f64::from(util)));
+    }
+    if let Some(v) = &s.kv_cache_dtype {
+        b = b.add_attribute(("kv_cache_dtype", variant(v)));
+    }
+    if let Some(v) = s.max_num_seqs {
+        b = b.add_attribute(("max_num_seqs", v));
+    }
+    if let Some(v) = s.max_num_batched_tokens {
+        b = b.add_attribute(("max_num_batched_tokens", v));
     }
     if !s.extra_args.is_empty() {
         b = b.add_attribute(("extra_args", str_array(&s.extra_args)));
