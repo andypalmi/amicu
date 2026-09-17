@@ -4,6 +4,7 @@ pub mod aws;
 pub mod azure;
 pub mod capability;
 pub mod catalog;
+pub mod consumer;
 pub mod cost;
 pub mod fake;
 pub mod gcp;

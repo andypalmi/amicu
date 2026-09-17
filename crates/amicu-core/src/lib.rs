@@ -68,6 +68,7 @@ mod tests {
                 model: "a100".into(),
                 count: 1,
                 memory: "80GiB".parse().unwrap(),
+                memory_bandwidth_gbps: None,
             }),
             cpu: None,
             memory: "128GiB".parse().unwrap(),

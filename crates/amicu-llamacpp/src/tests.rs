@@ -89,6 +89,7 @@ fn apple_silicon(mem_gib: u64) -> HardwareProfile {
             model: "m3_max".into(),
             count: 1,
             memory: ByteSize::from_bytes(mem_gib * GIB),
+            memory_bandwidth_gbps: None,
         }),
         cpu: None,
         memory: ByteSize::from_bytes(mem_gib * GIB),
