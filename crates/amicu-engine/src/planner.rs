@@ -177,7 +177,7 @@ fn action_for(
         hardware: hardware.map(hardware_label),
         provider: hardware.map(|h| h.provider.clone()),
         region: hardware.and_then(|h| h.region.as_ref().map(|r| r.code.clone())),
-        cost_performance: Some(cost_performance(hardware, launch)),
+        cost_performance: Some(cost_performance(hardware, launch, &d.runtime)),
         required_secrets: launch.secret_refs.iter().map(|r| r.name.clone()).collect(),
         required_action: None,
     }
@@ -206,13 +206,27 @@ fn runtime_settings(d: &Deployment) -> Vec<Setting> {
         context_length,
         port,
         n_gpu_layers,
+        extra_args,
+        env,
     } = s;
-    vec![
+    let mut settings = vec![
         setting("runtime", "llama_cpp"),
         setting("port", port.to_string()),
         setting("context_length", context_length.to_string()),
         setting("n_gpu_layers", n_gpu_layers.to_string()),
-    ]
+    ];
+    if !extra_args.is_empty() {
+        settings.push(setting("extra_args", extra_args.join(" ")));
+    }
+    if !env.is_empty() {
+        // Keys only, never values: env values may carry secrets or
+        // tuning data not meant for the plan display.
+        settings.push(setting(
+            "env",
+            env.keys().cloned().collect::<Vec<_>>().join(","),
+        ));
+    }
+    settings
 }
 
 fn setting(key: &str, value: impl Into<String>) -> Setting {
@@ -222,21 +236,42 @@ fn setting(key: &str, value: impl Into<String>) -> Setting {
     }
 }
 
-fn cost_performance(hardware: Option<&HardwareProfile>, launch: &LaunchPlan) -> CostPerformance {
+fn cost_performance(
+    hardware: Option<&HardwareProfile>,
+    launch: &LaunchPlan,
+    runtime: &Runtime,
+) -> CostPerformance {
     let cost = hardware.and_then(|h| h.price.as_ref()).map(|p| Range {
         min: p.per_hour.amount,
         max: p.per_hour.amount,
         unit: Some("usd_per_hour".to_owned()),
     });
+    let mut assumptions = vec![format!(
+        "estimated peak memory {}",
+        launch.estimate.estimated_memory
+    )];
+    // extra_args is an escape hatch the estimator cannot interpret (e.g. a
+    // KV-cache-dtype or speculative-decoding flag) - flag the whole estimate
+    // as unverified rather than silently ignoring what raw flags might do to
+    // memory/performance (amicu-planning#150). `confidence` is left alone:
+    // it already reads Low for this heuristic path.
+    if extra_args_present(runtime) {
+        assumptions.push("unverified: raw runtime flags present".to_owned());
+    }
     CostPerformance {
         cost,
         performance: None,
-        assumptions: vec![format!(
-            "estimated peak memory {}",
-            launch.estimate.estimated_memory
-        )],
+        assumptions,
         provenance: Some("heuristic".to_owned()),
         confidence: Some(amicu_plan::contract::Confidence::Low),
+    }
+}
+
+/// Whether the deployment's runtime settings carry any raw `extra_args`.
+fn extra_args_present(runtime: &Runtime) -> bool {
+    match runtime {
+        Runtime::LlamaCpp(s) => !s.extra_args.is_empty(),
+        Runtime::Vllm(s) => !s.extra_args.is_empty(),
     }
 }
 
@@ -288,4 +323,121 @@ fn info(resource: String, message: String) -> Diagnostic {
     );
     d.resource = Some(resource);
     d
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use amicu_core::ByteSize;
+    use amicu_core::resource::{
+        AcceleratorKind, Artifact, ArtifactFormat, ModelSource, SourceRegistry,
+    };
+    use std::collections::BTreeMap;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    fn model() -> Model {
+        Model {
+            id: "m".into(),
+            source: ModelSource {
+                registry: SourceRegistry::HuggingFace,
+                reference: "org/tiny-1B".into(),
+            },
+            architecture: "llama".into(),
+            modalities: Vec::new(),
+            artifact: Artifact {
+                format: ArtifactFormat::Gguf,
+                quantization: None,
+            },
+            context_length: Some(8192),
+            variants: vec![GgufVariant {
+                quantization: Quantization::Q4KM,
+                file: "m.q4_k_m.gguf".into(),
+                size: Some(ByteSize::from_bytes(GIB)),
+            }],
+        }
+    }
+
+    fn hardware() -> HardwareProfile {
+        HardwareProfile {
+            id: "hw".into(),
+            provider: "local".into(),
+            region: None,
+            accelerator: Some(Accelerator {
+                kind: AcceleratorKind::AppleSilicon,
+                model: "m3_max".into(),
+                count: 1,
+                memory: ByteSize::from_bytes(48 * GIB),
+            }),
+            cpu: None,
+            memory: ByteSize::from_bytes(48 * GIB),
+            interconnect: None,
+            price: None,
+        }
+    }
+
+    fn deployment(extra_args: Vec<String>) -> Deployment {
+        Deployment {
+            id: "dep".into(),
+            model: "m".into(),
+            hardware_profile: "hw".into(),
+            runtime: Runtime::LlamaCpp(LlamaCppSettings {
+                context_length: 8192,
+                port: 8000,
+                n_gpu_layers: -1,
+                extra_args,
+                env: BTreeMap::new(),
+            }),
+        }
+    }
+
+    fn graph(extra_args: Vec<String>) -> Graph {
+        let mut g = Graph::new();
+        g.models.push(model());
+        g.hardware_profiles.push(hardware());
+        g.deployments.push(deployment(extra_args));
+        g
+    }
+
+    const ASSUMPTION: &str = "unverified: raw runtime flags present";
+
+    #[test]
+    fn assumption_present_when_extra_args_nonempty() {
+        let result = build_plan(&graph(vec!["--jinja".to_owned()]), None).unwrap();
+        let cp = result.items[0].action.cost_performance.as_ref().unwrap();
+        assert!(cp.assumptions.iter().any(|a| a == ASSUMPTION));
+    }
+
+    #[test]
+    fn assumption_absent_when_extra_args_empty() {
+        let result = build_plan(&graph(Vec::new()), None).unwrap();
+        let cp = result.items[0].action.cost_performance.as_ref().unwrap();
+        assert!(!cp.assumptions.iter().any(|a| a == ASSUMPTION));
+    }
+
+    #[test]
+    fn extra_args_and_env_threaded_into_runtime_settings() {
+        let mut g = graph(vec!["--jinja".to_owned()]);
+        let Runtime::LlamaCpp(s) = &mut g.deployments[0].runtime else {
+            unreachable!("graph() always builds a llama_cpp deployment");
+        };
+        s.env.insert("FOO".to_owned(), "secretvalue".to_owned());
+
+        let result = build_plan(&g, None).unwrap();
+        let settings = &result.items[0].action.runtime;
+
+        let extra_args_setting = settings
+            .iter()
+            .find(|s| s.key == "extra_args")
+            .expect("extra_args setting present");
+        assert!(extra_args_setting.value.contains("--jinja"));
+
+        let env_setting = settings
+            .iter()
+            .find(|s| s.key == "env")
+            .expect("env setting present");
+        assert!(env_setting.value.contains("FOO"));
+        // Values never leak into the plan display, only key names.
+        assert!(!env_setting.value.contains("secretvalue"));
+    }
 }

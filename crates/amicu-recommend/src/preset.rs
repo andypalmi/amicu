@@ -490,6 +490,8 @@ fn build_local_dev_chat(preset: &Preset, answers: &WizardAnswers) -> Graph {
             port: 8000,
             // Offload every layer to the accelerator.
             n_gpu_layers: -1,
+            extra_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
         }),
     });
 
@@ -567,6 +569,8 @@ fn build_private_eu_production(preset: &Preset, answers: &WizardAnswers) -> Grap
             // Shard across the GPU count derived from concurrency.
             tensor_parallel_size: Some(gpu_count),
             gpu_memory_utilization: Some(0.9),
+            extra_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
         }),
     });
 
@@ -658,6 +662,8 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
             tensor_parallel_size: Some(gpu_count),
             // Pack the KV cache hard: throughput over headroom.
             gpu_memory_utilization: Some(0.95),
+            extra_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
         }),
     });
 

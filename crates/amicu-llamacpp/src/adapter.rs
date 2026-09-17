@@ -7,7 +7,7 @@ use amicu_core::ByteSize;
 use amicu_core::adapter::{
     Adapter, AdapterError, AdapterErrorKind, AdapterId, DescribeCapabilities, HealthStatus,
 };
-use amicu_core::diagnostic::Diagnostic;
+use amicu_core::diagnostic::{Diagnostic, Severity, catalog};
 use amicu_core::id::{HardwareProfileId, ModelId};
 use amicu_core::resource::{
     ArtifactFormat, Deployment, HardwareProfile, LlamaCppSettings, Modality, Model, Quantization,
@@ -22,7 +22,7 @@ use amicu_runtime::{
 use async_trait::async_trait;
 
 use crate::binary::{BinaryConfig, BinaryInfo, CommandRunner, HostRunner, detect_binary};
-use crate::command::render_command;
+use crate::command::{DENYLISTED_FLAGS, TYPED_FLAGS, render_command};
 use crate::error::LlamaCppError;
 use crate::supervisor::{ProcessSupervisor, ResolvedSecret};
 
@@ -196,6 +196,67 @@ fn diagnostic(error: &LlamaCppError) -> Diagnostic {
     Diagnostic::new(error.code(), error.severity(), error.to_string())
 }
 
+/// The leading `--flag` token of one `extra_args` entry: `--foo` and
+/// `--foo=value` both yield `--foo`; a bare value (a preceding flag's own
+/// argument, e.g. the `1` in `["--ctx-size", "1"]`) yields `None`.
+fn flag_token(arg: &str) -> Option<&str> {
+    if !arg.starts_with("--") {
+        return None;
+    }
+    Some(arg.split('=').next().unwrap_or(arg))
+}
+
+/// The first `extra_args` flag that either duplicates a typed field's flag
+/// (`AMICU-CAP-002`) or is on the fixed denylist (`AMICU-CAP-003`), as an
+/// error - used by `plan_launch` to refuse building an ambiguous or unsafe
+/// launch.
+fn first_extra_args_conflict(extra_args: &[String]) -> Result<(), LlamaCppError> {
+    for arg in extra_args {
+        let Some(flag) = flag_token(arg) else {
+            continue;
+        };
+        if TYPED_FLAGS.contains(&flag) {
+            return Err(LlamaCppError::ExtraArgDuplicatesTyped(flag.to_owned()));
+        }
+        if DENYLISTED_FLAGS.contains(&flag) {
+            return Err(LlamaCppError::ExtraArgDenylisted(flag.to_owned()));
+        }
+    }
+    Ok(())
+}
+
+/// Diagnose `extra_args` for `validate`: every duplicated/denylisted flag
+/// (`AMICU-CAP-002`/`AMICU-CAP-003`, one per offending entry so a caller sees
+/// every problem at once, not just the first), plus one informational
+/// `AMICU-CAP-004` whenever `extra_args` is non-empty at all - the estimate
+/// is unverified regardless of whether any flag conflicts.
+fn extra_args_diagnostics(extra_args: &[String]) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for arg in extra_args {
+        let Some(flag) = flag_token(arg) else {
+            continue;
+        };
+        if TYPED_FLAGS.contains(&flag) {
+            out.push(diagnostic(&LlamaCppError::ExtraArgDuplicatesTyped(
+                flag.to_owned(),
+            )));
+        }
+        if DENYLISTED_FLAGS.contains(&flag) {
+            out.push(diagnostic(&LlamaCppError::ExtraArgDenylisted(
+                flag.to_owned(),
+            )));
+        }
+    }
+    if !extra_args.is_empty() {
+        out.push(Diagnostic::new(
+            catalog::CAP_EXTRA_ARGS_PRESENT,
+            Severity::Info,
+            "raw runtime flags present; estimate unverified".to_owned(),
+        ));
+    }
+    out
+}
+
 #[async_trait]
 impl Adapter for LlamaCppAdapter {
     fn id(&self) -> AdapterId {
@@ -242,10 +303,14 @@ impl RuntimeAdapter for LlamaCppAdapter {
 
     fn validate(&self, d: &Deployment) -> Vec<Diagnostic> {
         let mut out = Vec::new();
-        if let Err(e) = Self::settings(d) {
-            out.push(diagnostic(&e));
-            return out;
-        }
+        let settings = match Self::settings(d) {
+            Ok(s) => s,
+            Err(e) => {
+                out.push(diagnostic(&e));
+                return out;
+            }
+        };
+        out.extend(extra_args_diagnostics(&settings.extra_args));
         let (resolved, hardware) = match self.resolve(d) {
             Ok(pair) => pair,
             Err(e) => {
@@ -276,6 +341,8 @@ impl RuntimeAdapter for LlamaCppAdapter {
 
     fn plan_launch(&self, d: &Deployment) -> Result<LaunchPlan, AdapterError> {
         let settings = Self::settings(d).map_err(LlamaCppError::into_adapter_error)?;
+        first_extra_args_conflict(&settings.extra_args)
+            .map_err(LlamaCppError::into_adapter_error)?;
         let (resolved, hardware) = self.resolve(d).map_err(LlamaCppError::into_adapter_error)?;
         let model = &resolved.model;
         if model.artifact.format != ArtifactFormat::Gguf {

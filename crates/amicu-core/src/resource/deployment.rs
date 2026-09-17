@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::id::{DeploymentId, HardwareProfileId, ModelId};
@@ -27,6 +29,18 @@ pub struct LlamaCppSettings {
     pub port: u16,
     /// Layers offloaded to the accelerator; `-1` offloads all.
     pub n_gpu_layers: i32,
+    /// Raw `llama-server` flags appended verbatim after the typed flags
+    /// (amicu-planning#150): the escape hatch for the ~98% of the flag
+    /// surface with no typed field yet. Declaration order is preserved -
+    /// it is argv order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+    /// Environment variables applied to the spawned process, merged with
+    /// (and never overriding) resolved secrets (amicu-planning#150).
+    /// `BTreeMap` for deterministic HCL round-trip, like `Tenant.labels`
+    /// and `Credential.env`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,4 +52,13 @@ pub struct VllmSettings {
     pub tensor_parallel_size: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_memory_utilization: Option<f32>,
+    /// Raw vLLM CLI flags appended verbatim by the vLLM renderer
+    /// (amicu-planning#150; the renderer itself ships separately). See
+    /// [`LlamaCppSettings::extra_args`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+    /// Environment variables applied to the spawned process. See
+    /// [`LlamaCppSettings::env`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }

@@ -14,7 +14,7 @@ mod ser;
 
 pub use de::parse_graph;
 pub use error::HclError;
-pub use secret_scan::scan_secret_leaks;
+pub use secret_scan::{scan_runtime_env_secrets, scan_secret_leaks};
 pub use ser::format_graph;
 
 #[cfg(test)]
@@ -184,6 +184,8 @@ mod tests {
                 context_length: 8192,
                 port: 8000,
                 n_gpu_layers: -1,
+                extra_args: Vec::new(),
+                env: std::collections::BTreeMap::new(),
             }),
         }
     }
@@ -511,5 +513,200 @@ mod tests {
         // URI-shaped argument should not trip the entropy heuristic.
         let src = "api_key = secret(\"vault://kv/openai#api_key\")\n";
         assert!(scan_secret_leaks(src).is_empty());
+    }
+
+    // --- amicu-planning#150: runtime escape hatch (extra_args / env) ---
+
+    #[test]
+    fn llama_cpp_extra_args_and_env_parse() {
+        let src = r#"
+            resource "model" "m" {
+              source {
+                registry  = "hugging_face"
+                reference = "org/model"
+              }
+              architecture = "llama"
+              artifact { format = "gguf" }
+            }
+            resource "hardware_profile" "hw" {
+              provider = "local"
+              memory   = "48GiB"
+            }
+            resource "deployment" "dep" {
+              model    = model.m.id
+              hardware = hardware_profile.hw.id
+              runtime  = "llama_cpp"
+              llama_cpp {
+                context_length = 8192
+                port           = 8000
+                n_gpu_layers   = -1
+                extra_args = ["--mmproj", "/models/mmproj.gguf", "--temp", "0.6"]
+                env {
+                  GGML_CUDA_DISABLE_GRAPHS = "1"
+                }
+              }
+            }
+        "#;
+        let graph = parse_graph(src).unwrap();
+        let Runtime::LlamaCpp(s) = &graph.deployments[0].runtime else {
+            panic!("expected llama_cpp runtime");
+        };
+        assert_eq!(
+            s.extra_args,
+            vec!["--mmproj", "/models/mmproj.gguf", "--temp", "0.6"]
+        );
+        assert_eq!(
+            s.env.get("GGML_CUDA_DISABLE_GRAPHS").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn vllm_extra_args_and_env_parse() {
+        let src = r#"
+            resource "model" "m" {
+              source {
+                registry  = "hugging_face"
+                reference = "org/model"
+              }
+              architecture = "llama"
+              artifact { format = "safetensors" }
+            }
+            resource "hardware_profile" "hw" {
+              provider = "local"
+              memory   = "48GiB"
+            }
+            resource "deployment" "dep" {
+              model    = model.m.id
+              hardware = hardware_profile.hw.id
+              runtime  = "vllm"
+              vllm {
+                context_length = 32768
+                port           = 8000
+                extra_args = ["--swap-space", "4", "--enforce-eager"]
+                env {
+                  NCCL_DEBUG = "WARN"
+                }
+              }
+            }
+        "#;
+        let graph = parse_graph(src).unwrap();
+        let Runtime::Vllm(s) = &graph.deployments[0].runtime else {
+            panic!("expected vllm runtime");
+        };
+        assert_eq!(s.extra_args, vec!["--swap-space", "4", "--enforce-eager"]);
+        assert_eq!(s.env.get("NCCL_DEBUG").map(String::as_str), Some("WARN"));
+    }
+
+    fn llama_cpp_deployment_with(extra_args: Vec<String>, env: BTreeMap<String, String>) -> Graph {
+        let mut g = Graph::new();
+        g.deployments.push(Deployment {
+            id: "dep".into(),
+            model: "phantom_model".into(),
+            hardware_profile: "phantom_hw".into(),
+            runtime: Runtime::LlamaCpp(LlamaCppSettings {
+                context_length: 8192,
+                port: 8000,
+                n_gpu_layers: -1,
+                extra_args,
+                env,
+            }),
+        });
+        g
+    }
+
+    fn vllm_deployment_with(extra_args: Vec<String>, env: BTreeMap<String, String>) -> Graph {
+        let mut g = Graph::new();
+        g.deployments.push(Deployment {
+            id: "dep".into(),
+            model: "phantom_model".into(),
+            hardware_profile: "phantom_hw".into(),
+            runtime: Runtime::Vllm(amicu_core::resource::VllmSettings {
+                context_length: 32768,
+                port: 8000,
+                tensor_parallel_size: None,
+                gpu_memory_utilization: None,
+                extra_args,
+                env,
+            }),
+        });
+        g
+    }
+
+    #[test]
+    fn llama_cpp_extra_args_and_env_round_trip() {
+        let mut env = BTreeMap::new();
+        env.insert("GGML_CUDA_DISABLE_GRAPHS".to_string(), "1".to_string());
+        let g = llama_cpp_deployment_with(
+            vec!["--mmproj".to_string(), "/models/mmproj.gguf".to_string()],
+            env,
+        );
+        let reparsed = parse_graph(&format_graph(&g).unwrap()).unwrap();
+        assert_eq!(g, reparsed);
+    }
+
+    #[test]
+    fn vllm_extra_args_and_env_round_trip() {
+        let mut env = BTreeMap::new();
+        env.insert("NCCL_DEBUG".to_string(), "WARN".to_string());
+        let g = vllm_deployment_with(vec!["--enforce-eager".to_string()], env);
+        let reparsed = parse_graph(&format_graph(&g).unwrap()).unwrap();
+        assert_eq!(g, reparsed);
+    }
+
+    #[test]
+    fn extra_args_declaration_order_is_preserved_through_round_trip() {
+        // extra_args order is argv order - it must never get reordered
+        // (e.g. by accidentally routing through a sorted map).
+        let args = vec![
+            "--mmproj".to_string(),
+            "/m.gguf".to_string(),
+            "--temp".to_string(),
+            "0.6".to_string(),
+            "--jinja".to_string(),
+        ];
+        let g = llama_cpp_deployment_with(args.clone(), BTreeMap::new());
+        let reparsed = parse_graph(&format_graph(&g).unwrap()).unwrap();
+        let Runtime::LlamaCpp(s) = &reparsed.deployments[0].runtime else {
+            panic!("expected llama_cpp runtime");
+        };
+        assert_eq!(s.extra_args, args);
+    }
+
+    #[test]
+    fn non_identifier_runtime_env_key_is_rejected_not_corrupted() {
+        for bad_key in ["cost.center", "cost center", ""] {
+            let mut env = BTreeMap::new();
+            env.insert(bad_key.to_string(), "value".to_string());
+            let g = llama_cpp_deployment_with(Vec::new(), env);
+            assert!(
+                matches!(format_graph(&g), Err(HclError::InvalidIdentifier { .. })),
+                "env key {bad_key:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn env_secret_suspected_warns_on_secret_looking_value() {
+        let mut env = BTreeMap::new();
+        env.insert("HF_TOKEN".to_string(), "AKIAIOSFODNN7EXAMPLE".to_string());
+        let g = llama_cpp_deployment_with(Vec::new(), env);
+        let warnings = scan_runtime_env_secrets(&g);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].code.to_string(), "AMICU-POLICY-006");
+        assert_eq!(
+            warnings[0].severity,
+            amicu_core::diagnostic::Severity::Warning
+        );
+        assert_eq!(warnings[0].path.as_deref(), Some("llama_cpp.env.HF_TOKEN"));
+        assert!(!warnings[0].message.contains("AKIAIOSFODNN7EXAMPLE"));
+    }
+
+    #[test]
+    fn env_secret_suspected_does_not_warn_on_ordinary_value() {
+        let mut env = BTreeMap::new();
+        env.insert("GGML_CUDA_DISABLE_GRAPHS".to_string(), "1".to_string());
+        let g = llama_cpp_deployment_with(Vec::new(), env);
+        assert!(scan_runtime_env_secrets(&g).is_empty());
     }
 }

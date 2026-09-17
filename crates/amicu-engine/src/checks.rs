@@ -21,6 +21,7 @@ const DUPLICATE_ID: DiagnosticCode = DiagnosticCode::new(Category::Schema, 2);
 pub fn report_for(graph: &Graph) -> DiagnosticReport {
     let mut diagnostics = duplicate_ids(graph);
     diagnostics.extend(residency_violations(graph));
+    diagnostics.extend(amicu_hcl::scan_runtime_env_secrets(graph));
 
     for missing in graph.missing_references() {
         let mut d = Diagnostic::new(
@@ -270,6 +271,8 @@ mod residency_tests {
                 context_length: 8192,
                 port: 8000,
                 n_gpu_layers: -1,
+                extra_args: Vec::new(),
+                env: std::collections::BTreeMap::new(),
             }),
         }
     }

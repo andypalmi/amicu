@@ -141,6 +141,21 @@ fn validate_identifiers(graph: &Graph) -> Result<(), HclError> {
         }
     }
 
+    for d in &graph.deployments {
+        let env = match &d.runtime {
+            Runtime::LlamaCpp(s) => &s.env,
+            Runtime::Vllm(s) => &s.env,
+        };
+        for key in env.keys() {
+            if Identifier::new(key).is_err() {
+                return Err(HclError::invalid_identifier(
+                    format!("deployment `{}` runtime env key", d.id.as_str()),
+                    key.as_str(),
+                ));
+            }
+        }
+    }
+
     validate_references(graph)
 }
 
@@ -285,13 +300,19 @@ fn deployment_block(d: &Deployment) -> Block {
         ));
     match &d.runtime {
         Runtime::LlamaCpp(s) => {
-            body = body.add_attribute(("runtime", "llama_cpp")).add_block(
-                Block::builder("llama_cpp")
-                    .add_attribute(("context_length", s.context_length))
-                    .add_attribute(("port", s.port))
-                    .add_attribute(("n_gpu_layers", s.n_gpu_layers))
-                    .build(),
-            );
+            let mut b = Block::builder("llama_cpp")
+                .add_attribute(("context_length", s.context_length))
+                .add_attribute(("port", s.port))
+                .add_attribute(("n_gpu_layers", s.n_gpu_layers));
+            if !s.extra_args.is_empty() {
+                b = b.add_attribute(("extra_args", str_array(&s.extra_args)));
+            }
+            if !s.env.is_empty() {
+                b = b.add_block(env_block(&s.env));
+            }
+            body = body
+                .add_attribute(("runtime", "llama_cpp"))
+                .add_block(b.build());
         }
         Runtime::Vllm(s) => {
             body = body
@@ -312,7 +333,25 @@ fn vllm_block(s: &VllmSettings) -> Block {
     if let Some(util) = s.gpu_memory_utilization {
         b = b.add_attribute(("gpu_memory_utilization", f64::from(util)));
     }
+    if !s.extra_args.is_empty() {
+        b = b.add_attribute(("extra_args", str_array(&s.extra_args)));
+    }
+    if !s.env.is_empty() {
+        b = b.add_block(env_block(&s.env));
+    }
     b.build()
+}
+
+/// A runtime settings block's `env {}` map, in `BTreeMap` (deterministic) key
+/// order. Keys are validated as HCL identifiers up front by
+/// [`validate_identifiers`], so [`Identifier::unchecked`] here never corrupts
+/// a key.
+fn env_block(env: &std::collections::BTreeMap<String, String>) -> Block {
+    let mut eb = Block::builder("env");
+    for (k, v) in env {
+        eb = eb.add_attribute((Identifier::unchecked(k), v.clone()));
+    }
+    eb.build()
 }
 
 fn routing_block(p: &amicu_core::resource::RoutingPolicy) -> Block {

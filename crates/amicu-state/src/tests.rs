@@ -76,6 +76,8 @@ fn sample_deployment() -> Deployment {
             context_length: 8192,
             port: 8080,
             n_gpu_layers: -1,
+            extra_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
         }),
     }
 }

@@ -66,6 +66,16 @@ pub enum LlamaCppError {
     /// `AMICU-PROVIDER-001`.
     #[error("runtime backend failed: {0}")]
     Supervisor(String),
+
+    /// An `extra_args` flag duplicates a flag already rendered by a typed
+    /// field (amicu-planning#150). Maps to `AMICU-CAP-002`.
+    #[error("extra_args flag `{0}` duplicates a typed field's flag")]
+    ExtraArgDuplicatesTyped(String),
+
+    /// An `extra_args` flag is on the fixed denylist (amicu-planning#150).
+    /// Maps to `AMICU-CAP-003`.
+    #[error("extra_args flag `{0}` is not allowed (amicu owns this setting)")]
+    ExtraArgDenylisted(String),
 }
 
 impl AdapterErrorKind for LlamaCppError {
@@ -83,6 +93,8 @@ impl AdapterErrorKind for LlamaCppError {
             | LlamaCppError::Probe(_)
             | LlamaCppError::Supervisor(_) => catalog::PROVIDER_CAPACITY_UNAVAILABLE,
             LlamaCppError::DownloadFailed(_) => catalog::PROVIDER_DOWNLOAD_FAILED,
+            LlamaCppError::ExtraArgDuplicatesTyped(_) => catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED,
+            LlamaCppError::ExtraArgDenylisted(_) => catalog::CAP_EXTRA_ARG_DENYLISTED,
         }
     }
 

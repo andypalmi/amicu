@@ -29,6 +29,7 @@ use amicu_runtime::{
 };
 
 use crate::binary::{BinaryConfig, CommandRunner, LlamaVersion, detect_binary};
+use crate::command::render_command;
 use crate::download::download_gguf;
 use crate::error::LlamaCppError;
 use crate::health::HealthProbe;
@@ -102,8 +103,20 @@ fn deployment() -> Deployment {
             context_length: 8192,
             port: 8080,
             n_gpu_layers: -1,
+            extra_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
         }),
     }
+}
+
+/// `deployment()` with `extra_args` set to `args` (amicu-planning#150).
+fn deployment_with_extra_args(args: &[&str]) -> Deployment {
+    let mut d = deployment();
+    let Runtime::LlamaCpp(s) = &mut d.runtime else {
+        unreachable!("deployment() always builds a llama_cpp runtime");
+    };
+    s.extra_args = args.iter().map(|a| (*a).to_owned()).collect();
+    d
 }
 
 /// Adapter over a catalog that fits (16 GiB Mac, ~4 GiB Q4_K_M model).
@@ -407,6 +420,61 @@ fn validate_reports_ref_for_unknown_model() {
     assert_eq!(diags[0].code, catalog::REF_UNKNOWN_RESOURCE);
 }
 
+// ---- extra_args diagnostics (amicu-planning#150) ----------------------------
+
+#[test]
+fn validate_reports_cap004_when_extra_args_present() {
+    let diags = fitting_adapter().validate(&deployment_with_extra_args(&["--jinja"]));
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0].code, catalog::CAP_EXTRA_ARGS_PRESENT);
+    assert_eq!(diags[0].severity, amicu_core::diagnostic::Severity::Info);
+}
+
+#[test]
+fn validate_reports_no_cap004_when_extra_args_empty() {
+    let diags = fitting_adapter().validate(&deployment());
+    assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
+}
+
+#[test]
+fn validate_reports_cap002_for_duplicate_flag_space_form() {
+    // `--ctx-size 1`: flag and value as two separate extra_args entries.
+    let diags = fitting_adapter().validate(&deployment_with_extra_args(&["--ctx-size", "1"]));
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+                && d.severity == amicu_core::diagnostic::Severity::Error),
+        "expected AMICU-CAP-002, got {diags:?}"
+    );
+}
+
+#[test]
+fn validate_reports_cap002_for_duplicate_flag_equals_form() {
+    // `--ctx-size=1`: flag and value in one extra_args entry.
+    let diags = fitting_adapter().validate(&deployment_with_extra_args(&["--ctx-size=1"]));
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+                && d.severity == amicu_core::diagnostic::Severity::Error),
+        "expected AMICU-CAP-002, got {diags:?}"
+    );
+}
+
+#[test]
+fn validate_reports_cap003_for_denylisted_flag() {
+    let diags =
+        fitting_adapter().validate(&deployment_with_extra_args(&["--api-key", "sk-whatever"]));
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == catalog::CAP_EXTRA_ARG_DENYLISTED
+                && d.severity == amicu_core::diagnostic::Severity::Error),
+        "expected AMICU-CAP-003, got {diags:?}"
+    );
+}
+
 // ---- plan_launch ------------------------------------------------------------
 
 #[test]
@@ -427,6 +495,52 @@ fn plan_launch_renders_visible_command() {
     assert_eq!(argv[1], "-m");
     assert!(argv[2].ends_with("tiny.Q4_K_M.gguf"));
     assert!(argv.contains(&"--port".to_owned()) && argv.contains(&"8080".to_owned()));
+}
+
+#[test]
+fn render_command_appends_extra_args_after_typed_flags() {
+    let settings = {
+        let Runtime::LlamaCpp(s) = deployment_with_extra_args(&["--mmproj", "/m.gguf"]).runtime
+        else {
+            unreachable!()
+        };
+        s
+    };
+    let (argv, text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    // Typed flags first, then extra_args verbatim, in declaration order.
+    let typed_end = argv
+        .iter()
+        .position(|a| a == "-1")
+        .expect("n_gpu_layers value present");
+    assert_eq!(&argv[typed_end + 1..], ["--mmproj", "/m.gguf"]);
+    assert!(text.ends_with("--mmproj /m.gguf"));
+}
+
+#[test]
+fn plan_launch_errors_on_cap002_duplicate_flag() {
+    let err = fitting_adapter()
+        .plan_launch(&deployment_with_extra_args(&["--port=9999"]))
+        .expect_err("duplicate typed flag must be rejected");
+    assert_eq!(err.code(), catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED);
+}
+
+#[test]
+fn plan_launch_errors_on_cap003_denylisted_flag() {
+    let err = fitting_adapter()
+        .plan_launch(&deployment_with_extra_args(&["--host", "0.0.0.0"]))
+        .expect_err("denylisted flag must be rejected");
+    assert_eq!(err.code(), catalog::CAP_EXTRA_ARG_DENYLISTED);
+}
+
+#[test]
+fn plan_launch_succeeds_with_only_informational_extra_args() {
+    let plan = fitting_adapter()
+        .plan_launch(&deployment_with_extra_args(&["--jinja"]))
+        .expect("non-conflicting extra_args must not block plan_launch");
+    let RenderedLaunch::Command { argv, .. } = &plan.rendered else {
+        panic!("expected a command");
+    };
+    assert!(argv.contains(&"--jinja".to_owned()));
 }
 
 #[test]
@@ -658,6 +772,8 @@ fn manifest_plan() -> LaunchPlan {
             context_length: 8192,
             port: 8080,
             n_gpu_layers: -1,
+            extra_args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
         }),
         secret_refs: vec![],
         estimate: ResourceEstimate {
@@ -799,6 +915,72 @@ async fn supervisor_injects_secrets_into_env_not_argv() {
     assert_eq!(spec.env, vec![("api_key".to_owned(), "s3cr3t".to_owned())]);
     // The value is in env, never in argv.
     assert!(spec.argv.iter().all(|a| !a.contains("s3cr3t")));
+}
+
+// ---- env merge / collision (amicu-planning#150) ------------------------------
+
+fn deployment_with_env(pairs: &[(&str, &str)]) -> Deployment {
+    let mut d = deployment();
+    let Runtime::LlamaCpp(s) = &mut d.runtime else {
+        unreachable!("deployment() always builds a llama_cpp runtime");
+    };
+    s.env = pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+    d
+}
+
+fn plan_with_env(pairs: &[(&str, &str)]) -> LaunchPlan {
+    fitting_adapter()
+        .plan_launch(&deployment_with_env(pairs))
+        .expect("plan")
+}
+
+#[tokio::test]
+async fn supervisor_merges_settings_env_before_secrets() {
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: true });
+    let plan = plan_with_env(&[("GGML_CUDA_DISABLE_GRAPHS", "1")]);
+    let secret = ResolvedSecret {
+        name: "api_key".into(),
+        value: SecretValue::new("s3cr3t"),
+    };
+    sup.start(&plan, std::slice::from_ref(&secret))
+        .await
+        .expect("start");
+
+    let spec = manager.started.lock().unwrap().clone().expect("started");
+    // settings.env first, then resolved secrets.
+    assert_eq!(
+        spec.env,
+        vec![
+            ("GGML_CUDA_DISABLE_GRAPHS".to_owned(), "1".to_owned()),
+            ("api_key".to_owned(), "s3cr3t".to_owned()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn supervisor_hard_errors_on_settings_env_secret_collision() {
+    // `secret_refs` is always empty for llama.cpp today (no HCL path
+    // produces one yet), so this constructs a `ResolvedSecret` directly to
+    // cover the collision path regardless.
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: true });
+    let plan = plan_with_env(&[("HF_TOKEN", "not-a-secret-value")]);
+    let secret = ResolvedSecret {
+        name: "HF_TOKEN".into(),
+        value: SecretValue::new("real-secret"),
+    };
+    let err = sup
+        .start(&plan, std::slice::from_ref(&secret))
+        .await
+        .expect_err("colliding env key must hard-error");
+    assert!(matches!(err, LlamaCppError::Supervisor(_)));
+    assert!(err.to_string().contains("HF_TOKEN"));
+    // Never even attempted to start the service.
+    assert!(manager.started.lock().unwrap().is_none());
 }
 
 // ---- launchd / systemd managers over a fake CommandExec ---------------------

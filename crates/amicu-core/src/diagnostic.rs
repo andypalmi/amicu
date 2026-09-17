@@ -305,6 +305,29 @@ pub mod catalog {
     pub const REF_UNKNOWN_RESOURCE: DiagnosticCode = DiagnosticCode::new(Category::Ref, 1);
     /// `AMICU-CAP-001` - runtime requires a GGUF model artifact.
     pub const CAP_RUNTIME_ARTIFACT_MISMATCH: DiagnosticCode = DiagnosticCode::new(Category::Cap, 1);
+    // --- amicu-planning#150: runtime escape hatch (extra_args / env) ---
+    /// `AMICU-CAP-002` - an `extra_args` flag duplicates a flag already
+    /// emitted by a typed field (e.g. `--ctx-size`, which `context_length`
+    /// already renders). Error, not a warning: the raw flag would either
+    /// silently double-pass the flag to `llama-server` (last one wins, which
+    /// one is order-dependent and easy to get wrong) or be rejected by the
+    /// binary itself, so the ambiguity is rejected before launch instead.
+    pub const CAP_EXTRA_ARG_DUPLICATES_TYPED: DiagnosticCode =
+        DiagnosticCode::new(Category::Cap, 2);
+    /// `AMICU-CAP-003` - an `extra_args` flag is on the fixed denylist
+    /// (`--host`, `--api-key`, `--api-key-file`, `--ssl-key-file`). Error:
+    /// `--host` conflicts with amicu owning the bind address (see
+    /// `ServiceSupervisor::start`'s endpoint derivation), and the others put
+    /// secret material - or a path to it - directly into argv, which is
+    /// visible to any process that can read `/proc/<pid>/cmdline` or a
+    /// process listing, defeating the point of secret-designated `env`.
+    pub const CAP_EXTRA_ARG_DENYLISTED: DiagnosticCode = DiagnosticCode::new(Category::Cap, 3);
+    /// `AMICU-CAP-004` - `extra_args` is non-empty. Info, not a blocker: the
+    /// estimator cannot interpret raw flags (e.g. a KV-cache-dtype or
+    /// speculative-decoding flag hidden in `extra_args`), so the memory/fit
+    /// verdict for this deployment is unverified. Mirrored in the plan's
+    /// `CostPerformance.assumptions` (`amicu_engine::planner`).
+    pub const CAP_EXTRA_ARGS_PRESENT: DiagnosticCode = DiagnosticCode::new(Category::Cap, 4);
     /// `AMICU-MEM-001` - model does not fit in available VRAM.
     pub const MEM_VRAM_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Mem, 1);
     /// `AMICU-MEM-002` - a single artifact/weight file exceeds the available
@@ -336,6 +359,18 @@ pub mod catalog {
     /// `# amicu:allow` comment on the same line.
     pub const POLICY_SECRET_PATTERN_SUSPECTED: DiagnosticCode =
         DiagnosticCode::new(Category::Policy, 5);
+    // --- amicu-planning#150: runtime escape hatch (extra_args / env) ---
+    /// `AMICU-POLICY-006` - a runtime settings block's `env` map (the
+    /// llama.cpp / vLLM `extra_args`/`env` escape hatch, amicu-planning#150)
+    /// has a value that matches a high-confidence secret shape (AWS access
+    /// key, OpenAI-style key, PEM header, JWT, or a high-entropy token) -
+    /// the same detectors [`POLICY_SECRET_PATTERN_SUSPECTED`] uses. Warning
+    /// only, never blocks: unlike `credential.env` (`AMICU-POLICY-004`), a
+    /// runtime `env` value is not schema-directed to be secret-designated,
+    /// so this is a heuristic nudge toward moving the value into a
+    /// `credential`, not a structural rejection.
+    pub const POLICY_RUNTIME_ENV_SECRET_SUSPECTED: DiagnosticCode =
+        DiagnosticCode::new(Category::Policy, 6);
     /// `AMICU-STATE-001` - state is locked by another operation.
     pub const STATE_LOCKED: DiagnosticCode = DiagnosticCode::new(Category::State, 1);
     /// `AMICU-PROVIDER-001` - requested capacity is unavailable in region.
@@ -367,13 +402,17 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 21] {
+    pub const fn all() -> [DiagnosticCode; 25] {
         [
             PARSE_UNCLOSED_BLOCK,
             PARSE_INVALID_SYNTAX,
             SCHEMA_MISSING_REQUIRED,
             REF_UNKNOWN_RESOURCE,
             CAP_RUNTIME_ARTIFACT_MISMATCH,
+            // amicu-planning#150 additions:
+            CAP_EXTRA_ARG_DUPLICATES_TYPED,
+            CAP_EXTRA_ARG_DENYLISTED,
+            CAP_EXTRA_ARGS_PRESENT,
             MEM_VRAM_EXCEEDED,
             MEM_ARTIFACT_OVERSIZE,
             POLICY_BUDGET_EXCEEDED,
@@ -383,6 +422,8 @@ pub mod catalog {
             // amicu-planning#119 additions:
             POLICY_SECRET_LITERAL_REJECTED,
             POLICY_SECRET_PATTERN_SUSPECTED,
+            // amicu-planning#150 addition:
+            POLICY_RUNTIME_ENV_SECRET_SUSPECTED,
             STATE_LOCKED,
             PROVIDER_CAPACITY_UNAVAILABLE,
             PROVIDER_DOWNLOAD_FAILED,
@@ -454,6 +495,19 @@ mod tests {
         assert_eq!(
             catalog::PROVIDER_METADATA_STALE.to_string(),
             "AMICU-PROVIDER-003"
+        );
+        assert_eq!(
+            catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED.to_string(),
+            "AMICU-CAP-002"
+        );
+        assert_eq!(
+            catalog::CAP_EXTRA_ARG_DENYLISTED.to_string(),
+            "AMICU-CAP-003"
+        );
+        assert_eq!(catalog::CAP_EXTRA_ARGS_PRESENT.to_string(), "AMICU-CAP-004");
+        assert_eq!(
+            catalog::POLICY_RUNTIME_ENV_SECRET_SUSPECTED.to_string(),
+            "AMICU-POLICY-006"
         );
     }
 
