@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "test": "node --test --experimental-strip-types 'lib/**/*.test.ts'",
+    "test": "node --test --experimental-strip-types 'lib/**/*.test.ts' && node --conditions=react-server --import tsx --test test/workerd/cookie-refresh.unit.test.ts",
+    "test:workerd-live": "node --conditions=react-server --import tsx --test test/workerd/live-preview.test.ts",
     "typecheck": "next typegen && tsc --noEmit",
     "cf:build": "opennextjs-cloudflare build",
     "cf:preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
@@ -42,6 +43,7 @@
     "eslint": "^9.39.5",
     "postcss": "^8.5.26",
     "tailwindcss": "^4.3.3",
+    "tsx": "^4.23.13",
     "typescript": "^6.0.3",
     "wrangler": "^4.132.0"
   }
