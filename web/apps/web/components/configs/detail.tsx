@@ -38,10 +38,10 @@ type DetailLoad =
 
 // One configuration's detail: current version, full version history, restore
 // (rollback creates a NEW version - nothing is deleted or overwritten), and a
-// "Load into wizard" link that seeds the wizard from this config's current
-// content (see components/wizard/wizard.tsx's `?configId=` handling). Reads
-// through GET /api/configs/{id} and GET /api/configs/{id}/versions; restore
-// through POST /api/configs/{id}/rollback/{no}.
+// "Load into classic wizard" link that seeds the wizard from this config's
+// current content (see components/wizard/wizard.tsx's `?configId=` handling).
+// Reads through GET /api/configs/{id} and GET /api/configs/{id}/versions;
+// restore through POST /api/configs/{id}/rollback/{no}.
 export function ConfigDetail({
   configId,
   onBack,
@@ -131,7 +131,7 @@ export function ConfigDetail({
                 </div>
                 <Button asChild size="sm">
                   <Link href={`/wizard?configId=${encodeURIComponent(load.detail.id)}`}>
-                    Load into wizard
+                    Load into classic wizard
                   </Link>
                 </Button>
               </div>

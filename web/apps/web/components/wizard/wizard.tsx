@@ -85,15 +85,16 @@ type LoadedConfigResult =
   | { kind: 'error'; id: string; message: string }
   | { kind: 'ready'; id: string; name: string; hcl: string };
 
-// The guided wizard: a client stepper over the preset BFF routes. (1) pick a
-// preset from the gallery; (2) fill a short requirements form seeded from the
-// preset's detail; (3) emit the HCL and review it. No tier gating here - the
-// endpoints are Community-minimum and the API enforces tier by content.
+// The classic preset wizard: a client stepper over the preset BFF routes. (1)
+// pick a preset from the gallery; (2) fill a short requirements form seeded
+// from the preset's detail; (3) emit the HCL and review it. No tier gating
+// here - the endpoints are Community-minimum and the API enforces tier by
+// content.
 //
 // A `?configId=<id>` query param instead loads a saved configuration (from "My
-// Configs" - see components/configs/detail.tsx's "Load into wizard" link) and
-// renders it straight into the same review/editor/Save panel, bypassing the
-// preset flow entirely.
+// Configs" - see components/configs/detail.tsx's "Load into classic wizard"
+// link) and renders it straight into the same review/editor/Save panel,
+// bypassing the preset flow entirely.
 export function Wizard() {
   const searchParams = useSearchParams();
   const loadConfigId = searchParams.get('configId');

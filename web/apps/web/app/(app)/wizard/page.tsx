@@ -6,7 +6,7 @@ import { PageHeader } from '@/components/common/page-header';
 import { LoadingState } from '@/components/common/loading-state';
 import { PageShell } from '@/components/common/page-shell';
 
-export const metadata: Metadata = { title: 'Wizard' };
+export const metadata: Metadata = { title: 'Classic preset wizard' };
 
 // The classic preset wizard: pick a preset from the gallery, answer a short
 // requirements form seeded from the preset's defaults, then emit ready-to-run
@@ -15,17 +15,17 @@ export const metadata: Metadata = { title: 'Wizard' };
 // UI adds no gating of its own.
 //
 // Superseded as the primary entry point by `/new` (andypalmi/amicu-planning#85),
-// which is what the nav's "Wizard" link now points to - this route stays
+// which is what the nav's "New config" link now points to - this route stays
 // reachable directly because `components/configs/detail.tsx`'s "Load into
-// wizard" link (?configId=<id>) targets it.
+// classic wizard" link (?configId=<id>) targets it.
 export default async function WizardPage() {
   await requireSession();
 
   return (
     <PageShell size="lg">
       <PageHeader
-        title="Guided wizard"
-        description="Start from a preset that matches your use case, answer a few requirements, and get back a ready-to-run Amicu configuration. The wizard emits HCL deterministically from your answers - no metrics are synthesized, and nothing is applied. Copy it, download it, or validate it in place before you use it."
+        title="Classic preset wizard"
+        description="Start from a preset that matches your use case, or from scratch, then answer a few requirements to get back a ready-to-run Amicu configuration. The wizard emits HCL deterministically from your answers - no metrics are synthesized, and nothing is applied. Copy it, download it, or validate it in place before you use it. Looking for the guided flow instead? It lives at /new."
       />
 
       <Suspense fallback={<LoadingState label="Loading wizard…" />}>
