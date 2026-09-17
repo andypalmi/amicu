@@ -20,6 +20,7 @@ amicu-hcl = { path = "../amicu-hcl" }
 amicu-plan = { path = "../amicu-plan" }
 amicu-engine = { path = "../amicu-engine" }
 amicu-llamacpp = { path = "../amicu-llamacpp" }
+amicu-vllm = { path = "../amicu-vllm" }
 amicu-runtime = { path = "../amicu-runtime" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

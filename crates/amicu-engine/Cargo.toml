@@ -12,6 +12,7 @@ amicu-hcl = { path = "../amicu-hcl" }
 amicu-plan = { path = "../amicu-plan" }
 amicu-providers = { path = "../amicu-providers" }
 amicu-llamacpp = { path = "../amicu-llamacpp" }
+amicu-vllm = { path = "../amicu-vllm" }
 amicu-runtime = { path = "../amicu-runtime" }
 amicu-registry = { path = "../amicu-registry" }
 
