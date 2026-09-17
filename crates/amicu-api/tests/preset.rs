@@ -31,11 +31,17 @@ use tower::ServiceExt;
 const ISS: &str = "https://issuer.test";
 const AUD: &str = "amicu-api";
 
-/// The three catalog preset ids the endpoints expose.
-const PRESET_IDS: [&str; 3] = [
+/// The catalog preset ids the endpoints expose.
+const PRESET_IDS: [&str; 9] = [
     "local_dev_chat",
     "private_eu_production",
     "cost_optimized_batch",
+    "internal_knowledge_chatbot",
+    "customer_support_assistant",
+    "document_extraction_pipeline",
+    "code_assistant_endpoint",
+    "api_replacement_migration",
+    "custom_stack",
 ];
 
 /// Build the API app under test plus a freshly-minted access token carrying
@@ -141,13 +147,18 @@ fn answers() -> Value {
 }
 
 #[tokio::test]
-async fn list_presets_returns_the_three_catalog_entries() {
+async fn list_presets_returns_every_catalog_entry() {
     let (app, token) = app_with(Tier::Community);
     let (status, body) = send(&app, get("/presets", Some(&token))).await;
 
     assert_eq!(status, StatusCode::OK);
     let entries = body.as_array().expect("array of summaries");
-    assert_eq!(entries.len(), 3, "the catalog has three presets");
+    assert_eq!(
+        entries.len(),
+        PRESET_IDS.len(),
+        "the catalog has {} presets",
+        PRESET_IDS.len()
+    );
 
     let ids: Vec<&str> = entries
         .iter()

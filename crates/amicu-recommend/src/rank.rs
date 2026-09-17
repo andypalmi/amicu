@@ -258,6 +258,12 @@ fn variant_specs(preset: &Preset, base: &Graph) -> Vec<VariantSpec> {
         "local_dev_chat" => local_dev_chat_variants(base),
         "private_eu_production" => private_eu_production_variants(preset, base),
         "cost_optimized_batch" => cost_optimized_batch_variants(base),
+        "internal_knowledge_chatbot" => internal_knowledge_chatbot_variants(base),
+        "customer_support_assistant" => customer_support_assistant_variants(base),
+        "document_extraction_pipeline" => document_extraction_pipeline_variants(base),
+        "code_assistant_endpoint" => code_assistant_endpoint_variants(base),
+        "api_replacement_migration" => api_replacement_migration_variants(base),
+        "custom_stack" => custom_stack_variants(base),
         // A preset with no curated variant set has, by construction, exactly
         // one shape: its own base graph. Per decision #5 this is a valid,
         // explicitly-explained single candidate rather than an error.
@@ -443,6 +449,359 @@ fn cost_optimized_batch_variants(base: &Graph) -> Vec<VariantSpec> {
             ],
             rejected: Vec::new(),
             axes: [0.6, 0.6, 0.8, 0.5, 0.7],
+        },
+    ]
+}
+
+// --- internal_knowledge_chatbot ----------------------------------------------
+
+fn internal_knowledge_chatbot_variants(base: &Graph) -> Vec<VariantSpec> {
+    let mut cost_optimized = base.clone();
+    set_safetensors_quantization(&mut cost_optimized, Quantization::Int8);
+    if let Some(hw) = cost_optimized.hardware_profiles.first_mut()
+        && let Some(accel) = hw.accelerator.as_mut()
+    {
+        accel.model = "l40s".to_string();
+        accel.memory = ByteSize::from_bytes(48 * GIB);
+    }
+
+    let mut performance_optimized = base.clone();
+    if let Some(hw) = performance_optimized.hardware_profiles.first_mut()
+        && let Some(accel) = hw.accelerator.as_mut()
+    {
+        accel.count += 1;
+    }
+    if let Some(deployment) = performance_optimized.deployments.first_mut()
+        && let Runtime::Vllm(settings) = &mut deployment.runtime
+    {
+        settings.tensor_parallel_size = performance_optimized
+            .hardware_profiles
+            .first()
+            .and_then(|hw| hw.accelerator.as_ref())
+            .map(|a| a.count);
+    }
+
+    vec![
+        VariantSpec {
+            archetype: CandidateArchetype::Balanced,
+            graph: base.clone(),
+            rationale: vec![
+                "A100 accelerators sized to the requested concurrency: the preset's default \
+                 balance of cost, latency, and quality for RAG-style prompts."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.5, 0.7, 0.8, 0.6, 0.8],
+        },
+        VariantSpec {
+            archetype: CandidateArchetype::CostOptimized,
+            graph: cost_optimized,
+            rationale: vec![
+                "L40S accelerators with INT8 weights: lower hourly rate for a RAG workload that \
+                 is not latency-critical."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.85, 0.5, 0.6, 0.6, 0.7],
+        },
+        VariantSpec {
+            archetype: CandidateArchetype::PerformanceOptimized,
+            graph: performance_optimized,
+            rationale: vec![
+                "One extra A100 beyond the concurrency-derived minimum, for lower tail latency \
+                 when retrieved-context prompts run long."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.3, 0.85, 0.85, 0.6, 0.6],
+        },
+    ]
+}
+
+// --- customer_support_assistant ----------------------------------------------
+
+fn customer_support_assistant_variants(base: &Graph) -> Vec<VariantSpec> {
+    let mut cost_optimized = base.clone();
+    set_safetensors_quantization(&mut cost_optimized, Quantization::Int4);
+    if let Some(hw) = cost_optimized.hardware_profiles.first_mut()
+        && let Some(accel) = hw.accelerator.as_mut()
+    {
+        accel.model = "a10g".to_string();
+        accel.memory = ByteSize::from_bytes(24 * GIB);
+    }
+
+    let mut performance_optimized = base.clone();
+    if let Some(hw) = performance_optimized.hardware_profiles.first_mut()
+        && let Some(accel) = hw.accelerator.as_mut()
+    {
+        accel.count += 1;
+    }
+    if let Some(deployment) = performance_optimized.deployments.first_mut()
+        && let Runtime::Vllm(settings) = &mut deployment.runtime
+    {
+        settings.tensor_parallel_size = performance_optimized
+            .hardware_profiles
+            .first()
+            .and_then(|hw| hw.accelerator.as_ref())
+            .map(|a| a.count);
+        settings.gpu_memory_utilization = Some(0.85);
+    }
+
+    vec![
+        VariantSpec {
+            archetype: CandidateArchetype::CostOptimized,
+            graph: cost_optimized,
+            rationale: vec![
+                "INT4 weights on A10G accelerators: lowest cost per token for support traffic."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.9, 0.6, 0.5, 0.6, 0.8],
+        },
+        VariantSpec {
+            archetype: CandidateArchetype::Balanced,
+            graph: base.clone(),
+            rationale: vec![
+                "INT8 weights on L40S accelerators: the preset's default balance of cost, \
+                 latency, and answer quality."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.6, 0.7, 0.75, 0.6, 0.8],
+        },
+        VariantSpec {
+            archetype: CandidateArchetype::PerformanceOptimized,
+            graph: performance_optimized,
+            rationale: vec![
+                "One extra L40S beyond the concurrency-derived minimum, for lower tail latency \
+                 under peak support load."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.4, 0.9, 0.8, 0.6, 0.6],
+        },
+    ]
+}
+
+// --- document_extraction_pipeline --------------------------------------------
+
+fn document_extraction_pipeline_variants(base: &Graph) -> Vec<VariantSpec> {
+    let cost_optimized = base.clone();
+
+    let mut quality_optimized = base.clone();
+    set_safetensors_quantization(&mut quality_optimized, Quantization::Int8);
+    if let Some(hw) = quality_optimized.hardware_profiles.first_mut() {
+        hw.memory = ByteSize::from_bytes(80 * GIB);
+        if let Some(accel) = hw.accelerator.as_mut() {
+            accel.model = "l40s".to_string();
+            accel.memory = ByteSize::from_bytes(48 * GIB);
+        }
+    }
+
+    vec![
+        VariantSpec {
+            archetype: CandidateArchetype::CostOptimized,
+            graph: cost_optimized,
+            rationale: vec![
+                "INT4 weights on A10G accelerators: the lowest cost per extracted page."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [1.0, 0.5, 0.5, 0.5, 0.8],
+        },
+        VariantSpec {
+            archetype: CandidateArchetype::PerformanceOptimized,
+            graph: quality_optimized,
+            rationale: vec![
+                "INT8 weights on L40S accelerators: less aggressive quantization for higher \
+                 extraction accuracy on dense or scanned pages."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.6, 0.6, 0.85, 0.5, 0.7],
+        },
+    ]
+}
+
+// --- code_assistant_endpoint --------------------------------------------------
+
+fn code_assistant_endpoint_variants(base: &Graph) -> Vec<VariantSpec> {
+    let mut cost_optimized = base.clone();
+    set_safetensors_quantization(&mut cost_optimized, Quantization::Int8);
+    if let Some(hw) = cost_optimized.hardware_profiles.first_mut()
+        && let Some(accel) = hw.accelerator.as_mut()
+    {
+        accel.model = "l40s".to_string();
+        accel.memory = ByteSize::from_bytes(48 * GIB);
+    }
+
+    let mut performance_optimized = base.clone();
+    if let Some(hw) = performance_optimized.hardware_profiles.first_mut()
+        && let Some(accel) = hw.accelerator.as_mut()
+    {
+        accel.count += 1;
+    }
+    if let Some(deployment) = performance_optimized.deployments.first_mut()
+        && let Runtime::Vllm(settings) = &mut deployment.runtime
+    {
+        settings.tensor_parallel_size = performance_optimized
+            .hardware_profiles
+            .first()
+            .and_then(|hw| hw.accelerator.as_ref())
+            .map(|a| a.count);
+        settings.gpu_memory_utilization = Some(0.85);
+    }
+
+    vec![
+        VariantSpec {
+            archetype: CandidateArchetype::Balanced,
+            graph: base.clone(),
+            rationale: vec![
+                "Unquantized weights on A100 accelerators: the preset's default balance for \
+                 interactive coding completions."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.4, 0.8, 0.9, 0.6, 0.7],
+        },
+        VariantSpec {
+            archetype: CandidateArchetype::CostOptimized,
+            graph: cost_optimized,
+            rationale: vec![
+                "INT8 weights on L40S accelerators: lower cost with a small quality trade-off \
+                 for code completions."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.8, 0.6, 0.7, 0.6, 0.7],
+        },
+        VariantSpec {
+            archetype: CandidateArchetype::PerformanceOptimized,
+            graph: performance_optimized,
+            rationale: vec![
+                "One extra A100 beyond the concurrency-derived minimum, for lower tail latency \
+                 on interactive completions."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.2, 0.95, 0.9, 0.6, 0.5],
+        },
+    ]
+}
+
+// --- api_replacement_migration ------------------------------------------------
+
+fn api_replacement_migration_variants(base: &Graph) -> Vec<VariantSpec> {
+    let mut cost_optimized = base.clone();
+    set_safetensors_quantization(&mut cost_optimized, Quantization::Int4);
+    if let Some(hw) = cost_optimized.hardware_profiles.first_mut()
+        && let Some(accel) = hw.accelerator.as_mut()
+    {
+        accel.model = "a10g".to_string();
+        accel.memory = ByteSize::from_bytes(24 * GIB);
+    }
+
+    let mut performance_optimized = base.clone();
+    if let Some(hw) = performance_optimized.hardware_profiles.first_mut()
+        && let Some(accel) = hw.accelerator.as_mut()
+    {
+        accel.count += 1;
+    }
+    if let Some(deployment) = performance_optimized.deployments.first_mut()
+        && let Runtime::Vllm(settings) = &mut deployment.runtime
+    {
+        settings.tensor_parallel_size = performance_optimized
+            .hardware_profiles
+            .first()
+            .and_then(|hw| hw.accelerator.as_ref())
+            .map(|a| a.count);
+    }
+
+    vec![
+        VariantSpec {
+            archetype: CandidateArchetype::CostOptimized,
+            graph: cost_optimized,
+            rationale: vec![
+                "INT4 weights on A10G accelerators: the cheapest drop-in replacement for \
+                 cost-sensitive migrations."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.9, 0.5, 0.5, 0.5, 0.7],
+        },
+        VariantSpec {
+            archetype: CandidateArchetype::Balanced,
+            graph: base.clone(),
+            rationale: vec![
+                "Unquantized weights on L40S accelerators: the closest quality match to a \
+                 full-precision third-party API."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.5, 0.7, 0.8, 0.5, 0.7],
+        },
+        VariantSpec {
+            archetype: CandidateArchetype::PerformanceOptimized,
+            graph: performance_optimized,
+            rationale: vec![
+                "One extra L40S beyond the concurrency-derived minimum, to absorb migrated \
+                 traffic spikes without added tail latency."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.3, 0.9, 0.8, 0.5, 0.6],
+        },
+    ]
+}
+
+// --- custom_stack ---------------------------------------------------------------
+
+fn custom_stack_variants(base: &Graph) -> Vec<VariantSpec> {
+    let mut cost_optimized = base.clone();
+    set_safetensors_quantization(&mut cost_optimized, Quantization::Int4);
+
+    let mut performance_optimized = base.clone();
+    if let Some(hw) = performance_optimized.hardware_profiles.first_mut() {
+        hw.memory = ByteSize::from_bytes(160 * GIB);
+        if let Some(accel) = hw.accelerator.as_mut() {
+            accel.model = "a100".to_string();
+            accel.memory = ByteSize::from_bytes(80 * GIB);
+        }
+    }
+
+    vec![
+        VariantSpec {
+            archetype: CandidateArchetype::Balanced,
+            graph: base.clone(),
+            rationale: vec![
+                "A10G accelerators, unquantized weights: a reasonable general-purpose starting \
+                 point with no preset opinion baked in."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.5, 0.5, 0.6, 0.5, 0.8],
+        },
+        VariantSpec {
+            archetype: CandidateArchetype::CostOptimized,
+            graph: cost_optimized,
+            rationale: vec![
+                "INT4 weights on the same hardware: lower cost per token if quality headroom \
+                 allows it."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.8, 0.5, 0.5, 0.5, 0.7],
+        },
+        VariantSpec {
+            archetype: CandidateArchetype::PerformanceOptimized,
+            graph: performance_optimized,
+            rationale: vec![
+                "A100 accelerators: more headroom for a heavier model or longer context once \
+                 the real shape is known."
+                    .to_string(),
+            ],
+            rejected: Vec::new(),
+            axes: [0.2, 0.7, 0.85, 0.5, 0.5],
         },
     ]
 }
@@ -692,6 +1051,90 @@ mod tests {
             enforce_hard_constraints(batch, specs),
             Err(PresetError::InvalidAnswer(_))
         ));
+    }
+
+    #[test]
+    fn every_preset_is_compliant_across_a_representative_answer_grid() {
+        // Table-driven compliance sweep (amicu-planning#149): every catalog
+        // preset, crossed with a representative grid of context length,
+        // concurrency, EU residency, and priority, must ask <= 6 questions,
+        // rank into 1-4 hard-constraint-compliant candidates that each carry
+        // a rationale and pass `report_for`, and rank deterministically. A
+        // future preset that regresses any of these fails here automatically
+        // - no per-preset test needs to be hand-written.
+        const CONTEXT_LENGTHS: [u32; 2] = [4096, 32768];
+        const CONCURRENCIES: [u32; 2] = [1, 64];
+        const RESIDENCY: [bool; 2] = [false, true];
+        const PRIORITIES: [Option<WizardPriority>; 3] = [
+            None,
+            Some(WizardPriority::Cost),
+            Some(WizardPriority::Quality),
+        ];
+
+        for preset in catalog() {
+            let question_count = crate::questions_for(preset).len();
+            assert!(
+                (1..=6).contains(&question_count),
+                "{} asks {question_count} questions, expected 1-6",
+                preset.id
+            );
+
+            for context_length in CONTEXT_LENGTHS {
+                for concurrency in CONCURRENCIES {
+                    for eu_residency_required in RESIDENCY {
+                        for priority in PRIORITIES {
+                            let a = WizardAnswers {
+                                context_length,
+                                concurrency,
+                                eu_residency_required,
+                                budget: Some(Money::new(1000.0, "EUR")),
+                                max_latency_ms: Some(2000),
+                                priority,
+                            };
+
+                            let candidates = rank(preset, &a).unwrap_or_else(|e| {
+                                panic!("{} rank failed for {a:?}: {e}", preset.id)
+                            });
+
+                            assert!(
+                                (1..=MAX_CANDIDATES).contains(&candidates.len()),
+                                "{} produced {} candidates for {a:?}",
+                                preset.id,
+                                candidates.len()
+                            );
+
+                            for candidate in &candidates {
+                                assert!(
+                                    hard_violation(preset, &candidate.graph).is_none(),
+                                    "{} {:?} candidate violates a hard constraint for {a:?}",
+                                    preset.id,
+                                    candidate.archetype
+                                );
+                                assert!(
+                                    !candidate.rationale.is_empty(),
+                                    "{} {:?} candidate has no rationale",
+                                    preset.id,
+                                    candidate.archetype
+                                );
+                                let report = amicu_engine::report_for(&candidate.graph);
+                                assert!(
+                                    report.valid,
+                                    "{} {:?} candidate failed report_for for {a:?}: {:?}",
+                                    preset.id, candidate.archetype, report.diagnostics
+                                );
+                            }
+
+                            let again = rank(preset, &a).expect("rerun rank");
+                            assert_eq!(
+                                candidates, again,
+                                "{} ranking is not deterministic for {a:?}",
+                                preset.id
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
