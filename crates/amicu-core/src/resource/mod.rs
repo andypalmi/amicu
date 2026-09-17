@@ -24,7 +24,7 @@ pub use credential::Credential;
 pub use data_class::{DataClass, Sensitivity};
 pub use deployment::{
     Deployment, FlashAttention, KvCacheType, LlamaCppSettings, ReasoningFormat, Runtime,
-    VllmKvCacheDtype, VllmSettings,
+    SpeculativeSettings, VllmKvCacheDtype, VllmSettings,
 };
 pub use governance::{GovernanceRule, RuleEffect};
 pub use hardware::{Accelerator, AcceleratorKind, Cpu, HardwareProfile, Interconnect, Price};

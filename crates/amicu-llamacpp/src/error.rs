@@ -117,6 +117,15 @@ pub enum LlamaCppError {
     /// flags, so having both is ambiguous. Maps to `AMICU-CAP-005`.
     #[error("chat_template and chat_template_file are mutually exclusive; set only one")]
     ChatTemplateConflict,
+
+    /// A `speculative {}` block's draft `model` reference names the
+    /// deployment's own primary model (amicu-planning#151 PR C). Maps to
+    /// `AMICU-CAP-007`.
+    #[error(
+        "speculative draft model '{0}' is the deployment's own model; the draft model must be a \
+         different (smaller) model"
+    )]
+    SpeculativeDraftIsPrimary(ModelId),
 }
 
 impl AdapterErrorKind for LlamaCppError {
@@ -145,6 +154,9 @@ impl AdapterErrorKind for LlamaCppError {
                 catalog::CAP_EXTRA_ARG_DENYLISTED
             }
             LlamaCppError::ChatTemplateConflict => catalog::CAP_CHAT_TEMPLATE_CONFLICT,
+            LlamaCppError::SpeculativeDraftIsPrimary(_) => {
+                catalog::CAP_SPECULATIVE_DRAFT_IS_PRIMARY
+            }
         }
     }
 

@@ -26,7 +26,8 @@ mod tests {
         Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Budget, BudgetPeriod, DataClass,
         Deployment, FlashAttention, GovernanceRule, HardwareProfile, KvCacheType, LlamaCppSettings,
         Model, ModelSource, Money, Quantization, RoutingPolicy, RoutingTarget, RuleEffect, Runtime,
-        Sensitivity, SourceRegistry, Tenant, UseCase, VllmKvCacheDtype, VllmSettings,
+        Sensitivity, SourceRegistry, SpeculativeSettings, Tenant, UseCase, VllmKvCacheDtype,
+        VllmSettings,
     };
     use std::collections::BTreeMap;
 
@@ -1271,5 +1272,237 @@ mod tests {
         env.insert("GGML_CUDA_DISABLE_GRAPHS".to_string(), "1".to_string());
         let g = llama_cpp_deployment_with(Vec::new(), env);
         assert!(scan_runtime_env_secrets(&g).is_empty());
+    }
+
+    // --- amicu-planning#151 PR C: the typed `speculative {}` block ---------
+
+    /// A one-deployment graph whose llama.cpp block carries `spec`.
+    fn speculative_graph(spec: SpeculativeSettings) -> Graph {
+        let mut g = Graph::new();
+        g.deployments.push(Deployment {
+            id: "dep".into(),
+            model: "phantom_model".into(),
+            hardware_profile: "phantom_hw".into(),
+            runtime: Runtime::LlamaCpp(LlamaCppSettings {
+                context_length: 8192,
+                port: 8000,
+                n_gpu_layers: -1,
+                speculative: Some(spec),
+                ..Default::default()
+            }),
+        });
+        g
+    }
+
+    fn draft_spec(model: &str) -> SpeculativeSettings {
+        SpeculativeSettings {
+            model: model.into(),
+            n_max: None,
+            n_min: None,
+            p_min: None,
+            n_gpu_layers: None,
+        }
+    }
+
+    #[test]
+    fn llama_cpp_speculative_block_round_trips() {
+        let g = speculative_graph(SpeculativeSettings {
+            model: "phantom_draft".into(),
+            n_max: Some(8),
+            n_min: Some(2),
+            p_min: Some(0.75),
+            n_gpu_layers: Some(99),
+        });
+        let formatted = format_graph(&g).unwrap();
+        assert!(formatted.contains("speculative"));
+        let reparsed = parse_graph(&formatted).unwrap();
+        assert_eq!(g, reparsed, "round trip through:\n{formatted}");
+    }
+
+    #[test]
+    fn speculative_fields_round_trip_individually() {
+        let variations = [
+            SpeculativeSettings {
+                n_max: Some(16),
+                ..draft_spec("phantom_draft")
+            },
+            SpeculativeSettings {
+                n_min: Some(1),
+                ..draft_spec("phantom_draft")
+            },
+            SpeculativeSettings {
+                p_min: Some(0.4),
+                ..draft_spec("phantom_draft")
+            },
+            SpeculativeSettings {
+                n_gpu_layers: Some(-1),
+                ..draft_spec("phantom_draft")
+            },
+            draft_spec("phantom_draft"),
+        ];
+        for spec in variations {
+            let g = speculative_graph(spec.clone());
+            let formatted = format_graph(&g).unwrap();
+            let reparsed = parse_graph(&formatted).unwrap();
+            assert_eq!(g, reparsed, "round trip failed for {spec:?}:\n{formatted}");
+        }
+    }
+
+    #[test]
+    fn speculative_fields_are_independently_optional() {
+        // The draft `model` reference is the only required attribute.
+        let g = speculative_graph(SpeculativeSettings {
+            n_max: Some(8),
+            ..draft_spec("phantom_draft")
+        });
+        let formatted = format_graph(&g).unwrap();
+        assert!(formatted.contains("n_max"));
+        assert!(!formatted.contains("n_min"));
+        assert!(!formatted.contains("p_min"));
+        let reparsed = parse_graph(&formatted).unwrap();
+        assert_eq!(g, reparsed);
+    }
+
+    #[test]
+    fn absent_speculative_block_emits_nothing() {
+        let g = llama_cpp_deployment_with(Vec::new(), BTreeMap::new());
+        let formatted = format_graph(&g).unwrap();
+        assert!(!formatted.contains("speculative"));
+        assert_eq!(g, parse_graph(&formatted).unwrap());
+    }
+
+    #[test]
+    fn speculative_draft_model_parses_as_a_reference() {
+        let src = r#"
+            resource "model" "m" {
+              source {
+                registry  = "hugging_face"
+                reference = "org/model"
+              }
+              architecture = "llama"
+              artifact { format = "gguf" }
+            }
+            resource "model" "draft" {
+              source {
+                registry  = "hugging_face"
+                reference = "org/draft"
+              }
+              architecture = "llama"
+              artifact { format = "gguf" }
+            }
+            resource "hardware_profile" "hw" {
+              provider = "local"
+              memory   = "48GiB"
+            }
+            resource "deployment" "dep" {
+              model    = model.m.id
+              hardware = hardware_profile.hw.id
+              runtime  = "llama_cpp"
+              llama_cpp {
+                context_length = 8192
+                port           = 8000
+                n_gpu_layers   = -1
+                speculative {
+                  model = model.draft.id
+                  n_max = 8
+                }
+              }
+            }
+        "#;
+        let graph = parse_graph(src).unwrap();
+        let Runtime::LlamaCpp(s) = &graph.deployments[0].runtime else {
+            panic!("expected llama_cpp runtime");
+        };
+        let spec = s.speculative.as_ref().expect("speculative block parsed");
+        assert_eq!(spec.model.as_str(), "draft");
+        assert_eq!(spec.n_max, Some(8));
+        // A real edge, resolved against the graph's models.
+        assert!(graph.missing_references().is_empty());
+    }
+
+    #[test]
+    fn speculative_draft_model_that_is_not_a_reference_is_a_schema_error() {
+        // The draft model goes through the same `reference` helper the
+        // deployment's own `model`/`hardware` attributes use: a traversal or a
+        // bare id string, never an arbitrary expression.
+        let src = r#"
+            resource "model" "m" {
+              source {
+                registry  = "hugging_face"
+                reference = "org/model"
+              }
+              architecture = "llama"
+              artifact { format = "gguf" }
+            }
+            resource "hardware_profile" "hw" {
+              provider = "local"
+              memory   = "48GiB"
+            }
+            resource "deployment" "dep" {
+              model    = model.m.id
+              hardware = hardware_profile.hw.id
+              runtime  = "llama_cpp"
+              llama_cpp {
+                context_length = 8192
+                port           = 8000
+                n_gpu_layers   = -1
+                speculative {
+                  model = 42
+                }
+              }
+            }
+        "#;
+        assert!(parse_graph(src).is_err());
+    }
+
+    #[test]
+    fn speculative_block_without_a_model_is_a_schema_error() {
+        let src = r#"
+            resource "model" "m" {
+              source {
+                registry  = "hugging_face"
+                reference = "org/model"
+              }
+              architecture = "llama"
+              artifact { format = "gguf" }
+            }
+            resource "hardware_profile" "hw" {
+              provider = "local"
+              memory   = "48GiB"
+            }
+            resource "deployment" "dep" {
+              model    = model.m.id
+              hardware = hardware_profile.hw.id
+              runtime  = "llama_cpp"
+              llama_cpp {
+                context_length = 8192
+                port           = 8000
+                n_gpu_layers   = -1
+                speculative {
+                  n_max = 8
+                }
+              }
+            }
+        "#;
+        assert!(parse_graph(src).is_err());
+    }
+
+    #[test]
+    fn non_identifier_speculative_draft_reference_is_rejected_not_corrupted() {
+        for bad in ["draft.with.dots", "has space", "1leading", ""] {
+            let g = speculative_graph(draft_spec(bad));
+            assert!(
+                matches!(format_graph(&g), Err(HclError::InvalidIdentifier { .. })),
+                "draft reference {bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_draft_model_equal_to_the_primary_model_still_parses_and_round_trips() {
+        // AMICU-CAP-007 is an adapter-level capability diagnostic, not an HCL
+        // schema error - the DSL layer round-trips it like any other edge.
+        let g = speculative_graph(draft_spec("phantom_model"));
+        assert_eq!(g, parse_graph(&format_graph(&g).unwrap()).unwrap());
     }
 }

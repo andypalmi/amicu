@@ -22,14 +22,15 @@ pub use units::ByteSize;
 mod tests {
     use crate::graph::{GRAPH_SCHEMA_VERSION, Graph};
     use crate::id::{
-        DeploymentId, HardwareProfileId, ModelId, RoutingPolicyId, TenantId, UseCaseId,
+        DeploymentId, HardwareProfileId, ModelId, ResourceKind, RoutingPolicyId, TenantId,
+        UseCaseId,
     };
     use crate::resource::{
         Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Budget, BudgetPeriod, DataClass,
         Deployment, GgufVariant, GovernanceRule, HardwareProfile, LlamaCppSettings, Modality,
         Model, ModelSource, Money, OptimizeFor, Price, Priority, Quantization, Quota, Region,
         Residency, RoutingPolicy, RoutingTarget, RuleEffect, Runtime, Sensitivity, SourceRegistry,
-        Tenant, UseCase,
+        SpeculativeSettings, Tenant, UseCase,
     };
     use crate::units::ByteSize;
 
@@ -121,6 +122,58 @@ mod tests {
         let missing = graph.missing_references();
         assert_eq!(missing.len(), 1);
         assert_eq!(missing[0].to_id, "does_not_exist");
+    }
+
+    // --- amicu-planning#151 PR C: the speculative draft model is a real
+    // second model edge, not a path string ------------------------------
+
+    /// `sample_graph()` whose deployment drafts with `draft`.
+    fn graph_with_speculative_draft(draft: &str) -> Graph {
+        let mut graph = sample_graph();
+        let Runtime::LlamaCpp(s) = &mut graph.deployments[0].runtime else {
+            unreachable!("sample_deployment builds a llama_cpp runtime");
+        };
+        s.speculative = Some(SpeculativeSettings {
+            model: ModelId::new(draft),
+            n_max: Some(8),
+            n_min: None,
+            p_min: None,
+            n_gpu_layers: None,
+        });
+        graph
+    }
+
+    #[test]
+    fn dangling_speculative_draft_reference_is_detected() {
+        let graph = graph_with_speculative_draft("does_not_exist");
+        let missing = graph.missing_references();
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert_eq!(missing[0].to_id, "does_not_exist");
+        assert_eq!(missing[0].to_kind, ResourceKind::Model);
+        assert_eq!(missing[0].from_kind, ResourceKind::Deployment);
+        assert_eq!(missing[0].from_id, "support_chat_prod");
+    }
+
+    #[test]
+    fn resolvable_speculative_draft_reference_is_not_missing() {
+        let mut graph = graph_with_speculative_draft("support_chat_draft");
+        let mut draft = sample_model();
+        draft.id = ModelId::new("support_chat_draft");
+        graph.models.push(draft);
+        assert!(
+            graph.missing_references().is_empty(),
+            "{:?}",
+            graph.missing_references()
+        );
+    }
+
+    #[test]
+    fn a_deployment_without_a_speculative_block_adds_no_edge() {
+        // Absent block = today's behaviour: only the model + hardware edges.
+        assert!(sample_graph().missing_references().is_empty());
+        let mut graph = sample_graph();
+        graph.hardware_profiles.clear();
+        assert_eq!(graph.missing_references().len(), 1);
     }
 
     #[test]
