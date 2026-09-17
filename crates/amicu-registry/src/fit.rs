@@ -337,6 +337,88 @@ pub fn check_variant_fit_with_kv_cache(
     report
 }
 
+/// Check vLLM's memory model: `weights` (+ optional KV cache) against
+/// `gpu_memory_utilization × per-device memory × tensor_parallel_size`
+/// (amicu-planning#152).
+///
+/// This deliberately does not reuse [`evaluate`]: vLLM's own
+/// `--gpu-memory-utilization` flag already *is* the usable fraction of each
+/// shard's VRAM (weights + KV cache + activations), so there is no separate
+/// flat per-device reserve or overhead band to add on top the way
+/// [`check_fit`]/[`check_variant_fit`] do for llama.cpp - adding one would
+/// double-count the same headroom vLLM's own flag already reserves. For the
+/// same reason `kv_cache`, when known, is folded straight into the fit
+/// decision here (unlike the llama.cpp path, where [`FitReport::kv_cache`] is
+/// informational only and never moves [`FitReport::fits`]): there is no flat
+/// overhead band left to carry that uncertainty instead.
+///
+/// `tensor_parallel_size` is clamped to `[1, hw's accelerator count]` - vLLM
+/// cannot shard across more devices than the profile has, and a caller-supplied
+/// count higher than what is physically present would otherwise overstate the
+/// available pool. A `hw` with no accelerator (or a non-GPU/TPU one) evaluates
+/// against system/unified memory with an effective device count of 1,
+/// regardless of `tensor_parallel_size`.
+#[must_use]
+pub fn check_vllm_fit(
+    weights: ByteSize,
+    hw: &HardwareProfile,
+    gpu_memory_utilization: f32,
+    tensor_parallel_size: u32,
+    kv_cache: Option<ByteSize>,
+) -> FitReport {
+    let (pool, per_device, hw_count) = device_pool(hw);
+    let count = tensor_parallel_size.max(1).min(hw_count.max(1));
+    let util = f64::from(gpu_memory_utilization.clamp(0.0, 1.0));
+    let device_memory = ByteSize::from_bytes(per_device.bytes().saturating_mul(u64::from(count)));
+    let available = bytes_from_f64(params_as_f64(device_memory.bytes()) * util);
+    let demand = ByteSize::from_bytes(
+        weights
+            .bytes()
+            .saturating_add(kv_cache.map_or(0, ByteSize::bytes)),
+    );
+    let fits = demand.bytes() <= available.bytes();
+    let headroom = ByteSize::from_bytes(available.bytes().saturating_sub(demand.bytes()));
+
+    let diagnostic = (!fits).then(|| {
+        let across = if count > 1 {
+            format!(
+                " across {count} × {model} accelerators",
+                model = hw.accelerator.as_ref().map_or("", |a| a.model.as_str()),
+            )
+        } else {
+            String::new()
+        };
+        Diagnostic::new(
+            pool.diagnostic_code(),
+            Severity::Error,
+            format!(
+                "model weights{kv} need {demand} but only {available} of {device_memory} {pool}{across} \
+                 is usable at {pct:.0}% gpu_memory_utilization",
+                kv = if kv_cache.is_some() { " + kv cache" } else { "" },
+                pool = pool.label(),
+                pct = util * 100.0,
+            ),
+        )
+    });
+
+    FitReport {
+        pool,
+        device_memory,
+        accelerator_count: count,
+        reserve: ByteSize::from_bytes(0),
+        available,
+        weights,
+        overhead: OverheadRange {
+            low: ByteSize::from_bytes(0),
+            high: ByteSize::from_bytes(0),
+        },
+        headroom,
+        fits,
+        diagnostic,
+        kv_cache,
+    }
+}
+
 /// Pick the memory pool, per-device size, and device count to evaluate against.
 /// Apple Silicon uses unified system memory; a discrete accelerator (GPU/TPU)
 /// uses its own VRAM aggregated across `count` cards; CPU-only or no accelerator
@@ -755,5 +837,120 @@ mod tests {
         assert_eq!(with_kv.headroom, baseline.headroom);
         assert_eq!(with_kv.overhead, baseline.overhead);
         assert_eq!(with_kv.weights, baseline.weights);
+    }
+
+    // --- amicu-planning#152: vLLM fit estimate ------------------------------
+
+    #[test]
+    fn vllm_fit_uses_gpu_memory_utilization_as_the_whole_pool() {
+        // 80 GiB GPU at 90% utilization -> ~72 GiB usable, no separate reserve.
+        let report = check_vllm_fit(ByteSize::from_bytes(1_000_000), &gpu(80), 0.9, 1, None);
+        let expected = (80 * GIB * 9) / 10;
+        // f64 multiplication by 0.9 is not bit-exact; a few bytes of slop is fine.
+        assert!(
+            report.available.bytes().abs_diff(expected) < 4096,
+            "got {}, expected ~{expected}",
+            report.available
+        );
+        assert_eq!(report.reserve, ByteSize::from_bytes(0));
+        assert_eq!(
+            report.overhead,
+            OverheadRange {
+                low: ByteSize::from_bytes(0),
+                high: ByteSize::from_bytes(0),
+            }
+        );
+    }
+
+    #[test]
+    fn vllm_fit_passes_when_weights_are_within_the_utilized_pool() {
+        let weights = ByteSize::from_bytes(10 * GIB);
+        let report = check_vllm_fit(weights, &gpu(80), 0.9, 1, None);
+        assert!(report.fits);
+        assert!(report.diagnostic.is_none());
+    }
+
+    #[test]
+    fn vllm_fit_fails_when_weights_exceed_the_utilized_pool() {
+        // 16 GiB GPU at 90% -> 14.4 GiB usable; ~14.9 GiB weights do not fit.
+        let weights = ByteSize::from_bytes(16_000_000_000);
+        let report = check_vllm_fit(weights, &gpu(16), 0.9, 1, None);
+        assert!(!report.fits);
+        let diag = report.diagnostic.expect("diagnostic");
+        assert_eq!(diag.code, catalog::MEM_VRAM_EXCEEDED);
+        assert_eq!(diag.severity, Severity::Error);
+    }
+
+    #[test]
+    fn vllm_fit_folds_kv_cache_into_the_gating_decision() {
+        // Weights alone fit; weights + a large kv_cache do not - unlike the
+        // llama.cpp path, kv_cache here is part of `fits`, not informational.
+        let weights = ByteSize::from_bytes(10 * GIB);
+        let without_kv = check_vllm_fit(weights, &gpu(16), 0.9, 1, None);
+        assert!(without_kv.fits);
+
+        let huge_kv = ByteSize::from_bytes(10 * GIB);
+        let with_kv = check_vllm_fit(weights, &gpu(16), 0.9, 1, Some(huge_kv));
+        assert!(!with_kv.fits);
+        assert_eq!(with_kv.kv_cache, Some(huge_kv));
+    }
+
+    #[test]
+    fn vllm_fit_scales_the_pool_by_tensor_parallel_size() {
+        // 16 GiB per GPU: tensor_parallel_size=1 doesn't fit ~14.9 GiB
+        // weights at 90%, tensor_parallel_size=2 does (aggregate 32 GiB).
+        let weights = ByteSize::from_bytes(16_000_000_000);
+        let one = check_vllm_fit(weights, &multi_gpu(16, 2), 0.9, 1, None);
+        assert!(!one.fits);
+        let two = check_vllm_fit(weights, &multi_gpu(16, 2), 0.9, 2, None);
+        assert!(two.fits);
+        assert_eq!(two.accelerator_count, 2);
+    }
+
+    #[test]
+    fn vllm_fit_clamps_tensor_parallel_size_to_the_profile_device_count() {
+        // A caller-supplied tensor_parallel_size of 8 on a 2-GPU profile must
+        // not overstate the pool as if 8 devices were present.
+        let clamped = check_vllm_fit(
+            ByteSize::from_bytes(1_000_000),
+            &multi_gpu(16, 2),
+            0.9,
+            8,
+            None,
+        );
+        let unclamped = check_vllm_fit(
+            ByteSize::from_bytes(1_000_000),
+            &multi_gpu(16, 2),
+            0.9,
+            2,
+            None,
+        );
+        assert_eq!(clamped.available, unclamped.available);
+        assert_eq!(clamped.accelerator_count, 2);
+    }
+
+    #[test]
+    fn vllm_fit_zero_tensor_parallel_size_is_guarded_to_one() {
+        let report = check_vllm_fit(ByteSize::from_bytes(1_000_000), &gpu(80), 0.9, 0, None);
+        assert_eq!(report.accelerator_count, 1);
+    }
+
+    #[test]
+    fn vllm_fit_utilization_is_clamped_to_zero_one() {
+        let over = check_vllm_fit(ByteSize::from_bytes(1_000_000), &gpu(80), 1.5, 1, None);
+        let one = check_vllm_fit(ByteSize::from_bytes(1_000_000), &gpu(80), 1.0, 1, None);
+        assert_eq!(over.available, one.available);
+    }
+
+    #[test]
+    fn vllm_fit_on_apple_silicon_uses_unified_memory() {
+        let report = check_vllm_fit(
+            ByteSize::from_bytes(1_000_000),
+            &apple_silicon(48),
+            0.9,
+            1,
+            None,
+        );
+        assert_eq!(report.pool, MemoryPool::Unified);
     }
 }

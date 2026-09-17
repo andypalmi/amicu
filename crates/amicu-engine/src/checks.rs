@@ -10,6 +10,7 @@ use amicu_core::resource::{Residency, RuleEffect, Runtime};
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
 use amicu_providers::resolve_residency;
 use amicu_runtime::RuntimeAdapter;
+use amicu_vllm::VllmAdapter;
 
 use crate::catalog::build_catalog;
 
@@ -33,12 +34,18 @@ pub fn report_for(graph: &Graph) -> DiagnosticReport {
         diagnostics.push(d);
     }
 
-    let adapter = LlamaCppAdapter::new(Box::new(build_catalog(graph)), host_supervisor());
+    // Dispatch to the adapter matching each deployment's own runtime family
+    // (amicu-planning#152) - previously this only ever ran llama.cpp's
+    // adapter, so a vllm deployment got no fit/capability validation at all.
+    let catalog = build_catalog(graph);
+    let llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), host_supervisor());
+    let vllm_adapter = VllmAdapter::new(Box::new(catalog), amicu_vllm::host_supervisor());
     for deployment in &graph.deployments {
-        if !matches!(deployment.runtime, Runtime::LlamaCpp(_)) {
-            continue;
-        }
-        for mut d in adapter.validate(deployment) {
+        let diags = match &deployment.runtime {
+            Runtime::LlamaCpp(_) => llama_adapter.validate(deployment),
+            Runtime::Vllm(_) => vllm_adapter.validate(deployment),
+        };
+        for mut d in diags {
             if d.resource.is_none() {
                 d.resource = Some(format!("deployment.{}", deployment.id));
             }
@@ -390,5 +397,158 @@ mod residency_tests {
         g.deployments.push(deployment());
         g.data_classes.push(data_class(&[Residency::Eu]));
         assert!(codes(&g).is_empty());
+    }
+}
+
+// --- amicu-planning#152: dispatch regression -------------------------------
+//
+// Before this PR, `report_for` (and `build_plan`) hardcoded `LlamaCppAdapter`
+// and skipped any non-llama.cpp deployment outright (`if !matches!(runtime,
+// Runtime::LlamaCpp(_)) { continue; }`), so a vLLM deployment got *no*
+// fit/capability validation at all, no matter how badly it overflowed its
+// hardware. This module pins the fixed behavior: a vLLM deployment now runs
+// through `VllmAdapter::validate` exactly like a llama.cpp one runs through
+// `LlamaCppAdapter::validate`.
+#[cfg(test)]
+mod vllm_dispatch_tests {
+    use super::*;
+    use amicu_core::resource::{
+        Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Deployment, HardwareProfile, Model,
+        ModelSource, SourceRegistry, VllmSettings,
+    };
+    use amicu_core::units::ByteSize;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    fn model(reference: &str) -> Model {
+        Model {
+            id: "m".into(),
+            source: ModelSource {
+                registry: SourceRegistry::HuggingFace,
+                reference: reference.to_owned(),
+            },
+            architecture: "llama".into(),
+            modalities: Vec::new(),
+            artifact: Artifact {
+                format: ArtifactFormat::Safetensors,
+                quantization: None,
+            },
+            context_length: Some(8192),
+            variants: Vec::new(),
+            n_layers: None,
+            n_kv_heads: None,
+            head_dim: None,
+        }
+    }
+
+    fn hw(vram_gib: u64) -> HardwareProfile {
+        HardwareProfile {
+            id: "hw".into(),
+            provider: "on_prem".into(),
+            region: None,
+            accelerator: Some(Accelerator {
+                kind: AcceleratorKind::Gpu,
+                model: "rtx4090".into(),
+                count: 1,
+                memory: ByteSize::from_bytes(vram_gib * GIB),
+                memory_bandwidth_gbps: None,
+            }),
+            cpu: None,
+            memory: ByteSize::from_bytes(64 * GIB),
+            interconnect: None,
+            price: None,
+        }
+    }
+
+    fn vllm_deployment(settings: VllmSettings) -> Deployment {
+        Deployment {
+            id: "dep".into(),
+            model: "m".into(),
+            hardware_profile: "hw".into(),
+            runtime: Runtime::Vllm(settings),
+        }
+    }
+
+    /// A vLLM deployment whose weights (70B @ bf16 default, ~130 GiB) cannot
+    /// possibly fit a single 24 GiB consumer GPU at any `gpu_memory_utilization`.
+    /// This is the exact shape of graph that, before this PR, `report_for`
+    /// produced zero diagnostics for.
+    #[test]
+    fn vllm_deployment_now_yields_a_fit_diagnostic() {
+        let mut g = Graph::new();
+        g.models.push(model("meta-llama/Llama-3.1-70B-Instruct"));
+        g.hardware_profiles.push(hw(24));
+        g.deployments.push(vllm_deployment(VllmSettings {
+            context_length: 8192,
+            port: 8000,
+            tensor_parallel_size: Some(1),
+            gpu_memory_utilization: Some(0.9),
+            ..Default::default()
+        }));
+
+        let report = report_for(&g);
+        assert!(!report.valid, "expected the report to be invalid");
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Error
+                    && (d.code == catalog::MEM_VRAM_EXCEEDED
+                        || d.code == catalog::MEM_ARTIFACT_OVERSIZE)),
+            "expected a memory fit error, got {:?}",
+            report.diagnostics
+        );
+    }
+
+    #[test]
+    fn vllm_deployment_that_fits_has_no_error() {
+        let mut g = Graph::new();
+        g.models.push(model("meta-llama/Llama-3.1-8B-Instruct"));
+        g.hardware_profiles.push(hw(80));
+        g.deployments.push(vllm_deployment(VllmSettings {
+            context_length: 8192,
+            port: 8000,
+            tensor_parallel_size: Some(1),
+            gpu_memory_utilization: Some(0.9),
+            ..Default::default()
+        }));
+
+        let report = report_for(&g);
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Error),
+            "unexpected error(s): {:?}",
+            report.diagnostics
+        );
+    }
+
+    /// GGUF-on-vLLM: a warning, not a block (amicu-planning#152's
+    /// `AMICU-CAP-005`), reached the same way through the dispatcher.
+    #[test]
+    fn vllm_deployment_with_gguf_artifact_warns_through_report_for() {
+        let mut g = Graph::new();
+        let mut m = model("meta-llama/Llama-3.1-8B-Instruct");
+        m.artifact.format = ArtifactFormat::Gguf;
+        g.models.push(m);
+        g.hardware_profiles.push(hw(80));
+        g.deployments.push(vllm_deployment(VllmSettings {
+            context_length: 8192,
+            port: 8000,
+            tensor_parallel_size: Some(1),
+            gpu_memory_utilization: Some(0.9),
+            ..Default::default()
+        }));
+
+        let report = report_for(&g);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == catalog::CAP_VLLM_GGUF_EXPERIMENTAL
+                    && d.severity == Severity::Warning)
+        );
+        assert!(report.valid, "a warning must not invalidate the report");
     }
 }

@@ -84,7 +84,7 @@ cargo build --release -p amicu-cli
 ```
 
 - **Local runtime (llama.cpp):** macOS (Apple Silicon) and Linux/CPU, run as a native process (launchd on macOS, systemd on Linux).
-- **Production runtime (vLLM):** NVIDIA CUDA, AMD ROCm, and Intel XPU GPUs, deployed via Kubernetes/Helm or k3s.
+- **Production runtime (vLLM):** NVIDIA CUDA, AMD ROCm, and Intel XPU GPUs. Locally as a native single process (launchd/systemd, same as llama.cpp) or deployed via Kubernetes/Helm or k3s.
 - **Provider adapters:** AWS, Azure, GCP, Hetzner, OVHcloud, Scaleway, RunPod, Nebius, and self-hosted (SSH) targets.
 
 ### Development database

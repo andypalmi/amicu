@@ -328,6 +328,12 @@ pub mod catalog {
     /// verdict for this deployment is unverified. Mirrored in the plan's
     /// `CostPerformance.assumptions` (`amicu_engine::planner`).
     pub const CAP_EXTRA_ARGS_PRESENT: DiagnosticCode = DiagnosticCode::new(Category::Cap, 4);
+    // --- amicu-planning#152: vLLM command renderer ---
+    /// `AMICU-CAP-005` - a deployment's model artifact is GGUF but the
+    /// runtime is vLLM. Warning, not an error: vLLM can load a single-file
+    /// GGUF checkpoint, but the support is experimental (upstream vLLM docs),
+    /// unlike llama.cpp where GGUF is the native, fully-supported format.
+    pub const CAP_VLLM_GGUF_EXPERIMENTAL: DiagnosticCode = DiagnosticCode::new(Category::Cap, 5);
     /// `AMICU-MEM-001` - model does not fit in available VRAM.
     pub const MEM_VRAM_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Mem, 1);
     /// `AMICU-MEM-002` - a single artifact/weight file exceeds the available
@@ -402,7 +408,7 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 25] {
+    pub const fn all() -> [DiagnosticCode; 26] {
         [
             PARSE_UNCLOSED_BLOCK,
             PARSE_INVALID_SYNTAX,
@@ -413,6 +419,8 @@ pub mod catalog {
             CAP_EXTRA_ARG_DUPLICATES_TYPED,
             CAP_EXTRA_ARG_DENYLISTED,
             CAP_EXTRA_ARGS_PRESENT,
+            // amicu-planning#152 addition:
+            CAP_VLLM_GGUF_EXPERIMENTAL,
             MEM_VRAM_EXCEEDED,
             MEM_ARTIFACT_OVERSIZE,
             POLICY_BUDGET_EXCEEDED,
@@ -505,6 +513,10 @@ mod tests {
             "AMICU-CAP-003"
         );
         assert_eq!(catalog::CAP_EXTRA_ARGS_PRESENT.to_string(), "AMICU-CAP-004");
+        assert_eq!(
+            catalog::CAP_VLLM_GGUF_EXPERIMENTAL.to_string(),
+            "AMICU-CAP-005"
+        );
         assert_eq!(
             catalog::POLICY_RUNTIME_ENV_SECRET_SUSPECTED.to_string(),
             "AMICU-POLICY-006"

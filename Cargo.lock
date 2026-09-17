@@ -137,6 +137,7 @@ dependencies = [
  "amicu-llamacpp",
  "amicu-plan",
  "amicu-runtime",
+ "amicu-vllm",
  "async-trait",
  "clap",
  "serde",
@@ -171,6 +172,7 @@ dependencies = [
  "amicu-providers",
  "amicu-registry",
  "amicu-runtime",
+ "amicu-vllm",
 ]
 
 [[package]]
@@ -336,6 +338,16 @@ version = "0.1.0"
 [[package]]
 name = "amicu-vllm"
 version = "0.1.0"
+dependencies = [
+ "amicu-core",
+ "amicu-llamacpp",
+ "amicu-registry",
+ "amicu-runtime",
+ "async-trait",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "amicu-worker"
