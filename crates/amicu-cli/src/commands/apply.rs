@@ -4,8 +4,10 @@ use std::io::Write;
 
 use amicu_core::diagnostic::{DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
+use amicu_core::resource::Runtime;
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
 use amicu_runtime::{EndpointRegistry, RuntimeAdapter, RuntimeHandle};
+use amicu_vllm::VllmAdapter;
 
 use crate::OutputFormat;
 use crate::catalog::build_catalog;
@@ -96,20 +98,42 @@ async fn apply_all(
     result: &PlanResult,
     prior: Option<&LocalState>,
 ) -> Result<Vec<RuntimeHandle>, CliError> {
-    let adapter = LlamaCppAdapter::new(Box::new(build_catalog(graph)), host_supervisor());
+    // Dispatch to the adapter matching each deployment's own runtime family
+    // (amicu-planning#152) - previously `apply` only ever started/stopped
+    // llama.cpp instances.
+    let catalog = build_catalog(graph);
+    let llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), host_supervisor());
+    let vllm_adapter = VllmAdapter::new(Box::new(catalog), amicu_vllm::host_supervisor());
     let resolver = EnvSecretResolver;
     let registry = EndpointRegistry::new();
     let mut handles = Vec::new();
 
     for item in &result.items {
         if let Some(launch) = &item.launch {
-            let handle = adapter.apply(launch, &resolver).await?;
+            let handle = match launch.runtime {
+                amicu_runtime::RuntimeKind::LlamaCpp => {
+                    llama_adapter.apply(launch, &resolver).await?
+                }
+                amicu_runtime::RuntimeKind::Vllm => vllm_adapter.apply(launch, &resolver).await?,
+            };
             registry.register(&handle);
             handles.push(handle);
         } else {
             // Destroy: stop the prior instance if we still hold its handle.
+            // Both `host_supervisor()` implementations manage the launchd/
+            // systemd unit purely by the handle's own id/endpoint, so either
+            // adapter stops it identically - dispatch on the prior graph's
+            // declared runtime anyway, to keep this symmetric with the apply
+            // path and future-proof against a supervisor that stops being
+            // runtime-agnostic.
             if let Some(prev) = prior.and_then(|s| find_handle(s, &item.deployment)) {
-                adapter.stop(prev).await?;
+                let prior_runtime = prior
+                    .and_then(|s| find_deployment(&s.graph, &item.deployment))
+                    .map(|d| &d.runtime);
+                match prior_runtime {
+                    Some(Runtime::Vllm(_)) => vllm_adapter.stop(prev).await?,
+                    _ => llama_adapter.stop(prev).await?,
+                }
                 registry.deregister(&item.deployment);
             }
         }
@@ -150,6 +174,13 @@ fn find_handle<'a>(
     deployment: &amicu_core::id::DeploymentId,
 ) -> Option<&'a RuntimeHandle> {
     state.endpoints.iter().find(|h| &h.deployment == deployment)
+}
+
+fn find_deployment<'a>(
+    graph: &'a Graph,
+    deployment: &amicu_core::id::DeploymentId,
+) -> Option<&'a amicu_core::resource::Deployment> {
+    graph.deployments.iter().find(|d| &d.id == deployment)
 }
 
 fn report(

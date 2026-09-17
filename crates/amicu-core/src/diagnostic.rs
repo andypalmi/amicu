@@ -336,6 +336,15 @@ pub mod catalog {
     /// than guessing which one should win, and `plan_launch` refuses to
     /// build a launch at all.
     pub const CAP_CHAT_TEMPLATE_CONFLICT: DiagnosticCode = DiagnosticCode::new(Category::Cap, 5);
+    // --- amicu-planning#152: vLLM command renderer ---
+    /// `AMICU-CAP-006` - a deployment's model artifact is GGUF but the
+    /// runtime is vLLM. Warning, not an error: vLLM can load a single-file
+    /// GGUF checkpoint, but the support is experimental (upstream vLLM docs),
+    /// unlike llama.cpp where GGUF is the native, fully-supported format.
+    /// Numbered 006, not 005: `AMICU-CAP-005` is
+    /// `CAP_CHAT_TEMPLATE_CONFLICT`, registered by the concurrently-landing
+    /// amicu-planning#151 typed-fields PR (feat/typed-runtime-b, #146).
+    pub const CAP_VLLM_GGUF_EXPERIMENTAL: DiagnosticCode = DiagnosticCode::new(Category::Cap, 6);
     // --- amicu-planning#151 PR C: typed speculative-decoding block ---
     /// `AMICU-CAP-007` - a `llama_cpp` deployment's `speculative { model = ... }`
     /// draft reference names the deployment's own primary model. Error:
@@ -419,7 +428,7 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 27] {
+    pub const fn all() -> [DiagnosticCode; 28] {
         [
             PARSE_UNCLOSED_BLOCK,
             PARSE_INVALID_SYNTAX,
@@ -432,6 +441,9 @@ pub mod catalog {
             CAP_EXTRA_ARGS_PRESENT,
             // amicu-planning#151 additions:
             CAP_CHAT_TEMPLATE_CONFLICT,
+            // amicu-planning#152 addition:
+            CAP_VLLM_GGUF_EXPERIMENTAL,
+            // amicu-planning#151 PR C addition:
             CAP_SPECULATIVE_DRAFT_IS_PRIMARY,
             MEM_VRAM_EXCEEDED,
             MEM_ARTIFACT_OVERSIZE,
@@ -528,6 +540,10 @@ mod tests {
         assert_eq!(
             catalog::CAP_CHAT_TEMPLATE_CONFLICT.to_string(),
             "AMICU-CAP-005"
+        );
+        assert_eq!(
+            catalog::CAP_VLLM_GGUF_EXPERIMENTAL.to_string(),
+            "AMICU-CAP-006"
         );
         assert_eq!(
             catalog::POLICY_RUNTIME_ENV_SECRET_SUSPECTED.to_string(),

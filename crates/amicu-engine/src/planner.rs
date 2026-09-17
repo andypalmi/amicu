@@ -1,18 +1,19 @@
 //! Turn a graph into an `amicu_plan::Plan` plus the launch artifacts `apply`
 //! needs, diffing against prior state to choose the action kind.
 
-use amicu_core::diagnostic::{Category, Diagnostic, DiagnosticCode, DiagnosticReport, Severity};
+use amicu_core::diagnostic::{Diagnostic, DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
 use amicu_core::id::DeploymentId;
 use amicu_core::resource::{
     Accelerator, Deployment, GgufVariant, HardwareProfile, LlamaCppSettings, Model, Quantization,
-    Runtime,
+    Runtime, VllmSettings,
 };
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
 use amicu_plan::Plan;
 use amicu_plan::contract::{ActionKind, Artifact, CostPerformance, PlannedAction, Range, Setting};
 use amicu_registry::GgufResolver;
 use amicu_runtime::{LaunchPlan, RuntimeAdapter};
+use amicu_vllm::VllmAdapter;
 
 use crate::catalog::build_catalog;
 
@@ -83,21 +84,20 @@ impl std::error::Error for PlanError {}
 /// triggering `AdapterError`, folded into a [`Diagnostic`]) if a runtime
 /// adapter fails to render a launch plan for some deployment.
 pub fn build_plan(graph: &Graph, prior: Option<&Graph>) -> Result<PlanResult, PlanError> {
-    let adapter = LlamaCppAdapter::new(Box::new(build_catalog(graph)), host_supervisor());
+    // Dispatch to the adapter matching each deployment's own runtime family
+    // (amicu-planning#152) - previously any non-llama.cpp deployment was
+    // skipped entirely (an info diagnostic, no launch, never applied).
+    let catalog = build_catalog(graph);
+    let llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), host_supervisor());
+    let vllm_adapter = VllmAdapter::new(Box::new(catalog), amicu_vllm::host_supervisor());
     let mut diagnostics = Vec::new();
     let mut items = Vec::new();
 
     for d in &graph.deployments {
-        if !matches!(d.runtime, Runtime::LlamaCpp(_)) {
-            diagnostics.push(info(
-                format!("deployment.{}", d.id),
-                format!(
-                    "runtime '{}' is not applied by the CLI (llama_cpp only); skipped",
-                    runtime_label(&d.runtime)
-                ),
-            ));
-            continue;
-        }
+        let adapter: &dyn RuntimeAdapter = match &d.runtime {
+            Runtime::LlamaCpp(_) => &llama_adapter,
+            Runtime::Vllm(_) => &vllm_adapter,
+        };
 
         diagnostics.extend(adapter.validate(d));
 
@@ -132,9 +132,6 @@ pub fn build_plan(graph: &Graph, prior: Option<&Graph>) -> Result<PlanResult, Pl
     // Deployments present in prior state but gone from the config are destroyed.
     if let Some(prior) = prior {
         for prev in &prior.deployments {
-            if !matches!(prev.runtime, Runtime::LlamaCpp(_)) {
-                continue;
-            }
             if find_deployment(graph, &prev.id).is_none() {
                 items.push(PlanItem {
                     action: destroy_action(&prev.id),
@@ -242,9 +239,13 @@ fn variant_artifact(variant: &GgufVariant) -> Artifact {
 }
 
 fn runtime_settings(d: &Deployment) -> Vec<Setting> {
-    let Runtime::LlamaCpp(s) = &d.runtime else {
-        return Vec::new();
-    };
+    match &d.runtime {
+        Runtime::LlamaCpp(s) => llama_cpp_runtime_settings(s),
+        Runtime::Vllm(s) => vllm_runtime_settings(s),
+    }
+}
+
+fn llama_cpp_runtime_settings(s: &LlamaCppSettings) -> Vec<Setting> {
     let LlamaCppSettings {
         context_length,
         port,
@@ -335,21 +336,67 @@ fn runtime_settings(d: &Deployment) -> Vec<Setting> {
             settings.push(setting("speculative_n_gpu_layers", v.to_string()));
         }
     }
+    extend_with_extra_args_and_env(&mut settings, extra_args, env);
+    if let Some(v) = build {
+        settings.push(setting("build", v.clone()));
+    }
+    settings
+}
+
+fn vllm_runtime_settings(s: &VllmSettings) -> Vec<Setting> {
+    let VllmSettings {
+        context_length,
+        port,
+        tensor_parallel_size,
+        gpu_memory_utilization,
+        kv_cache_dtype,
+        max_num_seqs,
+        max_num_batched_tokens,
+        extra_args,
+        env,
+    } = s;
+    let mut settings = vec![
+        setting("runtime", "vllm"),
+        setting("port", port.to_string()),
+        setting("context_length", context_length.to_string()),
+    ];
+    if let Some(v) = tensor_parallel_size {
+        settings.push(setting("tensor_parallel_size", v.to_string()));
+    }
+    if let Some(v) = gpu_memory_utilization {
+        settings.push(setting("gpu_memory_utilization", v.to_string()));
+    }
+    if let Some(v) = kv_cache_dtype {
+        settings.push(setting("kv_cache_dtype", v.to_string()));
+    }
+    if let Some(v) = max_num_seqs {
+        settings.push(setting("max_num_seqs", v.to_string()));
+    }
+    if let Some(v) = max_num_batched_tokens {
+        settings.push(setting("max_num_batched_tokens", v.to_string()));
+    }
+    extend_with_extra_args_and_env(&mut settings, extra_args, env);
+    settings
+}
+
+/// Append the shared `extra_args`/`env` settings both runtime families carry
+/// (amicu-planning#150's escape hatch): `extra_args` joined for display, and
+/// `env` key names only - never values, which may carry secrets or tuning
+/// data not meant for the plan display.
+fn extend_with_extra_args_and_env(
+    settings: &mut Vec<Setting>,
+    extra_args: &[String],
+    env: &std::collections::BTreeMap<String, String>,
+) {
     if !extra_args.is_empty() {
         settings.push(setting("extra_args", extra_args.join(" ")));
     }
     if !env.is_empty() {
-        // Keys only, never values: env values may carry secrets or
-        // tuning data not meant for the plan display.
         settings.push(setting(
             "env",
             env.keys().cloned().collect::<Vec<_>>().join(","),
         ));
     }
-    if let Some(v) = build {
-        settings.push(setting("build", v.clone()));
-    }
-    settings
 }
 
 fn setting(key: &str, value: impl Into<String>) -> Setting {
@@ -380,6 +427,13 @@ fn cost_performance(
     // it already reads Low for this heuristic path.
     if extra_args_present(runtime) {
         assumptions.push("unverified: raw runtime flags present".to_owned());
+    }
+    // vLLM's fit estimate is deliberately narrower than llama.cpp's (no flat
+    // overhead band - see `amicu_registry::fit::check_vllm_fit`'s doc
+    // comment): call that out on every vLLM plan, not just when a fit
+    // problem is found (amicu-planning#152).
+    if matches!(runtime, Runtime::Vllm(_)) {
+        assumptions.push("vllm fit estimate: weights + kv cache only".to_owned());
     }
     if let Some(assumption) = kv_cache_assumption(runtime, launch.estimate.kv_cache) {
         assumptions.push(assumption);
@@ -429,21 +483,31 @@ fn kv_cache_assumption(
     runtime: &Runtime,
     kv_bytes: Option<amicu_core::ByteSize>,
 ) -> Option<String> {
-    let Runtime::LlamaCpp(s) = runtime else {
-        return None;
-    };
     let kv_bytes = kv_bytes?;
-    let dtype = match (s.cache_type_k, s.cache_type_v) {
-        (Some(k), Some(v)) if k == v => k.to_string(),
-        (Some(k), Some(v)) => format!("k={k} v={v}"),
-        (Some(k), None) => format!("k={k} v=f16"),
-        (None, Some(v)) => format!("k=f16 v={v}"),
-        (None, None) => "f16".to_owned(),
-    };
-    Some(format!(
-        "KV cache: {kv_bytes} at {dtype} for {} ctx",
-        s.context_length
-    ))
+    match runtime {
+        Runtime::LlamaCpp(s) => {
+            let dtype = match (s.cache_type_k, s.cache_type_v) {
+                (Some(k), Some(v)) if k == v => k.to_string(),
+                (Some(k), Some(v)) => format!("k={k} v={v}"),
+                (Some(k), None) => format!("k={k} v=f16"),
+                (None, Some(v)) => format!("k=f16 v={v}"),
+                (None, None) => "f16".to_owned(),
+            };
+            Some(format!(
+                "KV cache: {kv_bytes} at {dtype} for {} ctx",
+                s.context_length
+            ))
+        }
+        Runtime::Vllm(s) => {
+            let dtype = s
+                .kv_cache_dtype
+                .map_or_else(|| "auto".to_owned(), |d| d.to_string());
+            Some(format!(
+                "KV cache: {kv_bytes} at {dtype} for {} ctx",
+                s.context_length
+            ))
+        }
+    }
 }
 
 fn hardware_label(hardware: &HardwareProfile) -> String {
@@ -477,23 +541,6 @@ fn quantization_label(q: Quantization) -> &'static str {
         Quantization::Q6K => "Q6_K",
         Quantization::Q8_0 => "Q8_0",
     }
-}
-
-fn runtime_label(runtime: &Runtime) -> &'static str {
-    match runtime {
-        Runtime::LlamaCpp(_) => "llama_cpp",
-        Runtime::Vllm(_) => "vllm",
-    }
-}
-
-fn info(resource: String, message: String) -> Diagnostic {
-    let mut d = Diagnostic::new(
-        DiagnosticCode::new(Category::Cap, 1),
-        Severity::Info,
-        message,
-    );
-    d.resource = Some(resource);
-    d
 }
 
 #[cfg(test)]
