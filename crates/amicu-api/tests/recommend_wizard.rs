@@ -32,11 +32,17 @@ use tower::ServiceExt;
 const ISS: &str = "https://issuer.test";
 const AUD: &str = "amicu-api";
 
-/// The three catalog preset ids the endpoints expose.
-const PRESET_IDS: [&str; 3] = [
+/// The catalog preset ids the endpoints expose.
+const PRESET_IDS: [&str; 9] = [
     "local_dev_chat",
     "private_eu_production",
     "cost_optimized_batch",
+    "internal_knowledge_chatbot",
+    "customer_support_assistant",
+    "document_extraction_pipeline",
+    "code_assistant_endpoint",
+    "api_replacement_migration",
+    "custom_stack",
 ];
 
 /// Build the API app under test plus a freshly-minted access token carrying

@@ -108,6 +108,26 @@ fn non_eu_edit_is_rejected() {
 }
 
 #[test]
+fn every_preset_honors_eu_residency_required_without_an_invalid_graph() {
+    // Generalizes the local_dev_chat/cost_optimized_batch regressions guarded
+    // in `amicu_recommend::preset`'s own tests to every catalog preset
+    // (amicu-planning#149): whatever shape a preset's base graph takes,
+    // setting `eu_residency_required = true` must never produce a graph
+    // `report_for` rejects.
+    let mut a = answers();
+    a.eu_residency_required = true;
+    for preset in catalog() {
+        let graph = build_graph(preset, &a).expect("build");
+        let report = report_for(&graph);
+        assert!(
+            report.valid,
+            "{} with eu_residency_required=true should validate cleanly, got {:?}",
+            preset.id, report.diagnostics
+        );
+    }
+}
+
+#[test]
 fn eu_preset_pins_no_region_code_allowlist() {
     // Belt-and-braces on top of the engine check: the governance rule must rely
     // on the EU-only provider set, not a region-code allowlist.

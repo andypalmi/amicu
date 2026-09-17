@@ -8,9 +8,13 @@
 //! [`WizardAnswers`] into a canonical [`Graph`] the user can then edit and
 //! validate. Nothing here applies a change to a stack; the output is data.
 //!
-//! The presets transcribe the shapes in the `amicu-presets` skill's
-//! `preset-catalog.md`: Local Dev Chat, Private EU Production, and
-//! Cost-Optimized Batch. Treat them as starting points, not fixed recipes.
+//! Local Dev Chat, Private EU Production, and Cost-Optimized Batch transcribe
+//! the shapes in the `amicu-presets` skill's `preset-catalog.md`. The other
+//! six (amicu-planning#149) transcribe the PRD's "Presets and Guided Stack
+//! Design" outcome list: Internal Knowledge Chatbot, Customer Support
+//! Assistant, Document Extraction Pipeline, Code Assistant Endpoint, API
+//! Replacement / Migration, and Custom Stack. Treat every entry as a starting
+//! point, not a fixed recipe.
 
 use std::sync::LazyLock;
 
@@ -224,11 +228,18 @@ static CATALOG: LazyLock<Vec<Preset>> = LazyLock::new(|| {
         local_dev_chat(),
         private_eu_production(),
         cost_optimized_batch(),
+        internal_knowledge_chatbot(),
+        customer_support_assistant(),
+        document_extraction_pipeline(),
+        code_assistant_endpoint(),
+        api_replacement_migration(),
+        custom_stack(),
     ]
 });
 
 /// The hardcoded preset catalog: the three starting points transcribed from the
-/// `amicu-presets` skill's `preset-catalog.md`.
+/// `amicu-presets` skill's `preset-catalog.md`, plus the remaining PRD-listed
+/// presets added by amicu-planning#149.
 #[must_use]
 pub fn catalog() -> &'static [Preset] {
     &CATALOG
@@ -283,6 +294,12 @@ pub fn build_graph(preset: &Preset, answers: &WizardAnswers) -> Result<Graph, Pr
         "local_dev_chat" => Ok(build_local_dev_chat(preset, answers)),
         "private_eu_production" => Ok(build_private_eu_production(preset, answers)),
         "cost_optimized_batch" => Ok(build_cost_optimized_batch(preset, answers)),
+        "internal_knowledge_chatbot" => Ok(build_internal_knowledge_chatbot(preset, answers)),
+        "customer_support_assistant" => Ok(build_customer_support_assistant(preset, answers)),
+        "document_extraction_pipeline" => Ok(build_document_extraction_pipeline(preset, answers)),
+        "code_assistant_endpoint" => Ok(build_code_assistant_endpoint(preset, answers)),
+        "api_replacement_migration" => Ok(build_api_replacement_migration(preset, answers)),
+        "custom_stack" => Ok(build_custom_stack(preset, answers)),
         _ => Err(PresetError::UnknownPreset(preset.id.clone())),
     }
 }
@@ -389,6 +406,222 @@ fn cost_optimized_batch() -> Preset {
             },
             (400.0, 1500.0),
             (15.0, 60.0),
+            Confidence::Estimated,
+        ),
+        min_tier: Tier::Community,
+    }
+}
+
+fn internal_knowledge_chatbot() -> Preset {
+    Preset {
+        id: PresetId::from_known("internal_knowledge_chatbot"),
+        name: "Internal Knowledge Chatbot".to_string(),
+        tagline: "RAG-ready endpoint for chatting over company documents.".to_string(),
+        fit: "Internal teams querying company documents; generous context for retrieved \
+              passages and steady internal-production throughput."
+            .to_string(),
+        constraints: vec![PresetConstraint::RuntimeFamily(RuntimeFamily::Vllm)],
+        requirement_defaults: UseCase {
+            id: UseCaseId::new("internal_knowledge_chatbot"),
+            description: Some("Internal RAG chat over company documents.".to_string()),
+            modalities: vec![Modality::Text],
+            min_context_length: Some(32768),
+            max_latency_ms: Some(3000),
+            required_data_class: None,
+            priority: None,
+        },
+        // RAG prompts carry retrieved passages; medium confidence pending
+        // concurrency data, as with the other production vLLM presets.
+        default_estimate: estimate(
+            Assumed {
+                prompt: 4096,
+                generation: 512,
+                concurrency: 8,
+            },
+            (200.0, 700.0),
+            (10.0, 30.0),
+            Confidence::Medium,
+        ),
+        min_tier: Tier::Community,
+    }
+}
+
+fn customer_support_assistant() -> Preset {
+    Preset {
+        id: PresetId::from_known("customer_support_assistant"),
+        name: "Customer Support Assistant".to_string(),
+        tagline: "Governed, customer-facing support endpoint with predictable latency.".to_string(),
+        fit: "Customer-facing support chat needing quantized weights for cost control and a \
+              tight latency ceiling."
+            .to_string(),
+        constraints: vec![
+            PresetConstraint::QuantizationRequired,
+            PresetConstraint::RuntimeFamily(RuntimeFamily::Vllm),
+        ],
+        requirement_defaults: UseCase {
+            id: UseCaseId::new("customer_support_assistant"),
+            description: Some("Customer-facing support assistant.".to_string()),
+            modalities: vec![Modality::Text],
+            min_context_length: Some(8192),
+            max_latency_ms: Some(1200),
+            required_data_class: None,
+            priority: None,
+        },
+        default_estimate: estimate(
+            Assumed {
+                prompt: 768,
+                generation: 256,
+                concurrency: 16,
+            },
+            (150.0, 500.0),
+            (8.0, 20.0),
+            Confidence::Medium,
+        ),
+        min_tier: Tier::Community,
+    }
+}
+
+fn document_extraction_pipeline() -> Preset {
+    Preset {
+        id: PresetId::from_known("document_extraction_pipeline"),
+        name: "Document Extraction Pipeline".to_string(),
+        tagline: "Structured extraction and classification over documents, cost-controlled."
+            .to_string(),
+        fit: "High-volume structured extraction and classification from documents (including \
+              scans), optimized for token cost with a quality floor."
+            .to_string(),
+        constraints: vec![
+            PresetConstraint::QuantizationRequired,
+            PresetConstraint::RuntimeFamily(RuntimeFamily::Vllm),
+        ],
+        requirement_defaults: UseCase {
+            id: UseCaseId::new("document_extraction_pipeline"),
+            description: Some(
+                "High-volume structured document extraction and classification.".to_string(),
+            ),
+            modalities: vec![Modality::Text, Modality::Vision],
+            min_context_length: Some(8192),
+            max_latency_ms: None,
+            required_data_class: None,
+            priority: None,
+        },
+        default_estimate: estimate(
+            Assumed {
+                prompt: 3072,
+                generation: 256,
+                concurrency: 16,
+            },
+            (300.0, 1000.0),
+            (12.0, 45.0),
+            Confidence::Estimated,
+        ),
+        min_tier: Tier::Community,
+    }
+}
+
+fn code_assistant_endpoint() -> Preset {
+    Preset {
+        id: PresetId::from_known("code_assistant_endpoint"),
+        name: "Code Assistant Endpoint".to_string(),
+        tagline: "Private endpoint for a coding-specialized model, tuned for low latency."
+            .to_string(),
+        fit: "Private, tool-calling-capable coding assistant endpoint prioritizing low latency \
+              for interactive completions."
+            .to_string(),
+        constraints: vec![PresetConstraint::RuntimeFamily(RuntimeFamily::Vllm)],
+        requirement_defaults: UseCase {
+            id: UseCaseId::new("code_assistant_endpoint"),
+            description: Some("Private coding-model endpoint.".to_string()),
+            modalities: vec![Modality::Text],
+            min_context_length: Some(16384),
+            max_latency_ms: Some(800),
+            required_data_class: None,
+            priority: None,
+        },
+        default_estimate: estimate(
+            Assumed {
+                prompt: 2048,
+                generation: 256,
+                concurrency: 8,
+            },
+            (100.0, 350.0),
+            (6.0, 18.0),
+            Confidence::Medium,
+        ),
+        min_tier: Tier::Community,
+    }
+}
+
+fn api_replacement_migration() -> Preset {
+    Preset {
+        id: PresetId::from_known("api_replacement_migration"),
+        name: "API Replacement / Migration".to_string(),
+        tagline: "Self-hosted OpenAI-compatible endpoint to replace a third-party API.".to_string(),
+        fit: "Teams migrating off an external OpenAI-compatible API who want a self-hosted \
+              drop-in endpoint sized to match existing throughput."
+            .to_string(),
+        // vLLM serves an OpenAI-compatible HTTP surface natively, which is the
+        // honest schema-expressible shape for "replace a third-party API": a
+        // self-hosted endpoint, not a routing/proxy config. No `routing_policy`
+        // resource is wired into this builder - see the PR description.
+        constraints: vec![PresetConstraint::RuntimeFamily(RuntimeFamily::Vllm)],
+        requirement_defaults: UseCase {
+            id: UseCaseId::new("api_replacement_migration"),
+            description: Some(
+                "Self-hosted replacement for an external OpenAI-compatible API.".to_string(),
+            ),
+            modalities: vec![Modality::Text],
+            min_context_length: Some(8192),
+            max_latency_ms: Some(1500),
+            required_data_class: None,
+            priority: None,
+        },
+        default_estimate: estimate(
+            Assumed {
+                prompt: 1024,
+                generation: 512,
+                concurrency: 16,
+            },
+            (150.0, 500.0),
+            (8.0, 22.0),
+            Confidence::Estimated,
+        ),
+        min_tier: Tier::Community,
+    }
+}
+
+fn custom_stack() -> Preset {
+    Preset {
+        id: PresetId::from_known("custom_stack"),
+        name: "Custom Stack".to_string(),
+        tagline: "Minimal starting graph, built entirely from your answers.".to_string(),
+        fit: "A stack that doesn't fit another preset's shape: a minimal starting graph with no \
+              preset opinions, expanded through guided requirement collection."
+            .to_string(),
+        // Deliberately no hard constraints: "custom stack" per the PRD is the
+        // minimal, unopinionated starting point every other preset narrows.
+        constraints: Vec::new(),
+        requirement_defaults: UseCase {
+            id: UseCaseId::new("custom_stack"),
+            description: Some(
+                "Custom stack, built from guided requirement collection.".to_string(),
+            ),
+            modalities: vec![Modality::Text],
+            min_context_length: Some(4096),
+            max_latency_ms: None,
+            required_data_class: None,
+            priority: None,
+        },
+        // No preset opinion to anchor an estimate on; a generic single-GPU
+        // planning figure until the user's own answers narrow the shape.
+        default_estimate: estimate(
+            Assumed {
+                prompt: 512,
+                generation: 256,
+                concurrency: 1,
+            },
+            (100.0, 400.0),
+            (10.0, 35.0),
             Confidence::Estimated,
         ),
         min_tier: Tier::Community,
@@ -676,6 +909,452 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
     graph
 }
 
+fn build_internal_knowledge_chatbot(preset: &Preset, answers: &WizardAnswers) -> Graph {
+    let mut graph = Graph::new();
+    let prefix = preset.id.as_str();
+    let model_id = format!("{prefix}_model");
+    let hw_id = format!("{prefix}_gpu");
+    let dc_id = format!("{prefix}_data");
+    let gpu_count = gpus_for_concurrency(answers.concurrency);
+
+    graph.models.push(Model {
+        id: model_id.as_str().into(),
+        source: ModelSource {
+            registry: SourceRegistry::HuggingFace,
+            reference: "Qwen/Qwen2.5-14B-Instruct".to_string(),
+        },
+        architecture: "qwen2".to_string(),
+        modalities: vec![Modality::Text],
+        artifact: Artifact {
+            format: ArtifactFormat::Safetensors,
+            quantization: None,
+        },
+        context_length: Some(answers.context_length),
+        variants: Vec::new(),
+    });
+
+    // See `cost_optimized_batch`'s builder for why the provider switches when
+    // EU residency is required: `maybe_push_eu_governance` below pins an
+    // EU-only provider allowlist in that case, so the hardware must already be
+    // on an EU-resident provider or `report_for` rejects the graph.
+    let provider = if answers.eu_residency_required {
+        "hetzner"
+    } else {
+        "runpod"
+    };
+
+    graph.hardware_profiles.push(HardwareProfile {
+        id: hw_id.as_str().into(),
+        provider: provider.to_string(),
+        region: None,
+        accelerator: Some(Accelerator {
+            kind: AcceleratorKind::Gpu,
+            model: "a100".to_string(),
+            count: gpu_count,
+            memory: ByteSize::from_bytes(80 * GIB),
+        }),
+        cpu: None,
+        memory: ByteSize::from_bytes(160 * GIB),
+        interconnect: None,
+        price: None,
+    });
+
+    graph.deployments.push(Deployment {
+        id: format!("{prefix}_deployment").as_str().into(),
+        model: model_id.as_str().into(),
+        hardware_profile: hw_id.as_str().into(),
+        runtime: Runtime::Vllm(VllmSettings {
+            context_length: answers.context_length,
+            port: 8000,
+            tensor_parallel_size: Some(gpu_count),
+            gpu_memory_utilization: Some(0.9),
+        }),
+    });
+
+    graph.data_classes.push(DataClass {
+        id: dc_id.as_str().into(),
+        sensitivity: Sensitivity::Internal,
+        residency: eu_residency(answers),
+        allow_external_providers: !answers.eu_residency_required,
+        handling: Vec::new(),
+    });
+
+    push_use_case(&mut graph, &preset.requirement_defaults, &dc_id, answers);
+    maybe_push_eu_governance(&mut graph, preset, answers, &dc_id);
+    maybe_push_budget(&mut graph, prefix, answers);
+
+    graph
+}
+
+fn build_customer_support_assistant(preset: &Preset, answers: &WizardAnswers) -> Graph {
+    let mut graph = Graph::new();
+    let prefix = preset.id.as_str();
+    let model_id = format!("{prefix}_model");
+    let hw_id = format!("{prefix}_gpu");
+    let dc_id = format!("{prefix}_data");
+    let gpu_count = gpus_for_concurrency(answers.concurrency);
+
+    graph.models.push(Model {
+        id: model_id.as_str().into(),
+        source: ModelSource {
+            registry: SourceRegistry::HuggingFace,
+            reference: "meta-llama/Llama-3.1-8B-Instruct".to_string(),
+        },
+        architecture: "llama".to_string(),
+        modalities: vec![Modality::Text],
+        artifact: Artifact {
+            format: ArtifactFormat::Safetensors,
+            // QuantizationRequired is a hard constraint for this preset.
+            quantization: Some(Quantization::Int8),
+        },
+        context_length: Some(answers.context_length),
+        variants: Vec::new(),
+    });
+
+    let provider = if answers.eu_residency_required {
+        "hetzner"
+    } else {
+        "runpod"
+    };
+
+    graph.hardware_profiles.push(HardwareProfile {
+        id: hw_id.as_str().into(),
+        provider: provider.to_string(),
+        region: None,
+        accelerator: Some(Accelerator {
+            kind: AcceleratorKind::Gpu,
+            model: "l40s".to_string(),
+            count: gpu_count,
+            memory: ByteSize::from_bytes(48 * GIB),
+        }),
+        cpu: None,
+        memory: ByteSize::from_bytes(96 * GIB),
+        interconnect: None,
+        price: None,
+    });
+
+    graph.deployments.push(Deployment {
+        id: format!("{prefix}_deployment").as_str().into(),
+        model: model_id.as_str().into(),
+        hardware_profile: hw_id.as_str().into(),
+        runtime: Runtime::Vllm(VllmSettings {
+            context_length: answers.context_length,
+            port: 8000,
+            tensor_parallel_size: Some(gpu_count),
+            gpu_memory_utilization: Some(0.9),
+        }),
+    });
+
+    graph.data_classes.push(DataClass {
+        id: dc_id.as_str().into(),
+        sensitivity: Sensitivity::Confidential,
+        residency: eu_residency(answers),
+        allow_external_providers: !answers.eu_residency_required,
+        handling: Vec::new(),
+    });
+
+    push_use_case(&mut graph, &preset.requirement_defaults, &dc_id, answers);
+    maybe_push_eu_governance(&mut graph, preset, answers, &dc_id);
+    maybe_push_budget(&mut graph, prefix, answers);
+
+    graph
+}
+
+fn build_document_extraction_pipeline(preset: &Preset, answers: &WizardAnswers) -> Graph {
+    let mut graph = Graph::new();
+    let prefix = preset.id.as_str();
+    let model_id = format!("{prefix}_model");
+    let hw_id = format!("{prefix}_gpu");
+    let dc_id = format!("{prefix}_data");
+    let gpu_count = gpus_for_concurrency(answers.concurrency);
+
+    graph.models.push(Model {
+        id: model_id.as_str().into(),
+        source: ModelSource {
+            registry: SourceRegistry::HuggingFace,
+            reference: "Qwen/Qwen2-VL-7B-Instruct".to_string(),
+        },
+        architecture: "qwen2_vl".to_string(),
+        modalities: vec![Modality::Text, Modality::Vision],
+        artifact: Artifact {
+            format: ArtifactFormat::Safetensors,
+            // QuantizationRequired is a hard constraint for this preset.
+            quantization: Some(Quantization::Int4),
+        },
+        context_length: Some(answers.context_length),
+        variants: Vec::new(),
+    });
+
+    let provider = if answers.eu_residency_required {
+        "hetzner"
+    } else {
+        "runpod"
+    };
+
+    graph.hardware_profiles.push(HardwareProfile {
+        id: hw_id.as_str().into(),
+        provider: provider.to_string(),
+        region: None,
+        accelerator: Some(Accelerator {
+            kind: AcceleratorKind::Gpu,
+            model: "a10g".to_string(),
+            count: gpu_count,
+            memory: ByteSize::from_bytes(24 * GIB),
+        }),
+        cpu: None,
+        memory: ByteSize::from_bytes(64 * GIB),
+        interconnect: None,
+        price: None,
+    });
+
+    graph.deployments.push(Deployment {
+        id: format!("{prefix}_deployment").as_str().into(),
+        model: model_id.as_str().into(),
+        hardware_profile: hw_id.as_str().into(),
+        runtime: Runtime::Vllm(VllmSettings {
+            context_length: answers.context_length,
+            port: 8000,
+            tensor_parallel_size: Some(gpu_count),
+            // Pack the KV cache hard: throughput over headroom, as with
+            // cost_optimized_batch.
+            gpu_memory_utilization: Some(0.95),
+        }),
+    });
+
+    graph.data_classes.push(DataClass {
+        id: dc_id.as_str().into(),
+        sensitivity: Sensitivity::Internal,
+        residency: eu_residency(answers),
+        allow_external_providers: !answers.eu_residency_required,
+        handling: Vec::new(),
+    });
+
+    push_use_case(&mut graph, &preset.requirement_defaults, &dc_id, answers);
+    maybe_push_eu_governance(&mut graph, preset, answers, &dc_id);
+    maybe_push_budget(&mut graph, prefix, answers);
+
+    graph
+}
+
+fn build_code_assistant_endpoint(preset: &Preset, answers: &WizardAnswers) -> Graph {
+    let mut graph = Graph::new();
+    let prefix = preset.id.as_str();
+    let model_id = format!("{prefix}_model");
+    let hw_id = format!("{prefix}_gpu");
+    let dc_id = format!("{prefix}_data");
+    let gpu_count = gpus_for_concurrency(answers.concurrency);
+
+    graph.models.push(Model {
+        id: model_id.as_str().into(),
+        source: ModelSource {
+            registry: SourceRegistry::HuggingFace,
+            reference: "Qwen/Qwen2.5-Coder-14B-Instruct".to_string(),
+        },
+        architecture: "qwen2".to_string(),
+        modalities: vec![Modality::Text],
+        artifact: Artifact {
+            format: ArtifactFormat::Safetensors,
+            quantization: None,
+        },
+        context_length: Some(answers.context_length),
+        variants: Vec::new(),
+    });
+
+    let provider = if answers.eu_residency_required {
+        "hetzner"
+    } else {
+        "runpod"
+    };
+
+    graph.hardware_profiles.push(HardwareProfile {
+        id: hw_id.as_str().into(),
+        provider: provider.to_string(),
+        region: None,
+        accelerator: Some(Accelerator {
+            kind: AcceleratorKind::Gpu,
+            model: "a100".to_string(),
+            count: gpu_count,
+            memory: ByteSize::from_bytes(80 * GIB),
+        }),
+        cpu: None,
+        memory: ByteSize::from_bytes(160 * GIB),
+        interconnect: None,
+        price: None,
+    });
+
+    graph.deployments.push(Deployment {
+        id: format!("{prefix}_deployment").as_str().into(),
+        model: model_id.as_str().into(),
+        hardware_profile: hw_id.as_str().into(),
+        runtime: Runtime::Vllm(VllmSettings {
+            context_length: answers.context_length,
+            port: 8000,
+            tensor_parallel_size: Some(gpu_count),
+            gpu_memory_utilization: Some(0.9),
+        }),
+    });
+
+    graph.data_classes.push(DataClass {
+        id: dc_id.as_str().into(),
+        sensitivity: Sensitivity::Confidential,
+        residency: eu_residency(answers),
+        allow_external_providers: !answers.eu_residency_required,
+        handling: Vec::new(),
+    });
+
+    push_use_case(&mut graph, &preset.requirement_defaults, &dc_id, answers);
+    maybe_push_eu_governance(&mut graph, preset, answers, &dc_id);
+    maybe_push_budget(&mut graph, prefix, answers);
+
+    graph
+}
+
+fn build_api_replacement_migration(preset: &Preset, answers: &WizardAnswers) -> Graph {
+    let mut graph = Graph::new();
+    let prefix = preset.id.as_str();
+    let model_id = format!("{prefix}_model");
+    let hw_id = format!("{prefix}_gpu");
+    let dc_id = format!("{prefix}_data");
+    let gpu_count = gpus_for_concurrency(answers.concurrency);
+
+    graph.models.push(Model {
+        id: model_id.as_str().into(),
+        source: ModelSource {
+            registry: SourceRegistry::HuggingFace,
+            reference: "meta-llama/Llama-3.1-8B-Instruct".to_string(),
+        },
+        architecture: "llama".to_string(),
+        modalities: vec![Modality::Text],
+        artifact: Artifact {
+            format: ArtifactFormat::Safetensors,
+            quantization: None,
+        },
+        context_length: Some(answers.context_length),
+        variants: Vec::new(),
+    });
+
+    let provider = if answers.eu_residency_required {
+        "hetzner"
+    } else {
+        "runpod"
+    };
+
+    graph.hardware_profiles.push(HardwareProfile {
+        id: hw_id.as_str().into(),
+        provider: provider.to_string(),
+        region: None,
+        accelerator: Some(Accelerator {
+            kind: AcceleratorKind::Gpu,
+            model: "l40s".to_string(),
+            count: gpu_count,
+            memory: ByteSize::from_bytes(48 * GIB),
+        }),
+        cpu: None,
+        memory: ByteSize::from_bytes(96 * GIB),
+        interconnect: None,
+        price: None,
+    });
+
+    graph.deployments.push(Deployment {
+        id: format!("{prefix}_deployment").as_str().into(),
+        model: model_id.as_str().into(),
+        hardware_profile: hw_id.as_str().into(),
+        runtime: Runtime::Vllm(VllmSettings {
+            context_length: answers.context_length,
+            port: 8000,
+            tensor_parallel_size: Some(gpu_count),
+            gpu_memory_utilization: Some(0.9),
+        }),
+    });
+
+    graph.data_classes.push(DataClass {
+        id: dc_id.as_str().into(),
+        sensitivity: Sensitivity::Internal,
+        residency: eu_residency(answers),
+        allow_external_providers: !answers.eu_residency_required,
+        handling: Vec::new(),
+    });
+
+    push_use_case(&mut graph, &preset.requirement_defaults, &dc_id, answers);
+    maybe_push_eu_governance(&mut graph, preset, answers, &dc_id);
+    maybe_push_budget(&mut graph, prefix, answers);
+
+    graph
+}
+
+fn build_custom_stack(preset: &Preset, answers: &WizardAnswers) -> Graph {
+    let mut graph = Graph::new();
+    let prefix = preset.id.as_str();
+    let model_id = format!("{prefix}_model");
+    let hw_id = format!("{prefix}_gpu");
+    let dc_id = format!("{prefix}_data");
+    let gpu_count = gpus_for_concurrency(answers.concurrency);
+
+    graph.models.push(Model {
+        id: model_id.as_str().into(),
+        source: ModelSource {
+            registry: SourceRegistry::HuggingFace,
+            reference: "Qwen/Qwen2.5-7B-Instruct".to_string(),
+        },
+        architecture: "qwen2".to_string(),
+        modalities: vec![Modality::Text],
+        artifact: Artifact {
+            format: ArtifactFormat::Safetensors,
+            quantization: None,
+        },
+        context_length: Some(answers.context_length),
+        variants: Vec::new(),
+    });
+
+    let provider = if answers.eu_residency_required {
+        "hetzner"
+    } else {
+        "runpod"
+    };
+
+    graph.hardware_profiles.push(HardwareProfile {
+        id: hw_id.as_str().into(),
+        provider: provider.to_string(),
+        region: None,
+        accelerator: Some(Accelerator {
+            kind: AcceleratorKind::Gpu,
+            model: "a10g".to_string(),
+            count: gpu_count,
+            memory: ByteSize::from_bytes(24 * GIB),
+        }),
+        cpu: None,
+        memory: ByteSize::from_bytes(64 * GIB),
+        interconnect: None,
+        price: None,
+    });
+
+    graph.deployments.push(Deployment {
+        id: format!("{prefix}_deployment").as_str().into(),
+        model: model_id.as_str().into(),
+        hardware_profile: hw_id.as_str().into(),
+        runtime: Runtime::Vllm(VllmSettings {
+            context_length: answers.context_length,
+            port: 8000,
+            tensor_parallel_size: Some(gpu_count),
+            gpu_memory_utilization: Some(0.9),
+        }),
+    });
+
+    graph.data_classes.push(DataClass {
+        id: dc_id.as_str().into(),
+        sensitivity: Sensitivity::Internal,
+        residency: eu_residency(answers),
+        allow_external_providers: !answers.eu_residency_required,
+        handling: Vec::new(),
+    });
+
+    push_use_case(&mut graph, &preset.requirement_defaults, &dc_id, answers);
+    maybe_push_eu_governance(&mut graph, preset, answers, &dc_id);
+    maybe_push_budget(&mut graph, prefix, answers);
+
+    graph
+}
+
 // --- shared builder helpers -------------------------------------------------
 
 /// One binary gibibyte. `pub(crate)` so [`crate::rank`]'s candidate variants
@@ -785,13 +1464,32 @@ mod tests {
         }
     }
 
+    /// Every preset id the catalog is expected to carry: the original three
+    /// plus the six added by amicu-planning#149 to cover the PRD's preset
+    /// list.
+    const ALL_PRESET_IDS: [&str; 9] = [
+        "local_dev_chat",
+        "private_eu_production",
+        "cost_optimized_batch",
+        "internal_knowledge_chatbot",
+        "customer_support_assistant",
+        "document_extraction_pipeline",
+        "code_assistant_endpoint",
+        "api_replacement_migration",
+        "custom_stack",
+    ];
+
     #[test]
-    fn catalog_is_non_empty_and_has_all_three_ids() {
+    fn catalog_is_non_empty_and_has_every_expected_id() {
         let ids: Vec<&str> = catalog().iter().map(|p| p.id.as_str()).collect();
-        assert!(!catalog().is_empty());
-        assert!(ids.contains(&"local_dev_chat"));
-        assert!(ids.contains(&"private_eu_production"));
-        assert!(ids.contains(&"cost_optimized_batch"));
+        assert_eq!(
+            ids.len(),
+            ALL_PRESET_IDS.len(),
+            "catalog size drifted from the expected preset list"
+        );
+        for expected in ALL_PRESET_IDS {
+            assert!(ids.contains(&expected), "missing preset id {expected}");
+        }
     }
 
     #[test]
