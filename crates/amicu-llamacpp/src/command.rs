@@ -15,13 +15,15 @@ use amicu_core::resource::LlamaCppSettings;
 /// `add_opt`, `-ctk`/`-ctv` are the K/V cache-type short forms, `-b`/`-ub` are
 /// the batch/ubatch short forms, `-np` is `--parallel`, `-fa` is
 /// `--flash-attn`. `--top-k`/`--top-p`/`--min-p`/`--repeat-penalty` have no
-/// short alias. `--chat-template`, `--chat-template-file`, `--jinja`, and
-/// `--reasoning-format` (amicu-planning#151, PR B) likewise have no
-/// documented short alias anywhere in this repo, so none is assumed. Shared
-/// with [`crate::adapter`] diagnostics (`AMICU-CAP-002`), which flatten this
-/// via [`is_typed_flag`] so a duplicated flag in `extra_args` is detected
-/// against exactly what [`render_command`] renders, not a hand-maintained
-/// shadow list.
+/// short alias. `--chat-template` and `--chat-template-file` (amicu-planning#151,
+/// PR B) likewise have no documented short alias anywhere in this repo, so
+/// none is assumed. `--jinja`/`--no-jinja` are one `add_opt`'s paired
+/// spellings for the same boolean field (`common/arg.cpp`), grouped as one
+/// entry below; `--reasoning-format` has no short alias. Shared with
+/// [`crate::adapter`] diagnostics (`AMICU-CAP-002`), which flatten this via
+/// [`is_typed_flag`] so a duplicated flag in `extra_args` is detected against
+/// exactly what [`render_command`] renders, not a hand-maintained shadow
+/// list.
 pub(crate) const TYPED_FLAGS: &[&[&str]] = &[
     &["--model", "-m"],
     &["--port"],
@@ -40,7 +42,7 @@ pub(crate) const TYPED_FLAGS: &[&[&str]] = &[
     &["--flash-attn", "-fa"],
     &["--chat-template"],
     &["--chat-template-file"],
-    &["--jinja"],
+    &["--jinja", "--no-jinja"],
     &["--reasoning-format"],
 ];
 
@@ -85,11 +87,18 @@ pub(crate) const DENYLISTED_ENV_KEYS: &[&str] = &[
 /// (`common/arg.cpp`) name the env var after the *field*
 /// (`n_batch`/`n_ubatch`/`n_parallel`), not the flag spelling, so the
 /// mechanical rule would derive `--batch`/`--ubatch`/`--n-parallel` - none a
-/// real flag - and silently miss the conflict.
+/// real flag - and silently miss the conflict. `LLAMA_ARG_THINK` is the same
+/// situation for `--reasoning-format` (amicu-planning#151 PR B, review
+/// hardening): `common/arg.cpp`'s `add_opt` for `--reasoning-format` calls
+/// `.set_env("LLAMA_ARG_THINK")` - named after the internal `params.think`
+/// field, not the flag - so the mechanical rule would derive
+/// `--reasoning-format` from the *wrong* env key (`LLAMA_ARG_REASONING_FORMAT`,
+/// which llama-server does not read at all) while missing the real one.
 const ENV_FLAG_OVERRIDES: &[(&str, &str)] = &[
     ("LLAMA_ARG_BATCH", "--batch-size"),
     ("LLAMA_ARG_UBATCH", "--ubatch-size"),
     ("LLAMA_ARG_N_PARALLEL", "--parallel"),
+    ("LLAMA_ARG_THINK", "--reasoning-format"),
 ];
 
 /// Map a `LLAMA_ARG_<X>` environment variable name to the CLI flag
@@ -205,10 +214,15 @@ pub fn render_command(model_path: &Path, settings: &LlamaCppSettings) -> (Vec<St
         }
         (Some(_), Some(_)) | (None, None) => {}
     }
-    // `--jinja` is a bare flag: llama-server has no `--no-jinja`, so
-    // `Some(false)`/`None` both render nothing.
-    if settings.jinja == Some(true) {
-        argv.push("--jinja".to_owned());
+    // `--jinja`/`--no-jinja` is a paired bare-flag toggle (`common/arg.cpp`):
+    // `Some(true)`/`Some(false)` render the matching bare flag - an explicit
+    // `false` renders `--no-jinja` so it overrides an inherited
+    // `LLAMA_ARG_JINJA=1` rather than just omitting the flag - and `None`
+    // renders nothing, leaving llama-server's own default/environment as-is.
+    match settings.jinja {
+        Some(true) => argv.push("--jinja".to_owned()),
+        Some(false) => argv.push("--no-jinja".to_owned()),
+        None => {}
     }
     if let Some(v) = settings.reasoning_format {
         argv.push("--reasoning-format".to_owned());

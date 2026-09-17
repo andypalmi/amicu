@@ -98,12 +98,15 @@ resource "deployment" "support_local_chat" {
     # AMICU-CAP-005 and the launch is refused.
     chat_template_file = "/models/support_chat/chat.jinja"
 
-    # Enable Jinja chat-template rendering. A bare flag: there is no
-    # `--no-jinja`, so Some(false)/unset both render nothing.
+    # Enable Jinja chat-template rendering. A paired bare-flag toggle:
+    # true -> --jinja, false -> --no-jinja (explicitly overrides an
+    # inherited LLAMA_ARG_JINJA=1), unset -> renders nothing.
     jinja = true
 
     # How reasoning/thinking blocks are extracted: "none" | "deepseek" |
-    # "deepseek_legacy" | "auto".
+    # "deepseek_legacy" | "auto". Renders as --reasoning-format on argv;
+    # "deepseek_legacy" renders as the hyphenated "deepseek-legacy" (the
+    # other three values are spelled the same in HCL and argv).
     reasoning_format = "deepseek"
 
     # A build tag ("b4500") or git sha. Stored/validated only - not yet
@@ -192,12 +195,14 @@ Rules and caveats:
   `--top-k`, `--min-p`, `--repeat-penalty`, `--cache-type-k`/`-ctk`,
   `--cache-type-v`/`-ctv`, `--batch-size`/`-b`, `--ubatch-size`/`-ub`,
   `--parallel`/`-np`, `--flash-attn`/`-fa`, `--chat-template`,
-  `--chat-template-file`, `--jinja`, `--reasoning-format`, in either
-  `--foo value` or `--foo=value` form) is rejected with `AMICU-CAP-002` - fix
-  the ambiguity by removing one side, not by hoping the last one wins. The
-  same check applies to an `env` entry whose key is `LLAMA_ARG_<X>` and
-  mirrors one of those flags (e.g. `LLAMA_ARG_TEMP`, `LLAMA_ARG_CACHE_TYPE_K`,
-  `LLAMA_ARG_CHAT_TEMPLATE`).
+  `--chat-template-file`, `--jinja`/`--no-jinja`, `--reasoning-format`, in
+  either `--foo value` or `--foo=value` form) is rejected with
+  `AMICU-CAP-002` - fix the ambiguity by removing one side, not by hoping
+  the last one wins. The same check applies to an `env` entry whose key is
+  `LLAMA_ARG_<X>` and mirrors one of those flags (e.g. `LLAMA_ARG_TEMP`,
+  `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CHAT_TEMPLATE`, and `LLAMA_ARG_THINK`
+  for `--reasoning-format` - not `LLAMA_ARG_REASONING_FORMAT`, which
+  llama-server does not read).
 - A denylisted flag (`--host`, `--api-key`, `--api-key-file`,
   `--ssl-key-file`) is rejected with `AMICU-CAP-003`: amicu owns the bind
   address, and the others put secret material - or a path to it - directly

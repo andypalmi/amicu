@@ -619,6 +619,7 @@ fn validate_reports_cap002_for_chat_template_jinja_reasoning_format_flags() {
             "/models/chat.jinja".to_owned(),
         ],
         vec!["--jinja".to_owned()],
+        vec!["--no-jinja".to_owned()],
         vec!["--reasoning-format".to_owned(), "auto".to_owned()],
     ] {
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -635,13 +636,18 @@ fn validate_reports_cap002_for_chat_template_jinja_reasoning_format_flags() {
 
 #[test]
 fn validate_reports_cap002_for_llama_arg_chat_template_jinja_reasoning_format_env_keys() {
-    // No ENV_FLAG_OVERRIDES entries needed for these four - the mechanical
-    // LLAMA_ARG_<X> -> --<x> rule already matches their real flags.
+    // No ENV_FLAG_OVERRIDES entry is needed for the first three - the
+    // mechanical LLAMA_ARG_<X> -> --<x> rule already matches their real
+    // flags. LLAMA_ARG_THINK is the exception: it is the real env var
+    // `--reasoning-format`'s `add_opt` registers via `set_env` in
+    // `common/arg.cpp` (named after the internal `params.think` field, not
+    // the flag), so it needs the explicit override in
+    // `command::ENV_FLAG_OVERRIDES` - there is no `LLAMA_ARG_REASONING_FORMAT`.
     for key in [
         "LLAMA_ARG_CHAT_TEMPLATE",
         "LLAMA_ARG_CHAT_TEMPLATE_FILE",
         "LLAMA_ARG_JINJA",
-        "LLAMA_ARG_REASONING_FORMAT",
+        "LLAMA_ARG_THINK",
     ] {
         let diags = fitting_adapter().validate(&deployment_with_env(&[(key, "x")]));
         assert!(
@@ -655,14 +661,15 @@ fn validate_reports_cap002_for_llama_arg_chat_template_jinja_reasoning_format_en
 }
 
 // Env vars whose LLAMA_ARG_ mirror does not mechanically match its flag
-// (`--batch-size`, `--ubatch-size`, `--parallel`) - see
-// `command::ENV_FLAG_OVERRIDES`.
+// (`--batch-size`, `--ubatch-size`, `--parallel`, `--reasoning-format`) -
+// see `command::ENV_FLAG_OVERRIDES`.
 #[test]
 fn validate_reports_cap002_for_irregular_env_flag_overrides() {
     for key in [
         "LLAMA_ARG_BATCH",
         "LLAMA_ARG_UBATCH",
         "LLAMA_ARG_N_PARALLEL",
+        "LLAMA_ARG_THINK",
     ] {
         let diags = fitting_adapter().validate(&deployment_with_env(&[(key, "4")]));
         assert!(
@@ -877,21 +884,59 @@ fn render_command_emits_chat_template_file_when_set() {
 }
 
 #[test]
-fn render_command_omits_jinja_when_false_or_unset() {
-    for jinja in [Some(false), None] {
-        let settings = LlamaCppSettings {
-            context_length: 8192,
-            port: 8000,
-            n_gpu_layers: -1,
-            jinja,
-            ..Default::default()
-        };
-        let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
-        assert!(
-            !argv.contains(&"--jinja".to_owned()),
-            "unexpected --jinja for jinja = {jinja:?}"
-        );
-    }
+fn render_command_omits_both_jinja_flags_when_unset() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        jinja: None,
+        ..Default::default()
+    };
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    assert!(!argv.contains(&"--jinja".to_owned()));
+    assert!(!argv.contains(&"--no-jinja".to_owned()));
+}
+
+// llama-server DOES have `--no-jinja` (paired with `--jinja` in one
+// `add_opt`, `common/arg.cpp`) - an explicit `jinja = false` renders it,
+// rather than rendering nothing, so it overrides an inherited
+// `LLAMA_ARG_JINJA=1` from the environment instead of silently deferring
+// to it.
+#[test]
+fn render_command_emits_no_jinja_when_explicitly_false() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        jinja: Some(false),
+        ..Default::default()
+    };
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    assert!(argv.contains(&"--no-jinja".to_owned()));
+    assert!(!argv.contains(&"--jinja".to_owned()));
+}
+
+// `common/chat.cpp`'s `common_reasoning_format_name` renders
+// `COMMON_REASONING_FORMAT_DEEPSEEK_LEGACY` as the hyphenated
+// `"deepseek-legacy"`, not the underscored HCL/schema spelling
+// `deepseek_legacy` - llama-server rejects the underscored form with
+// "Unknown reasoning format".
+#[test]
+fn render_command_emits_hyphenated_deepseek_legacy_reasoning_format() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        reasoning_format: Some(amicu_core::resource::ReasoningFormat::DeepseekLegacy),
+        ..Default::default()
+    };
+    let (argv, text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let i = argv
+        .iter()
+        .position(|a| a == "--reasoning-format")
+        .expect("--reasoning-format present");
+    assert_eq!(argv[i + 1], "deepseek-legacy");
+    assert!(text.contains("--reasoning-format deepseek-legacy"));
 }
 
 #[test]
@@ -924,6 +969,7 @@ fn render_command_omits_unset_chat_template_jinja_reasoning_format_fields() {
         "--chat-template",
         "--chat-template-file",
         "--jinja",
+        "--no-jinja",
         "--reasoning-format",
     ] {
         assert!(
