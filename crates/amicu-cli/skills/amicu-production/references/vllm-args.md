@@ -13,7 +13,7 @@ diagnostics.
 | — | `--host 127.0.0.1` | Always rendered; amicu owns the bind address (see denylist below). |
 | `context_length` | `--max-model-len <n>` | Upper bound on sequence length. |
 | `tensor_parallel_size` | `--tensor-parallel-size <n>` | GPUs per replica; defaults to `1` (vLLM's own default) when unset. |
-| `gpu_memory_utilization` | `--gpu-memory-utilization <f>` | Fraction of VRAM, `(0, 1]`; defaults to `0.90` (vLLM's own default) when unset. |
+| `gpu_memory_utilization` | `--gpu-memory-utilization <f>` | Fraction of VRAM, `(0, 1]`; defaults to `0.92` (vLLM's own default) when unset. |
 | `kv_cache_dtype` | `--kv-cache-dtype <auto\|fp8\|fp8_e5m2\|fp8_e4m3>` | KV-cache quantization; vLLM's own value set (distinct from llama.cpp's `cache_type_k`/`cache_type_v`). |
 | `max_num_seqs` | `--max-num-seqs <n>` | Maximum concurrent sequences; vLLM's rough equivalent of llama.cpp's `parallel_slots`. |
 | `max_num_batched_tokens` | `--max-num-batched-tokens <n>` | Maximum batched tokens per iteration; vLLM's rough equivalent of llama.cpp's `batch_size`. |

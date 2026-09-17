@@ -413,8 +413,9 @@ mod residency_tests {
 mod vllm_dispatch_tests {
     use super::*;
     use amicu_core::resource::{
-        Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Deployment, HardwareProfile, Model,
-        ModelSource, SourceRegistry, VllmSettings,
+        Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Deployment, GgufVariant,
+        HardwareProfile, LlamaCppSettings, Model, ModelSource, Quantization, SourceRegistry,
+        VllmSettings,
     };
     use amicu_core::units::ByteSize;
 
@@ -550,5 +551,93 @@ mod vllm_dispatch_tests {
                     && d.severity == Severity::Warning)
         );
         assert!(report.valid, "a warning must not invalidate the report");
+    }
+
+    /// A single graph mixing both runtime families: a llama.cpp deployment
+    /// that comfortably fits its GPU, and a badly oversized vLLM deployment
+    /// on its own separate (small) GPU. Confirms dispatch doesn't just route
+    /// each deployment to the right adapter (covered above) but also
+    /// attributes each diagnostic to its own deployment's resource address -
+    /// the llama.cpp deployment must come back clean even though the vLLM
+    /// deployment right next to it in the same graph fails its fit check.
+    #[test]
+    fn mixed_runtime_graph_attributes_fit_error_to_the_right_deployment() {
+        let mut g = Graph::new();
+
+        // llama.cpp: a tiny Q4_K_M GGUF model on a generously sized GPU.
+        let mut llama_model = model("org/tiny-llama");
+        llama_model.id = "llama_model".into();
+        llama_model.artifact = Artifact {
+            format: ArtifactFormat::Gguf,
+            quantization: None,
+        };
+        llama_model.variants = vec![GgufVariant {
+            quantization: Quantization::Q4KM,
+            file: "tiny.Q4_K_M.gguf".into(),
+            size: Some(ByteSize::from_bytes(4 * GIB)),
+            sha256: None,
+        }];
+        g.models.push(llama_model);
+        g.hardware_profiles.push(HardwareProfile {
+            id: "llama_hw".into(),
+            ..hw(24)
+        });
+        g.deployments.push(Deployment {
+            id: "llama_dep".into(),
+            model: "llama_model".into(),
+            hardware_profile: "llama_hw".into(),
+            runtime: Runtime::LlamaCpp(LlamaCppSettings {
+                context_length: 8192,
+                port: 8080,
+                n_gpu_layers: -1,
+                ..Default::default()
+            }),
+        });
+
+        // vLLM: a 70B model (bf16, ~130 GiB) on a 24 GiB GPU - can't possibly
+        // fit at any `gpu_memory_utilization`, same shape as
+        // `vllm_deployment_now_yields_a_fit_diagnostic` above.
+        g.models.push(model("meta-llama/Llama-3.1-70B-Instruct"));
+        g.hardware_profiles.push(HardwareProfile {
+            id: "vllm_hw".into(),
+            ..hw(24)
+        });
+        g.deployments.push(Deployment {
+            id: "vllm_dep".into(),
+            model: "meta-llama/Llama-3.1-70B-Instruct".into(),
+            hardware_profile: "vllm_hw".into(),
+            runtime: Runtime::Vllm(VllmSettings {
+                context_length: 8192,
+                port: 8000,
+                tensor_parallel_size: Some(1),
+                gpu_memory_utilization: Some(0.9),
+                ..Default::default()
+            }),
+        });
+
+        let report = report_for(&g);
+
+        let llama_errors: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| {
+                d.severity == Severity::Error
+                    && d.resource.as_deref() == Some("deployment.llama_dep")
+            })
+            .collect();
+        assert!(
+            llama_errors.is_empty(),
+            "llama.cpp deployment got unexpected error(s) from a neighboring \
+             oversized vLLM deployment: {llama_errors:?}"
+        );
+
+        let vllm_error = report.diagnostics.iter().find(|d| {
+            d.severity == Severity::Error && d.resource.as_deref() == Some("deployment.vllm_dep")
+        });
+        assert!(
+            vllm_error.is_some(),
+            "expected the oversized vLLM deployment to get its own fit error, got {:?}",
+            report.diagnostics
+        );
     }
 }

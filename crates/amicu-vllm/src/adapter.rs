@@ -51,7 +51,7 @@ const DEFAULT_QUANTIZATION: Quantization = Quantization::Bf16;
 
 /// Default `--gpu-memory-utilization` vLLM itself applies when the field is
 /// unset (matches vLLM's own CLI default).
-const DEFAULT_GPU_MEMORY_UTILIZATION: f32 = 0.90;
+const DEFAULT_GPU_MEMORY_UTILIZATION: f32 = 0.92;
 
 /// Default `--tensor-parallel-size` vLLM itself applies when the field is
 /// unset (matches vLLM's own CLI default: no sharding).
