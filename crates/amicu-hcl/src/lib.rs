@@ -23,9 +23,10 @@ mod tests {
     use amicu_core::ByteSize;
     use amicu_core::graph::Graph;
     use amicu_core::resource::{
-        Artifact, ArtifactFormat, Budget, BudgetPeriod, DataClass, Deployment, GovernanceRule,
-        HardwareProfile, LlamaCppSettings, Model, ModelSource, Money, Quantization, RoutingPolicy,
-        RoutingTarget, RuleEffect, Runtime, Sensitivity, SourceRegistry, Tenant, UseCase,
+        Artifact, ArtifactFormat, Budget, BudgetPeriod, DataClass, Deployment, FlashAttention,
+        GovernanceRule, HardwareProfile, KvCacheType, LlamaCppSettings, Model, ModelSource, Money,
+        Quantization, RoutingPolicy, RoutingTarget, RuleEffect, Runtime, Sensitivity,
+        SourceRegistry, Tenant, UseCase, VllmKvCacheDtype, VllmSettings,
     };
     use std::collections::BTreeMap;
 
@@ -96,6 +97,9 @@ mod tests {
             },
             context_length: None,
             variants: Vec::new(),
+            n_layers: None,
+            n_kv_heads: None,
+            head_dim: None,
         }
     }
 
@@ -184,8 +188,7 @@ mod tests {
                 context_length: 8192,
                 port: 8000,
                 n_gpu_layers: -1,
-                extra_args: Vec::new(),
-                env: std::collections::BTreeMap::new(),
+                ..Default::default()
             }),
         }
     }
@@ -610,6 +613,7 @@ mod tests {
                 n_gpu_layers: -1,
                 extra_args,
                 env,
+                ..Default::default()
             }),
         });
         g
@@ -628,6 +632,7 @@ mod tests {
                 gpu_memory_utilization: None,
                 extra_args,
                 env,
+                ..Default::default()
             }),
         });
         g
@@ -652,6 +657,230 @@ mod tests {
         let g = vllm_deployment_with(vec!["--enforce-eager".to_string()], env);
         let reparsed = parse_graph(&format_graph(&g).unwrap()).unwrap();
         assert_eq!(g, reparsed);
+    }
+
+    // --- amicu-planning#151: typed sampling/KV-cache/batching/flash-attn/
+    // parallel-slots fields, plus optional model shape metadata ------------
+
+    #[test]
+    fn llama_cpp_sampling_kv_cache_batching_flash_attn_fields_round_trip() {
+        let mut g = Graph::new();
+        g.deployments.push(Deployment {
+            id: "dep".into(),
+            model: "phantom_model".into(),
+            hardware_profile: "phantom_hw".into(),
+            runtime: Runtime::LlamaCpp(LlamaCppSettings {
+                context_length: 32768,
+                port: 8000,
+                n_gpu_layers: -1,
+                temperature: Some(0.6),
+                top_p: Some(0.9),
+                top_k: Some(40),
+                min_p: Some(0.05),
+                repeat_penalty: Some(1.1),
+                cache_type_k: Some(KvCacheType::Q8_0),
+                cache_type_v: Some(KvCacheType::F16),
+                batch_size: Some(2048),
+                ubatch_size: Some(512),
+                parallel_slots: Some(4),
+                flash_attention: Some(FlashAttention::Auto),
+                ..Default::default()
+            }),
+        });
+        let formatted = format_graph(&g).unwrap();
+        let reparsed = parse_graph(&formatted).unwrap();
+        assert_eq!(g, reparsed, "round trip through:\n{formatted}");
+    }
+
+    #[test]
+    fn llama_cpp_fields_are_independently_optional() {
+        // Setting only one field must not force the others to appear.
+        let mut g = Graph::new();
+        g.deployments.push(Deployment {
+            id: "dep".into(),
+            model: "phantom_model".into(),
+            hardware_profile: "phantom_hw".into(),
+            runtime: Runtime::LlamaCpp(LlamaCppSettings {
+                context_length: 8192,
+                port: 8000,
+                n_gpu_layers: -1,
+                temperature: Some(0.6),
+                ..Default::default()
+            }),
+        });
+        let formatted = format_graph(&g).unwrap();
+        assert!(formatted.contains("temperature"));
+        assert!(!formatted.contains("top_p"));
+        assert!(!formatted.contains("cache_type_k"));
+        assert!(!formatted.contains("flash_attention"));
+        let reparsed = parse_graph(&formatted).unwrap();
+        assert_eq!(g, reparsed);
+    }
+
+    #[test]
+    fn every_kv_cache_type_round_trips() {
+        for ty in [
+            KvCacheType::F16,
+            KvCacheType::BF16,
+            KvCacheType::Q8_0,
+            KvCacheType::Q4_0,
+            KvCacheType::Q4_1,
+            KvCacheType::Q5_0,
+            KvCacheType::Q5_1,
+            KvCacheType::Iq4Nl,
+        ] {
+            let mut g = Graph::new();
+            g.deployments.push(Deployment {
+                id: "dep".into(),
+                model: "phantom_model".into(),
+                hardware_profile: "phantom_hw".into(),
+                runtime: Runtime::LlamaCpp(LlamaCppSettings {
+                    context_length: 8192,
+                    port: 8000,
+                    n_gpu_layers: -1,
+                    cache_type_k: Some(ty),
+                    ..Default::default()
+                }),
+            });
+            let reparsed = parse_graph(&format_graph(&g).unwrap()).unwrap();
+            assert_eq!(g, reparsed, "round trip failed for {ty:?}");
+        }
+    }
+
+    #[test]
+    fn every_flash_attention_value_round_trips() {
+        for value in [
+            FlashAttention::On,
+            FlashAttention::Off,
+            FlashAttention::Auto,
+        ] {
+            let mut g = Graph::new();
+            g.deployments.push(Deployment {
+                id: "dep".into(),
+                model: "phantom_model".into(),
+                hardware_profile: "phantom_hw".into(),
+                runtime: Runtime::LlamaCpp(LlamaCppSettings {
+                    context_length: 8192,
+                    port: 8000,
+                    n_gpu_layers: -1,
+                    flash_attention: Some(value),
+                    ..Default::default()
+                }),
+            });
+            let reparsed = parse_graph(&format_graph(&g).unwrap()).unwrap();
+            assert_eq!(g, reparsed, "round trip failed for {value:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_cache_type_value_is_a_schema_error() {
+        let src = r#"
+            resource "model" "m" {
+              source {
+                registry  = "hugging_face"
+                reference = "org/model"
+              }
+              architecture = "llama"
+              artifact { format = "gguf" }
+            }
+            resource "hardware_profile" "hw" {
+              provider = "local"
+              memory   = "48GiB"
+            }
+            resource "deployment" "dep" {
+              model    = model.m.id
+              hardware = hardware_profile.hw.id
+              runtime  = "llama_cpp"
+              llama_cpp {
+                context_length = 8192
+                port           = 8000
+                n_gpu_layers   = -1
+                cache_type_k   = "not_a_real_dtype"
+              }
+            }
+        "#;
+        assert!(parse_graph(src).is_err());
+    }
+
+    #[test]
+    fn unknown_flash_attention_value_is_a_schema_error() {
+        let src = r#"
+            resource "model" "m" {
+              source {
+                registry  = "hugging_face"
+                reference = "org/model"
+              }
+              architecture = "llama"
+              artifact { format = "gguf" }
+            }
+            resource "hardware_profile" "hw" {
+              provider = "local"
+              memory   = "48GiB"
+            }
+            resource "deployment" "dep" {
+              model    = model.m.id
+              hardware = hardware_profile.hw.id
+              runtime  = "llama_cpp"
+              llama_cpp {
+                context_length  = 8192
+                port            = 8000
+                n_gpu_layers    = -1
+                flash_attention = "maybe"
+              }
+            }
+        "#;
+        assert!(parse_graph(src).is_err());
+    }
+
+    #[test]
+    fn vllm_kv_cache_dtype_and_batching_fields_round_trip() {
+        for dtype in [
+            VllmKvCacheDtype::Auto,
+            VllmKvCacheDtype::Fp8,
+            VllmKvCacheDtype::Fp8E5M2,
+            VllmKvCacheDtype::Fp8E4M3,
+        ] {
+            let mut g = Graph::new();
+            g.deployments.push(Deployment {
+                id: "dep".into(),
+                model: "phantom_model".into(),
+                hardware_profile: "phantom_hw".into(),
+                runtime: Runtime::Vllm(VllmSettings {
+                    context_length: 32768,
+                    port: 8000,
+                    tensor_parallel_size: Some(2),
+                    gpu_memory_utilization: Some(0.9),
+                    kv_cache_dtype: Some(dtype),
+                    max_num_seqs: Some(4),
+                    max_num_batched_tokens: Some(8192),
+                    ..Default::default()
+                }),
+            });
+            let formatted = format_graph(&g).unwrap();
+            let reparsed = parse_graph(&formatted).unwrap();
+            assert_eq!(g, reparsed, "round trip failed for {dtype:?}:\n{formatted}");
+        }
+    }
+
+    #[test]
+    fn model_shape_metadata_round_trips() {
+        let mut g = graph_with_model("m");
+        g.models[0].n_layers = Some(32);
+        g.models[0].n_kv_heads = Some(8);
+        g.models[0].head_dim = Some(128);
+        let formatted = format_graph(&g).unwrap();
+        let reparsed = parse_graph(&formatted).unwrap();
+        assert_eq!(g, reparsed, "round trip through:\n{formatted}");
+    }
+
+    #[test]
+    fn model_shape_metadata_is_optional_and_absent_by_default() {
+        let g = graph_with_model("m");
+        assert_eq!(g.models[0].n_layers, None);
+        let formatted = format_graph(&g).unwrap();
+        assert!(!formatted.contains("n_layers"));
+        assert!(!formatted.contains("n_kv_heads"));
+        assert!(!formatted.contains("head_dim"));
     }
 
     #[test]

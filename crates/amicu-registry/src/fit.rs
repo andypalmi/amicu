@@ -18,7 +18,9 @@
 //! (multi-GPU is reported with less capacity, never more).
 
 use amicu_core::diagnostic::{Diagnostic, DiagnosticCode, Severity, catalog};
-use amicu_core::resource::{AcceleratorKind, GgufVariant, HardwareProfile, Quantization};
+use amicu_core::resource::{
+    AcceleratorKind, GgufVariant, HardwareProfile, KvCacheType, Quantization,
+};
 use amicu_core::units::ByteSize;
 
 /// Approximate bytes per weight per quantization.
@@ -45,6 +47,57 @@ pub fn bytes_per_parameter(q: Quantization) -> f64 {
 #[must_use]
 pub fn weights_memory(total_parameters: u64, quantization: Quantization) -> ByteSize {
     bytes_from_f64(params_as_f64(total_parameters) * bytes_per_parameter(quantization))
+}
+
+/// Model shape and KV-cache dtype needed to estimate KV-cache memory
+/// (amicu-planning#151). Folded into a fit check only when every field is
+/// known - see [`check_variant_fit_with_kv_cache`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvCacheParams {
+    /// The deployment's configured context length (`--ctx-size`), not the
+    /// model's maximum supported context.
+    pub context_length: u32,
+    /// Transformer layer count.
+    pub n_layers: u32,
+    /// Key/value attention head count (post-GQA, if applicable).
+    pub n_kv_heads: u32,
+    /// Per-head dimension.
+    pub head_dim: u32,
+    /// KV-cache dtype for K. llama-server defaults each of `-ctk`/`-ctv`
+    /// independently to `f16` when unset (`common/arg.cpp`), so a caller
+    /// that only has one of the pair typed should pass [`KvCacheType::F16`]
+    /// for the other rather than omitting this whole struct.
+    pub cache_type_k: KvCacheType,
+    /// KV-cache dtype for V. See [`Self::cache_type_k`].
+    pub cache_type_v: KvCacheType,
+}
+
+/// Estimated total KV-cache memory for one deployment.
+///
+/// `ctx × n_layers × n_kv_heads × head_dim × (bytes_per_element(k) +
+/// bytes_per_element(v))`: one K vector and one V vector per attention head
+/// per layer per cached token, at the configured dtype.
+///
+/// This deliberately does **not** multiply by a parallel-slot count.
+/// llama-server's `--ctx-size` is the *total* context shared across
+/// `--parallel` slots - each slot's `n_ctx_slot()` divides that shared pool
+/// (`tools/server/server-context.cpp`), so the KV pool is sized once for the
+/// whole `ctx-size` regardless of how many slots split it.
+#[must_use]
+pub fn kv_cache_bytes(
+    context_length: u32,
+    n_layers: u32,
+    n_kv_heads: u32,
+    head_dim: u32,
+    cache_type_k: KvCacheType,
+    cache_type_v: KvCacheType,
+) -> ByteSize {
+    let elements = params_as_f64(u64::from(context_length))
+        * params_as_f64(u64::from(n_layers))
+        * params_as_f64(u64::from(n_kv_heads))
+        * params_as_f64(u64::from(head_dim));
+    let bytes_per_token = cache_type_k.bytes_per_element() + cache_type_v.bytes_per_element();
+    bytes_from_f64(elements * bytes_per_token)
 }
 
 /// KV-cache + runtime overhead as fractions of the weights figure. Wide by
@@ -159,6 +212,12 @@ pub struct FitReport {
     pub fits: bool,
     /// Diagnostic when weights do not fit; `None` otherwise.
     pub diagnostic: Option<Diagnostic>,
+    /// A computed KV-cache memory estimate (amicu-planning#151), present only
+    /// when [`check_variant_fit_with_kv_cache`] was given full
+    /// [`KvCacheParams`]. Distinct from [`Self::overhead`] (the flat band);
+    /// [`Self::fits`] and [`Self::headroom`] are unaffected by this field
+    /// regardless of whether it is set.
+    pub kv_cache: Option<ByteSize>,
 }
 
 /// Check whether `total_parameters` at `quantization` fit `hw` under `cfg`.
@@ -246,7 +305,36 @@ fn evaluate(weights: ByteSize, hw: &HardwareProfile, cfg: &FitConfig) -> FitRepo
         headroom,
         fits,
         diagnostic,
+        kv_cache: None,
     }
+}
+
+/// As [`check_variant_fit`], additionally computing [`FitReport::kv_cache`]
+/// when `kv` is given (amicu-planning#151). Does not otherwise change the
+/// report: [`FitReport::fits`]/[`FitReport::headroom`]/[`FitReport::overhead`]
+/// are exactly what [`check_variant_fit`] would have produced, so a caller
+/// with no [`KvCacheParams`] gets byte-for-byte the same report as before
+/// this function existed.
+#[must_use]
+pub fn check_variant_fit_with_kv_cache(
+    total_parameters: u64,
+    variant: &GgufVariant,
+    hw: &HardwareProfile,
+    cfg: &FitConfig,
+    kv: Option<KvCacheParams>,
+) -> FitReport {
+    let mut report = check_variant_fit(total_parameters, variant, hw, cfg);
+    report.kv_cache = kv.map(|p| {
+        kv_cache_bytes(
+            p.context_length,
+            p.n_layers,
+            p.n_kv_heads,
+            p.head_dim,
+            p.cache_type_k,
+            p.cache_type_v,
+        )
+    });
+    report
 }
 
 /// Pick the memory pool, per-device size, and device count to evaluate against.
@@ -571,5 +659,99 @@ mod tests {
             report.weights,
             weights_memory(7_000_000_000, Quantization::Q4KM)
         );
+    }
+
+    // --- amicu-planning#151: KV-cache estimator ---------------------------
+
+    #[test]
+    fn kv_cache_bytes_matches_hand_computed_value_for_a_known_model() {
+        // 32 layers, 8 kv heads, 128 head_dim, 32768 ctx, q8_0/q8_0.
+        // elements = 32768 * 32 * 8 * 128 = 1_073_741_824 (2^30).
+        // bytes_per_token = 34/32 + 34/32 = 2.125.
+        // bytes = 1_073_741_824 * 2.125 = 2_281_701_376 (exact: 2.125 GiB).
+        let bytes = kv_cache_bytes(32768, 32, 8, 128, KvCacheType::Q8_0, KvCacheType::Q8_0);
+        assert_eq!(bytes, ByteSize::from_bytes(2_281_701_376));
+    }
+
+    #[test]
+    fn kv_cache_bytes_sums_independent_k_and_v_dtypes() {
+        // f16 (2.0) + q4_0 (18/32 = 0.5625) = 2.5625 bytes/token.
+        // elements = 1000 * 1 * 1 * 1 = 1000.
+        let bytes = kv_cache_bytes(1000, 1, 1, 1, KvCacheType::F16, KvCacheType::Q4_0);
+        assert_eq!(bytes, ByteSize::from_bytes(2563)); // round(2562.5) = 2563
+    }
+
+    #[test]
+    fn kv_cache_bytes_does_not_scale_with_parallel_slots() {
+        // Deliberately not a parameter: total ctx is shared across slots, so
+        // the formula has no `parallel_slots` input at all - this test
+        // documents that by construction (same inputs -> same output,
+        // there is nothing to vary).
+        let a = kv_cache_bytes(4096, 32, 8, 128, KvCacheType::F16, KvCacheType::F16);
+        let b = kv_cache_bytes(4096, 32, 8, 128, KvCacheType::F16, KvCacheType::F16);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn check_variant_fit_with_kv_cache_is_none_when_kv_is_none() {
+        let variant = GgufVariant {
+            quantization: Quantization::Q4KM,
+            file: "m.Q4_K_M.gguf".into(),
+            size: None,
+        };
+        let report = check_variant_fit_with_kv_cache(
+            7_000_000_000,
+            &variant,
+            &apple_silicon(16),
+            &FitConfig::default(),
+            None,
+        );
+        assert_eq!(report.kv_cache, None);
+    }
+
+    #[test]
+    fn check_variant_fit_with_kv_cache_matches_check_variant_fit_when_kv_absent() {
+        // Byte-for-byte identical report when `kv` is `None`: the flat
+        // overhead band is unchanged, and nothing about `fits`/`headroom`
+        // moves just because this function exists.
+        let variant = GgufVariant {
+            quantization: Quantization::Q4KM,
+            file: "m.Q4_K_M.gguf".into(),
+            size: None,
+        };
+        let hw = apple_silicon(16);
+        let cfg = FitConfig::default();
+        let without_kv = check_variant_fit(7_000_000_000, &variant, &hw, &cfg);
+        let with_kv_none =
+            check_variant_fit_with_kv_cache(7_000_000_000, &variant, &hw, &cfg, None);
+        assert_eq!(without_kv, with_kv_none);
+    }
+
+    #[test]
+    fn check_variant_fit_with_kv_cache_sets_kv_cache_without_changing_fits_or_headroom() {
+        let variant = GgufVariant {
+            quantization: Quantization::Q4KM,
+            file: "m.Q4_K_M.gguf".into(),
+            size: None,
+        };
+        let hw = apple_silicon(16);
+        let cfg = FitConfig::default();
+        let kv = KvCacheParams {
+            context_length: 32768,
+            n_layers: 32,
+            n_kv_heads: 8,
+            head_dim: 128,
+            cache_type_k: KvCacheType::Q8_0,
+            cache_type_v: KvCacheType::Q8_0,
+        };
+        let baseline = check_variant_fit(7_000_000_000, &variant, &hw, &cfg);
+        let with_kv = check_variant_fit_with_kv_cache(7_000_000_000, &variant, &hw, &cfg, Some(kv));
+
+        assert_eq!(with_kv.kv_cache, Some(ByteSize::from_bytes(2_281_701_376)));
+        // Distinct from the flat overhead band, and doesn't move it.
+        assert_eq!(with_kv.fits, baseline.fits);
+        assert_eq!(with_kv.headroom, baseline.headroom);
+        assert_eq!(with_kv.overhead, baseline.overhead);
+        assert_eq!(with_kv.weights, baseline.weights);
     }
 }

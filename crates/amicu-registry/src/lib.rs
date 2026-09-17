@@ -10,8 +10,8 @@ pub mod gguf;
 pub mod source;
 
 pub use fit::{
-    FitConfig, FitReport, MemoryPool, OverheadRange, bytes_per_parameter, check_fit,
-    check_variant_fit, weights_memory,
+    FitConfig, FitReport, KvCacheParams, MemoryPool, OverheadRange, bytes_per_parameter, check_fit,
+    check_variant_fit, check_variant_fit_with_kv_cache, kv_cache_bytes, weights_memory,
 };
 pub use gguf::{GgufError, GgufResolver};
 pub use source::{

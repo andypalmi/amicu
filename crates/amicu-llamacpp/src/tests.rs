@@ -66,6 +66,9 @@ fn gguf_model(sizes: &[(Quantization, &str, u64)]) -> Model {
                 size: Some(ByteSize::from_bytes(*size)),
             })
             .collect(),
+        n_layers: None,
+        n_kv_heads: None,
+        head_dim: None,
     }
 }
 
@@ -103,8 +106,7 @@ fn deployment() -> Deployment {
             context_length: 8192,
             port: 8080,
             n_gpu_layers: -1,
-            extra_args: Vec::new(),
-            env: std::collections::BTreeMap::new(),
+            ..Default::default()
         }),
     }
 }
@@ -544,6 +546,86 @@ fn validate_reports_cap002_for_llama_arg_ctx_size_env_key() {
     );
 }
 
+// ---- amicu-planning#151: sampling/KV-cache/batching/flash-attn typed-flag
+// diagnostics -----------------------------------------------------------
+
+#[test]
+fn validate_reports_cap002_for_temp_flag_duplicate_in_extra_args() {
+    let diags = fitting_adapter().validate(&deployment_with_extra_args(&["--temp", "0.9"]));
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+                && d.severity == amicu_core::diagnostic::Severity::Error),
+        "expected AMICU-CAP-002 for --temp, got {diags:?}"
+    );
+}
+
+#[test]
+fn validate_reports_cap002_for_llama_arg_temp_env_key() {
+    let diags = fitting_adapter().validate(&deployment_with_env(&[("LLAMA_ARG_TEMP", "0.9")]));
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+                && d.severity == amicu_core::diagnostic::Severity::Error),
+        "expected AMICU-CAP-002 for LLAMA_ARG_TEMP, got {diags:?}"
+    );
+}
+
+#[test]
+fn validate_reports_cap002_for_new_typed_flags_and_short_aliases() {
+    for args in [
+        vec!["--top-p".to_owned(), "0.9".to_owned()],
+        vec!["--top-k".to_owned(), "40".to_owned()],
+        vec!["--min-p".to_owned(), "0.05".to_owned()],
+        vec!["--repeat-penalty".to_owned(), "1.1".to_owned()],
+        vec!["--cache-type-k".to_owned(), "q8_0".to_owned()],
+        vec!["-ctk".to_owned(), "q8_0".to_owned()],
+        vec!["--cache-type-v".to_owned(), "q8_0".to_owned()],
+        vec!["-ctv".to_owned(), "q8_0".to_owned()],
+        vec!["--batch-size".to_owned(), "2048".to_owned()],
+        vec!["-b".to_owned(), "2048".to_owned()],
+        vec!["--ubatch-size".to_owned(), "512".to_owned()],
+        vec!["-ub".to_owned(), "512".to_owned()],
+        vec!["--parallel".to_owned(), "4".to_owned()],
+        vec!["-np".to_owned(), "4".to_owned()],
+        vec!["--flash-attn".to_owned(), "on".to_owned()],
+        vec!["-fa".to_owned(), "on".to_owned()],
+    ] {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let diags = fitting_adapter().validate(&deployment_with_extra_args(&refs));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+                    && d.severity == amicu_core::diagnostic::Severity::Error),
+            "expected AMICU-CAP-002 for {args:?}, got {diags:?}"
+        );
+    }
+}
+
+// Env vars whose LLAMA_ARG_ mirror does not mechanically match its flag
+// (`--batch-size`, `--ubatch-size`, `--parallel`) - see
+// `command::ENV_FLAG_OVERRIDES`.
+#[test]
+fn validate_reports_cap002_for_irregular_env_flag_overrides() {
+    for key in [
+        "LLAMA_ARG_BATCH",
+        "LLAMA_ARG_UBATCH",
+        "LLAMA_ARG_N_PARALLEL",
+    ] {
+        let diags = fitting_adapter().validate(&deployment_with_env(&[(key, "4")]));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+                    && d.severity == amicu_core::diagnostic::Severity::Error),
+            "expected AMICU-CAP-002 for {key}, got {diags:?}"
+        );
+    }
+}
+
 #[test]
 fn validate_reports_no_diagnostic_for_ordinary_env_key() {
     let diags =
@@ -594,6 +676,91 @@ fn plan_launch_renders_visible_command() {
     assert_eq!(argv[1], "-m");
     assert!(argv[2].ends_with("tiny.Q4_K_M.gguf"));
     assert!(argv.contains(&"--port".to_owned()) && argv.contains(&"8080".to_owned()));
+}
+
+#[test]
+fn render_command_emits_new_typed_flags_when_set() {
+    let settings = LlamaCppSettings {
+        context_length: 32768,
+        port: 8000,
+        n_gpu_layers: -1,
+        temperature: Some(0.6),
+        top_p: Some(0.9),
+        top_k: Some(40),
+        min_p: Some(0.05),
+        repeat_penalty: Some(1.1),
+        cache_type_k: Some(amicu_core::resource::KvCacheType::Q8_0),
+        cache_type_v: Some(amicu_core::resource::KvCacheType::F16),
+        batch_size: Some(2048),
+        ubatch_size: Some(512),
+        parallel_slots: Some(4),
+        flash_attention: Some(amicu_core::resource::FlashAttention::Auto),
+        ..Default::default()
+    };
+    let (argv, text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+
+    let pairs = |flag: &str| -> Option<String> {
+        argv.iter()
+            .position(|a| a == flag)
+            .map(|i| argv[i + 1].clone())
+    };
+    assert_eq!(pairs("--temp").as_deref(), Some("0.6"));
+    assert_eq!(pairs("--top-p").as_deref(), Some("0.9"));
+    assert_eq!(pairs("--top-k").as_deref(), Some("40"));
+    assert_eq!(pairs("--min-p").as_deref(), Some("0.05"));
+    assert_eq!(pairs("--repeat-penalty").as_deref(), Some("1.1"));
+    assert_eq!(pairs("--cache-type-k").as_deref(), Some("q8_0"));
+    assert_eq!(pairs("--cache-type-v").as_deref(), Some("f16"));
+    assert_eq!(pairs("--batch-size").as_deref(), Some("2048"));
+    assert_eq!(pairs("--ubatch-size").as_deref(), Some("512"));
+    assert_eq!(pairs("--parallel").as_deref(), Some("4"));
+    assert_eq!(pairs("--flash-attn").as_deref(), Some("auto"));
+    // Typed flags precede extra_args (empty here), in the documented order.
+    assert!(text.contains("--temp 0.6"));
+    assert!(text.contains("--flash-attn auto"));
+}
+
+#[test]
+fn render_command_omits_unset_new_fields() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        ..Default::default()
+    };
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    for flag in [
+        "--temp",
+        "--top-p",
+        "--top-k",
+        "--min-p",
+        "--repeat-penalty",
+        "--cache-type-k",
+        "--cache-type-v",
+        "--batch-size",
+        "--ubatch-size",
+        "--parallel",
+        "--flash-attn",
+    ] {
+        assert!(
+            !argv.contains(&flag.to_owned()),
+            "unexpected {flag} in {argv:?}"
+        );
+    }
+}
+
+#[test]
+fn render_command_formats_f32_as_plain_decimal_not_scientific() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        temperature: Some(0.6),
+        ..Default::default()
+    };
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let i = argv.iter().position(|a| a == "--temp").unwrap();
+    assert_eq!(argv[i + 1], "0.6");
 }
 
 #[test]
@@ -697,6 +864,65 @@ fn plan_launch_command_is_secret_free_and_estimate_present() {
     // Weights + KV band is a positive estimate; one accelerator is occupied.
     assert!(plan.estimate.estimated_memory.bytes() > 4 * GIB);
     assert_eq!(plan.estimate.gpu_count, 1);
+}
+
+// ---- amicu-planning#151: KV-cache estimator wiring --------------------------
+
+#[test]
+fn plan_launch_kv_cache_is_none_when_model_has_no_shape_metadata() {
+    // deployment()/fitting_adapter()'s model declares no n_layers/n_kv_heads/
+    // head_dim - the flat overhead band remains the only estimate, unchanged.
+    let plan = fitting_adapter().plan_launch(&deployment()).expect("plan");
+    assert_eq!(plan.estimate.kv_cache, None);
+}
+
+#[test]
+fn validate_and_plan_launch_compute_kv_cache_when_model_shape_and_cache_type_are_set() {
+    let mut model = gguf_model(&[(Quantization::Q4KM, "tiny.Q4_K_M.gguf", 4 * GIB)]);
+    model.n_layers = Some(32);
+    model.n_kv_heads = Some(8);
+    model.head_dim = Some(128);
+    let catalog = MapCatalog::new()
+        .with_model(model, 7_000_000_000)
+        .with_hardware(apple_silicon(16));
+    let adapter = LlamaCppAdapter::new(Box::new(catalog), Box::new(FakeSupervisor::default()));
+
+    let mut d = deployment();
+    let Runtime::LlamaCpp(s) = &mut d.runtime else {
+        unreachable!("deployment() always builds a llama_cpp runtime");
+    };
+    s.context_length = 32768;
+    s.cache_type_k = Some(amicu_core::resource::KvCacheType::Q8_0);
+    s.cache_type_v = Some(amicu_core::resource::KvCacheType::Q8_0);
+
+    // validate() folds the same estimate into its own fit check without
+    // erroring (a fitting model/hardware pair stays diagnostic-free).
+    assert!(adapter.validate(&d).is_empty());
+
+    let plan = adapter.plan_launch(&d).expect("plan");
+    // 32768 * 32 * 8 * 128 * (34/32 + 34/32) = 2_281_701_376 bytes exactly.
+    assert_eq!(
+        plan.estimate.kv_cache,
+        Some(amicu_core::ByteSize::from_bytes(2_281_701_376))
+    );
+    assert!(plan.estimate.estimated_memory.bytes() >= 2_281_701_376);
+}
+
+#[test]
+fn plan_launch_kv_cache_is_none_when_shape_present_but_no_cache_type_set() {
+    // Shape metadata alone (with no cache_type_k/v) must not trigger the
+    // estimator - "at least one cache type" is required too.
+    let mut model = gguf_model(&[(Quantization::Q4KM, "tiny.Q4_K_M.gguf", 4 * GIB)]);
+    model.n_layers = Some(32);
+    model.n_kv_heads = Some(8);
+    model.head_dim = Some(128);
+    let catalog = MapCatalog::new()
+        .with_model(model, 7_000_000_000)
+        .with_hardware(apple_silicon(16));
+    let adapter = LlamaCppAdapter::new(Box::new(catalog), Box::new(FakeSupervisor::default()));
+
+    let plan = adapter.plan_launch(&deployment()).expect("plan");
+    assert_eq!(plan.estimate.kv_cache, None);
 }
 
 #[test]
@@ -918,13 +1144,13 @@ fn manifest_plan() -> LaunchPlan {
             context_length: 8192,
             port: 8080,
             n_gpu_layers: -1,
-            extra_args: Vec::new(),
-            env: std::collections::BTreeMap::new(),
+            ..Default::default()
         }),
         secret_refs: vec![],
         estimate: ResourceEstimate {
             estimated_memory: ByteSize::from_bytes(0),
             gpu_count: 0,
+            kv_cache: None,
         },
     }
 }

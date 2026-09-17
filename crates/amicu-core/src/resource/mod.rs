@@ -22,7 +22,10 @@ mod use_case;
 pub use budget::{Budget, BudgetPeriod};
 pub use credential::Credential;
 pub use data_class::{DataClass, Sensitivity};
-pub use deployment::{Deployment, LlamaCppSettings, Runtime, VllmSettings};
+pub use deployment::{
+    Deployment, FlashAttention, KvCacheType, LlamaCppSettings, Runtime, VllmKvCacheDtype,
+    VllmSettings,
+};
 pub use governance::{GovernanceRule, RuleEffect};
 pub use hardware::{Accelerator, AcceleratorKind, Cpu, HardwareProfile, Interconnect, Price};
 pub use model::{

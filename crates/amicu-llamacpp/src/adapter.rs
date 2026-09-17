@@ -10,11 +10,11 @@ use amicu_core::adapter::{
 use amicu_core::diagnostic::{Diagnostic, Severity, catalog};
 use amicu_core::id::{HardwareProfileId, ModelId};
 use amicu_core::resource::{
-    ArtifactFormat, Deployment, HardwareProfile, LlamaCppSettings, Modality, Model, Quantization,
-    Runtime,
+    ArtifactFormat, Deployment, HardwareProfile, KvCacheType, LlamaCppSettings, Modality, Model,
+    Quantization, Runtime,
 };
 use amicu_core::secret::SecretResolver;
-use amicu_registry::{FitConfig, GgufResolver, check_variant_fit};
+use amicu_registry::{FitConfig, GgufResolver, KvCacheParams, check_variant_fit_with_kv_cache};
 use amicu_runtime::{
     LaunchPlan, LogOptions, LogStream, Parallelism, Platform, RenderedLaunch, ResourceEstimate,
     RuntimeAdapter, RuntimeCapabilities, RuntimeHandle, RuntimeKind, RuntimeMetrics, RuntimeStatus,
@@ -198,6 +198,33 @@ fn diagnostic(error: &LlamaCppError) -> Diagnostic {
     Diagnostic::new(error.code(), error.severity(), error.to_string())
 }
 
+/// Assemble [`KvCacheParams`] for the KV-cache estimator (amicu-planning#151),
+/// when the inputs it needs are actually present: every one of the model's
+/// three declared shape fields, and at least one of the deployment's two
+/// cache-type fields (the other, if unset, defaults to
+/// [`KvCacheType::F16`] - llama-server's own per-flag default for whichever
+/// of `-ctk`/`-ctv` is left unset). Returns `None` otherwise, leaving the
+/// flat overhead band as the only memory-beyond-weights estimate - exactly
+/// today's behavior.
+fn kv_cache_params(model: &Model, settings: &LlamaCppSettings) -> Option<KvCacheParams> {
+    let (Some(n_layers), Some(n_kv_heads), Some(head_dim)) =
+        (model.n_layers, model.n_kv_heads, model.head_dim)
+    else {
+        return None;
+    };
+    if settings.cache_type_k.is_none() && settings.cache_type_v.is_none() {
+        return None;
+    }
+    Some(KvCacheParams {
+        context_length: settings.context_length,
+        n_layers,
+        n_kv_heads,
+        head_dim,
+        cache_type_k: settings.cache_type_k.unwrap_or(KvCacheType::F16),
+        cache_type_v: settings.cache_type_v.unwrap_or(KvCacheType::F16),
+    })
+}
+
 /// The leading flag token of one `extra_args` entry: a long (`--foo`,
 /// `--foo=value`) or short (`-f`, `-f=value`) option token yields its bare
 /// flag spelling; a bare value (a preceding flag's own argument, e.g. the
@@ -375,8 +402,14 @@ impl RuntimeAdapter for LlamaCppAdapter {
         }
         match GgufResolver::from_variants(&model.variants).recommended() {
             Some(variant) => {
-                let report =
-                    check_variant_fit(resolved.total_parameters, variant, &hardware, &self.fit);
+                let kv = kv_cache_params(model, settings);
+                let report = check_variant_fit_with_kv_cache(
+                    resolved.total_parameters,
+                    variant,
+                    &hardware,
+                    &self.fit,
+                    kv,
+                );
                 // Reuse the fit report's own diagnostic (AMICU-MEM-*).
                 if let Some(diag) = report.diagnostic {
                     out.push(diag);
@@ -402,13 +435,24 @@ impl RuntimeAdapter for LlamaCppAdapter {
             .cloned()
             .ok_or_else(|| LlamaCppError::NoVariant(model.id.clone()).into_adapter_error())?;
 
-        let report = check_variant_fit(resolved.total_parameters, &variant, &hardware, &self.fit);
+        let kv = kv_cache_params(model, settings);
+        let report = check_variant_fit_with_kv_cache(
+            resolved.total_parameters,
+            &variant,
+            &hardware,
+            &self.fit,
+            kv,
+        );
         let model_path = self.models_dir.join(model.id.as_str()).join(&variant.file);
         let (argv, text) = render_command(&model_path, settings);
 
         let gpu_count = u32::from(hardware.accelerator.is_some() && settings.n_gpu_layers != 0);
+        // Prefer the KV-cache estimate over the flat overhead band when it is
+        // known - it is a real number for this deployment, not a fraction of
+        // weights standing in for it.
+        let beyond_weights = report.kv_cache.unwrap_or(report.overhead.high);
         let estimated_memory =
-            ByteSize::from_bytes(report.weights.bytes() + report.overhead.high.bytes());
+            ByteSize::from_bytes(report.weights.bytes() + beyond_weights.bytes());
 
         Ok(LaunchPlan {
             deployment: d.id.clone(),
@@ -419,6 +463,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
             estimate: ResourceEstimate {
                 estimated_memory,
                 gpu_count,
+                kv_cache: report.kv_cache,
             },
         })
     }
