@@ -136,10 +136,54 @@ impl std::fmt::Debug for SigningKey {
     }
 }
 
-/// Stable kid: first 16 base64url chars of SHA-256 over the public key. Stable
-/// across restarts for the same key, so retiring keys keep their published kid.
+/// Stable kid: first 22 base64url chars (132 bits — comfortably over the
+/// 128-bit floor from andypalmi/amicu-planning#147) of SHA-256 over the
+/// public key. Stable across restarts for the same key, so retiring keys
+/// keep their published kid.
+///
+/// 22 chars was previously 16 (96 bits): two independently generated keys
+/// colliding on kid was only a ~2^-48 birthday-bound risk, not exploitable
+/// (`kid` is a selector, not a security boundary — the signature is), but a
+/// collision would silently shadow one key with another in the verifier's
+/// kid→key map. Widened before any key was provisioned in production, so
+/// there is no compatibility concern with already-issued tokens.
 fn derive_kid(public_key: &[u8; 32]) -> String {
     let digest = Sha256::digest(public_key);
     let encoded = URL_SAFE_NO_PAD.encode(digest);
-    encoded[..16].to_string()
+    encoded[..22].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// andypalmi/amicu-planning#147: kid must be at least 128 bits of
+    /// entropy. 22 base64url chars encode 132 bits (each char is 6 bits),
+    /// clearing the 128-bit floor (a base64url char count of 21.33 would be
+    /// the exact floor, so 22 is the smallest whole number of chars that
+    /// clears it).
+    #[test]
+    fn kid_is_at_least_128_bits_of_base64url() {
+        let key = SigningKey::generate().unwrap();
+        assert!(
+            key.kid().len() >= 22,
+            "kid {:?} is only {} base64url chars, need >= 22 (128 bits)",
+            key.kid(),
+            key.kid().len()
+        );
+    }
+
+    /// The same PEM must yield the same kid on every load — no per-boot
+    /// randomness, no coordination needed between replicas (see
+    /// `docs/ops/signing-key-rotation.md`).
+    #[test]
+    fn kid_is_stable_across_loads_of_the_same_pem() {
+        let pem = generate_pkcs8_pem().unwrap();
+
+        let first = SigningKey::from_pkcs8_pem(&pem).unwrap();
+        let second = SigningKey::from_pkcs8_pem(&pem).unwrap();
+
+        assert_eq!(first.kid(), second.kid());
+        assert!(first.kid().len() >= 22);
+    }
 }
