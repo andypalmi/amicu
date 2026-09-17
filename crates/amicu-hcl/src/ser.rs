@@ -371,6 +371,16 @@ fn deployment_block(d: &Deployment) -> Block {
             if let Some(v) = &s.build {
                 b = b.add_attribute(("build", v.clone()));
             }
+            if let Some(m) = &s.multimodal {
+                let mut mb = Block::builder("multimodal");
+                if let Some(v) = &m.projector {
+                    mb = mb.add_attribute(("projector", v.clone()));
+                }
+                if let Some(v) = m.offload {
+                    mb = mb.add_attribute(("offload", v));
+                }
+                b = b.add_block(mb.build());
+            }
             body = body
                 .add_attribute(("runtime", "llama_cpp"))
                 .add_block(b.build());

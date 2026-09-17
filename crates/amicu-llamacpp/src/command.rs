@@ -19,7 +19,11 @@ use amicu_core::resource::LlamaCppSettings;
 /// PR B) likewise have no documented short alias anywhere in this repo, so
 /// none is assumed. `--jinja`/`--no-jinja` are one `add_opt`'s paired
 /// spellings for the same boolean field (`common/arg.cpp`), grouped as one
-/// entry below; `--reasoning-format` has no short alias. Shared with
+/// entry below; `--reasoning-format` has no short alias. `-mm`/`--mmproj`
+/// and `--mmproj-offload`/`--no-mmproj-offload` (amicu-planning#151 PR D)
+/// are likewise each one `add_opt`'s paired spellings - verified against
+/// `tools/server/README.md`/`common/arg.cpp` via context7, not guessed (PR
+/// B's reviewer caught a wrong spelling here before). Shared with
 /// [`crate::adapter`] diagnostics (`AMICU-CAP-002`), which flatten this via
 /// [`is_typed_flag`] so a duplicated flag in `extra_args` is detected against
 /// exactly what [`render_command`] renders, not a hand-maintained shadow
@@ -44,6 +48,8 @@ pub(crate) const TYPED_FLAGS: &[&[&str]] = &[
     &["--chat-template-file"],
     &["--jinja", "--no-jinja"],
     &["--reasoning-format"],
+    &["--mmproj", "-mm"],
+    &["--mmproj-offload", "--no-mmproj-offload"],
 ];
 
 /// Whether `flag` is any alias of any typed field's flag (see
@@ -94,6 +100,12 @@ pub(crate) const DENYLISTED_ENV_KEYS: &[&str] = &[
 /// field, not the flag - so the mechanical rule would derive
 /// `--reasoning-format` from the *wrong* env key (`LLAMA_ARG_REASONING_FORMAT`,
 /// which llama-server does not read at all) while missing the real one.
+///
+/// `LLAMA_ARG_MMPROJ` and `LLAMA_ARG_MMPROJ_OFFLOAD` (amicu-planning#151 PR
+/// D) need no entry here: `common/arg.cpp`'s `add_opt` for `--mmproj`/`-mm`
+/// and `--mmproj-offload`/`--no-mmproj-offload` calls `.set_env(...)` with
+/// the env var named after the long flag itself, so the mechanical rule
+/// already derives the right flag for both.
 const ENV_FLAG_OVERRIDES: &[(&str, &str)] = &[
     ("LLAMA_ARG_BATCH", "--batch-size"),
     ("LLAMA_ARG_UBATCH", "--ubatch-size"),
@@ -128,8 +140,8 @@ pub(crate) fn llama_arg_env_flag(key: &str) -> Option<String> {
 ///
 /// Typed flags are emitted first (`-m`, `--port`, `--ctx-size`,
 /// `--n-gpu-layers`, then any set sampling/KV-cache/batching/flash-attention/
-/// chat-template/jinja/reasoning-format field in field-declaration order),
-/// then `settings.extra_args` verbatim, in declaration order - it is argv
+/// chat-template/jinja/reasoning-format/multimodal field in field-declaration
+/// order), then `settings.extra_args` verbatim, in declaration order - it is argv
 /// order. Duplicate/denylisted flags are caught as diagnostics before this
 /// ever runs (`crate::adapter`); this function itself renders whatever it is
 /// given. `f32` fields render via `{}` (plain decimal, e.g. `0.6`), never
@@ -227,6 +239,22 @@ pub fn render_command(model_path: &Path, settings: &LlamaCppSettings) -> (Vec<St
     if let Some(v) = settings.reasoning_format {
         argv.push("--reasoning-format".to_owned());
         argv.push(v.to_string());
+    }
+    // Multimodal projector (amicu-planning#151 PR D): `projector` and
+    // `offload` are independent. `--mmproj-offload`/`--no-mmproj-offload` is
+    // a paired bare-flag toggle exactly like `--jinja`/`--no-jinja` above -
+    // `Some(false)` renders the negative flag explicitly rather than
+    // omitting it, so it overrides an inherited `LLAMA_ARG_MMPROJ_OFFLOAD=1`.
+    if let Some(m) = &settings.multimodal {
+        if let Some(v) = &m.projector {
+            argv.push("--mmproj".to_owned());
+            argv.push(v.clone());
+        }
+        match m.offload {
+            Some(true) => argv.push("--mmproj-offload".to_owned()),
+            Some(false) => argv.push("--no-mmproj-offload".to_owned()),
+            None => {}
+        }
     }
     argv.extend(settings.extra_args.iter().cloned());
     let text = shell_join(&argv);

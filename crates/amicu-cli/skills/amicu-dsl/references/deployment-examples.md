@@ -123,6 +123,43 @@ emits neither flag and `plan_launch` refuses to build the launch. All five
 fields above are optional and independent of each other and of the
 sampling/KV-cache/batching fields from PR A.
 
+## llama.cpp: multimodal projector (amicu-planning#151 PR D)
+
+```hcl
+resource "deployment" "vision_chat_local" {
+  model    = model.vision_chat.id
+  hardware = hardware_profile.dev_mac.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 32768
+    port           = 8000
+    n_gpu_layers   = -1
+
+    multimodal {
+      # A plain path or HF-style reference to the mmproj GGUF - not a second
+      # `model` resource reference in this PR (that form can come later if
+      # amicu needs to track the projector as its own downloadable
+      # artifact). Not validated for existence at plan time; a bad path
+      # surfaces as a load failure at apply time.
+      projector = "/models/vision_chat/mmproj-f16.gguf"
+
+      # Whether to offload the projector to the accelerator. llama-server
+      # defaults this to enabled; `false` renders --no-mmproj-offload
+      # explicitly (overrides an inherited LLAMA_ARG_MMPROJ_OFFLOAD=1).
+      offload = true
+    }
+  }
+}
+```
+
+`projector` renders `--mmproj <value>`; `offload` is a paired bare-flag
+toggle like `jinja` above - `true` -> `--mmproj-offload`, `false` ->
+`--no-mmproj-offload`, unset -> renders nothing. Both fields are optional and
+independent of each other. `multimodal {}` is llama.cpp-only: it backs the
+`Modality::Vision` capability the llama.cpp adapter already declares, and a
+`multimodal` block on a `vllm {}` settings block is a schema error at parse
+time, not a capability diagnostic.
+
 ## vLLM deployment (production)
 
 ```hcl
@@ -172,13 +209,14 @@ resource "deployment" "vision_spec_local" {
     port           = 8000
     n_gpu_layers   = -1
     # Sampling, KV-cache dtype, batching, flash-attn, parallel slots, chat
-    # template, jinja, and reasoning-format are all typed fields (see above)
-    # - put them there, not here. What remains untyped after
-    # amicu-planning#151 (speculative decoding, multimodal projector) still
-    # goes through extra_args, tracked as separate PRs against the same
-    # issue.
+    # template, jinja, reasoning-format, and multimodal projector are all
+    # typed fields (see above) - put them there, not here. What remains
+    # untyped after amicu-planning#151 (speculative decoding) still goes
+    # through extra_args, tracked as a separate PR against the same issue.
+    multimodal {
+      projector = "/models/vision/mmproj-f16.gguf"
+    }
     extra_args = [
-      "--mmproj", "/models/vision/mmproj-f16.gguf",
       "--model-draft", "/models/vision/draft-q4.gguf",
       "--spec-type", "draft-dflash,ngram-map-k4v",
     ]
@@ -195,14 +233,15 @@ Rules and caveats:
   `--top-k`, `--min-p`, `--repeat-penalty`, `--cache-type-k`/`-ctk`,
   `--cache-type-v`/`-ctv`, `--batch-size`/`-b`, `--ubatch-size`/`-ub`,
   `--parallel`/`-np`, `--flash-attn`/`-fa`, `--chat-template`,
-  `--chat-template-file`, `--jinja`/`--no-jinja`, `--reasoning-format`, in
-  either `--foo value` or `--foo=value` form) is rejected with
-  `AMICU-CAP-002` - fix the ambiguity by removing one side, not by hoping
-  the last one wins. The same check applies to an `env` entry whose key is
-  `LLAMA_ARG_<X>` and mirrors one of those flags (e.g. `LLAMA_ARG_TEMP`,
-  `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CHAT_TEMPLATE`, and `LLAMA_ARG_THINK`
-  for `--reasoning-format` - not `LLAMA_ARG_REASONING_FORMAT`, which
-  llama-server does not read).
+  `--chat-template-file`, `--jinja`/`--no-jinja`, `--reasoning-format`,
+  `--mmproj`/`-mm`, `--mmproj-offload`/`--no-mmproj-offload`, in either
+  `--foo value` or `--foo=value` form) is rejected with `AMICU-CAP-002` -
+  fix the ambiguity by removing one side, not by hoping the last one wins.
+  The same check applies to an `env` entry whose key is `LLAMA_ARG_<X>` and
+  mirrors one of those flags (e.g. `LLAMA_ARG_TEMP`, `LLAMA_ARG_CACHE_TYPE_K`,
+  `LLAMA_ARG_CHAT_TEMPLATE`, `LLAMA_ARG_MMPROJ`, `LLAMA_ARG_MMPROJ_OFFLOAD`,
+  and `LLAMA_ARG_THINK` for `--reasoning-format` - not
+  `LLAMA_ARG_REASONING_FORMAT`, which llama-server does not read).
 - A denylisted flag (`--host`, `--api-key`, `--api-key-file`,
   `--ssl-key-file`) is rejected with `AMICU-CAP-003`: amicu owns the bind
   address, and the others put secret material - or a path to it - directly
@@ -211,8 +250,8 @@ Rules and caveats:
 - Any non-empty `extra_args` gets an informational `AMICU-CAP-004`, and the
   plan's cost/performance estimate is marked
   `"unverified: raw runtime flags present"` - the estimator cannot interpret
-  flags it doesn't have a typed model for (speculative decoding, multimodal
-  projector, chat template, ...).
+  flags it doesn't have a typed model for (speculative decoding, chat
+  template, ...).
 - An `env` value that looks like a real secret (an AWS key, an OpenAI-style
   key, a PEM header, a JWT, or a long high-entropy token) gets a
   `AMICU-POLICY-006` warning nudging it toward a `credential` resource
@@ -224,6 +263,11 @@ Rules and caveats:
   `plan_launch` refuses the launch - fix by removing one.
 - `extra_args`/`env` fields on the `vllm {}` block parse the same way, ahead
   of the vLLM command renderer that will consume them.
+- A `multimodal { ... }` block is only valid inside `llama_cpp {}`
+  (amicu-planning#151 PR D): putting one inside `vllm {}` is a structural
+  schema error at parse time (`VllmSettings` has no field for it), not a
+  capability diagnostic - fix by moving it to the `llama_cpp {}` block or
+  removing it.
 
 Notes:
 - The settings block must match the `runtime`: `llama_cpp {}` for `llama_cpp`,

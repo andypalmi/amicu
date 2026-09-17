@@ -10,8 +10,8 @@ use amicu_core::graph::Graph;
 use amicu_core::resource::{
     Accelerator, Artifact, Budget, Cpu, Credential, DataClass, Deployment, FlashAttention,
     GgufVariant, GovernanceRule, HardwareProfile, KvCacheType, LlamaCppSettings, Model,
-    ModelSource, Money, Price, Quota, ReasoningFormat, Region, Residency, RoutingPolicy,
-    RoutingTarget, Runtime, Tenant, UseCase, VllmKvCacheDtype, VllmSettings,
+    ModelSource, Money, MultimodalSettings, Price, Quota, ReasoningFormat, Region, Residency,
+    RoutingPolicy, RoutingTarget, Runtime, Tenant, UseCase, VllmKvCacheDtype, VllmSettings,
 };
 use amicu_core::secret::SecretRef;
 use amicu_core::units::ByteSize;
@@ -167,10 +167,31 @@ fn deployment(name: &str, f: &Fields) -> Result<Deployment> {
                     None => BTreeMap::new(),
                 },
                 build: s.opt_build("build")?,
+                multimodal: s
+                    .opt_block("multimodal")
+                    .map(|m| -> Result<MultimodalSettings> {
+                        Ok(MultimodalSettings {
+                            projector: m.opt_string("projector")?,
+                            offload: m.opt_bool("offload")?,
+                        })
+                    })
+                    .transpose()?,
             })
         }
         "vllm" => {
             let s = f.block("vllm")?;
+            // `multimodal { ... }` is llama.cpp-only (amicu-planning#151 PR
+            // D: it backs `--mmproj`/`--mmproj-offload`, which have no vLLM
+            // equivalent, and `VllmSettings` carries no such field to parse
+            // it into) - reject it structurally here rather than silently
+            // dropping it, which would otherwise happen since nothing else
+            // reads a `vllm {}` body's unrecognized blocks.
+            if s.opt_block("multimodal").is_some() {
+                return Err(HclError::schema(
+                    "a `multimodal { ... }` block is only valid inside a `llama_cpp {}` \
+                     settings block, not `vllm {}`",
+                ));
+            }
             Runtime::Vllm(VllmSettings {
                 context_length: s.u32("context_length")?,
                 port: s.u16("port")?,

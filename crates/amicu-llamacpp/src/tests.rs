@@ -712,6 +712,45 @@ fn validate_reports_cap003_for_denylisted_env_key() {
     }
 }
 
+// ---- amicu-planning#151 PR D: multimodal typed-flag diagnostics ----------
+
+#[test]
+fn validate_reports_cap002_for_multimodal_flags() {
+    for args in [
+        vec!["--mmproj".to_owned(), "/m.gguf".to_owned()],
+        vec!["-mm".to_owned(), "/m.gguf".to_owned()],
+        vec!["--mmproj-offload".to_owned()],
+        vec!["--no-mmproj-offload".to_owned()],
+    ] {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let diags = fitting_adapter().validate(&deployment_with_extra_args(&refs));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+                    && d.severity == amicu_core::diagnostic::Severity::Error),
+            "expected AMICU-CAP-002 for {args:?}, got {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn validate_reports_cap002_for_llama_arg_mmproj_env_keys() {
+    // No ENV_FLAG_OVERRIDES entry is needed for either key - `common/arg.cpp`
+    // sets each env var after its own long flag spelling, so the mechanical
+    // LLAMA_ARG_<X> -> --<x> rule already matches (amicu-planning#151 PR D).
+    for key in ["LLAMA_ARG_MMPROJ", "LLAMA_ARG_MMPROJ_OFFLOAD"] {
+        let diags = fitting_adapter().validate(&deployment_with_env(&[(key, "x")]));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+                    && d.severity == amicu_core::diagnostic::Severity::Error),
+            "expected AMICU-CAP-002 for {key}, got {diags:?}"
+        );
+    }
+}
+
 // ---- plan_launch ------------------------------------------------------------
 
 #[test]
@@ -821,8 +860,11 @@ fn render_command_formats_f32_as_plain_decimal_not_scientific() {
 
 #[test]
 fn render_command_appends_extra_args_after_typed_flags() {
+    // `--mmproj` used to be the canonical "still untyped" example here
+    // (amicu-planning#151 PR D types it) - `--lora` remains untyped, so it
+    // still demonstrates plain argv-order pass-through.
     let settings = {
-        let Runtime::LlamaCpp(s) = deployment_with_extra_args(&["--mmproj", "/m.gguf"]).runtime
+        let Runtime::LlamaCpp(s) = deployment_with_extra_args(&["--lora", "/m.gguf"]).runtime
         else {
             unreachable!()
         };
@@ -834,8 +876,8 @@ fn render_command_appends_extra_args_after_typed_flags() {
         .iter()
         .position(|a| a == "-1")
         .expect("n_gpu_layers value present");
-    assert_eq!(&argv[typed_end + 1..], ["--mmproj", "/m.gguf"]);
-    assert!(text.ends_with("--mmproj /m.gguf"));
+    assert_eq!(&argv[typed_end + 1..], ["--lora", "/m.gguf"]);
+    assert!(text.ends_with("--lora /m.gguf"));
 }
 
 // ---- amicu-planning#151 PR B: chat template / jinja / reasoning-format
@@ -972,6 +1014,67 @@ fn render_command_omits_unset_chat_template_jinja_reasoning_format_fields() {
         "--no-jinja",
         "--reasoning-format",
     ] {
+        assert!(
+            !argv.contains(&flag.to_owned()),
+            "unexpected {flag} in {argv:?}"
+        );
+    }
+}
+
+// ---- amicu-planning#151 PR D: multimodal projector renderer --------------
+
+#[test]
+fn render_command_emits_multimodal_projector_and_offload_when_set() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        multimodal: Some(amicu_core::resource::MultimodalSettings {
+            projector: Some("/models/mmproj-f16.gguf".to_owned()),
+            offload: Some(true),
+        }),
+        ..Default::default()
+    };
+    let (argv, text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let i = argv
+        .iter()
+        .position(|a| a == "--mmproj")
+        .expect("--mmproj present");
+    assert_eq!(argv[i + 1], "/models/mmproj-f16.gguf");
+    assert!(argv.contains(&"--mmproj-offload".to_owned()));
+    assert!(!argv.contains(&"--no-mmproj-offload".to_owned()));
+    assert!(text.contains("--mmproj /models/mmproj-f16.gguf"));
+    assert!(text.contains("--mmproj-offload"));
+}
+
+#[test]
+fn render_command_emits_no_mmproj_offload_when_explicitly_false() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        multimodal: Some(amicu_core::resource::MultimodalSettings {
+            projector: None,
+            offload: Some(false),
+        }),
+        ..Default::default()
+    };
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    assert!(!argv.contains(&"--mmproj".to_owned()));
+    assert!(argv.contains(&"--no-mmproj-offload".to_owned()));
+    assert!(!argv.contains(&"--mmproj-offload".to_owned()));
+}
+
+#[test]
+fn render_command_omits_multimodal_flags_when_unset() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        ..Default::default()
+    };
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    for flag in ["--mmproj", "-mm", "--mmproj-offload", "--no-mmproj-offload"] {
         assert!(
             !argv.contains(&flag.to_owned()),
             "unexpected {flag} in {argv:?}"
