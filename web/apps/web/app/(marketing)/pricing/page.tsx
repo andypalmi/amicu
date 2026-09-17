@@ -145,7 +145,7 @@ export default function PricingPage() {
               </TableHeader>
               <TableBody>
                 {featureMatrix.map((row) => (
-                  <TableRow key={row.feature}>
+                  <TableRow key={row.feature} className="hover:bg-transparent">
                     <TableHead
                       scope="row"
                       className="p-4 text-left text-sm font-normal normal-case tracking-normal text-muted-foreground"
