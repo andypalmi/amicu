@@ -91,4 +91,11 @@ pub struct GgufVariant {
     pub file: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<ByteSize>,
+    /// SHA-256 digest of the file, lowercase hex (amicu-planning#151).
+    /// Validated (64 hex characters) and normalized to lowercase at HCL
+    /// parse time. Verified against the resolved download artifact's
+    /// checksum before `download_gguf` fetches bytes, when both the
+    /// variant and the caller's expectation are known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }

@@ -521,6 +521,7 @@ mod tests {
             quantization: Quantization::Q4KM,
             file: "m.Q4_K_M.gguf".into(),
             size: Some(ByteSize::from_bytes(4 * GIB)),
+            sha256: None,
         };
         let report = check_variant_fit(
             7_000_000_000,
@@ -648,6 +649,7 @@ mod tests {
             quantization: Quantization::Q4KM,
             file: "m.Q4_K_M.gguf".into(),
             size: None,
+            sha256: None,
         };
         let report = check_variant_fit(
             7_000_000_000,
@@ -698,6 +700,7 @@ mod tests {
             quantization: Quantization::Q4KM,
             file: "m.Q4_K_M.gguf".into(),
             size: None,
+            sha256: None,
         };
         let report = check_variant_fit_with_kv_cache(
             7_000_000_000,
@@ -718,6 +721,7 @@ mod tests {
             quantization: Quantization::Q4KM,
             file: "m.Q4_K_M.gguf".into(),
             size: None,
+            sha256: None,
         };
         let hw = apple_silicon(16);
         let cfg = FitConfig::default();
@@ -733,6 +737,7 @@ mod tests {
             quantization: Quantization::Q4KM,
             file: "m.Q4_K_M.gguf".into(),
             size: None,
+            sha256: None,
         };
         let hw = apple_silicon(16);
         let cfg = FitConfig::default();

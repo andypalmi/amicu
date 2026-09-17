@@ -64,6 +64,7 @@ fn gguf_model(sizes: &[(Quantization, &str, u64)]) -> Model {
                 quantization: *q,
                 file: (*file).into(),
                 size: Some(ByteSize::from_bytes(*size)),
+                sha256: None,
             })
             .collect(),
         n_layers: None,
@@ -605,6 +606,53 @@ fn validate_reports_cap002_for_new_typed_flags_and_short_aliases() {
     }
 }
 
+// ---- amicu-planning#151 PR B: chat template / jinja / reasoning-format
+// typed-flag diagnostics ---------------------------------------------------
+
+#[test]
+fn validate_reports_cap002_for_chat_template_jinja_reasoning_format_flags() {
+    for args in [
+        vec!["--chat-template".to_owned(), "{{ messages }}".to_owned()],
+        vec![
+            "--chat-template-file".to_owned(),
+            "/models/chat.jinja".to_owned(),
+        ],
+        vec!["--jinja".to_owned()],
+        vec!["--reasoning-format".to_owned(), "auto".to_owned()],
+    ] {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        let diags = fitting_adapter().validate(&deployment_with_extra_args(&refs));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+                    && d.severity == amicu_core::diagnostic::Severity::Error),
+            "expected AMICU-CAP-002 for {args:?}, got {diags:?}"
+        );
+    }
+}
+
+#[test]
+fn validate_reports_cap002_for_llama_arg_chat_template_jinja_reasoning_format_env_keys() {
+    // No ENV_FLAG_OVERRIDES entries needed for these four - the mechanical
+    // LLAMA_ARG_<X> -> --<x> rule already matches their real flags.
+    for key in [
+        "LLAMA_ARG_CHAT_TEMPLATE",
+        "LLAMA_ARG_CHAT_TEMPLATE_FILE",
+        "LLAMA_ARG_JINJA",
+        "LLAMA_ARG_REASONING_FORMAT",
+    ] {
+        let diags = fitting_adapter().validate(&deployment_with_env(&[(key, "x")]));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED
+                    && d.severity == amicu_core::diagnostic::Severity::Error),
+            "expected AMICU-CAP-002 for {key}, got {diags:?}"
+        );
+    }
+}
+
 // Env vars whose LLAMA_ARG_ mirror does not mechanically match its flag
 // (`--batch-size`, `--ubatch-size`, `--parallel`) - see
 // `command::ENV_FLAG_OVERRIDES`.
@@ -780,6 +828,161 @@ fn render_command_appends_extra_args_after_typed_flags() {
         .expect("n_gpu_layers value present");
     assert_eq!(&argv[typed_end + 1..], ["--mmproj", "/m.gguf"]);
     assert!(text.ends_with("--mmproj /m.gguf"));
+}
+
+// ---- amicu-planning#151 PR B: chat template / jinja / reasoning-format
+// renderer ---------------------------------------------------------------
+
+#[test]
+fn render_command_emits_chat_template_jinja_reasoning_format_when_set() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        chat_template: Some("{{ messages }}".to_owned()),
+        jinja: Some(true),
+        reasoning_format: Some(amicu_core::resource::ReasoningFormat::Deepseek),
+        ..Default::default()
+    };
+    let (argv, text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+
+    let pairs = |flag: &str| -> Option<String> {
+        argv.iter()
+            .position(|a| a == flag)
+            .map(|i| argv[i + 1].clone())
+    };
+    assert_eq!(pairs("--chat-template").as_deref(), Some("{{ messages }}"));
+    assert!(argv.contains(&"--jinja".to_owned()));
+    assert_eq!(pairs("--reasoning-format").as_deref(), Some("deepseek"));
+    assert!(text.contains("--reasoning-format deepseek"));
+}
+
+#[test]
+fn render_command_emits_chat_template_file_when_set() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        chat_template_file: Some("/models/chat.jinja".to_owned()),
+        ..Default::default()
+    };
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    let i = argv
+        .iter()
+        .position(|a| a == "--chat-template-file")
+        .expect("--chat-template-file present");
+    assert_eq!(argv[i + 1], "/models/chat.jinja");
+    assert!(!argv.contains(&"--chat-template".to_owned()));
+}
+
+#[test]
+fn render_command_omits_jinja_when_false_or_unset() {
+    for jinja in [Some(false), None] {
+        let settings = LlamaCppSettings {
+            context_length: 8192,
+            port: 8000,
+            n_gpu_layers: -1,
+            jinja,
+            ..Default::default()
+        };
+        let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+        assert!(
+            !argv.contains(&"--jinja".to_owned()),
+            "unexpected --jinja for jinja = {jinja:?}"
+        );
+    }
+}
+
+#[test]
+fn render_command_renders_neither_chat_template_flag_when_both_are_set() {
+    // AMICU-CAP-005: an ambiguous pair - render_command itself refuses to
+    // guess which one wins, independent of the adapter-level diagnostic.
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        chat_template: Some("{{ messages }}".to_owned()),
+        chat_template_file: Some("/models/chat.jinja".to_owned()),
+        ..Default::default()
+    };
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    assert!(!argv.contains(&"--chat-template".to_owned()));
+    assert!(!argv.contains(&"--chat-template-file".to_owned()));
+}
+
+#[test]
+fn render_command_omits_unset_chat_template_jinja_reasoning_format_fields() {
+    let settings = LlamaCppSettings {
+        context_length: 8192,
+        port: 8000,
+        n_gpu_layers: -1,
+        ..Default::default()
+    };
+    let (argv, _text) = render_command(Path::new("/models/tiny.gguf"), &settings);
+    for flag in [
+        "--chat-template",
+        "--chat-template-file",
+        "--jinja",
+        "--reasoning-format",
+    ] {
+        assert!(
+            !argv.contains(&flag.to_owned()),
+            "unexpected {flag} in {argv:?}"
+        );
+    }
+}
+
+// ---- amicu-planning#151 PR B: AMICU-CAP-005 chat template conflict --------
+
+#[test]
+fn validate_reports_cap005_when_both_chat_template_fields_are_set() {
+    let mut d = deployment();
+    let Runtime::LlamaCpp(s) = &mut d.runtime else {
+        unreachable!("deployment() always builds a llama_cpp runtime");
+    };
+    s.chat_template = Some("{{ messages }}".to_owned());
+    s.chat_template_file = Some("/models/chat.jinja".to_owned());
+
+    let diags = fitting_adapter().validate(&d);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == catalog::CAP_CHAT_TEMPLATE_CONFLICT
+                && d.severity == amicu_core::diagnostic::Severity::Error),
+        "expected AMICU-CAP-005, got {diags:?}"
+    );
+}
+
+#[test]
+fn plan_launch_errors_on_cap005_chat_template_conflict() {
+    let mut d = deployment();
+    let Runtime::LlamaCpp(s) = &mut d.runtime else {
+        unreachable!("deployment() always builds a llama_cpp runtime");
+    };
+    s.chat_template = Some("{{ messages }}".to_owned());
+    s.chat_template_file = Some("/models/chat.jinja".to_owned());
+
+    let err = fitting_adapter()
+        .plan_launch(&d)
+        .expect_err("both chat_template fields set must be rejected");
+    assert_eq!(err.code(), catalog::CAP_CHAT_TEMPLATE_CONFLICT);
+}
+
+#[test]
+fn plan_launch_succeeds_with_only_chat_template_file_set() {
+    let mut d = deployment();
+    let Runtime::LlamaCpp(s) = &mut d.runtime else {
+        unreachable!("deployment() always builds a llama_cpp runtime");
+    };
+    s.chat_template_file = Some("/models/chat.jinja".to_owned());
+
+    let plan = fitting_adapter()
+        .plan_launch(&d)
+        .expect("a single chat-template field must not block plan_launch");
+    let RenderedLaunch::Command { argv, .. } = &plan.rendered else {
+        panic!("expected a command");
+    };
+    assert!(argv.contains(&"--chat-template-file".to_owned()));
 }
 
 #[test]
@@ -1006,9 +1209,16 @@ async fn download_completes_in_one_pass() {
     let source = FakeSource::new(64, false);
     let tmp = TempDir::new("download");
     let dest = tmp.file("w.gguf");
-    let result = download_gguf(&source, &ModelId::new("tiny_llama"), &selector(), &dest, 3)
-        .await
-        .expect("download");
+    let result = download_gguf(
+        &source,
+        &ModelId::new("tiny_llama"),
+        &selector(),
+        &dest,
+        3,
+        None,
+    )
+    .await
+    .expect("download");
     assert!(!result.resumed);
     assert_eq!(result.total_bytes, 64);
     assert_eq!(fs::metadata(&dest).unwrap().len(), 64);
@@ -1020,15 +1230,101 @@ async fn download_resumes_partial_after_transient_failure() {
     let tmp = TempDir::new("resume");
     let dest = tmp.file("w.gguf");
 
-    let result = download_gguf(&source, &ModelId::new("tiny_llama"), &selector(), &dest, 3)
-        .await
-        .expect("resumed download");
+    let result = download_gguf(
+        &source,
+        &ModelId::new("tiny_llama"),
+        &selector(),
+        &dest,
+        3,
+        None,
+    )
+    .await
+    .expect("resumed download");
 
     // The retry resumed from the 32-byte partial rather than restarting.
     assert!(result.resumed);
     assert_eq!(result.bytes_downloaded, 32);
     assert_eq!(result.total_bytes, 64);
     assert_eq!(fs::metadata(&dest).unwrap().len(), 64);
+}
+
+// ---- sha256 verification (amicu-planning#151) -------------------------------
+//
+// `FakeSource::resolve_artifact` always returns `checksum: "sha256:w".into()`
+// (see the fixture above).
+
+#[tokio::test]
+async fn download_succeeds_when_expected_sha256_matches() {
+    let source = FakeSource::new(64, false);
+    let tmp = TempDir::new("sha256-match");
+    let dest = tmp.file("w.gguf");
+    let result = download_gguf(
+        &source,
+        &ModelId::new("tiny_llama"),
+        &selector(),
+        &dest,
+        3,
+        Some("w"),
+    )
+    .await
+    .expect("matching checksum must not block download");
+    assert_eq!(result.total_bytes, 64);
+}
+
+#[tokio::test]
+async fn download_matches_expected_sha256_case_insensitively() {
+    let source = FakeSource::new(64, false);
+    let tmp = TempDir::new("sha256-case");
+    let dest = tmp.file("w.gguf");
+    download_gguf(
+        &source,
+        &ModelId::new("tiny_llama"),
+        &selector(),
+        &dest,
+        3,
+        Some("W"),
+    )
+    .await
+    .expect("checksum comparison must be case-insensitive");
+}
+
+#[tokio::test]
+async fn download_fails_fast_on_expected_sha256_mismatch_without_writing_bytes() {
+    let source = FakeSource::new(64, false);
+    let tmp = TempDir::new("sha256-mismatch");
+    let dest = tmp.file("w.gguf");
+    let err = download_gguf(
+        &source,
+        &ModelId::new("tiny_llama"),
+        &selector(),
+        &dest,
+        3,
+        Some("deadbeef"),
+    )
+    .await
+    .expect_err("mismatched checksum must be rejected before download");
+    assert!(matches!(err, LlamaCppError::ChecksumMismatch { .. }));
+    assert_eq!(err.code(), catalog::CAP_RUNTIME_ARTIFACT_MISMATCH);
+    // Fail-fast: no bytes were ever written for a checksum known to be wrong.
+    assert!(!dest.exists());
+}
+
+#[tokio::test]
+async fn download_skips_verification_when_expected_sha256_is_absent() {
+    // None is today's unchanged behavior: no verification at all.
+    let source = FakeSource::new(64, false);
+    let tmp = TempDir::new("sha256-absent");
+    let dest = tmp.file("w.gguf");
+    download_gguf(
+        &source,
+        &ModelId::new("tiny_llama"),
+        &selector(),
+        &dest,
+        3,
+        None,
+    )
+    .await
+    .expect("absent expected_sha256 must not verify anything");
 }
 
 fn selector() -> ArtifactSelector {

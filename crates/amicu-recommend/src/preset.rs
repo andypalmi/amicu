@@ -694,6 +694,7 @@ fn build_local_dev_chat(preset: &Preset, answers: &WizardAnswers) -> Graph {
             quantization: Quantization::Q4KM,
             file: "qwen2.5-7b-instruct-q4_k_m.gguf".to_string(),
             size: None,
+            sha256: None,
         }],
         n_layers: None,
         n_kv_heads: None,

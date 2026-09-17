@@ -248,6 +248,9 @@ fn model_block(m: &Model) -> Block {
         if let Some(size) = v.size {
             vb = vb.add_attribute(("size", size.to_string()));
         }
+        if let Some(sha256) = &v.sha256 {
+            vb = vb.add_attribute(("sha256", sha256.clone()));
+        }
         body = body.add_block(vb.build());
     }
     if let Some(v) = m.n_layers {
@@ -346,11 +349,26 @@ fn deployment_block(d: &Deployment) -> Block {
             if let Some(v) = &s.flash_attention {
                 b = b.add_attribute(("flash_attention", variant(v)));
             }
+            if let Some(v) = &s.chat_template {
+                b = b.add_attribute(("chat_template", v.clone()));
+            }
+            if let Some(v) = &s.chat_template_file {
+                b = b.add_attribute(("chat_template_file", v.clone()));
+            }
+            if let Some(v) = s.jinja {
+                b = b.add_attribute(("jinja", v));
+            }
+            if let Some(v) = &s.reasoning_format {
+                b = b.add_attribute(("reasoning_format", variant(v)));
+            }
             if !s.extra_args.is_empty() {
                 b = b.add_attribute(("extra_args", str_array(&s.extra_args)));
             }
             if !s.env.is_empty() {
                 b = b.add_block(env_block(&s.env));
+            }
+            if let Some(v) = &s.build {
+                b = b.add_attribute(("build", v.clone()));
             }
             body = body
                 .add_attribute(("runtime", "llama_cpp"))

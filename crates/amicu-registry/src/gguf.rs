@@ -116,6 +116,7 @@ mod tests {
             quantization: q,
             file: file.into(),
             size: size.map(ByteSize::from_bytes),
+            sha256: None,
         }
     }
 
