@@ -893,6 +893,279 @@ mod tests {
         assert!(parse_graph(src).is_err());
     }
 
+    // --- amicu-planning#151 PR B: chat template, jinja, reasoning_format,
+    // build, GgufVariant.sha256 ---------------------------------------------
+
+    #[test]
+    fn llama_cpp_chat_template_jinja_reasoning_format_build_fields_round_trip() {
+        let mut g = Graph::new();
+        g.deployments.push(Deployment {
+            id: "dep".into(),
+            model: "phantom_model".into(),
+            hardware_profile: "phantom_hw".into(),
+            runtime: Runtime::LlamaCpp(LlamaCppSettings {
+                context_length: 32768,
+                port: 8000,
+                n_gpu_layers: -1,
+                chat_template_file: Some("/models/chat.jinja".to_string()),
+                jinja: Some(true),
+                reasoning_format: Some(amicu_core::resource::ReasoningFormat::Deepseek),
+                build: Some("b4500".to_string()),
+                ..Default::default()
+            }),
+        });
+        let formatted = format_graph(&g).unwrap();
+        let reparsed = parse_graph(&formatted).unwrap();
+        assert_eq!(g, reparsed, "round trip through:\n{formatted}");
+    }
+
+    #[test]
+    fn llama_cpp_chat_template_inline_field_round_trips() {
+        // chat_template (inline Jinja text) and chat_template_file are
+        // independently settable - only setting *both* is a capability
+        // conflict (AMICU-CAP-005), enforced at the adapter layer, not here.
+        let mut g = Graph::new();
+        g.deployments.push(Deployment {
+            id: "dep".into(),
+            model: "phantom_model".into(),
+            hardware_profile: "phantom_hw".into(),
+            runtime: Runtime::LlamaCpp(LlamaCppSettings {
+                context_length: 8192,
+                port: 8000,
+                n_gpu_layers: -1,
+                chat_template: Some("{{ messages }}".to_string()),
+                ..Default::default()
+            }),
+        });
+        let formatted = format_graph(&g).unwrap();
+        assert!(formatted.contains("chat_template"));
+        assert!(!formatted.contains("chat_template_file"));
+        let reparsed = parse_graph(&formatted).unwrap();
+        assert_eq!(g, reparsed);
+    }
+
+    #[test]
+    fn llama_cpp_chat_template_jinja_reasoning_format_build_fields_are_independently_optional() {
+        // Setting only `jinja` must not force chat_template/reasoning_format/
+        // build to appear.
+        let mut g = Graph::new();
+        g.deployments.push(Deployment {
+            id: "dep".into(),
+            model: "phantom_model".into(),
+            hardware_profile: "phantom_hw".into(),
+            runtime: Runtime::LlamaCpp(LlamaCppSettings {
+                context_length: 8192,
+                port: 8000,
+                n_gpu_layers: -1,
+                jinja: Some(true),
+                ..Default::default()
+            }),
+        });
+        let formatted = format_graph(&g).unwrap();
+        assert!(formatted.contains("jinja"));
+        assert!(!formatted.contains("chat_template"));
+        assert!(!formatted.contains("reasoning_format"));
+        assert!(!formatted.contains("build"));
+        let reparsed = parse_graph(&formatted).unwrap();
+        assert_eq!(g, reparsed);
+    }
+
+    #[test]
+    fn every_reasoning_format_value_round_trips() {
+        for value in [
+            amicu_core::resource::ReasoningFormat::None,
+            amicu_core::resource::ReasoningFormat::Deepseek,
+            amicu_core::resource::ReasoningFormat::DeepseekLegacy,
+            amicu_core::resource::ReasoningFormat::Auto,
+        ] {
+            let mut g = Graph::new();
+            g.deployments.push(Deployment {
+                id: "dep".into(),
+                model: "phantom_model".into(),
+                hardware_profile: "phantom_hw".into(),
+                runtime: Runtime::LlamaCpp(LlamaCppSettings {
+                    context_length: 8192,
+                    port: 8000,
+                    n_gpu_layers: -1,
+                    reasoning_format: Some(value),
+                    ..Default::default()
+                }),
+            });
+            let reparsed = parse_graph(&format_graph(&g).unwrap()).unwrap();
+            assert_eq!(g, reparsed, "round trip failed for {value:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_reasoning_format_value_is_a_schema_error() {
+        let src = r#"
+            resource "model" "m" {
+              source {
+                registry  = "hugging_face"
+                reference = "org/model"
+              }
+              architecture = "llama"
+              artifact { format = "gguf" }
+            }
+            resource "hardware_profile" "hw" {
+              provider = "local"
+              memory   = "48GiB"
+            }
+            resource "deployment" "dep" {
+              model    = model.m.id
+              hardware = hardware_profile.hw.id
+              runtime  = "llama_cpp"
+              llama_cpp {
+                context_length   = 8192
+                port             = 8000
+                n_gpu_layers     = -1
+                reasoning_format = "not_a_real_format"
+              }
+            }
+        "#;
+        assert!(parse_graph(src).is_err());
+    }
+
+    #[test]
+    fn both_chat_template_fields_set_still_parses_and_round_trips() {
+        // The mutual-exclusivity check (AMICU-CAP-005) is an adapter-level
+        // capability diagnostic, not an HCL schema error - the DSL layer
+        // parses and round-trips it like any other pair of fields.
+        let mut g = Graph::new();
+        g.deployments.push(Deployment {
+            id: "dep".into(),
+            model: "phantom_model".into(),
+            hardware_profile: "phantom_hw".into(),
+            runtime: Runtime::LlamaCpp(LlamaCppSettings {
+                context_length: 8192,
+                port: 8000,
+                n_gpu_layers: -1,
+                chat_template: Some("{{ messages }}".to_string()),
+                chat_template_file: Some("/models/chat.jinja".to_string()),
+                ..Default::default()
+            }),
+        });
+        let reparsed = parse_graph(&format_graph(&g).unwrap()).unwrap();
+        assert_eq!(g, reparsed);
+    }
+
+    #[test]
+    fn malformed_build_is_a_schema_error() {
+        for bad in ["", "b 4500", "b4500\t"] {
+            let src = format!(
+                r#"
+                resource "model" "m" {{
+                  source {{
+                    registry  = "hugging_face"
+                    reference = "org/model"
+                  }}
+                  architecture = "llama"
+                  artifact {{ format = "gguf" }}
+                }}
+                resource "hardware_profile" "hw" {{
+                  provider = "local"
+                  memory   = "48GiB"
+                }}
+                resource "deployment" "dep" {{
+                  model    = model.m.id
+                  hardware = hardware_profile.hw.id
+                  runtime  = "llama_cpp"
+                  llama_cpp {{
+                    context_length = 8192
+                    port           = 8000
+                    n_gpu_layers   = -1
+                    build          = "{bad}"
+                  }}
+                }}
+            "#
+            );
+            assert!(
+                parse_graph(&src).is_err(),
+                "build = {bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn build_round_trips() {
+        let mut g = Graph::new();
+        g.deployments.push(Deployment {
+            id: "dep".into(),
+            model: "phantom_model".into(),
+            hardware_profile: "phantom_hw".into(),
+            runtime: Runtime::LlamaCpp(LlamaCppSettings {
+                context_length: 8192,
+                port: 8000,
+                n_gpu_layers: -1,
+                build: Some("b4500".to_string()),
+                ..Default::default()
+            }),
+        });
+        let reparsed = parse_graph(&format_graph(&g).unwrap()).unwrap();
+        assert_eq!(g, reparsed);
+    }
+
+    #[test]
+    fn gguf_variant_sha256_round_trips_and_is_normalized_to_lowercase() {
+        let mut g = graph_with_model("m");
+        g.models[0]
+            .variants
+            .push(amicu_core::resource::GgufVariant {
+                quantization: Quantization::Q4KM,
+                file: "m.Q4_K_M.gguf".to_string(),
+                size: None,
+                sha256: Some("A".repeat(64)),
+            });
+        let formatted = format_graph(&g).unwrap();
+        let reparsed = parse_graph(&formatted).unwrap();
+        assert_eq!(
+            reparsed.models[0].variants[0].sha256.as_deref(),
+            Some("a".repeat(64).as_str())
+        );
+    }
+
+    #[test]
+    fn gguf_variant_sha256_is_optional() {
+        let g = graph_with_model("m");
+        assert!(g.models[0].variants.is_empty());
+    }
+
+    #[test]
+    fn malformed_sha256_is_a_schema_error() {
+        let too_short = "a".repeat(63);
+        let non_hex = "g".repeat(64);
+        let too_long = "a".repeat(65);
+        for bad in [
+            "",
+            "abc",
+            too_short.as_str(),
+            non_hex.as_str(),
+            too_long.as_str(),
+        ] {
+            let src = format!(
+                r#"
+                resource "model" "m" {{
+                  source {{
+                    registry  = "hugging_face"
+                    reference = "org/model"
+                  }}
+                  architecture = "llama"
+                  artifact {{ format = "gguf" }}
+                  variant {{
+                    quantization = "q4_k_m"
+                    file         = "m.gguf"
+                    sha256       = "{bad}"
+                  }}
+                }}
+            "#
+            );
+            assert!(
+                parse_graph(&src).is_err(),
+                "sha256 = {bad:?} should be rejected"
+            );
+        }
+    }
+
     #[test]
     fn vllm_kv_cache_dtype_and_batching_fields_round_trip() {
         for dtype in [

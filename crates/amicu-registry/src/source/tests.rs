@@ -68,11 +68,13 @@ fn tiny_model() -> ModelMetadata {
                 quantization: Quantization::Q4KM,
                 file: "tiny-llama.Q4_K_M.gguf".into(),
                 size: Some(ByteSize::from_bytes(64)),
+                sha256: None,
             },
             GgufVariant {
                 quantization: Quantization::Q8_0,
                 file: "tiny-llama.Q8_0.gguf".into(),
                 size: Some(ByteSize::from_bytes(120)),
+                sha256: None,
             },
         ],
     }

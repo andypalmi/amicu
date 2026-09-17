@@ -10,8 +10,8 @@ use amicu_core::graph::Graph;
 use amicu_core::resource::{
     Accelerator, Artifact, Budget, Cpu, Credential, DataClass, Deployment, FlashAttention,
     GgufVariant, GovernanceRule, HardwareProfile, KvCacheType, LlamaCppSettings, Model,
-    ModelSource, Money, Price, Quota, Region, Residency, RoutingPolicy, RoutingTarget, Runtime,
-    Tenant, UseCase, VllmKvCacheDtype, VllmSettings,
+    ModelSource, Money, Price, Quota, ReasoningFormat, Region, Residency, RoutingPolicy,
+    RoutingTarget, Runtime, Tenant, UseCase, VllmKvCacheDtype, VllmSettings,
 };
 use amicu_core::secret::SecretRef;
 use amicu_core::units::ByteSize;
@@ -85,6 +85,7 @@ fn model(name: &str, f: &Fields) -> Result<Model> {
                     quantization: v.enum_val("quantization")?,
                     file: v.string("file")?,
                     size: v.opt_byte_size("size")?,
+                    sha256: v.opt_sha256("sha256")?,
                 })
             })
             .collect::<Result<_>>()?,
@@ -156,11 +157,16 @@ fn deployment(name: &str, f: &Fields) -> Result<Deployment> {
                 ubatch_size: s.opt_u32("ubatch_size")?,
                 parallel_slots: s.opt_u32("parallel_slots")?,
                 flash_attention: s.opt_enum::<FlashAttention>("flash_attention")?,
+                chat_template: s.opt_string("chat_template")?,
+                chat_template_file: s.opt_string("chat_template_file")?,
+                jinja: s.opt_bool("jinja")?,
+                reasoning_format: s.opt_enum::<ReasoningFormat>("reasoning_format")?,
                 extra_args: s.string_vec("extra_args")?,
                 env: match s.opt_block("env") {
                     Some(e) => e.string_map()?,
                     None => BTreeMap::new(),
                 },
+                build: s.opt_build("build")?,
             })
         }
         "vllm" => {
@@ -471,6 +477,38 @@ impl<'a> Fields<'a> {
     fn opt_byte_size(&self, key: &str) -> Result<Option<ByteSize>> {
         self.attr(key)
             .map_or(Ok(None), |_| self.byte_size(key).map(Some))
+    }
+
+    /// A `sha256` attribute: exactly 64 hex characters (case-insensitive),
+    /// normalized to lowercase. Hand-validated rather than a plain
+    /// pass-through (amicu-planning#151) - it must be a well-formed digest
+    /// before it is ever compared against a downloaded artifact's checksum
+    /// (see `amicu_llamacpp::download::download_gguf`).
+    fn opt_sha256(&self, key: &str) -> Result<Option<String>> {
+        self.opt_string(key)?
+            .map(|s| {
+                if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    Ok(s.to_lowercase())
+                } else {
+                    Err(self.bad(key, "64 hex characters (a sha256 digest)"))
+                }
+            })
+            .transpose()
+    }
+
+    /// A `build` attribute: non-empty and containing no whitespace (a build
+    /// tag like `"b4500"` or a git sha, amicu-planning#151). Stored/validated
+    /// only - not yet rendered or enforced.
+    fn opt_build(&self, key: &str) -> Result<Option<String>> {
+        self.opt_string(key)?
+            .map(|s| {
+                if s.is_empty() || s.chars().any(char::is_whitespace) {
+                    Err(self.bad(key, "non-empty with no whitespace"))
+                } else {
+                    Ok(s)
+                }
+            })
+            .transpose()
     }
 
     fn reference(&self, key: &str) -> Result<String> {

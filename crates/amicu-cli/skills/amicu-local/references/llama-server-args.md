@@ -21,12 +21,47 @@ reason about behavior and diagnostics.
 | `ubatch_size` | `--ubatch-size <n>` | Physical (micro-)batch size. |
 | `parallel_slots` | `--parallel <n>` | Concurrent request slots. `--ctx-size` is the *total* context shared across slots, not per-slot. |
 | `flash_attention` | `--flash-attn <on\|off\|auto>` | Three-way toggle, not a boolean. |
+| `chat_template` | `--chat-template <text>` | Inline Jinja chat template. Mutually exclusive with `chat_template_file` (`AMICU-CAP-005` if both are set). |
+| `chat_template_file` | `--chat-template-file <path>` | Path to a Jinja chat template file. Mutually exclusive with `chat_template`. |
+| `jinja` | `--jinja` (`true`) / `--no-jinja` (`false`) | Paired bare flags (no value); `Some(false)` renders `--no-jinja` explicitly (overrides an inherited `LLAMA_ARG_JINJA=1`), `None` renders nothing. |
+| `reasoning_format` | `--reasoning-format <none\|deepseek\|deepseek-legacy\|auto>` | Reasoning/thinking-block extraction format. HCL value `deepseek_legacy` renders as the hyphenated `deepseek-legacy` on argv - see below. |
+| `build` (model-level: `variant.sha256`) | *(not rendered)* | `build` is a stored/validated-only runtime build pin (amicu-planning#151 PR B); `sha256` verifies the resolved download artifact's checksum in `download_gguf`, before any bytes are fetched - neither appears in argv. |
 
 ## Sampling, KV cache, batching, flash-attn, parallel slots (amicu-planning#151)
 
 All twelve fields above are optional and independent - set only what you need,
 the rest fall back to llama-server's own defaults. See
 `amicu-dsl/references/deployment-examples.md` for a full example.
+
+## Chat template, jinja, reasoning format, build pin, artifact checksum (amicu-planning#151 PR B)
+
+`chat_template`/`chat_template_file`, `jinja`, and `reasoning_format` are
+optional and independent of each other and of the PR A fields above -
+`chat_template` and `chat_template_file` are the one pair that is *not*
+independent: setting both is `AMICU-CAP-005`, and `render_command` emits
+neither flag when that happens (`plan_launch` refuses to build the launch at
+all; `validate` reports the diagnostic without refusing).
+
+`reasoning_format`'s HCL/schema value `deepseek_legacy` renders as the
+hyphenated argv token `deepseek-legacy` - `common/chat.cpp`'s
+`common_reasoning_format_name` returns the hyphenated spelling, and
+`llama-server` rejects the underscored one with "Unknown reasoning format".
+The other three values (`none`, `deepseek`, `auto`) are spelled identically
+in HCL and argv.
+
+`build` (on `llama_cpp {}`) and `sha256` (on a model's `variant {}`) are
+validated at parse time but do not affect argv:
+
+- `build` must be non-empty with no whitespace (e.g. `"b4500"` or a git sha).
+  It is stored for future use - amicu does not yet render it into argv or
+  check it against the detected `llama-server` binary.
+- `sha256` must be exactly 64 hex characters (case-insensitive on input,
+  normalized to lowercase on parse). When a deployment's download path calls
+  `amicu_llamacpp::download::download_gguf` with `expected_sha256 = Some(&variant.sha256)`,
+  it is checked against the resolved `ArtifactRef.checksum` (an optional
+  `"sha256:"` prefix is stripped, case-insensitively) *before* any bytes are
+  fetched; a mismatch fails fast as `LlamaCppError::ChecksumMismatch`
+  (`AMICU-CAP-001`) rather than downloading a file already known to be wrong.
 
 ### KV-cache estimator
 
@@ -72,8 +107,9 @@ re-asserted:
   `-ngl`/`--gpu-layers`/`--n-gpu-layers`, `--port`, `--temp`/`--temperature`,
   `--top-p`, `--top-k`, `--min-p`, `--repeat-penalty`,
   `-ctk`/`--cache-type-k`, `-ctv`/`--cache-type-v`, `-b`/`--batch-size`,
-  `-ub`/`--ubatch-size`, `-np`/`--parallel`, `-fa`/`--flash-attn`) - is
-  `AMICU-CAP-002`.
+  `-ub`/`--ubatch-size`, `-np`/`--parallel`, `-fa`/`--flash-attn`,
+  `--chat-template`, `--chat-template-file`, `--jinja`/`--no-jinja`,
+  `--reasoning-format`) - is `AMICU-CAP-002`.
 - A flag on the fixed denylist (`--host`, `--api-key`, `--api-key-file`,
   `--ssl-key-file`) is `AMICU-CAP-003`.
 - llama-server also reads `LLAMA_ARG_<X>` environment variables as
@@ -81,17 +117,24 @@ re-asserted:
   checks: `LLAMA_ARG_CTX_SIZE` is `AMICU-CAP-002`, `LLAMA_ARG_HOST` is
   `AMICU-CAP-003`. Most of the new fields follow that same mechanical
   `LLAMA_ARG_<X>` -> `--<x>` rule (e.g. `LLAMA_ARG_TEMP` -> `--temp`,
-  `LLAMA_ARG_CACHE_TYPE_K` -> `--cache-type-k`), but three don't:
+  `LLAMA_ARG_CACHE_TYPE_K` -> `--cache-type-k`, `LLAMA_ARG_CHAT_TEMPLATE` ->
+  `--chat-template`, `LLAMA_ARG_JINJA` -> `--jinja`), but four don't:
   `LLAMA_ARG_BATCH` mirrors `--batch-size`, `LLAMA_ARG_UBATCH` mirrors
-  `--ubatch-size`, and `LLAMA_ARG_N_PARALLEL` mirrors `--parallel` - amicu
-  special-cases these three so `AMICU-CAP-002` still catches them. A
-  handful of dynamic-loader env vars (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`,
-  `DYLD_LIBRARY_PATH`, `LD_LIBRARY_PATH`) are denylisted outright regardless
-  of the `LLAMA_ARG_` prefix.
+  `--ubatch-size`, `LLAMA_ARG_N_PARALLEL` mirrors `--parallel`, and
+  `LLAMA_ARG_THINK` mirrors `--reasoning-format` (`common/arg.cpp`'s
+  `--reasoning-format` `add_opt` calls `.set_env("LLAMA_ARG_THINK")` -
+  named after the internal `params.think` field, not the flag; there is no
+  `LLAMA_ARG_REASONING_FORMAT`) - amicu special-cases these four so
+  `AMICU-CAP-002` still catches them. A handful of dynamic-loader env vars
+  (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`,
+  `LD_LIBRARY_PATH`) are denylisted outright regardless of the `LLAMA_ARG_`
+  prefix.
 - Any non-empty `extra_args` also gets an informational `AMICU-CAP-004`,
   and the plan's cost/performance estimate is marked "unverified: raw
   runtime flags present" - the estimator cannot interpret flags it has no
   typed model for.
+- Setting both `chat_template` and `chat_template_file` is `AMICU-CAP-005`
+  (amicu-planning#151 PR B) - see above.
 
 ## Service supervision
 
