@@ -12,9 +12,9 @@ use amicu_core::resource::Residency;
 
 use crate::capability::Region;
 use crate::{
-    AwsProvider, AzureProvider, GcpProvider, HetznerProvider, NebiusProvider, OvhCloudProvider,
-    Provider, RunPodProvider, ScalewayProvider, aws, azure, gcp, hetzner, nebius, ovhcloud, runpod,
-    scaleway,
+    AwsProvider, AzureProvider, GcpProvider, HetznerProvider, ModalProvider, NebiusProvider,
+    OvhCloudProvider, Provider, RunPodProvider, ScalewayProvider, aws, azure, gcp, hetzner, modal,
+    nebius, ovhcloud, runpod, scaleway,
 };
 
 /// Every residency jurisdiction, so catalogued providers expose all of their
@@ -40,6 +40,11 @@ fn provider_regions(provider: &str) -> Option<Vec<Region>> {
         ovhcloud::PROVIDER_ID => OvhCloudProvider::for_residencies(ALL_RESIDENCIES).capabilities(),
         scaleway::PROVIDER_ID => ScalewayProvider::for_residencies(ALL_RESIDENCIES).capabilities(),
         runpod::PROVIDER_ID => RunPodProvider::for_residencies(ALL_RESIDENCIES).capabilities(),
+        // Modal has no residency-filtering constructor: it exposes its full,
+        // genuinely multi-jurisdiction region table (broad `us`/`eu`/`ap`
+        // plus narrow sub-regions) unconditionally, so `ALL_RESIDENCIES` is
+        // moot here - see `modal.rs`'s module docs.
+        modal::PROVIDER_ID => ModalProvider::new().capabilities(),
         _ => return None,
     };
     Some(caps.regions)
@@ -83,5 +88,21 @@ mod tests {
     fn unknown_provider_or_region_is_none() {
         assert_eq!(resolve_residency("local_apple", "anywhere"), None);
         assert_eq!(resolve_residency("aws", "no-such-region"), None);
+    }
+
+    #[test]
+    fn modal_resolves_broad_and_narrow_regions_including_eu() {
+        assert_eq!(resolve_residency("modal", "us"), Some(Residency::Us));
+        assert_eq!(resolve_residency("modal", "eu"), Some(Residency::Eu));
+        assert_eq!(resolve_residency("modal", "eu-west"), Some(Residency::Eu));
+        assert_eq!(resolve_residency("modal", "uk"), Some(Residency::Uk));
+    }
+
+    #[test]
+    fn modal_unknown_region_fails_closed() {
+        // A region code Modal genuinely does not serve (not one it serves
+        // outside the EU) is the real fail-closed case.
+        assert_eq!(resolve_residency("modal", "mars-1"), None);
+        assert_eq!(resolve_residency("modal", "eu-central-1"), None);
     }
 }

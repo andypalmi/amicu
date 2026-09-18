@@ -253,6 +253,15 @@ pub enum ProviderError {
         /// A safe, secret-free description of why it was rejected.
         detail: String,
     },
+    /// The operation is permanently unsupported by this adapter (e.g. a
+    /// catalog-only adapter with no apply-time backend yet). Never
+    /// retryable, unlike [`ProviderError::Backend`] - there is no transient
+    /// condition to wait out. Maps to `AMICU-PROVIDER-015`.
+    #[error("provider does not support this operation: {detail}")]
+    Unsupported {
+        /// A safe, secret-free description of what is unsupported.
+        detail: String,
+    },
 }
 
 impl AdapterErrorKind for ProviderError {
@@ -264,6 +273,7 @@ impl AdapterErrorKind for ProviderError {
             ProviderError::UnknownInstance { .. } => catalog::PROVIDER_UNKNOWN_INSTANCE,
             ProviderError::Backend { .. } => catalog::PROVIDER_BACKEND,
             ProviderError::CredentialsRejected { .. } => catalog::PROVIDER_CREDENTIALS_REJECTED,
+            ProviderError::Unsupported { .. } => catalog::PROVIDER_UNSUPPORTED_OPERATION,
         }
     }
 
@@ -353,6 +363,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unsupported_operation_is_permanent_not_retryable() {
+        let err = AdapterError::from_kind(ProviderError::Unsupported {
+            detail: "catalog-only adapter".into(),
+        });
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-015");
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
     fn provider_error_normalizes_to_catalog_diagnostic() {
         let adapter_err = AdapterError::from_kind(ProviderError::UnknownOffering {
             offering: "gpu.h100.1x".into(),
@@ -405,6 +424,7 @@ mod tests {
             ProviderError::UnknownInstance { id: "i".into() },
             ProviderError::Backend { detail: "d".into() },
             ProviderError::CredentialsRejected { detail: "d".into() },
+            ProviderError::Unsupported { detail: "d".into() },
         ];
         for err in errors {
             assert!(catalog::all().contains(&err.code()));

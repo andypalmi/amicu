@@ -425,10 +425,15 @@ pub mod catalog {
     /// provider.
     pub const PROVIDER_CREDENTIALS_REJECTED: DiagnosticCode =
         DiagnosticCode::new(Category::Provider, 14);
+    /// `AMICU-PROVIDER-015` - the operation is permanently unsupported by this
+    /// adapter (e.g. a catalog-only adapter with no apply-time backend yet).
+    /// Never retryable.
+    pub const PROVIDER_UNSUPPORTED_OPERATION: DiagnosticCode =
+        DiagnosticCode::new(Category::Provider, 15);
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 28] {
+    pub const fn all() -> [DiagnosticCode; 29] {
         [
             PARSE_UNCLOSED_BLOCK,
             PARSE_INVALID_SYNTAX,
@@ -465,6 +470,8 @@ pub mod catalog {
             PROVIDER_UNKNOWN_INSTANCE,
             PROVIDER_BACKEND,
             PROVIDER_CREDENTIALS_REJECTED,
+            // amicu-planning#158 addition:
+            PROVIDER_UNSUPPORTED_OPERATION,
         ]
     }
 }
