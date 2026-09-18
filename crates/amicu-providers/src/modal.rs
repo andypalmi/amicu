@@ -12,14 +12,31 @@
 //! directly (per the planning issue) rather than through this trait's
 //! provisioning surface.
 //!
-//! Modal is not regionalized the way RunPod/AWS/etc. are: sandboxes are
-//! placed by Modal's scheduler with no caller-selectable data center, so the
-//! catalog exposes one logical [`Region`] (`"us"`, [`Residency::Us`]). Amicu
-//! targets EU workloads; a `data_class` requiring EU residency must fail
-//! closed against Modal, and it does here for free - `"us"` is the only
-//! region code [`catalog::resolve_residency`](crate::catalog::resolve_residency)
-//! can ever resolve for `"modal"`, and it never resolves to
-//! [`Residency::Eu`].
+//! Modal *is* regionalized: a caller can pin a Function/Sandbox to a broad
+//! region (`"us"`, `"eu"`, `"ap"`) or a narrower one (`"us-west"`,
+//! `"eu-north"`, `"uk"`, `"jp"`, ...) via the `region`/`routing_region`
+//! argument - it is a placement preference with a price multiplier, not a
+//! capacity gate (every GPU is assumed available in every region; Modal does
+//! not document per-region GPU availability). [`regions`] models the region
+//! table the same way [`RunPodProvider`](crate::RunPodProvider)'s internal
+//! `datacenters` does: a real list of codes tagged with their
+//! [`Residency`], read from
+//! <https://modal.com/docs/guide/region-selection> on 2026-09-18. This
+//! means `"eu"` (and every EU narrow region) resolves to [`Residency::Eu`]
+//! through [`catalog::resolve_residency`](crate::catalog::resolve_residency),
+//! so a `data_class` requiring EU residency is satisfiable against Modal
+//! when the deployment is pinned there, and fails closed only for a region
+//! code Modal genuinely does not serve.
+//!
+//! Pinning to a region multiplies Modal's base on-demand rate: broad regions
+//! by 1.15x, narrow regions by 1.75x (same source, checked 2026-09-18:
+//! "Broad (e.g. `us`) | 1.15x", "Narrow (e.g. `us-west`) | 1.75x"; the
+//! smaller multiplier applies when multiple regions spanning both
+//! categories are given). [`ComputeOffering`]/[`Pricing`] have no per-region
+//! rate field, so this adapter cannot represent that multiplier structurally
+//! (see [`regions`] for that decision) - the stored `on_demand` rate is
+//! Modal's *unpinned* base price, and amicu does not yet apply the
+//! multiplier automatically.
 //!
 //! GPU models, VRAM and on-demand USD/hr prices were read from
 //! <https://modal.com/pricing> on 2026-09-18 (Modal bills per second; the
@@ -51,10 +68,109 @@ use crate::provider::{
 /// The adapter identity Modal registers under.
 pub const PROVIDER_ID: &str = "modal";
 
-/// Modal's single logical region: sandboxes are placed by Modal's own
-/// scheduler with no caller-selectable data center, so there is no finer
-/// region granularity to expose.
-const REGION_CODE: &str = "us";
+/// One region Modal's `region`/`routing_region` argument accepts: its code,
+/// residency jurisdiction, and a human-readable location.
+struct ModalRegion {
+    /// Region code, used as the [`Region::code`].
+    code: &'static str,
+    /// Residency jurisdiction the region falls under.
+    residency: Residency,
+    /// Human-readable location.
+    location: &'static str,
+}
+
+/// A compact residency tag for [`RAW_REGIONS`], expanded to a real
+/// [`Residency`] in [`regions`]. Kept separate from `Residency` itself
+/// because [`Residency::Other`] owns a `String`, which cannot appear in a
+/// `const` table row; `Other` here holds the `'static` jurisdiction token
+/// instead.
+#[derive(Clone, Copy)]
+enum ResidencyTag {
+    Us,
+    Eu,
+    Apac,
+    Uk,
+    Ca,
+    Other(&'static str),
+}
+
+/// Every region Modal's `region=`/`routing_region=` argument accepts: three
+/// broad regions (`"us"`, `"eu"`, `"ap"`, 1.15x price multiplier) and the
+/// narrow regions each broad region contains (1.75x multiplier), as
+/// `(code, residency, location)`. Source:
+/// <https://modal.com/docs/guide/region-selection>, checked 2026-09-18.
+/// `"me"`/`"sa"`/`"af"`/`"mx"` (Middle East / South America / Africa /
+/// Mexico) have no matching named [`Residency`] variant, so they use
+/// [`ResidencyTag::Other`] with the region code as the jurisdiction token.
+const RAW_REGIONS: [(&str, ResidencyTag, &str); 22] = [
+    // Broad regions (1.15x multiplier).
+    ("us", ResidencyTag::Us, "United States (broad)"),
+    ("eu", ResidencyTag::Eu, "European Economic Area (broad)"),
+    ("ap", ResidencyTag::Apac, "Asia-Pacific (broad)"),
+    // Narrow regions (1.75x multiplier).
+    ("us-east", ResidencyTag::Us, "United States - Virginia"),
+    ("us-central", ResidencyTag::Us, "United States - Central"),
+    ("us-south", ResidencyTag::Us, "United States - South"),
+    ("us-west", ResidencyTag::Us, "United States - Oregon"),
+    (
+        "eu-west",
+        ResidencyTag::Eu,
+        "European Economic Area - Dublin",
+    ),
+    (
+        "eu-north",
+        ResidencyTag::Eu,
+        "European Economic Area - North",
+    ),
+    (
+        "eu-south",
+        ResidencyTag::Eu,
+        "European Economic Area - South",
+    ),
+    ("uk", ResidencyTag::Uk, "United Kingdom"),
+    ("ca", ResidencyTag::Ca, "Canada"),
+    (
+        "ap-northeast",
+        ResidencyTag::Apac,
+        "Asia-Pacific - Northeast",
+    ),
+    (
+        "ap-southeast",
+        ResidencyTag::Apac,
+        "Asia-Pacific - Southeast",
+    ),
+    ("ap-south", ResidencyTag::Apac, "Asia-Pacific - Mumbai"),
+    (
+        "ap-melbourne",
+        ResidencyTag::Apac,
+        "Asia-Pacific - Melbourne",
+    ),
+    ("jp", ResidencyTag::Apac, "Japan"),
+    ("au", ResidencyTag::Apac, "Australia"),
+    ("me", ResidencyTag::Other("me"), "Middle East"),
+    ("sa", ResidencyTag::Other("sa"), "South America"),
+    ("af", ResidencyTag::Other("af"), "Africa"),
+    ("mx", ResidencyTag::Other("mx"), "Mexico"),
+];
+
+/// Expand [`RAW_REGIONS`] into typed [`ModalRegion`]s. A `fn` (not a
+/// `const`) because [`Residency::Other`] owns a `String` - same reason
+/// [`RunPodProvider`](crate::RunPodProvider)'s internal `datacenters` is a
+/// `fn`.
+fn regions() -> [ModalRegion; 22] {
+    RAW_REGIONS.map(|(code, tag, location)| ModalRegion {
+        code,
+        residency: match tag {
+            ResidencyTag::Us => Residency::Us,
+            ResidencyTag::Eu => Residency::Eu,
+            ResidencyTag::Apac => Residency::Apac,
+            ResidencyTag::Uk => Residency::Uk,
+            ResidencyTag::Ca => Residency::Ca,
+            ResidencyTag::Other(token) => Residency::Other(token.to_string()),
+        },
+        location,
+    })
+}
 
 /// One entry of Modal's GPU catalog: the offering-id slug, the exact string
 /// Modal's `gpu=` argument expects (verbatim - PR 2's sandbox supervisor
@@ -203,8 +319,14 @@ const GPUS: &[GpuSpec] = &[
     },
 ];
 
-/// Build a single-GPU [`ComputeOffering`] for `g`, sold in `region_code`.
-fn offering(g: &GpuSpec, count: u32, region_code: &str) -> ComputeOffering {
+/// Build a [`ComputeOffering`] for `g` at `count` GPUs, sold in every region
+/// in `region_codes` (Modal does not document per-region GPU availability,
+/// so every GPU is assumed available everywhere - same simplifying
+/// assumption as [`RunPodProvider`](crate::RunPodProvider) and
+/// [`AwsProvider`](crate::AwsProvider) make for their own region-agnostic
+/// catalogs). The stored price is Modal's unpinned base rate; see the
+/// module docs for the region price multiplier this does not include.
+fn offering(g: &GpuSpec, count: u32, region_codes: &[String]) -> ComputeOffering {
     ComputeOffering {
         id: format!("gpu.{}.{count}x", g.id),
         accelerator: Some(Accelerator {
@@ -219,7 +341,7 @@ fn offering(g: &GpuSpec, count: u32, region_code: &str) -> ComputeOffering {
         // there is no representative host shape to report here.
         vcpus: None,
         memory: None,
-        regions: vec![region_code.to_string()],
+        regions: region_codes.to_vec(),
         pricing: Pricing::on_demand(Rate::new(
             Money::new(g.per_gpu_hourly * f64::from(count), "USD"),
             RateUnit::PerHour,
@@ -229,9 +351,11 @@ fn offering(g: &GpuSpec, count: u32, region_code: &str) -> ComputeOffering {
 }
 
 /// Every apply-time method rejects with this: PR 1 is catalog-only, with no
-/// transport behind `provision`/`status`/`teardown` yet.
+/// transport behind `provision`/`status`/`teardown` yet. This is permanent
+/// (not [`ProviderError::Backend`]'s transient "retry later"): no retry
+/// makes an unimplemented operation succeed.
 fn not_yet_provisionable() -> AdapterError {
-    AdapterError::from_kind(ProviderError::Backend {
+    AdapterError::from_kind(ProviderError::Unsupported {
         detail: "Modal provisioning is not implemented by this catalog-only adapter; \
                  use the Modal sandbox target added in amicu-planning#158 PR 2"
             .into(),
@@ -250,15 +374,12 @@ pub struct ModalProvider {
 }
 
 impl ModalProvider {
-    /// A Modal provider with the on-demand GPU catalog above, sold in the
-    /// single logical `"us"` region.
+    /// A Modal provider with the on-demand GPU catalog above, sold in every
+    /// region from [`regions`].
     #[must_use]
     pub fn new() -> Self {
         let id = AdapterId::new(PROVIDER_ID);
-        let region = Region::new(REGION_CODE, Residency::Us)
-            .with_display_name("United States (Modal-scheduled, no selectable data center)")
-            .with_country("US");
-        let capabilities = Self::capabilities_for(&id, region);
+        let capabilities = Self::capabilities_for(&id);
         Self {
             id,
             capabilities,
@@ -274,11 +395,16 @@ impl ModalProvider {
         self
     }
 
-    /// Build the capability descriptor for the single `region`. Every GPU
+    /// Build the capability descriptor across every Modal region. Every GPU
     /// carries a `1x` offering plus, when Modal allows more than one GPU per
-    /// container, a second offering at that maximum count.
-    fn capabilities_for(id: &AdapterId, region: Region) -> ProviderCapabilities {
-        let region_code = region.code.clone();
+    /// container, a second offering at that maximum count; each offering is
+    /// sold in every region (see [`offering`]).
+    fn capabilities_for(id: &AdapterId) -> ProviderCapabilities {
+        let region_list: Vec<Region> = regions()
+            .into_iter()
+            .map(|r| Region::new(r.code, r.residency).with_display_name(r.location))
+            .collect();
+        let region_codes: Vec<String> = region_list.iter().map(|r| r.code.clone()).collect();
         let mut caps = ProviderCapabilities::new(
             id.clone(),
             ProvisioningMethod::Api,
@@ -290,13 +416,13 @@ impl ModalProvider {
             Availability::new(AvailabilityState::Available),
             HealthStatus::Healthy,
         );
-        caps.regions = vec![region];
+        caps.regions = region_list;
         caps.compute = GPUS
             .iter()
             .flat_map(|g| {
-                let mut offerings = vec![offering(g, 1, &region_code)];
+                let mut offerings = vec![offering(g, 1, &region_codes)];
                 if g.max_count > 1 {
-                    offerings.push(offering(g, g.max_count, &region_code));
+                    offerings.push(offering(g, g.max_count, &region_codes));
                 }
                 offerings
             })
@@ -431,14 +557,43 @@ mod tests {
     }
 
     #[test]
-    fn single_us_region_is_sold_by_every_offering() {
+    fn catalog_includes_broad_and_narrow_regions_with_correct_residency() {
         let caps = ModalProvider::new().capabilities();
-        assert_eq!(caps.regions.len(), 1);
-        assert_eq!(caps.regions[0].code, "us");
-        assert_eq!(caps.regions[0].residency, Residency::Us);
-        assert!(!caps.regions[0].is_eu());
+        assert_eq!(caps.regions.len(), 22);
+        let residency_of = |code: &str| -> Residency {
+            caps.regions
+                .iter()
+                .find(|r| r.code == code)
+                .unwrap_or_else(|| panic!("region {code} present"))
+                .residency
+                .clone()
+        };
+        // Broad regions.
+        assert_eq!(residency_of("us"), Residency::Us);
+        assert_eq!(residency_of("eu"), Residency::Eu);
+        assert_eq!(residency_of("ap"), Residency::Apac);
+        // A sample of narrow regions, including ones with no named
+        // Residency variant.
+        assert_eq!(residency_of("us-west"), Residency::Us);
+        assert_eq!(residency_of("eu-west"), Residency::Eu);
+        assert_eq!(residency_of("eu-north"), Residency::Eu);
+        assert_eq!(residency_of("uk"), Residency::Uk);
+        assert_eq!(residency_of("ca"), Residency::Ca);
+        assert_eq!(residency_of("jp"), Residency::Apac);
+        assert_eq!(residency_of("au"), Residency::Apac);
+        assert_eq!(residency_of("mx"), Residency::Other("mx".to_string()));
+        // At least one EU-resident region is present, unlike a provider
+        // with no EU presence.
+        assert!(caps.regions.iter().any(Region::is_eu));
+    }
+
+    #[test]
+    fn every_offering_is_sold_in_every_region() {
+        let caps = ModalProvider::new().capabilities();
+        let region_codes: Vec<String> = caps.regions.iter().map(|r| r.code.clone()).collect();
+        assert!(!region_codes.is_empty());
         for offering in &caps.compute {
-            assert_eq!(offering.regions, vec!["us".to_string()]);
+            assert_eq!(offering.regions, region_codes);
         }
     }
 
@@ -472,7 +627,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provision_status_teardown_all_reject_as_retryable_backend_errors() {
+    async fn provision_status_teardown_all_reject_as_permanent_unsupported_errors() {
         let p = ModalProvider::new();
         let resolver = TestResolver::default();
         let req = ProvisionRequest::new("gpu.t4.1x", "us");
@@ -481,8 +636,10 @@ mod tests {
             .provision(&req, &resolver)
             .await
             .expect_err("catalog-only adapter must not provision");
-        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
-        assert!(err.is_retryable());
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-015");
+        // Permanently unimplemented, not a transient backend fault: no
+        // retry makes this succeed.
+        assert!(!err.is_retryable());
 
         let handle = ProvisioningHandle {
             id: "sandbox-1".into(),
@@ -497,13 +654,15 @@ mod tests {
             .status(&handle, &resolver)
             .await
             .expect_err("catalog-only adapter must not report status");
-        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-015");
+        assert!(!err.is_retryable());
 
         let err = p
             .teardown(&handle, &resolver)
             .await
             .expect_err("catalog-only adapter must not tear down");
-        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
+        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-015");
+        assert!(!err.is_retryable());
     }
 
     #[tokio::test]
