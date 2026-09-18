@@ -12,9 +12,9 @@ use amicu_core::resource::Residency;
 
 use crate::capability::Region;
 use crate::{
-    AwsProvider, AzureProvider, GcpProvider, HetznerProvider, NebiusProvider, OvhCloudProvider,
-    Provider, RunPodProvider, ScalewayProvider, aws, azure, gcp, hetzner, nebius, ovhcloud, runpod,
-    scaleway,
+    AwsProvider, AzureProvider, GcpProvider, HetznerProvider, ModalProvider, NebiusProvider,
+    OvhCloudProvider, Provider, RunPodProvider, ScalewayProvider, aws, azure, gcp, hetzner, modal,
+    nebius, ovhcloud, runpod, scaleway,
 };
 
 /// Every residency jurisdiction, so catalogued providers expose all of their
@@ -40,6 +40,10 @@ fn provider_regions(provider: &str) -> Option<Vec<Region>> {
         ovhcloud::PROVIDER_ID => OvhCloudProvider::for_residencies(ALL_RESIDENCIES).capabilities(),
         scaleway::PROVIDER_ID => ScalewayProvider::for_residencies(ALL_RESIDENCIES).capabilities(),
         runpod::PROVIDER_ID => RunPodProvider::for_residencies(ALL_RESIDENCIES).capabilities(),
+        // Modal has no residency-filtering constructor: it exposes one
+        // logical `"us"` region regardless of the requested jurisdiction, so
+        // an `eu` `data_class` constraint fails closed against it for free.
+        modal::PROVIDER_ID => ModalProvider::new().capabilities(),
         _ => return None,
     };
     Some(caps.regions)
@@ -83,5 +87,14 @@ mod tests {
     fn unknown_provider_or_region_is_none() {
         assert_eq!(resolve_residency("local_apple", "anywhere"), None);
         assert_eq!(resolve_residency("aws", "no-such-region"), None);
+    }
+
+    #[test]
+    fn modal_resolves_us_and_fails_closed_for_eu() {
+        assert_eq!(resolve_residency("modal", "us"), Some(Residency::Us));
+        // Modal has no EU region: any EU-residency data_class constraint
+        // against it fails closed because no region code ever resolves here.
+        assert_eq!(resolve_residency("modal", "eu"), None);
+        assert_eq!(resolve_residency("modal", "eu-central-1"), None);
     }
 }
