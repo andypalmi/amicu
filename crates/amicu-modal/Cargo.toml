@@ -1,0 +1,38 @@
+[package]
+name = "amicu-modal"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Client-only ("channel", not "transport" which also pulls the server
+# half). TLS: aws-lc-rs to match reqwest's backend elsewhere in the
+# workspace (crates/amicu-providers/Cargo.toml); webpki-roots (as lettre
+# already uses) so the Docker runtime image needs no OS trust store.
+tonic = { version = "0.14", default-features = false, features = [
+    "codegen",
+    "channel",
+    "tls-aws-lc",
+    "tls-webpki-roots",
+] }
+# `tonic_prost::ProstCodec`, referenced by build.rs-generated code.
+tonic-prost = "0.14"
+prost = "0.14"
+# Some api.proto fields use well-known types (Struct/Any/Timestamp);
+# generated code names them `::prost_types::*`.
+prost-types = "0.14"
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+# Vendored `protoc` binary + well-known-types includes: CI and the Docker
+# cargo-chef build stage have no system protoc.
+protoc-bin-vendored = "3"
+
+[lints]
+workspace = true

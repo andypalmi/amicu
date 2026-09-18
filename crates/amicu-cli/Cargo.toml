@@ -22,12 +22,23 @@ amicu-engine = { path = "../amicu-engine" }
 amicu-llamacpp = { path = "../amicu-llamacpp" }
 amicu-vllm = { path = "../amicu-vllm" }
 amicu-runtime = { path = "../amicu-runtime" }
+# CLI-only: `amicu modal auth-check`. Deliberately not a dependency of
+# amicu-api/amicu-server, so the shipped `amicu-server` binary (built with
+# `cargo build -p amicu-server`) never links it. Note this doesn't fully
+# isolate the Docker *build*: the Dockerfile's `cargo chef cook --workspace`
+# builder-stage step still compiles this crate's build-dependency graph
+# (protoc-bin-vendored, tonic-prost-build) as part of its caching layer.
+amicu-modal = { path = "../amicu-modal" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt"] }
+# "net"/"time" are enabled transitively by amicu-modal's tonic dependency
+# (feature unification across the workspace); listed explicitly here too
+# so `amicu modal auth-check`'s `Builder::new_current_thread().enable_all()`
+# reads as intentional rather than accidental.
+tokio = { version = "1", features = ["rt", "net", "time"] }
 
 [lints]
 workspace = true
