@@ -204,6 +204,10 @@ dependencies = [
 name = "amicu-modal"
 version = "0.1.0"
 dependencies = [
+ "amicu-core",
+ "amicu-llamacpp",
+ "amicu-runtime",
+ "async-trait",
  "base64 0.22.1",
  "prost",
  "prost-types",

@@ -89,13 +89,21 @@
 //! # Packaging note
 //!
 //! Only `amicu-cli` depends on this crate (via the `amicu modal auth-check`
-//! command) — `amicu-api`/`amicu-server` do not, so the `amicu-server` binary
-//! that actually ships in the Docker runtime image never links it. The Docker
-//! *build* is not fully isolated from it, though: `Dockerfile`'s builder stage
-//! runs `cargo chef cook --workspace`, which does compile this crate's
-//! build-dependency graph (`protoc-bin-vendored`, `tonic-prost-build`) as part
-//! of that caching layer, even though the final `cargo build -p amicu-server`
-//! step never links the crate into the shipped binary.
+//! command, and — since [`supervisor`] — `amicu apply`'s dispatch for a
+//! `provider = "modal"` vLLM deployment) — `amicu-api`/`amicu-server` do not,
+//! so the `amicu-server` binary that actually ships in the Docker runtime
+//! image never links it. The Docker *build* is not fully isolated from it,
+//! though: `Dockerfile`'s builder stage runs `cargo chef cook --workspace`,
+//! which does compile this crate's build-dependency graph
+//! (`protoc-bin-vendored`, `tonic-prost-build`) as part of that caching
+//! layer, even though the final `cargo build -p amicu-server` step never
+//! links the crate into the shipped binary.
+//!
+//! [`supervisor`] adds `amicu-llamacpp`/`amicu-runtime`/`amicu-core` as
+//! dependencies of this crate (for the `ProcessSupervisor` trait and the
+//! plan/handle types it exchanges). Neither of those crates depends back on
+//! `amicu-modal`, so this stays a one-way edge - `amicu-engine` and
+//! `amicu-vllm` still do not know Modal exists.
 
 mod client;
 mod credentials;
@@ -105,6 +113,7 @@ mod image;
 mod interceptor;
 mod pb;
 mod shim;
+pub mod supervisor;
 
 pub use client::{DEFAULT_ENDPOINT, ENDPOINT_ENV_VAR, Hello, ModalClient};
 pub use credentials::{Credentials, MissingCredential};
@@ -112,3 +121,4 @@ pub use deploy::{Deployment, MODAL_CLIENT_MOUNT_NAME, ServerSpec};
 pub use error::ModalError;
 pub use image::{IMAGE_BUILDER_VERSION, ImageSpec};
 pub use shim::{SHIM_CLASS_NAME, SHIM_MODULE_NAME, SHIM_PATH, render_shim};
+pub use supervisor::{DEFAULT_VLLM_IMAGE, HF_TOKEN_ENV_VAR, ModalSupervisor, VLLM_IMAGE_ENV_VAR};

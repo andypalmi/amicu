@@ -34,12 +34,27 @@ base64 = "0.22"
 # build included), so a runtime handle and a timer are needed at runtime, not
 # only in tests. tonic already pulls tokio in.
 tokio = { version = "1", features = ["rt", "time"] }
+# `supervisor.rs`: the `ProcessSupervisor` trait `amicu_llamacpp` defines is
+# `#[async_trait]`, and `ModalSupervisor` implements it.
+async-trait = "0.1"
+# `supervisor.rs` implements `amicu_llamacpp::ProcessSupervisor` so
+# `amicu-cli`'s `apply` can dispatch a `provider = "modal"` vLLM deployment
+# through this crate without amicu-engine/amicu-vllm knowing Modal exists
+# (see supervisor.rs's module docs). Neither crate depends on amicu-modal in
+# turn, so this does not create a cycle.
+amicu-llamacpp = { path = "../amicu-llamacpp" }
+amicu-runtime = { path = "../amicu-runtime" }
+amicu-core = { path = "../amicu-core" }
+# `ModalSupervisor::status`'s own tiny health probe (`GET <url>/health`) -
+# Modal's endpoint is HTTPS, unlike amicu_llamacpp::HttpHealthProbe's
+# loopback-only `ureq` (no TLS feature enabled there). Promoted from
+# dev-dependencies (where it backed `tests/live_deploy.rs`'s polling) now
+# that non-test code needs it too; same version and rustls backend as
+# amicu-providers/amicu-api.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
-# Live tests only: polls the deployed server's URL for HTTP 200. Same version
-# and rustls backend as amicu-providers/amicu-api already use.
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"
