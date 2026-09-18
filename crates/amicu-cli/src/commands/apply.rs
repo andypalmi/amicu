@@ -2,10 +2,13 @@
 
 use std::io::Write;
 
+use amicu_core::adapter::AdapterError;
 use amicu_core::diagnostic::{DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
 use amicu_core::resource::Runtime;
-use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
+use amicu_llamacpp::{Catalog, LlamaCppAdapter, LlamaCppError, host_supervisor};
+use amicu_modal::ModalSupervisor;
+use amicu_modal::supervisor::app_name_for;
 use amicu_runtime::{EndpointRegistry, RuntimeAdapter, RuntimeHandle};
 use amicu_vllm::VllmAdapter;
 
@@ -92,6 +95,37 @@ pub(crate) fn run(
     report(&handles, output, out)
 }
 
+/// Hardware profile `provider` value that routes a deployment through
+/// [`ModalSupervisor`] instead of the local host supervisor
+/// (amicu-planning#158 PR 5).
+const MODAL_PROVIDER: &str = "modal";
+
+/// The per-deployment supervisor `apply_all` routes to, decided purely from
+/// a deployment's runtime family and its hardware profile's `provider`.
+/// Factored out of the dispatch loop so the routing decision itself is unit
+/// tested (below) without executing any supervisor - no process spawn, no
+/// network call, regardless of which variant a case selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dispatch {
+    /// The existing local launchd/systemd path (`host_supervisor()`).
+    Host,
+    /// `provider = "modal"`, vLLM: route through [`ModalSupervisor`].
+    Modal,
+    /// `provider = "modal"`, llama.cpp: no Modal path exists yet (follow-up).
+    ModalUnsupportedRuntime,
+}
+
+/// Computes [`Dispatch`] for one deployment's runtime family and hardware
+/// profile provider.
+fn dispatch_for(runtime: amicu_runtime::RuntimeKind, provider: Option<&str>) -> Dispatch {
+    use amicu_runtime::RuntimeKind::{LlamaCpp, Vllm};
+    match (runtime, provider) {
+        (LlamaCpp, Some(MODAL_PROVIDER)) => Dispatch::ModalUnsupportedRuntime,
+        (Vllm, Some(MODAL_PROVIDER)) => Dispatch::Modal,
+        (LlamaCpp | Vllm, _) => Dispatch::Host,
+    }
+}
+
 /// Start every actionable deployment, register endpoints, stop removed ones.
 async fn apply_all(
     graph: &Graph,
@@ -100,21 +134,64 @@ async fn apply_all(
 ) -> Result<Vec<RuntimeHandle>, CliError> {
     // Dispatch to the adapter matching each deployment's own runtime family
     // (amicu-planning#152) - previously `apply` only ever started/stopped
-    // llama.cpp instances.
+    // llama.cpp instances. amicu-planning#158 PR 5 adds a second axis: a
+    // vLLM deployment whose hardware profile has `provider = "modal"` is
+    // routed through `ModalSupervisor` instead of the local launchd/systemd
+    // `host_supervisor()` below - built fresh per such deployment (it needs
+    // that deployment's own GPU/region), never reused across iterations.
+    // llama.cpp has no Modal path yet; such a deployment is rejected with a
+    // clear diagnostic before any adapter is touched (see the match arm
+    // below).
     let catalog = build_catalog(graph);
     let llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), host_supervisor());
-    let vllm_adapter = VllmAdapter::new(Box::new(catalog), amicu_vllm::host_supervisor());
+    let vllm_adapter = VllmAdapter::new(Box::new(catalog.clone()), amicu_vllm::host_supervisor());
     let resolver = EnvSecretResolver;
     let registry = EndpointRegistry::new();
     let mut handles = Vec::new();
 
     for item in &result.items {
         if let Some(launch) = &item.launch {
-            let handle = match launch.runtime {
-                amicu_runtime::RuntimeKind::LlamaCpp => {
+            let dispatch = dispatch_for(launch.runtime, item.action.provider.as_deref());
+            let handle = match (launch.runtime, dispatch) {
+                (_, Dispatch::ModalUnsupportedRuntime) => {
+                    return Err(CliError::Adapter(AdapterError::from_kind(
+                        LlamaCppError::Supervisor(format!(
+                            "deployment '{}': llama.cpp is not yet supported on Modal \
+                             (amicu-planning#158 follow-up); use a vllm runtime or a \
+                             non-modal hardware profile for this deployment",
+                            item.deployment
+                        )),
+                    )));
+                }
+                (_, Dispatch::Modal) => {
+                    let deployment = find_deployment(graph, &item.deployment).ok_or_else(|| {
+                        CliError::Message(format!(
+                            "deployment '{}' missing from its own graph while dispatching to \
+                             Modal",
+                            item.deployment
+                        ))
+                    })?;
+                    let hardware = catalog
+                        .resolve_hardware(&deployment.hardware_profile)
+                        .ok_or_else(|| {
+                            CliError::Message(format!(
+                                "deployment '{}': hardware profile '{}' not found in the catalog",
+                                item.deployment, deployment.hardware_profile
+                            ))
+                        })?;
+                    let app_name = app_name_for(item.deployment.as_str());
+                    let supervisor = ModalSupervisor::for_hardware(app_name, &hardware)
+                        .map_err(|e| CliError::Adapter(AdapterError::from_kind(e)))?;
+                    let modal_adapter =
+                        VllmAdapter::new(Box::new(catalog.clone()), Box::new(supervisor));
+                    modal_adapter.apply(launch, &resolver).await?
+                }
+                (amicu_runtime::RuntimeKind::LlamaCpp, Dispatch::Host) => {
                     llama_adapter.apply(launch, &resolver).await?
                 }
-                amicu_runtime::RuntimeKind::Vllm => vllm_adapter.apply(launch, &resolver).await?,
+                (amicu_runtime::RuntimeKind::Vllm, Dispatch::Host) => {
+                    vllm_adapter.apply(launch, &resolver).await?
+                }
             };
             registry.register(&handle);
             handles.push(handle);
@@ -125,14 +202,42 @@ async fn apply_all(
             // adapter stops it identically - dispatch on the prior graph's
             // declared runtime anyway, to keep this symmetric with the apply
             // path and future-proof against a supervisor that stops being
-            // runtime-agnostic.
+            // runtime-agnostic. A prior Modal vLLM deployment needs its own
+            // `ModalSupervisor` too: `stop` only needs the handle's stored
+            // Modal app id, not the hardware profile, so no GPU/region is
+            // resolved here.
             if let Some(prev) = prior.and_then(|s| find_handle(s, &item.deployment)) {
-                let prior_runtime = prior
-                    .and_then(|s| find_deployment(&s.graph, &item.deployment))
-                    .map(|d| &d.runtime);
-                match prior_runtime {
-                    Some(Runtime::Vllm(_)) => vllm_adapter.stop(prev).await?,
-                    _ => llama_adapter.stop(prev).await?,
+                let prior_deployment =
+                    prior.and_then(|s| find_deployment(&s.graph, &item.deployment));
+                let prior_provider = prior.zip(prior_deployment).and_then(|(s, d)| {
+                    s.graph
+                        .hardware_profiles
+                        .iter()
+                        .find(|h| h.id == d.hardware_profile)
+                        .map(|h| h.provider.as_str())
+                });
+                let prior_runtime_kind = prior_deployment
+                    .map_or(amicu_runtime::RuntimeKind::LlamaCpp, |d| {
+                        amicu_runtime::RuntimeKind::of(&d.runtime)
+                    });
+                match dispatch_for(prior_runtime_kind, prior_provider) {
+                    Dispatch::Modal => {
+                        let supervisor = ModalSupervisor::new(item.deployment.as_str());
+                        let modal_adapter =
+                            VllmAdapter::new(Box::new(catalog.clone()), Box::new(supervisor));
+                        modal_adapter.stop(prev).await?;
+                    }
+                    // `ModalUnsupportedRuntime` cannot have been applied in
+                    // the first place (the apply-side arm above refuses it
+                    // before any handle is ever stored), so a destroy never
+                    // legitimately observes it - fall back to the llama.cpp
+                    // host path exactly like the pre-existing default match
+                    // arm this replaces did.
+                    Dispatch::ModalUnsupportedRuntime => llama_adapter.stop(prev).await?,
+                    Dispatch::Host => match prior_deployment.map(|d| &d.runtime) {
+                        Some(Runtime::Vllm(_)) => vllm_adapter.stop(prev).await?,
+                        _ => llama_adapter.stop(prev).await?,
+                    },
                 }
                 registry.deregister(&item.deployment);
             }
@@ -214,4 +319,52 @@ fn prompt_approval(out: &mut dyn Write) -> Result<bool, CliError> {
 /// Whether a prompt response approves the apply.
 pub(crate) fn approved(input: &str) -> bool {
     matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::{Dispatch, dispatch_for};
+    use amicu_runtime::RuntimeKind;
+
+    // amicu-planning#158 PR 5: `dispatch_for` is the whole of `apply_all`'s
+    // provider-routing decision, factored out precisely so this exhausts it
+    // without executing any supervisor (no process spawn, no network call).
+
+    #[test]
+    fn vllm_on_modal_selects_the_modal_supervisor() {
+        assert_eq!(
+            dispatch_for(RuntimeKind::Vllm, Some("modal")),
+            Dispatch::Modal
+        );
+    }
+
+    #[test]
+    fn vllm_on_a_non_modal_provider_still_selects_the_host_supervisor() {
+        for provider in [Some("runpod"), Some("local_apple"), Some("on_prem"), None] {
+            assert_eq!(
+                dispatch_for(RuntimeKind::Vllm, provider),
+                Dispatch::Host,
+                "{provider:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn llama_cpp_on_modal_is_the_clear_unsupported_case() {
+        assert_eq!(
+            dispatch_for(RuntimeKind::LlamaCpp, Some("modal")),
+            Dispatch::ModalUnsupportedRuntime
+        );
+    }
+
+    #[test]
+    fn llama_cpp_on_a_non_modal_provider_still_selects_the_host_supervisor() {
+        for provider in [Some("runpod"), Some("local_apple"), Some("on_prem"), None] {
+            assert_eq!(
+                dispatch_for(RuntimeKind::LlamaCpp, provider),
+                Dispatch::Host,
+                "{provider:?}"
+            );
+        }
+    }
 }

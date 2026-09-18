@@ -232,6 +232,75 @@ equivalent of llama.cpp's `parallel_slots`; `max_num_batched_tokens` of
 `batch_size`. vLLM has no sampling-defaults deployment flags, so there is no
 `temperature`/`top_p`/... equivalent on `vllm {}`.
 
+## vLLM on Modal (serverless GPU, amicu-planning#158)
+
+```hcl
+resource "hardware_profile" "modal_h100" {
+  provider = "modal"
+  region   = "eu-west"
+  accelerator {
+    kind   = "gpu"
+    model  = "h100"
+    count  = 2
+    memory = "80GiB"
+  }
+  memory = "32GiB"
+}
+
+resource "deployment" "chat_modal" {
+  model    = model.chat_prod.id
+  hardware = hardware_profile.modal_h100.id
+  runtime  = "vllm"
+  vllm {
+    context_length       = 32768
+    port                 = 8000
+    tensor_parallel_size = 2
+
+    # Fast boot: skip CUDA-graph capture at startup. There is no typed
+    # `enforce_eager` field yet (tracked separately, `feat/vllm-enforce-eager`) -
+    # until it lands, this is the escape hatch.
+    extra_args = ["--enforce-eager"]
+  }
+}
+```
+
+`model.chat_prod.source.reference` **must be a Hugging Face repo id**
+(e.g. `"meta-llama/Llama-3.1-8B-Instruct"`), never a local path: Modal's
+container cannot see this machine's filesystem, and `ModalSupervisor`
+rejects a local-looking model reference (a leading `/`, `./`, `../`, or `~`)
+before making any Modal call.
+
+What actually happens on `amicu apply` for `chat_modal`:
+- `amicu-vllm`'s renderer builds the same `vllm serve ...` argv it would for
+  a local launch; `ModalSupervisor` rewrites `--host 127.0.0.1` to
+  `--host 0.0.0.0` (Modal's proxy reaches the container over its internal
+  network, not loopback) and refuses to proceed if the model argument looks
+  like a local path.
+- The container image is `vllm/vllm-openai:v0.29.0` (a fixed default,
+  overridable process-wide via `AMICU_MODAL_VLLM_IMAGE` - there is no HCL
+  `modal { image = ... }` block yet).
+- Two Modal Volumes are mounted and reused across every amicu deployment on
+  the workspace: `amicu-hf-cache` at `/root/.cache/huggingface` and
+  `amicu-vllm-cache` at `/root/.cache/vllm`.
+- Fixed autoscaling/lifecycle defaults (not yet HCL-configurable):
+  scaledown window 900s, startup timeout 600s, container timeout 3600s,
+  target concurrency 32, `min_containers = 0` (scales to zero).
+- Plain `vllm { env = {...} }` entries are baked into the image at build
+  time (they already cannot hold a secret-shaped value - `AMICU-POLICY-006`
+  warns, and vLLM's own `env`/`extra_args` denylists block the obvious
+  secret-carrying flags). A resolved `secret` reference in the deployment's
+  `secret_refs` is instead forwarded through a Modal Secret, injected only
+  into the running container - never written to the image. As a narrow,
+  documented bridge until vLLM deployments can declare a secret reference at
+  all, `ModalSupervisor` also reads `HF_TOKEN` from the *operator's own*
+  local environment (never from the deployment's `env` block) and forwards
+  it the same secret-only way, for a gated Hugging Face model.
+
+To try this: export `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` (same credentials
+`amicu modal auth-check` uses) before running `amicu apply` - a missing
+credential is rejected before any Modal call, with neither variable's value
+ever printed.
+
 ## llama.cpp escape hatch: `extra_args` + `env` (amicu-planning#150)
 
 Typed fields cover a small slice of `llama-server`'s flag surface. `extra_args`
