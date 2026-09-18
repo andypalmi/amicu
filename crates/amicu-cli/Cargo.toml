@@ -22,12 +22,20 @@ amicu-engine = { path = "../amicu-engine" }
 amicu-llamacpp = { path = "../amicu-llamacpp" }
 amicu-vllm = { path = "../amicu-vllm" }
 amicu-runtime = { path = "../amicu-runtime" }
+# CLI-only: `amicu modal auth-check`. Deliberately not a dependency of
+# amicu-api/amicu-server, so the Docker runtime image (built from
+# `-p amicu-server`) does not grow.
+amicu-modal = { path = "../amicu-modal" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt"] }
+# "net"/"time" are enabled transitively by amicu-modal's tonic dependency
+# (feature unification across the workspace); listed explicitly here too
+# so `amicu modal auth-check`'s `Builder::new_current_thread().enable_all()`
+# reads as intentional rather than accidental.
+tokio = { version = "1", features = ["rt", "net", "time"] }
 
 [lints]
 workspace = true

@@ -80,6 +80,21 @@ enum Command {
         #[command(subcommand)]
         command: SkillCommand,
     },
+    /// Modal (modal.com) control-plane commands. Does not require a project.
+    Modal {
+        #[command(subcommand)]
+        command: ModalCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ModalCommand {
+    /// Authenticate against Modal's control plane (the `ClientHello` RPC).
+    ///
+    /// Reads `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` from the
+    /// environment; never accepts them as flags, so the secret cannot
+    /// appear in shell history or `ps`.
+    AuthCheck,
 }
 
 #[derive(Debug, Subcommand)]
@@ -143,10 +158,15 @@ pub fn run() -> ExitCode {
 }
 
 fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
-    // `skill export` is project-independent; route it before discovery.
+    // `skill export` and `modal auth-check` are project-independent; route
+    // them before discovery.
     if let Command::Skill { command } = &cli.command {
         let SkillCommand::Export { target, path } = command;
         return commands::skill::export(*target, path.as_deref(), out);
+    }
+    if let Command::Modal { command } = &cli.command {
+        let ModalCommand::AuthCheck = command;
+        return commands::modal::auth_check(out);
     }
 
     let project = Project::discover()?;
@@ -159,7 +179,9 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
             commands::apply::run(&project, *auto_approve, cli.output, out)
         }
         Command::Doctor => commands::doctor::run(&project, cli.output, out),
-        Command::Skill { .. } => unreachable!("handled before project discovery"),
+        Command::Skill { .. } | Command::Modal { .. } => {
+            unreachable!("handled before project discovery")
+        }
     }
 }
 

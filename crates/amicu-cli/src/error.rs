@@ -31,6 +31,10 @@ pub enum CliError {
     #[error("serialization failed: {0}")]
     Serde(#[from] serde_json::Error),
 
+    /// `amicu modal` failed to authenticate or reach Modal's control plane.
+    #[error("{0}")]
+    Modal(#[from] amicu_modal::ModalError),
+
     /// A generic, already-formatted message.
     #[error("{0}")]
     Message(String),
