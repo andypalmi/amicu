@@ -34,12 +34,16 @@ base64 = "0.22"
 # build included), so a runtime handle and a timer are needed at runtime, not
 # only in tests. tonic already pulls tokio in.
 tokio = { version = "1", features = ["rt", "time"] }
+# `ModalClient::health` does a plain HTTP GET against a deployed server's
+# tunnel URL — no gRPC involved. Promoted from dev-dependencies (PR 3 used it
+# only in `tests/live_deploy.rs`) now that `ops.rs` needs it at runtime too;
+# same version, default-features off, and rustls backend as
+# amicu-providers/amicu-api already use, so the workspace does not gain a
+# second HTTP-client stack or a second TLS backend.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
-# Live tests only: polls the deployed server's URL for HTTP 200. Same version
-# and rustls backend as amicu-providers/amicu-api already use.
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"
