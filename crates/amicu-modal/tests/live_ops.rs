@@ -15,11 +15,19 @@
 //! no deployment by that name — `AppList` still lists the app itself, just
 //! in the `"stopped"` state, so this checks that `find_app` no longer
 //! resolves the *name* to an id, not that Modal forgot the app.
+//!
+//! Like `tests/live_deploy.rs`, an [`common::AppGuard`] is installed before
+//! `deploy_server` so a panic between deploying and the explicit
+//! `stop_app` call below (e.g. an assertion failure in `app_status` or
+//! `stream_logs`) still stops the billed container.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
 use amicu_modal::{Credentials, HealthStatus, ImageSpec, ModalClient, ServerSpec};
+
+mod common;
+use common::AppGuard;
 
 const PORT: u16 = 8000;
 
@@ -73,6 +81,10 @@ async fn status_logs_health_and_stop_after_a_cpu_deploy() {
         min_containers: 1,
         max_containers: Some(1),
     };
+
+    // Installed before the deploy, so a panic anywhere below (including
+    // inside `deploy_server` itself) still stops the billed container.
+    let _guard = AppGuard::install(app_name.clone()).await;
 
     let credentials = Credentials::from_env().expect("checked above");
     let mut client = ModalClient::connect(credentials)
