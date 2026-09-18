@@ -43,6 +43,11 @@
 //! assertion failure, and on a panic inside `deploy_server` itself — it looks
 //! the app up by name and stops it. A test that dies before the app is created
 //! leaves nothing behind; one that dies after leaves a stopped app.
+//!
+//! Cleanup needs `block_in_place`, which is only legal on a multi-threaded
+//! runtime — hence `#[tokio::test(flavor = "multi_thread")]`. If that ever
+//! changes the guard degrades to a detached task with a warning rather than
+//! panicking a second time on the way out of an already-failing test.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant, SystemTime};
@@ -90,28 +95,59 @@ fn unique_app_name(prefix: &str) -> String {
 /// or unborrowed, and it resolves the app by *name* so it also works when
 /// `deploy_server` panicked before returning an id.
 struct AppGuard {
-    client: ModalClient,
+    client: Option<ModalClient>,
     app_name: String,
+}
+
+impl AppGuard {
+    async fn install(app_name: String) -> Self {
+        Self {
+            client: Some(connect().await),
+            app_name,
+        }
+    }
+}
+
+/// Resolve the app by name and stop it, reporting whatever happens.
+async fn stop_named_app(mut client: ModalClient, app_name: String) {
+    match client.find_app(&app_name).await {
+        Ok(Some(app_id)) => match client.stop_app(&app_id).await {
+            Ok(()) => println!("cleanup: stopped {app_name} ({app_id})"),
+            Err(error) => println!("cleanup: AppStop for {app_name} failed: {error}"),
+        },
+        Ok(None) => println!("cleanup: no app named {app_name} to stop"),
+        Err(error) => println!("cleanup: lookup of {app_name} failed: {error}"),
+    }
 }
 
 impl Drop for AppGuard {
     fn drop(&mut self) {
+        let Some(client) = self.client.take() else {
+            return;
+        };
         let app_name = self.app_name.clone();
-        let client = &mut self.client;
-        // `block_in_place` + the current handle is the only way to await from
-        // `Drop`; it requires the multi-threaded runtime these tests use.
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                match client.find_app(&app_name).await {
-                    Ok(Some(app_id)) => match client.stop_app(&app_id).await {
-                        Ok(()) => println!("cleanup: stopped {app_name} ({app_id})"),
-                        Err(error) => println!("cleanup: AppStop for {app_name} failed: {error}"),
-                    },
-                    Ok(None) => println!("cleanup: no app named {app_name} to stop"),
-                    Err(error) => println!("cleanup: lookup of {app_name} failed: {error}"),
-                }
-            });
-        });
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            println!("cleanup: no tokio runtime in Drop; {app_name} was NOT stopped");
+            return;
+        };
+
+        // `block_in_place` is the only way to await from `Drop`, but it panics
+        // on a current-thread runtime. These tests ask for `multi_thread`; if
+        // that ever changes, degrade to a detached task rather than turning
+        // cleanup into a second panic on the way out of a failing test.
+        if matches!(
+            handle.runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread
+        ) {
+            tokio::task::block_in_place(|| handle.block_on(stop_named_app(client, app_name)));
+        } else {
+            println!(
+                "cleanup: warning: not a multi-thread runtime, spawning a detached cleanup for \
+                 {app_name}; it may not finish before the process exits"
+            );
+            handle.spawn(stop_named_app(client, app_name));
+        }
     }
 }
 
@@ -189,10 +225,7 @@ async fn deploy_cpu_http_server() {
 
     // Installed before the deploy, so a panic inside `deploy_server` is
     // cleaned up too.
-    let _guard = AppGuard {
-        client: connect().await,
-        app_name,
-    };
+    let _guard = AppGuard::install(app_name).await;
 
     let mut client = connect().await;
     let deployment = deploy(&mut client, &spec).await;
@@ -256,10 +289,7 @@ async fn deploy_vllm_smoke() {
         max_containers: Some(1),
     };
 
-    let _guard = AppGuard {
-        client: connect().await,
-        app_name,
-    };
+    let _guard = AppGuard::install(app_name).await;
 
     let mut client = connect().await;
     let deployment = deploy(&mut client, &spec).await;

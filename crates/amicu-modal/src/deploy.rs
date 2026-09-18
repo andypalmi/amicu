@@ -42,6 +42,16 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 /// (`image.py:396-403`).
 const IMAGE_JOIN_MAX_RETRIES: u32 = 3;
 
+/// How long `ImageJoinStreaming` may report nothing at all before the build is
+/// declared wedged.
+///
+/// Modal's own client has no such limit (`image.py:394-404` loops until a
+/// result arrives), and silence is legitimate: a build queued behind others
+/// produces no log lines until it starts. This ceiling exists only so a stream
+/// that will never speak again cannot spin indefinitely, so it is set far
+/// above any plausible queue wait.
+const IMAGE_BUILD_SILENCE_LIMIT: Duration = Duration::from_mins(30);
+
 /// What [`ModalClient::deploy_server`] produced.
 #[derive(Debug, Clone)]
 pub struct Deployment {
@@ -669,7 +679,7 @@ impl ModalClient {
 
         let mut last_entry_id = String::new();
         let mut consecutive_failures = 0_u32;
-        let mut consecutive_empty_rounds = 0_u32;
+        let mut silent_since = std::time::Instant::now();
 
         while result.is_none() {
             match self
@@ -679,19 +689,20 @@ impl ModalClient {
                 Ok(messages) => {
                     consecutive_failures = 0;
                     // Modal's server holds each `ImageJoinStreaming` call open
-                    // for the requested timeout and then ends the stream, so an
-                    // empty round is normal once. A run of them means nothing
-                    // is coming — bail instead of spinning.
+                    // for the requested timeout and then ends the stream, so
+                    // empty rounds are normal — a build queued behind others
+                    // can stay silent for a long time, and `image.py:394-404`
+                    // never gives up on silence at all. amicu keeps only a
+                    // generous ceiling, so a wedged stream cannot spin forever.
                     if messages == 0 && result.is_none() {
-                        consecutive_empty_rounds += 1;
-                        if consecutive_empty_rounds >= IMAGE_JOIN_MAX_RETRIES {
+                        if silent_since.elapsed() >= IMAGE_BUILD_SILENCE_LIMIT {
                             return Err(ModalError::ImageBuild {
                                 image_id,
                                 detail: "Modal stopped reporting build progress".to_owned(),
                             });
                         }
                     } else {
-                        consecutive_empty_rounds = 0;
+                        silent_since = std::time::Instant::now();
                     }
                 }
                 // `image.py:396-403` tolerates a few transient stream errors
