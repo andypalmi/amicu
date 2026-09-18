@@ -26,7 +26,11 @@ use amicu_core::resource::VllmSettings;
 ///
 /// Unlike llama.cpp, current stable vLLM `serve` CLI docs (`vllm serve
 /// --help`, `docs.vllm.ai/en/stable/cli/serve`) document no short aliases for
-/// any of these flags, so every entry here is a single long spelling.
+/// any of these flags, so every entry here is a long spelling - but the list
+/// is flat, not one-entry-per-field: a boolean field rendered as a paired
+/// bare-flag toggle (see [`VllmSettings::enforce_eager`]) contributes both
+/// its positive and `--no-` spelling as separate entries here, since either
+/// one alone in `extra_args` would duplicate what that field renders.
 pub(crate) const TYPED_FLAGS: &[&str] = &[
     "--model",
     "--port",
