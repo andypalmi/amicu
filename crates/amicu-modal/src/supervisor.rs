@@ -57,14 +57,18 @@ pub const DEFAULT_VLLM_IMAGE: &str = "vllm/vllm-openai:v0.29.0";
 
 /// Environment variable overriding [`DEFAULT_VLLM_IMAGE`]. There is no HCL
 /// schema seam for this today (see the module docs), so this is the entire
-/// override surface.
+/// override surface. Read fresh by [`ProcessSupervisor::start`] on every
+/// call, not cached - the supervisor itself is stateless between calls, so
+/// there is nothing to invalidate if the value changes between deploys.
 pub const VLLM_IMAGE_ENV_VAR: &str = "AMICU_MODAL_VLLM_IMAGE";
 
 /// Environment variable [`ModalSupervisor::start`] reads a Hugging Face
 /// token from when the launch plan carries no resolved `HF_TOKEN` secret.
 /// Read from the *operator's local* process environment - never from the
 /// deployment's own `vllm { env = {...} }` block - and forwarded only
-/// through Modal's Secret mechanism (never baked into the image).
+/// through Modal's Secret mechanism (never baked into the image). Like
+/// [`VLLM_IMAGE_ENV_VAR`], this is read fresh on every `start()` call, not
+/// cached.
 pub const HF_TOKEN_ENV_VAR: &str = "HF_TOKEN";
 
 /// Persistent Modal Volumes every Modal-deployed vLLM server mounts, as

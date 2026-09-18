@@ -222,7 +222,8 @@ async fn apply_all(
                     });
                 match dispatch_for(prior_runtime_kind, prior_provider) {
                     Dispatch::Modal => {
-                        let supervisor = ModalSupervisor::new(item.deployment.as_str());
+                        let supervisor =
+                            ModalSupervisor::new(app_name_for(item.deployment.as_str()));
                         let modal_adapter =
                             VllmAdapter::new(Box::new(catalog.clone()), Box::new(supervisor));
                         modal_adapter.stop(prev).await?;
