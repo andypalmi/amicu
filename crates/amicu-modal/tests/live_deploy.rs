@@ -1,10 +1,10 @@
 //! Live integration tests for the Modal deploy path.
 //!
-//! These are the only way to settle **H1** (a module baked into the image is
-//! importable with `mount_ids = []`) and **H2** (the `Function` field set for
-//! a class-based server is accepted by `FunctionCreate` from a non-Python
-//! client) — see the crate-level docs. Everything else about the deploy path
-//! is covered by the offline unit tests in `src/`.
+//! These are the only way to settle **H1** (the shim module baked into the
+//! image is importable) and **H2** (the `Function` field set for a class-based
+//! server is accepted by `FunctionCreate` from a non-Python client) — see the
+//! crate-level docs. Everything else about the deploy path is covered by the
+//! offline unit tests in `src/`.
 //!
 //! Both are `#[ignore]`d: they need network access, a real Modal token, and
 //! real (small) money. They **skip** rather than fail when
@@ -31,79 +31,117 @@
 //! * `deploy_vllm_smoke`: a first-run image pull of `vllm/vllm-openai`
 //!   (several GiB) plus roughly 3-6 minutes of one L4 while vLLM loads
 //!   Qwen2.5-0.5B into the HF cache Volume. At Modal's L4 rate that is well
-//!   under $0.10 per run; re-runs are faster because both the image and the
-//!   weights are cached. `--enforce-eager` is deliberate: it trades inference
-//!   throughput for a much shorter (and therefore cheaper) startup.
+//!   under $0.10 per run; re-runs are faster because the image is cached and
+//!   the weights persist in the named Volume. `--enforce-eager` is
+//!   deliberate: it trades inference throughput for a much shorter (and
+//!   therefore cheaper) startup.
 //!
-//! Both tests call `stop_app` in a cleanup path even when the assertion fails,
-//! so a failing run does not leave a GPU replica scaling up behind it.
+//! # Cleanup
+//!
+//! Each test creates a **uniquely named** app and installs an [`AppGuard`]
+//! *before* deploying. The guard's `Drop` runs on the success path, on an
+//! assertion failure, and on a panic inside `deploy_server` itself — it looks
+//! the app up by name and stops it. A test that dies before the app is created
+//! leaves nothing behind; one that dies after leaves a stopped app.
 
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
-use amicu_modal::{Credentials, Deployment, ImageSpec, ModalClient, ServerSpec, render_shim};
+use amicu_modal::{Credentials, Deployment, ImageSpec, ModalClient, ServerSpec};
 
-/// Returns `None` (and prints why) when the token env vars are not set.
-fn credentials_or_skip(test: &str) -> Option<Credentials> {
+/// Both servers listen here; the same value reaches `ServerSpec::port` (and
+/// so the shim's readiness probe and `http_config`) and the child's `--port`,
+/// with no second literal to drift.
+const PORT: u16 = 8000;
+
+/// Returns `false` (and prints why) when the token env vars are not set.
+fn have_credentials(test: &str) -> bool {
     match Credentials::from_env() {
-        Ok(credentials) => Some(credentials),
+        Ok(_) => true,
         Err(missing) => {
             println!("skipping {test}: {missing}");
-            None
+            false
         }
     }
 }
 
-fn argv(parts: &[&str]) -> Vec<String> {
-    parts.iter().map(|s| (*s).to_owned()).collect()
+async fn connect() -> ModalClient {
+    let credentials = Credentials::from_env().expect("checked by have_credentials");
+    ModalClient::connect(credentials)
+        .await
+        .expect("connect to Modal")
+}
+
+/// A per-run app name, so a crashed run never collides with the next one and
+/// each guard only ever stops its own app.
+fn unique_app_name(prefix: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("clock after 1970")
+        .as_nanos();
+    let suffix = u64::try_from(nanos & u128::from(u64::MAX)).unwrap_or_default();
+    format!("{prefix}-{suffix:x}")
+}
+
+/// Stops the named app on drop, however the test ends.
+///
+/// It holds its own `ModalClient` (a second channel to the same endpoint) so
+/// cleanup does not depend on the client the test was using still being alive
+/// or unborrowed, and it resolves the app by *name* so it also works when
+/// `deploy_server` panicked before returning an id.
+struct AppGuard {
+    client: ModalClient,
+    app_name: String,
+}
+
+impl Drop for AppGuard {
+    fn drop(&mut self) {
+        let app_name = self.app_name.clone();
+        let client = &mut self.client;
+        // `block_in_place` + the current handle is the only way to await from
+        // `Drop`; it requires the multi-threaded runtime these tests use.
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                match client.find_app(&app_name).await {
+                    Ok(Some(app_id)) => match client.stop_app(&app_id).await {
+                        Ok(()) => println!("cleanup: stopped {app_name} ({app_id})"),
+                        Err(error) => println!("cleanup: AppStop for {app_name} failed: {error}"),
+                    },
+                    Ok(None) => println!("cleanup: no app named {app_name} to stop"),
+                    Err(error) => println!("cleanup: lookup of {app_name} failed: {error}"),
+                }
+            });
+        });
+    }
 }
 
 /// Polls `url` until it answers 200 or `deadline` passes.
-async fn wait_for_http_200(url: &str, deadline: Duration) -> Result<(), String> {
+async fn wait_for_http_200(url: &str, deadline: Duration) {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("building the HTTP client: {e}"))?;
+        .expect("building the HTTP client");
     let started = Instant::now();
     let mut last = "no attempt made".to_owned();
 
     while started.elapsed() < deadline {
         match client.get(url).send().await {
-            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) if response.status().is_success() => {
+                println!("  {:>4}s {url}: 200", started.elapsed().as_secs());
+                return;
+            }
             Ok(response) => last = format!("HTTP {}", response.status()),
             Err(error) => last = format!("{error}"),
         }
         println!("  {:>4}s {url}: {last}", started.elapsed().as_secs());
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
-    Err(format!("gave up after {deadline:?}; last was {last}"))
+    panic!("{url} never answered 200 within {deadline:?}; last was {last}");
 }
 
-/// Runs `check` against the deployment, then stops the app either way.
-async fn with_cleanup(
-    client: &mut ModalClient,
-    deployment: &Deployment,
-    check: impl std::future::Future<Output = Result<(), String>>,
-) {
-    let outcome = check.await;
-    if let Err(error) = client.stop_app(&deployment.app_id).await {
-        println!("warning: AppStop for {} failed: {error}", deployment.app_id);
-    } else {
-        println!("stopped {}", deployment.app_id);
-    }
-    if let Err(error) = outcome {
-        panic!("{error}");
-    }
-}
-
-async fn deploy(spec: &ServerSpec) -> (ModalClient, Deployment) {
-    let credentials = Credentials::from_env().expect("checked by credentials_or_skip");
-    let mut client = ModalClient::connect(credentials)
-        .await
-        .expect("connect to Modal");
+async fn deploy(client: &mut ModalClient, spec: &ServerSpec) -> Deployment {
     // `Box::pin`: `deploy_server` awaits a long chain of tonic calls, so its
-    // future is a few tens of KiB — too big for the test thread's stack budget
-    // (clippy::large_futures).
+    // future is a few tens of KiB (clippy::large_futures).
     let deployment = Box::pin(client.deploy_server(spec, &mut |line| print!("{line}")))
         .await
         .expect("deploy the server");
@@ -111,7 +149,7 @@ async fn deploy(spec: &ServerSpec) -> (ModalClient, Deployment) {
         "deployed app={} function={} url={}",
         deployment.app_id, deployment.function_id, deployment.url
     );
-    (client, deployment)
+    deployment
 }
 
 /// The cheap experiment: no GPU, no model, a stdlib HTTP server. If this
@@ -120,23 +158,25 @@ async fn deploy(spec: &ServerSpec) -> (ModalClient, Deployment) {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs MODAL_TOKEN_ID/MODAL_TOKEN_SECRET, network access, and a few cents; see module docs"]
 async fn deploy_cpu_http_server() {
-    if credentials_or_skip("deploy_cpu_http_server").is_none() {
+    if !have_credentials("deploy_cpu_http_server") {
         return;
     }
 
-    let argv = argv(&["python", "-m", "http.server", "8000"]);
+    let app_name = unique_app_name("amicu-live-cpu-http");
     let spec = ServerSpec {
-        app_name: "amicu-live-cpu-http".to_owned(),
+        app_name: app_name.clone(),
         gpu: None,
         region: None,
-        port: 8000,
+        port: PORT,
+        argv: ["python", "-m", "http.server", &PORT.to_string()]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
         image: ImageSpec {
             base_registry_image: "python:3.12-slim".to_owned(),
             pip_packages: Vec::new(),
             env: BTreeMap::new(),
-            shim_source: render_shim(&argv, 8000),
         },
-        argv,
         volumes: Vec::new(),
         secret_env: BTreeMap::new(),
         scaledown_window_secs: 60,
@@ -147,11 +187,19 @@ async fn deploy_cpu_http_server() {
         max_containers: Some(1),
     };
 
-    let (mut client, deployment) = Box::pin(deploy(&spec)).await;
-    let url = deployment.url.clone();
-    with_cleanup(&mut client, &deployment, async move {
-        wait_for_http_200(&url, Duration::from_secs(spec.startup_timeout_secs.into())).await
-    })
+    // Installed before the deploy, so a panic inside `deploy_server` is
+    // cleaned up too.
+    let _guard = AppGuard {
+        client: connect().await,
+        app_name,
+    };
+
+    let mut client = connect().await;
+    let deployment = deploy(&mut client, &spec).await;
+    wait_for_http_200(
+        &deployment.url,
+        Duration::from_secs(spec.startup_timeout_secs.into()),
+    )
     .await;
 }
 
@@ -160,38 +208,41 @@ async fn deploy_cpu_http_server() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs MODAL_TOKEN_ID/MODAL_TOKEN_SECRET, network access, and an L4 for a few minutes; see module docs"]
 async fn deploy_vllm_smoke() {
-    if credentials_or_skip("deploy_vllm_smoke").is_none() {
+    if !have_credentials("deploy_vllm_smoke") {
         return;
     }
 
-    let argv = argv(&[
-        "vllm",
-        "serve",
-        "Qwen/Qwen2.5-0.5B-Instruct",
-        "--host",
-        "0.0.0.0",
-        "--port",
-        "8000",
-        "--enforce-eager",
-        "--max-model-len",
-        "2048",
-    ]);
+    let port = PORT.to_string();
+    let app_name = unique_app_name("amicu-live-vllm");
     let spec = ServerSpec {
-        app_name: "amicu-live-vllm-smoke".to_owned(),
+        app_name: app_name.clone(),
         gpu: Some("L4".to_owned()),
         region: None,
-        port: 8000,
+        port: PORT,
+        argv: [
+            "vllm",
+            "serve",
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            &port,
+            "--enforce-eager",
+            "--max-model-len",
+            "2048",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
         image: ImageSpec {
-            // Pinned: the official vLLM server image already contains Python
-            // 3.12, CUDA userspace, and vLLM, so the only thing amicu adds is
-            // the `modal` package and the shim. `v0.11.0` is the tag used
-            // here; bump it deliberately, and re-run this test when you do.
-            base_registry_image: "vllm/vllm-openai:v0.11.0".to_owned(),
+            // The official vLLM server image already contains Python 3.12, the
+            // CUDA userspace, and vLLM, so amicu adds only the shim — Modal's
+            // own client package arrives as a runtime mount, never as pip
+            // packages that could conflict with vLLM's pins.
+            base_registry_image: "vllm/vllm-openai:v0.29.0".to_owned(),
             pip_packages: Vec::new(),
             env: BTreeMap::from([("HF_XET_HIGH_PERFORMANCE".to_owned(), "1".to_owned())]),
-            shim_source: render_shim(&argv, 8000),
         },
-        argv,
         volumes: vec![(
             "amicu-live-hf-cache".to_owned(),
             "/root/.cache/huggingface".to_owned(),
@@ -205,10 +256,13 @@ async fn deploy_vllm_smoke() {
         max_containers: Some(1),
     };
 
-    let (mut client, deployment) = Box::pin(deploy(&spec)).await;
+    let _guard = AppGuard {
+        client: connect().await,
+        app_name,
+    };
+
+    let mut client = connect().await;
+    let deployment = deploy(&mut client, &spec).await;
     let url = format!("{}/v1/models", deployment.url.trim_end_matches('/'));
-    with_cleanup(&mut client, &deployment, async move {
-        wait_for_http_200(&url, Duration::from_secs(spec.startup_timeout_secs.into())).await
-    })
-    .await;
+    wait_for_http_200(&url, Duration::from_secs(spec.startup_timeout_secs.into())).await;
 }

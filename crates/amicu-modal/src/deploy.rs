@@ -6,18 +6,41 @@
 //! relative to the upstream checkout at that tag.
 
 use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
 
 use crate::client::ModalClient;
 use crate::error::ModalError;
 use crate::image::{IMAGE_BUILDER_VERSION, ImageSpec};
 use crate::pb::modal_client as pb;
-use crate::shim::{SHIM_CLASS_NAME, SHIM_MODULE_NAME};
+use crate::shim::{SHIM_CLASS_NAME, SHIM_MODULE_NAME, render_shim};
 
 /// Modal's proxy regions for the server's public endpoint.
 ///
-/// `app.py:1219` defaults `proxy_regions` to `["us-east"]` and
-/// `_server.py:33-34` rejects an empty list, so this is not optional.
+/// `app.py:1216` defaults `proxy_regions` to `["us-east"]` and
+/// `_server.py:34-35` rejects an empty list, so this is not optional. Making
+/// it configurable is a follow-up.
 const PROXY_REGIONS: [&str; 1] = ["us-east"];
+
+/// The deployment name of Modal's globally published client-package Mount.
+///
+/// `mount.py:63-70` builds it as `f"modal-client-mount-{version}"` and
+/// `_get_client_mount` (`mount.py:729-734`) looks it up with
+/// `Mount.from_name(..., namespace=DEPLOYMENT_NAMESPACE_GLOBAL)`. Mounting it
+/// is how the `modal` package gets into the container, so the image never has
+/// to `pip install modal` — which matters because Modal's client pins
+/// `click`, `protobuf` and `grpclib` ranges that can conflict with what a
+/// model-server image (notably `vllm/vllm-openai`) already has installed.
+///
+/// The version must match `proto/VENDORED.md`.
+pub const MODAL_CLIENT_MOUNT_NAME: &str = "modal-client-mount-1.3.1";
+
+/// How often the app heartbeat fires while a deploy is in flight
+/// (`config.py:241`, `"heartbeat_interval": _Setting(15, float)`).
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Consecutive `ImageJoinStreaming` errors tolerated before giving up
+/// (`image.py:396-403`).
+const IMAGE_JOIN_MAX_RETRIES: u32 = 3;
 
 /// What [`ModalClient::deploy_server`] produced.
 #[derive(Debug, Clone)]
@@ -34,7 +57,8 @@ pub struct Deployment {
 /// A server to deploy: one container image running one long-lived process
 /// behind Modal's HTTP proxy.
 ///
-/// `Debug` redacts [`ServerSpec::secret_env`] values.
+/// `Debug` redacts [`ServerSpec::secret_env`] values (and, via
+/// [`ImageSpec`]'s own `Debug`, `ENV` values).
 #[derive(Clone)]
 pub struct ServerSpec {
     /// Deployment name of the Modal app. Reused across deploys: an existing
@@ -45,9 +69,12 @@ pub struct ServerSpec {
     pub gpu: Option<String>,
     /// Optional region constraint, e.g. `"us-east"`.
     pub region: Option<String>,
-    /// The port the process in [`ServerSpec::argv`] listens on.
+    /// The port the process in [`ServerSpec::argv`] listens on. Baked into the
+    /// generated shim's readiness probe as well as `http_config.port`.
     pub port: u16,
     /// The command the container runs, verbatim; never shell-interpreted.
+    /// `deploy_server` renders the container-side shim from this, so it is the
+    /// single source of truth for what runs.
     pub argv: Vec<String>,
     /// The image to build and run.
     pub image: ImageSpec,
@@ -58,7 +85,8 @@ pub struct ServerSpec {
     pub secret_env: BTreeMap<String, String>,
     /// Idle seconds before a replica is scaled down.
     pub scaledown_window_secs: u32,
-    /// Seconds Modal waits for the port to accept connections.
+    /// Seconds Modal waits for the port to accept connections. Must be > 0
+    /// (`_server.py:30-31`).
     pub startup_timeout_secs: u32,
     /// Maximum lifetime of a single container, in seconds.
     pub timeout_secs: u32,
@@ -80,6 +108,7 @@ impl std::fmt::Debug for ServerSpec {
             .field("argv", &self.argv)
             .field("image", &self.image)
             .field("volumes", &self.volumes)
+            // Keys only — a secret value must never reach a log line.
             .field("secret_env", &self.secret_env.keys().collect::<Vec<_>>())
             .field("scaledown_window_secs", &self.scaledown_window_secs)
             .field("startup_timeout_secs", &self.startup_timeout_secs)
@@ -115,13 +144,39 @@ fn parse_gpu_config(spec: &str) -> Result<pb::GpuConfig, ModalError> {
 }
 
 impl ServerSpec {
+    /// Client-side validation, mirroring `validate_http_server_config`
+    /// (`_server.py:22-35`). `port` is a `u16` so the upper bound is already
+    /// enforced by the type; the lower bound and `startup_timeout` are not.
+    fn validate(&self) -> Result<(), ModalError> {
+        if self.port == 0 {
+            return Err(ModalError::InvalidSpec {
+                field: "port",
+                detail: "must be between 1 and 65535 (_server.py:28-29)".to_owned(),
+            });
+        }
+        if self.startup_timeout_secs == 0 {
+            return Err(ModalError::InvalidSpec {
+                field: "startup_timeout_secs",
+                detail: "must be positive (_server.py:30-31)".to_owned(),
+            });
+        }
+        if self.argv.is_empty() {
+            return Err(ModalError::InvalidSpec {
+                field: "argv",
+                detail: "the container needs a command to run".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Builds the `Function` message, mirroring what
-    /// `app._experimental_server(...)` (`app.py:1192-1338`) feeds to
+    /// `app._experimental_server(...)` (`app.py:1193-1338`) feeds to
     /// `_Function.from_local` (`_functions.py:660-1180`) for a class-based
     /// web server.
     fn function_definition(
         &self,
         image_id: &str,
+        client_mount_id: &str,
         secret_ids: Vec<String>,
         volume_mounts: Vec<pb::VolumeMount>,
     ) -> Result<pb::Function, ModalError> {
@@ -132,57 +187,79 @@ impl ServerSpec {
             .transpose()?
             // `parse_gpu_config(None)` returns an empty GPUConfig, and
             // `convert_fn_config_to_resources_config` always sets `resources`
-            // (`_functions.py:1120-1125`, `_resources.py:10-18`).
+            // (`_functions.py:1121-1125`, `_resources.py:10-18`).
             .unwrap_or_default();
+
+        // `_deps(only_explicit_mounts=True)` (`_functions.py:870-889`, called
+        // at `:984`): secrets, then proxy, then image, then network file
+        // systems, then volumes. Mounts are deliberately *excluded* — the
+        // `only_explicit_mounts` flag skips `all_mounts` (`:872-873`) — so the
+        // client mount below is in `mount_ids` but not here.
+        let mut object_dependencies: Vec<pb::ObjectDependency> = secret_ids
+            .iter()
+            .map(|id| pb::ObjectDependency {
+                object_id: id.clone(),
+            })
+            .collect();
+        object_dependencies.push(pb::ObjectDependency {
+            object_id: image_id.to_owned(),
+        });
+        object_dependencies.extend(volume_mounts.iter().map(|m| pb::ObjectDependency {
+            object_id: m.volume_id.clone(),
+        }));
 
         Ok(pb::Function {
             // `FunctionInfo.module_name` is the *file stem* of the module the
-            // class lives in (`_utils/function_utils.py:208-210`); ours is
-            // baked into the image at `/root/amicu_server.py`.
+            // class lives in (`_utils/function_utils.py:210`); ours is baked
+            // into the image at `/root/amicu_server.py`.
             module_name: SHIM_MODULE_NAME.to_owned(),
-            // `app.py:1295` passes `name_override=user_cls.__name__`, which
+            // `app.py:1297` passes `name_override=user_cls.__name__`, which
             // becomes `function_name` (`_utils/function_utils.py:172`). The
             // container splits this to find the class and explicitly allows
             // the bare `ClassName` form for servers
             // (`_runtime/user_code_imports.py:524-532`).
             function_name: SHIM_CLASS_NAME.to_owned(),
             // `f"{user_cls.__name__}.*"` for a class service function
-            // (`_utils/function_utils.py:163-165`).
+            // (`_utils/function_utils.py:165`).
             implementation_name: format!("{SHIM_CLASS_NAME}.*"),
-            // H1: empty. The Python client always ships two mounts here — its
-            // own package mount and the entrypoint source file
-            // (`_functions.py:730-733`, `:978`). amicu bakes the module into
-            // the image instead and installs `modal` there, so there is
-            // nothing to upload. See the crate docs for the fallback.
-            mount_ids: Vec::new(),
+            // The Python client sends two mounts (`_functions.py:730-733`):
+            // its own package and the user's source file. amicu bakes the
+            // source into the image but still mounts Modal's client package —
+            // that is what `mount_client_dependencies` below refers to, and it
+            // keeps the image free of Modal's pip pins.
+            mount_ids: vec![client_mount_id.to_owned()],
             image_id: image_id.to_owned(),
             secret_ids,
+            object_dependencies,
             // Not serialized (no cloudpickle), so FILE
-            // (`_utils/function_utils.py:141-145`).
+            // (`_utils/function_utils.py:141-145`); `function_serialized` and
+            // `class_serialized` stay empty (`_functions.py:955-957`).
             definition_type: pb::function::DefinitionType::File as i32,
             // `get_function_type(is_generator=None)`
             // (`_utils/function_utils.py:116-117`).
             function_type: pb::function::FunctionType::Function as i32,
             // Empty but *set*. `method_definitions` is populated only from
             // `_PartialFunctionFlags.interface_flags()` — CALLABLE_INTERFACE
-            // and WEB_INTERFACE (`_partial_function.py:35-36, 63-65`) — which
-            // `@modal.enter`/`@modal.exit` are not: those are lifecycle flags
-            // (`_partial_function.py:32-34, 55-61`). So a server class whose
-            // only decorated methods are enter/exit yields `{}` here
-            // (`_functions.py:837-866`), with `method_definitions_set=True`
-            // unconditionally (`_functions.py:1002`).
+            // and WEB_INTERFACE (`_partial_function.py:38-39`, `:64-66`) —
+            // which `@modal.enter`/`@modal.exit` are not: those are lifecycle
+            // flags (`_partial_function.py:32-36`, `:56-61`). So a server class
+            // whose only decorated methods are enter/exit yields `{}` here
+            // (`_functions.py:838-866`), with `method_definitions_set=True`
+            // unconditionally (`_functions.py:1007`).
             method_definitions: HashMap::new(),
             method_definitions_set: true,
             // `info.is_service_class()` is True when `raw_f is None`
             // (`_utils/function_utils.py:147-151`), which is the class case.
             is_class: true,
             // `bool(info.user_cls) and not info.is_service_class()`
-            // (`_functions.py:1035`) → False for the service class itself.
+            // (`_functions.py:1027`) → False for the service class itself.
             is_method: false,
             // `info.class_parameter_info()` with no annotated parameters
-            // (`_utils/function_utils.py:292-301`).
+            // (`_utils/function_utils.py:292-301`), sent at
+            // `_functions.py:1037`.
             class_parameter_info: Some(pb::ClassParameterInfo {
-                format: pb::class_parameter_info::ParameterSerializationFormat::ParamSerializationFormatPickle as i32,
+                format: pb::class_parameter_info::ParameterSerializationFormat::ParamSerializationFormatPickle
+                    as i32,
                 schema: Vec::new(),
             }),
             // `app.py:1327`.
@@ -190,18 +267,18 @@ impl ServerSpec {
             // `app.py:1264-1270`. Note `target_concurrency` is *not* part of
             // HTTPConfig in v1.3.1 even though the message has such a field:
             // the decorator routes it to `target_concurrent_inputs` below
-            // (`app.py:1315`).
+            // (`app.py:1317`).
             http_config: Some(pb::HttpConfig {
                 port: u32::from(self.port),
                 proxy_regions: PROXY_REGIONS.iter().map(|r| (*r).to_owned()).collect(),
                 startup_timeout: self.startup_timeout_secs,
-                // `app.py:1216` default.
+                // `app.py:1215` default.
                 exit_grace_period: 0,
-                // `app.py:1222` default.
+                // `app.py:1217` default.
                 h2_enabled: false,
                 target_concurrency: 0,
             }),
-            // `_functions.py:1024` (`target_concurrent_inputs or 0`).
+            // `_functions.py:1022` (`target_concurrent_inputs or 0`).
             target_concurrent_inputs: self.target_concurrency,
             // `_functions.py:784-789`.
             autoscaler_settings: Some(pb::AutoscalerSettings {
@@ -212,41 +289,55 @@ impl ServerSpec {
                 scaledown_window: Some(self.scaledown_window_secs),
             }),
             // Deprecated mirrors the client still sends alongside
-            // `autoscaler_settings` (`_functions.py:1050-1055`).
+            // `autoscaler_settings` (`_functions.py:1048-1052`).
             warm_pool_size: self.min_containers,
             concurrency_limit: self.max_containers.unwrap_or(0),
             task_idle_timeout_secs: self.scaledown_window_secs,
+            // `_functions.py:1012`.
             timeout_secs: self.timeout_secs,
-            // `startup_timeout or timeout_secs` (`_functions.py:1013`).
-            startup_timeout_secs: if self.startup_timeout_secs == 0 {
-                self.timeout_secs
-            } else {
-                self.startup_timeout_secs
-            },
+            // `startup_timeout or timeout_secs` (`_functions.py:1013`);
+            // `validate` has already rejected a zero startup timeout.
+            startup_timeout_secs: self.startup_timeout_secs,
             resources: Some(pb::Resources {
                 gpu_config: Some(gpu_config),
                 ..pb::Resources::default()
             }),
             // `region=` becomes a SchedulerPlacement with the region list
-            // (`_functions.py:760-763`); unset when no region is requested.
+            // (`_functions.py:755-757`); unset when no region is requested.
             scheduler_placement: self.region.as_ref().map(|region| pb::SchedulerPlacement {
                 regions: vec![region.clone()],
                 nonpreemptible: false,
                 ..pb::SchedulerPlacement::default()
             }),
-            // `_functions.py:968-975`.
+            // `_functions.py:969-976`.
             volume_mounts,
+            // `_functions.py:1019`.
             app_name: self.app_name.clone(),
-            // False: the Python client sets this from the image builder
-            // version (`_functions.py:962-966`) *and* ships the client mount
-            // in `mount_ids`. With no mounts, the worker must find `modal` in
-            // the image, which `ImageSpec` installs
-            // (`modal_proto/api.proto:1633-1635`).
-            mount_client_dependencies: false,
-            // Hard-coded True by the client (`_functions.py:1058`).
+            // True, matching the Python client for any image builder newer
+            // than 2024.10 (`_functions.py:964-966`): Modal's client libraries
+            // are mounted into the container at runtime and are "no longer
+            // expected to exist in the image itself"
+            // (`modal_proto/api.proto:1544-1546`). The mount that carries them
+            // is `mount_ids[0]`.
+            mount_client_dependencies: true,
+            // Hard-coded True by the client (`_functions.py:1045`).
             experimental_concurrent_cancellations: true,
             ..pb::Function::default()
         })
+    }
+}
+
+/// Keeps `AppHeartbeat` firing for the lifetime of a deploy.
+///
+/// `modal deploy` runs this loop for the whole of `_create_all_objects` +
+/// `_publish_app` (`runner.py:550-555`); an app left INITIALIZING without
+/// heartbeats is reaped server-side, which would abort a long image build.
+/// Dropping the guard aborts the task.
+struct HeartbeatGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for HeartbeatGuard {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -271,9 +362,8 @@ impl ModalClient {
         self.stub()
             .app_stop(pb::AppStopRequest {
                 app_id: app_id.to_owned(),
-                // `CLIENT_TYPE_LIBMODAL` is not a Python client, but AppStopSource
-                // has no libmodal variant; `modal app stop` sends CLI
-                // (`cli/app.py`), which is the closest honest match.
+                // `AppStopSource` has no libmodal variant; `modal app stop`
+                // sends CLI, which is the closest honest match.
                 source: pb::AppStopSource::Cli as i32,
             })
             .await
@@ -286,31 +376,65 @@ impl ModalClient {
     ///
     /// Issues, in the order `modal deploy` does (`runner.py:494-590`):
     /// `AppGetByDeploymentName` → `AppCreate` (only when absent) →
-    /// `ImageGetOrCreate` (+ `ImageJoinStreaming` until built) →
-    /// `VolumeGetOrCreate` per volume → `SecretGetOrCreate` (only when
-    /// `secret_env` is non-empty) → `FunctionPrecreate` → `FunctionCreate` →
-    /// `AppPublish`.
+    /// [`AppHeartbeat` every 15s for the rest of the call] →
+    /// `MountGetOrCreate` (Modal's global client mount) → `ImageGetOrCreate`
+    /// (+ `ImageJoinStreaming` until built) → `VolumeGetOrCreate` per volume →
+    /// `SecretGetOrCreate` (only when `secret_env` is non-empty) →
+    /// `FunctionPrecreate` → `FunctionCreate` → `AppPublish`.
     ///
-    /// `on_build_log` receives image build output line-fragments as Modal
-    /// streams them.
+    /// On any failure after the app exists, `AppClientDisconnect` is sent with
+    /// `APP_DISCONNECT_REASON_DEPLOYMENT_EXCEPTION` (`runner.py:576-578`) so
+    /// the app is not left INITIALIZING forever.
+    ///
+    /// `on_build_log` receives image build output as Modal streams it.
     pub async fn deploy_server(
         &mut self,
         spec: &ServerSpec,
         on_build_log: &mut dyn FnMut(&str),
     ) -> Result<Deployment, ModalError> {
+        spec.validate()?;
+
         let app_id = match self.find_app(&spec.app_name).await? {
             Some(app_id) => app_id,
             None => self.create_app(&spec.app_name).await?,
         };
 
-        let image_id = self.build_image(&app_id, &spec.image, on_build_log).await?;
+        let _heartbeat = self.spawn_heartbeat(&app_id);
+        // `Box::pin`: the chain of tonic calls below adds up to a few tens of
+        // KiB of future (clippy::large_futures).
+        match Box::pin(self.deploy_into_app(&app_id, spec, on_build_log)).await {
+            Ok(deployment) => Ok(deployment),
+            Err(error) => {
+                // Best effort: the original error is what the caller needs, so
+                // a failure to disconnect only replaces it if there is nothing
+                // else to report.
+                let _ = self.disconnect_after_failure(&app_id, &error).await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Everything between app creation and publish. Split out so
+    /// [`ModalClient::deploy_server`] has exactly one error funnel.
+    async fn deploy_into_app(
+        &mut self,
+        app_id: &str,
+        spec: &ServerSpec,
+        on_build_log: &mut dyn FnMut(&str),
+    ) -> Result<Deployment, ModalError> {
+        let client_mount_id = self.get_client_mount().await?;
+
+        let shim_source = render_shim(&spec.argv, spec.port);
+        let image_id = self
+            .build_image(app_id, &spec.image, &shim_source, on_build_log)
+            .await?;
 
         let mut volume_mounts = Vec::with_capacity(spec.volumes.len());
         for (name, mount_path) in &spec.volumes {
             volume_mounts.push(pb::VolumeMount {
                 volume_id: self.get_or_create_volume(name).await?,
                 mount_path: mount_path.clone(),
-                // `_functions.py:971`.
+                // `_functions.py:972`.
                 allow_background_commits: true,
                 read_only: false,
             });
@@ -319,18 +443,18 @@ impl ModalClient {
         let secret_ids = if spec.secret_env.is_empty() {
             Vec::new()
         } else {
-            vec![self.create_app_secret(&app_id, &spec.secret_env).await?]
+            vec![self.create_app_secret(app_id, &spec.secret_env).await?]
         };
 
-        let function = spec.function_definition(&image_id, secret_ids, volume_mounts)?;
+        let function =
+            spec.function_definition(&image_id, &client_mount_id, secret_ids, volume_mounts)?;
 
         // Preassign the Function's id so `FunctionCreate` updates it in place
-        // rather than creating a second one (`_functions.py:1158-1178`,
-        // `runner.py:152-171`).
+        // rather than creating a second one (`_functions.py:900-917`).
         let precreated = self
             .stub()
             .function_precreate(pb::FunctionPrecreateRequest {
-                app_id: app_id.clone(),
+                app_id: app_id.to_owned(),
                 function_name: function.function_name.clone(),
                 function_type: function.function_type,
                 existing_function_id: String::new(),
@@ -343,7 +467,7 @@ impl ModalClient {
         let created = self
             .stub()
             .function_create(pb::FunctionCreateRequest {
-                app_id: app_id.clone(),
+                app_id: app_id.to_owned(),
                 function: Some(function),
                 existing_function_id: precreated.function_id,
                 ..pb::FunctionCreateRequest::default()
@@ -372,10 +496,10 @@ impl ModalClient {
         // is how the container later finds itself
         // (`_container_entrypoint.py:304-306`). `class_ids` stays empty —
         // `app._experimental_server` registers only the service Function
-        // (`app.py:1334`).
+        // (`app.py:1336`).
         self.stub()
             .app_publish(pb::AppPublishRequest {
-                app_id: app_id.clone(),
+                app_id: app_id.to_owned(),
                 name: spec.app_name.clone(),
                 app_state: pb::AppState::Deployed as i32,
                 function_ids: HashMap::from([(
@@ -389,14 +513,59 @@ impl ModalClient {
             .map_err(|status| ModalError::from_status("AppPublish", status))?;
 
         Ok(Deployment {
-            app_id,
+            app_id: app_id.to_owned(),
             function_id: created.function_id,
             url,
         })
     }
 
+    /// Spawns the `AppHeartbeat` loop on a cloned stub (the generated tonic
+    /// client is `Clone`, and the underlying `Channel` multiplexes).
+    fn spawn_heartbeat(&mut self, app_id: &str) -> HeartbeatGuard {
+        let mut stub = self.stub().clone();
+        let request = pb::AppHeartbeatRequest {
+            app_id: app_id.to_owned(),
+        };
+        HeartbeatGuard(tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(HEARTBEAT_INTERVAL);
+            // The first tick is immediate; skip it, the app was just created.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                // A failed heartbeat is not fatal to the deploy: the RPC that
+                // is actually in flight will surface the real problem.
+                let _ = stub.app_heartbeat(request.clone()).await;
+            }
+        }))
+    }
+
+    /// `AppClientDisconnect` with `DEPLOYMENT_EXCEPTION`, which stops an app
+    /// that is still INITIALIZING and is a no-op otherwise
+    /// (`runner.py:576-578`, and the comment above it).
+    async fn disconnect_after_failure(
+        &mut self,
+        app_id: &str,
+        error: &ModalError,
+    ) -> Result<(), ModalError> {
+        // `_disconnect` truncates the exception text to 1000 chars
+        // (`runner.py:231-232`). `ModalError`'s Display never contains a
+        // token or a secret value (see `credentials.rs` and `ServerSpec`'s
+        // `Debug`), so it is safe to send.
+        let mut exception = error.to_string();
+        exception.truncate(1000);
+        self.stub()
+            .app_client_disconnect(pb::AppClientDisconnectRequest {
+                app_id: app_id.to_owned(),
+                reason: pb::AppDisconnectReason::DeploymentException as i32,
+                exception,
+            })
+            .await
+            .map_err(|status| ModalError::from_status("AppClientDisconnect", status))?;
+        Ok(())
+    }
+
     /// `AppCreate` in the INITIALIZING state, as `modal deploy` does before
-    /// publishing (`runner.py:76-99`).
+    /// publishing (`runner.py:83-90`).
     async fn create_app(&mut self, name: &str) -> Result<String, ModalError> {
         let response = self
             .stub()
@@ -410,6 +579,26 @@ impl ModalClient {
             .map_err(|status| ModalError::from_status("AppCreate", status))?
             .into_inner();
         Ok(response.app_id)
+    }
+
+    /// Resolves Modal's globally published client-package Mount by name —
+    /// `Mount.from_name(..., namespace=GLOBAL)`'s loader, which sends a
+    /// `MountGetOrCreateRequest` carrying only the name, namespace and
+    /// environment and therefore performs a pure lookup
+    /// (`mount.py:652-658`, reached from `_get_client_mount` at `:729-734`).
+    async fn get_client_mount(&mut self) -> Result<String, ModalError> {
+        let response = self
+            .stub()
+            .mount_get_or_create(pb::MountGetOrCreateRequest {
+                deployment_name: MODAL_CLIENT_MOUNT_NAME.to_owned(),
+                namespace: pb::DeploymentNamespace::Global as i32,
+                environment_name: String::new(),
+                ..pb::MountGetOrCreateRequest::default()
+            })
+            .await
+            .map_err(|status| ModalError::from_status("MountGetOrCreate", status))?
+            .into_inner();
+        Ok(response.mount_id)
     }
 
     async fn get_or_create_volume(&mut self, name: &str) -> Result<String, ModalError> {
@@ -429,7 +618,7 @@ impl ModalClient {
     }
 
     /// An anonymous, app-scoped Secret — what `Secret.from_dict` becomes when
-    /// an app is being loaded (`secret.py:207-215`). The values travel over
+    /// an app is being loaded (`secret.py:207-224`). The values travel over
     /// the TLS gRPC channel only and are never surfaced again.
     async fn create_app_secret(
         &mut self,
@@ -452,19 +641,20 @@ impl ModalClient {
     }
 
     /// `ImageGetOrCreate`, then `ImageJoinStreaming` until the build finishes,
-    /// mirroring `image.py:654-700` and `_image_await_build_result`
-    /// (`image.py:371-400`).
+    /// mirroring `image.py:654-668` and `_image_await_build_result`
+    /// (`image.py:371-404`).
     async fn build_image(
         &mut self,
         app_id: &str,
         spec: &ImageSpec,
+        shim_source: &str,
         on_build_log: &mut dyn FnMut(&str),
     ) -> Result<String, ModalError> {
         let response = self
             .stub()
             .image_get_or_create(pb::ImageGetOrCreateRequest {
                 app_id: app_id.to_owned(),
-                image: Some(spec.to_proto()),
+                image: Some(spec.to_proto(shim_source)),
                 namespace: pb::DeploymentNamespace::Workspace as i32,
                 builder_version: IMAGE_BUILDER_VERSION.to_owned(),
                 ..pb::ImageGetOrCreateRequest::default()
@@ -474,40 +664,43 @@ impl ModalClient {
             .into_inner();
 
         let image_id = response.image_id;
-        // A non-zero status means the image is already built (`image.py:672`).
+        // A non-zero status means the image is already built (`image.py:670`).
         let mut result = response.result.filter(|r| r.status != 0);
 
         let mut last_entry_id = String::new();
-        while result.is_none() {
-            let mut stream = self
-                .stub()
-                .image_join_streaming(pb::ImageJoinStreamingRequest {
-                    image_id: image_id.clone(),
-                    timeout: 55.0,
-                    last_entry_id: last_entry_id.clone(),
-                    include_logs_for_finished: false,
-                })
-                .await
-                .map_err(|status| ModalError::from_status("ImageJoinStreaming", status))?
-                .into_inner();
+        let mut consecutive_failures = 0_u32;
+        let mut consecutive_empty_rounds = 0_u32;
 
-            while let Some(message) = stream
-                .message()
+        while result.is_none() {
+            match self
+                .join_image_build(&image_id, &mut last_entry_id, &mut result, on_build_log)
                 .await
-                .map_err(|status| ModalError::from_status("ImageJoinStreaming", status))?
             {
-                if !message.entry_id.is_empty() {
-                    last_entry_id = message.entry_id;
-                }
-                for log in &message.task_logs {
-                    if !log.data.is_empty() {
-                        on_build_log(&log.data);
+                Ok(messages) => {
+                    consecutive_failures = 0;
+                    // Modal's server holds each `ImageJoinStreaming` call open
+                    // for the requested timeout and then ends the stream, so an
+                    // empty round is normal once. A run of them means nothing
+                    // is coming — bail instead of spinning.
+                    if messages == 0 && result.is_none() {
+                        consecutive_empty_rounds += 1;
+                        if consecutive_empty_rounds >= IMAGE_JOIN_MAX_RETRIES {
+                            return Err(ModalError::ImageBuild {
+                                image_id,
+                                detail: "Modal stopped reporting build progress".to_owned(),
+                            });
+                        }
+                    } else {
+                        consecutive_empty_rounds = 0;
                     }
                 }
-                if let Some(r) = message.result
-                    && r.status != 0
-                {
-                    result = Some(r);
+                // `image.py:396-403` tolerates a few transient stream errors
+                // before giving up.
+                Err(error) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= IMAGE_JOIN_MAX_RETRIES {
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -528,30 +721,78 @@ impl ModalClient {
         }
         Ok(image_id)
     }
+
+    /// One `ImageJoinStreaming` round; returns how many messages arrived.
+    /// Mirrors the `join()` closure at `image.py:376-392`.
+    async fn join_image_build(
+        &mut self,
+        image_id: &str,
+        last_entry_id: &mut String,
+        result: &mut Option<pb::GenericResult>,
+        on_build_log: &mut dyn FnMut(&str),
+    ) -> Result<usize, ModalError> {
+        let mut stream = self
+            .stub()
+            .image_join_streaming(pb::ImageJoinStreamingRequest {
+                image_id: image_id.to_owned(),
+                timeout: 55.0,
+                last_entry_id: last_entry_id.clone(),
+                include_logs_for_finished: false,
+            })
+            .await
+            .map_err(|status| ModalError::from_status("ImageJoinStreaming", status))?
+            .into_inner();
+
+        let mut messages = 0;
+        while let Some(message) = stream
+            .message()
+            .await
+            .map_err(|status| ModalError::from_status("ImageJoinStreaming", status))?
+        {
+            messages += 1;
+            if !message.entry_id.is_empty() {
+                last_entry_id.clone_from(&message.entry_id);
+            }
+            for log in &message.task_logs {
+                // Progress-only entries carry a byte counter, not log text
+                // (`image.py:384-389`); there is nothing to print.
+                let is_progress = log
+                    .task_progress
+                    .as_ref()
+                    .is_some_and(|p| p.pos != 0 || p.len != 0);
+                if !is_progress && !log.data.is_empty() {
+                    on_build_log(&log.data);
+                }
+            }
+            if let Some(r) = message.result
+                && r.status != 0
+            {
+                *result = Some(r);
+            }
+        }
+        Ok(messages)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shim::render_shim;
 
     fn sample_spec() -> ServerSpec {
-        let argv = ["vllm", "serve", "tiny"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
         ServerSpec {
             app_name: "amicu-test".to_owned(),
             gpu: Some("H100:2".to_owned()),
             region: Some("us-east".to_owned()),
             port: 8000,
+            argv: ["vllm", "serve", "tiny"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
             image: ImageSpec {
-                base_registry_image: "vllm/vllm-openai:v0.11.0".to_owned(),
+                base_registry_image: "vllm/vllm-openai:v0.29.0".to_owned(),
                 pip_packages: Vec::new(),
                 env: BTreeMap::new(),
-                shim_source: render_shim(&argv, 8000),
             },
-            argv,
             volumes: vec![(
                 "amicu-hf-cache".to_owned(),
                 "/root/.cache/huggingface".to_owned(),
@@ -564,6 +805,21 @@ mod tests {
             min_containers: 0,
             max_containers: Some(1),
         }
+    }
+
+    fn sample_function(spec: &ServerSpec) -> pb::Function {
+        spec.function_definition(
+            "im-123",
+            "mo-client",
+            vec!["st-9".to_owned()],
+            vec![pb::VolumeMount {
+                volume_id: "vo-1".to_owned(),
+                mount_path: "/root/.cache/huggingface".to_owned(),
+                allow_background_commits: true,
+                read_only: false,
+            }],
+        )
+        .expect("valid spec")
     }
 
     #[test]
@@ -594,25 +850,41 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_port_or_startup_timeout_or_empty_argv_is_rejected() {
+        for (mutate, field) in [
+            (
+                Box::new(|s: &mut ServerSpec| s.port = 0) as Box<dyn Fn(&mut ServerSpec)>,
+                "port",
+            ),
+            (
+                Box::new(|s: &mut ServerSpec| s.startup_timeout_secs = 0),
+                "startup_timeout_secs",
+            ),
+            (Box::new(|s: &mut ServerSpec| s.argv.clear()), "argv"),
+        ] {
+            let mut spec = sample_spec();
+            mutate(&mut spec);
+            let Err(err) = spec.validate() else {
+                panic!("expected {field} to be rejected");
+            };
+            assert!(
+                matches!(&err, ModalError::InvalidSpec { field: f, .. } if *f == field),
+                "{err}"
+            );
+        }
+        assert!(sample_spec().validate().is_ok());
+    }
+
+    #[test]
     fn function_definition_matches_the_python_client_shape() {
         let spec = sample_spec();
-        let function = spec
-            .function_definition(
-                "im-123",
-                vec!["st-9".to_owned()],
-                vec![pb::VolumeMount {
-                    volume_id: "vo-1".to_owned(),
-                    mount_path: "/root/.cache/huggingface".to_owned(),
-                    allow_background_commits: true,
-                    read_only: false,
-                }],
-            )
-            .expect("valid spec");
+        let function = sample_function(&spec);
 
         assert_eq!(function.module_name, "amicu_server");
         assert_eq!(function.function_name, "Server");
         assert_eq!(function.implementation_name, "Server.*");
-        assert!(function.mount_ids.is_empty());
+        assert_eq!(function.mount_ids, vec!["mo-client".to_owned()]);
+        assert!(function.mount_client_dependencies);
         assert_eq!(function.image_id, "im-123");
         assert_eq!(function.secret_ids, vec!["st-9".to_owned()]);
         assert_eq!(
@@ -628,7 +900,6 @@ mod tests {
         assert!(function.is_server);
         assert!(function.method_definitions.is_empty());
         assert!(function.method_definitions_set);
-        assert!(!function.mount_client_dependencies);
         assert!(function.experimental_concurrent_cancellations);
         assert!(function.function_serialized.is_empty());
         assert!(function.class_serialized.is_empty());
@@ -672,12 +943,24 @@ mod tests {
     }
 
     #[test]
+    fn object_dependencies_cover_secrets_image_and_volumes_in_deps_order() {
+        let ids: Vec<String> = sample_function(&sample_spec())
+            .object_dependencies
+            .into_iter()
+            .map(|d| d.object_id)
+            .collect();
+        // `_deps(only_explicit_mounts=True)`: secrets, image, volumes — and
+        // explicitly *not* the client mount (`_functions.py:870-889`).
+        assert_eq!(ids, vec!["st-9", "im-123", "vo-1"]);
+    }
+
+    #[test]
     fn a_cpu_only_spec_still_carries_an_empty_gpu_config_and_no_placement() {
         let mut spec = sample_spec();
         spec.gpu = None;
         spec.region = None;
         let function = spec
-            .function_definition("im-1", Vec::new(), Vec::new())
+            .function_definition("im-1", "mo-client", Vec::new(), Vec::new())
             .expect("valid spec");
 
         let gpu = function
@@ -689,15 +972,27 @@ mod tests {
         assert_eq!(gpu.count, 0);
         assert!(function.scheduler_placement.is_none());
         assert!(function.secret_ids.is_empty());
+        // Only the image remains a dependency.
+        assert_eq!(function.object_dependencies.len(), 1);
     }
 
     #[test]
     fn debug_never_reveals_secret_values() {
-        let rendered = format!("{:?}", sample_spec());
+        let mut spec = sample_spec();
+        spec.image
+            .env
+            .insert("PLAIN_ENV".to_owned(), "env-value".to_owned());
+        let rendered = format!("{spec:?}");
+
         assert!(rendered.contains("HF_TOKEN"), "keys stay visible");
+        assert!(rendered.contains("PLAIN_ENV"), "env keys stay visible");
         assert!(
             !rendered.contains("hf_supersecret"),
             "secret value leaked into Debug"
+        );
+        assert!(
+            !rendered.contains("env-value"),
+            "image env value leaked into Debug"
         );
     }
 }

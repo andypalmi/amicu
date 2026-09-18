@@ -10,15 +10,25 @@
 //! 1. `AppGetByDeploymentName` — reuse the app if the name is already
 //!    deployed ([`ModalClient::find_app`]).
 //! 2. `AppCreate` (`APP_STATE_INITIALIZING`) — only when it is not.
-//! 3. `ImageGetOrCreate` with a one-layer Dockerfile ([`ImageSpec`]), then
+//! 3. `AppHeartbeat` every 15 s, in a background task, for the whole of the
+//!    rest of the call (`runner.py:550-555`, `config.py:241`). An app left
+//!    INITIALIZING without heartbeats is reaped server-side, which would
+//!    abort a long image build.
+//! 4. `MountGetOrCreate` for Modal's globally published client-package Mount
+//!    ([`MODAL_CLIENT_MOUNT_NAME`]).
+//! 5. `ImageGetOrCreate` with a one-layer Dockerfile ([`ImageSpec`]), then
 //!    `ImageJoinStreaming` until the build finishes, surfacing build log
 //!    lines through a callback.
-//! 4. `VolumeGetOrCreate` per entry in [`ServerSpec::volumes`].
-//! 5. `SecretGetOrCreate` (anonymous, app-owned) — only when
+//! 6. `VolumeGetOrCreate` per entry in [`ServerSpec::volumes`].
+//! 7. `SecretGetOrCreate` (anonymous, app-owned) — only when
 //!    [`ServerSpec::secret_env`] is non-empty.
-//! 6. `FunctionPrecreate` to reserve the Function id, then `FunctionCreate`
+//! 8. `FunctionPrecreate` to reserve the Function id, then `FunctionCreate`
 //!    with `is_server = true`.
-//! 7. `AppPublish` (`APP_STATE_DEPLOYED`).
+//! 9. `AppPublish` (`APP_STATE_DEPLOYED`).
+//!
+//! Any failure after step 2 sends `AppClientDisconnect` with
+//! `APP_DISCONNECT_REASON_DEPLOYMENT_EXCEPTION` (`runner.py:576-578`), so a
+//! half-built app does not sit in INITIALIZING forever.
 //!
 //! The public URL comes back on `FunctionCreate` as the Function's
 //! `flash_service_urls`; `AppPublish` returns only the dashboard page.
@@ -28,11 +38,21 @@
 //!
 //! Modal's container runtime *is* Python: it imports a module by name and
 //! looks up a class in it. amicu neither ships nor runs Python —
-//! [`render_shim`] renders a ~15-line class as a Rust string and [`ImageSpec`]
-//! bakes it into the image (base64-encoded inside a `RUN`), where
-//! `@modal.enter` starts the real server process with
-//! `subprocess.Popen(argv)` and `@modal.exit` stops it. `argv` is embedded as
-//! a JSON literal and never touches a shell.
+//! [`render_shim`] renders a ~25-line class as a Rust string from the spec's
+//! `argv`/`port`, and [`ImageSpec`] bakes it into the image (base64-encoded
+//! inside a `RUN`). `@modal.enter` starts the real server process with
+//! `subprocess.Popen(argv)`, waits for it to accept connections on `port`, and
+//! raises if it exits first; `@modal.exit` stops it. `argv` is embedded as a
+//! JSON literal and never touches a shell.
+//!
+//! The `modal` package itself is **not** installed into the image: it arrives
+//! at container start from Modal's global client mount
+//! ([`MODAL_CLIENT_MOUNT_NAME`]), with `Function.mount_client_dependencies =
+//! true` — the same arrangement the Python client uses for every image builder
+//! newer than 2024.10 (`_functions.py:964-966`,
+//! `modal_proto/api.proto:1544-1546`). That keeps Modal's own pins (`click`,
+//! `protobuf`, `grpclib`) out of an image like `vllm/vllm-openai`, where they
+//! would risk a dependency conflict.
 //!
 //! # Two hypotheses this crate cannot verify offline
 //!
@@ -41,28 +61,25 @@
 //! only invoke). Two assumptions are therefore load-bearing and provable only
 //! against a real account, which is what `tests/live_deploy.rs` exists for:
 //!
-//! **H1 — a module baked into the image is importable with `mount_ids = []`.**
-//! The Python client always uploads two Mounts: its own package and the
-//! user's source file (`_functions.py:730-733`). amicu sends neither: the
-//! module is written into the image at `/root/amicu_server.py` and `modal`
-//! itself is `pip install`ed there, with `mount_client_dependencies = false`
-//! so the worker expects the client libraries in the image
-//! (`api.proto:1633-1635`, the pre-2024.10 arrangement). This relies on
-//! `/root` — the container's working directory — being on `sys.path` when
-//! `importlib.import_module("amicu_server")` runs
-//! (`_runtime/user_code_imports.py:517`).
-//! *Fallback if it fails:* implement the mount upload path (`MountPutFile` /
-//! `MountGetOrCreate`) and pass real `mount_ids`. That is strictly more work,
-//! not a protocol blocker.
+//! **H1 — the shim module baked into the image is importable.** The Python
+//! client uploads the user's source file as a second Mount
+//! (`_functions.py:730-733`); amicu writes it into the image instead, at
+//! `/root/amicu_server.py`, and sends only Modal's client mount in
+//! `mount_ids`. This relies on `/root` — the container's working directory —
+//! being on `sys.path` when `importlib.import_module("amicu_server")` runs
+//! (`_runtime/user_code_imports.py:517`). Mounting Modal's own package
+//! narrows the hypothesis to exactly this one file.
+//! *Fallback if it fails:* upload the shim as a Mount too (`MountPutFile` +
+//! `MountGetOrCreate` with `files`, `mount.py:571-611`) and add its id to
+//! `mount_ids`. More work, not a protocol blocker.
 //!
 //! **H2 — the `Function` field set for a class-based server is accepted.**
 //! `crate::deploy` cites a Python source line for every non-obvious field, but
 //! server-side validation may require something the client sets implicitly.
-//! The likeliest surprises are the empty `method_definitions` map (correct per
-//! `_partial_function.py`: `@modal.enter`/`@modal.exit` are lifecycle flags,
-//! not interface flags, so a server class contributes no method definitions)
-//! and the absent app heartbeat (`modal deploy` runs an `AppHeartbeat` loop
-//! while the app is INITIALIZING; a short deploy should not need it).
+//! The likeliest surprise is the empty `method_definitions` map — correct per
+//! `_partial_function.py`, where `@modal.enter`/`@modal.exit` are lifecycle
+//! flags rather than interface flags, so a server class contributes no method
+//! definitions at all.
 //! *Fallback if it fails:* the gRPC status names the offending field, and the
 //! fix is a field change here — no architectural change.
 //!
@@ -91,7 +108,7 @@ mod shim;
 
 pub use client::{DEFAULT_ENDPOINT, ENDPOINT_ENV_VAR, Hello, ModalClient};
 pub use credentials::{Credentials, MissingCredential};
-pub use deploy::{Deployment, ServerSpec};
+pub use deploy::{Deployment, MODAL_CLIENT_MOUNT_NAME, ServerSpec};
 pub use error::ModalError;
-pub use image::{IMAGE_BUILDER_VERSION, ImageSpec, MODAL_PACKAGE_SPEC};
+pub use image::{IMAGE_BUILDER_VERSION, ImageSpec};
 pub use shim::{SHIM_CLASS_NAME, SHIM_MODULE_NAME, SHIM_PATH, render_shim};

@@ -2,18 +2,17 @@
 //!
 //! Modal's Python client builds an image as a *chain* of one-command layers:
 //! `Image.from_registry(tag)` emits `["FROM <tag>", …]`
-//! (`modal/image.py:1886-1891` via `_registry_setup_commands` at `:1846-1892`),
+//! (`modal/image.py:1887-1892` via `_registry_setup_commands` at `:1846-1892`),
 //! and every `.entrypoint()` / `.pip_install()` / `.env()` call creates a new
 //! `_Image` whose dockerfile starts with `"FROM base"` and whose `base_images`
-//! map points at the previous layer (`modal/image.py:1708-1719`, `:1016-1022`,
-//! `:2391-2399`). Each layer is a separate `ImageGetOrCreate` round trip.
+//! map points at the previous layer (`modal/image.py:1717`, `:1019`,
+//! `:2393`). Each layer is a separate `ImageGetOrCreate` round trip.
 //!
 //! [`ImageSpec`] collapses that chain into a **single** layer: the commands are
 //! concatenated in the same order the Python client would have produced them,
 //! so the resulting Dockerfile is byte-for-byte what `docker build` would see,
 //! but it costs one RPC instead of four. The only observable difference is
-//! Modal's build cache granularity (a changed pip list invalidates the `ENV`
-//! layer too), which is irrelevant for amicu's single generated image.
+//! Modal's build cache granularity.
 
 use std::collections::BTreeMap;
 
@@ -26,87 +25,99 @@ use crate::shim::SHIM_PATH;
 ///
 /// `modal/image.py:70` lists `"2023.12" | "2024.04" | "2024.10" | "2025.06" |
 /// "PREVIEW"`; the Python client normally reads it from the *environment*
-/// (`modal/image.py:565-566`), which would cost an extra `EnvironmentGetOrCreate`
-/// round trip. amicu pins the newest dated version instead, which matters for
-/// one behaviour: at `> "2024.10"` the builder stops baking Modal's own client
-/// requirements into the image (`modal/image.py:1872-1885`).
+/// (`modal/image.py:565`), which would cost an extra environment lookup. amicu
+/// pins the newest dated version instead, which matters for one behaviour: at
+/// `> "2024.10"` the builder stops baking Modal's own client requirements into
+/// the image (`modal/image.py:1874-1885`) — amicu does not want them there,
+/// because it mounts them at runtime instead (see
+/// [`crate::MODAL_CLIENT_MOUNT_NAME`]).
 pub const IMAGE_BUILDER_VERSION: &str = "2025.06";
 
-/// The `modal` package version installed into the image.
+/// A one-layer container image: a registry base plus pip packages and env vars.
 ///
-/// Because amicu bakes the server module into the image rather than uploading
-/// it as a Mount, the Function is created with `mount_client_dependencies =
-/// false` (see `crate::deploy`), which tells the worker that the client
-/// libraries are "expected to exist in the image itself"
-/// (`modal_proto/api.proto:1633-1635`). So the image must install `modal`
-/// itself — pinned to the same release the vendored proto comes from
-/// (`proto/VENDORED.md`).
-pub const MODAL_PACKAGE_SPEC: &str = "modal==1.3.1";
-
-/// A one-layer container image: a registry base plus pip packages, env vars,
-/// and the generated Python shim.
-#[derive(Debug, Clone)]
+/// The generated Python shim is *not* part of this struct: `deploy_server`
+/// renders it from the [`crate::ServerSpec`]'s `argv`/`port` and passes it to
+/// [`ImageSpec::dockerfile_commands`], so there is exactly one source of truth
+/// for the command the container runs.
+///
+/// `Debug` redacts [`ImageSpec::env`] values (an `ENV` entry is a plausible
+/// place for a token even though [`crate::ServerSpec::secret_env`] is the
+/// intended one).
+#[derive(Clone)]
 pub struct ImageSpec {
     /// Fully qualified registry reference, e.g. `python:3.12-slim` or
-    /// `vllm/vllm-openai:v0.11.0`. **Must already contain Python 3.10-3.13 and
+    /// `vllm/vllm-openai:v0.29.0`. **Must already contain Python 3.10-3.13 and
     /// `pip` on `PATH`**: amicu does not use Modal's `add_python=` path, which
     /// needs a `context_mount_id` pointing at Modal's globally deployed
-    /// python-standalone Mount (`modal/image.py:1930-1938`) — resolving that
-    /// mount is extra RPC surface, and both images amicu targets (the official
-    /// `vllm/vllm-openai` images and `python:*-slim`) ship Python already.
+    /// python-standalone Mount (`modal/image.py:1930-1938`) — extra RPC
+    /// surface, and both images amicu targets (the official `vllm/vllm-openai`
+    /// images and `python:*-slim`) ship Python already.
     pub base_registry_image: String,
-    /// Extra pip packages. `modal` itself is always installed on top of these
-    /// (see [`MODAL_PACKAGE_SPEC`]) and need not be listed.
+    /// Extra pip packages. Modal's own client package is **not** installed
+    /// here — it is mounted at runtime from Modal's global client mount, so
+    /// nothing in this image can dependency-conflict with it.
     pub pip_packages: Vec<String>,
     /// `ENV` entries. Ordered (`BTreeMap`) so the Dockerfile — and therefore
     /// Modal's build cache key — is deterministic.
     pub env: BTreeMap<String, String>,
-    /// The Python module source to write to [`SHIM_PATH`]; see
-    /// [`crate::render_shim`].
-    pub shim_source: String,
+}
+
+impl std::fmt::Debug for ImageSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageSpec")
+            .field("base_registry_image", &self.base_registry_image)
+            .field("pip_packages", &self.pip_packages)
+            // Keys only: an ENV value can carry a token.
+            .field("env", &self.env.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl ImageSpec {
-    /// The `dockerfile_commands` list sent in the `Image` message.
+    /// The `dockerfile_commands` list sent in the `Image` message, with
+    /// `shim_source` written to [`SHIM_PATH`].
     ///
     /// Mirrors, in order, what the Python client emits for
     /// `Image.from_registry(base).entrypoint([]).pip_install(...).env(...)`:
     ///
-    /// * `FROM <base>` — `modal/image.py:1887` (no `COPY`/`RUN` for Modal's own
-    ///   requirements, because [`IMAGE_BUILDER_VERSION`] is `> "2024.10"`:
-    ///   `modal/image.py:1875-1885`).
-    /// * `ENTRYPOINT []` — `modal/image.py:1708-1719`. Clears the base image's
+    /// * `FROM <base>` — `modal/image.py:1888` (and nothing else from
+    ///   `_registry_setup_commands`, because [`IMAGE_BUILDER_VERSION`] is
+    ///   `> "2024.10"`: `modal/image.py:1874-1885`).
+    /// * `ENTRYPOINT []` — `modal/image.py:1717`. Clears the base image's
     ///   entrypoint so Modal's container runtime, not the image's own launcher
-    ///   (`vllm/vllm-openai` ships `ENTRYPOINT ["vllm", "serve"]`), is `PID 1`.
-    /// * `RUN python -m pip install <packages>` — `modal/image.py:1017-1022`,
-    ///   including its `shlex.join(sorted(pkgs))` normalisation.
-    /// * `ENV <k>=<shell-quoted v>` — `modal/image.py:2392-2393`.
-    /// * the shim write, which has no Python-client equivalent: it is a plain
-    ///   `RUN` like `Image.run_commands` would emit (`modal/image.py:1774`).
-    ///   The source is base64-encoded so that no part of it — quotes,
-    ///   newlines, `$`, backticks — is ever interpreted by the build shell.
+    ///   (`vllm/vllm-openai` ships a `vllm serve` entrypoint), is `PID 1`.
+    /// * `RUN python -m pip install <packages>` — `modal/image.py:1019`,
+    ///   including its `shlex.join(sorted(pkgs))` normalisation. Omitted
+    ///   entirely when there are no packages, matching `pip_install`'s early
+    ///   return (`modal/image.py:1007-1008`).
+    /// * `ENV <k>=<shell-quoted v>` — `modal/image.py:2393`.
+    /// * the shim write, which has no Python-client equivalent: a plain `RUN`
+    ///   like `Image.run_commands` emits (`modal/image.py:1754`). The source is
+    ///   base64-encoded so that no part of it — quotes, newlines, `$`,
+    ///   backticks — is ever interpreted by the build shell.
     #[must_use]
-    pub fn dockerfile_commands(&self) -> Vec<String> {
+    pub fn dockerfile_commands(&self, shim_source: &str) -> Vec<String> {
         let mut commands = vec![
             format!("FROM {}", self.base_registry_image),
             "ENTRYPOINT []".to_owned(),
         ];
 
-        let mut packages: Vec<&str> = self.pip_packages.iter().map(String::as_str).collect();
-        packages.push(MODAL_PACKAGE_SPEC);
-        packages.sort_unstable();
-        let joined = packages
-            .into_iter()
-            .map(shell_quote)
-            .collect::<Vec<_>>()
-            .join(" ");
-        commands.push(format!("RUN python -m pip install {joined}"));
+        if !self.pip_packages.is_empty() {
+            let mut packages: Vec<&str> = self.pip_packages.iter().map(String::as_str).collect();
+            packages.sort_unstable();
+            let joined = packages
+                .into_iter()
+                .map(shell_quote)
+                .collect::<Vec<_>>()
+                .join(" ");
+            commands.push(format!("RUN python -m pip install {joined}"));
+        }
 
         for (key, value) in &self.env {
             commands.push(format!("ENV {key}={}", shell_quote(value)));
         }
 
-        let encoded = base64::engine::general_purpose::STANDARD.encode(self.shim_source.as_bytes());
+        let encoded = base64::engine::general_purpose::STANDARD.encode(shim_source.as_bytes());
         commands.push(format!(
             "RUN printf '%s' '{encoded}' | base64 -d > {SHIM_PATH}"
         ));
@@ -120,17 +131,17 @@ impl ImageSpec {
     /// layer rather than a `FROM base` extension — compare
     /// `modal/image.py:582-588`, which fills it from the `base_images` dict
     /// that only the extension helpers populate.
-    pub(crate) fn to_proto(&self) -> pb::Image {
+    pub(crate) fn to_proto(&self, shim_source: &str) -> pb::Image {
         pb::Image {
-            dockerfile_commands: self.dockerfile_commands(),
+            dockerfile_commands: self.dockerfile_commands(shim_source),
             ..pb::Image::default()
         }
     }
 }
 
 /// POSIX-shell quoting, equivalent to Python's `shlex.quote`, which is what
-/// `modal/image.py` uses for pip package names (`:1017`) and `ENV` values
-/// (`:2392`).
+/// `modal/image.py` uses for pip package names (`:1018`) and `ENV` values
+/// (`:2393`).
 fn shell_quote(value: &str) -> String {
     let safe = !value.is_empty()
         && value
@@ -155,20 +166,20 @@ mod tests {
                 ("HF_XET_HIGH_PERFORMANCE".to_owned(), "1".to_owned()),
                 ("VLLM_ARGS".to_owned(), "a b".to_owned()),
             ]),
-            shim_source: "class Server:\n    pass\n".to_owned(),
         }
     }
 
     #[test]
     fn emits_exactly_the_expected_dockerfile() {
-        let commands = spec().dockerfile_commands();
+        let commands = spec().dockerfile_commands("class Server:\n    pass\n");
         assert_eq!(
             commands,
             vec![
                 "FROM python:3.12-slim",
                 "ENTRYPOINT []",
-                // sorted, shlex-quoted, with `modal` folded in
-                "RUN python -m pip install modal==1.3.1 vllm==0.11.0",
+                // sorted and shlex-quoted; no `modal` package — it is mounted
+                // at runtime, not installed here.
+                "RUN python -m pip install vllm==0.11.0",
                 "ENV HF_XET_HIGH_PERFORMANCE=1",
                 "ENV VLLM_ARGS='a b'",
                 "RUN printf '%s' 'Y2xhc3MgU2VydmVyOgogICAgcGFzcwo=' \
@@ -178,11 +189,20 @@ mod tests {
     }
 
     #[test]
+    fn omits_the_pip_layer_when_there_is_nothing_to_install() {
+        let mut spec = spec();
+        spec.pip_packages.clear();
+        spec.env.clear();
+        let commands = spec.dockerfile_commands("x = 1\n");
+        assert_eq!(commands.len(), 3, "{commands:?}");
+        assert!(!commands.iter().any(|c| c.contains("pip install")));
+    }
+
+    #[test]
     fn base64_round_trips_a_shim_full_of_shell_metacharacters() {
-        let mut s = spec();
-        s.shim_source = "ARGV = json.loads(\"[\\\"$(rm -rf /)\\\", \\\"`x`\\\"]\")\n".to_owned();
-        let run = s
-            .dockerfile_commands()
+        let shim = "ARGV = json.loads(\"[\\\"$(rm -rf /)\\\", \\\"`x`\\\"]\")\n";
+        let run = spec()
+            .dockerfile_commands(shim)
             .into_iter()
             .find(|c| c.starts_with("RUN printf"))
             .expect("shim RUN command");
@@ -195,7 +215,7 @@ mod tests {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(encoded)
             .expect("valid base64");
-        assert_eq!(String::from_utf8(decoded).expect("utf-8"), s.shim_source);
+        assert_eq!(String::from_utf8(decoded).expect("utf-8"), shim);
         // Nothing from the source leaked into the shell command verbatim.
         assert!(!run.contains("rm -rf"));
     }
@@ -203,10 +223,20 @@ mod tests {
     #[test]
     fn image_message_has_no_base_images_and_carries_the_commands() {
         let spec = spec();
-        let image = spec.to_proto();
+        let image = spec.to_proto("x = 1\n");
         assert!(image.base_images.is_empty());
         assert!(image.context_files.is_empty());
-        assert_eq!(image.dockerfile_commands, spec.dockerfile_commands());
+        assert_eq!(
+            image.dockerfile_commands,
+            spec.dockerfile_commands("x = 1\n")
+        );
+    }
+
+    #[test]
+    fn debug_never_reveals_env_values() {
+        let rendered = format!("{:?}", spec());
+        assert!(rendered.contains("VLLM_ARGS"), "keys stay visible");
+        assert!(!rendered.contains("a b"), "env value leaked into Debug");
     }
 
     #[test]

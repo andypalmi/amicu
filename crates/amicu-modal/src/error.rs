@@ -44,6 +44,16 @@ pub enum ModalError {
     )]
     Unauthenticated,
 
+    /// A `ServerSpec` field is outside the range Modal's own client validates
+    /// against (`modal/_server.py:22-35`).
+    #[error("invalid Modal server spec: {field} {detail}")]
+    InvalidSpec {
+        /// The offending `ServerSpec` field name.
+        field: &'static str,
+        /// What the constraint is, and where it comes from.
+        detail: String,
+    },
+
     /// A GPU request string (e.g. `"H100:2"`) could not be parsed into a
     /// type/count pair.
     #[error("invalid Modal GPU request {spec:?}; expected e.g. \"H100\" or \"H100:2\"")]

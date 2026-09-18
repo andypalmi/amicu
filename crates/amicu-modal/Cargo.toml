@@ -30,6 +30,10 @@ serde_json = "1"
 # interpreted by the build shell. Same version the rest of the workspace uses
 # (amicu-auth, amicu-server, amicu-store).
 base64 = "0.22"
+# `deploy_server` keeps an AppHeartbeat task alive for the whole deploy (image
+# build included), so a runtime handle and a timer are needed at runtime, not
+# only in tests. tonic already pulls tokio in.
+tokio = { version = "1", features = ["rt", "time"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
