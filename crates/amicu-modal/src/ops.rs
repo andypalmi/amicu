@@ -2,6 +2,7 @@
 //! and listing apps. `crate::deploy` creates/tears one down; this reads it
 //! back. RPCs are cited against `modal-client` v1.3.1 (`proto/VENDORED.md`).
 
+use std::ops::ControlFlow;
 use std::time::Duration;
 
 use crate::client::ModalClient;
@@ -73,9 +74,33 @@ fn map_log_batch(batch: &pb::TaskLogsBatch, last_entry_id: &mut String) -> Vec<L
         .collect()
 }
 
-/// How long one `AppGetLogs` call is held open (`_output.py:600-605`:
-/// `timeout=55`).
-const LOG_POLL_TIMEOUT_SECS: f32 = 55.0;
+/// How long one `AppGetLogs` call is held open while following
+/// (`_output.py:600-605`: `timeout=55`). Python's `get_app_logs_loop` always
+/// tails, so it always sends this value.
+const FOLLOW_LOG_POLL_TIMEOUT_SECS: f32 = 55.0;
+
+/// How long one `AppGetLogs` call is held open for a one-shot (`follow =
+/// false`) request. `AppGetLogsRequest.timeout` (`api.proto:368`, `float
+/// timeout = 2`) is the same field Python always sets to 55.0 — there is no
+/// dedicated "return immediately" mode on this RPC, so a one-shot call still
+/// blocks for however long the server holds the stream open, just for a
+/// shorter deadline than `--follow` uses. **5.0 is unverified against the
+/// real server** beyond "it is the same field Python populates with a
+/// different value"; if Modal enforces its own minimum poll window, one-shot
+/// calls could still take longer than this.
+const ONE_SHOT_LOG_POLL_TIMEOUT_SECS: f32 = 5.0;
+
+/// Picks the `AppGetLogsRequest.timeout` for a [`ModalClient::stream_logs`]
+/// call: the long [`FOLLOW_LOG_POLL_TIMEOUT_SECS`] while following, the
+/// short [`ONE_SHOT_LOG_POLL_TIMEOUT_SECS`] otherwise. Split out from
+/// `stream_logs` so the choice is testable without a socket.
+fn log_poll_timeout_secs(follow: bool) -> f32 {
+    if follow {
+        FOLLOW_LOG_POLL_TIMEOUT_SECS
+    } else {
+        ONE_SHOT_LOG_POLL_TIMEOUT_SECS
+    }
+}
 
 /// Status of one Function inside a deployed app. `running_containers` is
 /// `FunctionStats.num_total_tasks` — the pinned proto has no
@@ -207,26 +232,38 @@ impl ModalClient {
     /// Streams `AppGetLogs` for `app_id`, calling `sink` for each kept
     /// [`LogLine`]; `since_entry_id` resumes past a previously seen entry.
     /// Mirrors `get_app_logs_loop` (`modal/_output.py:543-675`): each call
-    /// is held open for [`LOG_POLL_TIMEOUT_SECS`]; `follow` decides whether
-    /// to reconnect when it ends without `app_done` (Python's helper
-    /// always reconnects, since `modal app logs` always tails — `follow`
-    /// adds a one-shot mode). Propagates the first RPC failure, unlike
-    /// Python's indefinite tail, which silently retries transient errors.
+    /// is held open for [`log_poll_timeout_secs`] (the full follow-mode
+    /// window, or a short one-shot window — see its doc); `follow` decides
+    /// whether to reconnect when a call ends without `app_done` (Python's
+    /// helper always reconnects, since `modal app logs` always tails —
+    /// `follow` adds a one-shot mode). Propagates the first RPC failure,
+    /// unlike Python's indefinite tail, which silently retries transient
+    /// errors.
+    ///
+    /// `sink` returning [`ControlFlow::Break`] stops streaming immediately
+    /// — no more lines are delivered from the batch it broke in and no
+    /// further `AppGetLogs` call is made, unlike Python's `OutputManager`,
+    /// which has no equivalent early-exit.
+    ///
+    /// Unlike Python's default CLI output, which suppresses image-build log
+    /// batches through its `OutputManager`, amicu has no such manager: build
+    /// noise is delivered to `sink` like any other log line.
     pub async fn stream_logs(
         &mut self,
         app_id: &str,
         since_entry_id: Option<String>,
         follow: bool,
-        mut sink: impl FnMut(LogLine),
+        mut sink: impl FnMut(LogLine) -> ControlFlow<()>,
     ) -> Result<(), ModalError> {
         let mut last_entry_id = since_entry_id.unwrap_or_default();
+        let timeout = log_poll_timeout_secs(follow);
 
         loop {
             let mut stream = self
                 .stub()
                 .app_get_logs(pb::AppGetLogsRequest {
                     app_id: app_id.to_owned(),
-                    timeout: LOG_POLL_TIMEOUT_SECS,
+                    timeout,
                     last_entry_id: last_entry_id.clone(),
                     ..pb::AppGetLogsRequest::default()
                 })
@@ -245,7 +282,9 @@ impl ModalClient {
                     break;
                 }
                 for line in map_log_batch(&batch, &mut last_entry_id) {
-                    sink(line);
+                    if sink(line).is_break() {
+                        return Ok(());
+                    }
                 }
             }
             if app_done || !follow {
@@ -423,6 +462,63 @@ mod tests {
         };
         map_log_batch(&server_batch, &mut last_entry_id);
         assert_eq!(last_entry_id, "en-1", "unchanged by an entry_id-less batch");
+    }
+
+    // Both sides of every comparison here are exact literal constants (no
+    // arithmetic that could round differently), so strict float equality is
+    // safe despite `clippy::float_cmp`'s general advice against it.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn log_poll_timeout_is_short_one_shot_and_full_length_when_following() {
+        assert_eq!(log_poll_timeout_secs(false), ONE_SHOT_LOG_POLL_TIMEOUT_SECS);
+        assert_eq!(log_poll_timeout_secs(true), FOLLOW_LOG_POLL_TIMEOUT_SECS);
+        assert_eq!(ONE_SHOT_LOG_POLL_TIMEOUT_SECS, 5.0);
+        assert_eq!(FOLLOW_LOG_POLL_TIMEOUT_SECS, 55.0);
+    }
+
+    /// Mirrors the CLI's sink breaking after a write error: a fake consumer
+    /// that keeps up to `limit` lines and then returns `Break`, applied to
+    /// [`map_log_batch`]'s output the same way `stream_logs` applies a real
+    /// sink to it. Asserts streaming stops exactly at that count rather
+    /// than draining the rest of the batch.
+    #[test]
+    fn sink_break_stops_line_delivery_after_the_requested_count() {
+        let batch = pb::TaskLogsBatch {
+            entry_id: "en-1".to_owned(),
+            items: vec![
+                task_log(pb::FileDescriptor::Stdout, "one\n"),
+                task_log(pb::FileDescriptor::Stdout, "two\n"),
+                task_log(pb::FileDescriptor::Stdout, "three\n"),
+            ],
+            ..pb::TaskLogsBatch::default()
+        };
+        let mut last_entry_id = String::new();
+        let lines = map_log_batch(&batch, &mut last_entry_id);
+        assert_eq!(lines.len(), 3, "sanity: all three lines kept");
+
+        let limit = 2;
+        let mut delivered = Vec::new();
+        let mut sink = |line: LogLine| {
+            if delivered.len() >= limit {
+                return ControlFlow::Break(());
+            }
+            delivered.push(line.text);
+            if delivered.len() >= limit {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        };
+
+        let mut broke = false;
+        for line in lines {
+            if sink(line).is_break() {
+                broke = true;
+                break;
+            }
+        }
+        assert!(broke, "the fake consumer must have stopped early");
+        assert_eq!(delivered, vec!["one\n".to_owned(), "two\n".to_owned()]);
     }
 
     #[test]

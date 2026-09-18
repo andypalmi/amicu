@@ -126,7 +126,10 @@ async fn status_logs_health_and_stop_after_a_cpu_deploy() {
 
     let mut lines = Vec::new();
     client
-        .stream_logs(&deployment.app_id, None, false, |line| lines.push(line))
+        .stream_logs(&deployment.app_id, None, false, |line| {
+            lines.push(line);
+            std::ops::ControlFlow::Continue(())
+        })
         .await
         .expect("stream_logs");
     assert!(!lines.is_empty(), "expected at least one log line");

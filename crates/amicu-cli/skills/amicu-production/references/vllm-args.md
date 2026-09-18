@@ -107,7 +107,7 @@ project-independent `amicu modal` commands, which read `MODAL_TOKEN_ID`/
 ```bash
 amicu modal auth-check              # confirms the token is accepted (ClientHello)
 amicu modal status <app-name>       # app state + each Function's url/running/backlog
-amicu modal logs <app-name>         # prints currently available logs, then returns
+amicu modal logs <app-name>         # one AppGetLogs call (~5s or app-end), then returns
 amicu modal logs <app-name> --follow --since <entry-id>   # tails from a resume point
 amicu modal stop <app-name>         # AppStop; terminates the app's containers
 ```
@@ -118,6 +118,8 @@ published, then `logs` (add `--follow` while watching a cold start), then
 `stop` once you are done - `status` right after `stop` reports no deployment
 by that name (Modal keeps the app itself in a `"stopped"` state internally,
 but its deployment *name* no longer resolves to an id, which is what
-`status` surfaces). `logs` without `--follow` is a single poll: useful in a
-script or right after `status` shows a Function running, not a substitute for
-`--follow` if the app has not produced output yet.
+`status` surfaces). `logs` without `--follow` is a single `AppGetLogs` call
+held open for roughly 5 seconds (or until the app finishes, if sooner) and
+then returns - not instant, and not a substitute for `--follow` if the app
+has not produced output yet. `--follow` instead streams until the app stops
+or you interrupt it (Ctrl-C).

@@ -7,6 +7,7 @@
 //! built here ever touches `Credentials` directly.
 
 use std::io::{self, Write};
+use std::ops::ControlFlow;
 
 use amicu_modal::{AppStatus, Credentials, LogFd, LogLine, ModalClient, ModalError};
 
@@ -110,10 +111,15 @@ fn format_log_line(line: &LogLine) -> String {
     format!("[{fd}] {}", line.text.trim_end_matches('\n'))
 }
 
-/// Prints an app's logs (`ModalClient::stream_logs`). `--follow` tails
-/// indefinitely (until the app finishes or the command is interrupted);
-/// without it, prints whatever is currently available and returns.
-/// `--since` resumes just past a previously seen entry id.
+/// Prints an app's logs (`ModalClient::stream_logs`). `--follow` streams
+/// until the app finishes or the command is interrupted (e.g. Ctrl-C), each
+/// `AppGetLogs` call held open up to 55s before silently reconnecting.
+/// Without `--follow`, it is a single `AppGetLogs` call held open up to a
+/// short 5s (or until the app finishes first) and then returns — not an
+/// instant snapshot, but no longer the ~55s wait a shared follow-mode
+/// timeout used to impose. That 5s value mirrors the same request field
+/// Python always sets to 55.0; it is not otherwise verified against the
+/// server. `--since` resumes just past a previously seen entry id.
 pub(crate) fn logs(
     app_name: &str,
     follow: bool,
@@ -133,7 +139,12 @@ pub(crate) fn logs(
             .stream_logs(&app_id, since, follow, |line| {
                 if let Err(error) = writeln!(out, "{}", format_log_line(&line)) {
                     write_error.get_or_insert(error);
+                    // Stop immediately — e.g. a broken pipe from `| head`
+                    // under `--follow` — instead of letting `stream_logs`
+                    // keep consuming and reconnecting until the app ends.
+                    return ControlFlow::Break(());
                 }
+                ControlFlow::Continue(())
             })
             .await?;
         Ok(true)
