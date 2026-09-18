@@ -261,6 +261,22 @@ fn extra_args_duplicating_typed_flag_is_cap002() {
 }
 
 #[test]
+fn extra_args_duplicating_enforce_eager_is_cap002() {
+    for flag in ["--enforce-eager", "--no-enforce-eager"] {
+        let mut settings = base_settings();
+        settings.extra_args = vec![flag.to_owned()];
+        let a = adapter(safetensors_model(), gpu_hardware(80, 1), LLAMA_8B);
+        let diags = a.validate(&deployment(settings));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == catalog::CAP_EXTRA_ARG_DUPLICATES_TYPED),
+            "{flag} should be flagged as duplicating the typed enforce_eager field"
+        );
+    }
+}
+
+#[test]
 fn extra_args_denylisted_flag_is_cap003() {
     for flag in [
         "--host",

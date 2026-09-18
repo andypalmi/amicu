@@ -352,6 +352,7 @@ fn vllm_runtime_settings(s: &VllmSettings) -> Vec<Setting> {
         kv_cache_dtype,
         max_num_seqs,
         max_num_batched_tokens,
+        enforce_eager,
         extra_args,
         env,
     } = s;
@@ -374,6 +375,9 @@ fn vllm_runtime_settings(s: &VllmSettings) -> Vec<Setting> {
     }
     if let Some(v) = max_num_batched_tokens {
         settings.push(setting("max_num_batched_tokens", v.to_string()));
+    }
+    if let Some(v) = enforce_eager {
+        settings.push(setting("enforce_eager", v.to_string()));
     }
     extend_with_extra_args_and_env(&mut settings, extra_args, env);
     settings

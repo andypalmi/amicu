@@ -220,6 +220,11 @@ resource "deployment" "chat_prod" {
     kv_cache_dtype           = "fp8"
     max_num_seqs             = 4
     max_num_batched_tokens   = 8192
+
+    # amicu-planning#158: unset here (default) so vLLM captures CUDA graphs
+    # for this production deployment; see "Modal fast boot" below for the
+    # opposite choice.
+    # enforce_eager           = false
   }
 }
 ```
@@ -230,7 +235,11 @@ resource "deployment" "chat_prod" {
 llama.cpp's `cache_type_k`/`cache_type_v`. `max_num_seqs` is vLLM's rough
 equivalent of llama.cpp's `parallel_slots`; `max_num_batched_tokens` of
 `batch_size`. vLLM has no sampling-defaults deployment flags, so there is no
-`temperature`/`top_p`/... equivalent on `vllm {}`.
+`temperature`/`top_p`/... equivalent on `vllm {}`. `enforce_eager` (bool,
+amicu-planning#158) toggles CUDA-graph capture at startup: `true` skips it
+for a faster cold start at the cost of steady-state throughput (the trade-off
+a "fast boot" preset wants), `false` forces capture, and unset leaves vLLM's
+own default (captured) in effect.
 
 ## llama.cpp escape hatch: `extra_args` + `env` (amicu-planning#150)
 

@@ -195,6 +195,7 @@ fn deployment(name: &str, f: &Fields) -> Result<Deployment> {
                 kv_cache_dtype: s.opt_enum::<VllmKvCacheDtype>("kv_cache_dtype")?,
                 max_num_seqs: s.opt_u32("max_num_seqs")?,
                 max_num_batched_tokens: s.opt_u32("max_num_batched_tokens")?,
+                enforce_eager: s.opt_bool("enforce_eager")?,
                 extra_args: s.string_vec("extra_args")?,
                 env: match s.opt_block("env") {
                     Some(e) => e.string_map()?,

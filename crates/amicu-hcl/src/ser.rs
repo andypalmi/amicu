@@ -441,6 +441,9 @@ fn vllm_block(s: &VllmSettings) -> Block {
     if let Some(v) = s.max_num_batched_tokens {
         b = b.add_attribute(("max_num_batched_tokens", v));
     }
+    if let Some(v) = s.enforce_eager {
+        b = b.add_attribute(("enforce_eager", v));
+    }
     if !s.extra_args.is_empty() {
         b = b.add_attribute(("extra_args", str_array(&s.extra_args)));
     }
