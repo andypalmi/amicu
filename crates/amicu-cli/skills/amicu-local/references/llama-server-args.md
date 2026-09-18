@@ -31,6 +31,8 @@ reason about behavior and diagnostics.
 | `speculative.p_min` | `--draft-p-min <n>` | Min draft probability, below which drafting stops. |
 | `speculative.n_gpu_layers` | `--n-gpu-layers-draft <n>` | Draft-model layers offloaded to the accelerator. |
 | `build` (model-level: `variant.sha256`) | *(not rendered)* | `build` is a stored/validated-only runtime build pin (amicu-planning#151 PR B); `sha256` verifies the resolved download artifact's checksum in `download_gguf`, before any bytes are fetched - neither appears in argv. |
+| `multimodal.projector` | `--mmproj <value>`/`-mm` | Path or HF-style reference to the mmproj GGUF. A plain string, not a second `model` resource reference; not validated for existence at plan time. |
+| `multimodal.offload` | `--mmproj-offload` (`true`) / `--no-mmproj-offload` (`false`) | Paired bare flags (no value), like `jinja`; llama-server defaults to enabled. `Some(false)` renders `--no-mmproj-offload` explicitly, `None` renders nothing. |
 
 ## Sampling, KV cache, batching, flash-attn, parallel slots (amicu-planning#151)
 
@@ -67,6 +69,32 @@ validated at parse time but do not affect argv:
   `"sha256:"` prefix is stripped, case-insensitively) *before* any bytes are
   fetched; a mismatch fails fast as `LlamaCppError::ChecksumMismatch`
   (`AMICU-CAP-001`) rather than downloading a file already known to be wrong.
+
+## Multimodal projector (amicu-planning#151 PR D)
+
+`multimodal { projector, offload }` backs the `Modality::Vision` capability
+the llama.cpp adapter already declares (`LlamaCppAdapter::capabilities`).
+Both fields are optional and independent. `projector` is always rendered as
+`--mmproj <value>` regardless of whether it looks like a local path or an
+HF-style reference - amicu does not distinguish the two in this PR (no
+`--mmproj-url` handling; that would need a separate field if added later).
+Spellings verified against `tools/server/README.md`/`common/arg.cpp` via
+context7, not guessed - upstream also exposes `-mmu`/`--mmproj-url`,
+`--mmproj-auto`/`--no-mmproj`/`--no-mmproj-auto`, and
+`-mmdev`/`--mmproj-device`, none of which amicu types in this PR; they
+remain available through `extra_args`.
+
+`multimodal {}` is llama.cpp-only: it is only parsed inside a `llama_cpp {}`
+settings block. A `multimodal` block inside `vllm {}` is a structural schema
+error at parse time (`amicu_hcl::de`) rather than a capability diagnostic -
+`VllmSettings` carries no field for it, so nothing would otherwise read (and
+therefore validate) a block placed there.
+
+The plan's `cost_performance.assumptions` gets
+`"multimodal: projector weights not estimated"` whenever the block is
+present: the estimator only sizes the main model's GGUF variant, never the
+projector's, so a multimodal deployment's `estimated_memory` is a strict
+undercount relative to what llama-server will actually allocate.
 
 ### KV-cache estimator
 
@@ -187,9 +215,8 @@ Two deliberate omissions:
 Anything past the typed fields above goes in `extra_args` (raw
 `llama-server` flags, appended verbatim after the typed ones, in declaration
 order) and `env` (process environment variables). See
-`amicu-dsl/references/deployment-examples.md` for a full example
-(speculative decoding, vision projector, chat template - still untyped as of
-amicu-planning#151's PR A).
+`amicu-dsl/references/deployment-examples.md` for a full example (the
+speculative type/ngram knobs remain untyped as of amicu-planning#151 PR D).
 
 Both channels are checked against the same typed-field/denylist tables the
 typed fields themselves use, so amicu-owned settings cannot be silently
@@ -202,7 +229,8 @@ re-asserted:
   `-ctk`/`--cache-type-k`, `-ctv`/`--cache-type-v`, `-b`/`--batch-size`,
   `-ub`/`--ubatch-size`, `-np`/`--parallel`, `-fa`/`--flash-attn`,
   `--chat-template`, `--chat-template-file`, `--jinja`/`--no-jinja`,
-  `--reasoning-format`, and every speculative spelling:
+  `--reasoning-format`, `-mm`/`--mmproj`,
+  `--mmproj-offload`/`--no-mmproj-offload`, and every speculative spelling:
   `--model-draft`/`--spec-draft-model`/`-md`,
   `--spec-draft-n-max`/`--draft-max`/`--draft-n`/`--draft`,
   `--spec-draft-n-min`/`--draft-min`/`--draft-n-min`,
@@ -219,8 +247,9 @@ re-asserted:
   `AMICU-CAP-003`. Most of the new fields follow that same mechanical
   `LLAMA_ARG_<X>` -> `--<x>` rule (e.g. `LLAMA_ARG_TEMP` -> `--temp`,
   `LLAMA_ARG_CACHE_TYPE_K` -> `--cache-type-k`, `LLAMA_ARG_CHAT_TEMPLATE` ->
-  `--chat-template`, `LLAMA_ARG_JINJA` -> `--jinja`), but four don't:
-  `LLAMA_ARG_BATCH` mirrors `--batch-size`, `LLAMA_ARG_UBATCH` mirrors
+  `--chat-template`, `LLAMA_ARG_JINJA` -> `--jinja`, `LLAMA_ARG_MMPROJ` ->
+  `--mmproj`, `LLAMA_ARG_MMPROJ_OFFLOAD` -> `--mmproj-offload`), but four
+  don't: `LLAMA_ARG_BATCH` mirrors `--batch-size`, `LLAMA_ARG_UBATCH` mirrors
   `--ubatch-size`, `LLAMA_ARG_N_PARALLEL` mirrors `--parallel`, and
   `LLAMA_ARG_THINK` mirrors `--reasoning-format` (`common/arg.cpp`'s
   `--reasoning-format` `add_opt` calls `.set_env("LLAMA_ARG_THINK")` -
@@ -244,6 +273,9 @@ re-asserted:
   (amicu-planning#151 PR B) - see above.
 - A `speculative {}` block whose draft `model` is the deployment's own model is
   `AMICU-CAP-007` (amicu-planning#151 PR C) - see above.
+- A `multimodal { ... }` block on the `vllm {}` settings block is a
+  structural schema error at parse time (amicu-planning#151 PR D), not a
+  capability diagnostic - see the "Multimodal projector" section above.
 
 ## Service supervision
 
