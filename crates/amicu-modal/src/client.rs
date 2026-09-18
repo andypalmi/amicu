@@ -34,9 +34,10 @@ impl Hello {
 
 /// An authenticated tonic client for Modal's control-plane gRPC API.
 ///
-/// This PR only wires up `ClientHello` ([`ModalClient::hello`]); the wider
-/// RPC surface is generated (see `crate::pb`) but not yet exposed — later
-/// PRs against `andypalmi/amicu-planning#158` build on this connection.
+/// Besides [`ModalClient::hello`] (the `ClientHello` auth check), the deploy
+/// surface is implemented in `crate::deploy`: `deploy_server`, `find_app`,
+/// and `stop_app`. The rest of Modal's generated RPC surface (see `crate::pb`)
+/// stays unexposed.
 pub struct ModalClient {
     inner: ModalClientClient<InterceptedService<Channel, AuthInterceptor>>,
     endpoint: String,
@@ -78,6 +79,15 @@ impl ModalClient {
     #[must_use]
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    /// The generated tonic stub, for RPC wrappers in sibling modules. Kept
+    /// `pub(crate)` so no caller outside this crate couples to the generated
+    /// types (see `crate::pb`).
+    pub(crate) fn stub(
+        &mut self,
+    ) -> &mut ModalClientClient<InterceptedService<Channel, AuthInterceptor>> {
+        &mut self.inner
     }
 
     /// Calls the `ClientHello` RPC, which is the minimal way to confirm the
