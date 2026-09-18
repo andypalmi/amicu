@@ -11,8 +11,14 @@
 //! connection and interceptor this crate provides.
 //!
 //! Only `amicu-cli` depends on this crate (via the `amicu modal
-//! auth-check` command) — `amicu-api`/`amicu-server`, and therefore the
-//! Docker runtime image, do not.
+//! auth-check` command) — `amicu-api`/`amicu-server` do not, so the
+//! `amicu-server` binary that actually ships in the Docker runtime image
+//! never links it. The Docker *build* is not fully isolated from it,
+//! though: `Dockerfile`'s builder stage runs `cargo chef cook --workspace`,
+//! which does compile this crate's build-dependency graph
+//! (`protoc-bin-vendored`, `tonic-prost-build`) as part of that caching
+//! layer, even though the final `cargo build -p amicu-server` step never
+//! links the crate into the shipped binary.
 
 mod client;
 mod credentials;
