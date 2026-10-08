@@ -1198,6 +1198,47 @@ mod tests {
     }
 
     #[test]
+    fn vllm_enforce_eager_round_trips() {
+        // Some(true), Some(false) and None (field absent) must each survive
+        // a format -> parse round trip, and None must not emit the attribute
+        // at all (see enforce_eager_absent_by_default_omits_attribute).
+        for value in [Some(true), Some(false), None] {
+            let mut g = Graph::new();
+            g.deployments.push(Deployment {
+                id: "dep".into(),
+                model: "phantom_model".into(),
+                hardware_profile: "phantom_hw".into(),
+                runtime: Runtime::Vllm(VllmSettings {
+                    context_length: 32768,
+                    port: 8000,
+                    enforce_eager: value,
+                    ..Default::default()
+                }),
+            });
+            let formatted = format_graph(&g).unwrap();
+            let reparsed = parse_graph(&formatted).unwrap();
+            assert_eq!(g, reparsed, "round trip failed for {value:?}:\n{formatted}");
+        }
+    }
+
+    #[test]
+    fn enforce_eager_absent_by_default_omits_attribute() {
+        let mut g = Graph::new();
+        g.deployments.push(Deployment {
+            id: "dep".into(),
+            model: "phantom_model".into(),
+            hardware_profile: "phantom_hw".into(),
+            runtime: Runtime::Vllm(VllmSettings {
+                context_length: 32768,
+                port: 8000,
+                ..Default::default()
+            }),
+        });
+        let formatted = format_graph(&g).unwrap();
+        assert!(!formatted.contains("enforce_eager"));
+    }
+
+    #[test]
     fn model_shape_metadata_round_trips() {
         let mut g = graph_with_model("m");
         g.models[0].n_layers = Some(32);

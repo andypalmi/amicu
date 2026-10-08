@@ -26,7 +26,11 @@ use amicu_core::resource::VllmSettings;
 ///
 /// Unlike llama.cpp, current stable vLLM `serve` CLI docs (`vllm serve
 /// --help`, `docs.vllm.ai/en/stable/cli/serve`) document no short aliases for
-/// any of these flags, so every entry here is a single long spelling.
+/// any of these flags, so every entry here is a long spelling - but the list
+/// is flat, not one-entry-per-field: a boolean field rendered as a paired
+/// bare-flag toggle (see [`VllmSettings::enforce_eager`]) contributes both
+/// its positive and `--no-` spelling as separate entries here, since either
+/// one alone in `extra_args` would duplicate what that field renders.
 pub(crate) const TYPED_FLAGS: &[&str] = &[
     "--model",
     "--port",
@@ -36,6 +40,8 @@ pub(crate) const TYPED_FLAGS: &[&str] = &[
     "--kv-cache-dtype",
     "--max-num-seqs",
     "--max-num-batched-tokens",
+    "--enforce-eager",
+    "--no-enforce-eager",
 ];
 
 /// Whether `flag` is the flag any typed field renders (see [`TYPED_FLAGS`]).
@@ -93,10 +99,11 @@ pub(crate) const DENYLISTED_ENV_KEYS: &[&str] = &[
 ///
 /// Typed flags are emitted first (`vllm serve <model>`, `--port`, `--host
 /// 127.0.0.1`, `--max-model-len`, then any set parallelism/memory/KV-cache/
-/// batching field in field-declaration order), then `settings.extra_args`
-/// verbatim, in declaration order - it is argv order. Duplicate/denylisted
-/// flags are caught as diagnostics before this ever runs (`crate::adapter`);
-/// this function itself renders whatever it is given.
+/// batching/eager-mode field in field-declaration order), then
+/// `settings.extra_args` verbatim, in declaration order - it is argv order.
+/// Duplicate/denylisted flags are caught as diagnostics before this ever
+/// runs (`crate::adapter`); this function itself renders whatever it is
+/// given.
 ///
 /// Returns `(argv, text)`: `argv` is the real argument vector (`argv[0]` =
 /// `vllm`) that supervisors exec directly, and `text` is a shell-quoted join
@@ -138,6 +145,13 @@ pub fn render_command(model_reference: &str, settings: &VllmSettings) -> (Vec<St
     if let Some(v) = settings.max_num_batched_tokens {
         argv.push("--max-num-batched-tokens".to_owned());
         argv.push(v.to_string());
+    }
+    if let Some(v) = settings.enforce_eager {
+        argv.push(if v {
+            "--enforce-eager".to_owned()
+        } else {
+            "--no-enforce-eager".to_owned()
+        });
     }
     argv.extend(settings.extra_args.iter().cloned());
     let text = shell_join(&argv);
@@ -266,11 +280,41 @@ mod tests {
     #[test]
     fn extra_args_appended_verbatim_after_typed_flags() {
         let settings = VllmSettings {
-            extra_args: vec!["--enforce-eager".to_owned()],
+            extra_args: vec!["--disable-log-stats".to_owned()],
             ..base_settings()
         };
         let (argv, _) = render_command("m", &settings);
-        assert_eq!(argv.last().map(String::as_str), Some("--enforce-eager"));
+        assert_eq!(argv.last().map(String::as_str), Some("--disable-log-stats"));
+    }
+
+    #[test]
+    fn renders_enforce_eager_true() {
+        let settings = VllmSettings {
+            enforce_eager: Some(true),
+            ..base_settings()
+        };
+        let (argv, _) = render_command("m", &settings);
+        assert!(argv.iter().any(|a| a == "--enforce-eager"));
+        assert!(!argv.iter().any(|a| a == "--no-enforce-eager"));
+    }
+
+    #[test]
+    fn renders_enforce_eager_false() {
+        let settings = VllmSettings {
+            enforce_eager: Some(false),
+            ..base_settings()
+        };
+        let (argv, _) = render_command("m", &settings);
+        assert!(argv.iter().any(|a| a == "--no-enforce-eager"));
+        assert!(!argv.iter().any(|a| a == "--enforce-eager"));
+    }
+
+    #[test]
+    fn renders_neither_enforce_eager_flag_when_unset() {
+        let settings = base_settings();
+        let (argv, _) = render_command("m", &settings);
+        assert!(!argv.iter().any(|a| a == "--enforce-eager"));
+        assert!(!argv.iter().any(|a| a == "--no-enforce-eager"));
     }
 
     #[test]
@@ -288,6 +332,7 @@ mod tests {
             kv_cache_dtype: Some(VllmKvCacheDtype::Auto),
             max_num_seqs: Some(1),
             max_num_batched_tokens: Some(1),
+            enforce_eager: Some(true),
             env: BTreeMap::new(),
             ..base_settings()
         };

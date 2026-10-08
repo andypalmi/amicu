@@ -385,6 +385,20 @@ pub struct VllmSettings {
     /// `batch_size`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_num_batched_tokens: Option<u32>,
+    /// Eager-mode toggle (`--enforce-eager`/`--no-enforce-eager`, amicu-planning#158):
+    /// a paired bare-flag toggle, not a value-having flag, following the
+    /// same shape as [`LlamaCppSettings::jinja`] - confirmed against vLLM's
+    /// `EngineArgs`/`FlexibleArgumentParser` (`get_kwargs`), which assigns
+    /// `argparse.BooleanOptionalAction` to every plain `bool` dataclass
+    /// field, auto-generating the `--no-<name>` negation alongside
+    /// `--<name>`. `Some(true)` renders `--enforce-eager` (CUDA-graph
+    /// capture is skipped entirely, so the server finishes starting faster
+    /// at the cost of per-request throughput); `Some(false)` renders
+    /// `--no-enforce-eager` (forces graph capture even if some inherited
+    /// environment/config default would skip it); `None` renders nothing,
+    /// leaving vLLM's own default (graphs captured) in effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce_eager: Option<bool>,
     /// Raw vLLM CLI flags appended verbatim by the vLLM renderer
     /// (amicu-planning#150; the renderer itself ships separately). See
     /// [`LlamaCppSettings::extra_args`].
