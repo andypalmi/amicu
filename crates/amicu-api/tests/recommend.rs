@@ -169,9 +169,9 @@ async fn recommend_pro_returns_full_transparent_report() {
     assert_eq!(primary["advisory"], true);
     // Full transparency: evidence, rejected alternatives, suggested changes, and
     // a confidence band all cross the wire.
-    assert!(!primary["evidence"].as_array().unwrap().is_empty());
-    assert!(!primary["rejected"].as_array().unwrap().is_empty());
-    assert!(!primary["changes"].as_array().unwrap().is_empty());
+    assert_ne!(primary["evidence"].as_array().unwrap().len(), 0);
+    assert_ne!(primary["rejected"].as_array().unwrap().len(), 0);
+    assert_ne!(primary["changes"].as_array().unwrap().len(), 0);
     assert_eq!(primary["confidence"], "high");
     let ev = &primary["evidence"][0];
     assert!(ev["metric"].is_string());

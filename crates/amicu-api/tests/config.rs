@@ -260,7 +260,7 @@ async fn create_canonicalizes_content_and_returns_201() {
     assert!(!content.contains("\"model\"    \"m\""));
     let graph = amicu_hcl::parse_graph(content).expect("canonical content re-parses");
     assert_eq!(graph.models.len(), 1);
-    assert!(!body["content_sha256"].as_str().unwrap().is_empty());
+    assert_ne!(body["content_sha256"].as_str().unwrap(), "");
 
     // It is immediately fetchable by id.
     let (status, fetched) = send(&app, get(&format!("/configs/{id}"), Some(&token))).await;

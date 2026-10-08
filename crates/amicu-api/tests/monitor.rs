@@ -197,8 +197,8 @@ async fn monitor_pro_returns_metrics_estimate_and_suggestions() {
     assert!(!recs.is_empty(), "Pro should see advisory suggestions");
     let primary = &recs[0];
     assert_eq!(primary["advisory"], true);
-    assert!(!primary["evidence"].as_array().unwrap().is_empty());
-    assert!(!primary["changes"].as_array().unwrap().is_empty());
+    assert_ne!(primary["evidence"].as_array().unwrap().len(), 0);
+    assert_ne!(primary["changes"].as_array().unwrap().len(), 0);
     assert!(primary["confidence"].is_string());
 }
 

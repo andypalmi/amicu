@@ -202,7 +202,7 @@ async fn unconfigured_drain_is_503_for_everyone() {
         0,
         "nothing may be drained while disabled"
     );
-    assert!(mailer.delivered().is_empty());
+    assert_eq!(mailer.delivered().len(), 0);
 }
 
 #[tokio::test]
