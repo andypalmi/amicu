@@ -13,3 +13,12 @@ allowBuilds:
   esbuild: true
   unrs-resolver: true
   workerd: true
+# Ignore GHSA-vfj7-8cjw-p6xm (braces 3.0.3, stack-exhaustion DoS via deeply
+# nested patterns). No patched braces release exists (3.0.3 is the latest and
+# the advisory lists no fix). It is reachable only through the dev-only lint
+# chain eslint-config-next -> @next/eslint-plugin-next -> fast-glob 3.3.1 ->
+# micromatch -> braces. Remove this when braces >=3.0.4 is published or
+# eslint-config-next drops fast-glob 3.3.1.
+audit:
+  ignore:
+    - GHSA-vfj7-8cjw-p6xm
