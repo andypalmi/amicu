@@ -204,9 +204,12 @@ dependencies = [
 name = "amicu-modal"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "prost",
  "prost-types",
  "protoc-bin-vendored",
+ "reqwest 0.13.4",
+ "serde_json",
  "thiserror",
  "tokio",
  "tonic",

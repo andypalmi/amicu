@@ -44,6 +44,38 @@ pub enum ModalError {
     )]
     Unauthenticated,
 
+    /// A `ServerSpec` field is outside the range Modal's own client validates
+    /// against (`modal/_server.py:22-35`).
+    #[error("invalid Modal server spec: {field} {detail}")]
+    InvalidSpec {
+        /// The offending `ServerSpec` field name.
+        field: &'static str,
+        /// What the constraint is, and where it comes from.
+        detail: String,
+    },
+
+    /// A GPU request string (e.g. `"H100:2"`) could not be parsed into a
+    /// type/count pair.
+    #[error("invalid Modal GPU request {spec:?}; expected e.g. \"H100\" or \"H100:2\"")]
+    InvalidGpu {
+        /// The offending request string.
+        spec: String,
+    },
+
+    /// Modal's image builder did not finish successfully.
+    #[error("Modal image build for {image_id} failed: {detail}")]
+    ImageBuild {
+        /// The image id Modal assigned (`im-…`).
+        image_id: String,
+        /// Modal's failure text, or a pointer at the build logs.
+        detail: String,
+    },
+
+    /// `FunctionCreate` succeeded but returned no server endpoint, so there is
+    /// nothing to send requests to.
+    #[error("Modal created the server function but returned no endpoint URL")]
+    MissingServerUrl,
+
     /// An RPC returned a non-OK, non-UNAUTHENTICATED gRPC status.
     #[error("Modal RPC {rpc} failed: {status}")]
     Rpc {
