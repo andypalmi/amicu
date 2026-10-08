@@ -119,12 +119,12 @@ async fn config_create_get_append_and_list_versions() {
             .expect("get_current unknown")
             .is_none()
     );
-    assert!(
+    assert_eq!(
         store
             .list_versions(WS, unknown)
             .await
-            .expect("list_versions unknown")
-            .is_empty()
+            .expect("list_versions unknown"),
+        Vec::new()
     );
     assert!(
         store
@@ -275,12 +275,12 @@ async fn config_is_invisible_to_another_workspace() {
             .expect("cross-tenant get_current")
             .is_none()
     );
-    assert!(
+    assert_eq!(
         store
             .list_versions(other, created.id)
             .await
-            .expect("cross-tenant list_versions")
-            .is_empty()
+            .expect("cross-tenant list_versions"),
+        Vec::new()
     );
     assert!(
         !store

@@ -114,8 +114,8 @@ mod tests {
     async fn identity_cipher_round_trips_empty_input() {
         let cipher = IdentityCipher;
         let ciphertext = cipher.encrypt(&[]).await.unwrap();
-        assert!(ciphertext.is_empty());
+        assert_eq!(ciphertext, Vec::<u8>::new());
         let recovered = cipher.decrypt(&ciphertext).await.unwrap();
-        assert!(recovered.is_empty());
+        assert_eq!(recovered, Vec::<u8>::new());
     }
 }

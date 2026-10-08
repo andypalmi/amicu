@@ -330,7 +330,7 @@ mod residency_tests {
     fn region_jurisdiction_within_allowlist_is_ok() {
         let mut g = graph_with(hw("aws", Some("eu-central-1")));
         g.data_classes.push(data_class(&[Residency::Eu]));
-        assert!(codes(&g).is_empty());
+        assert_eq!(codes(&g), Vec::<String>::new());
     }
 
     #[test]
@@ -339,14 +339,14 @@ mod residency_tests {
         // and the residency constraint cannot be proven violated.
         let mut g = graph_with(hw("local_apple", Some("cupertino")));
         g.data_classes.push(data_class(&[Residency::Eu]));
-        assert!(codes(&g).is_empty());
+        assert_eq!(codes(&g), Vec::<String>::new());
     }
 
     #[test]
     fn missing_region_is_not_flagged() {
         let mut g = graph_with(hw("aws", None));
         g.data_classes.push(data_class(&[Residency::Eu]));
-        assert!(codes(&g).is_empty());
+        assert_eq!(codes(&g), Vec::<String>::new());
     }
 
     #[test]
@@ -382,13 +382,13 @@ mod residency_tests {
         g.data_classes.push(data_class(&[Residency::Eu]));
         g.governance_rules
             .push(rule(RuleEffect::Allow, &["aws"], &["eu-central-1"]));
-        assert!(codes(&g).is_empty());
+        assert_eq!(codes(&g), Vec::<String>::new());
     }
 
     #[test]
     fn empty_allowlists_permit_everything() {
         let g = graph_with(hw("anything", Some("anywhere")));
-        assert!(codes(&g).is_empty());
+        assert_eq!(codes(&g), Vec::<String>::new());
     }
 
     #[test]
@@ -396,7 +396,7 @@ mod residency_tests {
         let mut g = Graph::new();
         g.deployments.push(deployment());
         g.data_classes.push(data_class(&[Residency::Eu]));
-        assert!(codes(&g).is_empty());
+        assert_eq!(codes(&g), Vec::<String>::new());
     }
 }
 

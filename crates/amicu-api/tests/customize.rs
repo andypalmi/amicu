@@ -236,7 +236,7 @@ async fn round_trip_unchanged_candidate_plans_empty_and_returns_valid_hcl() {
 
     // The returned HCL is non-empty and round-trips through the parser again.
     let response_hcl = body["hcl"].as_str().expect("hcl string");
-    assert!(!response_hcl.is_empty());
+    assert_ne!(response_hcl, "");
     amicu_hcl::parse_graph(response_hcl).expect("response hcl re-parses");
 }
 
@@ -270,7 +270,7 @@ async fn dangling_reference_edit_returns_422_with_no_plan() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {body}");
     assert!(body.get("plan").is_none(), "plan should be absent: {body}");
     assert!(!body["report"]["valid"].as_bool().unwrap_or(true));
-    assert!(!body["report"]["diagnostics"].as_array().unwrap().is_empty());
+    assert_ne!(body["report"]["diagnostics"].as_array().unwrap().len(), 0);
 }
 
 #[tokio::test]
@@ -291,7 +291,7 @@ async fn syntactically_broken_hcl_returns_422_with_diagnostics() {
     assert!(body.get("plan").is_none(), "plan should be absent: {body}");
     assert!(!body["report"]["valid"].as_bool().unwrap_or(true));
     let diagnostics = body["report"]["diagnostics"].as_array().expect("array");
-    assert!(!diagnostics.is_empty());
+    assert_ne!(diagnostics.len(), 0);
     assert_eq!(
         diagnostics[0]["code"].as_str().unwrap(),
         "AMICU-PARSE-002",
