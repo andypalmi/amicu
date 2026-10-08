@@ -64,16 +64,16 @@ mod tests {
     #[test]
     fn all_nine_kinds_are_present() {
         let graph = parse_graph(SAMPLE).unwrap();
-        assert!(!graph.models.is_empty());
-        assert!(!graph.hardware_profiles.is_empty());
-        assert!(!graph.deployments.is_empty());
-        assert!(!graph.routing_policies.is_empty());
-        assert!(!graph.data_classes.is_empty());
-        assert!(!graph.governance_rules.is_empty());
-        assert!(!graph.budgets.is_empty());
-        assert!(!graph.tenants.is_empty());
-        assert!(!graph.use_cases.is_empty());
-        assert!(graph.missing_references().is_empty());
+        assert_ne!(graph.models, Vec::new());
+        assert_ne!(graph.hardware_profiles, Vec::new());
+        assert_ne!(graph.deployments, Vec::new());
+        assert_ne!(graph.routing_policies, Vec::new());
+        assert_ne!(graph.data_classes, Vec::new());
+        assert_ne!(graph.governance_rules, Vec::new());
+        assert_ne!(graph.budgets, Vec::new());
+        assert_ne!(graph.tenants, Vec::new());
+        assert_ne!(graph.use_cases, Vec::new());
+        assert_eq!(graph.missing_references(), Vec::new());
     }
 
     #[test]
@@ -512,13 +512,13 @@ mod tests {
     #[test]
     fn amicu_allow_comment_suppresses_the_warning() {
         let src = "description = \"Remember to rotate AKIAIOSFODNN7EXAMPLE before shipping\" # amicu:allow\n";
-        assert!(scan_secret_leaks(src).is_empty());
+        assert_eq!(scan_secret_leaks(src), Vec::new());
     }
 
     #[test]
     fn normal_free_text_value_does_not_warn() {
         let src = "description = \"Customer PII must stay on EU infrastructure.\"\n";
-        assert!(scan_secret_leaks(src).is_empty());
+        assert_eq!(scan_secret_leaks(src), Vec::new());
     }
 
     #[test]
@@ -577,7 +577,7 @@ mod tests {
         // in a secret-designated field), but even scanned as raw text its
         // URI-shaped argument should not trip the entropy heuristic.
         let src = "api_key = secret(\"vault://kv/openai#api_key\")\n";
-        assert!(scan_secret_leaks(src).is_empty());
+        assert_eq!(scan_secret_leaks(src), Vec::new());
     }
 
     // --- amicu-planning#150: runtime escape hatch (extra_args / env) ---
@@ -1128,7 +1128,7 @@ mod tests {
     #[test]
     fn gguf_variant_sha256_is_optional() {
         let g = graph_with_model("m");
-        assert!(g.models[0].variants.is_empty());
+        assert_eq!(g.models[0].variants, Vec::new());
     }
 
     #[test]
@@ -1195,6 +1195,47 @@ mod tests {
             let reparsed = parse_graph(&formatted).unwrap();
             assert_eq!(g, reparsed, "round trip failed for {dtype:?}:\n{formatted}");
         }
+    }
+
+    #[test]
+    fn vllm_enforce_eager_round_trips() {
+        // Some(true), Some(false) and None (field absent) must each survive
+        // a format -> parse round trip, and None must not emit the attribute
+        // at all (see enforce_eager_absent_by_default_omits_attribute).
+        for value in [Some(true), Some(false), None] {
+            let mut g = Graph::new();
+            g.deployments.push(Deployment {
+                id: "dep".into(),
+                model: "phantom_model".into(),
+                hardware_profile: "phantom_hw".into(),
+                runtime: Runtime::Vllm(VllmSettings {
+                    context_length: 32768,
+                    port: 8000,
+                    enforce_eager: value,
+                    ..Default::default()
+                }),
+            });
+            let formatted = format_graph(&g).unwrap();
+            let reparsed = parse_graph(&formatted).unwrap();
+            assert_eq!(g, reparsed, "round trip failed for {value:?}:\n{formatted}");
+        }
+    }
+
+    #[test]
+    fn enforce_eager_absent_by_default_omits_attribute() {
+        let mut g = Graph::new();
+        g.deployments.push(Deployment {
+            id: "dep".into(),
+            model: "phantom_model".into(),
+            hardware_profile: "phantom_hw".into(),
+            runtime: Runtime::Vllm(VllmSettings {
+                context_length: 32768,
+                port: 8000,
+                ..Default::default()
+            }),
+        });
+        let formatted = format_graph(&g).unwrap();
+        assert!(!formatted.contains("enforce_eager"));
     }
 
     #[test]
@@ -1271,7 +1312,7 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("GGML_CUDA_DISABLE_GRAPHS".to_string(), "1".to_string());
         let g = llama_cpp_deployment_with(Vec::new(), env);
-        assert!(scan_runtime_env_secrets(&g).is_empty());
+        assert_eq!(scan_runtime_env_secrets(&g), Vec::new());
     }
 
     // --- amicu-planning#151 PR D: multimodal projector block ---------------
@@ -1550,7 +1591,7 @@ mod tests {
         assert_eq!(spec.model.as_str(), "draft");
         assert_eq!(spec.n_max, Some(8));
         // A real edge, resolved against the graph's models.
-        assert!(graph.missing_references().is_empty());
+        assert_eq!(graph.missing_references(), Vec::new());
     }
 
     #[test]

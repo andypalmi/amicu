@@ -17,6 +17,7 @@ diagnostics.
 | `kv_cache_dtype` | `--kv-cache-dtype <auto\|fp8\|fp8_e5m2\|fp8_e4m3>` | KV-cache quantization; vLLM's own value set (distinct from llama.cpp's `cache_type_k`/`cache_type_v`). |
 | `max_num_seqs` | `--max-num-seqs <n>` | Maximum concurrent sequences; vLLM's rough equivalent of llama.cpp's `parallel_slots`. |
 | `max_num_batched_tokens` | `--max-num-batched-tokens <n>` | Maximum batched tokens per iteration; vLLM's rough equivalent of llama.cpp's `batch_size`. |
+| `enforce_eager` | `Some(true)` → `--enforce-eager`; `Some(false)` → `--no-enforce-eager`; `None` → nothing | Disables CUDA-graph capture at startup when `true` (amicu-planning#158). Trade-off: `true` skips graph capture entirely, so the server finishes starting faster (fast boot) at the cost of per-request throughput once serving; `false` forces graph capture even over an inherited default that would skip it; unset leaves vLLM's own default (graphs captured) in effect. |
 
 No typed `dtype` (model weight dtype) field exists yet in `VllmSettings` - use
 `extra_args` (`--dtype bfloat16`, etc.) until it is promoted to a typed field.
@@ -40,9 +41,10 @@ flags, appended verbatim after the typed ones, in declaration order) and
 
 - A flag that duplicates a typed field's flag (`--port`, `--max-model-len`,
   `--tensor-parallel-size`, `--gpu-memory-utilization`, `--kv-cache-dtype`,
-  `--max-num-seqs`, `--max-num-batched-tokens`, or the model itself) is
-  `AMICU-CAP-002`. Current stable vLLM `serve` CLI docs document no short
-  aliases for any of these, unlike llama.cpp.
+  `--max-num-seqs`, `--max-num-batched-tokens`, `--enforce-eager`/
+  `--no-enforce-eager`, or the model itself) is `AMICU-CAP-002`. Current
+  stable vLLM `serve` CLI docs document no short aliases for any of these,
+  unlike llama.cpp.
 - A flag on the fixed denylist - `--host` (amicu owns the bind address),
   `--api-key` (puts secret material directly into argv), `--ssl-keyfile`/
   `--ssl-certfile` (amicu does not manage TLS termination for locally

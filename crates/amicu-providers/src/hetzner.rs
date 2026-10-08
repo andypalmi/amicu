@@ -675,7 +675,7 @@ mod tests {
     fn new_admits_only_eu_regions() {
         let caps = HetznerProvider::new().capabilities();
         assert_eq!(caps.provider, AdapterId::new("hetzner"));
-        assert!(!caps.regions.is_empty());
+        assert_ne!(caps.regions, Vec::new());
         // Every admitted region is EU...
         assert!(caps.regions.iter().all(Region::is_eu));
         // ...and the known EU data centers are present.

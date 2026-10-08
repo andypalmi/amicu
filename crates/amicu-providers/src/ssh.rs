@@ -386,7 +386,7 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_success());
-        assert!(out.stdout.is_empty());
+        assert_eq!(out.stdout.len(), 0);
     }
 
     #[tokio::test]

@@ -921,7 +921,7 @@ mod in_memory_tests {
             .expect("create in A");
         // B cannot see A's config by id, and A's config does not appear in B's list.
         assert!(store.get_current(ws_b, a.id).await.expect("get").is_none());
-        assert!(store.list(ws_b).await.expect("list B").is_empty());
+        assert_eq!(store.list(ws_b).await.expect("list B"), Vec::new());
         // The name is free in B (no cross-tenant uniqueness collision).
         store
             .create(ws_b, "shared-name", "b", None, None)

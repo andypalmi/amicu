@@ -3,7 +3,23 @@ packages:
   - packages/*
 overrides:
   js-yaml: ">=4.3.2"
+  undici@>=7.0.0 <7.29.1: ">=7.29.1 <8"
+  brace-expansion@<2: ">=1.1.20 <2"
+  brace-expansion@>=2 <3: ">=2.1.6 <3"
+  brace-expansion@>=5 <6: ">=5.0.11 <6"
+  source-map-js@<1.2.2: ">=1.2.2 <2"
+  sharp@<0.35.5: ">=0.35.5 <0.36"
 allowBuilds:
   esbuild: true
   unrs-resolver: true
   workerd: true
+# Ignore GHSA-vfj7-8cjw-p6xm (braces 3.0.3, stack-exhaustion DoS via deeply
+# nested patterns). No patched braces release exists (3.0.3 is the latest and
+# the advisory lists no fix). It is reachable only through the lint toolchain
+# (packages/config -> eslint-config-next -> @next/eslint-plugin-next ->
+# fast-glob 3.3.1 -> micromatch -> braces), which is never imported by built
+# app code. Remove this when braces >=3.0.4 is published or
+# eslint-config-next drops fast-glob 3.3.1.
+audit:
+  ignore:
+    - GHSA-vfj7-8cjw-p6xm
