@@ -97,3 +97,31 @@ Health is checked against `GET /health` on the configured port.
   KV-cache and better throughput.
 - Quantized safetensors (e.g. AWQ/GPTQ) reduce VRAM at some quality cost; see
   amicu-model-selection for the trade-off.
+
+## Testing a Modal deployment (amicu-planning#158)
+
+Modal (modal.com) is a no-Python-on-the-client GPU rental target reached over
+gRPC, not an `amicu apply` runtime yet (HCL wiring is a separate,
+not-yet-merged PR) - today it is exercised entirely through the
+project-independent `amicu modal` commands, which read `MODAL_TOKEN_ID`/
+`MODAL_TOKEN_SECRET` from the environment and never accept them as flags:
+
+```bash
+amicu modal auth-check              # confirms the token is accepted (ClientHello)
+amicu modal status <app-name>       # app state + each Function's url/running/backlog
+amicu modal logs <app-name>         # one AppGetLogs call (~5s or app-end), then returns
+amicu modal logs <app-name> --follow --since <entry-id>   # tails from a resume point
+amicu modal stop <app-name>         # AppStop; terminates the app's containers
+```
+
+A typical check-in-on-a-deploy loop: `auth-check` first if anything looks
+wrong, then `status` to see whether the Function is up and what URL it
+published, then `logs` (add `--follow` while watching a cold start), then
+`stop` once you are done - `status` right after `stop` reports no deployment
+by that name (Modal keeps the app itself in a `"stopped"` state internally,
+but its deployment *name* no longer resolves to an id, which is what
+`status` surfaces). `logs` without `--follow` is a single `AppGetLogs` call
+held open for roughly 5 seconds (or until the app finishes, if sooner) and
+then returns - not instant, and not a substitute for `--follow` if the app
+has not produced output yet. `--follow` instead streams until the app stops
+or you interrupt it (Ctrl-C).

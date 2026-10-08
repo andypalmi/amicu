@@ -95,6 +95,27 @@ enum ModalCommand {
     /// environment; never accepts them as flags, so the secret cannot
     /// appear in shell history or `ps`.
     AuthCheck,
+    /// Show a deployed app's state and its Functions' live stats.
+    Status {
+        /// The app's deployment name.
+        app_name: String,
+    },
+    /// Print an app's logs.
+    Logs {
+        /// The app's deployment name.
+        app_name: String,
+        /// Keep tailing after the currently available logs are printed.
+        #[arg(long)]
+        follow: bool,
+        /// Resume just past this log entry id instead of from the start.
+        #[arg(long)]
+        since: Option<String>,
+    },
+    /// Stop a deployed app, terminating its containers.
+    Stop {
+        /// The app's deployment name.
+        app_name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -165,8 +186,16 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
         return commands::skill::export(*target, path.as_deref(), out);
     }
     if let Command::Modal { command } = &cli.command {
-        let ModalCommand::AuthCheck = command;
-        return commands::modal::auth_check(out);
+        return match command {
+            ModalCommand::AuthCheck => commands::modal::auth_check(out),
+            ModalCommand::Status { app_name } => commands::modal::status(app_name, out),
+            ModalCommand::Logs {
+                app_name,
+                follow,
+                since,
+            } => commands::modal::logs(app_name, *follow, since.clone(), out),
+            ModalCommand::Stop { app_name } => commands::modal::stop(app_name, out),
+        };
     }
 
     let project = Project::discover()?;
