@@ -725,12 +725,9 @@ async fn invite_accept_binds_membership_to_the_invites_workspace_and_role() {
     ));
 
     // The pending list no longer shows the accepted invite.
-    assert!(
-        invites
-            .list_pending(ws)
-            .await
-            .expect("list pending")
-            .is_empty()
+    assert_eq!(
+        invites.list_pending(ws).await.expect("list pending"),
+        Vec::new()
     );
 }
 
@@ -952,7 +949,7 @@ async fn invite_revoke_is_authorized_workspace_scoped_and_audited() {
         .await
         .expect("owner revokes");
     // Gone from the pending list, and the token no longer redeems.
-    assert!(invites.list_pending(ws).await.expect("pending").is_empty());
+    assert_eq!(invites.list_pending(ws).await.expect("pending"), Vec::new());
     let joiner = seed_user(&users).await;
     assert!(matches!(
         invites
@@ -1334,7 +1331,7 @@ async fn org_console_audited_mutations_recheck_roles_and_audit_atomically() {
         .create(&unique("Org2"), Tier::Enterprise)
         .await
         .expect("create ws2");
-    assert!(members.org_audit(ws2).await.expect("audit ws2").is_empty());
+    assert_eq!(members.org_audit(ws2).await.expect("audit ws2"), Vec::new());
 }
 
 // ---------------------------------------------------------------------------
@@ -1730,11 +1727,8 @@ async fn audited_mutations_reject_on_a_downgraded_workspace_tier() {
         .revoke_authorized(ws, &owner, stale_invite)
         .await
         .expect("hosted: revoke succeeds again");
-    assert!(
-        invites
-            .list_pending(ws)
-            .await
-            .expect("list pending")
-            .is_empty()
+    assert_eq!(
+        invites.list_pending(ws).await.expect("list pending"),
+        Vec::new()
     );
 }

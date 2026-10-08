@@ -344,7 +344,7 @@ async fn invite_create_list_and_accept_binds_to_the_invites_workspace_and_role()
     .await;
     assert_eq!(status, StatusCode::CREATED);
     let token = body["token"].as_str().expect("plaintext token").to_string();
-    assert!(!token.is_empty());
+    assert_ne!(token, "");
     assert_eq!(body["role"], "admin");
 
     // The pending list shows exactly this invite, and never the token/hash.
@@ -402,7 +402,7 @@ async fn invite_create_list_and_accept_binds_to_the_invites_workspace_and_role()
 
     // The invite is consumed: the list is empty and a replay is refused.
     let (_, list2) = send(&h.app, get("/org/invites", &owner_token)).await;
-    assert!(list2["invites"].as_array().unwrap().is_empty());
+    assert_eq!(list2["invites"].as_array().unwrap().len(), 0);
     let (replay, _) = send(
         &h.app,
         post(
@@ -461,7 +461,7 @@ async fn invite_create_denied_below_enterprise_and_for_non_managers() {
     // No invite was created by either denied attempt.
     let owner_token = h.token(&owner, ws, Role::Owner, Tier::Enterprise);
     let (_, list) = send(&h.app, get("/org/invites", &owner_token)).await;
-    assert!(list["invites"].as_array().unwrap().is_empty());
+    assert_eq!(list["invites"].as_array().unwrap().len(), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -502,7 +502,7 @@ async fn revoke_invite_by_owner_and_admin_then_token_no_longer_redeems() {
     assert_eq!(rev, StatusCode::NO_CONTENT);
 
     let (_, list) = send(&h.app, get("/org/invites", &owner_token)).await;
-    assert!(list["invites"].as_array().unwrap().is_empty());
+    assert_eq!(list["invites"].as_array().unwrap().len(), 0);
 
     // The revoked token no longer redeems (invalid/expired/used -> 400).
     let joiner = h.new_user().await;

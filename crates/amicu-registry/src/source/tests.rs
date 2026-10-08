@@ -285,7 +285,7 @@ async fn search_returns_summaries() {
         })
         .await
         .expect("search");
-    assert!(miss.is_empty());
+    assert_eq!(miss, Vec::new());
 }
 
 #[tokio::test]

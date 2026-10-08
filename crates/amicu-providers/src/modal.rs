@@ -524,7 +524,7 @@ mod tests {
     #[test]
     fn catalog_is_non_empty_with_unique_offering_ids() {
         let caps = ModalProvider::new().capabilities();
-        assert!(!caps.compute.is_empty());
+        assert_ne!(caps.compute, Vec::new());
         let mut ids: Vec<&str> = caps.compute.iter().map(|o| o.id.as_str()).collect();
         ids.sort_unstable();
         ids.dedup();
@@ -591,7 +591,7 @@ mod tests {
     fn every_offering_is_sold_in_every_region() {
         let caps = ModalProvider::new().capabilities();
         let region_codes: Vec<String> = caps.regions.iter().map(|r| r.code.clone()).collect();
-        assert!(!region_codes.is_empty());
+        assert_ne!(region_codes.len(), 0);
         for offering in &caps.compute {
             assert_eq!(offering.regions, region_codes);
         }

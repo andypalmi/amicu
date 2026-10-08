@@ -346,14 +346,9 @@ async fn rollback_requires_a_held_lock_and_never_races_a_push() {
         .expect_err("rollback without a held lock");
     assert_eq!(err.code(), STATE_LOCK_NOT_HELD);
     assert!(!err.is_retryable());
-    assert!(
-        backend
-            .pull()
-            .await
-            .expect("pull")
-            .graph
-            .deployments
-            .is_empty()
+    assert_eq!(
+        backend.pull().await.expect("pull").graph.deployments,
+        Vec::new()
     );
 
     // Lock held by another handle, wrong token: still refused, still untouched.
@@ -364,14 +359,9 @@ async fn rollback_requires_a_held_lock_and_never_races_a_push() {
         .await
         .expect_err("rollback with the wrong lock");
     assert_eq!(err.code(), STATE_LOCK_NOT_HELD);
-    assert!(
-        backend
-            .pull()
-            .await
-            .expect("pull")
-            .graph
-            .deployments
-            .is_empty()
+    assert_eq!(
+        backend.pull().await.expect("pull").graph.deployments,
+        Vec::new()
     );
 
     // The genuine held lock authorizes the rollback.

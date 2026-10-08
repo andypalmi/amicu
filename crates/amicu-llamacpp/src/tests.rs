@@ -1212,7 +1212,7 @@ fn plan_launch_succeeds_with_ordinary_env_key() {
 #[test]
 fn plan_launch_command_is_secret_free_and_estimate_present() {
     let plan = fitting_adapter().plan_launch(&deployment()).expect("plan");
-    assert!(plan.secret_refs.is_empty());
+    assert_eq!(plan.secret_refs, Vec::new());
     assert!(!plan.rendered.as_text().to_lowercase().contains("secret"));
     // Weights + KV band is a positive estimate; one accelerator is occupied.
     assert!(plan.estimate.estimated_memory.bytes() > 4 * GIB);
@@ -1250,7 +1250,7 @@ fn validate_and_plan_launch_compute_kv_cache_when_model_shape_and_cache_type_are
 
     // validate() folds the same estimate into its own fit check without
     // erroring (a fitting model/hardware pair stays diagnostic-free).
-    assert!(adapter.validate(&d).is_empty());
+    assert_eq!(adapter.validate(&d), Vec::new());
 
     let plan = adapter.plan_launch(&d).expect("plan");
     // 32768 * 32 * 8 * 128 * (34/32 + 34/32) = 2_281_701_376 bytes exactly.
