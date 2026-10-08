@@ -141,3 +141,38 @@ Notes:
   "on_prem"` is the convention for hardware the user already owns - distinct
   from the pre-existing `"local_apple"` / `"local_cpu"` examples above, which
   predate this catalog and are left as-is.
+
+## Modal (serverless GPU, amicu-planning#158)
+
+```hcl
+resource "hardware_profile" "modal_h100" {
+  provider = "modal"
+  region   = "eu-west"
+  accelerator {
+    kind   = "gpu"
+    model  = "h100"
+    count  = 2
+    memory = "80GiB"
+  }
+  memory = "32GiB"
+}
+```
+
+Notes:
+- `provider = "modal"` routes a `vllm` deployment on this profile through
+  `amicu apply`'s `ModalSupervisor` (`crates/amicu-modal/src/supervisor.rs`)
+  instead of a local process. `accelerator.model` + `accelerator.count`
+  become Modal's `gpu=` request string - `"H100:2"` for the profile above
+  (upper-cased; the `:<count>` suffix is omitted when `count == 1`) - and
+  `region` (when set) becomes Modal's region constraint. This mapping is a
+  hand-maintained string pass-through, not validated against Modal's GPU
+  catalog at parse time (that catalog, `amicu-providers::modal`, lands
+  separately) - an unsupported `model` string surfaces as a Modal-side
+  rejection at apply time, not a parse-time diagnostic.
+- Only GPU accelerators are deployable to Modal today: a `tpu` or
+  `apple_silicon` accelerator on a `provider = "modal"` profile is rejected
+  before any RPC (Modal has no such offering).
+- llama.cpp has no Modal path yet - a `runtime = "llama_cpp"` deployment on a
+  `provider = "modal"` hardware profile is rejected with a clear error at
+  apply time (follow-up); use `vllm`. See `deployment-examples.md`'s "vLLM on
+  Modal" section for the full deployment-side example and defaults.

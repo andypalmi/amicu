@@ -400,7 +400,7 @@ impl ModalClient {
     pub async fn deploy_server(
         &mut self,
         spec: &ServerSpec,
-        on_build_log: &mut dyn FnMut(&str),
+        on_build_log: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Deployment, ModalError> {
         spec.validate()?;
 
@@ -430,7 +430,7 @@ impl ModalClient {
         &mut self,
         app_id: &str,
         spec: &ServerSpec,
-        on_build_log: &mut dyn FnMut(&str),
+        on_build_log: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Deployment, ModalError> {
         let client_mount_id = self.get_client_mount().await?;
 
@@ -658,7 +658,7 @@ impl ModalClient {
         app_id: &str,
         spec: &ImageSpec,
         shim_source: &str,
-        on_build_log: &mut dyn FnMut(&str),
+        on_build_log: &mut (dyn FnMut(&str) + Send),
     ) -> Result<String, ModalError> {
         let response = self
             .stub()
@@ -740,7 +740,7 @@ impl ModalClient {
         image_id: &str,
         last_entry_id: &mut String,
         result: &mut Option<pb::GenericResult>,
-        on_build_log: &mut dyn FnMut(&str),
+        on_build_log: &mut (dyn FnMut(&str) + Send),
     ) -> Result<usize, ModalError> {
         let mut stream = self
             .stub()

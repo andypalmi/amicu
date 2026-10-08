@@ -103,6 +103,25 @@ pub(crate) fn print_human(result: &PlanResult, out: &mut dyn Write) -> Result<()
             if let Some(hw) = &item.action.hardware {
                 io(writeln!(out, "      hardware: {hw}"))?;
             }
+            // `provider`/`region` were already computed by `action_for`
+            // (`amicu_engine::planner`) for every hardware profile, not just
+            // Modal's - this just surfaces them (amicu-planning#158 PR 5).
+            // The exact Modal `gpu=` string (`"H100:2"`) is not shown here:
+            // deriving it needs `amicu-modal`'s mapping, and this print path
+            // is shared with the HTTP API's `/plan` display contract, so
+            // pulling that crate in here was avoided (see
+            // `crates/amicu-modal/src/supervisor.rs`'s packaging note).
+            if let Some(provider) = &item.action.provider {
+                match &item.action.region {
+                    Some(region) => {
+                        io(writeln!(
+                            out,
+                            "      target:   {provider} (region {region})"
+                        ))?;
+                    }
+                    None => io(writeln!(out, "      target:   {provider}"))?,
+                }
+            }
             if let Some(artifact) = &item.action.artifact {
                 io(writeln!(out, "      artifact: {}", artifact.name))?;
             }
