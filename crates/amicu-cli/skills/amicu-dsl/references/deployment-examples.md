@@ -123,6 +123,43 @@ emits neither flag and `plan_launch` refuses to build the launch. All five
 fields above are optional and independent of each other and of the
 sampling/KV-cache/batching fields from PR A.
 
+## llama.cpp: multimodal projector (amicu-planning#151 PR D)
+
+```hcl
+resource "deployment" "vision_chat_local" {
+  model    = model.vision_chat.id
+  hardware = hardware_profile.dev_mac.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 32768
+    port           = 8000
+    n_gpu_layers   = -1
+
+    multimodal {
+      # A plain path or HF-style reference to the mmproj GGUF - not a second
+      # `model` resource reference in this PR (that form can come later if
+      # amicu needs to track the projector as its own downloadable
+      # artifact). Not validated for existence at plan time; a bad path
+      # surfaces as a load failure at apply time.
+      projector = "/models/vision_chat/mmproj-f16.gguf"
+
+      # Whether to offload the projector to the accelerator. llama-server
+      # defaults this to enabled; `false` renders --no-mmproj-offload
+      # explicitly (overrides an inherited LLAMA_ARG_MMPROJ_OFFLOAD=1).
+      offload = true
+    }
+  }
+}
+```
+
+`projector` renders `--mmproj <value>`; `offload` is a paired bare-flag
+toggle like `jinja` above - `true` -> `--mmproj-offload`, `false` ->
+`--no-mmproj-offload`, unset -> renders nothing. Both fields are optional and
+independent of each other. `multimodal {}` is llama.cpp-only: it backs the
+`Modality::Vision` capability the llama.cpp adapter already declares, and a
+`multimodal` block on a `vllm {}` settings block is a schema error at parse
+time, not a capability diagnostic.
+
 ## llama.cpp: speculative decoding with a draft model (amicu-planning#151 PR C)
 
 The draft model is a **second `model` resource**, referenced by a real graph
@@ -220,6 +257,11 @@ resource "deployment" "chat_prod" {
     kv_cache_dtype           = "fp8"
     max_num_seqs             = 4
     max_num_batched_tokens   = 8192
+
+    # amicu-planning#158: unset here (default) so vLLM captures CUDA graphs
+    # for this production deployment; see "Modal fast boot" below for the
+    # opposite choice.
+    # enforce_eager           = false
   }
 }
 ```
@@ -230,7 +272,11 @@ resource "deployment" "chat_prod" {
 llama.cpp's `cache_type_k`/`cache_type_v`. `max_num_seqs` is vLLM's rough
 equivalent of llama.cpp's `parallel_slots`; `max_num_batched_tokens` of
 `batch_size`. vLLM has no sampling-defaults deployment flags, so there is no
-`temperature`/`top_p`/... equivalent on `vllm {}`.
+`temperature`/`top_p`/... equivalent on `vllm {}`. `enforce_eager` (bool,
+amicu-planning#158) toggles CUDA-graph capture at startup: `true` skips it
+for a faster cold start at the cost of steady-state throughput (the trade-off
+a "fast boot" preset wants), `false` forces capture, and unset leaves vLLM's
+own default (captured) in effect.
 
 ## vLLM on Modal (serverless GPU, amicu-planning#158)
 
@@ -319,14 +365,20 @@ resource "deployment" "vision_spec_local" {
     port           = 8000
     n_gpu_layers   = -1
     # Sampling, KV-cache dtype, batching, flash-attn, parallel slots, chat
-    # template, jinja, reasoning-format, and speculative decoding are all
-    # typed fields (see above) - put them there, not here. Passing any of
-    # their flags (including --model-draft and friends) through extra_args is
-    # AMICU-CAP-002. What remains untyped after amicu-planning#151 (the
-    # multimodal projector, the speculative *type*/ngram knobs) still goes
-    # through extra_args, tracked as separate PRs against the same issue.
+    # template, jinja, reasoning-format, multimodal projector, and
+    # speculative decoding are all typed fields (see above) - put them
+    # there, not here. Passing any of their flags (including --mmproj or
+    # --model-draft and friends) through extra_args is AMICU-CAP-002. What
+    # remains untyped after amicu-planning#151 (the speculative *type*/ngram
+    # knobs) still goes through extra_args, tracked as a separate PR against
+    # the same issue.
+    multimodal {
+      projector = "/models/vision/mmproj-f16.gguf"
+    }
+    speculative {
+      model = model.vision_chat_draft.id
+    }
     extra_args = [
-      "--mmproj", "/models/vision/mmproj-f16.gguf",
       "--spec-type", "draft-dflash,ngram-map-k4v",
     ]
     env {
@@ -342,8 +394,9 @@ Rules and caveats:
   `--top-k`, `--min-p`, `--repeat-penalty`, `--cache-type-k`/`-ctk`,
   `--cache-type-v`/`-ctv`, `--batch-size`/`-b`, `--ubatch-size`/`-ub`,
   `--parallel`/`-np`, `--flash-attn`/`-fa`, `--chat-template`,
-  `--chat-template-file`, `--jinja`/`--no-jinja`, `--reasoning-format`, and
-  every speculative spelling - `--model-draft`/`--spec-draft-model`/`-md`,
+  `--chat-template-file`, `--jinja`/`--no-jinja`, `--reasoning-format`,
+  `--mmproj`/`-mm`, `--mmproj-offload`/`--no-mmproj-offload`, and every
+  speculative spelling - `--model-draft`/`--spec-draft-model`/`-md`,
   `--spec-draft-n-max`/`--draft-max`/`--draft-n`/`--draft`,
   `--spec-draft-n-min`/`--draft-min`/`--draft-n-min`,
   `--draft-p-min`/`--spec-draft-p-min`,
@@ -352,9 +405,9 @@ Rules and caveats:
   `AMICU-CAP-002` - fix the ambiguity by removing one side, not by hoping
   the last one wins. The same check applies to an `env` entry whose key is
   `LLAMA_ARG_<X>` and mirrors one of those flags (e.g. `LLAMA_ARG_TEMP`,
-  `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CHAT_TEMPLATE`, and `LLAMA_ARG_THINK`
-  for `--reasoning-format` - not `LLAMA_ARG_REASONING_FORMAT`, which
-  llama-server does not read).
+  `LLAMA_ARG_CACHE_TYPE_K`, `LLAMA_ARG_CHAT_TEMPLATE`, `LLAMA_ARG_MMPROJ`,
+  `LLAMA_ARG_MMPROJ_OFFLOAD`, and `LLAMA_ARG_THINK` for `--reasoning-format` -
+  not `LLAMA_ARG_REASONING_FORMAT`, which llama-server does not read).
 - A denylisted flag (`--host`, `--api-key`, `--api-key-file`,
   `--ssl-key-file`) is rejected with `AMICU-CAP-003`: amicu owns the bind
   address, and the others put secret material - or a path to it - directly
@@ -363,8 +416,8 @@ Rules and caveats:
 - Any non-empty `extra_args` gets an informational `AMICU-CAP-004`, and the
   plan's cost/performance estimate is marked
   `"unverified: raw runtime flags present"` - the estimator cannot interpret
-  flags it doesn't have a typed model for (speculative decoding, multimodal
-  projector, chat template, ...).
+  flags it doesn't have a typed model for (the speculative type/ngram knobs,
+  ...).
 - An `env` value that looks like a real secret (an AWS key, an OpenAI-style
   key, a PEM header, a JWT, or a long high-entropy token) gets a
   `AMICU-POLICY-006` warning nudging it toward a `credential` resource
@@ -380,6 +433,11 @@ Rules and caveats:
   twice for no speedup.
 - `extra_args`/`env` fields on the `vllm {}` block parse the same way, ahead
   of the vLLM command renderer that will consume them.
+- A `multimodal { ... }` block is only valid inside `llama_cpp {}`
+  (amicu-planning#151 PR D): putting one inside `vllm {}` is a structural
+  schema error at parse time (`VllmSettings` has no field for it), not a
+  capability diagnostic - fix by moving it to the `llama_cpp {}` block or
+  removing it.
 
 Notes:
 - The settings block must match the `runtime`: `llama_cpp {}` for `llama_cpp`,

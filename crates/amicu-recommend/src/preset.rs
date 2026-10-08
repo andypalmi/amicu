@@ -1654,7 +1654,7 @@ mod tests {
             rule.allowed_regions.is_empty(),
             "EU preset must not pin an allowed_regions code allowlist"
         );
-        assert!(!rule.allowed_providers.is_empty());
+        assert_ne!(rule.allowed_providers.len(), 0);
         for provider in &rule.allowed_providers {
             assert!(
                 EU_PROVIDERS.contains(&provider.as_str()),
@@ -1715,7 +1715,7 @@ mod tests {
         let mut a = answers();
         a.budget = None;
         let graph = build_graph(&catalog()[0], &a).expect("build");
-        assert!(graph.budgets.is_empty());
+        assert_eq!(graph.budgets, Vec::new());
     }
 
     #[test]

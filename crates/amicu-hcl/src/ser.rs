@@ -386,6 +386,16 @@ fn deployment_block(d: &Deployment) -> Block {
             if let Some(v) = &s.build {
                 b = b.add_attribute(("build", v.clone()));
             }
+            if let Some(m) = &s.multimodal {
+                let mut mb = Block::builder("multimodal");
+                if let Some(v) = &m.projector {
+                    mb = mb.add_attribute(("projector", v.clone()));
+                }
+                if let Some(v) = m.offload {
+                    mb = mb.add_attribute(("offload", v));
+                }
+                b = b.add_block(mb.build());
+            }
             body = body
                 .add_attribute(("runtime", "llama_cpp"))
                 .add_block(b.build());
@@ -440,6 +450,9 @@ fn vllm_block(s: &VllmSettings) -> Block {
     }
     if let Some(v) = s.max_num_batched_tokens {
         b = b.add_attribute(("max_num_batched_tokens", v));
+    }
+    if let Some(v) = s.enforce_eager {
+        b = b.add_attribute(("enforce_eager", v));
     }
     if !s.extra_args.is_empty() {
         b = b.add_attribute(("extra_args", str_array(&s.extra_args)));

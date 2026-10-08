@@ -86,10 +86,18 @@
 //! `deploy_cpu_http_server` in `tests/live_deploy.rs` settles both for a few
 //! cents on CPU; `deploy_vllm_smoke` then repeats it on a GPU.
 //!
+//! # Reading a deployment back: `crate::ops`
+//!
+//! [`ModalClient::stream_logs`] (`AppGetLogs`, mirroring
+//! `get_app_logs_loop`, `modal/_output.py:543-675`),
+//! [`ModalClient::app_status`] (`AppList` + `AppGetLayout` +
+//! `FunctionGetCurrentStats`), [`ModalClient::list_apps`] (`AppList`), and
+//! [`ModalClient::health`] (a plain HTTP GET, no gRPC) read a deployment
+//! back; see `crate::ops` for the per-RPC citations.
+//!
 //! # Packaging note
 //!
-//! Only `amicu-cli` depends on this crate (via the `amicu modal auth-check`
-//! command, and — since [`supervisor`] — `amicu apply`'s dispatch for a
+//! Only `amicu-cli` depends on this crate (via the `amicu modal` commands, and — since [`supervisor`] — `amicu apply`'s dispatch for a
 //! `provider = "modal"` vLLM deployment) — `amicu-api`/`amicu-server` do not,
 //! so the `amicu-server` binary that actually ships in the Docker runtime
 //! image never links it. The Docker *build* is not fully isolated from it,
@@ -111,6 +119,7 @@ mod deploy;
 mod error;
 mod image;
 mod interceptor;
+mod ops;
 mod pb;
 mod shim;
 pub mod supervisor;
@@ -120,5 +129,6 @@ pub use credentials::{Credentials, MissingCredential};
 pub use deploy::{Deployment, MODAL_CLIENT_MOUNT_NAME, ServerSpec};
 pub use error::ModalError;
 pub use image::{IMAGE_BUILDER_VERSION, ImageSpec};
+pub use ops::{AppStatus, AppSummary, FunctionStatus, HealthStatus, LogFd, LogLine};
 pub use shim::{SHIM_CLASS_NAME, SHIM_MODULE_NAME, SHIM_PATH, render_shim};
 pub use supervisor::{DEFAULT_VLLM_IMAGE, HF_TOKEN_ENV_VAR, ModalSupervisor, VLLM_IMAGE_ENV_VAR};

@@ -912,8 +912,8 @@ mod tests {
         assert!(function.method_definitions.is_empty());
         assert!(function.method_definitions_set);
         assert!(function.experimental_concurrent_cancellations);
-        assert!(function.function_serialized.is_empty());
-        assert!(function.class_serialized.is_empty());
+        assert_eq!(function.function_serialized, Vec::<u8>::new());
+        assert_eq!(function.class_serialized, Vec::<u8>::new());
         assert_eq!(function.app_name, "amicu-test");
         assert_eq!(function.timeout_secs, 3600);
         assert_eq!(function.startup_timeout_secs, 600);
@@ -982,7 +982,7 @@ mod tests {
         assert_eq!(gpu.gpu_type, "");
         assert_eq!(gpu.count, 0);
         assert!(function.scheduler_placement.is_none());
-        assert!(function.secret_ids.is_empty());
+        assert_eq!(function.secret_ids, Vec::<String>::new());
         // Only the image remains a dependency.
         assert_eq!(function.object_dependencies.len(), 1);
     }

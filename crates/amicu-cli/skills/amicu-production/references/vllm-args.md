@@ -17,6 +17,7 @@ diagnostics.
 | `kv_cache_dtype` | `--kv-cache-dtype <auto\|fp8\|fp8_e5m2\|fp8_e4m3>` | KV-cache quantization; vLLM's own value set (distinct from llama.cpp's `cache_type_k`/`cache_type_v`). |
 | `max_num_seqs` | `--max-num-seqs <n>` | Maximum concurrent sequences; vLLM's rough equivalent of llama.cpp's `parallel_slots`. |
 | `max_num_batched_tokens` | `--max-num-batched-tokens <n>` | Maximum batched tokens per iteration; vLLM's rough equivalent of llama.cpp's `batch_size`. |
+| `enforce_eager` | `Some(true)` → `--enforce-eager`; `Some(false)` → `--no-enforce-eager`; `None` → nothing | Disables CUDA-graph capture at startup when `true` (amicu-planning#158). Trade-off: `true` skips graph capture entirely, so the server finishes starting faster (fast boot) at the cost of per-request throughput once serving; `false` forces graph capture even over an inherited default that would skip it; unset leaves vLLM's own default (graphs captured) in effect. |
 
 No typed `dtype` (model weight dtype) field exists yet in `VllmSettings` - use
 `extra_args` (`--dtype bfloat16`, etc.) until it is promoted to a typed field.
@@ -40,9 +41,10 @@ flags, appended verbatim after the typed ones, in declaration order) and
 
 - A flag that duplicates a typed field's flag (`--port`, `--max-model-len`,
   `--tensor-parallel-size`, `--gpu-memory-utilization`, `--kv-cache-dtype`,
-  `--max-num-seqs`, `--max-num-batched-tokens`, or the model itself) is
-  `AMICU-CAP-002`. Current stable vLLM `serve` CLI docs document no short
-  aliases for any of these, unlike llama.cpp.
+  `--max-num-seqs`, `--max-num-batched-tokens`, `--enforce-eager`/
+  `--no-enforce-eager`, or the model itself) is `AMICU-CAP-002`. Current
+  stable vLLM `serve` CLI docs document no short aliases for any of these,
+  unlike llama.cpp.
 - A flag on the fixed denylist - `--host` (amicu owns the bind address),
   `--api-key` (puts secret material directly into argv), `--ssl-keyfile`/
   `--ssl-certfile` (amicu does not manage TLS termination for locally
@@ -95,3 +97,31 @@ Health is checked against `GET /health` on the configured port.
   KV-cache and better throughput.
 - Quantized safetensors (e.g. AWQ/GPTQ) reduce VRAM at some quality cost; see
   amicu-model-selection for the trade-off.
+
+## Testing a Modal deployment (amicu-planning#158)
+
+Modal (modal.com) is a no-Python-on-the-client GPU rental target reached over
+gRPC, not an `amicu apply` runtime yet (HCL wiring is a separate,
+not-yet-merged PR) - today it is exercised entirely through the
+project-independent `amicu modal` commands, which read `MODAL_TOKEN_ID`/
+`MODAL_TOKEN_SECRET` from the environment and never accept them as flags:
+
+```bash
+amicu modal auth-check              # confirms the token is accepted (ClientHello)
+amicu modal status <app-name>       # app state + each Function's url/running/backlog
+amicu modal logs <app-name>         # one AppGetLogs call (~5s or app-end), then returns
+amicu modal logs <app-name> --follow --since <entry-id>   # tails from a resume point
+amicu modal stop <app-name>         # AppStop; terminates the app's containers
+```
+
+A typical check-in-on-a-deploy loop: `auth-check` first if anything looks
+wrong, then `status` to see whether the Function is up and what URL it
+published, then `logs` (add `--follow` while watching a cold start), then
+`stop` once you are done - `status` right after `stop` reports no deployment
+by that name (Modal keeps the app itself in a `"stopped"` state internally,
+but its deployment *name* no longer resolves to an id, which is what
+`status` surfaces). `logs` without `--follow` is a single `AppGetLogs` call
+held open for roughly 5 seconds (or until the app finishes, if sooner) and
+then returns - not instant, and not a substitute for `--follow` if the app
+has not produced output yet. `--follow` instead streams until the app stops
+or you interrupt it (Ctrl-C).

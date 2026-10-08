@@ -485,7 +485,7 @@ mod tests {
     fn new_admits_only_eu_regions() {
         let caps = NebiusProvider::new().capabilities();
         assert_eq!(caps.provider, AdapterId::new("nebius"));
-        assert!(!caps.regions.is_empty());
+        assert_ne!(caps.regions, Vec::new());
         // Every admitted region is EU...
         assert!(caps.regions.iter().all(Region::is_eu));
         // ...and the known EU regions are present.
@@ -550,7 +550,7 @@ mod tests {
         assert!(history.last().unwrap().is_ready());
 
         p.teardown(&handle, &resolver).await.unwrap();
-        assert!(p.live_instances().is_empty());
+        assert_eq!(p.live_instances(), Vec::new());
         assert!(p.status(&handle, &resolver).await.unwrap().is_terminal());
     }
 
@@ -568,7 +568,7 @@ mod tests {
             .expect_err("non-EU region must be rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-011");
         assert!(!err.is_retryable());
-        assert!(p.live_instances().is_empty());
+        assert_eq!(p.live_instances(), Vec::new());
     }
 
     #[tokio::test]

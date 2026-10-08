@@ -224,8 +224,14 @@ mod tests {
     fn image_message_has_no_base_images_and_carries_the_commands() {
         let spec = spec();
         let image = spec.to_proto("x = 1\n");
-        assert!(image.base_images.is_empty());
-        assert!(image.context_files.is_empty());
+        assert_eq!(
+            image.base_images,
+            Vec::<crate::pb::modal_client::BaseImage>::new()
+        );
+        assert_eq!(
+            image.context_files,
+            Vec::<crate::pb::modal_client::ImageContextFile>::new()
+        );
         assert_eq!(
             image.dockerfile_commands,
             spec.dockerfile_commands("x = 1\n")

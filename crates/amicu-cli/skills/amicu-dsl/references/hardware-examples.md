@@ -51,6 +51,40 @@ Notes:
   size against these.
 - Set `region` and `provider` to satisfy `data_class` residency rules.
 
+## NVIDIA GPU (Modal, catalog only)
+
+```hcl
+resource "hardware_profile" "modal_h100" {
+  provider = "modal"
+  region   = "eu-west"
+  accelerator {
+    kind   = "nvidia_gpu"
+    model  = "H100"
+    count  = 1
+    memory = "80GiB"
+  }
+  memory = "64GiB"
+  price { per_hour = "3.9492 USD" }
+}
+```
+
+Notes:
+- Modal (`amicu_providers::modal`) is genuinely regionalized: broad regions
+  (`"us"`, `"eu"`, `"ap"`) and narrow ones (`"eu-west"`, `"us-west"`, `"uk"`,
+  `"jp"`, ...) are all valid `region` values, each tagged with its real
+  residency jurisdiction - `eu`/`eu-west`/`eu-north`/`eu-south` satisfy an
+  `eu` `data_class` residency constraint; a region Modal does not serve
+  fails closed. Pinning to a region multiplies the base price shown here
+  (1.15x broad, 1.75x narrow - not reflected in `price` above); see
+  `amicu_providers::modal`'s module docs for the source.
+- This is a catalog entry only (amicu-planning#158 PR 1): `provision`,
+  `status` and `teardown` all reject with `AMICU-PROVIDER-015`
+  (permanent - not retryable) until the Modal Sandbox gRPC target (PR 2)
+  lands. Do not `apply` a Modal deployment yet.
+- Prices are USD/hr, converted from Modal's per-second billing; see
+  `amicu_providers::modal`'s module docs for the verification date and
+  source.
+
 ## Consumer/on-prem NVIDIA GPU
 
 ```hcl

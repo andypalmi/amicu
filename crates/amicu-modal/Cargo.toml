@@ -45,12 +45,15 @@ async-trait = "0.1"
 amicu-llamacpp = { path = "../amicu-llamacpp" }
 amicu-runtime = { path = "../amicu-runtime" }
 amicu-core = { path = "../amicu-core" }
-# `ModalSupervisor::status`'s own tiny health probe (`GET <url>/health`) -
-# Modal's endpoint is HTTPS, unlike amicu_llamacpp::HttpHealthProbe's
-# loopback-only `ureq` (no TLS feature enabled there). Promoted from
-# dev-dependencies (where it backed `tests/live_deploy.rs`'s polling) now
-# that non-test code needs it too; same version and rustls backend as
-# amicu-providers/amicu-api.
+# `ModalClient::health` does a plain HTTP GET against a deployed server's
+# tunnel URL — no gRPC involved. Promoted from dev-dependencies (PR 3 used it
+# only in `tests/live_deploy.rs`) now that `ops.rs` needs it at runtime too;
+# same version, default-features off, and rustls backend as
+# amicu-providers/amicu-api already use, so the workspace does not gain a
+# second HTTP-client stack or a second TLS backend.
+# `ModalSupervisor::status` also uses it for its own `GET <url>/health` probe
+# (Modal's endpoint is HTTPS, unlike amicu_llamacpp::HttpHealthProbe's
+# loopback-only `ureq`).
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]

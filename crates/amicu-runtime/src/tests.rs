@@ -317,7 +317,7 @@ fn capabilities_describe_runtime_family() {
 fn validate_is_pure_and_needs_no_runtime() {
     // No tokio runtime in scope: validate and plan_launch are pure sync fns.
     let good = FakeRuntime::llama_cpp();
-    assert!(good.validate(&llama_deployment(8192)).is_empty());
+    assert_eq!(good.validate(&llama_deployment(8192)), Vec::new());
 
     let bad = FakeRuntime::llama_cpp().with_model_format(ArtifactFormat::Safetensors);
     let diags = bad.validate(&llama_deployment(8192));

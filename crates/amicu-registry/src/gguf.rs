@@ -214,6 +214,6 @@ mod tests {
         let r = GgufResolver::new(&m).expect("gguf");
         assert!(r.is_empty());
         assert!(r.recommended().is_none());
-        assert!(r.quantizations().is_empty());
+        assert_eq!(r.quantizations(), Vec::new());
     }
 }
