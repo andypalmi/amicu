@@ -331,6 +331,35 @@ pub struct LlamaCppSettings {
     /// Stored/validated only; not yet rendered or enforced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<String>,
+    /// Vision/audio multimodal projector settings (`multimodal { ... }`,
+    /// amicu-planning#151 PR D): backs the `Modality::Vision` capability this
+    /// adapter already declares (`crate::adapter::LlamaCppAdapter::capabilities`,
+    /// in `amicu-llamacpp`) with an actual mmproj file to load. llama.cpp-only:
+    /// a `multimodal` block on a `vllm {}` settings block is a schema error
+    /// (`amicu_hcl::de`), not a field that exists on [`VllmSettings`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multimodal: Option<MultimodalSettings>,
+}
+
+/// `llama-server`'s multimodal projector settings (`--mmproj`/
+/// `--mmproj-offload`, amicu-planning#151 PR D): both fields optional and
+/// independent.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MultimodalSettings {
+    /// Path or HF-style reference to the multimodal projector GGUF
+    /// (`--mmproj`/`-mm`). A plain string in this PR - not validated for
+    /// existence at plan time (apply time surfaces a load failure), and not
+    /// a second `model` resource reference; that form can come later if
+    /// amicu needs to track the projector as its own downloadable artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projector: Option<String>,
+    /// Whether to offload the projector to the accelerator
+    /// (`--mmproj-offload`/`--no-mmproj-offload`; llama-server defaults this
+    /// to enabled). `Some(true)`/`Some(false)` render the matching bare
+    /// flag explicitly (like [`LlamaCppSettings::jinja`]); `None` renders
+    /// nothing, leaving llama-server's own default/environment in effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offload: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -356,6 +385,20 @@ pub struct VllmSettings {
     /// `batch_size`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_num_batched_tokens: Option<u32>,
+    /// Eager-mode toggle (`--enforce-eager`/`--no-enforce-eager`, amicu-planning#158):
+    /// a paired bare-flag toggle, not a value-having flag, following the
+    /// same shape as [`LlamaCppSettings::jinja`] - confirmed against vLLM's
+    /// `EngineArgs`/`FlexibleArgumentParser` (`get_kwargs`), which assigns
+    /// `argparse.BooleanOptionalAction` to every plain `bool` dataclass
+    /// field, auto-generating the `--no-<name>` negation alongside
+    /// `--<name>`. `Some(true)` renders `--enforce-eager` (CUDA-graph
+    /// capture is skipped entirely, so the server finishes starting faster
+    /// at the cost of per-request throughput); `Some(false)` renders
+    /// `--no-enforce-eager` (forces graph capture even if some inherited
+    /// environment/config default would skip it); `None` renders nothing,
+    /// leaving vLLM's own default (graphs captured) in effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enforce_eager: Option<bool>,
     /// Raw vLLM CLI flags appended verbatim by the vLLM renderer
     /// (amicu-planning#150; the renderer itself ships separately). See
     /// [`LlamaCppSettings::extra_args`].

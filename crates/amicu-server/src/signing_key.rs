@@ -567,7 +567,7 @@ mod tests {
     fn development_missing_active_key_falls_back_to_generated() {
         let config = base_config();
         let keyring = load_keyring(&config).expect("development falls back to a generated key");
-        assert!(!keyring.active().kid().is_empty());
+        assert_ne!(keyring.active().kid(), "");
     }
 
     #[test]

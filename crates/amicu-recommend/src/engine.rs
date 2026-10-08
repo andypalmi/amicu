@@ -416,7 +416,7 @@ mod tests {
         assert_eq!(primary.confidence, Confidence::High);
         // Every triggering piece of evidence actually holds.
         assert!(primary.evidence.iter().all(Evidence::holds));
-        assert!(!primary.rejected.is_empty());
+        assert_ne!(primary.rejected, Vec::new());
     }
 
     #[test]

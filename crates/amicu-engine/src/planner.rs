@@ -269,6 +269,7 @@ fn llama_cpp_runtime_settings(s: &LlamaCppSettings) -> Vec<Setting> {
         extra_args,
         env,
         build,
+        multimodal,
     } = s;
     let mut settings = vec![
         setting("runtime", "llama_cpp"),
@@ -321,26 +322,54 @@ fn llama_cpp_runtime_settings(s: &LlamaCppSettings) -> Vec<Setting> {
     if let Some(v) = reasoning_format {
         settings.push(setting("reasoning_format", v.to_string()));
     }
-    if let Some(spec) = speculative {
-        settings.push(setting("speculative_model", spec.model.as_str()));
-        if let Some(v) = spec.n_max {
-            settings.push(setting("speculative_n_max", v.to_string()));
-        }
-        if let Some(v) = spec.n_min {
-            settings.push(setting("speculative_n_min", v.to_string()));
-        }
-        if let Some(v) = spec.p_min {
-            settings.push(setting("speculative_p_min", v.to_string()));
-        }
-        if let Some(v) = spec.n_gpu_layers {
-            settings.push(setting("speculative_n_gpu_layers", v.to_string()));
-        }
-    }
+    push_speculative_settings(&mut settings, speculative.as_ref());
     extend_with_extra_args_and_env(&mut settings, extra_args, env);
     if let Some(v) = build {
         settings.push(setting("build", v.clone()));
     }
+    push_multimodal_settings(&mut settings, multimodal.as_ref());
     settings
+}
+
+/// Append the `speculative {}` block's fields as display settings
+/// (amicu-planning#151 PR C).
+fn push_speculative_settings(
+    settings: &mut Vec<Setting>,
+    speculative: Option<&amicu_core::resource::SpeculativeSettings>,
+) {
+    let Some(spec) = speculative else {
+        return;
+    };
+    settings.push(setting("speculative_model", spec.model.as_str()));
+    if let Some(v) = spec.n_max {
+        settings.push(setting("speculative_n_max", v.to_string()));
+    }
+    if let Some(v) = spec.n_min {
+        settings.push(setting("speculative_n_min", v.to_string()));
+    }
+    if let Some(v) = spec.p_min {
+        settings.push(setting("speculative_p_min", v.to_string()));
+    }
+    if let Some(v) = spec.n_gpu_layers {
+        settings.push(setting("speculative_n_gpu_layers", v.to_string()));
+    }
+}
+
+/// Append the `multimodal {}` block's fields as display settings
+/// (amicu-planning#151 PR D).
+fn push_multimodal_settings(
+    settings: &mut Vec<Setting>,
+    multimodal: Option<&amicu_core::resource::MultimodalSettings>,
+) {
+    let Some(m) = multimodal else {
+        return;
+    };
+    if let Some(v) = &m.projector {
+        settings.push(setting("multimodal_projector", v.clone()));
+    }
+    if let Some(v) = m.offload {
+        settings.push(setting("multimodal_offload", v.to_string()));
+    }
 }
 
 fn vllm_runtime_settings(s: &VllmSettings) -> Vec<Setting> {
@@ -352,6 +381,7 @@ fn vllm_runtime_settings(s: &VllmSettings) -> Vec<Setting> {
         kv_cache_dtype,
         max_num_seqs,
         max_num_batched_tokens,
+        enforce_eager,
         extra_args,
         env,
     } = s;
@@ -374,6 +404,9 @@ fn vllm_runtime_settings(s: &VllmSettings) -> Vec<Setting> {
     }
     if let Some(v) = max_num_batched_tokens {
         settings.push(setting("max_num_batched_tokens", v.to_string()));
+    }
+    if let Some(v) = enforce_eager {
+        settings.push(setting("enforce_eager", v.to_string()));
     }
     extend_with_extra_args_and_env(&mut settings, extra_args, env);
     settings
@@ -435,6 +468,13 @@ fn cost_performance(
     if matches!(runtime, Runtime::Vllm(_)) {
         assumptions.push("vllm fit estimate: weights + kv cache only".to_owned());
     }
+    // A `multimodal` block's projector weights aren't sized anywhere - no
+    // GGUF header parser in-tree, and the estimator only ever sees the main
+    // model's variant size (amicu-planning#151 PR D; see `fit.rs`'s doc
+    // comment for the same "no parser" limitation on the main weights).
+    if multimodal_present(runtime) {
+        assumptions.push("multimodal: projector weights not estimated".to_owned());
+    }
     if let Some(assumption) = kv_cache_assumption(runtime, launch.estimate.kv_cache) {
         assumptions.push(assumption);
     }
@@ -472,6 +512,14 @@ fn extra_args_present(runtime: &Runtime) -> bool {
         Runtime::LlamaCpp(s) => !s.extra_args.is_empty(),
         Runtime::Vllm(s) => !s.extra_args.is_empty(),
     }
+}
+
+/// Whether the deployment carries a `multimodal { ... }` block
+/// (amicu-planning#151 PR D). `vllm` never does - `VllmSettings` has no such
+/// field (a `multimodal` block on a `vllm {}` settings block is a schema
+/// error, `amicu_hcl::de`).
+fn multimodal_present(runtime: &Runtime) -> bool {
+    matches!(runtime, Runtime::LlamaCpp(s) if s.multimodal.is_some())
 }
 
 /// A human-readable summary of the KV-cache estimate
@@ -670,6 +718,70 @@ mod tests {
         let result = build_plan(&graph(Vec::new()), None).unwrap();
         let cp = result.items[0].action.cost_performance.as_ref().unwrap();
         assert!(!cp.assumptions.iter().any(|a| a.starts_with("KV cache: ")));
+    }
+
+    // --- amicu-planning#151 PR D: multimodal assumption string -------------
+
+    #[test]
+    fn multimodal_assumption_present_when_block_is_set() {
+        let mut g = graph(Vec::new());
+        let Runtime::LlamaCpp(s) = &mut g.deployments[0].runtime else {
+            unreachable!("graph() always builds a llama_cpp deployment");
+        };
+        s.multimodal = Some(amicu_core::resource::MultimodalSettings {
+            projector: Some("/models/mmproj-f16.gguf".to_owned()),
+            offload: Some(true),
+        });
+
+        let result = build_plan(&g, None).unwrap();
+        let cp = result.items[0].action.cost_performance.as_ref().unwrap();
+        assert!(
+            cp.assumptions
+                .iter()
+                .any(|a| a == "multimodal: projector weights not estimated"),
+            "expected the multimodal assumption, got {:?}",
+            cp.assumptions
+        );
+    }
+
+    #[test]
+    fn multimodal_assumption_absent_when_block_is_unset() {
+        let result = build_plan(&graph(Vec::new()), None).unwrap();
+        let cp = result.items[0].action.cost_performance.as_ref().unwrap();
+        assert!(
+            !cp.assumptions
+                .iter()
+                .any(|a| a == "multimodal: projector weights not estimated")
+        );
+    }
+
+    #[test]
+    fn multimodal_fields_threaded_into_runtime_settings() {
+        let mut g = graph(Vec::new());
+        let Runtime::LlamaCpp(s) = &mut g.deployments[0].runtime else {
+            unreachable!("graph() always builds a llama_cpp deployment");
+        };
+        s.multimodal = Some(amicu_core::resource::MultimodalSettings {
+            projector: Some("/models/mmproj-f16.gguf".to_owned()),
+            offload: Some(false),
+        });
+
+        let result = build_plan(&g, None).unwrap();
+        let settings = &result.items[0].action.runtime;
+        assert_eq!(
+            settings
+                .iter()
+                .find(|s| s.key == "multimodal_projector")
+                .map(|s| s.value.as_str()),
+            Some("/models/mmproj-f16.gguf")
+        );
+        assert_eq!(
+            settings
+                .iter()
+                .find(|s| s.key == "multimodal_offload")
+                .map(|s| s.value.as_str()),
+            Some("false")
+        );
     }
 
     #[test]
