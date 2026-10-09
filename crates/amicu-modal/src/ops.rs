@@ -186,7 +186,9 @@ fn function_status(
 /// Every Function object in an `AppLayout`. Unlike `get_app_objects`
 /// (`__init__.py:143-146`), the class-service entry (`"<Name>.*"`) is kept:
 /// amicu's server has no distinct `Cls` object to filter it in favor of.
-fn function_objects(layout: &pb::AppLayout) -> Vec<(String, &pb::FunctionHandleMetadata)> {
+pub(crate) fn function_objects(
+    layout: &pb::AppLayout,
+) -> Vec<(String, &pb::FunctionHandleMetadata)> {
     layout
         .objects
         .iter()
