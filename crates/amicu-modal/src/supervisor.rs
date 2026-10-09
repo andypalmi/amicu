@@ -43,6 +43,8 @@ use amicu_runtime::{
 };
 use async_trait::async_trait;
 
+use amicu_providers::modal::modal_proxy_region;
+
 use crate::client::ModalClient;
 use crate::credentials::Credentials;
 use crate::deploy::ServerSpec;
@@ -284,6 +286,71 @@ fn modal_err(error: &ModalError) -> LlamaCppError {
     LlamaCppError::Supervisor(error.to_string())
 }
 
+/// Line budget for a `follow` read that sets no `tail`: [`LogStream`] is a
+/// finished batch, not a live stream, so an unbounded follow would never
+/// return. Reading stops (via `ControlFlow::Break`) once this many lines
+/// have been collected.
+const FOLLOW_MAX_LINES: usize = 1000;
+
+/// Collects [`crate::ops::LogLine`]s for [`ProcessSupervisor::logs`]. Pure and
+/// socket-free so its tail/follow behaviour is unit-tested directly.
+///
+/// - one-shot (`follow = false`): keeps the **last** `tail` lines
+///   (all lines when `tail` is `None`), matching the host supervisor's
+///   `tail()` in `amicu_llamacpp::service`;
+/// - `follow = true`: stops after `tail` lines (or [`FOLLOW_MAX_LINES`]) have
+///   arrived, since a `LogStream` cannot stay open.
+///
+/// Image-build output is not filtered: `stream_logs` delivers it like any
+/// other line (see its docs).
+struct LogCollector {
+    lines: std::collections::VecDeque<String>,
+    /// Max lines to retain (`None` = unbounded, one-shot only).
+    limit: Option<usize>,
+    follow: bool,
+}
+
+impl LogCollector {
+    fn new(options: LogOptions) -> Self {
+        let tail = options.tail.map(|n| n as usize);
+        Self {
+            lines: std::collections::VecDeque::new(),
+            limit: if options.follow {
+                Some(tail.unwrap_or(FOLLOW_MAX_LINES))
+            } else {
+                tail
+            },
+            follow: options.follow,
+        }
+    }
+
+    fn push(&mut self, line: &crate::ops::LogLine) -> std::ops::ControlFlow<()> {
+        if self.limit == Some(0) {
+            return std::ops::ControlFlow::Break(());
+        }
+        self.lines
+            .push_back(line.text.trim_end_matches('\n').to_owned());
+        match self.limit {
+            // Following: the first `limit` lines are the answer; stop.
+            Some(limit) if self.follow && self.lines.len() >= limit => {
+                std::ops::ControlFlow::Break(())
+            }
+            // One-shot: a rolling window of the newest `limit` lines.
+            Some(limit) => {
+                while self.lines.len() > limit {
+                    self.lines.pop_front();
+                }
+                std::ops::ControlFlow::Continue(())
+            }
+            None => std::ops::ControlFlow::Continue(()),
+        }
+    }
+
+    fn finish(self) -> Vec<String> {
+        self.lines.into()
+    }
+}
+
 impl ModalSupervisor {
     /// Connects an authenticated [`ModalClient`], reading
     /// `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` fresh each call - this
@@ -372,6 +439,7 @@ impl ModalSupervisor {
             app_name: self.app_name.clone(),
             gpu: self.gpu.clone(),
             region: self.region.clone(),
+            proxy_regions: vec![modal_proxy_region(self.region.as_deref()).to_owned()],
             port: settings.port,
             argv,
             image: ImageSpec {
@@ -469,16 +537,19 @@ impl ProcessSupervisor for ModalSupervisor {
 
     async fn logs(
         &self,
-        _handle: &RuntimeHandle,
-        _options: LogOptions,
+        handle: &RuntimeHandle,
+        options: LogOptions,
     ) -> Result<LogStream, LlamaCppError> {
-        // `AppGetLogs` plumbing is a separate PR (amicu-planning#158 PR 4,
-        // `crates/amicu-modal/src/ops.rs`) landing on its own branch; wiring
-        // it through this trait is a follow-up once it merges.
-        Err(LlamaCppError::Supervisor(
-            "log retrieval for Modal deployments is not yet implemented (amicu-planning#158)"
-                .to_owned(),
-        ))
+        let mut client = self.connect().await?;
+        let mut collector = LogCollector::new(options);
+        // `handle.id` is the Modal app id (`start` stores it there).
+        client
+            .stream_logs(&handle.id, None, options.follow, |line| {
+                collector.push(&line)
+            })
+            .await
+            .map_err(|e| modal_err(&e))?;
+        Ok(LogStream(collector.finish()))
     }
 
     async fn stop(&self, handle: &RuntimeHandle) -> Result<(), LlamaCppError> {
@@ -599,6 +670,89 @@ mod tests {
             price: None,
         };
         assert!(ModalSupervisor::for_hardware("amicu-x", &hardware).is_err());
+    }
+
+    // --- LogCollector -----------------------------------------------------
+
+    fn log_line(text: &str) -> crate::ops::LogLine {
+        crate::ops::LogLine {
+            entry_id: "en-1".to_owned(),
+            fd: crate::ops::LogFd::Stdout,
+            text: text.to_owned(),
+            timestamp: 0.0,
+        }
+    }
+
+    fn feed(options: LogOptions, n: usize) -> (Vec<String>, bool) {
+        let mut collector = LogCollector::new(options);
+        let mut broke = false;
+        for i in 0..n {
+            if collector.push(&log_line(&format!("l{i}\n"))).is_break() {
+                broke = true;
+                break;
+            }
+        }
+        (collector.finish(), broke)
+    }
+
+    #[test]
+    fn one_shot_without_tail_keeps_everything() {
+        let (lines, broke) = feed(LogOptions::default(), 3);
+        assert_eq!(lines, ["l0", "l1", "l2"]);
+        assert!(!broke);
+    }
+
+    #[test]
+    fn one_shot_tail_keeps_the_last_n_lines() {
+        let options = LogOptions {
+            follow: false,
+            tail: Some(2),
+        };
+        assert_eq!(feed(options, 5).0, ["l3", "l4"]);
+        assert_eq!(feed(options, 1).0, ["l0"]);
+    }
+
+    #[test]
+    fn follow_with_tail_breaks_once_the_limit_is_reached() {
+        let options = LogOptions {
+            follow: true,
+            tail: Some(2),
+        };
+        let (lines, broke) = feed(options, 10);
+        assert_eq!(lines, ["l0", "l1"]);
+        assert!(broke);
+    }
+
+    #[test]
+    fn follow_without_tail_is_capped() {
+        let options = LogOptions {
+            follow: true,
+            tail: None,
+        };
+        let (lines, broke) = feed(options, FOLLOW_MAX_LINES + 5);
+        assert_eq!(lines.len(), FOLLOW_MAX_LINES);
+        assert!(broke);
+    }
+
+    #[test]
+    fn tail_zero_returns_nothing() {
+        let options = LogOptions {
+            follow: false,
+            tail: Some(0),
+        };
+        assert_eq!(feed(options, 3).0.len(), 0);
+    }
+
+    #[test]
+    fn modal_errors_map_through_modal_err() {
+        let error = ModalError::InvalidSpec {
+            field: "proxy_regions",
+            detail: "bad".to_owned(),
+        };
+        let LlamaCppError::Supervisor(message) = modal_err(&error) else {
+            panic!("expected Supervisor");
+        };
+        assert_eq!(message, error.to_string());
     }
 
     // --- bind_all_interfaces --------------------------------------------

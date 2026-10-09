@@ -45,6 +45,9 @@ async-trait = "0.1"
 amicu-llamacpp = { path = "../amicu-llamacpp" }
 amicu-runtime = { path = "../amicu-runtime" }
 amicu-core = { path = "../amicu-core" }
+# `supervisor.rs` resolves the web server's proxy region from the pinned
+# compute region via the provider catalog (`modal_proxy_region`).
+amicu-providers = { path = "../amicu-providers" }
 # `ModalClient::health` does a plain HTTP GET against a deployed server's
 # tunnel URL — no gRPC involved. Promoted from dev-dependencies (PR 3 used it
 # only in `tests/live_deploy.rs`) now that `ops.rs` needs it at runtime too;

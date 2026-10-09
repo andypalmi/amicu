@@ -11,15 +11,9 @@ use std::time::Duration;
 use crate::client::ModalClient;
 use crate::error::ModalError;
 use crate::image::{IMAGE_BUILDER_VERSION, ImageSpec};
+use crate::ops::function_objects;
 use crate::pb::modal_client as pb;
 use crate::shim::{SHIM_CLASS_NAME, SHIM_MODULE_NAME, render_shim};
-
-/// Modal's proxy regions for the server's public endpoint.
-///
-/// `app.py:1216` defaults `proxy_regions` to `["us-east"]` and
-/// `_server.py:34-35` rejects an empty list, so this is not optional. Making
-/// it configurable is a follow-up.
-const PROXY_REGIONS: [&str; 1] = ["us-east"];
 
 /// The deployment name of Modal's globally published client-package Mount.
 ///
@@ -79,6 +73,12 @@ pub struct ServerSpec {
     pub gpu: Option<String>,
     /// Optional region constraint, e.g. `"us-east"`.
     pub region: Option<String>,
+    /// Regions Modal's public proxy for the endpoint runs in
+    /// (`HttpConfig.proxy_regions`). Must be non-empty with no blank entry
+    /// (`_server.py:56-59`). Distinct from [`ServerSpec::region`] (compute
+    /// placement): proxy names are a smaller set. See
+    /// `amicu_providers::modal::modal_proxy_region` for the mapping.
+    pub proxy_regions: Vec<String>,
     /// The port the process in [`ServerSpec::argv`] listens on. Baked into the
     /// generated shim's readiness probe as well as `http_config.port`.
     pub port: u16,
@@ -114,6 +114,7 @@ impl std::fmt::Debug for ServerSpec {
             .field("app_name", &self.app_name)
             .field("gpu", &self.gpu)
             .field("region", &self.region)
+            .field("proxy_regions", &self.proxy_regions)
             .field("port", &self.port)
             .field("argv", &self.argv)
             .field("image", &self.image)
@@ -168,6 +169,12 @@ impl ServerSpec {
             return Err(ModalError::InvalidSpec {
                 field: "startup_timeout_secs",
                 detail: "must be positive (_server.py:30-31)".to_owned(),
+            });
+        }
+        if self.proxy_regions.is_empty() || self.proxy_regions.iter().any(|r| r.trim().is_empty()) {
+            return Err(ModalError::InvalidSpec {
+                field: "proxy_regions",
+                detail: "must be non-empty with no blank entries (_server.py:56-59)".to_owned(),
             });
         }
         if self.argv.is_empty() {
@@ -280,7 +287,7 @@ impl ServerSpec {
             // (`app.py:1317`).
             http_config: Some(pb::HttpConfig {
                 port: u32::from(self.port),
-                proxy_regions: PROXY_REGIONS.iter().map(|r| (*r).to_owned()).collect(),
+                proxy_regions: self.proxy_regions.clone(),
                 startup_timeout: self.startup_timeout_secs,
                 // `app.py:1215` default.
                 exit_grace_period: 0,
@@ -351,7 +358,36 @@ impl Drop for HeartbeatGuard {
     }
 }
 
+/// The id of the Function named `function_name` in `layout`, or an empty
+/// string. `None` (the app is new) and "no Function by that name" both yield
+/// `""`, the "create a new Function" value for `existing_function_id`. Pure
+/// so the selection is testable without a socket.
+fn select_existing_function_id(layout: Option<&pb::AppLayout>, function_name: &str) -> String {
+    layout
+        .and_then(|layout| {
+            function_objects(layout)
+                .into_iter()
+                .find(|(_, meta)| meta.function_name == function_name)
+        })
+        .map(|(id, _)| id)
+        .unwrap_or_default()
+}
+
 impl ModalClient {
+    /// `AppGetLayout` for `app_id` (`modal/experimental/__init__.py:135-136`).
+    async fn app_layout(&mut self, app_id: &str) -> Result<pb::AppLayout, ModalError> {
+        Ok(self
+            .stub()
+            .app_get_layout(pb::AppGetLayoutRequest {
+                app_id: app_id.to_owned(),
+            })
+            .await
+            .map_err(|status| ModalError::from_status("AppGetLayout", status))?
+            .into_inner()
+            .app_layout
+            .unwrap_or_default())
+    }
+
     /// Looks up an existing deployed app id by name (`AppGetByDeploymentName`,
     /// `runner.py:102-123`). `Ok(None)` when no such deployment exists.
     pub async fn find_app(&mut self, name: &str) -> Result<Option<String>, ModalError> {
@@ -404,15 +440,21 @@ impl ModalClient {
     ) -> Result<Deployment, ModalError> {
         spec.validate()?;
 
-        let app_id = match self.find_app(&spec.app_name).await? {
-            Some(app_id) => app_id,
-            None => self.create_app(&spec.app_name).await?,
+        let (app_id, existing_function_id) = match self.find_app(&spec.app_name).await? {
+            Some(app_id) => {
+                let layout = self.app_layout(&app_id).await?;
+                let existing = select_existing_function_id(Some(&layout), SHIM_CLASS_NAME);
+                (app_id, existing)
+            }
+            None => (self.create_app(&spec.app_name).await?, String::new()),
         };
 
         let _heartbeat = self.spawn_heartbeat(&app_id);
         // `Box::pin`: the chain of tonic calls below adds up to a few tens of
         // KiB of future (clippy::large_futures).
-        match Box::pin(self.deploy_into_app(&app_id, spec, on_build_log)).await {
+        match Box::pin(self.deploy_into_app(&app_id, &existing_function_id, spec, on_build_log))
+            .await
+        {
             Ok(deployment) => Ok(deployment),
             Err(error) => {
                 // Best effort: the original error is what the caller needs, so
@@ -429,6 +471,7 @@ impl ModalClient {
     async fn deploy_into_app(
         &mut self,
         app_id: &str,
+        existing_function_id: &str,
         spec: &ServerSpec,
         on_build_log: &mut (dyn FnMut(&str) + Send),
     ) -> Result<Deployment, ModalError> {
@@ -459,15 +502,19 @@ impl ModalClient {
         let function =
             spec.function_definition(&image_id, &client_mount_id, secret_ids, volume_mounts)?;
 
-        // Preassign the Function's id so `FunctionCreate` updates it in place
-        // rather than creating a second one (`_functions.py:900-917`).
+        // Preassign the Function's id (`_functions.py:900-917`). On a
+        // re-deploy `existing_function_id` is the id of this app's current
+        // server Function (from `AppGetLayout`), so Modal updates it in place;
+        // for a fresh app, or one with no matching Function, it is empty and
+        // the server allocates a new id. Not yet confirmed against a live
+        // deploy that Modal keeps the id/URL stable.
         let precreated = self
             .stub()
             .function_precreate(pb::FunctionPrecreateRequest {
                 app_id: app_id.to_owned(),
                 function_name: function.function_name.clone(),
                 function_type: function.function_type,
-                existing_function_id: String::new(),
+                existing_function_id: existing_function_id.to_owned(),
                 ..pb::FunctionPrecreateRequest::default()
             })
             .await
@@ -794,6 +841,7 @@ mod tests {
             app_name: "amicu-test".to_owned(),
             gpu: Some("H100:2".to_owned()),
             region: Some("us-east".to_owned()),
+            proxy_regions: vec!["us-east".to_owned()],
             port: 8000,
             argv: ["vllm", "serve", "tiny"]
                 .into_iter()
@@ -884,6 +932,73 @@ mod tests {
             );
         }
         assert!(sample_spec().validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_or_blank_proxy_regions() {
+        let mut spec = sample_spec();
+        spec.proxy_regions = Vec::new();
+        assert!(matches!(
+            spec.validate(),
+            Err(ModalError::InvalidSpec {
+                field: "proxy_regions",
+                ..
+            })
+        ));
+        spec.proxy_regions = vec![" ".to_owned()];
+        assert!(spec.validate().is_err());
+    }
+
+    #[test]
+    fn proxy_regions_come_from_the_spec() {
+        let mut spec = sample_spec();
+        spec.proxy_regions = vec!["eu-west".to_owned()];
+        let http = sample_function(&spec).http_config.expect("http_config");
+        assert_eq!(http.proxy_regions, vec!["eu-west".to_owned()]);
+    }
+
+    fn layout_with(functions: &[(&str, &str)]) -> pb::AppLayout {
+        pb::AppLayout {
+            objects: functions
+                .iter()
+                .map(|(id, name)| pb::Object {
+                    object_id: (*id).to_owned(),
+                    handle_metadata_oneof: Some(
+                        pb::object::HandleMetadataOneof::FunctionHandleMetadata(
+                            pb::FunctionHandleMetadata {
+                                function_name: (*name).to_owned(),
+                                ..pb::FunctionHandleMetadata::default()
+                            },
+                        ),
+                    ),
+                })
+                .collect(),
+            ..pb::AppLayout::default()
+        }
+    }
+
+    #[test]
+    fn existing_function_id_is_empty_for_a_new_app() {
+        assert_eq!(select_existing_function_id(None, "Server"), "");
+    }
+
+    #[test]
+    fn existing_function_id_picks_the_matching_function() {
+        let layout = layout_with(&[("fu-other", "Other"), ("fu-server", "Server")]);
+        assert_eq!(
+            select_existing_function_id(Some(&layout), "Server"),
+            "fu-server"
+        );
+    }
+
+    #[test]
+    fn existing_function_id_is_empty_when_no_function_matches() {
+        let layout = layout_with(&[("fu-other", "Other")]);
+        assert_eq!(select_existing_function_id(Some(&layout), "Server"), "");
+        assert_eq!(
+            select_existing_function_id(Some(&pb::AppLayout::default()), "Server"),
+            ""
+        );
     }
 
     #[test]

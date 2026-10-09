@@ -16,7 +16,7 @@ import { pageMetadata } from '../_lib/seo';
 export const metadata: Metadata = pageMetadata({
   title: 'Providers',
   description:
-    'Provider-agnostic coverage: Hetzner, OVHcloud, Scaleway, Nebius, RunPod, AWS, Azure, GCP, and self-hosted / SSH - declare your stack once, run it anywhere. Residency and region are first-class planning inputs.',
+    'Provider-agnostic coverage: Hetzner, OVHcloud, Scaleway, Nebius, RunPod, Modal, AWS, Azure, GCP, and self-hosted / SSH - declare your stack once, run it anywhere. Residency and region are first-class planning inputs.',
   path: '/providers',
 });
 

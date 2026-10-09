@@ -206,6 +206,7 @@ version = "0.1.0"
 dependencies = [
  "amicu-core",
  "amicu-llamacpp",
+ "amicu-providers",
  "amicu-runtime",
  "async-trait",
  "base64 0.22.1",

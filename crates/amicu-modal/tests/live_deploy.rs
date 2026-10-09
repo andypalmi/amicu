@@ -136,6 +136,7 @@ async fn deploy_cpu_http_server() {
         app_name: app_name.clone(),
         gpu: None,
         region: None,
+        proxy_regions: vec!["us-east".to_owned()],
         port: PORT,
         argv: ["python", "-m", "http.server", &PORT.to_string()]
             .into_iter()
@@ -184,6 +185,7 @@ async fn deploy_vllm_smoke() {
         app_name: app_name.clone(),
         gpu: Some("L4".to_owned()),
         region: None,
+        proxy_regions: vec!["us-east".to_owned()],
         port: PORT,
         argv: [
             "vllm",

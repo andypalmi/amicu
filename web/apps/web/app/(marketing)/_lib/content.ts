@@ -242,6 +242,11 @@ export const providers: Provider[] = [
     residency: 'EU region selection',
   },
   {
+    name: 'Modal',
+    kind: 'Serverless GPU cloud',
+    residency: 'EU region selection (pin to eu / eu-north)',
+  },
+  {
     name: 'AWS',
     kind: 'Hyperscaler',
     residency: 'EU regions (Frankfurt, Ireland, Paris, Stockholm…)',

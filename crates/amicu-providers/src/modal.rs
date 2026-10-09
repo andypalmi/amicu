@@ -172,6 +172,48 @@ fn regions() -> [ModalRegion; 22] {
     })
 }
 
+/// The proxy-region fallback: Modal's own default for `@app.server`
+/// (`routing_region="us-east"`, `modal/app.py`), used when a deployment pins no
+/// region or one with no verified proxy equivalent.
+pub const DEFAULT_PROXY_REGION: &str = "us-east";
+
+/// The proxy ("routing") regions Modal documents for `routing_region=`, which
+/// `@app.server` forwards verbatim as `HttpConfig.proxy_regions=[routing_region]`
+/// (`modal-client` `py/modal/app.py`): `us-east` (Virginia), `us-west`
+/// (Oregon), `eu-west` (Dublin) and `ap-south` (Mumbai). Source:
+/// <https://modal.com/docs/guide/region-selection#regional-routing>, checked
+/// 2026-10-10. This is a *smaller* set than the compute regions in
+/// [`regions`]; a compute region code is not necessarily a valid proxy region.
+pub const PROXY_REGIONS: [&str; 4] = ["us-east", "us-west", "eu-west", "ap-south"];
+
+/// Resolves the proxy region for a deployment pinned to compute region
+/// `region` (a [`regions`] code), or unpinned (`None`).
+///
+/// - `us-west` / `eu-west` / `ap-south` map to themselves.
+/// - Every other EU region (`eu`, `eu-north`, `eu-south`) maps to `eu-west`,
+///   the only EU proxy region, so an EU-pinned deployment is not fronted by a
+///   US proxy.
+/// - Other `ap` regions (`ap`, `ap-northeast`, `ap-southeast`,
+///   `ap-melbourne`, `jp`, `au`) map to `ap-south`, the only APAC proxy region
+///   (a latency/locality choice, not an exact location match).
+/// - Everything else falls back to [`DEFAULT_PROXY_REGION`] (`us-east`): `us`
+///   and the other US regions, plus `uk`, `ca`, `me`, `sa`, `af`, `mx`, for
+///   which Modal documents no proxy region, and unknown or unpinned values.
+///   No proxy region name is invented for those.
+///
+/// The result is always one of [`PROXY_REGIONS`].
+#[must_use]
+pub fn modal_proxy_region(region: Option<&str>) -> &'static str {
+    match region {
+        Some("us-west") => "us-west",
+        Some("eu" | "eu-west" | "eu-north" | "eu-south") => "eu-west",
+        Some(
+            "ap" | "ap-south" | "ap-northeast" | "ap-southeast" | "ap-melbourne" | "jp" | "au",
+        ) => "ap-south",
+        _ => DEFAULT_PROXY_REGION,
+    }
+}
+
 /// One entry of Modal's GPU catalog: the offering-id slug, the exact string
 /// Modal's `gpu=` argument expects (verbatim - PR 2's sandbox supervisor
 /// passes it through, optionally suffixed `:<count>`), per-accelerator VRAM,
@@ -512,6 +554,27 @@ mod tests {
                 )
             })
         }
+    }
+
+    #[test]
+    fn proxy_region_is_always_a_documented_proxy_region() {
+        for region in regions() {
+            let proxy = modal_proxy_region(Some(region.code));
+            assert!(PROXY_REGIONS.contains(&proxy), "{} -> {proxy}", region.code);
+        }
+        assert_eq!(modal_proxy_region(None), "us-east");
+        assert_eq!(modal_proxy_region(Some("nowhere")), "us-east");
+    }
+
+    #[test]
+    fn eu_residency_regions_get_an_eu_proxy() {
+        for region in regions().iter().filter(|r| r.residency == Residency::Eu) {
+            assert_eq!(modal_proxy_region(Some(region.code)), "eu-west");
+        }
+        assert_eq!(modal_proxy_region(Some("us-west")), "us-west");
+        assert_eq!(modal_proxy_region(Some("jp")), "ap-south");
+        assert_eq!(modal_proxy_region(Some("us")), "us-east");
+        assert_eq!(modal_proxy_region(Some("uk")), "us-east");
     }
 
     #[test]
