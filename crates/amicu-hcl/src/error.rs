@@ -26,6 +26,18 @@ pub enum HclError {
         resource: String,
         field: String,
     },
+    /// An attribute or nested block the schema does not define
+    /// (amicu-planning#157). `code` is [`catalog::SCHEMA_UNKNOWN_ATTRIBUTE`],
+    /// `context` locates the enclosing block (e.g. `deployment chat.llama_cpp`),
+    /// `kind` is `"attribute"` or `"block"`, `name` the offending key, and
+    /// `suggestion` a known key within a small edit distance, if any.
+    UnknownField {
+        code: DiagnosticCode,
+        context: String,
+        kind: &'static str,
+        name: String,
+        suggestion: Option<String>,
+    },
 }
 
 impl HclError {
@@ -51,11 +63,26 @@ impl HclError {
         }
     }
 
+    pub(crate) fn unknown_field(
+        context: impl Into<String>,
+        kind: &'static str,
+        name: impl Into<String>,
+        suggestion: Option<String>,
+    ) -> Self {
+        Self::UnknownField {
+            code: catalog::SCHEMA_UNKNOWN_ATTRIBUTE,
+            context: context.into(),
+            kind,
+            name: name.into(),
+            suggestion,
+        }
+    }
+
     /// The standardized diagnostic code for this error, when it has one.
     #[must_use]
     pub const fn code(&self) -> Option<DiagnosticCode> {
         match self {
-            Self::SecretLiteral { code, .. } => Some(*code),
+            Self::SecretLiteral { code, .. } | Self::UnknownField { code, .. } => Some(*code),
             Self::Parse(_) | Self::Schema(_) | Self::InvalidIdentifier { .. } => None,
         }
     }
@@ -81,6 +108,19 @@ impl fmt::Display for HclError {
                 "{code}: {resource}: `{field}` is a secret-designated field and must be a \
                  secret reference, e.g. `{field} = secret(\"vault://...\")`, not a literal value"
             ),
+            Self::UnknownField {
+                code,
+                context,
+                kind,
+                name,
+                suggestion,
+            } => {
+                write!(f, "{code}: {context}: unknown {kind} `{name}`")?;
+                if let Some(s) = suggestion {
+                    write!(f, "; did you mean `{s}`?")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -89,7 +129,10 @@ impl std::error::Error for HclError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Parse(e) => Some(e),
-            Self::Schema(_) | Self::InvalidIdentifier { .. } | Self::SecretLiteral { .. } => None,
+            Self::Schema(_)
+            | Self::InvalidIdentifier { .. }
+            | Self::SecretLiteral { .. }
+            | Self::UnknownField { .. } => None,
         }
     }
 }

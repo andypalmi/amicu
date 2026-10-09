@@ -47,7 +47,7 @@ resource "budget" "research_monthly" {
 
 ## Weighted routing with failover
 
-See the `routing_policy` block in the skill: `targets { deployment, weight }`
+See the `routing_policy` block in the skill: `target { deployment, weight }` (repeatable)
 splits traffic proportionally; `failover { enabled, health_check_interval_secs,
 max_failures }` drains unhealthy targets. Use `optimize_for` (`latency`, `cost`,
 `quality`) to express intent.

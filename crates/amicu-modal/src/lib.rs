@@ -117,9 +117,9 @@
 //! layer, even though the final `cargo build -p amicu-server` step never
 //! links the crate into the shipped binary.
 //!
-//! [`supervisor`] adds `amicu-llamacpp`/`amicu-runtime`/`amicu-core` as
-//! dependencies of this crate (for the `ProcessSupervisor` trait and the
-//! plan/handle types it exchanges). Neither of those crates depends back on
+//! [`supervisor`] adds `amicu-llamacpp`/`amicu-runtime`/`amicu-core`/`amicu-providers` as
+//! dependencies of this crate (for the `ProcessSupervisor` trait, the
+//! plan/handle types it exchanges, and the Modal proxy-region mapping). None of those crates depends back on
 //! `amicu-modal`, so this stays a one-way edge - `amicu-engine` and
 //! `amicu-vllm` still do not know Modal exists.
 
