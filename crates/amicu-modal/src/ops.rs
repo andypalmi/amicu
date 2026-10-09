@@ -224,10 +224,9 @@ impl HealthStatus {
     #[must_use]
     pub fn auth_hint(&self) -> Option<String> {
         match self {
-            Self::Ok(code) => crate::proxy_auth::hint_for_status(
-                *code,
-                crate::proxy_auth::ProxyToken::from_env().is_some(),
-            ),
+            Self::Ok(code) => {
+                crate::proxy_auth::hint_for_status(*code, crate::proxy_auth::env_state())
+            }
             Self::Unreachable(_) => None,
         }
     }
@@ -395,6 +394,7 @@ impl ModalClient {
         let target = build_health_url(url, path);
         let outcome = async {
             let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
                 .timeout(timeout)
                 .build()
                 .map_err(|error| error.to_string())?;

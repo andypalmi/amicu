@@ -103,7 +103,7 @@ async fn wait_for_http_200(url: &str, deadline: Duration) {
                 // Fail fast: retrying cannot fix missing/wrong proxy auth.
                 let hint = amicu_modal::proxy_auth::hint_for_status(
                     401,
-                    amicu_modal::proxy_auth::ProxyToken::from_env().is_some(),
+                    amicu_modal::proxy_auth::env_state(),
                 )
                 .unwrap_or_default();
                 panic!("{url}: {hint}");

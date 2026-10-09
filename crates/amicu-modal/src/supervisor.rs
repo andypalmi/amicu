@@ -404,6 +404,7 @@ impl ModalSupervisor {
 async fn health_status(endpoint: &str) -> Option<u16> {
     let url = format!("{}/health", endpoint.trim_end_matches('/'));
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
         .build()
         .ok()?;
@@ -453,12 +454,9 @@ impl ProcessSupervisor for ModalSupervisor {
             RuntimeStatus::Running {
                 detail: "healthy".to_owned(),
             }
-        } else if let Some(hint) = code.and_then(|c| {
-            crate::proxy_auth::hint_for_status(
-                c,
-                crate::proxy_auth::ProxyToken::from_env().is_some(),
-            )
-        }) {
+        } else if let Some(hint) =
+            code.and_then(|c| crate::proxy_auth::hint_for_status(c, crate::proxy_auth::env_state()))
+        {
             RuntimeStatus::Failed {
                 detail: format!("auth required: {hint}"),
             }

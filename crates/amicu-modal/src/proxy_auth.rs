@@ -13,16 +13,19 @@
 
 use std::fmt;
 
+use reqwest::header::HeaderValue;
+
 /// Env var holding the Proxy Auth Token id (`wk-...`), sent as `Modal-Key`.
 pub const TOKEN_ID_ENV_VAR: &str = "MODAL_PROXY_TOKEN_ID";
 /// Env var holding the Proxy Auth Token secret (`ws-...`), sent as `Modal-Secret`.
 pub const TOKEN_SECRET_ENV_VAR: &str = "MODAL_PROXY_TOKEN_SECRET";
 
-/// A Modal Proxy Auth Token. No `Display`; `Debug` redacts the secret.
+/// A validated Modal Proxy Auth Token. No `Display`; `Debug` redacts both
+/// halves, and the header values are marked sensitive.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProxyToken {
-    id: String,
-    secret: String,
+    id: HeaderValue,
+    secret: HeaderValue,
 }
 
 impl fmt::Debug for ProxyToken {
@@ -35,56 +38,147 @@ impl fmt::Debug for ProxyToken {
 }
 
 impl ProxyToken {
-    /// Builds a token from raw values; `None` unless both are non-blank.
+    /// The `(Modal-Key, Modal-Secret)` header pairs, values marked sensitive.
     #[must_use]
-    pub fn from_values(id: Option<String>, secret: Option<String>) -> Option<Self> {
-        let id = id?.trim().to_owned();
-        let secret = secret?.trim().to_owned();
-        (!id.is_empty() && !secret.is_empty()).then_some(Self { id, secret })
+    pub fn headers(&self) -> [(&'static str, HeaderValue); 2] {
+        [
+            ("Modal-Key", self.id.clone()),
+            ("Modal-Secret", self.secret.clone()),
+        ]
+    }
+}
+
+/// What the environment holds for the two token variables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenConfig {
+    /// Neither variable is set (or both are blank).
+    None,
+    /// Exactly one is set; `missing` names the other.
+    Partial {
+        set: &'static str,
+        missing: &'static str,
+    },
+    /// A value contains characters not allowed in an HTTP header.
+    Invalid { var: &'static str },
+    /// Both set and valid.
+    Complete(ProxyToken),
+}
+
+/// Payload-free summary of a [`TokenConfig`], for hints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenState {
+    None,
+    Partial {
+        set: &'static str,
+        missing: &'static str,
+    },
+    Invalid {
+        var: &'static str,
+    },
+    Complete,
+}
+
+fn header_value(var: &'static str, raw: &str) -> Result<HeaderValue, TokenConfig> {
+    let mut value = HeaderValue::from_str(raw).map_err(|_| TokenConfig::Invalid { var })?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
+impl TokenConfig {
+    /// Pure constructor; surrounding whitespace is trimmed, blank counts as unset.
+    #[must_use]
+    pub fn from_values(id: Option<String>, secret: Option<String>) -> Self {
+        let clean = |v: Option<String>| v.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+        match (clean(id), clean(secret)) {
+            (None, None) => Self::None,
+            (Some(_), None) => Self::Partial {
+                set: TOKEN_ID_ENV_VAR,
+                missing: TOKEN_SECRET_ENV_VAR,
+            },
+            (None, Some(_)) => Self::Partial {
+                set: TOKEN_SECRET_ENV_VAR,
+                missing: TOKEN_ID_ENV_VAR,
+            },
+            (Some(id), Some(secret)) => {
+                let id = match header_value(TOKEN_ID_ENV_VAR, &id) {
+                    Ok(v) => v,
+                    Err(e) => return e,
+                };
+                match header_value(TOKEN_SECRET_ENV_VAR, &secret) {
+                    Ok(secret) => Self::Complete(ProxyToken { id, secret }),
+                    Err(e) => e,
+                }
+            }
+        }
     }
 
-    /// Reads the token from [`TOKEN_ID_ENV_VAR`] / [`TOKEN_SECRET_ENV_VAR`].
+    /// Reads [`TOKEN_ID_ENV_VAR`] / [`TOKEN_SECRET_ENV_VAR`].
     #[must_use]
-    pub fn from_env() -> Option<Self> {
+    pub fn from_env() -> Self {
         Self::from_values(
             std::env::var(TOKEN_ID_ENV_VAR).ok(),
             std::env::var(TOKEN_SECRET_ENV_VAR).ok(),
         )
     }
 
-    /// The `(Modal-Key, Modal-Secret)` header pairs.
+    /// Payload-free state.
     #[must_use]
-    pub fn headers(&self) -> [(&'static str, &str); 2] {
-        [("Modal-Key", &self.id), ("Modal-Secret", &self.secret)]
+    pub fn state(&self) -> TokenState {
+        match self {
+            Self::None => TokenState::None,
+            Self::Partial { set, missing } => TokenState::Partial { set, missing },
+            Self::Invalid { var } => TokenState::Invalid { var },
+            Self::Complete(_) => TokenState::Complete,
+        }
     }
 }
 
-/// Attaches the env-configured proxy auth headers (if any) to a request.
+/// Attaches the env-configured proxy auth headers (only when the token is
+/// complete and valid) to a request. Value bytes are marked sensitive.
 pub fn apply(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-    match ProxyToken::from_env() {
-        Some(token) => token
+    match TokenConfig::from_env() {
+        TokenConfig::Complete(token) => token
             .headers()
             .into_iter()
             .fold(request, |req, (name, value)| req.header(name, value)),
-        None => request,
+        _ => request,
     }
 }
 
-/// Actionable message for a `401` from a Modal URL, `None` for other codes.
+/// State of the environment, for [`hint_for_status`].
 #[must_use]
-pub fn hint_for_status(status: u16, token_configured: bool) -> Option<String> {
-    if status != 401 {
-        return None;
-    }
-    let tail = if token_configured {
-        "The configured token was rejected: check that it is current and belongs to the \
-         workspace that owns this app."
-    } else {
-        "Create a Proxy Auth Token in the Modal dashboard (Settings -> Proxy Auth Tokens) and \
-         export MODAL_PROXY_TOKEN_ID / MODAL_PROXY_TOKEN_SECRET."
+pub fn env_state() -> TokenState {
+    TokenConfig::from_env().state()
+}
+
+/// Actionable message for a `401`/`403` from a Modal URL, `None` otherwise.
+/// Never contains a token value.
+#[must_use]
+pub fn hint_for_status(status: u16, state: TokenState) -> Option<String> {
+    let tail = match (status, state) {
+        (401, TokenState::None) => {
+            "Modal Servers require proxy auth. Create a Proxy Auth Token in the Modal \
+             dashboard (Settings -> Proxy Auth Tokens) and export MODAL_PROXY_TOKEN_ID / \
+             MODAL_PROXY_TOKEN_SECRET."
+                .to_owned()
+        }
+        (401, TokenState::Partial { set, missing }) => {
+            format!("{set} is set but {missing} is not; export both.")
+        }
+        (401, TokenState::Invalid { var }) => format!(
+            "{var} contains characters not allowed in an HTTP header (check for whitespace or \
+             newlines), so no token was sent."
+        ),
+        (401, TokenState::Complete) => "The configured token was rejected: check that it is \
+             current and belongs to the workspace that owns this app."
+            .to_owned(),
+        (403, _) => "The proxy token was rejected (403): it may be scoped to a different \
+             workspace/environment."
+            .to_owned(),
+        _ => return None,
     };
     Some(format!(
-        "Modal proxy rejected the request (401): Modal Servers require proxy auth. {tail}"
+        "Modal proxy rejected the request ({status}): {tail}"
     ))
 }
 
@@ -92,42 +186,92 @@ pub fn hint_for_status(status: u16, token_configured: bool) -> Option<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn no_headers_without_both_values() {
-        assert!(ProxyToken::from_values(None, None).is_none());
-        assert!(ProxyToken::from_values(Some("wk-1".into()), None).is_none());
-        assert!(ProxyToken::from_values(None, Some("ws-1".into())).is_none());
-        assert!(ProxyToken::from_values(Some("wk-1".into()), Some("  ".into())).is_none());
+    fn cfg(id: Option<&str>, secret: Option<&str>) -> TokenConfig {
+        TokenConfig::from_values(id.map(Into::into), secret.map(Into::into))
     }
 
     #[test]
-    fn headers_when_both_set() {
-        let t = ProxyToken::from_values(Some("wk-1".into()), Some("ws-2".into())).unwrap();
+    fn none_partial_complete() {
+        assert_eq!(cfg(None, None), TokenConfig::None);
+        assert_eq!(cfg(Some(" "), None), TokenConfig::None);
         assert_eq!(
-            t.headers(),
-            [("Modal-Key", "wk-1"), ("Modal-Secret", "ws-2")]
+            cfg(Some("wk-1"), None).state(),
+            TokenState::Partial {
+                set: TOKEN_ID_ENV_VAR,
+                missing: TOKEN_SECRET_ENV_VAR
+            }
+        );
+        assert_eq!(
+            cfg(None, Some("ws-1")).state(),
+            TokenState::Partial {
+                set: TOKEN_SECRET_ENV_VAR,
+                missing: TOKEN_ID_ENV_VAR
+            }
+        );
+        assert_eq!(
+            cfg(Some(" wk-1\n"), Some("ws-2")).state(),
+            TokenState::Complete
         );
     }
 
     #[test]
+    fn headers_are_sensitive_and_correct() {
+        let TokenConfig::Complete(t) = cfg(Some("wk-1"), Some("ws-2")) else {
+            panic!("expected complete");
+        };
+        let [(k, kv), (s, sv)] = t.headers();
+        assert_eq!((k, kv.to_str().unwrap()), ("Modal-Key", "wk-1"));
+        assert_eq!((s, sv.to_str().unwrap()), ("Modal-Secret", "ws-2"));
+        assert!(kv.is_sensitive() && sv.is_sensitive());
+    }
+
+    #[test]
+    fn invalid_header_chars_are_reported_without_the_value() {
+        let c = cfg(Some("wk-1"), Some("ws-\nbad"));
+        assert_eq!(
+            c,
+            TokenConfig::Invalid {
+                var: TOKEN_SECRET_ENV_VAR
+            }
+        );
+        let hint = hint_for_status(401, c.state()).unwrap();
+        assert!(hint.contains("MODAL_PROXY_TOKEN_SECRET contains characters"));
+        assert!(!hint.contains("bad"));
+        assert!(!format!("{c:?}").contains("bad"));
+    }
+
+    #[test]
     fn debug_redacts_secret_and_id() {
-        let t = ProxyToken::from_values(Some("wk-visible".into()), Some("ws-topsecret".into()))
-            .unwrap();
-        let dbg = format!("{t:?}");
+        let c = cfg(Some("wk-visible"), Some("ws-topsecret"));
+        let dbg = format!("{c:?}");
         assert!(!dbg.contains("ws-topsecret"));
         assert!(!dbg.contains("wk-visible"));
         assert!(dbg.contains("redacted"));
     }
 
     #[test]
-    fn hint_only_for_401_and_never_leaks() {
-        assert!(hint_for_status(200, false).is_none());
-        assert!(hint_for_status(503, false).is_none());
-        let unset = hint_for_status(401, false).unwrap();
-        assert!(unset.contains("MODAL_PROXY_TOKEN_ID"));
-        assert!(unset.contains("MODAL_PROXY_TOKEN_SECRET"));
-        assert!(unset.contains("Proxy Auth Tokens"));
-        let set = hint_for_status(401, true).unwrap();
-        assert!(set.contains("rejected"));
+    fn hints_by_status_and_state() {
+        assert!(hint_for_status(200, TokenState::None).is_none());
+        assert!(hint_for_status(503, TokenState::Complete).is_none());
+        let none = hint_for_status(401, TokenState::None).unwrap();
+        assert!(none.contains("MODAL_PROXY_TOKEN_ID") && none.contains("Proxy Auth Tokens"));
+        let partial = hint_for_status(
+            401,
+            TokenState::Partial {
+                set: TOKEN_ID_ENV_VAR,
+                missing: TOKEN_SECRET_ENV_VAR,
+            },
+        )
+        .unwrap();
+        assert!(
+            partial.contains("MODAL_PROXY_TOKEN_ID is set but MODAL_PROXY_TOKEN_SECRET is not")
+        );
+        assert!(
+            hint_for_status(401, TokenState::Complete)
+                .unwrap()
+                .contains("rejected")
+        );
+        let forbidden = hint_for_status(403, TokenState::Complete).unwrap();
+        assert!(forbidden.contains("(403)") && forbidden.contains("different workspace"));
     }
 }
