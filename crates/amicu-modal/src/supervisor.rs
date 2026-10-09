@@ -450,16 +450,21 @@ impl ModalSupervisor {
 /// `amicu_llamacpp::health::HttpHealthProbe` but over TLS (Modal's endpoint
 /// is always HTTPS) - see the module docs for why that probe cannot be reused
 /// as-is. A `2xx` is healthy; anything else (including a network error or
-/// timeout) is not.
-async fn health_ok(endpoint: &str) -> bool {
+/// timeout) is not. Returns the status code when a response arrived (so a
+/// proxy `401` can be told apart from "not up yet"); proxy auth headers are
+/// attached when `MODAL_PROXY_TOKEN_*` are set.
+async fn health_status(endpoint: &str) -> Option<u16> {
     let url = format!("{}/health", endpoint.trim_end_matches('/'));
-    let Ok(client) = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
         .build()
-    else {
-        return false;
-    };
-    matches!(client.get(url).send().await, Ok(resp) if resp.status().is_success())
+        .ok()?;
+    let resp = crate::proxy_auth::apply(client.get(url))
+        .send()
+        .await
+        .ok()?;
+    Some(resp.status().as_u16())
 }
 
 #[async_trait]
@@ -496,9 +501,16 @@ impl ProcessSupervisor for ModalSupervisor {
     }
 
     async fn status(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, LlamaCppError> {
-        Ok(if health_ok(&handle.endpoint).await {
+        let code = health_status(&handle.endpoint).await;
+        Ok(if matches!(code, Some(c) if (200..300).contains(&c)) {
             RuntimeStatus::Running {
                 detail: "healthy".to_owned(),
+            }
+        } else if let Some(hint) =
+            code.and_then(|c| crate::proxy_auth::hint_for_status(c, crate::proxy_auth::env_state()))
+        {
+            RuntimeStatus::Failed {
+                detail: format!("auth required: {hint}"),
             }
         } else {
             RuntimeStatus::Failed {

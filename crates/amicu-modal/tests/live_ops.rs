@@ -101,10 +101,11 @@ async fn status_logs_health_and_stop_after_a_cpu_deploy() {
     let deadline =
         std::time::Instant::now() + Duration::from_secs(spec.startup_timeout_secs.into());
     loop {
-        if matches!(
-            ModalClient::health(&deployment.url, "/", Duration::from_secs(10)).await,
-            HealthStatus::Ok(200)
-        ) {
+        let probe = ModalClient::health(&deployment.url, "/", Duration::from_secs(10)).await;
+        if let Some(hint) = probe.auth_hint() {
+            panic!("{}: {hint}", deployment.url);
+        }
+        if matches!(probe, HealthStatus::Ok(200)) {
             break;
         }
         assert!(std::time::Instant::now() < deadline, "server never came up");
