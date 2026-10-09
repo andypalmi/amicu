@@ -13,7 +13,7 @@ use crate::error::ModalError;
 use crate::image::{IMAGE_BUILDER_VERSION, ImageSpec};
 use crate::ops::function_objects;
 use crate::pb::modal_client as pb;
-use crate::shim::{SHIM_CLASS_NAME, SHIM_MODULE_NAME, render_shim};
+use crate::shim::{SHIM_CLASS_NAME, SHIM_MODULE_NAME, render_shim_with_readiness};
 
 /// The deployment name of Modal's globally published client-package Mount.
 ///
@@ -85,6 +85,11 @@ pub struct ServerSpec {
     /// The port the process in [`ServerSpec::argv`] listens on. Baked into the
     /// generated shim's readiness probe as well as `http_config.port`.
     pub port: u16,
+    /// HTTP path the generated shim polls for a 200 before reporting the
+    /// server ready (see [`crate::render_shim_with_readiness`]); `None` uses the
+    /// TCP-connect probe. Set for servers that open their port before the
+    /// model has loaded (llama-server: `/health`).
+    pub ready_path: Option<String>,
     /// The command the container runs, verbatim; never shell-interpreted.
     /// `deploy_server` renders the container-side shim from this, so it is the
     /// single source of truth for what runs.
@@ -115,6 +120,7 @@ impl std::fmt::Debug for ServerSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServerSpec")
             .field("app_name", &self.app_name)
+            .field("ready_path", &self.ready_path)
             .field("gpu", &self.gpu)
             .field("region", &self.region)
             .field("proxy_regions", &self.proxy_regions)
@@ -488,7 +494,8 @@ impl ModalClient {
     ) -> Result<Deployment, ModalError> {
         let client_mount_id = self.get_client_mount().await?;
 
-        let shim_source = render_shim(&spec.argv, spec.port);
+        let shim_source =
+            render_shim_with_readiness(&spec.argv, spec.port, spec.ready_path.as_deref());
         let image_id = self
             .build_image(app_id, &spec.image, &shim_source, on_build_log)
             .await?;
@@ -854,6 +861,7 @@ mod tests {
             region: Some("us-east".to_owned()),
             proxy_regions: vec!["us-east".to_owned()],
             port: 8000,
+            ready_path: None,
             argv: ["vllm", "serve", "tiny"]
                 .into_iter()
                 .map(str::to_owned)
@@ -861,6 +869,7 @@ mod tests {
             image: ImageSpec {
                 base_registry_image: "vllm/vllm-openai:v0.29.0".to_owned(),
                 pip_packages: Vec::new(),
+                setup_commands: Vec::new(),
                 env: BTreeMap::new(),
             },
             volumes: vec![(

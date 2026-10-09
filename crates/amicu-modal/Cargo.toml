@@ -45,6 +45,9 @@ async-trait = "0.1"
 amicu-llamacpp = { path = "../amicu-llamacpp" }
 amicu-runtime = { path = "../amicu-runtime" }
 amicu-core = { path = "../amicu-core" }
+# `ModalSupervisor::with_gguf_model` picks the same recommended GGUF variant
+# `LlamaCppAdapter::plan_launch` renders, via the same resolver.
+amicu-registry = { path = "../amicu-registry" }
 # `supervisor.rs` resolves the web server's proxy region from the pinned
 # compute region via the provider catalog (`modal_proxy_region`).
 amicu-providers = { path = "../amicu-providers" }

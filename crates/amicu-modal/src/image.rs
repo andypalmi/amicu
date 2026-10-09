@@ -46,17 +46,27 @@ pub const IMAGE_BUILDER_VERSION: &str = "2025.06";
 #[derive(Clone)]
 pub struct ImageSpec {
     /// Fully qualified registry reference, e.g. `python:3.12-slim` or
-    /// `vllm/vllm-openai:v0.29.0`. **Must already contain Python 3.10-3.13 and
-    /// `pip` on `PATH`**: amicu does not use Modal's `add_python=` path, which
-    /// needs a `context_mount_id` pointing at Modal's globally deployed
+    /// `vllm/vllm-openai:v0.29.0`. **Must contain Python 3.10-3.13 as `python`
+    /// on `PATH`, either already or once [`ImageSpec::setup_commands`] have
+    /// run**: amicu does not use Modal's `add_python=` path, which needs a
+    /// `context_mount_id` pointing at Modal's globally deployed
     /// python-standalone Mount (`modal/image.py:1930-1938`) — extra RPC
-    /// surface, and both images amicu targets (the official `vllm/vllm-openai`
-    /// images and `python:*-slim`) ship Python already.
+    /// surface. The official `vllm/vllm-openai` images and `python:*-slim`
+    /// ship Python already; the llama.cpp server image does not and gets it
+    /// from `setup_commands` (an `apt-get` install), the equivalent
+    /// Dockerfile step.
     pub base_registry_image: String,
     /// Extra pip packages. Modal's own client package is **not** installed
     /// here — it is mounted at runtime from Modal's global client mount, so
     /// nothing in this image can dependency-conflict with it.
     pub pip_packages: Vec<String>,
+    /// Extra Dockerfile instructions (each one full line, e.g. `RUN ...`),
+    /// emitted right after `ENTRYPOINT []` and before the pip layer. Empty for
+    /// the vLLM image, which already ships everything amicu needs. The
+    /// llama.cpp server image uses these to add the Python the shim needs
+    /// (see [`crate::supervisor::llamacpp_setup_commands`]). Must never carry
+    /// secrets: they are part of the (cached, logged) image definition.
+    pub setup_commands: Vec<String>,
     /// `ENV` entries. Ordered (`BTreeMap`) so the Dockerfile — and therefore
     /// Modal's build cache key — is deterministic.
     pub env: BTreeMap<String, String>,
@@ -67,6 +77,7 @@ impl std::fmt::Debug for ImageSpec {
         f.debug_struct("ImageSpec")
             .field("base_registry_image", &self.base_registry_image)
             .field("pip_packages", &self.pip_packages)
+            .field("setup_commands", &self.setup_commands)
             // Keys only: an ENV value can carry a token.
             .field("env", &self.env.keys().collect::<Vec<_>>())
             .finish()
@@ -101,6 +112,8 @@ impl ImageSpec {
             format!("FROM {}", self.base_registry_image),
             "ENTRYPOINT []".to_owned(),
         ];
+
+        commands.extend(self.setup_commands.iter().cloned());
 
         if !self.pip_packages.is_empty() {
             let mut packages: Vec<&str> = self.pip_packages.iter().map(String::as_str).collect();
@@ -162,6 +175,7 @@ mod tests {
         ImageSpec {
             base_registry_image: "python:3.12-slim".to_owned(),
             pip_packages: vec!["vllm==0.11.0".to_owned()],
+            setup_commands: Vec::new(),
             env: BTreeMap::from([
                 ("HF_XET_HIGH_PERFORMANCE".to_owned(), "1".to_owned()),
                 ("VLLM_ARGS".to_owned(), "a b".to_owned()),
@@ -186,6 +200,17 @@ mod tests {
                  | base64 -d > /root/amicu_server.py",
             ]
         );
+    }
+
+    #[test]
+    fn setup_commands_come_right_after_the_entrypoint_reset() {
+        let mut spec = spec();
+        spec.setup_commands = vec!["RUN echo setup".to_owned()];
+        let commands = spec.dockerfile_commands("x = 1\n");
+        assert_eq!(commands[0], "FROM python:3.12-slim");
+        assert_eq!(commands[1], "ENTRYPOINT []");
+        assert_eq!(commands[2], "RUN echo setup");
+        assert!(commands[3].starts_with("RUN python -m pip install"));
     }
 
     #[test]

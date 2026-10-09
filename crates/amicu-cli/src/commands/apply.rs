@@ -6,7 +6,7 @@ use amicu_core::adapter::AdapterError;
 use amicu_core::diagnostic::{DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
 use amicu_core::resource::Runtime;
-use amicu_llamacpp::{Catalog, LlamaCppAdapter, LlamaCppError, host_supervisor};
+use amicu_llamacpp::{Catalog, LlamaCppAdapter, host_supervisor};
 use amicu_modal::ModalSupervisor;
 use amicu_modal::supervisor::app_name_for;
 use amicu_runtime::{EndpointRegistry, RuntimeAdapter, RuntimeHandle};
@@ -109,10 +109,9 @@ const MODAL_PROVIDER: &str = "modal";
 enum Dispatch {
     /// The existing local launchd/systemd path (`host_supervisor()`).
     Host,
-    /// `provider = "modal"`, vLLM: route through [`ModalSupervisor`].
+    /// `provider = "modal"`, vLLM or llama.cpp: route through
+    /// [`ModalSupervisor`] (the runtime picks the adapter and the image).
     Modal,
-    /// `provider = "modal"`, llama.cpp: no Modal path exists yet (follow-up).
-    ModalUnsupportedRuntime,
 }
 
 /// Computes [`Dispatch`] for one deployment's runtime family and hardware
@@ -120,10 +119,42 @@ enum Dispatch {
 fn dispatch_for(runtime: amicu_runtime::RuntimeKind, provider: Option<&str>) -> Dispatch {
     use amicu_runtime::RuntimeKind::{LlamaCpp, Vllm};
     match (runtime, provider) {
-        (LlamaCpp, Some(MODAL_PROVIDER)) => Dispatch::ModalUnsupportedRuntime,
-        (Vllm, Some(MODAL_PROVIDER)) => Dispatch::Modal,
+        (LlamaCpp | Vllm, Some(MODAL_PROVIDER)) => Dispatch::Modal,
         (LlamaCpp | Vllm, _) => Dispatch::Host,
     }
+}
+
+/// Builds the [`ModalSupervisor`] for one deployment from its hardware profile.
+/// A llama.cpp deployment also gets its model's Hugging Face GGUF source: the
+/// container fetches the GGUF itself with `-hf` (a non-HF model is rejected
+/// when the supervisor starts).
+fn modal_supervisor(
+    graph: &Graph,
+    catalog: &dyn Catalog,
+    id: &amicu_core::id::DeploymentId,
+    runtime: amicu_runtime::RuntimeKind,
+) -> Result<ModalSupervisor, CliError> {
+    let deployment = find_deployment(graph, id).ok_or_else(|| {
+        CliError::Message(format!(
+            "deployment '{id}' missing from its own graph while dispatching to Modal"
+        ))
+    })?;
+    let hardware = catalog
+        .resolve_hardware(&deployment.hardware_profile)
+        .ok_or_else(|| {
+            CliError::Message(format!(
+                "deployment '{id}': hardware profile '{}' not found in the catalog",
+                deployment.hardware_profile
+            ))
+        })?;
+    let supervisor = ModalSupervisor::for_hardware(app_name_for(id.as_str()), &hardware)
+        .map_err(|e| CliError::Adapter(AdapterError::from_kind(e)))?;
+    Ok(match (runtime, catalog.resolve_model(&deployment.model)) {
+        (amicu_runtime::RuntimeKind::LlamaCpp, Some(resolved)) => {
+            supervisor.with_gguf_model(&resolved.model)
+        }
+        _ => supervisor,
+    })
 }
 
 /// Start every actionable deployment, register endpoints, stop removed ones.
@@ -139,9 +170,8 @@ async fn apply_all(
     // routed through `ModalSupervisor` instead of the local launchd/systemd
     // `host_supervisor()` below - built fresh per such deployment (it needs
     // that deployment's own GPU/region), never reused across iterations.
-    // llama.cpp has no Modal path yet; such a deployment is rejected with a
-    // clear diagnostic before any adapter is touched (see the match arm
-    // below).
+    // A llama.cpp deployment on Modal takes the same route through a
+    // `LlamaCppAdapter` (amicu-planning#160).
     let catalog = build_catalog(graph);
     let llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), host_supervisor());
     let vllm_adapter = VllmAdapter::new(Box::new(catalog.clone()), amicu_vllm::host_supervisor());
@@ -153,38 +183,20 @@ async fn apply_all(
         if let Some(launch) = &item.launch {
             let dispatch = dispatch_for(launch.runtime, item.action.provider.as_deref());
             let handle = match (launch.runtime, dispatch) {
-                (_, Dispatch::ModalUnsupportedRuntime) => {
-                    return Err(CliError::Adapter(AdapterError::from_kind(
-                        LlamaCppError::Supervisor(format!(
-                            "deployment '{}': llama.cpp is not yet supported on Modal \
-                             (amicu-planning#158 follow-up); use a vllm runtime or a \
-                             non-modal hardware profile for this deployment",
-                            item.deployment
-                        )),
-                    )));
-                }
-                (_, Dispatch::Modal) => {
-                    let deployment = find_deployment(graph, &item.deployment).ok_or_else(|| {
-                        CliError::Message(format!(
-                            "deployment '{}' missing from its own graph while dispatching to \
-                             Modal",
-                            item.deployment
-                        ))
-                    })?;
-                    let hardware = catalog
-                        .resolve_hardware(&deployment.hardware_profile)
-                        .ok_or_else(|| {
-                            CliError::Message(format!(
-                                "deployment '{}': hardware profile '{}' not found in the catalog",
-                                item.deployment, deployment.hardware_profile
-                            ))
-                        })?;
-                    let app_name = app_name_for(item.deployment.as_str());
-                    let supervisor = ModalSupervisor::for_hardware(app_name, &hardware)
-                        .map_err(|e| CliError::Adapter(AdapterError::from_kind(e)))?;
-                    let modal_adapter =
-                        VllmAdapter::new(Box::new(catalog.clone()), Box::new(supervisor));
-                    modal_adapter.apply(launch, &resolver).await?
+                (runtime, Dispatch::Modal) => {
+                    let supervisor = modal_supervisor(graph, &catalog, &item.deployment, runtime)?;
+                    match runtime {
+                        amicu_runtime::RuntimeKind::Vllm => {
+                            VllmAdapter::new(Box::new(catalog.clone()), Box::new(supervisor))
+                                .apply(launch, &resolver)
+                                .await?
+                        }
+                        amicu_runtime::RuntimeKind::LlamaCpp => {
+                            LlamaCppAdapter::new(Box::new(catalog.clone()), Box::new(supervisor))
+                                .apply(launch, &resolver)
+                                .await?
+                        }
+                    }
                 }
                 (amicu_runtime::RuntimeKind::LlamaCpp, Dispatch::Host) => {
                     llama_adapter.apply(launch, &resolver).await?
@@ -224,17 +236,24 @@ async fn apply_all(
                     Dispatch::Modal => {
                         let supervisor =
                             ModalSupervisor::new(app_name_for(item.deployment.as_str()));
-                        let modal_adapter =
-                            VllmAdapter::new(Box::new(catalog.clone()), Box::new(supervisor));
-                        modal_adapter.stop(prev).await?;
+                        // `stop` only needs the stored app id, so either adapter
+                        // stops a Modal deployment identically.
+                        match prior_runtime_kind {
+                            amicu_runtime::RuntimeKind::Vllm => {
+                                VllmAdapter::new(Box::new(catalog.clone()), Box::new(supervisor))
+                                    .stop(prev)
+                                    .await?;
+                            }
+                            amicu_runtime::RuntimeKind::LlamaCpp => {
+                                LlamaCppAdapter::new(
+                                    Box::new(catalog.clone()),
+                                    Box::new(supervisor),
+                                )
+                                .stop(prev)
+                                .await?;
+                            }
+                        }
                     }
-                    // `ModalUnsupportedRuntime` cannot have been applied in
-                    // the first place (the apply-side arm above refuses it
-                    // before any handle is ever stored), so a destroy never
-                    // legitimately observes it - fall back to the llama.cpp
-                    // host path exactly like the pre-existing default match
-                    // arm this replaces did.
-                    Dispatch::ModalUnsupportedRuntime => llama_adapter.stop(prev).await?,
                     Dispatch::Host => match prior_deployment.map(|d| &d.runtime) {
                         Some(Runtime::Vllm(_)) => vllm_adapter.stop(prev).await?,
                         _ => llama_adapter.stop(prev).await?,
@@ -351,10 +370,10 @@ mod dispatch_tests {
     }
 
     #[test]
-    fn llama_cpp_on_modal_is_the_clear_unsupported_case() {
+    fn llama_cpp_on_modal_selects_the_modal_supervisor() {
         assert_eq!(
             dispatch_for(RuntimeKind::LlamaCpp, Some("modal")),
-            Dispatch::ModalUnsupportedRuntime
+            Dispatch::Modal
         );
     }
 

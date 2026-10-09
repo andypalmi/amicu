@@ -302,10 +302,9 @@ resource "deployment" "chat_modal" {
     port                 = 8000
     tensor_parallel_size = 2
 
-    # Fast boot: skip CUDA-graph capture at startup. There is no typed
-    # `enforce_eager` field yet (tracked separately, `feat/vllm-enforce-eager`) -
-    # until it lands, this is the escape hatch.
-    extra_args = ["--enforce-eager"]
+    # Fast boot: skip CUDA-graph capture at startup (renders `--enforce-eager`;
+    # `false` renders `--no-enforce-eager`).
+    enforce_eager = true
   }
 }
 ```
@@ -357,6 +356,60 @@ amicu sends them as `Modal-Key` / `Modal-Secret` on its health/status probes
 (never logged). By hand:
 `curl -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" "$URL/v1/models"`.
 (Not `Authorization: Bearer`, which vLLM's `--api-key` also uses.)
+
+## llama.cpp on Modal (serverless GPU, amicu-planning#160)
+
+```hcl
+resource "model" "gemma_gguf" {
+  # source registry must be hugging_face, reference "ggml-org/gemma-3-1b-it-GGUF";
+  # ... architecture, artifact (gguf) and variant blocks as usual
+}
+
+resource "deployment" "gemma_modal" {
+  model    = model.gemma_gguf.id
+  hardware = hardware_profile.modal_h100.id   # provider = "modal"
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 8192
+    port           = 8080
+    n_gpu_layers   = -1
+  }
+}
+```
+
+The model's `source.registry` **must be `hugging_face`**: the container
+downloads the GGUF itself. A model with any other source (or a local path) is
+rejected before any Modal call with an error asking for a Hugging Face GGUF
+reference.
+
+What actually happens on `amicu apply`:
+- The llama.cpp renderer's local `-m models/<id>/<file>` is replaced by
+  `llama-server -hf <source.reference> -hff <recommended variant file>`, and
+  `--host 0.0.0.0` is appended, same as vLLM.
+- The image is `ghcr.io/ggml-org/llama.cpp:server-cuda-b11515` (overridable
+  via `AMICU_MODAL_LLAMACPP_IMAGE`). It has no Python, so the build adds
+  `python3` + `python-is-python3` with `apt-get` (Modal's runtime and the
+  baked shim are Python), puts `llama-server` on `PATH`, and clears the
+  image's `ENTRYPOINT` so Modal's runtime is PID 1.
+- `LLAMA_CACHE=/root/.cache/llama.cpp` points at the Modal Volume
+  `amicu-llamacpp-cache`, so a restart or cold start reuses the downloaded
+  GGUF. A `llama_cpp { env = { LLAMA_CACHE = ... } }` entry overrides it.
+- `HF_TOKEN` (for gated repos) is forwarded exactly as for vLLM: a resolved
+  secret, else the operator's own `HF_TOKEN`, through a Modal Secret only.
+- The shim waits for `GET /health` to return 200 (llama-server opens its port
+  before the model is loaded), so the deployment is only "ready" once the GGUF
+  has downloaded and loaded.
+- `-hf` would auto-download the repo's multimodal projector, so `--no-mmproj`
+  is appended unless the deployment has a `multimodal {}` block.
+- Rejected before any Modal call (local files Modal cannot see):
+  `speculative {}` (draft GGUF), `multimodal { projector }` / `--mmproj`/`-mm`,
+  `--chat-template-file`, `--lora`, `--lora-scaled`, `--control-vector`,
+  `--control-vector-scaled`. Also rejected, because they would bake a secret
+  into the image command line: `--hf-token`/`-hft`, `--api-key`,
+  `--api-key-file` (use the `HF_TOKEN` secret path instead).
+- Autoscaling defaults and the stop path are the same as for vLLM.
+- Calling the endpoint needs the same Modal Proxy Auth Token headers as vLLM
+  (see "Calling the endpoint" above); amicu's status probe sends them too.
 
 ## llama.cpp escape hatch: `extra_args` + `env` (amicu-planning#150)
 

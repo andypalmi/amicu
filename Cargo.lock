@@ -207,6 +207,7 @@ dependencies = [
  "amicu-core",
  "amicu-llamacpp",
  "amicu-providers",
+ "amicu-registry",
  "amicu-runtime",
  "async-trait",
  "base64 0.22.1",
