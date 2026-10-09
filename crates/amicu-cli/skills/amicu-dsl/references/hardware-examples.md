@@ -172,7 +172,8 @@ Notes:
 - Only GPU accelerators are deployable to Modal today: a `tpu` or
   `apple_silicon` accelerator on a `provider = "modal"` profile is rejected
   before any RPC (Modal has no such offering).
-- llama.cpp has no Modal path yet - a `runtime = "llama_cpp"` deployment on a
-  `provider = "modal"` hardware profile is rejected with a clear error at
-  apply time (follow-up); use `vllm`. See `deployment-examples.md`'s "vLLM on
-  Modal" section for the full deployment-side example and defaults.
+- Both `vllm` and `llama_cpp` deployments on a `provider = "modal"` profile
+  route through `ModalSupervisor`. A `llama_cpp` deployment needs a model whose
+  source is Hugging Face (the GGUF is fetched in the container with `-hf`). See
+  `deployment-examples.md`'s "vLLM on Modal" and "llama.cpp on Modal" sections
+  for the full examples and defaults.

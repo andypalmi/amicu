@@ -70,6 +70,7 @@ async fn status_logs_health_and_stop_after_a_cpu_deploy() {
         image: ImageSpec {
             base_registry_image: "python:3.12-slim".to_owned(),
             pip_packages: Vec::new(),
+            setup_commands: Vec::new(),
             env: BTreeMap::new(),
         },
         volumes: Vec::new(),

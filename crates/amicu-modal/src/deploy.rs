@@ -802,6 +802,7 @@ mod tests {
             image: ImageSpec {
                 base_registry_image: "vllm/vllm-openai:v0.29.0".to_owned(),
                 pip_packages: Vec::new(),
+                setup_commands: Vec::new(),
                 env: BTreeMap::new(),
             },
             volumes: vec![(

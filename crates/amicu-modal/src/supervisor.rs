@@ -32,14 +32,35 @@
 //! carries only resolved [`LaunchPlan::secret_refs`] (never a plain
 //! `vllm { env = {...} }` entry - those become baked-in image env) plus the
 //! [`HF_TOKEN_ENV_VAR`] fallback documented on that constant.
+//!
+//! # llama.cpp
+//!
+//! A `llama_cpp` launch goes through the same `build_spec`, selected by
+//! `plan.settings`. What differs, and why:
+//!
+//! - **Image**: [`DEFAULT_LLAMACPP_IMAGE`] (overridable via
+//!   [`LLAMACPP_IMAGE_ENV_VAR`]). Its `ENTRYPOINT` (`/app/llama-server`) is
+//!   already cleared by [`crate::ImageSpec`]'s `ENTRYPOINT []`, so Modal's
+//!   runtime is PID 1; the image has no Python, so
+//!   [`llamacpp_setup_commands`] installs it and puts `llama-server` on `PATH`.
+//! - **GGUF delivery**: the llama.cpp renderer emits `-m <local path>`, which
+//!   cannot exist in the container. `build_spec` replaces it with
+//!   `-hf <repo> -hff <file>` from the model's Hugging Face source
+//!   ([`ModalSupervisor::with_gguf_model`]); `LLAMA_CACHE` points at a Modal
+//!   Volume ([`LLAMACPP_VOLUMES`]) so a cold start does not re-download. A
+//!   model that is not on Hugging Face is rejected with a clear error.
+//!   `HF_TOKEN` is forwarded through `secret_env` exactly as for vLLM.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use amicu_core::resource::{Accelerator, AcceleratorKind, HardwareProfile, Runtime};
+use amicu_core::resource::{
+    Accelerator, AcceleratorKind, HardwareProfile, Model, Runtime, SourceRegistry,
+};
 use amicu_llamacpp::{LlamaCppError, ProcessSupervisor, ResolvedSecret};
+use amicu_registry::GgufResolver;
 use amicu_runtime::{
-    LaunchPlan, LogOptions, LogStream, RuntimeHandle, RuntimeMetrics, RuntimeStatus,
+    LaunchPlan, LogOptions, LogStream, RuntimeHandle, RuntimeKind, RuntimeMetrics, RuntimeStatus,
 };
 use async_trait::async_trait;
 
@@ -61,6 +82,76 @@ pub const DEFAULT_VLLM_IMAGE: &str = "vllm/vllm-openai:v0.29.0";
 /// call, not cached - the supervisor itself is stateless between calls, so
 /// there is nothing to invalidate if the value changes between deploys.
 pub const VLLM_IMAGE_ENV_VAR: &str = "AMICU_MODAL_VLLM_IMAGE";
+
+/// The llama.cpp base image used for `llama_cpp` launches unless overridden
+/// by [`LLAMACPP_IMAGE_ENV_VAR`]: the official CUDA server build from
+/// `ghcr.io/ggml-org/llama.cpp` (Ubuntu 24.04, CUDA 12.8.1, amd64). The tag
+/// was verified to exist in the ghcr.io registry (manifest list with amd64)
+/// on 2026-10-10; the image ships `llama-server` at `/app/llama-server` with
+/// `ENTRYPOINT ["/app/llama-server"]` and no Python (see
+/// [`llamacpp_setup_commands`]).
+pub const DEFAULT_LLAMACPP_IMAGE: &str = "ghcr.io/ggml-org/llama.cpp:server-cuda-b11515";
+
+/// Environment variable overriding [`DEFAULT_LLAMACPP_IMAGE`]; same
+/// semantics as [`VLLM_IMAGE_ENV_VAR`].
+pub const LLAMACPP_IMAGE_ENV_VAR: &str = "AMICU_MODAL_LLAMACPP_IMAGE";
+
+/// Where llama-server caches `-hf` downloads inside the container
+/// (`LLAMA_CACHE`); the mount path of the llama.cpp cache Volume.
+pub const LLAMA_CACHE_PATH: &str = "/root/.cache/llama.cpp";
+
+/// Persistent Modal Volumes every Modal-deployed llama.cpp server mounts, as
+/// `(volume name, container mount path)` pairs. Shared across amicu
+/// deployments in a workspace, like [`VOLUMES`]: a repeated or restarted
+/// deploy of the same GGUF finds it already downloaded.
+pub const LLAMACPP_VOLUMES: [(&str, &str); 1] = [("amicu-llamacpp-cache", LLAMA_CACHE_PATH)];
+
+/// Default base image for a runtime family.
+#[must_use]
+pub const fn default_image(runtime: RuntimeKind) -> &'static str {
+    match runtime {
+        RuntimeKind::Vllm => DEFAULT_VLLM_IMAGE,
+        RuntimeKind::LlamaCpp => DEFAULT_LLAMACPP_IMAGE,
+    }
+}
+
+/// Operator environment variable that overrides [`default_image`].
+#[must_use]
+pub const fn image_env_var(runtime: RuntimeKind) -> &'static str {
+    match runtime {
+        RuntimeKind::Vllm => VLLM_IMAGE_ENV_VAR,
+        RuntimeKind::LlamaCpp => LLAMACPP_IMAGE_ENV_VAR,
+    }
+}
+
+/// Dockerfile steps that make the llama.cpp server image usable by Modal's
+/// Python container runtime. This is the Dockerfile equivalent of Modal's
+/// `add_python=` (which would need an extra mount RPC, see
+/// [`crate::ImageSpec::base_registry_image`]):
+///
+/// 1. install `python3` (Ubuntu 24.04: 3.12, inside Modal's 3.10-3.13) plus
+///    `python-is-python3` so `python` exists, and `ca-certificates` for the
+///    runtime's TLS - only when `python` is not already on `PATH`, so a
+///    custom image that has it is left alone;
+/// 2. make `llama-server` resolvable by bare name: the official image keeps
+///    it at `/app/llama-server`, off `PATH`, and the amicu renderer emits
+///    `llama-server` as `argv[0]`.
+///
+/// Modal's own package is not installed (it is mounted at runtime), so no
+/// `pip` is needed.
+#[must_use]
+pub fn llamacpp_setup_commands() -> Vec<String> {
+    vec![
+        "RUN command -v python >/dev/null 2>&1 || (apt-get update \
+         && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+         python3 python-is-python3 ca-certificates \
+         && rm -rf /var/lib/apt/lists/*)"
+            .to_owned(),
+        "RUN command -v llama-server >/dev/null 2>&1 \
+         || ln -s /app/llama-server /usr/local/bin/llama-server"
+            .to_owned(),
+    ]
+}
 
 /// Environment variable [`ModalSupervisor::start`] reads a Hugging Face
 /// token from when the launch plan carries no resolved `HF_TOKEN` secret.
@@ -111,6 +202,18 @@ pub struct ModalSupervisor {
     app_name: String,
     gpu: Option<String>,
     region: Option<String>,
+    gguf: Option<GgufSource>,
+}
+
+/// A GGUF file on Hugging Face: what a Modal-deployed llama-server fetches
+/// with `-hf <repo> -hff <file>` instead of the local `-m <path>` the
+/// renderer emits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GgufSource {
+    /// Hugging Face repo id (`org/model`).
+    pub repo: String,
+    /// File name within the repo.
+    pub file: String,
 }
 
 impl ModalSupervisor {
@@ -125,6 +228,7 @@ impl ModalSupervisor {
             app_name: app_name.into(),
             gpu: None,
             region: None,
+            gguf: None,
         }
     }
 
@@ -151,6 +255,27 @@ impl ModalSupervisor {
     #[must_use]
     pub fn with_region(mut self, region: Option<String>) -> Self {
         self.region = region;
+        self
+    }
+
+    /// Sets the Hugging Face GGUF a llama.cpp launch downloads, from the
+    /// deployment's model: its Hugging Face source repo and the same
+    /// recommended variant `LlamaCppAdapter::plan_launch` renders. Left unset
+    /// (so a llama.cpp `start` is rejected) for a model with any other source
+    /// registry or no variants. A no-op for vLLM launches.
+    #[must_use]
+    pub fn with_gguf_model(mut self, model: &Model) -> Self {
+        self.gguf = (model.source.registry == SourceRegistry::HuggingFace)
+            .then(|| {
+                GgufResolver::from_variants(&model.variants)
+                    .recommended()
+                    .cloned()
+            })
+            .flatten()
+            .map(|variant| GgufSource {
+                repo: model.source.reference.clone(),
+                file: variant.file,
+            });
         self
     }
 
@@ -233,19 +358,90 @@ fn looks_like_local_path(model_reference: &str) -> bool {
         || model_reference.starts_with('~')
 }
 
-/// The rendered model reference from a vLLM `argv` (`["vllm", "serve",
-/// "<model>", ...]`), if the shape matches.
+/// llama-server flags that name a Hugging Face repo (`-hf <repo>[:quant]`).
+const LLAMA_HF_FLAGS: [&str; 3] = ["-hf", "-hfr", "--hf-repo"];
+/// llama-server flags that name a local model file.
+const LLAMA_MODEL_FLAGS: [&str; 2] = ["-m", "--model"];
+/// llama-server flags that name a speculative-decoding draft model (a local
+/// path when rendered by amicu).
+const LLAMA_DRAFT_FLAGS: [&str; 3] = ["-md", "--model-draft", "--spec-draft-model"];
+
+/// Whether `argv` is a `llama-server` launch (`argv[0]` is `llama-server`,
+/// bare or by absolute path).
+fn is_llama_server(argv: &[String]) -> bool {
+    argv.first()
+        .is_some_and(|a| a == "llama-server" || a.ends_with("/llama-server"))
+}
+
+/// The value of the first of `flags` in `argv[1..]`, accepting both
+/// `--flag value` and `--flag=value`.
+fn flag_value<'a>(argv: &'a [String], flags: &[&str]) -> Option<&'a str> {
+    let mut rest = argv.iter().skip(1);
+    while let Some(arg) = rest.next() {
+        if flags.contains(&arg.as_str()) {
+            return rest.next().map(String::as_str);
+        }
+        if let Some((name, value)) = arg.split_once('=')
+            && flags.contains(&name)
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// The rendered model reference from a launch `argv`, if the shape matches:
+/// `["vllm", "serve", "<model>", ...]` for vLLM, or a `llama-server` argv,
+/// where a Hugging Face reference (`-hf <repo>[:quant]`) wins over a model
+/// file (`-m <path>`, what the amicu renderer emits).
 fn model_reference(argv: &[String]) -> Option<&str> {
+    if is_llama_server(argv) {
+        return flag_value(argv, &LLAMA_HF_FLAGS).or_else(|| flag_value(argv, &LLAMA_MODEL_FLAGS));
+    }
     (argv.first().map(String::as_str) == Some("vllm")
         && argv.get(1).map(String::as_str) == Some("serve"))
     .then(|| argv.get(2).map(String::as_str))
     .flatten()
 }
 
+/// `argv` without any `-m`/`--model` model-file flag (and its value).
+fn without_model_file(argv: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(argv.len());
+    let mut iter = argv.iter().enumerate();
+    while let Some((i, arg)) = iter.next() {
+        if i > 0 && LLAMA_MODEL_FLAGS.contains(&arg.as_str()) {
+            iter.next();
+        } else if i > 0
+            && arg
+                .split_once('=')
+                .is_some_and(|(name, _)| LLAMA_MODEL_FLAGS.contains(&name))
+        {
+            // `--model=<path>` carries its value inline.
+        } else {
+            out.push(arg.clone());
+        }
+    }
+    out
+}
+
 /// Refuses a launch whose model reference is a local path: Modal's
-/// container has no access to the operator's filesystem, so vLLM there must
-/// be given a Hugging Face repo id.
+/// container has no access to the operator's filesystem, so the server there
+/// must be given a Hugging Face repo id (vLLM) or `-hf` GGUF repo
+/// (llama-server).
 fn reject_local_path_model(argv: &[String]) -> Result<(), LlamaCppError> {
+    if is_llama_server(argv) && flag_value(argv, &LLAMA_HF_FLAGS).is_none() {
+        // A llama-server `-m` value is always a file path, however relative
+        // (the amicu renderer emits `models/<id>/<file>`), so it never
+        // reaches `looks_like_local_path`'s prefix heuristic.
+        if let Some(path) = flag_value(argv, &LLAMA_MODEL_FLAGS) {
+            return Err(LlamaCppError::Supervisor(format!(
+                "Modal deployments need a Hugging Face GGUF reference (a model whose source \
+                 registry is hugging_face, e.g. 'ggml-org/gemma-3-1b-it-GGUF'), not a local \
+                 model file; got '{path}' - Modal's container cannot see this machine's \
+                 filesystem"
+            )));
+        }
+    }
     match model_reference(argv) {
         Some(reference) if looks_like_local_path(reference) => {
             Err(LlamaCppError::Supervisor(format!(
@@ -300,6 +496,53 @@ impl ModalSupervisor {
             .map_err(|e| modal_err(&e))
     }
 
+    /// The llama-server argv for a Modal container: the renderer's local
+    /// `-m <path>` is replaced by `-hf <repo> -hff <file>` from
+    /// [`ModalSupervisor::with_gguf_model`] (unless the launch already names a
+    /// Hugging Face repo itself), and anything that points at this machine's
+    /// filesystem is rejected.
+    fn hf_llama_argv(&self, argv: &[String]) -> Result<Vec<String>, LlamaCppError> {
+        if !is_llama_server(argv) {
+            return Err(LlamaCppError::Supervisor(
+                "the Modal supervisor expected a `llama-server` command for a llama.cpp launch"
+                    .to_owned(),
+            ));
+        }
+        if flag_value(argv, &LLAMA_DRAFT_FLAGS).is_some() {
+            return Err(LlamaCppError::Supervisor(
+                "speculative decoding (a draft model) is not yet supported on Modal: the draft \
+                 GGUF is a local path Modal's container cannot see"
+                    .to_owned(),
+            ));
+        }
+        if flag_value(argv, &LLAMA_HF_FLAGS).is_some() {
+            let out = without_model_file(argv);
+            reject_local_path_model(&out)?;
+            return Ok(out);
+        }
+        let Some(source) = &self.gguf else {
+            // No Hugging Face source known: surface the local-path error.
+            reject_local_path_model(argv)?;
+            return Err(LlamaCppError::Supervisor(
+                "Modal deployments need a Hugging Face GGUF reference (a model whose source \
+                 registry is hugging_face, with at least one variant)"
+                    .to_owned(),
+            ));
+        };
+        let mut out = without_model_file(argv);
+        out.splice(
+            1..1,
+            [
+                "-hf".to_owned(),
+                source.repo.clone(),
+                "-hff".to_owned(),
+                source.file.clone(),
+            ],
+        );
+        reject_local_path_model(&out)?;
+        Ok(out)
+    }
+
     /// Builds the [`ServerSpec`] for `plan`, forwarding `secrets` (plus the
     /// [`HF_TOKEN_ENV_VAR`] fallback) as Modal Secret env, never image env.
     ///
@@ -325,32 +568,39 @@ impl ModalSupervisor {
         base_registry_image: &str,
         hf_token_fallback: Option<&str>,
     ) -> Result<ServerSpec, LlamaCppError> {
-        let settings = match &plan.settings {
-            Runtime::Vllm(s) => s,
-            Runtime::LlamaCpp(_) => {
-                return Err(LlamaCppError::Supervisor(
-                    "the Modal supervisor serves vLLM launches only".to_owned(),
-                ));
-            }
+        let (settings_env, port, runtime) = match &plan.settings {
+            Runtime::Vllm(s) => (&s.env, s.port, RuntimeKind::Vllm),
+            Runtime::LlamaCpp(s) => (&s.env, s.port, RuntimeKind::LlamaCpp),
         };
         let argv = plan.rendered.argv().ok_or_else(|| {
             LlamaCppError::Supervisor("Modal supervisor expects a command launch".to_owned())
         })?;
-        reject_local_path_model(argv)?;
-        let argv = bind_all_interfaces(argv);
+        let argv = match runtime {
+            RuntimeKind::Vllm => {
+                reject_local_path_model(argv)?;
+                bind_all_interfaces(argv)
+            }
+            RuntimeKind::LlamaCpp => bind_all_interfaces(&self.hf_llama_argv(argv)?),
+        };
 
-        if let Some(s) = secrets.iter().find(|s| settings.env.contains_key(&s.name)) {
+        if let Some(s) = secrets.iter().find(|s| settings_env.contains_key(&s.name)) {
             return Err(LlamaCppError::Supervisor(format!(
                 "env var '{}' is set both by the deployment's `env` block and a resolved secret",
                 s.name
             )));
         }
 
-        let image_env: BTreeMap<String, String> = settings
-            .env
+        let mut image_env: BTreeMap<String, String> = settings_env
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        if runtime == RuntimeKind::LlamaCpp {
+            // `-hf` downloads land here, on the Volume mounted at the same
+            // path. A value the deployment's own `env` block set wins.
+            image_env
+                .entry("LLAMA_CACHE".to_owned())
+                .or_insert_with(|| LLAMA_CACHE_PATH.to_owned());
+        }
 
         let mut secret_env = BTreeMap::new();
         for secret in secrets {
@@ -372,17 +622,24 @@ impl ModalSupervisor {
             app_name: self.app_name.clone(),
             gpu: self.gpu.clone(),
             region: self.region.clone(),
-            port: settings.port,
+            port,
             argv,
             image: ImageSpec {
                 base_registry_image: base_registry_image.to_owned(),
                 pip_packages: Vec::new(),
+                setup_commands: match runtime {
+                    RuntimeKind::Vllm => Vec::new(),
+                    RuntimeKind::LlamaCpp => llamacpp_setup_commands(),
+                },
                 env: image_env,
             },
-            volumes: VOLUMES
-                .iter()
-                .map(|(name, path)| ((*name).to_owned(), (*path).to_owned()))
-                .collect(),
+            volumes: match runtime {
+                RuntimeKind::Vllm => VOLUMES.as_slice(),
+                RuntimeKind::LlamaCpp => LLAMACPP_VOLUMES.as_slice(),
+            }
+            .iter()
+            .map(|(name, path)| ((*name).to_owned(), (*path).to_owned()))
+            .collect(),
             secret_env,
             scaledown_window_secs: SCALEDOWN_WINDOW_SECS,
             startup_timeout_secs: STARTUP_TIMEOUT_SECS,
@@ -417,8 +674,9 @@ impl ProcessSupervisor for ModalSupervisor {
         plan: &LaunchPlan,
         secrets: &[ResolvedSecret],
     ) -> Result<RuntimeHandle, LlamaCppError> {
-        let base_registry_image =
-            std::env::var(VLLM_IMAGE_ENV_VAR).unwrap_or_else(|_| DEFAULT_VLLM_IMAGE.to_owned());
+        let runtime = RuntimeKind::of(&plan.settings);
+        let base_registry_image = std::env::var(image_env_var(runtime))
+            .unwrap_or_else(|_| default_image(runtime).to_owned());
         let hf_token_fallback = std::env::var(HF_TOKEN_ENV_VAR).ok();
         let spec = self.build_spec(
             plan,
@@ -779,5 +1037,286 @@ mod tests {
             spec.secret_env.get("HF_TOKEN").map(String::as_str),
             Some("real-secret")
         );
+    }
+
+    // --- llama.cpp ---------------------------------------------------------
+
+    fn llama_argv() -> Vec<String> {
+        [
+            "llama-server",
+            "-m",
+            "models/gemma/gemma-q4_k_m.gguf",
+            "--port",
+            "8080",
+            "--ctx-size",
+            "4096",
+            "--n-gpu-layers",
+            "-1",
+        ]
+        .map(str::to_owned)
+        .to_vec()
+    }
+
+    fn llama_plan(argv: Vec<String>, env: BTreeMap<String, String>) -> LaunchPlan {
+        let mut plan = plan_with(argv, base_settings());
+        plan.runtime = RuntimeKind::LlamaCpp;
+        plan.settings = Runtime::LlamaCpp(amicu_core::resource::LlamaCppSettings {
+            context_length: 4096,
+            port: 8080,
+            env,
+            ..Default::default()
+        });
+        plan
+    }
+
+    fn gguf_model(registry: SourceRegistry) -> Model {
+        Model {
+            id: "gemma".into(),
+            source: amicu_core::resource::ModelSource {
+                registry,
+                reference: "ggml-org/gemma-3-1b-it-GGUF".to_owned(),
+            },
+            architecture: "gemma".to_owned(),
+            modalities: Vec::new(),
+            artifact: amicu_core::resource::Artifact {
+                format: amicu_core::resource::ArtifactFormat::Gguf,
+                quantization: None,
+            },
+            context_length: None,
+            variants: vec![amicu_core::resource::GgufVariant {
+                quantization: amicu_core::resource::Quantization::Q4KM,
+                file: "gemma-3-1b-it-Q4_K_M.gguf".to_owned(),
+                size: None,
+                sha256: None,
+            }],
+            n_layers: None,
+            n_kv_heads: None,
+            head_dim: None,
+        }
+    }
+
+    fn llama_supervisor() -> ModalSupervisor {
+        ModalSupervisor::new("amicu-dep").with_gguf_model(&gguf_model(SourceRegistry::HuggingFace))
+    }
+
+    #[test]
+    fn model_reference_reads_a_llama_server_hf_repo_or_model_file() {
+        let mut argv = llama_argv();
+        assert_eq!(
+            model_reference(&argv),
+            Some("models/gemma/gemma-q4_k_m.gguf")
+        );
+        // `-hf` wins over `-m`, in any spelling.
+        for flag in ["-hf", "-hfr", "--hf-repo"] {
+            let mut with_hf = argv.clone();
+            with_hf.extend([flag.to_owned(), "org/model:Q4_K_M".to_owned()]);
+            assert_eq!(
+                model_reference(&with_hf),
+                Some("org/model:Q4_K_M"),
+                "{flag}"
+            );
+        }
+        argv.push("--hf-repo=org/inline".to_owned());
+        assert_eq!(model_reference(&argv), Some("org/inline"));
+        assert_eq!(model_reference(&["llama-server".to_owned()]), None);
+        // An absolute binary path is still llama-server; another binary is not.
+        assert!(is_llama_server(&["/app/llama-server".to_owned()]));
+        assert_eq!(
+            model_reference(&["other".to_owned(), "-m".to_owned(), "x".to_owned()]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_relative_llama_server_model_file_is_rejected_as_local() {
+        let err = reject_local_path_model(&llama_argv())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Hugging Face GGUF"), "{err}");
+        assert!(err.contains("models/gemma/gemma-q4_k_m.gguf"), "{err}");
+        let mut hf = llama_argv();
+        hf.extend(["-hf".to_owned(), "org/model".to_owned()]);
+        assert!(reject_local_path_model(&hf).is_ok());
+    }
+
+    #[test]
+    fn image_selection_is_per_runtime() {
+        assert_eq!(default_image(RuntimeKind::Vllm), DEFAULT_VLLM_IMAGE);
+        assert_eq!(default_image(RuntimeKind::LlamaCpp), DEFAULT_LLAMACPP_IMAGE);
+        assert!(DEFAULT_LLAMACPP_IMAGE.starts_with("ghcr.io/ggml-org/llama.cpp:server-cuda-b"));
+        assert_eq!(image_env_var(RuntimeKind::Vllm), "AMICU_MODAL_VLLM_IMAGE");
+        assert_eq!(
+            image_env_var(RuntimeKind::LlamaCpp),
+            "AMICU_MODAL_LLAMACPP_IMAGE"
+        );
+    }
+
+    #[test]
+    fn build_spec_maps_a_llama_launch_onto_the_llamacpp_image_and_volume() {
+        let plan = llama_plan(llama_argv(), BTreeMap::new());
+        let spec = llama_supervisor()
+            .build_spec(
+                &plan,
+                &[],
+                default_image(RuntimeKind::LlamaCpp),
+                no_hf_token_fallback(),
+            )
+            .unwrap();
+
+        assert_eq!(spec.image.base_registry_image, DEFAULT_LLAMACPP_IMAGE);
+        assert_eq!(spec.port, 8080);
+        assert_eq!(
+            spec.argv[..5],
+            [
+                "llama-server",
+                "-hf",
+                "ggml-org/gemma-3-1b-it-GGUF",
+                "-hff",
+                "gemma-3-1b-it-Q4_K_M.gguf"
+            ]
+        );
+        // The local path is gone, the rest of the launch is untouched, and
+        // the server binds all interfaces.
+        assert!(!spec.argv.iter().any(|a| a == "-m" || a.contains("models/")));
+        assert!(spec.argv.windows(2).any(|w| w == ["--ctx-size", "4096"]));
+        let host = spec.argv.iter().position(|a| a == "--host").unwrap();
+        assert_eq!(spec.argv[host + 1], "0.0.0.0");
+        // Cache on a Volume, python + PATH setup in the image.
+        assert_eq!(
+            spec.image.env.get("LLAMA_CACHE").map(String::as_str),
+            Some(LLAMA_CACHE_PATH)
+        );
+        assert_eq!(
+            spec.volumes,
+            vec![(
+                "amicu-llamacpp-cache".to_owned(),
+                LLAMA_CACHE_PATH.to_owned()
+            )]
+        );
+        assert_eq!(spec.image.setup_commands, llamacpp_setup_commands());
+    }
+
+    #[test]
+    fn vllm_launches_get_no_setup_commands_and_the_vllm_volumes() {
+        let plan = plan_with(base_argv(), base_settings());
+        let spec = ModalSupervisor::new("amicu-dep")
+            .build_spec(&plan, &[], no_image_override(), no_hf_token_fallback())
+            .unwrap();
+        assert_eq!(spec.image.setup_commands.len(), 0);
+        assert!(!spec.image.env.contains_key("LLAMA_CACHE"));
+        assert_eq!(spec.volumes[0].1, "/root/.cache/huggingface");
+    }
+
+    #[test]
+    fn llamacpp_setup_installs_python_and_exposes_llama_server() {
+        let commands = llamacpp_setup_commands().join("\n");
+        assert!(commands.contains("python3 python-is-python3"), "{commands}");
+        assert!(commands.contains("command -v python"), "{commands}");
+        assert!(commands.contains("ln -s /app/llama-server /usr/local/bin/llama-server"));
+        assert!(!commands.contains("HF_TOKEN"));
+    }
+
+    #[test]
+    fn a_llama_launch_without_a_hugging_face_source_is_rejected() {
+        let plan = llama_plan(llama_argv(), BTreeMap::new());
+        for sup in [
+            ModalSupervisor::new("amicu-dep"),
+            ModalSupervisor::new("amicu-dep").with_gguf_model(&gguf_model(SourceRegistry::Local)),
+        ] {
+            let err = sup
+                .build_spec(&plan, &[], no_image_override(), no_hf_token_fallback())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("Hugging Face GGUF"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_llama_launch_that_already_names_an_hf_repo_keeps_it() {
+        let mut argv = llama_argv();
+        argv.extend(["-hf".to_owned(), "org/own:Q8_0".to_owned()]);
+        let spec = ModalSupervisor::new("amicu-dep")
+            .build_spec(
+                &llama_plan(argv, BTreeMap::new()),
+                &[],
+                no_image_override(),
+                no_hf_token_fallback(),
+            )
+            .unwrap();
+        assert_eq!(spec.argv.iter().filter(|a| *a == "-hf").count(), 1);
+        assert!(spec.argv.iter().any(|a| a == "org/own:Q8_0"));
+        assert!(!spec.argv.iter().any(|a| a == "-m"));
+    }
+
+    #[test]
+    fn a_llama_draft_model_is_rejected() {
+        let mut argv = llama_argv();
+        argv.extend(["--model-draft".to_owned(), "models/draft.gguf".to_owned()]);
+        let err = llama_supervisor()
+            .build_spec(
+                &llama_plan(argv, BTreeMap::new()),
+                &[],
+                no_image_override(),
+                no_hf_token_fallback(),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("draft"), "{err}");
+    }
+
+    #[test]
+    fn llama_hf_token_goes_to_secret_env_never_image_env_or_errors() {
+        let plan = llama_plan(llama_argv(), BTreeMap::new());
+        let spec = llama_supervisor()
+            .build_spec(&plan, &[], no_image_override(), Some("hf_secret_value"))
+            .unwrap();
+        assert_eq!(
+            spec.secret_env.get("HF_TOKEN").map(String::as_str),
+            Some("hf_secret_value")
+        );
+        assert!(!spec.image.env.contains_key("HF_TOKEN"));
+        assert!(!format!("{spec:?}").contains("hf_secret_value"));
+    }
+
+    #[test]
+    fn a_deployment_llama_cache_env_wins_over_the_default() {
+        let env = BTreeMap::from([("LLAMA_CACHE".to_owned(), "/custom".to_owned())]);
+        let spec = llama_supervisor()
+            .build_spec(
+                &llama_plan(llama_argv(), env),
+                &[],
+                no_image_override(),
+                no_hf_token_fallback(),
+            )
+            .unwrap();
+        assert_eq!(
+            spec.image.env.get("LLAMA_CACHE").map(String::as_str),
+            Some("/custom")
+        );
+    }
+
+    #[test]
+    fn with_gguf_model_uses_the_hugging_face_source_and_recommended_variant() {
+        let sup =
+            ModalSupervisor::new("a").with_gguf_model(&gguf_model(SourceRegistry::HuggingFace));
+        assert_eq!(
+            sup.gguf,
+            Some(GgufSource {
+                repo: "ggml-org/gemma-3-1b-it-GGUF".to_owned(),
+                file: "gemma-3-1b-it-Q4_K_M.gguf".to_owned(),
+            })
+        );
+        for registry in [
+            SourceRegistry::Local,
+            SourceRegistry::Url,
+            SourceRegistry::Ollama,
+        ] {
+            assert!(
+                ModalSupervisor::new("a")
+                    .with_gguf_model(&gguf_model(registry))
+                    .gguf
+                    .is_none()
+            );
+        }
     }
 }

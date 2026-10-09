@@ -144,6 +144,7 @@ async fn deploy_cpu_http_server() {
         image: ImageSpec {
             base_registry_image: "python:3.12-slim".to_owned(),
             pip_packages: Vec::new(),
+            setup_commands: Vec::new(),
             env: BTreeMap::new(),
         },
         volumes: Vec::new(),
@@ -207,6 +208,7 @@ async fn deploy_vllm_smoke() {
             // packages that could conflict with vLLM's pins.
             base_registry_image: "vllm/vllm-openai:v0.29.0".to_owned(),
             pip_packages: Vec::new(),
+            setup_commands: Vec::new(),
             env: BTreeMap::from([("HF_XET_HIGH_PERFORMANCE".to_owned(), "1".to_owned())]),
         },
         volumes: vec![(
