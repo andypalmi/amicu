@@ -63,6 +63,7 @@ async fn status_logs_health_and_stop_after_a_cpu_deploy() {
         gpu: None,
         region: None,
         port: PORT,
+        ready_path: None,
         argv: ["python", "-m", "http.server", &PORT.to_string()]
             .into_iter()
             .map(str::to_owned)

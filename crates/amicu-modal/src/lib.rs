@@ -130,5 +130,7 @@ pub use deploy::{Deployment, MODAL_CLIENT_MOUNT_NAME, ServerSpec};
 pub use error::ModalError;
 pub use image::{IMAGE_BUILDER_VERSION, ImageSpec};
 pub use ops::{AppStatus, AppSummary, FunctionStatus, HealthStatus, LogFd, LogLine};
-pub use shim::{SHIM_CLASS_NAME, SHIM_MODULE_NAME, SHIM_PATH, render_shim};
+pub use shim::{
+    SHIM_CLASS_NAME, SHIM_MODULE_NAME, SHIM_PATH, render_shim, render_shim_with_readiness,
+};
 pub use supervisor::{DEFAULT_VLLM_IMAGE, HF_TOKEN_ENV_VAR, ModalSupervisor, VLLM_IMAGE_ENV_VAR};

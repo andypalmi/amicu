@@ -137,6 +137,7 @@ async fn deploy_cpu_http_server() {
         gpu: None,
         region: None,
         port: PORT,
+        ready_path: None,
         argv: ["python", "-m", "http.server", &PORT.to_string()]
             .into_iter()
             .map(str::to_owned)
@@ -186,6 +187,7 @@ async fn deploy_vllm_smoke() {
         gpu: Some("L4".to_owned()),
         region: None,
         port: PORT,
+        ready_path: None,
         argv: [
             "vllm",
             "serve",

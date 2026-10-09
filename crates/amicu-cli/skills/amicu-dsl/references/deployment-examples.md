@@ -385,8 +385,17 @@ What actually happens on `amicu apply`:
   GGUF. A `llama_cpp { env = { LLAMA_CACHE = ... } }` entry overrides it.
 - `HF_TOKEN` (for gated repos) is forwarded exactly as for vLLM: a resolved
   secret, else the operator's own `HF_TOKEN`, through a Modal Secret only.
-- Not supported on Modal yet: `speculative {}` (draft GGUF is a local path)
-  and a `multimodal { projector }` that is a local path.
+- The shim waits for `GET /health` to return 200 (llama-server opens its port
+  before the model is loaded), so the deployment is only "ready" once the GGUF
+  has downloaded and loaded.
+- `-hf` would auto-download the repo's multimodal projector, so `--no-mmproj`
+  is appended unless the deployment has a `multimodal {}` block.
+- Rejected before any Modal call (local files Modal cannot see):
+  `speculative {}` (draft GGUF), `multimodal { projector }` / `--mmproj`/`-mm`,
+  `--chat-template-file`, `--lora`, `--lora-scaled`, `--control-vector`,
+  `--control-vector-scaled`. Also rejected, because they would bake a secret
+  into the image command line: `--hf-token`/`-hft`, `--api-key`,
+  `--api-key-file` (use the `HF_TOKEN` secret path instead).
 - Autoscaling defaults and the stop path are the same as for vLLM.
 
 ## llama.cpp escape hatch: `extra_args` + `env` (amicu-planning#150)

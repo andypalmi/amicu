@@ -362,6 +362,20 @@ fn looks_like_local_path(model_reference: &str) -> bool {
 const LLAMA_HF_FLAGS: [&str; 3] = ["-hf", "-hfr", "--hf-repo"];
 /// llama-server flags that name a local model file.
 const LLAMA_MODEL_FLAGS: [&str; 2] = ["-m", "--model"];
+/// llama-server flags whose value is a local file path (besides the model
+/// and draft model handled separately).
+const LLAMA_LOCAL_PATH_FLAGS: [&str; 7] = [
+    "--mmproj",
+    "-mm",
+    "--chat-template-file",
+    "--lora",
+    "--lora-scaled",
+    "--control-vector",
+    "--control-vector-scaled",
+];
+/// llama-server flags that carry (or point at) a secret; baked into the image
+/// argv they would leak.
+const LLAMA_SECRET_FLAGS: [&str; 4] = ["-hft", "--hf-token", "--api-key-file", "--api-key"];
 /// llama-server flags that name a speculative-decoding draft model (a local
 /// path when rendered by amicu).
 const LLAMA_DRAFT_FLAGS: [&str; 3] = ["-md", "--model-draft", "--spec-draft-model"];
@@ -371,6 +385,15 @@ const LLAMA_DRAFT_FLAGS: [&str; 3] = ["-md", "--model-draft", "--spec-draft-mode
 fn is_llama_server(argv: &[String]) -> bool {
     argv.first()
         .is_some_and(|a| a == "llama-server" || a.ends_with("/llama-server"))
+}
+
+/// The first of `flags` present in `argv[1..]`, as `--flag value` or
+/// `--flag=value`.
+fn first_flag<'a>(argv: &[String], flags: &[&'a str]) -> Option<&'a str> {
+    argv.iter().skip(1).find_map(|arg| {
+        let name = arg.split_once('=').map_or(arg.as_str(), |(n, _)| n);
+        flags.iter().copied().find(|f| *f == name)
+    })
 }
 
 /// The value of the first of `flags` in `argv[1..]`, accepting both
@@ -496,18 +519,50 @@ impl ModalSupervisor {
             .map_err(|e| modal_err(&e))
     }
 
-    /// The llama-server argv for a Modal container: the renderer's local
-    /// `-m <path>` is replaced by `-hf <repo> -hff <file>` from
-    /// [`ModalSupervisor::with_gguf_model`] (unless the launch already names a
-    /// Hugging Face repo itself), and anything that points at this machine's
-    /// filesystem is rejected.
-    fn hf_llama_argv(&self, argv: &[String]) -> Result<Vec<String>, LlamaCppError> {
+    /// Validates a llama-server launch for Modal and rewrites its model flags
+    /// (see [`ModalSupervisor::rewrite_gguf_args`]). Rejects, before any RPC,
+    /// flags that point at this machine's filesystem
+    /// ([`LLAMA_LOCAL_PATH_FLAGS`]) or would bake a secret into the image's
+    /// argv ([`LLAMA_SECRET_FLAGS`]; only the flag name is reported, never a
+    /// value). `-hf` auto-downloads the repo's multimodal projector, so
+    /// `--no-mmproj` is appended unless the deployment declared `multimodal`.
+    fn hf_llama_argv(
+        &self,
+        argv: &[String],
+        has_multimodal: bool,
+    ) -> Result<Vec<String>, LlamaCppError> {
         if !is_llama_server(argv) {
             return Err(LlamaCppError::Supervisor(
                 "the Modal supervisor expected a `llama-server` command for a llama.cpp launch"
                     .to_owned(),
             ));
         }
+        if let Some(flag) = first_flag(argv, &LLAMA_LOCAL_PATH_FLAGS) {
+            return Err(LlamaCppError::Supervisor(format!(
+                "'{flag}' is not supported on Modal yet: it names a local file Modal's \
+                 container cannot see"
+            )));
+        }
+        if let Some(flag) = first_flag(argv, &LLAMA_SECRET_FLAGS) {
+            return Err(LlamaCppError::Supervisor(format!(
+                "'{flag}' is not allowed on Modal: it would bake a secret into the container \
+                 image's command line; pass the Hugging Face token as the HF_TOKEN secret \
+                 instead"
+            )));
+        }
+        let mut out = self.rewrite_gguf_args(argv)?;
+        if !has_multimodal && first_flag(&out, &["--no-mmproj"]).is_none() {
+            out.push("--no-mmproj".to_owned());
+        }
+        Ok(out)
+    }
+
+    /// The llama-server argv for a Modal container: the renderer's local
+    /// `-m <path>` is replaced by `-hf <repo> -hff <file>` from
+    /// [`ModalSupervisor::with_gguf_model`] (unless the launch already names a
+    /// Hugging Face repo itself), and anything that points at this machine's
+    /// filesystem is rejected.
+    fn rewrite_gguf_args(&self, argv: &[String]) -> Result<Vec<String>, LlamaCppError> {
         if flag_value(argv, &LLAMA_DRAFT_FLAGS).is_some() {
             return Err(LlamaCppError::Supervisor(
                 "speculative decoding (a draft model) is not yet supported on Modal: the draft \
@@ -575,12 +630,16 @@ impl ModalSupervisor {
         let argv = plan.rendered.argv().ok_or_else(|| {
             LlamaCppError::Supervisor("Modal supervisor expects a command launch".to_owned())
         })?;
+        let has_multimodal =
+            matches!(&plan.settings, Runtime::LlamaCpp(s) if s.multimodal.is_some());
         let argv = match runtime {
             RuntimeKind::Vllm => {
                 reject_local_path_model(argv)?;
                 bind_all_interfaces(argv)
             }
-            RuntimeKind::LlamaCpp => bind_all_interfaces(&self.hf_llama_argv(argv)?),
+            RuntimeKind::LlamaCpp => {
+                bind_all_interfaces(&self.hf_llama_argv(argv, has_multimodal)?)
+            }
         };
 
         if let Some(s) = secrets.iter().find(|s| settings_env.contains_key(&s.name)) {
@@ -623,6 +682,7 @@ impl ModalSupervisor {
             gpu: self.gpu.clone(),
             region: self.region.clone(),
             port,
+            ready_path: (runtime == RuntimeKind::LlamaCpp).then(|| "/health".to_owned()),
             argv,
             image: ImageSpec {
                 base_registry_image: base_registry_image.to_owned(),
@@ -1318,5 +1378,94 @@ mod tests {
                     .is_none()
             );
         }
+    }
+
+    fn llama_spec_err(extra: &[&str]) -> String {
+        let mut argv = llama_argv();
+        argv.extend(extra.iter().map(|s| (*s).to_owned()));
+        llama_supervisor()
+            .build_spec(
+                &llama_plan(argv, BTreeMap::new()),
+                &[],
+                no_image_override(),
+                no_hf_token_fallback(),
+            )
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn each_local_path_flag_is_rejected_in_both_forms() {
+        for flag in LLAMA_LOCAL_PATH_FLAGS {
+            let spaced = llama_spec_err(&[flag, "some/local/file"]);
+            assert!(
+                spaced.contains(flag) && spaced.contains("not supported on Modal"),
+                "{spaced}"
+            );
+            let inline = format!("{flag}=some/local/file");
+            let joined = llama_spec_err(&[inline.as_str()]);
+            assert!(joined.contains(flag), "{joined}");
+        }
+    }
+
+    #[test]
+    fn each_secret_flag_is_rejected_in_both_forms_without_echoing_the_value() {
+        for flag in LLAMA_SECRET_FLAGS {
+            let spaced = llama_spec_err(&[flag, "s3cr3t-value"]);
+            assert!(
+                spaced.contains(flag) && spaced.contains("secret"),
+                "{spaced}"
+            );
+            assert!(!spaced.contains("s3cr3t-value"));
+            let inline = format!("{flag}=s3cr3t-value");
+            let joined = llama_spec_err(&[inline.as_str()]);
+            assert!(joined.contains(flag), "{joined}");
+            assert!(!joined.contains("s3cr3t-value"));
+        }
+    }
+
+    #[test]
+    fn no_mmproj_is_appended_unless_the_deployment_declares_multimodal() {
+        let build = |multimodal: bool, extra: &[&str]| {
+            let mut argv = llama_argv();
+            argv.extend(extra.iter().map(|s| (*s).to_owned()));
+            let mut plan = llama_plan(argv, BTreeMap::new());
+            if multimodal && let Runtime::LlamaCpp(s) = &mut plan.settings {
+                s.multimodal = Some(amicu_core::resource::MultimodalSettings {
+                    projector: None,
+                    offload: Some(true),
+                });
+            }
+            llama_supervisor()
+                .build_spec(&plan, &[], no_image_override(), no_hf_token_fallback())
+                .unwrap()
+                .argv
+        };
+        let count = |argv: &[String]| argv.iter().filter(|a| *a == "--no-mmproj").count();
+        assert_eq!(count(&build(false, &[])), 1);
+        assert_eq!(count(&build(false, &["--no-mmproj"])), 1, "no duplicate");
+        assert_eq!(count(&build(true, &[])), 0);
+    }
+
+    #[test]
+    fn llama_waits_on_http_health_while_vllm_keeps_the_tcp_probe() {
+        let llama = llama_supervisor()
+            .build_spec(
+                &llama_plan(llama_argv(), BTreeMap::new()),
+                &[],
+                no_image_override(),
+                no_hf_token_fallback(),
+            )
+            .unwrap();
+        assert_eq!(llama.ready_path.as_deref(), Some("/health"));
+        let vllm = ModalSupervisor::new("amicu-dep")
+            .build_spec(
+                &plan_with(base_argv(), base_settings()),
+                &[],
+                no_image_override(),
+                no_hf_token_fallback(),
+            )
+            .unwrap();
+        assert_eq!(vllm.ready_path, None);
     }
 }
