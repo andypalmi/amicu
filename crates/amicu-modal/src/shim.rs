@@ -18,7 +18,7 @@
 //! plain class and synthesises an `_App` for it
 //! (`modal/_runtime/user_code_imports.py:620-631`, `get_active_app_fallback`
 //! at `:643-666`), so the shim needs neither a `modal.App` object nor the
-//! `@app._experimental_server` decorator — only `modal.enter` / `modal.exit`,
+//! `@app._experimental_server` decorator - only `modal.enter` / `modal.exit`,
 //! which come from the `modal` package Modal mounts into the container at
 //! runtime (see `crate::MODAL_CLIENT_MOUNT_NAME`).
 
@@ -129,10 +129,12 @@ fn render_http_shim(argv: &[String], port: u16, ready_path: &str) -> String {
          \x20   @modal.enter()\n\
          \x20   def start(self):\n\
          \x20       self.process = subprocess.Popen(ARGV)\n\
+         \x20       # No env proxy for the loopback probe.\n\
+         \x20       opener = urllib.request.build_opener(urllib.request.ProxyHandler({{}}))\n\
          \x20       url = \"http://127.0.0.1:%d%s\" % (PORT, READY_PATH)\n\
          \x20       while self.process.poll() is None:\n\
          \x20           try:\n\
-         \x20               with urllib.request.urlopen(url, timeout=5) as response:\n\
+         \x20               with opener.open(url, timeout=5) as response:\n\
          \x20                   if response.status == 200:\n\
          \x20                       return\n\
          \x20           except Exception:\n\
@@ -160,6 +162,8 @@ mod tests {
         assert!(source.contains("READY_PATH = \"/health\"\n"), "{source}");
         assert!(source.contains("PORT = 8080\n"));
         assert!(source.contains("import urllib.request"));
+        assert!(source.contains("ProxyHandler({})"));
+        assert!(source.contains("opener.open(url"));
         assert!(source.contains("response.status == 200"));
         assert!(source.contains("while self.process.poll() is None:"));
         assert!(source.contains("raise RuntimeError"));
