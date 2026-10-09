@@ -196,8 +196,10 @@ pub const PROXY_REGIONS: [&str; 4] = ["us-east", "us-west", "eu-west", "ap-south
 /// - Other `ap` regions (`ap`, `ap-northeast`, `ap-southeast`,
 ///   `ap-melbourne`, `jp`, `au`) map to `ap-south`, the only APAC proxy region
 ///   (a latency/locality choice, not an exact location match).
+/// - `uk` maps to `eu-west` (Dublin), the nearest proxy region, so a
+///   UK-pinned deployment is not fronted by a US proxy.
 /// - Everything else falls back to [`DEFAULT_PROXY_REGION`] (`us-east`): `us`
-///   and the other US regions, plus `uk`, `ca`, `me`, `sa`, `af`, `mx`, for
+///   and the other US regions, plus `ca`, `me`, `sa`, `af`, `mx`, for
 ///   which Modal documents no proxy region, and unknown or unpinned values.
 ///   No proxy region name is invented for those.
 ///
@@ -206,7 +208,7 @@ pub const PROXY_REGIONS: [&str; 4] = ["us-east", "us-west", "eu-west", "ap-south
 pub fn modal_proxy_region(region: Option<&str>) -> &'static str {
     match region {
         Some("us-west") => "us-west",
-        Some("eu" | "eu-west" | "eu-north" | "eu-south") => "eu-west",
+        Some("eu" | "eu-west" | "eu-north" | "eu-south" | "uk") => "eu-west",
         Some(
             "ap" | "ap-south" | "ap-northeast" | "ap-southeast" | "ap-melbourne" | "jp" | "au",
         ) => "ap-south",
@@ -574,7 +576,8 @@ mod tests {
         assert_eq!(modal_proxy_region(Some("us-west")), "us-west");
         assert_eq!(modal_proxy_region(Some("jp")), "ap-south");
         assert_eq!(modal_proxy_region(Some("us")), "us-east");
-        assert_eq!(modal_proxy_region(Some("uk")), "us-east");
+        assert_eq!(modal_proxy_region(Some("uk")), "eu-west");
+        assert_eq!(modal_proxy_region(Some("ca")), "us-east");
     }
 
     #[test]

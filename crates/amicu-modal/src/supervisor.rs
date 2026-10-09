@@ -26,8 +26,8 @@
 //! container cannot see ([`reject_local_path_model`]); `gpu` is the hardware
 //! profile's [`Accelerator`] rendered as Modal's `"<MODEL>:<count>"` string
 //! ([`gpu_string`] - a **hand-maintained coupling**, not validated against
-//! `amicu-providers::modal`'s GPU catalog, which is not on this crate's
-//! dependency graph); `image` is [`DEFAULT_VLLM_IMAGE`], overridable via
+//! `amicu-providers::modal`'s GPU catalog, although this crate does now
+//! depend on `amicu-providers` for [`modal_proxy_region`]); `image` is [`DEFAULT_VLLM_IMAGE`], overridable via
 //! [`VLLM_IMAGE_ENV_VAR`] (no HCL schema seam exists for it yet); `secret_env`
 //! carries only resolved [`LaunchPlan::secret_refs`] (never a plain
 //! `vllm { env = {...} }` entry - those become baked-in image env) plus the
@@ -286,64 +286,48 @@ fn modal_err(error: &ModalError) -> LlamaCppError {
     LlamaCppError::Supervisor(error.to_string())
 }
 
-/// Line budget for a `follow` read that sets no `tail`: [`LogStream`] is a
-/// finished batch, not a live stream, so an unbounded follow would never
-/// return. Reading stops (via `ControlFlow::Break`) once this many lines
-/// have been collected.
-const FOLLOW_MAX_LINES: usize = 1000;
+/// Hard cap on buffered lines when no `tail` is given. A memory bound only,
+/// not a termination mechanism: `stream_logs` is always called one-shot, so
+/// it ends on its own. When the cap is hit the oldest lines are dropped.
+const MAX_BUFFERED_LINES: usize = 10_000;
 
 /// Collects [`crate::ops::LogLine`]s for [`ProcessSupervisor::logs`]. Pure and
-/// socket-free so its tail/follow behaviour is unit-tested directly.
+/// socket-free so its behaviour is unit-tested directly.
 ///
-/// - one-shot (`follow = false`): keeps the **last** `tail` lines
-///   (all lines when `tail` is `None`), matching the host supervisor's
-///   `tail()` in `amicu_llamacpp::service`;
-/// - `follow = true`: stops after `tail` lines (or [`FOLLOW_MAX_LINES`]) have
-///   arrived, since a `LogStream` cannot stay open.
+/// Keeps a rolling window of the **last** `tail` lines (all lines, up to
+/// [`MAX_BUFFERED_LINES`], when `tail` is `None`), matching the host
+/// supervisor's `tail()` in `amicu_llamacpp::service`. It never breaks the
+/// stream early: the newest lines arrive last, so stopping at N would return
+/// the first N.
 ///
 /// Image-build output is not filtered: `stream_logs` delivers it like any
 /// other line (see its docs).
 struct LogCollector {
     lines: std::collections::VecDeque<String>,
-    /// Max lines to retain (`None` = unbounded, one-shot only).
-    limit: Option<usize>,
-    follow: bool,
+    limit: usize,
 }
 
 impl LogCollector {
     fn new(options: LogOptions) -> Self {
-        let tail = options.tail.map(|n| n as usize);
+        let limit = options
+            .tail
+            .map_or(MAX_BUFFERED_LINES, |n| (n as usize).min(MAX_BUFFERED_LINES));
         Self {
             lines: std::collections::VecDeque::new(),
-            limit: if options.follow {
-                Some(tail.unwrap_or(FOLLOW_MAX_LINES))
-            } else {
-                tail
-            },
-            follow: options.follow,
+            limit,
         }
     }
 
     fn push(&mut self, line: &crate::ops::LogLine) -> std::ops::ControlFlow<()> {
-        if self.limit == Some(0) {
+        if self.limit == 0 {
             return std::ops::ControlFlow::Break(());
         }
         self.lines
             .push_back(line.text.trim_end_matches('\n').to_owned());
-        match self.limit {
-            // Following: the first `limit` lines are the answer; stop.
-            Some(limit) if self.follow && self.lines.len() >= limit => {
-                std::ops::ControlFlow::Break(())
-            }
-            // One-shot: a rolling window of the newest `limit` lines.
-            Some(limit) => {
-                while self.lines.len() > limit {
-                    self.lines.pop_front();
-                }
-                std::ops::ControlFlow::Continue(())
-            }
-            None => std::ops::ControlFlow::Continue(()),
+        while self.lines.len() > self.limit {
+            self.lines.pop_front();
         }
+        std::ops::ControlFlow::Continue(())
     }
 
     fn finish(self) -> Vec<String> {
@@ -540,13 +524,19 @@ impl ProcessSupervisor for ModalSupervisor {
         handle: &RuntimeHandle,
         options: LogOptions,
     ) -> Result<LogStream, LlamaCppError> {
+        // `follow` is intentionally treated as one-shot: `LogStream` is a
+        // finished batch (like the host supervisor, which ignores `follow`
+        // and returns the last N lines), so a live tail cannot be expressed
+        // here and would never return. Use `amicu modal logs <app> --follow`
+        // to stream.
+        if options.tail == Some(0) {
+            return Ok(LogStream(Vec::new()));
+        }
         let mut client = self.connect().await?;
         let mut collector = LogCollector::new(options);
         // `handle.id` is the Modal app id (`start` stores it there).
         client
-            .stream_logs(&handle.id, None, options.follow, |line| {
-                collector.push(&line)
-            })
+            .stream_logs(&handle.id, None, false, |line| collector.push(&line))
             .await
             .map_err(|e| modal_err(&e))?;
         Ok(LogStream(collector.finish()))
@@ -696,42 +686,31 @@ mod tests {
     }
 
     #[test]
-    fn one_shot_without_tail_keeps_everything() {
+    fn without_tail_keeps_everything_and_never_breaks() {
         let (lines, broke) = feed(LogOptions::default(), 3);
         assert_eq!(lines, ["l0", "l1", "l2"]);
         assert!(!broke);
     }
 
     #[test]
-    fn one_shot_tail_keeps_the_last_n_lines() {
-        let options = LogOptions {
-            follow: false,
-            tail: Some(2),
-        };
-        assert_eq!(feed(options, 5).0, ["l3", "l4"]);
-        assert_eq!(feed(options, 1).0, ["l0"]);
+    fn tail_keeps_the_last_n_lines_for_both_follow_modes() {
+        for follow in [false, true] {
+            let options = LogOptions {
+                follow,
+                tail: Some(2),
+            };
+            let (lines, broke) = feed(options, 5);
+            assert_eq!(lines, ["l3", "l4"], "follow={follow}");
+            assert!(!broke, "must consume the whole finite stream");
+            assert_eq!(feed(options, 1).0, ["l0"]);
+        }
     }
 
     #[test]
-    fn follow_with_tail_breaks_once_the_limit_is_reached() {
-        let options = LogOptions {
-            follow: true,
-            tail: Some(2),
-        };
-        let (lines, broke) = feed(options, 10);
-        assert_eq!(lines, ["l0", "l1"]);
-        assert!(broke);
-    }
-
-    #[test]
-    fn follow_without_tail_is_capped() {
-        let options = LogOptions {
-            follow: true,
-            tail: None,
-        };
-        let (lines, broke) = feed(options, FOLLOW_MAX_LINES + 5);
-        assert_eq!(lines.len(), FOLLOW_MAX_LINES);
-        assert!(broke);
+    fn untailed_buffer_is_capped_to_the_newest_lines() {
+        let (lines, _) = feed(LogOptions::default(), MAX_BUFFERED_LINES + 3);
+        assert_eq!(lines.len(), MAX_BUFFERED_LINES);
+        assert_eq!(lines[0], "l3");
     }
 
     #[test]
@@ -741,6 +720,27 @@ mod tests {
             tail: Some(0),
         };
         assert_eq!(feed(options, 3).0.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn logs_with_tail_zero_returns_empty_without_any_rpc() {
+        // No credentials in play: it must return before `connect`.
+        let handle = RuntimeHandle {
+            id: "ap-1".to_owned(),
+            deployment: amicu_core::id::DeploymentId::from("dep"),
+            endpoint: "https://x".to_owned(),
+        };
+        let out = ModalSupervisor::new("amicu-x")
+            .logs(
+                &handle,
+                LogOptions {
+                    follow: true,
+                    tail: Some(0),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.0.len(), 0);
     }
 
     #[test]

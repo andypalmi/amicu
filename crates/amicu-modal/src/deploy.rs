@@ -75,7 +75,10 @@ pub struct ServerSpec {
     pub region: Option<String>,
     /// Regions Modal's public proxy for the endpoint runs in
     /// (`HttpConfig.proxy_regions`). Must be non-empty with no blank entry
-    /// (`_server.py:56-59`). Distinct from [`ServerSpec::region`] (compute
+    /// (`_server.py:56-59`). Modal does not allow a routing region to change
+    /// after a Function's initial deployment, so changing `region` on an
+    /// existing deployment needs `amicu modal stop <app>` and then a re-apply.
+    /// Distinct from [`ServerSpec::region`] (compute
     /// placement): proxy names are a smaller set. See
     /// `amicu_providers::modal::modal_proxy_region` for the mapping.
     pub proxy_regions: Vec<String>,
@@ -363,12 +366,20 @@ impl Drop for HeartbeatGuard {
 /// `""`, the "create a new Function" value for `existing_function_id`. Pure
 /// so the selection is testable without a socket.
 fn select_existing_function_id(layout: Option<&pb::AppLayout>, function_name: &str) -> String {
-    layout
-        .and_then(|layout| {
-            function_objects(layout)
-                .into_iter()
-                .find(|(_, meta)| meta.function_name == function_name)
-        })
+    let Some(layout) = layout else {
+        return String::new();
+    };
+    // Preferred: the tag -> id map `runner.py` reads, and which amicu itself
+    // publishes (`function_ids = {"Server": id}`). Fall back to scanning the
+    // objects' handle metadata by function name.
+    if let Some(id) = layout.function_ids.get(function_name)
+        && !id.is_empty()
+    {
+        return id.clone();
+    }
+    function_objects(layout)
+        .into_iter()
+        .find(|(_, meta)| meta.function_name == function_name)
         .map(|(id, _)| id)
         .unwrap_or_default()
 }
@@ -988,6 +999,26 @@ mod tests {
         assert_eq!(
             select_existing_function_id(Some(&layout), "Server"),
             "fu-server"
+        );
+    }
+
+    #[test]
+    fn existing_function_id_prefers_the_function_ids_map() {
+        let mut layout = layout_with(&[("fu-meta", "Server")]);
+        layout
+            .function_ids
+            .insert("Server".to_owned(), "fu-tag".to_owned());
+        assert_eq!(
+            select_existing_function_id(Some(&layout), "Server"),
+            "fu-tag"
+        );
+        let only_map = pb::AppLayout {
+            function_ids: layout.function_ids.clone(),
+            ..pb::AppLayout::default()
+        };
+        assert_eq!(
+            select_existing_function_id(Some(&only_map), "Server"),
+            "fu-tag"
         );
     }
 

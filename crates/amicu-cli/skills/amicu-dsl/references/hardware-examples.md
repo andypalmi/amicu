@@ -77,6 +77,11 @@ Notes:
   fails closed. Pinning to a region multiplies the base price shown here
   (1.15x broad, 1.75x narrow - not reflected in `price` above); see
   `amicu_providers::modal`'s module docs for the source.
+- The `region` also picks the web endpoint's proxy region (`eu*`/`uk` ->
+  `eu-west`, `us-west` -> `us-west`, `ap*`/`jp`/`au` -> `ap-south`, otherwise
+  `us-east`). Modal does not allow a routing region to change after the
+  initial deployment, so changing `region` on an existing deployment needs
+  `amicu modal stop <app>` and then a re-apply.
 - This is a catalog entry only (amicu-planning#158 PR 1): `provision`,
   `status` and `teardown` all reject with `AMICU-PROVIDER-015`
   (permanent - not retryable) until the Modal Sandbox gRPC target (PR 2)
