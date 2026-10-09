@@ -57,6 +57,6 @@ left untouched. Run `amicu fmt --check` in CI to detect drift.
 Field names and enums come from `amicu-core` `references/resource-types.md`.
 When `amicu schema` ships, prefer it; today, `amicu validate` is the schema gate.
 
-Unknown attributes and blocks are rejected (`AMICU-SCHEMA-002`), with a
+Unknown attributes and blocks are rejected (`AMICU-SCHEMA-003`), with a
 `did you mean` hint for near-misses, so a typo can never silently fall back to
 a default. Only free-form maps (`env {}`, `labels {}`) accept arbitrary keys.

@@ -388,14 +388,22 @@ type Seen = Rc<RefCell<BTreeSet<String>>>;
 /// it, so [`Registry::ensure_exhaustive`] can reject the leftovers
 /// (amicu-planning#157).
 #[derive(Clone, Default)]
-struct Registry<'a>(Rc<RefCell<Vec<Visited<'a>>>>);
+struct Registry<'a> {
+    bodies: Rc<RefCell<Vec<Visited<'a>>>>,
+    /// Structural problems noticed while reading (duplicate singleton
+    /// blocks, labelled nested blocks); reported before unknown keys.
+    problems: Rc<RefCell<Vec<String>>>,
+}
 
 type Visited<'a> = (&'a Body, String, Seen);
 
 impl Registry<'_> {
     /// Error on the first attribute or block no accessor ever read.
     fn ensure_exhaustive(&self) -> Result<()> {
-        for (body, ctx, seen) in self.0.borrow().iter() {
+        if let Some(p) = self.problems.borrow().first() {
+            return Err(HclError::schema(p.clone()));
+        }
+        for (body, ctx, seen) in self.bodies.borrow().iter() {
             let seen = seen.borrow();
             let unknown = body
                 .attributes()
@@ -414,7 +422,11 @@ impl Registry<'_> {
 /// The candidate within a small edit distance of `key`, if any.
 fn closest<'c>(key: &str, candidates: impl Iterator<Item = &'c str>) -> Option<String> {
     let max = if key.chars().count() <= 4 { 1 } else { 2 };
+    // For very short keys a one-letter difference in the first letter is a
+    // different word (`cpu` vs `gpu`), not a typo.
+    let short = key.chars().count() <= 3;
     candidates
+        .filter(|c| !short || c.chars().next() == key.chars().next())
         .map(|c| (edit_distance(key, c), c))
         .filter(|(d, _)| *d <= max)
         .min_by_key(|(d, _)| *d)
@@ -441,7 +453,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 
 impl<'a> Fields<'a> {
     fn new(body: &'a Body, ctx: String, registry: &Registry<'a>) -> Self {
-        let mut bodies = registry.0.borrow_mut();
+        let mut bodies = registry.bodies.borrow_mut();
         // Re-visiting the same body (e.g. `opt_block` called twice) must
         // share one seen-set, or the first visit's reads would be lost.
         let seen =
@@ -729,8 +741,27 @@ impl<'a> Fields<'a> {
             .collect()
     }
 
+    fn check_nested(&self, key: &str, matching: &[&hcl::Block], singleton: bool) {
+        let mut problems = self.registry.problems.borrow_mut();
+        if singleton && matching.len() > 1 {
+            problems.push(format!(
+                "{}: duplicate `{key}` block (only one is allowed)",
+                self.ctx
+            ));
+        }
+        if matching.iter().any(|b| !b.labels().is_empty()) {
+            problems.push(format!("{}: `{key}` block takes no labels", self.ctx));
+        }
+    }
+
     fn opt_block(&self, key: &str) -> Option<Fields<'a>> {
         self.mark(key);
+        let all: Vec<&hcl::Block> = self
+            .body
+            .blocks()
+            .filter(|b| b.identifier() == key)
+            .collect();
+        self.check_nested(key, &all, true);
         self.body
             .blocks()
             .find(|b| b.identifier() == key)
@@ -743,6 +774,12 @@ impl<'a> Fields<'a> {
 
     fn blocks(&self, key: &str) -> Vec<Fields<'a>> {
         self.mark(key);
+        let all: Vec<&hcl::Block> = self
+            .body
+            .blocks()
+            .filter(|b| b.identifier() == key)
+            .collect();
+        self.check_nested(key, &all, false);
         self.body
             .blocks()
             .filter(|b| b.identifier() == key)

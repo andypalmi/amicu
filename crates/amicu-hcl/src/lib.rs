@@ -1682,13 +1682,13 @@ mod tests {
 
     // --- amicu-planning#157: unknown attributes / blocks are rejected ---
 
-    /// Parse `src`, expecting `AMICU-SCHEMA-002`; returns
+    /// Parse `src`, expecting `AMICU-SCHEMA-003`; returns
     /// `(context, kind, name, suggestion)`.
     fn unknown(src: &str) -> (String, &'static str, String, Option<String>) {
         let err = parse_graph(src).expect_err("an unknown field must be rejected");
         assert_eq!(
             err.code().map(|c| c.to_string()).as_deref(),
-            Some("AMICU-SCHEMA-002"),
+            Some("AMICU-SCHEMA-003"),
             "{err}"
         );
         let HclError::UnknownField {
@@ -1978,7 +1978,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err.to_string(),
-            "AMICU-SCHEMA-002: deployment d.vllm: unknown attribute `enforce_eagr`; \
+            "AMICU-SCHEMA-003: deployment d.vllm: unknown attribute `enforce_eagr`; \
              did you mean `enforce_eager`?"
         );
     }
@@ -2021,5 +2021,81 @@ mod tests {
             "invalid resource: deployment d.vllm: missing `context_length` \
              (found unknown `contex_length`; did you mean `context_length`?)"
         );
+    }
+
+    #[test]
+    fn duplicate_singleton_block_is_rejected() {
+        let err = parse_graph(&res(
+            "hardware_profile",
+            "h",
+            "provider = \"aws\"\nmemory = \"1GiB\"\ncpu { model = \"a\"\ncores = 1 }\ncpu { model = \"b\"\ncores = 2\nbogus = 1 }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid resource: hardware_profile h: duplicate `cpu` block (only one is allowed)"
+        );
+    }
+
+    #[test]
+    fn labelled_nested_block_is_rejected() {
+        let err = parse_graph(&res(
+            "routing_policy",
+            "r",
+            "target \"x\" { deployment = deployment.d.id\nweight = 1 }",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid resource: routing_policy r: `target` block takes no labels"
+        );
+    }
+
+    #[test]
+    fn short_keys_are_not_suggested_across_first_letter() {
+        let (_, _, _, sug) = unknown(&res(
+            "hardware_profile",
+            "h",
+            "provider = \"aws\"\nmemory = \"1GiB\"\ngpu { model = \"a\"\ncores = 1 }",
+        ));
+        assert_eq!(sug, None);
+    }
+
+    fn collect_md(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                collect_md(&p, out);
+            } else if p.extension().is_some_and(|x| x == "md") {
+                out.push(p);
+            }
+        }
+    }
+
+    #[test]
+    fn skill_doc_hcl_examples_have_no_unknown_fields() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../amicu-cli/skills");
+        let mut files = Vec::new();
+        collect_md(&root, &mut files);
+        assert!(!files.is_empty(), "no skill docs found at {root:?}");
+        let mut checked = 0;
+        for f in files {
+            let text = std::fs::read_to_string(&f).unwrap();
+            for chunk in text.split("```hcl\n").skip(1) {
+                let Some((block, _)) = chunk.split_once("```") else {
+                    continue;
+                };
+                if !block.contains("resource") {
+                    continue;
+                }
+                checked += 1;
+                // Partial snippets may fail for other reasons; only the
+                // unknown-field error is asserted on.
+                if let Err(e @ HclError::UnknownField { .. }) = parse_graph(block) {
+                    panic!("{}: {e}", f.display());
+                }
+            }
+        }
+        assert!(checked > 0, "no hcl examples found");
     }
 }
