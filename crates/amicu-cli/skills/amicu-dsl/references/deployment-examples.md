@@ -346,6 +346,17 @@ To try this: export `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` (same credentials
 credential is rejected before any Modal call, with neither variable's value
 ever printed.
 
+**Calling the endpoint:**
+
+Modal Servers require proxy auth: unauthenticated requests to the
+`*.modal.direct` URL get a `401` from Modal's proxy. Create a Proxy Auth
+Token (Modal dashboard, Settings -> Proxy Auth Tokens) and export
+`MODAL_PROXY_TOKEN_ID` (`wk-...`) and `MODAL_PROXY_TOKEN_SECRET` (`ws-...`);
+amicu sends them as `Modal-Key` / `Modal-Secret` on its health/status probes
+(never logged). By hand:
+`curl -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" "$URL/v1/models"`.
+(Not `Authorization: Bearer`, which vLLM's `--api-key` also uses.)
+
 ## llama.cpp on Modal (serverless GPU, amicu-planning#160)
 
 ```hcl
@@ -397,6 +408,8 @@ What actually happens on `amicu apply`:
   into the image command line: `--hf-token`/`-hft`, `--api-key`,
   `--api-key-file` (use the `HF_TOKEN` secret path instead).
 - Autoscaling defaults and the stop path are the same as for vLLM.
+- Calling the endpoint needs the same Modal Proxy Auth Token headers as vLLM
+  (see "Calling the endpoint" above); amicu's status probe sends them too.
 
 ## llama.cpp escape hatch: `extra_args` + `env` (amicu-planning#150)
 

@@ -94,10 +94,19 @@ async fn wait_for_http_200(url: &str, deadline: Duration) {
     let mut last = "no attempt made".to_owned();
 
     while started.elapsed() < deadline {
-        match client.get(url).send().await {
+        match amicu_modal::proxy_auth::apply(client.get(url)).send().await {
             Ok(response) if response.status().is_success() => {
                 println!("  {:>4}s {url}: 200", started.elapsed().as_secs());
                 return;
+            }
+            Ok(response) if response.status().as_u16() == 401 => {
+                // Fail fast: retrying cannot fix missing/wrong proxy auth.
+                let hint = amicu_modal::proxy_auth::hint_for_status(
+                    401,
+                    amicu_modal::proxy_auth::env_state(),
+                )
+                .unwrap_or_default();
+                panic!("{url}: {hint}");
             }
             Ok(response) => last = format!("HTTP {}", response.status()),
             Err(error) => last = format!("{error}"),
