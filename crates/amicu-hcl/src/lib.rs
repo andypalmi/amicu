@@ -1679,4 +1679,347 @@ mod tests {
         let g = speculative_graph(draft_spec("phantom_model"));
         assert_eq!(g, parse_graph(&format_graph(&g).unwrap()).unwrap());
     }
+
+    // --- amicu-planning#157: unknown attributes / blocks are rejected ---
+
+    /// Parse `src`, expecting `AMICU-SCHEMA-002`; returns
+    /// `(context, kind, name, suggestion)`.
+    fn unknown(src: &str) -> (String, &'static str, String, Option<String>) {
+        let err = parse_graph(src).expect_err("an unknown field must be rejected");
+        assert_eq!(
+            err.code().map(|c| c.to_string()).as_deref(),
+            Some("AMICU-SCHEMA-002"),
+            "{err}"
+        );
+        let HclError::UnknownField {
+            context,
+            kind,
+            name,
+            suggestion,
+            ..
+        } = err
+        else {
+            panic!("expected HclError::UnknownField, got {err:?}");
+        };
+        (context, kind, name, suggestion)
+    }
+
+    fn res(kind: &str, name: &str, body: &str) -> String {
+        {
+            // Allow compact `block { a = 1\nb = 2 }` literals in the cases.
+            let body = body.replace("{ ", "{\n").replace(" }", "\n}");
+            format!("resource \"{kind}\" \"{name}\" {{\n{body}\n}}\n")
+        }
+    }
+
+    const MODEL_BODY: &str = r#"
+        source {
+          registry = "hugging_face"
+          reference = "a/b"
+        }
+        architecture = "qwen2"
+        modalities = ["text"]
+        artifact {
+          format = "gguf"
+        }
+    "#;
+
+    fn deployment_src(runtime: &str, settings: &str) -> String {
+        res(
+            "deployment",
+            "d",
+            &format!(
+                "model = model.m.id\nhardware = hardware_profile.h.id\nruntime = \"{runtime}\"\n{settings}"
+            ),
+        )
+    }
+
+    #[test]
+    fn unknown_attribute_in_each_top_level_resource_is_rejected() {
+        let cases: Vec<(&str, String, &str, &str)> = vec![
+            (
+                "model",
+                format!("{MODEL_BODY}\nmodalites = []"),
+                "model h",
+                "modalites",
+            ),
+            (
+                "hardware_profile",
+                "provider = \"aws\"\nmemory = \"1GiB\"\nbogus = 1".to_string(),
+                "hardware_profile h",
+                "bogus",
+            ),
+            (
+                "routing_policy",
+                "aliases = []\noptimise_for = \"cost\"".to_string(),
+                "routing_policy h",
+                "optimise_for",
+            ),
+            (
+                "data_class",
+                "sensitivity = \"public\"\nresidence = [\"eu\"]".to_string(),
+                "data_class h",
+                "residence",
+            ),
+            (
+                "governance_rule",
+                "effect = \"allow\"\nbogus = 1".to_string(),
+                "governance_rule h",
+                "bogus",
+            ),
+            (
+                "budget",
+                "period = \"monthly\"\nlimit { amount = 1.0\ncurrency = \"USD\" }\nbogus = 1"
+                    .to_string(),
+                "budget h",
+                "bogus",
+            ),
+            ("tenant", "bogus = 1".to_string(), "tenant h", "bogus"),
+            (
+                "use_case",
+                "min_context_lenght = 1".to_string(),
+                "use_case h",
+                "min_context_lenght",
+            ),
+            (
+                "credential",
+                "api_keys = 1".to_string(),
+                "credential h",
+                "api_keys",
+            ),
+        ];
+        for (kind, body, ctx, name) in cases {
+            let (c, k, n, _) = unknown(&res(kind, "h", &body));
+            assert_eq!(
+                (c.as_str(), k, n.as_str()),
+                (ctx, "attribute", name),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_attribute_in_nested_blocks_is_rejected() {
+        let model = |extra: &str| res("model", "m", &format!("{MODEL_BODY}\n{extra}"));
+        // `source` / `artifact` / `variant` of a model.
+        let (c, _, n, _) = unknown(&res(
+            "model",
+            "m",
+            &MODEL_BODY.replace(
+                "reference = \"a/b\"",
+                "reference = \"a/b\"\nrevision = \"x\"",
+            ),
+        ));
+        assert_eq!((c.as_str(), n.as_str()), ("model m.source", "revision"));
+        let (c, _, n, _) = unknown(&res(
+            "model",
+            "m",
+            &MODEL_BODY.replace("format = \"gguf\"", "format = \"gguf\"\nbits = 4"),
+        ));
+        assert_eq!((c.as_str(), n.as_str()), ("model m.artifact", "bits"));
+        let (c, _, n, _) = unknown(&model(
+            "variant { quantization = \"q4_k_m\"\nfile = \"f\"\nsise = \"1GiB\" }",
+        ));
+        assert_eq!((c.as_str(), n.as_str()), ("model m.variant", "sise"));
+
+        let hw = |extra: &str| {
+            res(
+                "hardware_profile",
+                "h",
+                &format!("provider = \"aws\"\nmemory = \"1GiB\"\n{extra}"),
+            )
+        };
+        let (c, _, n, _) = unknown(&hw(
+            "accelerator { kind = \"gpu\"\nmodel = \"a\"\ncount = 1\nmemory = \"1GiB\"\nvendor = \"x\" }",
+        ));
+        assert_eq!(
+            (c.as_str(), n.as_str()),
+            ("hardware_profile h.accelerator", "vendor")
+        );
+        let (c, _, n, _) = unknown(&hw("cpu { model = \"a\"\ncores = 1\nthreads = 2 }"));
+        assert_eq!(
+            (c.as_str(), n.as_str()),
+            ("hardware_profile h.cpu", "threads")
+        );
+        let (c, _, n, _) = unknown(&hw(
+            "price { currency = \"USD\"\nper_hour { amount = 1.0\ncurrency = \"USD\" } }",
+        ));
+        assert_eq!(
+            (c.as_str(), n.as_str()),
+            ("hardware_profile h.price", "currency")
+        );
+        let (c, _, n, _) = unknown(&hw(
+            "price { per_hour { amount = 1.0\ncurrency = \"USD\"\nunit = \"h\" } }",
+        ));
+        assert_eq!(
+            (c.as_str(), n.as_str()),
+            ("hardware_profile h.price.per_hour", "unit")
+        );
+
+        let rp = |extra: &str| res("routing_policy", "r", extra);
+        let (c, _, n, _) = unknown(&rp(
+            "target { deployment = deployment.d.id\nweight = 1\nbias = 2 }",
+        ));
+        assert_eq!(
+            (c.as_str(), n.as_str()),
+            ("routing_policy r.target", "bias")
+        );
+        let (c, _, n, _) = unknown(&rp("failover { enabled = true\nretries = 2 }"));
+        assert_eq!(
+            (c.as_str(), n.as_str()),
+            ("routing_policy r.failover", "retries")
+        );
+
+        let (c, _, n, _) = unknown(&res(
+            "budget",
+            "b",
+            "period = \"monthly\"\nlimit { amount = 1.0\ncurrency = \"USD\"\ncap = 1 }",
+        ));
+        assert_eq!((c.as_str(), n.as_str()), ("budget b.limit", "cap"));
+        let (c, _, n, _) = unknown(&res(
+            "tenant",
+            "t",
+            "quota { max_concurrent = 1\nburst = 2 }",
+        ));
+        assert_eq!((c.as_str(), n.as_str()), ("tenant t.quota", "burst"));
+    }
+
+    #[test]
+    fn unknown_attribute_in_runtime_blocks_is_rejected_with_suggestion() {
+        let (c, k, n, sug) = unknown(&deployment_src(
+            "llama_cpp",
+            "llama_cpp {\ncontext_length = 1\nport = 1\nn_gpu_layers = 1\ncontex_length = 8192\n}",
+        ));
+        assert_eq!(
+            (c.as_str(), k, n.as_str()),
+            ("deployment d.llama_cpp", "attribute", "contex_length")
+        );
+        assert_eq!(sug.as_deref(), Some("context_length"));
+
+        let (c, _, n, _) = unknown(&deployment_src(
+            "llama_cpp",
+            "llama_cpp {\ncontext_length = 1\nport = 1\nn_gpu_layers = 1\nspeculative {\nmodel = model.m.id\nctx_size = 4096\n}\n}",
+        ));
+        assert_eq!(
+            (c.as_str(), n.as_str()),
+            ("deployment d.llama_cpp.speculative", "ctx_size")
+        );
+
+        let (c, _, n, _) = unknown(&deployment_src(
+            "llama_cpp",
+            "llama_cpp {\ncontext_length = 1\nport = 1\nn_gpu_layers = 1\nmultimodal {\nprojektor = \"p\"\n}\n}",
+        ));
+        assert_eq!(
+            (c.as_str(), n.as_str()),
+            ("deployment d.llama_cpp.multimodal", "projektor")
+        );
+
+        let (c, _, n, sug) = unknown(&deployment_src(
+            "vllm",
+            "vllm {\ncontext_length = 1\nport = 1\ntensor_parallel_sizes = 2\n}",
+        ));
+        assert_eq!(
+            (c.as_str(), n.as_str()),
+            ("deployment d.vllm", "tensor_parallel_sizes")
+        );
+        assert_eq!(sug.as_deref(), Some("tensor_parallel_size"));
+
+        // Top level of the deployment itself.
+        let (c, _, n, _) = unknown(&deployment_src(
+            "vllm",
+            "vllm {\ncontext_length = 1\nport = 1\n}\nreplicas = 2",
+        ));
+        assert_eq!((c.as_str(), n.as_str()), ("deployment d", "replicas"));
+    }
+
+    #[test]
+    fn unknown_block_is_rejected() {
+        let (c, k, n, _) = unknown(&res("model", "m", &format!("{MODEL_BODY}\nextras {{}}")));
+        assert_eq!((c.as_str(), k, n.as_str()), ("model m", "block", "extras"));
+        // The wrong runtime's settings block is not read, so it is unknown.
+        let (c, k, n, _) = unknown(&deployment_src(
+            "llama_cpp",
+            "llama_cpp {\ncontext_length = 1\nport = 1\nn_gpu_layers = 1\n}\nvllm {}",
+        ));
+        assert_eq!(
+            (c.as_str(), k, n.as_str()),
+            ("deployment d", "block", "vllm")
+        );
+        // `target`, not `targets`.
+        let (c, k, n, sug) = unknown(&res("routing_policy", "r", "targets { weight = 1 }"));
+        assert_eq!(
+            (c.as_str(), k, n.as_str()),
+            ("routing_policy r", "block", "targets")
+        );
+        assert_eq!(sug.as_deref(), Some("target"));
+    }
+
+    #[test]
+    fn unknown_top_level_attribute_is_rejected() {
+        let (c, k, n, _) = unknown("version = 1");
+        assert_eq!(
+            (c.as_str(), k, n.as_str()),
+            ("top level", "attribute", "version")
+        );
+    }
+
+    #[test]
+    fn suggestion_is_omitted_when_nothing_is_close() {
+        let (_, _, _, sug) = unknown(&res("tenant", "t", "completely_unrelated = 1"));
+        assert_eq!(sug, None);
+    }
+
+    #[test]
+    fn error_message_names_block_attribute_and_suggestion() {
+        let err = parse_graph(&deployment_src(
+            "vllm",
+            "vllm {\ncontext_length = 1\nport = 1\nenforce_eagr = true\n}",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "AMICU-SCHEMA-002: deployment d.vllm: unknown attribute `enforce_eagr`; \
+             did you mean `enforce_eager`?"
+        );
+    }
+
+    #[test]
+    fn free_form_maps_accept_arbitrary_keys() {
+        let src = format!(
+            "{}{}{}{}",
+            res(
+                "tenant",
+                "t",
+                "labels {\nteam = \"x\"\nanything_goes = \"y\"\n}"
+            ),
+            deployment_src(
+                "llama_cpp",
+                "llama_cpp {\ncontext_length = 1\nport = 1\nn_gpu_layers = 1\nenv {\nFOO_BAR = \"1\"\n}\n}"
+            ),
+            deployment_src(
+                "vllm",
+                "vllm {\ncontext_length = 1\nport = 1\nenv {\nVLLM_X = \"1\"\n}\n}"
+            ),
+            res(
+                "credential",
+                "c",
+                "env {\nHF_TOKEN = secret(\"vault://kv/hf\")\n}"
+            ),
+        );
+        parse_graph(&src).expect("free-form maps are exempt");
+    }
+
+    #[test]
+    fn misspelled_required_attribute_reports_the_near_miss() {
+        let err = parse_graph(&deployment_src(
+            "vllm",
+            "vllm {\ncontex_length = 1\nport = 1\n}",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid resource: deployment d.vllm: missing `context_length` \
+             (found unknown `contex_length`; did you mean `context_length`?)"
+        );
+    }
 }
