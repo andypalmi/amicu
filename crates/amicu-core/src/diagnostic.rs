@@ -301,6 +301,16 @@ pub mod catalog {
     pub const PARSE_INVALID_SYNTAX: DiagnosticCode = DiagnosticCode::new(Category::Parse, 2);
     /// `AMICU-SCHEMA-001` - required attribute is missing.
     pub const SCHEMA_MISSING_REQUIRED: DiagnosticCode = DiagnosticCode::new(Category::Schema, 1);
+    /// `AMICU-SCHEMA-002` - the same resource id is declared in more than one
+    /// config file. Raised by `amicu-engine` checks.
+    pub const SCHEMA_DUPLICATE_ID: DiagnosticCode = DiagnosticCode::new(Category::Schema, 2);
+    /// `AMICU-SCHEMA-003` - an attribute or nested block that the schema does
+    /// not define appears inside a resource (or its nested block), or at the
+    /// top level of the file (amicu-planning#157). Error, not a warning: a
+    /// typo such as `contex_length` would otherwise be silently dropped and
+    /// the field would quietly fall back to its default. Raised by the HCL
+    /// front end (`amicu-hcl::HclError::UnknownField`).
+    pub const SCHEMA_UNKNOWN_ATTRIBUTE: DiagnosticCode = DiagnosticCode::new(Category::Schema, 3);
     /// `AMICU-REF-001` - reference points at an unknown resource.
     pub const REF_UNKNOWN_RESOURCE: DiagnosticCode = DiagnosticCode::new(Category::Ref, 1);
     /// `AMICU-CAP-001` - runtime requires a GGUF model artifact.
@@ -433,11 +443,14 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 29] {
+    pub const fn all() -> [DiagnosticCode; 31] {
         [
             PARSE_UNCLOSED_BLOCK,
             PARSE_INVALID_SYNTAX,
             SCHEMA_MISSING_REQUIRED,
+            SCHEMA_DUPLICATE_ID,
+            // amicu-planning#157 addition:
+            SCHEMA_UNKNOWN_ATTRIBUTE,
             REF_UNKNOWN_RESOURCE,
             CAP_RUNTIME_ARTIFACT_MISMATCH,
             // amicu-planning#150 additions:

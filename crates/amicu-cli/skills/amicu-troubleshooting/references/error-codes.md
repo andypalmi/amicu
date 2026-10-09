@@ -18,6 +18,12 @@ signal; the number identifies the specific check.
 
 - `AMICU-PARSE-001` - HCL failed to parse.
 - `AMICU-SCHEMA-001` - structural/schema validation failed.
+- `AMICU-SCHEMA-002` - the same resource id is declared in more than one config
+  file.
+- `AMICU-SCHEMA-003` - unknown attribute or block (usually a typo such as
+  `contex_length`); the message names the block, the offending key, and a
+  `did you mean` suggestion. Unknown keys are a hard error, never ignored.
+  Free-form maps (`env {}`, `labels {}`) accept any key.
 - `AMICU-REF-001` - a referenced resource id was not found.
 - `AMICU-CAP-001` - capability mismatch (e.g. runtime cannot serve the artifact).
 - `AMICU-MEM-001` / `AMICU-MEM-002` - capacity/memory fit failures.

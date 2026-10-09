@@ -2,9 +2,7 @@
 
 use std::collections::HashSet;
 
-use amicu_core::diagnostic::{
-    Category, Diagnostic, DiagnosticCode, DiagnosticReport, Severity, catalog,
-};
+use amicu_core::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticReport, Severity, catalog};
 use amicu_core::graph::Graph;
 use amicu_core::resource::{Residency, RuleEffect, Runtime};
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
@@ -13,9 +11,6 @@ use amicu_runtime::RuntimeAdapter;
 use amicu_vllm::VllmAdapter;
 
 use crate::catalog::build_catalog;
-
-/// `AMICU-SCHEMA-002` - the same id is declared in more than one config file.
-const DUPLICATE_ID: DiagnosticCode = DiagnosticCode::new(Category::Schema, 2);
 
 /// Run reference and per-deployment runtime checks over `graph`.
 #[must_use]
@@ -237,7 +232,7 @@ fn collect_dups<'a>(out: &mut Vec<Diagnostic>, kind: &str, ids: impl Iterator<It
     for id in ids {
         if !seen.insert(id) && reported.insert(id) {
             let mut d = Diagnostic::new(
-                DUPLICATE_ID,
+                catalog::SCHEMA_DUPLICATE_ID,
                 Severity::Error,
                 format!("duplicate {kind} id '{id}' declared in more than one config file"),
             );
