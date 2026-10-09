@@ -97,6 +97,16 @@
 //!
 //! # Packaging note
 //!
+//! # Calling a deployed server (proxy auth)
+//!
+//! Modal Servers require proxy auth by default, so an unauthenticated request
+//! to the `*.modal.direct` URL gets a `401` from Modal's proxy. Create a Proxy
+//! Auth Token (dashboard: Settings -> Proxy Auth Tokens) and export
+//! `MODAL_PROXY_TOKEN_ID` (`wk-...`) and `MODAL_PROXY_TOKEN_SECRET` (`ws-...`);
+//! every probe in this crate sends them as `Modal-Key` / `Modal-Secret`
+//! ([`proxy_auth`]). The secret is never logged. By hand:
+//! `curl -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" "$URL/v1/models"`.
+//!
 //! Only `amicu-cli` depends on this crate (via the `amicu modal` commands, and — since [`supervisor`] — `amicu apply`'s dispatch for a
 //! `provider = "modal"` vLLM deployment) — `amicu-api`/`amicu-server` do not,
 //! so the `amicu-server` binary that actually ships in the Docker runtime
@@ -121,6 +131,7 @@ mod image;
 mod interceptor;
 mod ops;
 mod pb;
+pub mod proxy_auth;
 mod shim;
 pub mod supervisor;
 

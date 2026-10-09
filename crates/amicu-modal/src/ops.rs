@@ -206,7 +206,7 @@ pub enum HealthStatus {
     /// The server answered with this HTTP status code (2xx or not).
     Ok(u16),
     /// The request could not complete (DNS, connect, TLS, timeout, …).
-    /// Carries `reqwest`'s error text — no auth header is sent here.
+    /// Carries `reqwest`'s error text (never the proxy token, which only goes in headers).
     Unreachable(String),
 }
 
@@ -216,6 +216,20 @@ fn classify_probe(outcome: Result<u16, String>) -> HealthStatus {
     match outcome {
         Ok(code) => HealthStatus::Ok(code),
         Err(reason) => HealthStatus::Unreachable(reason),
+    }
+}
+
+impl HealthStatus {
+    /// Actionable hint when the probe got a Modal proxy `401`.
+    #[must_use]
+    pub fn auth_hint(&self) -> Option<String> {
+        match self {
+            Self::Ok(code) => crate::proxy_auth::hint_for_status(
+                *code,
+                crate::proxy_auth::ProxyToken::from_env().is_some(),
+            ),
+            Self::Unreachable(_) => None,
+        }
     }
 }
 
@@ -384,8 +398,7 @@ impl ModalClient {
                 .timeout(timeout)
                 .build()
                 .map_err(|error| error.to_string())?;
-            let response = client
-                .get(&target)
+            let response = crate::proxy_auth::apply(client.get(&target))
                 .send()
                 .await
                 .map_err(|error| error.to_string())?;

@@ -159,6 +159,14 @@ resource "hardware_profile" "modal_h100" {
 ```
 
 Notes:
+- Modal Servers require proxy auth: unauthenticated requests to the
+  `*.modal.direct` URL get a `401` from Modal's proxy. Create a Proxy Auth
+  Token (Modal dashboard, Settings -> Proxy Auth Tokens) and export
+  `MODAL_PROXY_TOKEN_ID` (`wk-...`) and `MODAL_PROXY_TOKEN_SECRET` (`ws-...`);
+  amicu sends them as `Modal-Key` / `Modal-Secret` on its health/status probes
+  (never logged). By hand:
+  `curl -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" "$URL/v1/models"`.
+  (Not `Authorization: Bearer`, which vLLM's `--api-key` also uses.)
 - `provider = "modal"` routes a `vllm` deployment on this profile through
   `amicu apply`'s `ModalSupervisor` (`crates/amicu-modal/src/supervisor.rs`)
   instead of a local process. `accelerator.model` + `accelerator.count`

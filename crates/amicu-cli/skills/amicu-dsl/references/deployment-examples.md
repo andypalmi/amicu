@@ -347,6 +347,17 @@ To try this: export `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` (same credentials
 credential is rejected before any Modal call, with neither variable's value
 ever printed.
 
+**Calling the endpoint:**
+
+Modal Servers require proxy auth: unauthenticated requests to the
+`*.modal.direct` URL get a `401` from Modal's proxy. Create a Proxy Auth
+Token (Modal dashboard, Settings -> Proxy Auth Tokens) and export
+`MODAL_PROXY_TOKEN_ID` (`wk-...`) and `MODAL_PROXY_TOKEN_SECRET` (`ws-...`);
+amicu sends them as `Modal-Key` / `Modal-Secret` on its health/status probes
+(never logged). By hand:
+`curl -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" "$URL/v1/models"`.
+(Not `Authorization: Bearer`, which vLLM's `--api-key` also uses.)
+
 ## llama.cpp escape hatch: `extra_args` + `env` (amicu-planning#150)
 
 Typed fields cover a small slice of `llama-server`'s flag surface. `extra_args`
