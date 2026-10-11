@@ -126,6 +126,13 @@ pub(crate) fn print_human(result: &PlanResult, out: &mut dyn Write) -> Result<()
                 io(writeln!(out, "      artifact: {}", artifact.name))?;
             }
             if let Some(cmd) = &item.rendered {
+                // `ModalSupervisor` rewrites the loopback bind to `0.0.0.0`
+                // before launch (`bind_all_interfaces`); show what is sent.
+                let cmd = if item.action.provider.as_deref() == Some("modal") {
+                    cmd.replace("--host 127.0.0.1", "--host 0.0.0.0")
+                } else {
+                    cmd.clone()
+                };
                 io(writeln!(out, "      launch:   {cmd}"))?;
             }
             if let Some(cp) = &item.action.cost_performance {
