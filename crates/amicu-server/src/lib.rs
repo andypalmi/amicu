@@ -106,6 +106,10 @@
 //! | `min_tier` | `--min-tier` | `AMICU_MIN_TIER` | `community` |
 //! | `rate_limit_max` | `--rate-limit-max` | `AMICU_RATE_LIMIT_MAX` | `30` |
 //! | `rate_limit_window_secs` | `--rate-limit-window-secs` | `AMICU_RATE_LIMIT_WINDOW_SECS` | `60` |
+//! | `email_rate_limit_max` | `--email-rate-limit-max` | `AMICU_EMAIL_RATE_LIMIT_MAX` | `5` - per normalized email, `/recover` + `/verify/resend` (#194) |
+//! | `signin_email_rate_limit_max` | `--signin-email-rate-limit-max` | `AMICU_SIGNIN_EMAIL_RATE_LIMIT_MAX` | `20` - per normalized email, `/signin` + `/token` (#194) |
+//! | `email_rate_limit_window_secs` | `--email-rate-limit-window-secs` | `AMICU_EMAIL_RATE_LIMIT_WINDOW_SECS` | `900` |
+//! | (env only) | - | `AMICU_SECURITY_HASH_KEY` | none - secret key for hashing emails/IPs in `amicu::security` events and the per-email limiter keys; set the SAME value on every replica (#194) |
 //! | `rate_limit_timeout_ms` | `--rate-limit-timeout-ms` | `AMICU_RATE_LIMIT_TIMEOUT_MS` | `1000` - Postgres path only; a timeout fails OPEN like any other database error |
 //! | `max_workspaces_per_user` | `--max-workspaces-per-user` | `AMICU_MAX_WORKSPACES_PER_USER` | `50` |
 //! | `environment` | `--environment` | `AMICU_ENV` | `development` |
@@ -337,6 +341,25 @@ pub struct Config {
     /// awaits, so it has nothing to time out.
     #[arg(long, env = "AMICU_RATE_LIMIT_TIMEOUT_MS", default_value_t = 1_000)]
     pub rate_limit_timeout_ms: u64,
+
+    /// Per-EMAIL budget for `/recover` and `/verify/resend`, per
+    /// `email_rate_limit_window_secs` (andypalmi/amicu-planning#194). On top of
+    /// the per-IP limit; shared across replicas on the Postgres path.
+    #[arg(long, env = "AMICU_EMAIL_RATE_LIMIT_MAX", default_value_t = 5)]
+    pub email_rate_limit_max: u32,
+
+    /// Per-EMAIL budget for `/signin` / `/token` per window. A loose ceiling;
+    /// the per-account exponential backoff is the tight control.
+    #[arg(long, env = "AMICU_SIGNIN_EMAIL_RATE_LIMIT_MAX", default_value_t = 20)]
+    pub signin_email_rate_limit_max: u32,
+
+    /// Window for both per-email limits, seconds.
+    #[arg(
+        long,
+        env = "AMICU_EMAIL_RATE_LIMIT_WINDOW_SECS",
+        default_value_t = 900
+    )]
+    pub email_rate_limit_window_secs: u64,
 
     /// Cap on the TOTAL number of workspaces a user may OWN (across every
     /// workspace, including the personal workspace sign-up provisions), enforced
@@ -996,6 +1019,30 @@ fn build_rate_limiter(pool: Option<PgPool>, config: &Config) -> Arc<dyn RateLimi
     }
 }
 
+/// The per-email limiters (`/recover` + `/verify/resend`, and `/signin`):
+/// Postgres-backed (shared across replicas, fail-open on database error like
+/// the per-IP limiter) when `pool` is present, in-memory otherwise.
+fn build_email_limiters(
+    pool: Option<&PgPool>,
+    config: &Config,
+) -> (Arc<dyn RateLimiter>, Arc<dyn RateLimiter>) {
+    let window = Duration::from_secs(config.email_rate_limit_window_secs);
+    let make = |max: u32| -> Arc<dyn RateLimiter> {
+        if let Some(pool) = pool {
+            Arc::new(
+                PostgresRateLimiter::new(PostgresRateLimitStore::new(pool.clone()), max, window)
+                    .with_timeout(Duration::from_millis(config.rate_limit_timeout_ms)),
+            )
+        } else {
+            Arc::new(InMemoryRateLimiter::new(max, window))
+        }
+    };
+    (
+        make(config.email_rate_limit_max),
+        make(config.signin_email_rate_limit_max),
+    )
+}
+
 /// Shared implementation behind [`build_app`] and [`build_app_in_memory`].
 /// `database_url` is an explicit override rather than an environment read, so
 /// callers control store selection precisely: `Some(url)` selects the
@@ -1118,6 +1165,23 @@ pub async fn build_app_with_database_url(
     if let Some(memberships) = memberships {
         service = service.with_membership_store(memberships);
     }
+    // Per-account sign-in backoff (#194): shared across replicas on the
+    // Postgres path; the in-memory default is process-local (dev/tests).
+    if let Some(pool) = pool.clone() {
+        service =
+            service.with_login_throttle(Arc::new(amicu_store::PostgresLoginThrottle::new(pool)));
+    }
+    // Pseudonym key for security events + per-email limiter keys (#194).
+    match std::env::var("AMICU_SECURITY_HASH_KEY") {
+        Ok(k) if !k.is_empty() => {
+            let _ = amicu_auth::security::set_hash_key(k.as_bytes());
+        }
+        _ => eprintln!(
+            "amicu-server: WARNING - AMICU_SECURITY_HASH_KEY is not set; emails/IPs in \
+             security events are hashed with a PUBLIC default key (guessable for \
+             low-entropy inputs). Set one secret value, identical on every replica."
+        ),
+    }
     // A live handle to the SAME keyring the service just took ownership of:
     // wiring this into KeyringJwksProvider (below) means the engine-gate
     // verifier observes rotate_keys()/retire() in-process, with no restart
@@ -1135,7 +1199,9 @@ pub async fn build_app_with_database_url(
     // Postgres limiter here - no separate check needed, mirroring how every
     // other Postgres-vs-in-memory store selection in this function works.
     let limiter = build_rate_limiter(pool.clone(), config);
+    let (recover_limiter, signin_limiter) = build_email_limiters(pool.as_ref(), config);
     let auth_state = AuthApiState::new(service.clone(), limiter)
+        .with_email_limiters(recover_limiter, signin_limiter)
         .with_trusted_proxies(trusted)
         .with_edge_trust(edge_trust.clone());
 
@@ -1264,6 +1330,14 @@ pub async fn build_app_with_database_url(
     if let Some(pool) = pool.clone() {
         router = mount_outbox_drain(router, config, pool, &mailer, &effective_base_url);
     }
+
+    // Security headers on EVERYTHING, including the health and outbox routes
+    // merged outside `api_router` (#194).
+    let router = router.layer(axum::middleware::from_fn(amicu_api::security_headers));
+
+    // Security headers on EVERYTHING, including the health and outbox routes
+    // merged outside `api_router` (#194).
+    let router = router.layer(axum::middleware::from_fn(amicu_api::security_headers));
 
     Ok(BuiltApp { router, pool })
 }

@@ -14,10 +14,12 @@ use crate::key::SigningKey;
 use crate::keyring::Keyring;
 use crate::membership::{MembershipStore, PersonalMembershipStore, WorkspaceMembership};
 use crate::notify::{Notification, NotificationKind, Notifier};
-use crate::password::{check_password_policy, hash_password, verify_password};
+use crate::password::{MAX_PASSWORD_LEN, check_password_policy, hash_password, verify_password};
 use crate::refresh::{self, RefreshStore};
 use crate::reset::{self, ResetStore};
+use crate::security::{SecurityEvent, Severity};
 use crate::tenant::WorkspaceId;
+use crate::throttle::{Admission, InMemoryLoginThrottle, LoginThrottle};
 use crate::user::{User, UserStore};
 use crate::verify::{self, VerifyStore};
 
@@ -55,6 +57,10 @@ use crate::verify::{self, VerifyStore};
 /// becomes observable again - but a database that slow degrades the lookup both
 /// branches share too, so the signal is buried in noise rather than clean.
 const ANTI_ENUMERATION_FLOOR: Duration = Duration::from_millis(250);
+
+/// Budget for one throttle round trip. The throttle FAILS OPEN on error or
+/// timeout (see [`AuthService::admit_sign_in`]).
+const THROTTLE_TIMEOUT: Duration = Duration::from_millis(1_000);
 
 /// Result of a sign-up attempt, reported truthfully to the (trusted) caller.
 ///
@@ -114,6 +120,7 @@ pub struct AuthService<C: Clock = SystemClock> {
     /// [`with_membership_store`](AuthService::with_membership_store).
     memberships: Arc<dyn MembershipStore>,
     notifier: Arc<dyn Notifier>,
+    throttle: Arc<dyn LoginThrottle>,
     base_url: String,
 }
 
@@ -147,6 +154,7 @@ impl<C: Clock> AuthService<C> {
             verifies,
             memberships,
             notifier,
+            throttle: Arc::new(InMemoryLoginThrottle::default()),
             base_url: base_url.into(),
         }
     }
@@ -180,6 +188,15 @@ impl<C: Clock> AuthService<C> {
     /// [`AuthError::InvalidCredentials`] (empty email or password),
     /// [`AuthError::WeakPassword`] (fails the password policy), or
     /// [`AuthError::PasswordHash`].
+    /// Replace the per-account sign-in backoff store (default: process-local
+    /// [`InMemoryLoginThrottle`]). Multi-replica deployments install a shared,
+    /// Postgres-backed one.
+    #[must_use]
+    pub fn with_login_throttle(mut self, throttle: Arc<dyn LoginThrottle>) -> Self {
+        self.throttle = throttle;
+        self
+    }
+
     pub async fn sign_up(&self, email: &str, password: &SecretValue) -> Result<SignUpOutcome> {
         let email = normalize_email(email);
         if email.is_empty() {
@@ -254,6 +271,19 @@ impl<C: Clock> AuthService<C> {
     /// is unverified.
     pub async fn sign_in(&self, email: &str, password: &SecretValue) -> Result<TokenPair> {
         let email = normalize_email(email);
+        // Bound the Argon2 input. Rejected before any lookup, so it is the same
+        // generic failure for every email.
+        if password.expose_secret().len() > MAX_PASSWORD_LEN {
+            return Err(AuthError::InvalidCredentials);
+        }
+        // Per-account backoff, keyed by the email pseudonym whether or not the
+        // account exists (anti-enumeration). While locked, spend one dummy
+        // Argon2 verify so the response time does not reveal the lock state.
+        let throttle_key = throttle_key(&email);
+        if let Admission::Locked { retry_after_secs } = self.admit_sign_in(&throttle_key).await {
+            let _ = verify_password(password, dummy_hash());
+            return Err(AuthError::Throttled { retry_after_secs });
+        }
         let user = self.users.get_by_email(&email).await?;
         let Some(user) = user else {
             // Equalize timing against a dummy hash to blunt user enumeration.
@@ -261,6 +291,12 @@ impl<C: Clock> AuthService<C> {
             return Err(AuthError::InvalidCredentials);
         };
         verify_password(password, &user.password_hash)?;
+        // Correct password: forget the failures (best-effort).
+        if let Err(_e) = self.throttle.clear(&throttle_key).await {
+            SecurityEvent::new("login_throttle_unavailable", Severity::Warn)
+                .reason("clear_failed")
+                .emit();
+        }
         // Gate AFTER the password check: a wrong password can never reach here,
         // so the unverified-email signal is only ever shown to the true owner.
         if require_email_verification() && !user.email_verified {
@@ -274,18 +310,30 @@ impl<C: Clock> AuthService<C> {
             .await
     }
 
-    /// Rotate a refresh token: validate it, revoke it, and issue a fresh pair
-    /// within the same token family.
-    ///
-    /// Reuse/theft detection: presenting a token that is *already revoked*
-    /// (typically an old token replayed after the family has rotated past it)
-    /// is treated as a compromise - the entire family is revoked and flagged,
-    /// killing both the attacker's rotated token and the victim's live one and
-    /// forcing a fresh sign-in. See the [`refresh`] module docs.
-    ///
-    /// # Errors
-    /// [`AuthError::RefreshInvalid`] if unknown, expired, or revoked (the reuse
-    /// case additionally revokes the family before returning this error).
+    /// Count this attempt against the account's backoff. FAILS OPEN: a database
+    /// error or timeout admits the attempt (and emits a
+    /// `login_throttle_unavailable` security event). Rationale: the per-IP and
+    /// per-email rate limiters still bound guessing, and a throttle-table
+    /// hiccup must not become a sign-in outage; a full database outage fails
+    /// sign-in anyway at the user lookup.
+    async fn admit_sign_in(&self, key: &str) -> Admission {
+        match tokio::time::timeout(THROTTLE_TIMEOUT, self.throttle.begin_attempt(key)).await {
+            Ok(Ok(admission)) => admission,
+            Ok(Err(_)) => {
+                SecurityEvent::new("login_throttle_unavailable", Severity::Warn)
+                    .reason("error")
+                    .emit();
+                Admission::Allowed
+            }
+            Err(_) => {
+                SecurityEvent::new("login_throttle_unavailable", Severity::Warn)
+                    .reason("timeout")
+                    .emit();
+                Admission::Allowed
+            }
+        }
+    }
+
     pub async fn refresh(&self, presented: &SecretValue) -> Result<TokenPair> {
         let token = presented
             .expose_secret_str()
@@ -304,6 +352,10 @@ impl<C: Clock> AuthService<C> {
             // presented. Revoke and flag the whole family, then reject.
             refresh::RefreshConsume::Reuse { family_id } => {
                 self.refresh.compromise_family(&family_id).await?;
+                // `family_id` is an opaque server-generated id, not a token.
+                SecurityEvent::new("refresh_reuse_detected", Severity::Warn)
+                    .reason("family_revoked")
+                    .emit();
                 Err(AuthError::RefreshInvalid)
             }
             // This caller won the rotation; re-validate membership in the SAME
@@ -507,6 +559,11 @@ impl<C: Clock> AuthService<C> {
         // on a partial failure.
         self.refresh.revoke_all_for_user(&user_id).await?;
         self.users.update_password(&user_id, password_hash).await?;
+        SecurityEvent::new("password_changed", Severity::Info)
+            .outcome("ok")
+            .reason("reset")
+            .user(&user_id)
+            .emit();
         Ok(())
     }
 
@@ -535,6 +592,10 @@ impl<C: Clock> AuthService<C> {
             | verify::VerifyConsume::Expired => return Err(AuthError::VerifyInvalid),
         };
         self.users.set_email_verified(&user_id).await?;
+        SecurityEvent::new("email_verified", Severity::Info)
+            .outcome("ok")
+            .user(&user_id)
+            .emit();
         Ok(())
     }
 
@@ -698,8 +759,15 @@ impl<C: Clock> AuthService<C> {
     }
 }
 
-fn normalize_email(email: &str) -> String {
+/// Canonical form used for account lookup, throttling and event hashing.
+#[must_use]
+pub fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
+}
+
+/// Backoff key: a pseudonym, so no plaintext email is stored in the throttle.
+fn throttle_key(normalized_email: &str) -> String {
+    crate::security::pseudonym("login-throttle", normalized_email)
 }
 
 /// Whether sign-in must reject accounts whose email is unverified.

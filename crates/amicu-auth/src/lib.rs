@@ -78,7 +78,11 @@ pub mod refresh;
 #[cfg(feature = "issuer")]
 pub mod reset;
 #[cfg(feature = "issuer")]
+pub mod security;
+#[cfg(feature = "issuer")]
 pub mod service;
+#[cfg(feature = "issuer")]
+pub mod throttle;
 #[cfg(feature = "issuer")]
 pub mod user;
 #[cfg(feature = "issuer")]

@@ -668,6 +668,9 @@ fn forbidden_tier() -> Response {
         .into_response()
 }
 
+/// Maximum request body on the `/org/*` routes.
+pub const MAX_ORG_BODY_BYTES: usize = 16 * 1024;
+
 /// Build the org sub-router: every route behind the Enterprise gate.
 pub fn org_router(state: OrgApiState) -> Router {
     Router::new()
@@ -689,6 +692,8 @@ pub fn org_router(state: OrgApiState) -> Router {
         )
         .route("/org/roles", get(list_roles_handler))
         .route("/org/audit", get(audit_handler))
+        // Small JSON bodies only (a user id and a role / an invite).
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_ORG_BODY_BYTES))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             org_auth_gate,
@@ -973,6 +978,13 @@ pub(crate) async fn add_member_handler(
         .add_member_audited(ctx.workspace, &ctx.user_id, user_id, role)
         .await
         .map_err(|e| map_store_error(e, user_id, "cannot demote the last remaining Owner"))?;
+    amicu_auth::security::SecurityEvent::new("member_added", amicu_auth::security::Severity::Info)
+        .outcome("ok")
+        .workspace(&ctx.workspace.to_string())
+        .user(&ctx.user_id)
+        .target_user(user_id)
+        .role(assigned.as_str())
+        .emit();
 
     Ok((
         StatusCode::CREATED,
@@ -1014,6 +1026,13 @@ pub(crate) async fn change_role_handler(
         .set_role_audited(ctx.workspace, &ctx.user_id, &target_id, new_role)
         .await
         .map_err(|e| map_store_error(e, &target_id, "cannot demote the last remaining Owner"))?;
+    amicu_auth::security::SecurityEvent::new("role_changed", amicu_auth::security::Severity::Info)
+        .outcome("ok")
+        .workspace(&ctx.workspace.to_string())
+        .user(&ctx.user_id)
+        .target_user(&target_id)
+        .role(new_role.as_str())
+        .emit();
 
     Ok(Json(MemberView {
         user_id: target_id,
@@ -1046,6 +1065,16 @@ pub(crate) async fn remove_member_handler(
         .remove_member_audited(ctx.workspace, &ctx.user_id, &target_id)
         .await
         .map_err(|e| map_store_error(e, &target_id, "cannot remove the last remaining Owner"))?;
+    amicu_auth::security::SecurityEvent::new(
+        "member_removed",
+        amicu_auth::security::Severity::Info,
+    )
+    .outcome("ok")
+    .workspace(&ctx.workspace.to_string())
+    .user(&ctx.user_id)
+    .target_user(&target_id)
+    .role(removed.as_str())
+    .emit();
 
     Ok(Json(MemberView {
         user_id: target_id,

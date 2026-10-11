@@ -120,3 +120,39 @@ ALTER DEFAULT PRIVILEGES FOR ROLE amicu_owner IN SCHEMA public
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO amicu_app;
 ALTER DEFAULT PRIVILEGES FOR ROLE amicu_owner IN SCHEMA public
     GRANT USAGE, SELECT ON SEQUENCES TO amicu_app;
+
+-- 4. Narrow the blanket DML above (andypalmi/amicu-planning#194).
+--
+--    * AUDIT tables are append-only for the service: INSERT + SELECT only, so
+--      a compromised/buggy service cannot rewrite or erase the audit trail.
+--      (`ON DELETE CASCADE` from `workspaces` still removes a deleted
+--      workspace's rows: referential actions run with the OWNER's privileges.)
+--      Every FUTURE audit table must be added to this list - the
+--      ALTER DEFAULT PRIVILEGES above grants full DML on new tables.
+--    * `_sqlx_migrations` is read-only for the service (it only inspects
+--      applied versions at startup; migrations are applied by `amicu-server
+--      migrate` as the owner).
+--
+--    Like step 3, run (or re-run) this after the first `amicu-server migrate`
+--    and again after any migration that adds an audit table; each REVOKE is
+--    skipped while its table does not exist yet, so the script stays
+--    re-runnable at any point.
+DO $$
+DECLARE
+    audit_table text;
+BEGIN
+    FOREACH audit_table IN ARRAY ARRAY['org_audit'] LOOP
+        IF to_regclass(format('public.%I', audit_table)) IS NOT NULL THEN
+            EXECUTE format(
+                'REVOKE UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON public.%I FROM amicu_app',
+                audit_table
+            );
+        END IF;
+    END LOOP;
+
+    IF to_regclass('public._sqlx_migrations') IS NOT NULL THEN
+        REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER
+            ON public._sqlx_migrations FROM amicu_app;
+    END IF;
+END
+$$;

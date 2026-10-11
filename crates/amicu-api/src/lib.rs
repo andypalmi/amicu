@@ -71,6 +71,7 @@ pub mod preset;
 pub mod ratelimit;
 pub mod recommend;
 pub mod recommend_wizard;
+pub mod security;
 pub mod session;
 pub mod tenancy;
 
@@ -99,6 +100,7 @@ pub use outbox::{
 pub use ratelimit::{
     InMemoryRateLimiter, PostgresRateLimiter, ProxyParseError, RateLimiter, TrustedProxies,
 };
+pub use security::security_headers;
 pub use session::{SessionApiState, session_router};
 pub use tenancy::{PostgresTenancyStore, TenancyStore};
 
@@ -179,4 +181,7 @@ pub fn api_router(
         .merge(org_router(org_state))
         .merge(config_router(config_state, engine_state))
         .merge(session_router(session_state))
+        // Outermost: every response (including 4xx/413 from inner layers) gets
+        // the security headers.
+        .layer(axum::middleware::from_fn(security_headers))
 }

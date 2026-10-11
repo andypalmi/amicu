@@ -424,10 +424,23 @@ impl TrustedProxies {
         peer: Option<SocketAddr>,
         xff: Option<&str>,
     ) -> Option<String> {
+        let ident = self.client_ident_with_edge(edge_ip, peer, xff)?;
+        Some(format!("{route}|{ident}"))
+    }
+
+    /// The client identity (textual IP) [`Self::client_key_with_edge`] keys on,
+    /// without the route prefix; `None` when there is no trustworthy identity.
+    #[must_use]
+    pub fn client_ident_with_edge(
+        &self,
+        edge_ip: Option<IpAddr>,
+        peer: Option<SocketAddr>,
+        xff: Option<&str>,
+    ) -> Option<String> {
         if let Some(ip) = edge_ip {
-            return Some(format!("{route}|{ip}"));
+            return Some(ip.to_string());
         }
-        self.client_key(route, peer, xff)
+        Some(self.client_ident(peer?, xff))
     }
 
     fn client_ident(&self, peer: SocketAddr, xff: Option<&str>) -> String {

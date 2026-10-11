@@ -43,6 +43,10 @@ pub enum AuthError {
     /// Password does not meet the minimum strength policy.
     #[error("password does not meet policy")]
     WeakPassword,
+    /// Password exceeds [`crate::password::MAX_PASSWORD_LEN`] bytes (bounds the
+    /// Argon2 input).
+    #[error("password exceeds the maximum length")]
+    PasswordTooLong,
     /// Refresh token is unknown, expired, or revoked.
     #[error("refresh token invalid")]
     RefreshInvalid,
@@ -78,6 +82,10 @@ pub enum AuthError {
     /// Rate limit tripped on an auth endpoint.
     #[error("rate limit exceeded")]
     RateLimited,
+    /// Per-account sign-in backoff is in effect. Rendered exactly like
+    /// [`AuthError::RateLimited`] (same status/body) plus a `Retry-After`.
+    #[error("rate limit exceeded")]
+    Throttled { retry_after_secs: u64 },
     /// Signing failed.
     #[error("token signing failure")]
     Signing,

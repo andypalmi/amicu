@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM login_failures WHERE updated_at + $1 <= extract(epoch FROM now())::bigint AND locked_until <= extract(epoch FROM now())::bigint",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "969a3c358abe17aad5d2349313927997a4f3c6ee974801d5c84e5b7a0315bcc1"
+}

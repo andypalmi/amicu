@@ -17,6 +17,11 @@ use crate::error::{AuthError, Result};
 /// substitute for a breach-corpus / entropy check.
 pub const MIN_PASSWORD_LEN: usize = 8;
 
+/// Maximum accepted password length, in BYTES. Bounds the input fed to Argon2
+/// (and the work an unauthenticated caller can force per request); generous
+/// enough for any passphrase or password-manager output.
+pub const MAX_PASSWORD_LEN: usize = 256;
+
 /// Enforce the minimum password-strength policy at registration time.
 ///
 /// Applied on sign-up only; sign-in never re-checks policy (an existing
@@ -26,6 +31,7 @@ pub const MIN_PASSWORD_LEN: usize = 8;
 ///
 /// # Errors
 /// [`AuthError::InvalidCredentials`] for an empty password;
+/// [`AuthError::PasswordTooLong`] above [`MAX_PASSWORD_LEN`] bytes;
 /// [`AuthError::WeakPassword`] for a password below [`MIN_PASSWORD_LEN`] scalar
 /// values.
 ///
@@ -36,6 +42,9 @@ pub const MIN_PASSWORD_LEN: usize = 8;
 pub fn check_password_policy(password: &SecretValue) -> Result<()> {
     if password.is_empty() {
         return Err(AuthError::InvalidCredentials);
+    }
+    if password.expose_secret().len() > MAX_PASSWORD_LEN {
+        return Err(AuthError::PasswordTooLong);
     }
     // Count scalar values when the password is UTF-8; fall back to byte length
     // (non-UTF-8 secrets only make the floor stricter, never weaker).
