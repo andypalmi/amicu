@@ -287,6 +287,14 @@ pub fn render_command(
     }
     push_multimodal_flags(&mut argv, settings);
     push_speculative_flags(&mut argv, draft_model_path, settings);
+    // llama-server serves Prometheus `/metrics` only with `--metrics`
+    // (`endpoint_metrics` in `tools/server/server-context.cpp`; without it the
+    // route answers an error). Always on so `amicu modal metrics` and the host
+    // supervisor can scrape it; skipped when `extra_args` already carries it,
+    // so a user who spelled it out does not get a duplicate.
+    if !settings.extra_args.iter().any(|a| a == "--metrics") {
+        argv.push("--metrics".to_owned());
+    }
     argv.extend(settings.extra_args.iter().cloned());
     let text = shell_join(&argv);
     (argv, text)

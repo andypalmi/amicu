@@ -129,6 +129,7 @@ mod deploy;
 mod error;
 mod image;
 mod interceptor;
+pub mod metrics;
 mod ops;
 mod pb;
 pub mod proxy_auth;
