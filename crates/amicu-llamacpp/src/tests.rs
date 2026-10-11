@@ -876,8 +876,25 @@ fn render_command_appends_extra_args_after_typed_flags() {
         .iter()
         .position(|a| a == "-1")
         .expect("n_gpu_layers value present");
-    assert_eq!(&argv[typed_end + 1..], ["--lora", "/m.gguf"]);
-    assert!(text.ends_with("--lora /m.gguf"));
+    // `--metrics` (always rendered) sits between the typed flags and extra_args.
+    assert_eq!(&argv[typed_end + 1..], ["--metrics", "--lora", "/m.gguf"]);
+    assert!(text.ends_with("--metrics --lora /m.gguf"));
+}
+
+#[test]
+fn render_command_always_enables_the_metrics_endpoint_once() {
+    let settings = |extra: &[&str]| {
+        let Runtime::LlamaCpp(s) = deployment_with_extra_args(extra).runtime else {
+            unreachable!()
+        };
+        s
+    };
+    let count = |extra: &[&str]| {
+        let (argv, _) = render_command(Path::new("/models/tiny.gguf"), None, &settings(extra));
+        argv.iter().filter(|a| *a == "--metrics").count()
+    };
+    assert_eq!(count(&[]), 1);
+    assert_eq!(count(&["--metrics"]), 1, "no duplicate when user passes it");
 }
 
 // ---- amicu-planning#151 PR B: chat template / jinja / reasoning-format

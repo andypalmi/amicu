@@ -111,6 +111,22 @@ enum ModalCommand {
         #[arg(long)]
         since: Option<String>,
     },
+    /// Show a deployed app's runtime metrics (vLLM or llama.cpp `/metrics`).
+    ///
+    /// Scrapes through the app's Modal URL; set `MODAL_PROXY_TOKEN_ID` and
+    /// `MODAL_PROXY_TOKEN_SECRET` for proxy auth. A scaled-to-zero app is
+    /// woken by the request, so the first call can be slow.
+    Metrics {
+        /// The app's deployment name.
+        app_name: String,
+        /// Keep scraping and print a new snapshot every `--interval`
+        /// seconds, with throughput derived from successive scrapes.
+        #[arg(long)]
+        watch: bool,
+        /// Seconds between snapshots under `--watch`.
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..))]
+        interval: u64,
+    },
     /// Stop a deployed app, terminating its containers.
     Stop {
         /// The app's deployment name.
@@ -194,6 +210,11 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
                 follow,
                 since,
             } => commands::modal::logs(app_name, *follow, since.clone(), out),
+            ModalCommand::Metrics {
+                app_name,
+                watch,
+                interval,
+            } => commands::modal::metrics(app_name, *watch, *interval, out),
             ModalCommand::Stop { app_name } => commands::modal::stop(app_name, out),
         };
     }

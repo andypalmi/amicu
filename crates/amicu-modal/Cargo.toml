@@ -51,6 +51,9 @@ amicu-registry = { path = "../amicu-registry" }
 # `supervisor.rs` resolves the web server's proxy region from the pinned
 # compute region via the provider catalog (`modal_proxy_region`).
 amicu-providers = { path = "../amicu-providers" }
+# `metrics.rs` folds a `/metrics` scrape into the shared `StackMetrics`
+# surface (workspace-internal; amicu-telemetry depends only on core/runtime).
+amicu-telemetry = { path = "../amicu-telemetry" }
 # `ModalClient::health` does a plain HTTP GET against a deployed server's
 # tunnel URL — no gRPC involved. Promoted from dev-dependencies (PR 3 used it
 # only in `tests/live_deploy.rs`) now that `ops.rs` needs it at runtime too;
@@ -63,7 +66,7 @@ amicu-providers = { path = "../amicu-providers" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "net", "io-util"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

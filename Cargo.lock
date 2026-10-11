@@ -209,6 +209,7 @@ dependencies = [
  "amicu-providers",
  "amicu-registry",
  "amicu-runtime",
+ "amicu-telemetry",
  "async-trait",
  "base64 0.22.1",
  "prost",

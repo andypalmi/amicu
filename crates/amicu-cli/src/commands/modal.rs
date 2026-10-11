@@ -1,4 +1,4 @@
-//! `amicu modal auth-check` / `status` / `logs` / `stop` - operate a Modal
+//! `amicu modal auth-check` / `status` / `logs` / `metrics` / `stop` - operate a Modal
 //! deployment from the command line.
 //!
 //! Project-independent (like `skill export`): none of these need a `*.hcl`
@@ -8,7 +8,9 @@
 
 use std::io::{self, Write};
 use std::ops::ControlFlow;
+use std::time::{Duration, Instant};
 
+use amicu_modal::metrics::{self, MetricsSnapshot, Percentiles};
 use amicu_modal::{AppStatus, Credentials, LogFd, LogLine, ModalClient, ModalError};
 
 use crate::commands::build_runtime;
@@ -154,6 +156,129 @@ pub(crate) fn logs(
     Ok(0)
 }
 
+/// Prints a one-shot runtime-metrics snapshot of a deployed app, or with
+/// `watch` a new one every `interval_secs` until interrupted. The URL comes
+/// from the app's first Function that has one (the same lookup as `status`);
+/// the scrape itself is a plain HTTPS GET with the proxy-auth headers, and its
+/// errors never contain them.
+pub(crate) fn metrics(
+    app_name: &str,
+    watch: bool,
+    interval_secs: u64,
+    out: &mut dyn Write,
+) -> Result<u8, CliError> {
+    let credentials = Credentials::from_env().map_err(ModalError::from)?;
+    let rt = build_runtime()?;
+
+    let status = rt.block_on(async {
+        let mut client = ModalClient::connect(credentials).await?;
+        client.app_status(app_name).await
+    })?;
+    let Some(status) = status else {
+        writeln!(out, "no deployment named {app_name}").map_err(io_err)?;
+        return Ok(1);
+    };
+    let Some(url) = status.functions.iter().find_map(|f| f.url.clone()) else {
+        writeln!(out, "{app_name} has no URL to scrape (is it a web server?)").map_err(io_err)?;
+        return Ok(1);
+    };
+
+    let mut previous: Option<(MetricsSnapshot, Instant)> = None;
+    loop {
+        let snapshot = rt
+            .block_on(metrics::scrape(&url))
+            .map_err(|e| CliError::Message(e.to_string()))?;
+        let now = Instant::now();
+        let snapshot = match &previous {
+            Some((before, at)) => snapshot.rate_since(before, now.duration_since(*at)),
+            None => snapshot,
+        };
+        write_metrics(out, app_name, &snapshot, watch)?;
+        out.flush().map_err(io_err)?;
+        if !watch {
+            return Ok(0);
+        }
+        previous = Some((snapshot, now));
+        std::thread::sleep(Duration::from_secs(interval_secs));
+    }
+}
+
+fn opt<T: std::fmt::Display>(value: Option<T>) -> String {
+    value.map_or_else(|| "n/a".to_owned(), |v| v.to_string())
+}
+
+fn percentiles(value: Option<Percentiles>) -> String {
+    value.map_or_else(
+        || "n/a".to_owned(),
+        |p| {
+            format!(
+                "p50={:.0}ms p90={:.0}ms p99={:.0}ms",
+                p.p50_ms, p.p90_ms, p.p99_ms
+            )
+        },
+    )
+}
+
+/// Renders one snapshot. Split out from [`metrics`] so it is testable
+/// without a network call. `watch` only changes the hint shown where a rate
+/// needs a second scrape.
+fn write_metrics(
+    out: &mut dyn Write,
+    app_name: &str,
+    m: &MetricsSnapshot,
+    watch: bool,
+) -> Result<(), CliError> {
+    let tps = |v: Option<f64>| {
+        v.map_or_else(
+            || {
+                if watch {
+                    "n/a".to_owned()
+                } else {
+                    "n/a (run with --watch)".to_owned()
+                }
+            },
+            |v| format!("{v:.1}"),
+        )
+    };
+    let kv = m
+        .kv_cache_usage
+        .map_or_else(|| "n/a".to_owned(), |v| format!("{:.1}%", v * 100.0));
+    writeln!(out, "metrics {app_name} ({})", m.runtime.label()).map_err(io_err)?;
+    writeln!(
+        out,
+        "  requests:    total={} running={} waiting={}",
+        opt(m.requests_total),
+        opt(m.requests_running),
+        opt(m.requests_waiting)
+    )
+    .map_err(io_err)?;
+    writeln!(
+        out,
+        "  tokens:      prompt={} generated={}",
+        opt(m.prompt_tokens_total),
+        opt(m.generation_tokens_total)
+    )
+    .map_err(io_err)?;
+    writeln!(
+        out,
+        "  tokens/s:    generation={} prompt={}",
+        tps(m.generation_tokens_per_second),
+        tps(m.prompt_tokens_per_second)
+    )
+    .map_err(io_err)?;
+    writeln!(out, "  kv cache:    {kv}").map_err(io_err)?;
+    writeln!(out, "  preemptions: {}", opt(m.preemptions)).map_err(io_err)?;
+    writeln!(out, "  e2e latency: {}", percentiles(m.e2e_latency)).map_err(io_err)?;
+    writeln!(out, "  ttft:        {}", percentiles(m.time_to_first_token)).map_err(io_err)?;
+    writeln!(
+        out,
+        "  per token:   {}",
+        percentiles(m.time_per_output_token)
+    )
+    .map_err(io_err)?;
+    Ok(())
+}
+
 /// Stops a deployed app (`ModalClient::find_app` + `ModalClient::stop_app`).
 pub(crate) fn stop(app_name: &str, out: &mut dyn Write) -> Result<u8, CliError> {
     let credentials = Credentials::from_env().map_err(ModalError::from)?;
@@ -273,6 +398,52 @@ mod tests {
         );
         assert_eq!(format_log_line(&make(LogFd::Info, "x")), "[info] x");
         assert_eq!(format_log_line(&make(LogFd::Unspecified, "x")), "[?] x");
+    }
+
+    #[test]
+    fn write_metrics_renders_vllm_and_marks_missing_series_na() {
+        use amicu_modal::metrics::snapshot_from_text;
+        let vllm = "vllm:request_success_total{finished_reason=\"stop\"} 7\n\
+                    vllm:num_requests_running 1\n\
+                    vllm:kv_cache_usage_perc 0.125\n\
+                    vllm:generation_tokens_total 900\n\
+                    vllm:e2e_request_latency_seconds_bucket{le=\"1.0\"} 10\n\
+                    vllm:e2e_request_latency_seconds_bucket{le=\"+Inf\"} 10\n";
+        let snap = snapshot_from_text(vllm).expect("vllm");
+        let mut out = new_buf();
+        write_metrics(&mut out, "amicu-app", &snap, false).expect("writes ok");
+        let r = as_str(&out);
+        assert!(r.contains("metrics amicu-app (vLLM)"), "{r}");
+        assert!(r.contains("total=7 running=1 waiting=n/a"), "{r}");
+        assert!(r.contains("generated=900"), "{r}");
+        assert!(r.contains("generation=n/a (run with --watch)"), "{r}");
+        assert!(r.contains("kv cache:    12.5%"), "{r}");
+        assert!(r.contains("e2e latency: p50=500ms"), "{r}");
+        assert!(r.contains("ttft:        n/a"), "{r}");
+
+        let rated = snap.clone().rate_since(&snap, Duration::from_secs(1));
+        let mut out = new_buf();
+        write_metrics(&mut out, "amicu-app", &rated, true).expect("writes ok");
+        assert!(as_str(&out).contains("generation=0.0"), "{}", as_str(&out));
+    }
+
+    #[test]
+    fn write_metrics_renders_llamacpp_gauges() {
+        use amicu_modal::metrics::snapshot_from_text;
+        let snap = snapshot_from_text(
+            "llamacpp:predicted_tokens_seconds 41.25\nllamacpp:requests_processing 2\n",
+        )
+        .expect("llama.cpp");
+        let mut out = new_buf();
+        write_metrics(&mut out, "amicu-llm", &snap, false).expect("writes ok");
+        let r = as_str(&out);
+        assert!(r.contains("(llama.cpp)"), "{r}");
+        assert!(r.contains("total=n/a running=2"), "{r}");
+        assert!(
+            r.contains("generation=41.2") || r.contains("generation=41.3"),
+            "{r}"
+        );
+        assert!(r.contains("e2e latency: n/a"), "{r}");
     }
 
     #[test]

@@ -878,16 +878,14 @@ impl ProcessSupervisor for ModalSupervisor {
         })
     }
 
-    async fn metrics(&self, _handle: &RuntimeHandle) -> Result<RuntimeMetrics, LlamaCppError> {
-        // Same placeholder zero-metrics `amicu_llamacpp::ServiceSupervisor`
-        // returns: real metrics need Modal's own function-call telemetry,
-        // out of scope here.
-        Ok(RuntimeMetrics {
-            requests_total: 0,
-            latency_p50_ms: 0.0,
-            tokens_per_second: 0.0,
-            memory_used: amicu_core::ByteSize::from_bytes(0),
-        })
+    async fn metrics(&self, handle: &RuntimeHandle) -> Result<RuntimeMetrics, LlamaCppError> {
+        // Scrapes the runtime's Prometheus `/metrics` over the Modal URL (see
+        // `crate::metrics` for the series and their sources). One second apart
+        // for vLLM, which has no throughput gauge.
+        crate::metrics::scrape_with_rate(&handle.endpoint, Duration::from_secs(1))
+            .await
+            .map(|m| m.to_runtime_metrics())
+            .map_err(|e| LlamaCppError::Supervisor(e.to_string()))
     }
 
     async fn logs(
