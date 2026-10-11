@@ -75,6 +75,7 @@ pub enum Quantization {
     F32,
     F16,
     Bf16,
+    Fp8,
     Int8,
     Int4,
     Q4KM,

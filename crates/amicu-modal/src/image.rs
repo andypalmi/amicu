@@ -156,7 +156,7 @@ impl ImageSpec {
 /// POSIX-shell quoting, equivalent to Python's `shlex.quote`, which is what
 /// `modal/image.py` uses for pip package names (`:1018`) and `ENV` values
 /// (`:2393`).
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     let safe = !value.is_empty()
         && value
             .chars()

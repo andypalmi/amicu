@@ -26,7 +26,7 @@ use amicu_core::units::ByteSize;
 /// Approximate bytes per weight per quantization.
 ///
 /// Basis: GGUF effective bits-per-weight, divided by 8. F32=4B, F16/BF16=2B and
-/// Int8/Int4 are exact; the K-quants are llama.cpp effective sizes - Q8_0 8.5
+/// FP8/Int8/Int4 are exact; the K-quants are llama.cpp effective sizes - Q8_0 8.5
 /// bpw (1.0625 B), Q6_K ≈6.56 bpw (0.82 B), Q5_K_M ≈5.44 bpw (0.68 B), Q4_K_M
 /// ≈4.48 bpw (0.56 B). Approximations, not exact file sizes.
 #[must_use]
@@ -35,7 +35,7 @@ pub fn bytes_per_parameter(q: Quantization) -> f64 {
         Quantization::F32 => 4.0,
         Quantization::F16 | Quantization::Bf16 => 2.0,
         Quantization::Q8_0 => 1.0625,
-        Quantization::Int8 => 1.0,
+        Quantization::Int8 | Quantization::Fp8 => 1.0,
         Quantization::Q6K => 0.82,
         Quantization::Q5KM => 0.68,
         Quantization::Q4KM => 0.56,
@@ -553,6 +553,7 @@ mod tests {
         assert!((bytes_per_parameter(Quantization::Bf16) - 2.0).abs() < f64::EPSILON);
         assert!((bytes_per_parameter(Quantization::Q8_0) - 1.0625).abs() < f64::EPSILON);
         assert!((bytes_per_parameter(Quantization::Int8) - 1.0).abs() < f64::EPSILON);
+        assert!((bytes_per_parameter(Quantization::Fp8) - 1.0).abs() < f64::EPSILON);
         assert!((bytes_per_parameter(Quantization::Q6K) - 0.82).abs() < f64::EPSILON);
         assert!((bytes_per_parameter(Quantization::Q5KM) - 0.68).abs() < f64::EPSILON);
         assert!((bytes_per_parameter(Quantization::Q4KM) - 0.56).abs() < f64::EPSILON);

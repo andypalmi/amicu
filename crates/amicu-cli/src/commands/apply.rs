@@ -74,7 +74,7 @@ pub(crate) fn run(
         } else {
             &mut *out
         };
-        crate::commands::plan::print_human(&result, preview)?;
+        crate::commands::plan::print_human(&result, &graph, preview)?;
         if !auto_approve && !prompt_approval(preview)? {
             writeln!(preview, "Apply cancelled.").map_err(|e| CliError::io("write failed", e))?;
             return Ok(0);

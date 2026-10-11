@@ -667,6 +667,42 @@ impl ModalSupervisor {
         Ok(out)
     }
 
+    /// The argv the Modal container actually runs for `plan`: the renderer's
+    /// local launch with the Modal rewrites applied (`-hf`/`-hff` and
+    /// `--no-mmproj` for llama.cpp, `--host 0.0.0.0` for both). Single source
+    /// of truth for [`ModalSupervisor::build_spec`] and `amicu plan`'s display.
+    ///
+    /// # Errors
+    /// [`LlamaCppError::Supervisor`] if `plan` is not a command launch or names
+    /// something Modal cannot reach (a local model path, a secret flag, ...).
+    pub fn launch_argv(&self, plan: &LaunchPlan) -> Result<Vec<String>, LlamaCppError> {
+        let argv = plan.rendered.argv().ok_or_else(|| {
+            LlamaCppError::Supervisor("Modal supervisor expects a command launch".to_owned())
+        })?;
+        Ok(match &plan.settings {
+            Runtime::Vllm(_) => {
+                reject_local_path_model(argv)?;
+                bind_all_interfaces(argv)
+            }
+            Runtime::LlamaCpp(s) => {
+                bind_all_interfaces(&self.hf_llama_argv(argv, s.multimodal.is_some())?)
+            }
+        })
+    }
+
+    /// [`ModalSupervisor::launch_argv`] as one shell-quoted line, for display.
+    ///
+    /// # Errors
+    /// See [`ModalSupervisor::launch_argv`].
+    pub fn launch_text(&self, plan: &LaunchPlan) -> Result<String, LlamaCppError> {
+        Ok(self
+            .launch_argv(plan)?
+            .iter()
+            .map(|a| crate::image::shell_quote(a))
+            .collect::<Vec<_>>()
+            .join(" "))
+    }
+
     /// Builds the [`ServerSpec`] for `plan`, forwarding `secrets` (plus the
     /// [`HF_TOKEN_ENV_VAR`] fallback) as Modal Secret env, never image env.
     ///
@@ -696,20 +732,7 @@ impl ModalSupervisor {
             Runtime::Vllm(s) => (&s.env, s.port, RuntimeKind::Vllm),
             Runtime::LlamaCpp(s) => (&s.env, s.port, RuntimeKind::LlamaCpp),
         };
-        let argv = plan.rendered.argv().ok_or_else(|| {
-            LlamaCppError::Supervisor("Modal supervisor expects a command launch".to_owned())
-        })?;
-        let has_multimodal =
-            matches!(&plan.settings, Runtime::LlamaCpp(s) if s.multimodal.is_some());
-        let argv = match runtime {
-            RuntimeKind::Vllm => {
-                reject_local_path_model(argv)?;
-                bind_all_interfaces(argv)
-            }
-            RuntimeKind::LlamaCpp => {
-                bind_all_interfaces(&self.hf_llama_argv(argv, has_multimodal)?)
-            }
-        };
+        let argv = self.launch_argv(plan)?;
 
         if let Some(s) = secrets.iter().find(|s| settings_env.contains_key(&s.name)) {
             return Err(LlamaCppError::Supervisor(format!(
