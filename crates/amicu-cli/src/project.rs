@@ -107,8 +107,15 @@ impl Project {
             .map_err(|e| CliError::io(format!("cannot create {}", dir.display()), e))?;
         let path = self.state_file();
         let text = serde_json::to_string_pretty(state)?;
-        fs::write(&path, text)
-            .map_err(|e| CliError::io(format!("cannot write {}", path.display()), e))?;
+        // Write a sibling temp file then rename over the target, so a crash
+        // mid-write can never leave a truncated state file.
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, text)
+            .map_err(|e| CliError::io(format!("cannot write {}", tmp.display()), e))?;
+        fs::rename(&tmp, &path).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            CliError::io(format!("cannot write {}", path.display()), e)
+        })?;
         Ok(())
     }
 }
