@@ -8,7 +8,11 @@ import {
 } from '@amicu/ui';
 import { LoginForm } from '@/components/auth/login-form';
 
-export const metadata: Metadata = { title: 'Sign in' };
+export const metadata: Metadata = {
+  title: 'Sign in',
+  description:
+    'Sign in to your Amicu account to design, deploy, and operate LLM serving stacks.',
+};
 
 export default async function LoginPage({
   searchParams,

@@ -8,7 +8,11 @@ import {
 } from '@amicu/ui';
 import { ForgotForm } from '@/components/auth/forgot-form';
 
-export const metadata: Metadata = { title: 'Reset password' };
+export const metadata: Metadata = {
+  title: 'Reset password',
+  description:
+    'Request a link to reset your Amicu account password.',
+};
 
 export default function ForgotPage() {
   return (
