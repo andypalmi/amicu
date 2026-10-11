@@ -2,7 +2,7 @@ import { RootProvider } from 'fumadocs-ui/provider/next';
 import './global.css';
 import 'sonner/dist/styles.css';
 import { Inter } from 'next/font/google';
-import type { Metadata, Viewport } from 'next';
+import type { Metadata } from 'next';
 import { Toaster } from '@/components/common/toaster';
 import { appName, appTagline, siteUrl } from '@/lib/shared';
 
@@ -31,10 +31,6 @@ export const metadata: Metadata = {
     images: ['/opengraph-image'],
   },
 };
-
-// viewport-fit=cover lets env(safe-area-inset-*) report real insets on notched
-// phones (used by the marketing mobile CTA bar).
-export const viewport: Viewport = { viewportFit: 'cover' };
 
 export default function Layout({ children }: LayoutProps<'/'>) {
   return (

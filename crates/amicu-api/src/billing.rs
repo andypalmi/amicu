@@ -798,11 +798,11 @@ pub fn stripe_config_from_env<S: std::hash::BuildHasher>(
     }
 
     let success_url = non_empty(env, "STRIPE_SUCCESS_URL")
-        .unwrap_or_else(|| "http://localhost:3000/account/billing?checkout=success".to_owned());
+        .unwrap_or_else(|| "http://localhost:3000/billing?checkout=success".to_owned());
     let cancel_url = non_empty(env, "STRIPE_CANCEL_URL")
-        .unwrap_or_else(|| "http://localhost:3000/account/billing?checkout=cancel".to_owned());
+        .unwrap_or_else(|| "http://localhost:3000/billing?checkout=cancel".to_owned());
     let portal_return_url = non_empty(env, "STRIPE_PORTAL_RETURN_URL")
-        .unwrap_or_else(|| "http://localhost:3000/account/billing".to_owned());
+        .unwrap_or_else(|| "http://localhost:3000/billing".to_owned());
 
     let mut config = StripeConfig::new(
         SecretValue::new(secret_key.into_bytes()),

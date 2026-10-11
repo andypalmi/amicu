@@ -1,7 +1,12 @@
+import type { Viewport } from 'next';
 import Link from 'next/link';
 import { HomeLayout } from 'fumadocs-ui/layouts/home';
 import { Button } from '@amicu/ui';
 import { baseOptions } from '@/lib/layout.shared';
+
+// viewport-fit=cover lets env(safe-area-inset-*) report real insets on notched
+// phones (used by the mobile CTA bar). Scoped to marketing only.
+export const viewport: Viewport = { viewportFit: 'cover' };
 
 export default function Layout({ children }: LayoutProps<'/'>) {
   return (
