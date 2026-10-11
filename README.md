@@ -75,6 +75,30 @@ resource "deployment" "starter_chat_local" {
 
 Six other resource kinds - `routing_policy`, `data_class`, `governance_rule`, `budget`, `tenant`, `use_case` - extend the same graph with traffic splitting, residency/sensitivity constraints, and spend limits. Full reference lives in the docs site (below).
 
+## Deploy to Modal
+
+`amicu apply` can deploy a model to Modal (serverless GPU) when the hardware profile has `provider = "modal"`; both `vllm` and `llama_cpp` runtimes work, and the model must come from Hugging Face.
+
+```bash
+export MODAL_TOKEN_ID=...  MODAL_TOKEN_SECRET=...              # control plane
+export MODAL_PROXY_TOKEN_ID=...  MODAL_PROXY_TOKEN_SECRET=...  # calling the endpoint
+```
+
+```hcl
+resource "hardware_profile" "modal_l4" {
+  provider = "modal"
+  accelerator {
+    kind   = "gpu"
+    model  = "l4"
+    count  = 1
+    memory = "24GiB"
+  }
+  memory = "32GiB"
+}
+```
+
+Bind a model to it with a `deployment` as in the quickstart, then `amicu plan` and `amicu apply`. Inspect with `amicu modal status|logs|metrics|stop <app>`, where the app is `amicu-` plus the deployment id with `_` as `-`. The full guide (llama.cpp GGUF example, multi-GPU, metrics, state) is the `modal-deployment.md` reference in the `amicu-dsl` skill: `crates/amicu-cli/skills/amicu-dsl/references/modal-deployment.md`, also available via `amicu skill export`.
+
 ## Install & platforms
 
 No published binary yet - build from source with Rust 1.97+:

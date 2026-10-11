@@ -280,6 +280,8 @@ own default (captured) in effect.
 
 ## vLLM on Modal (serverless GPU, amicu-planning#158)
 
+Setup, multi-GPU, metrics and state behaviour: `modal-deployment.md`.
+
 ```hcl
 resource "hardware_profile" "modal_h100" {
   provider = "modal"

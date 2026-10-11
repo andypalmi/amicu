@@ -44,7 +44,8 @@ pub(crate) const SKILLS: &[Skill] = &[
         [
             "model-examples.md",
             "hardware-examples.md",
-            "deployment-examples.md"
+            "deployment-examples.md",
+            "modal-deployment.md"
         ]
     ),
     skill!(
