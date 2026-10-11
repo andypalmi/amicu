@@ -16,6 +16,7 @@ use crate::OutputFormat;
 use crate::catalog::build_catalog;
 use crate::checks::report_for;
 use crate::error::CliError;
+use crate::lock::StateLock;
 use crate::planner::{PlanError, PlanResult, build_plan};
 use crate::project::{LocalState, Project};
 use crate::secret::EnvSecretResolver;
@@ -25,6 +26,7 @@ use crate::write_json;
 pub(crate) fn run(
     project: &Project,
     auto_approve: bool,
+    lock_timeout: Option<std::time::Duration>,
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
@@ -37,6 +39,11 @@ pub(crate) fn run(
         emit_report(&diagnostics, output, out)?;
         return Ok(1);
     }
+
+    // Hold the state lock for the whole read -> refresh -> plan -> apply ->
+    // save section, so a concurrent apply or `modal stop` cannot interleave
+    // (amicu-planning#178). Released when `_lock` drops on return.
+    let _lock = StateLock::acquire(&project.state_dir(), "apply", lock_timeout)?;
 
     let (prior_state, pruned) =
         crate::refresh::load_refreshed(project, &crate::refresh::ModalLookup, output, out)?;
