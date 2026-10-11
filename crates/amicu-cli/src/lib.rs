@@ -9,6 +9,7 @@ mod commands;
 mod error;
 mod planner;
 mod project;
+mod refresh;
 mod secret;
 mod skills;
 

@@ -30,7 +30,9 @@ pub(crate) fn run(
         return Ok(1);
     }
 
-    let prior = project.load_state()?.map(|s| s.graph);
+    let prior =
+        crate::refresh::load_refreshed_state(project, &crate::refresh::ModalLookup, output, out)?
+            .map(|s| s.graph);
     let result = match build_plan(&graph, prior.as_ref()) {
         Ok(result) => result,
         // A deployment failed to plan (e.g. a CAP-002/CAP-003 extra_args/env

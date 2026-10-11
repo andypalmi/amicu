@@ -38,7 +38,8 @@ pub(crate) fn run(
         return Ok(1);
     }
 
-    let prior_state = project.load_state()?;
+    let prior_state =
+        crate::refresh::load_refreshed_state(project, &crate::refresh::ModalLookup, output, out)?;
     let prior_graph = prior_state.as_ref().map(|s| s.graph.clone());
     let result = match build_plan(&graph, prior_graph.as_ref()) {
         Ok(result) => result,
