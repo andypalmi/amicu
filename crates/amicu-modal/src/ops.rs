@@ -112,12 +112,14 @@ pub struct FunctionStatus {
     pub name: String,
     pub url: Option<String>,
     pub running_containers: u32,
-    /// Queued-but-not-running inputs (`FunctionStats.backlog`).
-    pub backlog: u32,
+    /// Queued-but-not-running inputs (`FunctionStats.backlog`). `None` for a
+    /// Server function: Modal rejects `FunctionGetCurrentStats` for those, so
+    /// there is no backlog figure (see [`stats_unsupported`]).
+    pub backlog: Option<u32>,
 }
 
 /// Aggregated status of a deployed app, from `AppList` + `AppGetLayout` +
-/// `FunctionGetCurrentStats`.
+/// `FunctionGetCurrentStats` (`FlashContainerList` for a Server).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppStatus {
     /// The Modal app id (`ap-…`).
@@ -179,8 +181,17 @@ fn function_status(
         name: meta.function_name.clone(),
         url,
         running_containers: stats.num_total_tasks,
-        backlog: stats.backlog,
+        backlog: Some(stats.backlog),
     }
+}
+
+/// Whether `status` is Modal refusing `FunctionGetCurrentStats` for this kind
+/// of Function. A Server (`is_server`) answers `FAILED_PRECONDITION` "Unable
+/// to get current stats for http_server": its stats live behind
+/// `ServerGetTimeRangeStats` (`modal/_server.py` `Server.stats`), which the
+/// vendored v1.3.1 proto does not carry. Any other failure stays an error.
+fn stats_unsupported(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::FailedPrecondition
 }
 
 /// Every Function object in an `AppLayout`. Unlike `get_app_objects`
@@ -351,15 +362,39 @@ impl ModalClient {
 
         let mut functions = Vec::new();
         for (function_id, meta) in function_objects(&layout) {
-            let current_stats = self
+            let reply = self
                 .stub()
                 .function_get_current_stats(pb::FunctionGetCurrentStatsRequest {
                     function_id: function_id.clone(),
                 })
-                .await
-                .map_err(|status| ModalError::from_status("FunctionGetCurrentStats", status))?
-                .into_inner();
-            functions.push(function_status(function_id, meta, current_stats));
+                .await;
+            let function = match reply {
+                Ok(response) => function_status(function_id, meta, response.into_inner()),
+                Err(rejected) if stats_unsupported(&rejected) => {
+                    // Server function: count its registered containers
+                    // instead (`Server._experimental_list_containers`).
+                    drop(rejected);
+                    let containers = self
+                        .stub()
+                        .flash_container_list(pb::FlashContainerListRequest {
+                            function_id: function_id.clone(),
+                        })
+                        .await
+                        .map_err(|status| ModalError::from_status("FlashContainerList", status))?
+                        .into_inner()
+                        .containers
+                        .len();
+                    let mut function =
+                        function_status(function_id, meta, pb::FunctionStats::default());
+                    function.running_containers = u32::try_from(containers).unwrap_or(u32::MAX);
+                    function.backlog = None;
+                    function
+                }
+                Err(rejected) => {
+                    return Err(ModalError::from_status("FunctionGetCurrentStats", rejected));
+                }
+            };
+            functions.push(function);
         }
 
         Ok(Some(AppStatus {
@@ -595,7 +630,7 @@ mod tests {
 
         let status = function_status(id.clone(), &meta, current_stats);
         assert_eq!(status.url, Some("https://a.modal.run".to_owned()));
-        assert_eq!(status.backlog, 3);
+        assert_eq!(status.backlog, Some(3));
         assert_eq!(status.running_containers, 2);
 
         meta.web_url.clear();
@@ -607,6 +642,18 @@ mod tests {
 
         meta.experimental_flash_urls.clear();
         assert_eq!(function_status(id, &meta, current_stats).url, None);
+    }
+
+    #[test]
+    fn only_failed_precondition_means_stats_unsupported() {
+        use tonic::{Code, Status};
+        assert!(stats_unsupported(&Status::new(
+            Code::FailedPrecondition,
+            "Unable to get current stats for http_server"
+        )));
+        for code in [Code::NotFound, Code::Internal, Code::PermissionDenied] {
+            assert!(!stats_unsupported(&Status::new(code, "x")), "{code:?}");
+        }
     }
 
     #[test]
