@@ -15,6 +15,7 @@ use amicu_modal::{AppStatus, Credentials, LogFd, LogLine, ModalClient, ModalErro
 
 use crate::commands::build_runtime;
 use crate::error::CliError;
+use crate::project::Project;
 
 fn io_err(error: io::Error) -> CliError {
     CliError::io("write failed", error)
@@ -295,7 +296,27 @@ pub(crate) fn stop(app_name: &str, out: &mut dyn Write) -> Result<u8, CliError> 
         }
     })?;
 
-    write_stop_result(out, app_name, stopped.as_deref())
+    let code = write_stop_result(out, app_name, stopped.as_deref())?;
+    if stopped.is_some() {
+        forget_stopped_app(app_name, out)?;
+    }
+    Ok(code)
+}
+
+/// Keeps a project's state consistent with a successful `stop`: when run in a
+/// project whose state holds `app_name`, drops that deployment and its
+/// endpoint so the next `plan`/`apply` recreates it. Outside a project (no
+/// state file) this does nothing; a state problem warns but never fails the
+/// stop, which already happened.
+fn forget_stopped_app(app_name: &str, out: &mut dyn Write) -> Result<(), CliError> {
+    match Project::discover().and_then(|project| crate::refresh::forget_app(&project, app_name)) {
+        Ok(Some(id)) => {
+            writeln!(out, "removed deployment {id} from local state").map_err(io_err)?;
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!("warning: could not update local state: {error}"),
+    }
+    Ok(())
 }
 
 /// Renders a `stop` result. Split out from [`stop`] so it is testable
