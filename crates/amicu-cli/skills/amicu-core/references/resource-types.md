@@ -18,7 +18,7 @@ another resource by its id: `model.<name>.id`, `hardware_profile.<name>.id`,
 
 Enums seen in validation: runtimes `llama_cpp`, `vllm`; artifact formats
 include `gguf` and `safetensors`; quantizations include `q4_k_m`, `q5_k_m`,
-`q6_k`, `q8_0`, `int8`, `int4`, `f16`, `bf16`, `f32`; accelerator kinds include
+`q6_k`, `q8_0`, `fp8`, `int8`, `int4`, `f16`, `bf16`, `f32`; accelerator kinds include
 `apple_silicon` and `nvidia_gpu`; `cache_type_k`/`cache_type_v` (llama.cpp)
 accept `f16`, `bf16`, `q8_0`, `q4_0`, `q4_1`, `q5_0`, `q5_1`, `iq4_nl`;
 `flash_attention` accepts `on`, `off`, `auto` (not a boolean); `reasoning_format`

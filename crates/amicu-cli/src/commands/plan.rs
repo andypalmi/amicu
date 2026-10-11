@@ -3,11 +3,14 @@
 use std::io::Write;
 
 use amicu_core::diagnostic::{DiagnosticReport, Severity};
+use amicu_core::graph::Graph;
+use amicu_modal::ModalSupervisor;
+use amicu_modal::supervisor::app_name_for;
 
 use crate::OutputFormat;
 use crate::checks::report_for;
 use crate::error::CliError;
-use crate::planner::{PlanError, PlanResult, build_plan};
+use crate::planner::{PlanError, PlanItem, PlanResult, build_plan};
 use crate::project::Project;
 use crate::write_json;
 
@@ -49,7 +52,7 @@ pub(crate) fn run(
     if output.is_json() {
         write_json(out, &result.plan)?;
     } else {
-        print_human(&result, out)?;
+        print_human(&result, &graph, out)?;
     }
     Ok(0)
 }
@@ -86,7 +89,11 @@ fn emit_report(
     Ok(())
 }
 
-pub(crate) fn print_human(result: &PlanResult, out: &mut dyn Write) -> Result<(), CliError> {
+pub(crate) fn print_human(
+    result: &PlanResult,
+    graph: &Graph,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
     let io = |r: std::io::Result<()>| r.map_err(|e| CliError::io("write failed", e));
 
     if result.items.is_empty() {
@@ -126,10 +133,11 @@ pub(crate) fn print_human(result: &PlanResult, out: &mut dyn Write) -> Result<()
                 io(writeln!(out, "      artifact: {}", artifact.name))?;
             }
             if let Some(cmd) = &item.rendered {
-                // `ModalSupervisor` rewrites the loopback bind to `0.0.0.0`
-                // before launch (`bind_all_interfaces`); show what is sent.
+                // On Modal the supervisor rewrites the argv before launch
+                // (`-hf`/`-hff`, `--no-mmproj`, `--host 0.0.0.0`); show what
+                // is really sent, via the supervisor's own transformation.
                 let cmd = if item.action.provider.as_deref() == Some("modal") {
-                    cmd.replace("--host 127.0.0.1", "--host 0.0.0.0")
+                    modal_launch_text(graph, item).unwrap_or_else(|| cmd.clone())
                 } else {
                     cmd.clone()
                 };
@@ -155,11 +163,156 @@ pub(crate) fn print_human(result: &PlanResult, out: &mut dyn Write) -> Result<()
     Ok(())
 }
 
+/// The launch line `ModalSupervisor` would really send for `item`, or `None`
+/// when it cannot be derived (the caller then shows the local rendering;
+/// `apply` surfaces the underlying error).
+fn modal_launch_text(graph: &Graph, item: &PlanItem) -> Option<String> {
+    let launch = item.launch.as_ref()?;
+    let mut supervisor = ModalSupervisor::new(app_name_for(item.deployment.as_str()));
+    if let Some(model) = graph
+        .deployments
+        .iter()
+        .find(|d| d.id == item.deployment)
+        .and_then(|d| graph.models.iter().find(|m| m.id == d.model))
+    {
+        supervisor = supervisor.with_gguf_model(model);
+    }
+    supervisor.launch_text(launch).ok()
+}
+
 fn symbol(kind: &str) -> &'static str {
     match kind {
         "create" => "+",
         "destroy" => "-",
         "replace" => "±",
         _ => "~",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use amicu_core::ByteSize;
+    use amicu_core::resource::{
+        Accelerator, AcceleratorKind, Artifact, ArtifactFormat, Deployment, GgufVariant,
+        HardwareProfile, LlamaCppSettings, Model, ModelSource, Quantization, Runtime,
+        SourceRegistry, VllmSettings,
+    };
+
+    use super::*;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    fn graph(provider: &str, runtime: Runtime) -> Graph {
+        let mut g = Graph::new();
+        g.models.push(Model {
+            id: "m".into(),
+            source: ModelSource {
+                registry: SourceRegistry::HuggingFace,
+                reference: "org/tiny-1B".into(),
+            },
+            architecture: "llama".into(),
+            modalities: Vec::new(),
+            artifact: Artifact {
+                format: ArtifactFormat::Gguf,
+                quantization: None,
+            },
+            context_length: Some(8192),
+            variants: vec![GgufVariant {
+                quantization: Quantization::Q4KM,
+                file: "m.q4_k_m.gguf".into(),
+                size: Some(ByteSize::from_bytes(GIB)),
+                sha256: None,
+            }],
+            n_layers: None,
+            n_kv_heads: None,
+            head_dim: None,
+        });
+        g.hardware_profiles.push(HardwareProfile {
+            id: "hw".into(),
+            provider: provider.into(),
+            region: None,
+            accelerator: Some(Accelerator {
+                kind: AcceleratorKind::Gpu,
+                model: "l4".into(),
+                count: 1,
+                memory: ByteSize::from_bytes(24 * GIB),
+                memory_bandwidth_gbps: None,
+            }),
+            cpu: None,
+            memory: ByteSize::from_bytes(48 * GIB),
+            interconnect: None,
+            price: None,
+        });
+        g.deployments.push(Deployment {
+            id: "dep".into(),
+            model: "m".into(),
+            hardware_profile: "hw".into(),
+            runtime,
+        });
+        g
+    }
+
+    fn llama() -> Runtime {
+        Runtime::LlamaCpp(LlamaCppSettings {
+            context_length: 8192,
+            port: 8000,
+            n_gpu_layers: -1,
+            extra_args: Vec::new(),
+            env: BTreeMap::new(),
+            ..Default::default()
+        })
+    }
+
+    fn vllm() -> Runtime {
+        Runtime::Vllm(VllmSettings {
+            context_length: 8192,
+            port: 8000,
+            ..Default::default()
+        })
+    }
+
+    fn launch_line(g: &Graph) -> String {
+        let result = build_plan(g, None).expect("plan");
+        let mut out = Vec::new();
+        print_human(&result, g, &mut out).expect("print");
+        let text = String::from_utf8(out).expect("utf8");
+        text.lines()
+            .find_map(|l| {
+                l.trim()
+                    .strip_prefix("launch:")
+                    .map(|c| c.trim().to_owned())
+            })
+            .unwrap_or_else(|| panic!("no launch line in:\n{text}"))
+    }
+
+    #[test]
+    fn modal_vllm_shows_all_interfaces_bind() {
+        let line = launch_line(&graph("modal", vllm()));
+        assert!(line.contains("--host 0.0.0.0"), "{line}");
+        assert!(!line.contains("127.0.0.1"), "{line}");
+    }
+
+    #[test]
+    fn modal_llamacpp_shows_the_argv_modal_really_runs() {
+        let line = launch_line(&graph("modal", llama()));
+        assert!(
+            line.contains("-hf org/tiny-1B -hff m.q4_k_m.gguf"),
+            "{line}"
+        );
+        assert!(!line.contains(" -m "), "{line}");
+        assert!(line.contains("--host 0.0.0.0"), "{line}");
+        assert!(line.contains("--no-mmproj"), "{line}");
+    }
+
+    #[test]
+    fn host_targets_keep_the_local_rendering() {
+        for runtime in [llama(), vllm()] {
+            let line = launch_line(&graph("local", runtime));
+            assert!(!line.contains("0.0.0.0"), "{line}");
+            assert!(!line.contains("--no-mmproj"), "{line}");
+            assert!(!line.contains("-hf "), "{line}");
+        }
     }
 }

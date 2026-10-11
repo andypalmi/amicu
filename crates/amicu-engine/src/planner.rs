@@ -582,6 +582,7 @@ fn quantization_label(q: Quantization) -> &'static str {
         Quantization::F32 => "F32",
         Quantization::F16 => "F16",
         Quantization::Bf16 => "BF16",
+        Quantization::Fp8 => "FP8",
         Quantization::Int8 => "INT8",
         Quantization::Int4 => "INT4",
         Quantization::Q4KM => "Q4_K_M",

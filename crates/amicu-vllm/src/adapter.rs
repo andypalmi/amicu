@@ -37,6 +37,7 @@ const SAFETENSORS_QUANTIZATIONS: &[Quantization] = &[
     Quantization::F32,
     Quantization::F16,
     Quantization::Bf16,
+    Quantization::Fp8,
     Quantization::Int8,
     Quantization::Int4,
 ];
