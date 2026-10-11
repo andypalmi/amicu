@@ -334,6 +334,39 @@ resource "deployment" "support_modal" {
     }
 
     #[test]
+    fn forget_app_skips_when_state_is_locked() {
+        let dir = std::env::temp_dir().join(format!("amicu-forget-locked-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = Project::new(&dir);
+        project.save_state(&state_for(MODAL_CONFIG)).unwrap();
+
+        let held = StateLock::acquire(&project.state_dir(), "apply", None).unwrap();
+        let err = forget_app(&project, APP).unwrap_err();
+        assert!(matches!(err, CliError::StateLocked(_)), "{err}");
+        // State untouched while locked.
+        let state = project.load_state().unwrap().unwrap();
+        assert_eq!(state.graph.deployments.len(), 1);
+        assert_eq!(state.endpoints.len(), 1);
+
+        drop(held);
+        assert_eq!(
+            forget_app(&project, APP).unwrap().as_deref(),
+            Some("support_modal")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forget_app_outside_a_project_creates_nothing() {
+        let dir = std::env::temp_dir().join(format!("amicu-forget-none-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = Project::new(&dir);
+        assert_eq!(forget_app(&project, APP).unwrap(), None);
+        assert!(!dir.join(".amicu").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn forget_app_skips_non_modal_deployments() {
         let dir = std::env::temp_dir().join(format!("amicu-forget-local-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

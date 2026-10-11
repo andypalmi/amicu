@@ -652,6 +652,25 @@ fn state_round_trips() {
 }
 
 #[test]
+fn apply_fails_fast_when_state_is_locked() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+
+    let _held = crate::lock::StateLock::acquire(&project.state_dir(), "apply", None).unwrap();
+    let mut out = Vec::new();
+    let err = commands::apply::run(&project, true, None, OutputFormat::Human, &mut out)
+        .expect_err("a locked state must fail apply");
+    assert!(
+        matches!(err, crate::error::CliError::StateLocked(_)),
+        "{err}"
+    );
+    // Failed before any plan output or side effect, and wrote no state.
+    assert_eq!(out.len(), 0);
+    assert!(project.load_state().unwrap().is_none());
+}
+
+#[test]
 #[ignore = "spawns a real llama-server via the host supervisor"]
 fn apply_end_to_end() {
     let td = TempDir::new();
