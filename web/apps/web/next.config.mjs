@@ -2,6 +2,14 @@ import { createMDX } from 'fumadocs-mdx/next';
 
 const withMDX = createMDX();
 
+const siteHost = (() => {
+  try {
+    return process.env.NEXT_PUBLIC_SITE_URL ? new URL(process.env.NEXT_PUBLIC_SITE_URL).host : null;
+  } catch {
+    return null;
+  }
+})();
+
 const isProd = process.env.NODE_ENV === 'production';
 
 // Content-Security-Policy for the whole app.
@@ -62,6 +70,12 @@ const securityHeaders = [
 /** @type {import('next').NextConfig} */
 const config = {
   reactStrictMode: true,
+  // Server actions already reject cross-origin calls (Origin vs Host /
+  // X-Forwarded-Host). Behind Cloudflare the public host may differ from what the
+  // Worker sees, so also allow the configured public site host explicitly.
+  experimental: {
+    serverActions: { allowedOrigins: siteHost ? [siteHost] : [] },
+  },
   transpilePackages: ['@amicu/ui', '@amicu/auth'],
   async headers() {
     return [

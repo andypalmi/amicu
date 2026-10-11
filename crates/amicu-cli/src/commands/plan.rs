@@ -248,6 +248,7 @@ mod tests {
             price: None,
         });
         g.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "m".into(),
             hardware_profile: "hw".into(),

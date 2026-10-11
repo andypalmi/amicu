@@ -1,4 +1,5 @@
 import 'server-only';
+import { readJsonBody } from '@/lib/security/body';
 import type { CheckoutRequest } from '@amicu/api-client';
 
 // Body validation for the /api/billing/checkout BFF route. Session guarding and
@@ -14,12 +15,9 @@ import type { CheckoutRequest } from '@amicu/api-client';
 export async function readCheckoutBody(
   request: Request,
 ): Promise<{ body: CheckoutRequest } | { deny: Response }> {
-  let raw: unknown;
-  try {
-    raw = await request.json();
-  } catch {
-    return { deny: Response.json({ error: 'request body must be JSON' }, { status: 400 }) };
-  }
+  const parsed = await readJsonBody(request);
+  if ('deny' in parsed) return parsed;
+  const raw: unknown = parsed.value;
   const plan = (raw as { plan?: unknown })?.plan;
   if (typeof plan !== 'string' || plan.trim() === '') {
     return { deny: Response.json({ error: '`plan` (string) is required' }, { status: 400 }) };

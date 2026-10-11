@@ -43,7 +43,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import http from 'node:http';
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { startStubAuthApi } from './fixtures/refresh-stub.ts';
 
@@ -56,8 +56,8 @@ const BUILD_TIMEOUT_MS = 180_000;
 const SERVER_READY_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 500;
 
-const ACCESS_COOKIE = 'amicu_at';
-const REFRESH_COOKIE = 'amicu_rt';
+const ACCESS_COOKIE = '__Host-amicu_at';
+const REFRESH_COOKIE = '__Host-amicu_rt';
 
 function craftJwt(exp: number): string {
   const b64url = (obj: unknown) =>
@@ -326,6 +326,51 @@ test('workerd (wrangler dev): production fail-fast fires for a misconfigured API
       500,
       'a misconfigured (empty) production API_URL must fail the request (parseServerEnv fail-fast), not boot against a localhost default',
     );
+  } finally {
+    killGroup(server.child);
+  }
+});
+
+test('workerd (wrangler dev): security headers reach Worker responses AND static assets; cross-origin POST to /api is 403', async (t) => {
+  if (skipReason || !buildReady) {
+    t.skip(skipReason ?? 'build did not complete');
+    return;
+  }
+  const server = await startWranglerDev({ API_URL: 'http://127.0.0.1:1', COOKIE_SECURE: 'true' });
+  if (!server.ok) {
+    t.skip(`wrangler dev did not come up in this sandbox: ${server.reason}`);
+    return;
+  }
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const chunksDir = path.join(APP_DIR, '.open-next/assets/_next/static/chunks');
+    const chunk = readdirSync(chunksDir).find((f) => f.endsWith('.js'));
+    assert.ok(chunk, 'expected at least one built static chunk');
+
+    for (const p of ['/api/health', '/login', `/_next/static/chunks/${chunk}`]) {
+      const res = await fetch(`${base}${p}`);
+      await res.arrayBuffer();
+      assert.equal(res.headers.get('x-content-type-options'), 'nosniff', `${p}: nosniff`);
+      assert.match(res.headers.get('strict-transport-security') ?? '', /max-age=\d+/, `${p}: HSTS`);
+      assert.equal(res.headers.get('x-frame-options'), 'DENY', `${p}: X-Frame-Options`);
+    }
+    // CSP is document-level: must be on Worker-rendered HTML.
+    const page = await fetch(`${base}/login`);
+    await page.arrayBuffer();
+    assert.match(page.headers.get('content-security-policy') ?? '', /default-src 'self'/);
+
+    const cross = await fetch(`${base}/api/engine/plan`, {
+      method: 'POST',
+      headers: { origin: 'https://evil.example', 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(cross.status, 403);
+    const same = await fetch(`${base}/api/engine/plan`, {
+      method: 'POST',
+      headers: { origin: base, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(same.status, 401, 'same-origin POST passes the CSRF guard (then 401: no session)');
   } finally {
     killGroup(server.child);
   }

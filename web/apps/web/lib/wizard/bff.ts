@@ -1,4 +1,5 @@
 import 'server-only';
+import { readJsonBody } from '@/lib/security/body';
 import type { components } from '@amicu/api-client';
 
 type WizardAnswersDto = components['schemas']['WizardAnswersDto'];
@@ -19,12 +20,9 @@ type CandidatesRequestDto = components['schemas']['CandidatesRequestDto'];
 export async function readWizardAnswersBody(
   request: Request,
 ): Promise<{ body: WizardAnswersDto } | { deny: Response }> {
-  let raw: unknown;
-  try {
-    raw = await request.json();
-  } catch {
-    return { deny: Response.json({ error: 'request body must be JSON' }, { status: 400 }) };
-  }
+  const parsed = await readJsonBody(request);
+  if ('deny' in parsed) return parsed;
+  const raw: unknown = parsed.value;
   if (!raw || typeof raw !== 'object') {
     return { deny: Response.json({ error: 'request body must be an object' }, { status: 400 }) };
   }
@@ -52,12 +50,9 @@ export async function readWizardAnswersBody(
 export async function readCandidatesBody(
   request: Request,
 ): Promise<{ body: CandidatesRequestDto } | { deny: Response }> {
-  let raw: unknown;
-  try {
-    raw = await request.json();
-  } catch {
-    return { deny: Response.json({ error: 'request body must be JSON' }, { status: 400 }) };
-  }
+  const parsed = await readJsonBody(request);
+  if ('deny' in parsed) return parsed;
+  const raw: unknown = parsed.value;
   if (!raw || typeof raw !== 'object') {
     return { deny: Response.json({ error: 'request body must be an object' }, { status: 400 }) };
   }

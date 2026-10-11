@@ -6,6 +6,7 @@ import {
   REFRESH_COOKIE,
   REFRESH_MAX_AGE,
   COOKIE_SECURE,
+  LEGACY_COOKIES,
 } from './config';
 
 // Shared cookie attributes. httpOnly keeps both tokens out of browser JS; SameSite
@@ -36,13 +37,27 @@ export async function setSessionCookies(tokens: TokenResponse): Promise<void> {
     ...baseAttrs,
     maxAge: REFRESH_MAX_AGE,
   });
+  await expireLegacy(store);
+}
+
+type CookieStore = Awaited<ReturnType<typeof cookies>>;
+
+// Expire by re-setting with the same attributes + maxAge 0: a `__Host-` cookie can
+// only be modified by a Secure, Path=/ Set-Cookie, which `store.delete()` omits.
+function expire(store: CookieStore, name: string): void {
+  store.set(name, '', { ...baseAttrs, maxAge: 0 });
+}
+
+async function expireLegacy(store: CookieStore): Promise<void> {
+  for (const name of LEGACY_COOKIES) expire(store, name);
 }
 
 /** Clear both session cookies (logout / hard failure). */
 export async function clearSessionCookies(): Promise<void> {
   const store = await cookies();
-  store.delete(ACCESS_COOKIE);
-  store.delete(REFRESH_COOKIE);
+  expire(store, ACCESS_COOKIE);
+  expire(store, REFRESH_COOKIE);
+  await expireLegacy(store);
 }
 
 /** Read the raw refresh token from the request cookies, if present. */

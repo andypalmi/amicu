@@ -2,7 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { isMarkdownPreferred, rewritePath } from 'fumadocs-core/negotiation';
 import { docsContentRoute, docsRoute } from '@/lib/shared';
 import { attemptRefresh } from '@/lib/auth/middleware-refresh';
-import { ACCESS_COOKIE, REFRESH_COOKIE, REFRESH_MAX_AGE, COOKIE_SECURE } from '@/lib/auth/config';
+import {
+  ACCESS_COOKIE,
+  REFRESH_COOKIE,
+  REFRESH_MAX_AGE,
+  COOKIE_SECURE,
+  LEGACY_COOKIES,
+  SITE_URL,
+} from '@/lib/auth/config';
+import { requestIsSameOrigin } from '@/lib/security/csrf';
 
 const { rewrite: rewriteDocs } = rewritePath(
   `${docsRoute}{/*path}`,
@@ -70,8 +78,10 @@ async function handleAuth(request: NextRequest): Promise<NextResponse> {
     request.cookies.delete(ACCESS_COOKIE);
     request.cookies.delete(REFRESH_COOKIE);
     const res = NextResponse.next({ request });
-    res.cookies.delete(ACCESS_COOKIE);
-    res.cookies.delete(REFRESH_COOKIE);
+    // Expire with Secure+Path=/ (a __Host- cookie can't be deleted without them).
+    for (const name of [ACCESS_COOKIE, REFRESH_COOKIE, ...LEGACY_COOKIES]) {
+      res.cookies.set(name, '', { ...cookieAttrs, maxAge: 0 });
+    }
     return res;
   }
 
@@ -80,6 +90,15 @@ async function handleAuth(request: NextRequest): Promise<NextResponse> {
 
 export default async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
+
+  // CSRF: state-changing BFF route-handler requests must be same-origin. (Server
+  // actions get Next's own Origin/Host check; this covers /api/*.)
+  if (
+    (pathname === '/api' || pathname.startsWith('/api/')) &&
+    !requestIsSameOrigin(request, SITE_URL)
+  ) {
+    return NextResponse.json({ error: 'cross-origin request rejected' }, { status: 403 });
+  }
 
   // Docs content negotiation (markdown rewrites) - unchanged.
   const suffix = rewriteSuffix(pathname);

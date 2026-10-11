@@ -1,4 +1,5 @@
 import 'server-only';
+import { readJsonBody } from '@/lib/security/body';
 import type { AddMemberRequest, ChangeRoleRequest } from '@amicu/api-client';
 
 // Body validation for the /api/org/* BFF routes. Session guarding and the
@@ -14,12 +15,9 @@ import type { AddMemberRequest, ChangeRoleRequest } from '@amicu/api-client';
 export async function readAddMemberBody(
   request: Request,
 ): Promise<{ body: AddMemberRequest } | { deny: Response }> {
-  let raw: unknown;
-  try {
-    raw = await request.json();
-  } catch {
-    return { deny: Response.json({ error: 'request body must be JSON' }, { status: 400 }) };
-  }
+  const parsed = await readJsonBody(request);
+  if ('deny' in parsed) return parsed;
+  const raw: unknown = parsed.value;
   const userId = (raw as { user_id?: unknown })?.user_id;
   if (typeof userId !== 'string' || userId.trim() === '') {
     return { deny: Response.json({ error: '`user_id` (string) is required' }, { status: 400 }) };
@@ -38,12 +36,9 @@ export async function readAddMemberBody(
 export async function readChangeRoleBody(
   request: Request,
 ): Promise<{ body: ChangeRoleRequest } | { deny: Response }> {
-  let raw: unknown;
-  try {
-    raw = await request.json();
-  } catch {
-    return { deny: Response.json({ error: 'request body must be JSON' }, { status: 400 }) };
-  }
+  const parsed = await readJsonBody(request);
+  if ('deny' in parsed) return parsed;
+  const raw: unknown = parsed.value;
   const role = (raw as { role?: unknown })?.role;
   if (typeof role !== 'string' || role.trim() === '') {
     return { deny: Response.json({ error: '`role` (string) is required' }, { status: 400 }) };

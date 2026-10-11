@@ -6,8 +6,8 @@ use serde::Serialize;
 
 use amicu_core::graph::Graph;
 use amicu_core::resource::{
-    Credential, Deployment, HardwareProfile, Model, Money, Residency, Runtime, SpeculativeSettings,
-    Tenant, VllmSettings,
+    Credential, Deployment, HardwareProfile, Model, Money, Residency, Runtime, ScalingSettings,
+    SpeculativeSettings, Tenant, VllmSettings,
 };
 use amicu_core::secret::SecretRef;
 
@@ -406,7 +406,29 @@ fn deployment_block(d: &Deployment) -> Block {
                 .add_block(vllm_block(s));
         }
     }
+    if let Some(sc) = &d.scaling {
+        body = body.add_block(scaling_block(sc));
+    }
     resource("deployment", d.id.as_str(), body.build())
+}
+
+/// A deployment's `scaling {}` block (amicu-planning#180); the window is
+/// written as a canonical duration string (`"15m"`).
+fn scaling_block(sc: &ScalingSettings) -> Block {
+    let mut b = Block::builder("scaling");
+    if let Some(v) = sc.min_replicas {
+        b = b.add_attribute(("min_replicas", v));
+    }
+    if let Some(v) = sc.max_replicas {
+        b = b.add_attribute(("max_replicas", v));
+    }
+    if let Some(v) = sc.target_concurrency {
+        b = b.add_attribute(("target_concurrency", v));
+    }
+    if let Some(v) = sc.scaledown_window_secs {
+        b = b.add_attribute(("scaledown_window", ScalingSettings::format_window(v)));
+    }
+    b.build()
 }
 
 /// A llama.cpp `speculative {}` block (amicu-planning#151 PR C). `model` is
