@@ -1,4 +1,5 @@
 import 'server-only';
+import { readJsonBody } from '@/lib/security/body';
 import type { MonitorRequest } from '@amicu/api-client';
 
 // Body validation for the /api/monitor BFF route. Session guarding and the
@@ -15,12 +16,9 @@ import type { MonitorRequest } from '@amicu/api-client';
 export async function readMonitorBody(
   request: Request,
 ): Promise<{ body: MonitorRequest } | { deny: Response }> {
-  let raw: unknown;
-  try {
-    raw = await request.json();
-  } catch {
-    return { deny: Response.json({ error: 'request body must be JSON' }, { status: 400 }) };
-  }
+  const parsed = await readJsonBody(request);
+  if ('deny' in parsed) return parsed;
+  const raw: unknown = parsed.value;
   if (!raw || typeof raw !== 'object') {
     return { deny: Response.json({ error: 'request body must be an object' }, { status: 400 }) };
   }

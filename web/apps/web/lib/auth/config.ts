@@ -1,5 +1,6 @@
 import 'server-only';
 import { parseServerEnv } from '@/lib/auth/server-env';
+import { sessionCookieNames } from '@/lib/auth/cookie-names';
 
 // Server-only auth/BFF configuration. All values come from the environment with
 // sensible dev defaults so the app boots without a running backend. Nothing here
@@ -37,8 +38,14 @@ export const COOKIE_SECURE = env.COOKIE_SECURE;
 // httpOnly cookie names. BOTH tokens are httpOnly + Secure + SameSite and are held
 // by the BFF only - the browser's JS never reads either. The refresh token in
 // particular never reaches client code (RFC 0001 §11.6).
-export const ACCESS_COOKIE = 'amicu_at';
-export const REFRESH_COOKIE = 'amicu_rt';
+const names = sessionCookieNames(COOKIE_SECURE);
+export const ACCESS_COOKIE = names.access;
+export const REFRESH_COOKIE = names.refresh;
+/** Pre-`__Host-` names: never read, only cleared (see cookie-names.ts). */
+export const LEGACY_COOKIES = names.legacy;
+
+/** Public site URL (same env the rest of the app uses) for the CSRF origin check. */
+export const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? null;
 
 /** Refresh-cookie lifetime (30 days). The issuer's own revocation is authoritative. */
 export const REFRESH_MAX_AGE = 60 * 60 * 24 * 30;
