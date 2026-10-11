@@ -38,8 +38,8 @@ pub(crate) fn run(
         return Ok(1);
     }
 
-    let prior_state =
-        crate::refresh::load_refreshed_state(project, &crate::refresh::ModalLookup, output, out)?;
+    let (prior_state, pruned) =
+        crate::refresh::load_refreshed(project, &crate::refresh::ModalLookup, output, out)?;
     let prior_graph = prior_state.as_ref().map(|s| s.graph.clone());
     let result = match build_plan(&graph, prior_graph.as_ref()) {
         Ok(result) => result,
@@ -61,6 +61,11 @@ pub(crate) fn run(
     }
 
     if result.items.is_empty() {
+        // The refresh may have dropped apps that are gone from Modal and from
+        // the config; persist that so the drift note does not repeat forever.
+        if pruned && let Some(state) = &prior_state {
+            project.save_state(state)?;
+        }
         writeln!(out, "No changes to apply.").map_err(|e| CliError::io("write failed", e))?;
         return Ok(0);
     }
@@ -85,13 +90,44 @@ pub(crate) fn run(
     let rt = crate::commands::build_runtime()?;
     let handles = rt.block_on(apply_all(&graph, &result, prior_state.as_ref()))?;
 
+    let prior_endpoints = prior_state.as_ref().map_or(&[][..], |s| &s.endpoints[..]);
+    let endpoints = merge_endpoints(prior_endpoints, &graph, &result, &handles);
     project.save_state(&LocalState {
         version: LocalState::VERSION.to_owned(),
         graph,
-        endpoints: handles.clone(),
+        endpoints,
     })?;
 
     report(&handles, output, out)
+}
+
+/// The endpoints to record after an apply: the prior (refreshed) endpoints of
+/// deployments that are still in `graph` and were not destroyed, plus this
+/// run's `handles` (which replace any prior entry for the same deployment).
+/// Pure so it is unit tested without a network (amicu-planning#176).
+fn merge_endpoints(
+    prior: &[RuntimeHandle],
+    graph: &Graph,
+    result: &PlanResult,
+    handles: &[RuntimeHandle],
+) -> Vec<RuntimeHandle> {
+    let destroyed = |h: &RuntimeHandle| {
+        result
+            .items
+            .iter()
+            .any(|i| i.launch.is_none() && i.deployment == h.deployment)
+    };
+    let mut merged: Vec<RuntimeHandle> = prior
+        .iter()
+        .filter(|h| {
+            find_deployment(graph, &h.deployment).is_some()
+                && !destroyed(h)
+                && !handles.iter().any(|n| n.deployment == h.deployment)
+        })
+        .cloned()
+        .collect();
+    merged.extend(handles.iter().cloned());
+    merged
 }
 
 /// Hardware profile `provider` value that routes a deployment through
@@ -385,5 +421,115 @@ mod dispatch_tests {
                 "{provider:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::merge_endpoints;
+    use crate::planner::build_plan;
+    use amicu_runtime::RuntimeHandle;
+
+    const CONFIG: &str = r#"resource "model" "m" {
+  source {
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen2.5-7B-Instruct"
+  }
+  architecture   = "qwen2"
+  modalities     = ["text"]
+  artifact {
+    format       = "gguf"
+    quantization = "q4_k_m"
+  }
+  context_length = 8192
+  variant {
+    quantization = "q4_k_m"
+    file         = "model.gguf"
+    size         = "4GiB"
+  }
+}
+
+resource "hardware_profile" "hw" {
+  provider = "local_apple"
+  memory   = "16GiB"
+}
+
+resource "deployment" "alpha" {
+  model    = model.m.id
+  hardware = hardware_profile.hw.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 8192
+    port           = 8000
+    n_gpu_layers   = -1
+  }
+}
+
+resource "deployment" "beta" {
+  model    = model.m.id
+  hardware = hardware_profile.hw.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 8192
+    port           = 8001
+    n_gpu_layers   = -1
+  }
+}
+"#;
+
+    fn handle(graph: &amicu_core::graph::Graph, name: &str, endpoint: &str) -> RuntimeHandle {
+        RuntimeHandle {
+            id: format!("unit-{name}"),
+            deployment: graph
+                .deployments
+                .iter()
+                .find(|d| d.id.as_str() == name)
+                .expect("deployment in fixture")
+                .id
+                .clone(),
+            endpoint: endpoint.to_owned(),
+        }
+    }
+
+    #[test]
+    fn unchanged_deployment_keeps_its_endpoint_and_changed_one_is_replaced() {
+        let prior_graph = amicu_hcl::parse_graph(CONFIG).unwrap();
+        let prior = vec![
+            handle(&prior_graph, "alpha", "http://old-alpha"),
+            handle(&prior_graph, "beta", "http://old-beta"),
+        ];
+        // Only beta changes (port).
+        let graph = amicu_hcl::parse_graph(&CONFIG.replace("8001", "9001")).unwrap();
+        let result = build_plan(&graph, Some(&prior_graph)).unwrap();
+        assert_eq!(result.items.len(), 1, "only beta is actionable");
+
+        let new_beta = handle(&graph, "beta", "http://new-beta");
+        let merged = merge_endpoints(&prior, &graph, &result, std::slice::from_ref(&new_beta));
+        let ends: Vec<_> = merged
+            .iter()
+            .map(|h| (h.deployment.as_str(), h.endpoint.as_str()))
+            .collect();
+        assert_eq!(
+            ends,
+            vec![("alpha", "http://old-alpha"), ("beta", "http://new-beta")]
+        );
+    }
+
+    #[test]
+    fn destroyed_deployment_endpoint_is_dropped() {
+        let prior_graph = amicu_hcl::parse_graph(CONFIG).unwrap();
+        let prior = vec![
+            handle(&prior_graph, "alpha", "http://old-alpha"),
+            handle(&prior_graph, "beta", "http://old-beta"),
+        ];
+        // Remove beta from the config.
+        let idx = CONFIG.find("resource \"deployment\" \"beta\"").unwrap();
+        let graph = amicu_hcl::parse_graph(&CONFIG[..idx]).unwrap();
+        let result = build_plan(&graph, Some(&prior_graph)).unwrap();
+        assert_eq!(result.items.len(), 1, "beta is destroyed");
+
+        let merged = merge_endpoints(&prior, &graph, &result, &[]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].deployment.as_str(), "alpha");
     }
 }

@@ -121,8 +121,19 @@ pub(crate) fn load_refreshed_state(
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<Option<LocalState>, CliError> {
+    Ok(load_refreshed(project, lookup, output, out)?.0)
+}
+
+/// Like [`load_refreshed_state`], also reporting whether the refresh dropped
+/// anything from the recorded state (so a caller can persist the pruned state).
+pub(crate) fn load_refreshed(
+    project: &Project,
+    lookup: &dyn AppLookup,
+    output: OutputFormat,
+    out: &mut dyn Write,
+) -> Result<(Option<LocalState>, bool), CliError> {
     let Some(mut state) = project.load_state()? else {
-        return Ok(None);
+        return Ok((None, false));
     };
     let refresh = refresh_state(&mut state, lookup);
     if let Some(warning) = &refresh.warning {
@@ -133,7 +144,7 @@ pub(crate) fn load_refreshed_state(
     for note in &refresh.notes {
         writeln!(sink, "drift: {note}").map_err(|e| CliError::io("write failed", e))?;
     }
-    Ok(Some(state))
+    Ok((Some(state), !refresh.notes.is_empty()))
 }
 
 /// Removes the deployment whose Modal app is `app_name`, and its endpoint,
@@ -147,7 +158,14 @@ pub(crate) fn forget_app(project: &Project, app_name: &str) -> Result<Option<Str
         .graph
         .deployments
         .iter()
-        .find(|d| app_name_for(d.id.as_str()) == app_name)
+        .find(|d| {
+            app_name_for(d.id.as_str()) == app_name
+                && state
+                    .graph
+                    .hardware_profiles
+                    .iter()
+                    .any(|h| h.id == d.hardware_profile && h.provider == MODAL_PROVIDER)
+        })
         .map(|d| d.id.to_string())
     else {
         return Ok(None);
@@ -304,6 +322,40 @@ resource "deployment" "support_modal" {
         let state = project.load_state().unwrap().unwrap();
         assert_eq!(state.graph.deployments.len(), 0);
         assert_eq!(state.endpoints.len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forget_app_skips_non_modal_deployments() {
+        let dir = std::env::temp_dir().join(format!("amicu-forget-local-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = Project::new(&dir);
+        let local = MODAL_CONFIG.replace("\"modal\"", "\"local_apple\"");
+        project.save_state(&state_for(&local)).unwrap();
+        assert_eq!(forget_app(&project, APP).unwrap(), None);
+        let state = project.load_state().unwrap().unwrap();
+        assert_eq!(state.graph.deployments.len(), 1);
+        assert_eq!(state.endpoints.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn json_mode_routes_drift_notes_away_from_stdout() {
+        let dir = std::env::temp_dir().join(format!("amicu-json-notes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = Project::new(&dir);
+        project.save_state(&state_for(MODAL_CONFIG)).unwrap();
+
+        let mut out = Vec::new();
+        let (state, pruned) =
+            load_refreshed(&project, &Fake(Ok(vec![])), OutputFormat::Json, &mut out).unwrap();
+        assert!(pruned);
+        assert_eq!(state.unwrap().graph.deployments.len(), 0);
+        assert!(out.is_empty(), "JSON mode must keep stdout clean");
+
+        let mut out = Vec::new();
+        load_refreshed(&project, &Fake(Ok(vec![])), OutputFormat::Human, &mut out).unwrap();
+        assert!(String::from_utf8(out).unwrap().contains("drift:"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
