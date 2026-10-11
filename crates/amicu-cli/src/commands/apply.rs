@@ -191,6 +191,7 @@ fn modal_supervisor(
         })?;
     let supervisor = ModalSupervisor::for_hardware(app_name_for(id.as_str()), &hardware)
         .map_err(|e| CliError::Adapter(AdapterError::from_kind(e)))?;
+    let supervisor = supervisor.with_scaling(deployment.scaling.as_ref());
     Ok(match (runtime, catalog.resolve_model(&deployment.model)) {
         (amicu_runtime::RuntimeKind::LlamaCpp, Some(resolved)) => {
             supervisor.with_gguf_model(&resolved.model)

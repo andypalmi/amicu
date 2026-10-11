@@ -243,6 +243,7 @@ mod tests {
 
     fn deployment(id: &str, model_ref: &str, hw_ref: &str) -> Deployment {
         Deployment {
+            scaling: None,
             id: id.into(),
             model: model_ref.into(),
             hardware_profile: hw_ref.into(),
@@ -666,6 +667,7 @@ mod tests {
     fn llama_cpp_deployment_with(extra_args: Vec<String>, env: BTreeMap<String, String>) -> Graph {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -684,6 +686,7 @@ mod tests {
     fn vllm_deployment_with(extra_args: Vec<String>, env: BTreeMap<String, String>) -> Graph {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -728,6 +731,7 @@ mod tests {
     fn llama_cpp_sampling_kv_cache_batching_flash_attn_fields_round_trip() {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -759,6 +763,7 @@ mod tests {
         // Setting only one field must not force the others to appear.
         let mut g = Graph::new();
         g.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -793,6 +798,7 @@ mod tests {
         ] {
             let mut g = Graph::new();
             g.deployments.push(Deployment {
+                scaling: None,
                 id: "dep".into(),
                 model: "phantom_model".into(),
                 hardware_profile: "phantom_hw".into(),
@@ -818,6 +824,7 @@ mod tests {
         ] {
             let mut g = Graph::new();
             g.deployments.push(Deployment {
+                scaling: None,
                 id: "dep".into(),
                 model: "phantom_model".into(),
                 hardware_profile: "phantom_hw".into(),
@@ -901,6 +908,7 @@ mod tests {
     fn llama_cpp_chat_template_jinja_reasoning_format_build_fields_round_trip() {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -927,6 +935,7 @@ mod tests {
         // conflict (AMICU-CAP-005), enforced at the adapter layer, not here.
         let mut g = Graph::new();
         g.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -951,6 +960,7 @@ mod tests {
         // build to appear.
         let mut g = Graph::new();
         g.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -981,6 +991,7 @@ mod tests {
         ] {
             let mut g = Graph::new();
             g.deployments.push(Deployment {
+                scaling: None,
                 id: "dep".into(),
                 model: "phantom_model".into(),
                 hardware_profile: "phantom_hw".into(),
@@ -1034,6 +1045,7 @@ mod tests {
         // parses and round-trips it like any other pair of fields.
         let mut g = Graph::new();
         g.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -1091,6 +1103,7 @@ mod tests {
     fn build_round_trips() {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -1177,6 +1190,7 @@ mod tests {
         ] {
             let mut g = Graph::new();
             g.deployments.push(Deployment {
+                scaling: None,
                 id: "dep".into(),
                 model: "phantom_model".into(),
                 hardware_profile: "phantom_hw".into(),
@@ -1205,6 +1219,7 @@ mod tests {
         for value in [Some(true), Some(false), None] {
             let mut g = Graph::new();
             g.deployments.push(Deployment {
+                scaling: None,
                 id: "dep".into(),
                 model: "phantom_model".into(),
                 hardware_profile: "phantom_hw".into(),
@@ -1225,6 +1240,7 @@ mod tests {
     fn enforce_eager_absent_by_default_omits_attribute() {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -1321,6 +1337,7 @@ mod tests {
     fn llama_cpp_multimodal_block_round_trips() {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -1345,6 +1362,7 @@ mod tests {
         // projector alone, with no `multimodal` block at all when unset.
         let mut g = Graph::new();
         g.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -1368,6 +1386,7 @@ mod tests {
         // offload alone.
         let mut g2 = Graph::new();
         g2.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -1391,6 +1410,7 @@ mod tests {
         // Unset entirely - no `multimodal` block at all.
         let mut g3 = Graph::new();
         g3.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -1448,12 +1468,108 @@ mod tests {
         );
     }
 
+    // --- amicu-planning#180: the provider-agnostic `scaling {}` block ------
+
+    fn scaling_src(scaling_body: &str) -> String {
+        format!(
+            r#"
+            resource "model" "m" {{
+              source {{
+                registry  = "hugging_face"
+                reference = "org/model"
+              }}
+              architecture = "llama"
+              artifact {{ format = "safetensors" }}
+            }}
+            resource "hardware_profile" "hw" {{
+              provider = "modal"
+              memory   = "48GiB"
+            }}
+            resource "deployment" "dep" {{
+              model    = model.m.id
+              hardware = hardware_profile.hw.id
+              runtime  = "vllm"
+              vllm {{
+                context_length = 8192
+                port           = 8000
+              }}
+              {scaling_body}
+            }}
+        "#
+        )
+    }
+
+    #[test]
+    fn scaling_block_parses_and_round_trips() {
+        let src = scaling_src(
+            r#"scaling {
+                 min_replicas       = 1
+                 max_replicas       = 3
+                 target_concurrency = 16
+                 scaledown_window   = "15m"
+               }"#,
+        );
+        let g = parse_graph(&src).unwrap();
+        let sc = g.deployments[0].scaling.clone().expect("scaling parsed");
+        assert_eq!(sc.min_replicas, Some(1));
+        assert_eq!(sc.max_replicas, Some(3));
+        assert_eq!(sc.target_concurrency, Some(16));
+        assert_eq!(sc.scaledown_window_secs, Some(900));
+        let formatted = format_graph(&g).unwrap();
+        assert!(formatted.contains("scaledown_window"));
+        assert!(formatted.contains("\"15m\""));
+        assert_eq!(parse_graph(&formatted).unwrap(), g);
+    }
+
+    #[test]
+    fn scaling_fields_are_independently_optional_and_absent_block_emits_nothing() {
+        let g = parse_graph(&scaling_src("scaling { max_replicas = 1 }")).unwrap();
+        let sc = g.deployments[0].scaling.clone().unwrap();
+        assert_eq!(sc.max_replicas, Some(1));
+        assert_eq!(sc.min_replicas, None);
+        assert_eq!(parse_graph(&format_graph(&g).unwrap()).unwrap(), g);
+
+        let none = parse_graph(&scaling_src("")).unwrap();
+        assert!(none.deployments[0].scaling.is_none());
+        assert!(!format_graph(&none).unwrap().contains("scaling"));
+    }
+
+    #[test]
+    fn scaling_window_accepts_seconds_and_hours_and_rejects_garbage() {
+        let g = parse_graph(&scaling_src("scaling { scaledown_window = \"90s\" }")).unwrap();
+        assert_eq!(
+            g.deployments[0]
+                .scaling
+                .as_ref()
+                .unwrap()
+                .scaledown_window_secs,
+            Some(90)
+        );
+        let g = parse_graph(&scaling_src("scaling { scaledown_window = \"1h\" }")).unwrap();
+        assert_eq!(
+            g.deployments[0]
+                .scaling
+                .as_ref()
+                .unwrap()
+                .scaledown_window_secs,
+            Some(3600)
+        );
+        for bad in ["15", "m", "1.5m", "-5m", "15 minutes", ""] {
+            let src = scaling_src(&format!("scaling {{ scaledown_window = \"{bad}\" }}"));
+            assert!(
+                matches!(parse_graph(&src), Err(HclError::Schema(_))),
+                "`{bad}` should be a schema error"
+            );
+        }
+    }
+
     // --- amicu-planning#151 PR C: the typed `speculative {}` block ---------
 
     /// A one-deployment graph whose llama.cpp block carries `spec`.
     fn speculative_graph(spec: SpeculativeSettings) -> Graph {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),

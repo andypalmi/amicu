@@ -101,6 +101,7 @@ fn apple_silicon(mem_gib: u64) -> HardwareProfile {
 
 fn deployment() -> Deployment {
     Deployment {
+        scaling: None,
         id: DeploymentId::new("support_chat_local"),
         model: ModelId::new("tiny_llama"),
         hardware_profile: HardwareProfileId::new("m3_max"),

@@ -135,6 +135,7 @@ fn base_settings() -> VllmSettings {
 
 fn deployment(settings: VllmSettings) -> Deployment {
     Deployment {
+        scaling: None,
         id: DeploymentId::new("dep"),
         model: ModelId::new("llama8b"),
         hardware_profile: HardwareProfileId::new("hw"),

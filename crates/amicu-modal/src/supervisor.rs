@@ -55,6 +55,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use amicu_core::ByteSize;
+use amicu_core::resource::ScalingSettings;
 use amicu_core::resource::{
     Accelerator, AcceleratorKind, HardwareProfile, Model, Runtime, SourceRegistry,
 };
@@ -224,6 +225,7 @@ pub struct ModalSupervisor {
     app_name: String,
     gpu: Option<String>,
     region: Option<String>,
+    scaling: ScalingSettings,
     gguf: Option<GgufSource>,
 }
 
@@ -251,7 +253,19 @@ impl ModalSupervisor {
             gpu: None,
             region: None,
             gguf: None,
+            scaling: ScalingSettings::default(),
         }
+    }
+
+    /// Applies a deployment's `scaling {}` overrides (amicu-planning#180);
+    /// `None` or omitted fields keep the module defaults
+    /// ([`SCALEDOWN_WINDOW_SECS`], [`TARGET_CONCURRENCY`], [`MIN_CONTAINERS`],
+    /// unlimited max). Values are not re-validated here: `amicu validate`/
+    /// `plan` reject invalid blocks first (`AMICU-CAP-008`).
+    #[must_use]
+    pub fn with_scaling(mut self, scaling: Option<&ScalingSettings>) -> Self {
+        self.scaling = scaling.cloned().unwrap_or_default();
+        self
     }
 
     /// Sets the GPU request from a hardware profile's accelerator (`None`
@@ -808,12 +822,18 @@ impl ModalSupervisor {
             .map(|(name, path)| ((*name).to_owned(), (*path).to_owned()))
             .collect(),
             secret_env,
-            scaledown_window_secs: SCALEDOWN_WINDOW_SECS,
+            scaledown_window_secs: self
+                .scaling
+                .scaledown_window_secs
+                .unwrap_or(SCALEDOWN_WINDOW_SECS),
             startup_timeout_secs: STARTUP_TIMEOUT_SECS,
             timeout_secs: TIMEOUT_SECS,
-            target_concurrency: TARGET_CONCURRENCY,
-            min_containers: MIN_CONTAINERS,
-            max_containers: None,
+            target_concurrency: self
+                .scaling
+                .target_concurrency
+                .unwrap_or(TARGET_CONCURRENCY),
+            min_containers: self.scaling.min_replicas.unwrap_or(MIN_CONTAINERS),
+            max_containers: self.scaling.max_replicas,
         })
     }
 }
@@ -1337,6 +1357,56 @@ mod tests {
     }
     fn no_hf_token_fallback() -> Option<&'static str> {
         None
+    }
+
+    #[test]
+    fn build_spec_without_scaling_keeps_the_hardcoded_defaults() {
+        let plan = plan_with(base_argv(), base_settings());
+        let spec = ModalSupervisor::new("amicu-dep")
+            .build_spec(&plan, &[], no_image_override(), no_hf_token_fallback())
+            .unwrap();
+        assert_eq!(spec.min_containers, MIN_CONTAINERS);
+        assert_eq!(spec.max_containers, None);
+        assert_eq!(spec.target_concurrency, TARGET_CONCURRENCY);
+        assert_eq!(spec.scaledown_window_secs, SCALEDOWN_WINDOW_SECS);
+    }
+
+    #[test]
+    fn build_spec_applies_scaling_overrides_field_by_field() {
+        let plan = plan_with(base_argv(), base_settings());
+        let full = ScalingSettings {
+            min_replicas: Some(1),
+            max_replicas: Some(4),
+            target_concurrency: Some(8),
+            scaledown_window_secs: Some(120),
+        };
+        let spec = ModalSupervisor::new("amicu-dep")
+            .with_scaling(Some(&full))
+            .build_spec(&plan, &[], no_image_override(), no_hf_token_fallback())
+            .unwrap();
+        assert_eq!(
+            (
+                spec.min_containers,
+                spec.max_containers,
+                spec.target_concurrency,
+                spec.scaledown_window_secs
+            ),
+            (1, Some(4), 8, 120)
+        );
+
+        // Only max set: the other three keep their defaults.
+        let only_max = ScalingSettings {
+            max_replicas: Some(1),
+            ..ScalingSettings::default()
+        };
+        let spec = ModalSupervisor::new("amicu-dep")
+            .with_scaling(Some(&only_max))
+            .build_spec(&plan, &[], no_image_override(), no_hf_token_fallback())
+            .unwrap();
+        assert_eq!(spec.max_containers, Some(1));
+        assert_eq!(spec.min_containers, MIN_CONTAINERS);
+        assert_eq!(spec.target_concurrency, TARGET_CONCURRENCY);
+        assert_eq!(spec.scaledown_window_secs, SCALEDOWN_WINDOW_SECS);
     }
 
     #[test]

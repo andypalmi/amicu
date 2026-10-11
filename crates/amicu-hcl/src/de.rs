@@ -13,8 +13,8 @@ use amicu_core::resource::{
     Accelerator, Artifact, Budget, Cpu, Credential, DataClass, Deployment, FlashAttention,
     GgufVariant, GovernanceRule, HardwareProfile, KvCacheType, LlamaCppSettings, Model,
     ModelSource, Money, MultimodalSettings, Price, Quota, ReasoningFormat, Region, Residency,
-    RoutingPolicy, RoutingTarget, Runtime, SpeculativeSettings, Tenant, UseCase, VllmKvCacheDtype,
-    VllmSettings,
+    RoutingPolicy, RoutingTarget, Runtime, ScalingSettings, SpeculativeSettings, Tenant, UseCase,
+    VllmKvCacheDtype, VllmSettings,
 };
 use amicu_core::secret::SecretRef;
 use amicu_core::units::ByteSize;
@@ -244,11 +244,37 @@ fn deployment(name: &str, f: &Fields) -> Result<Deployment> {
         other => return Err(HclError::schema(format!("unknown runtime `{other}`"))),
     };
     Ok(Deployment {
+        scaling: scaling_settings(f)?,
         id: name.into(),
         model: f.reference("model")?.into(),
         hardware_profile: f.reference("hardware")?.into(),
         runtime,
     })
+}
+
+/// The deployment-level `scaling { ... }` block (amicu-planning#180).
+/// `scaledown_window` is a duration string (`"15m"`); value ranges are
+/// checked later by `AMICU-CAP-008`, only the syntax is checked here.
+fn scaling_settings(f: &Fields) -> Result<Option<ScalingSettings>> {
+    f.opt_block("scaling")
+        .map(|s| -> Result<ScalingSettings> {
+            Ok(ScalingSettings {
+                min_replicas: s.opt_u32("min_replicas")?,
+                max_replicas: s.opt_u32("max_replicas")?,
+                target_concurrency: s.opt_u32("target_concurrency")?,
+                scaledown_window_secs: s
+                    .opt_string("scaledown_window")?
+                    .map(|w| {
+                        ScalingSettings::parse_window(&w).ok_or_else(|| {
+                            HclError::schema(format!(
+                                "`scaledown_window` must be a duration like \"900s\", \"15m\" or \"1h\", got \"{w}\""
+                            ))
+                        })
+                    })
+                    .transpose()?,
+            })
+        })
+        .transpose()
 }
 
 fn routing_policy(name: &str, f: &Fields) -> Result<RoutingPolicy> {

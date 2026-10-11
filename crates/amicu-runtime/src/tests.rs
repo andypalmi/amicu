@@ -276,6 +276,7 @@ impl RuntimeAdapter for FakeRuntime {
 
 fn llama_deployment(context_length: u32) -> Deployment {
     Deployment {
+        scaling: None,
         id: DeploymentId::new("support_chat_local"),
         model: ModelId::new("support_chat"),
         hardware_profile: HardwareProfileId::new("a100_80gb"),
@@ -290,6 +291,7 @@ fn llama_deployment(context_length: u32) -> Deployment {
 
 fn vllm_deployment() -> Deployment {
     Deployment {
+        scaling: None,
         id: DeploymentId::new("support_chat_gpu"),
         model: ModelId::new("support_chat"),
         hardware_profile: HardwareProfileId::new("a100_80gb"),

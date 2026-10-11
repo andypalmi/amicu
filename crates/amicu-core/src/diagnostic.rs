@@ -364,6 +364,17 @@ pub mod catalog {
     /// memory for no speedup) and the fit check would count them twice.
     pub const CAP_SPECULATIVE_DRAFT_IS_PRIMARY: DiagnosticCode =
         DiagnosticCode::new(Category::Cap, 7);
+    // --- amicu-planning#180: provider-agnostic `scaling {}` block ---
+    /// `AMICU-CAP-008` - a deployment's `scaling {}` block has invalid
+    /// values (`max_replicas`/`target_concurrency` below 1, a zero
+    /// `scaledown_window`, or `min_replicas` above `max_replicas`). Error.
+    pub const CAP_SCALING_INVALID: DiagnosticCode = DiagnosticCode::new(Category::Cap, 8);
+    /// `AMICU-CAP-009` - a deployment sets `scaling {}` but its hardware
+    /// profile's provider has no scaling mapping yet (only `modal` does;
+    /// amicu-planning#181 tracks the rest). Error rather than a silent no-op:
+    /// the block's point is to cap spend, so ignoring it would be a lie.
+    pub const CAP_SCALING_UNSUPPORTED_PROVIDER: DiagnosticCode =
+        DiagnosticCode::new(Category::Cap, 9);
     /// `AMICU-MEM-001` - model does not fit in available VRAM.
     pub const MEM_VRAM_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Mem, 1);
     /// `AMICU-MEM-002` - a single artifact/weight file exceeds the available
@@ -443,7 +454,7 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 31] {
+    pub const fn all() -> [DiagnosticCode; 33] {
         [
             PARSE_UNCLOSED_BLOCK,
             PARSE_INVALID_SYNTAX,
@@ -463,6 +474,9 @@ pub mod catalog {
             CAP_VLLM_GGUF_EXPERIMENTAL,
             // amicu-planning#151 PR C addition:
             CAP_SPECULATIVE_DRAFT_IS_PRIMARY,
+            // amicu-planning#180 additions:
+            CAP_SCALING_INVALID,
+            CAP_SCALING_UNSUPPORTED_PROVIDER,
             MEM_VRAM_EXCEEDED,
             MEM_ARTIFACT_OVERSIZE,
             POLICY_BUDGET_EXCEEDED,
