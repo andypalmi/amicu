@@ -127,6 +127,7 @@ mod client;
 mod credentials;
 mod deploy;
 mod error;
+pub mod hardware;
 mod image;
 mod interceptor;
 pub mod metrics;

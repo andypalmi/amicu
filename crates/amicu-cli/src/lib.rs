@@ -117,7 +117,14 @@ enum ModalCommand {
         #[arg(long)]
         since: Option<String>,
     },
-    /// Show a deployed app's runtime metrics (vLLM or llama.cpp `/metrics`).
+    /// Show a deployed app's runtime metrics (vLLM or llama.cpp `/metrics`)
+    /// and per-container hardware metrics (accelerator utilisation, memory,
+    /// temperature, power; container memory and CPU).
+    ///
+    /// Hardware is read by running a fixed read-only probe script inside each
+    /// running container (`ContainerExec`); if that fails, the runtime
+    /// metrics still print and hardware shows `n/a (reason)`. `--output json`
+    /// emits one JSON document per snapshot.
     ///
     /// Scrapes through the app's Modal URL; set `MODAL_PROXY_TOKEN_ID` and
     /// `MODAL_PROXY_TOKEN_SECRET` for proxy auth. A scaled-to-zero app is
@@ -220,7 +227,7 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
                 app_name,
                 watch,
                 interval,
-            } => commands::modal::metrics(app_name, *watch, *interval, out),
+            } => commands::modal::metrics(app_name, *watch, *interval, cli.output, out),
             ModalCommand::Stop { app_name } => commands::modal::stop(app_name, out),
         };
     }

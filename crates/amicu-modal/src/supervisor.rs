@@ -54,6 +54,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use amicu_core::ByteSize;
 use amicu_core::resource::{
     Accelerator, AcceleratorKind, HardwareProfile, Model, Runtime, SourceRegistry,
 };
@@ -62,6 +63,7 @@ use amicu_registry::GgufResolver;
 use amicu_runtime::{
     LaunchPlan, LogOptions, LogStream, RuntimeHandle, RuntimeKind, RuntimeMetrics, RuntimeStatus,
 };
+use amicu_telemetry::hardware::HardwareSample;
 use async_trait::async_trait;
 
 use amicu_providers::modal::modal_proxy_region;
@@ -588,6 +590,18 @@ impl ModalSupervisor {
             .map_err(|e| modal_err(&e))
     }
 
+    /// Accelerator memory in use across the app's containers, or `None` when
+    /// the probe could not run or nothing reported it.
+    async fn accelerator_memory_used(&self, app_id: &str) -> Option<u64> {
+        let mut client = self.connect().await.ok()?;
+        let containers = client.probe_app_hardware(app_id).await.ok()?;
+        containers
+            .iter()
+            .filter_map(|c| c.outcome.as_ref().ok())
+            .filter_map(HardwareSample::accelerator_memory_used)
+            .reduce(u64::saturating_add)
+    }
+
     /// Validates a llama-server launch for Modal and rewrites its model flags
     /// (see [`ModalSupervisor::rewrite_gguf_args`]). Rejects, before any RPC,
     /// flags that point at this machine's filesystem
@@ -982,10 +996,19 @@ impl ProcessSupervisor for ModalSupervisor {
         // Scrapes the runtime's Prometheus `/metrics` over the Modal URL (see
         // `crate::metrics` for the series and their sources). One second apart
         // for vLLM, which has no throughput gauge.
-        crate::metrics::scrape_with_rate(&handle.endpoint, Duration::from_secs(1))
-            .await
-            .map(|m| m.to_runtime_metrics())
-            .map_err(|e| LlamaCppError::Supervisor(e.to_string()))
+        let mut metrics =
+            crate::metrics::scrape_with_rate(&handle.endpoint, Duration::from_secs(1))
+                .await
+                .map(|m| m.to_runtime_metrics())
+                .map_err(|e| LlamaCppError::Supervisor(e.to_string()))?;
+        // `memory_used` is the accelerator memory summed over the app's
+        // containers, from the hardware probe (`crate::hardware`). Best
+        // effort: an exec that fails or an accelerator that does not report
+        // memory leaves the zero `to_runtime_metrics` set, never an error.
+        if let Some(bytes) = self.accelerator_memory_used(&handle.id).await {
+            metrics.memory_used = ByteSize::from_bytes(bytes);
+        }
+        Ok(metrics)
     }
 
     async fn logs(
