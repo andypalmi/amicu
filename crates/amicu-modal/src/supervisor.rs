@@ -155,6 +155,24 @@ pub fn llamacpp_setup_commands() -> Vec<String> {
     ]
 }
 
+/// Dockerfile step that makes `python` resolve on `PATH` for the vLLM image.
+///
+/// Modal's builder records `python -VV` as the image's
+/// `ImageMetadata.python_version_info`, and `FunctionCreate` fails with
+/// `FailedPrecondition` ("unable to determine the version of Python
+/// installed in the Image") when it is unset. `vllm/vllm-openai` installs
+/// Python only as `python3` (deadsnakes + `update-alternatives` for
+/// `python3`, no `python`), so alias it. A no-op when `python` already
+/// exists; the build fails loudly if there is no `python3` either.
+#[must_use]
+pub fn vllm_setup_commands() -> Vec<String> {
+    vec![
+        "RUN command -v python >/dev/null 2>&1 \
+         || ln -s \"$(command -v python3)\" /usr/local/bin/python"
+            .to_owned(),
+    ]
+}
+
 /// Environment variable [`ModalSupervisor::start`] reads a Hugging Face
 /// token from when the launch plan carries no resolved `HF_TOKEN` secret.
 /// Read from the *operator's local* process environment - never from the
@@ -740,7 +758,7 @@ impl ModalSupervisor {
                 base_registry_image: base_registry_image.to_owned(),
                 pip_packages: Vec::new(),
                 setup_commands: match runtime {
-                    RuntimeKind::Vllm => Vec::new(),
+                    RuntimeKind::Vllm => vllm_setup_commands(),
                     RuntimeKind::LlamaCpp => llamacpp_setup_commands(),
                 },
                 env: image_env,
@@ -1423,12 +1441,14 @@ mod tests {
     }
 
     #[test]
-    fn vllm_launches_get_no_setup_commands_and_the_vllm_volumes() {
+    fn vllm_launches_get_the_python_alias_and_the_vllm_volumes() {
         let plan = plan_with(base_argv(), base_settings());
         let spec = ModalSupervisor::new("amicu-dep")
             .build_spec(&plan, &[], no_image_override(), no_hf_token_fallback())
             .unwrap();
-        assert_eq!(spec.image.setup_commands.len(), 0);
+        assert_eq!(spec.image.setup_commands, vllm_setup_commands());
+        let setup = spec.image.setup_commands.join("\n");
+        assert!(setup.contains("command -v python3"), "{setup}");
         assert!(!spec.image.env.contains_key("LLAMA_CACHE"));
         assert_eq!(spec.volumes[0].1, "/root/.cache/huggingface");
     }
