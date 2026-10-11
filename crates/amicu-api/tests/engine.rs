@@ -243,7 +243,7 @@ async fn validate_invalid_config_returns_200_with_diagnostics() {
     assert_eq!(status, StatusCode::OK);
     let report: DiagnosticReport = serde_json::from_value(body).expect("report");
     assert!(!report.valid);
-    assert!(!report.diagnostics.is_empty());
+    assert_ne!(report.diagnostics, Vec::new());
 }
 
 #[tokio::test]

@@ -458,7 +458,7 @@ fn plan_diffs_against_prior_state() {
 
     // Applying against a prior identical graph yields no actions.
     let unchanged = build_plan(&graph, Some(&graph)).unwrap();
-    assert!(unchanged.plan.actions.is_empty());
+    assert_eq!(unchanged.plan.actions, Vec::new());
 }
 
 #[test]

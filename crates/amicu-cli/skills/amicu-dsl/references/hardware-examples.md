@@ -77,6 +77,11 @@ Notes:
   fails closed. Pinning to a region multiplies the base price shown here
   (1.15x broad, 1.75x narrow - not reflected in `price` above); see
   `amicu_providers::modal`'s module docs for the source.
+- The `region` also picks the web endpoint's proxy region (`eu*`/`uk` ->
+  `eu-west`, `us-west` -> `us-west`, `ap*`/`jp`/`au` -> `ap-south`, otherwise
+  `us-east`). Modal does not allow a routing region to change after the
+  initial deployment, so changing `region` on an existing deployment needs
+  `amicu modal stop <app>` and then a re-apply.
 - This is a catalog entry only (amicu-planning#158 PR 1): `provision`,
   `status` and `teardown` all reject with `AMICU-PROVIDER-015`
   (permanent - not retryable) until the Modal Sandbox gRPC target (PR 2)
@@ -141,3 +146,47 @@ Notes:
   "on_prem"` is the convention for hardware the user already owns - distinct
   from the pre-existing `"local_apple"` / `"local_cpu"` examples above, which
   predate this catalog and are left as-is.
+
+## Modal (serverless GPU, amicu-planning#158)
+
+```hcl
+resource "hardware_profile" "modal_h100" {
+  provider = "modal"
+  region   = "eu-west"
+  accelerator {
+    kind   = "gpu"
+    model  = "h100"
+    count  = 2
+    memory = "80GiB"
+  }
+  memory = "32GiB"
+}
+```
+
+Notes:
+- Modal Servers require proxy auth: unauthenticated requests to the
+  `*.modal.direct` URL get a `401` from Modal's proxy. Create a Proxy Auth
+  Token (Modal dashboard, Settings -> Proxy Auth Tokens) and export
+  `MODAL_PROXY_TOKEN_ID` (`wk-...`) and `MODAL_PROXY_TOKEN_SECRET` (`ws-...`);
+  amicu sends them as `Modal-Key` / `Modal-Secret` on its health/status probes
+  (never logged). By hand:
+  `curl -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" "$URL/v1/models"`.
+  (Not `Authorization: Bearer`, which vLLM's `--api-key` also uses.)
+- `provider = "modal"` routes a `vllm` deployment on this profile through
+  `amicu apply`'s `ModalSupervisor` (`crates/amicu-modal/src/supervisor.rs`)
+  instead of a local process. `accelerator.model` + `accelerator.count`
+  become Modal's `gpu=` request string - `"H100:2"` for the profile above
+  (upper-cased; the `:<count>` suffix is omitted when `count == 1`) - and
+  `region` (when set) becomes Modal's region constraint. This mapping is a
+  hand-maintained string pass-through, not validated against Modal's GPU
+  catalog at parse time (that catalog, `amicu-providers::modal`, lands
+  separately) - an unsupported `model` string surfaces as a Modal-side
+  rejection at apply time, not a parse-time diagnostic.
+- Only GPU accelerators are deployable to Modal today: a `tpu` or
+  `apple_silicon` accelerator on a `provider = "modal"` profile is rejected
+  before any RPC (Modal has no such offering).
+- Both `vllm` and `llama_cpp` deployments on a `provider = "modal"` profile
+  route through `ModalSupervisor`. A `llama_cpp` deployment needs a model whose
+  source is Hugging Face (the GGUF is fetched in the container with `-hf`). See
+  `deployment-examples.md`'s "vLLM on Modal" and "llama.cpp on Modal" sections
+  for the full examples and defaults.

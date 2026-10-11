@@ -24,9 +24,46 @@ prost = "0.14"
 # generated code names them `::prost_types::*`.
 prost-types = "0.14"
 thiserror = "2"
+# The container shim embeds its argv as a JSON literal rather than shell text.
+serde_json = "1"
+# The shim is base64'd into a Dockerfile `RUN` so no byte of it is ever
+# interpreted by the build shell. Same version the rest of the workspace uses
+# (amicu-auth, amicu-server, amicu-store).
+base64 = "0.22"
+# `deploy_server` keeps an AppHeartbeat task alive for the whole deploy (image
+# build included), so a runtime handle and a timer are needed at runtime, not
+# only in tests. tonic already pulls tokio in.
+tokio = { version = "1", features = ["rt", "time"] }
+# `supervisor.rs`: the `ProcessSupervisor` trait `amicu_llamacpp` defines is
+# `#[async_trait]`, and `ModalSupervisor` implements it.
+async-trait = "0.1"
+# `supervisor.rs` implements `amicu_llamacpp::ProcessSupervisor` so
+# `amicu-cli`'s `apply` can dispatch a `provider = "modal"` vLLM deployment
+# through this crate without amicu-engine/amicu-vllm knowing Modal exists
+# (see supervisor.rs's module docs). Neither crate depends on amicu-modal in
+# turn, so this does not create a cycle.
+amicu-llamacpp = { path = "../amicu-llamacpp" }
+amicu-runtime = { path = "../amicu-runtime" }
+amicu-core = { path = "../amicu-core" }
+# `ModalSupervisor::with_gguf_model` picks the same recommended GGUF variant
+# `LlamaCppAdapter::plan_launch` renders, via the same resolver.
+amicu-registry = { path = "../amicu-registry" }
+# `supervisor.rs` resolves the web server's proxy region from the pinned
+# compute region via the provider catalog (`modal_proxy_region`).
+amicu-providers = { path = "../amicu-providers" }
+# `ModalClient::health` does a plain HTTP GET against a deployed server's
+# tunnel URL — no gRPC involved. Promoted from dev-dependencies (PR 3 used it
+# only in `tests/live_deploy.rs`) now that `ops.rs` needs it at runtime too;
+# same version, default-features off, and rustls backend as
+# amicu-providers/amicu-api already use, so the workspace does not gain a
+# second HTTP-client stack or a second TLS backend.
+# `ModalSupervisor::status` also uses it for its own `GET <url>/health` probe
+# (Modal's endpoint is HTTPS, unlike amicu_llamacpp::HttpHealthProbe's
+# loopback-only `ureq`).
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 
 [build-dependencies]
 tonic-prost-build = "0.14"

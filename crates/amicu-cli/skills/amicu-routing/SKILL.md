@@ -14,11 +14,11 @@ governance, and cap spend per tenant.
 resource "routing_policy" "chat" {
   aliases     = ["chat", "default"]
   optimize_for = "latency"        # or "cost"/"quality"
-  targets {
+  target {
     deployment = deployment.chat_prod.id
     weight     = 80
   }
-  targets {
+  target {
     deployment = deployment.chat_local.id
     weight     = 20
   }

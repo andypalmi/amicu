@@ -112,7 +112,7 @@ mod tests {
 
     #[test]
     fn valid_graph_has_no_missing_references() {
-        assert!(sample_graph().missing_references().is_empty());
+        assert_eq!(sample_graph().missing_references(), Vec::new());
     }
 
     #[test]
@@ -170,7 +170,7 @@ mod tests {
     #[test]
     fn a_deployment_without_a_speculative_block_adds_no_edge() {
         // Absent block = today's behaviour: only the model + hardware edges.
-        assert!(sample_graph().missing_references().is_empty());
+        assert_eq!(sample_graph().missing_references(), Vec::new());
         let mut graph = sample_graph();
         graph.hardware_profiles.clear();
         assert_eq!(graph.missing_references().len(), 1);

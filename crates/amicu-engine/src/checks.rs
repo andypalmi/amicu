@@ -2,9 +2,7 @@
 
 use std::collections::HashSet;
 
-use amicu_core::diagnostic::{
-    Category, Diagnostic, DiagnosticCode, DiagnosticReport, Severity, catalog,
-};
+use amicu_core::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticReport, Severity, catalog};
 use amicu_core::graph::Graph;
 use amicu_core::resource::{Residency, RuleEffect, Runtime};
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
@@ -13,9 +11,6 @@ use amicu_runtime::RuntimeAdapter;
 use amicu_vllm::VllmAdapter;
 
 use crate::catalog::build_catalog;
-
-/// `AMICU-SCHEMA-002` - the same id is declared in more than one config file.
-const DUPLICATE_ID: DiagnosticCode = DiagnosticCode::new(Category::Schema, 2);
 
 /// Run reference and per-deployment runtime checks over `graph`.
 #[must_use]
@@ -237,7 +232,7 @@ fn collect_dups<'a>(out: &mut Vec<Diagnostic>, kind: &str, ids: impl Iterator<It
     for id in ids {
         if !seen.insert(id) && reported.insert(id) {
             let mut d = Diagnostic::new(
-                DUPLICATE_ID,
+                catalog::SCHEMA_DUPLICATE_ID,
                 Severity::Error,
                 format!("duplicate {kind} id '{id}' declared in more than one config file"),
             );
@@ -330,7 +325,7 @@ mod residency_tests {
     fn region_jurisdiction_within_allowlist_is_ok() {
         let mut g = graph_with(hw("aws", Some("eu-central-1")));
         g.data_classes.push(data_class(&[Residency::Eu]));
-        assert!(codes(&g).is_empty());
+        assert_eq!(codes(&g), Vec::<String>::new());
     }
 
     #[test]
@@ -339,14 +334,14 @@ mod residency_tests {
         // and the residency constraint cannot be proven violated.
         let mut g = graph_with(hw("local_apple", Some("cupertino")));
         g.data_classes.push(data_class(&[Residency::Eu]));
-        assert!(codes(&g).is_empty());
+        assert_eq!(codes(&g), Vec::<String>::new());
     }
 
     #[test]
     fn missing_region_is_not_flagged() {
         let mut g = graph_with(hw("aws", None));
         g.data_classes.push(data_class(&[Residency::Eu]));
-        assert!(codes(&g).is_empty());
+        assert_eq!(codes(&g), Vec::<String>::new());
     }
 
     #[test]
@@ -382,13 +377,13 @@ mod residency_tests {
         g.data_classes.push(data_class(&[Residency::Eu]));
         g.governance_rules
             .push(rule(RuleEffect::Allow, &["aws"], &["eu-central-1"]));
-        assert!(codes(&g).is_empty());
+        assert_eq!(codes(&g), Vec::<String>::new());
     }
 
     #[test]
     fn empty_allowlists_permit_everything() {
         let g = graph_with(hw("anything", Some("anywhere")));
-        assert!(codes(&g).is_empty());
+        assert_eq!(codes(&g), Vec::<String>::new());
     }
 
     #[test]
@@ -396,7 +391,7 @@ mod residency_tests {
         let mut g = Graph::new();
         g.deployments.push(deployment());
         g.data_classes.push(data_class(&[Residency::Eu]));
-        assert!(codes(&g).is_empty());
+        assert_eq!(codes(&g), Vec::<String>::new());
     }
 }
 

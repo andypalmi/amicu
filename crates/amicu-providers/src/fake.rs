@@ -408,7 +408,7 @@ mod tests {
 
         p.teardown(&handle, &resolver).await.unwrap();
         assert_eq!(p.teardown_calls(), vec![handle.id.clone()]);
-        assert!(p.live_instances().is_empty());
+        assert_eq!(p.live_instances(), Vec::new());
     }
 
     #[tokio::test]
@@ -482,7 +482,7 @@ mod tests {
         let observed = p.status(&handle, &resolver).await.unwrap();
         assert!(observed.is_failed());
         // A failed instance is terminal, so it is not counted as live.
-        assert!(p.live_instances().is_empty());
+        assert_eq!(p.live_instances(), Vec::new());
     }
 
     #[tokio::test]
@@ -521,7 +521,7 @@ mod tests {
             .await
             .expect_err("missing secret must surface as an error");
         assert_eq!(err.code().category(), DiagCategory::Policy);
-        assert!(p.live_instances().is_empty());
+        assert_eq!(p.live_instances(), Vec::new());
     }
 
     #[tokio::test]

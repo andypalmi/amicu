@@ -709,7 +709,7 @@ mod tests {
     fn new_admits_only_eu_regions() {
         let caps = ScalewayProvider::new().capabilities();
         assert_eq!(caps.provider, AdapterId::new("scaleway"));
-        assert!(!caps.regions.is_empty());
+        assert_ne!(caps.regions, Vec::new());
         // Every admitted region is EU...
         assert!(caps.regions.iter().all(Region::is_eu));
         // ...and the known Scaleway regions are present.
@@ -724,9 +724,9 @@ mod tests {
         // Scaleway has no non-EU regions, so widening the residency filter to a
         // non-EU jurisdiction admits nothing - the filter is a real filter, not a
         // hand-picked list.
-        assert!(ScalewayProvider::region_codes(&Residency::Us).is_empty());
+        assert_eq!(ScalewayProvider::region_codes(&Residency::Us).len(), 0);
         let widened = ScalewayProvider::for_residencies(&[Residency::Us]);
-        assert!(widened.capabilities().regions.is_empty());
+        assert_eq!(widened.capabilities().regions, Vec::new());
     }
 
     #[test]

@@ -1,6 +1,8 @@
 //! HCL text -> canonical [`Graph`].
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use hcl::expr::TraversalOperator;
 use hcl::{Body, Expression};
@@ -26,6 +28,15 @@ pub fn parse_graph(src: &str) -> Result<Graph> {
     let body = hcl::parse(src)?;
     let mut graph = Graph::new();
 
+    if let Some(attr) = body.attributes().next() {
+        return Err(HclError::unknown_field(
+            "top level",
+            "attribute",
+            attr.key(),
+            None,
+        ));
+    }
+
     for block in body.blocks() {
         if block.identifier() != "resource" {
             return Err(HclError::schema(format!(
@@ -40,7 +51,8 @@ pub fn parse_graph(src: &str) -> Result<Graph> {
             ));
         };
         let (kind, name) = (kind.as_str(), name.as_str());
-        let f = Fields::new(block.body(), format!("{kind} {name}"));
+        let registry = Registry::default();
+        let f = Fields::new(block.body(), format!("{kind} {name}"), &registry);
 
         match kind {
             "model" => graph.models.push(model(name, &f)?),
@@ -55,6 +67,10 @@ pub fn parse_graph(src: &str) -> Result<Graph> {
             "credential" => graph.credentials.push(credential(name, &f)?),
             other => return Err(HclError::schema(format!("unknown resource kind `{other}`"))),
         }
+        // Every accessor the builder above called recorded the key it read;
+        // anything left over in a body is unknown to the schema. The known
+        // set therefore comes from the parser's own reads, not a second list.
+        registry.ensure_exhaustive()?;
     }
 
     Ok(graph)
@@ -217,6 +233,7 @@ fn deployment(name: &str, f: &Fields) -> Result<Deployment> {
                 kv_cache_dtype: s.opt_enum::<VllmKvCacheDtype>("kv_cache_dtype")?,
                 max_num_seqs: s.opt_u32("max_num_seqs")?,
                 max_num_batched_tokens: s.opt_u32("max_num_batched_tokens")?,
+                enforce_eager: s.opt_bool("enforce_eager")?,
                 extra_args: s.string_vec("extra_args")?,
                 env: match s.opt_block("env") {
                     Some(e) => e.string_map()?,
@@ -360,15 +377,123 @@ fn money(f: &Fields) -> Result<Money> {
 struct Fields<'a> {
     body: &'a Body,
     ctx: String,
+    /// Keys (attributes and block identifiers) the parser has asked for.
+    seen: Seen,
+    registry: Registry<'a>,
+}
+
+type Seen = Rc<RefCell<BTreeSet<String>>>;
+
+/// Every body visited while parsing one resource, with the keys read from
+/// it, so [`Registry::ensure_exhaustive`] can reject the leftovers
+/// (amicu-planning#157).
+#[derive(Clone, Default)]
+struct Registry<'a> {
+    bodies: Rc<RefCell<Vec<Visited<'a>>>>,
+    /// Structural problems noticed while reading (duplicate singleton
+    /// blocks, labelled nested blocks); reported before unknown keys.
+    problems: Rc<RefCell<Vec<String>>>,
+}
+
+type Visited<'a> = (&'a Body, String, Seen);
+
+impl Registry<'_> {
+    /// Error on the first attribute or block no accessor ever read.
+    fn ensure_exhaustive(&self) -> Result<()> {
+        if let Some(p) = self.problems.borrow().first() {
+            return Err(HclError::schema(p.clone()));
+        }
+        for (body, ctx, seen) in self.bodies.borrow().iter() {
+            let seen = seen.borrow();
+            let unknown = body
+                .attributes()
+                .map(|a| ("attribute", a.key()))
+                .chain(body.blocks().map(|b| ("block", b.identifier())))
+                .find(|(_, key)| !seen.contains(*key));
+            if let Some((kind, key)) = unknown {
+                let suggestion = closest(key, seen.iter().map(String::as_str));
+                return Err(HclError::unknown_field(ctx.clone(), kind, key, suggestion));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The candidate within a small edit distance of `key`, if any.
+fn closest<'c>(key: &str, candidates: impl Iterator<Item = &'c str>) -> Option<String> {
+    let max = if key.chars().count() <= 4 { 1 } else { 2 };
+    // For very short keys a one-letter difference in the first letter is a
+    // different word (`cpu` vs `gpu`), not a typo.
+    let short = key.chars().count() <= 3;
+    candidates
+        .filter(|c| !short || c.chars().next() == key.chars().next())
+        .map(|c| (edit_distance(key, c), c))
+        .filter(|(d, _)| *d <= max)
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c.to_string())
+}
+
+/// Levenshtein distance.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            cur.push(
+                (prev[j] + usize::from(ca != *cb))
+                    .min(prev[j + 1] + 1)
+                    .min(cur[j] + 1),
+            );
+        }
+        prev = cur;
+    }
+    prev[b.len()]
 }
 
 impl<'a> Fields<'a> {
-    fn new(body: &'a Body, ctx: String) -> Self {
-        Self { body, ctx }
+    fn new(body: &'a Body, ctx: String, registry: &Registry<'a>) -> Self {
+        let mut bodies = registry.bodies.borrow_mut();
+        // Re-visiting the same body (e.g. `opt_block` called twice) must
+        // share one seen-set, or the first visit's reads would be lost.
+        let seen =
+            if let Some((_, _, seen)) = bodies.iter().find(|(b, _, _)| std::ptr::eq(*b, body)) {
+                Rc::clone(seen)
+            } else {
+                let seen = Seen::default();
+                bodies.push((body, ctx.clone(), Rc::clone(&seen)));
+                seen
+            };
+        Self {
+            body,
+            ctx,
+            seen,
+            registry: registry.clone(),
+        }
+    }
+
+    fn mark(&self, key: &str) {
+        self.seen.borrow_mut().insert(key.to_string());
     }
 
     fn missing(&self, key: &str) -> HclError {
-        HclError::schema(format!("{}: missing `{key}`", self.ctx))
+        // A misspelled required attribute shows up as "missing"; point at the
+        // near-miss instead of leaving the user to spot the typo.
+        let seen = self.seen.borrow();
+        let near = self
+            .body
+            .attributes()
+            .map(hcl::Attribute::key)
+            .chain(self.body.blocks().map(hcl::Block::identifier))
+            .filter(|k| !seen.contains(*k))
+            .find(|k| closest(k, std::iter::once(key)).is_some());
+        match near {
+            Some(k) => HclError::schema(format!(
+                "{}: missing `{key}` (found unknown `{k}`; did you mean `{key}`?)",
+                self.ctx
+            )),
+            None => HclError::schema(format!("{}: missing `{key}`", self.ctx)),
+        }
     }
 
     fn bad(&self, key: &str, want: &str) -> HclError {
@@ -376,6 +501,7 @@ impl<'a> Fields<'a> {
     }
 
     fn attr(&self, key: &str) -> Option<&Expression> {
+        self.mark(key);
         self.body
             .attributes()
             .find(|a| a.key() == key)
@@ -607,6 +733,7 @@ impl<'a> Fields<'a> {
             .body
             .attributes()
             .map(|a| {
+                block.mark(a.key());
                 let v =
                     secret_ref_from_expr(a.expr()).ok_or_else(|| block.secret_literal(a.key()))?;
                 Ok((a.key().to_string(), v))
@@ -614,11 +741,31 @@ impl<'a> Fields<'a> {
             .collect()
     }
 
+    fn check_nested(&self, key: &str, matching: &[&hcl::Block], singleton: bool) {
+        let mut problems = self.registry.problems.borrow_mut();
+        if singleton && matching.len() > 1 {
+            problems.push(format!(
+                "{}: duplicate `{key}` block (only one is allowed)",
+                self.ctx
+            ));
+        }
+        if matching.iter().any(|b| !b.labels().is_empty()) {
+            problems.push(format!("{}: `{key}` block takes no labels", self.ctx));
+        }
+    }
+
     fn opt_block(&self, key: &str) -> Option<Fields<'a>> {
+        self.mark(key);
+        let all: Vec<&hcl::Block> = self
+            .body
+            .blocks()
+            .filter(|b| b.identifier() == key)
+            .collect();
+        self.check_nested(key, &all, true);
         self.body
             .blocks()
             .find(|b| b.identifier() == key)
-            .map(|b| Fields::new(b.body(), format!("{}.{key}", self.ctx)))
+            .map(|b| Fields::new(b.body(), format!("{}.{key}", self.ctx), &self.registry))
     }
 
     fn block(&self, key: &str) -> Result<Fields<'a>> {
@@ -626,10 +773,17 @@ impl<'a> Fields<'a> {
     }
 
     fn blocks(&self, key: &str) -> Vec<Fields<'a>> {
+        self.mark(key);
+        let all: Vec<&hcl::Block> = self
+            .body
+            .blocks()
+            .filter(|b| b.identifier() == key)
+            .collect();
+        self.check_nested(key, &all, false);
         self.body
             .blocks()
             .filter(|b| b.identifier() == key)
-            .map(|b| Fields::new(b.body(), format!("{}.{key}", self.ctx)))
+            .map(|b| Fields::new(b.body(), format!("{}.{key}", self.ctx), &self.registry))
             .collect()
     }
 
@@ -637,7 +791,11 @@ impl<'a> Fields<'a> {
         self.body
             .attributes()
             .map(|a| match a.expr() {
-                Expression::String(s) => Ok((a.key().to_string(), s.clone())),
+                Expression::String(s) => {
+                    // Free-form map: every key is intentionally accepted.
+                    self.mark(a.key());
+                    Ok((a.key().to_string(), s.clone()))
+                }
                 _ => Err(self.bad(a.key(), "a string")),
             })
             .collect()

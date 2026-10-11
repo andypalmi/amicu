@@ -137,6 +137,6 @@ fn eu_preset_pins_no_region_code_allowlist() {
             rule.allowed_regions.is_empty(),
             "no governance rule may pin an allowed_regions code allowlist"
         );
-        assert!(!rule.allowed_providers.is_empty());
+        assert_ne!(rule.allowed_providers.len(), 0);
     }
 }
