@@ -11,20 +11,11 @@ use std::ops::ControlFlow;
 
 use amicu_modal::{AppStatus, Credentials, LogFd, LogLine, ModalClient, ModalError};
 
+use crate::commands::build_runtime;
 use crate::error::CliError;
 
 fn io_err(error: io::Error) -> CliError {
     CliError::io("write failed", error)
-}
-
-/// A fresh current-thread Tokio runtime, matching `auth_check`'s original
-/// shape: every command here issues a short, sequential chain of RPCs with
-/// no background task, so a single-threaded executor is enough.
-fn build_runtime() -> Result<tokio::runtime::Runtime, CliError> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| CliError::io("cannot start async runtime", e))
 }
 
 /// Connects to Modal and calls `ClientHello`, the minimal RPC that

@@ -81,9 +81,7 @@ pub(crate) fn run(
         }
     }
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .map_err(|e| CliError::io("cannot start async runtime", e))?;
+    let rt = crate::commands::build_runtime()?;
     let handles = rt.block_on(apply_all(&graph, &result, prior_state.as_ref()))?;
 
     project.save_state(&LocalState {
