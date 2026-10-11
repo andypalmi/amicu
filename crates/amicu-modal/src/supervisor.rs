@@ -825,6 +825,59 @@ async fn health_status(endpoint: &str) -> Option<u16> {
     Some(resp.status().as_u16())
 }
 
+/// One-line phase note printed to stderr before the (possibly slow) deploy.
+const BUILD_PHASE_NOTE: &str =
+    "building image and deploying to Modal (first build of an image can take several minutes)...";
+
+/// Prefix put on every streamed image-build line.
+const BUILD_LOG_PREFIX: &str = "  build: ";
+
+/// Values that must never reach the terminal: every secret value and every
+/// plain image-env value (an `ENV k=v` step can be echoed by the builder, and
+/// a user may have put a token in the `env` block). Values shorter than 4
+/// bytes are kept only for secrets, to avoid mangling unrelated output.
+fn redaction_values(spec: &ServerSpec) -> Vec<String> {
+    let secrets = spec.secret_env.values().filter(|v| !v.is_empty());
+    let env = spec.image.env.values().filter(|v| v.len() >= 4);
+    secrets.chain(env).cloned().collect()
+}
+
+/// Writes image-build output to a (non-stdout) writer: one prefixed line per
+/// build line, control characters stripped, secret values replaced by `***`.
+/// Write errors are ignored: a broken stderr must not fail a deploy.
+struct BuildLogSink<W: std::io::Write> {
+    out: W,
+    redact: Vec<String>,
+}
+
+impl<W: std::io::Write> BuildLogSink<W> {
+    fn new(out: W, redact: Vec<String>) -> Self {
+        Self { out, redact }
+    }
+
+    fn phase(&mut self, note: &str) {
+        let _ = writeln!(self.out, "{note}");
+    }
+
+    fn line(&mut self, chunk: &str) {
+        // Modal may send several lines (or a bare `\r`-terminated progress
+        // update) in one chunk.
+        for raw in chunk.split(['\n', '\r']) {
+            let mut text: String = raw
+                .chars()
+                .filter(|c| !c.is_control() || *c == '\t')
+                .collect();
+            if text.trim().is_empty() {
+                continue;
+            }
+            for value in &self.redact {
+                text = text.replace(value.as_str(), "***");
+            }
+            let _ = writeln!(self.out, "{BUILD_LOG_PREFIX}{text}");
+        }
+    }
+}
+
 #[async_trait]
 impl ProcessSupervisor for ModalSupervisor {
     async fn start(
@@ -843,13 +896,14 @@ impl ProcessSupervisor for ModalSupervisor {
             hf_token_fallback.as_deref(),
         )?;
         let mut client = self.connect().await?;
-        // Build log lines carry no secret (see `crate::deploy`'s doc
-        // comments); discarding them here (rather than printing) matches
-        // `apply`'s existing quiet-by-default behaviour for the local
-        // supervisor, which reports only the final handle.
-        let mut discard_log_line = |_line: &str| {};
+        // Stream the image build to stderr (stdout stays clean so
+        // `--output json` is one JSON value). Lines are scrubbed of every
+        // image-env and secret value first, see `BuildLogSink`.
+        let mut sink = BuildLogSink::new(std::io::stderr(), redaction_values(&spec));
+        sink.phase(BUILD_PHASE_NOTE);
+        let mut on_log = |line: &str| sink.line(line);
         let deployment = client
-            .deploy_server(&spec, &mut discard_log_line)
+            .deploy_server(&spec, &mut on_log)
             .await
             .map_err(|e| modal_err(&e))?;
         Ok(RuntimeHandle {
@@ -920,6 +974,41 @@ impl ProcessSupervisor for ModalSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_log_sink_prefixes_splits_and_redacts() {
+        let mut buf = Vec::new();
+        {
+            let mut sink = BuildLogSink::new(&mut buf, vec!["hf_supersecret".to_owned()]);
+            sink.phase("starting");
+            sink.line("Step 1\nusing hf_supersecret here\n\n");
+            sink.line("\x1b[31mred\x1b[0m\rprogress");
+            sink.line("   ");
+        }
+        let out = String::from_utf8(buf).unwrap();
+        assert_eq!(
+            out,
+            "starting\n  build: Step 1\n  build: using *** here\n  build: [31mred[0m\n  build: progress\n"
+        );
+        assert!(!out.contains("hf_supersecret"));
+    }
+
+    #[test]
+    fn redaction_values_cover_secrets_and_image_env() {
+        let mut settings = base_settings();
+        settings.env = BTreeMap::from([("K".to_owned(), "plainvalue".to_owned())]);
+        let plan = plan_with(base_argv(), settings);
+        let secret = ResolvedSecret {
+            name: "HF_TOKEN".to_owned(),
+            value: SecretValue::new("tok".to_owned()),
+        };
+        let spec = ModalSupervisor::new("amicu-dep")
+            .build_spec(&plan, &[secret], DEFAULT_VLLM_IMAGE, None)
+            .unwrap();
+        let values = redaction_values(&spec);
+        assert!(values.contains(&"plainvalue".to_owned()));
+        assert!(values.contains(&"tok".to_owned()));
+    }
     use amicu_core::ByteSize;
     use amicu_core::id::DeploymentId;
     use amicu_core::resource::VllmSettings;

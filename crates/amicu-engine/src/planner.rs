@@ -560,8 +560,17 @@ fn kv_cache_assumption(
 
 fn hardware_label(hardware: &HardwareProfile) -> String {
     match &hardware.accelerator {
-        Some(Accelerator { kind, model, .. }) => {
-            format!("{}.{}", accelerator_token(*kind), model)
+        Some(Accelerator {
+            kind, model, count, ..
+        }) => {
+            let base = format!("{}.{}", accelerator_token(*kind), model);
+            // Single-accelerator output stays unchanged; only show a count
+            // when it is above 1 (amicu-planning#177).
+            if *count > 1 {
+                format!("{base} x{count}")
+            } else {
+                base
+            }
         }
         None => "cpu".to_owned(),
     }
@@ -646,6 +655,17 @@ mod tests {
             interconnect: None,
             price: None,
         }
+    }
+
+    #[test]
+    fn hardware_label_shows_count_only_above_one() {
+        let mut hw = hardware();
+        let acc = hw.accelerator.as_mut().unwrap();
+        acc.kind = AcceleratorKind::Gpu;
+        acc.model = "l4".into();
+        assert_eq!(hardware_label(&hw), "gpu.l4");
+        hw.accelerator.as_mut().unwrap().count = 2;
+        assert_eq!(hardware_label(&hw), "gpu.l4 x2");
     }
 
     fn deployment(extra_args: Vec<String>) -> Deployment {
