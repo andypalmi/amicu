@@ -314,6 +314,9 @@ fn forget_stopped_app(app_name: &str, out: &mut dyn Write) -> Result<(), CliErro
             writeln!(out, "removed deployment {id} from local state").map_err(io_err)?;
         }
         Ok(None) => {}
+        Err(error @ CliError::StateLocked(_)) => {
+            eprintln!("warning: skipped updating local state: {error}");
+        }
         Err(error) => eprintln!("warning: could not update local state: {error}"),
     }
     Ok(())

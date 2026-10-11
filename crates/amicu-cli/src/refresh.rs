@@ -16,6 +16,7 @@ use amicu_modal::{Credentials, ModalClient, ModalError};
 use crate::OutputFormat;
 use crate::commands::build_runtime;
 use crate::error::CliError;
+use crate::lock::StateLock;
 use crate::project::{LocalState, Project};
 
 /// Hardware profile `provider` value of a Modal-backed deployment.
@@ -151,6 +152,13 @@ pub(crate) fn load_refreshed(
 /// from the project state. Returns the deployment id removed, or `None` when
 /// the state does not hold that app.
 pub(crate) fn forget_app(project: &Project, app_name: &str) -> Result<Option<String>, CliError> {
+    // Lock only when there is a state to update, so `stop` outside a project
+    // never creates `.amicu/`. Callers treat any error as a warning.
+    if project.load_state()?.is_none() {
+        return Ok(None);
+    }
+    let _lock = StateLock::acquire(&project.state_dir(), "modal stop", None)?;
+    // Re-read under the lock: the pre-check above may be stale.
     let Some(mut state) = project.load_state()? else {
         return Ok(None);
     };

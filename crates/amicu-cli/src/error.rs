@@ -35,6 +35,10 @@ pub enum CliError {
     #[error("{0}")]
     Modal(#[from] amicu_modal::ModalError),
 
+    /// Another amicu process holds the state lock (amicu-planning#178).
+    #[error("{0}")]
+    StateLocked(String),
+
     /// A generic, already-formatted message.
     #[error("{0}")]
     Message(String),

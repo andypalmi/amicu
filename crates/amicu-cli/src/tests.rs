@@ -375,7 +375,7 @@ fn region_residency_violation_blocks_validate_plan_and_apply() {
 
     // apply never reaches a side effect
     let mut out = Vec::new();
-    let code = commands::apply::run(&project, true, OutputFormat::Json, &mut out).unwrap();
+    let code = commands::apply::run(&project, true, None, OutputFormat::Json, &mut out).unwrap();
     assert_eq!(code, 1);
     let report: amicu_core::diagnostic::DiagnosticReport = serde_json::from_slice(&out).unwrap();
     assert!(has_code(&report, "AMICU-POLICY-002"));
@@ -576,7 +576,7 @@ fn apply_json_stdout_is_a_single_json_value() {
     write(&td.path, "amicu.hcl", SECOND_MODEL);
 
     let mut out = Vec::new();
-    let code = commands::apply::run(&project, true, OutputFormat::Json, &mut out).unwrap();
+    let code = commands::apply::run(&project, true, None, OutputFormat::Json, &mut out).unwrap();
     assert_eq!(code, 0);
     // The whole stdout buffer must parse as one JSON value.
     let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
@@ -659,7 +659,7 @@ fn apply_end_to_end() {
     write(&td.path, "amicu.hcl", VALID_CONFIG);
 
     let mut out = Vec::new();
-    let code = commands::apply::run(&project, true, OutputFormat::Human, &mut out).unwrap();
+    let code = commands::apply::run(&project, true, None, OutputFormat::Human, &mut out).unwrap();
     assert_eq!(code, 0);
     assert!(project.load_state().unwrap().is_some());
 }

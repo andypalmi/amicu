@@ -7,6 +7,7 @@ mod catalog;
 mod checks;
 mod commands;
 mod error;
+mod lock;
 mod planner;
 mod project;
 mod refresh;
@@ -73,6 +74,10 @@ enum Command {
         /// Skip the interactive approval prompt.
         #[arg(long, visible_alias = "yes")]
         auto_approve: bool,
+        /// Wait up to this many seconds for the state lock instead of failing
+        /// immediately when another amicu process holds it.
+        #[arg(long, value_name = "SECS")]
+        lock_timeout: Option<u64>,
     },
     /// Run environment and project diagnostics.
     Doctor,
@@ -226,9 +231,16 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
         Command::Fmt { check } => commands::fmt::run(&project, *check, out),
         Command::Validate { fix } => commands::validate::run(&project, *fix, cli.output, out),
         Command::Plan => commands::plan::run(&project, cli.output, out),
-        Command::Apply { auto_approve } => {
-            commands::apply::run(&project, *auto_approve, cli.output, out)
-        }
+        Command::Apply {
+            auto_approve,
+            lock_timeout,
+        } => commands::apply::run(
+            &project,
+            *auto_approve,
+            lock_timeout.map(std::time::Duration::from_secs),
+            cli.output,
+            out,
+        ),
         Command::Doctor => commands::doctor::run(&project, cli.output, out),
         Command::Skill { .. } | Command::Modal { .. } => {
             unreachable!("handled before project discovery")
