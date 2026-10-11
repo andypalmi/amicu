@@ -85,10 +85,13 @@ fn write_status(
         writeln!(out, "  no functions found").map_err(io_err)?;
     }
     for function in &status.functions {
+        let backlog = function
+            .backlog
+            .map_or_else(|| "n/a".to_owned(), |backlog| backlog.to_string());
         writeln!(
             out,
-            "  {} ({}): running={} backlog={}",
-            function.name, function.function_id, function.running_containers, function.backlog
+            "  {} ({}): running={} backlog={backlog}",
+            function.name, function.function_id, function.running_containers
         )
         .map_err(io_err)?;
         if let Some(url) = &function.url {
@@ -225,14 +228,21 @@ mod tests {
                     name: "Server".to_owned(),
                     url: Some("https://x.modal.run".to_owned()),
                     running_containers: 1,
-                    backlog: 0,
+                    backlog: Some(0),
                 },
                 FunctionStatus {
                     function_id: "fu-2".to_owned(),
                     name: "Idle".to_owned(),
                     url: None,
                     running_containers: 0,
-                    backlog: 3,
+                    backlog: Some(3),
+                },
+                FunctionStatus {
+                    function_id: "fu-3".to_owned(),
+                    name: "Srv".to_owned(),
+                    url: None,
+                    running_containers: 2,
+                    backlog: None,
                 },
             ],
         };
@@ -243,6 +253,7 @@ mod tests {
         assert!(rendered.contains("app amicu-app (ap-1): deployed"));
         assert!(rendered.contains("Server (fu-1): running=1 backlog=0"));
         assert!(rendered.contains("Idle (fu-2): running=0 backlog=3"));
+        assert!(rendered.contains("Srv (fu-3): running=2 backlog=n/a"));
         // Only the first function has a URL to print.
         assert_eq!(rendered.matches("url:").count(), 1, "{rendered}");
 
