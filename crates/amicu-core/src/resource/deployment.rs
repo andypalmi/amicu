@@ -228,12 +228,117 @@ pub struct SpeculativeSettings {
     pub n_gpu_layers: Option<i32>,
 }
 
+/// Per-deployment autoscaling knobs for the Modal provider
+/// (amicu-planning#180), the deployment's optional `scaling { ... }` block.
+///
+/// Every field is optional and independent: an omitted field keeps the
+/// provider default exactly as it was before this block existed
+/// (`min_replicas = 0`, `max_replicas` unlimited,
+/// `target_concurrency = 32`, `scaledown_window = 15m`; the constants live in
+/// `amicu_modal::supervisor`). Only meaningful when the deployment's hardware
+/// profile has `provider = "modal"`; on any other provider it is rejected with
+/// the `AMICU-CAP-009` error.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScalingSettings {
+    /// Replicas kept warm; `0` scales to zero when idle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_replicas: Option<u32>,
+    /// Hard cap on concurrently running replicas; omitted means unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_replicas: Option<u32>,
+    /// Concurrent requests one replica handles before Modal scales out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_concurrency: Option<u32>,
+    /// Idle seconds before a replica scales down. Written in HCL as a
+    /// duration string (`"15m"`, `"900s"`, `"1h"`); stored as whole seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaledown_window_secs: Option<u32>,
+}
+
+impl ScalingSettings {
+    /// Whether no field is set (the block is a no-op).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.min_replicas.is_none()
+            && self.max_replicas.is_none()
+            && self.target_concurrency.is_none()
+            && self.scaledown_window_secs.is_none()
+    }
+
+    /// Human-readable problems with these values (empty when valid):
+    /// `max_replicas >= 1`, `target_concurrency >= 1`,
+    /// `scaledown_window > 0` (the only bound Modal's own client enforces:
+    /// `modal/_functions.py` raises "`scaledown_window` must be > 0"; no
+    /// upper bound is enforced client-side, so none is invented here), and
+    /// `min_replicas <= max_replicas` when both are set (also enforced by
+    /// the Modal client).
+    #[must_use]
+    pub fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.max_replicas == Some(0) {
+            out.push("`max_replicas` must be >= 1".to_owned());
+        }
+        if self.target_concurrency == Some(0) {
+            out.push("`target_concurrency` must be >= 1".to_owned());
+        }
+        if self.scaledown_window_secs == Some(0) {
+            out.push("`scaledown_window` must be greater than zero".to_owned());
+        }
+        if let (Some(min), Some(max)) = (self.min_replicas, self.max_replicas)
+            && min > max
+        {
+            out.push(format!(
+                "`min_replicas` ({min}) must not exceed `max_replicas` ({max})"
+            ));
+        }
+        out
+    }
+
+    /// Parses a duration string of one positive integer plus a unit:
+    /// `s`, `m` or `h` (`"900s"`, `"15m"`, `"1h"`). Returns whole seconds,
+    /// or `None` if malformed or overflowing. A zero value parses (and is
+    /// then rejected by [`ScalingSettings::problems`]).
+    #[must_use]
+    pub fn parse_window(text: &str) -> Option<u32> {
+        let text = text.trim();
+        let unit = text.chars().last()?;
+        let mult: u32 = match unit {
+            's' => 1,
+            'm' => 60,
+            'h' => 3600,
+            _ => return None,
+        };
+        let digits = &text[..text.len() - 1];
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse::<u32>().ok()?.checked_mul(mult)
+    }
+
+    /// Canonical duration string for `secs`: the largest exact unit
+    /// (`3600` -> `"1h"`, `900` -> `"15m"`, `90` -> `"90s"`).
+    #[must_use]
+    pub fn format_window(secs: u32) -> String {
+        if secs != 0 && secs.is_multiple_of(3600) {
+            format!("{}h", secs / 3600)
+        } else if secs != 0 && secs.is_multiple_of(60) {
+            format!("{}m", secs / 60)
+        } else {
+            format!("{secs}s")
+        }
+    }
+}
+
 /// Binds a model to a hardware profile with runtime-specific settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Deployment {
     pub id: DeploymentId,
     pub model: ModelId,
     pub hardware_profile: HardwareProfileId,
+    /// Optional Modal autoscaling overrides (amicu-planning#180); `None`
+    /// keeps today's defaults. See [`ScalingSettings`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scaling: Option<ScalingSettings>,
     #[serde(flatten)]
     pub runtime: Runtime,
 }
@@ -408,4 +513,45 @@ pub struct VllmSettings {
     /// [`LlamaCppSettings::env`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+}
+
+#[cfg(test)]
+mod scaling_tests {
+    use super::ScalingSettings;
+
+    #[test]
+    fn window_parse_and_format_round_trip() {
+        assert_eq!(ScalingSettings::parse_window("15m"), Some(900));
+        assert_eq!(ScalingSettings::parse_window("90s"), Some(90));
+        assert_eq!(ScalingSettings::parse_window("2h"), Some(7200));
+        for bad in ["", "15", "m", "1.5m", "-1s", "5d", "4294967295h"] {
+            assert_eq!(ScalingSettings::parse_window(bad), None, "{bad}");
+        }
+        for secs in [1, 90, 900, 3600, 5400] {
+            let text = ScalingSettings::format_window(secs);
+            assert_eq!(ScalingSettings::parse_window(&text), Some(secs));
+        }
+        assert_eq!(ScalingSettings::format_window(900), "15m");
+        assert_eq!(ScalingSettings::format_window(3600), "1h");
+    }
+
+    #[test]
+    fn problems_cover_each_rule_and_default_is_valid() {
+        assert_eq!(ScalingSettings::default().problems(), Vec::<String>::new());
+        assert!(ScalingSettings::default().is_empty());
+        let s = ScalingSettings {
+            min_replicas: Some(2),
+            max_replicas: Some(2),
+            target_concurrency: Some(1),
+            scaledown_window_secs: Some(1),
+        };
+        assert_eq!(s.problems(), Vec::<String>::new());
+        let bad = ScalingSettings {
+            min_replicas: Some(5),
+            max_replicas: Some(0),
+            target_concurrency: Some(0),
+            scaledown_window_secs: Some(0),
+        };
+        assert_eq!(bad.problems().len(), 4);
+    }
 }

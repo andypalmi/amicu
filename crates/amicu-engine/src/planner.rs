@@ -213,7 +213,7 @@ fn action_for(
         kind,
         address: format!("deployment.{}", d.id),
         artifact: variant.as_ref().map(variant_artifact),
-        runtime: runtime_settings(d),
+        runtime: runtime_settings_with_scaling(d),
         hardware: hardware.map(hardware_label),
         provider: hardware.map(|h| h.provider.clone()),
         region: hardware.and_then(|h| h.region.as_ref().map(|r| r.code.clone())),
@@ -236,6 +236,30 @@ fn variant_artifact(variant: &GgufVariant) -> Artifact {
         quantization: Some(quantization_label(variant.quantization).to_owned()),
         estimated_download_size_bytes: variant.size.map(amicu_core::ByteSize::bytes),
     }
+}
+
+/// Runtime settings plus the deployment's explicitly-set `scaling {}` fields
+/// (amicu-planning#180), so a non-default cap is visible in the plan.
+fn runtime_settings_with_scaling(d: &Deployment) -> Vec<Setting> {
+    let mut settings = runtime_settings(d);
+    if let Some(s) = &d.scaling {
+        if let Some(v) = s.min_replicas {
+            settings.push(setting("scaling_min_replicas", v.to_string()));
+        }
+        if let Some(v) = s.max_replicas {
+            settings.push(setting("scaling_max_replicas", v.to_string()));
+        }
+        if let Some(v) = s.target_concurrency {
+            settings.push(setting("scaling_target_concurrency", v.to_string()));
+        }
+        if let Some(v) = s.scaledown_window_secs {
+            settings.push(setting(
+                "scaling_scaledown_window",
+                amicu_core::resource::ScalingSettings::format_window(v),
+            ));
+        }
+    }
+    settings
 }
 
 fn runtime_settings(d: &Deployment) -> Vec<Setting> {
@@ -670,6 +694,7 @@ mod tests {
 
     fn deployment(extra_args: Vec<String>) -> Deployment {
         Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "m".into(),
             hardware_profile: "hw".into(),
@@ -959,5 +984,64 @@ mod tests {
             memory(&with_draft),
             "the draft model's weights must move the estimate"
         );
+    }
+
+    // --- amicu-planning#180: scaling {} ------------------------------------
+
+    fn with_scaling(mut g: Graph, s: amicu_core::resource::ScalingSettings) -> Graph {
+        g.deployments[0].scaling = Some(s);
+        g
+    }
+
+    #[test]
+    fn scaling_is_shown_in_the_plan_only_when_set() {
+        let plain = build_plan(&graph(Vec::new()), None).unwrap();
+        assert!(
+            !plain.items[0]
+                .action
+                .runtime
+                .iter()
+                .any(|s| s.key.starts_with("scaling_"))
+        );
+
+        let g = with_scaling(
+            graph(Vec::new()),
+            amicu_core::resource::ScalingSettings {
+                min_replicas: Some(0),
+                max_replicas: Some(1),
+                target_concurrency: Some(16),
+                scaledown_window_secs: Some(900),
+            },
+        );
+        let result = build_plan(&g, None).unwrap();
+        let get = |k: &str| {
+            result.items[0]
+                .action
+                .runtime
+                .iter()
+                .find(|s| s.key == k)
+                .map(|s| s.value.clone())
+        };
+        assert_eq!(get("scaling_min_replicas").as_deref(), Some("0"));
+        assert_eq!(get("scaling_max_replicas").as_deref(), Some("1"));
+        assert_eq!(get("scaling_target_concurrency").as_deref(), Some("16"));
+        assert_eq!(get("scaling_scaledown_window").as_deref(), Some("15m"));
+    }
+
+    #[test]
+    fn changing_scaling_is_an_update() {
+        let prior = graph(Vec::new());
+        let next = with_scaling(
+            graph(Vec::new()),
+            amicu_core::resource::ScalingSettings {
+                max_replicas: Some(1),
+                ..Default::default()
+            },
+        );
+        let result = build_plan(&next, Some(&prior)).unwrap();
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].action.kind, ActionKind::Update);
+        // Unchanged scaling is a no-op.
+        assert!(build_plan(&next, Some(&next)).unwrap().items.is_empty());
     }
 }

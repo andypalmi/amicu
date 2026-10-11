@@ -18,6 +18,7 @@ pub fn report_for(graph: &Graph) -> DiagnosticReport {
     let mut diagnostics = duplicate_ids(graph);
     diagnostics.extend(residency_violations(graph));
     diagnostics.extend(amicu_hcl::scan_runtime_env_secrets(graph));
+    diagnostics.extend(scaling_diagnostics(graph));
 
     for missing in graph.missing_references() {
         let mut d = Diagnostic::new(
@@ -49,6 +50,51 @@ pub fn report_for(graph: &Graph) -> DiagnosticReport {
     }
 
     DiagnosticReport::new(diagnostics)
+}
+
+/// Hardware-profile `provider` value whose deployments honor `scaling {}`.
+const SCALING_PROVIDER: &str = "modal";
+
+/// Validate each deployment's `scaling {}` block (amicu-planning#180):
+/// `AMICU-CAP-008` for invalid values, `AMICU-CAP-009` when the deployment's
+/// provider has no scaling mapping yet.
+fn scaling_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &graph.deployments {
+        let Some(scaling) = &d.scaling else {
+            continue;
+        };
+        let resource = format!("deployment.{}", d.id);
+        for problem in scaling.problems() {
+            let mut diag = Diagnostic::new(
+                catalog::CAP_SCALING_INVALID,
+                Severity::Error,
+                format!("deployment `{}`: invalid scaling: {problem}", d.id),
+            );
+            diag.resource = Some(resource.clone());
+            out.push(diag);
+        }
+        let provider = graph
+            .hardware_profiles
+            .iter()
+            .find(|h| h.id == d.hardware_profile)
+            .map(|h| h.provider.as_str());
+        if let Some(provider) = provider
+            && provider != SCALING_PROVIDER
+        {
+            let mut diag = Diagnostic::new(
+                catalog::CAP_SCALING_UNSUPPORTED_PROVIDER,
+                Severity::Error,
+                format!(
+                    "deployment `{}`: `scaling {{}}` is not supported for provider `{provider}` yet (only `{SCALING_PROVIDER}`); remove the block",
+                    d.id
+                ),
+            );
+            diag.resource = Some(resource.clone());
+            out.push(diag);
+        }
+    }
+    out
 }
 
 /// Reject deployments whose hardware region/provider violate the configured
@@ -266,6 +312,7 @@ mod residency_tests {
 
     fn deployment() -> Deployment {
         Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "m".into(),
             hardware_profile: "hw".into(),
@@ -458,6 +505,7 @@ mod vllm_dispatch_tests {
 
     fn vllm_deployment(settings: VllmSettings) -> Deployment {
         Deployment {
+            scaling: None,
             id: "dep".into(),
             model: "m".into(),
             hardware_profile: "hw".into(),
@@ -578,6 +626,7 @@ mod vllm_dispatch_tests {
             ..hw(24)
         });
         g.deployments.push(Deployment {
+            scaling: None,
             id: "llama_dep".into(),
             model: "llama_model".into(),
             hardware_profile: "llama_hw".into(),
@@ -598,6 +647,7 @@ mod vllm_dispatch_tests {
             ..hw(24)
         });
         g.deployments.push(Deployment {
+            scaling: None,
             id: "vllm_dep".into(),
             model: "meta-llama/Llama-3.1-70B-Instruct".into(),
             hardware_profile: "vllm_hw".into(),
@@ -633,6 +683,106 @@ mod vllm_dispatch_tests {
             vllm_error.is_some(),
             "expected the oversized vLLM deployment to get its own fit error, got {:?}",
             report.diagnostics
+        );
+    }
+}
+
+#[cfg(test)]
+mod scaling_tests {
+    use super::*;
+    use amicu_core::resource::{
+        Deployment, HardwareProfile, LlamaCppSettings, Runtime, ScalingSettings,
+    };
+    use amicu_core::units::ByteSize;
+
+    fn graph(provider: &str, scaling: Option<ScalingSettings>) -> Graph {
+        let mut g = Graph::new();
+        g.hardware_profiles.push(HardwareProfile {
+            id: "hw".into(),
+            provider: provider.to_owned(),
+            region: None,
+            accelerator: None,
+            cpu: None,
+            memory: ByteSize::from_bytes(1024),
+            interconnect: None,
+            price: None,
+        });
+        g.deployments.push(Deployment {
+            scaling,
+            id: "dep".into(),
+            model: "m".into(),
+            hardware_profile: "hw".into(),
+            runtime: Runtime::LlamaCpp(LlamaCppSettings::default()),
+        });
+        g
+    }
+
+    fn codes(g: &Graph) -> Vec<String> {
+        scaling_diagnostics(g)
+            .iter()
+            .map(|d| d.code.to_string())
+            .collect()
+    }
+
+    fn valid() -> ScalingSettings {
+        ScalingSettings {
+            min_replicas: Some(0),
+            max_replicas: Some(2),
+            target_concurrency: Some(8),
+            scaledown_window_secs: Some(300),
+        }
+    }
+
+    #[test]
+    fn valid_scaling_on_modal_is_clean_and_absent_scaling_is_clean() {
+        assert_eq!(codes(&graph("modal", Some(valid()))), Vec::<String>::new());
+        assert_eq!(codes(&graph("local_apple", None)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn invalid_values_are_cap_008() {
+        let bad = [
+            ScalingSettings {
+                max_replicas: Some(0),
+                ..ScalingSettings::default()
+            },
+            ScalingSettings {
+                target_concurrency: Some(0),
+                ..ScalingSettings::default()
+            },
+            ScalingSettings {
+                scaledown_window_secs: Some(0),
+                ..ScalingSettings::default()
+            },
+            ScalingSettings {
+                min_replicas: Some(3),
+                max_replicas: Some(2),
+                ..ScalingSettings::default()
+            },
+        ];
+        for s in bad {
+            assert_eq!(
+                codes(&graph("modal", Some(s.clone()))),
+                vec!["AMICU-CAP-008"],
+                "{s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_modal_provider_is_cap_009_error() {
+        let g = graph("local_apple", Some(valid()));
+        assert_eq!(codes(&g), vec!["AMICU-CAP-009"]);
+        assert!(
+            scaling_diagnostics(&g)
+                .iter()
+                .all(|d| d.severity == Severity::Error)
+        );
+        assert!(
+            report_for(&g)
+                .diagnostics
+                .iter()
+                .any(|d| d.code.to_string() == "AMICU-CAP-009")
         );
     }
 }

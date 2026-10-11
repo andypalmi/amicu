@@ -278,6 +278,23 @@ for a faster cold start at the cost of steady-state throughput (the trade-off
 a "fast boot" preset wants), `false` forces capture, and unset leaves vLLM's
 own default (captured) in effect.
 
+## Modal autoscaling: `scaling {}` (amicu-planning#180)
+
+Deployment-level, optional, provider-agnostic block; only the `modal` provider
+maps it today (others get `AMICU-CAP-009`). Omitted fields keep today's
+defaults (min 0, no max, target concurrency 32, scaledown 15m).
+
+```hcl
+  scaling {
+    min_replicas       = 0
+    max_replicas       = 1        # >= 1 and >= min_replicas
+    target_concurrency = 32       # >= 1
+    scaledown_window   = "15m"    # "90s" | "15m" | "1h"; > 0
+  }
+```
+
+See `modal-deployment.md` for details (`AMICU-CAP-008` validation, plan output).
+
 ## vLLM on Modal (serverless GPU, amicu-planning#158)
 
 Setup, multi-GPU, metrics and state behaviour: `modal-deployment.md`.

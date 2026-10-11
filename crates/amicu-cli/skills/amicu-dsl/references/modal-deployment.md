@@ -35,7 +35,50 @@ Fixed names and constants (not configurable in HCL today):
   starts are fast.
 - **Lifecycle**: startup timeout 600s, scaledown window 900s (idle time before
   scale-to-zero), container timeout 3600s, target concurrency 32,
-  `min_containers = 0`.
+  `min_containers = 0`, no max (unlimited). Override the autoscaling four with
+  a `scaling {}` block (below).
+
+## Capping autoscaling: `scaling {}` (amicu-planning#180)
+
+An optional deployment-level block (a sibling of `llama_cpp {}`/`vllm {}`,
+works with both runtimes). Every field is optional; omitted fields keep the
+defaults above, so a deployment without the block is unchanged.
+
+```hcl
+resource "deployment" "chat" {
+  model    = model.qwen.id
+  hardware = hardware_profile.modal_l4.id   # provider = "modal"
+  runtime  = "vllm"
+  vllm { context_length = 8192  port = 8000 }
+
+  scaling {
+    min_replicas       = 0       # warm containers; 0 = scale to zero
+    max_replicas       = 1       # hard cap; omitted = unlimited
+    target_concurrency = 32      # requests per container before scaling out
+    scaledown_window   = "15m"   # idle time before scale-down: "90s", "15m", "1h"
+  }
+}
+```
+
+Maps to Modal's `min_containers`, `max_containers`, `target_concurrent_inputs`
+and `scaledown_window`. Without `max_replicas`, a request burst can fan out
+into many GPU containers.
+
+- Validation (`AMICU-CAP-008`, error): `max_replicas >= 1`,
+  `target_concurrency >= 1`, `scaledown_window > 0`, and
+  `min_replicas <= max_replicas` when both are set. `scaledown_window` must be
+  a string with a single `s`/`m`/`h` unit (anything else is a schema error).
+  Modal's client only requires the window to be greater than zero; amicu does
+  not invent an upper bound.
+- Providers other than Modal have no scaling mapping yet (tracked in
+  amicu-planning#181): a `scaling {}` block on them is `AMICU-CAP-009`
+  (error), never silently ignored.
+- `plan` lists the fields you set as `scaling_min_replicas`,
+  `scaling_max_replicas`, `scaling_target_concurrency`,
+  `scaling_scaledown_window`; changing any of them is an `update` that
+  redeploys the app. The change is detected from config/state; `refresh` only
+  checks that the Modal app is still live and does not read scaling back from
+  Modal.
 
 ## llama.cpp on Modal: full example
 
