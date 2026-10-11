@@ -51,20 +51,21 @@ pub struct ImageSpec {
     /// run**: amicu does not use Modal's `add_python=` path, which needs a
     /// `context_mount_id` pointing at Modal's globally deployed
     /// python-standalone Mount (`modal/image.py:1930-1938`) — extra RPC
-    /// surface. The official `vllm/vllm-openai` images and `python:*-slim`
-    /// ship Python already; the llama.cpp server image does not and gets it
-    /// from `setup_commands` (an `apt-get` install), the equivalent
-    /// Dockerfile step.
+    /// surface. `python:*-slim` ships it already; the official
+    /// `vllm/vllm-openai` image has only `python3` and gets a `python`
+    /// symlink from `setup_commands`, and the llama.cpp server image has no
+    /// Python and gets it from `setup_commands` (an `apt-get` install).
     pub base_registry_image: String,
     /// Extra pip packages. Modal's own client package is **not** installed
     /// here — it is mounted at runtime from Modal's global client mount, so
     /// nothing in this image can dependency-conflict with it.
     pub pip_packages: Vec<String>,
     /// Extra Dockerfile instructions (each one full line, e.g. `RUN ...`),
-    /// emitted right after `ENTRYPOINT []` and before the pip layer. Empty for
-    /// the vLLM image, which already ships everything amicu needs. The
-    /// llama.cpp server image uses these to add the Python the shim needs
-    /// (see [`crate::supervisor::llamacpp_setup_commands`]). Must never carry
+    /// emitted right after `ENTRYPOINT []` and before the pip layer. The vLLM
+    /// image uses these to alias `python` to `python3` (see
+    /// [`crate::supervisor::vllm_setup_commands`]) and the llama.cpp server
+    /// image to add the Python the shim needs (see
+    /// [`crate::supervisor::llamacpp_setup_commands`]). Must never carry
     /// secrets: they are part of the (cached, logged) image definition.
     pub setup_commands: Vec<String>,
     /// `ENV` entries. Ordered (`BTreeMap`) so the Dockerfile — and therefore
