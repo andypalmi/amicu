@@ -15,6 +15,7 @@
 //!   concurrency, queue, memory/KV, GPU, cost, and reliability. It is the
 //!   measured input to the recommendation engine (`amicu-recommend`).
 
+pub mod hardware;
 mod log;
 mod metrics;
 mod schema;
