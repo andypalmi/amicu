@@ -286,13 +286,14 @@ fn parse_labels(mut s: &str) -> Option<(Vec<(String, String)>, &str)> {
 /// Sum of every sample called `name` (across label sets); `None` if none.
 fn sum(samples: &[Sample], name: &str) -> Option<f64> {
     let mut found = false;
-    let total = samples
+    let total: f64 = samples
         .iter()
         .filter(|s| s.name == name)
         .inspect(|_| found = true)
         .map(|s| s.value)
         .sum();
-    found.then_some(total)
+    // NaN/Inf from a hostile or buggy endpoint must not reach the display.
+    found.then_some(total).filter(|t| t.is_finite())
 }
 
 fn first_sum(samples: &[Sample], names: &[&str]) -> Option<f64> {
@@ -327,12 +328,17 @@ fn histogram_percentiles(samples: &[Sample], base: &str) -> Option<Percentiles> 
             "+Inf" | "Inf" => f64::INFINITY,
             other => other.parse::<f64>().ok()?,
         };
-        match buckets.iter_mut().find(|(b, _)| b.total_cmp(&le).is_eq()) {
-            Some((_, count)) => *count += s.value,
-            None => buckets.push((le, s.value)),
-        }
+        buckets.push((le, s.value));
     }
     buckets.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Merge label sets (engines) sharing a bound.
+    buckets.dedup_by(|dup, kept| {
+        let same = dup.0.total_cmp(&kept.0).is_eq();
+        if same {
+            kept.1 += dup.1;
+        }
+        same
+    });
     let total = buckets.last().map(|b| b.1).filter(|t| *t > 0.0)?;
     let quantile = |q: f64| -> f64 {
         let target = q * total;
@@ -415,7 +421,7 @@ fn vllm_kv_usage(s: &[Sample]) -> Option<f64> {
         .find_map(|name| {
             let values: Vec<f64> = s
                 .iter()
-                .filter(|x| x.name == *name)
+                .filter(|x| x.name == *name && x.value.is_finite())
                 .map(|x| x.value)
                 .collect();
             #[allow(clippy::cast_precision_loss)]
@@ -466,12 +472,25 @@ pub async fn scrape(endpoint: &str) -> Result<MetricsSnapshot, MetricsError> {
         404 | 501 => return Err(MetricsError::NotEnabled(status)),
         other => return Err(MetricsError::Status(other)),
     }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| MetricsError::Unreachable(transport_reason(&e)))?;
-    if bytes.len() > MAX_BODY_BYTES {
+    // Enforce the cap while streaming: `bytes()` would buffer a hostile or
+    // runaway body in full before any length check could run.
+    if response
+        .content_length()
+        .is_some_and(|n| n > MAX_BODY_BYTES as u64)
+    {
         return Err(MetricsError::BadBody);
+    }
+    let mut response = response;
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| MetricsError::Unreachable(transport_reason(&e)))?
+    {
+        if bytes.len() + chunk.len() > MAX_BODY_BYTES {
+            return Err(MetricsError::BadBody);
+        }
+        bytes.extend_from_slice(&chunk);
     }
     let text = std::str::from_utf8(&bytes).map_err(|_| MetricsError::BadBody)?;
     snapshot_from_text(text)
@@ -642,6 +661,14 @@ llamacpp:requests_deferred 0
     fn llamacpp_older_kv_ratio_is_read_when_present() {
         let t = "llamacpp:kv_cache_usage_ratio 0.03\n";
         assert_eq!(snapshot_from_text(t).unwrap().kv_cache_usage, Some(0.03));
+    }
+
+    #[test]
+    fn non_finite_values_are_dropped_not_displayed() {
+        let t = "vllm:kv_cache_usage_perc NaN\nllamacpp:x 1\nvllm:num_requests_running +Inf\n";
+        let m = snapshot_from_text(t).unwrap();
+        assert_eq!(m.kv_cache_usage, None);
+        assert_eq!(m.requests_running, None);
     }
 
     #[test]
