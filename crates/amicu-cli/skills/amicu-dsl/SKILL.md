@@ -23,7 +23,9 @@ preserve existing structure.
 - `deployment` - binds a model id to a hardware id and a runtime block.
 
 See `references/model-examples.md`, `references/hardware-examples.md`, and
-`references/deployment-examples.md` for concrete, valid blocks.
+`references/deployment-examples.md` for concrete, valid blocks. For
+`provider = "modal"` (setup, multi-GPU, llama.cpp, metrics, lifecycle) see
+`references/modal-deployment.md`.
 
 ## References between resources
 

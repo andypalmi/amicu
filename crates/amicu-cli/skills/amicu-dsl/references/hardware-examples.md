@@ -82,10 +82,11 @@ Notes:
   `us-east`). Modal does not allow a routing region to change after the
   initial deployment, so changing `region` on an existing deployment needs
   `amicu modal stop <app>` and then a re-apply.
-- This is a catalog entry only (amicu-planning#158 PR 1): `provision`,
-  `status` and `teardown` all reject with `AMICU-PROVIDER-015`
-  (permanent - not retryable) until the Modal Sandbox gRPC target (PR 2)
-  lands. Do not `apply` a Modal deployment yet.
+- The `amicu-providers` catalog `provision`/`status`/`teardown` still reject
+  with `AMICU-PROVIDER-015` (permanent - not retryable), but that is not the
+  deploy path: `amicu apply` deploys `vllm` and `llama_cpp` deployments on a
+  `provider = "modal"` profile through `ModalSupervisor`. See
+  `modal-deployment.md`.
 - Prices are USD/hr, converted from Modal's per-second billing; see
   `amicu_providers::modal`'s module docs for the verification date and
   source.
@@ -176,7 +177,8 @@ Notes:
   `amicu apply`'s `ModalSupervisor` (`crates/amicu-modal/src/supervisor.rs`)
   instead of a local process. `accelerator.model` + `accelerator.count`
   become Modal's `gpu=` request string - `"H100:2"` for the profile above
-  (upper-cased; the `:<count>` suffix is omitted when `count == 1`) - and
+  (upper-cased; the `:<count>` suffix is omitted when `count == 1`;
+  `amicu plan` shows `gpu.h100 x2`) - and
   `region` (when set) becomes Modal's region constraint. This mapping is a
   hand-maintained string pass-through, not validated against Modal's GPU
   catalog at parse time (that catalog, `amicu-providers::modal`, lands
@@ -189,4 +191,4 @@ Notes:
   route through `ModalSupervisor`. A `llama_cpp` deployment needs a model whose
   source is Hugging Face (the GGUF is fetched in the container with `-hf`). See
   `deployment-examples.md`'s "vLLM on Modal" and "llama.cpp on Modal" sections
-  for the full examples and defaults.
+  and `modal-deployment.md` for the full examples and defaults.

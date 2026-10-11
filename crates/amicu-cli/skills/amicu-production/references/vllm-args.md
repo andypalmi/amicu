@@ -100,9 +100,9 @@ Health is checked against `GET /health` on the configured port.
 
 ## Testing a Modal deployment (amicu-planning#158)
 
-Modal (modal.com) is a no-Python-on-the-client GPU rental target reached over
-gRPC, not an `amicu apply` runtime yet (HCL wiring is a separate,
-not-yet-merged PR) - today it is exercised entirely through the
+Modal (modal.com) is a serverless GPU target reached over gRPC, deployed by
+`amicu apply` for a `provider = "modal"` hardware profile (setup, multi-GPU and
+lifecycle: amicu-dsl `references/modal-deployment.md`). It is operated with the
 project-independent `amicu modal` commands, which read `MODAL_TOKEN_ID`/
 `MODAL_TOKEN_SECRET` from the environment and never accept them as flags:
 
@@ -111,6 +111,7 @@ amicu modal auth-check              # confirms the token is accepted (ClientHell
 amicu modal status <app-name>       # app state + each Function's url/running/backlog
 amicu modal logs <app-name>         # one AppGetLogs call (~5s or app-end), then returns
 amicu modal logs <app-name> --follow --since <entry-id>   # tails from a resume point
+amicu modal metrics <app-name> [--watch] [--interval N]   # scrape /metrics (needs proxy tokens)
 amicu modal stop <app-name>         # AppStop; terminates the app's containers
 ```
 
