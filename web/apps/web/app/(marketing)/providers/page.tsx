@@ -1,6 +1,5 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { Globe, MapPin, Server } from 'lucide-react';
 import {
   Badge,
   Button,
@@ -9,7 +8,7 @@ import {
   CardHeader,
   CardTitle,
 } from '@amicu/ui';
-import { Container, PageHeader } from '../_components/marketing';
+import { PageHeader, Section } from '../_components/marketing';
 import { providers } from '../_lib/content';
 import { pageMetadata } from '../_lib/seo';
 
@@ -23,7 +22,7 @@ export const metadata: Metadata = pageMetadata({
 export default function ProvidersPage() {
   return (
     <main className="flex flex-1 flex-col">
-      <Container className="py-20 sm:py-24">
+      <Section size="lg">
         <PageHeader
           eyebrow="Providers"
           title="Provider-agnostic coverage, your rules."
@@ -32,16 +31,11 @@ export default function ProvidersPage() {
 
         <div className="mt-14 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
           {providers.map((provider) => {
-            const isSelfHosted = provider.name.startsWith('Self-hosted');
-            const Icon = isSelfHosted ? Server : provider.euNative ? MapPin : Globe;
             return (
               <Card key={provider.name} className="flex flex-col">
                 <CardHeader className="gap-2">
                   <div className="flex items-start justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <Icon className="size-5 text-primary" aria-hidden />
-                      <CardTitle className="text-lg">{provider.name}</CardTitle>
-                    </div>
+                    <CardTitle className="text-lg">{provider.name}</CardTitle>
                     {provider.euNative ? (
                       <Badge variant="secondary">EU-native</Badge>
                     ) : null}
@@ -75,7 +69,7 @@ export default function ProvidersPage() {
             </Button>
           </div>
         </section>
-      </Container>
+      </Section>
     </main>
   );
 }

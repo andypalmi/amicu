@@ -17,7 +17,7 @@ import {
   TableHeader,
   TableRow,
 } from '@amicu/ui';
-import { Container, PageHeader } from '../_components/marketing';
+import { PageHeader, Section } from '../_components/marketing';
 import {
   type Availability,
   featureMatrix,
@@ -104,7 +104,7 @@ function TierCard({ tier }: { tier: Tier }) {
 export default function PricingPage() {
   return (
     <main className="flex flex-1 flex-col">
-      <Container className="py-20 sm:py-24">
+      <Section size="lg">
         <PageHeader
           eyebrow="Pricing"
           title="One rail, four tiers."
@@ -180,7 +180,7 @@ export default function PricingPage() {
             <span className="flex items-center gap-1.5">as applicable - per plan</span>
           </div>
         </section>
-      </Container>
+      </Section>
     </main>
   );
 }

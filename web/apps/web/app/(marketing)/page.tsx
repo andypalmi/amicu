@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { ArrowRight, Compass, FileCode2 } from 'lucide-react';
+import { ArrowRight } from 'lucide-react';
 import {
   Badge,
   Button,
@@ -11,7 +11,8 @@ import {
   CardTitle,
 } from '@amicu/ui';
 import { appName, appTagline, gitConfig, siteUrl } from '@/lib/shared';
-import { Container } from './_components/marketing';
+import { EXAMPLE_CONFIG } from '@/lib/engine/example';
+import { Section } from './_components/marketing';
 import { landingFeatures, providers } from './_lib/content';
 import { pageMetadata } from './_lib/seo';
 
@@ -53,143 +54,147 @@ export default function LandingPage() {
         }}
       />
       {/* Hero */}
-      <section className="border-b border-border">
-        <Container className="flex flex-col items-center gap-6 py-24 text-center sm:py-32">
-          <Badge variant="outline" className="gap-1.5">
-            <span className="inline-block size-1.5 rounded-full bg-primary" />
-            Open-source · declarative AI infrastructure
-          </Badge>
-          <h1 className="max-w-3xl text-balance text-4xl font-bold tracking-tight sm:text-6xl">
+      <Section size="lg" containerClassName="grid items-center gap-12 lg:grid-cols-2">
+        <div className="flex flex-col items-start gap-6">
+          <h1 className="text-balance text-4xl font-bold tracking-tight sm:text-5xl">
             Design, deploy, and operate LLM serving stacks.
           </h1>
-          <p className="max-w-2xl text-pretty text-lg text-muted-foreground">
+          <p className="max-w-xl text-pretty text-lg text-muted-foreground">
             Amicu is a thin, open client over the Rust Management API - guided stack
             design, transparent recommendations, and day-2 operations for inference
             infrastructure you declare once and run on any provider.
           </p>
-          <div className="flex flex-wrap items-center justify-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <Button asChild size="lg">
               <Link href="/app">
-                Get started <ArrowRight />
+                Open the console <ArrowRight />
               </Link>
             </Button>
             <Button asChild size="lg" variant="outline">
               <Link href="/docs">Read the docs</Link>
             </Button>
           </div>
-        </Container>
-      </section>
+        </div>
+        <figure className="min-w-0">
+          <div className="overflow-hidden rounded-lg border border-border bg-card shadow-sm">
+            <div className="border-b border-border bg-muted/50 px-4 py-2 font-mono text-xs text-muted-foreground">
+              stack.hcl
+            </div>
+            <pre
+              tabIndex={0}
+              aria-label="Example Amicu HCL configuration"
+              className="max-h-[22rem] overflow-auto p-4 font-mono text-xs leading-relaxed text-card-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+            >
+              <code>{EXAMPLE_CONFIG}</code>
+            </pre>
+          </div>
+          <figcaption className="mt-3 text-sm text-muted-foreground">
+            A model, an Apple-silicon host, and a llama.cpp deployment. This exact
+            config validates and plans in the console.
+          </figcaption>
+        </figure>
+      </Section>
 
       {/* Dual-mode teaser */}
-      <section className="border-b border-border bg-muted/30">
-        <Container className="py-20">
-          <div className="mx-auto max-w-2xl text-center">
-            <h2 className="text-3xl font-semibold tracking-tight">
-              Two ways in. Both open to everyone.
-            </h2>
-            <p className="mt-3 text-muted-foreground">
-              The tier split is about depth of recommendation and team collaboration -
-              never about access to the wizard. Community gets the guided flow too.
-            </p>
-          </div>
-          <div className="mx-auto mt-10 grid max-w-4xl gap-6 sm:grid-cols-2">
-            <Card>
-              <CardHeader>
-                <Compass className="size-6 text-primary" aria-hidden />
-                <CardTitle className="text-xl">Help me choose</CardTitle>
-                <CardDescription>
-                  A guided wizard turns your outcome - model, latency, budget,
-                  residency - into a recommended stack, with the reasoning shown.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Button asChild variant="link" className="h-auto p-0">
-                  <Link href="/app">
-                    Start the wizard <ArrowRight />
-                  </Link>
-                </Button>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <FileCode2 className="size-6 text-primary" aria-hidden />
-                <CardTitle className="text-xl">I know my stack</CardTitle>
-                <CardDescription>
-                  Drop straight into the HCL editor. Author, validate, and plan / apply
-                  declarative infrastructure - the stack is code, not click-ops.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Button asChild variant="link" className="h-auto p-0">
-                  <Link href="/app">
-                    Open the editor <ArrowRight />
-                  </Link>
-                </Button>
-              </CardContent>
-            </Card>
-          </div>
-        </Container>
-      </section>
+      <Section tone="muted">
+        <div className="mx-auto max-w-2xl text-center">
+          <h2 className="text-3xl font-semibold tracking-tight">
+            Two ways in. Both open to everyone.
+          </h2>
+          <p className="mt-3 text-muted-foreground">
+            The tier split is about depth of recommendation and team collaboration -
+            never about access to the wizard. Community gets the guided flow too.
+          </p>
+        </div>
+        <div className="mx-auto mt-10 grid max-w-4xl gap-6 sm:grid-cols-2">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-xl">Help me choose</CardTitle>
+              <CardDescription>
+                A guided wizard turns your outcome - model, latency, budget,
+                residency - into a recommended stack, with the reasoning shown.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button asChild variant="link" className="h-auto p-0">
+                <Link href="/app">
+                  Start the wizard <ArrowRight />
+                </Link>
+              </Button>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-xl">I know my stack</CardTitle>
+              <CardDescription>
+                Drop straight into the HCL editor. Author, validate, and plan / apply
+                declarative infrastructure - the stack is code, not click-ops.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button asChild variant="link" className="h-auto p-0">
+                <Link href="/app">
+                  Open the editor <ArrowRight />
+                </Link>
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+      </Section>
 
       {/* Feature grid */}
-      <section className="border-b border-border">
-        <Container className="py-20">
-          <div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-3">
-            {landingFeatures.map((feature) => (
-              <div key={feature.title}>
-                <h3 className="text-lg font-semibold">{feature.title}</h3>
-                <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-                  {feature.body}
-                </p>
-              </div>
-            ))}
-          </div>
-        </Container>
-      </section>
+      <Section>
+        <div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-3">
+          {landingFeatures.map((feature) => (
+            <div key={feature.title}>
+              <h3 className="text-lg font-semibold">{feature.title}</h3>
+              <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
+                {feature.body}
+              </p>
+            </div>
+          ))}
+        </div>
+      </Section>
 
       {/* Provider strip */}
-      <section className="border-b border-border bg-muted/30">
-        <Container className="py-16">
-          <p className="text-center text-sm font-medium uppercase tracking-widest text-muted-foreground">
-            Deploy across any provider
-          </p>
-          <div className="mt-6 flex flex-wrap items-center justify-center gap-x-3 gap-y-3">
-            {providers.map((provider) => (
-              <Badge
-                key={provider.name}
-                variant={provider.euNative ? 'secondary' : 'outline'}
-                className="text-sm"
-              >
-                {provider.name}
-              </Badge>
-            ))}
-          </div>
-          <div className="mt-8 text-center">
-            <Button asChild variant="outline">
-              <Link href="/providers">
-                See provider coverage <ArrowRight />
-              </Link>
-            </Button>
-          </div>
-        </Container>
-      </section>
+      <Section tone="muted">
+        <p className="text-center text-sm font-medium uppercase tracking-widest text-muted-foreground">
+          Deploy across any provider
+        </p>
+        <div className="mt-6 flex flex-wrap items-center justify-center gap-x-3 gap-y-3">
+          {providers.map((provider) => (
+            <Badge
+              key={provider.name}
+              variant={provider.euNative ? 'secondary' : 'outline'}
+              className="text-sm"
+            >
+              {provider.name}
+            </Badge>
+          ))}
+        </div>
+        <div className="mt-8 text-center">
+          <Button asChild variant="outline">
+            <Link href="/providers">
+              See provider coverage <ArrowRight />
+            </Link>
+          </Button>
+        </div>
+      </Section>
 
       {/* Closing CTA */}
-      <section>
-        <Container className="flex flex-col items-center gap-6 py-24 text-center">
-          <h2 className="max-w-2xl text-balance text-3xl font-semibold tracking-tight sm:text-4xl">
-            Bring your stack under transparent, open control.
-          </h2>
-          <div className="flex flex-wrap items-center justify-center gap-3">
-            <Button asChild size="lg">
-              <Link href="/app">Get started</Link>
-            </Button>
-            <Button asChild size="lg" variant="outline">
-              <Link href="/pricing">Compare tiers</Link>
-            </Button>
-          </div>
-        </Container>
-      </section>
+      <Section size="lg" containerClassName="flex flex-col items-center gap-6 text-center">
+        <h2 className="max-w-2xl text-balance text-3xl font-semibold tracking-tight sm:text-4xl">
+          Bring your stack under transparent, open control.
+        </h2>
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          <Button asChild size="lg">
+            <Link href="/app">Open the console</Link>
+          </Button>
+          <Button asChild size="lg" variant="outline">
+            <Link href="/pricing">Compare tiers</Link>
+          </Button>
+        </div>
+      </Section>
     </main>
   );
 }

@@ -13,7 +13,11 @@ import {
 import { verifyAction } from '@/app/(auth)/actions';
 import { ResendVerificationForm } from '@/components/auth/resend-verification-form';
 
-export const metadata: Metadata = { title: 'Verify email' };
+export const metadata: Metadata = {
+  title: 'Verify email',
+  description:
+    'Confirm your email address to finish setting up your Amicu account.',
+};
 
 // Landing page for the verification link mailed at sign-up. The email points at
 // `{web_base}/verify?token={token}` (the contract with the SMTP sender), so this

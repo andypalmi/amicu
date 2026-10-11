@@ -1,6 +1,7 @@
 import type { SVGProps } from 'react';
 import { cn } from '@amicu/ui';
 import { appName } from '@/lib/shared';
+import { brandMarkShapes } from '@/lib/brand-shapes';
 
 // Shared product brand mark. The app otherwise presents itself as a plain text
 // wordmark (see `appName` / the fumadocs nav title), so the mark here is the
@@ -30,9 +31,7 @@ export function BrandMark({ className, ...props }: SVGProps<SVGSVGElement>) {
       aria-hidden
       {...props}
     >
-      <rect x={2.5} y={2.5} width={19} height={19} rx={5.5} />
-      <path d="M7.5 16.5 12 7l4.5 9.5" />
-      <path d="M9.25 13h5.5" />
+      {brandMarkShapes()}
     </svg>
   );
 }

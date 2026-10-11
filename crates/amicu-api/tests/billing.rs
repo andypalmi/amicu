@@ -113,9 +113,9 @@ async fn harness(tier: Tier, configure_stripe: bool) -> Harness {
             SecretValue::new(b"sk_test_dummy".to_vec()),
             SecretValue::new(WEBHOOK_SECRET.as_bytes().to_vec()),
             vec![(Tier::Pro, PRICE_PRO.to_owned())],
-            "http://localhost:3000/account/billing?checkout=success",
-            "http://localhost:3000/account/billing?checkout=cancel",
-            "http://localhost:3000/account/billing",
+            "http://localhost:3000/billing?checkout=success",
+            "http://localhost:3000/billing?checkout=cancel",
+            "http://localhost:3000/billing",
         );
         BillingApiState::with_stripe(verifier.clone(), users.clone(), stripe)
     } else {

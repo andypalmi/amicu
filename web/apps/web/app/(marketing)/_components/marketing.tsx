@@ -40,3 +40,41 @@ export function PageHeader({
     </header>
   );
 }
+
+const SECTION_SIZES = {
+  md: 'py-16',
+  lg: 'py-24',
+} as const;
+
+/**
+ * Full-width marketing band with a bottom rule. Two vertical sizes only
+ * (`md` = py-16, `lg` = py-24) so rhythm stays consistent; `tone="muted"`
+ * shades the band.
+ */
+export function Section({
+  size = 'md',
+  tone,
+  className,
+  containerClassName,
+  children,
+}: {
+  size?: keyof typeof SECTION_SIZES;
+  tone?: 'muted';
+  className?: string;
+  containerClassName?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section
+      className={cn(
+        'border-b border-border last:border-b-0',
+        tone === 'muted' && 'bg-muted/30',
+        className,
+      )}
+    >
+      <Container className={cn(SECTION_SIZES[size], containerClassName)}>
+        {children}
+      </Container>
+    </section>
+  );
+}

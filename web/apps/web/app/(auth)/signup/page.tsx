@@ -8,7 +8,11 @@ import {
 } from '@amicu/ui';
 import { SignupForm } from '@/components/auth/signup-form';
 
-export const metadata: Metadata = { title: 'Create account' };
+export const metadata: Metadata = {
+  title: 'Create account',
+  description:
+    'Create a free Amicu account and start designing LLM serving stacks.',
+};
 
 export default function SignupPage() {
   return (
