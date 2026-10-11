@@ -10,6 +10,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Shrink target/ on the (disk-limited) runners: no debuginfo, no incremental.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_INCREMENTAL: 0
 
 jobs:
   check:
@@ -17,6 +20,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          # Drop large preinstalled toolchains we never use so the
+          # workspace build (target/) fits on the runner disk.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          df -h /
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -61,7 +73,7 @@ jobs:
       # Verifies the multi-stage Dockerfile actually builds (cargo-chef
       # plan/cook, SQLX_OFFLINE against the committed .sqlx/ cache, the
       # --locked release build of amicu-server, distroless runtime) on every
-      # push/PR — this is the only build verification the image gets today
+      # push/PR - this is the only build verification the image gets today
       # (amicu-planning#143): Docker is unavailable on the maintainer's
       # local machine, and `push: false` means no registry credentials are
       # needed here at all. The real push+deploy happens in
@@ -81,6 +93,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          # Drop large preinstalled toolchains we never use so the
+          # workspace build (target/) fits on the runner disk.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force || true
+          df -h /
 
       - uses: dtolnay/rust-toolchain@1.97
 
