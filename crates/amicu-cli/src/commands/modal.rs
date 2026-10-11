@@ -10,9 +10,11 @@ use std::io::{self, Write};
 use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
 
+use amicu_modal::hardware::{AcceleratorSample, ContainerHardware, HardwareSample};
 use amicu_modal::metrics::{self, MetricsSnapshot, Percentiles};
 use amicu_modal::{AppStatus, Credentials, LogFd, LogLine, ModalClient, ModalError};
 
+use crate::OutputFormat;
 use crate::commands::build_runtime;
 use crate::error::CliError;
 use crate::project::Project;
@@ -157,15 +159,24 @@ pub(crate) fn logs(
     Ok(0)
 }
 
+/// What the hardware probe found for an app: one entry per running
+/// container, or the reason nothing could be probed at all.
+type HardwareReport = Result<Vec<ContainerHardware>, String>;
+
 /// Prints a one-shot runtime-metrics snapshot of a deployed app, or with
 /// `watch` a new one every `interval_secs` until interrupted. The URL comes
 /// from the app's first Function that has one (the same lookup as `status`);
 /// the scrape itself is a plain HTTPS GET with the proxy-auth headers, and its
 /// errors never contain them.
+///
+/// Each snapshot also carries a hardware section from probing the app's
+/// containers. That is best effort: a failure there is reported as
+/// `hardware: n/a (reason)` and never replaces the runtime metrics.
 pub(crate) fn metrics(
     app_name: &str,
     watch: bool,
     interval_secs: u64,
+    format: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
     let credentials = Credentials::from_env().map_err(ModalError::from)?;
@@ -194,7 +205,17 @@ pub(crate) fn metrics(
             Some((before, at)) => snapshot.rate_since(before, now.duration_since(*at)),
             None => snapshot,
         };
-        write_metrics(out, app_name, &snapshot, watch)?;
+        let hardware = rt.block_on(probe_hardware(&status.app_id));
+        match format {
+            OutputFormat::Human => {
+                write_metrics(out, app_name, &snapshot, watch)?;
+                write_hardware(out, &hardware)?;
+            }
+            OutputFormat::Json => {
+                let doc = metrics_json(app_name, &snapshot, &hardware);
+                writeln!(out, "{doc}").map_err(io_err)?;
+            }
+        }
         out.flush().map_err(io_err)?;
         if !watch {
             return Ok(0);
@@ -202,6 +223,19 @@ pub(crate) fn metrics(
         previous = Some((snapshot, now));
         std::thread::sleep(Duration::from_secs(interval_secs));
     }
+}
+
+/// Connects afresh (credentials were validated by the caller) and probes the
+/// app's containers; every failure becomes text for `hardware: n/a (..)`.
+async fn probe_hardware(app_id: &str) -> HardwareReport {
+    let credentials = Credentials::from_env().map_err(|e| e.to_string())?;
+    let mut client = ModalClient::connect(credentials)
+        .await
+        .map_err(|e| e.to_string())?;
+    client
+        .probe_app_hardware(app_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 fn opt<T: std::fmt::Display>(value: Option<T>) -> String {
@@ -278,6 +312,147 @@ fn write_metrics(
     )
     .map_err(io_err)?;
     Ok(())
+}
+
+/// `12.3 GiB`, `512.0 MiB`, `900 B`.
+fn fmt_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    #[allow(clippy::cast_precision_loss)]
+    let b = bytes as f64;
+    if b >= KIB * KIB * KIB {
+        format!("{:.1} GiB", b / (KIB * KIB * KIB))
+    } else if b >= KIB * KIB {
+        format!("{:.1} MiB", b / (KIB * KIB))
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn fmt_opt<T>(value: Option<T>, f: impl FnOnce(T) -> String) -> String {
+    value.map_or_else(|| "n/a".to_owned(), f)
+}
+
+fn write_accelerator(out: &mut dyn Write, a: &AcceleratorSample) -> Result<(), CliError> {
+    let name = a.name.as_deref().map_or_else(
+        || a.vendor.label().to_owned(),
+        |n| format!("{}, {n}", a.vendor.label()),
+    );
+    let mem = match (a.mem_used_bytes, a.mem_total_bytes) {
+        (Some(used), Some(total)) => format!("{} / {}", fmt_bytes(used), fmt_bytes(total)),
+        (Some(used), None) => format!("{} / n/a", fmt_bytes(used)),
+        (None, Some(total)) => format!("n/a / {}", fmt_bytes(total)),
+        (None, None) => "n/a".to_owned(),
+    };
+    writeln!(
+        out,
+        "    gpu {} ({name}): util={} mem={mem} temp={} power={}",
+        a.index,
+        fmt_opt(a.util_pct, |v| format!("{v:.0}%")),
+        fmt_opt(a.temp_c, |v| format!("{v:.0}C")),
+        fmt_opt(a.power_w, |v| format!("{v:.1}W")),
+    )
+    .map_err(io_err)
+}
+
+fn write_host(out: &mut dyn Write, sample: &HardwareSample) -> Result<(), CliError> {
+    let h = &sample.host;
+    let mem = match (h.mem_used_bytes, h.mem_limit_bytes) {
+        (Some(used), Some(limit)) => format!("{} / {}", fmt_bytes(used), fmt_bytes(limit)),
+        (Some(used), None) => format!("{} / no limit", fmt_bytes(used)),
+        (None, Some(limit)) => format!("n/a / {}", fmt_bytes(limit)),
+        (None, None) => "n/a".to_owned(),
+    };
+    let source = h
+        .memory_source
+        .map_or_else(String::new, |s| format!(" ({})", s.label()));
+    #[allow(clippy::cast_precision_loss)]
+    let cpu = fmt_opt(h.cpu_usage_usec, |us| format!("{:.1}s", us as f64 / 1e6));
+    writeln!(out, "    memory: {mem}{source}  cpu time: {cpu}").map_err(io_err)
+}
+
+/// Renders the hardware section. Split out so it is testable without a
+/// network call. Missing values print `n/a`; a probe that could not run
+/// prints `hardware: n/a (reason)`.
+fn write_hardware(out: &mut dyn Write, report: &HardwareReport) -> Result<(), CliError> {
+    let containers = match report {
+        Err(reason) => return writeln!(out, "hardware: n/a ({reason})").map_err(io_err),
+        Ok(containers) if containers.is_empty() => {
+            return writeln!(out, "hardware: n/a (no running containers)").map_err(io_err);
+        }
+        Ok(containers) => containers,
+    };
+    writeln!(out, "hardware:").map_err(io_err)?;
+    for container in containers {
+        match &container.outcome {
+            Err(reason) => {
+                writeln!(out, "  container {}: n/a ({reason})", container.task_id)
+                    .map_err(io_err)?;
+            }
+            Ok(sample) => {
+                writeln!(out, "  container {}", container.task_id).map_err(io_err)?;
+                if sample.accelerators.is_empty() {
+                    writeln!(out, "    accelerators: none detected").map_err(io_err)?;
+                }
+                for accelerator in &sample.accelerators {
+                    write_accelerator(out, accelerator)?;
+                }
+                write_host(out, sample)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The `--output json` document: runtime series plus hardware, with `null`
+/// wherever a value is not reported.
+fn metrics_json(
+    app_name: &str,
+    m: &MetricsSnapshot,
+    hardware: &HardwareReport,
+) -> serde_json::Value {
+    use serde_json::json;
+    let pct = |p: Option<Percentiles>| {
+        p.map(|p| json!({ "p50_ms": p.p50_ms, "p90_ms": p.p90_ms, "p99_ms": p.p99_ms }))
+    };
+    let hardware = match hardware {
+        Err(reason) => json!({ "error": reason, "containers": [] }),
+        Ok(containers) => json!({
+            "error": null,
+            "containers": containers.iter().map(|c| match &c.outcome {
+                Ok(sample) => json!({
+                    "task_id": c.task_id,
+                    "error": null,
+                    "accelerators": sample.accelerators,
+                    "host": sample.host,
+                }),
+                Err(reason) => json!({
+                    "task_id": c.task_id,
+                    "error": reason,
+                    "accelerators": [],
+                    "host": null,
+                }),
+            }).collect::<Vec<_>>(),
+        }),
+    };
+    json!({
+        "app": app_name,
+        "runtime": {
+            "kind": m.runtime.label(),
+            "requests_total": m.requests_total,
+            "requests_running": m.requests_running,
+            "requests_waiting": m.requests_waiting,
+            "prompt_tokens_total": m.prompt_tokens_total,
+            "generation_tokens_total": m.generation_tokens_total,
+            "generation_tokens_per_second": m.generation_tokens_per_second,
+            "prompt_tokens_per_second": m.prompt_tokens_per_second,
+            "kv_cache_usage": m.kv_cache_usage,
+            "preemptions": m.preemptions,
+            "e2e_latency": pct(m.e2e_latency),
+            "time_to_first_token": pct(m.time_to_first_token),
+            "time_per_output_token": pct(m.time_per_output_token),
+        },
+        "hardware": hardware,
+    })
 }
 
 /// Stops a deployed app (`ModalClient::find_app` + `ModalClient::stop_app`).
@@ -465,6 +640,145 @@ mod tests {
             "{r}"
         );
         assert!(r.contains("e2e latency: n/a"), "{r}");
+    }
+
+    fn sample_with_gpu() -> HardwareSample {
+        use amicu_modal::hardware::{HostSample, MemorySource, Vendor};
+        let gpu = AcceleratorSample {
+            index: 0,
+            vendor: Vendor::Nvidia,
+            name: Some("NVIDIA H100 80GB HBM3".to_owned()),
+            util_pct: Some(37.0),
+            mem_used_bytes: Some(21412 * 1024 * 1024),
+            mem_total_bytes: Some(81559 * 1024 * 1024),
+            temp_c: Some(45.0),
+            power_w: Some(289.5),
+        };
+        let blank = AcceleratorSample {
+            index: 1,
+            vendor: Vendor::Amd,
+            name: None,
+            util_pct: None,
+            mem_used_bytes: None,
+            mem_total_bytes: None,
+            temp_c: None,
+            power_w: None,
+        };
+        HardwareSample {
+            accelerators: vec![gpu, blank],
+            host: HostSample {
+                mem_used_bytes: Some(13_240_508_416),
+                mem_limit_bytes: None,
+                cpu_usage_usec: Some(123_456_789),
+                memory_source: Some(MemorySource::CgroupV2),
+            },
+        }
+    }
+
+    #[allow(clippy::unnecessary_wraps)]
+    fn report(outcome: Result<HardwareSample, String>) -> HardwareReport {
+        Ok(vec![ContainerHardware {
+            task_id: "ta-1".to_owned(),
+            outcome,
+        }])
+    }
+
+    #[test]
+    fn write_hardware_renders_accelerators_and_marks_missing_na() {
+        let mut out = new_buf();
+        write_hardware(&mut out, &report(Ok(sample_with_gpu()))).expect("writes ok");
+        let r = as_str(&out);
+        assert!(r.contains("container ta-1"), "{r}");
+        assert!(
+            r.contains(
+                "gpu 0 (nvidia, NVIDIA H100 80GB HBM3): util=37% mem=20.9 GiB / 79.6 GiB temp=45C power=289.5W"
+            ),
+            "{r}"
+        );
+        assert!(
+            r.contains("gpu 1 (amd): util=n/a mem=n/a temp=n/a power=n/a"),
+            "{r}"
+        );
+        assert!(
+            r.contains("memory: 12.3 GiB / no limit (cgroup v2)  cpu time: 123.5s"),
+            "{r}"
+        );
+    }
+
+    #[test]
+    fn write_hardware_degrades_to_na_with_a_reason() {
+        let mut out = new_buf();
+        write_hardware(
+            &mut out,
+            &Err("Modal RPC TaskList failed: Unavailable: x".to_owned()),
+        )
+        .expect("writes ok");
+        assert_eq!(
+            as_str(&out),
+            "hardware: n/a (Modal RPC TaskList failed: Unavailable: x)\n"
+        );
+
+        let mut out = new_buf();
+        write_hardware(&mut out, &Ok(Vec::new())).expect("writes ok");
+        assert_eq!(as_str(&out), "hardware: n/a (no running containers)\n");
+
+        let mut out = new_buf();
+        write_hardware(&mut out, &report(Err("exec not supported".to_owned()))).expect("writes ok");
+        assert!(
+            as_str(&out).contains("container ta-1: n/a (exec not supported)"),
+            "{}",
+            as_str(&out)
+        );
+
+        let mut out = new_buf();
+        write_hardware(&mut out, &report(Ok(HardwareSample::default()))).expect("writes ok");
+        assert!(as_str(&out).contains("accelerators: none detected"));
+        assert!(
+            as_str(&out).contains("memory: n/a  cpu time: n/a"),
+            "{}",
+            as_str(&out)
+        );
+    }
+
+    #[test]
+    fn metrics_json_includes_hardware_and_nulls_for_missing() {
+        use amicu_modal::metrics::snapshot_from_text;
+        let snap = snapshot_from_text("vllm:num_requests_running 2\n").expect("vllm");
+        let doc = metrics_json("amicu-app", &snap, &report(Ok(sample_with_gpu())));
+        assert_eq!(doc["app"], "amicu-app");
+        assert_eq!(doc["runtime"]["kind"], "vLLM");
+        assert_eq!(doc["runtime"]["requests_running"], 2);
+        assert!(doc["runtime"]["requests_waiting"].is_null());
+        let c = &doc["hardware"]["containers"][0];
+        assert_eq!(c["task_id"], "ta-1");
+        assert_eq!(c["accelerators"][0]["vendor"], "nvidia");
+        assert_eq!(c["accelerators"][0]["util_pct"], 37.0);
+        assert!(c["accelerators"][1]["util_pct"].is_null());
+        assert!(c["host"]["mem_limit_bytes"].is_null());
+        assert_eq!(c["host"]["memory_source"], "cgroup-v2");
+        // Round-trips as text: it is what `--output json` prints.
+        serde_json::from_str::<serde_json::Value>(&doc.to_string()).expect("valid json");
+    }
+
+    #[test]
+    fn metrics_json_keeps_runtime_when_hardware_fails() {
+        use amicu_modal::metrics::snapshot_from_text;
+        let snap = snapshot_from_text("vllm:num_requests_running 2\n").expect("vllm");
+        let doc = metrics_json("a", &snap, &Err("boom".to_owned()));
+        assert_eq!(doc["runtime"]["requests_running"], 2);
+        assert_eq!(doc["hardware"]["error"], "boom");
+        assert_eq!(doc["hardware"]["containers"], serde_json::json!([]));
+
+        let doc = metrics_json("a", &snap, &report(Err("no exec".to_owned())));
+        assert_eq!(doc["hardware"]["containers"][0]["error"], "no exec");
+        assert!(doc["hardware"]["containers"][0]["host"].is_null());
+    }
+
+    #[test]
+    fn fmt_bytes_units() {
+        assert_eq!(fmt_bytes(900), "900 B");
+        assert_eq!(fmt_bytes(512 * 1024 * 1024), "512.0 MiB");
+        assert_eq!(fmt_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
     }
 
     #[test]
