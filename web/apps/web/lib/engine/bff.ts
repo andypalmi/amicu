@@ -1,4 +1,5 @@
 import 'server-only';
+import { readJsonBody } from '@/lib/security/body';
 import { getSession } from '@/lib/auth/session';
 import { readAccessToken } from '@/lib/auth/cookies';
 import { logServerError, type ServerErrorContext } from '@/lib/observability/log-server-error';
@@ -28,12 +29,9 @@ export async function guardEngine(): Promise<Guard> {
 export async function readConfigBody(
   request: Request,
 ): Promise<{ config: string; prior?: string | null } | { deny: Response }> {
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return { deny: Response.json({ error: 'request body must be JSON' }, { status: 400 }) };
-  }
+  const parsed = await readJsonBody(request);
+  if ('deny' in parsed) return parsed;
+  const body: unknown = parsed.value;
   const config = (body as { config?: unknown })?.config;
   if (typeof config !== 'string') {
     return { deny: Response.json({ error: '`config` (string) is required' }, { status: 400 }) };

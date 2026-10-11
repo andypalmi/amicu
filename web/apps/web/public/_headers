@@ -1,0 +1,11 @@
+# Cloudflare static-assets headers. OpenNext serves /_next/static/* and public/*
+# straight from the ASSETS binding, bypassing the Worker, so the security headers
+# set by next.config.mjs headers() (which only reach Worker-rendered responses)
+# do NOT apply to them. Keep in sync with securityHeaders in next.config.mjs.
+# CSP/frame headers are document-level and only matter for HTML, which the Worker
+# serves; assets need the transport/sniffing ones.
+/*
+  X-Content-Type-Options: nosniff
+  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY

@@ -1,4 +1,5 @@
 import 'server-only';
+import { readJsonBody } from '@/lib/security/body';
 import type { CreateConfigRequest, AppendVersionRequest } from '@amicu/api-client';
 
 // Body/param validation for the /api/configs/* BFF routes. Session guarding and
@@ -15,12 +16,9 @@ import type { CreateConfigRequest, AppendVersionRequest } from '@amicu/api-clien
 export async function readCreateConfigBody(
   request: Request,
 ): Promise<{ body: CreateConfigRequest } | { deny: Response }> {
-  let raw: unknown;
-  try {
-    raw = await request.json();
-  } catch {
-    return { deny: Response.json({ error: 'request body must be JSON' }, { status: 400 }) };
-  }
+  const parsed = await readJsonBody(request);
+  if ('deny' in parsed) return parsed;
+  const raw: unknown = parsed.value;
   const name = (raw as { name?: unknown })?.name;
   if (typeof name !== 'string' || name.trim() === '') {
     return { deny: Response.json({ error: '`name` (string) is required' }, { status: 400 }) };
@@ -42,12 +40,9 @@ export async function readCreateConfigBody(
 export async function readAppendVersionBody(
   request: Request,
 ): Promise<{ body: AppendVersionRequest } | { deny: Response }> {
-  let raw: unknown;
-  try {
-    raw = await request.json();
-  } catch {
-    return { deny: Response.json({ error: 'request body must be JSON' }, { status: 400 }) };
-  }
+  const parsed = await readJsonBody(request);
+  if ('deny' in parsed) return parsed;
+  const raw: unknown = parsed.value;
   const content = (raw as { content?: unknown })?.content;
   if (typeof content !== 'string') {
     return { deny: Response.json({ error: '`content` (string) is required' }, { status: 400 }) };

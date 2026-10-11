@@ -44,8 +44,8 @@ import assert from 'node:assert/strict';
 import type { NextRequest as NextRequestType, NextResponse } from 'next/server';
 import { startStubAuthApi, type StubAuthApi } from './fixtures/refresh-stub.ts';
 
-const ACCESS_COOKIE = 'amicu_at';
-const REFRESH_COOKIE = 'amicu_rt';
+const ACCESS_COOKIE = '__Host-amicu_at';
+const REFRESH_COOKIE = '__Host-amicu_rt';
 
 /** A syntactically-valid, unsigned JWT with the given `exp` (seconds since epoch). */
 function craftJwt(exp: number): string {
@@ -115,8 +115,8 @@ test('rotates the session cookies with HttpOnly/Secure/SameSite=Lax on an expiri
   assert.ok(rt, 'amicu_rt Set-Cookie header missing');
 
   for (const [name, header] of [
-    ['amicu_at', at],
-    ['amicu_rt', rt],
+    [ACCESS_COOKIE, at],
+    [REFRESH_COOKIE, rt],
   ] as const) {
     assert.match(header!, /HttpOnly/i, `${name} must be HttpOnly`);
     assert.match(header!, /Secure/i, `${name} must be Secure (COOKIE_SECURE=true)`);
@@ -253,8 +253,8 @@ test('the revoked path: a rejected/reused refresh token clears both cookies and 
   const rt = setCookieHeaders.find((c) => c.startsWith(`${REFRESH_COOKIE}=`));
   assert.ok(at, 'amicu_at must still be addressed by a Set-Cookie (clearing it)');
   assert.ok(rt, 'amicu_rt must still be addressed by a Set-Cookie (clearing it)');
-  assert.match(at!, /^amicu_at=;/, 'amicu_at must be cleared (empty value), not left with a stale token');
-  assert.match(rt!, /^amicu_rt=;/, 'amicu_rt must be cleared (empty value), not left with a stale token');
+  assert.match(at!, /^__Host-amicu_at=;/, 'amicu_at must be cleared (empty value), not left with a stale token');
+  assert.match(rt!, /^__Host-amicu_rt=;/, 'amicu_rt must be cleared (empty value), not left with a stale token');
 });
 
 test('DOCUMENTED RESIDUAL RISK: if a second, independently-constructed request ever replays the pre-rotation refresh cookie after a legitimate rotation, the whole token family is compromised - including the just-issued valid successor', async () => {
@@ -294,4 +294,16 @@ test('DOCUMENTED RESIDUAL RISK: if a second, independently-constructed request e
     'the successor token from the LEGITIMATE call #1 - already handed to the browser via Set-Cookie - is now also invalid: ' +
       'this is the real-world impact if a genuine duplicate dispatch with a reconstructed request ever occurred',
   );
+});
+
+test('proxy: cross-origin POST to /api/* is rejected with 403; same-origin POST and cross-origin GET pass through', async () => {
+  const url = 'https://amicu.example.test/api/engine/plan';
+  const cross = await proxy(new NextRequest(url, { method: 'POST', headers: { origin: 'https://evil.example' } }));
+  assert.equal(cross.status, 403);
+  const crossFetchMeta = await proxy(new NextRequest(url, { method: 'POST', headers: { 'sec-fetch-site': 'cross-site' } }));
+  assert.equal(crossFetchMeta.status, 403);
+  const same = await proxy(new NextRequest(url, { method: 'POST', headers: { origin: 'https://amicu.example.test' } }));
+  assert.notEqual(same.status, 403);
+  const get = await proxy(new NextRequest(url, { method: 'GET', headers: { origin: 'https://evil.example' } }));
+  assert.notEqual(get.status, 403);
 });
