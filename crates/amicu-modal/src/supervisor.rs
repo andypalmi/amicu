@@ -832,49 +832,96 @@ const BUILD_PHASE_NOTE: &str =
 /// Prefix put on every streamed image-build line.
 const BUILD_LOG_PREFIX: &str = "  build: ";
 
-/// Values that must never reach the terminal: every secret value and every
-/// plain image-env value (an `ENV k=v` step can be echoed by the builder, and
-/// a user may have put a token in the `env` block). Values shorter than 4
-/// bytes are kept only for secrets, to avoid mangling unrelated output.
+/// Env keys whose (plain, image) values are treated as secrets for redaction.
+const SECRET_KEY_HINTS: [&str; 7] = [
+    "TOKEN",
+    "KEY",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "AUTH",
+];
+
+/// Values that must never reach the terminal: every resolved-secret value, plus
+/// plain image-env values whose key looks like a credential (a user may have
+/// put a token in the `env` block and a builder can echo `ENV k=v`). Other
+/// image-env values (`true`, cache paths, ...) are left alone so ordinary build
+/// output is not mangled. Non-secret-looking values shorter than 4 bytes are
+/// never redacted.
 fn redaction_values(spec: &ServerSpec) -> Vec<String> {
     let secrets = spec.secret_env.values().filter(|v| !v.is_empty());
-    let env = spec.image.env.values().filter(|v| v.len() >= 4);
+    let env = spec
+        .image
+        .env
+        .iter()
+        .filter(|(k, v)| {
+            let k = k.to_ascii_uppercase();
+            v.len() >= 4 && SECRET_KEY_HINTS.iter().any(|h| k.contains(h))
+        })
+        .map(|(_, v)| v);
     secrets.chain(env).cloned().collect()
 }
 
+/// Upper bound on a buffered partial line before it is flushed anyway.
+const MAX_PARTIAL_LINE: usize = 64 * 1024;
+
 /// Writes image-build output to a (non-stdout) writer: one prefixed line per
 /// build line, control characters stripped, secret values replaced by `***`.
-/// Write errors are ignored: a broken stderr must not fail a deploy.
+/// Chunks are reassembled into whole lines before redaction so a value split
+/// across chunks cannot leak. Write errors are ignored: a broken stderr must
+/// not fail a deploy.
 struct BuildLogSink<W: std::io::Write> {
     out: W,
     redact: Vec<String>,
+    partial: String,
 }
 
 impl<W: std::io::Write> BuildLogSink<W> {
     fn new(out: W, redact: Vec<String>) -> Self {
-        Self { out, redact }
+        Self {
+            out,
+            redact,
+            partial: String::new(),
+        }
     }
 
     fn phase(&mut self, note: &str) {
         let _ = writeln!(self.out, "{note}");
     }
 
+    /// Feed one chunk of build output (may hold several lines or a fragment).
     fn line(&mut self, chunk: &str) {
-        // Modal may send several lines (or a bare `\r`-terminated progress
-        // update) in one chunk.
-        for raw in chunk.split(['\n', '\r']) {
-            let mut text: String = raw
-                .chars()
-                .filter(|c| !c.is_control() || *c == '\t')
-                .collect();
-            if text.trim().is_empty() {
-                continue;
-            }
-            for value in &self.redact {
-                text = text.replace(value.as_str(), "***");
-            }
-            let _ = writeln!(self.out, "{BUILD_LOG_PREFIX}{text}");
+        self.partial.push_str(chunk);
+        // `\n` and a bare `\r` (progress update) both terminate a line.
+        while let Some(end) = self.partial.find(['\n', '\r']) {
+            let raw: String = self.partial.drain(..=end).collect();
+            self.emit(&raw);
         }
+        if self.partial.len() > MAX_PARTIAL_LINE {
+            let raw = std::mem::take(&mut self.partial);
+            self.emit(&raw);
+        }
+    }
+
+    /// Flush any trailing unterminated line.
+    fn finish(&mut self) {
+        let raw = std::mem::take(&mut self.partial);
+        self.emit(&raw);
+    }
+
+    fn emit(&mut self, raw: &str) {
+        let mut text: String = raw
+            .chars()
+            .filter(|c| !c.is_control() || *c == '\t')
+            .collect();
+        if text.trim().is_empty() {
+            return;
+        }
+        for value in &self.redact {
+            text = text.replace(value.as_str(), "***");
+        }
+        let _ = writeln!(self.out, "{BUILD_LOG_PREFIX}{text}");
     }
 }
 
@@ -902,10 +949,9 @@ impl ProcessSupervisor for ModalSupervisor {
         let mut sink = BuildLogSink::new(std::io::stderr(), redaction_values(&spec));
         sink.phase(BUILD_PHASE_NOTE);
         let mut on_log = |line: &str| sink.line(line);
-        let deployment = client
-            .deploy_server(&spec, &mut on_log)
-            .await
-            .map_err(|e| modal_err(&e))?;
+        let deployed = client.deploy_server(&spec, &mut on_log).await;
+        sink.finish();
+        let deployment = deployed.map_err(|e| modal_err(&e))?;
         Ok(RuntimeHandle {
             id: deployment.app_id,
             deployment: plan.deployment.clone(),
@@ -983,12 +1029,16 @@ mod tests {
             sink.phase("starting");
             sink.line("Step 1\nusing hf_supersecret here\n\n");
             sink.line("\x1b[31mred\x1b[0m\rprogress");
-            sink.line("   ");
+            sink.line("\n   \n");
+            // Secret split across chunks, plus an unterminated tail.
+            sink.line("tok hf_super");
+            sink.line("secret end\ntail hf_supersecret");
+            sink.finish();
         }
         let out = String::from_utf8(buf).unwrap();
         assert_eq!(
             out,
-            "starting\n  build: Step 1\n  build: using *** here\n  build: [31mred[0m\n  build: progress\n"
+            "starting\n  build: Step 1\n  build: using *** here\n  build: [31mred[0m\n  build: progress\n  build: tok *** end\n  build: tail ***\n"
         );
         assert!(!out.contains("hf_supersecret"));
     }
@@ -996,7 +1046,11 @@ mod tests {
     #[test]
     fn redaction_values_cover_secrets_and_image_env() {
         let mut settings = base_settings();
-        settings.env = BTreeMap::from([("K".to_owned(), "plainvalue".to_owned())]);
+        settings.env = BTreeMap::from([
+            ("MY_API_TOKEN".to_owned(), "plainvalue".to_owned()),
+            ("FLAG".to_owned(), "true".to_owned()),
+            ("CACHE".to_owned(), "/root/.cache/huggingface".to_owned()),
+        ]);
         let plan = plan_with(base_argv(), settings);
         let secret = ResolvedSecret {
             name: "HF_TOKEN".to_owned(),
@@ -1008,6 +1062,8 @@ mod tests {
         let values = redaction_values(&spec);
         assert!(values.contains(&"plainvalue".to_owned()));
         assert!(values.contains(&"tok".to_owned()));
+        assert!(!values.contains(&"true".to_owned()));
+        assert!(!values.contains(&"/root/.cache/huggingface".to_owned()));
     }
     use amicu_core::ByteSize;
     use amicu_core::id::DeploymentId;
