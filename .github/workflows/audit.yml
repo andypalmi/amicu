@@ -47,7 +47,7 @@ jobs:
           pnpm audit --audit-level=high
 
       - name: Report failure as an issue
-        if: steps.cargo.outcome == 'failure' || steps.pnpm.outcome == 'failure'
+        if: github.ref == 'refs/heads/main' && (steps.cargo.outcome == 'failure' || steps.pnpm.outcome == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_TITLE: Dependency audit failing on main
@@ -63,7 +63,7 @@ jobs:
           fi
 
       - name: Close tracking issue when green
-        if: steps.cargo.outcome == 'success' && steps.pnpm.outcome == 'success'
+        if: github.ref == 'refs/heads/main' && steps.cargo.outcome == 'success' && steps.pnpm.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_TITLE: Dependency audit failing on main
