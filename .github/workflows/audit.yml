@@ -18,13 +18,8 @@ jobs:
     permissions:
       contents: read
       issues: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      ISSUE_TITLE: Dependency audit failing on main
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: main
 
       - uses: taiki-e/install-action@cargo-audit
 
@@ -53,15 +48,31 @@ jobs:
 
       - name: Report failure as an issue
         if: steps.cargo.outcome == 'failure' || steps.pnpm.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_TITLE: Dependency audit failing on main
         run: |
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          body="Dependency audit failed on main (cargo audit: ${{ steps.cargo.outcome }}, pnpm audit: ${{ steps.pnpm.outcome }}). See $run_url"
+          body="Dependency audit failed on $GITHUB_REF_NAME (cargo audit: ${{ steps.cargo.outcome }}, pnpm audit: ${{ steps.pnpm.outcome }}). See $run_url"
           existing=$(gh issue list --state open --search "\"$ISSUE_TITLE\" in:title" \
             --json number,title --jq "[.[] | select(.title == \"$ISSUE_TITLE\")][0].number // empty")
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "$body"
           else
             gh issue create --title "$ISSUE_TITLE" --body "$body"
+          fi
+
+      - name: Close tracking issue when green
+        if: steps.cargo.outcome == 'success' && steps.pnpm.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_TITLE: Dependency audit failing on main
+        run: |
+          existing=$(gh issue list --state open --search "\"$ISSUE_TITLE\" in:title" \
+            --json number,title --jq "[.[] | select(.title == \"$ISSUE_TITLE\")][0].number // empty")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "audit green again"
+            gh issue close "$existing"
           fi
 
       - name: Fail run if audit failed

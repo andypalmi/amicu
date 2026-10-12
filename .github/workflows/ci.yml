@@ -64,11 +64,15 @@ jobs:
       - name: Detect dependency changes
         id: deps
         run: |
+          set -euo pipefail
           blocking=false
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] &&
-            git diff --name-only "origin/${{ github.base_ref }}...HEAD" |
-              grep -Eq '(^|/)(Cargo\.lock|Cargo\.toml)$'; then
-            blocking=true
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            # Fail closed: a git error aborts the step (set -e), failing the job.
+            git rev-parse --verify "origin/$GITHUB_BASE_REF" > /dev/null
+            changed=$(git diff --name-only "origin/$GITHUB_BASE_REF...HEAD")
+            if grep -Eq '(^|/)(Cargo\.lock|Cargo\.toml)$|^\.cargo/audit\.toml$' <<< "$changed"; then
+              blocking=true
+            fi
           fi
           echo "blocking=$blocking" >> "$GITHUB_OUTPUT"
           echo "Audit blocking: $blocking"
@@ -166,11 +170,15 @@ jobs:
         id: deps
         working-directory: .
         run: |
+          set -euo pipefail
           blocking=false
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] &&
-            git diff --name-only "origin/${{ github.base_ref }}...HEAD" |
-              grep -Eq '^web/(.*/)?(package\.json|pnpm-lock\.yaml)$'; then
-            blocking=true
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            # Fail closed: a git error aborts the step (set -e), failing the job.
+            git rev-parse --verify "origin/$GITHUB_BASE_REF" > /dev/null
+            changed=$(git diff --name-only "origin/$GITHUB_BASE_REF...HEAD")
+            if grep -Eq '^web/(.*/)?(package\.json|pnpm-lock\.yaml)$|^web/pnpm-workspace\.yaml$' <<< "$changed"; then
+              blocking=true
+            fi
           fi
           echo "blocking=$blocking" >> "$GITHUB_OUTPUT"
           echo "Audit blocking: $blocking"
