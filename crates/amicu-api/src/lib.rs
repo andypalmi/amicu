@@ -94,8 +94,9 @@ pub use health::{HealthApiState, health_router};
 pub use openapi::ApiDoc;
 pub use org::{InMemoryOrgStore, OrgApiState, OrgStore, org_router};
 pub use outbox::{
-    DEFAULT_DRAIN_BATCH_SIZE, DEFAULT_DRAIN_BUDGET_MS, DrainAuth, DrainReport, OutboxApiState,
-    drain_once, outbox_router,
+    DEFAULT_DRAIN_BATCH_SIZE, DEFAULT_DRAIN_BUDGET_MS, DEFAULT_INLINE_BATCH_SIZE,
+    DEFAULT_INLINE_BUDGET_MS, DrainAuth, DrainReport, InlineSend, OutboxApiState, drain_once,
+    outbox_router,
 };
 pub use ratelimit::{
     InMemoryRateLimiter, LimiterUnavailable, PostgresRateLimiter, ProxyParseError, RateLimiter,

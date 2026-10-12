@@ -64,8 +64,16 @@ pub const DEFAULT_DRAIN_BATCH_SIZE: u32 = 50;
 /// Cloud Scheduler's HTTP attempt deadline for this job is 30s
 /// (`amicu-infra/modules/scheduler`), so the drain must return comfortably
 /// inside that even when every send is slow. 20s leaves 10s of headroom; the
-/// remaining messages are simply claimed by the next minute's invocation.
+/// remaining messages are simply claimed by the next scheduled invocation.
 pub const DEFAULT_DRAIN_BUDGET_MS: u64 = 20_000;
+
+/// Default for the inline (post-enqueue) send: at most this many messages.
+pub const DEFAULT_INLINE_BATCH_SIZE: u32 = 1;
+
+/// Default wall-clock budget, in milliseconds, of the inline send performed by
+/// the sign-up / recover / resend-verification handlers. It is BOTH the cap on
+/// the send and the fixed duration of that phase (see [`InlineSend`]).
+pub const DEFAULT_INLINE_BUDGET_MS: u64 = 1_000;
 
 /// Hard ceiling on the batch size, whatever the configuration asks for. A
 /// runaway value would let one request hold a claim lease over the whole queue.
@@ -411,6 +419,122 @@ pub async fn drain_once(
     Ok(report)
 }
 
+/// Best-effort delivery right after a request enqueued mail.
+///
+/// Cloud Run throttles CPU once the response is written, so a detached task
+/// cannot be trusted to send; this runs INSIDE the request, after the handler's
+/// enqueue transaction has committed, and before the response is returned.
+///
+/// # Same claim path as the scheduler
+///
+/// It calls [`drain_once`], i.e. the same `claim_due` (`FOR UPDATE SKIP LOCKED`
+/// plus a lease), `mark_sent` and `plan_failure`/`mark_failed` accounting. A
+/// concurrent scheduler drain therefore cannot double-send, and a failed inline
+/// attempt is recorded exactly like a failed scheduled one: the row stays
+/// pending with backoff and the scheduler sweep retries it.
+///
+/// # Best-effort
+///
+/// Every failure (SMTP, DB, timeout) is swallowed and logged at `warn` with
+/// counts only (no addresses, tokens, or error text from the mailer). The HTTP
+/// response is never affected. If the budget elapses mid-send the claimed row
+/// is NOT cancelled: it finishes on a detached task (possibly late on Cloud Run,
+/// where CPU is throttled after the response) and records its outcome normally.
+/// A task lost with its instance leaves the row leased; the sweep retries it
+/// once the lease expires.
+///
+/// # Anti-enumeration
+///
+/// `/signup`, `/recover` and `/verify/resend` enqueue mail only when the account
+/// state warrants it. Sending inline only in that case would make the response
+/// time depend on whether the account exists (an SMTP round trip vs nothing).
+/// So [`run_padded`](Self::run_padded) is called UNCONDITIONALLY by those
+/// handlers and always occupies exactly `budget` of wall-clock time: the send is
+/// cut off at the budget by a timeout, and if it finishes early we sleep out the
+/// remainder. The observable duration is therefore the constant `budget`
+/// whether there was something to send or not. (Same fixed-floor technique as
+/// the service layer's `ANTI_ENUMERATION_FLOOR`.)
+#[derive(Clone)]
+pub struct InlineSend {
+    store: Arc<dyn OutboxStore>,
+    notifier: Arc<dyn Notifier>,
+    batch_size: u32,
+    budget: Duration,
+}
+
+impl InlineSend {
+    /// Build an inline sender over the outbox `store` and the real `notifier`
+    /// (the mailer, NOT the enqueueing notifier the auth flows use).
+    #[must_use]
+    pub fn new(store: Arc<dyn OutboxStore>, notifier: Arc<dyn Notifier>) -> Self {
+        Self {
+            store,
+            notifier,
+            batch_size: DEFAULT_INLINE_BATCH_SIZE,
+            budget: Duration::from_millis(DEFAULT_INLINE_BUDGET_MS),
+        }
+    }
+
+    /// Cap how many messages one inline pass claims (clamped to `1..=500`).
+    #[must_use]
+    pub fn with_batch_size(mut self, batch_size: u32) -> Self {
+        self.batch_size = batch_size.clamp(1, MAX_DRAIN_BATCH_SIZE);
+        self
+    }
+
+    /// Set the time budget (and fixed phase duration).
+    #[must_use]
+    pub fn with_budget(mut self, budget: Duration) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// Attempt delivery, never failing, and always taking exactly `budget`.
+    ///
+    /// A zero budget disables the inline send entirely (nothing is claimed and
+    /// no padding is applied).
+    ///
+    /// The pass runs on its own spawned task and only the wait on its
+    /// `JoinHandle` is bounded by the deadline. Dropping `drain_once` mid-flight
+    /// would cancel it between "SMTP accepted" and `mark_sent` (the row would be
+    /// re-sent after the lease expires) or strand claimed-but-untried rows. On
+    /// timeout the task simply keeps running and records its outcome. On Cloud
+    /// Run CPU is throttled after the response, so that tail may finish late
+    /// (when the instance next gets CPU); that is acceptable because it is no
+    /// longer cancelled mid-statement. The inner budget is half the outer one so
+    /// the pass stops starting new sends well before the deadline.
+    pub async fn run_padded(&self) {
+        if self.budget.is_zero() {
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + self.budget;
+        let store = self.store.clone();
+        let notifier = self.notifier.clone();
+        let (batch_size, inner) = (self.batch_size, self.budget / 2);
+        let pass = tokio::spawn(async move {
+            drain_once(store.as_ref(), notifier.as_ref(), batch_size, inner).await
+        });
+        match tokio::time::timeout_at(deadline, pass).await {
+            Ok(Ok(Ok(report))) => {
+                if report.failed > 0 || report.dead_lettered > 0 {
+                    tracing::warn!(
+                        sent = report.sent,
+                        failed = report.failed,
+                        dead_lettered = report.dead_lettered,
+                        "inline outbox send: some messages left for the scheduler retry"
+                    );
+                } else if report.claimed > 0 {
+                    tracing::debug!(sent = report.sent, "inline outbox send delivered");
+                }
+            }
+            Ok(Ok(Err(_))) => tracing::warn!("inline outbox send failed: store error"),
+            Ok(Err(_)) => tracing::warn!("inline outbox send task aborted"),
+            Err(_) => tracing::warn!("inline outbox send still running at deadline; detached"),
+        }
+        tokio::time::sleep_until(deadline).await;
+    }
+}
+
 /// `POST /internal/outbox/drain`.
 async fn drain_handler(State(state): State<OutboxApiState>, headers: HeaderMap) -> Response {
     if let Err(rejection) = state.auth.authorize(&headers).await {
@@ -425,7 +549,23 @@ async fn drain_handler(State(state): State<OutboxApiState>, headers: HeaderMap) 
     )
     .await
     {
-        Ok(report) => (StatusCode::OK, Json(report)).into_response(),
+        Ok(report) => {
+            // One concise line, and only when there was something to do: an
+            // empty sweep every 15 minutes is noise against the log quota.
+            if report.claimed == 0 {
+                tracing::debug!("outbox drain: nothing due");
+            } else {
+                tracing::info!(
+                    claimed = report.claimed,
+                    sent = report.sent,
+                    failed = report.failed,
+                    dead_lettered = report.dead_lettered,
+                    budget_exhausted = report.budget_exhausted,
+                    "outbox drain"
+                );
+            }
+            (StatusCode::OK, Json(report)).into_response()
+        }
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": "outbox drain failed" })),

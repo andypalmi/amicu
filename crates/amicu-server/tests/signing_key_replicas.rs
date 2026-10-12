@@ -51,6 +51,8 @@ fn test_config(signing_key_pem: Option<&str>, signing_keys_retiring_pem: Option<
         internal_caller_emails: String::new(),
         outbox_drain_batch_size: amicu_api::DEFAULT_DRAIN_BATCH_SIZE,
         outbox_drain_budget_ms: amicu_api::DEFAULT_DRAIN_BUDGET_MS,
+        outbox_inline_send: false,
+        outbox_inline_budget_ms: amicu_api::DEFAULT_INLINE_BUDGET_MS,
     }
 }
 

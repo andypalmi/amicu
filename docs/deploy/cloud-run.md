@@ -41,7 +41,8 @@ amicu-infra provisions:
   `AMICU_ISSUER`/`AMICU_AUDIENCE`/`AMICU_WEB_URL`/`AMICU_TRUSTED_PROXIES` and
   the rest are plain env vars Terraform sets directly. The outbox-drain
   settings (`AMICU_INTERNAL_AUDIENCE`, `AMICU_INTERNAL_CALLER_EMAILS`,
-  `AMICU_OUTBOX_DRAIN_BATCH_SIZE`, `AMICU_OUTBOX_DRAIN_BUDGET_MS`, plus the
+  `AMICU_OUTBOX_DRAIN_BATCH_SIZE`, `AMICU_OUTBOX_DRAIN_BUDGET_MS`,
+  `AMICU_OUTBOX_INLINE_SEND`, `AMICU_OUTBOX_INLINE_BUDGET_MS`, plus the
   optional `AMICU_INTERNAL_TOKEN` secret) are covered in "Cloud Scheduler →
   outbox drain" below.
 
@@ -154,7 +155,7 @@ fixed cadence — amicu-planning#141.
 | | |
 | --- | --- |
 | Method + path | `POST {api_base_url}/internal/outbox/drain` |
-| Cadence | every minute (`* * * * *`), `attempt_deadline = 30s`, `retry_count = 1` |
+| Cadence | every 15 minutes (`*/15 * * * *`) — a retry sweep, see "Inline send" below; `attempt_deadline = 30s`, `retry_count = 1` |
 | Auth header | `Authorization: Bearer <Google-signed OIDC ID token>` (Cloud Scheduler's `oidc_token` block — no shared secret, nothing in Terraform state) |
 | Caller identity | the token's `email` claim, which must be **verified** and listed in `AMICU_INTERNAL_CALLER_EMAILS` (`terraform output scheduler_service_account_email`) |
 | `aud` claim | `AMICU_INTERNAL_AUDIENCE`, defaulting to `AMICU_BASE_URL` — the Cloud Run **service URL**, not the `/internal/outbox/drain` path, matching Google's documented pattern and `modules/scheduler`'s `oidc_audience` default |
@@ -167,14 +168,31 @@ fixed cadence — amicu-planning#141.
   `AMICU_OUTBOX_DRAIN_BATCH_SIZE` (default 50) messages at a time and stops
   entirely after `AMICU_OUTBOX_DRAIN_BUDGET_MS` (default 20000ms), returning
   partial counts with `budget_exhausted: true`. That keeps every call well
-  inside the scheduler's 30s attempt deadline; the remainder is picked up a
-  minute later.
+  inside the scheduler's 30s attempt deadline; the remainder is picked up by
+  the next invocation.
+- **Quiet logs**: an empty sweep logs at `debug` only; a sweep that sent or
+  failed something emits one `info` line with the counts.
 - **Safe to overlap**: claiming is a single `FOR UPDATE SKIP LOCKED` statement
   that also stamps a lease, so concurrent replicas and overlapping Scheduler
   invocations never hand the same message to two senders.
 - **Retry/dead-letter**: a failed send backs off exponentially (30s, doubling,
   capped at 30 minutes) and is dead-lettered after 8 attempts. A dead-lettered
   or delivered row has its raw one-shot token cleared.
+- **Inline send (prompt delivery)**: so mail does not wait for the sweep,
+  `/signup`, `/recover` and `/verify/resend` attempt delivery themselves after
+  the enqueue transaction has committed and before the response is written
+  (Cloud Run throttles CPU after the response, so it cannot be a detached
+  task). It uses the same `SKIP LOCKED` + lease claim and the same
+  attempt/backoff accounting as the drain, so it cannot double-send with a
+  concurrent sweep; any failure is swallowed (a `warn` with counts only), the
+  response is unchanged, and the message simply waits for the sweep. Because
+  sending only when mail was queued would leak whether an account exists, the
+  inline phase always lasts exactly the configured budget (the send is detached at the
+  deadline and finishes in the background, or the phase is padded if quicker), on every outcome. Settings:
+  `AMICU_OUTBOX_INLINE_SEND` (default `true`; `false` restores sweep-only
+  delivery; no-op without a database) and `AMICU_OUTBOX_INLINE_BUDGET_MS`
+  (default `1000`; `0` disables the inline send; this is added to the response time of those three
+  endpoints).
 - **Self-hosted alternative**: set the `AMICU_INTERNAL_TOKEN` *environment
   variable* (env only, never a flag) and present it as a static bearer token
   from cron + curl; it is compared in constant time. Or skip HTTP entirely and
