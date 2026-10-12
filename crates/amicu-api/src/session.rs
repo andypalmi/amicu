@@ -98,6 +98,9 @@ pub(crate) struct SwitchWorkspaceRequest {
     workspace_id: String,
 }
 
+/// Maximum request body on the session / workspace routes.
+pub const MAX_SESSION_BODY_BYTES: usize = 16 * 1024;
+
 /// Build the session router: both routes behind the authentication gate.
 pub fn session_router(state: SessionApiState) -> Router {
     Router::new()
@@ -110,6 +113,7 @@ pub fn session_router(state: SessionApiState) -> Router {
             "/org/invites/accept",
             post(crate::tenancy::accept_invite_handler),
         )
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_SESSION_BODY_BYTES))
         .layer(from_fn_with_state(state.clone(), session_auth_gate))
         .with_state(state)
 }

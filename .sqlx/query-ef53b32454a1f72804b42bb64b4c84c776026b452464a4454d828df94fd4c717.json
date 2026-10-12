@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO known_networks (key, seen_at) VALUES ($1, extract(epoch FROM now())::bigint) ON CONFLICT (key) DO UPDATE SET seen_at = EXCLUDED.seen_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ef53b32454a1f72804b42bb64b4c84c776026b452464a4454d828df94fd4c717"
+}

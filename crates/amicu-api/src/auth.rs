@@ -7,10 +7,12 @@ use std::sync::Arc;
 
 use amicu_auth::error::AuthError;
 use amicu_auth::jwks::{Jwks, OpenIdConfiguration};
+use amicu_auth::security::{self, SecurityEvent, Severity};
 use amicu_auth::service::{AuthService, TokenPair};
+use amicu_auth::throttle::{InMemoryKnownNetworks, KnownNetworks};
 use amicu_core::secret::SecretValue;
-use axum::extract::{ConnectInfo, Request, State};
-use axum::http::StatusCode;
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension, Request, State};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{Next, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -20,13 +22,69 @@ use serde_json::json;
 use utoipa::ToSchema;
 
 use crate::edge::EdgeTrust;
-use crate::ratelimit::{RateLimiter, TrustedProxies};
+use crate::ratelimit::{InMemoryRateLimiter, RateLimiter, TrustedProxies};
+
+/// Maximum request body on the auth routes (JSON credentials / tokens only).
+pub const MAX_AUTH_BODY_BYTES: usize = 16 * 1024;
+
+/// Default per-email budget for `/recover` and `/verify/resend`: 5 per 15 min.
+const DEFAULT_EMAIL_LIMIT: (u32, u64) = (5, 900);
+/// Default per-email budget of FAILED `/signin` / `/token` attempts: 100 per
+/// 15 min (a loose ceiling; the network-scoped account backoff is the tight
+/// control).
+const DEFAULT_SIGNIN_EMAIL_LIMIT: (u32, u64) = (100, 900);
+
+/// Operator-visible signal that the shared failed-sign-in budget store is down
+/// and the per-replica fallback is in effect.
+fn budget_unavailable() {
+    SecurityEvent::new("login_throttle_unavailable", Severity::Warn)
+        .reason("email_budget_error")
+        .emit();
+}
+
+/// Pseudonym of the verified client IP for this request (`None` when the
+/// request carried no trustworthy identity). Inserted by the rate-limit
+/// middleware so handlers can attach it to security events without ever
+/// touching the raw address.
+#[derive(Clone, Debug)]
+pub(crate) struct ClientFingerprint {
+    /// Pseudonym of the client IP, for security events.
+    ip: Option<String>,
+    /// Pseudonym of the client's network (IPv4 /24, IPv6 /64), used to scope
+    /// the per-account sign-in backoff.
+    net: Option<String>,
+}
+
+/// The IPv4 /24 or IPv6 /64 containing `ip`, textual.
+fn network_prefix(ip: std::net::IpAddr) -> String {
+    // IPv4-mapped IPv6 (::ffff:a.b.c.d) is the same host as the IPv4 address.
+    match ip.to_canonical() {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            format!("{}.{}.{}.0/24", o[0], o[1], o[2])
+        }
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+    }
+}
 
 /// Shared HTTP state.
 #[derive(Clone)]
 pub struct AuthApiState {
     service: Arc<AuthService>,
     limiter: Arc<dyn RateLimiter>,
+    /// Per-email limiter for `/recover` and `/verify/resend`.
+    email_limiter: Arc<dyn RateLimiter>,
+    /// Per-email limiter for `/signin` and `/token`.
+    signin_email_limiter: Arc<dyn RateLimiter>,
+    /// Per-replica stand-in for `signin_email_limiter` when it errors or times
+    /// out: same limits, process-local, so the failed-sign-in budget degrades
+    /// to per-replica enforcement instead of to nothing.
+    signin_fallback: Arc<InMemoryRateLimiter>,
+    /// Networks that recently signed in successfully, per account.
+    known_networks: Arc<dyn KnownNetworks>,
     trusted_proxies: TrustedProxies,
     edge_trust: EdgeTrust,
 }
@@ -41,9 +99,140 @@ impl AuthApiState {
         Self {
             service,
             limiter,
+            email_limiter: Arc::new(InMemoryRateLimiter::new(
+                DEFAULT_EMAIL_LIMIT.0,
+                std::time::Duration::from_secs(DEFAULT_EMAIL_LIMIT.1),
+            )),
+            signin_email_limiter: Arc::new(InMemoryRateLimiter::new(
+                DEFAULT_SIGNIN_EMAIL_LIMIT.0,
+                std::time::Duration::from_secs(DEFAULT_SIGNIN_EMAIL_LIMIT.1),
+            )),
+            signin_fallback: Arc::new(InMemoryRateLimiter::new(
+                DEFAULT_SIGNIN_EMAIL_LIMIT.0,
+                std::time::Duration::from_secs(DEFAULT_SIGNIN_EMAIL_LIMIT.1),
+            )),
+            known_networks: Arc::new(InMemoryKnownNetworks::default()),
             trusted_proxies: TrustedProxies::default(),
             edge_trust: EdgeTrust::default(),
         }
+    }
+
+    /// Install the per-EMAIL limiters (andypalmi/amicu-planning#194), applied
+    /// in addition to the per-IP limiter: `recover_and_resend` guards
+    /// `/recover` and `/verify/resend`, `signin` guards `/signin` and `/token`.
+    /// Keys are pseudonyms of the normalized email, so unknown emails are
+    /// limited exactly like registered ones (no enumeration signal). Production
+    /// passes Postgres-backed limiters so the budget is shared across replicas.
+    #[must_use]
+    pub fn with_email_limiters(
+        mut self,
+        recover_and_resend: Arc<dyn RateLimiter>,
+        signin: Arc<dyn RateLimiter>,
+    ) -> Self {
+        self.email_limiter = recover_and_resend;
+        self.signin_email_limiter = signin;
+        self
+    }
+
+    /// Set the limits of the per-replica fallback for the failed-sign-in budget
+    /// (should equal the shared limiter's `max` and `window`).
+    #[must_use]
+    pub fn with_signin_fallback(mut self, max: u32, window: std::time::Duration) -> Self {
+        self.signin_fallback = Arc::new(InMemoryRateLimiter::new(max, window));
+        self
+    }
+
+    /// Install the shared "known networks" store (Postgres-backed in production).
+    #[must_use]
+    pub fn with_known_networks(mut self, known: Arc<dyn KnownNetworks>) -> Self {
+        self.known_networks = known;
+        self
+    }
+
+    /// Key for the failed-sign-in budget of `email`.
+    fn signin_budget_key(email: &str) -> Option<String> {
+        let normalized = amicu_auth::service::normalize_email(email);
+        (!normalized.is_empty()).then(|| {
+            format!(
+                "email|signin_failed|{}",
+                security::pseudonym("email-rl", &normalized)
+            )
+        })
+    }
+
+    /// Pre-check of the failed-sign-in budget (no hit counted). When it is
+    /// exhausted, only a network that recently signed in successfully to this
+    /// account may still attempt; everyone else is refused BEFORE any password
+    /// check. Identical for unknown emails (the budget is keyed by email, and an
+    /// unknown email never has a known network). Store errors fail open.
+    ///
+    /// Trade-off: during an active distributed attack the owner on a brand-new
+    /// network is refused until the budget window passes.
+    async fn signin_budget_refuses(&self, email: &str, net: Option<&str>) -> bool {
+        let Some(key) = Self::signin_budget_key(email) else {
+            return false;
+        };
+        let exhausted = if let Ok(e) = self.signin_email_limiter.try_is_exhausted(&key).await {
+            e
+        } else {
+            budget_unavailable();
+            self.signin_fallback.exhausted(&key)
+        };
+
+        if !exhausted {
+            return false;
+        }
+        let known = tokio::time::timeout(
+            std::time::Duration::from_millis(1_000),
+            self.known_networks.is_known(&Self::known_key(email, net)),
+        )
+        .await;
+        !matches!(known, Ok(Ok(true)))
+    }
+
+    /// Count one FAILED sign-in against the budget; true when it is now over.
+    /// A backend error or timeout switches to the per-replica fallback.
+    async fn signin_budget_consume(&self, email: &str) -> bool {
+        let Some(key) = Self::signin_budget_key(email) else {
+            return false;
+        };
+        if let Ok(allowed) = self.signin_email_limiter.try_check(&key).await {
+            !allowed
+        } else {
+            budget_unavailable();
+            !self.signin_fallback.check(&key)
+        }
+    }
+
+    fn known_key(email: &str, net: Option<&str>) -> String {
+        security::pseudonym(
+            "known-network",
+            &format!(
+                "{}|{}",
+                amicu_auth::service::normalize_email(email),
+                net.unwrap_or("")
+            ),
+        )
+    }
+
+    /// True when `email` has exhausted `limiter`'s budget for `bucket`. Empty
+    /// emails are not tracked (no shared bucket). The limiter fails open on
+    /// database errors, like the per-IP one.
+    async fn email_throttled(
+        &self,
+        limiter: &Arc<dyn RateLimiter>,
+        bucket: &str,
+        email: &str,
+    ) -> bool {
+        let normalized = amicu_auth::service::normalize_email(email);
+        if normalized.is_empty() {
+            return false;
+        }
+        let key = format!(
+            "email|{bucket}|{}",
+            security::pseudonym("email-rl", &normalized)
+        );
+        !limiter.check(&key).await
     }
 
     /// Configure the trusted-proxy allowlist used to decide whether a request's
@@ -94,7 +283,10 @@ pub fn auth_router(state: AuthApiState) -> Router {
         // wrap the whole router including its fallback 404 handler, letting
         // an attacker grow the bucket table without bound simply by varying
         // the path.
-        .route_layer(from_fn_with_state(state.clone(), rate_limit));
+        .route_layer(from_fn_with_state(state.clone(), rate_limit))
+        // Explicit, small cap: nothing here is bigger than a credential pair or
+        // a token. Over-limit bodies are refused with 413 before buffering.
+        .layer(DefaultBodyLimit::max(MAX_AUTH_BODY_BYTES));
 
     well_known.merge(credentials).with_state(state)
 }
@@ -254,13 +446,73 @@ pub(crate) async fn sign_up(
 )]
 pub(crate) async fn token(
     State(state): State<AuthApiState>,
+    Extension(client): Extension<ClientFingerprint>,
     Json(body): Json<Credentials>,
 ) -> Result<Json<TokenResponse>, ApiError> {
-    let pair = state
+    let event = |name: &'static str, sev: Severity| {
+        SecurityEvent::new(name, sev)
+            .email(&body.email)
+            .ip_hash(client.ip.as_deref())
+    };
+    if state
+        .signin_budget_refuses(&body.email, client.net.as_deref())
+        .await
+    {
+        event("signin_failed", Severity::Warn)
+            .outcome("rate_limited")
+            .reason("email_budget_exhausted")
+            .emit();
+        return Err(ApiError(AuthError::RateLimited));
+    }
+    let result = state
         .service
-        .sign_in(&body.email, &SecretValue::new(body.password.into_bytes()))
-        .await?;
-    Ok(Json(to_response(&pair)?))
+        .sign_in_from(
+            &body.email,
+            &SecretValue::new(body.password.into_bytes()),
+            client.net.as_deref(),
+        )
+        .await;
+    match result {
+        Ok(pair) => {
+            // Remember this network for the account (best-effort, bounded).
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(1_000),
+                state
+                    .known_networks
+                    .record(&AuthApiState::known_key(&body.email, client.net.as_deref())),
+            )
+            .await;
+            event("signin_succeeded", Severity::Info)
+                .outcome("ok")
+                .emit();
+            Ok(Json(to_response(&pair)?))
+        }
+        Err(err) => {
+            // The per-email budget counts only FAILED guesses (consulted before
+            // the check via `signin_budget_refuses`, consumed here). Unknown
+            // emails are counted identically (anti-enumeration).
+            if matches!(err, AuthError::InvalidCredentials)
+                && state.signin_budget_consume(&body.email).await
+            {
+                event("signin_failed", Severity::Warn)
+                    .outcome("rate_limited")
+                    .reason("email_rate_limited")
+                    .emit();
+                return Err(ApiError(AuthError::RateLimited));
+            }
+            let reason = match &err {
+                AuthError::InvalidCredentials => "invalid_credentials",
+                AuthError::Throttled { .. } => "account_backoff",
+                AuthError::EmailUnverified => "email_unverified",
+                _ => "error",
+            };
+            event("signin_failed", Severity::Warn)
+                .outcome("failed")
+                .reason(reason)
+                .emit();
+            Err(err.into())
+        }
+    }
 }
 
 #[utoipa::path(
@@ -327,8 +579,22 @@ pub(crate) async fn logout(
 )]
 pub(crate) async fn recover(
     State(state): State<AuthApiState>,
+    Extension(client): Extension<ClientFingerprint>,
     Json(body): Json<RecoverRequest>,
 ) -> Result<Response, ApiError> {
+    let event = SecurityEvent::new("reset_requested", Severity::Info)
+        .email(&body.email)
+        .ip_hash(client.ip.as_deref());
+    if state
+        .email_throttled(&state.email_limiter, "recover", &body.email)
+        .await
+    {
+        event.outcome("rate_limited").emit();
+        return Err(ApiError(AuthError::RateLimited));
+    }
+    // The event never says whether the account exists (anti-enumeration holds
+    // for the log stream too).
+    event.outcome("accepted").emit();
     state.service.request_password_reset(&body.email).await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -364,16 +630,38 @@ pub(crate) async fn recover(
 )]
 pub(crate) async fn reset(
     State(state): State<AuthApiState>,
+    Extension(client): Extension<ClientFingerprint>,
     Json(body): Json<ResetRequest>,
 ) -> Result<StatusCode, ApiError> {
-    state
+    let result = state
         .service
         .reset_password(
             &SecretValue::new(body.reset_token.into_bytes()),
             &SecretValue::new(body.new_password.into_bytes()),
         )
-        .await?;
-    Ok(StatusCode::OK)
+        .await;
+    match result {
+        Ok(()) => {
+            SecurityEvent::new("reset_completed", Severity::Info)
+                .outcome("ok")
+                .ip_hash(client.ip.as_deref())
+                .emit();
+            Ok(StatusCode::OK)
+        }
+        Err(err) => {
+            let reason = match &err {
+                AuthError::ResetInvalid => "invalid_token",
+                AuthError::WeakPassword | AuthError::PasswordTooLong => "password_policy",
+                _ => "error",
+            };
+            SecurityEvent::new("reset_completed", Severity::Warn)
+                .outcome("failed")
+                .reason(reason)
+                .ip_hash(client.ip.as_deref())
+                .emit();
+            Err(err.into())
+        }
+    }
 }
 
 /// Confirm an email address by consuming a verification token.
@@ -395,13 +683,27 @@ pub(crate) async fn reset(
 )]
 pub(crate) async fn verify(
     State(state): State<AuthApiState>,
+    Extension(client): Extension<ClientFingerprint>,
     Json(body): Json<VerifyRequest>,
 ) -> Result<StatusCode, ApiError> {
-    state
+    let result = state
         .service
         .verify_email(&SecretValue::new(body.token.into_bytes()))
-        .await?;
-    Ok(StatusCode::OK)
+        .await;
+    match result {
+        Ok(()) => Ok(StatusCode::OK),
+        Err(err) => {
+            SecurityEvent::new("verify_failed", Severity::Warn)
+                .outcome("failed")
+                .reason(match &err {
+                    AuthError::VerifyInvalid => "invalid_token",
+                    _ => "error",
+                })
+                .ip_hash(client.ip.as_deref())
+                .emit();
+            Err(err.into())
+        }
+    }
 }
 
 /// Resend the email-verification link.
@@ -425,8 +727,20 @@ pub(crate) async fn verify(
 )]
 pub(crate) async fn resend_verification(
     State(state): State<AuthApiState>,
+    Extension(client): Extension<ClientFingerprint>,
     Json(body): Json<ResendVerificationRequest>,
 ) -> Result<Response, ApiError> {
+    let event = SecurityEvent::new("verify_resend_requested", Severity::Info)
+        .email(&body.email)
+        .ip_hash(client.ip.as_deref());
+    if state
+        .email_throttled(&state.email_limiter, "verify_resend", &body.email)
+        .await
+    {
+        event.outcome("rate_limited").emit();
+        return Err(ApiError(AuthError::RateLimited));
+    }
+    event.outcome("accepted").emit();
     state.service.resend_verification(&body.email).await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -493,18 +807,34 @@ async fn rate_limit(State(state): State<AuthApiState>, request: Request, next: N
     // itself already refuses to trust the header without a valid token, so a
     // request straight to the raw *.run.app URL can never spoof this.
     let edge_ip = state.edge_trust.trusted_client_ip(request.headers());
-    let throttled =
-        match state
-            .trusted_proxies
-            .client_key_with_edge(request.uri().path(), edge_ip, peer, xff)
-        {
-            Some(key) => !state.limiter.check(&key).await,
-            None => false, // no trustworthy identity: fail open, never share a bucket
-        };
+    let ident = state
+        .trusted_proxies
+        .client_ident_with_edge(edge_ip, peer, xff);
+    // Pseudonymize once, here: handlers only ever see the hash.
+    let fingerprint = ClientFingerprint {
+        ip: ident.as_deref().map(security::ip_hash),
+        net: ident
+            .as_deref()
+            .and_then(|i| i.parse::<std::net::IpAddr>().ok())
+            .map(|ip| security::pseudonym("ipnet", &network_prefix(ip))),
+    };
+    let throttled = match &ident {
+        Some(ident) => {
+            let key = format!("{}|{ident}", request.uri().path());
+            !state.limiter.check(&key).await
+        }
+        None => false, // no trustworthy identity: fail open, never share a bucket
+    };
 
     if throttled {
+        SecurityEvent::new("ip_rate_limited", Severity::Warn)
+            .outcome("rate_limited")
+            .ip_hash(fingerprint.ip.as_deref())
+            .emit();
         ApiError(AuthError::RateLimited).into_response()
     } else {
+        let mut request = request;
+        request.extensions_mut().insert(fingerprint);
         next.run(request).await
     }
 }
@@ -534,9 +864,10 @@ impl IntoResponse for ApiError {
             // or already-used verification token is indistinguishable from any
             // other rejected token (never a 401/404), so it leaks nothing about
             // which tokens or accounts exist.
-            AuthError::WeakPassword | AuthError::ResetInvalid | AuthError::VerifyInvalid => {
-                StatusCode::BAD_REQUEST
-            }
+            AuthError::WeakPassword
+            | AuthError::PasswordTooLong
+            | AuthError::ResetInvalid
+            | AuthError::VerifyInvalid => StatusCode::BAD_REQUEST,
             // Credentials were correct but the email is unverified (only reachable
             // once the verification gate is enabled). Distinct from the generic
             // 401 so a verified-but-wrong-password attempt cannot be told from an
@@ -549,9 +880,15 @@ impl IntoResponse for ApiError {
             AuthError::EmailUnverified | AuthError::Forbidden => StatusCode::FORBIDDEN,
             // Internal-only; sign-up never surfaces it (anti-enumeration).
             AuthError::UserExists => StatusCode::CONFLICT,
-            AuthError::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            AuthError::RateLimited | AuthError::Throttled { .. } => StatusCode::TOO_MANY_REQUESTS,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (status, Json(json!({ "error": self.0.to_string() }))).into_response()
+        let mut response = (status, Json(json!({ "error": self.0.to_string() }))).into_response();
+        if let AuthError::Throttled { retry_after_secs } = self.0
+            && let Ok(v) = HeaderValue::from_str(&retry_after_secs.max(1).to_string())
+        {
+            response.headers_mut().insert(header::RETRY_AFTER, v);
+        }
+        response
     }
 }

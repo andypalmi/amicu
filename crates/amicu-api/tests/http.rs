@@ -415,9 +415,11 @@ async fn missing_connect_info_fails_open_no_shared_lockout() {
     // rather than collapse into one shared bucket that locks everyone out. The
     // `call` helper injects no ConnectInfo extension.
     let app = app(1);
-    let body = json!({"email": "rl@example.com", "password": "bad"});
-    for _ in 0..5 {
-        let (status, _) = call(&app, "POST", "/token", Some(body.clone()), "9.9.9.9").await;
+    for n in 0..5 {
+        // A distinct email per request: this test is about the per-IP limiter
+        // failing open, not the per-account backoff (#194).
+        let body = json!({"email": format!("rl{n}@example.com"), "password": "bad"});
+        let (status, _) = call(&app, "POST", "/token", Some(body), "9.9.9.9").await;
         assert_eq!(
             status,
             StatusCode::UNAUTHORIZED,

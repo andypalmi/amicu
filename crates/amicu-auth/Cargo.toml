@@ -66,6 +66,7 @@ tokio = { version = "1", default-features = false, features = ["time"], optional
 # verifier and issuer paths. `serde` backs the `#[serde(transparent)]` wire form;
 # `v4` mints fresh ids at sign-up/provisioning.
 uuid = { version = "1", default-features = false, features = ["v4", "serde", "std"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 # verifier http transport
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"], optional = true }

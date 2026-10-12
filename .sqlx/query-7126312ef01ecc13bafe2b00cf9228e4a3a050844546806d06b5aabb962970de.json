@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO login_failures AS l (key, failures, locked_until, updated_at, last_admitted)\n            VALUES ($1, 1, 0, extract(epoch FROM now())::bigint, TRUE)\n            ON CONFLICT (key) DO UPDATE SET\n                failures = CASE\n                    WHEN l.locked_until > extract(epoch FROM now())::bigint THEN l.failures\n                    WHEN l.updated_at + $4 <= extract(epoch FROM now())::bigint THEN 1\n                    ELSE l.failures + 1\n                END,\n                locked_until = CASE\n                    WHEN l.locked_until > extract(epoch FROM now())::bigint THEN l.locked_until\n                    ELSE extract(epoch FROM now())::bigint + CASE\n                        WHEN (CASE WHEN l.updated_at + $4 <= extract(epoch FROM now())::bigint\n                                   THEN 1 ELSE l.failures + 1 END) <= $2 THEN 0\n                        ELSE LEAST($3, (1::bigint << LEAST(\n                            (CASE WHEN l.updated_at + $4 <= extract(epoch FROM now())::bigint\n                                  THEN 1 ELSE l.failures + 1 END) - $2, 20)::int))\n                    END\n                END,\n                updated_at = CASE\n                    WHEN l.locked_until > extract(epoch FROM now())::bigint THEN l.updated_at\n                    ELSE extract(epoch FROM now())::bigint\n                END,\n                last_admitted = (l.locked_until <= extract(epoch FROM now())::bigint)\n            RETURNING\n                last_admitted,\n                (locked_until - extract(epoch FROM now())::bigint)::bigint AS \"remaining!\"\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_admitted",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "remaining!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "7126312ef01ecc13bafe2b00cf9228e4a3a050844546806d06b5aabb962970de"
+}

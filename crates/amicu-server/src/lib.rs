@@ -106,6 +106,10 @@
 //! | `min_tier` | `--min-tier` | `AMICU_MIN_TIER` | `community` |
 //! | `rate_limit_max` | `--rate-limit-max` | `AMICU_RATE_LIMIT_MAX` | `30` |
 //! | `rate_limit_window_secs` | `--rate-limit-window-secs` | `AMICU_RATE_LIMIT_WINDOW_SECS` | `60` |
+//! | `email_rate_limit_max` | `--email-rate-limit-max` | `AMICU_EMAIL_RATE_LIMIT_MAX` | `5` - per normalized email, `/recover` + `/verify/resend` (#194) |
+//! | `signin_email_rate_limit_max` | `--signin-email-rate-limit-max` | `AMICU_SIGNIN_EMAIL_RATE_LIMIT_MAX` | `100` - FAILED sign-ins per normalized email (#194) |
+//! | `email_rate_limit_window_secs` | `--email-rate-limit-window-secs` | `AMICU_EMAIL_RATE_LIMIT_WINDOW_SECS` | `900` |
+//! | (env only) | - | `AMICU_SECURITY_HASH_KEY` | none - secret key (>= 32 bytes) for hashing emails/IPs in `amicu::security` events and limiter/backoff keys; set the SAME value on every replica. REQUIRED in `AMICU_ENV=production` (#194) |
 //! | `rate_limit_timeout_ms` | `--rate-limit-timeout-ms` | `AMICU_RATE_LIMIT_TIMEOUT_MS` | `1000` - Postgres path only; a timeout fails OPEN like any other database error |
 //! | `max_workspaces_per_user` | `--max-workspaces-per-user` | `AMICU_MAX_WORKSPACES_PER_USER` | `50` |
 //! | `environment` | `--environment` | `AMICU_ENV` | `development` |
@@ -338,6 +342,25 @@ pub struct Config {
     #[arg(long, env = "AMICU_RATE_LIMIT_TIMEOUT_MS", default_value_t = 1_000)]
     pub rate_limit_timeout_ms: u64,
 
+    /// Per-EMAIL budget for `/recover` and `/verify/resend`, per
+    /// `email_rate_limit_window_secs` (andypalmi/amicu-planning#194). On top of
+    /// the per-IP limit; shared across replicas on the Postgres path.
+    #[arg(long, env = "AMICU_EMAIL_RATE_LIMIT_MAX", default_value_t = 5)]
+    pub email_rate_limit_max: u32,
+
+    /// Per-EMAIL budget for `/signin` / `/token` per window. A loose ceiling;
+    /// the per-account exponential backoff is the tight control.
+    #[arg(long, env = "AMICU_SIGNIN_EMAIL_RATE_LIMIT_MAX", default_value_t = 100)]
+    pub signin_email_rate_limit_max: u32,
+
+    /// Window for both per-email limits, seconds.
+    #[arg(
+        long,
+        env = "AMICU_EMAIL_RATE_LIMIT_WINDOW_SECS",
+        default_value_t = 900
+    )]
+    pub email_rate_limit_window_secs: u64,
+
     /// Cap on the TOTAL number of workspaces a user may OWN (across every
     /// workspace, including the personal workspace sign-up provisions), enforced
     /// on `POST /workspaces`. There is no `DELETE /workspaces`, so this is a hard
@@ -542,6 +565,17 @@ pub enum Error {
     /// `AMICU_ENV=production` but no `DATABASE_URL` was set. A production
     /// deploy may never silently fall back to ephemeral in-memory stores.
     MissingDatabaseUrl,
+    /// `AMICU_ENV=production` but `AMICU_SECURITY_HASH_KEY` is unset or shorter
+    /// than 32 bytes (andypalmi/amicu-planning#194). Without a secret key the
+    /// pseudonyms in security events and rate-limit keys are guessable.
+    MissingSecurityHashKey,
+    /// `AMICU_ENV=production` without `AMICU_EDGE_TOKEN` set AND
+    /// `AMICU_REQUIRE_EDGE_TOKEN=true` (andypalmi/amicu-planning#194),
+    /// whatever `AMICU_TRUSTED_PROXIES` says: an empty list collapses clients
+    /// onto the proxy address and a catch-all trusts a spoofable
+    /// `X-Forwarded-For`, so the per-IP/per-network sign-in controls need the
+    /// verified edge identity.
+    ProductionRequiresEdgeToken,
     /// `AMICU_ENV=production` and the connected Postgres role would bypass
     /// row-level security (superuser/BYPASSRLS, direct or inherited, or owns
     /// a `FORCE ROW LEVEL SECURITY` table).
@@ -589,6 +623,17 @@ impl std::fmt::Display for Error {
                 "AMICU_ENV=production requires DATABASE_URL to be set (production may not \
                  silently fall back to ephemeral in-memory stores)"
             ),
+            Error::ProductionRequiresEdgeToken => write!(
+                f,
+                "AMICU_ENV=production requires AMICU_EDGE_TOKEN to be set and \
+                 AMICU_REQUIRE_EDGE_TOKEN=true, so client identity comes from the verified edge \
+                 rather than a spoofable X-Forwarded-For or a collapsed proxy address"
+            ),
+            Error::MissingSecurityHashKey => write!(
+                f,
+                "AMICU_ENV=production requires AMICU_SECURITY_HASH_KEY (at least 32 bytes, the \
+                 same secret value on every replica)"
+            ),
             Error::RlsBypass(msg) => write!(f, "RLS-bypass startup guard: {msg}"),
             Error::PendingMigrations(n) => write!(
                 f,
@@ -624,6 +669,8 @@ impl std::error::Error for Error {
             Error::Port(_)
             | Error::MissingSigningKey
             | Error::MissingDatabaseUrl
+            | Error::MissingSecurityHashKey
+            | Error::ProductionRequiresEdgeToken
             | Error::RlsBypass(_)
             | Error::PendingMigrations(_)
             | Error::MigratorLacksCreate(_)
@@ -996,6 +1043,30 @@ fn build_rate_limiter(pool: Option<PgPool>, config: &Config) -> Arc<dyn RateLimi
     }
 }
 
+/// The per-email limiters (`/recover` + `/verify/resend`, and `/signin`):
+/// Postgres-backed (shared across replicas, fail-open on database error like
+/// the per-IP limiter) when `pool` is present, in-memory otherwise.
+fn build_email_limiters(
+    pool: Option<&PgPool>,
+    config: &Config,
+) -> (Arc<dyn RateLimiter>, Arc<dyn RateLimiter>) {
+    let window = Duration::from_secs(config.email_rate_limit_window_secs);
+    let make = |max: u32| -> Arc<dyn RateLimiter> {
+        if let Some(pool) = pool {
+            Arc::new(
+                PostgresRateLimiter::new(PostgresRateLimitStore::new(pool.clone()), max, window)
+                    .with_timeout(Duration::from_millis(config.rate_limit_timeout_ms)),
+            )
+        } else {
+            Arc::new(InMemoryRateLimiter::new(max, window))
+        }
+    };
+    (
+        make(config.email_rate_limit_max),
+        make(config.signin_email_rate_limit_max),
+    )
+}
+
 /// Shared implementation behind [`build_app`] and [`build_app_in_memory`].
 /// `database_url` is an explicit override rather than an environment read, so
 /// callers control store selection precisely: `Some(url)` selects the
@@ -1040,6 +1111,7 @@ pub async fn build_app_with_database_url(
     if require_edge_token && edge_token.is_none() {
         return Err(Error::MissingEdgeToken);
     }
+    check_prod_edge_identity(config.environment, edge_token.is_some(), require_edge_token)?;
     let edge_trust = EdgeTrust::new(edge_token, require_edge_token);
 
     // Also the default `aud` the outbox-drain OIDC verifier enforces (see
@@ -1118,6 +1190,13 @@ pub async fn build_app_with_database_url(
     if let Some(memberships) = memberships {
         service = service.with_membership_store(memberships);
     }
+    // Per-account sign-in backoff (#194): shared across replicas on the
+    // Postgres path; the in-memory default is process-local (dev/tests).
+    if let Some(pool) = pool.clone() {
+        service =
+            service.with_login_throttle(Arc::new(amicu_store::PostgresLoginThrottle::new(pool)));
+    }
+    init_security_hash_key(config)?;
     // A live handle to the SAME keyring the service just took ownership of:
     // wiring this into KeyringJwksProvider (below) means the engine-gate
     // verifier observes rotate_keys()/retire() in-process, with no restart
@@ -1135,7 +1214,20 @@ pub async fn build_app_with_database_url(
     // Postgres limiter here - no separate check needed, mirroring how every
     // other Postgres-vs-in-memory store selection in this function works.
     let limiter = build_rate_limiter(pool.clone(), config);
+    let (recover_limiter, signin_limiter) = build_email_limiters(pool.as_ref(), config);
+    let known_networks: Arc<dyn amicu_auth::throttle::KnownNetworks> =
+        if let Some(pool) = pool.clone() {
+            Arc::new(amicu_store::PostgresKnownNetworks::new(pool))
+        } else {
+            Arc::new(amicu_auth::throttle::InMemoryKnownNetworks::default())
+        };
     let auth_state = AuthApiState::new(service.clone(), limiter)
+        .with_email_limiters(recover_limiter, signin_limiter)
+        .with_signin_fallback(
+            config.signin_email_rate_limit_max,
+            Duration::from_secs(config.email_rate_limit_window_secs),
+        )
+        .with_known_networks(known_networks)
         .with_trusted_proxies(trusted)
         .with_edge_trust(edge_trust.clone());
 
@@ -1662,9 +1754,62 @@ fn env_flag_is_truthy(name: &str) -> bool {
     })
 }
 
+/// Install the pseudonym key for security events and limiter/backoff keys
+/// (#194): REQUIRED (>= 32 bytes) in production; dev keeps a loud warning.
+fn init_security_hash_key(config: &Config) -> Result<(), Error> {
+    match std::env::var("AMICU_SECURITY_HASH_KEY") {
+        Ok(k) if k.len() >= 32 => {
+            let _ = amicu_auth::security::set_hash_key(k.as_bytes());
+        }
+        _ if config.environment == Environment::Production => {
+            return Err(Error::MissingSecurityHashKey);
+        }
+        _ => eprintln!(
+            "amicu-server: WARNING - AMICU_SECURITY_HASH_KEY is not set (or < 32 bytes); \
+             emails/IPs in security events are hashed with a PUBLIC default key (guessable for \
+             low-entropy inputs). Set one secret value, identical on every replica."
+        ),
+    }
+    Ok(())
+}
+
+/// Production identity rule (see [`Error::ProductionRequiresEdgeToken`]): in
+/// production every request must carry a valid edge token, so client identity
+/// always comes from the verified edge. This holds regardless of
+/// `AMICU_TRUSTED_PROXIES`: an empty list collapses every client onto the
+/// proxy's address and a near-catch-all one trusts spoofable
+/// `X-Forwarded-For`.
+fn check_prod_edge_identity(
+    env: Environment,
+    has_edge_token: bool,
+    require_edge_token: bool,
+) -> Result<(), Error> {
+    if env == Environment::Production && !(has_edge_token && require_edge_token) {
+        return Err(Error::ProductionRequiresEdgeToken);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prod_requires_edge_token_and_enforcement_regardless_of_proxies() {
+        let p = Environment::Production;
+        assert!(check_prod_edge_identity(p, false, false).is_err());
+        assert!(check_prod_edge_identity(p, true, false).is_err());
+        assert!(check_prod_edge_identity(p, false, true).is_err());
+        assert!(check_prod_edge_identity(p, true, true).is_ok());
+        // Development is unaffected.
+        assert!(check_prod_edge_identity(Environment::Development, false, false).is_ok());
+        // The error message never contains a token.
+        assert!(
+            !Error::ProductionRequiresEdgeToken
+                .to_string()
+                .contains("secret")
+        );
+    }
 
     fn addr(s: &str) -> SocketAddr {
         s.parse().expect("valid test socket address")

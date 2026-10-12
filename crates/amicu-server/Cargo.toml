@@ -45,6 +45,7 @@ lettre = { version = "0.11", default-features = false, features = [
     "webpki-roots",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "std"] }
 # Zeroize-on-drop intermediates while normalizing/splitting the raw
 # signing-key PEM (src/signing_key.rs), so no un-zeroized copy of key
 # material survives a `.replace()`/`format!()` step longer than it has to.

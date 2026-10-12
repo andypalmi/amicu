@@ -57,6 +57,7 @@ enum Command {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
+    init_logging();
     let result = match cli.command {
         Some(Command::Migrate) => amicu_server::migrate().await,
         Some(Command::GenSigningKey) => amicu_server::gen_signing_key(),
@@ -70,4 +71,16 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Install the `tracing` subscriber: one JSON object per line on stderr, which
+/// Cloud Run / Cloud Logging ingest as structured entries. Carries the
+/// `amicu::security` events (andypalmi/amicu-planning#194); those hold only
+/// pseudonymized identifiers, never plaintext emails, IPs, passwords or tokens.
+fn init_logging() {
+    let _ = tracing_subscriber::fmt()
+        .json()
+        .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
