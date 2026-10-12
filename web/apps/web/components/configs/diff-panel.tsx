@@ -118,8 +118,8 @@ function DiffView({ diff }: { diff: string }) {
           <div
             key={i}
             className={cn(
-              kind === 'add' && 'bg-success/10 text-success',
-              kind === 'remove' && 'bg-destructive/10 text-destructive',
+              kind === 'add' && 'bg-diff-add/10 text-diff-add',
+              kind === 'remove' && 'bg-diff-destroy/10 text-diff-destroy',
               kind === 'hunk' && 'text-muted-foreground',
               kind === 'header' && 'font-medium text-muted-foreground',
             )}

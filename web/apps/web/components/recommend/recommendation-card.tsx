@@ -33,7 +33,7 @@ export function RecommendationCard({ rec }: { rec: Recommendation }) {
         {rec.evidence.length > 0 ? (
           <div className="space-y-1.5">
             <Separator />
-            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            <h3 className="text-xs font-medium text-muted-foreground">
               Evidence
             </h3>
             <ul className="space-y-1">
@@ -54,7 +54,7 @@ export function RecommendationCard({ rec }: { rec: Recommendation }) {
         {rec.changes.length > 0 ? (
           <div className="space-y-1.5">
             <Separator />
-            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            <h3 className="text-xs font-medium text-muted-foreground">
               Suggested changes
             </h3>
             <ul className="space-y-1">
@@ -79,7 +79,7 @@ export function RecommendationCard({ rec }: { rec: Recommendation }) {
         {rec.rejected.length > 0 ? (
           <div className="space-y-1.5">
             <Separator />
-            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            <h3 className="text-xs font-medium text-muted-foreground">
               Rejected alternatives
             </h3>
             <ul className="space-y-1">
@@ -95,7 +95,7 @@ export function RecommendationCard({ rec }: { rec: Recommendation }) {
         {rec.assumptions.length > 0 ? (
           <div className="space-y-1.5">
             <Separator />
-            <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            <h3 className="text-xs font-medium text-muted-foreground">
               Assumptions
             </h3>
             <ul className="list-inside list-disc space-y-1 text-xs text-muted-foreground">

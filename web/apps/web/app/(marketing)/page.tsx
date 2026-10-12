@@ -76,7 +76,7 @@ export default function LandingPage() {
           </div>
         </div>
         <figure className="min-w-0">
-          <div className="overflow-hidden rounded-lg border border-border bg-card shadow-sm">
+          <div className="overflow-hidden rounded-lg border border-border bg-card">
             <div className="border-b border-border bg-muted/50 px-4 py-2 font-mono text-xs text-muted-foreground">
               stack.hcl
             </div>
@@ -158,7 +158,7 @@ export default function LandingPage() {
 
       {/* Provider strip */}
       <Section tone="muted">
-        <p className="text-center text-sm font-medium uppercase tracking-widest text-muted-foreground">
+        <p className="text-center text-sm font-medium text-muted-foreground">
           Deploy across any provider
         </p>
         <div className="mt-6 flex flex-wrap items-center justify-center gap-x-3 gap-y-3">

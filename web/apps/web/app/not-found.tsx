@@ -19,7 +19,7 @@ export default function NotFound() {
     <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col justify-center px-6 py-16">
       <Card>
         <CardHeader>
-          <p className="text-sm font-medium uppercase tracking-widest text-muted-foreground">
+          <p className="text-sm font-medium text-muted-foreground">
             404
           </p>
           <CardTitle className="text-2xl">Page not found</CardTitle>

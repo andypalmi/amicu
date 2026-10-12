@@ -66,7 +66,7 @@ function TierCard({ tier }: { tier: Tier }) {
     <Card
       className={cn(
         'flex flex-col',
-        tier.featured && 'border-primary shadow-md ring-1 ring-primary',
+        tier.featured && 'border-primary ring-1 ring-primary',
       )}
     >
       <CardHeader className="gap-3">

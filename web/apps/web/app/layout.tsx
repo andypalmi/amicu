@@ -1,12 +1,31 @@
 import { RootProvider } from 'fumadocs-ui/provider/next';
 import './global.css';
 import 'sonner/dist/styles.css';
-import { Inter } from 'next/font/google';
-import type { Metadata } from 'next';
+import { Martian_Mono, Schibsted_Grotesk } from 'next/font/google';
+import type { Metadata, Viewport } from 'next';
 import { Toaster } from '@/components/common/toaster';
 import { appName, appTagline, siteUrl } from '@/lib/shared';
 
-const inter = Inter({ subsets: ['latin'] });
+const schibsted = Schibsted_Grotesk({
+  subsets: ['latin'],
+  variable: '--font-schibsted',
+  display: 'swap',
+});
+const martian = Martian_Mono({
+  subsets: ['latin'],
+  variable: '--font-martian',
+  display: 'swap',
+});
+
+// Matches --background (light / dark). Follows the OS preference; the in-app
+// toggle (next-themes) only changes the page itself.
+export const viewport: Viewport = {
+  colorScheme: 'light dark',
+  themeColor: [
+    { media: '(prefers-color-scheme: light)', color: '#f8f8f7' },
+    { media: '(prefers-color-scheme: dark)', color: '#111110' },
+  ],
+};
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
@@ -34,7 +53,7 @@ export const metadata: Metadata = {
 
 export default function Layout({ children }: LayoutProps<'/'>) {
   return (
-    <html lang="en" className={inter.className} suppressHydrationWarning>
+    <html lang="en" className={`${schibsted.variable} ${martian.variable}`} suppressHydrationWarning>
       <body className="flex flex-col min-h-screen bg-background text-foreground">
         <RootProvider>
           {children}
