@@ -1,13 +1,13 @@
 # Nothing here is needed to build the amicu-server image (Rust workspace
 # under crates/, root Cargo.toml/Cargo.lock, and the committed .sqlx/ offline
-# query cache are the only inputs cargo-chef/cargo actually touch) — keeping
+# query cache are the only inputs cargo-chef/cargo actually touch) - keeping
 # the build context small also keeps cargo-chef's cache layer stable across
 # unrelated edits (web/docs changes must not bust the dependency-cook layer).
 
 .git/
 .github/
 
-# Rust build output — never ship the host's target/ into the image or the
+# Rust build output - never ship the host's target/ into the image or the
 # build context; the multi-stage build produces its own.
 target/
 **/target/
@@ -24,6 +24,9 @@ docker-compose.yml
 docs/
 ops/
 .turbo/
+# Claude Code worktrees/state (can be GBs of nested checkouts + target/)
+.claude/
+*.log
 
 .DS_Store
 **/*.DS_Store
