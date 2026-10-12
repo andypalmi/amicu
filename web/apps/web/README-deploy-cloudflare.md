@@ -24,10 +24,8 @@ pnpm --filter web cf:build
 # runtime, via wrangler) for manual verification.
 pnpm --filter web cf:preview
 
-# Build and deploy (passes --keep-vars to `wrangler deploy` so it does NOT
-# overwrite dashboard-set vars with the committed placeholders - see the
-# warning below). DO NOT RUN until a Cloudflare account/zone is provisioned
-# and the vars/secrets below are set for real in that account.
+# Build and deploy (passes --keep-vars to `wrangler deploy`; the committed
+# `vars` are the production values - see the note below).
 pnpm --filter web cf:deploy
 
 # Regenerate `cloudflare-env.d.ts` (typed `CloudflareEnv`) after changing
@@ -42,12 +40,13 @@ available without an account.
 
 ## Required vars / secrets
 
-`wrangler.jsonc` commits **placeholder, non-secret** values under `vars` so
-the file is valid and `cf:build`/`cf:preview` work out of the box. **None of
-the committed values are real.** Before any real deploy, every one of these
-must be overridden in the Cloudflare dashboard ("Variables and Secrets" on
-the Worker) or via `wrangler secret put <NAME>` / an environment-specific
-`vars` override - **never commit real values to this file.**
+`wrangler.jsonc` commits the **production, non-secret** values under `vars`
+(`API_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_JWKS_URL`,
+`NEXT_PUBLIC_SITE_URL`, `NODE_ENV`), so a bare `wrangler deploy` or CI deploy
+keeps production intact. Change them by editing the file in a PR. Do **not**
+also set a Worker secret with one of these names (`wrangler secret put
+API_URL` etc.): a secret and a var with the same name conflict. Only real
+secrets (e.g. `TURNSTILE_SECRET_KEY`) belong in the secret store.
 
 | Variable | Purpose | Notes |
 | --- | --- | --- |
@@ -61,10 +60,8 @@ the Worker) or via `wrangler secret put <NAME>` / an environment-specific
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY` (optional) | Cloudflare Turnstile public site key | **Build-time** (inlined). Unset => widget not rendered. Create the widget in the Cloudflare dashboard (hostname = the public site host). |
 | `TURNSTILE_SECRET_KEY` (optional) | Turnstile secret for server-side siteverify | **Secret** - `wrangler secret put TURNSTILE_SECRET_KEY`; never `NEXT_PUBLIC`, never in `vars`. Unset => verification skipped (dev). Set BOTH keys together. Verification is **fail-closed**: if the secret is set and the token is missing or Cloudflare is unreachable/times out (5s), signup/forgot/resend show a generic error. Checks `success`, `action` and hostname (from `NEXT_PUBLIC_SITE_URL`); forwards `CF-Connecting-IP`. |
 
-None of these are secrets in the credential sense (no API keys/passwords),
-but `API_URL`/`AUTH_ISSUER`/`AUTH_JWKS_URL` are still environment-specific
-infrastructure details that shouldn't be committed as real values - keep
-using Cloudflare's vars/secrets store per environment (staging vs prod).
+None of these are secrets in the credential sense (public URLs and claims),
+which is why the production values are committed in `wrangler.jsonc`.
 
 ### Issuer/audience parity (hard rule)
 
@@ -134,33 +131,15 @@ always, whenever either service's issuer/audience config changes.
   upstream-tracked caveat rather than something this repo can "fix" by
   choosing a different runtime.
 
-> [!WARNING]
-> **`wrangler deploy` (bare) DELETES every plain dashboard-set `vars` and
-> replaces them with whatever is committed in `wrangler.jsonc`'s `vars`
-> block** - i.e. the placeholder values above. This is standard Wrangler
-> behavior (each deploy's `vars` fully replaces the previous deploy's
-> `vars`), not something specific to this adapter, but it's an easy way to
-> accidentally overwrite a real `API_URL`/`AUTH_ISSUER`/etc. with
-> `https://REPLACE-ME.example.invalid` and take the whole app down.
->
-> Two independent mitigations, both already in place:
-> - **`cf:deploy` passes `--keep-vars`** (`opennextjs-cloudflare deploy --
->   --keep-vars`, which forwards straight through to `wrangler deploy
->   --keep-vars`), which preserves whatever plain vars are already set on the
->   Worker instead of overwriting them with the committed placeholders.
-> - **Prefer `wrangler secret put <NAME>` over dashboard "vars" for
->   anything environment-specific** (`API_URL`, `AUTH_ISSUER`,
->   `AUTH_AUDIENCE`, `AUTH_JWKS_URL`, `NEXT_PUBLIC_SITE_URL`\*). Secrets are
->   **never** touched by `wrangler deploy`, `--keep-vars` or not - they're
->   the safer default for anything that would be bad to accidentally reset.
->   (\* `NEXT_PUBLIC_SITE_URL` is the one exception: since it must be present
->   at *build* time, not just runtime, it can't be a Workers secret - it has
->   to be set in the environment that runs `cf:build`/`cf:deploy`, e.g. CI
->   secrets, not the Worker's own secret store.)
->
-> If you ever do need to intentionally reset `vars` to the committed
-> placeholders (e.g. tearing down an environment), run bare `wrangler
-> deploy` deliberately - never as a reflex.
+> [!NOTE]
+> Each `wrangler deploy` fully replaces the Worker's plain `vars` with the
+> `vars` block in `wrangler.jsonc`. Since that block now holds the real
+> production values, a bare deploy is safe. `cf:deploy` still passes
+> `--keep-vars` (forwarded to `wrangler deploy`), which only preserves
+> dashboard-set vars that are absent from the file. Do not set secrets with
+> the same names as committed vars. `NEXT_PUBLIC_SITE_URL` must also be
+> present at *build* time (CI repo variable) since it is inlined into the
+> client bundle.
 
 ## Local verification (already run before this PR)
 
@@ -173,8 +152,8 @@ curl -i http://127.0.0.1:<port>/api/<some-bff-route>
 # Ctrl-C the preview process when done.
 ```
 
-With `API_URL` pointing at the placeholder host above, BFF routes that call
+With `API_URL` pointing at the production API, BFF routes that call
 the API are expected to fail (DNS/connect error surfaced as a 4xx/5xx) - the
 point of this check is that the Worker itself boots, resolves the App
-Router, and routes matching requests, not that the placeholder backend
-responds successfully.
+Router, and routes matching requests, not that the backend
+responds successfully from a local preview.
