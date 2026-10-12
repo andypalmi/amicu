@@ -110,7 +110,7 @@ always, whenever either service's issuer/audience config changes.
   `workers_dev` is explicitly `false` (no `*.workers.dev` URL), and
   `dev.host: "localhost"` stops `wrangler dev`/`cf:preview` from rewriting
   request URL/Host/Origin to `amicu.dev`.
-- **Before approving the first production deploy**: set the repo variable
+- **Before dispatching the first production deploy** (manual `workflow_dispatch` on `main`: Actions → Deploy Web → Run workflow, or `gh workflow run deploy-web.yml --ref main`; required reviewers are unavailable on the free plan, so dispatch is the gate): set the repo variable
   `NEXT_PUBLIC_SITE_URL=https://amicu.dev` (build-time) and add `amicu.dev`
   to the Turnstile widget's hostnames.
 - **Assets binding**: `wrangler.jsonc`'s `assets.directory` points at

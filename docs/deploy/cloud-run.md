@@ -231,36 +231,30 @@ defeats the RLS backstop (see the script's header comment and
 
 ## Trigger model
 
-Both deploy workflows run via `workflow_run`, gated on `.github/workflows/ci.yml`
-(`name: CI`) completing successfully on `main` — they never deploy a commit
-CI hasn't already validated (build/clippy/test/audit/docker build, plus the
-`web` job's lint/typecheck/build). Each workflow's `deploy` job also gates on
-`github.event.workflow_run.conclusion == 'success'` (a failed/cancelled CI
-run does not deploy), and checks out `github.event.workflow_run.head_sha` —
-the exact commit CI validated — rather than plain `github.sha`, which under
-`workflow_run` refers to the default branch's HEAD at event time and isn't
-guaranteed to be the same commit. Both workflows can also be triggered
-manually via `workflow_dispatch`.
+Production deploys are **manual**. Both workflows are `workflow_dispatch`-only:
+Actions → Deploy API / Deploy Web → Run workflow on `main`, or
+`gh workflow run deploy-api.yml --ref main` (likewise `deploy-web.yml`).
+GitHub's free plan doesn't offer required reviewers on environments for
+private repos, so the manual dispatch is the gate. The `production`
+environment is restricted to the `main` branch, and each job also has
+`if: github.ref == 'refs/heads/main'`.
 
-`workflow_run` doesn't support `paths:` filters, so unlike the previous
-push-triggered setup, neither workflow filters by changed paths anymore —
-`deploy-api.yml` and `deploy-web.yml` both now run on every successful `main`
-CI run, not just ones touching `crates/**`/`Cargo.*`/`Dockerfile` or
-`web/**` respectively.
+Before deploying, each job checks that the latest `ci.yml` run for
+`github.sha` concluded `success` (`gh run list --workflow ci.yml --commit
+"$GITHUB_SHA"`), and fails otherwise. The optional boolean input
+`skip_ci_check` (default false) bypasses that check with a loud warning; use
+it only when Actions minutes are exhausted and CI was run locally
+(`gh workflow run deploy-api.yml --ref main -f skip_ci_check=true`).
+Deploys use `github.sha` (the dispatched `main` commit).
 
-> ⚠️ **Before you configure secrets**: create the `production` GitHub
-> environment with a required reviewer **and** enable branch protection on
-> `main` first. Both deploy workflows are gated behind that `production`
-> environment (Settings → Environments — create it once on this repo, same
-> as `amicu-infra`'s own gate on `apply`), but that gate only protects
-> anything if it's in place *before* the WIF/Cloudflare secrets and
-> variables below are added — otherwise the first CI run that completes on
-> `main` after those secrets exist will auto-deploy unreviewed.
+> Before you configure secrets: create the `production` GitHub environment
+> (Settings → Environments) restricted to the `main` branch, and enable
+> branch protection on `main`. Required reviewers are not available on the
+> free plan, so nothing deploys unless someone dispatches the workflow.
 
 ## Deploy order
 
-1. **`deploy-api.yml`** (`workflow_run` after CI succeeds on `main`, or
-   `workflow_dispatch`): WIF auth → build & push the image to Artifact
+1. **`deploy-api.yml`** (manual `workflow_dispatch` on `main`): WIF auth → build & push the image to Artifact
    Registry, tagged with the deployed commit's SHA and `:latest` → update
    + execute the `amicu-migrate` Job with the new image, **waiting** for it
    to finish → only on success, `gcloud run deploy amicu-api --image …`.
@@ -271,8 +265,7 @@ CI run, not just ones touching `crates/**`/`Cargo.*`/`Dockerfile` or
    (`amicu-infra/modules/cloud-run-api`'s `lifecycle.ignore_changes` on
    `template[0].containers[0].image`/`client`/`client_version` only), so
    this workflow can never fight a later `terraform apply`.
-2. **`deploy-web.yml`** (`workflow_run` after CI succeeds on `main`, or
-   `workflow_dispatch`): pnpm install → `pnpm --filter @amicu/web cf:deploy`
+2. **`deploy-web.yml`** (manual `workflow_dispatch` on `main`): pnpm install → `pnpm --filter @amicu/web cf:deploy`
    (`opennextjs-cloudflare build && opennextjs-cloudflare deploy --
    --keep-vars` — `--keep-vars` preserves whatever vars/secrets are already
    set on the Worker instead of resetting them to `wrangler.jsonc`'s

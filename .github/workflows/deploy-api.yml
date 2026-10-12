@@ -5,17 +5,15 @@ name: Deploy API (Cloud Run)
 # amicu's names from amicu-infra's envs/prod/outputs.tf (see
 # docs/deploy/cloud-run.md for the full vars/secrets table).
 on:
+  # Manual only: GitHub's free plan has no required reviewers on environments
+  # for private repos, so the `production` environment can't gate deploys.
+  # Dispatching the workflow (from main) IS the gate.
   workflow_dispatch:
-  # Runs after CI (.github/workflows/ci.yml, `name: CI`) finishes on `main`,
-  # rather than on push directly — deploys only ever ship a commit CI has
-  # already validated (build/clippy/test/audit/docker build). workflow_run
-  # doesn't support `paths:` filters (see docs/deploy/cloud-run.md), so this
-  # runs on every successful `main` CI run, not just ones touching
-  # crates/**/Cargo.*/Dockerfile.
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [main]
+    inputs:
+      skip_ci_check:
+        description: "Skip the CI-success check (only when Actions minutes are exhausted and CI was run locally)"
+        type: boolean
+        default: false
 
 concurrency:
   # Repo-wide, not per-ref: only one Cloud Run rollout (migrate + deploy) in
@@ -26,6 +24,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
   id-token: write
 
 jobs:
@@ -33,7 +32,7 @@ jobs:
     name: Build, migrate, deploy
     runs-on: ubuntu-latest
     environment: production
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: github.ref == 'refs/heads/main'
     env:
       REGION: ${{ vars.GCP_REGION }}
       # amicu-infra's module.gcp_project.artifact_registry_path output, e.g.
@@ -44,15 +43,11 @@ jobs:
       # resources use. Hardcoded, not a repo variable: this is a fixed
       # Terraform-module default, not something meant to vary per deploy.
       IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/amicu/amicu-api
-      # Under workflow_run, plain `github.sha` is the default branch's HEAD
-      # at event time, not necessarily the exact commit CI validated (usually
-      # the same, but not guaranteed) — head_sha is that exact commit.
-      # workflow_dispatch has no workflow_run context, hence the fallback.
-      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      SHA: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - id: auth

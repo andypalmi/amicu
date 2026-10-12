@@ -9,20 +9,18 @@ name: Deploy Web (Cloudflare Workers)
 #
 # Deviates from frontend.yml in one way, on amicu-infra README's explicit
 # instruction ("What the amicu app repo must add"): gated behind the same
-# `production` GitHub environment as deploy-api.yml (required reviewer),
+# `production` GitHub environment as deploy-api.yml (restricted to `main`),
 # where safecheck-frontend's own deploy job has no environment gate at all.
 on:
+  # Manual only: GitHub's free plan has no required reviewers on environments
+  # for private repos, so the `production` environment can't gate deploys.
+  # Dispatching the workflow (from main) IS the gate.
   workflow_dispatch:
-  # Runs after CI (.github/workflows/ci.yml, `name: CI`) finishes on `main`,
-  # rather than on push directly — deploys only ever ship a commit CI has
-  # already validated (build/clippy/test/audit/docker build, plus the `web`
-  # job's lint/typecheck/build). workflow_run doesn't support `paths:`
-  # filters (see docs/deploy/cloud-run.md), so this runs on every successful
-  # `main` CI run, not just ones touching web/**.
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [main]
+    inputs:
+      skip_ci_check:
+        description: "Skip the CI-success check (only when Actions minutes are exhausted and CI was run locally)"
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-web
@@ -30,20 +28,21 @@ concurrency:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   deploy:
     name: Build & deploy OpenNext Worker
     runs-on: ubuntu-latest
     environment: production
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: github.ref == 'refs/heads/main'
     defaults:
       run:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       # Activates the `packageManager` pin in web/package.json
