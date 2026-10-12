@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM known_networks WHERE seen_at <= extract(epoch FROM now())::bigint - $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ddf5e83e26e616938698b26c1df3543e5d79b2234ddf8d1cc92683c725fd3847"
+}

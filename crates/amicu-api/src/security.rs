@@ -1,7 +1,8 @@
 //! API-wide security response headers (andypalmi/amicu-planning#194).
 //!
-//! [`security_headers`] is a middleware applied to the whole router (see
-//! [`crate::api_router`]; `amicu-server` also wraps the health/outbox routes):
+//! [`security_headers`] is a middleware applied by [`crate::api_router`] to
+//! every route it serves (the health and outbox routers `amicu-server` merges
+//! alongside it are not covered):
 //!
 //! * `X-Content-Type-Options: nosniff`
 //! * `Strict-Transport-Security: max-age=63072000; includeSubDomains`

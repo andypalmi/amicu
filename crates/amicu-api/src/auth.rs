@@ -21,6 +21,8 @@ use serde_json::json;
 use utoipa::ToSchema;
 
 use crate::edge::EdgeTrust;
+use amicu_auth::throttle::{InMemoryKnownNetworks, KnownNetworks};
+
 use crate::ratelimit::{InMemoryRateLimiter, RateLimiter, TrustedProxies};
 
 /// Maximum request body on the auth routes (JSON credentials / tokens only).
@@ -48,7 +50,8 @@ pub(crate) struct ClientFingerprint {
 
 /// The IPv4 /24 or IPv6 /64 containing `ip`, textual.
 fn network_prefix(ip: std::net::IpAddr) -> String {
-    match ip {
+    // IPv4-mapped IPv6 (::ffff:a.b.c.d) is the same host as the IPv4 address.
+    match ip.to_canonical() {
         std::net::IpAddr::V4(v4) => {
             let o = v4.octets();
             format!("{}.{}.{}.0/24", o[0], o[1], o[2])
@@ -69,6 +72,8 @@ pub struct AuthApiState {
     email_limiter: Arc<dyn RateLimiter>,
     /// Per-email limiter for `/signin` and `/token`.
     signin_email_limiter: Arc<dyn RateLimiter>,
+    /// Networks that recently signed in successfully, per account.
+    known_networks: Arc<dyn KnownNetworks>,
     trusted_proxies: TrustedProxies,
     edge_trust: EdgeTrust,
 }
@@ -91,6 +96,7 @@ impl AuthApiState {
                 DEFAULT_SIGNIN_EMAIL_LIMIT.0,
                 std::time::Duration::from_secs(DEFAULT_SIGNIN_EMAIL_LIMIT.1),
             )),
+            known_networks: Arc::new(InMemoryKnownNetworks::default()),
             trusted_proxies: TrustedProxies::default(),
             edge_trust: EdgeTrust::default(),
         }
@@ -111,6 +117,58 @@ impl AuthApiState {
         self.email_limiter = recover_and_resend;
         self.signin_email_limiter = signin;
         self
+    }
+
+    /// Install the shared "known networks" store (Postgres-backed in production).
+    #[must_use]
+    pub fn with_known_networks(mut self, known: Arc<dyn KnownNetworks>) -> Self {
+        self.known_networks = known;
+        self
+    }
+
+    /// Key for the failed-sign-in budget of `email`.
+    fn signin_budget_key(email: &str) -> Option<String> {
+        let normalized = amicu_auth::service::normalize_email(email);
+        (!normalized.is_empty()).then(|| {
+            format!(
+                "email|signin_failed|{}",
+                security::pseudonym("email-rl", &normalized)
+            )
+        })
+    }
+
+    /// Pre-check of the failed-sign-in budget (no hit counted). When it is
+    /// exhausted, only a network that recently signed in successfully to this
+    /// account may still attempt; everyone else is refused BEFORE any password
+    /// check. Identical for unknown emails (the budget is keyed by email, and an
+    /// unknown email never has a known network). Store errors fail open.
+    ///
+    /// Trade-off: during an active distributed attack the owner on a brand-new
+    /// network is refused until the budget window passes.
+    async fn signin_budget_refuses(&self, email: &str, net: Option<&str>) -> bool {
+        let Some(key) = Self::signin_budget_key(email) else {
+            return false;
+        };
+        if !self.signin_email_limiter.is_exhausted(&key).await {
+            return false;
+        }
+        let known = tokio::time::timeout(
+            std::time::Duration::from_millis(1_000),
+            self.known_networks.is_known(&Self::known_key(email, net)),
+        )
+        .await;
+        !matches!(known, Ok(Ok(true)))
+    }
+
+    fn known_key(email: &str, net: Option<&str>) -> String {
+        security::pseudonym(
+            "known-network",
+            &format!(
+                "{}|{}",
+                amicu_auth::service::normalize_email(email),
+                net.unwrap_or("")
+            ),
+        )
     }
 
     /// True when `email` has exhausted `limiter`'s budget for `bucket`. Empty
@@ -352,6 +410,16 @@ pub(crate) async fn token(
             .email(&body.email)
             .ip_hash(client.ip.as_deref())
     };
+    if state
+        .signin_budget_refuses(&body.email, client.net.as_deref())
+        .await
+    {
+        event("signin_failed", Severity::Warn)
+            .outcome("rate_limited")
+            .reason("email_budget_exhausted")
+            .emit();
+        return Err(ApiError(AuthError::RateLimited));
+    }
     let result = state
         .service
         .sign_in_from(
@@ -362,17 +430,23 @@ pub(crate) async fn token(
         .await;
     match result {
         Ok(pair) => {
+            // Remember this network for the account (best-effort, bounded).
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(1_000),
+                state
+                    .known_networks
+                    .record(&AuthApiState::known_key(&body.email, client.net.as_deref())),
+            )
+            .await;
             event("signin_succeeded", Severity::Info)
                 .outcome("ok")
                 .emit();
             Ok(Json(to_response(&pair)?))
         }
         Err(err) => {
-            // The per-email budget counts only FAILED guesses and is consulted
-            // only after the password check failed, so a correct password is
-            // never refused by it (an attacker cannot lock the owner out with
-            // it). Unknown emails are counted identically (anti-enumeration).
-            // The hard control is the network-scoped account backoff.
+            // The per-email budget counts only FAILED guesses (consulted before
+            // the check via `signin_budget_refuses`, consumed here). Unknown
+            // emails are counted identically (anti-enumeration).
             if matches!(err, AuthError::InvalidCredentials)
                 && state
                     .email_throttled(&state.signin_email_limiter, "signin_failed", &body.email)

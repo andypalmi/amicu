@@ -14,7 +14,9 @@ use crate::key::SigningKey;
 use crate::keyring::Keyring;
 use crate::membership::{MembershipStore, PersonalMembershipStore, WorkspaceMembership};
 use crate::notify::{Notification, NotificationKind, Notifier};
-use crate::password::{MAX_PASSWORD_LEN, check_password_policy, hash_password, verify_password};
+use crate::password::{
+    MAX_SIGNIN_PASSWORD_LEN, check_password_policy, hash_password, verify_password,
+};
 use crate::refresh::{self, RefreshStore};
 use crate::reset::{self, ResetStore};
 use crate::security::{SecurityEvent, Severity};
@@ -294,7 +296,7 @@ impl<C: Clock> AuthService<C> {
         let email = normalize_email(email);
         // Bound the Argon2 input. Rejected before any lookup, so it is the same
         // generic failure for every email.
-        if password.expose_secret().len() > MAX_PASSWORD_LEN {
+        if password.expose_secret().len() > MAX_SIGNIN_PASSWORD_LEN {
             return Err(AuthError::InvalidCredentials);
         }
         // Per-account backoff, keyed by the email pseudonym whether or not the
@@ -313,11 +315,7 @@ impl<C: Clock> AuthService<C> {
         };
         verify_password(password, &user.password_hash)?;
         // Correct password: forget the failures (best-effort).
-        if let Err(_e) = self.throttle.clear(&throttle_key).await {
-            SecurityEvent::new("login_throttle_unavailable", Severity::Warn)
-                .reason("clear_failed")
-                .emit();
-        }
+        self.clear_throttle(&throttle_key).await;
         // Gate AFTER the password check: a wrong password can never reach here,
         // so the unverified-email signal is only ever shown to the true owner.
         if require_email_verification() && !user.email_verified {
@@ -329,6 +327,13 @@ impl<C: Clock> AuthService<C> {
         // inside `issue_pair_for_workspace`.
         self.issue_pair_for_workspace(&user, user.personal_workspace_id)
             .await
+    }
+
+    /// Forget the failures for `key` in the shared store (bounded by the same
+    /// timeout; errors are ignored) and in the local fallback.
+    async fn clear_throttle(&self, key: &str) {
+        let _ = tokio::time::timeout(THROTTLE_TIMEOUT, self.throttle.clear(key)).await;
+        let _ = self.fallback_throttle.clear(key).await;
     }
 
     /// Count this attempt against the account's backoff. On a throttle-store

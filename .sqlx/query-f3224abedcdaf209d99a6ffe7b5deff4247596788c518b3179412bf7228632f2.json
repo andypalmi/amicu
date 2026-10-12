@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count FROM rate_limit_buckets WHERE key = $1 AND expires_at > extract(epoch FROM now())::bigint",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f3224abedcdaf209d99a6ffe7b5deff4247596788c518b3179412bf7228632f2"
+}

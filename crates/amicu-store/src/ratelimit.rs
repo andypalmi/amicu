@@ -159,6 +159,22 @@ impl PostgresRateLimitStore {
     ///
     /// # Errors
     /// Returns [`StoreError::Database`] if the delete fails.
+    /// Current in-window count for `key` WITHOUT counting a hit (0 when there is
+    /// no live window). Used for "is this budget already exhausted?" checks.
+    ///
+    /// # Errors
+    /// [`StoreError`] on a database failure.
+    pub async fn peek(&self, key: &str) -> Result<i64, StoreError> {
+        let count = sqlx::query_scalar!(
+            "SELECT count FROM rate_limit_buckets \
+             WHERE key = $1 AND expires_at > extract(epoch FROM now())::bigint",
+            key,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(count.unwrap_or(0))
+    }
+
     pub async fn cleanup_expired(&self) -> Result<u64, StoreError> {
         let result = sqlx::query!(
             "DELETE FROM rate_limit_buckets WHERE expires_at <= extract(epoch FROM now())::bigint"

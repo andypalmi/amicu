@@ -22,6 +22,12 @@ pub const MIN_PASSWORD_LEN: usize = 8;
 /// enough for any passphrase or password-manager output.
 pub const MAX_PASSWORD_LEN: usize = 256;
 
+/// Cap on a password PRESENTED AT SIGN-IN, in bytes. Deliberately far above
+/// [`MAX_PASSWORD_LEN`] so accounts created before that limit existed can
+/// still sign in; it only bounds Argon2 input (the request body is capped
+/// much lower anyway).
+pub const MAX_SIGNIN_PASSWORD_LEN: usize = 4096;
+
 /// Enforce the minimum password-strength policy at registration time.
 ///
 /// Applied on sign-up only; sign-in never re-checks policy (an existing

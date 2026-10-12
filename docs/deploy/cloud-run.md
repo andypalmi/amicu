@@ -117,6 +117,29 @@ untouched by this change; once a valid edge token is presented,
 `CF-Connecting-IP` is used instead and `AMICU_TRUSTED_PROXIES` is not
 consulted for that request at all.
 
+## Auth hardening env (amicu-planning#194)
+
+| Env var | Secret? | Default | Purpose |
+| --- | --- | --- | --- |
+| `AMICU_SECURITY_HASH_KEY` | **yes** | unset | Secret key (**>= 32 bytes**, e.g. `openssl rand -base64 48`) used to pseudonymize emails and client IPs in `amicu::security` log events and in the sign-in backoff / per-email limiter keys. **Required when `AMICU_ENV=production`** (startup error otherwise); the SAME value on every replica. Store in Secret Manager. Rotating it resets backoff counters and changes the hashes in logs. |
+| `AMICU_EMAIL_RATE_LIMIT_MAX` / `AMICU_EMAIL_RATE_LIMIT_WINDOW_SECS` | no | `5` / `900` | Per-email budget for `/recover` and `/verify/resend`. |
+| `AMICU_SIGNIN_EMAIL_RATE_LIMIT_MAX` | no | `100` | Per-email budget of FAILED sign-ins per window. Once exhausted, only networks that signed in successfully to that account in the last 30 days may still attempt; others get `429` until the window passes (so during an active distributed attack the owner on a brand-new network is refused). |
+
+**Production client identity.** The per-network sign-in backoff and the
+per-IP limits trust the client IP. With the Cloud Run default
+`AMICU_TRUSTED_PROXIES=0.0.0.0/0` every peer is "trusted" and
+`X-Forwarded-For` is spoofable, so in `AMICU_ENV=production` a catch-all
+(`0.0.0.0/0` or `::/0`) is **refused at startup unless `AMICU_EDGE_TOKEN` is set
+and `AMICU_REQUIRE_EDGE_TOKEN=true`**: identity then always comes from the
+verified `CF-Connecting-IP`. Production example:
+
+```sh
+AMICU_ENV=production
+AMICU_TRUSTED_PROXIES=0.0.0.0/0
+AMICU_REQUIRE_EDGE_TOKEN=true
+# secrets (Secret Manager): AMICU_EDGE_TOKEN, AMICU_SECURITY_HASH_KEY
+```
+
 ## Cloud Scheduler → outbox drain
 
 Cloud Run gives a container CPU only while a request is in flight, so

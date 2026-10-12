@@ -83,6 +83,7 @@ use uuid::Uuid;
 
 pub mod config;
 pub mod invite;
+pub mod known_networks;
 pub mod login_throttle;
 pub mod membership;
 pub mod outbox;
@@ -96,6 +97,7 @@ pub mod workspace;
 
 pub use config::{ConfigStore, InMemoryConfigStore, PostgresConfigStore};
 pub use invite::{AcceptedInvite, Invite, InviteError, PostgresInviteStore};
+pub use known_networks::PostgresKnownNetworks;
 pub use login_throttle::PostgresLoginThrottle;
 pub use membership::{
     Member, OrgAuditAction, OrgAuditEntry, OrgMutationError, PostgresMembershipStore, Role,

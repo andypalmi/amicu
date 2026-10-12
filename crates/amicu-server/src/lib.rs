@@ -569,6 +569,13 @@ pub enum Error {
     /// than 32 bytes (andypalmi/amicu-planning#194). Without a secret key the
     /// pseudonyms in security events and rate-limit keys are guessable.
     MissingSecurityHashKey,
+    /// `AMICU_ENV=production` with a catch-all `AMICU_TRUSTED_PROXIES`
+    /// (`0.0.0.0/0` or `::/0`) but without `AMICU_EDGE_TOKEN` set AND
+    /// `AMICU_REQUIRE_EDGE_TOKEN=true` (andypalmi/amicu-planning#194). A
+    /// catch-all trusts `X-Forwarded-For` from anyone, so client identity (and
+    /// with it the per-IP/per-network sign-in controls) would be spoofable;
+    /// production must derive identity from the verified edge instead.
+    CatchAllProxyWithoutEdge,
     /// `AMICU_ENV=production` and the connected Postgres role would bypass
     /// row-level security (superuser/BYPASSRLS, direct or inherited, or owns
     /// a `FORCE ROW LEVEL SECURITY` table).
@@ -616,6 +623,12 @@ impl std::fmt::Display for Error {
                 "AMICU_ENV=production requires DATABASE_URL to be set (production may not \
                  silently fall back to ephemeral in-memory stores)"
             ),
+            Error::CatchAllProxyWithoutEdge => write!(
+                f,
+                "AMICU_ENV=production with a catch-all AMICU_TRUSTED_PROXIES (0.0.0.0/0 or ::/0) \
+                 requires AMICU_EDGE_TOKEN to be set and AMICU_REQUIRE_EDGE_TOKEN=true, so client \
+                 identity comes from the verified edge rather than a spoofable X-Forwarded-For"
+            ),
             Error::MissingSecurityHashKey => write!(
                 f,
                 "AMICU_ENV=production requires AMICU_SECURITY_HASH_KEY (at least 32 bytes, the \
@@ -657,6 +670,7 @@ impl std::error::Error for Error {
             | Error::MissingSigningKey
             | Error::MissingDatabaseUrl
             | Error::MissingSecurityHashKey
+            | Error::CatchAllProxyWithoutEdge
             | Error::RlsBypass(_)
             | Error::PendingMigrations(_)
             | Error::MigratorLacksCreate(_)
@@ -1097,6 +1111,12 @@ pub async fn build_app_with_database_url(
     if require_edge_token && edge_token.is_none() {
         return Err(Error::MissingEdgeToken);
     }
+    check_prod_edge_identity(
+        config.environment,
+        trusted.has_catch_all(),
+        edge_token.is_some(),
+        require_edge_token,
+    )?;
     let edge_trust = EdgeTrust::new(edge_token, require_edge_token);
 
     // Also the default `aud` the outbox-drain OIDC verifier enforces (see
@@ -1181,21 +1201,7 @@ pub async fn build_app_with_database_url(
         service =
             service.with_login_throttle(Arc::new(amicu_store::PostgresLoginThrottle::new(pool)));
     }
-    // Pseudonym key for security events + per-email limiter keys (#194):
-    // REQUIRED (>= 32 bytes) in production; dev keeps a loud-warning fallback.
-    match std::env::var("AMICU_SECURITY_HASH_KEY") {
-        Ok(k) if k.len() >= 32 => {
-            let _ = amicu_auth::security::set_hash_key(k.as_bytes());
-        }
-        _ if config.environment == Environment::Production => {
-            return Err(Error::MissingSecurityHashKey);
-        }
-        _ => eprintln!(
-            "amicu-server: WARNING - AMICU_SECURITY_HASH_KEY is not set (or < 32 bytes); \
-             emails/IPs in security events are hashed with a PUBLIC default key (guessable for \
-             low-entropy inputs). Set one secret value, identical on every replica."
-        ),
-    }
+    init_security_hash_key(config)?;
     // A live handle to the SAME keyring the service just took ownership of:
     // wiring this into KeyringJwksProvider (below) means the engine-gate
     // verifier observes rotate_keys()/retire() in-process, with no restart
@@ -1214,8 +1220,15 @@ pub async fn build_app_with_database_url(
     // other Postgres-vs-in-memory store selection in this function works.
     let limiter = build_rate_limiter(pool.clone(), config);
     let (recover_limiter, signin_limiter) = build_email_limiters(pool.as_ref(), config);
+    let known_networks: Arc<dyn amicu_auth::throttle::KnownNetworks> =
+        if let Some(pool) = pool.clone() {
+            Arc::new(amicu_store::PostgresKnownNetworks::new(pool))
+        } else {
+            Arc::new(amicu_auth::throttle::InMemoryKnownNetworks::default())
+        };
     let auth_state = AuthApiState::new(service.clone(), limiter)
         .with_email_limiters(recover_limiter, signin_limiter)
+        .with_known_networks(known_networks)
         .with_trusted_proxies(trusted)
         .with_edge_trust(edge_trust.clone());
 
@@ -1742,9 +1755,64 @@ fn env_flag_is_truthy(name: &str) -> bool {
     })
 }
 
+/// Install the pseudonym key for security events and limiter/backoff keys
+/// (#194): REQUIRED (>= 32 bytes) in production; dev keeps a loud warning.
+fn init_security_hash_key(config: &Config) -> Result<(), Error> {
+    match std::env::var("AMICU_SECURITY_HASH_KEY") {
+        Ok(k) if k.len() >= 32 => {
+            let _ = amicu_auth::security::set_hash_key(k.as_bytes());
+        }
+        _ if config.environment == Environment::Production => {
+            return Err(Error::MissingSecurityHashKey);
+        }
+        _ => eprintln!(
+            "amicu-server: WARNING - AMICU_SECURITY_HASH_KEY is not set (or < 32 bytes); \
+             emails/IPs in security events are hashed with a PUBLIC default key (guessable for \
+             low-entropy inputs). Set one secret value, identical on every replica."
+        ),
+    }
+    Ok(())
+}
+
+/// Production identity rule (see [`Error::CatchAllProxyWithoutEdge`]): a
+/// catch-all trusted-proxy list is only acceptable when every request must
+/// carry a valid edge token, so identity always comes from the edge.
+fn check_prod_edge_identity(
+    env: Environment,
+    catch_all_proxy: bool,
+    has_edge_token: bool,
+    require_edge_token: bool,
+) -> Result<(), Error> {
+    if env == Environment::Production && catch_all_proxy && !(has_edge_token && require_edge_token)
+    {
+        return Err(Error::CatchAllProxyWithoutEdge);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prod_catch_all_proxy_requires_edge_token_and_enforcement() {
+        let p = Environment::Production;
+        let d = Environment::Development;
+        // Catch-all in production: only OK with token AND enforcement.
+        assert!(check_prod_edge_identity(p, true, false, false).is_err());
+        assert!(check_prod_edge_identity(p, true, true, false).is_err());
+        assert!(check_prod_edge_identity(p, true, false, true).is_err());
+        assert!(check_prod_edge_identity(p, true, true, true).is_ok());
+        // Specific proxies, or non-production, are unaffected.
+        assert!(check_prod_edge_identity(p, false, false, false).is_ok());
+        assert!(check_prod_edge_identity(d, true, false, false).is_ok());
+        // The error message never contains a token.
+        assert!(
+            !Error::CatchAllProxyWithoutEdge
+                .to_string()
+                .contains("secret")
+        );
+    }
 
     fn addr(s: &str) -> SocketAddr {
         s.parse().expect("valid test socket address")

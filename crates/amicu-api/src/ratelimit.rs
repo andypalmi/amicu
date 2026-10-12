@@ -136,6 +136,16 @@ impl InMemoryRateLimiter {
         self.max > 0
     }
 
+    /// True if `key` has already used `max` hits in its live window (no hit
+    /// is recorded).
+    pub fn exhausted(&self, key: &str) -> bool {
+        let now = Instant::now();
+        let buckets = self.buckets.lock().expect("rate limiter poisoned");
+        buckets.get(key).is_some_and(|b| {
+            now.duration_since(b.window_start) <= self.window && b.count >= self.max
+        })
+    }
+
     /// Number of buckets currently tracked. Primarily for tests/observability.
     #[must_use]
     pub fn tracked(&self) -> usize {
@@ -193,12 +203,23 @@ impl Default for InMemoryRateLimiter {
 pub trait RateLimiter: Send + Sync {
     /// Record a hit for `key`; returns `true` if it is within the limit.
     async fn check(&self, key: &str) -> bool;
+
+    /// True when `key`'s budget for the current window is already used up,
+    /// WITHOUT counting a hit. Backends that cannot peek (and any backend
+    /// error or timeout) report `false`: this is a fail-open advisory read.
+    async fn is_exhausted(&self, _key: &str) -> bool {
+        false
+    }
 }
 
 #[async_trait]
 impl RateLimiter for InMemoryRateLimiter {
     async fn check(&self, key: &str) -> bool {
         self.check(key)
+    }
+
+    async fn is_exhausted(&self, key: &str) -> bool {
+        self.exhausted(key)
     }
 }
 
@@ -319,6 +340,21 @@ impl RateLimiter for PostgresRateLimiter {
             }
         }
     }
+
+    async fn is_exhausted(&self, key: &str) -> bool {
+        match tokio::time::timeout(self.timeout, self.store.peek(key)).await {
+            Ok(Ok(count)) => count >= i64::from(self.max),
+            // Fail open, like `check`.
+            Ok(Err(err)) => {
+                self.note_fail_open(err);
+                false
+            }
+            Err(_) => {
+                self.note_fail_open("peek timed out");
+                false
+            }
+        }
+    }
 }
 
 /// Configured allowlist of trusted reverse-proxy addresses, plus the logic for
@@ -367,6 +403,13 @@ impl TrustedProxies {
             nets.push(net);
         }
         Ok(Self::new(nets))
+    }
+
+    /// True if any entry is a catch-all (`0.0.0.0/0` or `::/0`), i.e. every
+    /// peer is "trusted" and `X-Forwarded-For` is believed from anyone.
+    #[must_use]
+    pub fn has_catch_all(&self) -> bool {
+        self.nets.iter().any(|n| n.prefix_len() == 0)
     }
 
     /// True if `ip` belongs to a trusted-proxy network.

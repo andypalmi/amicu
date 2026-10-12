@@ -105,13 +105,15 @@ impl LoginThrottle for InMemoryLoginThrottle {
         if map.len() >= self.capacity && !map.contains_key(key) {
             let reset = i64::try_from(RESET_AFTER_SECS).unwrap_or(i64::MAX);
             map.retain(|_, e| e.updated_at + reset > now);
-            if map.len() >= self.capacity
-                && let Some(oldest) = map
-                    .iter()
-                    .min_by_key(|(_, e)| e.updated_at)
-                    .map(|(k, _)| k.clone())
-            {
-                map.remove(&oldest);
+            if map.len() >= self.capacity {
+                // Still full of live entries: drop the oldest eighth in one
+                // pass, so the O(n) scan is amortized over capacity/8 inserts.
+                let mut by_age: Vec<(i64, String)> =
+                    map.iter().map(|(k, e)| (e.updated_at, k.clone())).collect();
+                by_age.sort_unstable();
+                for (_, k) in by_age.into_iter().take(self.capacity / 8 + 1) {
+                    map.remove(&k);
+                }
             }
         }
         let e = map.entry(key.to_owned()).or_insert(Entry {
@@ -136,6 +138,63 @@ impl LoginThrottle for InMemoryLoginThrottle {
 
     async fn clear(&self, key: &str) -> Result<()> {
         self.entries.lock().expect("throttle poisoned").remove(key);
+        Ok(())
+    }
+}
+
+/// How long a successful sign-in keeps its network "known" for an account.
+pub const KNOWN_NETWORK_TTL_SECS: u64 = 30 * 24 * 3600;
+
+/// Remembers which client networks recently signed in successfully to which
+/// account (both folded into one opaque pseudonym `key`). Consulted only when
+/// an account's failed-attempt budget is exhausted: a known network still gets
+/// through, an unknown one is refused.
+///
+/// Trade-off: during an active distributed attack, the owner on a brand-new
+/// network is refused until the budget window passes.
+#[async_trait]
+pub trait KnownNetworks: Send + Sync {
+    /// Whether `key` signed in successfully within [`KNOWN_NETWORK_TTL_SECS`].
+    async fn is_known(&self, key: &str) -> Result<bool>;
+    /// Record a successful sign-in for `key`.
+    async fn record(&self, key: &str) -> Result<()>;
+}
+
+/// Process-local [`KnownNetworks`]. NOT multi-replica safe.
+#[derive(Default)]
+pub struct InMemoryKnownNetworks {
+    seen: Mutex<HashMap<String, i64>>,
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+#[async_trait]
+impl KnownNetworks for InMemoryKnownNetworks {
+    async fn is_known(&self, key: &str) -> Result<bool> {
+        let ttl = i64::try_from(KNOWN_NETWORK_TTL_SECS).unwrap_or(i64::MAX);
+        Ok(self
+            .seen
+            .lock()
+            .expect("known networks poisoned")
+            .get(key)
+            .is_some_and(|t| *t + ttl > unix_now()))
+    }
+
+    async fn record(&self, key: &str) -> Result<()> {
+        let mut m = self.seen.lock().expect("known networks poisoned");
+        if m.len() >= 65_536 {
+            let ttl = i64::try_from(KNOWN_NETWORK_TTL_SECS).unwrap_or(i64::MAX);
+            let now = unix_now();
+            m.retain(|_, t| *t + ttl > now);
+            if m.len() >= 65_536 {
+                m.clear();
+            }
+        }
+        m.insert(key.to_owned(), unix_now());
         Ok(())
     }
 }

@@ -530,10 +530,23 @@ async fn attacker_on_another_network_cannot_lock_out_the_owner() {
     assert_eq!(s, StatusCode::OK);
 }
 
+async fn signin(app: &Router, email: &str, pw: &str, ip: [u8; 4]) -> StatusCode {
+    post_from(
+        app,
+        "/signin",
+        json!({"email": email, "password": pw}).to_string(),
+        None,
+        ip,
+    )
+    .await
+    .0
+}
+
 #[tokio::test]
-async fn per_email_signin_budget_counts_only_failures() {
-    let h = harness_with(100, 1);
+async fn exhausted_email_budget_refuses_unknown_networks_but_not_known_ones() {
+    let h = harness_with(100, 2);
     let (email, good) = ("budget@example.com", "correct horse battery");
+    let (home, away) = ([203, 0, 113, 9], [198, 51, 100, 5]);
     post(
         &h.app,
         "/signup",
@@ -541,29 +554,50 @@ async fn per_email_signin_budget_counts_only_failures() {
         None,
     )
     .await;
-    // Successful sign-ins never consume the failed-attempt budget.
+    // Successful sign-ins never consume the failed-attempt budget, and they
+    // make the home network "known" for this account.
     for _ in 0..3 {
-        let (s, _, _) = post(
-            &h.app,
-            "/signin",
-            json!({"email": email, "password": good}),
-            None,
-        )
-        .await;
-        assert_eq!(s, StatusCode::OK);
+        assert_eq!(signin(&h.app, email, good, home).await, StatusCode::OK);
     }
-    let bad = json!({"email": email, "password": "wrong-guess-1"});
-    let (s, _, _) = post(&h.app, "/signin", bad.clone(), None).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED);
-    let (s, _, _) = post(&h.app, "/signin", bad, None).await;
-    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS); // budget (1) exceeded by failures
-    // ... but the correct password is never refused by it.
-    let (s, _, _) = post(
-        &h.app,
-        "/signin",
-        json!({"email": email, "password": good}),
-        None,
-    )
-    .await;
-    assert_eq!(s, StatusCode::OK);
+    // Two failures from elsewhere exhaust the budget (2).
+    for _ in 0..2 {
+        assert_eq!(
+            signin(&h.app, email, "wrong-guess-1", away).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    // Budget exhausted: an unknown network is refused BEFORE the password is
+    // checked, so even the correct password gets 429 from there ...
+    assert_eq!(
+        signin(&h.app, email, good, away).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        signin(&h.app, email, good, [192, 0, 2, 44]).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    // ... while the owner's known network still gets through.
+    assert_eq!(signin(&h.app, email, good, home).await, StatusCode::OK);
+
+    // An unknown account behaves identically (no enumeration signal).
+    let ghost = "ghost@example.com";
+    let seq: Vec<_> = futures_seq(&h.app, ghost, away).await;
+    let real: Vec<_> = futures_seq(&h.app, "other@example.com", away).await;
+    assert_eq!(seq, real);
+    assert_eq!(
+        seq,
+        [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::TOO_MANY_REQUESTS
+        ]
+    );
+}
+
+async fn futures_seq(app: &Router, email: &str, ip: [u8; 4]) -> Vec<StatusCode> {
+    let mut v = Vec::new();
+    for _ in 0..3 {
+        v.push(signin(app, email, "wrong-guess-1", ip).await);
+    }
+    v
 }
