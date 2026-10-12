@@ -92,3 +92,21 @@ test('fail-closed: timeout, network error, non-2xx, bad JSON', async () => {
   const bad = (async () => new Response('<html>', { status: 200 })) as unknown as typeof fetch;
   assert.deepEqual(await verifyTurnstile({ ...base, fetchImpl: bad }), unavailable);
 });
+
+test('hostname comparison is case-insensitive', async () => {
+  const r = await verifyTurnstile({
+    ...base,
+    expectedHostname: 'amicu.dev',
+    fetchImpl: json({ success: true, action: 'signup', hostname: 'AMICU.Dev' }),
+  });
+  assert.deepEqual(r, { ok: true, skipped: false });
+});
+
+test('missing hostname in response is rejected when one is expected', async () => {
+  const r = await verifyTurnstile({
+    ...base,
+    expectedHostname: 'amicu.dev',
+    fetchImpl: json({ success: true, action: 'signup' }),
+  });
+  assert.deepEqual(r, { ok: false, reason: 'rejected' });
+});

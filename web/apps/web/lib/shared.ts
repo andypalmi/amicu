@@ -8,7 +8,7 @@ export const docsContentRoute = '/llms.mdx/docs';
 // unset, production builds fall back to https://amicu.dev and dev falls back to
 // localhost so it works without configuration.
 export const siteUrl =
-  process.env.NEXT_PUBLIC_SITE_URL ??
+  process.env.NEXT_PUBLIC_SITE_URL ||
   (process.env.NODE_ENV === 'production' ? 'https://amicu.dev' : 'http://localhost:3000');
 
 /** One-line product summary reused across metadata and llms.txt. */

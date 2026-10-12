@@ -59,7 +59,7 @@ Routes: `/` (marketing), `/app` (product shell), `/docs` (documentation),
 
 - `packages/api-client` and `packages/auth` are intentional **stubs** - see their
   READMEs. Do not implement them here.
-- The docs live in a single app at `/docs`; a split of the docs off `amicu.dev` / Vercel
+- The docs live in a single app at `/docs`; a `docs.amicu.dev` split / Vercel
   multi-zone is deferred (RFC 0001 §7).
 
 Note: a local `next start` or preview served over plain http needs `COOKIE_SECURE=false`, otherwise the session cookies (Secure flag) are dropped and sign-in will not stick.

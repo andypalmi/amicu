@@ -107,7 +107,12 @@ always, whenever either service's issuer/audience config changes.
   custom_domain: true }]`, so `cf:deploy` attaches the Worker to the apex of
   the `amicu.dev` zone (DNS record + cert managed by Cloudflare). `www.amicu.dev`
   redirects to the apex (infra). The API is on `https://api.amicu.dev`.
-  `wrangler dev`/`cf:preview` ignore routes.
+  `workers_dev` is explicitly `false` (no `*.workers.dev` URL), and
+  `dev.host: "localhost"` stops `wrangler dev`/`cf:preview` from rewriting
+  request URL/Host/Origin to `amicu.dev`.
+- **Before approving the first production deploy**: set the repo variable
+  `NEXT_PUBLIC_SITE_URL=https://amicu.dev` (build-time) and add `amicu.dev`
+  to the Turnstile widget's hostnames.
 - **Assets binding**: `wrangler.jsonc`'s `assets.directory` points at
   OpenNext's `.open-next/assets` output (Next.js's static/public assets).
   This app does not use `next/image`, so no `images` binding is configured.
