@@ -44,6 +44,8 @@ fn test_config() -> Config {
         internal_caller_emails: String::new(),
         outbox_drain_batch_size: amicu_api::DEFAULT_DRAIN_BATCH_SIZE,
         outbox_drain_budget_ms: amicu_api::DEFAULT_DRAIN_BUDGET_MS,
+        outbox_inline_send: false,
+        outbox_inline_budget_ms: amicu_api::DEFAULT_INLINE_BUDGET_MS,
     }
 }
 

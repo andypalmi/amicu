@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use amicu_api::{DrainAuth, OutboxApiState, outbox_router};
+use amicu_api::{DrainAuth, InlineSend, OutboxApiState, outbox_router};
 use amicu_auth::error::AuthError;
 use amicu_auth::notify::{Notification, Notifier};
 use amicu_store::StoreError;
@@ -412,4 +412,92 @@ async fn the_batch_size_bounds_one_claim() {
     assert_eq!(body["claimed"], 7);
     assert_eq!(body["sent"], 7);
     assert_eq!(store.sent_count(), 7);
+}
+
+// ---- inline send (post-enqueue, best-effort) --------------------------------
+
+fn inline(store: Arc<dyn OutboxStore>, mailer: Arc<dyn Notifier>, ms: u64) -> InlineSend {
+    InlineSend::new(store, mailer).with_budget(Duration::from_millis(ms))
+}
+
+/// The inline pass delivers the queued message and marks it sent.
+#[tokio::test]
+async fn inline_send_delivers_and_marks_sent() {
+    let store = FakeStore::with_messages(vec![message("a@example.test", 1)]);
+    let mailer = FakeMailer::delivering();
+    inline(store.clone(), mailer.clone(), 100)
+        .run_padded()
+        .await;
+
+    assert_eq!(mailer.delivered(), vec!["a@example.test".to_string()]);
+    assert_eq!(store.sent_count(), 1);
+    assert_eq!(store.failures().len(), 0);
+}
+
+/// A failing mailer is swallowed (no panic, nothing returned) and recorded with
+/// the SAME failure accounting as the scheduled drain (retry + backoff).
+#[tokio::test]
+async fn inline_failure_is_recorded_for_the_scheduler_retry() {
+    let store = FakeStore::with_messages(vec![message("a@example.test", 1)]);
+    inline(store.clone(), FakeMailer::failing(), 100)
+        .run_padded()
+        .await;
+
+    assert_eq!(store.sent_count(), 0);
+    let failures = store.failures();
+    assert_eq!(failures.len(), 1);
+    assert!(matches!(failures[0].1, FailureOutcome::Retry { .. }));
+    assert_eq!(failures[0].2, AuthError::Backend.to_string());
+}
+
+/// After an inline success the scheduled drain finds nothing to resend.
+#[tokio::test]
+async fn scheduler_drain_after_inline_success_does_not_resend() {
+    let store = FakeStore::with_messages(vec![message("a@example.test", 1)]);
+    let mailer = FakeMailer::delivering();
+    inline(store.clone(), mailer.clone(), 100)
+        .run_padded()
+        .await;
+
+    let (status, body) = post(&configured(store.clone(), mailer.clone()), Some(TOKEN)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["claimed"], 0);
+    assert_eq!(mailer.delivered().len(), 1);
+    assert_eq!(store.sent_count(), 1);
+}
+
+/// Anti-enumeration: the phase lasts the full budget whether or not there was
+/// anything to send, and a slow mailer is cut off at the budget rather than
+/// stretching the request.
+#[tokio::test]
+async fn inline_phase_takes_the_fixed_budget_regardless_of_work() {
+    let budget = Duration::from_millis(200);
+    let empty = FakeStore::with_messages(vec![]);
+    let t = std::time::Instant::now();
+    inline(empty, FakeMailer::delivering(), 200)
+        .run_padded()
+        .await;
+    let idle = t.elapsed();
+
+    let busy = FakeStore::with_messages(vec![message("a@example.test", 1)]);
+    let t = std::time::Instant::now();
+    inline(busy, FakeMailer::delivering(), 200)
+        .run_padded()
+        .await;
+    let sent = t.elapsed();
+
+    let stuck = FakeStore::with_messages(vec![message("a@example.test", 1)]);
+    let t = std::time::Instant::now();
+    inline(stuck, FakeMailer::slow(Duration::from_secs(30)), 200)
+        .run_padded()
+        .await;
+    let timed_out = t.elapsed();
+
+    for d in [idle, sent, timed_out] {
+        assert!(d >= budget, "{d:?} shorter than budget");
+        assert!(
+            d < budget + Duration::from_millis(150),
+            "{d:?} overran budget"
+        );
+    }
 }

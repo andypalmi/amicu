@@ -87,6 +87,8 @@ pub struct AuthApiState {
     known_networks: Arc<dyn KnownNetworks>,
     trusted_proxies: TrustedProxies,
     edge_trust: EdgeTrust,
+    /// Best-effort send right after enqueue; `None` = disabled / no outbox.
+    inline_send: Option<crate::outbox::InlineSend>,
 }
 
 impl AuthApiState {
@@ -114,6 +116,24 @@ impl AuthApiState {
             known_networks: Arc::new(InMemoryKnownNetworks::default()),
             trusted_proxies: TrustedProxies::default(),
             edge_trust: EdgeTrust::default(),
+            inline_send: None,
+        }
+    }
+
+    /// Deliver queued mail inline after the enqueueing handlers (`/signup`,
+    /// `/recover`, `/verify/resend`); see [`crate::outbox::InlineSend`] for the
+    /// best-effort and anti-enumeration contract.
+    #[must_use]
+    pub fn with_inline_send(mut self, inline: crate::outbox::InlineSend) -> Self {
+        self.inline_send = Some(inline);
+        self
+    }
+
+    /// Run the inline send, if configured, on every outcome of the calling
+    /// handler (NOT only when mail was queued: that would be a timing oracle).
+    async fn inline_send(&self) {
+        if let Some(inline) = &self.inline_send {
+            inline.run_padded().await;
         }
     }
 
@@ -424,6 +444,8 @@ pub(crate) async fn sign_up(
         .service
         .sign_up(&body.email, &SecretValue::new(body.password.into_bytes()))
         .await?;
+    // Unconditional (created or already-registered): see `InlineSend`.
+    state.inline_send().await;
     Ok((
         StatusCode::ACCEPTED,
         Json(SignUpResponse {
@@ -596,6 +618,7 @@ pub(crate) async fn recover(
     // for the log stream too).
     event.outcome("accepted").emit();
     state.service.request_password_reset(&body.email).await?;
+    state.inline_send().await; // unconditional: see `InlineSend`
     Ok((
         StatusCode::ACCEPTED,
         Json(RecoverResponse {
@@ -742,6 +765,7 @@ pub(crate) async fn resend_verification(
     }
     event.outcome("accepted").emit();
     state.service.resend_verification(&body.email).await?;
+    state.inline_send().await; // unconditional: see `InlineSend`
     Ok((
         StatusCode::ACCEPTED,
         Json(ResendVerificationResponse {

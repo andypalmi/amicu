@@ -125,6 +125,8 @@
 //! | `internal_caller_emails` | `--internal-caller-emails` | `AMICU_INTERNAL_CALLER_EMAILS` | empty (OIDC drain auth OFF) |
 //! | `outbox_drain_batch_size` | `--outbox-drain-batch-size` | `AMICU_OUTBOX_DRAIN_BATCH_SIZE` | `50` |
 //! | `outbox_drain_budget_ms` | `--outbox-drain-budget-ms` | `AMICU_OUTBOX_DRAIN_BUDGET_MS` | `20000` |
+//! | `outbox_inline_send` | `--outbox-inline-send` | `AMICU_OUTBOX_INLINE_SEND` | `true` |
+//! | `outbox_inline_budget_ms` | `--outbox-inline-budget-ms` | `AMICU_OUTBOX_INLINE_BUDGET_MS` | `2000` |
 //!
 //! `environment` (see [`Environment`]) gates production safety checks: a
 //! missing `DATABASE_URL` and an RLS-bypassing connected role are hard startup
@@ -162,7 +164,7 @@
 //! | | |
 //! |---|---|
 //! | Method + path | `POST {service_url}/internal/outbox/drain` |
-//! | Cadence | every minute (`* * * * *`), 30s attempt deadline |
+//! | Cadence | every 15 minutes (`*/15 * * * *`; retry sweep, mail is also sent inline after enqueue), 30s attempt deadline |
 //! | Auth | `Authorization: Bearer <Google-signed OIDC ID token>` |
 //! | `iss` | `https://accounts.google.com` (or the bare `accounts.google.com`) |
 //! | `aud` | `AMICU_INTERNAL_AUDIENCE`, defaulting to the effective `base_url` - the Cloud Run SERVICE URL, **not** the `/internal/outbox/drain` path |
@@ -497,6 +499,31 @@ pub struct Config {
         default_value_t = amicu_api::DEFAULT_DRAIN_BUDGET_MS
     )]
     pub outbox_drain_budget_ms: u64,
+
+    /// Send queued email INLINE, right after the sign-up / recover / resend
+    /// handler enqueues it and before the response is returned (Cloud Run
+    /// throttles CPU after the response, so it cannot be done afterwards).
+    /// Best-effort: failures leave the message for the scheduled drain, which
+    /// is then only a retry sweep. Needs a database (the outbox) and does
+    /// nothing without one.
+    #[arg(
+        long,
+        env = "AMICU_OUTBOX_INLINE_SEND",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub outbox_inline_send: bool,
+
+    /// Wall-clock budget, in milliseconds, of the inline send. The affected
+    /// endpoints always spend exactly this long in that phase (padded when the
+    /// send is quicker or there is nothing to send) so response time does not
+    /// reveal whether an account exists.
+    #[arg(
+        long,
+        env = "AMICU_OUTBOX_INLINE_BUDGET_MS",
+        default_value_t = amicu_api::DEFAULT_INLINE_BUDGET_MS
+    )]
+    pub outbox_inline_budget_ms: u64,
 }
 
 /// Deployment environment gate (`AMICU_ENV`): whether production safety
@@ -1230,6 +1257,7 @@ pub async fn build_app_with_database_url(
         .with_known_networks(known_networks)
         .with_trusted_proxies(trusted)
         .with_edge_trust(edge_trust.clone());
+    let auth_state = with_inline_send(auth_state, config, pool.as_ref(), &mailer);
 
     let verifier = Arc::new(Verifier::new(
         KeyringJwksProvider::new(keyring_handle),
@@ -1358,6 +1386,28 @@ pub async fn build_app_with_database_url(
     }
 
     Ok(BuiltApp { router, pool })
+}
+
+/// Wire the inline post-enqueue send into the auth state.
+///
+/// Only meaningful with the durable outbox (a pool); without one the auth flows
+/// already talk to the mailer directly, so this is a no-op.
+fn with_inline_send(
+    auth_state: AuthApiState,
+    config: &Config,
+    pool: Option<&PgPool>,
+    mailer: &Arc<dyn Notifier>,
+) -> AuthApiState {
+    match pool {
+        Some(pool) if config.outbox_inline_send => auth_state.with_inline_send(
+            amicu_api::InlineSend::new(
+                Arc::new(amicu_store::PostgresOutboxStore::new(pool.clone())),
+                mailer.clone(),
+            )
+            .with_budget(Duration::from_millis(config.outbox_inline_budget_ms)),
+        ),
+        _ => auth_state,
+    }
 }
 
 /// The MAILER: the transport that actually puts a message on the wire.
