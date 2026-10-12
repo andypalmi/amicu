@@ -191,7 +191,7 @@ fixed cadence — amicu-planning#141.
   timeout, or padded if quicker), on every outcome. Settings:
   `AMICU_OUTBOX_INLINE_SEND` (default `true`; `false` restores sweep-only
   delivery; no-op without a database) and `AMICU_OUTBOX_INLINE_BUDGET_MS`
-  (default `2000`; this is added to the response time of those three
+  (default `1000`; this is added to the response time of those three
   endpoints).
 - **Self-hosted alternative**: set the `AMICU_INTERNAL_TOKEN` *environment
   variable* (env only, never a flag) and present it as a static bearer token

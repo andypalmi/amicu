@@ -116,7 +116,7 @@
 //! | `db_max_connections` | `--db-max-connections` | `AMICU_DB_MAX_CONNECTIONS` | `5` |
 //! | `db_min_connections` | `--db-min-connections` | `AMICU_DB_MIN_CONNECTIONS` | `0` |
 //! | `db_acquire_timeout_secs` | `--db-acquire-timeout-secs` | `AMICU_DB_ACQUIRE_TIMEOUT_SECS` | `10` |
-//! | `readyz_timeout_ms` | `--readyz-timeout-ms` | `AMICU_READYZ_TIMEOUT_MS` | `2000` |
+//! | `readyz_timeout_ms` | `--readyz-timeout-ms` | `AMICU_READYZ_TIMEOUT_MS` | `1000` |
 //! | `signing_key_pem` | `--signing-key-pem` | `AMICU_SIGNING_KEY_PEM` | none (dev: ephemeral `generate()`; prod: hard error) |
 //! | `signing_key_pem_file` | `--signing-key-pem-file` | `AMICU_SIGNING_KEY_PEM_FILE` | none |
 //! | `signing_keys_retiring_pem` | `--signing-keys-retiring-pem` | `AMICU_SIGNING_KEYS_RETIRING_PEM` | none |
@@ -126,7 +126,7 @@
 //! | `outbox_drain_batch_size` | `--outbox-drain-batch-size` | `AMICU_OUTBOX_DRAIN_BATCH_SIZE` | `50` |
 //! | `outbox_drain_budget_ms` | `--outbox-drain-budget-ms` | `AMICU_OUTBOX_DRAIN_BUDGET_MS` | `20000` |
 //! | `outbox_inline_send` | `--outbox-inline-send` | `AMICU_OUTBOX_INLINE_SEND` | `true` |
-//! | `outbox_inline_budget_ms` | `--outbox-inline-budget-ms` | `AMICU_OUTBOX_INLINE_BUDGET_MS` | `2000` |
+//! | `outbox_inline_budget_ms` | `--outbox-inline-budget-ms` | `AMICU_OUTBOX_INLINE_BUDGET_MS` | `1000` |
 //!
 //! `environment` (see [`Environment`]) gates production safety checks: a
 //! missing `DATABASE_URL` and an RLS-bypassing connected role are hard startup
@@ -517,7 +517,7 @@ pub struct Config {
     /// Wall-clock budget, in milliseconds, of the inline send. The affected
     /// endpoints always spend exactly this long in that phase (padded when the
     /// send is quicker or there is nothing to send) so response time does not
-    /// reveal whether an account exists.
+    /// reveal whether an account exists. `0` disables the inline send.
     #[arg(
         long,
         env = "AMICU_OUTBOX_INLINE_BUDGET_MS",

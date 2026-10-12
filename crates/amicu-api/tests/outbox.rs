@@ -501,3 +501,24 @@ async fn inline_phase_takes_the_fixed_budget_regardless_of_work() {
         );
     }
 }
+
+/// A zero budget disables the inline send: nothing is claimed, no padding.
+#[tokio::test]
+async fn zero_budget_inline_send_is_disabled() {
+    let store = FakeStore::with_messages(vec![message("a@example.test", 1)]);
+    let mailer = FakeMailer::delivering();
+    inline(store.clone(), mailer.clone(), 0).run_padded().await;
+    assert_eq!(mailer.delivered().len(), 0);
+    assert_eq!(store.sent_count(), 0);
+}
+
+/// A send outliving the deadline is not cancelled: its outcome is still recorded.
+#[tokio::test]
+async fn send_outliving_the_deadline_still_completes() {
+    let store = FakeStore::with_messages(vec![message("a@example.test", 1)]);
+    let mailer = FakeMailer::slow(Duration::from_millis(150));
+    inline(store.clone(), mailer, 100).run_padded().await;
+    assert_eq!(store.sent_count(), 0);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(store.sent_count(), 1);
+}
