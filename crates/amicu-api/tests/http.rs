@@ -56,6 +56,15 @@ fn build_app_with_limiter(
     trusted: TrustedProxies,
     notifier: Arc<dyn Notifier>,
 ) -> (Router, Arc<InMemoryRateLimiter>) {
+    build_app_full(rate_max, trusted, notifier, true)
+}
+
+fn build_app_full(
+    rate_max: u32,
+    trusted: TrustedProxies,
+    notifier: Arc<dyn Notifier>,
+    signups_enabled: bool,
+) -> (Router, Arc<InMemoryRateLimiter>) {
     let keyring = Keyring::new(SigningKey::generate().unwrap());
     let issuer = TokenIssuer::new(IssuerConfig::new(ISS, AUD));
     let service = Arc::new(AuthService::new(
@@ -69,8 +78,11 @@ fn build_app_with_limiter(
         "https://auth.amicu.dev",
     ));
     let limiter = Arc::new(InMemoryRateLimiter::new(rate_max, Duration::from_secs(60)));
-    let router =
-        auth_router(AuthApiState::new(service, limiter.clone()).with_trusted_proxies(trusted));
+    let router = auth_router(
+        AuthApiState::new(service, limiter.clone())
+            .with_trusted_proxies(trusted)
+            .with_signups_enabled(signups_enabled),
+    );
     (router, limiter)
 }
 
@@ -309,6 +321,26 @@ async fn wrong_password_is_unauthorized() {
         "2.2.2.2",
     )
     .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn signup_disabled_returns_403_and_creates_no_user() {
+    let (app, _) = build_app_full(
+        100,
+        TrustedProxies::default(),
+        Arc::new(LoggingNotifier),
+        false,
+    );
+    let creds = json!({"email": "user@example.com", "password": "hunter2-hunter2"});
+
+    let (status, body) = call(&app, "POST", "/signup", Some(creds.clone()), "10.0.0.1").await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["code"], "signups_disabled");
+    assert!(body["error"].as_str().is_some());
+
+    // No user row was created: the credentials cannot sign in.
+    let (status, _) = call(&app, "POST", "/token", Some(creds), "10.0.0.1").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 

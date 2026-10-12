@@ -35,6 +35,9 @@ export const AUTH_AUDIENCE = env.AUTH_AUDIENCE;
  */
 export const COOKIE_SECURE = env.COOKIE_SECURE;
 
+/** Whether public sign-ups are open. Closed unless `SIGNUPS_ENABLED=true`. */
+export const SIGNUPS_ENABLED = env.SIGNUPS_ENABLED;
+
 // httpOnly cookie names. BOTH tokens are httpOnly + Secure + SameSite and are held
 // by the BFF only - the browser's JS never reads either. The refresh token in
 // particular never reaches client code (RFC 0001 §11.6).

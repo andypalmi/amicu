@@ -31,6 +31,13 @@ export interface ServerEnv {
    * (local `next dev`), and can be overridden explicitly via `COOKIE_SECURE`.
    */
   COOKIE_SECURE: boolean;
+  /**
+   * Whether public sign-ups are open (`SIGNUPS_ENABLED`). Fail-closed: only the
+   * explicit value `true` (case-insensitive, trimmed) enables them; unset or
+   * anything else means closed. Must be paired with the API's
+   * `AMICU_SIGNUPS_ENABLED`, which is what actually enforces it.
+   */
+  SIGNUPS_ENABLED: boolean;
 }
 
 /**
@@ -105,5 +112,6 @@ export function parseServerEnv(env: NodeJS.ProcessEnv): ServerEnv {
     AUTH_ISSUER: parsed.data.AUTH_ISSUER ?? base,
     AUTH_AUDIENCE: parsed.data.AUTH_AUDIENCE ?? 'amicu',
     COOKIE_SECURE: cookieSecure,
+    SIGNUPS_ENABLED: env.SIGNUPS_ENABLED?.trim().toLowerCase() === 'true',
   };
 }

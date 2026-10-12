@@ -10,6 +10,7 @@ import {
   type FieldErrors,
 } from '@amicu/auth';
 import { authClient } from '@/lib/auth/client';
+import { SIGNUPS_ENABLED } from '@/lib/auth/config';
 import {
   setSessionCookies,
   clearSessionCookies,
@@ -95,6 +96,10 @@ export async function signupAction(
   _prev: AuthFormState,
   formData: FormData,
 ): Promise<AuthFormState> {
+  // Closed sign-ups: refuse before touching the API (or the challenge).
+  if (!SIGNUPS_ENABLED) {
+    return { error: 'Sign-ups are currently closed.' };
+  }
   const parsed = signupSchema.safeParse({
     email: formData.get('email'),
     password: formData.get('password'),

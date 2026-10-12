@@ -59,6 +59,9 @@
     "AUTH_JWKS_URL": "https://api.amicu.dev/.well-known/jwks.json",
     "NEXT_PUBLIC_SITE_URL": "https://amicu.dev",
     "NODE_ENV": "production",
+    // Public sign-ups closed (fail-closed: only "true" opens them). Pair with
+    // AMICU_SIGNUPS_ENABLED on the API, which enforces it.
+    "SIGNUPS_ENABLED": "false",
   },
   // Turnstile (optional; omitted => widget hidden, verification skipped):
   //  - NEXT_PUBLIC_TURNSTILE_SITE_KEY: public; BUILD-time (set before cf:build).
