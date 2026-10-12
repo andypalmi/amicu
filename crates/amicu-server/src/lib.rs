@@ -116,7 +116,7 @@
 //! | `db_max_connections` | `--db-max-connections` | `AMICU_DB_MAX_CONNECTIONS` | `5` |
 //! | `db_min_connections` | `--db-min-connections` | `AMICU_DB_MIN_CONNECTIONS` | `0` |
 //! | `db_acquire_timeout_secs` | `--db-acquire-timeout-secs` | `AMICU_DB_ACQUIRE_TIMEOUT_SECS` | `10` |
-//! | `readyz_timeout_ms` | `--readyz-timeout-ms` | `AMICU_READYZ_TIMEOUT_MS` | `1000` |
+//! | `readyz_timeout_ms` | `--readyz-timeout-ms` | `AMICU_READYZ_TIMEOUT_MS` | `2000` |
 //! | `signing_key_pem` | `--signing-key-pem` | `AMICU_SIGNING_KEY_PEM` | none (dev: ephemeral `generate()`; prod: hard error) |
 //! | `signing_key_pem_file` | `--signing-key-pem-file` | `AMICU_SIGNING_KEY_PEM_FILE` | none |
 //! | `signing_keys_retiring_pem` | `--signing-keys-retiring-pem` | `AMICU_SIGNING_KEYS_RETIRING_PEM` | none |

@@ -47,6 +47,10 @@ use lettre::message::{Mailbox, MultiPart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
+/// Per-command SMTP timeout, well below the outbox claim lease (120s) so a
+/// detached inline send cannot hang past its lease.
+const SMTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Default submission port for implicit TLS (SMTPS).
 const IMPLICIT_TLS_PORT: u16 = 465;
 /// Default submission port for a STARTTLS upgrade.
@@ -281,7 +285,7 @@ impl SmtpNotifier {
         }
 
         Ok(Self {
-            transport: builder.build(),
+            transport: builder.timeout(Some(SMTP_TIMEOUT)).build(),
             from,
             web_url: web_url.trim_end_matches('/').into(),
         })
