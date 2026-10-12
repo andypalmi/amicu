@@ -50,6 +50,10 @@
     "NEXT_PUBLIC_SITE_URL": "https://REPLACE-ME.example.invalid",
     "NODE_ENV": "production",
   },
+  // Turnstile (optional; omitted => widget hidden, verification skipped):
+  //  - NEXT_PUBLIC_TURNSTILE_SITE_KEY: public; BUILD-time (set before cf:build).
+  //  - TURNSTILE_SECRET_KEY: SECRET, server-only. Set with
+  //    `wrangler secret put TURNSTILE_SECRET_KEY`; never add it to "vars".
   "observability": {
     "enabled": true,
   },

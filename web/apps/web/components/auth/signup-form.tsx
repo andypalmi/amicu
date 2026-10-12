@@ -4,12 +4,20 @@ import Link from 'next/link';
 import { useActionState } from 'react';
 import { Alert, AlertDescription, Button } from '@amicu/ui';
 import { signupAction, type AuthFormState } from '@/app/(auth)/actions';
+import { TurnstileWidget } from './turnstile-widget';
 import { FormField } from './form-field';
 import { SubmitButton } from './submit-button';
 
 const initial: AuthFormState = {};
 
-export function SignupForm() {
+export function SignupForm({
+  siteKey,
+  legal,
+}: {
+  siteKey?: string | null;
+  /** Which legal pages are live; consent line renders only when at least one is. */
+  legal?: { terms: boolean; privacy: boolean };
+}) {
   const [state, action] = useActionState(signupAction, initial);
 
   // Signup returns a 202 acknowledgement (no auto-login). On success we show the
@@ -51,6 +59,26 @@ export function SignupForm() {
         required
         error={state.fieldErrors?.password}
       />
+
+      {legal && (legal.terms || legal.privacy) ? (
+        <p className="text-center text-xs text-muted-foreground">
+          By creating an account you agree to the{' '}
+          {legal.terms ? (
+            <Link href="/terms" className="underline hover:text-foreground">
+              Terms
+            </Link>
+          ) : null}
+          {legal.terms && legal.privacy ? ' and ' : null}
+          {legal.privacy ? (
+            <Link href="/privacy" className="underline hover:text-foreground">
+              Privacy Policy
+            </Link>
+          ) : null}
+          .
+        </p>
+      ) : null}
+
+      <TurnstileWidget siteKey={siteKey} action="signup" resetKey={state} />
 
       <SubmitButton pendingLabel="Creating account…">Create account</SubmitButton>
 

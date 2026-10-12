@@ -4,12 +4,13 @@ import Link from 'next/link';
 import { useActionState } from 'react';
 import { Alert, AlertDescription } from '@amicu/ui';
 import { forgotAction, type AuthFormState } from '@/app/(auth)/actions';
+import { TurnstileWidget } from './turnstile-widget';
 import { FormField } from './form-field';
 import { SubmitButton } from './submit-button';
 
 const initial: AuthFormState = {};
 
-export function ForgotForm() {
+export function ForgotForm({ siteKey }: { siteKey?: string | null }) {
   const [state, action] = useActionState(forgotAction, initial);
 
   return (
@@ -17,6 +18,12 @@ export function ForgotForm() {
       {state.notice ? (
         <Alert variant="success">
           <AlertDescription>{state.notice}</AlertDescription>
+        </Alert>
+      ) : null}
+
+      {state.error ? (
+        <Alert variant="destructive">
+          <AlertDescription>{state.error}</AlertDescription>
         </Alert>
       ) : null}
 
@@ -28,6 +35,8 @@ export function ForgotForm() {
         required
         error={state.fieldErrors?.email}
       />
+
+      <TurnstileWidget siteKey={siteKey} action="forgot" resetKey={state} />
 
       <SubmitButton pendingLabel="Sending…">Send reset link</SubmitButton>
 

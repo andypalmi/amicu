@@ -6,6 +6,8 @@ import {
   CardDescription,
   CardContent,
 } from '@amicu/ui';
+import { turnstileSiteKey } from '@/lib/security/turnstile-config';
+import { legalPages } from '@/lib/legal/company';
 import { SignupForm } from '@/components/auth/signup-form';
 
 export const metadata: Metadata = {
@@ -24,7 +26,10 @@ export default function SignupPage() {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <SignupForm />
+        <SignupForm
+          siteKey={turnstileSiteKey()}
+          legal={{ terms: legalPages.terms, privacy: legalPages.privacy }}
+        />
       </CardContent>
     </Card>
   );
