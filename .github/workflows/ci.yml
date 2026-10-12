@@ -53,6 +53,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so the base branch diff below works
+
+      # Policy: advisories appear independently of code changes, so the audit
+      # only BLOCKS a PR that itself touches Rust dependencies. Otherwise it
+      # still runs and reports, but a failure is non-blocking (also on push to
+      # main, so advisories alone never redden main or stop deploys). The
+      # daily audit.yml workflow opens an issue for failures on main.
+      - name: Detect dependency changes
+        id: deps
+        run: |
+          set -euo pipefail
+          blocking=false
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            # Fail closed: a git error aborts the step (set -e), failing the job.
+            git rev-parse --verify "origin/$GITHUB_BASE_REF" > /dev/null
+            changed=$(git diff --name-only "origin/$GITHUB_BASE_REF...HEAD")
+            if grep -Eq '(^|/)(Cargo\.lock|Cargo\.toml)$|^\.cargo/audit\.toml$' <<< "$changed"; then
+              blocking=true
+            fi
+          fi
+          echo "blocking=$blocking" >> "$GITHUB_OUTPUT"
+          echo "Audit blocking: $blocking"
 
       # `.cargo/audit.toml` carries the ignore list for advisories with no
       # available fix (each entry documents why + its removal condition);
@@ -60,6 +83,7 @@ jobs:
       - uses: taiki-e/install-action@cargo-audit
 
       - name: Audit
+        continue-on-error: ${{ steps.deps.outputs.blocking != 'true' }}
         run: cargo audit
 
   docker:
@@ -121,6 +145,8 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history for the base branch diff below
 
       # `uses:` steps ignore `defaults.run.working-directory`, so point
       # action-setup at the web package.json for its pinned `packageManager`
@@ -138,8 +164,28 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      # Fails the job on any high/critical advisory in the web lockfile.
+      # Same policy as the cargo audit job: blocking only when the PR
+      # touches the web lockfile or a package.json; otherwise non-blocking.
+      - name: Detect dependency changes
+        id: deps
+        working-directory: .
+        run: |
+          set -euo pipefail
+          blocking=false
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            # Fail closed: a git error aborts the step (set -e), failing the job.
+            git rev-parse --verify "origin/$GITHUB_BASE_REF" > /dev/null
+            changed=$(git diff --name-only "origin/$GITHUB_BASE_REF...HEAD")
+            if grep -Eq '^web/(.*/)?(package\.json|pnpm-lock\.yaml)$|^web/pnpm-workspace\.yaml$' <<< "$changed"; then
+              blocking=true
+            fi
+          fi
+          echo "blocking=$blocking" >> "$GITHUB_OUTPUT"
+          echo "Audit blocking: $blocking"
+
+      # Fails on any high/critical advisory in the web lockfile (when blocking).
       - name: Audit
+        continue-on-error: ${{ steps.deps.outputs.blocking != 'true' }}
         run: pnpm audit --audit-level=high
 
       # Fails if the committed @amicu/api-client no longer matches
