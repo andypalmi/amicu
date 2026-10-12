@@ -32,16 +32,22 @@ const isProd = process.env.NODE_ENV === 'production';
 //  - The browser only ever calls same-origin /api/* (BFF pattern); the server
 //    talks to the upstream API. So `connect-src 'self'` is correct and the
 //    upstream origin is intentionally NOT listed.
+// Cloudflare Turnstile (signup / forgot / resend-verification). Scripts, the
+// challenge iframe and its XHR all come from this single origin.
+const turnstileOrigin = 'https://challenges.cloudflare.com';
+
 const cspDirectives = [
   "default-src 'self'",
   // 'unsafe-eval' is added in dev only: React 19's Fast Refresh runtime and the
   // Next.js error overlay use eval() in the browser. Production stays strict and
   // must NOT include 'unsafe-eval'. Matches Next.js's official CSP guidance.
-  `script-src 'self' 'unsafe-inline'${isProd ? '' : " 'unsafe-eval'"}`,
+  `script-src 'self' 'unsafe-inline' ${turnstileOrigin}${isProd ? '' : " 'unsafe-eval'"}`,
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self'",
   "img-src 'self' blob: data:",
-  "connect-src 'self'",
+  `connect-src 'self' ${turnstileOrigin}`,
+  // Turnstile renders its challenge in an iframe.
+  `frame-src ${turnstileOrigin}`,
   "object-src 'none'",
   "base-uri 'self'",
   "frame-ancestors 'none'",

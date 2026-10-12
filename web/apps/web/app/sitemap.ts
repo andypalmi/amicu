@@ -1,5 +1,6 @@
 import type { MetadataRoute } from 'next';
 import { source } from '@/lib/source';
+import { legalPages } from '@/lib/legal/company';
 import { siteUrl } from '@/lib/shared';
 
 // Public sitemap: the marketing routes plus every generated docs page. Docs
@@ -7,7 +8,16 @@ import { siteUrl } from '@/lib/shared';
 // content under content/docs shows up automatically. Private areas ((app) and
 // (auth)) are intentionally excluded and additionally carry robots noindex.
 
-const marketingRoutes = ['/', '/pricing', '/providers', '/security'];
+const marketingRoutes = [
+  '/',
+  '/pricing',
+  '/providers',
+  '/security',
+  // Legal pages are listed only once the owner fills lib/legal/company.ts.
+  ...(legalPages.privacy ? ['/privacy'] : []),
+  ...(legalPages.terms ? ['/terms'] : []),
+  ...(legalPages.imprint ? ['/imprint'] : []),
+];
 
 function absolute(path: string): string {
   return new URL(path, siteUrl).toString();

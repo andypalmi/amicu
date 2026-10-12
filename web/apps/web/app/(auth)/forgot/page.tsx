@@ -6,6 +6,7 @@ import {
   CardDescription,
   CardContent,
 } from '@amicu/ui';
+import { turnstileSiteKey } from '@/lib/security/turnstile-config';
 import { ForgotForm } from '@/components/auth/forgot-form';
 
 export const metadata: Metadata = {
@@ -24,7 +25,7 @@ export default function ForgotPage() {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <ForgotForm />
+        <ForgotForm siteKey={turnstileSiteKey()} />
       </CardContent>
     </Card>
   );

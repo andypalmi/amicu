@@ -1,5 +1,6 @@
 'use server';
 
+import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import {
   loginSchema,
@@ -14,6 +15,11 @@ import {
   clearSessionCookies,
   readRefreshToken,
 } from '@/lib/auth/cookies';
+import {
+  TURNSTILE_RESPONSE_FIELD,
+  verifyTurnstile,
+  type TurnstileAction,
+} from '@/lib/security/turnstile';
 
 // Result surfaced back to the client forms via useActionState.
 export interface AuthFormState {
@@ -27,6 +33,35 @@ export interface AuthFormState {
 // whether the email exists or the password was wrong (RFC 0001 §3, TASK-078).
 const GENERIC_CREDS = 'Invalid email or password.';
 const GENERIC_UNAVAILABLE = 'Something went wrong. Please try again.';
+
+// Same message for every Turnstile failure (missing token, rejected, Cloudflare
+// outage - fail-closed, see lib/security/turnstile.ts). It never depends on the
+// email, so it leaks nothing about account existence.
+const GENERIC_CHALLENGE = 'Verification failed. Please refresh the page and try again.';
+
+// Returns an error state when the Turnstile check fails; null when it passes or is
+// disabled (no TURNSTILE_SECRET_KEY). Runs AFTER input validation (so typos don't
+// burn a single-use token) and BEFORE any call to the API.
+async function challengeFailure(
+  formData: FormData,
+  action: TurnstileAction,
+): Promise<AuthFormState | null> {
+  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL;
+  let expectedHostname: string | null = null;
+  try {
+    expectedHostname = siteUrl ? new URL(siteUrl).hostname : null;
+  } catch {
+    expectedHostname = null;
+  }
+  const result = await verifyTurnstile({
+    token: formData.get(TURNSTILE_RESPONSE_FIELD),
+    action,
+    remoteIp: (await headers()).get('cf-connecting-ip'),
+    secret: process.env.TURNSTILE_SECRET_KEY,
+    expectedHostname,
+  });
+  return result.ok ? null : { error: GENERIC_CHALLENGE };
+}
 
 function safeNext(raw: FormDataEntryValue | null): string {
   // Only allow local, absolute in-app paths - never an open redirect.
@@ -68,6 +103,9 @@ export async function signupAction(
     return { fieldErrors: fieldErrors(parsed.error) };
   }
 
+  const blocked = await challengeFailure(formData, 'signup');
+  if (blocked) return blocked;
+
   const result = await authClient.signup(parsed.data);
   if (!result.ok) {
     return { error: GENERIC_UNAVAILABLE };
@@ -91,6 +129,9 @@ export async function forgotAction(
     return { fieldErrors: fieldErrors(parsed.error) };
   }
 
+  const blocked = await challengeFailure(formData, 'forgot');
+  if (blocked) return blocked;
+
   // Fire-and-forget from the UI's perspective: the outcome is intentionally opaque.
   // We always return the same confirmation so an attacker cannot probe which emails
   // are registered.
@@ -110,6 +151,9 @@ export async function resendVerificationAction(
   if (!parsed.success) {
     return { fieldErrors: fieldErrors(parsed.error) };
   }
+
+  const blocked = await challengeFailure(formData, 'resend-verification');
+  if (blocked) return blocked;
 
   // Fire-and-forget from the UI's perspective: the outcome is intentionally
   // opaque. We always return the same confirmation so an attacker cannot probe

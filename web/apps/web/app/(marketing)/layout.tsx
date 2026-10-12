@@ -2,6 +2,7 @@ import type { Viewport } from 'next';
 import Link from 'next/link';
 import { HomeLayout } from 'fumadocs-ui/layouts/home';
 import { Button } from '@amicu/ui';
+import { SiteFooter } from './_components/footer';
 import { baseOptions } from '@/lib/layout.shared';
 
 // viewport-fit=cover lets env(safe-area-inset-*) report real insets on notched
@@ -23,6 +24,7 @@ export default function Layout({ children }: LayoutProps<'/'>) {
       {/* Bottom padding keeps the fixed mobile CTA bar from covering the footer. */}
       <div className="flex flex-1 flex-col pb-[calc(4.5rem+env(safe-area-inset-bottom))] md:pb-0">
         {children}
+        <SiteFooter />
       </div>
       <MobileCtaBar />
     </HomeLayout>

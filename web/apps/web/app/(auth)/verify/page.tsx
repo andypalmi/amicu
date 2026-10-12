@@ -11,6 +11,7 @@ import {
   CardTitle,
 } from '@amicu/ui';
 import { verifyAction } from '@/app/(auth)/actions';
+import { turnstileSiteKey } from '@/lib/security/turnstile-config';
 import { ResendVerificationForm } from '@/components/auth/resend-verification-form';
 
 export const metadata: Metadata = {
@@ -46,7 +47,7 @@ export default async function VerifyPage({
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <ResendVerificationForm />
+          <ResendVerificationForm siteKey={turnstileSiteKey()} />
           <Button asChild variant="outline" className="w-full">
             <Link href="/login">Go to sign in</Link>
           </Button>
@@ -119,7 +120,7 @@ export default async function VerifyPage({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <ResendVerificationForm />
+        <ResendVerificationForm siteKey={turnstileSiteKey()} />
         <Button asChild variant="outline" className="w-full">
           <Link href="/login">Go to sign in</Link>
         </Button>
