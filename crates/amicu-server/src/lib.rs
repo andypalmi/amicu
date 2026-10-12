@@ -107,9 +107,9 @@
 //! | `rate_limit_max` | `--rate-limit-max` | `AMICU_RATE_LIMIT_MAX` | `30` |
 //! | `rate_limit_window_secs` | `--rate-limit-window-secs` | `AMICU_RATE_LIMIT_WINDOW_SECS` | `60` |
 //! | `email_rate_limit_max` | `--email-rate-limit-max` | `AMICU_EMAIL_RATE_LIMIT_MAX` | `5` - per normalized email, `/recover` + `/verify/resend` (#194) |
-//! | `signin_email_rate_limit_max` | `--signin-email-rate-limit-max` | `AMICU_SIGNIN_EMAIL_RATE_LIMIT_MAX` | `20` - per normalized email, `/signin` + `/token` (#194) |
+//! | `signin_email_rate_limit_max` | `--signin-email-rate-limit-max` | `AMICU_SIGNIN_EMAIL_RATE_LIMIT_MAX` | `100` - FAILED sign-ins per normalized email (#194) |
 //! | `email_rate_limit_window_secs` | `--email-rate-limit-window-secs` | `AMICU_EMAIL_RATE_LIMIT_WINDOW_SECS` | `900` |
-//! | (env only) | - | `AMICU_SECURITY_HASH_KEY` | none - secret key for hashing emails/IPs in `amicu::security` events and the per-email limiter keys; set the SAME value on every replica (#194) |
+//! | (env only) | - | `AMICU_SECURITY_HASH_KEY` | none - secret key (>= 32 bytes) for hashing emails/IPs in `amicu::security` events and limiter/backoff keys; set the SAME value on every replica. REQUIRED in `AMICU_ENV=production` (#194) |
 //! | `rate_limit_timeout_ms` | `--rate-limit-timeout-ms` | `AMICU_RATE_LIMIT_TIMEOUT_MS` | `1000` - Postgres path only; a timeout fails OPEN like any other database error |
 //! | `max_workspaces_per_user` | `--max-workspaces-per-user` | `AMICU_MAX_WORKSPACES_PER_USER` | `50` |
 //! | `environment` | `--environment` | `AMICU_ENV` | `development` |
@@ -350,7 +350,7 @@ pub struct Config {
 
     /// Per-EMAIL budget for `/signin` / `/token` per window. A loose ceiling;
     /// the per-account exponential backoff is the tight control.
-    #[arg(long, env = "AMICU_SIGNIN_EMAIL_RATE_LIMIT_MAX", default_value_t = 20)]
+    #[arg(long, env = "AMICU_SIGNIN_EMAIL_RATE_LIMIT_MAX", default_value_t = 100)]
     pub signin_email_rate_limit_max: u32,
 
     /// Window for both per-email limits, seconds.
@@ -565,6 +565,10 @@ pub enum Error {
     /// `AMICU_ENV=production` but no `DATABASE_URL` was set. A production
     /// deploy may never silently fall back to ephemeral in-memory stores.
     MissingDatabaseUrl,
+    /// `AMICU_ENV=production` but `AMICU_SECURITY_HASH_KEY` is unset or shorter
+    /// than 32 bytes (andypalmi/amicu-planning#194). Without a secret key the
+    /// pseudonyms in security events and rate-limit keys are guessable.
+    MissingSecurityHashKey,
     /// `AMICU_ENV=production` and the connected Postgres role would bypass
     /// row-level security (superuser/BYPASSRLS, direct or inherited, or owns
     /// a `FORCE ROW LEVEL SECURITY` table).
@@ -612,6 +616,11 @@ impl std::fmt::Display for Error {
                 "AMICU_ENV=production requires DATABASE_URL to be set (production may not \
                  silently fall back to ephemeral in-memory stores)"
             ),
+            Error::MissingSecurityHashKey => write!(
+                f,
+                "AMICU_ENV=production requires AMICU_SECURITY_HASH_KEY (at least 32 bytes, the \
+                 same secret value on every replica)"
+            ),
             Error::RlsBypass(msg) => write!(f, "RLS-bypass startup guard: {msg}"),
             Error::PendingMigrations(n) => write!(
                 f,
@@ -647,6 +656,7 @@ impl std::error::Error for Error {
             Error::Port(_)
             | Error::MissingSigningKey
             | Error::MissingDatabaseUrl
+            | Error::MissingSecurityHashKey
             | Error::RlsBypass(_)
             | Error::PendingMigrations(_)
             | Error::MigratorLacksCreate(_)
@@ -1171,14 +1181,18 @@ pub async fn build_app_with_database_url(
         service =
             service.with_login_throttle(Arc::new(amicu_store::PostgresLoginThrottle::new(pool)));
     }
-    // Pseudonym key for security events + per-email limiter keys (#194).
+    // Pseudonym key for security events + per-email limiter keys (#194):
+    // REQUIRED (>= 32 bytes) in production; dev keeps a loud-warning fallback.
     match std::env::var("AMICU_SECURITY_HASH_KEY") {
-        Ok(k) if !k.is_empty() => {
+        Ok(k) if k.len() >= 32 => {
             let _ = amicu_auth::security::set_hash_key(k.as_bytes());
         }
+        _ if config.environment == Environment::Production => {
+            return Err(Error::MissingSecurityHashKey);
+        }
         _ => eprintln!(
-            "amicu-server: WARNING - AMICU_SECURITY_HASH_KEY is not set; emails/IPs in \
-             security events are hashed with a PUBLIC default key (guessable for \
+            "amicu-server: WARNING - AMICU_SECURITY_HASH_KEY is not set (or < 32 bytes); \
+             emails/IPs in security events are hashed with a PUBLIC default key (guessable for \
              low-entropy inputs). Set one secret value, identical on every replica."
         ),
     }
@@ -1330,14 +1344,6 @@ pub async fn build_app_with_database_url(
     if let Some(pool) = pool.clone() {
         router = mount_outbox_drain(router, config, pool, &mailer, &effective_base_url);
     }
-
-    // Security headers on EVERYTHING, including the health and outbox routes
-    // merged outside `api_router` (#194).
-    let router = router.layer(axum::middleware::from_fn(amicu_api::security_headers));
-
-    // Security headers on EVERYTHING, including the health and outbox routes
-    // merged outside `api_router` (#194).
-    let router = router.layer(axum::middleware::from_fn(amicu_api::security_headers));
 
     Ok(BuiltApp { router, pool })
 }

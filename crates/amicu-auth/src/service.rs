@@ -121,6 +121,9 @@ pub struct AuthService<C: Clock = SystemClock> {
     memberships: Arc<dyn MembershipStore>,
     notifier: Arc<dyn Notifier>,
     throttle: Arc<dyn LoginThrottle>,
+    /// Process-local backoff used when `throttle` errors or times out, so a
+    /// saturated pool degrades to per-replica protection, never to none.
+    fallback_throttle: InMemoryLoginThrottle,
     base_url: String,
 }
 
@@ -155,6 +158,7 @@ impl<C: Clock> AuthService<C> {
             memberships,
             notifier,
             throttle: Arc::new(InMemoryLoginThrottle::default()),
+            fallback_throttle: InMemoryLoginThrottle::default(),
             base_url: base_url.into(),
         }
     }
@@ -167,6 +171,15 @@ impl<C: Clock> AuthService<C> {
     #[must_use]
     pub fn with_membership_store(mut self, memberships: Arc<dyn MembershipStore>) -> Self {
         self.memberships = memberships;
+        self
+    }
+
+    /// Replace the per-account sign-in backoff store (default: process-local
+    /// [`InMemoryLoginThrottle`]). Multi-replica deployments install a shared,
+    /// Postgres-backed one.
+    #[must_use]
+    pub fn with_login_throttle(mut self, throttle: Arc<dyn LoginThrottle>) -> Self {
+        self.throttle = throttle;
         self
     }
 
@@ -188,15 +201,6 @@ impl<C: Clock> AuthService<C> {
     /// [`AuthError::InvalidCredentials`] (empty email or password),
     /// [`AuthError::WeakPassword`] (fails the password policy), or
     /// [`AuthError::PasswordHash`].
-    /// Replace the per-account sign-in backoff store (default: process-local
-    /// [`InMemoryLoginThrottle`]). Multi-replica deployments install a shared,
-    /// Postgres-backed one.
-    #[must_use]
-    pub fn with_login_throttle(mut self, throttle: Arc<dyn LoginThrottle>) -> Self {
-        self.throttle = throttle;
-        self
-    }
-
     pub async fn sign_up(&self, email: &str, password: &SecretValue) -> Result<SignUpOutcome> {
         let email = normalize_email(email);
         if email.is_empty() {
@@ -270,6 +274,23 @@ impl<C: Clock> AuthService<C> {
     /// [`AuthError::EmailUnverified`] when the gate is on and the account's email
     /// is unverified.
     pub async fn sign_in(&self, email: &str, password: &SecretValue) -> Result<TokenPair> {
+        self.sign_in_from(email, password, None).await
+    }
+
+    /// [`Self::sign_in`] with the caller's network (an opaque pseudonym of the
+    /// client's IPv4 /24 or IPv6 /64, `None` when there is no trusted client
+    /// IP). The hard backoff is keyed on email AND network, so an attacker on a
+    /// different network cannot lock the real owner out; the owner's own
+    /// network (or an unattributed one) shares the counter.
+    ///
+    /// # Errors
+    /// As [`Self::sign_in`], plus [`AuthError::Throttled`] while locked.
+    pub async fn sign_in_from(
+        &self,
+        email: &str,
+        password: &SecretValue,
+        client_net: Option<&str>,
+    ) -> Result<TokenPair> {
         let email = normalize_email(email);
         // Bound the Argon2 input. Rejected before any lookup, so it is the same
         // generic failure for every email.
@@ -279,7 +300,7 @@ impl<C: Clock> AuthService<C> {
         // Per-account backoff, keyed by the email pseudonym whether or not the
         // account exists (anti-enumeration). While locked, spend one dummy
         // Argon2 verify so the response time does not reveal the lock state.
-        let throttle_key = throttle_key(&email);
+        let throttle_key = throttle_key(&email, client_net);
         if let Admission::Locked { retry_after_secs } = self.admit_sign_in(&throttle_key).await {
             let _ = verify_password(password, dummy_hash());
             return Err(AuthError::Throttled { retry_after_secs });
@@ -310,30 +331,40 @@ impl<C: Clock> AuthService<C> {
             .await
     }
 
-    /// Count this attempt against the account's backoff. FAILS OPEN: a database
-    /// error or timeout admits the attempt (and emits a
-    /// `login_throttle_unavailable` security event). Rationale: the per-IP and
-    /// per-email rate limiters still bound guessing, and a throttle-table
-    /// hiccup must not become a sign-in outage; a full database outage fails
-    /// sign-in anyway at the user lookup.
+    /// Count this attempt against the account's backoff. On a throttle-store
+    /// error or timeout it does NOT fail open to "no protection": it emits a
+    /// `login_throttle_unavailable` event and falls back to this replica's
+    /// process-local throttle (per-replica, not shared, but never none). That
+    /// matters because a saturated pool makes every Postgres-backed limiter
+    /// time out together while the user lookup may still wait longer.
     async fn admit_sign_in(&self, key: &str) -> Admission {
-        match tokio::time::timeout(THROTTLE_TIMEOUT, self.throttle.begin_attempt(key)).await {
-            Ok(Ok(admission)) => admission,
-            Ok(Err(_)) => {
-                SecurityEvent::new("login_throttle_unavailable", Severity::Warn)
-                    .reason("error")
-                    .emit();
-                Admission::Allowed
-            }
-            Err(_) => {
-                SecurityEvent::new("login_throttle_unavailable", Severity::Warn)
-                    .reason("timeout")
-                    .emit();
-                Admission::Allowed
-            }
-        }
+        let reason =
+            match tokio::time::timeout(THROTTLE_TIMEOUT, self.throttle.begin_attempt(key)).await {
+                Ok(Ok(admission)) => return admission,
+                Ok(Err(_)) => "error",
+                Err(_) => "timeout",
+            };
+        SecurityEvent::new("login_throttle_unavailable", Severity::Warn)
+            .reason(reason)
+            .emit();
+        self.fallback_throttle
+            .begin_attempt(key)
+            .await
+            .unwrap_or(Admission::Allowed)
     }
 
+    /// Rotate a refresh token: validate it, revoke it, and issue a fresh pair
+    /// within the same token family.
+    ///
+    /// Reuse/theft detection: presenting a token that is *already revoked*
+    /// (typically an old token replayed after the family has rotated past it)
+    /// is treated as a compromise - the entire family is revoked and flagged,
+    /// killing both the attacker's rotated token and the victim's live one and
+    /// forcing a fresh sign-in. See the [`refresh`] module docs.
+    ///
+    /// # Errors
+    /// [`AuthError::RefreshInvalid`] if unknown, expired, or revoked (the reuse
+    /// case additionally revokes the family before returning this error).
     pub async fn refresh(&self, presented: &SecretValue) -> Result<TokenPair> {
         let token = presented
             .expose_secret_str()
@@ -766,8 +797,11 @@ pub fn normalize_email(email: &str) -> String {
 }
 
 /// Backoff key: a pseudonym, so no plaintext email is stored in the throttle.
-fn throttle_key(normalized_email: &str) -> String {
-    crate::security::pseudonym("login-throttle", normalized_email)
+fn throttle_key(normalized_email: &str, client_net: Option<&str>) -> String {
+    crate::security::pseudonym(
+        "login-throttle",
+        &format!("{normalized_email}|{}", client_net.unwrap_or("")),
+    )
 }
 
 /// Whether sign-in must reject accounts whose email is unverified.

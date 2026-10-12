@@ -45,7 +45,7 @@ impl PostgresLoginThrottle {
         let reset = i64::try_from(RESET_AFTER_SECS).unwrap_or(i64::MAX);
         let _ = sqlx::query!(
             "DELETE FROM login_failures \
-             WHERE updated_at + $1 <= extract(epoch FROM now())::bigint \
+             WHERE updated_at <= extract(epoch FROM now())::bigint - $1 \
                AND locked_until <= extract(epoch FROM now())::bigint",
             reset,
         )
@@ -105,7 +105,9 @@ impl LoginThrottle for PostgresLoginThrottle {
             .fetch_add(1, Ordering::Relaxed)
             .is_multiple_of(CLEANUP_EVERY)
         {
-            self.cleanup().await;
+            // Off the request path: not covered by the caller's timeout.
+            let this = self.clone();
+            tokio::spawn(async move { this.cleanup().await });
         }
 
         Ok(if row.last_admitted {

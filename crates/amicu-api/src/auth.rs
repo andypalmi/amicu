@@ -28,16 +28,37 @@ pub const MAX_AUTH_BODY_BYTES: usize = 16 * 1024;
 
 /// Default per-email budget for `/recover` and `/verify/resend`: 5 per 15 min.
 const DEFAULT_EMAIL_LIMIT: (u32, u64) = (5, 900);
-/// Default per-email budget for `/signin` / `/token`: 20 per 15 min (a loose
-/// ceiling; the per-account exponential backoff is the tight control).
-const DEFAULT_SIGNIN_EMAIL_LIMIT: (u32, u64) = (20, 900);
+/// Default per-email budget of FAILED `/signin` / `/token` attempts: 100 per
+/// 15 min (a loose ceiling; the network-scoped account backoff is the tight
+/// control).
+const DEFAULT_SIGNIN_EMAIL_LIMIT: (u32, u64) = (100, 900);
 
 /// Pseudonym of the verified client IP for this request (`None` when the
 /// request carried no trustworthy identity). Inserted by the rate-limit
 /// middleware so handlers can attach it to security events without ever
 /// touching the raw address.
 #[derive(Clone, Debug)]
-pub(crate) struct ClientFingerprint(Option<String>);
+pub(crate) struct ClientFingerprint {
+    /// Pseudonym of the client IP, for security events.
+    ip: Option<String>,
+    /// Pseudonym of the client's network (IPv4 /24, IPv6 /64), used to scope
+    /// the per-account sign-in backoff.
+    net: Option<String>,
+}
+
+/// The IPv4 /24 or IPv6 /64 containing `ip`, textual.
+fn network_prefix(ip: std::net::IpAddr) -> String {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            format!("{}.{}.{}.0/24", o[0], o[1], o[2])
+        }
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+    }
+}
 
 /// Shared HTTP state.
 #[derive(Clone)]
@@ -329,20 +350,15 @@ pub(crate) async fn token(
     let event = |name: &'static str, sev: Severity| {
         SecurityEvent::new(name, sev)
             .email(&body.email)
-            .ip_hash(client.0.as_deref())
+            .ip_hash(client.ip.as_deref())
     };
-    if state
-        .email_throttled(&state.signin_email_limiter, "signin", &body.email)
-        .await
-    {
-        event("signin_failed", Severity::Warn)
-            .reason("email_rate_limited")
-            .emit();
-        return Err(ApiError(AuthError::RateLimited));
-    }
     let result = state
         .service
-        .sign_in(&body.email, &SecretValue::new(body.password.into_bytes()))
+        .sign_in_from(
+            &body.email,
+            &SecretValue::new(body.password.into_bytes()),
+            client.net.as_deref(),
+        )
         .await;
     match result {
         Ok(pair) => {
@@ -352,6 +368,22 @@ pub(crate) async fn token(
             Ok(Json(to_response(&pair)?))
         }
         Err(err) => {
+            // The per-email budget counts only FAILED guesses and is consulted
+            // only after the password check failed, so a correct password is
+            // never refused by it (an attacker cannot lock the owner out with
+            // it). Unknown emails are counted identically (anti-enumeration).
+            // The hard control is the network-scoped account backoff.
+            if matches!(err, AuthError::InvalidCredentials)
+                && state
+                    .email_throttled(&state.signin_email_limiter, "signin_failed", &body.email)
+                    .await
+            {
+                event("signin_failed", Severity::Warn)
+                    .outcome("rate_limited")
+                    .reason("email_rate_limited")
+                    .emit();
+                return Err(ApiError(AuthError::RateLimited));
+            }
             let reason = match &err {
                 AuthError::InvalidCredentials => "invalid_credentials",
                 AuthError::Throttled { .. } => "account_backoff",
@@ -436,7 +468,7 @@ pub(crate) async fn recover(
 ) -> Result<Response, ApiError> {
     let event = SecurityEvent::new("reset_requested", Severity::Info)
         .email(&body.email)
-        .ip_hash(client.0.as_deref());
+        .ip_hash(client.ip.as_deref());
     if state
         .email_throttled(&state.email_limiter, "recover", &body.email)
         .await
@@ -496,7 +528,7 @@ pub(crate) async fn reset(
         Ok(()) => {
             SecurityEvent::new("reset_completed", Severity::Info)
                 .outcome("ok")
-                .ip_hash(client.0.as_deref())
+                .ip_hash(client.ip.as_deref())
                 .emit();
             Ok(StatusCode::OK)
         }
@@ -509,7 +541,7 @@ pub(crate) async fn reset(
             SecurityEvent::new("reset_completed", Severity::Warn)
                 .outcome("failed")
                 .reason(reason)
-                .ip_hash(client.0.as_deref())
+                .ip_hash(client.ip.as_deref())
                 .emit();
             Err(err.into())
         }
@@ -551,7 +583,7 @@ pub(crate) async fn verify(
                     AuthError::VerifyInvalid => "invalid_token",
                     _ => "error",
                 })
-                .ip_hash(client.0.as_deref())
+                .ip_hash(client.ip.as_deref())
                 .emit();
             Err(err.into())
         }
@@ -584,7 +616,7 @@ pub(crate) async fn resend_verification(
 ) -> Result<Response, ApiError> {
     let event = SecurityEvent::new("verify_resend_requested", Severity::Info)
         .email(&body.email)
-        .ip_hash(client.0.as_deref());
+        .ip_hash(client.ip.as_deref());
     if state
         .email_throttled(&state.email_limiter, "verify_resend", &body.email)
         .await
@@ -663,7 +695,13 @@ async fn rate_limit(State(state): State<AuthApiState>, request: Request, next: N
         .trusted_proxies
         .client_ident_with_edge(edge_ip, peer, xff);
     // Pseudonymize once, here: handlers only ever see the hash.
-    let fingerprint = ClientFingerprint(ident.as_deref().map(security::ip_hash));
+    let fingerprint = ClientFingerprint {
+        ip: ident.as_deref().map(security::ip_hash),
+        net: ident
+            .as_deref()
+            .and_then(|i| i.parse::<std::net::IpAddr>().ok())
+            .map(|ip| security::pseudonym("ipnet", &network_prefix(ip))),
+    };
     let throttled = match &ident {
         Some(ident) => {
             let key = format!("{}|{ident}", request.uri().path());
@@ -675,7 +713,7 @@ async fn rate_limit(State(state): State<AuthApiState>, request: Request, next: N
     if throttled {
         SecurityEvent::new("ip_rate_limited", Severity::Warn)
             .outcome("rate_limited")
-            .ip_hash(fingerprint.0.as_deref())
+            .ip_hash(fingerprint.ip.as_deref())
             .emit();
         ApiError(AuthError::RateLimited).into_response()
     } else {

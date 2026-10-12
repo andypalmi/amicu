@@ -74,6 +74,7 @@
 //! export AMICU_BYPASS_DIRECT_DATABASE_URL="$B/amicu?user=amicu_bypass_direct"
 //! export AMICU_BYPASS_MEMBER_DATABASE_URL="$B/amicu?user=amicu_bypass_member"
 //! export AMICU_FRESH_DATABASE_URL="$B/amicu_probe?user=amicu_fresh"
+//! export AMICU_SECURITY_HASH_KEY="$(openssl rand -hex 32)"  # required by AMICU_ENV=production boots
 //! cargo test -p amicu-server --test rls_guard_live -- --ignored
 //!
 //! # 7. Tear down.
@@ -114,7 +115,7 @@ fn test_config() -> Config {
         rate_limit_window_secs: 60,
         rate_limit_timeout_ms: 1_000,
         email_rate_limit_max: 5,
-        signin_email_rate_limit_max: 20,
+        signin_email_rate_limit_max: 100,
         email_rate_limit_window_secs: 900,
         max_workspaces_per_user: amicu_store::DEFAULT_MAX_WORKSPACES_PER_USER,
         environment: Environment::Development,

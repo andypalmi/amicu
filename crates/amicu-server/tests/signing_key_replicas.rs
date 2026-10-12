@@ -35,7 +35,7 @@ fn test_config(signing_key_pem: Option<&str>, signing_keys_retiring_pem: Option<
         rate_limit_window_secs: 60,
         rate_limit_timeout_ms: 1_000,
         email_rate_limit_max: 5,
-        signin_email_rate_limit_max: 20,
+        signin_email_rate_limit_max: 100,
         email_rate_limit_window_secs: 900,
         max_workspaces_per_user: amicu_store::DEFAULT_MAX_WORKSPACES_PER_USER,
         environment: amicu_server::Environment::Development,

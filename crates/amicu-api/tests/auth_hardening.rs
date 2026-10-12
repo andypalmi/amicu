@@ -41,6 +41,10 @@ struct Harness {
 }
 
 fn harness(email_limit: u32) -> Harness {
+    harness_with(email_limit, 1000)
+}
+
+fn harness_with(email_limit: u32, signin_fail_limit: u32) -> Harness {
     let keyring = Keyring::new(SigningKey::generate().unwrap());
     let issuer = TokenIssuer::new(IssuerConfig::new(ISS, AUD));
     let jwks = keyring.jwks();
@@ -80,7 +84,7 @@ fn harness(email_limit: u32) -> Harness {
     )
     .with_email_limiters(
         Arc::new(InMemoryRateLimiter::new(email_limit, window)),
-        Arc::new(InMemoryRateLimiter::new(1000, window)),
+        Arc::new(InMemoryRateLimiter::new(signin_fail_limit, window)),
     );
     let verifier = Arc::new(Verifier::new(
         StaticJwksProvider::new(jwks),
@@ -115,14 +119,21 @@ async fn post_raw(
     body: String,
     bearer: Option<&str>,
 ) -> (StatusCode, HeaderMap, Value) {
+    post_from(app, uri, body, bearer, [203, 0, 113, 9]).await
+}
+
+async fn post_from(
+    app: &Router,
+    uri: &str,
+    body: String,
+    bearer: Option<&str>,
+    ip: [u8; 4],
+) -> (StatusCode, HeaderMap, Value) {
     let mut b = Request::builder()
         .method("POST")
         .uri(uri)
         .header("content-type", "application/json")
-        .extension(ConnectInfo(std::net::SocketAddr::from((
-            [203, 0, 113, 9],
-            5000,
-        ))));
+        .extension(ConnectInfo(std::net::SocketAddr::from((ip, 5000))));
     if let Some(t) = bearer {
         b = b.header("authorization", format!("Bearer {t}"));
     }
@@ -474,4 +485,85 @@ async fn security_events_are_emitted_and_leak_no_secrets() {
             dump(&events)
         );
     }
+}
+
+#[tokio::test]
+async fn attacker_on_another_network_cannot_lock_out_the_owner() {
+    let h = harness(100);
+    let (email, good) = ("owner@example.com", "correct horse battery");
+    post(
+        &h.app,
+        "/signup",
+        json!({"email": email, "password": good}),
+        None,
+    )
+    .await;
+    // Attacker (198.51.100.x) burns through the backoff.
+    for _ in 0..6 {
+        post_from(
+            &h.app,
+            "/signin",
+            json!({"email": email, "password": "wrong-guess-1"}).to_string(),
+            None,
+            [198, 51, 100, 7],
+        )
+        .await;
+    }
+    let (s, _, _) = post_from(
+        &h.app,
+        "/signin",
+        json!({"email": email, "password": "wrong-guess-1"}).to_string(),
+        None,
+        [198, 51, 100, 8], // same /24: locked
+    )
+    .await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS);
+    // The owner, from their own /24, still signs in.
+    let (s, _, _) = post_from(
+        &h.app,
+        "/signin",
+        json!({"email": email, "password": good}).to_string(),
+        None,
+        [203, 0, 113, 9],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn per_email_signin_budget_counts_only_failures() {
+    let h = harness_with(100, 1);
+    let (email, good) = ("budget@example.com", "correct horse battery");
+    post(
+        &h.app,
+        "/signup",
+        json!({"email": email, "password": good}),
+        None,
+    )
+    .await;
+    // Successful sign-ins never consume the failed-attempt budget.
+    for _ in 0..3 {
+        let (s, _, _) = post(
+            &h.app,
+            "/signin",
+            json!({"email": email, "password": good}),
+            None,
+        )
+        .await;
+        assert_eq!(s, StatusCode::OK);
+    }
+    let bad = json!({"email": email, "password": "wrong-guess-1"});
+    let (s, _, _) = post(&h.app, "/signin", bad.clone(), None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _, _) = post(&h.app, "/signin", bad, None).await;
+    assert_eq!(s, StatusCode::TOO_MANY_REQUESTS); // budget (1) exceeded by failures
+    // ... but the correct password is never refused by it.
+    let (s, _, _) = post(
+        &h.app,
+        "/signin",
+        json!({"email": email, "password": good}),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
 }
