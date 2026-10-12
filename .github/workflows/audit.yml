@@ -1,0 +1,69 @@
+name: Dependency audit
+
+# Daily audit of main. Advisories appear independently of code changes, so
+# ci.yml only blocks PRs that touch dependencies; this workflow is what
+# surfaces new advisories, by opening (or commenting on) a tracking issue.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: audit (main)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_TITLE: Dependency audit failing on main
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: taiki-e/install-action@cargo-audit
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: cargo audit
+        id: cargo
+        continue-on-error: true
+        run: cargo audit
+
+      - name: pnpm audit
+        id: pnpm
+        continue-on-error: true
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm audit --audit-level=high
+
+      - name: Report failure as an issue
+        if: steps.cargo.outcome == 'failure' || steps.pnpm.outcome == 'failure'
+        run: |
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          body="Dependency audit failed on main (cargo audit: ${{ steps.cargo.outcome }}, pnpm audit: ${{ steps.pnpm.outcome }}). See $run_url"
+          existing=$(gh issue list --state open --search "\"$ISSUE_TITLE\" in:title" \
+            --json number,title --jq "[.[] | select(.title == \"$ISSUE_TITLE\")][0].number // empty")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$ISSUE_TITLE" --body "$body"
+          fi
+
+      - name: Fail run if audit failed
+        if: steps.cargo.outcome == 'failure' || steps.pnpm.outcome == 'failure'
+        run: exit 1
