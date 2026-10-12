@@ -45,6 +45,19 @@ jobs:
       IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/amicu/amicu-api
       SHA: ${{ github.sha }}
     steps:
+      - name: Verify CI passed for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SKIP: ${{ inputs.skip_ci_check }}
+        run: |
+          if [ "$SKIP" = "true" ]; then
+            echo "::warning title=CI check SKIPPED::skip_ci_check=true - deploying $GITHUB_SHA WITHOUT verifying CI. Only valid if CI was run locally."
+            exit 0
+          fi
+          c=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --event push --branch main -L 1 --json conclusion -q '.[0].conclusion')
+          [ "$c" = "success" ] || { echo "::error::CI for $GITHUB_SHA is '${c:-none/in_progress}'"; exit 1; }
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}

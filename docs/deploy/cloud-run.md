@@ -254,8 +254,8 @@ Deploys use `github.sha` (the dispatched `main` commit).
 
 ## Deploy order
 
-1. **`deploy-api.yml`** (manual `workflow_dispatch` on `main`): WIF auth → build & push the image to Artifact
-   Registry, tagged with the deployed commit's SHA and `:latest` → update
+1. **`deploy-api.yml`** (manual `workflow_dispatch` on `main`): WIF auth →
+   build & push the image to Artifact Registry, tagged with the deployed commit's SHA and `:latest` → update
    + execute the `amicu-migrate` Job with the new image, **waiting** for it
    to finish → only on success, `gcloud run deploy amicu-api --image …`.
    Migrate-before-deploy, same order as `safecheck-backend`'s `backend.yml`
@@ -265,7 +265,8 @@ Deploys use `github.sha` (the dispatched `main` commit).
    (`amicu-infra/modules/cloud-run-api`'s `lifecycle.ignore_changes` on
    `template[0].containers[0].image`/`client`/`client_version` only), so
    this workflow can never fight a later `terraform apply`.
-2. **`deploy-web.yml`** (manual `workflow_dispatch` on `main`): pnpm install → `pnpm --filter @amicu/web cf:deploy`
+2. **`deploy-web.yml`** (manual `workflow_dispatch` on `main`): pnpm install →
+   `pnpm --filter @amicu/web cf:deploy`
    (`opennextjs-cloudflare build && opennextjs-cloudflare deploy --
    --keep-vars` — `--keep-vars` preserves whatever vars/secrets are already
    set on the Worker instead of resetting them to `wrangler.jsonc`'s
