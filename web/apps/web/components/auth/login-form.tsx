@@ -9,7 +9,13 @@ import { SubmitButton } from './submit-button';
 
 const initial: AuthFormState = {};
 
-export function LoginForm({ next }: { next?: string }) {
+export function LoginForm({
+  next,
+  signupsEnabled = false,
+}: {
+  next?: string;
+  signupsEnabled?: boolean;
+}) {
   const [state, action] = useActionState(loginAction, initial);
 
   return (
@@ -47,12 +53,14 @@ export function LoginForm({ next }: { next?: string }) {
 
       <SubmitButton pendingLabel="Signing in…">Sign in</SubmitButton>
 
-      <p className="text-center text-sm text-muted-foreground">
-        New to Amicu?{' '}
-        <Link href="/signup" className="font-medium text-foreground hover:underline">
-          Create an account
-        </Link>
-      </p>
+      {signupsEnabled ? (
+        <p className="text-center text-sm text-muted-foreground">
+          New to Amicu?{' '}
+          <Link href="/signup" className="font-medium text-foreground hover:underline">
+            Create an account
+          </Link>
+        </p>
+      ) : null}
     </form>
   );
 }

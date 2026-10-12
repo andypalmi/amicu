@@ -1648,6 +1648,9 @@
           "400": {
             "description": "Request-level validation failed (empty email or weak password)."
           },
+          "403": {
+            "description": "Public sign-ups are disabled on this deployment (`code: signups_disabled`)."
+          },
           "429": {
             "description": "Rate limited."
           }

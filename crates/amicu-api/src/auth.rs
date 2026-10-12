@@ -89,6 +89,8 @@ pub struct AuthApiState {
     edge_trust: EdgeTrust,
     /// Best-effort send right after enqueue; `None` = disabled / no outbox.
     inline_send: Option<crate::outbox::InlineSend>,
+    /// Whether `POST /signup` accepts registrations (default `true`).
+    signups_enabled: bool,
 }
 
 impl AuthApiState {
@@ -117,7 +119,17 @@ impl AuthApiState {
             trusted_proxies: TrustedProxies::default(),
             edge_trust: EdgeTrust::default(),
             inline_send: None,
+            signups_enabled: true,
         }
+    }
+
+    /// Enable or disable public registration (`POST /signup`). Default
+    /// enabled. When disabled the handler answers `403` / `signups_disabled`
+    /// before doing any work; invites, login, verify and resend are unaffected.
+    #[must_use]
+    pub fn with_signups_enabled(mut self, enabled: bool) -> Self {
+        self.signups_enabled = enabled;
+        self
     }
 
     /// Deliver queued mail inline after the enqueueing handlers (`/signup`,
@@ -430,6 +442,7 @@ pub(crate) async fn openid_configuration(
     responses(
         (status = 202, description = "Accepted. If the email can be registered, a follow-up is sent out-of-band. Response is identical whether or not the account already exists (anti-enumeration).", body = SignUpResponse),
         (status = 400, description = "Request-level validation failed (empty email or weak password)."),
+        (status = 403, description = "Public sign-ups are disabled on this deployment (`code: signups_disabled`)."),
         (status = 429, description = "Rate limited."),
     ),
 )]
@@ -437,6 +450,17 @@ pub(crate) async fn sign_up(
     State(state): State<AuthApiState>,
     Json(body): Json<Credentials>,
 ) -> Result<Response, ApiError> {
+    if !state.signups_enabled {
+        // Before any work: no hashing, no store access, no outbox/email.
+        return Ok((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "sign-ups are currently closed",
+                "code": "signups_disabled",
+            })),
+        )
+            .into_response());
+    }
     // Deliberately discard the Created/AlreadyRegistered distinction: the
     // response must be identical on both paths (anti-enumeration). We still
     // await the call so its Argon2 work - the timing equalizer - runs.

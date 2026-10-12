@@ -125,6 +125,7 @@
 //! | `internal_caller_emails` | `--internal-caller-emails` | `AMICU_INTERNAL_CALLER_EMAILS` | empty (OIDC drain auth OFF) |
 //! | `outbox_drain_batch_size` | `--outbox-drain-batch-size` | `AMICU_OUTBOX_DRAIN_BATCH_SIZE` | `50` |
 //! | `outbox_drain_budget_ms` | `--outbox-drain-budget-ms` | `AMICU_OUTBOX_DRAIN_BUDGET_MS` | `20000` |
+//! | `signups_enabled` | `--signups-enabled` | `AMICU_SIGNUPS_ENABLED` | `false` - sign-ups are CLOSED unless explicitly `true`; closed => `POST /signup` answers 403 `signups_disabled`; invites, login, verify unaffected |
 //! | `outbox_inline_send` | `--outbox-inline-send` | `AMICU_OUTBOX_INLINE_SEND` | `true` |
 //! | `outbox_inline_budget_ms` | `--outbox-inline-budget-ms` | `AMICU_OUTBOX_INLINE_BUDGET_MS` | `1000` |
 //!
@@ -524,6 +525,18 @@ pub struct Config {
         default_value_t = amicu_api::DEFAULT_INLINE_BUDGET_MS
     )]
     pub outbox_inline_budget_ms: u64,
+
+    /// Accept public registrations on `POST /signup`. Defaults to `false`
+    /// (closed): set `true` explicitly to open sign-ups. When closed it
+    /// answers `403` with code `signups_disabled` before doing any work.
+    /// Invite acceptance, login, verify and verify/resend are unaffected.
+    #[arg(
+        long,
+        env = "AMICU_SIGNUPS_ENABLED",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub signups_enabled: bool,
 }
 
 /// Deployment environment gate (`AMICU_ENV`): whether production safety
@@ -1256,7 +1269,8 @@ pub async fn build_app_with_database_url(
         )
         .with_known_networks(known_networks)
         .with_trusted_proxies(trusted)
-        .with_edge_trust(edge_trust.clone());
+        .with_edge_trust(edge_trust.clone())
+        .with_signups_enabled(config.signups_enabled);
     let auth_state = with_inline_send(auth_state, config, pool.as_ref(), &mailer);
 
     let verifier = Arc::new(Verifier::new(

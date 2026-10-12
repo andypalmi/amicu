@@ -118,3 +118,11 @@ test('explicit overrides for JWKS/issuer/audience are honored', () => {
   assert.equal(env.AUTH_ISSUER, 'https://issuer.example.com');
   assert.equal(env.AUTH_AUDIENCE, 'custom-aud');
 });
+
+test('SIGNUPS_ENABLED is fail-closed: only an explicit "true" opens sign-ups', () => {
+  const base = { NODE_ENV: 'development' } as NodeJS.ProcessEnv;
+  assert.equal(parseServerEnv(base).SIGNUPS_ENABLED, false);
+  assert.equal(parseServerEnv({ ...base, SIGNUPS_ENABLED: 'false' }).SIGNUPS_ENABLED, false);
+  assert.equal(parseServerEnv({ ...base, SIGNUPS_ENABLED: '1' }).SIGNUPS_ENABLED, false);
+  assert.equal(parseServerEnv({ ...base, SIGNUPS_ENABLED: ' TRUE ' }).SIGNUPS_ENABLED, true);
+});

@@ -3805,6 +3805,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Public sign-ups are disabled on this deployment (`code: signups_disabled`). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Rate limited. */
             429: {
                 headers: {
