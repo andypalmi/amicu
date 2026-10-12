@@ -98,7 +98,8 @@ pub use outbox::{
     drain_once, outbox_router,
 };
 pub use ratelimit::{
-    InMemoryRateLimiter, PostgresRateLimiter, ProxyParseError, RateLimiter, TrustedProxies,
+    InMemoryRateLimiter, LimiterUnavailable, PostgresRateLimiter, ProxyParseError, RateLimiter,
+    TrustedProxies,
 };
 pub use security::security_headers;
 pub use session::{SessionApiState, session_router};

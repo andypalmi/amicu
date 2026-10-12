@@ -210,7 +210,23 @@ pub trait RateLimiter: Send + Sync {
     async fn is_exhausted(&self, _key: &str) -> bool {
         false
     }
+
+    /// Like [`Self::check`], but reports a backend failure instead of failing
+    /// open, so a caller that needs a stricter degradation (a per-replica
+    /// fallback) can apply it. In-process backends never fail.
+    async fn try_check(&self, key: &str) -> Result<bool, LimiterUnavailable> {
+        Ok(self.check(key).await)
+    }
+
+    /// Like [`Self::is_exhausted`], but reports a backend failure.
+    async fn try_is_exhausted(&self, key: &str) -> Result<bool, LimiterUnavailable> {
+        Ok(self.is_exhausted(key).await)
+    }
 }
+
+/// The rate-limit backend errored or timed out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LimiterUnavailable;
 
 #[async_trait]
 impl RateLimiter for InMemoryRateLimiter {
@@ -316,42 +332,46 @@ impl PostgresRateLimiter {
 #[async_trait]
 impl RateLimiter for PostgresRateLimiter {
     async fn check(&self, key: &str) -> bool {
+        // Fail OPEN: a transient database error (or a timeout from a saturated
+        // pool) must not turn into a total login/signup outage for the
+        // credential routes this backs (see the module docs' "Fail-open on
+        // database error" section). Callers needing stricter degradation use
+        // [`RateLimiter::try_check`].
+        self.try_check(key).await.unwrap_or(true)
+    }
+
+    async fn is_exhausted(&self, key: &str) -> bool {
+        self.try_is_exhausted(key).await.unwrap_or(false)
+    }
+
+    async fn try_check(&self, key: &str) -> Result<bool, LimiterUnavailable> {
         match tokio::time::timeout(self.timeout, self.store.hit(key, self.window_secs)).await {
-            Ok(Ok(count)) => count <= i64::from(self.max),
-            // Fail OPEN: a transient database error must not turn into a
-            // total login/signup outage for the credential routes this backs
-            // (see the module docs' "Fail-open on database error" section for
-            // the full rationale). Never fail closed here.
+            Ok(Ok(count)) => Ok(count <= i64::from(self.max)),
             Ok(Err(err)) => {
                 self.note_fail_open(err);
-                true
+                Err(LimiterUnavailable)
             }
-            // The hit didn't finish within `self.timeout` - a saturated pool
-            // or a slow/hung database must not block (or eventually lock out)
-            // every credential request either; a timeout is just another
-            // shape of database unavailability, so it fails OPEN the same way.
             Err(_) => {
                 self.note_fail_open(format_args!(
                     "database hit did not complete within the configured {:?} rate-limit \
                      timeout (AMICU_RATE_LIMIT_TIMEOUT_MS)",
                     self.timeout
                 ));
-                true
+                Err(LimiterUnavailable)
             }
         }
     }
 
-    async fn is_exhausted(&self, key: &str) -> bool {
+    async fn try_is_exhausted(&self, key: &str) -> Result<bool, LimiterUnavailable> {
         match tokio::time::timeout(self.timeout, self.store.peek(key)).await {
-            Ok(Ok(count)) => count >= i64::from(self.max),
-            // Fail open, like `check`.
+            Ok(Ok(count)) => Ok(count >= i64::from(self.max)),
             Ok(Err(err)) => {
                 self.note_fail_open(err);
-                false
+                Err(LimiterUnavailable)
             }
             Err(_) => {
                 self.note_fail_open("peek timed out");
-                false
+                Err(LimiterUnavailable)
             }
         }
     }

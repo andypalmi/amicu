@@ -9,6 +9,7 @@ use amicu_auth::error::AuthError;
 use amicu_auth::jwks::{Jwks, OpenIdConfiguration};
 use amicu_auth::security::{self, SecurityEvent, Severity};
 use amicu_auth::service::{AuthService, TokenPair};
+use amicu_auth::throttle::{InMemoryKnownNetworks, KnownNetworks};
 use amicu_core::secret::SecretValue;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
@@ -21,8 +22,6 @@ use serde_json::json;
 use utoipa::ToSchema;
 
 use crate::edge::EdgeTrust;
-use amicu_auth::throttle::{InMemoryKnownNetworks, KnownNetworks};
-
 use crate::ratelimit::{InMemoryRateLimiter, RateLimiter, TrustedProxies};
 
 /// Maximum request body on the auth routes (JSON credentials / tokens only).
@@ -34,6 +33,14 @@ const DEFAULT_EMAIL_LIMIT: (u32, u64) = (5, 900);
 /// 15 min (a loose ceiling; the network-scoped account backoff is the tight
 /// control).
 const DEFAULT_SIGNIN_EMAIL_LIMIT: (u32, u64) = (100, 900);
+
+/// Operator-visible signal that the shared failed-sign-in budget store is down
+/// and the per-replica fallback is in effect.
+fn budget_unavailable() {
+    SecurityEvent::new("login_throttle_unavailable", Severity::Warn)
+        .reason("email_budget_error")
+        .emit();
+}
 
 /// Pseudonym of the verified client IP for this request (`None` when the
 /// request carried no trustworthy identity). Inserted by the rate-limit
@@ -72,6 +79,10 @@ pub struct AuthApiState {
     email_limiter: Arc<dyn RateLimiter>,
     /// Per-email limiter for `/signin` and `/token`.
     signin_email_limiter: Arc<dyn RateLimiter>,
+    /// Per-replica stand-in for `signin_email_limiter` when it errors or times
+    /// out: same limits, process-local, so the failed-sign-in budget degrades
+    /// to per-replica enforcement instead of to nothing.
+    signin_fallback: Arc<InMemoryRateLimiter>,
     /// Networks that recently signed in successfully, per account.
     known_networks: Arc<dyn KnownNetworks>,
     trusted_proxies: TrustedProxies,
@@ -96,6 +107,10 @@ impl AuthApiState {
                 DEFAULT_SIGNIN_EMAIL_LIMIT.0,
                 std::time::Duration::from_secs(DEFAULT_SIGNIN_EMAIL_LIMIT.1),
             )),
+            signin_fallback: Arc::new(InMemoryRateLimiter::new(
+                DEFAULT_SIGNIN_EMAIL_LIMIT.0,
+                std::time::Duration::from_secs(DEFAULT_SIGNIN_EMAIL_LIMIT.1),
+            )),
             known_networks: Arc::new(InMemoryKnownNetworks::default()),
             trusted_proxies: TrustedProxies::default(),
             edge_trust: EdgeTrust::default(),
@@ -116,6 +131,14 @@ impl AuthApiState {
     ) -> Self {
         self.email_limiter = recover_and_resend;
         self.signin_email_limiter = signin;
+        self
+    }
+
+    /// Set the limits of the per-replica fallback for the failed-sign-in budget
+    /// (should equal the shared limiter's `max` and `window`).
+    #[must_use]
+    pub fn with_signin_fallback(mut self, max: u32, window: std::time::Duration) -> Self {
+        self.signin_fallback = Arc::new(InMemoryRateLimiter::new(max, window));
         self
     }
 
@@ -149,7 +172,14 @@ impl AuthApiState {
         let Some(key) = Self::signin_budget_key(email) else {
             return false;
         };
-        if !self.signin_email_limiter.is_exhausted(&key).await {
+        let exhausted = if let Ok(e) = self.signin_email_limiter.try_is_exhausted(&key).await {
+            e
+        } else {
+            budget_unavailable();
+            self.signin_fallback.exhausted(&key)
+        };
+
+        if !exhausted {
             return false;
         }
         let known = tokio::time::timeout(
@@ -158,6 +188,20 @@ impl AuthApiState {
         )
         .await;
         !matches!(known, Ok(Ok(true)))
+    }
+
+    /// Count one FAILED sign-in against the budget; true when it is now over.
+    /// A backend error or timeout switches to the per-replica fallback.
+    async fn signin_budget_consume(&self, email: &str) -> bool {
+        let Some(key) = Self::signin_budget_key(email) else {
+            return false;
+        };
+        if let Ok(allowed) = self.signin_email_limiter.try_check(&key).await {
+            !allowed
+        } else {
+            budget_unavailable();
+            !self.signin_fallback.check(&key)
+        }
     }
 
     fn known_key(email: &str, net: Option<&str>) -> String {
@@ -448,9 +492,7 @@ pub(crate) async fn token(
             // the check via `signin_budget_refuses`, consumed here). Unknown
             // emails are counted identically (anti-enumeration).
             if matches!(err, AuthError::InvalidCredentials)
-                && state
-                    .email_throttled(&state.signin_email_limiter, "signin_failed", &body.email)
-                    .await
+                && state.signin_budget_consume(&body.email).await
             {
                 event("signin_failed", Severity::Warn)
                     .outcome("rate_limited")

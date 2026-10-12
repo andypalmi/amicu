@@ -191,7 +191,13 @@ impl KnownNetworks for InMemoryKnownNetworks {
             let now = unix_now();
             m.retain(|_, t| *t + ttl > now);
             if m.len() >= 65_536 {
-                m.clear();
+                // Still full of live entries: drop the oldest eighth.
+                let mut by_age: Vec<(i64, String)> =
+                    m.iter().map(|(k, t)| (*t, k.clone())).collect();
+                by_age.sort_unstable();
+                for (_, k) in by_age.into_iter().take(65_536 / 8) {
+                    m.remove(&k);
+                }
             }
         }
         m.insert(key.to_owned(), unix_now());

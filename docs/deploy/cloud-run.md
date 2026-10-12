@@ -126,10 +126,11 @@ consulted for that request at all.
 | `AMICU_SIGNIN_EMAIL_RATE_LIMIT_MAX` | no | `100` | Per-email budget of FAILED sign-ins per window. Once exhausted, only networks that signed in successfully to that account in the last 30 days may still attempt; others get `429` until the window passes (so during an active distributed attack the owner on a brand-new network is refused). |
 
 **Production client identity.** The per-network sign-in backoff and the
-per-IP limits trust the client IP. With the Cloud Run default
-`AMICU_TRUSTED_PROXIES=0.0.0.0/0` every peer is "trusted" and
-`X-Forwarded-For` is spoofable, so in `AMICU_ENV=production` a catch-all
-(`0.0.0.0/0` or `::/0`) is **refused at startup unless `AMICU_EDGE_TOKEN` is set
+per-IP limits trust the client IP, which behind Cloud Run/Cloudflare is only
+trustworthy from the verified edge (`AMICU_TRUSTED_PROXIES` alone either
+collapses every client onto the proxy address or trusts a spoofable
+`X-Forwarded-For`). So in `AMICU_ENV=production`, **regardless of
+`AMICU_TRUSTED_PROXIES`, startup is refused unless `AMICU_EDGE_TOKEN` is set
 and `AMICU_REQUIRE_EDGE_TOKEN=true`**: identity then always comes from the
 verified `CF-Connecting-IP`. Production example:
 

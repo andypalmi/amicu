@@ -569,13 +569,13 @@ pub enum Error {
     /// than 32 bytes (andypalmi/amicu-planning#194). Without a secret key the
     /// pseudonyms in security events and rate-limit keys are guessable.
     MissingSecurityHashKey,
-    /// `AMICU_ENV=production` with a catch-all `AMICU_TRUSTED_PROXIES`
-    /// (`0.0.0.0/0` or `::/0`) but without `AMICU_EDGE_TOKEN` set AND
-    /// `AMICU_REQUIRE_EDGE_TOKEN=true` (andypalmi/amicu-planning#194). A
-    /// catch-all trusts `X-Forwarded-For` from anyone, so client identity (and
-    /// with it the per-IP/per-network sign-in controls) would be spoofable;
-    /// production must derive identity from the verified edge instead.
-    CatchAllProxyWithoutEdge,
+    /// `AMICU_ENV=production` without `AMICU_EDGE_TOKEN` set AND
+    /// `AMICU_REQUIRE_EDGE_TOKEN=true` (andypalmi/amicu-planning#194),
+    /// whatever `AMICU_TRUSTED_PROXIES` says: an empty list collapses clients
+    /// onto the proxy address and a catch-all trusts a spoofable
+    /// `X-Forwarded-For`, so the per-IP/per-network sign-in controls need the
+    /// verified edge identity.
+    ProductionRequiresEdgeToken,
     /// `AMICU_ENV=production` and the connected Postgres role would bypass
     /// row-level security (superuser/BYPASSRLS, direct or inherited, or owns
     /// a `FORCE ROW LEVEL SECURITY` table).
@@ -623,11 +623,11 @@ impl std::fmt::Display for Error {
                 "AMICU_ENV=production requires DATABASE_URL to be set (production may not \
                  silently fall back to ephemeral in-memory stores)"
             ),
-            Error::CatchAllProxyWithoutEdge => write!(
+            Error::ProductionRequiresEdgeToken => write!(
                 f,
-                "AMICU_ENV=production with a catch-all AMICU_TRUSTED_PROXIES (0.0.0.0/0 or ::/0) \
-                 requires AMICU_EDGE_TOKEN to be set and AMICU_REQUIRE_EDGE_TOKEN=true, so client \
-                 identity comes from the verified edge rather than a spoofable X-Forwarded-For"
+                "AMICU_ENV=production requires AMICU_EDGE_TOKEN to be set and \
+                 AMICU_REQUIRE_EDGE_TOKEN=true, so client identity comes from the verified edge \
+                 rather than a spoofable X-Forwarded-For or a collapsed proxy address"
             ),
             Error::MissingSecurityHashKey => write!(
                 f,
@@ -670,7 +670,7 @@ impl std::error::Error for Error {
             | Error::MissingSigningKey
             | Error::MissingDatabaseUrl
             | Error::MissingSecurityHashKey
-            | Error::CatchAllProxyWithoutEdge
+            | Error::ProductionRequiresEdgeToken
             | Error::RlsBypass(_)
             | Error::PendingMigrations(_)
             | Error::MigratorLacksCreate(_)
@@ -1111,12 +1111,7 @@ pub async fn build_app_with_database_url(
     if require_edge_token && edge_token.is_none() {
         return Err(Error::MissingEdgeToken);
     }
-    check_prod_edge_identity(
-        config.environment,
-        trusted.has_catch_all(),
-        edge_token.is_some(),
-        require_edge_token,
-    )?;
+    check_prod_edge_identity(config.environment, edge_token.is_some(), require_edge_token)?;
     let edge_trust = EdgeTrust::new(edge_token, require_edge_token);
 
     // Also the default `aud` the outbox-drain OIDC verifier enforces (see
@@ -1228,6 +1223,10 @@ pub async fn build_app_with_database_url(
         };
     let auth_state = AuthApiState::new(service.clone(), limiter)
         .with_email_limiters(recover_limiter, signin_limiter)
+        .with_signin_fallback(
+            config.signin_email_rate_limit_max,
+            Duration::from_secs(config.email_rate_limit_window_secs),
+        )
         .with_known_networks(known_networks)
         .with_trusted_proxies(trusted)
         .with_edge_trust(edge_trust.clone());
@@ -1774,18 +1773,19 @@ fn init_security_hash_key(config: &Config) -> Result<(), Error> {
     Ok(())
 }
 
-/// Production identity rule (see [`Error::CatchAllProxyWithoutEdge`]): a
-/// catch-all trusted-proxy list is only acceptable when every request must
-/// carry a valid edge token, so identity always comes from the edge.
+/// Production identity rule (see [`Error::ProductionRequiresEdgeToken`]): in
+/// production every request must carry a valid edge token, so client identity
+/// always comes from the verified edge. This holds regardless of
+/// `AMICU_TRUSTED_PROXIES`: an empty list collapses every client onto the
+/// proxy's address and a near-catch-all one trusts spoofable
+/// `X-Forwarded-For`.
 fn check_prod_edge_identity(
     env: Environment,
-    catch_all_proxy: bool,
     has_edge_token: bool,
     require_edge_token: bool,
 ) -> Result<(), Error> {
-    if env == Environment::Production && catch_all_proxy && !(has_edge_token && require_edge_token)
-    {
-        return Err(Error::CatchAllProxyWithoutEdge);
+    if env == Environment::Production && !(has_edge_token && require_edge_token) {
+        return Err(Error::ProductionRequiresEdgeToken);
     }
     Ok(())
 }
@@ -1795,20 +1795,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prod_catch_all_proxy_requires_edge_token_and_enforcement() {
+    fn prod_requires_edge_token_and_enforcement_regardless_of_proxies() {
         let p = Environment::Production;
-        let d = Environment::Development;
-        // Catch-all in production: only OK with token AND enforcement.
-        assert!(check_prod_edge_identity(p, true, false, false).is_err());
-        assert!(check_prod_edge_identity(p, true, true, false).is_err());
-        assert!(check_prod_edge_identity(p, true, false, true).is_err());
-        assert!(check_prod_edge_identity(p, true, true, true).is_ok());
-        // Specific proxies, or non-production, are unaffected.
-        assert!(check_prod_edge_identity(p, false, false, false).is_ok());
-        assert!(check_prod_edge_identity(d, true, false, false).is_ok());
+        assert!(check_prod_edge_identity(p, false, false).is_err());
+        assert!(check_prod_edge_identity(p, true, false).is_err());
+        assert!(check_prod_edge_identity(p, false, true).is_err());
+        assert!(check_prod_edge_identity(p, true, true).is_ok());
+        // Development is unaffected.
+        assert!(check_prod_edge_identity(Environment::Development, false, false).is_ok());
         // The error message never contains a token.
         assert!(
-            !Error::CatchAllProxyWithoutEdge
+            !Error::ProductionRequiresEdgeToken
                 .to_string()
                 .contains("secret")
         );

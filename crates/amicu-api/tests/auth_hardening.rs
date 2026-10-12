@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use amicu_api::{
     AuthApiState, BillingApiState, ConfigApiState, EngineApiState, InMemoryOrgStore,
-    InMemoryRateLimiter, OrgApiState, SessionApiState, api_router,
+    InMemoryRateLimiter, LimiterUnavailable, OrgApiState, RateLimiter, SessionApiState, api_router,
 };
 use amicu_auth::claims::Tier;
 use amicu_auth::issuer::{IssuerConfig, TokenIssuer};
@@ -45,6 +45,21 @@ fn harness(email_limit: u32) -> Harness {
 }
 
 fn harness_with(email_limit: u32, signin_fail_limit: u32) -> Harness {
+    harness_custom(
+        email_limit,
+        Arc::new(InMemoryRateLimiter::new(
+            signin_fail_limit,
+            Duration::from_secs(60),
+        )),
+        signin_fail_limit,
+    )
+}
+
+fn harness_custom(
+    email_limit: u32,
+    signin_limiter: Arc<dyn RateLimiter>,
+    fallback_max: u32,
+) -> Harness {
     let keyring = Keyring::new(SigningKey::generate().unwrap());
     let issuer = TokenIssuer::new(IssuerConfig::new(ISS, AUD));
     let jwks = keyring.jwks();
@@ -84,8 +99,9 @@ fn harness_with(email_limit: u32, signin_fail_limit: u32) -> Harness {
     )
     .with_email_limiters(
         Arc::new(InMemoryRateLimiter::new(email_limit, window)),
-        Arc::new(InMemoryRateLimiter::new(signin_fail_limit, window)),
-    );
+        signin_limiter,
+    )
+    .with_signin_fallback(fallback_max, window);
     let verifier = Arc::new(Verifier::new(
         StaticJwksProvider::new(jwks),
         VerifierConfig::new(ISS, AUD),
@@ -600,4 +616,53 @@ async fn futures_seq(app: &Router, email: &str, ip: [u8; 4]) -> Vec<StatusCode> 
         v.push(signin(app, email, "wrong-guess-1", ip).await);
     }
     v
+}
+
+/// A backend that is down: the strict calls fail, the fail-open ones allow.
+struct DownLimiter;
+
+#[async_trait::async_trait]
+impl RateLimiter for DownLimiter {
+    async fn check(&self, _: &str) -> bool {
+        true
+    }
+    async fn try_check(&self, _: &str) -> Result<bool, LimiterUnavailable> {
+        Err(LimiterUnavailable)
+    }
+    async fn try_is_exhausted(&self, _: &str) -> Result<bool, LimiterUnavailable> {
+        Err(LimiterUnavailable)
+    }
+}
+
+#[tokio::test]
+async fn signin_budget_falls_back_to_a_per_replica_limiter_when_the_store_is_down() {
+    let (collector, _guard) = capture();
+    let h = harness_custom(100, Arc::new(DownLimiter), 2);
+    let (email, good) = ("down@example.com", "correct horse battery");
+    let (home, away) = ([203, 0, 113, 9], [198, 51, 100, 5]);
+    post(
+        &h.app,
+        "/signup",
+        json!({"email": email, "password": good}),
+        None,
+    )
+    .await;
+    assert_eq!(signin(&h.app, email, good, home).await, StatusCode::OK);
+    // The fallback (max 2) still counts failures and exhausts the budget ...
+    for _ in 0..2 {
+        assert_eq!(
+            signin(&h.app, email, "wrong-guess-1", away).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    // ... so an unknown network is refused, a known one is not.
+    assert_eq!(
+        signin(&h.app, email, good, away).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(signin(&h.app, email, good, home).await, StatusCode::OK);
+    // The degradation is visible to operators.
+    assert!(collector.security_events().iter().any(|e| {
+        e.name() == "login_throttle_unavailable" && e.get("reason") == Some("email_budget_error")
+    }));
 }
