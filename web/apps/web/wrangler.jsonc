@@ -47,19 +47,17 @@
     "directory": ".open-next/assets",
     "binding": "ASSETS",
   },
-  // PLACEHOLDER values only - none of these are secrets, but none of these
-  // are real either. Real deploys must override every one of them via
-  // Cloudflare dashboard "Variables and Secrets" (or `wrangler secret put` /
-  // an environment-specific `vars` block) - never commit real values here.
-  // See README-deploy-cloudflare.md for the full table and the hard rule
-  // that AUTH_ISSUER/AUTH_AUDIENCE MUST match the API's
-  // AMICU_ISSUER/AMICU_AUDIENCE.
+  // Production values for amicu.dev. None are secrets (public URLs/claims), so
+  // they are committed; a bare `wrangler deploy` therefore keeps prod intact.
+  // Do NOT also set a Worker secret with any of these names (name conflict).
+  // AUTH_ISSUER/AUTH_AUDIENCE MUST match the API's AMICU_ISSUER/AMICU_AUDIENCE;
+  // see README-deploy-cloudflare.md.
   "vars": {
-    "API_URL": "https://REPLACE-ME.example.invalid",
-    "AUTH_ISSUER": "https://REPLACE-ME.example.invalid",
+    "API_URL": "https://api.amicu.dev",
+    "AUTH_ISSUER": "https://api.amicu.dev",
     "AUTH_AUDIENCE": "amicu",
-    "AUTH_JWKS_URL": "https://REPLACE-ME.example.invalid/.well-known/jwks.json",
-    "NEXT_PUBLIC_SITE_URL": "https://REPLACE-ME.example.invalid",
+    "AUTH_JWKS_URL": "https://api.amicu.dev/.well-known/jwks.json",
+    "NEXT_PUBLIC_SITE_URL": "https://amicu.dev",
     "NODE_ENV": "production",
   },
   // Turnstile (optional; omitted => widget hidden, verification skipped):

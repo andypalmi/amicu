@@ -75,9 +75,9 @@ jobs:
       # `cf:deploy` (web/apps/web/package.json) is
       # `opennextjs-cloudflare build && opennextjs-cloudflare deploy --
       # --keep-vars` — `--keep-vars` preserves whatever non-secret `vars`
-      # and `wrangler secret put` values are already set on the Worker
-      # (Cloudflare dashboard / CLI) instead of resetting them to
-      # wrangler.jsonc's placeholder values on every deploy. Runtime
+      # and `wrangler secret put` values already set on the Worker
+      # (Cloudflare dashboard / CLI) that are not in wrangler.jsonc (which
+      # now commits the production vars). Runtime
       # secrets (a BFF session secret, etc.) are never set here — see
       # docs/deploy/cloud-run.md and web/apps/web/README-deploy-cloudflare.md.
       - name: Build & deploy
