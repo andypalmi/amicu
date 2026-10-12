@@ -72,3 +72,13 @@ html > body[data-scroll-locked] {
   margin-right: 0px !important;
   --removed-body-scroll-bar-size: 0px !important;
 }
+
+/* No coloured left-edge indicators: hide the docs sidebar active stripe and the
+   TOC rail highlight/thumb. Active state is the fill + text colour instead. */
+#nd-sidebar [data-active='true']::before {
+  display: none;
+}
+svg .stroke-fd-primary,
+.size-1.bg-fd-primary {
+  display: none;
+}

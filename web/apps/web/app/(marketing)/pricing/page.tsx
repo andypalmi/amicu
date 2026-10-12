@@ -38,7 +38,7 @@ function AvailabilityCell({ value }: { value: Availability }) {
     case 'yes':
       return (
         <>
-          <Check className="mx-auto size-4 text-primary" aria-hidden />
+          <Check className="mx-auto size-4 text-accent-text" aria-hidden />
           <span className="sr-only">Included</span>
         </>
       );
@@ -66,7 +66,7 @@ function TierCard({ tier }: { tier: Tier }) {
     <Card
       className={cn(
         'flex flex-col',
-        tier.featured && 'border-primary ring-1 ring-primary',
+        tier.featured && 'border-foreground bg-secondary',
       )}
     >
       <CardHeader className="gap-3">
@@ -82,7 +82,7 @@ function TierCard({ tier }: { tier: Tier }) {
         <ul className="mt-4 space-y-2">
           {tier.highlights.map((item) => (
             <li key={item} className="flex gap-2 text-sm">
-              <Check className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden />
+              <Check className="mt-0.5 size-4 shrink-0 text-accent-text" aria-hidden />
               <span>{item}</span>
             </li>
           ))}
@@ -172,7 +172,7 @@ export default function PricingPage() {
 
           <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-xs text-muted-foreground">
             <span className="flex items-center gap-1.5">
-              <Check className="size-3.5 text-primary" aria-hidden /> Included
+              <Check className="size-3.5 text-accent-text" aria-hidden /> Included
             </span>
             <span className="flex items-center gap-1.5">
               <Lock className="size-3.5" aria-hidden /> Locked - upgrade to unlock
