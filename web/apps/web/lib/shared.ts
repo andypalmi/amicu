@@ -4,9 +4,12 @@ export const docsContentRoute = '/llms.mdx/docs';
 
 // Canonical origin for the site, used by the Metadata API (metadataBase,
 // canonical URLs, Open Graph), the sitemap, robots.txt, and llms.txt. Set
-// NEXT_PUBLIC_SITE_URL in the deployment environment (no trailing slash); the
-// localhost fallback keeps dev and build working without configuration.
-export const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000';
+// NEXT_PUBLIC_SITE_URL in the deployment environment (no trailing slash). When
+// unset, production builds fall back to https://amicu.dev and dev falls back to
+// localhost so it works without configuration.
+export const siteUrl =
+  process.env.NEXT_PUBLIC_SITE_URL ||
+  (process.env.NODE_ENV === 'production' ? 'https://amicu.dev' : 'http://localhost:3000');
 
 /** One-line product summary reused across metadata and llms.txt. */
 export const appTagline =

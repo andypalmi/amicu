@@ -76,7 +76,7 @@ export async function verifyTurnstile(input: VerifyTurnstileInput): Promise<Turn
 
   if (data.success !== true) return { ok: false, reason: 'rejected' };
   if (data.action !== input.action) return { ok: false, reason: 'rejected' };
-  if (input.expectedHostname && data.hostname !== input.expectedHostname) {
+  if (input.expectedHostname && data.hostname?.toLowerCase() !== input.expectedHostname.toLowerCase()) {
     return { ok: false, reason: 'rejected' };
   }
   return { ok: true, skipped: false };

@@ -271,7 +271,7 @@ CI run, not just ones touching `crates/**`/`Cargo.*`/`Dockerfile` or
 | `GCP_REGION` | repo variable | `deploy-api.yml` | `amicu-infra/envs/prod/variables.tf`'s `region` (default `europe-west1`). |
 | `CLOUDFLARE_API_TOKEN` | repo **secret** | `deploy-web.yml` | Same token amicu-infra's README documents creating (Cloudflare dashboard → API Tokens), scopes listed there. Set on both repos. |
 | `CLOUDFLARE_ACCOUNT_ID` | repo variable | `deploy-web.yml` | Cloudflare dashboard (Workers & Pages → Overview, right sidebar) — not a Terraform output (amicu-infra's Cloudflare resources are zone-scoped, never needed the account id). |
-| `NEXT_PUBLIC_SITE_URL` | repo variable | `deploy-web.yml` | The UI's public origin, `https://amicu.<domain>` (amicu-infra output `app_hostname`, informational — not Terraform-managed on the DNS side, see `web/apps/web/wrangler.jsonc`). Build-time only: inlined into the client bundle by `next build`, must be set correctly before `cf:build` runs. |
+| `NEXT_PUBLIC_SITE_URL` | repo variable | `deploy-web.yml` | The UI's public origin, `https://amicu.dev` (served by the Worker custom-domain route in `web/apps/web/wrangler.jsonc`; `www.amicu.dev` redirects to it; the API is `https://api.amicu.dev`). Build-time only: inlined into the client bundle by `next build`, must be set correctly before `cf:build` runs. |
 
 The Artifact Registry repo id (`amicu`), the Cloud Run service name
 (`amicu-api`), and the migrate Job name (`amicu-migrate`) are hardcoded in
