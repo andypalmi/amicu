@@ -5,9 +5,10 @@ import { brandMarkShapes } from '@/lib/brand-shapes';
 
 // Shared product brand mark. The app otherwise presents itself as a plain text
 // wordmark (see `appName` / the fumadocs nav title), so the mark here is the
-// first real logo the product has. It is deliberately monochrome: the design
-// token system is pure grayscale with NO brand accent color, so the mark draws
-// with `currentColor` and inherits the surrounding foreground in either theme.
+// first real logo the product has. It is deliberately monochrome: the "Signal"
+// palette is neutral graphite and keeps its orange for primary actions, focus
+// and key highlights only, so the mark draws with `currentColor` and inherits
+// the surrounding foreground in either theme.
 //
 // Inline SVG only (strict CSP forbids external images/fonts). Reusable: import
 // `BrandMark` for the glyph alone, or `Brand` for the mark + wordmark lockup.

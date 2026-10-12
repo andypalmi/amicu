@@ -43,7 +43,7 @@ export default function ProvidersPage() {
                   <p className="text-sm text-muted-foreground">{provider.kind}</p>
                 </CardHeader>
                 <CardContent className="mt-auto">
-                  <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                  <p className="text-xs text-muted-foreground">
                     Residency
                   </p>
                   <p className="mt-1 text-sm">{provider.residency}</p>

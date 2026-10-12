@@ -27,7 +27,7 @@ export function PageHeader({
   return (
     <header className="mx-auto max-w-3xl text-center">
       {eyebrow ? (
-        <p className="mb-3 text-sm font-medium uppercase tracking-widest text-muted-foreground">
+        <p className="mb-3 text-sm font-medium text-muted-foreground">
           {eyebrow}
         </p>
       ) : null}

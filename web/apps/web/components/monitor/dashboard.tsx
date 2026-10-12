@@ -212,7 +212,7 @@ function LatencyVsEstimate({
 
       <div className="space-y-1.5">
         <Separator />
-        <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        <h3 className="text-xs font-medium text-muted-foreground">
           End-to-end latency (measured, no estimate)
         </h3>
         <DistributionRow dist={metrics.latency.e2e_ms} unit="ms" />
@@ -220,7 +220,7 @@ function LatencyVsEstimate({
 
       <div className="space-y-1.5">
         <Separator />
-        <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        <h3 className="text-xs font-medium text-muted-foreground">
           Estimate assumptions
         </h3>
         <ul className="list-inside list-disc space-y-1 text-xs text-muted-foreground">
@@ -259,14 +259,14 @@ function MeasuredVsEstimated({
         </div>
 
         <div className="space-y-1">
-          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          <span className="text-xs font-medium text-muted-foreground">
             Measured
           </span>
           <DistributionRow dist={measured} unit={unit} />
         </div>
 
         <div className="space-y-1">
-          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          <span className="text-xs font-medium text-muted-foreground">
             Estimated
           </span>
           <div className="flex flex-wrap items-center gap-2">
@@ -380,7 +380,7 @@ function DistributionRow({ dist, unit }: { dist: Distribution; unit?: string }) 
           key={p.label}
           className="inline-flex items-baseline gap-1 rounded bg-muted px-1.5 py-0.5"
         >
-          <span className="text-[10px] font-medium uppercase text-muted-foreground">{p.label}</span>
+          <span className="text-[10px] font-medium text-muted-foreground">{p.label}</span>
           <span className="font-mono text-xs tabular-nums">{p.value}</span>
         </span>
       ))}

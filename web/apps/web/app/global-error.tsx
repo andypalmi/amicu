@@ -56,27 +56,28 @@ export default function GlobalError({
 // without the app stylesheet. Light + dark via prefers-color-scheme.
 const globalErrorStyles = `
   :root {
-    --ge-bg: oklch(1 0 0);
-    --ge-fg: oklch(0.145 0 0);
+    --ge-bg: oklch(0.975 0.001 90);
+    --ge-fg: oklch(0.19 0.004 90);
     --ge-card: oklch(1 0 0);
-    --ge-muted: oklch(0.556 0 0);
-    --ge-border: oklch(0.922 0 0);
-    --ge-primary: oklch(0.205 0 0);
-    --ge-primary-fg: oklch(0.985 0 0);
-    --ge-accent: oklch(0.97 0 0);
+    --ge-muted: oklch(0.47 0.005 90);
+    --ge-border: oklch(0.86 0.003 90);
+    --ge-primary: oklch(0.64 0.19 42);
+    --ge-primary-fg: oklch(0.17 0.02 42);
+    --ge-accent: oklch(0.945 0.002 90);
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --ge-bg: oklch(0.145 0 0);
-      --ge-fg: oklch(0.985 0 0);
-      --ge-card: oklch(0.205 0 0);
-      --ge-muted: oklch(0.708 0 0);
-      --ge-border: oklch(1 0 0 / 10%);
-      --ge-primary: oklch(0.922 0 0);
-      --ge-primary-fg: oklch(0.205 0 0);
-      --ge-accent: oklch(0.269 0 0);
+      --ge-bg: oklch(0.165 0.002 90);
+      --ge-fg: oklch(0.95 0.003 90);
+      --ge-card: oklch(0.2 0.003 90);
+      --ge-muted: oklch(0.71 0.005 90);
+      --ge-border: oklch(0.32 0.004 90);
+      --ge-primary: oklch(0.7 0.18 45);
+      --ge-primary-fg: oklch(0.16 0.02 45);
+      --ge-accent: oklch(0.235 0.003 90);
     }
   }
+  :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
   body {
     margin: 0;
@@ -96,17 +97,14 @@ const globalErrorStyles = `
     width: 100%;
     max-width: 32rem;
     background: var(--ge-card);
-    border: 1px solid var(--ge-border);
-    border-radius: 0.75rem;
-    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    border: 1.5px solid var(--ge-border);
+    border-radius: 4px;
     padding: 2rem;
   }
   .amicu-ge-eyebrow {
     margin: 0 0 0.75rem;
     font-size: 0.75rem;
     font-weight: 600;
-    letter-spacing: 0.15em;
-    text-transform: uppercase;
     color: var(--ge-muted);
   }
   .amicu-ge-title {
@@ -140,7 +138,7 @@ const globalErrorStyles = `
     height: 2.25rem;
     padding: 0 1rem;
     border: 1px solid transparent;
-    border-radius: 0.375rem;
+    border-radius: 3px;
     font-size: 0.875rem;
     font-weight: 500;
     text-decoration: none;

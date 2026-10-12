@@ -24,8 +24,8 @@ export default async function Layout({ children }: LayoutProps<'/'>) {
         {...baseOptions()}
         // `active: 'nested-url'` lets fumadocs mark a nav item active for its whole
         // section (exact URL or any nested route) using its own client-side
-        // usePathname match. In the neutral theme the active state is a neutral
-        // foreground shift (muted-foreground -> fd-primary, hsl 0 0% 9%) - no accent.
+        // usePathname match. The active state is a colour shift to the accent-text
+        // token (fd-primary) - never an edge bar.
         links={[
           { text: 'Console', url: '/app', active: 'nested-url' },
           { text: 'New config', url: '/new', active: 'nested-url' },
