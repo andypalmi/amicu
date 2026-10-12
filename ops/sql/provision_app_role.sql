@@ -82,6 +82,16 @@ BEGIN
 END
 $$;
 
+-- Since PG16 a CREATEROLE non-superuser (e.g. Supabase's `postgres`) that
+-- creates a role gets ADMIN OPTION on it but NOT SET/INHERIT membership
+-- (unless createrole_self_grant is set), so `ALTER SCHEMA ... OWNER TO` and
+-- `ALTER DEFAULT PRIVILEGES FOR ROLE amicu_owner` below would fail with
+-- "must be able to SET ROLE". Grant the invoking admin membership explicitly.
+-- The admin being a member of amicu_owner is harmless: the invariant is that
+-- amicu_app has NO privileged memberships (verified at the end, unchanged).
+-- Idempotent; for a true superuser it is a no-op (at most a NOTICE).
+GRANT amicu_owner TO CURRENT_USER;
+
 -- amicu_owner owns `public`, so it (and only it) can CREATE the
 -- tables/indexes `amicu-server migrate` applies, and therefore owns every
 -- object those migrations create.
