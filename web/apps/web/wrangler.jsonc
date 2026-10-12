@@ -30,6 +30,12 @@
     // README-deploy-cloudflare.md.
     "allow_importable_env",
   ],
+  // Production custom domain: the zone amicu.dev is on this Cloudflare account,
+  // so `wrangler deploy` attaches the Worker to the apex and manages its DNS
+  // record + certificate. www.amicu.dev -> apex redirect is handled by infra.
+  // The API lives separately on https://api.amicu.dev (Cloud Run). Local
+  // `wrangler dev` / `cf:preview` ignore routes, so previews are unaffected.
+  "routes": [{ "pattern": "amicu.dev", "custom_domain": true }],
   "assets": {
     // OpenNext's static build output (Next.js public/ + prerendered assets).
     "directory": ".open-next/assets",

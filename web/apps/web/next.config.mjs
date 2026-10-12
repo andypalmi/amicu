@@ -31,7 +31,8 @@ const isProd = process.env.NODE_ENV === 'production';
 //    are needed - `font-src 'self'` and `style-src 'self'` suffice.
 //  - The browser only ever calls same-origin /api/* (BFF pattern); the server
 //    talks to the upstream API. So `connect-src 'self'` is correct and the
-//    upstream origin is intentionally NOT listed.
+//    upstream origin (https://api.amicu.dev in production) is intentionally
+//    NOT listed.
 // Cloudflare Turnstile (signup / forgot / resend-verification). Scripts, the
 // challenge iframe and its XHR all come from this single origin.
 const turnstileOrigin = 'https://challenges.cloudflare.com';

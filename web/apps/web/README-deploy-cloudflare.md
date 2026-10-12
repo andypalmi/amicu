@@ -51,11 +51,11 @@ the Worker) or via `wrangler secret put <NAME>` / an environment-specific
 
 | Variable | Purpose | Notes |
 | --- | --- | --- |
-| `API_URL` | Base URL of the Rust Management API (Cloud Run origin) | Server-only. Required in production (`server-env.ts` throws at request time if missing). Must be the Cloud Run service URL, e.g. `https://amicu-api-xxxxx-uc.a.run.app`. |
-| `AUTH_ISSUER` | Expected JWT `iss` claim | **MUST equal the API's `AMICU_ISSUER`.** See "Issuer/audience parity" below. |
+| `API_URL` | Base URL of the Rust Management API (Cloud Run origin) | Server-only. Required in production (`server-env.ts` throws at request time if missing). Production: `https://api.amicu.dev` (the API's custom domain in front of Cloud Run). |
+| `AUTH_ISSUER` | Expected JWT `iss` claim | Production: `https://api.amicu.dev`. **MUST equal the API's `AMICU_ISSUER`.** See "Issuer/audience parity" below. |
 | `AUTH_AUDIENCE` | Expected JWT `aud` claim | **MUST equal the API's `AMICU_AUDIENCE`.** Defaults to `amicu` on both sides if unset, but don't rely on that across two independently-configured services - set both explicitly. |
 | `AUTH_JWKS_URL` | JWKS endpoint used to verify access tokens offline (`jose` `createRemoteJWKSet`, see `packages/auth/src/jwt.ts`) | Defaults to `${API_URL}/.well-known/jwks.json` if unset; set explicitly if the API serves JWKS from a different host/path. |
-| `NEXT_PUBLIC_SITE_URL` | Public site origin, embedded in client bundles | **Build-time**, not just runtime: `NEXT_PUBLIC_*` vars are inlined into the JS bundle during `next build`/`cf:build`, so this must be set correctly *before* building, not only in the deployed Worker's runtime vars. |
+| `NEXT_PUBLIC_SITE_URL` | Public site origin, embedded in client bundles. Production: `https://amicu.dev` (also the source of the expected Turnstile hostname) | **Build-time**, not just runtime: `NEXT_PUBLIC_*` vars are inlined into the JS bundle during `next build`/`cf:build`, so this must be set correctly *before* building, not only in the deployed Worker's runtime vars. |
 | `NODE_ENV` | Standard Node env flag | Keep `production` for any real deploy. Also gates `COOKIE_SECURE`'s default (see below) and the CSP's dev-only `'unsafe-eval'` allowance in `next.config.mjs`. |
 | `COOKIE_SECURE` (optional) | Explicit override for the session cookies' `Secure` flag | Not in `wrangler.jsonc` by default - it defaults to `true` whenever `NODE_ENV !== 'development'`, which is correct for every real deployment (Workers always serves over TLS). Only set this if you need to force a non-default value; see `lib/auth/server-env.ts`. |
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY` (optional) | Cloudflare Turnstile public site key | **Build-time** (inlined). Unset => widget not rendered. Create the widget in the Cloudflare dashboard (hostname = the public site host). |
@@ -103,6 +103,11 @@ always, whenever either service's issuer/audience config changes.
   doesn't silently depend on exactly how a given runtime sets `NODE_ENV`.
   Local `next dev` behavior is unchanged (still non-Secure, since `next dev`
   sets `NODE_ENV=development`).
+- **Custom domain**: `wrangler.jsonc` has `routes: [{ pattern: "amicu.dev",
+  custom_domain: true }]`, so `cf:deploy` attaches the Worker to the apex of
+  the `amicu.dev` zone (DNS record + cert managed by Cloudflare). `www.amicu.dev`
+  redirects to the apex (infra). The API is on `https://api.amicu.dev`.
+  `wrangler dev`/`cf:preview` ignore routes.
 - **Assets binding**: `wrangler.jsonc`'s `assets.directory` points at
   OpenNext's `.open-next/assets` output (Next.js's static/public assets).
   This app does not use `next/image`, so no `images` binding is configured.
