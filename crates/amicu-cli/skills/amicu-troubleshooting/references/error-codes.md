@@ -43,6 +43,16 @@ signal; the number identifies the specific check.
   Declare the shape on the model.
 - `AMICU-MEM-001` / `AMICU-MEM-002` - capacity/memory fit failures.
 - `AMICU-POLICY-001` - a governance/residency rule was violated.
+- `AMICU-POLICY-004` - a secret-designated field (`api_key`, `token`, ...) was
+  given as a literal. Use `secret("NAME")`.
+- `AMICU-POLICY-005` - warning: free-text field or comment looks like a secret
+  (key, JWT, PEM). Move it out; `# amicu:allow` on the line suppresses it.
+- `AMICU-POLICY-006` - warning: a runtime `env` value looks like a secret. Move
+  it to a `secret(...)` reference.
+- `AMICU-POLICY-007` - a deployment reachable off-machine (e.g. `modal`) has no
+  `api_key`. Add `api_key = secret("NAME")` and `export NAME=$(openssl rand -hex 32)`.
+- `AMICU-POLICY-008` - the resolved endpoint API key is unusable (empty, or
+  contains a comma, whitespace or non-ASCII). Regenerate it.
 - `AMICU-STATE-001..004` - state lock/drift/read/write problems.
 - `AMICU-PROVIDER-001` / `AMICU-PROVIDER-002` - provider provisioning/availability.
 

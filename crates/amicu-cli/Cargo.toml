@@ -40,5 +40,8 @@ thiserror = "2"
 # reads as intentional rather than accidental.
 tokio = { version = "1", features = ["rt", "net", "time"] }
 
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "net", "io-util", "time"] }
+
 [lints]
 workspace = true

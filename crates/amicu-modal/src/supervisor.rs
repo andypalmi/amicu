@@ -57,12 +57,13 @@ use std::time::Duration;
 use amicu_core::ByteSize;
 use amicu_core::resource::ScalingSettings;
 use amicu_core::resource::{
-    Accelerator, AcceleratorKind, HardwareProfile, Model, Runtime, SourceRegistry,
+    Accelerator, AcceleratorKind, Cpu, HardwareProfile, Model, Runtime, SourceRegistry,
 };
 use amicu_llamacpp::{LlamaCppError, ProcessSupervisor, ResolvedSecret};
 use amicu_registry::GgufResolver;
 use amicu_runtime::{
-    LaunchPlan, LogOptions, LogStream, RuntimeHandle, RuntimeKind, RuntimeMetrics, RuntimeStatus,
+    EndpointExposure, GatewayAuth, LaunchPlan, LogOptions, LogStream, RuntimeHandle, RuntimeKind,
+    RuntimeMetrics, RuntimeStatus,
 };
 use amicu_telemetry::hardware::HardwareSample;
 use async_trait::async_trait;
@@ -227,6 +228,8 @@ pub struct ModalSupervisor {
     region: Option<String>,
     scaling: ScalingSettings,
     gguf: Option<GgufSource>,
+    memory_mb: Option<u32>,
+    milli_cpu: Option<u32>,
 }
 
 /// A GGUF file on Hugging Face: what a Modal-deployed llama-server fetches
@@ -254,7 +257,24 @@ impl ModalSupervisor {
             region: None,
             gguf: None,
             scaling: ScalingSettings::default(),
+            memory_mb: None,
+            milli_cpu: None,
         }
+    }
+
+    /// Requests container memory and CPU from a hardware profile's `memory`
+    /// and `cpu`, the way Modal's Python client does for `memory=`/`cpu=`
+    /// (`_resources.py`): memory in MiB (rounded up so the request is never
+    /// below what the profile declares), CPU in milli-cores
+    /// (`cores * 1000`). A zero value, or one that does not fit Modal's
+    /// 32-bit fields, leaves that resource at Modal's default.
+    #[must_use]
+    pub fn with_resources(mut self, memory: ByteSize, cpu: Option<&Cpu>) -> Self {
+        self.memory_mb = memory_mb(memory);
+        self.milli_cpu = cpu
+            .and_then(|c| c.cores.checked_mul(1000))
+            .filter(|m| *m > 0);
+        self
     }
 
     /// Applies a deployment's `scaling {}` overrides (amicu-planning#180);
@@ -326,8 +346,19 @@ impl ModalSupervisor {
     ) -> Result<Self, LlamaCppError> {
         let region = hardware.region.as_ref().map(|r| r.code.clone());
         let supervisor = Self::new(app_name).with_accelerator(hardware.accelerator.as_ref())?;
-        Ok(supervisor.with_region(region))
+        Ok(supervisor
+            .with_region(region)
+            .with_resources(hardware.memory, hardware.cpu.as_ref()))
     }
+}
+
+/// Bytes -> MiB for `Resources.memory_mb`, rounded up; `None` for zero or a
+/// value past `u32::MAX` MiB.
+fn memory_mb(memory: ByteSize) -> Option<u32> {
+    const MIB: u64 = 1024 * 1024;
+    u32::try_from(memory.bytes().div_ceil(MIB))
+        .ok()
+        .filter(|mb| *mb > 0)
 }
 
 /// Deployment-name-safe app name: `amicu-<sanitized deployment id>`.
@@ -834,6 +865,8 @@ impl ModalSupervisor {
                 .unwrap_or(TARGET_CONCURRENCY),
             min_containers: self.scaling.min_replicas.unwrap_or(MIN_CONTAINERS),
             max_containers: self.scaling.max_replicas,
+            memory_mb: self.memory_mb,
+            milli_cpu: self.milli_cpu,
         })
     }
 }
@@ -892,25 +925,18 @@ const EXPOSURE_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 /// open to anyone with the URL (`Err`). Anything else (network error, `5xx`
 /// while the container warms up) is retried until `timeout`, then fails closed:
 /// an endpoint whose auth cannot be verified is not reported deployed.
+///
+/// This is the shared [`amicu_runtime::exposure`] probe pointed at `/health`
+/// (the route the proxy refuses before the runtime sees it). The key check on
+/// the OpenAI route is the caller's, via [`amicu_runtime::exposure::verify_endpoint`].
 async fn ensure_not_exposed(
     endpoint: &str,
     timeout: Duration,
     interval: Duration,
 ) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        match probe_status(endpoint, false).await {
-            Some(code) if (200..300).contains(&code) => return Err(exposure_message(code)),
-            Some(401 | 403) => return Ok(()),
-            _ => {}
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(
-                "could not verify that the endpoint rejects unauthenticated requests".to_owned(),
-            );
-        }
-        tokio::time::sleep(interval).await;
-    }
+    amicu_runtime::exposure::ensure_rejects_unauthenticated(endpoint, "/health", timeout, interval)
+        .await
+        .map_err(|e| e.detail().to_owned())
 }
 
 /// The error `start` returns for an unsafe endpoint: the original `detail`, plus
@@ -921,13 +947,15 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,
 {
-    LlamaCppError::Supervisor(match stop().await {
-        Ok(()) => format!("{detail}; the Modal app was stopped"),
-        Err(e) => format!(
-            "{detail}; teardown FAILED ({e}): stop app {app_id} manually \
-             (`modal app stop {app_id}`)"
-        ),
-    })
+    LlamaCppError::Supervisor(
+        amicu_runtime::exposure::teardown_report(
+            detail,
+            app_id,
+            &format!("`modal app stop {app_id}`"),
+            stop,
+        )
+        .await,
+    )
 }
 
 /// One-line phase note printed to stderr before the (possibly slow) deploy.
@@ -1078,6 +1106,11 @@ impl ProcessSupervisor for ModalSupervisor {
             id: deployment.app_id,
             deployment: plan.deployment.clone(),
             endpoint: deployment.url,
+            // Modal Servers are reachable from anywhere behind the workspace
+            // proxy-auth token; the runtime's own API key is the second layer.
+            exposure: EndpointExposure::Public {
+                gateway: GatewayAuth::ModalProxyToken,
+            },
         })
     }
 
@@ -1229,6 +1262,7 @@ mod tests {
             rendered: RenderedLaunch::Command { argv, text },
             settings: Runtime::Vllm(settings),
             secret_refs: Vec::new(),
+            api_key: None,
             estimate: ResourceEstimate {
                 estimated_memory: ByteSize::from_bytes(0),
                 gpu_count: 1,
@@ -1311,6 +1345,99 @@ mod tests {
         assert!(ModalSupervisor::for_hardware("amicu-x", &hardware).is_err());
     }
 
+    fn modal_hardware(memory: ByteSize, cpu: Option<Cpu>) -> HardwareProfile {
+        HardwareProfile {
+            id: "hw".into(),
+            provider: "modal".into(),
+            region: None,
+            accelerator: Some(accelerator(AcceleratorKind::Gpu, "l4", 1)),
+            cpu,
+            memory,
+            interconnect: None,
+            price: None,
+        }
+    }
+
+    fn spec_for(hardware: &HardwareProfile) -> ServerSpec {
+        ModalSupervisor::for_hardware("amicu-x", hardware)
+            .unwrap()
+            .build_spec(
+                &plan_with(base_argv(), base_settings()),
+                &[],
+                no_image_override(),
+                no_hf_token_fallback(),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn hardware_memory_and_cpu_become_the_modal_resource_request() {
+        let hardware = modal_hardware(
+            ByteSize::from_bytes(32 * 1024 * 1024 * 1024),
+            Some(Cpu {
+                model: "any".to_owned(),
+                cores: 8,
+            }),
+        );
+        let spec = spec_for(&hardware);
+        assert_eq!(spec.memory_mb, Some(32 * 1024));
+        assert_eq!(spec.milli_cpu, Some(8000));
+    }
+
+    #[test]
+    fn memory_is_rounded_up_to_whole_mib_and_zero_means_unset() {
+        assert_eq!(memory_mb(ByteSize::from_bytes(1)), Some(1));
+        assert_eq!(memory_mb(ByteSize::from_bytes(1024 * 1024)), Some(1));
+        assert_eq!(memory_mb(ByteSize::from_bytes(1024 * 1024 + 1)), Some(2));
+        assert_eq!(memory_mb(ByteSize::from_bytes(0)), None);
+        assert_eq!(memory_mb(ByteSize::from_bytes(u64::MAX)), None);
+        let spec = spec_for(&modal_hardware(ByteSize::from_bytes(0), None));
+        assert_eq!((spec.memory_mb, spec.milli_cpu), (None, None));
+    }
+
+    // --- endpoint API key delivery ---------------------------------------
+
+    const API_KEY: &str = "sk-endpoint-key-very-secret";
+
+    #[test]
+    fn the_endpoint_api_key_goes_to_modal_secret_env_only() {
+        let sup = ModalSupervisor::new("amicu-dep");
+        let plan = plan_with(base_argv(), base_settings());
+        let secrets = [ResolvedSecret {
+            name: "VLLM_API_KEY".to_owned(),
+            value: SecretValue::new(API_KEY.to_owned()),
+        }];
+        let spec = sup
+            .build_spec(&plan, &secrets, no_image_override(), no_hf_token_fallback())
+            .unwrap();
+        assert_eq!(
+            spec.secret_env.get("VLLM_API_KEY").map(String::as_str),
+            Some(API_KEY)
+        );
+        // Never image env (baked into the image), never argv, never Debug.
+        assert!(!spec.image.env.contains_key("VLLM_API_KEY"));
+        assert!(spec.image.env.values().all(|v| !v.contains(API_KEY)));
+        assert!(spec.argv.iter().all(|a| !a.contains(API_KEY)));
+        assert!(!format!("{spec:?}").contains(API_KEY));
+        assert!(redaction_values(&spec).iter().any(|v| v == API_KEY));
+    }
+
+    #[test]
+    fn a_user_env_block_cannot_shadow_the_endpoint_api_key() {
+        let sup = ModalSupervisor::new("amicu-dep");
+        let mut settings = base_settings();
+        settings.env = BTreeMap::from([("VLLM_API_KEY".to_owned(), "user-supplied".to_owned())]);
+        let plan = plan_with(base_argv(), settings);
+        let secrets = [ResolvedSecret {
+            name: "VLLM_API_KEY".to_owned(),
+            value: SecretValue::new(API_KEY.to_owned()),
+        }];
+        let err = sup
+            .build_spec(&plan, &secrets, no_image_override(), no_hf_token_fallback())
+            .unwrap_err();
+        assert!(!err.to_string().contains(API_KEY));
+    }
+
     // --- LogCollector -----------------------------------------------------
 
     fn log_line(text: &str) -> crate::ops::LogLine {
@@ -1378,6 +1505,9 @@ mod tests {
             id: "ap-1".to_owned(),
             deployment: amicu_core::id::DeploymentId::from("dep"),
             endpoint: "https://x".to_owned(),
+            exposure: EndpointExposure::Public {
+                gateway: GatewayAuth::ModalProxyToken,
+            },
         };
         let out = ModalSupervisor::new("amicu-x")
             .logs(
@@ -1478,7 +1608,10 @@ mod tests {
     #[tokio::test]
     async fn teardown_error_reports_stopped_or_failed_and_keeps_the_cause() {
         let ok = teardown_error("open", "ap-1", || async { Ok(()) }).await;
-        assert!(ok.to_string().contains("open; the Modal app was stopped"));
+        assert!(
+            ok.to_string()
+                .contains("open; the deployment (ap-1) was stopped")
+        );
         let bad = teardown_error("open", "ap-1", || async { Err("rpc down".to_owned()) }).await;
         let msg = bad.to_string();
         assert!(msg.contains("open;") && msg.contains("teardown FAILED"));

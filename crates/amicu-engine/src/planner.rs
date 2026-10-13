@@ -218,7 +218,12 @@ fn action_for(
         provider: hardware.map(|h| h.provider.clone()),
         region: hardware.and_then(|h| h.region.as_ref().map(|r| r.code.clone())),
         cost_performance: Some(cost_performance(hardware, launch, &d.runtime)),
-        required_secrets: launch.secret_refs.iter().map(|r| r.name.clone()).collect(),
+        required_secrets: launch
+            .secret_refs
+            .iter()
+            .chain(launch.api_key.as_ref())
+            .map(|r| r.name.clone())
+            .collect(),
         required_action: None,
     }
 }
@@ -242,6 +247,11 @@ fn variant_artifact(variant: &GgufVariant) -> Artifact {
 /// (amicu-planning#180), so a non-default cap is visible in the plan.
 fn runtime_settings_with_scaling(d: &Deployment) -> Vec<Setting> {
     let mut settings = runtime_settings(d);
+    // The endpoint API key is shown redacted, and is never resolved at plan
+    // time: the plan carries the reference only.
+    if d.api_key.is_some() {
+        settings.push(setting("api_key", API_KEY_REDACTED));
+    }
     if let Some(s) = &d.scaling {
         if let Some(v) = s.min_replicas {
             settings.push(setting("scaling_min_replicas", v.to_string()));
@@ -261,6 +271,9 @@ fn runtime_settings_with_scaling(d: &Deployment) -> Vec<Setting> {
     }
     settings
 }
+
+/// How a deployment's `api_key` appears in a plan.
+const API_KEY_REDACTED: &str = "******";
 
 fn runtime_settings(d: &Deployment) -> Vec<Setting> {
     match &d.runtime {
@@ -706,6 +719,7 @@ mod tests {
     fn deployment(extra_args: Vec<String>) -> Deployment {
         Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "m".into(),
             hardware_profile: "hw".into(),
@@ -1117,6 +1131,61 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].action.kind, ActionKind::Update);
         // Unchanged scaling is a no-op.
+        assert!(build_plan(&next, Some(&next)).unwrap().items.is_empty());
+    }
+
+    // --- amicu-planning#191: api_key ---------------------------------------
+
+    fn with_key(mut g: Graph, name: &str) -> Graph {
+        g.deployments[0].api_key = Some(amicu_core::secret::SecretRef::new(name));
+        g
+    }
+
+    #[test]
+    fn api_key_is_shown_redacted_and_never_resolved_at_plan_time() {
+        let plain = build_plan(&graph(Vec::new()), None).unwrap();
+        assert!(
+            !plain.items[0]
+                .action
+                .runtime
+                .iter()
+                .any(|s| s.key == "api_key")
+        );
+
+        let result = build_plan(&with_key(graph(Vec::new()), "CHAT_API_KEY"), None).unwrap();
+        let item = &result.items[0];
+        let shown = item
+            .action
+            .runtime
+            .iter()
+            .find(|s| s.key == "api_key")
+            .expect("api_key setting");
+        assert_eq!(shown.value, "******");
+        // The reference travels in the launch plan and the required secrets
+        // (by name), never a value; the rendered launch has no key flag.
+        let launch = item.launch.as_ref().unwrap();
+        assert_eq!(
+            launch.api_key,
+            Some(amicu_core::secret::SecretRef::new("CHAT_API_KEY"))
+        );
+        assert!(
+            item.action
+                .required_secrets
+                .contains(&"CHAT_API_KEY".to_owned())
+        );
+        let rendered = item.rendered.as_deref().unwrap();
+        assert!(!rendered.contains("--api-key") && !rendered.contains("CHAT_API_KEY"));
+        // The plan contract carries the redaction.
+        assert!(format!("{:?}", result.plan).contains("******"));
+    }
+
+    #[test]
+    fn changing_the_api_key_reference_is_an_update() {
+        let prior = with_key(graph(Vec::new()), "OLD_KEY");
+        let next = with_key(graph(Vec::new()), "NEW_KEY");
+        let result = build_plan(&next, Some(&prior)).unwrap();
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].action.kind, ActionKind::Update);
         assert!(build_plan(&next, Some(&next)).unwrap().items.is_empty());
     }
 }

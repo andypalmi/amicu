@@ -167,6 +167,8 @@ async fn deploy_cpu_http_server() {
         target_concurrency: 10,
         min_containers: 1,
         max_containers: Some(1),
+        memory_mb: None,
+        milli_cpu: None,
     };
 
     // Installed before the deploy, so a panic inside `deploy_server` is
@@ -237,6 +239,8 @@ async fn deploy_vllm_smoke() {
         target_concurrency: 8,
         min_containers: 1,
         max_containers: Some(1),
+        memory_mb: None,
+        milli_cpu: None,
     };
 
     let _guard = AppGuard::install(app_name).await;

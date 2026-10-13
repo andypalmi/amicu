@@ -245,6 +245,7 @@ mod tests {
     fn deployment(id: &str, model_ref: &str, hw_ref: &str) -> Deployment {
         Deployment {
             scaling: None,
+            api_key: None,
             id: id.into(),
             model: model_ref.into(),
             hardware_profile: hw_ref.into(),
@@ -669,6 +670,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -688,6 +690,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -733,6 +736,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -765,6 +769,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -800,6 +805,7 @@ mod tests {
             let mut g = Graph::new();
             g.deployments.push(Deployment {
                 scaling: None,
+                api_key: None,
                 id: "dep".into(),
                 model: "phantom_model".into(),
                 hardware_profile: "phantom_hw".into(),
@@ -826,6 +832,7 @@ mod tests {
             let mut g = Graph::new();
             g.deployments.push(Deployment {
                 scaling: None,
+                api_key: None,
                 id: "dep".into(),
                 model: "phantom_model".into(),
                 hardware_profile: "phantom_hw".into(),
@@ -910,6 +917,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -937,6 +945,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -962,6 +971,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -993,6 +1003,7 @@ mod tests {
             let mut g = Graph::new();
             g.deployments.push(Deployment {
                 scaling: None,
+                api_key: None,
                 id: "dep".into(),
                 model: "phantom_model".into(),
                 hardware_profile: "phantom_hw".into(),
@@ -1047,6 +1058,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -1105,6 +1117,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -1192,6 +1205,7 @@ mod tests {
             let mut g = Graph::new();
             g.deployments.push(Deployment {
                 scaling: None,
+                api_key: None,
                 id: "dep".into(),
                 model: "phantom_model".into(),
                 hardware_profile: "phantom_hw".into(),
@@ -1221,6 +1235,7 @@ mod tests {
             let mut g = Graph::new();
             g.deployments.push(Deployment {
                 scaling: None,
+                api_key: None,
                 id: "dep".into(),
                 model: "phantom_model".into(),
                 hardware_profile: "phantom_hw".into(),
@@ -1242,6 +1257,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -1374,6 +1390,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -1399,6 +1416,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -1423,6 +1441,7 @@ mod tests {
         let mut g2 = Graph::new();
         g2.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -1447,6 +1466,7 @@ mod tests {
         let mut g3 = Graph::new();
         g3.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),
@@ -1599,6 +1619,48 @@ mod tests {
         }
     }
 
+    // --- amicu-planning#191: per-deployment endpoint `api_key` -------------
+
+    #[test]
+    fn deployment_api_key_is_a_secret_reference_and_round_trips() {
+        let g = parse_graph(&scaling_src("api_key = secret(\"CHAT_API_KEY\")")).unwrap();
+        assert_eq!(
+            g.deployments[0].api_key,
+            Some(amicu_core::secret::SecretRef::new("CHAT_API_KEY"))
+        );
+        let formatted = format_graph(&g).unwrap();
+        assert!(
+            formatted.contains("api_key = secret(\"CHAT_API_KEY\")"),
+            "{formatted}"
+        );
+        assert_eq!(parse_graph(&formatted).unwrap(), g);
+
+        let none = parse_graph(&scaling_src("")).unwrap();
+        assert!(none.deployments[0].api_key.is_none());
+        assert!(!format_graph(&none).unwrap().contains("api_key"));
+    }
+
+    #[test]
+    fn deployment_api_key_literal_is_rejected_with_policy_004() {
+        for body in [
+            "api_key = \"sk-abcdefghijklmnopqrstuvwxyz123456\"",
+            "api_key = \"hunter2\"",
+            "api_key = 12345",
+            // A well-known secret shape wrapped in secret() is still a literal.
+            "api_key = secret(\"sk-abcdefghijklmnopqrstuvwxyz123456\")",
+        ] {
+            let err = parse_graph(&scaling_src(body)).expect_err(body);
+            assert!(
+                matches!(err, HclError::SecretLiteral { .. }),
+                "{body}: {err}"
+            );
+            assert_eq!(err.code().unwrap().to_string(), "AMICU-POLICY-004");
+            // The rejection never echoes the offending value.
+            assert!(!err.to_string().contains("hunter2"), "{err}");
+            assert!(!err.to_string().contains("sk-abcdef"), "{err}");
+        }
+    }
+
     // --- amicu-planning#151 PR C: the typed `speculative {}` block ---------
 
     /// A one-deployment graph whose llama.cpp block carries `spec`.
@@ -1606,6 +1668,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
             hardware_profile: "phantom_hw".into(),

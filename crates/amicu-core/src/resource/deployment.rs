@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::id::{DeploymentId, HardwareProfileId, ModelId};
+use crate::secret::SecretRef;
 
 /// KV-cache quantization dtype for llama.cpp's `--cache-type-k`/`--cache-type-v`,
 /// spelled exactly as `llama-server` accepts them.
@@ -339,8 +340,70 @@ pub struct Deployment {
     /// keeps today's defaults. See [`ScalingSettings`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scaling: Option<ScalingSettings>,
+    /// Reference to the secret holding the endpoint's API key (bearer token
+    /// clients must present). A [`SecretRef`] pointer only - never the key
+    /// itself (`AMICU-POLICY-004` rejects literals at parse time); it is
+    /// resolved at apply time and handed to the runtime through its
+    /// environment (`LLAMA_API_KEY` / `VLLM_API_KEY`), never argv.
+    ///
+    /// Required for any deployment whose endpoint is reachable off this
+    /// machine (every provider except the local ones); optional for
+    /// loopback-only local deployments. See [`Deployment::requires_api_key`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<SecretRef>,
     #[serde(flatten)]
     pub runtime: Runtime,
+}
+
+/// Hardware profile `provider` values that mean "this machine": the endpoint
+/// binds loopback and is not reachable off-host. Every other provider serves
+/// from somewhere else, so its endpoint is reachable off-machine.
+pub const LOCAL_PROVIDERS: [&str; 4] = ["local", "local_apple", "local_cpu", "on_prem"];
+
+/// Whether a hardware profile `provider` runs on this machine. The empty
+/// provider is treated as local, as it always has been.
+#[must_use]
+pub fn is_local_provider(provider: &str) -> bool {
+    provider.is_empty() || LOCAL_PROVIDERS.contains(&provider)
+}
+
+impl Deployment {
+    /// Whether this deployment's endpoint is reachable off-machine for a
+    /// hardware profile with `provider`, and so must declare an `api_key`.
+    #[must_use]
+    pub fn requires_api_key(provider: &str) -> bool {
+        !is_local_provider(provider)
+    }
+
+    /// A secret name to suggest for this deployment's API key: the id
+    /// upper-cased with every run of non-alphanumerics folded to `_`, plus
+    /// `_API_KEY` (`chat-modal` -> `CHAT_MODAL_API_KEY`). It doubles as the
+    /// environment variable the local secret resolver reads, so it is always
+    /// a valid shell identifier.
+    #[must_use]
+    pub fn suggested_api_key_secret(id: &str) -> String {
+        let mut out = String::with_capacity(id.len() + 8);
+        let mut pending_sep = false;
+        for c in id.chars() {
+            if c.is_ascii_alphanumeric() {
+                if pending_sep && !out.is_empty() {
+                    out.push('_');
+                }
+                pending_sep = false;
+                out.push(c.to_ascii_uppercase());
+            } else {
+                pending_sep = true;
+            }
+        }
+        if out.is_empty() {
+            return "ENDPOINT_API_KEY".to_owned();
+        }
+        if out.starts_with(|c: char| c.is_ascii_digit()) {
+            out.insert(0, '_');
+        }
+        out.push_str("_API_KEY");
+        out
+    }
 }
 
 /// The serving runtime and its configuration. Serialized inline with a
@@ -513,6 +576,39 @@ pub struct VllmSettings {
     /// [`LlamaCppSettings::env`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+}
+
+#[cfg(test)]
+mod api_key_tests {
+    use super::{Deployment, is_local_provider};
+
+    #[test]
+    fn only_local_providers_may_omit_the_key() {
+        for local in ["local", "local_apple", "local_cpu", "on_prem", ""] {
+            assert!(is_local_provider(local), "{local}");
+            assert!(!Deployment::requires_api_key(local), "{local}");
+        }
+        for remote in ["modal", "runpod", "hetzner", "aws", "ssh", "anything-new"] {
+            assert!(Deployment::requires_api_key(remote), "{remote}");
+        }
+    }
+
+    #[test]
+    fn suggested_secret_names_are_shell_identifiers() {
+        assert_eq!(Deployment::suggested_api_key_secret("chat"), "CHAT_API_KEY");
+        assert_eq!(
+            Deployment::suggested_api_key_secret("chat-modal.v2"),
+            "CHAT_MODAL_V2_API_KEY"
+        );
+        assert_eq!(
+            Deployment::suggested_api_key_secret("9lives"),
+            "_9LIVES_API_KEY"
+        );
+        assert_eq!(
+            Deployment::suggested_api_key_secret("--"),
+            "ENDPOINT_API_KEY"
+        );
+    }
 }
 
 #[cfg(test)]

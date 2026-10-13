@@ -56,7 +56,8 @@ with the host supervisor; `doctor` reports whether the binary is discoverable.
 
 ## Safety
 
-- Ports bind locally; do not expose a local deployment publicly without intent.
+- Ports bind locally (`--host 127.0.0.1`); do not expose a local deployment publicly without intent.
+- A local deployment may add `api_key = secret("NAME")` so other local processes need a bearer key too. `apply` reads it from the environment variable `NAME` and gives it to the service through its private (0600) environment file or plist as `LLAMA_API_KEY`, never argv, then verifies the endpoint rejects anonymous requests.
 - Never commit downloaded model files or secrets into the repo.
 
 ## References

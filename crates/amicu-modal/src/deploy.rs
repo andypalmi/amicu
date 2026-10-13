@@ -114,6 +114,15 @@ pub struct ServerSpec {
     pub min_containers: u32,
     /// Replica ceiling, or `None` for Modal's default.
     pub max_containers: Option<u32>,
+    /// Container memory request in MiB (`Resources.memory_mb`); `None` leaves
+    /// Modal's default. Mirrors `memory=` in the Python client
+    /// (`_resources.py`, `convert_fn_config_to_resources_config`): an integer
+    /// is a MiB request with no separate limit.
+    pub memory_mb: Option<u32>,
+    /// Container CPU request in milli-cores (`Resources.milli_cpu`); `None`
+    /// leaves Modal's default. The Python client sends `int(1000 * cpu)` for
+    /// `cpu=`.
+    pub milli_cpu: Option<u32>,
 }
 
 impl std::fmt::Debug for ServerSpec {
@@ -136,6 +145,8 @@ impl std::fmt::Debug for ServerSpec {
             .field("target_concurrency", &self.target_concurrency)
             .field("min_containers", &self.min_containers)
             .field("max_containers", &self.max_containers)
+            .field("memory_mb", &self.memory_mb)
+            .field("milli_cpu", &self.milli_cpu)
             .finish()
     }
 }
@@ -324,8 +335,14 @@ impl ServerSpec {
             // `startup_timeout or timeout_secs` (`_functions.py:1013`);
             // `validate` has already rejected a zero startup timeout.
             startup_timeout_secs: self.startup_timeout_secs,
+            // `convert_fn_config_to_resources_config` (`_resources.py:10-18`):
+            // `memory=<int>` -> `memory_mb` (MiB, `memory_mb_max` left 0),
+            // `cpu=<n>` -> `milli_cpu = int(1000 * n)`; an unset value is 0,
+            // which Modal reads as "use the default".
             resources: Some(pb::Resources {
                 gpu_config: Some(gpu_config),
+                memory_mb: self.memory_mb.unwrap_or(0),
+                milli_cpu: self.milli_cpu.unwrap_or(0),
                 ..pb::Resources::default()
             }),
             // `region=` becomes a SchedulerPlacement with the region list
@@ -883,6 +900,8 @@ mod tests {
             target_concurrency: 100,
             min_containers: 0,
             max_containers: Some(1),
+            memory_mb: None,
+            milli_cpu: None,
         }
     }
 
@@ -1118,6 +1137,27 @@ mod tests {
         // `_deps(only_explicit_mounts=True)`: secrets, image, volumes — and
         // explicitly *not* the client mount (`_functions.py:870-889`).
         assert_eq!(ids, vec!["st-9", "im-123", "vo-1"]);
+    }
+
+    #[test]
+    fn memory_and_cpu_requests_reach_the_function_resources() {
+        // `convert_fn_config_to_resources_config`: `memory=` is MiB into
+        // `memory_mb`, `cpu=` is `int(1000 * cpu)` into `milli_cpu`, and the
+        // limit fields stay 0.
+        let mut spec = sample_spec();
+        spec.memory_mb = Some(32 * 1024);
+        spec.milli_cpu = Some(8000);
+        let resources = sample_function(&spec).resources.expect("resources");
+        assert_eq!(resources.memory_mb, 32768);
+        assert_eq!(resources.milli_cpu, 8000);
+        assert_eq!(resources.memory_mb_max, 0);
+        assert_eq!(resources.milli_cpu_max, 0);
+
+        // Unset stays 0: Modal's default.
+        let unset = sample_function(&sample_spec())
+            .resources
+            .expect("resources");
+        assert_eq!((unset.memory_mb, unset.milli_cpu), (0, 0));
     }
 
     #[test]

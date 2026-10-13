@@ -92,6 +92,8 @@ async fn scrape_a_cpu_server_through_the_proxy() {
         target_concurrency: 10,
         min_containers: 1,
         max_containers: Some(1),
+        memory_mb: None,
+        milli_cpu: None,
     };
 
     let _guard = AppGuard::install(app_name.clone()).await;

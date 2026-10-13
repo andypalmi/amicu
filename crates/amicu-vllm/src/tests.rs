@@ -41,6 +41,7 @@ impl ProcessSupervisor for FakeSupervisor {
             id: "inst-1".into(),
             deployment: plan.deployment.clone(),
             endpoint: "http://127.0.0.1:8000".into(),
+            exposure: amicu_runtime::EndpointExposure::Loopback,
         })
     }
 
@@ -137,6 +138,7 @@ fn base_settings() -> VllmSettings {
 fn deployment(settings: VllmSettings) -> Deployment {
     Deployment {
         scaling: None,
+        api_key: None,
         id: DeploymentId::new("dep"),
         model: ModelId::new("llama8b"),
         hardware_profile: HardwareProfileId::new("hw"),
@@ -525,4 +527,122 @@ impl SecretResolver for FakeResolver {
     async fn resolve(&self, secret: &SecretRef) -> Result<SecretValue, AdapterError> {
         Ok(SecretValue::new(format!("value-of-{}", secret.name)))
     }
+}
+
+// ---- endpoint API key (amicu-planning#191) -----------------------------------
+
+const KEY_VALUE: &str = "vllm-endpoint-key-123";
+
+/// Records the resolved secrets a `start` receives (name only is asserted on
+/// by name; values only to prove where they went).
+struct RecordingSupervisor {
+    secrets: std::sync::Arc<Mutex<Vec<(String, String)>>>,
+    argv: std::sync::Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl ProcessSupervisor for RecordingSupervisor {
+    async fn start(
+        &self,
+        plan: &amicu_runtime::LaunchPlan,
+        secrets: &[ResolvedSecret],
+    ) -> Result<RuntimeHandle, LlamaCppError> {
+        *self.secrets.lock().unwrap() = secrets
+            .iter()
+            .map(|s| {
+                (
+                    s.name.clone(),
+                    s.value.expose_secret_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        *self.argv.lock().unwrap() = plan.rendered.argv().unwrap_or_default().to_vec();
+        FakeSupervisor::default().start(plan, secrets).await
+    }
+    async fn status(&self, h: &RuntimeHandle) -> Result<RuntimeStatus, LlamaCppError> {
+        FakeSupervisor::default().status(h).await
+    }
+    async fn metrics(&self, h: &RuntimeHandle) -> Result<RuntimeMetrics, LlamaCppError> {
+        FakeSupervisor::default().metrics(h).await
+    }
+    async fn logs(&self, h: &RuntimeHandle, o: LogOptions) -> Result<LogStream, LlamaCppError> {
+        FakeSupervisor::default().logs(h, o).await
+    }
+    async fn stop(&self, h: &RuntimeHandle) -> Result<(), LlamaCppError> {
+        FakeSupervisor::default().stop(h).await
+    }
+}
+
+struct KeyResolver;
+
+#[async_trait]
+impl SecretResolver for KeyResolver {
+    async fn resolve(&self, _: &SecretRef) -> Result<SecretValue, AdapterError> {
+        Ok(SecretValue::new(KEY_VALUE.to_owned()))
+    }
+}
+
+fn keyed(settings: VllmSettings) -> Deployment {
+    let mut d = deployment(settings);
+    d.api_key = Some(SecretRef::new("CHAT_API_KEY"));
+    d
+}
+
+#[test]
+fn plan_launch_carries_only_the_key_reference() {
+    let a = adapter(safetensors_model(), gpu_hardware(80, 1), LLAMA_8B);
+    let plan = a.plan_launch(&keyed(base_settings())).unwrap();
+    assert_eq!(plan.api_key, Some(SecretRef::new("CHAT_API_KEY")));
+    let argv = plan.rendered.argv().unwrap();
+    assert!(!argv.iter().any(|a| a == "--api-key"));
+    assert!(!serde_json::to_string(&plan).unwrap().contains(KEY_VALUE));
+}
+
+#[tokio::test]
+async fn apply_delivers_the_key_as_vllm_api_key_never_argv() {
+    let secrets = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let argv = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let catalog = MapCatalog::new()
+        .with_model(safetensors_model(), LLAMA_8B)
+        .with_hardware(gpu_hardware(80, 1));
+    let a = VllmAdapter::new(
+        Box::new(catalog),
+        Box::new(RecordingSupervisor {
+            secrets: secrets.clone(),
+            argv: argv.clone(),
+        }),
+    );
+    let plan = a.plan_launch(&keyed(base_settings())).unwrap();
+    a.apply(&plan, &KeyResolver).await.expect("apply");
+    assert_eq!(
+        *secrets.lock().unwrap(),
+        vec![("VLLM_API_KEY".to_owned(), KEY_VALUE.to_owned())]
+    );
+    assert!(argv.lock().unwrap().iter().all(|a| !a.contains(KEY_VALUE)));
+}
+
+#[test]
+fn user_supplied_key_channels_stay_denylisted() {
+    let a = adapter(safetensors_model(), gpu_hardware(80, 1), LLAMA_8B);
+    for args in [&["--api-key", "x"][..], &["--api-key=x"][..]] {
+        let mut s = base_settings();
+        s.extra_args = args.iter().map(|a| (*a).to_owned()).collect();
+        let d = deployment(s);
+        assert!(
+            a.validate(&d)
+                .iter()
+                .any(|d| d.code == catalog::CAP_EXTRA_ARG_DENYLISTED),
+            "{args:?}"
+        );
+        assert!(a.plan_launch(&d).is_err(), "{args:?}");
+    }
+    let mut s = base_settings();
+    s.env = [("VLLM_API_KEY".to_owned(), "x".to_owned())].into();
+    let d = deployment(s);
+    assert!(
+        a.validate(&d)
+            .iter()
+            .any(|d| d.code == catalog::CAP_EXTRA_ARG_DENYLISTED)
+    );
+    assert!(a.plan_launch(&d).is_err());
 }

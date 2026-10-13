@@ -16,6 +16,7 @@ HCL, logs or chat):
 |---|---|---|
 | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | Control plane: `apply`, `plan`/`apply` refresh, every `amicu modal` command | A missing one fails with `MODAL_TOKEN_ID is not set` (or `..._SECRET`) before any Modal call. |
 | `MODAL_PROXY_TOKEN_ID`, `MODAL_PROXY_TOKEN_SECRET` | Calling the endpoint, and `amicu modal metrics` | Create in the Modal dashboard (Settings -> Proxy Auth Tokens). Sent as the `Modal-Key` / `Modal-Secret` headers, not `Authorization: Bearer`. |
+| The deployment's `api_key` secret (e.g. `CHAT_API_KEY`) | `apply` (required for Modal) | The endpoint's own API key. Any name works as long as the variable of that name is set when you run `amicu apply`: `export CHAT_API_KEY=$(openssl rand -hex 32)`. See "Endpoint API key" below. |
 | `HF_TOKEN` (optional) | Gated or private Hugging Face repos | Read from the operator's environment and sent as a Modal Secret, injected only into the running container. Never baked into the image. |
 | `AMICU_MODAL_VLLM_IMAGE`, `AMICU_MODAL_LLAMACPP_IMAGE` (optional) | Override the base image | Defaults: `vllm/vllm-openai:v0.29.0`, `ghcr.io/ggml-org/llama.cpp:server-cuda-b11515`. Process-wide; there is no HCL image field. |
 
@@ -33,10 +34,56 @@ Fixed names and constants (not configurable in HCL today):
   (llama.cpp, via `LLAMA_CACHE`). Weights and compile caches persist across
   cold starts, which is why only the first run of a model is slow and warm
   starts are fast.
+- **Resources**: the hardware profile's `memory` becomes the container's
+  memory request (`memory_mb`, in MiB, rounded up) and, when the profile has a
+  `cpu { cores = N }` block, the CPU request (`milli_cpu = N * 1000`); both
+  mirror `memory=`/`cpu=` in Modal's Python client. A zero memory leaves
+  Modal's default. The GPU comes from the `accelerator` block as before.
 - **Lifecycle**: startup timeout 600s, scaledown window 900s (idle time before
   scale-to-zero), container timeout 3600s, target concurrency 32,
   `min_containers = 0`, no max (unlimited). Override the autoscaling four with
   a `scaling {}` block (below).
+
+## Endpoint API key: `api_key` (required on Modal)
+
+A Modal endpoint is reachable from the internet, so every Modal deployment must
+declare an `api_key`: a `secret(...)` reference (never a literal; a string is
+rejected with `AMICU-POLICY-004`). Without it `validate`/`plan` fail with
+`AMICU-POLICY-007`, which spells out the fix.
+
+```hcl
+resource "deployment" "chat" {
+  model    = model.qwen.id
+  hardware = hardware_profile.modal_l4.id   # provider = "modal"
+  runtime  = "vllm"
+  api_key  = secret("CHAT_API_KEY")
+  vllm { context_length = 8192  port = 8000 }
+}
+```
+
+```bash
+export CHAT_API_KEY=$(openssl rand -hex 32)   # the secret resolver reads the env var named like the secret
+amicu apply
+```
+
+- `plan` shows `api_key: ****** (secret "CHAT_API_KEY", resolved at apply)`; it
+  never reads the variable.
+- The value reaches the container as `VLLM_API_KEY` (vLLM) or `LLAMA_API_KEY`
+  (llama-server) through a Modal Secret, never argv or image env. `extra_args`
+  / `env` entries for `--api-key`, `--api-key-file`, `VLLM_API_KEY` and
+  `LLAMA_API_KEY` stay rejected (`AMICU-CAP-003`).
+- Keys must be non-empty and contain no comma, whitespace or non-ASCII
+  characters (`AMICU-POLICY-008`; the runtimes read a comma as a key list).
+- After deploy, `apply` sends an unauthenticated `GET /v1/models`; it must get
+  `401`/`403`. A `2xx` stops the app and fails apply. With the proxy tokens set
+  it also checks that the proxy credentials alone are refused by the runtime
+  (the key is enforced behind the proxy) and that the key works. Without
+  `MODAL_PROXY_TOKEN_*` it prints a note and skips the "key works" step.
+- vLLM's `--api-key` only protects `/v1/*`; `/metrics`, `/health` and others
+  stay open behind the proxy, so Modal's proxy auth is the second layer.
+  llama-server leaves `/health` open by design.
+- After a successful apply amicu prints the endpoint with a ready-to-copy
+  `curl` and OpenAI SDK snippet naming the credentials by environment variable.
 
 ## Capping autoscaling: `scaling {}` (amicu-planning#180)
 
@@ -49,6 +96,7 @@ resource "deployment" "chat" {
   model    = model.qwen.id
   hardware = hardware_profile.modal_l4.id   # provider = "modal"
   runtime  = "vllm"
+  api_key  = secret("CHAT_API_KEY")
   vllm { context_length = 8192  port = 8000 }
 
   scaling {
@@ -124,6 +172,7 @@ resource "deployment" "qwen35_modal" {
   model    = model.qwen35_9b_gguf.id
   hardware = hardware_profile.modal_l4.id
   runtime  = "llama_cpp"
+  api_key  = secret("QWEN35_MODAL_API_KEY")
   llama_cpp {
     context_length = 32768
     port           = 8080
@@ -134,7 +183,8 @@ resource "deployment" "qwen35_modal" {
 
 App name: `amicu-qwen35-modal`. Local-file flags (`--mmproj`, `--lora`,
 `--chat-template-file`, a `speculative {}` draft model) and secret-bearing
-flags (`--hf-token`, `--api-key`) are rejected before any Modal call.
+flags (`--hf-token`, `--api-key`; use the `api_key` attribute) are rejected
+before any Modal call.
 
 ## Multi-GPU (vLLM)
 
@@ -173,6 +223,7 @@ resource "deployment" "qwen35_tp2" {
   model    = model.qwen35_fp8.id
   hardware = hardware_profile.modal_2xl4.id
   runtime  = "vllm"
+  api_key  = secret("QWEN35_TP2_API_KEY")
   vllm {
     context_length       = 262144
     port                 = 8000
@@ -249,11 +300,14 @@ histograms, not a recent window. The coarse runtime-metrics view reports
 ## Calling the endpoint
 
 ```bash
-curl -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" \
+curl -H "Authorization: Bearer $CHAT_API_KEY" \
+     -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" \
   "$URL/v1/models"
 ```
 
-`$URL` is the endpoint `apply` printed (or `amicu modal status <app>`). Expect
+Both layers are needed: the Modal proxy token (`Modal-Key`/`Modal-Secret`) and
+the deployment's API key (`Authorization: Bearer`). `apply` prints this as a
+ready-to-copy snippet. `$URL` is the endpoint `apply` printed (or `amicu modal status <app>`). Expect
 a `503` while the container cold-starts. Thinking models (Qwen3.5 style) spend
 `max_tokens` on reasoning: give a generous `max_tokens` and check
 `finish_reason`.

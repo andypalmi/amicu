@@ -425,6 +425,19 @@ pub mod catalog {
     /// `credential`, not a structural rejection.
     pub const POLICY_RUNTIME_ENV_SECRET_SUSPECTED: DiagnosticCode =
         DiagnosticCode::new(Category::Policy, 6);
+    // --- amicu-planning#191: per-deployment endpoint API keys ---
+    /// `AMICU-POLICY-007` - a deployment whose endpoint is reachable
+    /// off-machine (any provider other than the local ones, e.g. `modal`)
+    /// declares no `api_key`. Error: an off-machine endpoint with no
+    /// application-level authentication is open to anyone who learns its URL.
+    pub const POLICY_ENDPOINT_API_KEY_REQUIRED: DiagnosticCode =
+        DiagnosticCode::new(Category::Policy, 7);
+    /// `AMICU-POLICY-008` - the endpoint API key resolved from a deployment's
+    /// `api_key` secret cannot be used (empty, or containing a comma,
+    /// whitespace or non-printable characters). Raised at apply time; the
+    /// message never contains the value.
+    pub const POLICY_ENDPOINT_API_KEY_INVALID: DiagnosticCode =
+        DiagnosticCode::new(Category::Policy, 8);
     /// `AMICU-STATE-001` - state is locked by another operation.
     pub const STATE_LOCKED: DiagnosticCode = DiagnosticCode::new(Category::State, 1);
     /// `AMICU-PROVIDER-001` - requested capacity is unavailable in region.
@@ -461,7 +474,7 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 34] {
+    pub const fn all() -> [DiagnosticCode; 36] {
         [
             PARSE_UNCLOSED_BLOCK,
             PARSE_INVALID_SYNTAX,
@@ -497,6 +510,9 @@ pub mod catalog {
             POLICY_SECRET_PATTERN_SUSPECTED,
             // amicu-planning#150 addition:
             POLICY_RUNTIME_ENV_SECRET_SUSPECTED,
+            // amicu-planning#191 addition:
+            POLICY_ENDPOINT_API_KEY_REQUIRED,
+            POLICY_ENDPOINT_API_KEY_INVALID,
             STATE_LOCKED,
             PROVIDER_CAPACITY_UNAVAILABLE,
             PROVIDER_DOWNLOAD_FAILED,

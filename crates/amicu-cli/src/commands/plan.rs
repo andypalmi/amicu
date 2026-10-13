@@ -134,6 +134,23 @@ pub(crate) fn print_human(
             if let Some(artifact) = &item.action.artifact {
                 io(writeln!(out, "      artifact: {}", artifact.name))?;
             }
+            // The endpoint API key: always redacted, and only the secret's name
+            // is shown - the value is resolved at apply time, never here.
+            if let Some(shown) = item.action.runtime.iter().find(|s| s.key == "api_key") {
+                let secret = graph
+                    .deployments
+                    .iter()
+                    .find(|d| d.id == item.deployment)
+                    .and_then(|d| d.api_key.as_ref());
+                match secret {
+                    Some(r) => io(writeln!(
+                        out,
+                        "      api_key:  {} (secret \"{}\", resolved at apply)",
+                        shown.value, r.name
+                    ))?,
+                    None => io(writeln!(out, "      api_key:  {}", shown.value))?,
+                }
+            }
             if let Some(cmd) = &item.rendered {
                 // On Modal the supervisor rewrites the argv before launch
                 // (`-hf`/`-hff`, `--no-mmproj`, `--host 0.0.0.0`); show what
@@ -250,6 +267,7 @@ mod tests {
         });
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "m".into(),
             hardware_profile: "hw".into(),
@@ -289,6 +307,30 @@ mod tests {
                     .map(|c| c.trim().to_owned())
             })
             .unwrap_or_else(|| panic!("no launch line in:\n{text}"))
+    }
+
+    fn human_plan(g: &Graph) -> String {
+        let result = build_plan(g, None).expect("plan");
+        let mut out = Vec::new();
+        print_human(&result, g, &mut out).expect("print");
+        String::from_utf8(out).expect("utf8")
+    }
+
+    #[test]
+    fn api_key_shows_redacted_with_the_secret_name_only() {
+        let mut g = graph("modal", vllm());
+        assert!(!human_plan(&g).contains("api_key"));
+        g.deployments[0].api_key = Some(amicu_core::secret::SecretRef::new("CHAT_API_KEY"));
+        let text = human_plan(&g);
+        let line = text
+            .lines()
+            .find(|l| l.trim().starts_with("api_key:"))
+            .unwrap_or_else(|| panic!("no api_key line in:\n{text}"));
+        assert!(line.contains("******"), "{line}");
+        assert!(line.contains("CHAT_API_KEY"), "{line}");
+        // Planning never resolves: even with the variable set, its value is
+        // nowhere in the output.
+        assert!(!text.contains("--api-key"), "{text}");
     }
 
     #[test]

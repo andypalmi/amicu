@@ -155,6 +155,7 @@ fn sample_hardware() -> HardwareProfile {
 fn sample_deployment() -> Deployment {
     Deployment {
         scaling: None,
+        api_key: None,
         id: DeploymentId::new("support_chat_prod"),
         model: ModelId::new("support_chat"),
         hardware_profile: HardwareProfileId::new("a100_80gb"),

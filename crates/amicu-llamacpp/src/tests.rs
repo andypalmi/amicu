@@ -103,6 +103,7 @@ fn apple_silicon(mem_gib: u64) -> HardwareProfile {
 fn deployment() -> Deployment {
     Deployment {
         scaling: None,
+        api_key: None,
         id: DeploymentId::new("support_chat_local"),
         model: ModelId::new("tiny_llama"),
         hardware_profile: HardwareProfileId::new("m3_max"),
@@ -185,6 +186,7 @@ impl ProcessSupervisor for FakeSupervisor {
             id: "inst-1".into(),
             deployment: plan.deployment.clone(),
             endpoint: "http://127.0.0.1:8080".into(),
+            exposure: amicu_runtime::EndpointExposure::Loopback,
         })
     }
 
@@ -1643,6 +1645,7 @@ fn manifest_plan() -> LaunchPlan {
             ..Default::default()
         }),
         secret_refs: vec![],
+        api_key: None,
         estimate: ResourceEstimate {
             estimated_memory: ByteSize::from_bytes(0),
             gpu_count: 0,
@@ -2573,4 +2576,186 @@ fn host_exec_runs_a_real_process() {
     let out = HostExec.exec("echo", &["amicu"]).expect("echo runs");
     assert!(out.success);
     assert!(out.stdout.contains("amicu"));
+}
+
+// ---- endpoint API key (amicu-planning#191) ----------------------------------
+
+const ENDPOINT_KEY: &str = "value-of-CHAT_API_KEY";
+
+fn keyed_deployment() -> Deployment {
+    let mut d = deployment();
+    d.api_key = Some(SecretRef::new("CHAT_API_KEY"));
+    d
+}
+
+/// An adapter whose supervisor is a real `ServiceSupervisor` over a fake
+/// service manager, so the env that would reach launchd/systemd is observable.
+fn adapter_over_fake_manager(manager: &std::sync::Arc<FakeManager>) -> LlamaCppAdapter {
+    let catalog = MapCatalog::new()
+        .with_model(
+            gguf_model(&[(Quantization::Q4KM, "tiny.Q4_K_M.gguf", 4 * GIB)]),
+            7_000_000_000,
+        )
+        .with_hardware(apple_silicon(16));
+    LlamaCppAdapter::new(
+        Box::new(catalog),
+        Box::new(ServiceSupervisor::new(
+            SharedManager(manager.clone()),
+            FakeProbe { ready: true },
+        )),
+    )
+}
+
+#[test]
+fn plan_launch_carries_the_key_reference_only() {
+    let plan = fitting_adapter().plan_launch(&keyed_deployment()).unwrap();
+    assert_eq!(plan.api_key, Some(SecretRef::new("CHAT_API_KEY")));
+    // The plan is secret-free: no value, nothing on argv, nothing in JSON.
+    let json = serde_json::to_string(&plan).unwrap();
+    assert!(!json.contains(ENDPOINT_KEY));
+    assert!(!format!("{plan:?}").contains(ENDPOINT_KEY));
+    let argv = plan.rendered.argv().unwrap();
+    assert!(argv.iter().all(|a| !a.contains("CHAT_API_KEY")));
+    assert!(!argv.iter().any(|a| a == "--api-key"));
+    // An unkeyed deployment has none.
+    assert!(
+        fitting_adapter()
+            .plan_launch(&deployment())
+            .unwrap()
+            .api_key
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn apply_delivers_the_key_as_llama_api_key_env_never_argv() {
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+    let adapter = adapter_over_fake_manager(&manager);
+    let plan = adapter.plan_launch(&keyed_deployment()).unwrap();
+    let handle = adapter.apply(&plan, &FakeResolver).await.expect("apply");
+
+    let spec = manager.started.lock().unwrap().clone().expect("started");
+    assert_eq!(
+        spec.env,
+        vec![("LLAMA_API_KEY".to_owned(), ENDPOINT_KEY.to_owned())]
+    );
+    assert!(spec.argv.iter().all(|a| !a.contains(ENDPOINT_KEY)));
+    assert!(!spec.argv.iter().any(|a| a == "--api-key"));
+    // Never in Debug, and the handle (persisted in state) holds no secret.
+    assert!(!format!("{spec:?}").contains(ENDPOINT_KEY));
+    assert!(!format!("{handle:?}").contains(ENDPOINT_KEY));
+    assert!(
+        !serde_json::to_string(&handle)
+            .unwrap()
+            .contains(ENDPOINT_KEY)
+    );
+    // Local services bind loopback and say so.
+    assert_eq!(handle.exposure, amicu_runtime::EndpointExposure::Loopback);
+}
+
+#[tokio::test]
+async fn apply_without_a_key_sets_no_key_env() {
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+    let adapter = adapter_over_fake_manager(&manager);
+    let plan = adapter.plan_launch(&deployment()).unwrap();
+    adapter.apply(&plan, &FakeResolver).await.expect("apply");
+    let spec = manager.started.lock().unwrap().clone().expect("started");
+    assert_eq!(spec.env, Vec::<(String, String)>::new());
+}
+
+struct ValueResolver(&'static str);
+
+#[async_trait]
+impl SecretResolver for ValueResolver {
+    async fn resolve(&self, _: &SecretRef) -> Result<SecretValue, AdapterError> {
+        Ok(SecretValue::new(self.0.to_owned()))
+    }
+}
+
+#[tokio::test]
+async fn unusable_key_values_are_refused_before_start_without_echoing_them() {
+    for bad in ["", "two,keys", "has space", "new\nline"] {
+        let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+        let adapter = adapter_over_fake_manager(&manager);
+        let plan = adapter.plan_launch(&keyed_deployment()).unwrap();
+        let err = adapter
+            .apply(&plan, &ValueResolver(bad))
+            .await
+            .expect_err("unusable key");
+        assert_eq!(err.code(), catalog::POLICY_ENDPOINT_API_KEY_INVALID);
+        let text = err.to_string();
+        assert!(text.contains("CHAT_API_KEY"), "{text}");
+        assert!(bad.is_empty() || !text.contains(bad), "{text}");
+        assert!(manager.started.lock().unwrap().is_none(), "must not start");
+    }
+}
+
+#[test]
+fn user_supplied_key_channels_stay_denylisted() {
+    // `--api-key` / `--api-key-file` via extra_args (both spellings of the
+    // value form), and every env spelling llama-server reads.
+    for args in [
+        &["--api-key", "x"][..],
+        &["--api-key=x"][..],
+        &["--api-key-file", "/tmp/k"][..],
+    ] {
+        let diags = fitting_adapter().validate(&deployment_with_extra_args(args));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == catalog::CAP_EXTRA_ARG_DENYLISTED),
+            "{args:?}: {diags:?}"
+        );
+    }
+    for key in [
+        "LLAMA_API_KEY",
+        "LLAMA_ARG_API_KEY",
+        "LLAMA_ARG_API_KEY_FILE",
+    ] {
+        let d = deployment_with_env(&[(key, "x")]);
+        let diags = fitting_adapter().validate(&d);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == catalog::CAP_EXTRA_ARG_DENYLISTED),
+            "{key}: {diags:?}"
+        );
+        assert!(fitting_adapter().plan_launch(&d).is_err(), "{key}");
+    }
+}
+
+#[test]
+fn service_spec_debug_shows_env_names_but_never_values() {
+    let mut spec = service_spec();
+    spec.env = vec![("LLAMA_API_KEY".into(), "hunter2-secret".into())];
+    let text = format!("{spec:?}");
+    assert!(text.contains("LLAMA_API_KEY"));
+    assert!(!text.contains("hunter2-secret"), "{text}");
+}
+
+#[test]
+fn launchd_plist_carries_the_key_in_a_0600_file_removed_on_stop_and_on_failed_load() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut spec = service_spec();
+    spec.env = vec![("LLAMA_API_KEY".into(), ENDPOINT_KEY.into())];
+
+    let tmp = TempDir::new("launchd-key");
+    let agents = tmp.file("agents");
+    let manager = LaunchdManager::new(FakeExec::new(true, ""), &agents, tmp.file("logs"));
+    manager.start(&spec).unwrap();
+    let plist = agents.join("io.amicu.llama.support_chat_local.plist");
+    let body = fs::read_to_string(&plist).unwrap();
+    assert!(body.contains("<key>LLAMA_API_KEY</key>"));
+    assert!(body.contains(ENDPOINT_KEY));
+    assert_eq!(
+        fs::metadata(&plist).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    manager.stop(&spec.label).unwrap();
+    assert!(!plist.exists());
+
+    // A failed `launchctl load` must not leave the secret behind.
+    let failing = LaunchdManager::new(FakeExec::new(false, ""), &agents, tmp.file("logs"));
+    assert!(failing.start(&spec).is_err());
+    assert!(!plist.exists(), "plist with the key must be removed");
 }

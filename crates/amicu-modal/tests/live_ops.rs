@@ -83,6 +83,8 @@ async fn status_logs_health_and_stop_after_a_cpu_deploy() {
         target_concurrency: 10,
         min_containers: 1,
         max_containers: Some(1),
+        memory_mb: None,
+        milli_cpu: None,
     };
 
     // Installed before the deploy, so a panic anywhere below (including

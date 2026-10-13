@@ -70,6 +70,8 @@ async fn probe_a_cpu_container_over_container_exec() {
         target_concurrency: 10,
         min_containers: 1,
         max_containers: Some(1),
+        memory_mb: None,
+        milli_cpu: None,
     };
 
     let _guard = AppGuard::install(app_name.clone()).await;

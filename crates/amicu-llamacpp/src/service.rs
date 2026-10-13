@@ -14,7 +14,7 @@ use crate::error::LlamaCppError;
 
 /// A service to define and run: its manager label, the argv to exec, and the
 /// environment (resolved secrets) to inject into the process.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServiceSpec {
     /// Manager label / unit name, e.g. `io.amicu.llama.<deployment>`.
     pub label: String,
@@ -22,6 +22,21 @@ pub struct ServiceSpec {
     pub argv: Vec<String>,
     /// Environment injected into the process (secret name/value pairs).
     pub env: Vec<(String, String)>,
+}
+
+/// Redacted: env values may be secrets (the endpoint API key), so `Debug`
+/// shows the variable names only.
+impl std::fmt::Debug for ServiceSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceSpec")
+            .field("label", &self.label)
+            .field("argv", &self.argv)
+            .field(
+                "env",
+                &self.env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 /// The coarse lifecycle state a service manager reports.
@@ -155,10 +170,20 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         )?;
         ensure_dir(&self.log_dir)?;
         let plist = self.plist_path(&spec.label);
-        let out = self
+        let out = match self
             .exec
-            .exec("launchctl", &["load", "-w", &plist.to_string_lossy()])?;
+            .exec("launchctl", &["load", "-w", &plist.to_string_lossy()])
+        {
+            Ok(out) => out,
+            Err(e) => {
+                remove_env_file(&plist);
+                return Err(e);
+            }
+        };
         if !out.success {
+            // The plist holds the environment (secrets): never leave it behind
+            // for a service that did not start.
+            remove_env_file(&plist);
             return Err(LlamaCppError::Supervisor(format!(
                 "launchctl load failed: {}",
                 out.stderr.trim()
@@ -481,7 +506,14 @@ fn write_private(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), LlamaCppEr
     let mut file = opts
         .open(path)
         .map_err(|e| LlamaCppError::Supervisor(format!("create {}: {e}", path.display())))?;
-    file.write_all(bytes)
-        .map_err(|e| LlamaCppError::Supervisor(format!("write {}: {e}", path.display())))?;
+    if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        // Never leave a partially written secrets file behind.
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(LlamaCppError::Supervisor(format!(
+            "write {}: {e}",
+            path.display()
+        )));
+    }
     Ok(())
 }

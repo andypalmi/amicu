@@ -27,6 +27,14 @@ See `references/model-examples.md`, `references/hardware-examples.md`, and
 `provider = "modal"` (setup, multi-GPU, llama.cpp, metrics, lifecycle) see
 `references/modal-deployment.md`.
 
+A `deployment` may declare `api_key = secret("NAME")`: the endpoint's API key,
+by reference only (a quoted literal is rejected, `AMICU-POLICY-004`). It is
+**required for any off-machine provider** such as `modal` (`AMICU-POLICY-007`
+otherwise) and optional for local loopback ones. `apply` reads the value from the
+environment variable `NAME` (`export NAME=$(openssl rand -hex 32)`), passes it to
+the runtime by environment (never argv), and then checks the endpoint rejects
+unauthenticated requests.
+
 ## References between resources
 
 ```hcl

@@ -8,10 +8,13 @@
 //! [`LaunchdSupervisor`] and [`SystemdSupervisor`] pin the host wiring.
 
 use amicu_core::ByteSize;
+use amicu_core::adapter::AdapterError;
+use amicu_core::diagnostic::catalog;
 use amicu_core::resource::Runtime;
-use amicu_core::secret::SecretValue;
+use amicu_core::secret::{SecretResolver, SecretValue};
 use amicu_runtime::{
-    LaunchPlan, LogOptions, LogStream, RuntimeHandle, RuntimeMetrics, RuntimeStatus,
+    EndpointExposure, LaunchPlan, LogOptions, LogStream, RuntimeHandle, RuntimeMetrics,
+    RuntimeStatus,
 };
 use async_trait::async_trait;
 
@@ -30,6 +33,47 @@ pub struct ResolvedSecret {
     pub name: String,
     /// The resolved value.
     pub value: SecretValue,
+}
+
+/// Resolve everything a launch needs from the [`SecretResolver`], at apply
+/// time: the plan's `secret_refs` (each injected under its own name) and the
+/// endpoint API key, injected under the runtime's own key variable
+/// ([`RuntimeKind::api_key_env_var`]: `LLAMA_API_KEY` / `VLLM_API_KEY`).
+///
+/// This is the only place the key becomes a value, and it is only ever handed
+/// to a supervisor as a [`ResolvedSecret`] - which delivers it through the
+/// process/container environment, never argv. Nothing here logs or formats a
+/// value, and the errors name the secret reference, not its content.
+///
+/// # Errors
+/// The resolver's error, or `AMICU-POLICY-008` if the key value cannot be
+/// delivered safely (empty, a comma, whitespace, non-printable characters).
+pub async fn resolve_launch_secrets(
+    plan: &LaunchPlan,
+    resolver: &dyn SecretResolver,
+) -> Result<Vec<ResolvedSecret>, AdapterError> {
+    let mut secrets = Vec::with_capacity(plan.secret_refs.len() + 1);
+    for reference in &plan.secret_refs {
+        let value = resolver.resolve(reference).await?;
+        secrets.push(ResolvedSecret {
+            name: reference.name.clone(),
+            value,
+        });
+    }
+    if let Some(reference) = &plan.api_key {
+        let value = resolver.resolve(reference).await?;
+        if let Err(why) = amicu_runtime::exposure::validate_api_key_value(&value) {
+            return Err(AdapterError::permanent(
+                catalog::POLICY_ENDPOINT_API_KEY_INVALID,
+                format!("endpoint API key secret '{}' {why}", reference.name),
+            ));
+        }
+        secrets.push(ResolvedSecret {
+            name: plan.runtime.api_key_env_var().to_owned(),
+            value,
+        });
+    }
+    Ok(secrets)
 }
 
 /// Starts, inspects, and stops a rendered launch against some process backend
@@ -176,6 +220,8 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
             id: label,
             deployment: plan.deployment.clone(),
             endpoint: endpoint_for(plan),
+            // Every flag set renders `--host 127.0.0.1` explicitly.
+            exposure: EndpointExposure::Loopback,
         })
     }
 
