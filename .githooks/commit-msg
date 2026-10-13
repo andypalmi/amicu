@@ -1,5 +1,19 @@
 #!/bin/sh
-# Chain to the clone-local commit-msg hook (core.hooksPath replaces .git/hooks).
+# Block Claude / Claude Code attribution in commit messages. Offending lines
+# are stripped from the message file so it can be re-committed as-is.
+dir=$(dirname "$0")
+removed=$("$dir/no-claude-attribution.sh" strip "$1" 2>&1)
+if [ $? -ne 0 ]; then
+  echo "commit-msg: commit blocked, Claude attribution is not allowed in commit messages." >&2
+  echo "Removed these lines from the message:" >&2
+  printf '%s\n' "$removed" >&2
+  msg="$(git rev-parse --git-dir)/COMMIT_EDITMSG"
+  echo "The cleaned message is in $msg. Re-commit with:" >&2
+  echo "  git commit -F $msg    (or: git commit -e -F $msg)" >&2
+  exit 1
+fi
+
+# Then chain to the clone-local commit-msg hook (core.hooksPath replaces .git/hooks).
 common=$(git rev-parse --git-common-dir 2>/dev/null)
 if [ -n "$common" ] && [ -x "$common/hooks/commit-msg" ]; then
   "$common/hooks/commit-msg" "$@" || exit $?

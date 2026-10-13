@@ -48,6 +48,29 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+  commit-messages:
+    name: no Claude attribution in commits
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # base..head needs both tips and their history
+      - name: Check commit messages
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          bad=0
+          for sha in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            git log -1 --format=%B "$sha" > "$RUNNER_TEMP/msg"
+            if ! .githooks/no-claude-attribution.sh check "$RUNNER_TEMP/msg"; then
+              echo "::error::commit $sha contains Claude attribution (lines above)"
+              bad=1
+            fi
+          done
+          exit $bad
+
   audit:
     name: cargo audit
     runs-on: ubuntu-latest

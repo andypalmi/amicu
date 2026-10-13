@@ -35,6 +35,10 @@ cd apps/web && NEXT_PUBLIC_SITE_URL=https://amicu.dev pnpm cf:build
 
 `pnpm lint:links` validates every internal link (docs MDX, `#heading` anchors, and `href`s in `app/`, `components/`) against the real route set (`next-validate-link` + Fumadocs source); external links are skipped. It runs in CI and as a git pre-commit hook (`.githooks/pre-commit`, enabled by `pnpm install` through the `prepare` script, or manually with `git config core.hooksPath .githooks`). The hook only runs when `web/` files are staged and is skipped if pnpm is not installed; bypass with `git commit --no-verify`. Hooks live in `.githooks` and chain to any local `.git/hooks` hook of the same name. The checker validates physical routes only and ignores the `amicu.dev` / `app.amicu.dev` host split.
 
+## Commit messages
+
+Do not put Claude / Claude Code attribution (session links, `Co-Authored-By: Claude`, "Generated with ...") in commit messages: the `commit-msg` hook strips such lines and fails the commit (re-run with `git commit -F .git/COMMIT_EDITMSG`), and CI checks every PR commit. Any line mentioning Claude is stripped on purpose, not only attribution trailers. Test the check with `sh .githooks/test-no-claude-attribution.sh`.
+
 ## Writing docs
 
 Public documentation is MDX under `apps/web/content/docs`, rendered by Fumadocs. Each folder has a `meta.json` that sets the page order; a page missing from its `meta.json` still builds but does not appear in the sidebar.
