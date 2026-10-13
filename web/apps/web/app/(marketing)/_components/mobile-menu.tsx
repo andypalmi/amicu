@@ -19,8 +19,6 @@ export type MobileNavCta = {
   variant: 'outline' | 'default';
 };
 
-const FOCUSABLE = 'a[href], button:not([disabled])';
-
 const itemCls =
   'flex w-full items-center justify-between rounded-sm py-3 text-left text-3xl font-medium tracking-tight text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-[current=page]:text-foreground aria-expanded:text-foreground';
 
@@ -39,7 +37,6 @@ export function MobileMenu({
   const [expanded, setExpanded] = useState<string | null>(null);
   const panelId = useId();
   const toggleRef = useRef<HTMLButtonElement>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
   const pathname = usePathname();
 
   const close = useCallback((restoreFocus: boolean) => {
@@ -71,39 +68,23 @@ export function MobileMenu({
     const prev = html.style.overflow;
     html.style.overflow = 'hidden';
 
+    // Everything outside the header (which holds the panel) is inert while open.
+    const header = toggleRef.current?.closest('header');
+    const outside = Array.from(header?.parentElement?.children ?? []).filter(
+      (n): n is HTMLElement => n !== header && n instanceof HTMLElement && !n.inert,
+    );
+    outside.forEach((n) => (n.inert = true));
+
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
         close(true);
-        return;
-      }
-      if (e.key !== 'Tab') return;
-      const panel = panelRef.current;
-      const toggle = toggleRef.current;
-      if (!panel || !toggle) return;
-      const nodes = [
-        toggle,
-        ...Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
-          (n) => n.offsetParent !== null && getComputedStyle(n).visibility !== 'hidden',
-        ),
-      ];
-      const first = nodes[0];
-      const last = nodes[nodes.length - 1];
-      const active = document.activeElement as HTMLElement | null;
-      if (!active || !nodes.includes(active)) {
-        e.preventDefault();
-        first.focus();
-      } else if (e.shiftKey && active === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && active === last) {
-        e.preventDefault();
-        first.focus();
       }
     };
     document.addEventListener('keydown', onKey);
     return () => {
       html.style.overflow = prev;
+      outside.forEach((n) => (n.inert = false));
       document.removeEventListener('keydown', onKey);
     };
   }, [open, close]);
@@ -123,8 +104,10 @@ export function MobileMenu({
       </button>
 
       <div
-        ref={panelRef}
         id={panelId}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Menu"
         className={cn(
           'fixed inset-x-0 bottom-0 top-[calc(3.5rem+1px)] z-40 overflow-y-auto overscroll-contain bg-background md:hidden',
           'transition-[opacity,transform,visibility] duration-200 ease-out motion-reduce:transition-none',
