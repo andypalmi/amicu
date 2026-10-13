@@ -6,6 +6,18 @@
 // mirrors it for UX. Pricing numbers are intentionally omitted (RFC §1
 // non-goal): tiers carry qualitative positioning and a CTA, not a price.
 
+import { gitConfig } from '@/lib/shared';
+
+/** Public repository URL. */
+export const githubUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
+/** The README quickstart (build the CLI, `amicu init`, plan, apply). */
+export const quickstartUrl = `${githubUrl}#quickstart`;
+/**
+ * Contact channel until a company contact address exists (see
+ * `lib/legal/company.ts`, all fields still null): the repository's issues.
+ */
+export const contactUrl = `${githubUrl}/issues`;
+
 export type TierId = 'community' | 'pro' | 'enterprise' | 'hosted';
 
 export interface Tier {
@@ -31,7 +43,7 @@ export const tiers: Tier[] = [
     priceLabel: 'Free · AGPL-3.0',
     description:
       'Author and validate HCL, run local llama.cpp and single-node vLLM, use the guided wizard, and keep solo remote state against a self-hosted backend.',
-    cta: { label: 'Get started', href: '/app' },
+    cta: { label: 'Get started', href: quickstartUrl },
     highlights: [
       'HCL editor, validate, local plan / apply',
       'Guided wizard (preset-based recommendations)',
@@ -46,7 +58,7 @@ export const tiers: Tier[] = [
     priceLabel: 'Paid',
     description:
       'Everything in Community, plus performance-DB-backed recommendations, performance-DB queries and filtered comparison, and shared team state with locking and roles.',
-    cta: { label: 'Start Pro', href: '/app' },
+    cta: { label: 'Sign in', href: '/login' },
     featured: true,
     highlights: [
       'Advanced perf-DB-backed recommendations',
@@ -61,7 +73,7 @@ export const tiers: Tier[] = [
     priceLabel: 'Contact sales',
     description:
       'Everything in Pro, plus org / RBAC / SSO / audit, multi-node distributed serving, advanced routing and failover, and a private performance DB.',
-    cta: { label: 'Contact sales', href: '/docs' },
+    cta: { label: 'Get in touch', href: contactUrl },
     highlights: [
       'Org / RBAC / SSO / audit',
       'Multi-node distributed serving',
@@ -76,7 +88,7 @@ export const tiers: Tier[] = [
     priceLabel: 'Talk to us',
     description:
       'Amicu-hosted control plane and managed GPU capacity. Pro and Enterprise capabilities apply as your plan allows, with none of the day-2 infrastructure to run yourself.',
-    cta: { label: 'Talk to us', href: '/docs' },
+    cta: { label: 'Get in touch', href: contactUrl },
     highlights: [
       'Fully managed GPU hosting',
       'Managed control plane',
@@ -265,37 +277,5 @@ export const providers: Provider[] = [
     name: 'Self-hosted / SSH',
     kind: 'Your own hardware',
     residency: 'Wherever you run it - full residency control',
-  },
-];
-
-export interface LandingFeature {
-  title: string;
-  body: string;
-}
-
-export const landingFeatures: LandingFeature[] = [
-  {
-    title: 'Thin client, open core',
-    body: 'A thin, open-source client over the Rust Management API. Planning, recommendations, policy, and capability logic live in the API - the web app renders them, it does not own them.',
-  },
-  {
-    title: 'Dual-mode entry',
-    body: '"Help me choose" walks you through a guided wizard; "I know my stack" drops you straight into the HCL editor. Both are open to everyone, Community included.',
-  },
-  {
-    title: 'Transparent recommendations',
-    body: 'Every suggestion shows its reasoning and the numbers behind it. Compare measured-vs-estimated on day 2 and apply suggested changes with the trade-offs in view.',
-  },
-  {
-    title: 'Provider-agnostic coverage',
-    body: 'One declarative model across EU-native clouds, hyperscaler regions, and self-hosted/SSH. Pin a fully EU-only stack - or air-gapped, cost-optimized, or multi-cloud. Residency and region are first-class planning inputs.',
-  },
-  {
-    title: 'HCL as the source of truth',
-    body: 'Author, validate, and plan/apply declarative HCL. Version it, review it, and keep solo or team remote state - the stack is code, not click-ops.',
-  },
-  {
-    title: 'Day-2 operations',
-    body: 'Monitor deployments, compare estimated against measured performance, manage credential references, and roll changes forward from a single dashboard.',
   },
 ];

@@ -1,23 +1,23 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { ArrowRight } from 'lucide-react';
+import { Button } from '@amicu/ui';
+import { appName, appTagline, siteUrl } from '@/lib/shared';
+import { HclCode, Transcript } from './_components/code';
+import { Container } from './_components/marketing';
+import { githubUrl, quickstartUrl } from './_lib/content';
 import {
-  Badge,
-  Button,
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@amicu/ui';
-import { appName, appTagline, gitConfig, siteUrl } from '@/lib/shared';
-import { EXAMPLE_CONFIG } from '@/lib/engine/example';
-import { Section } from './_components/marketing';
-import { landingFeatures, providers } from './_lib/content';
+  GPU_LAUNCH,
+  HERO_HCL,
+  HERO_PLAN,
+  LAPTOP_LAUNCH,
+  OUTCOMES,
+  STEPS,
+  SUPPORT,
+} from './_lib/landing';
 import { pageMetadata } from './_lib/seo';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'Design, deploy, and operate LLM serving stacks',
+  title: 'Infrastructure as code for LLM serving',
   description: appTagline,
   path: '/',
 });
@@ -34,15 +34,39 @@ const jsonLd = {
   description: appTagline,
   url: siteUrl,
   applicationCategory: 'DeveloperApplication',
-  operatingSystem: 'Web, Linux, macOS',
+  operatingSystem: 'Linux, macOS',
   offers: {
     '@type': 'Offer',
     price: '0',
     priceCurrency: 'EUR',
   },
   license: 'https://www.gnu.org/licenses/agpl-3.0.html',
-  sameAs: [`https://github.com/${gitConfig.user}/${gitConfig.repo}`],
+  sameAs: [githubUrl],
 };
+
+function SectionHeading({ id, title, lead }: { id?: string; title: string; lead?: string }) {
+  return (
+    <div className="max-w-2xl">
+      <h2 id={id} className="scroll-mt-24 text-balance text-3xl font-semibold tracking-tight sm:text-4xl">
+        {title}
+      </h2>
+      {lead ? <p className="mt-4 text-pretty text-lg text-muted-foreground">{lead}</p> : null}
+    </div>
+  );
+}
+
+function PrimaryCtas() {
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <Button asChild size="lg">
+        <a href={quickstartUrl}>Get started</a>
+      </Button>
+      <Button asChild size="lg" variant="outline">
+        <Link href="/docs">Read the docs</Link>
+      </Button>
+    </div>
+  );
+}
 
 export default function LandingPage() {
   return (
@@ -53,148 +77,206 @@ export default function LandingPage() {
           __html: JSON.stringify(jsonLd).replace(/</g, '\\u003c'),
         }}
       />
-      {/* Hero */}
-      <Section size="lg" containerClassName="grid items-center gap-12 lg:grid-cols-2">
-        <div className="flex flex-col items-start gap-6">
-          <h1 className="text-balance text-4xl font-bold tracking-tight sm:text-5xl">
-            Design, deploy, and operate LLM serving stacks.
+
+      {/* Hero: the claim, then the real artifact. */}
+      <section>
+        <Container className="pt-16 pb-20 sm:pt-24 sm:pb-28">
+          <h1 className="max-w-4xl text-balance text-4xl font-semibold tracking-tight sm:text-6xl sm:leading-[1.05]">
+            Infrastructure as code for teams that serve their own LLMs.
           </h1>
-          <p className="max-w-xl text-pretty text-lg text-muted-foreground">
-            Amicu is a thin, open client over the Rust Management API - guided stack
-            design, transparent recommendations, and day-2 operations for inference
-            infrastructure you declare once and run on any provider.
+          <p className="mt-6 max-w-2xl text-pretty text-lg leading-relaxed text-muted-foreground">
+            Describe the model, the hardware and the runtime in one HCL file. Amicu checks
+            that it fits and that your data stays where it is allowed to, shows you the exact
+            plan, then starts llama.cpp or vLLM on your own machine or on Modal GPUs.
+          </p>
+          <div className="mt-8 flex flex-col gap-4">
+            <PrimaryCtas />
+            <p className="text-sm text-muted-foreground">
+              Open source under AGPL-3.0. Hosted sign-ups are closed for now.
+            </p>
+          </div>
+
+          <div className="mt-14 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] sm:mt-20">
+            <figure className="min-w-0 overflow-hidden rounded-xl border border-border bg-card">
+              <figcaption className="border-b border-border px-5 py-2.5 font-mono text-xs text-muted-foreground">
+                amicu.hcl
+              </figcaption>
+              <HclCode code={HERO_HCL} className="px-5 py-4" />
+            </figure>
+            <figure className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-card">
+              <figcaption className="border-b border-border px-5 py-2.5 font-mono text-xs text-muted-foreground">
+                terminal
+              </figcaption>
+              <Transcript
+                lines={HERO_PLAN}
+                reveal
+                wrap
+                label="Output of amicu plan for the example file"
+                className="px-5 py-4"
+              />
+              <p className="mt-auto border-t border-border px-5 py-4 text-sm leading-relaxed text-muted-foreground">
+                The data class keeps customer data in the EU. Change the region to{' '}
+                <code className="font-mono text-foreground">us-east</code> and the plan stops
+                with a residency error before anything is started.
+              </p>
+            </figure>
+          </div>
+        </Container>
+      </section>
+
+      {/* How it works */}
+      <section className="border-t border-border">
+        <Container className="py-20 sm:py-28">
+          <SectionHeading
+            id="how-it-works"
+            title="How it works"
+            lead="The same loop you already use for the rest of your infrastructure, applied to model serving."
+          />
+          <ol className="mt-14">
+            {STEPS.map((step, i) => (
+              <li
+                key={step.id}
+                className="grid gap-6 border-t border-border py-10 md:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] md:gap-12"
+              >
+                <div>
+                  <p className="font-mono text-sm text-muted-foreground">{i + 1}</p>
+                  <h3 className="mt-2 text-xl font-semibold tracking-tight">{step.title}</h3>
+                  <p className="mt-3 max-w-prose text-pretty leading-relaxed text-muted-foreground">
+                    {step.body}
+                  </p>
+                </div>
+                <Transcript
+                  lines={step.transcript}
+                  wrap
+                  label={`Example: ${step.title}`}
+                  className="self-start rounded-lg border border-border bg-muted/40 px-5 py-4"
+                />
+              </li>
+            ))}
+          </ol>
+        </Container>
+      </section>
+
+      {/* What you get */}
+      <section className="border-t border-border">
+        <Container className="py-20 sm:py-28">
+          <SectionHeading
+            title="From a laptop to a GPU without rewriting your setup"
+            lead="Prototype with llama.cpp on a MacBook, then point the same workflow at an L4 for vLLM. The plan tells you what will change before it does."
+          />
+          <div className="mt-10 grid gap-4 lg:grid-cols-2">
+            <LaunchLine where="On your laptop, llama.cpp" command={LAPTOP_LAUNCH} />
+            <LaunchLine where="On Modal in eu-west, vLLM" command={GPU_LAUNCH} />
+          </div>
+          <dl className="mt-16">
+            {OUTCOMES.map((o) => (
+              <div
+                key={o.title}
+                className="grid gap-2 border-t border-border py-8 md:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] md:gap-12"
+              >
+                <dt className="text-lg font-semibold tracking-tight">{o.title}</dt>
+                <dd className="max-w-prose text-pretty leading-relaxed text-muted-foreground">
+                  {o.body}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </Container>
+      </section>
+
+      {/* Where it runs today */}
+      <section className="border-t border-border">
+        <Container className="py-20 sm:py-28">
+          <SectionHeading
+            id="where-it-runs"
+            title="Where it runs today"
+            lead="What ships now, without the roadmap mixed in."
+          />
+          <dl className="mt-12">
+            {SUPPORT.map((s) => (
+              <div
+                key={s.label}
+                className="grid gap-2 border-t border-border py-6 md:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] md:gap-12"
+              >
+                <dt className="font-medium">{s.label}</dt>
+                <dd className="max-w-prose text-pretty leading-relaxed text-muted-foreground">
+                  {s.value}
+                </dd>
+              </div>
+            ))}
+          </dl>
+          <p className="mt-6 text-sm text-muted-foreground">
+            Per-provider regions and residency are listed on the{' '}
+            <Link href="/providers" className="text-foreground underline underline-offset-4">
+              providers page
+            </Link>
+            .
+          </p>
+        </Container>
+      </section>
+
+      {/* Who it's for, and how to run it */}
+      <section className="border-t border-border">
+        <Container className="grid gap-12 py-20 sm:py-28 md:grid-cols-2 md:gap-16">
+          <div>
+            <h2 className="text-2xl font-semibold tracking-tight">Who it is for</h2>
+            <p className="mt-4 text-pretty leading-relaxed text-muted-foreground">
+              Engineers who run open-weight models themselves: platform teams taking a
+              llama.cpp prototype onto real GPUs, and teams in regulated settings who have to
+              show where prompts are processed.
+            </p>
+          </div>
+          <div>
+            <h2 className="text-2xl font-semibold tracking-tight">Self-host or use the console</h2>
+            <p className="mt-4 text-pretty leading-relaxed text-muted-foreground">
+              The CLI, planner and server are open source. Build them from source and run
+              everything yourself, with state in your project or in your own Postgres. The
+              hosted console adds the guided wizard, saved configs and shared workspaces;
+              sign-ups are closed during early access, but existing accounts can{' '}
+              <Link href="/login" className="text-foreground underline underline-offset-4">
+                sign in
+              </Link>
+              .
+            </p>
+          </div>
+        </Container>
+      </section>
+
+      {/* Closing CTA */}
+      <section className="border-t border-border">
+        <Container className="flex flex-col items-start gap-6 py-20 sm:py-28">
+          <h2 className="max-w-2xl text-balance text-3xl font-semibold tracking-tight sm:text-4xl">
+            Try it on your laptop first.
+          </h2>
+          <p className="max-w-2xl text-pretty text-lg text-muted-foreground">
+            Build the CLI, run <code className="font-mono text-foreground">amicu init</code>,
+            and read the plan for a llama.cpp deployment on your own machine.
           </p>
           <div className="flex flex-wrap items-center gap-3">
             <Button asChild size="lg">
-              <Link href="/app">
-                Open the console <ArrowRight />
-              </Link>
+              <a href={quickstartUrl}>Get started</a>
             </Button>
             <Button asChild size="lg" variant="outline">
-              <Link href="/docs">Read the docs</Link>
+              <a href={githubUrl}>View on GitHub</a>
             </Button>
           </div>
-        </div>
-        <figure className="min-w-0">
-          <div className="overflow-hidden rounded-lg border border-border bg-card shadow-sm">
-            <div className="border-b border-border bg-muted/50 px-4 py-2 font-mono text-xs text-muted-foreground">
-              stack.hcl
-            </div>
-            <pre
-              tabIndex={0}
-              aria-label="Example Amicu HCL configuration"
-              className="max-h-[22rem] overflow-auto p-4 font-mono text-xs leading-relaxed text-card-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-            >
-              <code>{EXAMPLE_CONFIG}</code>
-            </pre>
-          </div>
-          <figcaption className="mt-3 text-sm text-muted-foreground">
-            A model, an Apple-silicon host, and a llama.cpp deployment. This exact
-            config validates and plans in the console.
-          </figcaption>
-        </figure>
-      </Section>
-
-      {/* Dual-mode teaser */}
-      <Section tone="muted">
-        <div className="mx-auto max-w-2xl text-center">
-          <h2 className="text-3xl font-semibold tracking-tight">
-            Two ways in. Both open to everyone.
-          </h2>
-          <p className="mt-3 text-muted-foreground">
-            The tier split is about depth of recommendation and team collaboration -
-            never about access to the wizard. Community gets the guided flow too.
-          </p>
-        </div>
-        <div className="mx-auto mt-10 grid max-w-4xl gap-6 sm:grid-cols-2">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-xl">Help me choose</CardTitle>
-              <CardDescription>
-                A guided wizard turns your outcome - model, latency, budget,
-                residency - into a recommended stack, with the reasoning shown.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button asChild variant="link" className="h-auto p-0">
-                <Link href="/app">
-                  Start the wizard <ArrowRight />
-                </Link>
-              </Button>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-xl">I know my stack</CardTitle>
-              <CardDescription>
-                Drop straight into the HCL editor. Author, validate, and plan / apply
-                declarative infrastructure - the stack is code, not click-ops.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button asChild variant="link" className="h-auto p-0">
-                <Link href="/app">
-                  Open the editor <ArrowRight />
-                </Link>
-              </Button>
-            </CardContent>
-          </Card>
-        </div>
-      </Section>
-
-      {/* Feature grid */}
-      <Section>
-        <div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-3">
-          {landingFeatures.map((feature) => (
-            <div key={feature.title}>
-              <h3 className="text-lg font-semibold">{feature.title}</h3>
-              <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-                {feature.body}
-              </p>
-            </div>
-          ))}
-        </div>
-      </Section>
-
-      {/* Provider strip */}
-      <Section tone="muted">
-        <p className="text-center text-sm font-medium uppercase tracking-widest text-muted-foreground">
-          Deploy across any provider
-        </p>
-        <div className="mt-6 flex flex-wrap items-center justify-center gap-x-3 gap-y-3">
-          {providers.map((provider) => (
-            <Badge
-              key={provider.name}
-              variant={provider.euNative ? 'secondary' : 'outline'}
-              className="text-sm"
-            >
-              {provider.name}
-            </Badge>
-          ))}
-        </div>
-        <div className="mt-8 text-center">
-          <Button asChild variant="outline">
-            <Link href="/providers">
-              See provider coverage <ArrowRight />
-            </Link>
-          </Button>
-        </div>
-      </Section>
-
-      {/* Closing CTA */}
-      <Section size="lg" containerClassName="flex flex-col items-center gap-6 text-center">
-        <h2 className="max-w-2xl text-balance text-3xl font-semibold tracking-tight sm:text-4xl">
-          Bring your stack under transparent, open control.
-        </h2>
-        <div className="flex flex-wrap items-center justify-center gap-3">
-          <Button asChild size="lg">
-            <Link href="/app">Open the console</Link>
-          </Button>
-          <Button asChild size="lg" variant="outline">
-            <Link href="/pricing">Compare tiers</Link>
-          </Button>
-        </div>
-      </Section>
+        </Container>
+      </section>
     </main>
+  );
+}
+
+function LaunchLine({ where, command }: { where: string; command: string }) {
+  return (
+    <figure className="min-w-0 rounded-lg border border-border bg-card px-5 py-4">
+      <figcaption className="text-sm text-muted-foreground">{where}</figcaption>
+      <pre
+        tabIndex={0}
+        aria-label={`Launch command: ${where}`}
+        className="mt-2 whitespace-pre-wrap break-all font-mono text-[0.8125rem] leading-6 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <code>{command}</code>
+      </pre>
+    </figure>
   );
 }
