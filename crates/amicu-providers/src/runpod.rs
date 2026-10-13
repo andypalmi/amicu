@@ -40,7 +40,9 @@ use crate::capability::{
 };
 use crate::provider::{
     Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
+    ResourceIdentity, TeardownOutcome,
 };
+use crate::rest_lifecycle::{self, ServerApi};
 use crate::transport::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport, TransportError};
 
 /// The adapter identity RunPod registers under.
@@ -222,6 +224,7 @@ const GPUS: &[GpuSpec] = &[
 /// live provisioning (amicu-planning#23 / the gated smoke tests).
 #[derive(Serialize)]
 struct CreatePodRequest<'a> {
+    name: &'a str,
     #[serde(rename = "computeType")]
     compute_type: &'a str,
     #[serde(rename = "gpuCount")]
@@ -237,6 +240,9 @@ struct CreatePodRequest<'a> {
 struct PodResponse {
     /// Provider-assigned pod id.
     id: String,
+    /// The pod name (carries the deterministic identity).
+    #[serde(default)]
+    name: Option<String>,
     /// Desired lifecycle status, e.g. `"RUNNING"`.
     #[serde(rename = "desiredStatus")]
     desired_status: Option<String>,
@@ -346,7 +352,7 @@ impl RunPodProvider {
     /// Swap in a transport and base URL. Test-only: adapter tests inject a mock
     /// so the provisioning path runs with no network, credentials, or spend.
     #[cfg(test)]
-    fn with_transport(
+    pub(crate) fn with_transport(
         mut self,
         transport: Arc<dyn HttpTransport>,
         base_url: impl Into<String>,
@@ -437,6 +443,22 @@ impl RunPodProvider {
         self.capabilities.regions.iter().any(|r| r.code == region)
     }
 
+    /// Check `offering_id` is offered and `region` is admitted, before any
+    /// backend call.
+    fn validate(&self, offering_id: &str, region: &str) -> Result<(), AdapterError> {
+        if !self.has_offering(offering_id) {
+            return Err(AdapterError::from_kind(ProviderError::UnknownOffering {
+                offering: offering_id.to_string(),
+            }));
+        }
+        if !self.admits_region(region) {
+            return Err(AdapterError::from_kind(ProviderError::UnknownRegion {
+                region: region.to_string(),
+            }));
+        }
+        Ok(())
+    }
+
     /// Build a request for `{base}{path}`, attaching `token` as a bearer when
     /// present.
     fn build_request(&self, method: HttpMethod, path: &str, token: Option<&str>) -> HttpRequest {
@@ -509,33 +531,57 @@ impl Provider for RunPodProvider {
         self.capabilities.clone()
     }
 
-    async fn provision(
+    fn prepare(
         &self,
         request: &ProvisionRequest,
+        identity: ResourceIdentity,
+    ) -> Result<ProvisioningHandle, AdapterError> {
+        self.validate(&request.offering_id, &request.region)?;
+        Ok(ProvisioningHandle::prepared(
+            self.id.clone(),
+            request,
+            identity,
+        ))
+    }
+
+    async fn provision(
+        &self,
+        prepared: ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningHandle, AdapterError> {
-        if !self.has_offering(&request.offering_id) {
-            return Err(AdapterError::from_kind(ProviderError::UnknownOffering {
-                offering: request.offering_id.clone(),
-            }));
-        }
-        // Residency filter: only admitted (EU by default) regions can host a pod.
-        // A real RunPod data center outside the admitted set is rejected here,
-        // before any backend call.
-        if !self.admits_region(&request.region) {
-            return Err(AdapterError::from_kind(ProviderError::UnknownRegion {
-                region: request.region.clone(),
+        self.validate(&prepared.offering_id, &prepared.region)?;
+        if prepared.identity.name.is_empty() {
+            return Err(AdapterError::from_kind(ProviderError::Backend {
+                detail: "record has no resource identity".into(),
             }));
         }
         let token = self
-            .resolve_token(resolver, request.credentials.as_ref())
+            .resolve_token(resolver, prepared.credentials.as_ref())
             .await?;
 
+        // Adopt a pod already created under this identity (retry after a
+        // crash) instead of creating a duplicate.
+        if let Some(id) = self
+            .list_by_identity(&prepared, token.as_deref())
+            .await?
+            .into_iter()
+            .next()
+        {
+            return Ok(prepared.completed(
+                "pod_id",
+                id,
+                ProvisioningState::Provisioning {
+                    detail: "adopted existing pod".into(),
+                },
+            ));
+        }
+
         let create = CreatePodRequest {
+            name: prepared.identity.name.as_str(),
             compute_type: "GPU",
             gpu_count: 1,
-            gpu_type_ids: [request.offering_id.as_str()],
-            data_center_ids: [request.region.as_str()],
+            gpu_type_ids: [prepared.offering_id.as_str()],
+            data_center_ids: [prepared.region.as_str()],
         };
         let body = serde_json::to_value(&create).map_err(|_| {
             AdapterError::from_kind(ProviderError::Backend {
@@ -556,11 +602,11 @@ impl Provider for RunPodProvider {
                     detail: "RunPod rejected the API token".into(),
                 },
                 404 => ProviderError::UnknownOffering {
-                    offering: request.offering_id.clone(),
+                    offering: prepared.offering_id.clone(),
                 },
                 409 | 429 => ProviderError::CapacityUnavailable {
-                    offering: request.offering_id.clone(),
-                    region: request.region.clone(),
+                    offering: prepared.offering_id.clone(),
+                    region: prepared.region.clone(),
                 },
                 status => ProviderError::Backend {
                     detail: format!("RunPod API returned HTTP {status}"),
@@ -573,15 +619,8 @@ impl Provider for RunPodProvider {
                 detail: "malformed RunPod create response".into(),
             })
         })?;
-        Ok(ProvisioningHandle {
-            id: pod.id,
-            provider: self.id.clone(),
-            region: request.region.clone(),
-            zone: None,
-            offering_id: request.offering_id.clone(),
-            credentials: request.credentials.clone(),
-            state: map_pod_state(pod.desired_status.as_deref()),
-        })
+        let state = map_pod_state(pod.desired_status.as_deref());
+        Ok(prepared.completed("pod_id", pod.id, state))
     }
 
     async fn status(
@@ -614,27 +653,96 @@ impl Provider for RunPodProvider {
         &self,
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<TeardownOutcome, AdapterError> {
         let token = self
             .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
-        let path = format!("/pods/{}", handle.id);
-        let request = self.build_request(HttpMethod::Delete, &path, token.as_deref());
+        rest_lifecycle::teardown(self, handle, token.as_deref()).await
+    }
+}
+
+#[async_trait]
+impl ServerApi for RunPodProvider {
+    async fn list_by_identity(
+        &self,
+        handle: &ProvisioningHandle,
+        token: Option<&str>,
+    ) -> Result<Vec<String>, AdapterError> {
+        let name = handle.identity.name.as_str();
+        if name.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = format!("/pods?name={name}");
+        let request = self.build_request(HttpMethod::Get, &path, token);
         let response = self
             .transport
             .execute(request)
             .await
             .map_err(|e| transport_error(&e))?;
-        if !response.is_success() {
-            return Err(lifecycle_error(response.status, &handle.id));
+        if response.status == 404 {
+            return Ok(Vec::new());
         }
-        Ok(())
+        if !response.is_success() {
+            return Err(lifecycle_error(response.status, name));
+        }
+        let pods: Vec<PodResponse> = response.json().map_err(|_| {
+            AdapterError::from_kind(ProviderError::Backend {
+                detail: "malformed RunPod list response".into(),
+            })
+        })?;
+        Ok(pods
+            .into_iter()
+            .filter(|p| p.name.as_deref() == Some(name))
+            .map(|p| p.id)
+            .collect())
+    }
+
+    async fn delete(
+        &self,
+        _handle: &ProvisioningHandle,
+        id: &str,
+        token: Option<&str>,
+    ) -> Result<(), AdapterError> {
+        let path = format!("/pods/{id}");
+        let request = self.build_request(HttpMethod::Delete, &path, token);
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if response.is_success() || response.status == 404 {
+            return Ok(());
+        }
+        Err(lifecycle_error(response.status, id))
+    }
+
+    async fn exists(
+        &self,
+        _handle: &ProvisioningHandle,
+        id: &str,
+        token: Option<&str>,
+    ) -> Result<bool, AdapterError> {
+        let path = format!("/pods/{id}");
+        let request = self.build_request(HttpMethod::Get, &path, token);
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if response.status == 404 {
+            return Ok(false);
+        }
+        if response.is_success() {
+            return Ok(true);
+        }
+        Err(lifecycle_error(response.status, id))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ProvisionCompat;
     use crate::transport::{HttpResponse, MockTransport};
     use amicu_core::adapter::Registry;
     use amicu_core::diagnostic::{Category as DiagCategory, DiagnosticCode};
@@ -764,20 +872,30 @@ mod tests {
         let p = mock_provider(mock.clone());
         let req = ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1");
 
-        let handle = p.provision(&req, &no_creds()).await.unwrap();
+        let handle = p.provision_request(&req, &no_creds()).await.unwrap();
         assert!(handle.state.is_ready());
         assert_eq!(handle.id, "pod-xyz");
         assert_eq!(handle.provider, AdapterId::new("runpod"));
 
         assert!(p.status(&handle, &no_creds()).await.unwrap().is_ready());
-        p.teardown(&handle, &no_creds()).await.unwrap();
+        // The canned GET keeps reporting the resource after the delete, so absence is
+        // unconfirmed (the conformance harness covers the confirmed path).
+        assert!(
+            !p.teardown(&handle, &no_creds())
+                .await
+                .unwrap()
+                .is_confirmed_gone()
+        );
 
         // The lifecycle hit the expected REST endpoints in order.
         let seen = mock.requests();
-        assert_eq!(seen[0].method, HttpMethod::Post);
-        assert!(seen[0].url.ends_with("/pods"));
-        assert_eq!(seen[1].method, HttpMethod::Get);
-        assert_eq!(seen[2].method, HttpMethod::Delete);
+        // The identity lookup (adoption check) comes first, then the create.
+        assert_eq!(seen[0].method, HttpMethod::Get);
+        assert!(
+            seen.iter()
+                .any(|r| r.method == HttpMethod::Post && r.url.ends_with("/pods"))
+        );
+        assert!(seen.iter().any(|r| r.method == HttpMethod::Delete));
     }
 
     #[tokio::test]
@@ -787,7 +905,7 @@ mod tests {
         // backend call.
         let p = RunPodProvider::new();
         let err = p
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.a100-80gb.1x", "US-CA-1"),
                 &no_creds(),
             )
@@ -800,7 +918,7 @@ mod tests {
     #[tokio::test]
     async fn provision_unknown_offering_is_rejected() {
         let err = RunPodProvider::new()
-            .provision(&ProvisionRequest::new("nope", "EU-RO-1"), &no_creds())
+            .provision_request(&ProvisionRequest::new("nope", "EU-RO-1"), &no_creds())
             .await
             .expect_err("unknown offering");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-010");
@@ -813,7 +931,7 @@ mod tests {
         let req = ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1")
             .with_credentials(SecretRef::new("runpod_token"));
         let err = p
-            .provision(&req, &resolver)
+            .provision_request(&req, &resolver)
             .await
             .expect_err("empty credential rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
@@ -832,7 +950,7 @@ mod tests {
             .with_credentials(SecretRef::new("runpod_token"));
         let resolver = TestResolver::default().with("runpod_token", "bad");
         let err = p
-            .provision(&req, &resolver)
+            .provision_request(&req, &resolver)
             .await
             .expect_err("401 must reject credentials");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
@@ -847,7 +965,7 @@ mod tests {
             HttpResponse::new(429, b"slow down".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1"),
                 &no_creds(),
             )
@@ -870,7 +988,7 @@ mod tests {
         );
         let p = mock_provider(mock);
         let handle = p
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1"),
                 &no_creds(),
             )
@@ -892,7 +1010,7 @@ mod tests {
             TransportError::Timeout,
         ));
         let err = mock_provider(mock)
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1"),
                 &no_creds(),
             )
@@ -910,7 +1028,7 @@ mod tests {
             HttpResponse::new(404, b"no such gpu type".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1"),
                 &no_creds(),
             )
@@ -928,7 +1046,7 @@ mod tests {
             HttpResponse::new(500, b"boom".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1"),
                 &no_creds(),
             )
@@ -946,7 +1064,7 @@ mod tests {
             HttpResponse::new(201, b"not json".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1"),
                 &no_creds(),
             )
@@ -956,7 +1074,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn teardown_maps_404_to_unknown_instance() {
+    async fn teardown_404_is_confirmed_gone() {
         let mock = Arc::new(
             MockTransport::default()
                 .on(HttpMethod::Post, "/pods", created("pod-1"))
@@ -968,18 +1086,15 @@ mod tests {
         );
         let p = mock_provider(mock);
         let handle = p
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1"),
                 &no_creds(),
             )
             .await
             .unwrap();
-        let err = p
-            .teardown(&handle, &no_creds())
-            .await
-            .expect_err("teardown 404 maps to unknown instance");
-        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
-        assert!(!err.is_retryable());
+        // Idempotent: a 404 on delete means already gone.
+        let outcome = p.teardown(&handle, &no_creds()).await.unwrap();
+        assert_eq!(outcome, TeardownOutcome::ConfirmedGone);
     }
 
     #[tokio::test]
@@ -989,7 +1104,7 @@ mod tests {
         let req = ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1")
             .with_credentials(SecretRef::new("runpod_token"));
         let err = p
-            .provision(&req, &resolver)
+            .provision_request(&req, &resolver)
             .await
             .expect_err("non-UTF-8 credential rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
@@ -1010,7 +1125,7 @@ mod tests {
         assert!(req_json.contains("runpod_token"));
         assert!(!req_json.contains(secret_value));
 
-        let handle = p.provision(&req, &resolver).await.unwrap();
+        let handle = p.provision_request(&req, &resolver).await.unwrap();
         let handle_json = serde_json::to_string(&handle).unwrap();
         assert!(handle_json.contains("runpod_token"));
         assert!(!handle_json.contains(secret_value));
@@ -1042,7 +1157,7 @@ mod tests {
         registry.register(Arc::new(mock_provider(mock)));
         let found: Arc<dyn Provider> = registry.get(&AdapterId::new("runpod")).unwrap();
         let handle = found
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.rtx-4090.1x", "EU-NL-1"),
                 &no_creds(),
             )

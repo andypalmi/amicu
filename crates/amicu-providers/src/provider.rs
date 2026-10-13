@@ -22,7 +22,41 @@
 //! dropped - it is never stored on the handle nor serialized. Every fallible
 //! method returns [`AdapterError`]; adapters never panic.
 //!
+//! # The orphan-proof provider contract
+//!
+//! Every adapter must make it impossible to leak a billable resource. The
+//! contract (enforced for every adapter by the [`conformance`](crate::conformance)
+//! harness) is:
+//!
+//! 1. **Everything needed to stop a resource lives in the record.** The
+//!    [`ProvisioningHandle`] is a self-describing, serializable stop record:
+//!    provider kind, region/zone, credential *reference*, a deterministic
+//!    [`ResourceIdentity`], the provider's resource ids (and, for self-hosted,
+//!    the SSH host and agent id), and a schema version. It carries no secret
+//!    value (a compile-time assertion guards that `SecretValue` stays
+//!    non-`Serialize`).
+//! 2. **Write-ahead.** [`Provider::prepare`] is pure (no backend contact) and
+//!    returns the record *before* any resource exists. The caller persists it,
+//!    and only then calls [`Provider::provision`]. A record whose `id` is empty
+//!    means "may or may not exist"; it is still stoppable.
+//! 3. **Deterministic identity.** `provision` names/tags the resource with the
+//!    identity derived from deployment id + project id, and adopts an existing
+//!    resource carrying that identity rather than creating a duplicate. If the
+//!    process dies between the create call and persisting the returned ids, or
+//!    `provision` fails midway, [`Provider::teardown`] finds the resource by its
+//!    identity.
+//! 4. **Teardown works from the record alone**, never from adapter
+//!    configuration, and is idempotent: an absent resource is confirmed gone.
+//! 5. **Confirmed or not.** [`Provider::teardown`] returns
+//!    [`TeardownOutcome::ConfirmedGone`] only after the backend confirmed the
+//!    resource absent; otherwise [`TeardownOutcome::Unconfirmed`] (or an error).
+//!    Callers keep the record in state until `ConfirmedGone`. There is no
+//!    warn-and-drop path: after any `provision` error the caller must still
+//!    tear down the prepared record.
+//!
 //! [`SecretValue`]: amicu_core::secret::SecretValue
+
+use std::collections::BTreeMap;
 
 use amicu_core::adapter::{
     Adapter, AdapterError, AdapterErrorKind, AdapterId, DescribeCapabilities,
@@ -176,33 +210,207 @@ impl ProvisioningState {
     }
 }
 
-/// Identifies a provisioned instance and how it was provisioned.
+/// Current schema version of [`ProvisioningHandle`].
+pub const HANDLE_SCHEMA_VERSION: u32 = 1;
+
+fn default_schema_version() -> u32 {
+    HANDLE_SCHEMA_VERSION
+}
+
+fn default_state() -> ProvisioningState {
+    ProvisioningState::Requested
+}
+
+// Compile-time guarantee that the stop record cannot carry a secret value: the
+// build fails if `SecretValue` ever becomes `Serialize`.
+const _: () = {
+    trait AmbiguousIfSerialize<A> {
+        fn probe() {}
+    }
+    impl<T: ?Sized> AmbiguousIfSerialize<()> for T {}
+    impl<T: ?Sized + Serialize> AmbiguousIfSerialize<u8> for T {}
+    let _ = <amicu_core::secret::SecretValue as AmbiguousIfSerialize<_>>::probe;
+};
+
+/// The deterministic identity a resource is created under.
 ///
-/// Returned by [`Provider::provision`] and passed back to
-/// [`Provider::status`] / [`Provider::teardown`]. It carries the credential by
-/// [`SecretRef`] (name only) so later operations can re-authenticate; it never
-/// stores the resolved [`SecretValue`](amicu_core::secret::SecretValue), so it
-/// is safe to serialize.
+/// Derived from the deployment id and project id, so it is known before any
+/// API call and lets teardown find a resource whose provider id was never
+/// recorded (crash between create and persist).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ResourceIdentity {
+    /// The deployment this resource belongs to.
+    #[serde(default)]
+    pub deployment_id: String,
+    /// The project this resource belongs to.
+    #[serde(default)]
+    pub project_id: String,
+    /// The provider-safe resource name/tag derived from the two ids
+    /// (lowercase alphanumerics and `-`, at most 63 characters).
+    #[serde(default)]
+    pub name: String,
+}
+
+impl ResourceIdentity {
+    /// Maximum length of the derived name (a DNS label).
+    pub const MAX_NAME_LEN: usize = 63;
+
+    /// Derive the identity for `deployment_id` in `project_id`. Pure and
+    /// deterministic: the same inputs always yield the same name, and distinct
+    /// inputs yield distinct names.
+    #[must_use]
+    pub fn new(deployment_id: impl Into<String>, project_id: impl Into<String>) -> Self {
+        let deployment_id = deployment_id.into();
+        let project_id = project_id.into();
+        let slug = |v: &str| -> String {
+            v.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>()
+                .trim_matches('-')
+                .to_string()
+        };
+        // FNV-1a over the raw ids: keeps names unique even when slugging or
+        // truncation would collapse distinct ids.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in project_id
+            .bytes()
+            .chain(std::iter::once(0))
+            .chain(deployment_id.bytes())
+        {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        let suffix = format!("{:08x}", hash & 0xffff_ffff);
+        let mut base = format!("amicu-{}-{}", slug(&project_id), slug(&deployment_id));
+        let budget = Self::MAX_NAME_LEN - suffix.len() - 1;
+        base.truncate(budget);
+        let name = format!("{}-{suffix}", base.trim_end_matches('-'));
+        Self {
+            deployment_id,
+            project_id,
+            name,
+        }
+    }
+}
+
+/// A fully self-describing, serializable stop record for a provisioned (or
+/// about-to-be-provisioned) resource.
+///
+/// Produced by [`Provider::prepare`] *before* any resource exists, persisted
+/// by the caller (write-ahead), completed by [`Provider::provision`], and
+/// sufficient on its own for [`Provider::status`] / [`Provider::teardown`].
+/// It carries the credential by [`SecretRef`] (name only); a compile-time
+/// assertion keeps `SecretValue` non-`Serialize`, so no secret can be stored.
+/// Fields have serde defaults so older/newer records stay readable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvisioningHandle {
-    /// Opaque, provider-assigned instance id.
+    /// Schema version of this record.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    /// Primary provider-assigned resource id. Empty until `provision` has
+    /// recorded one; an empty id still stops via [`identity`](Self::identity).
+    #[serde(default)]
     pub id: String,
-    /// The provider that provisioned the instance.
+    /// The provider kind that owns the resource.
     pub provider: AdapterId,
-    /// The region the instance runs in.
+    /// The region the resource runs in.
     pub region: String,
-    /// The zone (AZ) the instance was placed in, when the adapter resolved one.
-    /// Carried so later zone-addressed `status`/`teardown` calls target the same
-    /// zone; `None` for region-addressed providers.
+    /// The zone (AZ), when the adapter resolved one; carried so later
+    /// zone-addressed calls target the same zone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zone: Option<String>,
     /// The offering that was provisioned.
+    #[serde(default)]
     pub offering_id: String,
     /// Reference to the credential used for backend operations (name only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials: Option<SecretRef>,
-    /// The instance's lifecycle state.
+    /// The deterministic identity the resource is created under.
+    #[serde(default)]
+    pub identity: ResourceIdentity,
+    /// Further provider resource ids / addressing needed to stop the resource
+    /// (e.g. `ssh_host`, `ssh_user`, `ssh_port`, `agent_id` for self-hosted).
+    /// Ids and addresses only - never secret values.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resources: BTreeMap<String, String>,
+    /// The resource's lifecycle state.
+    #[serde(default = "default_state")]
     pub state: ProvisioningState,
+}
+
+impl ProvisioningHandle {
+    /// A freshly prepared record: identity known, no resource created yet.
+    #[must_use]
+    pub fn prepared(
+        provider: AdapterId,
+        request: &ProvisionRequest,
+        identity: ResourceIdentity,
+    ) -> Self {
+        Self {
+            schema_version: HANDLE_SCHEMA_VERSION,
+            id: String::new(),
+            provider,
+            region: request.region.clone(),
+            zone: request.zone.clone(),
+            offering_id: request.offering_id.clone(),
+            credentials: request.credentials.clone(),
+            identity,
+            resources: BTreeMap::new(),
+            state: ProvisioningState::Requested,
+        }
+    }
+
+    /// Record the created resource: sets the primary `id`, files it under
+    /// `resource_key` in [`resources`](Self::resources), and sets the state.
+    #[must_use]
+    pub fn completed(
+        mut self,
+        resource_key: &str,
+        id: impl Into<String>,
+        state: ProvisioningState,
+    ) -> Self {
+        let id = id.into();
+        self.resources.insert(resource_key.to_string(), id.clone());
+        self.id = id;
+        self.state = state;
+        self
+    }
+
+    /// Whether a provider resource id has been recorded.
+    #[must_use]
+    pub fn has_resource_id(&self) -> bool {
+        !self.id.is_empty()
+    }
+}
+
+/// The result of a [`Provider::teardown`] that did not fail outright.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+#[must_use = "an unconfirmed teardown must keep the record in state"]
+pub enum TeardownOutcome {
+    /// The backend confirmed every resource of the record is absent. The only
+    /// outcome after which the record may leave state.
+    ConfirmedGone,
+    /// A stop was issued but absence could not be confirmed; keep the record
+    /// and retry (teardown is idempotent).
+    Unconfirmed {
+        /// Safe, secret-free reason.
+        reason: String,
+    },
+}
+
+impl TeardownOutcome {
+    /// Whether the resource is confirmed gone.
+    #[must_use]
+    pub fn is_confirmed_gone(&self) -> bool {
+        matches!(self, TeardownOutcome::ConfirmedGone)
+    }
 }
 
 /// Failures a provider adapter can raise, each mapped to a stable
@@ -307,25 +515,33 @@ pub trait Provider: Adapter + DescribeCapabilities {
     /// that it runs during `plan`.
     fn capabilities(&self) -> ProviderCapabilities;
 
-    /// Provision compute per `request`, driving the instance
-    /// `Requested` → `Provisioning` → `Ready` and returning its handle.
-    /// Apply-time only.
-    ///
-    /// `resolver` turns `request.credentials` into a
-    /// [`SecretValue`](amicu_core::secret::SecretValue) transiently, to
-    /// authenticate the backend call. The value is used and dropped here; it is
-    /// never placed on the returned handle nor logged.
+    /// Validate `request` and return the stop record for it, under
+    /// `identity`, **without contacting the backend or creating anything**.
+    /// The caller persists the record, then calls [`provision`](Self::provision).
     ///
     /// # Errors
     /// [`ProviderError::UnknownOffering`] / [`ProviderError::UnknownRegion`]
-    /// when the request references an offering or region the provider does not
-    /// have; [`ProviderError::CapacityUnavailable`] when there is no capacity;
-    /// [`ProviderError::CredentialsRejected`] when the credential is rejected;
-    /// or the resolver's error (an `AMICU-POLICY-*` code) when the referenced
-    /// secret is unavailable - each folded into an [`AdapterError`].
-    async fn provision(
+    /// for a request the provider cannot serve.
+    fn prepare(
         &self,
         request: &ProvisionRequest,
+        identity: ResourceIdentity,
+    ) -> Result<ProvisioningHandle, AdapterError>;
+
+    /// Create the resource described by the (already persisted) `prepared`
+    /// record under its deterministic identity, adopting an existing resource
+    /// with that identity instead of duplicating it, and return the completed
+    /// record (resource ids filled in). Apply-time only.
+    ///
+    /// On error the resource may still exist: the caller must keep the
+    /// prepared record and tear it down.
+    ///
+    /// # Errors
+    /// Capacity, credential and backend failures folded into an
+    /// [`AdapterError`].
+    async fn provision(
+        &self,
+        prepared: ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningHandle, AdapterError>;
 
@@ -343,20 +559,38 @@ pub trait Provider: Adapter + DescribeCapabilities {
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningState, AdapterError>;
 
-    /// Tear down a previously provisioned instance, driving it
-    /// `Stopping` → `Terminated`. Apply-time only; re-authenticates via
-    /// `resolver`.
+    /// Stop everything the record describes, from the record alone.
+    /// Idempotent: an absent resource counts as gone. Returns
+    /// [`TeardownOutcome::ConfirmedGone`] only after the backend confirmed
+    /// absence; never `Ok` for an unconfirmed stop. Apply-time only.
     ///
     /// # Errors
-    /// [`ProviderError::UnknownInstance`] when `handle` refers to no known
-    /// instance, or the resolver's error when the credential is unavailable -
-    /// folded into an [`AdapterError`].
+    /// Credential/backend failures folded into an [`AdapterError`]; the record
+    /// must then be kept.
     async fn teardown(
         &self,
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
-    ) -> Result<(), AdapterError>;
+    ) -> Result<TeardownOutcome, AdapterError>;
 }
+
+/// Test-only convenience: `prepare` + `provision` in one call, for adapter unit
+/// tests that exercise the happy path rather than the write-ahead split.
+#[cfg(test)]
+#[async_trait]
+pub(crate) trait ProvisionCompat: Provider {
+    async fn provision_request(
+        &self,
+        request: &ProvisionRequest,
+        resolver: &dyn SecretResolver,
+    ) -> Result<ProvisioningHandle, AdapterError> {
+        let prepared = self.prepare(request, ResourceIdentity::new("deployment", "project"))?;
+        self.provision(prepared, resolver).await
+    }
+}
+
+#[cfg(test)]
+impl<T: Provider + ?Sized> ProvisionCompat for T {}
 
 #[cfg(test)]
 mod tests {
@@ -398,16 +632,47 @@ mod tests {
         assert_eq!(req.zone.as_deref(), Some("fr-par-2"));
         assert!(serde_json::to_string(&req).unwrap().contains("fr-par-2"));
 
-        let handle = ProvisioningHandle {
-            id: "srv-1".into(),
-            provider: AdapterId::new("scaleway"),
-            region: "fr-par".into(),
-            zone: None,
-            offering_id: "gpu.h100.1x".into(),
-            credentials: None,
-            state: ProvisioningState::Requested,
-        };
+        let handle = ProvisioningHandle::prepared(
+            AdapterId::new("scaleway"),
+            &ProvisionRequest::new("gpu.h100.1x", "fr-par"),
+            ResourceIdentity::new("d", "p"),
+        );
         assert!(!serde_json::to_string(&handle).unwrap().contains("zone"));
+    }
+
+    #[test]
+    fn record_roundtrips_and_tolerates_missing_fields() {
+        let mut h = ProvisioningHandle::prepared(
+            AdapterId::new("hetzner"),
+            &ProvisionRequest::new("o", "nbg1"),
+            ResourceIdentity::new("dep-1", "proj-1"),
+        );
+        h.id = "42".into();
+        h.resources.insert("server_id".into(), "42".into());
+        let json = serde_json::to_string(&h).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ProvisioningHandle>(&json).unwrap(),
+            h
+        );
+        let min: ProvisioningHandle =
+            serde_json::from_str(r#"{"provider":"hetzner","region":"nbg1"}"#).unwrap();
+        assert_eq!(min.schema_version, HANDLE_SCHEMA_VERSION);
+        assert!(!min.has_resource_id());
+    }
+
+    #[test]
+    fn identity_is_deterministic_dns_safe_and_collision_resistant() {
+        let a = ResourceIdentity::new("Dep_1", "My Project");
+        assert_eq!(a, ResourceIdentity::new("Dep_1", "My Project"));
+        assert!(a.name.len() <= ResourceIdentity::MAX_NAME_LEN);
+        assert!(
+            a.name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        );
+        assert_ne!(a.name, ResourceIdentity::new("dep-1", "my-project").name);
+        let long = ResourceIdentity::new("d".repeat(200), "p".repeat(200));
+        assert!(long.name.len() <= ResourceIdentity::MAX_NAME_LEN);
     }
 
     #[test]

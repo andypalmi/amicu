@@ -63,6 +63,7 @@ use crate::capability::{
 };
 use crate::provider::{
     Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
+    ResourceIdentity, TeardownOutcome,
 };
 
 /// The adapter identity Modal registers under.
@@ -505,9 +506,17 @@ impl Provider for ModalProvider {
         self.capabilities.clone()
     }
 
-    async fn provision(
+    fn prepare(
         &self,
         _request: &ProvisionRequest,
+        _identity: ResourceIdentity,
+    ) -> Result<ProvisioningHandle, AdapterError> {
+        Err(not_yet_provisionable())
+    }
+
+    async fn provision(
+        &self,
+        _prepared: ProvisioningHandle,
         _resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningHandle, AdapterError> {
         Err(not_yet_provisionable())
@@ -525,7 +534,7 @@ impl Provider for ModalProvider {
         &self,
         _handle: &ProvisioningHandle,
         _resolver: &dyn SecretResolver,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<TeardownOutcome, AdapterError> {
         Err(not_yet_provisionable())
     }
 }
@@ -533,6 +542,7 @@ impl Provider for ModalProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ProvisionCompat;
     use amicu_core::adapter::Registry;
     use amicu_core::diagnostic::{Category as DiagCategory, DiagnosticCode};
     use amicu_core::secret::{SecretRef, SecretValue};
@@ -699,7 +709,7 @@ mod tests {
         let req = ProvisionRequest::new("gpu.t4.1x", "us");
 
         let err = p
-            .provision(&req, &resolver)
+            .provision_request(&req, &resolver)
             .await
             .expect_err("catalog-only adapter must not provision");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-015");
@@ -707,15 +717,12 @@ mod tests {
         // retry makes this succeed.
         assert!(!err.is_retryable());
 
-        let handle = ProvisioningHandle {
-            id: "sandbox-1".into(),
-            provider: AdapterId::new("modal"),
-            region: "us".into(),
-            zone: None,
-            offering_id: "gpu.t4.1x".into(),
-            credentials: None,
-            state: ProvisioningState::Requested,
-        };
+        let mut handle = ProvisioningHandle::prepared(
+            AdapterId::new("modal"),
+            &ProvisionRequest::new("gpu.t4.1x", "us"),
+            ResourceIdentity::new("d", "p"),
+        );
+        handle.id = "sandbox-1".into();
         let err = p
             .status(&handle, &resolver)
             .await
@@ -740,7 +747,7 @@ mod tests {
         let resolver = TestResolver::default();
         let req = ProvisionRequest::new("gpu.t4.1x", "us")
             .with_credentials(SecretRef::new("modal_token"));
-        let err = p.provision(&req, &resolver).await.unwrap_err();
+        let err = p.provision_request(&req, &resolver).await.unwrap_err();
         assert_eq!(err.code().category(), DiagCategory::Provider);
     }
 

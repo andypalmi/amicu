@@ -47,7 +47,9 @@ use crate::capability::{
 };
 use crate::provider::{
     Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
+    ResourceIdentity, TeardownOutcome,
 };
+use crate::rest_lifecycle::{self, ServerApi};
 use crate::transport::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport, TransportError};
 
 /// The adapter identity OVHcloud registers under.
@@ -235,6 +237,9 @@ struct CreateInstanceRequest<'a> {
 struct InstanceResponse {
     /// Provider-assigned instance id.
     id: String,
+    /// The instance name (carries the deterministic identity).
+    #[serde(default)]
+    name: Option<String>,
     /// Lifecycle status, e.g. `"ACTIVE"`.
     status: Option<String>,
 }
@@ -354,7 +359,7 @@ impl OvhCloudProvider {
     /// Swap in a transport and base URL. Test-only: adapter tests inject a mock
     /// so the provisioning path runs with no network, credentials, or spend.
     #[cfg(test)]
-    fn with_transport(
+    pub(crate) fn with_transport(
         mut self,
         transport: Arc<dyn HttpTransport>,
         base_url: impl Into<String>,
@@ -449,6 +454,22 @@ impl OvhCloudProvider {
         self.capabilities.regions.iter().any(|r| r.code == region)
     }
 
+    /// Check `offering_id` is offered and `region` is admitted, before any
+    /// backend call.
+    fn validate(&self, offering_id: &str, region: &str) -> Result<(), AdapterError> {
+        if !self.has_offering(offering_id) {
+            return Err(AdapterError::from_kind(ProviderError::UnknownOffering {
+                offering: offering_id.to_string(),
+            }));
+        }
+        if !self.admits_region(region) {
+            return Err(AdapterError::from_kind(ProviderError::UnknownRegion {
+                region: region.to_string(),
+            }));
+        }
+        Ok(())
+    }
+
     /// Build a request for `{base}{path}`, attaching `token` in the OVH auth
     /// header when present.
     fn build_request(&self, method: HttpMethod, path: &str, token: Option<&str>) -> HttpRequest {
@@ -522,32 +543,55 @@ impl Provider for OvhCloudProvider {
         self.capabilities.clone()
     }
 
-    async fn provision(
+    fn prepare(
         &self,
         request: &ProvisionRequest,
+        identity: ResourceIdentity,
+    ) -> Result<ProvisioningHandle, AdapterError> {
+        self.validate(&request.offering_id, &request.region)?;
+        Ok(ProvisioningHandle::prepared(
+            self.id.clone(),
+            request,
+            identity,
+        ))
+    }
+
+    async fn provision(
+        &self,
+        prepared: ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningHandle, AdapterError> {
-        if !self.has_offering(&request.offering_id) {
-            return Err(AdapterError::from_kind(ProviderError::UnknownOffering {
-                offering: request.offering_id.clone(),
-            }));
-        }
-        // Residency filter: only admitted (EU by default) regions can host an
-        // instance. A real OVH data center outside the admitted set - including
-        // the UK - is rejected here.
-        if !self.admits_region(&request.region) {
-            return Err(AdapterError::from_kind(ProviderError::UnknownRegion {
-                region: request.region.clone(),
+        self.validate(&prepared.offering_id, &prepared.region)?;
+        if prepared.identity.name.is_empty() {
+            return Err(AdapterError::from_kind(ProviderError::Backend {
+                detail: "record has no resource identity".into(),
             }));
         }
         let token = self
-            .resolve_token(resolver, request.credentials.as_ref())
+            .resolve_token(resolver, prepared.credentials.as_ref())
             .await?;
 
+        // Adopt an instance already created under this identity (retry after a
+        // crash) instead of creating a duplicate.
+        if let Some(id) = self
+            .list_by_identity(&prepared, token.as_deref())
+            .await?
+            .into_iter()
+            .next()
+        {
+            return Ok(prepared.completed(
+                "instance_id",
+                id,
+                ProvisioningState::Provisioning {
+                    detail: "adopted existing instance".into(),
+                },
+            ));
+        }
+
         let create = CreateInstanceRequest {
-            name: "amicu-instance",
-            flavor_id: request.offering_id.as_str(),
-            region: request.region.as_str(),
+            name: prepared.identity.name.as_str(),
+            flavor_id: prepared.offering_id.as_str(),
+            region: prepared.region.as_str(),
         };
         let body = serde_json::to_value(&create).map_err(|_| {
             AdapterError::from_kind(ProviderError::Backend {
@@ -569,11 +613,11 @@ impl Provider for OvhCloudProvider {
                     detail: "OVHcloud rejected the credential".into(),
                 },
                 404 => ProviderError::UnknownOffering {
-                    offering: request.offering_id.clone(),
+                    offering: prepared.offering_id.clone(),
                 },
                 409 | 429 => ProviderError::CapacityUnavailable {
-                    offering: request.offering_id.clone(),
-                    region: request.region.clone(),
+                    offering: prepared.offering_id.clone(),
+                    region: prepared.region.clone(),
                 },
                 status => ProviderError::Backend {
                     detail: format!("OVHcloud API returned HTTP {status}"),
@@ -586,15 +630,8 @@ impl Provider for OvhCloudProvider {
                 detail: "malformed OVHcloud create response".into(),
             })
         })?;
-        Ok(ProvisioningHandle {
-            id: instance.id,
-            provider: self.id.clone(),
-            region: request.region.clone(),
-            zone: None,
-            offering_id: request.offering_id.clone(),
-            credentials: request.credentials.clone(),
-            state: map_instance_state(instance.status.as_deref()),
-        })
+        let state = map_instance_state(instance.status.as_deref());
+        Ok(prepared.completed("instance_id", instance.id, state))
     }
 
     async fn status(
@@ -627,27 +664,96 @@ impl Provider for OvhCloudProvider {
         &self,
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<TeardownOutcome, AdapterError> {
         let token = self
             .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
-        let path = instance_path(&format!("/{}", handle.id));
-        let request = self.build_request(HttpMethod::Delete, &path, token.as_deref());
+        rest_lifecycle::teardown(self, handle, token.as_deref()).await
+    }
+}
+
+#[async_trait]
+impl ServerApi for OvhCloudProvider {
+    async fn list_by_identity(
+        &self,
+        handle: &ProvisioningHandle,
+        token: Option<&str>,
+    ) -> Result<Vec<String>, AdapterError> {
+        let name = handle.identity.name.as_str();
+        if name.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = instance_path(&format!("?region={}", handle.region));
+        let request = self.build_request(HttpMethod::Get, &path, token);
         let response = self
             .transport
             .execute(request)
             .await
             .map_err(|e| transport_error(&e))?;
-        if !response.is_success() {
-            return Err(lifecycle_error(response.status, &handle.id));
+        if response.status == 404 {
+            return Ok(Vec::new());
         }
-        Ok(())
+        if !response.is_success() {
+            return Err(lifecycle_error(response.status, name));
+        }
+        let list: Vec<InstanceResponse> = response.json().map_err(|_| {
+            AdapterError::from_kind(ProviderError::Backend {
+                detail: "malformed OVHcloud list response".into(),
+            })
+        })?;
+        Ok(list
+            .into_iter()
+            .filter(|i| i.name.as_deref() == Some(name))
+            .map(|i| i.id)
+            .collect())
+    }
+
+    async fn delete(
+        &self,
+        _handle: &ProvisioningHandle,
+        id: &str,
+        token: Option<&str>,
+    ) -> Result<(), AdapterError> {
+        let path = instance_path(&format!("/{id}"));
+        let request = self.build_request(HttpMethod::Delete, &path, token);
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if response.is_success() || response.status == 404 {
+            return Ok(());
+        }
+        Err(lifecycle_error(response.status, id))
+    }
+
+    async fn exists(
+        &self,
+        _handle: &ProvisioningHandle,
+        id: &str,
+        token: Option<&str>,
+    ) -> Result<bool, AdapterError> {
+        let path = instance_path(&format!("/{id}"));
+        let request = self.build_request(HttpMethod::Get, &path, token);
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if response.status == 404 {
+            return Ok(false);
+        }
+        if response.is_success() {
+            return Ok(true);
+        }
+        Err(lifecycle_error(response.status, id))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ProvisionCompat;
     use crate::transport::{HttpResponse, MockTransport};
     use amicu_core::adapter::Registry;
     use amicu_core::diagnostic::{Category as DiagCategory, DiagnosticCode};
@@ -800,20 +906,30 @@ mod tests {
         let p = mock_provider(mock.clone());
         let req = ProvisionRequest::new("gpu.a100.1x", "GRA");
 
-        let handle = p.provision(&req, &no_creds()).await.unwrap();
+        let handle = p.provision_request(&req, &no_creds()).await.unwrap();
         assert!(handle.state.is_ready());
         assert_eq!(handle.id, "ovh-1");
         assert_eq!(handle.provider, AdapterId::new("ovhcloud"));
 
         assert!(p.status(&handle, &no_creds()).await.unwrap().is_ready());
-        p.teardown(&handle, &no_creds()).await.unwrap();
+        // The canned GET keeps reporting the resource after the delete, so absence is
+        // unconfirmed (the conformance harness covers the confirmed path).
+        assert!(
+            !p.teardown(&handle, &no_creds())
+                .await
+                .unwrap()
+                .is_confirmed_gone()
+        );
 
         // The lifecycle hit the expected REST endpoints in order.
         let seen = mock.requests();
-        assert_eq!(seen[0].method, HttpMethod::Post);
-        assert!(seen[0].url.ends_with("/instance"));
-        assert_eq!(seen[1].method, HttpMethod::Get);
-        assert_eq!(seen[2].method, HttpMethod::Delete);
+        // The identity lookup (adoption check) comes first, then the create.
+        assert_eq!(seen[0].method, HttpMethod::Get);
+        assert!(
+            seen.iter()
+                .any(|r| r.method == HttpMethod::Post && r.url.ends_with("/instance"))
+        );
+        assert!(seen.iter().any(|r| r.method == HttpMethod::Delete));
     }
 
     #[tokio::test]
@@ -823,7 +939,7 @@ mod tests {
         // before any backend call.
         let p = OvhCloudProvider::new();
         let err = p
-            .provision(&ProvisionRequest::new("gpu.a100.1x", "UK1"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.a100.1x", "UK1"), &no_creds())
             .await
             .expect_err("UK region must be rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-011");
@@ -835,7 +951,7 @@ mod tests {
         // BHS (Canada) is a real OVH data center outside the admitted EU set.
         let p = OvhCloudProvider::new();
         let err = p
-            .provision(&ProvisionRequest::new("gpu.a100.1x", "BHS"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.a100.1x", "BHS"), &no_creds())
             .await
             .expect_err("non-EU region must be rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-011");
@@ -845,7 +961,7 @@ mod tests {
     #[tokio::test]
     async fn provision_unknown_offering_is_rejected() {
         let err = OvhCloudProvider::new()
-            .provision(&ProvisionRequest::new("nope", "GRA"), &no_creds())
+            .provision_request(&ProvisionRequest::new("nope", "GRA"), &no_creds())
             .await
             .expect_err("unknown offering");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-010");
@@ -858,7 +974,7 @@ mod tests {
         let req = ProvisionRequest::new("gpu.a100.1x", "GRA")
             .with_credentials(SecretRef::new("ovh_api_key"));
         let err = p
-            .provision(&req, &resolver)
+            .provision_request(&req, &resolver)
             .await
             .expect_err("empty credential rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
@@ -872,7 +988,7 @@ mod tests {
         let req = ProvisionRequest::new("gpu.a100.1x", "GRA")
             .with_credentials(SecretRef::new("ovh_api_key"));
         let err = p
-            .provision(&req, &resolver)
+            .provision_request(&req, &resolver)
             .await
             .expect_err("non-UTF-8 credential rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
@@ -891,7 +1007,7 @@ mod tests {
             .with_credentials(SecretRef::new("ovh_api_key"));
         let resolver = TestResolver::default().with("ovh_api_key", "bad");
         let err = p
-            .provision(&req, &resolver)
+            .provision_request(&req, &resolver)
             .await
             .expect_err("403 must reject credentials");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
@@ -906,7 +1022,7 @@ mod tests {
             HttpResponse::new(404, b"no such flavor".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
             .await
             .expect_err("create 404 maps to unknown offering");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-010");
@@ -921,7 +1037,7 @@ mod tests {
             HttpResponse::new(429, b"quota".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
             .await
             .expect_err("429 must map to capacity unavailable");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-001");
@@ -936,7 +1052,7 @@ mod tests {
             HttpResponse::new(500, b"boom".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
             .await
             .expect_err("5xx maps to backend");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
@@ -951,7 +1067,7 @@ mod tests {
             HttpResponse::new(201, b"not json".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
             .await
             .expect_err("malformed 2xx body maps to backend");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
@@ -970,7 +1086,7 @@ mod tests {
         );
         let p = mock_provider(mock);
         let handle = p
-            .provision(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
             .await
             .unwrap();
         let err = p
@@ -982,7 +1098,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn teardown_maps_404_to_unknown_instance() {
+    async fn teardown_404_is_confirmed_gone() {
         let mock = Arc::new(
             MockTransport::default()
                 .on(HttpMethod::Post, "/instance", created("ovh-2"))
@@ -994,15 +1110,12 @@ mod tests {
         );
         let p = mock_provider(mock);
         let handle = p
-            .provision(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
             .await
             .unwrap();
-        let err = p
-            .teardown(&handle, &no_creds())
-            .await
-            .expect_err("teardown 404 maps to unknown instance");
-        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
-        assert!(!err.is_retryable());
+        // Idempotent: a 404 on delete means already gone.
+        let outcome = p.teardown(&handle, &no_creds()).await.unwrap();
+        assert_eq!(outcome, TeardownOutcome::ConfirmedGone);
     }
 
     #[tokio::test]
@@ -1013,7 +1126,7 @@ mod tests {
             TransportError::Timeout,
         ));
         let err = mock_provider(mock)
-            .provision(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.a100.1x", "GRA"), &no_creds())
             .await
             .expect_err("transport failure surfaces as an error");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
@@ -1034,7 +1147,7 @@ mod tests {
         assert!(req_json.contains("ovh_api_key"));
         assert!(!req_json.contains(secret_value));
 
-        let handle = p.provision(&req, &resolver).await.unwrap();
+        let handle = p.provision_request(&req, &resolver).await.unwrap();
         let handle_json = serde_json::to_string(&handle).unwrap();
         assert!(handle_json.contains("ovh_api_key"));
         assert!(!handle_json.contains(secret_value));
@@ -1073,7 +1186,7 @@ mod tests {
         registry.register(Arc::new(mock_provider(mock)));
         let found: Arc<dyn Provider> = registry.get(&AdapterId::new("ovhcloud")).unwrap();
         let handle = found
-            .provision(&ProvisionRequest::new("gpu.t4.1x", "DE1"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.t4.1x", "DE1"), &no_creds())
             .await
             .unwrap();
         assert!(handle.state.is_ready());

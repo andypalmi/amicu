@@ -46,7 +46,9 @@ use crate::capability::{
 };
 use crate::provider::{
     Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
+    ResourceIdentity, TeardownOutcome,
 };
+use crate::rest_lifecycle::{self, ServerApi};
 use crate::transport::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport, TransportError};
 
 /// The adapter identity Scaleway registers under.
@@ -177,6 +179,12 @@ struct ServerActionRequest {
     action: &'static str,
 }
 
+/// The Scaleway `{"servers":[...]}` list envelope.
+#[derive(Deserialize)]
+struct ServerList {
+    servers: Vec<ServerObject>,
+}
+
 /// The Scaleway `{"server":{...}}` envelope returned by create and status.
 #[derive(Deserialize)]
 struct ServerEnvelope {
@@ -188,6 +196,9 @@ struct ServerEnvelope {
 struct ServerObject {
     /// Provider-assigned server id (a UUID).
     id: String,
+    /// The server name (carries the deterministic identity).
+    #[serde(default)]
+    name: Option<String>,
     /// Lifecycle state, e.g. `"running"`.
     state: Option<String>,
 }
@@ -229,17 +240,17 @@ fn transport_error(err: &TransportError) -> AdapterError {
 
 /// Map a non-`2xx` status from a create-path call (create / boot action) onto a
 /// typed error; `404` means the offering is unknown.
-fn create_error(status: u16, request: &ProvisionRequest) -> AdapterError {
+fn create_error(status: u16, offering_id: &str, region: &str) -> AdapterError {
     let kind = match status {
         401 | 403 => ProviderError::CredentialsRejected {
             detail: "Scaleway rejected the API secret key".into(),
         },
         404 => ProviderError::UnknownOffering {
-            offering: request.offering_id.clone(),
+            offering: offering_id.to_string(),
         },
         409 | 429 => ProviderError::CapacityUnavailable {
-            offering: request.offering_id.clone(),
-            region: request.region.clone(),
+            offering: offering_id.to_string(),
+            region: region.to_string(),
         },
         _ => ProviderError::Backend {
             detail: format!("Scaleway API returned HTTP {status}"),
@@ -321,7 +332,7 @@ impl ScalewayProvider {
     /// Swap in a transport and base URL. Test-only: adapter tests inject a mock
     /// so the provisioning path runs with no network, credentials, or spend.
     #[cfg(test)]
-    fn with_transport(
+    pub(crate) fn with_transport(
         mut self,
         transport: Arc<dyn HttpTransport>,
         base_url: impl Into<String>,
@@ -431,6 +442,22 @@ impl ScalewayProvider {
             .to_string()
     }
 
+    /// Check `offering_id` is offered and `region` is admitted, before any
+    /// backend call.
+    fn validate(&self, offering_id: &str, region: &str) -> Result<(), AdapterError> {
+        if !self.has_offering(offering_id) {
+            return Err(AdapterError::from_kind(ProviderError::UnknownOffering {
+                offering: offering_id.to_string(),
+            }));
+        }
+        if !self.admits_region(region) {
+            return Err(AdapterError::from_kind(ProviderError::UnknownRegion {
+                region: region.to_string(),
+            }));
+        }
+        Ok(())
+    }
+
     /// Build a request for `{base}{path}`, attaching `token` in the Scaleway
     /// `X-Auth-Token` header when present.
     fn build_request(&self, method: HttpMethod, path: &str, token: Option<&str>) -> HttpRequest {
@@ -503,34 +530,59 @@ impl Provider for ScalewayProvider {
         self.capabilities.clone()
     }
 
-    async fn provision(
+    fn prepare(
         &self,
         request: &ProvisionRequest,
+        identity: ResourceIdentity,
+    ) -> Result<ProvisioningHandle, AdapterError> {
+        self.validate(&request.offering_id, &request.region)?;
+        // Scaleway's Instance API path segment is a zone (e.g. `fr-par-1`), not
+        // a region (`fr-par`): resolve it now so the record carries it.
+        let zone = self.resolve_zone(&request.region, request.zone.as_deref());
+        let mut record = ProvisioningHandle::prepared(self.id.clone(), request, identity);
+        record.zone = Some(zone);
+        Ok(record)
+    }
+
+    async fn provision(
+        &self,
+        prepared: ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningHandle, AdapterError> {
-        if !self.has_offering(&request.offering_id) {
-            return Err(AdapterError::from_kind(ProviderError::UnknownOffering {
-                offering: request.offering_id.clone(),
+        self.validate(&prepared.offering_id, &prepared.region)?;
+        if prepared.identity.name.is_empty() {
+            return Err(AdapterError::from_kind(ProviderError::Backend {
+                detail: "record has no resource identity".into(),
             }));
         }
-        // Residency filter: only admitted (EU by default) regions can host an
-        // instance. Any region outside the admitted set is rejected here.
-        if !self.admits_region(&request.region) {
-            return Err(AdapterError::from_kind(ProviderError::UnknownRegion {
-                region: request.region.clone(),
-            }));
-        }
-        // Scaleway's Instance API path segment is a zone (e.g. `fr-par-1`), not a
-        // region (`fr-par`): resolve the admitted region's default zone, honoring
-        // an explicit override when the request carries one.
-        let zone = self.resolve_zone(&request.region, request.zone.as_deref());
+        let zone = prepared
+            .zone
+            .clone()
+            .unwrap_or_else(|| prepared.region.clone());
         let token = self
-            .resolve_token(resolver, request.credentials.as_ref())
+            .resolve_token(resolver, prepared.credentials.as_ref())
             .await?;
 
+        // Adopt a server already created under this identity (retry after a
+        // crash) instead of creating a duplicate.
+        if let Some(id) = self
+            .list_by_identity(&prepared, token.as_deref())
+            .await?
+            .into_iter()
+            .next()
+        {
+            return Ok(prepared.completed(
+                "server_id",
+                id,
+                ProvisioningState::Provisioning {
+                    detail: "adopted existing server".into(),
+                },
+            ));
+        }
+
         let create = CreateServerRequest {
-            name: "amicu-instance",
-            commercial_type: request.offering_id.as_str(),
+            name: prepared.identity.name.as_str(),
+            commercial_type: prepared.offering_id.as_str(),
         };
         let body = serde_json::to_value(&create).map_err(|_| {
             AdapterError::from_kind(ProviderError::Backend {
@@ -547,7 +599,11 @@ impl Provider for ScalewayProvider {
             .await
             .map_err(|e| transport_error(&e))?;
         if !response.is_success() {
-            return Err(create_error(response.status, request));
+            return Err(create_error(
+                response.status,
+                &prepared.offering_id,
+                &prepared.region,
+            ));
         }
         let envelope: ServerEnvelope = response.json().map_err(|_| {
             AdapterError::from_kind(ProviderError::Backend {
@@ -555,6 +611,11 @@ impl Provider for ScalewayProvider {
             })
         })?;
         let server_id = envelope.server.id;
+        let state = map_server_state(envelope.server.state.as_deref());
+        // The id is now known: fold it into the record so a failure below
+        // still leaves the caller a stoppable record (the prepared one finds
+        // the server by identity regardless).
+        let record = prepared.completed("server_id", server_id.clone(), state);
 
         // A freshly created Scaleway server is stopped; boot it explicitly.
         let action_body =
@@ -573,24 +634,12 @@ impl Provider for ScalewayProvider {
             .await
             .map_err(|e| transport_error(&e))?;
         if !action_response.is_success() {
-            // Boot failed after create succeeded: best-effort teardown so the
-            // created server does not linger (and bill). Its result is ignored;
-            // the boot failure is the error surfaced. A 404 here means the
-            // just-created instance, not the offering.
-            let cleanup_path = format!("/zones/{zone}/servers/{server_id}");
-            let cleanup = self.build_request(HttpMethod::Delete, &cleanup_path, token.as_deref());
-            let _ = self.transport.execute(cleanup).await;
+            // No best-effort cleanup that swallows its result: the created
+            // server is stopped via the caller's prepared record (identity
+            // lookup), whose teardown is confirmed.
             return Err(lifecycle_error(action_response.status, &server_id));
         }
-        Ok(ProvisioningHandle {
-            id: server_id,
-            provider: self.id.clone(),
-            region: request.region.clone(),
-            zone: Some(zone),
-            offering_id: request.offering_id.clone(),
-            credentials: request.credentials.clone(),
-            state: map_server_state(envelope.server.state.as_deref()),
-        })
+        Ok(record)
     }
 
     async fn status(
@@ -624,28 +673,101 @@ impl Provider for ScalewayProvider {
         &self,
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<TeardownOutcome, AdapterError> {
         let token = self
             .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
-        let zone = handle.zone.as_deref().unwrap_or(&handle.region);
-        let path = format!("/zones/{zone}/servers/{}", handle.id);
-        let request = self.build_request(HttpMethod::Delete, &path, token.as_deref());
+        rest_lifecycle::teardown(self, handle, token.as_deref()).await
+    }
+}
+
+fn zone_of(handle: &ProvisioningHandle) -> &str {
+    handle.zone.as_deref().unwrap_or(&handle.region)
+}
+
+#[async_trait]
+impl ServerApi for ScalewayProvider {
+    async fn list_by_identity(
+        &self,
+        handle: &ProvisioningHandle,
+        token: Option<&str>,
+    ) -> Result<Vec<String>, AdapterError> {
+        let name = handle.identity.name.as_str();
+        if name.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = format!("/zones/{}/servers?name={name}", zone_of(handle));
+        let request = self.build_request(HttpMethod::Get, &path, token);
         let response = self
             .transport
             .execute(request)
             .await
             .map_err(|e| transport_error(&e))?;
-        if !response.is_success() {
-            return Err(lifecycle_error(response.status, &handle.id));
+        if response.status == 404 {
+            return Ok(Vec::new());
         }
-        Ok(())
+        if !response.is_success() {
+            return Err(lifecycle_error(response.status, name));
+        }
+        let list: ServerList = response.json().map_err(|_| {
+            AdapterError::from_kind(ProviderError::Backend {
+                detail: "malformed Scaleway list response".into(),
+            })
+        })?;
+        Ok(list
+            .servers
+            .into_iter()
+            .filter(|s| s.name.as_deref() == Some(name))
+            .map(|s| s.id)
+            .collect())
+    }
+
+    async fn delete(
+        &self,
+        handle: &ProvisioningHandle,
+        id: &str,
+        token: Option<&str>,
+    ) -> Result<(), AdapterError> {
+        let path = format!("/zones/{}/servers/{id}", zone_of(handle));
+        let request = self.build_request(HttpMethod::Delete, &path, token);
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if response.is_success() || response.status == 404 {
+            return Ok(());
+        }
+        Err(lifecycle_error(response.status, id))
+    }
+
+    async fn exists(
+        &self,
+        handle: &ProvisioningHandle,
+        id: &str,
+        token: Option<&str>,
+    ) -> Result<bool, AdapterError> {
+        let path = format!("/zones/{}/servers/{id}", zone_of(handle));
+        let request = self.build_request(HttpMethod::Get, &path, token);
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if response.status == 404 {
+            return Ok(false);
+        }
+        if response.is_success() {
+            return Ok(true);
+        }
+        Err(lifecycle_error(response.status, id))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ProvisionCompat;
     use crate::transport::{HttpResponse, MockTransport};
     use amicu_core::adapter::Registry;
     use amicu_core::diagnostic::{Category as DiagCategory, DiagnosticCode};
@@ -781,23 +903,31 @@ mod tests {
         let p = mock_provider(mock.clone());
         let req = ProvisionRequest::new("gpu.l40s.1x", "fr-par");
 
-        let handle = p.provision(&req, &no_creds()).await.unwrap();
+        let handle = p.provision_request(&req, &no_creds()).await.unwrap();
         assert!(handle.state.is_ready());
         assert_eq!(handle.id, "srv-1");
         assert_eq!(handle.provider, AdapterId::new("scaleway"));
 
         assert!(p.status(&handle, &no_creds()).await.unwrap().is_ready());
-        p.teardown(&handle, &no_creds()).await.unwrap();
+        // The canned GET keeps reporting the resource after the delete, so absence is
+        // unconfirmed (the conformance harness covers the confirmed path).
+        assert!(
+            !p.teardown(&handle, &no_creds())
+                .await
+                .unwrap()
+                .is_confirmed_gone()
+        );
 
         // The lifecycle hit the expected REST endpoints in order: create, boot
         // action, status, teardown.
         let seen = mock.requests();
-        assert_eq!(seen[0].method, HttpMethod::Post);
-        assert!(seen[0].url.ends_with("/zones/fr-par-1/servers"));
-        assert_eq!(seen[1].method, HttpMethod::Post);
-        assert!(seen[1].url.ends_with("/action"));
-        assert_eq!(seen[2].method, HttpMethod::Get);
-        assert_eq!(seen[3].method, HttpMethod::Delete);
+        // The identity lookup (adoption check) comes first, then the create.
+        assert_eq!(seen[0].method, HttpMethod::Get);
+        assert!(
+            seen.iter()
+                .any(|r| r.method == HttpMethod::Post && r.url.ends_with("/zones/fr-par-1/servers"))
+        );
+        assert!(seen.iter().any(|r| r.method == HttpMethod::Delete));
     }
 
     #[tokio::test]
@@ -806,7 +936,7 @@ mod tests {
         // filter, before any backend call.
         let p = ScalewayProvider::new();
         let err = p
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.l40s.1x", "us-east-1"),
                 &no_creds(),
             )
@@ -819,7 +949,7 @@ mod tests {
     #[tokio::test]
     async fn provision_unknown_offering_is_rejected() {
         let err = ScalewayProvider::new()
-            .provision(&ProvisionRequest::new("nope", "fr-par"), &no_creds())
+            .provision_request(&ProvisionRequest::new("nope", "fr-par"), &no_creds())
             .await
             .expect_err("unknown offering");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-010");
@@ -832,7 +962,7 @@ mod tests {
         let req = ProvisionRequest::new("gpu.l40s.1x", "fr-par")
             .with_credentials(SecretRef::new("scaleway_secret_key"));
         let err = p
-            .provision(&req, &resolver)
+            .provision_request(&req, &resolver)
             .await
             .expect_err("empty credential rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
@@ -846,7 +976,7 @@ mod tests {
         let req = ProvisionRequest::new("gpu.l40s.1x", "fr-par")
             .with_credentials(SecretRef::new("scaleway_secret_key"));
         let err = p
-            .provision(&req, &resolver)
+            .provision_request(&req, &resolver)
             .await
             .expect_err("non-UTF-8 credential rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
@@ -854,9 +984,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provision_poweron_failure_tears_down_and_reports_unknown_instance() {
-        // Create succeeds, boot action 404s: the orphaned server must be torn
-        // down and the error mapped to UnknownInstance (not UnknownOffering).
+    async fn provision_poweron_failure_surfaces_error_without_swallowed_cleanup() {
+        // Create succeeds, boot action 404s: the error maps to UnknownInstance
+        // (not UnknownOffering). There is no best-effort cleanup whose result is
+        // swallowed; the caller stops the server via its prepared record (see the
+        // conformance harness).
         let mock = Arc::new(
             MockTransport::default()
                 .on(
@@ -877,17 +1009,13 @@ mod tests {
         );
         let p = mock_provider(mock.clone());
         let err = p
-            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
             .await
             .expect_err("poweron failure surfaces");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
         assert!(!err.is_retryable());
-        // The orphaned server was cleaned up.
         let seen = mock.requests();
-        assert!(
-            seen.iter()
-                .any(|r| r.method == HttpMethod::Delete && r.url.ends_with("/servers/srv-9"))
-        );
+        assert!(seen.iter().all(|r| r.method != HttpMethod::Delete));
     }
 
     #[tokio::test]
@@ -902,7 +1030,7 @@ mod tests {
             .with_credentials(SecretRef::new("scaleway_secret_key"));
         let resolver = TestResolver::default().with("scaleway_secret_key", "bad");
         let err = p
-            .provision(&req, &resolver)
+            .provision_request(&req, &resolver)
             .await
             .expect_err("401 must reject credentials");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
@@ -917,7 +1045,7 @@ mod tests {
             HttpResponse::new(404, b"no such commercial_type".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
             .await
             .expect_err("create 404 maps to unknown offering");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-010");
@@ -932,7 +1060,7 @@ mod tests {
             HttpResponse::new(429, b"too many requests".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
             .await
             .expect_err("429 must map to capacity unavailable");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-001");
@@ -947,7 +1075,7 @@ mod tests {
             HttpResponse::new(500, b"boom".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
             .await
             .expect_err("5xx maps to backend");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
@@ -962,7 +1090,7 @@ mod tests {
             HttpResponse::new(201, b"not json".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
             .await
             .expect_err("malformed 2xx body maps to backend");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
@@ -986,7 +1114,7 @@ mod tests {
         );
         let p = mock_provider(mock);
         let handle = p
-            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
             .await
             .unwrap();
         let err = p
@@ -998,7 +1126,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn teardown_maps_404_to_unknown_instance() {
+    async fn teardown_404_is_confirmed_gone() {
         let mock = Arc::new(
             MockTransport::default()
                 .on(
@@ -1015,15 +1143,12 @@ mod tests {
         );
         let p = mock_provider(mock);
         let handle = p
-            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
             .await
             .unwrap();
-        let err = p
-            .teardown(&handle, &no_creds())
-            .await
-            .expect_err("teardown 404 maps to unknown instance");
-        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
-        assert!(!err.is_retryable());
+        // Idempotent: a 404 on delete means already gone.
+        let outcome = p.teardown(&handle, &no_creds()).await.unwrap();
+        assert_eq!(outcome, TeardownOutcome::ConfirmedGone);
     }
 
     #[tokio::test]
@@ -1034,7 +1159,7 @@ mod tests {
             TransportError::Timeout,
         ));
         let err = mock_provider(mock)
-            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
             .await
             .expect_err("transport failure surfaces as an error");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-013");
@@ -1062,7 +1187,7 @@ mod tests {
         assert!(req_json.contains("scaleway_secret_key"));
         assert!(!req_json.contains(secret_value));
 
-        let handle = p.provision(&req, &resolver).await.unwrap();
+        let handle = p.provision_request(&req, &resolver).await.unwrap();
         let handle_json = serde_json::to_string(&handle).unwrap();
         assert!(handle_json.contains("scaleway_secret_key"));
         assert!(!handle_json.contains(secret_value));
@@ -1109,7 +1234,7 @@ mod tests {
         registry.register(Arc::new(mock_provider(mock)));
         let found: Arc<dyn Provider> = registry.get(&AdapterId::new("scaleway")).unwrap();
         let handle = found
-            .provision(&ProvisionRequest::new("gpu.l4.1x", "nl-ams"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.l4.1x", "nl-ams"), &no_creds())
             .await
             .unwrap();
         assert!(handle.state.is_ready());
@@ -1153,14 +1278,18 @@ mod tests {
         );
         let p = mock_provider(mock.clone());
         let handle = p
-            .provision(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
+            .provision_request(&ProvisionRequest::new("gpu.l40s.1x", "fr-par"), &no_creds())
             .await
             .unwrap();
         assert_eq!(handle.region, "fr-par");
         assert_eq!(handle.zone.as_deref(), Some("fr-par-1"));
         let seen = mock.requests();
-        assert!(seen[0].url.ends_with("/zones/fr-par-1/servers"));
-        assert!(!seen[0].url.ends_with("/zones/fr-par/servers"));
+        let create = seen
+            .iter()
+            .find(|r| r.method == HttpMethod::Post)
+            .expect("create call");
+        assert!(create.url.ends_with("/zones/fr-par-1/servers"));
+        assert!(!create.url.ends_with("/zones/fr-par/servers"));
     }
 
     #[tokio::test]
@@ -1192,10 +1321,17 @@ mod tests {
         let p = mock_provider(mock.clone());
         let req = ProvisionRequest::new("gpu.l40s.1x", "fr-par").with_zone("fr-par-2");
 
-        let handle = p.provision(&req, &no_creds()).await.unwrap();
+        let handle = p.provision_request(&req, &no_creds()).await.unwrap();
         assert_eq!(handle.zone.as_deref(), Some("fr-par-2"));
         assert!(p.status(&handle, &no_creds()).await.unwrap().is_ready());
-        p.teardown(&handle, &no_creds()).await.unwrap();
+        // The canned GET keeps reporting the resource after the delete, so absence is
+        // unconfirmed (the conformance harness covers the confirmed path).
+        assert!(
+            !p.teardown(&handle, &no_creds())
+                .await
+                .unwrap()
+                .is_confirmed_gone()
+        );
 
         // Every call targeted the override zone, never the region default.
         let seen = mock.requests();
@@ -1208,7 +1344,7 @@ mod tests {
         // Residency filtering is unchanged: a region outside the admitted set is
         // rejected before any zone is resolved - the zone never enters the filter.
         let err = ScalewayProvider::new()
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.l40s.1x", "us-east-1").with_zone("us-east-1a"),
                 &no_creds(),
             )

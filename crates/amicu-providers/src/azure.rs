@@ -35,6 +35,7 @@ use crate::capability::{
 };
 use crate::provider::{
     Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
+    ResourceIdentity, TeardownOutcome,
 };
 
 /// The adapter identity Azure registers under.
@@ -402,10 +403,10 @@ impl Provider for AzureProvider {
         self.capabilities.clone()
     }
 
-    async fn provision(
+    fn prepare(
         &self,
         request: &ProvisionRequest,
-        resolver: &dyn SecretResolver,
+        identity: ResourceIdentity,
     ) -> Result<ProvisioningHandle, AdapterError> {
         if !self.has_offering(&request.offering_id) {
             return Err(AdapterError::from_kind(ProviderError::UnknownOffering {
@@ -420,12 +421,24 @@ impl Provider for AzureProvider {
                 region: request.region.clone(),
             }));
         }
-        self.authenticate(resolver, request.credentials.as_ref())
+        Ok(ProvisioningHandle::prepared(
+            self.id.clone(),
+            request,
+            identity,
+        ))
+    }
+
+    async fn provision(
+        &self,
+        prepared: ProvisioningHandle,
+        resolver: &dyn SecretResolver,
+    ) -> Result<ProvisioningHandle, AdapterError> {
+        self.authenticate(resolver, prepared.credentials.as_ref())
             .await?;
 
         let mut state = self.lock();
         state.counter += 1;
-        let id = format!("azure-{}-{}", request.region, state.counter);
+        let id = format!("azure-{}-{}", prepared.region, state.counter);
 
         let ready = ProvisioningState::Ready {
             detail: "instance ready".into(),
@@ -437,15 +450,7 @@ impl Provider for AzureProvider {
             },
             ready.clone(),
         ];
-        let handle = ProvisioningHandle {
-            id: id.clone(),
-            provider: self.id.clone(),
-            region: request.region.clone(),
-            zone: None,
-            offering_id: request.offering_id.clone(),
-            credentials: request.credentials.clone(),
-            state: ready,
-        };
+        let handle = prepared.completed("instance_id", id.clone(), ready);
         state.history.insert(id.clone(), transitions);
         state.instances.insert(id, handle.clone());
         Ok(handle)
@@ -473,15 +478,14 @@ impl Provider for AzureProvider {
         &self,
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<TeardownOutcome, AdapterError> {
         self.authenticate(resolver, handle.credentials.as_ref())
             .await?;
 
         let mut state = self.lock();
+        // Idempotent: an unknown instance is already gone.
         let Some(instance) = state.instances.get_mut(&handle.id) else {
-            return Err(AdapterError::from_kind(ProviderError::UnknownInstance {
-                id: handle.id.clone(),
-            }));
+            return Ok(TeardownOutcome::ConfirmedGone);
         };
         instance.state = ProvisioningState::Terminated {
             detail: "instance terminated".into(),
@@ -493,13 +497,14 @@ impl Provider for AzureProvider {
         entry.push(ProvisioningState::Terminated {
             detail: "instance terminated".into(),
         });
-        Ok(())
+        Ok(TeardownOutcome::ConfirmedGone)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ProvisionCompat;
     use amicu_core::adapter::Registry;
     use amicu_core::diagnostic::{Category as DiagCategory, DiagnosticCode};
     use amicu_core::secret::SecretValue;
@@ -619,7 +624,7 @@ mod tests {
         let resolver = no_creds();
         let req = ProvisionRequest::new("Standard_NC24ads_A100_v4", "westeurope");
 
-        let handle = p.provision(&req, &resolver).await.unwrap();
+        let handle = p.provision_request(&req, &resolver).await.unwrap();
         assert!(handle.state.is_ready());
         assert_eq!(handle.provider, AdapterId::new("azure"));
         assert!(handle.id.starts_with("azure-westeurope-"));
@@ -629,7 +634,12 @@ mod tests {
         assert!(matches!(history[0], ProvisioningState::Requested));
         assert!(history.last().unwrap().is_ready());
 
-        p.teardown(&handle, &resolver).await.unwrap();
+        assert!(
+            p.teardown(&handle, &resolver)
+                .await
+                .unwrap()
+                .is_confirmed_gone()
+        );
         assert_eq!(p.live_instances(), Vec::new());
         assert!(p.status(&handle, &resolver).await.unwrap().is_terminal());
     }
@@ -640,7 +650,7 @@ mod tests {
         // admit it: the UK is outside the EU/EEA residency boundary.
         let p = AzureProvider::new();
         let err = p
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("Standard_NC24ads_A100_v4", "uksouth"),
                 &no_creds(),
             )
@@ -656,7 +666,7 @@ mod tests {
         // eastus (Virginia) is a real Azure region outside the admitted EU set.
         let p = AzureProvider::new();
         let err = p
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("Standard_NC24ads_A100_v4", "eastus"),
                 &no_creds(),
             )
@@ -670,7 +680,7 @@ mod tests {
     #[tokio::test]
     async fn provision_unknown_offering_is_rejected() {
         let err = AzureProvider::new()
-            .provision(&ProvisionRequest::new("nope", "westeurope"), &no_creds())
+            .provision_request(&ProvisionRequest::new("nope", "westeurope"), &no_creds())
             .await
             .expect_err("unknown offering");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-010");
@@ -683,7 +693,7 @@ mod tests {
         let req = ProvisionRequest::new("Standard_NC24ads_A100_v4", "westeurope")
             .with_credentials(SecretRef::new("azure_client_secret"));
         let err = p
-            .provision(&req, &resolver)
+            .provision_request(&req, &resolver)
             .await
             .expect_err("empty credential rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
@@ -702,7 +712,7 @@ mod tests {
         assert!(req_json.contains("azure_client_secret"));
         assert!(!req_json.contains(secret_value));
 
-        let handle = p.provision(&req, &resolver).await.unwrap();
+        let handle = p.provision_request(&req, &resolver).await.unwrap();
         let handle_json = serde_json::to_string(&handle).unwrap();
         assert!(handle_json.contains("azure_client_secret"));
         assert!(!handle_json.contains(secret_value));
@@ -728,7 +738,7 @@ mod tests {
         registry.register(Arc::new(AzureProvider::new()));
         let found: Arc<dyn Provider> = registry.get(&AdapterId::new("azure")).unwrap();
         let handle = found
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("Standard_NC4as_T4_v3", "northeurope"),
                 &no_creds(),
             )
