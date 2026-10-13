@@ -1,7 +1,7 @@
 import { providers } from '@/app/(marketing)/_lib/content';
-import { ProviderRegistry } from './provider-registry';
+import { ProviderList } from './provider-list';
 
-/** Server wrapper so MDX can render the registry without props. */
+/** Server wrapper so MDX can render the registry list without props. */
 export function ProviderGrid() {
-  return <ProviderRegistry items={providers} />;
+  return <ProviderList items={providers} />;
 }

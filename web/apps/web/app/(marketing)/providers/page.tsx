@@ -1,40 +1,55 @@
 import type { Metadata } from 'next';
-import { ProviderRegistry } from '@/components/providers/provider-registry';
-import { CTABand, PageHeader, Section } from '../_components/marketing';
+import Link from 'next/link';
+import { ProviderList } from '@/components/providers/provider-list';
+import { HclCode } from '../_components/code';
+import { GAP_HEAD, Headline, HomeSection, MEASURE, MockWindow } from '../_components/home';
 import { providers } from '../_lib/content';
 import { pageMetadata } from '../_lib/seo';
 
 export const metadata: Metadata = pageMetadata({
   title: 'Providers',
   description:
-    'amicu applies to your own machine, your own servers (on_prem) and Modal today. Other providers are in preview or planned.',
+    'amicu applies to this machine (local, Apple, CPU or on-prem hardware you run amicu on) and Modal today. Other providers are in preview or planned.',
   path: '/providers',
 });
+
+const PROVIDER_HCL = `resource "hardware_profile" "gpu" {
+  provider = "modal"
+  region   = "eu-west"
+}`;
+
+const linkClass =
+  'text-foreground underline underline-offset-4 decoration-border hover:decoration-foreground';
 
 export default function ProvidersPage() {
   return (
     <main className="flex flex-1 flex-col">
-      <Section>
-        <PageHeader
-          title="Providers"
-          description="Today the local machine and Modal are supported. Others are in preview or planned."
-        />
-
-        <div className="mx-auto mt-14 max-w-5xl">
-          <ProviderRegistry items={providers} />
-          <p className="mt-6 text-sm text-muted-foreground">
-            Supported: wired into <code>amicu apply</code>. Preview: an adapter exists, tested
-            against mocks, not wired into apply. Planned: region and pricing data only.
-          </p>
+      <HomeSection>
+        <Headline as="h1">Providers</Headline>
+        <p className={`mt-6 text-base text-muted-foreground sm:text-lg ${MEASURE}`}>
+          A deployment runs wherever its hardware profile&apos;s <code>provider</code> says.
+        </p>
+        <div className={`${GAP_HEAD} ${MEASURE}`}>
+          <MockWindow title="amicu.hcl">
+            <HclCode code={PROVIDER_HCL} className="[&_pre]:px-4" />
+          </MockWindow>
         </div>
+      </HomeSection>
 
-        <div className="mt-16">
-          <CTABand
-            title="Regions, residency and zones"
-            primary={{ label: 'Provider docs', href: '/docs/providers' }}
-          />
-        </div>
-      </Section>
+      <HomeSection>
+        <ProviderList items={providers} regions />
+        <p className={`mt-12 text-sm text-muted-foreground ${MEASURE}`}>
+          Moving a deployment is a change to <code>provider</code>. See{' '}
+          <Link href="/docs/providers" className={linkClass}>
+            Providers
+          </Link>{' '}
+          and{' '}
+          <Link href="/docs/configuration/hardware-profile" className={linkClass}>
+            Hardware profile
+          </Link>{' '}
+          in the docs.
+        </p>
+      </HomeSection>
     </main>
   );
 }
