@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Button, cn } from '@amicu/ui';
 import { appName, appTagline, siteUrl } from '@/lib/shared';
+import { ApplyDemo } from './_components/apply-demo';
 import { HclCode, Transcript } from './_components/code';
 import {
   DiffBody,
@@ -18,7 +19,6 @@ import {
   APPLY_OUTPUT,
   CONFIG_LINKS,
   DEPLOYMENT_HCL,
-  HERO_PLAN,
   POLICY_LINKS,
   PROVIDER_DIFF,
   PROVIDER_SWITCH_LINKS,
@@ -94,13 +94,7 @@ export default function LandingPage() {
           </Button>
         </div>
         <MockWindow title="terminal" className="mt-14 w-full max-w-2xl sm:mt-20">
-          <Transcript
-            lines={HERO_PLAN}
-            reveal
-            wrap
-            label="Output of amicu plan for the example file"
-            className="px-4 py-4"
-          />
+          <ApplyDemo />
         </MockWindow>
       </HomeSection>
 

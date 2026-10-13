@@ -15,18 +15,6 @@ export interface TermLine {
   tone?: 'cmd' | 'add' | 'muted';
 }
 
-/** Hero: `amicu plan` for a one-deployment config, trimmed to what fits a phone. */
-export const HERO_PLAN: TermLine[] = [
-  { text: '$ amicu plan', tone: 'cmd' },
-  { text: 'Plan: 1 action(s).' },
-  { text: '' },
-  { text: '  + deployment.chat', tone: 'add' },
-  { text: '      action:   create' },
-  { text: '      hardware: gpu.l4' },
-  { text: '      target:   modal (region eu-west)' },
-  { text: '      api_key:  ****** (secret "CHAT_API_KEY", resolved at apply)' },
-];
-
 /** Excerpt of the config that produces HERO_PLAN. */
 export const DEPLOYMENT_HCL = `resource "deployment" "chat" {
   model    = model.qwen.id
