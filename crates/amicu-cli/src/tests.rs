@@ -47,7 +47,6 @@ resource "deployment" "support_local" {
   model    = model.support_chat.id
   hardware = hardware_profile.dev_mac.id
   runtime  = "llama_cpp"
-  api_key  = secret("SUPPORT_LOCAL_API_KEY")
   llama_cpp {
     context_length = 8192
     port           = 8000
@@ -146,6 +145,7 @@ resource "deployment" "support_local" {
   model    = model.support_chat.id
   hardware = hardware_profile.dev_mac.id
   runtime  = "llama_cpp"
+  api_key  = secret("SUPPORT_LOCAL_API_KEY")
   llama_cpp {
     context_length = 8192
     port           = 8000
@@ -413,7 +413,7 @@ fn residency_compliant_stack_passes() {
 
     let mut out = Vec::new();
     let code = commands::validate::run(&project, false, OutputFormat::Json, &mut out).unwrap();
-    assert_eq!(code, 0);
+    assert_eq!(code, 0, "{}", String::from_utf8_lossy(&out));
     let report: amicu_core::diagnostic::DiagnosticReport = serde_json::from_slice(&out).unwrap();
     assert!(report.valid);
     assert!(!has_code(&report, "AMICU-POLICY-002"));
