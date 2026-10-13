@@ -6,6 +6,64 @@
 /* Scan the shared design system for utility classes. */
 @source '../../../packages/ui/src/**/*.{ts,tsx}';
 
+@theme inline {
+  --font-sans: var(--font-schibsted), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-martian), ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Fumadocs -> Signal tokens. fd-primary is used for active links and text, so it
+   maps to the AA-safe accent-text; fills use --primary directly. */
+:root,
+.dark {
+  --color-fd-background: var(--background);
+  --color-fd-foreground: var(--foreground);
+  --color-fd-muted: var(--muted);
+  --color-fd-muted-foreground: var(--muted-foreground);
+  --color-fd-popover: var(--popover);
+  --color-fd-popover-foreground: var(--popover-foreground);
+  --color-fd-card: var(--card);
+  --color-fd-card-foreground: var(--card-foreground);
+  --color-fd-border: var(--border);
+  --color-fd-primary: var(--accent-text);
+  --color-fd-primary-foreground: var(--accent-text-foreground);
+  --color-fd-secondary: var(--secondary);
+  --color-fd-secondary-foreground: var(--secondary-foreground);
+  --color-fd-accent: var(--accent);
+  --color-fd-accent-foreground: var(--accent-foreground);
+  --color-fd-ring: var(--ring);
+  --color-fd-overlay: oklch(0 0 0 / 0.3);
+  --color-fd-info: var(--accent-text);
+  --color-fd-warning: var(--warn);
+  --color-fd-error: var(--destructive);
+  --color-fd-success: var(--success);
+  --color-fd-idea: var(--warn);
+  --color-fd-diff-remove: color-mix(in oklab, var(--diff-destroy) 14%, transparent);
+  --color-fd-diff-remove-symbol: var(--diff-destroy);
+  --color-fd-diff-add: color-mix(in oklab, var(--diff-add) 14%, transparent);
+  --color-fd-diff-add-symbol: var(--diff-add);
+}
+
+/* neutral.css retunes the dark docs sidebar with hsl greys; keep it on tokens. */
+.dark #nd-sidebar {
+  --color-fd-muted: var(--muted);
+  --color-fd-secondary: var(--secondary);
+  --color-fd-muted-foreground: var(--muted-foreground);
+}
+
+/* Flat surfaces: Fumadocs cards, code blocks and tables ship shadow-sm/md. */
+.shadow-sm,
+.shadow-md {
+  box-shadow: none;
+}
+
+code,
+pre,
+kbd,
+samp,
+table {
+  font-variant-numeric: tabular-nums;
+}
+
 html {
   scrollbar-gutter: stable;
 }
@@ -13,4 +71,14 @@ html {
 html > body[data-scroll-locked] {
   margin-right: 0px !important;
   --removed-body-scroll-bar-size: 0px !important;
+}
+
+/* No coloured left-edge indicators: hide the docs sidebar active stripe and the
+   TOC rail highlight/thumb. Active state is the fill + text colour instead. */
+#nd-sidebar [data-active='true']::before {
+  display: none;
+}
+svg .stroke-fd-primary,
+.size-1.bg-fd-primary {
+  display: none;
 }

@@ -33,7 +33,7 @@ export function severityCounts(
   return { error: g.error.length, warning: g.warning.length, info: g.info.length };
 }
 
-type Tone = 'default' | 'secondary' | 'destructive' | 'outline';
+type Tone = 'default' | 'secondary' | 'destructive' | 'outline' | 'success' | 'warning';
 
 /** Badge variant + label + short glyph for a diagnostic severity. */
 export function severityMeta(severity: Severity): { label: string; tone: Tone } {
@@ -55,9 +55,9 @@ export function actionKindMeta(kind: ActionKind): {
 } {
   switch (kind) {
     case 'create':
-      return { label: 'Create', tone: 'default', sigil: '+' };
+      return { label: 'Create', tone: 'success', sigil: '+' };
     case 'update':
-      return { label: 'Update', tone: 'secondary', sigil: '~' };
+      return { label: 'Update', tone: 'warning', sigil: '~' };
     case 'replace':
       return { label: 'Replace', tone: 'outline', sigil: '±' };
     case 'destroy':
