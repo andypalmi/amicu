@@ -121,20 +121,6 @@ export function CodePanel({
   );
 }
 
-/** Flat, filled note for a state the reader should know about. */
-export function StatusNote({ children, className }: { children: ReactNode; className?: string }) {
-  return (
-    <p
-      className={cn(
-        'rounded-md border border-border bg-muted px-4 py-3 text-sm text-muted-foreground',
-        className,
-      )}
-    >
-      {children}
-    </p>
-  );
-}
-
 /** Closing call to action: one short sentence and two actions. */
 export function CTABand({
   title,

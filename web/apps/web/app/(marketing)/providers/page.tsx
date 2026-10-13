@@ -14,7 +14,7 @@ import { pageMetadata } from '../_lib/seo';
 export const metadata: Metadata = pageMetadata({
   title: 'Providers',
   description:
-    'Amicu applies to your own machine and Modal today. Other providers are in preview or planned.',
+    'amicu applies to your own machine and Modal today. Other providers are in preview or planned.',
   path: '/providers',
 });
 
@@ -30,11 +30,11 @@ export default function ProvidersPage() {
       <Section>
         <PageHeader
           title="Providers"
-          description="Today the local machine and Modal are supported. The rest are in preview."
+          description="Today the local machine and Modal are supported. Others are in preview or planned."
         />
 
-        <div className="mx-auto mt-14 max-w-4xl overflow-x-auto rounded-md border border-border">
-          <Table className="min-w-[560px]">
+        <div className="mx-auto mt-14 max-w-4xl overflow-hidden rounded-md border border-border">
+          <Table>
             <TableHeader>
               <TableRow className="bg-muted/40 hover:bg-muted/40">
                 <TableHead className="p-4 text-left text-sm font-medium normal-case tracking-normal text-foreground">
@@ -43,7 +43,7 @@ export default function ProvidersPage() {
                 <TableHead className="p-4 text-left text-sm font-medium normal-case tracking-normal text-foreground">
                   Status
                 </TableHead>
-                <TableHead className="p-4 text-left text-sm font-medium normal-case tracking-normal text-foreground">
+                <TableHead className="hidden p-4 text-left text-sm font-medium normal-case tracking-normal text-foreground sm:table-cell">
                   Regions
                 </TableHead>
               </TableRow>
@@ -56,9 +56,12 @@ export default function ProvidersPage() {
                     className="p-4 text-left text-sm font-medium normal-case tracking-normal text-foreground"
                   >
                     {p.name}
+                    <span className="mt-1 block font-normal text-muted-foreground sm:hidden">
+                      {p.residency}
+                    </span>
                   </TableHead>
                   <TableCell className="p-4 text-left text-sm">{STATUS_LABEL[p.status]}</TableCell>
-                  <TableCell className="p-4 text-left text-sm text-muted-foreground">
+                  <TableCell className="hidden p-4 text-left text-sm text-muted-foreground sm:table-cell">
                     {p.residency}
                   </TableCell>
                 </TableRow>

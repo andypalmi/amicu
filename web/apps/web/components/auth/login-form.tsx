@@ -55,7 +55,7 @@ export function LoginForm({
 
       {signupsEnabled ? (
         <p className="text-center text-sm text-muted-foreground">
-          New to Amicu?{' '}
+          New to amicu?{' '}
           <Link href="/signup" className="font-medium text-foreground hover:underline">
             Create an account
           </Link>

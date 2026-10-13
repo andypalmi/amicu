@@ -27,7 +27,7 @@ import { pageMetadata } from '../_lib/seo';
 export const metadata: Metadata = pageMetadata({
   title: 'Pricing',
   description:
-    'Amicu is free and open source under AGPL-3.0. Team and enterprise plans are planned.',
+    'amicu is free and open source under AGPL-3.0. Team and enterprise plans are planned.',
   path: '/pricing',
 });
 
@@ -100,7 +100,7 @@ const faq = [
   },
   {
     q: 'Do my configs and models fall under the AGPL?',
-    a: 'No. The license covers the amicu source. Your HCL files, models and endpoint outputs stay yours.',
+    a: 'No. The license covers the amicu source, not the HCL files you write with it.',
   },
   {
     q: 'When does the AGPL require me to share code?',

@@ -11,7 +11,7 @@ import { LoginForm } from '@/components/auth/login-form';
 export const metadata: Metadata = {
   title: 'Sign in',
   description:
-    'Sign in to to the amicu console.',
+    'Sign in to the amicu console.',
 };
 
 export default async function LoginPage({

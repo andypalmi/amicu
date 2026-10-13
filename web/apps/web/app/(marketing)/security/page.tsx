@@ -4,9 +4,9 @@ import { CTABand, FactList, PageHeader, Section, SectionHeader } from '../_compo
 import { githubUrl } from '../_lib/content';
 import { pageMetadata } from '../_lib/seo';
 
-const docsLink = (href: string) => (
+const docsLink = (href: string, label: string) => (
   <Link href={href} className="text-foreground underline underline-offset-4">
-    Read more in the docs
+    {label}
   </Link>
 );
 
@@ -17,7 +17,7 @@ const cliFacts = [
       <>
         Write secret(&quot;NAME&quot;) in the config. The value is read from your environment at
         apply. It is never written to state or the plan, and shows as ****** in output.{' '}
-        {docsLink('/docs/security/secrets')}
+        {docsLink('/docs/security/secrets', 'Secrets in the docs')}
       </>
     ),
   },
@@ -28,7 +28,7 @@ const cliFacts = [
         Each endpoint can have its own API key. Locally it goes to the service through an
         owner-only (0600) environment file, never the command line. After apply, amicu sends an
         anonymous request: if it is not rejected, the endpoint is torn down and apply fails.{' '}
-        {docsLink('/docs/security/endpoint-auth')}
+        {docsLink('/docs/security/endpoint-auth', 'Endpoint keys in the docs')}
       </>
     ),
   },
@@ -38,7 +38,7 @@ const cliFacts = [
       <>
         State is a file in your project, under .amicu/state. You can also keep it in your own
         Postgres when you run the server.{' '}
-        {docsLink('/docs/security/state')}
+        {docsLink('/docs/security/state', 'State in the docs')}
       </>
     ),
   },
@@ -46,10 +46,11 @@ const cliFacts = [
     term: 'Telemetry',
     detail: (
       <>
-        The CLI sends no usage telemetry. It contacts Modal&apos;s API when you apply to Modal, and
-        the serving container downloads weights from Hugging Face. On Modal, your Hugging Face
-        token is passed as a Modal secret. Prompts go only to the endpoint you deployed.{' '}
-        {docsLink('/docs/security/telemetry')}
+        The CLI sends no usage telemetry. When you apply to Modal it calls Modal&apos;s API, and the
+        serving container downloads weights from Hugging Face. On Modal, your Hugging Face token
+        is passed as a Modal secret. Apply also sends requests to your own deployed endpoint for
+        the exposure check.{' '}
+        {docsLink('/docs/security/telemetry', 'Telemetry in the docs')}
       </>
     ),
   },

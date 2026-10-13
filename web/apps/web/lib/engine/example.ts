@@ -1,4 +1,4 @@
-// A small, known-valid & plannable Amicu HCL config used to seed the editor so
+// A small, known-valid & plannable amicu HCL config used to seed the editor so
 // the console is non-empty (and Validate/Plan succeed) on first load. Mirrors the
 // `PLANNABLE` fixture in crates/amicu-api/tests/engine.rs: a llama_cpp deployment
 // that fits its Apple-silicon hardware.

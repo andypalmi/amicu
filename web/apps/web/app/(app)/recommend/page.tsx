@@ -18,7 +18,7 @@ export default async function RecommendPage() {
     <PageShell size="lg">
       <PageHeader
         title="Recommendations & transparency"
-        description="Diagnose a serving stack from a measured metrics snapshot and its workload estimate. Every recommendation is advisory and explainable: it shows the evidence that triggered it, the confidence behind it, the changes it suggests, and the alternatives it ruled out. Amicu never auto-applies a recommendation."
+        description="Diagnose a serving stack from a measured metrics snapshot and its workload estimate. Every recommendation is advisory and explainable: it shows the evidence that triggered it, the confidence behind it, the changes it suggests, and the alternatives it ruled out. amicu never auto-applies a recommendation."
       />
 
       <RecommendConsole />

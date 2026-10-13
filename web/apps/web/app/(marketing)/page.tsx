@@ -100,8 +100,9 @@ export default function LandingPage() {
               className="flex flex-col gap-6 border-t border-border py-10 text-center"
             >
               <div>
-                <p className="font-mono text-sm text-muted-foreground">{i + 1}</p>
-                <h3 className="mt-2 text-xl font-semibold tracking-tight">{step.title}</h3>
+                <h3 className="text-xl font-semibold tracking-tight">
+                  {i + 1}. {step.title}
+                </h3>
                 <p className="mx-auto mt-3 max-w-prose text-pretty leading-relaxed text-muted-foreground">
                   {step.body}
                 </p>

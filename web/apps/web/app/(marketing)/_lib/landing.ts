@@ -134,7 +134,7 @@ export const STEPS: Step[] = [
   {
     id: 'call',
     title: 'Call it',
-    body: 'Send requests with your API key, and check status and logs from the CLI.',
+    body: 'Send requests with your API key. Modal endpoints also need proxy-token headers.',
     transcript: CURL_REQUEST,
   },
 ];
