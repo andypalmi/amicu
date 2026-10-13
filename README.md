@@ -232,6 +232,10 @@ Early stage. Working today: the HCL DSL and parser, the CLI (`init`, `fmt`, `val
 - Website: https://amicu.dev
 - Documentation: https://amicu.dev/docs
 
+## Contributing and security
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for setup and the checks CI runs. Report vulnerabilities privately as described in [SECURITY.md](./SECURITY.md).
+
 ## License
 
 AGPL-3.0 for the core.

@@ -3,3 +3,13 @@
 
 # Turborepo local cache (also ignored in web/.gitignore for the workspace)
 .turbo/
+
+# Stray local files at the repo root
+/*.log
+
+# Local Claude Code state (settings, worktrees)
+.claude/
+
+# Written by `next dev` when it detects an AI coding agent (Next.js agent rules)
+web/apps/web/AGENTS.md
+web/apps/web/CLAUDE.md
