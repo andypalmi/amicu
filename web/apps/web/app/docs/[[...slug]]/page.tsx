@@ -39,6 +39,10 @@ export default async function Page(props: PageProps<'/docs/[[...slug]]'>) {
   );
 }
 
+// Unknown slugs must 404 at the routing layer: rendered on demand, notFound()
+// runs after loading.tsx has already streamed a 200 shell.
+export const dynamicParams = false;
+
 export async function generateStaticParams() {
   return source.generateParams();
 }
