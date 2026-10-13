@@ -92,8 +92,8 @@ export const CHAT_SESSION: ChatSession = {
   auth: 'Bearer $CHAT_API_KEY',
   user: 'Draft a retention notice for our EU customers.',
   reply: [
-    'We keep customer data only in EU regions, and delete it 30 days after you close your account.',
-    'You can ask for earlier deletion at any time by contacting our privacy team.',
+    'We keep customer data only in EU regions.',
+    'You can ask for deletion at any time by contacting our privacy team.',
   ],
   status: '2.1s · 24 tok/s',
   hint: 'enter send · ctrl+c quit',
