@@ -42,9 +42,9 @@ test('final state is complete and stable', () => {
   assert.deepEqual(demoState(steps, Infinity), s);
 });
 
-test('real timeline ends on the call screen, fully revealed, under 14s', () => {
+test('real timeline ends on the call screen, fully revealed, under 6s', () => {
   const end = demoDuration(DEMO_STEPS);
-  assert.ok(end < 14000);
+  assert.ok(end < 6000);
   const s = demoState(DEMO_STEPS, end);
   assert.equal(s.screen, 'call');
   assert.ok(s.rows.every((r) => r.rest === '' && r.shown !== ''));
@@ -57,4 +57,20 @@ test('transcript carries both panes, with the non-streaming response', () => {
   assert.match(t, /"object": "chat\.completion"/);
   assert.doesNotMatch(t, /"stream"/);
   assert.doesNotMatch(t, /starting|online/i);
+});
+
+test('applied output follows the `y` keystroke within 500ms', () => {
+  const y = DEMO_STEPS.find((s) => s.kind === 'line' && s.text.endsWith('[y/N] y'));
+  const applied = DEMO_STEPS.find((s) => s.kind === 'line' && s.text.startsWith('Applied '));
+  assert.ok(y && applied);
+  assert.ok(applied.at - y.at <= 500);
+  const last = DEMO_STEPS.filter((s) => s.screen === 'term' && s.at >= applied.at).at(-1);
+  assert.ok(last && last.at - y.at <= 700);
+});
+
+test('the whole curl command types in at most 1s', () => {
+  const curl = DEMO_STEPS.find((s) => s.kind === 'type' && s.text.startsWith('$ curl '));
+  assert.ok(curl && curl.kind === 'type');
+  assert.equal(curl.text.split('\n').length, 4);
+  assert.ok(curl.text.length * (curl.msPerChar ?? 35) <= 1000);
 });

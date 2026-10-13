@@ -58,24 +58,26 @@ const RESPONSE = `{
 const L = (at: number, text: string, tone?: Tone): Step => ({ kind: 'line', at, screen: 'term', text, tone });
 
 export const DEMO_STEPS: Step[] = [
-  { kind: 'type', at: 150, screen: 'term', tone: 'cmd', text: '$ amicu apply' },
-  L(1000, 'Plan: 1 action(s).'),
-  L(1100, ' '),
-  L(1200, '  + deployment.chat', 'add'),
-  L(1300, '      action:   create'),
-  L(1400, '      hardware: gpu.l4'),
+  { kind: 'type', at: 100, screen: 'term', tone: 'cmd', msPerChar: 30, text: '$ amicu apply' },
+  L(650, 'Plan: 1 action(s).'),
+  L(730, ' '),
+  L(810, '  + deployment.chat', 'add'),
+  L(890, '      action:   create'),
+  L(970, '      hardware: gpu.l4'),
   // plan.rs also prints a `launch:` line for some actions; trimmed here.
-  L(1500, '      target:   modal (region eu-west)'),
-  L(1600, '      api_key:  ****** (secret "CHAT_API_KEY", resolved at apply)'),
-  L(2000, 'Apply these changes? [y/N] y'),
-  L(4200, ' '),
-  L(4200, 'Applied 1 deployment(s):'),
-  L(4400, `  deployment.chat -> ${URL}`, 'muted'),
+  L(1050, '      target:   modal (region eu-west)'),
+  L(1130, '      api_key:  ****** (secret "CHAT_API_KEY", resolved at apply)'),
+  L(1500, 'Apply these changes? [y/N] y'),
+  // Output lands ~450ms after the `y` (the owner's budget is 500ms).
+  L(1950, ' '),
+  L(1950, 'Applied 1 deployment(s):'),
+  L(2050, `  deployment.chat -> ${URL}`, 'muted'),
   // apply.rs then prints a `curl:` / `python (openai):` usage snippet; trimmed here,
   // the request is shown once, in the next pane.
-  { kind: 'screen', at: 5600, screen: 'call' },
-  { kind: 'type', at: 5900, screen: 'call', tone: 'cmd', msPerChar: 6, text: '$ ' + CURL_ARGS.join('\n') },
-  { kind: 'line', at: 8600, screen: 'call', text: RESPONSE },
+  { kind: 'screen', at: 2800, screen: 'call' },
+  // The 4-line command types in well under a second (a few chars per frame).
+  { kind: 'type', at: 3000, screen: 'call', tone: 'cmd', msPerChar: 2.5, text: '$ ' + CURL_ARGS.join('\n') },
+  { kind: 'line', at: 4200, screen: 'call', text: RESPONSE },
 ];
 
 /** Time at which every step has finished. */
