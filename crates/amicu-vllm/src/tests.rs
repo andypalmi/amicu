@@ -445,6 +445,14 @@ fn hybrid_attention_counts_only_kv_layers() {
 }
 
 #[test]
+fn n_kv_layers_alone_supplies_the_layer_count() {
+    let mut model = shaped_model();
+    model.n_layers = None;
+    model.n_kv_layers = Some(10);
+    assert_eq!(kv_bytes(model, 8192), 8192 * 10 * 8 * 128 * 2 * 2);
+}
+
+#[test]
 fn validate_warns_when_kv_cache_cannot_be_estimated() {
     let a = adapter(safetensors_model(), gpu_hardware(80, 1), LLAMA_8B);
     let diags = a.validate(&deployment(base_settings()));

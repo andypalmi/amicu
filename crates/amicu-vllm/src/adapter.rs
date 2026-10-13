@@ -151,10 +151,10 @@ fn vllm_kv_bytes_per_element(dtype: amicu_core::resource::VllmKvCacheDtype) -> f
 /// declares full shape metadata (amicu-planning#152's fit-estimate formula:
 /// "weights + kv cache only").
 ///
-/// `ctx × kv_layers × n_kv_heads × head_dim × 2 × bytes_per_element(dtype)`,
-/// where `kv_layers` is [`amicu_core::resource::Model::kv_layers`] (only the
-/// full-attention layers for a hybrid-attention model): one K vector and one
-/// V vector per attention head per KV-holding layer per cached token - vLLM applies a single `--kv-cache-dtype` to both K and V, unlike
+/// `ctx × kv_layers × n_kv_heads × head_dim × 2 × bytes_per_element(dtype)`:
+/// one K vector and one V vector per attention head per KV-holding layer per
+/// cached token. `kv_layers` is [`amicu_core::resource::Model::kv_layers`]
+/// (only the full-attention layers for a hybrid-attention model) - vLLM applies a single `--kv-cache-dtype` to both K and V, unlike
 /// llama.cpp's independently-settable `-ctk`/`-ctv`. `dtype` defaults to
 /// [`amicu_core::resource::VllmKvCacheDtype::Auto`] when
 /// `settings.kv_cache_dtype` is unset, matching vLLM's own CLI default.
