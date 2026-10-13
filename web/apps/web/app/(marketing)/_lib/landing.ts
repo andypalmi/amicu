@@ -15,8 +15,24 @@ export interface TermLine {
   tone?: 'cmd' | 'add' | 'muted';
 }
 
-/** Excerpt of the config that produces HERO_PLAN. */
-export const DEPLOYMENT_HCL = `resource "deployment" "chat" {
+/**
+ * Excerpt of the config that produces the apply output (the `model "qwen"`
+ * block, RedHatAI/Qwen3.5-9B-FP8-dynamic, is left out for length). The provider
+ * lives on the hardware profile, so it is shown here.
+ */
+export const DEPLOYMENT_HCL = `resource "hardware_profile" "gpu" {
+  provider = "modal"
+  region   = "eu-west"
+  accelerator {
+    kind   = "gpu"
+    model  = "l4"
+    count  = 1
+    memory = "24GiB"
+  }
+  memory = "32GiB"
+}
+
+resource "deployment" "chat" {
   model    = model.qwen.id
   hardware = hardware_profile.gpu.id
   runtime  = "vllm"

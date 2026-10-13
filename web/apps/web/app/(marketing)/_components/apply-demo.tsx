@@ -8,7 +8,6 @@ import {
   demoState,
   demoTranscript,
   type Row,
-  type Status,
   type Tone,
 } from '@/lib/marketing/demo-timeline';
 
@@ -33,21 +32,6 @@ function RowLine({ row, className }: { row: Row; className?: string }) {
     <span className={cn('block whitespace-pre-wrap break-words', toneClass[row.tone], className)}>
       {row.shown}
       <span className="invisible">{row.rest}</span>
-    </span>
-  );
-}
-
-function StatusChip({ status }: { status: Status | null }) {
-  return (
-    <span
-      className={cn(
-        'inline-flex min-w-24 items-center justify-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs',
-        status === 'online' ? 'border-success text-success' : 'border-border text-muted-foreground',
-        !status && 'invisible',
-      )}
-    >
-      <span aria-hidden className="size-1.5 rounded-full bg-current" />
-      {status ?? 'starting'}
     </span>
   );
 }
@@ -121,8 +105,7 @@ export function ApplyDemo() {
 
   return (
     <div ref={rootRef} className="px-3 py-3 font-mono text-xs leading-5 sm:px-4 sm:text-[0.8125rem] sm:leading-6">
-      <div className="flex items-center justify-between">
-        <StatusChip status={state.status} />
+      <div className="flex justify-end">
         <button
           type="button"
           onClick={play}

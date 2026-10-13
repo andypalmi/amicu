@@ -171,23 +171,25 @@ export default function LandingPage() {
         <MockWindow title="providers" className="mt-12 max-w-2xl sm:mt-16">
           <ul className="px-4 font-mono text-sm">
             {sortedProviders.map((p) => (
-              <li
-                key={p.name}
-                className="flex items-center justify-between gap-3 border-b border-border py-2.5 last:border-b-0"
-              >
-                <span className="min-w-0 truncate">{p.name}</span>
-                <span
-                  className={cn(
-                    'shrink-0 rounded-full border px-2.5 py-0.5 text-xs',
-                    p.status === 'supported'
-                      ? 'border-transparent bg-foreground text-background'
-                      : p.status === 'preview'
-                        ? 'border-border text-foreground'
-                        : 'border-border text-muted-foreground',
-                  )}
+              <li key={p.name} className="border-b border-border last:border-b-0">
+                <Link
+                  href={['/docs/providers', p.slug].join('/')}
+                  className="-mx-4 flex items-center justify-between gap-3 px-4 py-2.5 transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                 >
-                  {statusLabel[p.status]}
-                </span>
+                  <span className="min-w-0 truncate">{p.name}</span>
+                  <span
+                    className={cn(
+                      'shrink-0 rounded-full border px-2.5 py-0.5 text-xs',
+                      p.status === 'supported'
+                        ? 'border-transparent bg-foreground text-background'
+                        : p.status === 'preview'
+                          ? 'border-border text-foreground'
+                          : 'border-border text-muted-foreground',
+                    )}
+                  >
+                    {statusLabel[p.status]}
+                  </span>
+                </Link>
               </li>
             ))}
           </ul>
