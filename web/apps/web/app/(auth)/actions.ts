@@ -10,6 +10,7 @@ import {
   type FieldErrors,
 } from '@amicu/auth';
 import { appHomeHref } from '@/lib/shared';
+import { safeNextPath } from '@/lib/auth/safe-next';
 import { authClient } from '@/lib/auth/client';
 import { SIGNUPS_ENABLED } from '@/lib/auth/config';
 import {
@@ -67,9 +68,7 @@ async function challengeFailure(
 }
 
 function safeNext(raw: FormDataEntryValue | null): string {
-  // Only allow local, absolute in-app paths - never an open redirect.
-  const value = typeof raw === 'string' ? raw : '';
-  return value.startsWith('/') && !value.startsWith('//') ? value : appHomeHref();
+  return safeNextPath(raw, appHomeHref());
 }
 
 export async function loginAction(

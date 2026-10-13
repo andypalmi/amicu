@@ -3,7 +3,8 @@
   // Worker name shown in the Cloudflare dashboard / `wrangler deploy` output.
   // Rename to match the account's chosen Workers service name before deploying.
   "name": "amicu-web",
-  "main": ".open-next/worker.js",
+  // Custom entry wrapping .open-next/worker.js (strips X-Forwarded-Host/Proto).
+  "main": "worker.ts",
   "compatibility_date": "2026-09-16",
   "compatibility_flags": [
     // Required by @opennextjs/cloudflare: Next.js server code uses Node.js
