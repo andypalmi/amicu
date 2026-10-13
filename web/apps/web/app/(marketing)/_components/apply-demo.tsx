@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { RotateCcw } from 'lucide-react';
 import { cn } from '@amicu/ui';
 import {
   DEMO_STEPS,
@@ -10,6 +11,7 @@ import {
   type Row,
   type Tone,
 } from '@/lib/marketing/demo-timeline';
+import { MockWindow } from './home';
 
 // Server-renders the final frame (t = Infinity); after hydration it rewinds
 // to 0 and plays once as soon as it nears the viewport. Reduced motion keeps the final
@@ -36,7 +38,7 @@ function RowLine({ row, className }: { row: Row; className?: string }) {
   );
 }
 
-export function ApplyDemo() {
+export function ApplyDemo({ className }: { className?: string }) {
   const [t, setT] = useState(Infinity);
   const [replayable, setReplayable] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -103,39 +105,48 @@ export function ApplyDemo() {
   const term = state.rows.filter((r) => r.screen === 'term');
   const call = state.rows.filter((r) => r.screen === 'call');
 
+  const replay = (
+    <button
+      type="button"
+      onClick={play}
+      aria-label="Replay animation"
+      title="Replay"
+      tabIndex={replayable ? 0 : -1}
+      aria-hidden={!replayable}
+      className={cn(
+        'rounded-sm p-1.5 text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+        !replayable && 'invisible',
+      )}
+    >
+      <RotateCcw aria-hidden className="size-3.5" />
+    </button>
+  );
+
   return (
-    <div ref={rootRef} className="px-3 py-3 font-mono text-xs leading-5 sm:px-4 sm:text-[0.8125rem] sm:leading-6">
-      <div className="flex justify-end">
-        <button
-          type="button"
-          onClick={play}
-          className={cn(
-            'rounded-sm px-1 text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-            !replayable && 'invisible',
-          )}
-          tabIndex={replayable ? 0 : -1}
-        >
-          Replay
-        </button>
-      </div>
-      <pre className="sr-only">{TRANSCRIPT}</pre>
-      <div aria-hidden className="mt-3">
-        <div>
-          {term.map((row, i) => (
-            <RowLine key={i} row={row} />
-          ))}
-        </div>
-        <div
-          className={cn(
-            'mt-3 border-t border-border pt-3',
-            state.screen !== 'call' && 'invisible',
-          )}
-        >
-          {call.map((row, i) => (
-            <RowLine key={i} row={row} className={i === 1 ? 'mt-3' : undefined} />
-          ))}
+    <MockWindow title="terminal" action={replay} className={className}>
+      <div
+        ref={rootRef}
+        className="px-3 py-3 font-mono text-xs leading-5 sm:px-4 sm:text-[0.8125rem] sm:leading-6"
+      >
+        <pre className="sr-only">{TRANSCRIPT}</pre>
+        <div aria-hidden>
+          <div>
+            {term.map((row, i) => (
+              <RowLine key={i} row={row} />
+            ))}
+          </div>
+          <div
+            className={cn(
+              'mt-3 border-t border-border pt-3',
+              state.screen !== 'call' && 'invisible',
+            )}
+          >
+            {call.map((row, i) => (
+              <RowLine key={i} row={row} className={i === 1 ? 'mt-3' : undefined} />
+            ))}
+          </div>
         </div>
       </div>
-    </div>
+    </MockWindow>
   );
 }
