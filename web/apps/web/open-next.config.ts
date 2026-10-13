@@ -12,7 +12,10 @@
 // revalidateTag/revalidatePath are ever needed, switch to the R2 or KV cache and
 // add a tag cache - see https://opennext.js.org/cloudflare/caching
 //
-// `opennextjs-cloudflare deploy|preview|upload` populate the cache assets.
+// `pnpm cf:build` copies the prerender output into .open-next/assets/cdn-cgi/
+// (`populateCache local`, no credentials needed), so a plain `wrangler deploy`
+// ships it; `opennextjs-cloudflare deploy|preview|upload` repeat the same
+// idempotent local copy.
 import { defineCloudflareConfig } from '@opennextjs/cloudflare';
 import staticAssetsIncrementalCache from '@opennextjs/cloudflare/overrides/incremental-cache/static-assets-incremental-cache';
 
