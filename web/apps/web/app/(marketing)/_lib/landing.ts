@@ -67,6 +67,22 @@ export const HERO_PLAN: TermLine[] = [
   },
 ];
 
+/**
+ * A request to the endpoint `apply` prints. The endpoint is OpenAI-compatible
+ * and protected by the deployment's `api_key`; Modal endpoints also need the
+ * workspace proxy-token headers.
+ */
+export const CURL_REQUEST: TermLine[] = [
+  { text: '$ curl "$ENDPOINT/v1/chat/completions" \\', tone: 'cmd' },
+  { text: '    -H "Authorization: Bearer $CHAT_API_KEY" \\' },
+  { text: '    -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" \\' },
+  { text: '    -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" \\' },
+  { text: '    -H "Content-Type: application/json" \\' },
+  {
+    text: `    -d '{"model": "RedHatAI/Qwen3.5-9B-FP8-dynamic", "messages": [{"role": "user", "content": "Hello"}]}'`,
+  },
+];
+
 export interface Step {
   /** Anchor-safe id. */
   id: string;
@@ -79,8 +95,8 @@ export interface Step {
 export const STEPS: Step[] = [
   {
     id: 'declare',
-    title: 'Declare the stack',
-    body: 'Write the model, the hardware it runs on and the serving runtime as HCL resources. Start from a scaffold, or answer a few questions in the web console (context length, concurrency, budget, latency, EU residency) and get ranked candidate stacks written out as HCL.',
+    title: 'Write the config',
+    body: 'Describe the model, hardware and runtime as HCL, or start from amicu init.',
     transcript: [
       { text: '$ amicu init', tone: 'cmd' },
       { text: '  create amicu.hcl' },
@@ -94,14 +110,14 @@ export const STEPS: Step[] = [
   },
   {
     id: 'plan',
-    title: 'Check it and read the plan',
-    body: 'Before anything starts, amicu checks references, whether the model fits the memory you gave it, and every residency and governance rule. The plan then shows each change against recorded state, with the exact launch command it will run.',
+    title: 'Read the plan',
+    body: 'See every change and the exact launch command before anything starts.',
     transcript: HERO_PLAN,
   },
   {
     id: 'apply',
-    title: 'Apply with approval',
-    body: 'Apply shows the plan again and waits for a yes. It then starts llama.cpp or vLLM as a launchd or systemd service on your machine, or as an app on Modal’s serverless GPUs, and records the endpoint in state.',
+    title: 'Apply it',
+    body: 'Approve the plan and amicu starts the service, locally or on Modal.',
     transcript: [
       { text: '$ amicu apply', tone: 'cmd' },
       { text: 'Plan: 1 action(s).' },
@@ -116,43 +132,12 @@ export const STEPS: Step[] = [
     ],
   },
   {
-    id: 'observe',
-    title: 'Watch it run',
-    body: 'Check status, logs and metrics from the CLI. Give the tuning engine a metrics snapshot and it compares measured throughput and latency with the plan’s estimates, then suggests changes with the evidence behind each one. Suggestions are advisory: nothing changes until you edit the file and apply.',
-    transcript: [
-      { text: '$ amicu modal status amicu-chat', tone: 'cmd' },
-      { text: 'app amicu-chat (ap-…): deployed', tone: 'muted' },
-    ],
+    id: 'call',
+    title: 'Call it',
+    body: 'Send requests with your API key, and check status and logs from the CLI.',
+    transcript: CURL_REQUEST,
   },
 ];
-
-export interface ChatSession {
-  client: string;
-  model: string;
-  host: string;
-  user: string;
-  reply: string[];
-  status: string;
-  hint: string;
-}
-
-/**
- * Illustrative chat session against the endpoint `apply` prints. amicu has no
- * chat command; this is any OpenAI-compatible client, and the answer is an
- * example, not recorded model output.
- */
-export const CHAT_SESSION: ChatSession = {
-  client: 'chat',
-  model: 'RedHatAI/Qwen3.5-9B-FP8-dynamic',
-  host: '<workspace>--amicu-chat-server.<region>.modal.direct',
-  user: 'Draft a retention notice for our EU customers.',
-  reply: [
-    'We keep customer data only in EU regions, and delete it 30 days after you close your account.',
-    'You can ask for earlier deletion at any time by contacting our privacy team.',
-  ],
-  status: '2.1s · 24 tok/s',
-  hint: 'enter send · ctrl+c quit',
-};
 
 /** Same model resource, two hardware profiles: real launch lines from `plan`. */
 export const LAPTOP_LAUNCH =
@@ -168,20 +153,16 @@ export interface Outcome {
 /** What you get. Each claim maps to shipped behaviour in the CLI/engine. */
 export const OUTCOMES: Outcome[] = [
   {
-    title: 'Residency is checked, not promised',
-    body: 'Declare that a data class must stay in the EU (or the UK, US, Canada, APAC), or allow and deny specific providers and regions. A deployment that would land outside those rules fails the plan with a named error instead of starting.',
-  },
-  {
-    title: 'No guessing about what will run',
-    body: 'The plan prints the launch command, target and region, and an estimate of peak memory. If the model will not fit the hardware you declared, you find out at plan time, not after a cold start.',
+    title: 'Checked at plan time',
+    body: 'A model that does not fit the hardware, or a deployment outside the regions you allow, fails the plan with a named error.',
   },
   {
     title: 'Reviewable changes',
-    body: 'The stack is a text file in your repository. Changes go through code review like anything else, and every apply is a diff against recorded state.',
+    body: 'The stack is a text file in your repository. Every apply is a diff against recorded state.',
   },
   {
-    title: 'Recommendations that show their working',
-    body: 'The wizard ranks candidate stacks against your constraints, and the tuning advice names the bottleneck, the evidence and the alternatives it ruled out.',
+    title: 'Recommendations with evidence',
+    body: 'The wizard ranks candidate stacks against your constraints. Tuning advice names the bottleneck and the evidence.',
   },
 ];
 
@@ -198,11 +179,7 @@ export const SUPPORT: Support[] = [
   },
   {
     label: 'Apply targets',
-    value: 'Your own machine, as a launchd or systemd service. Modal serverless GPUs, with region pinning and autoscaling caps.',
-  },
-  {
-    label: 'Residency and pricing data',
-    value: 'Region and pricing data for Hetzner, OVHcloud, Scaleway, Nebius, RunPod, Modal, AWS, Azure and GCP feed the residency checks and recommendations. Provisioning adapters for Hetzner, OVHcloud, Scaleway, RunPod and SSH hosts exist but are untested live and not wired into apply; AWS, Azure, GCP and Nebius have none yet.',
+    value: 'Your own machine, as a launchd or systemd service. Modal serverless GPUs, with region pinning.',
   },
   {
     label: 'Models',

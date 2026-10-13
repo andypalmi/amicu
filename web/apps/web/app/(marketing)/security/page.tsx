@@ -1,38 +1,64 @@
 import type { Metadata } from 'next';
-import { FactList, PageHeader, Section, CTABand } from '../_components/marketing';
+import Link from 'next/link';
+import { CTABand, FactList, PageHeader, Section, SectionHeader } from '../_components/marketing';
+import { githubUrl } from '../_lib/content';
 import { pageMetadata } from '../_lib/seo';
 
-const pillars = [
+const docsLink = (href: string) => (
+  <Link href={href} className="text-foreground underline underline-offset-4">
+    Read more in the docs
+  </Link>
+);
+
+const cliFacts = [
   {
-    title: 'Enforced by the API, not the UI',
-    body: 'The frontend mirrors tier and role gating for UX - show, lock, upsell - but never enforces it. The Rust Management API re-checks every mutation server-side. Reading a claim never grants an action.',
+    term: 'Secrets',
+    detail: (
+      <>
+        Write secret(&quot;NAME&quot;) in the config. The value is read from your environment at
+        apply. It is never written to state or the plan, and shows as ****** in output.{' '}
+        {docsLink('/docs/security/secrets')}
+      </>
+    ),
   },
   {
-    title: 'Asymmetric, verifiable sessions',
-    body: 'Auth issues asymmetric JWTs with a published JWKS at /.well-known/jwks.json. Tier and role claims verify offline; sessions refresh through the API. No third-party identity dependency in the open core.',
+    term: 'Endpoint keys',
+    detail: (
+      <>
+        Each endpoint can have its own API key. Locally it goes to the service through an
+        owner-only (0600) environment file, never the command line. After apply, amicu sends an
+        anonymous request: if it is not rejected, the endpoint is torn down and apply fails.{' '}
+        {docsLink('/docs/security/endpoint-auth')}
+      </>
+    ),
   },
   {
-    title: 'Secrets by reference',
-    body: 'Amicu works with credential and secret references, not copies of your keys. Provider credentials stay in your secret store; the stack declares what to use, not the secret itself.',
+    term: 'State',
+    detail: (
+      <>
+        State is a file in your project, under .amicu/state. You can also keep it in your own
+        Postgres when you run the server.{' '}
+        {docsLink('/docs/security/state')}
+      </>
+    ),
   },
   {
-    title: 'Data residency you choose',
-    body: 'Residency and region are first-class planning inputs. Plans are checked against the regions your data class allows, so a stack that would leave them is rejected before anything starts.',
-  },
-  {
-    title: 'Open source, auditable',
-    body: 'The entire frontend - marketing, app, and docs - is AGPL-3.0 in the open monorepo. There is no closed UI hiding paid features; anyone can read and audit exactly what runs in the browser.',
-  },
-  {
-    title: 'Enterprise governance',
-    body: 'Org administration, RBAC, SSO, and audit are available on the Enterprise tier for teams that need centralized access control and a verifiable record of who changed what.',
+    term: 'Telemetry',
+    detail: (
+      <>
+        The CLI sends no usage telemetry. It contacts Modal&apos;s API when you apply to Modal, and
+        the serving container downloads weights from Hugging Face. On Modal, your Hugging Face
+        token is passed as a Modal secret. Prompts go only to the endpoint you deployed.{' '}
+        {docsLink('/docs/security/telemetry')}
+      </>
+    ),
   },
 ];
 
 export const metadata: Metadata = pageMetadata({
   title: 'Security',
   description:
-    'How Amicu handles trust: API-enforced tier gating, asymmetric verifiable sessions, secrets by reference, residency checks in plans, and a fully open-source auditable frontend.',
+    'How the amicu CLI handles secrets, endpoint keys, state and network access, and how to report a vulnerability.',
   path: '/security',
 });
 
@@ -41,22 +67,27 @@ export default function SecurityPage() {
     <main className="flex flex-1 flex-col">
       <Section>
         <PageHeader
-          title="Trust the boundary, not the browser."
-          description="The web app renders decisions. The API makes and enforces them."
+          title="Security"
+          description="What the CLI does with your secrets, endpoints and data."
         />
+        <FactList className="mt-14" items={cliFacts} />
+      </Section>
 
-        <FactList
-          className="mt-14"
-          items={pillars.map((x) => ({ term: x.title, detail: x.body }))}
+      <Section>
+        <SectionHeader title="Hosted console" />
+        <p className="mx-auto mt-6 max-w-2xl text-pretty text-center leading-relaxed text-muted-foreground">
+          The console is optional. Sessions use short-lived signed tokens and refresh through the
+          API. Access rules are enforced by the API, not the browser. Sign-ups are closed.
+        </p>
+      </Section>
+
+      <Section>
+        <CTABand
+          title="Report a vulnerability"
+          lede="Report it privately through a GitHub security advisory. Please do not file a public issue."
+          primary={{ label: 'Report privately', href: `${githubUrl}/security/advisories/new`, external: true }}
+          secondary={{ label: 'Security docs', href: '/docs/security' }}
         />
-
-        <div className="mt-16">
-          <CTABand
-            title="The thin-client boundary"
-            lede="Compromising the browser cannot grant capabilities the server did not."
-            primary={{ label: 'Read the security docs', href: '/docs' }}
-          />
-        </div>
       </Section>
     </main>
   );

@@ -10,8 +10,8 @@ import { gitConfig } from '@/lib/shared';
 
 /** Public repository URL. */
 export const githubUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
-/** The README quickstart (build the CLI, `amicu init`, plan, apply). */
-export const quickstartUrl = `${githubUrl}#quickstart`;
+/** The docs quickstart (install the CLI, `amicu init`, plan, apply). */
+export const quickstartUrl = '/docs/quickstart';
 /**
  * Contact channel until a company contact address exists (see
  * `lib/legal/company.ts`, all fields still null): the repository's issues.
@@ -38,7 +38,7 @@ export const tiers: Tier[] = [
   {
     id: 'community',
     name: 'Community',
-    tagline: 'Everything a single operator needs.',
+    tagline: 'Everything one operator needs.',
     priceLabel: 'Free · AGPL-3.0',
     description:
       'Author and validate HCL, run local llama.cpp and single-node vLLM, use the guided wizard, and keep solo remote state against a self-hosted backend.',
@@ -54,10 +54,10 @@ export const tiers: Tier[] = [
     id: 'pro',
     name: 'Pro',
     tagline: 'Advanced recommendations + team collaboration.',
-    priceLabel: 'Paid',
+    priceLabel: 'Planned',
     description:
       'Everything in Community, plus performance-DB-backed recommendations, performance-DB queries and filtered comparison, and shared team state with locking and roles.',
-    cta: { label: 'Sign-ups closed', href: null },
+    cta: { label: 'Contact us', href: contactUrl },
     highlights: [
       'Advanced perf-DB-backed recommendations',
       'Performance-DB query + filtered comparison',
@@ -68,10 +68,10 @@ export const tiers: Tier[] = [
     id: 'enterprise',
     name: 'Enterprise',
     tagline: 'Governance + production scale.',
-    priceLabel: 'Contact sales',
+    priceLabel: 'Planned',
     description:
       'Everything in Pro, plus org / RBAC / SSO / audit, multi-node distributed serving, advanced routing and failover, and a private performance DB.',
-    cta: { label: 'Get in touch', href: contactUrl },
+    cta: { label: 'Contact us', href: contactUrl },
     highlights: [
       'Org / RBAC / SSO / audit',
       'Multi-node distributed serving',
@@ -82,11 +82,11 @@ export const tiers: Tier[] = [
   {
     id: 'hosted',
     name: 'Hosted',
-    tagline: 'Fully managed, we run the GPUs.',
-    priceLabel: 'Talk to us',
+    tagline: 'We run the GPUs.',
+    priceLabel: 'Planned',
     description:
-      'Amicu-hosted control plane and managed GPU capacity. Pro and Enterprise capabilities apply as your plan allows, with none of the day-2 infrastructure to run yourself.',
-    cta: { label: 'Get in touch', href: contactUrl },
+      'A managed control plane and managed GPU capacity, so you run none of the infrastructure yourself.',
+    cta: { label: 'Contact us', href: contactUrl },
     highlights: [
       'Fully managed GPU hosting',
       'Managed control plane',

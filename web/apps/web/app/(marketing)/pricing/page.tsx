@@ -15,7 +15,7 @@ import {
   TableHeader,
   TableRow,
 } from '@amicu/ui';
-import { PageHeader, Section, StatusNote } from '../_components/marketing';
+import { PageHeader, Section, SectionHeader } from '../_components/marketing';
 import {
   type Availability,
   featureMatrix,
@@ -27,7 +27,7 @@ import { pageMetadata } from '../_lib/seo';
 export const metadata: Metadata = pageMetadata({
   title: 'Pricing',
   description:
-    'Amicu tiers - Community, Pro, Enterprise, and Hosted - gated on an individual-vs-team axis. Compare the full feature matrix.',
+    'Amicu is free and open source under AGPL-3.0. Team and enterprise plans are planned.',
   path: '/pricing',
 });
 
@@ -44,7 +44,7 @@ function AvailabilityCell({ value }: { value: Availability }) {
       return (
         <>
           <Lock className="mx-auto size-4 text-muted-foreground/60" aria-hidden />
-          <span className="sr-only">Locked - upgrade required</span>
+          <span className="sr-only">Not included</span>
         </>
       );
     case 'asApplicable':
@@ -61,7 +61,7 @@ function AvailabilityCell({ value }: { value: Availability }) {
 
 function TierCard({ tier }: { tier: Tier }) {
   return (
-    <Card className="flex flex-col">
+    <Card className="flex flex-col text-left">
       <CardHeader className="gap-3">
         <CardTitle className="text-xl">{tier.name}</CardTitle>
         <p className="text-sm text-muted-foreground">{tier.tagline}</p>
@@ -93,40 +93,56 @@ function TierCard({ tier }: { tier: Tier }) {
   );
 }
 
+const faq = [
+  {
+    q: 'Can I use amicu at work?',
+    a: 'Yes. The AGPL-3.0 allows use for any purpose, including inside a company.',
+  },
+  {
+    q: 'Do my configs and models fall under the AGPL?',
+    a: 'No. The license covers the amicu source. Your HCL files, models and endpoint outputs stay yours.',
+  },
+  {
+    q: 'When does the AGPL require me to share code?',
+    a: 'If you modify amicu and let others use that version over a network, you must offer them its source.',
+  },
+  {
+    q: 'Is there a commercial license?',
+    a: 'Not yet. If the AGPL does not fit your use, contact us.',
+  },
+];
+
 export default function PricingPage() {
+  const [community, ...planned] = tiers;
   return (
     <main className="flex flex-1 flex-col">
       <Section>
-        <PageHeader
-          title="One rail, four tiers."
-          description="Community is free. Pro, Enterprise and Hosted add team and production features."
+        <PageHeader title="Pricing" description="amicu is free and open source under AGPL-3.0." />
+
+        <div className="mx-auto mt-12 max-w-xl">
+          <TierCard tier={community} />
+        </div>
+      </Section>
+
+      <Section>
+        <SectionHeader
+          title="Team and enterprise"
+          lead="Planned. Contact us if you want to talk about it."
         />
-
-        <StatusNote className="mx-auto mt-8 max-w-3xl text-center">
-          Hosted sign-ups are closed for now. Community is open source and free.
-        </StatusNote>
-
-        <div className="mt-10 grid gap-6 lg:grid-cols-4">
-          {tiers.map((tier) => (
+        <div className="mt-10 grid gap-6 text-left lg:grid-cols-3">
+          {planned.map((tier) => (
             <TierCard key={tier.id} tier={tier} />
           ))}
         </div>
 
-        {/* Full feature matrix */}
         <section className="mt-20">
-          <h2 className="text-2xl font-semibold tracking-tight">Compare every tier</h2>
-          <p className="mt-2 text-sm text-muted-foreground">
-            <Lock className="mr-1 inline size-3.5 align-[-2px]" aria-hidden />
-            Locked features are rendered with an upsell, not hidden - the API rejects
-            the action regardless of what the UI shows.
-          </p>
-
-          <div className="mt-6 overflow-hidden rounded-md border border-border">
+          <h2 className="text-center text-2xl font-semibold tracking-tight">Compare tiers</h2>
+          <div className="mt-6 overflow-x-auto rounded-md border border-border">
             <Table className="min-w-[720px]">
               <TableHeader>
                 <TableRow className="bg-muted/40 hover:bg-muted/40">
                   <TableHead className="p-4 text-sm font-medium normal-case tracking-normal text-foreground">
-                    Screen / feature
+                    Feature
                   </TableHead>
                   {tiers.map((tier) => (
                     <TableHead
@@ -165,16 +181,27 @@ export default function PricingPage() {
             </Table>
           </div>
 
-          <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-xs text-muted-foreground">
+          <div className="mt-4 flex flex-wrap justify-center gap-x-6 gap-y-2 text-xs text-muted-foreground">
             <span className="flex items-center gap-1.5">
               <Check className="size-3.5 text-accent-text" aria-hidden /> Included
             </span>
             <span className="flex items-center gap-1.5">
-              <Lock className="size-3.5" aria-hidden /> Locked - upgrade to unlock
+              <Lock className="size-3.5" aria-hidden /> Not in this tier
             </span>
-            <span className="flex items-center gap-1.5">as applicable - per plan</span>
           </div>
         </section>
+      </Section>
+
+      <Section>
+        <SectionHeader title="AGPL questions" />
+        <dl className="mx-auto mt-10 max-w-2xl divide-y divide-border border-y border-border text-center">
+          {faq.map((f) => (
+            <div key={f.q} className="py-6">
+              <dt className="font-medium">{f.q}</dt>
+              <dd className="mt-2 text-pretty leading-relaxed text-muted-foreground">{f.a}</dd>
+            </div>
+          ))}
+        </dl>
       </Section>
     </main>
   );

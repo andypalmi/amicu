@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { company, legalPages } from '@/lib/legal/company';
 import { githubUrl } from '../_lib/content';
+import { Brand } from '@/components/common/brand';
 import { Container } from './marketing';
 
 const linkCls = 'text-muted-foreground hover:text-foreground hover:underline';
@@ -14,21 +15,23 @@ export function SiteFooter() {
 
   return (
     <footer className="border-t border-border py-10 text-sm">
-      <Container className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
-        <div className="flex flex-col gap-1">
-          <span className="font-semibold tracking-tight text-foreground">amicu</span>
+      <Container className="flex flex-col items-center gap-6 text-center">
+        <div className="flex flex-col items-center gap-1">
+          <Brand className="text-lg" />
           <span className="text-muted-foreground">Open source under AGPL-3.0.</span>
         </div>
-        <div className="flex flex-col gap-3 sm:items-end">
-          <nav aria-label="Footer" className="flex flex-wrap gap-x-6 gap-y-2">
+        <div className="flex flex-col items-center gap-3">
+          <nav aria-label="Footer" className="flex flex-wrap justify-center gap-x-6 gap-y-2">
+            <Link className={linkCls} href="/docs/quickstart">Quickstart</Link>
+            <Link className={linkCls} href="/docs">Docs</Link>
             <Link className={linkCls} href="/pricing">Pricing</Link>
             <Link className={linkCls} href="/providers">Providers</Link>
             <Link className={linkCls} href="/security">Security</Link>
-            <Link className={linkCls} href="/docs">Docs</Link>
             <a className={linkCls} href={githubUrl}>GitHub</a>
+            <a className={linkCls} href={`${githubUrl}/blob/main/LICENSE`}>License</a>
           </nav>
           {legal.length > 0 || legalPages.contact ? (
-            <nav aria-label="Legal" className="flex flex-wrap gap-x-6 gap-y-2">
+            <nav aria-label="Legal" className="flex flex-wrap justify-center gap-x-6 gap-y-2">
               {legal.map((l) => (
                 <Link key={l.href} className={linkCls} href={l.href}>{l.label}</Link>
               ))}

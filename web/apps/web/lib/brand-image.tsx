@@ -1,10 +1,9 @@
 import { ImageResponse } from 'next/og';
-import { brandMarkShapes } from '@/lib/brand-shapes';
 
-// Square monogram PNG on a solid background, for the apple-touch icon and the
-// PWA manifest icons. Neutral palette only (no brand accent exists yet).
-export function monogramImage(size: number, opts?: { padding?: number }) {
-  const pad = opts?.padding ?? Math.round(size * 0.14);
+// Square icon PNG for the apple-touch icon and the PWA manifest icons: the
+// lowercase "a" of the typed "amicu" wordmark, set in the same semibold weight
+// as the header logo, on a solid background. Neutral palette only.
+export function monogramImage(size: number) {
   return new ImageResponse(
     (
       <div
@@ -15,21 +14,14 @@ export function monogramImage(size: number, opts?: { padding?: number }) {
           alignItems: 'center',
           justifyContent: 'center',
           background: '#0a0a0a',
-          padding: pad,
+          color: '#fafafa',
+          fontSize: Math.round(size * 0.72),
+          fontWeight: 600,
+          lineHeight: 1,
+          paddingBottom: Math.round(size * 0.06),
         }}
       >
-        <svg
-          viewBox="0 0 24 24"
-          width="100%"
-          height="100%"
-          fill="none"
-          stroke="#fafafa"
-          strokeWidth={1.75}
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          {brandMarkShapes()}
-        </svg>
+        a
       </div>
     ),
     { width: size, height: size },

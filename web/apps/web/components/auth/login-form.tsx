@@ -60,7 +60,11 @@ export function LoginForm({
             Create an account
           </Link>
         </p>
-      ) : null}
+      ) : (
+        <p className="text-center text-sm text-muted-foreground">
+          Sign-ups are closed. Using the CLI? You don&apos;t need an account.
+        </p>
+      )}
     </form>
   );
 }

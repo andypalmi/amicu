@@ -1,62 +1,81 @@
 import type { Metadata } from 'next';
-import { CTABand, GroupedList, PageHeader, Section } from '../_components/marketing';
-import { providers } from '../_lib/content';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@amicu/ui';
+import { CTABand, PageHeader, Section } from '../_components/marketing';
+import { providers, type ProviderStatus } from '../_lib/content';
 import { pageMetadata } from '../_lib/seo';
 
 export const metadata: Metadata = pageMetadata({
   title: 'Providers',
   description:
-    'Amicu applies to your own machine and Modal today. Hetzner, OVHcloud, Scaleway, RunPod and SSH hosts have provisioning adapters not yet tested live. AWS, Azure, GCP and Nebius are region and pricing data only.',
+    'Amicu applies to your own machine and Modal today. Other providers are in preview or planned.',
   path: '/providers',
 });
 
-const CATEGORIES = ['European cloud', 'GPU cloud', 'Hyperscaler', 'Self-hosted'];
+const STATUS_LABEL: Record<ProviderStatus, string> = {
+  supported: 'Supported',
+  preview: 'Preview',
+  planned: 'Planned',
+};
 
 export default function ProvidersPage() {
-  const supported = providers.filter((p) => p.status === 'supported');
-  const preview = providers.filter((p) => p.status === 'preview');
-  const planned = providers.filter((p) => p.status === 'planned');
   return (
     <main className="flex flex-1 flex-col">
       <Section>
         <PageHeader
-          title="Where amicu applies"
-          description="Apply works on your machine and Modal. Some adapters are built but untested live; others are planned."
+          title="Providers"
+          description="Today the local machine and Modal are supported. The rest are in preview."
         />
 
-        <div className="mt-14 space-y-12">
-          <GroupedList
-            title="Supported"
-            groups={[
-              {
-                entries: supported.map((p) => ({ name: p.name, detail: p.kind, note: p.residency })),
-              },
-            ]}
-          />
-          <GroupedList
-            title="Preview"
-            note="Provisioning adapter built, not yet tested live."
-            groups={CATEGORIES.map((c) => ({
-              label: c,
-              entries: preview
-                .filter((p) => p.kind === c)
-                .map((p) => ({ name: p.name, note: p.residency })),
-            })).filter((g) => g.entries.length > 0)}
-          />
-          <GroupedList
-            title="Planned"
-            note="Region and pricing data for planning; provisioning not built yet."
-            groups={CATEGORIES.map((c) => ({
-              label: c,
-              entries: planned
-                .filter((p) => p.kind === c)
-                .map((p) => ({ name: p.name, note: p.residency })),
-            })).filter((g) => g.entries.length > 0)}
-          />
+        <div className="mx-auto mt-14 max-w-4xl overflow-x-auto rounded-md border border-border">
+          <Table className="min-w-[560px]">
+            <TableHeader>
+              <TableRow className="bg-muted/40 hover:bg-muted/40">
+                <TableHead className="p-4 text-left text-sm font-medium normal-case tracking-normal text-foreground">
+                  Provider
+                </TableHead>
+                <TableHead className="p-4 text-left text-sm font-medium normal-case tracking-normal text-foreground">
+                  Status
+                </TableHead>
+                <TableHead className="p-4 text-left text-sm font-medium normal-case tracking-normal text-foreground">
+                  Regions
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {providers.map((p) => (
+                <TableRow key={p.name} className="hover:bg-transparent">
+                  <TableHead
+                    scope="row"
+                    className="p-4 text-left text-sm font-medium normal-case tracking-normal text-foreground"
+                  >
+                    {p.name}
+                  </TableHead>
+                  <TableCell className="p-4 text-left text-sm">{STATUS_LABEL[p.status]}</TableCell>
+                  <TableCell className="p-4 text-left text-sm text-muted-foreground">
+                    {p.residency}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         </div>
+        <p className="mx-auto mt-4 max-w-4xl text-center text-sm text-muted-foreground">
+          Preview: an adapter exists but is not tested live. Planned: region and pricing data
+          only.
+        </p>
 
         <div className="mt-16">
-          <CTABand title="How residency, region and zone work" primary={{ label: 'Open the docs', href: '/docs' }} />
+          <CTABand
+            title="Regions, residency and zones"
+            primary={{ label: 'Provider docs', href: '/docs/providers' }}
+          />
         </div>
       </Section>
     </main>
