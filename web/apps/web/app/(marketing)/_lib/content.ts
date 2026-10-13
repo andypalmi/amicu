@@ -211,9 +211,15 @@ export const featureMatrix: FeatureRow[] = [
 export type ProviderStatus = 'supported' | 'preview' | 'planned';
 
 export interface Provider {
+  /** Docs page: `/docs/providers/<slug>`. */
+  slug: string;
   name: string;
-  /** Category (non-supported providers are grouped by it) or a one-line description. */
+  /** Category, shown under the name. */
   kind: string;
+  /** One line on what the provider is, for tiles. */
+  blurb: string;
+  /** Two or three short capability tags, taken from the adapter or apply path. */
+  tags: string[];
   /**
    * `supported`: wired into `amicu apply` (this machine, Modal).
    * `preview`: provisioning adapter built (bare machine only), tested against
@@ -229,64 +235,102 @@ export interface Provider {
 // launchd/systemd or Modal) and the catalogs in crates/amicu-providers.
 export const providers: Provider[] = [
   {
+    slug: 'local',
     name: 'This machine',
     kind: 'launchd or systemd service',
+    blurb: 'Run llama.cpp or vLLM as a user service on the machine where you invoke amicu.',
+    tags: ['macOS and Linux', 'Loopback endpoint', 'Apple Silicon and CPU'],
     status: 'supported',
     residency: 'Wherever the machine is',
   },
   {
+    slug: 'modal',
     name: 'Modal',
     kind: 'Serverless GPU cloud',
+    blurb: 'Deploy llama.cpp or vLLM to Modal as an autoscaling app.',
+    tags: ['Serverless GPU', 'Region pinning', 'Autoscaling'],
     status: 'supported',
     residency: 'Region pinning, EU included (for example eu-west)',
   },
-  { name: 'Hetzner', kind: 'European cloud', status: 'preview', residency: 'Germany, Finland, plus US and APAC' },
   {
+    slug: 'hetzner',
+    name: 'Hetzner',
+    kind: 'European cloud',
+    blurb: 'Dedicated GPU servers in German and Finnish data centers.',
+    tags: ['Dedicated servers', 'Monthly billing', 'EU data centers'],
+    status: 'preview',
+    residency: 'Germany, Finland, plus US and APAC',
+  },
+  {
+    slug: 'ovhcloud',
     name: 'OVHcloud',
     kind: 'European cloud',
+    blurb: 'Public Cloud GPU instances from a French sovereign cloud.',
+    tags: ['GPU instances', 'On-demand', 'EU data centers'],
     status: 'preview',
     residency: 'France, Germany, Poland, plus non-EU regions',
   },
   {
+    slug: 'scaleway',
     name: 'Scaleway',
     kind: 'European cloud',
+    blurb: 'Single-GPU instances in French, Dutch and Polish regions.',
+    tags: ['GPU instances', 'On-demand', 'EU only'],
     status: 'preview',
     residency: 'France, Netherlands, Poland',
   },
   {
-    name: 'Nebius',
-    kind: 'GPU cloud',
-    status: 'planned',
-    residency: 'EU regions, plus a US region',
-  },
-  {
+    slug: 'runpod',
     name: 'RunPod',
     kind: 'GPU cloud',
+    blurb: 'Provider-managed GPU pods across EU, EEA and worldwide data centers.',
+    tags: ['GPU pods', 'On-demand and interruptible', 'EU and EEA'],
     status: 'preview',
     residency: 'EU and EEA data centers, plus US, Canada and APAC',
   },
   {
+    slug: 'self-hosted',
+    name: 'Self-hosted over SSH',
+    kind: 'Self-hosted',
+    blurb: 'Hardware you declare and own, reached over SSH.',
+    tags: ['Your hardware', 'SSH key auth', 'Declared location'],
+    status: 'preview',
+    residency: 'The location you declare for each host',
+  },
+  {
+    slug: 'nebius',
+    name: 'Nebius',
+    kind: 'GPU cloud',
+    blurb: 'High-end GPUs in Finland and France, plus a US region.',
+    tags: ['High-end GPUs', 'Catalog data only'],
+    status: 'planned',
+    residency: 'EU regions, plus a US region',
+  },
+  {
+    slug: 'aws',
     name: 'AWS',
     kind: 'Hyperscaler',
+    blurb: 'GPU EC2 instances in five EU regions, plus US and APAC.',
+    tags: ['GPU EC2', 'Catalog data only'],
     status: 'planned',
     residency: 'Ireland, Frankfurt, Stockholm, Milan, Paris, plus US and APAC',
   },
   {
+    slug: 'azure',
     name: 'Azure',
     kind: 'Hyperscaler',
+    blurb: 'GPU virtual machines across Europe, the UK, the US and APAC.',
+    tags: ['GPU VMs', 'Catalog data only'],
     status: 'planned',
     residency: 'West and North Europe, Germany, Sweden, France, plus UK, US and APAC',
   },
   {
+    slug: 'gcp',
     name: 'GCP',
     kind: 'Hyperscaler',
+    blurb: 'GPU Compute Engine instances in EU regions, plus US and APAC.',
+    tags: ['GPU Compute Engine', 'Catalog data only'],
     status: 'planned',
     residency: 'Belgium, Netherlands, Finland, Frankfurt, Paris, plus US and APAC',
-  },
-  {
-    name: 'Self-hosted over SSH',
-    kind: 'Self-hosted',
-    status: 'preview',
-    residency: 'The location you declare for each host',
   },
 ];

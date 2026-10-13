@@ -37,9 +37,9 @@ If an apply fails after starting some deployments, those deployments are recorde
 
 State can fall out of date if something changes a deployment outside amicu.
 
-- **Modal.** Before each `plan` and `apply`, amicu asks Modal which recorded apps still exist. Apps that are gone are dropped from state and the plan shows a `create`. A `drift:` line is printed (to stderr with `--output json`). If the lookup fails, a `warning: could not check Modal for live apps` is printed and state is used as is.
+- **Remote providers (Modal today).** Before each `plan` and `apply`, amicu asks Modal which recorded apps still exist. Apps that are gone are dropped from state and the plan shows a `create`. A `drift:` line is printed (to stderr with `--output json`). If the lookup fails, a `warning: could not check Modal for live apps` is printed and state is used as is.
 - **Local services.** There is no automatic refresh. If you stopped a service by hand, remove the deployment from the configuration and apply, or stop and re-add it. See [Troubleshooting](/docs/troubleshooting).
 
 ## Starting over
 
-If state is lost or corrupt, `plan` shows `create` for everything. Stop the running services first (see [This machine](/docs/providers/local) and [Modal](/docs/providers/modal)), then delete the state file and apply. Only do this with explicit intent: amicu forgets what it started.
+If state is lost or corrupt, `plan` shows `create` for everything. Stop the running services first (see [This machine](/docs/providers/local) and your [provider's page](/docs/providers)), then delete the state file and apply. Only do this with explicit intent: amicu forgets what it started.

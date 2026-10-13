@@ -1,0 +1,72 @@
+---
+title: Self-hosted over SSH
+description: "Hardware you own, reached over SSH. Preview: adapter built, not wired into apply."
+---
+
+<ProviderFacts slug="self-hosted" ids="self-hosted" />
+
+<Callout type="warning" title="Preview: not wired into apply">
+  The SSH adapter exists and is tested against a mock SSH transport. It has not been tested against real hosts, and `amicu apply` cannot deploy to it yet.
+</Callout>
+
+## Use this provider
+
+Remote deployment over SSH is not available from HCL yet. What works today is running amicu on the machine itself with the `on_prem` provider, which behaves like [This machine](/docs/providers/local):
+
+```hcl
+resource "hardware_profile" "rack_gpu" {
+  provider = "on_prem"
+  accelerator {
+    kind   = "gpu"
+    model  = "l40s"
+    count  = 1
+    memory = "48GiB"
+  }
+  memory = "128GiB"
+}
+```
+
+Install amicu and the runtime on the host, then run `amicu apply` there.
+
+## Overview
+
+Unlike the cloud adapters, self-hosted has no cloud API and no fixed catalog. It represents bare-metal boxes and existing clusters that an operator declares. Each declared host carries its resources and the region where it physically sits. Residency is derived from that declared location, so a host declared in the EU yields an EU region. Because the operator vouches for the jurisdiction, there is no residency filter.
+
+The adapter validates that a request matches a declared host, then runs host preparation, status, and teardown commands over SSH.
+
+## Setup and credentials
+
+The adapter authenticates with an SSH key, resolved transiently when needed. There is no HCL syntax for declaring hosts or for pointing at a key yet, so there is nothing to configure today. When it is wired in, keys will be secret references only (see [Secrets](/docs/security/secrets)).
+
+## Configuration reference
+
+| Argument | Type | Default | Required | Notes |
+|---|---|---|---|---|
+| `provider` | string | none | yes | `"on_prem"` is the value `apply` accepts today. `"self-hosted"` is the adapter id and is not accepted by `apply`. |
+
+Hosts are declared in code, not in HCL. A declared host has an id, a region with its jurisdiction, an SSH address, user, and optional port, optional accelerator and resources, and an optional hourly cost (amortized own-hardware figure, default zero).
+
+## GPUs and regions
+
+Both come from what you declare per host. There is no catalog.
+
+## Limits
+
+- Not wired into `apply`; no HCL surface for hosts.
+- Declared hourly costs are your own figures, not a provider quote.
+- A failed SSH exchange (connection, authentication, timeout) is reported separately from a command that ran and returned a non-zero status.
+
+## Troubleshooting
+
+<Accordions>
+  <Accordion title="apply says the provider is not supported">
+    The error reads `provider "self-hosted" is not supported by apply yet`. Use `on_prem` and run amicu on the host, as shown above.
+  </Accordion>
+  <Accordion title="Where does the endpoint listen?">
+    With `on_prem`, the server binds to `127.0.0.1` on the `port` you set. To reach it from elsewhere, put your own reverse proxy in front and keep an `api_key` on the deployment. See [Endpoint auth](/docs/security/endpoint-auth).
+  </Accordion>
+</Accordions>
+
+## Source
+
+Adapters: [`self_hosted.rs`](https://github.com/andypalmi/amicu/blob/main/crates/amicu-providers/src/self_hosted.rs) and [`ssh.rs`](https://github.com/andypalmi/amicu/blob/main/crates/amicu-providers/src/ssh.rs). Status of every provider: [Providers](/docs/providers).

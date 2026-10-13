@@ -1,22 +1,26 @@
 ---
 title: Providers
-description: Where amicu can deploy today, and what is still in preview.
+description: Every provider amicu knows about, what apply can deploy to today, and a page for each.
 ---
 
-A provider is set by `provider` on a [`hardware_profile`](/docs/configuration/hardware-profile). It decides where `apply` runs the deployment.
+A provider is set by `provider` on a [`hardware_profile`](/docs/configuration/hardware-profile). It decides where `apply` runs the deployment. Filter the registry by status, then open a provider for setup, configuration, regions, and troubleshooting.
 
-| Provider id | Where | `apply` | Endpoint |
-|---|---|---|---|
-| `local`, `local_apple`, `local_cpu`, `on_prem` | This machine | Supported | Loopback. `api_key` optional. |
-| `modal` | Modal serverless GPU | Supported | Public. `api_key` required. |
-| `hetzner`, `ovhcloud`, `scaleway`, `runpod`, SSH hosts | | Preview: not wired into `apply` | |
-| `aws`, `azure`, `gcp`, `nebius` | | Planned: catalog data only | |
+<ProviderGrid />
 
-A deployment whose provider `apply` cannot run fails with an error before anything starts. It does not fall back to running locally.
+## Where to start
 
-- [This machine](/docs/providers/local): launchd and systemd user services.
-- [Modal](/docs/providers/modal): tokens, regions, GPU types, scaling.
-- [Preview providers](/docs/providers/preview): status of the rest.
+- **A GPU provider:** open its tile above. Today `apply` supports Modal as a remote GPU provider; the others are in preview or planned. The [Quickstart, Path B](/docs/quickstart#path-b-on-a-gpu-provider) walks through it.
+- **This machine:** see [This machine](/docs/providers/local), or [Quickstart, Path A](/docs/quickstart#path-a-on-this-machine).
+
+## What the statuses mean
+
+| Status | Meaning |
+|---|---|
+| Supported | Wired into `amicu apply`. Today: this machine (`local`, `local_apple`, `local_cpu`, `on_prem`) and Modal as a remote GPU provider. |
+| Preview | A provisioning adapter exists and is tested against mocks. Not live-tested and not wired into `apply`. |
+| Planned | Region and GPU catalog data only. Provisioning is not built. |
+
+`validate` and `plan` use the region catalogs of preview and planned providers for residency and cost checks. A deployment whose provider `apply` cannot run fails with an error before anything starts. It does not fall back to running locally.
 
 ## Off-machine providers
 
@@ -26,3 +30,7 @@ Every provider other than the four local ones serves the endpoint off the machin
 - `apply` verifies the endpoint rejects anonymous requests.
 
 See [Endpoint auth](/docs/security/endpoint-auth).
+
+## What to do for an unsupported provider today
+
+Provision the machine yourself, install the runtime there, and run amicu on it with the [`on_prem`](/docs/providers/local) provider.

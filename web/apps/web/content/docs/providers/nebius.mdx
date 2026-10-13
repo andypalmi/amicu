@@ -1,0 +1,85 @@
+---
+title: Nebius
+description: "GPU cloud with a Finland flagship region. Planned: catalog data only."
+---
+
+<ProviderFacts slug="nebius" ids="nebius" />
+
+<Callout type="info" title="Planned: catalog data only">
+  amicu carries region and GPU catalog data for this provider, which `validate` and `plan` use for residency and cost checks. Provisioning is not built, and `amicu apply` cannot deploy to it.
+</Callout>
+
+## Use this provider
+
+```hcl
+resource "hardware_profile" "nebius_gpu" {
+  provider = "nebius"
+  region   = "eu-north1"
+  accelerator {
+    kind   = "gpu"
+    model  = "h100"
+    count  = 1
+    memory = "80GiB"
+  }
+  memory = "200GiB"
+}
+```
+
+Running `amicu apply` against this profile fails before anything starts. To check it today, run `amicu validate` and `amicu plan`.
+
+## Overview
+
+Nebius is a European GPU cloud (managed Kubernetes and bare-metal GPU instances) with its flagship region in Finland. amicu carries its EU regions and a slice of its high-end GPU catalog, with on-demand and interruptible rates. The provisioning surface only simulates an instance lifecycle in memory; no Nebius API is called.
+
+## Setup and credentials
+
+Nothing to set up yet: nothing connects to Nebius today. The adapter is modelled on a service-account credential.
+
+## Configuration reference
+
+| Argument | Type | Default | Required | Notes |
+|---|---|---|---|---|
+| `provider` | string | none | yes | `"nebius"`. |
+| `region` | string | none | no | One of the region codes below. Used for residency checks and cost estimates. |
+| `accelerator.kind` | string | none | yes (with `accelerator`) | `gpu`. |
+| `accelerator.model` | string | none | yes (with `accelerator`) | A GPU model from the table below. |
+| `accelerator.count` | number | none | yes (with `accelerator`) | Number of accelerators. |
+| `accelerator.memory` | size | none | yes (with `accelerator`) | VRAM, for the fit check. |
+| `memory` | size | none | yes | Host RAM. |
+| `price.per_hour` | money block | none | no | Your own price, for cost planning. |
+
+These are the generic [`hardware_profile`](/docs/configuration/hardware-profile) fields. There are no nebius-specific arguments.
+
+## GPUs and regions
+
+| Region code | Location | Jurisdiction |
+|---|---|---|
+| `eu-north1` | Finland | `eu` |
+| `eu-west1` | Paris | `eu` |
+| `us-central1` | Kansas City | `us` |
+
+| `model` | VRAM |
+|---|---|
+| `h200` | 141 GiB |
+| `h100` | 80 GiB |
+| `l40s` | 48 GiB |
+
+## Limits
+
+- Provisioning is not built, and not wired into `apply`.
+- Prices in the catalog are illustrative values, not live quotes. amicu does not sync live capacity or pricing yet, so cost estimates are indicative.
+
+## Troubleshooting
+
+<Accordions>
+  <Accordion title="apply says the provider is not supported">
+  Expected. The error reads `provider "nebius" is not supported by apply yet`. `apply` deploys to this machine and Modal only. Provision the machine yourself, install the runtime there, and run amicu on it with the [`on_prem`](/docs/providers/local) provider. The endpoint then binds to loopback on that host.
+  </Accordion>
+  <Accordion title="validate or plan rejects the region">
+  The region code must be one the catalog lists, and its jurisdiction must satisfy your [`data_class`](/docs/configuration/data-class) residency constraint. An unknown code is not guessed at: the residency check fails closed. See [Residency](/docs/concepts/residency).
+  </Accordion>
+</Accordions>
+
+## Source
+
+Adapter: [`crates/amicu-providers/src/nebius.rs`](https://github.com/andypalmi/amicu/blob/main/crates/amicu-providers/src/nebius.rs). Status of every provider: [Providers](/docs/providers).

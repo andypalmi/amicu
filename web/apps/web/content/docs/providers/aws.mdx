@@ -1,0 +1,92 @@
+---
+title: AWS
+description: "GPU EC2 instances on AWS. Planned: catalog data only."
+---
+
+<ProviderFacts slug="aws" ids="aws" />
+
+<Callout type="info" title="Planned: catalog data only">
+  amicu carries region and GPU catalog data for this provider, which `validate` and `plan` use for residency and cost checks. Provisioning is not built, and `amicu apply` cannot deploy to it.
+</Callout>
+
+## Use this provider
+
+```hcl
+resource "hardware_profile" "aws_gpu" {
+  provider = "aws"
+  region   = "eu-central-1"
+  accelerator {
+    kind   = "gpu"
+    model  = "l40s"
+    count  = 1
+    memory = "48GiB"
+  }
+  memory = "32GiB"
+}
+```
+
+Running `amicu apply` against this profile fails before anything starts. To check it today, run `amicu validate` and `amicu plan`.
+
+## Overview
+
+AWS is a global hyperscaler, so the catalog mixes EU and non-EU regions. amicu carries its EU regions plus a few others, and a slice of the GPU EC2 catalog with on-demand and spot rates. The provisioning surface only simulates an instance lifecycle in memory; no AWS API is called.
+
+## Setup and credentials
+
+Nothing to set up yet: nothing connects to AWS today. The adapter is modelled on an access-key credential.
+
+## Configuration reference
+
+| Argument | Type | Default | Required | Notes |
+|---|---|---|---|---|
+| `provider` | string | none | yes | `"aws"`. |
+| `region` | string | none | no | One of the region codes below. Used for residency checks and cost estimates. |
+| `accelerator.kind` | string | none | yes (with `accelerator`) | `gpu`. |
+| `accelerator.model` | string | none | yes (with `accelerator`) | A GPU model from the table below. |
+| `accelerator.count` | number | none | yes (with `accelerator`) | Number of accelerators. |
+| `accelerator.memory` | size | none | yes (with `accelerator`) | VRAM, for the fit check. |
+| `memory` | size | none | yes | Host RAM. |
+| `price.per_hour` | money block | none | no | Your own price, for cost planning. |
+
+These are the generic [`hardware_profile`](/docs/configuration/hardware-profile) fields. There are no aws-specific arguments.
+
+## GPUs and regions
+
+| Region code | Location | Jurisdiction |
+|---|---|---|
+| `eu-west-1` | Ireland | `eu` |
+| `eu-central-1` | Frankfurt | `eu` |
+| `eu-north-1` | Stockholm | `eu` |
+| `eu-south-1` | Milan | `eu` |
+| `eu-west-3` | Paris | `eu` |
+| `us-east-1` | N. Virginia | `us` |
+| `us-west-2` | Oregon | `us` |
+| `ap-southeast-1` | Singapore | `apac` |
+
+| Instance type | GPU model |
+|---|---|
+| `p5.48xlarge` | `h100` |
+| `p4d.24xlarge` | `a100` |
+| `g6e.xlarge` | `l40s` |
+| `g6.xlarge` | `l4` |
+| `g5.xlarge` | `a10g` |
+
+## Limits
+
+- Provisioning is not built, and not wired into `apply`.
+- Prices in the catalog are illustrative values, not live quotes. amicu does not sync live capacity or pricing yet, so cost estimates are indicative.
+
+## Troubleshooting
+
+<Accordions>
+  <Accordion title="apply says the provider is not supported">
+  Expected. The error reads `provider "aws" is not supported by apply yet`. `apply` deploys to this machine and Modal only. Provision the machine yourself, install the runtime there, and run amicu on it with the [`on_prem`](/docs/providers/local) provider. The endpoint then binds to loopback on that host.
+  </Accordion>
+  <Accordion title="validate or plan rejects the region">
+  The region code must be one the catalog lists, and its jurisdiction must satisfy your [`data_class`](/docs/configuration/data-class) residency constraint. An unknown code is not guessed at: the residency check fails closed. See [Residency](/docs/concepts/residency).
+  </Accordion>
+</Accordions>
+
+## Source
+
+Adapter: [`crates/amicu-providers/src/aws.rs`](https://github.com/andypalmi/amicu/blob/main/crates/amicu-providers/src/aws.rs). Status of every provider: [Providers](/docs/providers).

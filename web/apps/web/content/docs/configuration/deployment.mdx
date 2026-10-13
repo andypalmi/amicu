@@ -22,7 +22,7 @@ resource "deployment" "support_local" {
 }
 ```
 
-vLLM on Modal with an endpoint key and autoscaling limits:
+vLLM on a remote GPU provider (Modal here) with an endpoint key and autoscaling limits:
 
 ```hcl
 resource "model" "chat_prod" {
@@ -38,7 +38,7 @@ resource "model" "chat_prod" {
   context_length = 32768
 }
 
-resource "hardware_profile" "modal_a100" {
+resource "hardware_profile" "gpu_a100" {
   provider = "modal"
   region   = "eu-west"
   accelerator {
@@ -52,7 +52,7 @@ resource "hardware_profile" "modal_a100" {
 
 resource "deployment" "chat_prod" {
   model    = model.chat_prod.id
-  hardware = hardware_profile.modal_a100.id
+  hardware = hardware_profile.gpu_a100.id
   runtime  = "vllm"
   api_key  = secret("CHAT_API_KEY")
   vllm {
@@ -79,11 +79,11 @@ resource "deployment" "chat_prod" {
 | `llama_cpp` | block | with `runtime = "llama_cpp"` | llama.cpp settings |
 | `vllm` | block | with `runtime = "vllm"` | vLLM settings |
 | `api_key` | `secret("NAME")` | off-machine providers | The endpoint's API key, by reference. A literal is rejected (`AMICU-POLICY-004`). Required unless the provider is local (`AMICU-POLICY-007`). |
-| `scaling` | block | no | Autoscaling limits. Modal only. |
+| `scaling` | block | no | Autoscaling limits. Providers with autoscaling only (Modal today). |
 
 ### scaling
 
-Every field is optional. Omitted fields keep Modal's defaults. On any other provider the block is an error (`AMICU-CAP-009`).
+Every field is optional. Omitted fields keep the provider's defaults (see [Modal](/docs/providers/modal#resources-and-defaults)). On any other provider the block is an error (`AMICU-CAP-009`).
 
 | Field | Type | Description |
 |---|---|---|

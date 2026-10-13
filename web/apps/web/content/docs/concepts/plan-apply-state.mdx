@@ -35,13 +35,13 @@ Only diagnostics with severity `error` fail the command (exit code 1). Warnings 
 
 For each deployment the plan shows the hardware, the provider, the model artifact, the exact launch command, and notes such as the estimated peak memory. Secret-designated fields show as `******`. A plan never reads secret values.
 
-For Modal deployments, `plan` and `apply` first ask Modal whether the apps recorded in state still exist. An app that was stopped outside amicu is dropped from state so the plan shows a `create`, and a `drift:` line is printed. If the lookup fails, a `warning:` is printed and local state is used as is.
+For remote provider deployments (Modal today), `plan` and `apply` first ask the provider whether the apps recorded in state still exist. An app that was stopped outside amicu is dropped from state so the plan shows a `create`, and a `drift:` line is printed. If the lookup fails, a `warning:` is printed and local state is used as is.
 
 ## Apply
 
 `apply` recomputes the plan and prints it. Unless you pass `--auto-approve` (alias `--yes`) it asks for confirmation. It then:
 
-1. Runs preflight checks before anything starts: the provider must be supported by `apply`, every off-machine deployment must have an `api_key`, and Modal deployments need the proxy tokens.
+1. Runs preflight checks before anything starts: the provider must be supported by `apply`, every off-machine deployment must have an `api_key`, and the provider's own credentials must be present (on Modal, the proxy tokens).
 2. Starts each deployment through its provider.
 3. Verifies that each endpoint is protected. See [Endpoint auth](/docs/security/endpoint-auth).
 4. Stops deployments that were removed from the configuration.

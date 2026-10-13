@@ -1,18 +1,20 @@
 ---
 title: Quickstart
-description: Install amicu, deploy a model on your machine or on Modal, send a request, and tear it down.
+description: Install amicu, deploy a model on your machine or on a GPU provider, send a request, and tear it down.
 ---
 
-## 1. Choose a provider
+## 1. Choose where to run
 
-| Provider | Runtime | Status |
+Two equal paths. Pick one; steps 2 and 3 are shared.
+
+| | [Path A: on this machine](#path-a-on-this-machine) | [Path B: on a GPU provider](#path-b-on-a-gpu-provider) |
 |---|---|---|
-| This machine (macOS or Linux) | llama.cpp or vLLM | Supported |
-| Modal | llama.cpp or vLLM | Supported |
-| Hetzner, OVHcloud, Scaleway, RunPod, SSH | | Preview: `apply` is not wired up yet |
-| AWS, Azure, GCP, Nebius | | Planned |
+| Where | macOS or Linux, launchd or systemd user service | A remote GPU provider you have an account with |
+| Runtime | llama.cpp or vLLM | llama.cpp or vLLM |
+| Endpoint | Loopback, `api_key` optional | Public, `api_key` required |
+| Status | Supported | Today `apply` supports Modal; Hetzner, OVHcloud, Scaleway, RunPod and SSH are in preview, and AWS, Azure, GCP and Nebius are planned |
 
-Pick one of the two supported paths below. Steps 2 and 3 are shared.
+See [Providers](/docs/providers) for every provider and its status.
 
 ## 2. Install
 
@@ -37,7 +39,7 @@ amicu init
 
 `init` creates `amicu.hcl` (a starter config), `variables.amicu.hcl` (a placeholder), and `.amicu/` (project config and state). It never overwrites existing files.
 
-## Path A: this machine (llama.cpp)
+## Path A: on this machine
 
 Requirements:
 
@@ -128,95 +130,97 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 If the request fails, check that the service is running and read its log: on macOS `~/Library/Logs/amicu/<label>.out.log` and `<label>.err.log`, on Linux `journalctl --user --unit=<label>`. The label is `io.amicu.llama.qwen3_8b_local`. A missing or wrong GGUF path is the usual cause; confirm the file exists where the plan's `launch:` line says.
 
-To require a key even locally, add `api_key = secret("LOCAL_API_KEY")` to the deployment and export `LOCAL_API_KEY` before `apply`. See the next path for the request format.
+To require a key even locally, add `api_key = secret("LOCAL_API_KEY")` to the deployment and export `LOCAL_API_KEY` before `apply`, then send `Authorization: Bearer $LOCAL_API_KEY`.
 
-## Path B: Modal
+## Path B: on a GPU provider
 
-Requirements: a Modal account, and four token values exported in your shell. `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` authenticate the control plane. `MODAL_PROXY_TOKEN_ID` and `MODAL_PROXY_TOKEN_SECRET` are a Proxy Auth Token (Modal dashboard, Settings, Proxy Auth Tokens); `apply` uses them to verify the endpoint and you use them to call it. Every Modal deployment also needs its own API key.
+The steps are the same for any provider:
 
-```bash
-export MODAL_TOKEN_ID=...
-export MODAL_TOKEN_SECRET=...
-export MODAL_PROXY_TOKEN_ID=...
-export MODAL_PROXY_TOKEN_SECRET=...
-export CHAT_API_KEY=$(openssl rand -hex 32)
-amicu modal auth-check
-```
+1. Pick a provider from the [registry](/docs/providers) and create an account there.
+2. Export its credentials in your shell. Never write them into HCL.
+3. Set `provider` (and optionally `region`) on the `hardware_profile`.
+4. Give the deployment an endpoint key: `api_key = secret("CHAT_API_KEY")`, with `CHAT_API_KEY` exported. Every off-machine endpoint needs one.
+5. Run `amicu validate`, `amicu plan`, `amicu apply`.
 
-Replace the contents of `amicu.hcl` with:
+`plan` shows `api_key: ******` and never reads the key. `apply` starts the deployment and then checks that the endpoint rejects anonymous requests and accepts your key. The first deploy downloads the weights and can take several minutes.
 
-```hcl
-resource "model" "qwen" {
-  source {
-    registry  = "hugging_face"
-    reference = "Qwen/Qwen3-8B"
-  }
-  architecture   = "qwen3"
-  modalities     = ["text"]
-  artifact {
-    format = "safetensors"
-  }
-  context_length = 32768
-}
+Today, `apply` supports Modal as a remote GPU provider. Hetzner, OVHcloud, Scaleway, RunPod and SSH are in preview (adapter built, not wired into `apply`), and AWS, Azure, GCP and Nebius are planned. Selecting one of those fails at `apply` with a clear error before anything starts. Each provider page has its own setup and troubleshooting.
 
-resource "hardware_profile" "modal_l4" {
-  provider = "modal"
-  region   = "eu-west"
-  accelerator {
-    kind   = "gpu"
-    model  = "l4"
-    count  = 1
-    memory = "24GiB"
-  }
-  memory = "32GiB"
-}
+<Tabs items={['Modal']}>
+  <Tab value="Modal">
+    Requirements: a Modal account and four token values. `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` authenticate the control plane. `MODAL_PROXY_TOKEN_ID` and `MODAL_PROXY_TOKEN_SECRET` are a Proxy Auth Token (Modal dashboard, Settings, Proxy Auth Tokens). See [Modal](/docs/providers/modal).
 
-resource "deployment" "chat" {
-  model    = model.qwen.id
-  hardware = hardware_profile.modal_l4.id
-  runtime  = "vllm"
-  api_key  = secret("CHAT_API_KEY")
-  vllm {
-    context_length = 8192
-    port           = 8000
-  }
-}
-```
+    ```bash
+    export MODAL_TOKEN_ID=...
+    export MODAL_TOKEN_SECRET=...
+    export MODAL_PROXY_TOKEN_ID=...
+    export MODAL_PROXY_TOKEN_SECRET=...
+    export CHAT_API_KEY=$(openssl rand -hex 32)
+    amicu modal auth-check
+    ```
 
-```bash
-amicu validate
-amicu plan
-amicu apply
-```
+    Replace the contents of `amicu.hcl` with:
 
-`plan` shows `api_key: ******` and never reads `CHAT_API_KEY`. `apply` builds the image, starts the app, and then checks that the endpoint rejects anonymous requests and accepts your key. The first deploy downloads the weights and can take several minutes. See [Modal](/docs/providers/modal).
+    ```hcl
+    resource "model" "qwen" {
+      source {
+        registry  = "hugging_face"
+        reference = "Qwen/Qwen3-8B"
+      }
+      architecture   = "qwen3"
+      modalities     = ["text"]
+      artifact {
+        format = "safetensors"
+      }
+      context_length = 32768
+    }
 
-When apply finishes it prints the endpoint URL and a ready-to-copy `curl` command. Both layers of credentials are required:
+    resource "hardware_profile" "gpu_l4" {
+      provider = "modal"
+      region   = "eu-west"
+      accelerator {
+        kind   = "gpu"
+        model  = "l4"
+        count  = 1
+        memory = "24GiB"
+      }
+      memory = "32GiB"
+    }
 
-```bash
-curl "$URL/v1/chat/completions" \
-  -H "Authorization: Bearer $CHAT_API_KEY" \
-  -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" \
-  -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "Qwen/Qwen3-8B", "messages": [{"role": "user", "content": "Hello"}]}'
-```
+    resource "deployment" "chat" {
+      model    = model.qwen.id
+      hardware = hardware_profile.gpu_l4.id
+      runtime  = "vllm"
+      api_key  = secret("CHAT_API_KEY")
+      vllm {
+        context_length = 8192
+        port           = 8000
+      }
+    }
+    ```
 
-`validate` and `plan` print the warning `AMICU-CAP-010` here, because the model does not declare `n_layers`, `n_kv_heads`, and `head_dim`. It is expected: the fit check then covers weights only. Declare the shape on the model to silence it.
+    When apply finishes it prints the endpoint URL and a ready-to-copy `curl` command. Modal needs both layers of credentials:
 
-A `503` while the container cold-starts is normal. Watch it with `amicu modal logs amicu-chat --follow`.
+    ```bash
+    curl "$URL/v1/chat/completions" \
+      -H "Authorization: Bearer $CHAT_API_KEY" \
+      -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" \
+      -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" \
+      -H "Content-Type: application/json" \
+      -d '{"model": "Qwen/Qwen3-8B", "messages": [{"role": "user", "content": "Hello"}]}'
+    ```
+
+    A `503` while the container cold-starts is normal.
+  </Tab>
+</Tabs>
+
+`validate` and `plan` print the warning `AMICU-CAP-010` for this model, because it does not declare `n_layers`, `n_kv_heads`, and `head_dim`. It is expected: the fit check then covers weights only. Declare the shape on the model to silence it.
 
 ## 4. Tear down
 
 There is no `destroy` command. Amicu removes what is no longer declared: delete the `deployment` resource from your HCL and run `amicu apply`. The plan shows a `destroy` action and apply stops the service.
 
-For a Modal app you can also stop it directly:
-
-```bash
-amicu modal stop amicu-chat
-```
-
-Run this inside the project directory to also remove the deployment from local state.
+Some providers also have a direct stop command; see the provider page (for example [Modal](/docs/providers/modal#monitoring)).
 
 ## Next
 

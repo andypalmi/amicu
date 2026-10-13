@@ -1,7 +1,11 @@
 import type { ComponentProps, ReactNode } from 'react';
 import defaultMdxComponents from 'fumadocs-ui/mdx';
 import { CalloutDescription, CalloutTitle } from 'fumadocs-ui/components/callout';
+import { Tab, Tabs } from 'fumadocs-ui/components/tabs';
+import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
 import type { MDXComponents } from 'mdx/types';
+import { ProviderFacts } from '@/components/providers/provider-facts';
+import { ProviderGrid } from '@/components/providers/provider-grid';
 import { CircleCheck, CircleX, Info, Lightbulb, TriangleAlert } from 'lucide-react';
 
 type CalloutType = 'info' | 'warning' | 'error' | 'success' | 'idea' | 'tip' | 'warn';
@@ -50,6 +54,12 @@ export function getMDXComponents(components?: MDXComponents) {
   return {
     ...defaultMdxComponents,
     Callout,
+    Tab,
+    Tabs,
+    Accordion,
+    Accordions,
+    ProviderFacts,
+    ProviderGrid,
     ...components,
   } satisfies MDXComponents;
 }

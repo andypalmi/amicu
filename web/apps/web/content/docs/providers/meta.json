@@ -1,4 +1,20 @@
 {
   "title": "Providers",
-  "pages": ["index", "local", "modal", "preview"]
+  "pages": [
+    "index",
+    "---Supported---",
+    "local",
+    "modal",
+    "---Preview---",
+    "runpod",
+    "hetzner",
+    "ovhcloud",
+    "scaleway",
+    "self-hosted",
+    "---Planned---",
+    "nebius",
+    "aws",
+    "azure",
+    "gcp"
+  ]
 }
