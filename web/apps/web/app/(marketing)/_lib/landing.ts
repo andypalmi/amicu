@@ -1,37 +1,34 @@
-// Copy and real artifacts for the marketing landing page.
+// Copy and real artifacts for the marketing home page.
 //
-// Every HCL snippet here validates with the current CLI, and every terminal
-// transcript is real output of `amicu` (built from main) run against that
-// snippet - trimmed (relative paths, elided plan detail) but never invented.
-// If the CLI's output format changes, re-run the commands and update these
-// strings rather than editing them by hand.
+// Terminal transcripts are real output of `amicu` against the matching HCL,
+// trimmed (relative paths, elided detail) but never invented. The residency
+// failure uses the exact message formats from crates/amicu-engine/src/checks.rs
+// and the `Cannot plan` renderer in crates/amicu-cli/src/commands/plan.rs.
+// If the CLI's output format changes, update these strings to match.
 
-/** Hero example: one model, served by vLLM on a Modal L4 GPU in eu-west, with a 200k-token context. */
-export const HERO_HCL = `resource "model" "qwen" {
-  source {
-    registry  = "hugging_face"
-    reference = "RedHatAI/Qwen3.5-9B-FP8-dynamic"
-  }
-  architecture = "qwen3"
-  artifact {
-    format       = "safetensors"
-    quantization = "fp8"
-  }
+/**
+ * One line of terminal output. `tone` maps to a semantic token only:
+ * `cmd` is the prompt line, `add` a created resource, `muted` secondary detail.
+ */
+export interface TermLine {
+  text: string;
+  tone?: 'cmd' | 'add' | 'muted';
 }
 
-resource "hardware_profile" "gpu" {
-  provider = "modal"
-  region   = "eu-west"
-  memory   = "32GiB"
-  accelerator {
-    kind   = "gpu"
-    model  = "l4"
-    count  = 1
-    memory = "24GiB"
-  }
-}
+/** Hero: `amicu plan` for a one-deployment config, trimmed to what fits a phone. */
+export const HERO_PLAN: TermLine[] = [
+  { text: '$ amicu plan', tone: 'cmd' },
+  { text: 'Plan: 1 action(s).' },
+  { text: '' },
+  { text: '  + deployment.chat', tone: 'add' },
+  { text: '      action:   create' },
+  { text: '      hardware: gpu.l4' },
+  { text: '      target:   modal (region eu-west)' },
+  { text: '      api_key:  ****** (secret "CHAT_API_KEY", resolved at apply)' },
+];
 
-resource "deployment" "chat" {
+/** Excerpt of the config that produces HERO_PLAN. */
+export const DEPLOYMENT_HCL = `resource "deployment" "chat" {
   model    = model.qwen.id
   hardware = hardware_profile.gpu.id
   runtime  = "vllm"
@@ -43,178 +40,106 @@ resource "deployment" "chat" {
 }
 `;
 
-/**
- * One line of terminal output. `tone` maps to a semantic token only:
- * `cmd` is the prompt line, `add` a created resource, `muted` secondary detail.
- */
-export interface TermLine {
+/** `amicu apply` for the same deployment. */
+export const APPLY_OUTPUT: TermLine[] = [
+  { text: '$ amicu apply', tone: 'cmd' },
+  { text: 'Apply these changes? [y/N] y' },
+  { text: 'Applied 1 deployment(s):' },
+  { text: '  deployment.chat -> https://<workspace>--amicu-chat-server.<region>.modal.direct', tone: 'muted' },
+];
+
+export type DiffTone = 'add' | 'del' | 'ctx';
+
+export interface DiffLine {
+  tone: DiffTone;
   text: string;
-  tone?: 'cmd' | 'add' | 'muted';
 }
 
-/** `amicu plan` against HERO_HCL. */
-export const HERO_PLAN: TermLine[] = [
+/** Moving a hardware profile from this machine to a GPU provider. */
+export const PROVIDER_DIFF: DiffLine[] = [
+  { tone: 'ctx', text: 'resource "hardware_profile" "main" {' },
+  { tone: 'del', text: '  provider = "local"' },
+  { tone: 'add', text: '  provider = "modal"' },
+  { tone: 'add', text: '  region   = "eu-west"' },
+  { tone: 'ctx', text: '  ...' },
+  { tone: 'ctx', text: '}' },
+];
+
+/** A governance rule that rejects a region outside the EU. */
+export const RESIDENCY_HCL = `resource "data_class" "customer" {
+  residency = ["eu"]
+}
+
+resource "governance_rule" "eu_only" {
+  effect          = "allow"
+  allowed_regions = ["eu", "eu-west"]
+}
+
+resource "hardware_profile" "gpu" {
+  provider = "modal"
+  region   = "us-east"
+}
+`;
+
+/** `amicu plan` when the hardware profile names `us-east`. */
+export const RESIDENCY_PLAN: TermLine[] = [
   { text: '$ amicu plan', tone: 'cmd' },
-  { text: 'Plan: 1 action(s).' },
-  { text: '' },
-  { text: '  + deployment.chat', tone: 'add' },
-  { text: '      action:   create' },
-  { text: '      hardware: gpu.l4' },
-  { text: '      target:   modal (region eu-west)' },
-  { text: '      api_key:  ****** (secret "CHAT_API_KEY", resolved at apply)' },
-  {
-    text: '      launch:   vllm serve RedHatAI/Qwen3.5-9B-FP8-dynamic --port 8000 --host 0.0.0.0 --max-model-len 200000',
-  },
+  { text: 'Cannot plan: configuration has errors.' },
+  { text: "  error [AMICU-POLICY-002] region 'us-east' (us) violates the data residency allowlist" },
+  { text: "  error [AMICU-POLICY-002] region 'us-east' violates the allowed-regions list" },
 ];
 
-export interface ChatSession {
-  client: string;
-  model: string;
-  host: string;
-  /** Auth scheme the client sends, matching the deployment's api_key. */
-  auth: string;
-  user: string;
-  reply: string[];
-  status: string;
-  hint: string;
-}
-
-/**
- * Illustrative chat session against the endpoint `apply` prints. amicu has no
- * chat command; this is any OpenAI-compatible client sending the deployment's
- * api_key as a Bearer token, and the answer is an example, not recorded model
- * output.
- */
-export const CHAT_SESSION: ChatSession = {
-  client: 'chat',
-  model: 'RedHatAI/Qwen3.5-9B-FP8-dynamic',
-  host: '<workspace>--amicu-chat-server.<region>.modal.direct',
-  auth: 'Bearer $CHAT_API_KEY',
-  user: 'Draft a retention notice for our EU customers.',
-  reply: [
-    'We keep customer data only in EU regions.',
-    'You can ask for deletion at any time by contacting our privacy team.',
-  ],
-  status: '2.1s · 24 tok/s',
-  hint: 'enter send · ctrl+c quit',
-};
-
-/**
- * A request to the endpoint `apply` prints. The endpoint is OpenAI-compatible
- * and protected by the deployment's `api_key`; Modal endpoints also need the
- * workspace proxy-token headers.
- */
-export const CURL_REQUEST: TermLine[] = [
-  { text: '$ curl "$ENDPOINT/v1/chat/completions" \\', tone: 'cmd' },
-  { text: '    -H "Authorization: Bearer $CHAT_API_KEY" \\' },
-  { text: '    -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" \\' },
-  { text: '    -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" \\' },
-  { text: '    -H "Content-Type: application/json" \\' },
-  {
-    text: `    -d '{"model": "RedHatAI/Qwen3.5-9B-FP8-dynamic", "messages": [{"role": "user", "content": "Hello"}]}'`,
-  },
-];
-
-export interface Step {
-  /** Anchor-safe id. */
-  id: string;
-  title: string;
-  body: string;
-  /** A short, real transcript that shows the step's artifact. */
-  transcript: TermLine[];
-}
-
-export const STEPS: Step[] = [
-  {
-    id: 'declare',
-    title: 'Write the config',
-    body: 'Describe the model, hardware and runtime as HCL, or start from amicu init.',
-    transcript: [
-      { text: '$ amicu init', tone: 'cmd' },
-      { text: '  create amicu.hcl' },
-      { text: '  create variables.amicu.hcl' },
-      { text: '  create .amicu/' },
-      { text: '  create .amicu/config.yaml' },
-      { text: '  create .amicu/state/' },
-      { text: '  create .amicu/state/.gitkeep' },
-      { text: 'Initialized Amicu project (6 item(s) created).', tone: 'muted' },
-    ],
-  },
-  {
-    id: 'plan',
-    title: 'Read the plan',
-    body: 'See every change and the exact launch command before anything starts.',
-    transcript: HERO_PLAN,
-  },
-  {
-    id: 'apply',
-    title: 'Apply it',
-    body: 'Approve the plan and amicu starts the service, locally or on Modal.',
-    transcript: [
-      { text: '$ amicu apply', tone: 'cmd' },
-      { text: 'Plan: 1 action(s).' },
-      { text: '' },
-      { text: '  + deployment.chat', tone: 'add' },
-      { text: '      target:   modal (region eu-west)', tone: 'muted' },
-      { text: '' },
-      { text: 'Apply these changes? [y/N] y' },
-      { text: '' },
-      { text: 'Applied 1 deployment(s):' },
-      { text: '  deployment.chat -> https://<workspace>--amicu-chat-server.<region>.modal.direct', tone: 'muted' },
-    ],
-  },
-  {
-    id: 'call',
-    title: 'Call it',
-    body: 'Send requests with your API key. Modal endpoints also need proxy-token headers.',
-    transcript: CURL_REQUEST,
-  },
-];
-
-/** Same model resource, two hardware profiles: real launch lines from `plan`. */
-export const LAPTOP_LAUNCH =
-  'llama-server -m models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf --port 8000 --ctx-size 100000 --n-gpu-layers -1 --metrics';
-export const GPU_LAUNCH =
-  'vllm serve RedHatAI/Qwen3.5-9B-FP8-dynamic --port 8000 --host 0.0.0.0 --max-model-len 200000';
-
-export interface Outcome {
-  title: string;
-  body: string;
-}
-
-/** What you get. Each claim maps to shipped behaviour in the CLI/engine. */
-export const OUTCOMES: Outcome[] = [
-  {
-    title: 'Checked at plan time',
-    body: 'A model that does not fit the hardware, or a deployment outside the regions you allow, fails the plan with a named error.',
-  },
-  {
-    title: 'Reviewable changes',
-    body: 'The stack is a text file in your repository. Every apply is a diff against recorded state.',
-  },
-  {
-    title: 'Recommendations with evidence',
-    body: 'The wizard ranks candidate stacks against your constraints. Tuning advice names the bottleneck and the evidence.',
-  },
-];
-
-export interface Support {
+export interface FeatureLink {
   label: string;
-  value: string;
+  href: string;
 }
 
-/** Where it runs today. Keep this strictly to shipped behaviour. */
-export const SUPPORT: Support[] = [
+export const CONFIG_LINKS: FeatureLink[] = [
+  { label: 'Configuration', href: '/docs/configuration' },
+  { label: 'Hardware profiles', href: '/docs/configuration/hardware-profile' },
+  { label: 'Plan and apply', href: '/docs/concepts/plan-apply-state' },
+  { label: 'CLI reference', href: '/docs/reference/cli' },
+];
+
+export const PROVIDER_SWITCH_LINKS: FeatureLink[] = [
+  { label: 'Local', href: '/docs/providers/local' },
+  { label: 'Providers', href: '/docs/providers' },
+  { label: 'Deployments', href: '/docs/configuration/deployment' },
+];
+
+export const POLICY_LINKS: FeatureLink[] = [
+  { label: 'Residency', href: '/docs/concepts/residency' },
+  { label: 'Governance rules', href: '/docs/configuration/governance-rule' },
+  { label: 'Endpoint auth', href: '/docs/security/endpoint-auth' },
+  { label: 'Secrets', href: '/docs/security/secrets' },
+];
+
+export interface Tile {
+  title: string;
+  body: string;
+  /** Mono line-art graphic, one string per line. */
+  graphic: string[];
+  href: string;
+}
+
+/** Shipped features only; each maps to a docs page. */
+export const TILES: Tile[] = [
   {
-    label: 'Runtimes',
-    value: 'llama.cpp (GGUF) on Apple Silicon and Linux. vLLM on NVIDIA and AMD GPUs.',
+    title: 'Endpoint auth, tested',
+    body: 'After apply, amicu checks the endpoint rejects anonymous requests.',
+    graphic: ['GET /v1/models', '  no key    401', '  with key  200'],
+    href: '/docs/security/endpoint-auth',
   },
   {
-    label: 'Apply targets',
-    value: 'Your own machine, as a launchd or systemd service. Modal serverless GPUs, with region pinning.',
+    title: 'Agent skills',
+    body: 'Teach your coding agent the amicu workflow and HCL schema.',
+    graphic: ['$ amicu skill export \\', '    --target claude-code'],
+    href: '/docs/reference/agent-skills',
   },
   {
-    label: 'Models',
-    value: 'Open-weight models from Hugging Face, as GGUF or safetensors.',
+    title: 'Health checks',
+    body: 'Check the host, config and state directory in one command.',
+    graphic: ['$ amicu doctor', '$ amicu doctor --output json'],
+    href: '/docs/operate/monitoring',
   },
 ];

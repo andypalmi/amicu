@@ -1,20 +1,30 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { Button } from '@amicu/ui';
+import { Button, cn } from '@amicu/ui';
 import { appName, appTagline, siteUrl } from '@/lib/shared';
 import { HclCode, Transcript } from './_components/code';
-import { TerminalChat } from './_components/terminal-chat';
-import { CodePanel, Container, CTABand, Section, FactList, SectionHeader } from './_components/marketing';
-import { githubUrl, quickstartUrl } from './_lib/content';
 import {
-  CHAT_SESSION,
-  GPU_LAUNCH,
-  HERO_HCL,
+  DiffBody,
+  FeatureLinks,
+  FeatureTile,
+  Headline,
+  HomeSection,
+  MockWindow,
+  ProofLine,
+  StackedWindows,
+} from './_components/home';
+import { githubUrl, providers, quickstartUrl, type ProviderStatus } from './_lib/content';
+import {
+  APPLY_OUTPUT,
+  CONFIG_LINKS,
+  DEPLOYMENT_HCL,
   HERO_PLAN,
-  LAPTOP_LAUNCH,
-  OUTCOMES,
-  STEPS,
-  SUPPORT,
+  POLICY_LINKS,
+  PROVIDER_DIFF,
+  PROVIDER_SWITCH_LINKS,
+  RESIDENCY_HCL,
+  RESIDENCY_PLAN,
+  TILES,
 } from './_lib/landing';
 import { pageMetadata } from './_lib/seo';
 
@@ -46,6 +56,17 @@ const jsonLd = {
   sameAs: [githubUrl],
 };
 
+const statusLabel: Record<ProviderStatus, string> = {
+  supported: 'Supported',
+  preview: 'Preview',
+  planned: 'Planned',
+};
+const statusOrder: ProviderStatus[] = ['supported', 'preview', 'planned'];
+const sortedProviders = [...providers].sort(
+  (a, b) => statusOrder.indexOf(a.status) - statusOrder.indexOf(b.status),
+);
+const previewCount = providers.filter((p) => p.status === 'preview').length;
+
 export default function LandingPage() {
   return (
     <main className="flex flex-1 flex-col">
@@ -56,140 +77,162 @@ export default function LandingPage() {
         }}
       />
 
-      {/* Hero: the claim, then the real artifact. */}
-      <section>
-        <Container className="pt-16 pb-20 text-center sm:pt-24 sm:pb-28">
-          <h1 className="mx-auto max-w-4xl text-balance text-4xl font-semibold tracking-tight sm:text-6xl sm:leading-[1.05]">
-            Infrastructure as code for self-hosted LLMs.
-          </h1>
-          <p className="mx-auto mt-6 max-w-2xl text-pretty text-lg leading-relaxed text-muted-foreground">
-            Terraform for self-hosted inference. Describe the model, hardware and runtime in
-            HCL, read the plan, then apply it to your machine or Modal.
-          </p>
-          <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-            <Button asChild size="lg">
-              <Link href={quickstartUrl}>Quickstart</Link>
-            </Button>
-            <Button asChild size="lg" variant="outline">
-              <a href={githubUrl}>GitHub</a>
-            </Button>
-          </div>
-
-          <div className="mt-14 grid items-start gap-4 text-left sm:mt-20 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
-            <CodePanel caption="amicu.hcl">
-              <HclCode code={HERO_HCL} className="[&_pre]:px-5 [&_pre]:py-4" />
-            </CodePanel>
-            <div className="flex min-w-0 flex-col gap-4">
-              <CodePanel caption="terminal">
-                <Transcript
-                  lines={HERO_PLAN}
-                  reveal
-                  wrap
-                  label="Output of amicu plan for the example file"
-                  className="px-5 py-4"
-                />
-              </CodePanel>
-              <CodePanel caption="chat client (illustrative)">
-                <TerminalChat session={CHAT_SESSION} />
-              </CodePanel>
-            </div>
-          </div>
-        </Container>
-      </section>
-
-      {/* How it works */}
-      <Section>
-        <SectionHeader id="how-it-works" title="How it works" />
-        <ol className="mx-auto mt-14 max-w-3xl">
-          {STEPS.map((step, i) => (
-            <li
-              key={step.id}
-              className="flex flex-col gap-6 border-t border-border py-10 text-center"
-            >
-              <div>
-                <h3 className="text-xl font-semibold tracking-tight">
-                  {i + 1}. {step.title}
-                </h3>
-                <p className="mx-auto mt-3 max-w-prose text-pretty leading-relaxed text-muted-foreground">
-                  {step.body}
-                </p>
-              </div>
-              <Transcript
-                lines={step.transcript}
-                wrap
-                label={`Example: ${step.title}`}
-                className="rounded-md border border-border bg-muted/40 px-5 py-4 text-left"
-              />
-            </li>
-          ))}
-        </ol>
-      </Section>
-
-      {/* What you get */}
-      <Section>
-        <SectionHeader
-          title="From a laptop to a GPU"
-          lead="The same workflow on a MacBook with llama.cpp and an L4 with vLLM."
-        />
-        <div className="mt-10 grid gap-4 text-left lg:grid-cols-2">
-          <LaunchLine where="On your laptop, llama.cpp" command={LAPTOP_LAUNCH} />
-          <LaunchLine where="On Modal in eu-west, vLLM" command={GPU_LAUNCH} />
-        </div>
-        <FactList className="mt-16" items={OUTCOMES.map((o) => ({ term: o.title, detail: o.body }))} />
-      </Section>
-
-      {/* Where it runs today */}
-      <Section>
-        <SectionHeader id="where-it-runs" title="Where it runs today" />
-        <FactList className="mt-12" items={SUPPORT.map((x) => ({ term: x.label, detail: x.value }))} />
-        <p className="mt-6 text-center text-sm text-muted-foreground">
-          Provider status and regions are on the{' '}
-          <Link href="/providers" className="text-foreground underline underline-offset-4">
-            providers page
-          </Link>
-          .
+      {/* Hero */}
+      <HomeSection className="flex flex-col items-center text-center sm:min-h-0 min-h-[calc(100svh-4rem)] justify-center">
+        <Headline as="h1" className="max-w-4xl [font-size:clamp(2.75rem,9vw,5.5rem)]">
+          Self-hosted LLMs, as code.
+        </Headline>
+        <p className="mt-6 font-mono text-sm text-muted-foreground sm:text-base">
+          On your laptop or a GPU provider.
         </p>
-      </Section>
-
-      {/* Who it is for, and how to run it */}
-      <Section>
-        <SectionHeader title="Run it yourself" />
-        <div className="mx-auto mt-6 max-w-2xl space-y-4 text-pretty text-center leading-relaxed text-muted-foreground">
-          <p>
-            For engineers who run open-weight models themselves, including teams that have to
-            show where prompts are processed.
-          </p>
-          <p>
-            The CLI, planner and server are open source. Build them from source and keep state
-            in your project or your own Postgres. No account is needed.
-          </p>
+        <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+          <Button asChild size="lg">
+            <Link href={quickstartUrl}>Get started</Link>
+          </Button>
+          <Button asChild size="lg" variant="outline">
+            <a href={githubUrl}>GitHub</a>
+          </Button>
         </div>
-      </Section>
+        <MockWindow title="terminal" className="mt-14 w-full max-w-2xl sm:mt-20">
+          <Transcript
+            lines={HERO_PLAN}
+            reveal
+            wrap
+            label="Output of amicu plan for the example file"
+            className="px-4 py-4"
+          />
+        </MockWindow>
+      </HomeSection>
+
+      {/* Describe, apply */}
+      <HomeSection id="how-it-works">
+        <Headline>Describe a model. Get an endpoint.</Headline>
+        <StackedWindows
+          back={
+            <MockWindow title="amicu.hcl">
+              <HclCode code={DEPLOYMENT_HCL} className="[&_pre]:px-4 [&_pre]:pt-4 [&_pre]:pb-10" />
+            </MockWindow>
+          }
+          front={
+            <MockWindow title="terminal" className="shadow-sm">
+              <Transcript
+                lines={APPLY_OUTPUT}
+                wrap
+                label="Output of amicu apply"
+                className="px-4 py-4"
+              />
+            </MockWindow>
+          }
+        />
+        <ProofLine
+          lead="One file declares model, hardware and policy."
+          rest="amicu plans the rest."
+        />
+        <FeatureLinks links={CONFIG_LINKS} />
+      </HomeSection>
+
+      {/* Laptop to GPU */}
+      <HomeSection>
+        <Headline>Start local. Move to a GPU provider with one line.</Headline>
+        <MockWindow title="amicu.hcl" className="mt-12 max-w-2xl sm:mt-16">
+          <DiffBody lines={PROVIDER_DIFF} label="Changing the provider of a hardware profile" />
+        </MockWindow>
+        <ProofLine
+          lead="llama.cpp on your laptop, vLLM on a GPU provider."
+          rest="Same config."
+        />
+        <FeatureLinks links={PROVIDER_SWITCH_LINKS} />
+      </HomeSection>
+
+      {/* Residency */}
+      <HomeSection>
+        <Headline>Your data stays where you say.</Headline>
+        <StackedWindows
+          back={
+            <MockWindow title="amicu.hcl">
+              <HclCode code={RESIDENCY_HCL} className="[&_pre]:px-4 [&_pre]:pt-4 [&_pre]:pb-10" />
+            </MockWindow>
+          }
+          front={
+            <MockWindow title="terminal" className="shadow-sm">
+              <Transcript
+                lines={RESIDENCY_PLAN}
+                wrap
+                label="amicu plan rejecting a region outside the EU"
+                className="px-4 py-4"
+              />
+            </MockWindow>
+          }
+        />
+        <ProofLine
+          lead="Residency and governance are checked at plan time,"
+          rest="before anything deploys."
+        />
+        <FeatureLinks links={POLICY_LINKS} />
+      </HomeSection>
+
+      {/* Providers */}
+      <HomeSection>
+        <Headline>Pick a provider. Change it later.</Headline>
+        <MockWindow title="providers" className="mt-12 max-w-2xl sm:mt-16">
+          <ul className="px-4 font-mono text-sm">
+            {sortedProviders.map((p) => (
+              <li
+                key={p.name}
+                className="flex items-center justify-between gap-3 border-b border-border py-2.5 last:border-b-0"
+              >
+                <span className="min-w-0 truncate">{p.name}</span>
+                <span
+                  className={cn(
+                    'shrink-0 rounded-full border px-2.5 py-0.5 text-xs',
+                    p.status === 'supported'
+                      ? 'border-transparent bg-foreground text-background'
+                      : p.status === 'preview'
+                        ? 'border-border text-foreground'
+                        : 'border-border text-muted-foreground',
+                  )}
+                >
+                  {statusLabel[p.status]}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </MockWindow>
+        <ProofLine
+          lead="Apply runs on your machine and Modal today."
+          rest={`${previewCount} more, such as Hetzner and Scaleway, are in preview.`}
+        />
+        <FeatureLinks
+          links={[{ label: 'Provider docs', href: '/docs/providers' }]}
+          all={{ label: 'All providers', href: '/providers' }}
+        />
+      </HomeSection>
+
+      {/* Built in */}
+      <HomeSection>
+        <Headline>Built for operators.</Headline>
+        <div className="mt-12 grid gap-4 sm:mt-16 md:grid-cols-3">
+          {TILES.map((t) => (
+            <FeatureTile key={t.title} {...t} />
+          ))}
+        </div>
+      </HomeSection>
 
       {/* Closing CTA */}
-      <Section>
-        <CTABand
-          title="Try it on your laptop first."
-          lede="Install the CLI, run amicu init and read the plan."
-          primary={{ label: 'Quickstart', href: quickstartUrl }}
-          secondary={{ label: 'GitHub', href: githubUrl, external: true }}
-        />
-      </Section>
+      <HomeSection className="flex flex-col items-center text-center">
+        <Headline>Plan your first deployment.</Headline>
+        <p className="mt-6 font-mono text-sm text-muted-foreground sm:text-base">
+          Open source, AGPL-3.0. No account needed.
+        </p>
+        <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+          <Button asChild size="lg">
+            <Link href={quickstartUrl}>Get started</Link>
+          </Button>
+          <Button asChild size="lg" variant="outline">
+            <Link href="/providers">Providers</Link>
+          </Button>
+        </div>
+      </HomeSection>
     </main>
-  );
-}
-
-function LaunchLine({ where, command }: { where: string; command: string }) {
-  return (
-    <figure className="min-w-0 rounded-md border border-border bg-card px-5 py-4">
-      <figcaption className="text-sm text-muted-foreground">{where}</figcaption>
-      <pre
-        tabIndex={0}
-        aria-label={`Launch command: ${where}`}
-        className="mt-2 whitespace-pre-wrap break-all font-mono text-[0.8125rem] leading-6 text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        <code>{command}</code>
-      </pre>
-    </figure>
   );
 }
