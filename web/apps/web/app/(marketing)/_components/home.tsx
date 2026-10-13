@@ -6,7 +6,18 @@ import type { DiffLine, FeatureLink } from '../_lib/landing';
 // Building blocks for the Vercel-style home: one huge headline, one product
 // snapshot, a two-tone proof line, and a short list of plain text links.
 
-/** Full-width band: gutters match the rest of the site, generous vertical rhythm. */
+// Layout constants, defined once. Every section shares one container
+// (max-w-6xl), one vertical rhythm and one text measure.
+/** Cap for running text (sub-copy, proof lines, link lists). */
+export const MEASURE = 'max-w-2xl';
+/** Headline to content: 48px. */
+export const GAP_HEAD = 'mt-12';
+/** Content to proof line: 40px. */
+export const GAP_PROOF = 'mt-10';
+/** Proof line to links: 24px. */
+export const GAP_LINKS = 'mt-6';
+
+/** Full-width band: one container, 96px (64px on mobile) vertical padding. */
 export function HomeSection({
   id,
   className,
@@ -18,14 +29,14 @@ export function HomeSection({
 }) {
   return (
     <section id={id} className="border-t border-border first:border-t-0">
-      <div className={cn('mx-auto w-full max-w-6xl px-4 py-20 sm:px-6 sm:py-28', className)}>
+      <div className={cn('mx-auto w-full max-w-6xl px-4 py-16 sm:px-6 sm:py-24', className)}>
         {children}
       </div>
     </section>
   );
 }
 
-/** The section headline: huge, tight, left-aligned. */
+/** The section headline: one size for every h2, the h1 one step larger. */
 export function Headline({
   as: Tag = 'h2',
   className,
@@ -38,7 +49,10 @@ export function Headline({
   return (
     <Tag
       className={cn(
-        'text-balance font-semibold tracking-[-0.05em] [font-size:clamp(2.5rem,7vw,4.5rem)] leading-[1.05]',
+        'text-balance font-semibold tracking-[-0.05em] leading-[1.05]',
+        Tag === 'h1'
+          ? '[font-size:clamp(2.5rem,7vw,4.5rem)]'
+          : '[font-size:clamp(2.25rem,6vw,3.5rem)]',
         className,
       )}
     >
@@ -63,11 +77,11 @@ export function MockWindow({
   return (
     <figure
       className={cn(
-        'min-w-0 overflow-hidden rounded-xl border border-border bg-card text-left',
+        'min-w-0 overflow-hidden rounded-xl border border-border bg-background text-left',
         className,
       )}
     >
-      <figcaption className="flex items-center justify-between gap-2 border-b border-border bg-muted/40 px-4 py-2.5 font-mono text-xs text-muted-foreground">
+      <figcaption className="flex items-center justify-between gap-2 border-b border-border px-4 py-2.5 font-mono text-xs text-muted-foreground">
         <span>{title}</span>
         {action ? <span className="-my-1.5 -mr-1.5 flex">{action}</span> : null}
       </figcaption>
@@ -76,20 +90,31 @@ export function MockWindow({
   );
 }
 
-/** Two windows, the second offset down and right so it overlaps the first. */
-export function StackedWindows({ back, front }: { back: ReactNode; front: ReactNode }) {
+/** Two windows side by side from lg, stacked below; no overlap or offset. */
+export function WindowPair({ left, right }: { left: ReactNode; right: ReactNode }) {
   return (
-    <div className="mt-12 sm:mt-16">
-      <div className="w-full sm:w-[88%]">{back}</div>
-      <div className="relative -mt-6 ml-4 sm:-mt-8 sm:ml-auto sm:w-[78%]">{front}</div>
+    <div className={cn('grid gap-6 lg:grid-cols-2', GAP_HEAD)}>
+      {left}
+      {right}
     </div>
   );
+}
+
+/** Spacing wrapper so a single snapshot sits the same distance under the headline. */
+export function Snapshot({ children }: { children: ReactNode }) {
+  return <div className={GAP_HEAD}>{children}</div>;
 }
 
 /** Two-tone statement: first clause in foreground, the rest muted. */
 export function ProofLine({ lead, rest }: { lead: string; rest: string }) {
   return (
-    <p className="mt-12 max-w-4xl text-balance text-2xl font-semibold tracking-[-0.03em] leading-[1.2] sm:mt-16 sm:text-[1.75rem]">
+    <p
+      className={cn(
+        'text-balance text-2xl font-semibold tracking-[-0.03em] leading-[1.2] sm:text-[1.75rem]',
+        GAP_PROOF,
+        MEASURE,
+      )}
+    >
       <span>{lead}</span> <span className="text-muted-foreground">{rest}</span>
     </p>
   );
@@ -105,7 +130,7 @@ export function FeatureLinks({
 }) {
   const items = all ? [...links, all] : links;
   return (
-    <div className="mt-10 max-w-md sm:mt-12">
+    <div className={cn(GAP_LINKS, MEASURE)}>
       <p className="mb-3 font-mono text-xs uppercase tracking-wider text-muted-foreground">
         Features
       </p>
@@ -169,10 +194,10 @@ export function FeatureTile({
   href: string;
 }) {
   return (
-    <article className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-card">
+    <article className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-background">
       <pre
         aria-hidden
-        className="min-h-40 overflow-hidden whitespace-pre-wrap break-words border-b border-border bg-muted/40 p-5 font-mono text-xs leading-6 text-muted-foreground"
+        className="min-h-40 overflow-hidden whitespace-pre-wrap break-words border-b border-border p-5 font-mono text-xs leading-6 text-muted-foreground"
       >
         {graphic.join('\n')}
       </pre>
