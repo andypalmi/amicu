@@ -22,7 +22,7 @@ export function ogImage() {
         <div style={{ fontSize: 56, fontWeight: 600 }}>amicu</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
           <div style={{ fontSize: 76, fontWeight: 700, lineHeight: 1.05, letterSpacing: -2 }}>
-            Infrastructure as code for self-hosted LLMs.
+            Infrastructure as code for open-weight LLMs.
           </div>
           <div style={{ fontSize: 30, color: '#a3a3a3' }}>
             Describe the model, hardware and runtime in HCL. Plan, then apply.
