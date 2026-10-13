@@ -40,7 +40,7 @@ pub use service::{
 };
 pub use supervisor::{
     LaunchdSupervisor, ProcessSupervisor, ReadyWait, ResolvedSecret, ServiceSupervisor,
-    SystemdSupervisor, host_supervisor, resolve_launch_secrets,
+    SystemdSupervisor, host_label, host_supervisor, resolve_launch_secrets,
 };
 
 #[cfg(test)]

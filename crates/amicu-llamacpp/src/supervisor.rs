@@ -323,6 +323,13 @@ fn endpoint_for(plan: &LaunchPlan) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
+/// The launchd label / systemd unit the host supervisor uses for a
+/// deployment. Deterministic, so a stop handle can be derived from state alone.
+#[must_use]
+pub fn host_label(deployment: &str) -> String {
+    format!("io.amicu.llama.{deployment}")
+}
+
 #[async_trait]
 impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<M, P> {
     async fn start(
@@ -366,7 +373,7 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
             })?;
             env.push((s.name.clone(), value.to_owned()));
         }
-        let label = format!("io.amicu.llama.{}", plan.deployment);
+        let label = host_label(plan.deployment.as_str());
         let spec = ServiceSpec {
             label: label.clone(),
             argv: self.resolve_program(argv)?,

@@ -263,6 +263,7 @@ resource "deployment" "support_modal" {
             .collect();
         LocalState {
             version: LocalState::VERSION.to_owned(),
+            pending: Vec::new(),
             graph,
             endpoints,
         }

@@ -235,6 +235,11 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
 
     fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
         let plist = self.plist_path(label);
+        // No plist means amicu has nothing loaded under this label: the
+        // service is confirmed absent, which is a successful stop.
+        if !plist.exists() {
+            return Ok(());
+        }
         let out = self
             .exec
             .exec("launchctl", &["unload", "-w", &plist.to_string_lossy()])?;
@@ -446,6 +451,10 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
         // `--collect` unit is "not loaded" and its stop errors).
         remove_env_file(&self.env_path(label));
         let out = out?;
+        // "Unit ... not loaded": the unit is confirmed absent.
+        if !out.success && out.stderr.contains("not loaded") {
+            return Ok(());
+        }
         if !out.success {
             return Err(LlamaCppError::Supervisor(format!(
                 "systemctl stop failed: {}",

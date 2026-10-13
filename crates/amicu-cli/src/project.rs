@@ -26,6 +26,12 @@ pub(crate) struct LocalState {
     pub graph: Graph,
     #[serde(default)]
     pub endpoints: Vec<RuntimeHandle>,
+    /// Deployments whose start was begun (state is written ahead of the
+    /// provider call) but not confirmed. Each is also in `graph`, so it can be
+    /// found and stopped from state alone even if amicu died mid-start.
+    /// Absent in state written before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<amicu_core::id::DeploymentId>,
 }
 
 impl LocalState {

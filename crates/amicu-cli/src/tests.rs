@@ -570,6 +570,7 @@ fn apply_json_stdout_is_a_single_json_value() {
     project
         .save_state(&LocalState {
             version: LocalState::VERSION.to_owned(),
+            pending: Vec::new(),
             graph: prior,
             endpoints: Vec::new(),
         })
@@ -643,6 +644,7 @@ fn state_round_trips() {
 
     let state = LocalState {
         version: LocalState::VERSION.to_owned(),
+        pending: Vec::new(),
         graph: graph.clone(),
         endpoints: Vec::new(),
     };
@@ -845,8 +847,8 @@ fn destroy_unknown_target_is_an_error_and_plans_nothing() {
     };
     assert!(msg.contains("ghost"), "{msg}");
     assert!(
-        !msg.contains("unknown --target deployment(s): support_two"),
-        "{msg}"
+        msg.starts_with("unknown --target deployment(s): ghost;"),
+        "only the unknown name is reported: {msg}"
     );
     assert!(msg.contains("support_local"), "lists known names: {msg}");
 }
@@ -858,6 +860,7 @@ fn destroy_unknown_target_leaves_state_untouched() {
     let graph = two_deployment_graph();
     let state = LocalState {
         version: LocalState::VERSION.to_owned(),
+        pending: Vec::new(),
         graph,
         endpoints: Vec::new(),
     };
@@ -889,6 +892,9 @@ fn destroy_with_empty_state_prints_nothing_to_destroy() {
     assert!(project.load_state().unwrap().is_none());
 }
 
+// Runs the real host stop path, which is a no-op on macOS when nothing is
+// loaded; elsewhere it would call systemctl, so keep it off other platforms.
+#[cfg(target_os = "macos")]
 #[test]
 fn destroy_updates_state_like_apply() {
     let td = TempDir::new();
@@ -896,6 +902,7 @@ fn destroy_updates_state_like_apply() {
     // No recorded endpoints, so executing the destroys stops nothing real.
     let state = LocalState {
         version: LocalState::VERSION.to_owned(),
+        pending: Vec::new(),
         graph: two_deployment_graph(),
         endpoints: Vec::new(),
     };
@@ -934,4 +941,126 @@ fn destroy_updates_state_like_apply() {
         .deployments
         .len();
     assert_eq!(left, 0);
+}
+
+fn handle(id: &str, port: u16) -> amicu_runtime::RuntimeHandle {
+    amicu_runtime::RuntimeHandle {
+        id: id.to_owned(),
+        deployment: id.into(),
+        endpoint: format!("http://127.0.0.1:{port}"),
+        exposure: amicu_runtime::EndpointExposure::Loopback,
+    }
+}
+
+#[test]
+fn destroy_cancel_or_eof_destroys_nothing() {
+    for answer in ["", "n\n", "no\n", "\n"] {
+        let td = TempDir::new();
+        let project = Project::new(&td.path);
+        let state = LocalState {
+            version: LocalState::VERSION.to_owned(),
+            pending: Vec::new(),
+            graph: two_deployment_graph(),
+            endpoints: Vec::new(),
+        };
+        project.save_state(&state).unwrap();
+        let mut out = Vec::new();
+        let mut input = std::io::Cursor::new(answer.as_bytes().to_vec());
+        let code = commands::destroy::run_with(
+            &project,
+            &[],
+            false,
+            None,
+            OutputFormat::Human,
+            &mut out,
+            &mut input,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        let text = utf8(out);
+        assert!(text.contains("Destroy these deployments? [y/N]"), "{text}");
+        assert!(text.contains("Destroy cancelled."), "{text}");
+        assert_eq!(project.load_state().unwrap().unwrap().graph, state.graph);
+    }
+}
+
+// Runs the real host stop path, which is a no-op on macOS when nothing is
+// loaded; elsewhere it would call systemctl, so keep it off other platforms.
+#[cfg(target_os = "macos")]
+#[test]
+fn destroy_confirmed_with_y_proceeds() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    let state = LocalState {
+        version: LocalState::VERSION.to_owned(),
+        pending: Vec::new(),
+        graph: two_deployment_graph(),
+        endpoints: Vec::new(),
+    };
+    project.save_state(&state).unwrap();
+    let mut out = Vec::new();
+    let mut input = std::io::Cursor::new(b"y\n".to_vec());
+    commands::destroy::run_with(
+        &project,
+        &[],
+        false,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut input,
+    )
+    .unwrap();
+    assert!(utf8(out).contains("Destroyed 2 deployment(s):"));
+    assert_eq!(
+        project
+            .load_state()
+            .unwrap()
+            .unwrap()
+            .graph
+            .deployments
+            .len(),
+        0
+    );
+}
+
+// Runs the real host stop path, which is a no-op on macOS when nothing is
+// loaded; elsewhere it would call systemctl, so keep it off other platforms.
+#[cfg(target_os = "macos")]
+#[test]
+fn targeted_destroy_preserves_other_deployments_endpoints() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    // Only the kept deployment has a handle, so nothing real is stopped; the
+    // destroyed one has no handle, so it is stopped via its derived label.
+    let kept = handle("support_local", 8000);
+    let state = LocalState {
+        version: LocalState::VERSION.to_owned(),
+        pending: Vec::new(),
+        graph: two_deployment_graph(),
+        endpoints: vec![kept.clone()],
+    };
+    project.save_state(&state).unwrap();
+    let mut out = Vec::new();
+    let targets = ["support_two".to_owned()];
+    commands::destroy::run(
+        &project,
+        &targets,
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+    )
+    .unwrap();
+    let after = project.load_state().unwrap().unwrap();
+    assert_eq!(after.endpoints, vec![kept]);
+    assert_eq!(after.graph.deployments.len(), 1);
+}
+
+#[test]
+fn destroy_nothing_in_json_mode_is_an_empty_array() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    let mut out = Vec::new();
+    commands::destroy::run(&project, &[], true, None, OutputFormat::Json, &mut out).unwrap();
+    assert_eq!(utf8(out).trim(), "[]");
 }

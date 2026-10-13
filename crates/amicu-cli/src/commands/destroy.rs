@@ -10,7 +10,7 @@ use std::io::Write;
 use amicu_core::graph::Graph;
 
 use crate::OutputFormat;
-use crate::commands::apply::{execute, prompt_approval};
+use crate::commands::apply::{execute, prompt_approval_from};
 use crate::error::CliError;
 use crate::lock::StateLock;
 use crate::planner::{PlanError, PlanResult};
@@ -26,14 +26,58 @@ pub(crate) fn run(
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
+    run_with(
+        project,
+        targets,
+        auto_approve,
+        lock_timeout,
+        output,
+        out,
+        &mut std::io::stdin().lock(),
+    )
+}
+
+/// [`run`] with the approval answer read from `input`.
+pub(crate) fn run_with(
+    project: &Project,
+    targets: &[String],
+    auto_approve: bool,
+    lock_timeout: Option<std::time::Duration>,
+    output: OutputFormat,
+    out: &mut dyn Write,
+    input: &mut dyn std::io::BufRead,
+) -> Result<u8, CliError> {
     // Same locking discipline as `apply`: read -> refresh -> plan -> destroy ->
     // save under one state lock.
     let _lock = StateLock::acquire(&project.state_dir(), "destroy", lock_timeout)?;
+
+    // Validate --target against the raw recorded state first, so a typo fails
+    // before the Modal drift refresh makes any network call or prints drift.
+    let raw = project.load_state()?;
+    let raw_graph = raw.as_ref().map_or_else(Graph::new, |s| s.graph.clone());
+    if let Err(DestroyPlanError::UnknownTarget(msg)) = plan_destroy(&raw_graph, targets) {
+        return Err(CliError::Message(msg));
+    }
 
     let (prior_state, pruned) =
         crate::refresh::load_refreshed(project, &crate::refresh::ModalLookup, output, out)?;
     let empty = Graph::new();
     let prior_graph = prior_state.as_ref().map_or(&empty, |s| &s.graph);
+
+    // Targets the refresh pruned (their Modal app is gone) are not "unknown":
+    // they were in state, and no longer exist remotely.
+    let gone: Vec<&str> = targets
+        .iter()
+        .map(String::as_str)
+        .filter(|t| !prior_graph.deployments.iter().any(|d| d.id.as_str() == *t))
+        .collect();
+    if !gone.is_empty() {
+        return Err(CliError::Message(format!(
+            "deployment(s) already gone remotely: {}; the refresh dropped them from state, \
+             so there is nothing left to stop",
+            gone.join(", ")
+        )));
+    }
 
     let result = match plan_destroy(prior_graph, targets) {
         Ok(result) => result,
@@ -54,7 +98,11 @@ pub(crate) fn run(
         if pruned && let Some(state) = &prior_state {
             project.save_state(state)?;
         }
-        writeln!(out, "Nothing to destroy.").map_err(|e| CliError::io("write failed", e))?;
+        if output.is_json() {
+            write_json(out, &Vec::<&str>::new())?;
+        } else {
+            writeln!(out, "Nothing to destroy.").map_err(|e| CliError::io("write failed", e))?;
+        }
         return Ok(0);
     }
 
@@ -68,7 +116,7 @@ pub(crate) fn run(
             &mut *out
         };
         crate::commands::plan::print_human(&result, prior_graph, preview)?;
-        if !auto_approve && !prompt_approval(preview)? {
+        if !auto_approve && !prompt_approval_from(preview, "Destroy these deployments?", input)? {
             writeln!(preview, "Destroy cancelled.").map_err(|e| CliError::io("write failed", e))?;
             return Ok(0);
         }
