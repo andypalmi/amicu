@@ -16,6 +16,8 @@ export const GAP_HEAD = 'mt-12';
 export const GAP_PROOF = 'mt-10';
 /** Proof line to links: 24px. */
 export const GAP_LINKS = 'mt-6';
+/** Horizontal scrollers: a thin visible scrollbar so overflow is never silent. */
+export const SCROLLER = 'overflow-x-auto [scrollbar-width:thin] [scrollbar-color:var(--color-muted-foreground)_transparent]';
 
 /** Full-width band: one container, 96px (64px on mobile) vertical padding. */
 export function HomeSection({
@@ -93,7 +95,7 @@ export function MockWindow({
 /** Two windows side by side from lg, stacked below; no overlap or offset. */
 export function WindowPair({ left, right }: { left: ReactNode; right: ReactNode }) {
   return (
-    <div className={cn('grid gap-6 lg:grid-cols-2', GAP_HEAD)}>
+    <div className={cn('grid items-start gap-6 lg:grid-cols-2', GAP_HEAD)}>
       {left}
       {right}
     </div>
@@ -168,11 +170,11 @@ export function DiffBody({ lines, label }: { lines: DiffLine[]; label: string })
   return (
     <pre
       aria-label={label}
-      className="px-4 py-4 font-mono text-xs leading-6 sm:text-[0.8125rem]"
+      className={cn('px-4 py-4 font-mono text-xs leading-6 sm:text-[0.8125rem]', SCROLLER)}
     >
       <code className="block">
         {lines.map((l, i) => (
-          <span key={i} className={cn('block whitespace-pre-wrap break-words', diffClass[l.tone])}>
+          <span key={i} className={cn('block whitespace-pre-wrap', diffClass[l.tone])}>
             {diffMark[l.tone]} {l.text}
           </span>
         ))}
@@ -197,7 +199,7 @@ export function FeatureTile({
     <article className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-background">
       <pre
         aria-hidden
-        className="min-h-40 overflow-hidden whitespace-pre-wrap break-words border-b border-border p-5 font-mono text-xs leading-6 text-muted-foreground"
+        className="min-h-28 overflow-hidden whitespace-pre-wrap border-b border-border p-5 font-mono text-xs leading-6 text-muted-foreground"
       >
         {graphic.join('\n')}
       </pre>

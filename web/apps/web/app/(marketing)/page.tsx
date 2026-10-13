@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Button, cn } from '@amicu/ui';
@@ -24,6 +25,7 @@ import {
   DEPLOYMENT_HCL,
   POLICY_LINKS,
   PROVIDER_DIFF,
+  PROVIDER_PLAN,
   PROVIDER_SWITCH_LINKS,
   RESIDENCY_HCL,
   RESIDENCY_PLAN,
@@ -129,11 +131,26 @@ export default function LandingPage() {
       {/* Target switch */}
       <HomeSection>
         <Headline>Laptop or cloud GPU. Same file.</Headline>
-        <Snapshot>
-          <MockWindow title="amicu.hcl">
-            <DiffBody lines={PROVIDER_DIFF} label="Switching the provider of a hardware profile between a laptop and a cloud GPU" />
-          </MockWindow>
-        </Snapshot>
+        <WindowPair
+          left={
+            <MockWindow title="amicu.hcl">
+              <DiffBody
+                lines={PROVIDER_DIFF}
+                label="Switching the provider of a hardware profile between a laptop and a cloud GPU"
+              />
+            </MockWindow>
+          }
+          right={
+            <MockWindow title="terminal">
+              <Transcript
+                lines={PROVIDER_PLAN}
+                wrap
+                label="Output of amicu plan after switching the provider to Modal"
+                className="px-4 py-4"
+              />
+            </MockWindow>
+          }
+        />
         <ProofLine
           lead="Change the provider line to switch targets:"
           rest="your machine or a cloud GPU (Modal)."
@@ -172,32 +189,41 @@ export default function LandingPage() {
       <HomeSection>
         <Headline>Pick a provider. Change it later.</Headline>
         <Snapshot>
-        <MockWindow title="providers">
-          <ul className="px-4 font-mono text-sm">
-            {sortedProviders.map((p) => (
-              <li key={p.name} className="border-b border-border last:border-b-0">
-                <Link
-                  href={['/docs/providers', p.slug].join('/')}
-                  className="-mx-4 flex items-center justify-between gap-3 px-4 py-2.5 transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+          <MockWindow title="providers">
+            <ul
+              className="px-4 font-mono text-sm lg:grid lg:grid-flow-col lg:grid-cols-2 lg:gap-x-8 lg:[grid-template-rows:repeat(var(--rows),auto)]"
+              style={{ '--rows': Math.ceil(sortedProviders.length / 2) } as CSSProperties}
+            >
+              {sortedProviders.map((p, i) => (
+                <li
+                  key={p.name}
+                  className={cn(
+                    'border-b border-border last:border-b-0',
+                    (i + 1) % Math.ceil(sortedProviders.length / 2) === 0 && 'lg:border-b-0',
+                  )}
                 >
-                  <span className="min-w-0 truncate">{p.name}</span>
-                  <span
-                    className={cn(
-                      'shrink-0 rounded-full border px-2.5 py-0.5 text-xs',
-                      p.status === 'supported'
-                        ? 'border-transparent bg-foreground text-background'
-                        : p.status === 'preview'
-                          ? 'border-border text-foreground'
-                          : 'border-border text-muted-foreground',
-                    )}
+                  <Link
+                    href={['/docs/providers', p.slug].join('/')}
+                    className="-mx-4 flex items-center justify-between gap-3 px-4 py-2.5 transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                   >
-                    {statusLabel[p.status]}
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </MockWindow>
+                    <span className="min-w-0 truncate">{p.name}</span>
+                    <span
+                      className={cn(
+                        'shrink-0 rounded-full border px-2.5 py-0.5 text-xs',
+                        p.status === 'supported'
+                          ? 'border-transparent bg-foreground text-background'
+                          : p.status === 'preview'
+                            ? 'border-border text-foreground'
+                            : 'border-border text-muted-foreground',
+                      )}
+                    >
+                      {statusLabel[p.status]}
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </MockWindow>
         </Snapshot>
         <ProofLine
           lead="Apply runs on your machine, on-prem hosts and Modal today."

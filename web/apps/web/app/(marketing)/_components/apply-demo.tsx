@@ -11,7 +11,7 @@ import {
   type Row,
   type Tone,
 } from '@/lib/marketing/demo-timeline';
-import { MockWindow } from './home';
+import { MockWindow, SCROLLER } from './home';
 
 // Server-renders the final frame (t = Infinity); after hydration it rewinds
 // to 0 and plays once as soon as it nears the viewport. Reduced motion keeps the final
@@ -31,7 +31,7 @@ const useIsoLayoutEffect = typeof window === 'undefined' ? useEffect : useLayout
 
 function RowLine({ row, className }: { row: Row; className?: string }) {
   return (
-    <span className={cn('block whitespace-pre-wrap break-words', toneClass[row.tone], className)}>
+    <span className={cn('block whitespace-pre-wrap', toneClass[row.tone], className)}>
       {row.shown}
       <span className="invisible">{row.rest}</span>
     </span>
@@ -126,18 +126,19 @@ export function ApplyDemo({ className }: { className?: string }) {
     <MockWindow title="terminal" action={replay} className={className}>
       <div
         ref={rootRef}
-        className="px-3 py-3 font-mono text-xs leading-5 sm:px-4 sm:text-[0.8125rem] sm:leading-6"
+        className="grid font-mono text-xs leading-5 sm:text-[0.8125rem] sm:leading-6 lg:grid-cols-2"
       >
         <pre className="sr-only">{TRANSCRIPT}</pre>
-        <div aria-hidden>
-          <div>
-            {term.map((row, i) => (
-              <RowLine key={i} row={row} />
-            ))}
-          </div>
+        <div aria-hidden className={cn('min-w-0 px-3 py-3 sm:px-4', SCROLLER)}>
+          {term.map((row, i) => (
+            <RowLine key={i} row={row} />
+          ))}
+        </div>
+        <div aria-hidden className="min-w-0 border-border lg:border-l">
           <div
             className={cn(
-              'mt-3 border-t border-border pt-3',
+              'mx-3 border-t border-border pb-3 pt-3 sm:mx-4 lg:mx-0 lg:border-t-0 lg:px-4',
+              SCROLLER,
               state.screen !== 'call' && 'invisible',
             )}
           >
