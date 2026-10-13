@@ -42,26 +42,20 @@ const MODEL = 'RedHatAI/Qwen3.5-9B-FP8-dynamic';
 const BODY = `{"model": "${MODEL}", "messages": [{"role": "user", "content": "Hello"}]}`;
 const CURL_ARGS = [
   `curl '${URL}/v1/chat/completions' \\`,
-  '  -H "Authorization: Bearer $CHAT_API_KEY" \\',
-  '  -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" \\',
-  '  -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" \\',
-  '  -H "Content-Type: application/json" \\',
+  '  -H "Authorization: Bearer $CHAT_API_KEY" -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" \\',
+  '  -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" -H "Content-Type: application/json" \\',
   `  -d '${BODY}'`,
 ];
+
 // Non-streaming body, as vLLM returns it: the curl above sends no `stream`.
+// Whitespace is compacted (one line per top-level key) to stay short on phones.
 const RESPONSE = `{
-  "id": "chatcmpl-8f3a1c92d7e4",
-  "object": "chat.completion",
-  "created": 1767225600,
-  "model": "${MODEL}",
-  "choices": [
-    {
-      "index": 0,
-      "message": {"role": "assistant", "content": "Hello! How can I help you today?"},
-      "finish_reason": "stop"
-    }
-  ],
-  "usage": {"prompt_tokens": 9, "completion_tokens": 10, "total_tokens": 19}
+"id": "chatcmpl-8f3a1c92d7e4",
+"object": "chat.completion",
+"created": 1767225600,
+"model": "${MODEL}",
+"choices": [{"index": 0, "message": {"role": "assistant", "content": "Hello! How can I help you today?"}, "finish_reason": "stop"}],
+"usage": {"prompt_tokens": 9, "completion_tokens": 10, "total_tokens": 19}
 }`;
 
 const L = (at: number, text: string, tone?: Tone): Step => ({ kind: 'line', at, screen: 'term', text, tone });
@@ -82,11 +76,11 @@ export const DEMO_STEPS: Step[] = [
   L(4200, 'Applied 1 deployment(s):'),
   L(4400, `  deployment.chat -> ${URL}`, 'muted'),
   { kind: 'status', at: 4400, status: 'online' },
-  L(4700, '      curl:', 'muted'),
-  ...CURL_ARGS.map((c, i) => L(4800 + i * 120, '        ' + c, 'muted')),
-  { kind: 'screen', at: 7000, screen: 'call' },
-  { kind: 'type', at: 7300, screen: 'call', tone: 'cmd', msPerChar: 6, text: '$ ' + CURL_ARGS.join('\n') },
-  { kind: 'line', at: 10600, screen: 'call', text: RESPONSE },
+  // apply.rs then prints a `curl:` / `python (openai):` usage snippet; trimmed here,
+  // the request is shown once, in the next pane.
+  { kind: 'screen', at: 5600, screen: 'call' },
+  { kind: 'type', at: 5900, screen: 'call', tone: 'cmd', msPerChar: 6, text: '$ ' + CURL_ARGS.join('\n') },
+  { kind: 'line', at: 8600, screen: 'call', text: RESPONSE },
 ];
 
 /** Time at which every step has finished. */

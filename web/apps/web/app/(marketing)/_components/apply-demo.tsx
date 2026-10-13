@@ -115,7 +115,7 @@ export function ApplyDemo() {
   const call = state.rows.filter((r) => r.screen === 'call');
 
   return (
-    <div ref={rootRef} className="px-4 py-3 font-mono text-[0.8125rem] leading-6">
+    <div ref={rootRef} className="px-3 py-3 font-mono text-xs leading-5 sm:px-4 sm:text-[0.8125rem] sm:leading-6">
       <div className="flex items-center justify-between">
         <StatusChip status={state.status} />
         <button
@@ -139,7 +139,7 @@ export function ApplyDemo() {
         </div>
         <div
           className={cn(
-            'mt-4 border-t border-border pt-4',
+            'mt-3 border-t border-border pt-3',
             state.screen !== 'call' && 'invisible',
           )}
         >
