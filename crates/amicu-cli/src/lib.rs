@@ -79,6 +79,19 @@ enum Command {
         #[arg(long, value_name = "SECS")]
         lock_timeout: Option<u64>,
     },
+    /// Destroy deployments recorded in state (everything, or only `--target`s).
+    Destroy {
+        /// Destroy only this deployment (repeatable). Unknown names are an error.
+        #[arg(long, value_name = "NAME")]
+        target: Vec<String>,
+        /// Skip the interactive approval prompt.
+        #[arg(long, visible_alias = "yes")]
+        auto_approve: bool,
+        /// Wait up to this many seconds for the state lock instead of failing
+        /// immediately when another amicu process holds it.
+        #[arg(long, value_name = "SECS")]
+        lock_timeout: Option<u64>,
+    },
     /// Run environment and project diagnostics.
     Doctor,
     /// Export coding-agent skills. Does not require a project.
@@ -243,6 +256,18 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
             lock_timeout,
         } => commands::apply::run(
             &project,
+            *auto_approve,
+            lock_timeout.map(std::time::Duration::from_secs),
+            cli.output,
+            out,
+        ),
+        Command::Destroy {
+            target,
+            auto_approve,
+            lock_timeout,
+        } => commands::destroy::run(
+            &project,
+            target,
             *auto_approve,
             lock_timeout.map(std::time::Duration::from_secs),
             cli.output,

@@ -99,25 +99,27 @@ pub(crate) fn run(
         }
     }
 
+    let (handles, state) = execute(project, graph, &result, prior_state.as_ref())?;
+    report(&handles, &state.graph, output, out)
+}
+
+/// Run an approved plan and persist the resulting state. Shared by `apply` and
+/// `destroy`: `graph` is the desired graph that becomes the new state graph.
+/// Returns the handles started and the saved state.
+pub(crate) fn execute(
+    project: &Project,
+    graph: Graph,
+    result: &PlanResult,
+    prior_state: Option<&LocalState>,
+) -> Result<(Vec<RuntimeHandle>, LocalState), CliError> {
     let rt = crate::commands::build_runtime()?;
     let mut progress = Progress::default();
-    if let Err(err) = rt.block_on(apply_all(
-        &graph,
-        &result,
-        prior_state.as_ref(),
-        &mut progress,
-    )) {
-        return Err(record_partial(
-            project,
-            &graph,
-            prior_state.as_ref(),
-            &progress,
-            err,
-        ));
+    if let Err(err) = rt.block_on(apply_all(&graph, result, prior_state, &mut progress)) {
+        return Err(record_partial(project, &graph, prior_state, &progress, err));
     }
     let handles = progress.started;
 
-    let prior_endpoints = prior_state.as_ref().map_or(&[][..], |s| &s.endpoints[..]);
+    let prior_endpoints = prior_state.map_or(&[][..], |s| &s.endpoints[..]);
     let destroyed: Vec<DeploymentId> = result
         .items
         .iter()
@@ -132,7 +134,7 @@ pub(crate) fn run(
     };
     project.save_state(&state)?;
 
-    report(&handles, &state.graph, output, out)
+    Ok((handles, state))
 }
 
 /// The endpoints to record after an apply: the prior (refreshed) endpoints of
@@ -838,7 +840,7 @@ fn usage_snippets(
     out
 }
 
-fn prompt_approval(out: &mut dyn Write) -> Result<bool, CliError> {
+pub(crate) fn prompt_approval(out: &mut dyn Write) -> Result<bool, CliError> {
     write!(out, "\nApply these changes? [y/N] ").map_err(|e| CliError::io("write failed", e))?;
     out.flush().map_err(|e| CliError::io("write failed", e))?;
     let mut line = String::new();

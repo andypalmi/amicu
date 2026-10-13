@@ -775,3 +775,163 @@ fn approval_parsing() {
     assert!(!commands::apply::approved(""));
     assert!(!commands::apply::approved("no"));
 }
+
+/// `VALID_CONFIG` plus a second deployment, `support_two`, on another port.
+fn two_deployments() -> String {
+    let second = r#"
+resource "deployment" "support_two" {
+  model    = model.support_chat.id
+  hardware = hardware_profile.dev_mac.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 8192
+    port           = 8001
+    n_gpu_layers   = -1
+  }
+}
+"#;
+    format!("{VALID_CONFIG}{second}")
+}
+
+fn two_deployment_graph() -> amicu_core::graph::Graph {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", &two_deployments());
+    project.load_graph().unwrap()
+}
+
+fn destroyed_ids(result: &crate::planner::PlanResult) -> Vec<String> {
+    result
+        .items
+        .iter()
+        .map(|i| i.deployment.as_str().to_owned())
+        .collect()
+}
+
+#[test]
+fn destroy_plans_every_deployment_in_state() {
+    let prior = two_deployment_graph();
+    let result = commands::destroy::plan_destroy(&prior, &[]).unwrap();
+    assert_eq!(result.plan.actions.len(), 2);
+    assert!(
+        result
+            .plan
+            .actions
+            .iter()
+            .all(|a| a.kind == amicu_plan::contract::ActionKind::Destroy)
+    );
+    assert!(result.items.iter().all(|i| i.launch.is_none()));
+    assert_eq!(destroyed_ids(&result), ["support_local", "support_two"]);
+}
+
+#[test]
+fn destroy_target_limits_the_plan_to_the_named_deployments() {
+    let prior = two_deployment_graph();
+    let result = commands::destroy::plan_destroy(&prior, &["support_two".to_owned()]).unwrap();
+    assert_eq!(destroyed_ids(&result), ["support_two"]);
+    assert_eq!(result.plan.actions.len(), 1);
+    assert_eq!(result.plan.actions[0].address, "deployment.support_two");
+}
+
+#[test]
+fn destroy_unknown_target_is_an_error_and_plans_nothing() {
+    let prior = two_deployment_graph();
+    let err =
+        commands::destroy::plan_destroy(&prior, &["support_two".to_owned(), "ghost".to_owned()])
+            .err()
+            .expect("unknown target must fail");
+    let commands::destroy::DestroyPlanError::UnknownTarget(msg) = err else {
+        panic!("expected UnknownTarget");
+    };
+    assert!(msg.contains("ghost"), "{msg}");
+    assert!(
+        !msg.contains("unknown --target deployment(s): support_two"),
+        "{msg}"
+    );
+    assert!(msg.contains("support_local"), "lists known names: {msg}");
+}
+
+#[test]
+fn destroy_unknown_target_leaves_state_untouched() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    let graph = two_deployment_graph();
+    let state = LocalState {
+        version: LocalState::VERSION.to_owned(),
+        graph,
+        endpoints: Vec::new(),
+    };
+    project.save_state(&state).unwrap();
+    let mut out = Vec::new();
+    let err = commands::destroy::run(
+        &project,
+        &["ghost".to_owned()],
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+    )
+    .expect_err("unknown target");
+    assert!(err.to_string().contains("ghost"), "{err}");
+    assert_eq!(project.load_state().unwrap().unwrap().graph, state.graph);
+    assert_eq!(out.len(), 0);
+}
+
+#[test]
+fn destroy_with_empty_state_prints_nothing_to_destroy() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    let mut out = Vec::new();
+    let code =
+        commands::destroy::run(&project, &[], true, None, OutputFormat::Human, &mut out).unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(utf8(out), "Nothing to destroy.\n");
+    assert!(project.load_state().unwrap().is_none());
+}
+
+#[test]
+fn destroy_updates_state_like_apply() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    // No recorded endpoints, so executing the destroys stops nothing real.
+    let state = LocalState {
+        version: LocalState::VERSION.to_owned(),
+        graph: two_deployment_graph(),
+        endpoints: Vec::new(),
+    };
+    project.save_state(&state).unwrap();
+
+    let mut out = Vec::new();
+    let targets = ["support_two".to_owned()];
+    let code = commands::destroy::run(
+        &project,
+        &targets,
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(code, 0);
+    let kept = project.load_state().unwrap().unwrap();
+    let ids: Vec<&str> = kept
+        .graph
+        .deployments
+        .iter()
+        .map(|d| d.id.as_str())
+        .collect();
+    assert_eq!(ids, ["support_local"]);
+
+    let mut out = Vec::new();
+    commands::destroy::run(&project, &[], true, None, OutputFormat::Human, &mut out).unwrap();
+    let text = utf8(out);
+    assert!(text.contains("Destroyed 1 deployment(s):"), "{text}");
+    let left = project
+        .load_state()
+        .unwrap()
+        .unwrap()
+        .graph
+        .deployments
+        .len();
+    assert_eq!(left, 0);
+}
