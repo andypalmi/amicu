@@ -52,6 +52,11 @@ pub enum ServiceState {
 
 /// Load/start, query, stop, and read logs for a supervised service.
 pub trait ServiceManager: Send + Sync {
+    /// Best-effort removal of any previous instance with this label, so an
+    /// update can start the new one (`systemd-run --unit=<same>` fails while the
+    /// unit exists; a loaded launchd job would keep the old definition). Errors
+    /// are ignored: normally there is nothing to release.
+    fn release(&self, _label: &str) {}
     /// Write the service definition and start it.
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError>;
     /// The service's current lifecycle state.
@@ -60,6 +65,9 @@ pub trait ServiceManager: Send + Sync {
     fn stop(&self, label: &str) -> Result<(), LlamaCppError>;
     /// Read the service's captured log lines.
     fn logs(&self, label: &str, options: LogOptions) -> Result<Vec<String>, LlamaCppError>;
+    /// Where a human finds the service's logs (file paths or a command), for
+    /// error messages. Never contains the environment.
+    fn log_location(&self, label: &str) -> String;
 }
 
 /// The captured result of running a command.
@@ -156,6 +164,17 @@ impl LaunchdManager<HostExec> {
 }
 
 impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
+    fn release(&self, label: &str) {
+        let plist = self.plist_path(label);
+        if plist.exists() {
+            let _ = self
+                .exec
+                .exec("launchctl", &["unload", "-w", &plist.to_string_lossy()]);
+        }
+        // By label too, even when the plist file is gone but the job is loaded.
+        let _ = self.exec.exec("launchctl", &["remove", label]);
+    }
+
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
         require_absolute(&self.agents_dir)?;
         write_private(
@@ -245,6 +264,14 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         let lines = text.lines().map(str::to_owned).collect();
         Ok(tail(lines, options))
     }
+
+    fn log_location(&self, label: &str) -> String {
+        format!(
+            "{} and {}",
+            self.stdout_path(label).display(),
+            self.stderr_path(label).display()
+        )
+    }
 }
 
 /// Render the LaunchAgent plist for `spec`.
@@ -293,6 +320,10 @@ fn xml_escape(s: &str) -> String {
 
 /// systemd-backed manager: a transient `--user` unit started with `systemd-run`,
 /// queried with `systemctl --user`, logs read via `journalctl --user`.
+///
+/// Transient units do not survive a reboot or logout (unlike the launchd
+/// plist, which has `RunAtLoad`): after either, `amicu apply` must be re-run.
+/// Known limitation for now; persistent units are future work.
 ///
 /// Env (including secrets) goes in a per-unit 0600 `EnvironmentFile` that is
 /// removed on stop, so values never appear on `systemd-run`'s argv
@@ -357,6 +388,10 @@ fn environment_file(env: &[(String, String)]) -> Result<String, LlamaCppError> {
 }
 
 impl<E: CommandExec> ServiceManager for SystemdManager<E> {
+    fn release(&self, label: &str) {
+        let _ = self.exec.exec("systemctl", &["--user", "stop", label]);
+    }
+
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
         let unit = format!("--unit={}", spec.label);
         let mut args = vec!["--user", "--collect", &unit];
@@ -436,6 +471,10 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
             )));
         }
         Ok(out.stdout.lines().map(str::to_owned).collect())
+    }
+
+    fn log_location(&self, label: &str) -> String {
+        format!("`journalctl --user --unit={label}`")
     }
 }
 

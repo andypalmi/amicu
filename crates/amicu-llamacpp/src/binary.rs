@@ -71,7 +71,7 @@ impl CommandRunner for HostRunner {
         let path = std::env::var_os("PATH")?;
         std::env::split_paths(&path).find_map(|dir| {
             let candidate = dir.join(name);
-            candidate.is_file().then_some(candidate)
+            is_executable(&candidate).then_some(candidate)
         })
     }
 
@@ -84,6 +84,22 @@ impl CommandRunner for HostRunner {
         let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&output.stderr));
         Ok(text)
+    }
+}
+
+/// A regular file with an execute bit (unix); any regular file elsewhere.
+fn is_executable(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
     }
 }
 

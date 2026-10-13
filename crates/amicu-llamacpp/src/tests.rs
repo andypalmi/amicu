@@ -37,7 +37,7 @@ use crate::service::{
     CommandExec, ExecOutput, HostExec, LaunchdManager, ServiceManager, ServiceSpec, ServiceState,
     SystemdManager,
 };
-use crate::supervisor::{ProcessSupervisor, ResolvedSecret, ServiceSupervisor};
+use crate::supervisor::{ProcessSupervisor, ReadyWait, ResolvedSecret, ServiceSupervisor};
 use crate::{LlamaCppAdapter, MapCatalog};
 
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -1571,6 +1571,10 @@ struct FakeManager {
     logs: Vec<String>,
     started: Mutex<Option<ServiceSpec>>,
     stopped: Mutex<bool>,
+    /// Scripted `state()` answers, consumed in order, then `state` repeats.
+    script: Mutex<std::collections::VecDeque<ServiceState>>,
+    stop_ok: bool,
+    released: Mutex<u32>,
 }
 
 impl FakeManager {
@@ -1581,6 +1585,9 @@ impl FakeManager {
             logs: vec!["server listening".into()],
             started: Mutex::new(None),
             stopped: Mutex::new(false),
+            script: Mutex::new(std::collections::VecDeque::new()),
+            stop_ok: true,
+            released: Mutex::new(0),
         }
     }
     fn failing_start() -> Self {
@@ -1600,11 +1607,26 @@ impl ServiceManager for FakeManager {
         Ok(())
     }
     fn state(&self, _label: &str) -> Result<ServiceState, LlamaCppError> {
-        Ok(self.state)
+        Ok(self
+            .script
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(self.state))
     }
     fn stop(&self, _label: &str) -> Result<(), LlamaCppError> {
         *self.stopped.lock().unwrap() = true;
-        Ok(())
+        if self.stop_ok {
+            Ok(())
+        } else {
+            Err(LlamaCppError::Supervisor("Unit not loaded.".into()))
+        }
+    }
+    fn release(&self, _label: &str) {
+        *self.released.lock().unwrap() += 1;
+    }
+    fn log_location(&self, _label: &str) -> String {
+        "/logs/fake.log".into()
     }
     fn logs(&self, _label: &str, options: LogOptions) -> Result<Vec<String>, LlamaCppError> {
         let mut lines = self.logs.clone();
@@ -1625,6 +1647,23 @@ impl HealthProbe for FakeProbe {
     async fn is_ready(&self, _endpoint: &str) -> bool {
         self.ready
     }
+}
+
+const NO_WAIT: ReadyWait = ReadyWait {
+    timeout: std::time::Duration::ZERO,
+    interval: std::time::Duration::ZERO,
+};
+
+/// A supervisor over fakes: the binary "is found" and there is no readiness
+/// wait, so tests that are not about either stay hermetic and instant.
+fn test_supervisor<M: ServiceManager, P: HealthProbe>(
+    manager: M,
+    probe: P,
+) -> ServiceSupervisor<M, P> {
+    ServiceSupervisor::new(manager, probe)
+        .with_runner(Box::new(FakeRunner::found("")))
+        .with_ready_wait(NO_WAIT)
+        .with_drain(std::time::Duration::ZERO)
 }
 
 fn command_plan() -> LaunchPlan {
@@ -1656,7 +1695,7 @@ fn manifest_plan() -> LaunchPlan {
 
 #[tokio::test]
 async fn supervisor_start_yields_running_healthy() {
-    let sup = ServiceSupervisor::new(
+    let sup = test_supervisor(
         FakeManager::new(ServiceState::Active),
         FakeProbe { ready: true },
     );
@@ -1674,7 +1713,7 @@ async fn supervisor_start_yields_running_healthy() {
 
 #[tokio::test]
 async fn supervisor_status_degraded_when_endpoint_not_ready() {
-    let sup = ServiceSupervisor::new(
+    let sup = test_supervisor(
         FakeManager::new(ServiceState::Active),
         FakeProbe { ready: false },
     );
@@ -1687,7 +1726,7 @@ async fn supervisor_status_degraded_when_endpoint_not_ready() {
 
 #[tokio::test]
 async fn supervisor_status_failed_when_service_crashed() {
-    let sup = ServiceSupervisor::new(
+    let sup = test_supervisor(
         FakeManager::new(ServiceState::Failed),
         FakeProbe { ready: true },
     );
@@ -1700,7 +1739,7 @@ async fn supervisor_status_failed_when_service_crashed() {
 
 #[tokio::test]
 async fn supervisor_status_stopped_when_inactive() {
-    let sup = ServiceSupervisor::new(
+    let sup = test_supervisor(
         FakeManager::new(ServiceState::Inactive),
         FakeProbe { ready: false },
     );
@@ -1714,7 +1753,7 @@ async fn supervisor_status_stopped_when_inactive() {
 #[tokio::test]
 async fn supervisor_logs_and_stop_and_metrics() {
     let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
-    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: true });
+    let sup = test_supervisor(SharedManager(manager.clone()), FakeProbe { ready: true });
     let handle = sup.start(&command_plan(), &[]).await.expect("start");
 
     let logs = sup
@@ -1746,11 +1785,17 @@ impl ServiceManager for SharedManager {
     fn logs(&self, label: &str, options: LogOptions) -> Result<Vec<String>, LlamaCppError> {
         self.0.logs(label, options)
     }
+    fn log_location(&self, label: &str) -> String {
+        self.0.log_location(label)
+    }
+    fn release(&self, label: &str) {
+        self.0.release(label);
+    }
 }
 
 #[tokio::test]
 async fn supervisor_start_failure_is_typed_error() {
-    let sup = ServiceSupervisor::new(FakeManager::failing_start(), FakeProbe { ready: true });
+    let sup = test_supervisor(FakeManager::failing_start(), FakeProbe { ready: true });
     let err = sup
         .start(&command_plan(), &[])
         .await
@@ -1762,7 +1807,7 @@ async fn supervisor_start_failure_is_typed_error() {
 
 #[tokio::test]
 async fn supervisor_rejects_manifest_launch() {
-    let sup = ServiceSupervisor::new(
+    let sup = test_supervisor(
         FakeManager::new(ServiceState::Active),
         FakeProbe { ready: true },
     );
@@ -1773,7 +1818,7 @@ async fn supervisor_rejects_manifest_launch() {
 #[tokio::test]
 async fn supervisor_injects_secrets_into_env_not_argv() {
     let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
-    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: true });
+    let sup = test_supervisor(SharedManager(manager.clone()), FakeProbe { ready: true });
     let secret = ResolvedSecret {
         name: "api_key".into(),
         value: SecretValue::new("s3cr3t"),
@@ -1811,7 +1856,7 @@ fn plan_with_env(pairs: &[(&str, &str)]) -> LaunchPlan {
 #[tokio::test]
 async fn supervisor_merges_settings_env_before_secrets() {
     let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
-    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: true });
+    let sup = test_supervisor(SharedManager(manager.clone()), FakeProbe { ready: true });
     let plan = plan_with_env(&[("GGML_CUDA_DISABLE_GRAPHS", "1")]);
     let secret = ResolvedSecret {
         name: "api_key".into(),
@@ -1838,7 +1883,7 @@ async fn supervisor_hard_errors_on_settings_env_secret_collision() {
     // produces one yet), so this constructs a `ResolvedSecret` directly to
     // cover the collision path regardless.
     let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
-    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: true });
+    let sup = test_supervisor(SharedManager(manager.clone()), FakeProbe { ready: true });
     let plan = plan_with_env(&[("HF_TOKEN", "not-a-secret-value")]);
     let secret = ResolvedSecret {
         name: "HF_TOKEN".into(),
@@ -1852,6 +1897,271 @@ async fn supervisor_hard_errors_on_settings_env_secret_collision() {
     assert!(err.to_string().contains("HF_TOKEN"));
     // Never even attempted to start the service.
     assert!(manager.started.lock().unwrap().is_none());
+}
+
+// ---- absolute model path, binary resolution, readiness, replace (#204) -------
+
+#[test]
+fn plan_launch_uses_an_absolute_model_path_under_the_models_dir() {
+    let adapter = fitting_adapter().with_models_dir("/proj/models");
+    let plan = adapter.plan_launch(&deployment()).expect("plan");
+    let argv = plan.rendered.argv().unwrap();
+    let at = argv
+        .iter()
+        .position(|a| a == "-m" || a == "--model")
+        .unwrap();
+    assert_eq!(argv[at + 1], "/proj/models/tiny_llama/tiny.Q4_K_M.gguf");
+    assert!(plan.rendered.as_text().contains("/proj/models/tiny_llama/"));
+}
+
+#[test]
+fn an_absolute_variant_file_is_left_as_is() {
+    let catalog = MapCatalog::new()
+        .with_model(
+            gguf_model(&[(Quantization::Q4KM, "/data/own.gguf", 4 * GIB)]),
+            7_000_000_000,
+        )
+        .with_hardware(apple_silicon(16));
+    let adapter = LlamaCppAdapter::new(Box::new(catalog), Box::new(FakeSupervisor::default()))
+        .with_models_dir("/proj/models");
+    let plan = adapter.plan_launch(&deployment()).expect("plan");
+    assert!(
+        plan.rendered
+            .argv()
+            .unwrap()
+            .contains(&"/data/own.gguf".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn bare_program_is_resolved_to_an_absolute_path_on_start() {
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+    let sup = test_supervisor(SharedManager(manager.clone()), FakeProbe { ready: true });
+    sup.start(&command_plan(), &[]).await.expect("start");
+    let spec = manager.started.lock().unwrap().clone().expect("started");
+    // The fake runner "finds" it under /usr/local/bin.
+    assert_eq!(spec.argv[0], "/usr/local/bin/llama-server");
+}
+
+#[tokio::test]
+async fn an_absolute_program_is_not_searched_for() {
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: true })
+        .with_runner(Box::new(FakeRunner::missing()))
+        .with_ready_wait(NO_WAIT)
+        .with_drain(std::time::Duration::ZERO);
+    let mut plan = command_plan();
+    let RenderedLaunch::Command { argv, .. } = &mut plan.rendered else {
+        unreachable!("command_plan renders a command");
+    };
+    argv[0] = "/opt/bin/llama-server".into();
+    sup.start(&plan, &[]).await.expect("start");
+    let spec = manager.started.lock().unwrap().clone().expect("started");
+    assert_eq!(spec.argv[0], "/opt/bin/llama-server");
+}
+
+#[tokio::test]
+async fn a_missing_binary_fails_before_anything_is_started() {
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: true })
+        .with_runner(Box::new(FakeRunner::missing()))
+        .with_ready_wait(NO_WAIT)
+        .with_drain(std::time::Duration::ZERO);
+    let err = sup
+        .start(&command_plan(), &[])
+        .await
+        .expect_err("binary missing");
+    let msg = err.to_string();
+    assert!(msg.contains("llama-server not found on PATH"), "{msg}");
+    assert!(msg.contains("brew install llama.cpp"), "{msg}");
+    assert!(manager.started.lock().unwrap().is_none());
+}
+
+/// Becomes ready on the Nth probe.
+struct ReadyAfter(std::sync::atomic::AtomicU32);
+
+#[async_trait]
+impl HealthProbe for ReadyAfter {
+    async fn is_ready(&self, _endpoint: &str) -> bool {
+        // Counts probes down to zero; ready on the last one.
+        let before = self.0.load(std::sync::atomic::Ordering::SeqCst);
+        self.0.store(
+            before.saturating_sub(1),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        before <= 1
+    }
+}
+
+const FAST_WAIT: ReadyWait = ReadyWait {
+    timeout: std::time::Duration::from_millis(300),
+    interval: std::time::Duration::from_millis(5),
+};
+
+#[tokio::test]
+async fn start_waits_until_the_endpoint_is_ready() {
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+    let sup = ServiceSupervisor::new(
+        SharedManager(manager.clone()),
+        ReadyAfter(std::sync::atomic::AtomicU32::new(4)),
+    )
+    .with_runner(Box::new(FakeRunner::found("")))
+    .with_drain(std::time::Duration::ZERO)
+    .with_ready_wait(FAST_WAIT);
+    sup.start(&command_plan(), &[])
+        .await
+        .expect("ready in time");
+    assert!(!*manager.stopped.lock().unwrap());
+}
+
+#[tokio::test]
+async fn start_times_out_stops_the_service_and_names_the_logs() {
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: false })
+        .with_runner(Box::new(FakeRunner::found("")))
+        .with_ready_wait(FAST_WAIT);
+    let err = sup
+        .start(&command_plan(), &[])
+        .await
+        .expect_err("never ready");
+    let msg = err.to_string();
+    assert!(msg.contains("was not ready within"), "{msg}");
+    assert!(msg.contains("/logs/fake.log"), "{msg}");
+    assert!(msg.contains("was stopped"), "{msg}");
+    assert!(*manager.stopped.lock().unwrap(), "fail closed: stopped");
+}
+
+#[tokio::test]
+async fn start_fails_fast_when_the_service_crashes() {
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Failed));
+    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: false })
+        .with_runner(Box::new(FakeRunner::found("")))
+        .with_ready_wait(ReadyWait {
+            timeout: std::time::Duration::from_secs(600),
+            interval: std::time::Duration::from_millis(5),
+        });
+    let err = sup.start(&command_plan(), &[]).await.expect_err("crashed");
+    assert!(err.to_string().contains("exited abnormally"), "{err}");
+    assert!(*manager.stopped.lock().unwrap());
+}
+
+#[test]
+fn launchd_update_releases_the_old_job_by_plist_and_label_before_loading() {
+    let tmp = TempDir::new("launchd-update");
+    let exec = std::sync::Arc::new(FakeExec::new(true, ""));
+    let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"));
+    let spec = service_spec();
+    manager.start(&spec).expect("first start");
+    manager.release(&spec.label);
+    manager.start(&spec).expect("update");
+
+    let calls = exec.calls.lock().unwrap().clone();
+    let verbs: Vec<&str> = calls.iter().map(|c| c[1].as_str()).collect();
+    assert_eq!(verbs, ["load", "unload", "remove", "load"]);
+    assert_eq!(calls[2][2], spec.label);
+}
+
+#[test]
+fn launchd_release_removes_by_label_even_without_a_plist() {
+    let tmp = TempDir::new("launchd-release");
+    let exec = std::sync::Arc::new(FakeExec::new(true, ""));
+    let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"));
+    manager.release("io.amicu.llama.x");
+    let calls = exec.calls.lock().unwrap().clone();
+    assert_eq!(calls, [["launchctl", "remove", "io.amicu.llama.x"]]);
+}
+
+#[test]
+fn systemd_release_stops_a_previous_unit_with_the_same_name_before_systemd_run() {
+    let dir = TempDir::new("systemd-update");
+    let exec = std::sync::Arc::new(FakeExec::new(true, ""));
+    let manager = SystemdManager::new(exec.clone(), &dir.0);
+    manager.release("io.amicu.llama.support_chat_local");
+    manager.start(&service_spec()).expect("start");
+
+    let calls = exec.calls.lock().unwrap().clone();
+    assert_eq!(
+        calls[0],
+        [
+            "systemctl",
+            "--user",
+            "stop",
+            "io.amicu.llama.support_chat_local"
+        ]
+    );
+    assert_eq!(calls[1][0], "systemd-run");
+}
+
+#[tokio::test]
+async fn a_port_still_serving_after_release_fails_without_starting() {
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+    // Something always answers /health: a foreign process on the port.
+    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: true })
+        .with_runner(Box::new(FakeRunner::found("")))
+        .with_ready_wait(NO_WAIT)
+        .with_drain(std::time::Duration::from_millis(300));
+    let err = sup
+        .start(&command_plan(), &[])
+        .await
+        .expect_err("port busy");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("port 8080 is already serving /health"),
+        "{msg}"
+    );
+    assert!(msg.contains("io.amicu.llama.support_chat_local"), "{msg}");
+    assert!(manager.started.lock().unwrap().is_none());
+}
+
+#[tokio::test]
+async fn supervisor_releases_the_previous_instance_before_starting() {
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+    let sup = test_supervisor(SharedManager(manager.clone()), FakeProbe { ready: true });
+    sup.start(&command_plan(), &[]).await.expect("start");
+    assert_eq!(*manager.released.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn an_inactive_service_is_treated_as_exited_after_two_reads() {
+    // systemd-like: a crashed `--collect` unit reads inactive, never failed,
+    // and its stop errors ("not loaded"); that must not read as a stop failure.
+    let mut fake = FakeManager::new(ServiceState::Inactive);
+    fake.stop_ok = false;
+    let manager = std::sync::Arc::new(fake);
+    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: false })
+        .with_runner(Box::new(FakeRunner::found("")))
+        .with_drain(std::time::Duration::ZERO)
+        .with_ready_wait(ReadyWait {
+            timeout: std::time::Duration::from_secs(600),
+            interval: std::time::Duration::from_millis(5),
+        });
+    let err = sup.start(&command_plan(), &[]).await.expect_err("exited");
+    let msg = err.to_string();
+    assert!(msg.contains("the service exited"), "{msg}");
+    assert!(!msg.contains("FAILED"), "{msg}");
+    assert!(msg.contains("/logs/fake.log"), "{msg}");
+}
+
+#[tokio::test]
+async fn a_transient_inactive_read_does_not_abort_the_wait() {
+    // launchd-like: no PID for one read right after load, then running.
+    let fake = FakeManager::new(ServiceState::Active);
+    fake.script.lock().unwrap().extend([
+        ServiceState::Inactive,
+        ServiceState::Active,
+        ServiceState::Inactive,
+        ServiceState::Active,
+    ]);
+    let manager = std::sync::Arc::new(fake);
+    let sup = ServiceSupervisor::new(
+        SharedManager(manager.clone()),
+        ReadyAfter(std::sync::atomic::AtomicU32::new(6)),
+    )
+    .with_runner(Box::new(FakeRunner::found("")))
+    .with_drain(std::time::Duration::ZERO)
+    .with_ready_wait(FAST_WAIT);
+    sup.start(&command_plan(), &[]).await.expect("ready");
+    assert!(!*manager.stopped.lock().unwrap());
 }
 
 // ---- launchd / systemd managers over a fake CommandExec ---------------------
@@ -2599,7 +2909,7 @@ fn adapter_over_fake_manager(manager: &std::sync::Arc<FakeManager>) -> LlamaCppA
         .with_hardware(apple_silicon(16));
     LlamaCppAdapter::new(
         Box::new(catalog),
-        Box::new(ServiceSupervisor::new(
+        Box::new(test_supervisor(
             SharedManager(manager.clone()),
             FakeProbe { ready: true },
         )),
