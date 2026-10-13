@@ -4,10 +4,10 @@ import { DEMO_STEPS, demoDuration, demoState, type Step } from './demo-timeline.
 
 const steps: Step[] = [
   { kind: 'type', at: 100, screen: 'term', text: 'abcd', msPerChar: 10 },
-  { kind: 'spinner', at: 200, until: 300, screen: 'term', text: 'job' },
+  { kind: 'line', at: 200, screen: 'term', text: 'job' },
   { kind: 'status', at: 300, status: 'online' },
-  { kind: 'screen', at: 400, screen: 'chat' },
-  { kind: 'stream', at: 400, screen: 'chat', text: 'one two three', msPerToken: 50 },
+  { kind: 'screen', at: 400, screen: 'call' },
+  { kind: 'stream', at: 400, screen: 'call', text: 'one two three', msPerToken: 50 },
 ];
 
 test('nothing is revealed before the first step', () => {
@@ -26,17 +26,10 @@ test('typing reveals one char per interval and keeps the rest reserved', () => {
   assert.equal(s.rows[0].rest, 'cd');
 });
 
-test('spinner animates then resolves to a check', () => {
-  const mid = demoState(steps, 250).rows[1];
-  assert.equal(mid.visible, true);
-  assert.notEqual(mid.mark, '✓');
-  assert.equal(demoState(steps, 300).rows[1].mark, '✓');
-});
-
 test('status and screen flip at their step time', () => {
   assert.equal(demoState(steps, 299).status, null);
   assert.equal(demoState(steps, 300).status, 'online');
-  assert.equal(demoState(steps, 400).screen, 'chat');
+  assert.equal(demoState(steps, 400).screen, 'call');
 });
 
 test('stream reveals whole tokens', () => {
@@ -54,11 +47,11 @@ test('final state is complete and stable', () => {
   assert.deepEqual(demoState(steps, Infinity), s);
 });
 
-test('real timeline ends online, in chat, fully revealed, under 12s', () => {
+test('real timeline ends online, on the call screen, fully revealed, under 14s', () => {
   const end = demoDuration(DEMO_STEPS);
-  assert.ok(end < 12000);
+  assert.ok(end < 14000);
   const s = demoState(DEMO_STEPS, end);
   assert.equal(s.status, 'online');
-  assert.equal(s.screen, 'chat');
+  assert.equal(s.screen, 'call');
   assert.ok(s.rows.every((r) => r.visible && r.rest === ''));
 });

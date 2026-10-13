@@ -27,11 +27,6 @@ const useIsoLayoutEffect = typeof window === 'undefined' ? useEffect : useLayout
 function RowLine({ row, className }: { row: Row; className?: string }) {
   return (
     <span className={cn('block whitespace-pre-wrap break-words', toneClass[row.tone], className)}>
-      {row.hasMark && (
-        <span className={cn('inline-block w-4', row.mark === '✓' && 'text-success')}>
-          {row.mark || ' '}
-        </span>
-      )}
       {row.shown}
       <span className="invisible">{row.rest}</span>
     </span>
@@ -98,7 +93,7 @@ export function ApplyDemo() {
 
   const state = demoState(DEMO_STEPS, t);
   const term = state.rows.filter((r) => r.screen === 'term');
-  const [prompt, reply] = state.rows.filter((r) => r.screen === 'chat');
+  const call = state.rows.filter((r) => r.screen === 'call');
 
   return (
     <div ref={rootRef} className="px-4 py-3 font-mono text-[0.8125rem] leading-6">
@@ -128,27 +123,14 @@ export function ApplyDemo() {
           ))}
         </div>
         <div
-          aria-hidden={state.screen !== 'chat'}
-          className={cn(
-            'col-start-1 row-start-1 flex flex-col rounded-[3px] border border-border',
-            state.screen !== 'chat' && 'invisible',
-          )}
+          aria-label="A curl request to the endpoint and its response"
+          role="img"
+          aria-hidden={state.screen !== 'call'}
+          className={cn('col-start-1 row-start-1', state.screen !== 'call' && 'invisible')}
         >
-          <div className="flex flex-col gap-x-3 border-b border-border px-3 py-2 sm:flex-row sm:flex-wrap">
-            <span className="font-semibold">chat</span>
-            <span className="break-all">RedHatAI/Qwen3.5-9B-FP8-dynamic</span>
-            <span className="text-muted-foreground">Bearer $CHAT_API_KEY</span>
-          </div>
-          <div className="flex flex-col gap-3 px-3 py-3">
-            <p className="flex gap-2">
-              <span className="text-accent-text">&gt;</span>
-              <span className="min-w-0 flex-1">{prompt && <RowLine row={prompt} />}</span>
-            </p>
-            <div className="pl-4">{reply && <RowLine row={reply} />}</div>
-          </div>
-          <p className="border-t border-border px-3 py-2 text-xs text-muted-foreground">
-            enter send · ctrl+c quit
-          </p>
+          {call.map((row, i) => (
+            <RowLine key={i} row={row} className={i === 1 ? 'mt-3' : undefined} />
+          ))}
         </div>
       </div>
     </div>
