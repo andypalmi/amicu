@@ -81,6 +81,15 @@ enum Command {
     },
     /// Run environment and project diagnostics.
     Doctor,
+    /// List amicu-owned resources (Modal apps, launchd jobs, systemd units)
+    /// that this project's state does not record, with the manual stop
+    /// command for each. Read-only.
+    ///
+    /// Resources from other projects on this machine or Modal workspace also
+    /// appear: labels are not project-scoped yet. Needs `MODAL_TOKEN_ID` and
+    /// `MODAL_TOKEN_SECRET` to inspect Modal; without them that backend is
+    /// reported as unavailable and the local ones still print.
+    Orphans,
     /// Export coding-agent skills. Does not require a project.
     Skill {
         #[command(subcommand)]
@@ -249,6 +258,7 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
             out,
         ),
         Command::Doctor => commands::doctor::run(&project, cli.output, out),
+        Command::Orphans => commands::orphans::run(&project, cli.output, out),
         Command::Skill { .. } | Command::Modal { .. } => {
             unreachable!("handled before project discovery")
         }
