@@ -59,7 +59,7 @@ function PrimaryCtas() {
   return (
     <div className="flex flex-wrap items-center gap-3">
       <Button asChild size="lg">
-        <a href={quickstartUrl}>Get started</a>
+        <a href={quickstartUrl}>Read the quickstart</a>
       </Button>
       <Button asChild size="lg" variant="outline">
         <Link href="/docs">Read the docs</Link>
@@ -97,13 +97,13 @@ export default function LandingPage() {
           </div>
 
           <div className="mt-14 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] sm:mt-20">
-            <figure className="min-w-0 overflow-hidden rounded-xl border border-border bg-card">
+            <figure className="min-w-0 overflow-hidden rounded-md border border-border bg-card">
               <figcaption className="border-b border-border px-5 py-2.5 font-mono text-xs text-muted-foreground">
                 amicu.hcl
               </figcaption>
               <HclCode code={HERO_HCL} className="px-5 py-4" />
             </figure>
-            <figure className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-card">
+            <figure className="flex min-w-0 flex-col overflow-hidden rounded-md border border-border bg-card">
               <figcaption className="border-b border-border px-5 py-2.5 font-mono text-xs text-muted-foreground">
                 terminal
               </figcaption>
@@ -149,7 +149,7 @@ export default function LandingPage() {
                   lines={step.transcript}
                   wrap
                   label={`Example: ${step.title}`}
-                  className="self-start rounded-lg border border-border bg-muted/40 px-5 py-4"
+                  className="self-start rounded-md border border-border bg-muted/40 px-5 py-4"
                 />
               </li>
             ))}
@@ -254,7 +254,7 @@ export default function LandingPage() {
           </p>
           <div className="flex flex-wrap items-center gap-3">
             <Button asChild size="lg">
-              <a href={quickstartUrl}>Get started</a>
+              <a href={quickstartUrl}>Read the quickstart</a>
             </Button>
             <Button asChild size="lg" variant="outline">
               <a href={githubUrl}>View on GitHub</a>
@@ -268,7 +268,7 @@ export default function LandingPage() {
 
 function LaunchLine({ where, command }: { where: string; command: string }) {
   return (
-    <figure className="min-w-0 rounded-lg border border-border bg-card px-5 py-4">
+    <figure className="min-w-0 rounded-md border border-border bg-card px-5 py-4">
       <figcaption className="text-sm text-muted-foreground">{where}</figcaption>
       <pre
         tabIndex={0}

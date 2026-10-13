@@ -66,7 +66,7 @@ export function SiteHeader() {
             </summary>
             <nav
               aria-label="Main"
-              className="absolute right-0 top-11 flex w-56 flex-col rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-lg"
+              className="absolute right-0 top-11 flex w-56 flex-col rounded-md border border-border bg-popover p-2 text-popover-foreground"
             >
               {all.map((l) => (
                 <Link

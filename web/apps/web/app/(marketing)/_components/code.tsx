@@ -55,11 +55,14 @@ const toneClass: Record<NonNullable<TermLine['tone']> | 'plain', string> = {
 export function Transcript({
   lines,
   reveal = false,
+  wrap = false,
   className,
   label,
 }: {
   lines: TermLine[];
   reveal?: boolean;
+  /** Wrap long lines instead of scrolling horizontally. */
+  wrap?: boolean;
   className?: string;
   label: string;
 }) {
@@ -72,13 +75,13 @@ export function Transcript({
         className,
       )}
     >
-      <code className="block min-w-max">
+      <code className={cn('block', !wrap && 'min-w-max')}>
         {lines.map((line, i) => (
           <span
             // Lines are static content; index keys are stable.
             key={i}
             className={cn(
-              'block whitespace-pre',
+              wrap ? 'block whitespace-pre-wrap break-words' : 'block whitespace-pre',
               toneClass[line.tone ?? 'plain'],
               reveal &&
                 'motion-safe:transition-opacity motion-safe:duration-500 motion-safe:ease-out motion-safe:starting:opacity-0',
