@@ -128,7 +128,7 @@ There are no published binaries yet. Two options, both need Rust 1.97 or newer:
 
 ```bash
 # Install the `amicu` binary into ~/.cargo/bin
-cargo install --git https://github.com/andypalmi/amicu amicu-cli
+cargo install --locked --git https://github.com/andypalmi/amicu amicu-cli
 ```
 
 Or build from source:
