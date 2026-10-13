@@ -1948,7 +1948,8 @@ async fn an_absolute_program_is_not_searched_for() {
     let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
     let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: true })
         .with_runner(Box::new(FakeRunner::missing()))
-        .with_ready_wait(NO_WAIT);
+        .with_ready_wait(NO_WAIT)
+        .with_drain(std::time::Duration::ZERO);
     let mut plan = command_plan();
     let RenderedLaunch::Command { argv, .. } = &mut plan.rendered else {
         unreachable!("command_plan renders a command");
@@ -1964,7 +1965,8 @@ async fn a_missing_binary_fails_before_anything_is_started() {
     let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
     let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: true })
         .with_runner(Box::new(FakeRunner::missing()))
-        .with_ready_wait(NO_WAIT);
+        .with_ready_wait(NO_WAIT)
+        .with_drain(std::time::Duration::ZERO);
     let err = sup
         .start(&command_plan(), &[])
         .await
@@ -2004,6 +2006,7 @@ async fn start_waits_until_the_endpoint_is_ready() {
         ReadyAfter(std::sync::atomic::AtomicU32::new(4)),
     )
     .with_runner(Box::new(FakeRunner::found("")))
+    .with_drain(std::time::Duration::ZERO)
     .with_ready_wait(FAST_WAIT);
     sup.start(&command_plan(), &[])
         .await
@@ -2087,6 +2090,27 @@ fn systemd_release_stops_a_previous_unit_with_the_same_name_before_systemd_run()
         ]
     );
     assert_eq!(calls[1][0], "systemd-run");
+}
+
+#[tokio::test]
+async fn a_port_still_serving_after_release_fails_without_starting() {
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+    // Something always answers /health: a foreign process on the port.
+    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: true })
+        .with_runner(Box::new(FakeRunner::found("")))
+        .with_ready_wait(NO_WAIT)
+        .with_drain(std::time::Duration::from_millis(300));
+    let err = sup
+        .start(&command_plan(), &[])
+        .await
+        .expect_err("port busy");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("port 8080 is already serving /health"),
+        "{msg}"
+    );
+    assert!(msg.contains("io.amicu.llama.support_chat_local"), "{msg}");
+    assert!(manager.started.lock().unwrap().is_none());
 }
 
 #[tokio::test]

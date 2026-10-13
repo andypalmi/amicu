@@ -199,12 +199,22 @@ impl<M: ServiceManager, P: HealthProbe> ServiceSupervisor<M, P> {
     }
 
     /// Wait (bounded) for a previous instance to stop answering, so the new
-    /// one's readiness probe cannot hit the dying old server. Best effort.
-    async fn wait_released(&self, endpoint: &str) {
+    /// one's readiness probe cannot hit the dying old server. If something is
+    /// still answering at the deadline it is not ours to stop: fail rather than
+    /// let that process make a dead service look ready.
+    async fn wait_released(&self, label: &str, endpoint: &str) -> Result<(), LlamaCppError> {
         let deadline = tokio::time::Instant::now() + self.drain;
-        while self.probe.is_ready(endpoint).await && tokio::time::Instant::now() < deadline {
+        while self.probe.is_ready(endpoint).await {
+            if tokio::time::Instant::now() >= deadline {
+                let port = endpoint.rsplit(':').next().unwrap_or(endpoint);
+                return Err(LlamaCppError::Supervisor(format!(
+                    "port {port} is already serving /health; stop whatever is listening there \
+                     (not released by `{label}`)"
+                )));
+            }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
+        Ok(())
     }
 
     /// Block until the endpoint is ready. On a crash or timeout the service is
@@ -366,7 +376,7 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
         // Update: remove the previous instance and let its port go quiet first.
         self.manager.release(&label);
         if !self.drain.is_zero() {
-            self.wait_released(&endpoint).await;
+            self.wait_released(&label, &endpoint).await?;
         }
         self.manager.start(&spec)?;
         self.wait_ready(&label, &endpoint).await?;
