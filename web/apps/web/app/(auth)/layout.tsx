@@ -20,7 +20,7 @@ export default async function AuthLayout({ children }: LayoutProps<'/'>) {
       <div className="w-full max-w-sm">
         <Link
           href="/"
-          aria-label="Amicu home"
+          aria-label="amicu home"
           className="mb-8 flex justify-center rounded-md outline-none transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
         >
           <Brand />

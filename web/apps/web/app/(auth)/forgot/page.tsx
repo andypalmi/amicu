@@ -12,7 +12,7 @@ import { ForgotForm } from '@/components/auth/forgot-form';
 export const metadata: Metadata = {
   title: 'Reset password',
   description:
-    'Request a link to reset your Amicu account password.',
+    'Request a link to reset your amicu account password.',
 };
 
 export default function ForgotPage() {

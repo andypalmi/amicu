@@ -1,4 +1,4 @@
-export const appName = 'Amicu';
+export const appName = 'amicu';
 export const docsRoute = '/docs';
 export const docsContentRoute = '/llms.mdx/docs';
 

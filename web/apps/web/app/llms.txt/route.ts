@@ -4,7 +4,7 @@ import { appName, appTagline, gitConfig, siteUrl } from '@/lib/shared';
 export const revalidate = false;
 
 // llms.txt (https://llmstxt.org convention): a compact, machine-readable map of
-// the product so generative engines can understand and cite Amicu. The docs
+// the product so generative engines can understand and cite amicu. The docs
 // section is derived from the fumadocs page source map, and llms-full.txt holds
 // the concatenated full text of every docs page for deeper retrieval.
 
@@ -52,7 +52,7 @@ export function GET() {
 > ${appTagline}
 
 ${appName} is an open-source (AGPL-3.0) web client. Planning, recommendations,
-policy, and capability logic live in the Amicu Rust Management API; the web app
+policy, and capability logic live in the amicu Rust Management API; the web app
 renders those decisions rather than owning them. Two entry paths: a guided
 "help me choose" wizard, and a direct HCL editor for authoring, validating, and
 planning declarative serving stacks. Residency-aware by design: apply works

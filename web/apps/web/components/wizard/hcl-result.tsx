@@ -144,7 +144,7 @@ export function HclResult({
         onChange={(e) => setHcl(e.target.value)}
         spellCheck={false}
         className={editorClass}
-        aria-label="Generated Amicu HCL configuration"
+        aria-label="Generated amicu HCL configuration"
       />
       <p className="text-xs text-muted-foreground">
         Editable - your edits are what Copy, Download, and Validate use. Downloads as{' '}
