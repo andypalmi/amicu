@@ -20,7 +20,7 @@ export default async function MonitorPage() {
     <PageShell size="lg">
       <PageHeader
         title="Monitoring"
-        description="The measured serving surface shown against its workload estimate. Latencies and queue waits are reported as distributions (P50/P90/P99), never a single point presented as truth. The estimate is a range with a stated confidence and assumptions, so any measured-vs-estimated gap stays attributable. Suggested changes are the engine’s advisory output - Amicu never auto-applies them."
+        description="The measured serving surface shown against its workload estimate. Latencies and queue waits are reported as distributions (P50/P90/P99), never a single point presented as truth. The estimate is a range with a stated confidence and assumptions, so any measured-vs-estimated gap stays attributable. Suggested changes are the engine’s advisory output - amicu never auto-applies them."
       />
 
       <MonitorDashboard />

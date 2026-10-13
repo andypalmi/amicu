@@ -1,38 +1,35 @@
 import Link from 'next/link';
+import { Brand } from '@/components/common/brand';
 import { Container } from './marketing';
 import { ThemeToggle } from './theme-toggle';
 import { appHref } from '@/lib/shared';
 import { githubUrl } from '../_lib/content';
 
-const productLinks = [
-  { href: '/#how-it-works', label: 'How it works' },
-  { href: '/#where-it-runs', label: 'Where it runs' },
-];
-
 const siteLinks = [
+  { href: '/docs', label: 'Docs' },
+  { href: '/providers', label: 'Providers' },
   { href: '/pricing', label: 'Pricing' },
   { href: '/security', label: 'Security' },
-  { href: '/docs', label: 'Docs' },
 ];
 
 const linkCls =
   'rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
 
 /**
- * Marketing header: a typeset wordmark (there is no logo), product anchors,
- * secondary site links, GitHub, sign-in and the theme switch. Server-rendered;
+ * Marketing header: the wordmark, site links (docs first), GitHub, a quiet sign-in link and the theme switch. Server-rendered;
  * on narrow screens the links fold into a native <details> menu (no JS).
  */
 export function SiteHeader() {
-  const all = [...productLinks, ...siteLinks];
+  const all = siteLinks;
   return (
     <header className="sticky top-0 z-40 border-b border-border bg-background">
       <Container className="flex h-14 items-center gap-6">
         <Link
           href="/"
-          className="rounded-sm text-xl font-semibold tracking-tight text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          aria-label="amicu home"
+          className="rounded-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
-          amicu
+          <Brand />
         </Link>
 
         <nav aria-label="Main" className="hidden items-center gap-6 text-sm lg:flex">
@@ -49,7 +46,7 @@ export function SiteHeader() {
         <div className="ml-auto flex items-center gap-2 text-sm">
           <Link
             href={appHref('/login')}
-            className="rounded-md px-3 py-1.5 font-medium text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className={`${linkCls} px-2`}
           >
             Sign in
           </Link>

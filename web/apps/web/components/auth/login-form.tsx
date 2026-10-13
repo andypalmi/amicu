@@ -55,12 +55,16 @@ export function LoginForm({
 
       {signupsEnabled ? (
         <p className="text-center text-sm text-muted-foreground">
-          New to Amicu?{' '}
+          New to amicu?{' '}
           <Link href="/signup" className="font-medium text-foreground hover:underline">
             Create an account
           </Link>
         </p>
-      ) : null}
+      ) : (
+        <p className="text-center text-sm text-muted-foreground">
+          Sign-ups are closed. Using the CLI? You don&apos;t need an account.
+        </p>
+      )}
     </form>
   );
 }

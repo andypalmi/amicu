@@ -17,7 +17,7 @@ import { ResendVerificationForm } from '@/components/auth/resend-verification-fo
 export const metadata: Metadata = {
   title: 'Verify email',
   description:
-    'Confirm your email address to finish setting up your Amicu account.',
+    'Confirm your email address to finish setting up your amicu account.',
 };
 
 // Landing page for the verification link mailed at sign-up. The email points at

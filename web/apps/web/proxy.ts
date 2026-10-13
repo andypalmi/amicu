@@ -114,8 +114,8 @@ export default async function proxy(request: NextRequest) {
   // Host split (amicu.dev marketing/docs vs app.amicu.dev console + auth). Inert
   // unless the request host is one of the two configured hosts (so localhost and
   // previews serve every route). /api/* is never redirected.
-  const host =
-    request.headers.get('x-forwarded-host') ?? request.headers.get('host') ?? request.nextUrl.host;
+  // Classify on the URL host only: X-Forwarded-Host is client-controllable on Workers.
+  const host = request.nextUrl.host;
   const hostAction = resolveHostRoute({
     host,
     pathname,

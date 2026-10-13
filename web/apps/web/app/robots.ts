@@ -9,7 +9,8 @@ import { classifyHost } from '@/lib/routing/host';
 // App host (app.amicu.dev): the whole origin is private, so disallow everything.
 export default async function robots(): Promise<MetadataRoute.Robots> {
   const h = await headers();
-  const host = h.get('x-forwarded-host') ?? h.get('host');
+  // Host header only: X-Forwarded-Host is client-controllable.
+  const host = h.get('host');
   if (classifyHost(host, siteUrl, appUrl) === 'app') {
     return { rules: { userAgent: '*', disallow: '/' } };
   }

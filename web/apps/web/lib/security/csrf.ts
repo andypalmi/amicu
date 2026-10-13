@@ -25,10 +25,6 @@ export interface CsrfInput {
   secFetchSite: string | null;
   /** `Host` header. */
   host: string | null;
-  /** `X-Forwarded-Host` header (first value). */
-  forwardedHost: string | null;
-  /** `X-Forwarded-Proto` header (first value). */
-  forwardedProto: string | null;
   /** Origin of the request URL as seen by the app. */
   requestOrigin: string;
   /** Configured public site URL (NEXT_PUBLIC_SITE_URL), if any. */
@@ -44,11 +40,10 @@ export function allowedOrigins(input: CsrfInput): Set<string> {
   add(originOf(input.siteUrl));
   add(originOf(input.appUrl));
   add(originOf(input.requestOrigin));
-  const proto = (input.forwardedProto?.split(',')[0]?.trim() || new URL(input.requestOrigin).protocol.replace(':', ''));
-  for (const h of [input.forwardedHost, input.host]) {
-    const host = h?.split(',')[0]?.trim();
-    if (host) add(originOf(`${proto}://${host}`));
-  }
+  // Only the Host header (set by the platform) is trusted; X-Forwarded-* is
+  // client-controllable on Workers and deliberately ignored.
+  const host = input.host?.split(',')[0]?.trim();
+  if (host) add(originOf(`${new URL(input.requestOrigin).protocol}//${host}`));
   return out;
 }
 
@@ -82,8 +77,6 @@ export function requestIsSameOrigin(
     origin: h.get('origin'),
     secFetchSite: h.get('sec-fetch-site'),
     host: h.get('host'),
-    forwardedHost: h.get('x-forwarded-host'),
-    forwardedProto: h.get('x-forwarded-proto'),
     requestOrigin: new URL(request.url).origin,
     siteUrl,
     appUrl,

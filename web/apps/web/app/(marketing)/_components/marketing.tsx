@@ -48,7 +48,7 @@ export function Section({
   );
 }
 
-/** Left-aligned heading for a section inside a page; `lead` is one short sentence. */
+/** Centered heading for a section inside a page; `lead` is one short sentence. */
 export function SectionHeader({
   id,
   title,
@@ -59,7 +59,7 @@ export function SectionHeader({
   lead?: string;
 }) {
   return (
-    <div className="max-w-2xl">
+    <div className="mx-auto max-w-2xl text-center">
       <h2
         id={id}
         className="scroll-mt-24 text-balance text-3xl font-semibold tracking-tight sm:text-4xl"
@@ -83,14 +83,11 @@ export function FactList({
   className?: string;
 }) {
   return (
-    <dl className={cn('border-b border-border', className)}>
+    <dl className={cn('mx-auto max-w-3xl border-b border-border text-center', className)}>
       {items.map((item, i) => (
-        <div
-          key={i}
-          className="grid gap-2 border-t border-border py-6 md:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] md:gap-12"
-        >
+        <div key={i} className="flex flex-col gap-2 border-t border-border py-6">
           <dt className="font-medium">{item.term}</dt>
-          <dd className="max-w-prose text-pretty leading-relaxed text-muted-foreground">
+          <dd className="mx-auto max-w-prose text-pretty leading-relaxed text-muted-foreground">
             {item.detail}
           </dd>
         </div>
@@ -124,20 +121,6 @@ export function CodePanel({
   );
 }
 
-/** Flat, filled note for a state the reader should know about. */
-export function StatusNote({ children, className }: { children: ReactNode; className?: string }) {
-  return (
-    <p
-      className={cn(
-        'rounded-md border border-border bg-muted px-4 py-3 text-sm text-muted-foreground',
-        className,
-      )}
-    >
-      {children}
-    </p>
-  );
-}
-
 /** Closing call to action: one short sentence and two actions. */
 export function CTABand({
   title,
@@ -156,50 +139,13 @@ export function CTABand({
     </Button>
   );
   return (
-    <div className="flex flex-col items-start gap-6">
+    <div className="flex flex-col items-center gap-6 text-center">
       <SectionHeader title={title} />
-      {lede ? <p className="max-w-2xl text-pretty text-lg text-muted-foreground">{lede}</p> : null}
-      <div className="flex flex-wrap items-center gap-3">
+      {lede ? <p className="mx-auto max-w-2xl text-pretty text-lg text-muted-foreground">{lede}</p> : null}
+      <div className="flex flex-wrap items-center justify-center gap-3">
         {action(primary)}
         {secondary ? action(secondary, 'outline') : null}
       </div>
     </div>
-  );
-}
-
-/**
- * A titled group of name/note entries that reflows into columns. The group
- * heading carries the meaning, so entries need no per-row badge.
- */
-export function GroupedList({
-  title,
-  note,
-  groups,
-}: {
-  title: string;
-  note?: string;
-  groups: { label?: string; entries: { name: string; note: string; detail?: string }[] }[];
-}) {
-  return (
-    <section className="border-t border-border pt-8 first:border-t-0 first:pt-0">
-      <h2 className="text-2xl font-semibold tracking-tight">{title}</h2>
-      {note ? <p className="mt-2 text-muted-foreground">{note}</p> : null}
-      <div className="mt-6 space-y-8">
-        {groups.map((g) => (
-          <div key={g.label ?? title}>
-            {g.label ? <h3 className="mb-3 text-sm text-muted-foreground">{g.label}</h3> : null}
-            <ul className="grid gap-x-10 gap-y-5 sm:grid-cols-2 lg:grid-cols-3">
-              {g.entries.map((e) => (
-                <li key={e.name} className="min-w-0">
-                  <p className="font-medium">{e.name}</p>
-                  {e.detail ? <p className="text-sm">{e.detail}</p> : null}
-                  <p className="text-sm text-muted-foreground">{e.note}</p>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
-      </div>
-    </section>
   );
 }

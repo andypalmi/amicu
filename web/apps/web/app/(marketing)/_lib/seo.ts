@@ -15,7 +15,7 @@ import { appName } from '@/lib/shared';
 const OG_IMAGE = { url: '/opengraph-image', width: 1200, height: 630, alt: `${appName} social card` };
 
 interface PageSeo {
-  /** Page title; fed through the root title template (`%s - Amicu`). */
+  /** Page title; fed through the root title template (`%s - amicu`). */
   title: string;
   description: string;
   /** Absolute path from the site root, e.g. '/pricing' or '/'. */

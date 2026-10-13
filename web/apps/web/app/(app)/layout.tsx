@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { HomeLayout } from 'fumadocs-ui/layouts/home';
 import { Badge } from '@amicu/ui';
 import { TIER_LABELS } from '@amicu/auth';
+import { appUrl, siteHref } from '@/lib/shared';
 import { baseOptions } from '@/lib/layout.shared';
 import { requireSession } from '@/lib/auth/session';
 import { SessionProvider } from '@/components/session-provider';
@@ -27,12 +28,15 @@ export default async function Layout({ children }: LayoutProps<'/'>) {
         // usePathname match. The active state is a colour shift to the accent-text
         // token (fd-primary) - never an edge bar.
         links={[
-          { text: 'Console', url: '/app', active: 'nested-url' },
+          // Prod serves the dashboard at the rewritten `/`, so match it exactly there.
+          appUrl
+            ? { text: 'Console', url: '/', active: 'url' as const }
+            : { text: 'Console', url: '/app', active: 'nested-url' as const },
           { text: 'New config', url: '/new', active: 'nested-url' },
           { text: 'My Configs', url: '/configs', active: 'nested-url' },
           { text: 'Recommendations', url: '/recommend', active: 'nested-url' },
           { text: 'Monitoring', url: '/monitor', active: 'nested-url' },
-          { text: 'Docs', url: '/docs', active: 'nested-url' },
+          { text: 'Docs', url: siteHref('/docs'), active: 'none' },
           { text: 'Account', url: '/account', active: 'nested-url' },
           { text: 'Billing', url: '/billing', active: 'nested-url' },
           { text: 'Organization', url: '/org', active: 'nested-url' },

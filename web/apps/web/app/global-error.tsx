@@ -1,13 +1,14 @@
 'use client';
 
 import { useEffect } from 'react';
+import { siteHref } from '@/lib/shared';
 import { reportClientError } from '@/lib/observability/report-error';
 
 // Root error boundary for CATASTROPHIC failures - thrown while rendering the
 // root layout itself. It replaces the whole document, so it must supply its own
 // <html>/<body> and cannot rely on the root layout or the app's global CSS
 // (which is imported by that layout). Styling is therefore self-contained and
-// theme-aware via a scoped <style> block using the Amicu design tokens.
+// theme-aware via a scoped <style> block using the amicu design tokens.
 export default function GlobalError({
   error,
   reset,
@@ -25,7 +26,7 @@ export default function GlobalError({
         <style>{globalErrorStyles}</style>
         <main className="amicu-ge">
           <div className="amicu-ge-card" role="alert">
-            <p className="amicu-ge-eyebrow">Amicu</p>
+            <p className="amicu-ge-eyebrow">amicu</p>
             <h1 className="amicu-ge-title">Something went badly wrong</h1>
             <p className="amicu-ge-body">
               The application hit an unrecoverable error while loading. Try reloading -
@@ -40,8 +41,7 @@ export default function GlobalError({
               </button>
               {/* Intentional full-document reload: the router tree that <Link>
                   relies on is what just failed, so a hard navigation is safer. */}
-              {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
-              <a className="amicu-ge-btn amicu-ge-btn--ghost" href="/">
+              <a className="amicu-ge-btn amicu-ge-btn--ghost" href={siteHref('/')}>
                 Go home
               </a>
             </div>

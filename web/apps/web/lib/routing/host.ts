@@ -55,10 +55,28 @@ export const isAppPath = (pathname: string): boolean =>
 export const isSitePath = (pathname: string): boolean =>
   pathname === '/' || SITE_PATH_PREFIXES.some((p) => matchesPrefix(pathname, p));
 
+/** Lowercase, drop a trailing dot on the hostname (`amicu.dev.` === `amicu.dev`). */
+function normalizeHost(host: string): string {
+  const m = /^(.*?)(:\d+)?$/.exec(host.toLowerCase());
+  const name = (m?.[1] ?? host).replace(/\.+$/, '');
+  return `${name}${m?.[2] ?? ''}`;
+}
+
 function hostOf(origin: string | null | undefined): string | null {
   if (!origin) return null;
   try {
-    return new URL(origin).host.toLowerCase();
+    return normalizeHost(new URL(origin).host);
+  } catch {
+    return null;
+  }
+}
+
+const stripPort = (host: string): string => host.replace(/:\d+$/, '');
+
+/** Percent-decode a pathname; null when malformed (never throws). */
+function safeDecode(pathname: string): string | null {
+  try {
+    return decodeURIComponent(pathname);
   } catch {
     return null;
   }
@@ -72,13 +90,17 @@ export function classifyHost(
   siteOrigin: string | null | undefined,
   appOrigin: string | null | undefined,
 ): HostKind {
-  const h = host?.split(',')[0]?.trim().toLowerCase();
+  const raw = host?.split(',')[0]?.trim();
+  const h = raw ? normalizeHost(raw) : null;
   const siteHost = hostOf(siteOrigin);
   const appHost = hostOf(appOrigin);
   // Both must be configured and distinct, otherwise there is no split.
   if (!h || !siteHost || !appHost || siteHost === appHost) return 'other';
-  if (h === appHost) return 'app';
-  if (h === siteHost) return 'site';
+  // A port is compared only when the configured origin has one (local setups);
+  // otherwise `amicu.dev:443` style hosts still classify.
+  const eq = (cfg: string) => (/:\d+$/.test(cfg) ? h === cfg : stripPort(h) === cfg);
+  if (eq(appHost)) return 'app';
+  if (eq(siteHost)) return 'site';
   return 'other';
 }
 
@@ -93,10 +115,15 @@ export interface HostRouteInput {
 
 /** Decide what to do with a (host, path) pair. /api/* is never touched. */
 export function resolveHostRoute(input: HostRouteInput): HostAction {
-  const { pathname } = input;
+  const { pathname: rawPath } = input;
   const search = input.search ?? '';
   const kind = classifyHost(input.host, input.siteOrigin, input.appOrigin);
   if (kind === 'other') return { kind: 'next' };
+  // Match on the decoded path (so `/%61pp` cannot dodge the split); redirect with
+  // the original. A malformed escape matches nothing and falls through.
+  const decoded = safeDecode(rawPath);
+  if (decoded === null) return { kind: 'next' };
+  const pathname = decoded.length > 1 ? decoded.replace(/\/+$/, '') || '/' : decoded;
   if (pathname === '/api' || pathname.startsWith('/api/')) return { kind: 'next' };
 
   const trim = (o: string) => o.replace(/\/+$/, '');
@@ -108,7 +135,7 @@ export function resolveHostRoute(input: HostRouteInput): HostAction {
     if (pathname === '/') return { kind: 'rewrite', pathname: '/app' };
     if (pathname === '/app') return { kind: 'redirect', url: `${app}/${search}`, status: 307 };
     if (isSitePath(pathname)) {
-      return { kind: 'redirect', url: `${site}${pathname}${search}`, status: 301 };
+      return { kind: 'redirect', url: `${site}${rawPath}${search}`, status: 301 };
     }
     return { kind: 'next' };
   }
@@ -116,7 +143,7 @@ export function resolveHostRoute(input: HostRouteInput): HostAction {
   // kind === 'site'
   if (pathname === '/app') return { kind: 'redirect', url: `${app}/${search}`, status: 301 };
   if (isAppPath(pathname)) {
-    return { kind: 'redirect', url: `${app}${pathname}${search}`, status: 301 };
+    return { kind: 'redirect', url: `${app}${rawPath}${search}`, status: 301 };
   }
   return { kind: 'next' };
 }

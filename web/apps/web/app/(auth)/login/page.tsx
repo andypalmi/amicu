@@ -3,7 +3,6 @@ import {
   Card,
   CardHeader,
   CardTitle,
-  CardDescription,
   CardContent,
 } from '@amicu/ui';
 import { SIGNUPS_ENABLED } from '@/lib/auth/config';
@@ -12,7 +11,7 @@ import { LoginForm } from '@/components/auth/login-form';
 export const metadata: Metadata = {
   title: 'Sign in',
   description:
-    'Sign in to your Amicu account to design, deploy, and operate LLM serving stacks.',
+    'Sign in to the amicu console.',
 };
 
 export default async function LoginPage({
@@ -24,8 +23,7 @@ export default async function LoginPage({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Welcome back</CardTitle>
-        <CardDescription>Sign in to your Amicu account.</CardDescription>
+        <CardTitle>Sign in</CardTitle>
       </CardHeader>
       <CardContent>
         <LoginForm next={nextPath} signupsEnabled={SIGNUPS_ENABLED} />

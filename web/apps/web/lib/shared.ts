@@ -1,4 +1,4 @@
-export const appName = 'Amicu';
+export const appName = 'amicu';
 export const docsRoute = '/docs';
 export const docsContentRoute = '/llms.mdx/docs';
 
@@ -22,6 +22,16 @@ export const appUrl: string | null =
 /** Absolute link into the app from marketing/docs pages (relative in dev). */
 export function appHref(path: string): string {
   return appUrl ? `${appUrl.replace(/\/+$/, '')}${path}` : path;
+}
+
+/** Link to the app dashboard: clean `https://app.amicu.dev/` in prod, `/app` in dev. */
+export function appHomeHref(): string {
+  return appUrl ? `${appUrl.replace(/\/+$/, '')}/` : '/app';
+}
+
+/** Link into the marketing/docs site from app pages (relative in dev). */
+export function siteHref(path: string): string {
+  return appUrl ? `${siteUrl.replace(/\/+$/, '')}${path}` : path;
 }
 
 /** One-line product summary reused across metadata and llms.txt. */

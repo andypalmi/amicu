@@ -10,7 +10,7 @@ export const metadata: Metadata = { title: 'Classic preset wizard' };
 
 // The classic preset wizard: pick a preset from the gallery, answer a short
 // requirements form seeded from the preset's defaults, then emit ready-to-run
-// Amicu HCL (with copy / download / validate) via the /api/presets BFF routes.
+// amicu HCL (with copy / download / validate) via the /api/presets BFF routes.
 // The preset catalog is Community-minimum - tier is enforced by the API, and the
 // UI adds no gating of its own.
 //
@@ -25,7 +25,7 @@ export default async function WizardPage() {
     <PageShell size="lg">
       <PageHeader
         title="Classic preset wizard"
-        description="Start from a preset that matches your use case, or from scratch, then answer a few requirements to get back a ready-to-run Amicu configuration. The wizard emits HCL deterministically from your answers - no metrics are synthesized, and nothing is applied. Copy it, download it, or validate it in place before you use it. Looking for the guided flow instead? It lives at /new."
+        description="Start from a preset that matches your use case, or from scratch, then answer a few requirements to get back a ready-to-run amicu configuration. The wizard emits HCL deterministically from your answers - no metrics are synthesized, and nothing is applied. Copy it, download it, or validate it in place before you use it. Looking for the guided flow instead? It lives at /new."
       />
 
       <Suspense fallback={<LoadingState label="Loading wizard…" />}>

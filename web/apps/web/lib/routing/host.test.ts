@@ -68,6 +68,51 @@ test('site host: marketing, docs and api are untouched', () => {
     assert.deepEqual(r('amicu.dev', p), { kind: 'next' }, p);
 });
 
+test('trailing slashes and encoded paths are matched', () => {
+  assert.equal(r('amicu.dev', '/login/').kind, 'redirect');
+  assert.deepEqual(r('app.amicu.dev', '/app/'), {
+    kind: 'redirect',
+    url: 'https://app.amicu.dev/',
+    status: 307,
+  });
+  assert.deepEqual(r('amicu.dev', '/%6Cogin', '?a=1'), {
+    kind: 'redirect',
+    url: 'https://app.amicu.dev/%6Cogin?a=1',
+    status: 301,
+  });
+  assert.equal(r('app.amicu.dev', '/%70ricing').kind, 'redirect');
+  assert.equal(r('app.amicu.dev', '/pricing/').kind, 'redirect');
+  // malformed escape: never throws, falls through
+  assert.deepEqual(r('amicu.dev', '/%E0%A4%A'), { kind: 'next' });
+});
+
+test('prefix collisions are not treated as app or site paths', () => {
+  for (const p of ['/apple-icon', '/newsletter', '/organization', '/applications', '/configsx'])
+    assert.deepEqual(r('amicu.dev', p), { kind: 'next' }, p);
+  for (const p of ['/docsify', '/pricing-faq', '/security.txt'])
+    assert.deepEqual(r('app.amicu.dev', p), { kind: 'next' }, p);
+});
+
+test('host normalisation: ports, case and trailing dot', () => {
+  assert.equal(classifyHost('amicu.dev.', SITE, APP), 'site');
+  assert.equal(classifyHost('APP.amicu.dev.:443', SITE, APP), 'app');
+  assert.equal(classifyHost('amicu.dev:8443', SITE, APP), 'site');
+  assert.equal(r('amicu.dev.', '/login').kind, 'redirect');
+  const L = ['http://localhost:3000', 'http://localhost:3001'] as const;
+  assert.equal(classifyHost('localhost:3000', L[0], L[1]), 'site');
+  assert.equal(classifyHost('localhost:3001', L[0], L[1]), 'app');
+  assert.equal(classifyHost('localhost:4000', L[0], L[1]), 'other');
+  assert.equal(classifyHost('evil-amicu.dev', SITE, APP), 'other');
+  assert.equal(classifyHost('app.amicu.dev.evil.com', SITE, APP), 'other');
+});
+
+test('proxy classifies on the supplied host only (spoofed forwarded host is not an input)', () => {
+  // resolveHostRoute has no forwarded-host parameter: a request for amicu.dev
+  // stays a site request regardless of any x-forwarded-host header value.
+  assert.deepEqual(r('amicu.dev', '/pricing'), { kind: 'next' });
+  assert.deepEqual(r('app.amicu.dev', '/login'), { kind: 'next' });
+});
+
 test('other hosts (localhost, previews) never redirect', () => {
   for (const p of ['/', '/login', '/app', '/pricing', '/docs'])
     assert.deepEqual(r('localhost:3000', p), { kind: 'next' }, p);

@@ -2,6 +2,7 @@
 
 import { useEffect } from 'react';
 import Link from 'next/link';
+import { appHomeHref } from '@/lib/shared';
 import { AlertTriangle, RotateCcw } from 'lucide-react';
 import {
   Alert,
@@ -59,7 +60,7 @@ export default function Error({
             <RotateCcw /> Try again
           </Button>
           <Button asChild variant="outline">
-            <Link href="/app">Back to console</Link>
+            <Link href={appHomeHref()}>Back to console</Link>
           </Button>
         </CardFooter>
       </Card>
