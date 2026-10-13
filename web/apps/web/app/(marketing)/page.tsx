@@ -133,7 +133,7 @@ export default function LandingPage() {
         </MockWindow>
         <ProofLine
           lead="Change the provider line to switch targets:"
-          rest="llama.cpp on your machine, vLLM on GPUs."
+          rest="your machine or a cloud GPU (Modal)."
         />
         <FeatureLinks links={PROVIDER_SWITCH_LINKS} />
       </HomeSection>

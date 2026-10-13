@@ -1,23 +1,21 @@
-// One Shiki theme (light + dark) shared by the docs code blocks (fumadocs
-// rehypeCode, see source.config.ts) and the marketing code panels.
+// One Shiki theme shared by the docs code blocks (fumadocs rehypeCode, see
+// source.config.ts) and the marketing code panels.
+//
+// Colours are CSS variables from packages/ui/src/styles/tokens.css, so light
+// and dark both come from the tokens (they are redefined under `.dark`) and no
+// colour literal lives here. Shiki emits them as `--shiki-light` /
+// `--shiki-dark` custom properties which resolve to the same live tokens.
 //
 // Mapping, identical for HCL, shell, JSON and TOML:
 //   orange (accent-text)  keywords, HCL block types, function / command names,
 //                         property and attribute keys
 //   foreground            strings, numbers, constants, identifiers
 //   muted-foreground      comments (italic), punctuation, operators
-//
-// Hex values are the sRGB equivalents of the design tokens in
-// packages/ui/src/styles/tokens.css (Shiki cannot resolve CSS variables when
-// it emits the paired --shiki-light / --shiki-dark values). All pairs are AA
-// against the card and muted fills.
-const palettes = {
-  light: { fg: '#141412', muted: '#5c5b58', accent: '#b53900' },
-  dark: { fg: '#efeeec', muted: '#a3a19e', accent: '#fa8746' },
-} as const;
+const fg = 'var(--foreground)';
+const muted = 'var(--muted-foreground)';
+const accent = 'var(--accent-text)';
 
 function build(mode: 'light' | 'dark') {
-  const { fg, muted, accent } = palettes[mode];
   return {
     name: `amicu-${mode}`,
     type: mode,

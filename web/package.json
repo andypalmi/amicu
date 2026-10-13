@@ -10,11 +10,14 @@
   "scripts": {
     "build": "turbo run build",
     "dev": "turbo run dev",
-    "lint": "turbo run lint",
+    "lint": "turbo run lint && pnpm check:colors",
+    "check:colors": "node scripts/check-colors.mjs",
+    "test:colors": "node --test scripts/check-colors.test.mjs",
+    "gen:tokens": "node scripts/gen-tokens.mjs",
     "lint:links": "pnpm --filter @amicu/web lint:links",
     "typecheck": "turbo run typecheck",
-    "test": "turbo run test",
-    "check:generated": "turbo run check:generated",
+    "test": "turbo run test && pnpm test:colors",
+    "check:generated": "turbo run check:generated && node scripts/gen-tokens.mjs --check",
     "clean": "turbo run clean",
     "prepare": "git rev-parse --git-dir >/dev/null 2>&1 && git config core.hooksPath .githooks || true"
   },

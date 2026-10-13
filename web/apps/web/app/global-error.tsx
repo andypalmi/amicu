@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
+import { tokens } from '@/lib/generated/tokens';
 import { siteHref } from '@/lib/shared';
 import { reportClientError } from '@/lib/observability/report-error';
 
@@ -52,29 +53,24 @@ export default function GlobalError({
   );
 }
 
-// Mirrors the design tokens in packages/ui so the fallback stays on-brand even
-// without the app stylesheet. Light + dark via prefers-color-scheme.
+// Built from the design tokens (generated from packages/ui tokens.css, since
+// the app stylesheet is unavailable here). Light + dark via prefers-color-scheme.
+// Light: primary + its foreground. Dark: the lighter accent-text orange with its
+// dark foreground (keeps the original light-orange-with-dark-text look, AA).
+const geVars = (t: typeof tokens.light | typeof tokens.dark, btn: readonly [string, string]) => `
+    --ge-bg: ${t.background};
+    --ge-fg: ${t.foreground};
+    --ge-card: ${t.card};
+    --ge-muted: ${t.mutedForeground};
+    --ge-border: ${t.border};
+    --ge-primary: ${btn[0]};
+    --ge-primary-fg: ${btn[1]};
+    --ge-accent: ${t.accent};`;
 const globalErrorStyles = `
-  :root {
-    --ge-bg: oklch(0.975 0.001 90);
-    --ge-fg: oklch(0.19 0.004 90);
-    --ge-card: oklch(1 0 0);
-    --ge-muted: oklch(0.47 0.005 90);
-    --ge-border: oklch(0.86 0.003 90);
-    --ge-primary: oklch(0.64 0.19 42);
-    --ge-primary-fg: oklch(0.17 0.02 42);
-    --ge-accent: oklch(0.945 0.002 90);
+  :root {${geVars(tokens.light, [tokens.light.primary, tokens.light.primaryForeground])}
   }
   @media (prefers-color-scheme: dark) {
-    :root {
-      --ge-bg: oklch(0.165 0.002 90);
-      --ge-fg: oklch(0.95 0.003 90);
-      --ge-card: oklch(0.2 0.003 90);
-      --ge-muted: oklch(0.71 0.005 90);
-      --ge-border: oklch(0.32 0.004 90);
-      --ge-primary: oklch(0.7 0.18 45);
-      --ge-primary-fg: oklch(0.16 0.02 45);
-      --ge-accent: oklch(0.235 0.003 90);
+    :root {${geVars(tokens.dark, [tokens.dark.accentText, tokens.dark.accentTextForeground])}
     }
   }
   :root { color-scheme: light dark; }

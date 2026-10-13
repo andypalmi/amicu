@@ -31,7 +31,7 @@
   --color-fd-accent: var(--accent);
   --color-fd-accent-foreground: var(--accent-foreground);
   --color-fd-ring: var(--ring);
-  --color-fd-overlay: oklch(0 0 0 / 0.3);
+  --color-fd-overlay: var(--overlay);
   --color-fd-info: var(--accent-text);
   --color-fd-warning: var(--warn);
   --color-fd-error: var(--destructive);
