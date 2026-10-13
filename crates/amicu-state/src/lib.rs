@@ -29,6 +29,8 @@ mod drift;
 mod error;
 mod lock;
 mod memory;
+mod renew;
+mod runtime;
 mod snapshot;
 
 pub use adapter::StateBackendAdapter;
@@ -40,6 +42,8 @@ pub use error::{
 };
 pub use lock::LockHandle;
 pub use memory::InMemoryStateBackend;
+pub use renew::LeaseKeeper;
+pub use runtime::{DeploymentPhase, DeploymentRecord, RuntimeState, StopIdentity};
 pub use snapshot::{StateSnapshot, StateVersion};
 
 #[cfg(test)]

@@ -431,3 +431,150 @@ async fn registry_holds_state_backends_and_discovers_capabilities() {
     assert_eq!(discovered.len(), 1);
     assert_eq!(discovered[0].capabilities["supports_rollback"], true);
 }
+
+// --- runtime records, renew, lease keeper -----------------------------------
+
+use super::{DeploymentPhase, DeploymentRecord, LeaseKeeper, RuntimeState, StopIdentity};
+use amicu_runtime::{EndpointExposure, GatewayAuth, RuntimeHandle};
+use std::time::Duration;
+
+fn stop_identity(deployment: &str) -> StopIdentity {
+    StopIdentity {
+        deployment: DeploymentId::new(deployment),
+        backend: "modal".into(),
+        fields: [("app".to_string(), format!("app-{deployment}"))].into(),
+    }
+}
+
+#[test]
+fn snapshot_without_runtime_keeps_the_v1_checksum_and_old_json_still_verifies() {
+    let snap = snapshot("v1", sample_graph());
+    assert!(snap.checksum.starts_with("sha256-v1:"));
+
+    // A snapshot serialized before `runtime` existed has no such key.
+    let mut json = serde_json::to_value(&snap).expect("serialize");
+    json.as_object_mut().expect("object").remove("runtime");
+    let old: StateSnapshot = serde_json::from_value(json).expect("old shape deserializes");
+    assert!(old.runtime.is_empty());
+    old.verify().expect("old snapshot verifies unchanged");
+}
+
+#[test]
+fn snapshot_with_runtime_uses_v2_and_detects_tampering() {
+    let mut runtime = RuntimeState::default();
+    runtime.upsert(DeploymentRecord::pending(stop_identity("d1")));
+    let snap = StateSnapshot::with_runtime("v1", "t", sample_graph(), runtime).expect("stamp");
+    assert!(snap.checksum.starts_with("sha256-v2:"));
+    snap.verify().expect("verifies");
+
+    let mut tampered = snap.clone();
+    tampered.runtime.remove(&DeploymentId::new("d1"));
+    assert!(
+        tampered.verify().is_err(),
+        "dropping a record must be caught"
+    );
+
+    // Runtime smuggled in under a v1 tag is rejected too.
+    let mut smuggled = snapshot("v1", sample_graph());
+    smuggled
+        .runtime
+        .upsert(DeploymentRecord::pending(stop_identity("d1")));
+    assert!(smuggled.verify().is_err());
+}
+
+#[test]
+fn record_round_trips_through_json_with_handle() {
+    let record = DeploymentRecord {
+        phase: DeploymentPhase::Running,
+        stop: stop_identity("d1"),
+        handle: Some(RuntimeHandle {
+            id: "inst-1".into(),
+            deployment: DeploymentId::new("d1"),
+            endpoint: "http://127.0.0.1:8080".into(),
+            exposure: EndpointExposure::Public {
+                gateway: GatewayAuth::None,
+            },
+        }),
+    };
+    let json = serde_json::to_string(&record).expect("serialize");
+    let back: DeploymentRecord = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(back, record);
+}
+
+#[tokio::test]
+async fn put_and_remove_deployment_record_touch_only_that_record() {
+    let b = InMemoryStateBackend::new("primary");
+    let lock = b.lock().await.expect("lock");
+
+    b.put_deployment_record(DeploymentRecord::pending(stop_identity("d1")), &lock)
+        .await
+        .expect("put d1");
+    b.put_deployment_record(DeploymentRecord::pending(stop_identity("d2")), &lock)
+        .await
+        .expect("put d2");
+    let mut running = DeploymentRecord::pending(stop_identity("d1"));
+    running.phase = DeploymentPhase::Running;
+    b.put_deployment_record(running, &lock)
+        .await
+        .expect("replace d1");
+
+    let pulled = b.pull().await.expect("pull");
+    assert_eq!(pulled.runtime.deployments.len(), 2);
+    assert_eq!(
+        pulled
+            .runtime
+            .get(&DeploymentId::new("d1"))
+            .expect("d1")
+            .phase,
+        DeploymentPhase::Running
+    );
+
+    assert!(
+        b.remove_deployment_record(&DeploymentId::new("d1"), &lock)
+            .await
+            .expect("remove d1")
+    );
+    assert!(
+        !b.remove_deployment_record(&DeploymentId::new("d1"), &lock)
+            .await
+            .expect("remove again")
+    );
+    let pulled = b.pull().await.expect("pull");
+    assert!(pulled.runtime.get(&DeploymentId::new("d1")).is_none());
+    assert!(pulled.runtime.get(&DeploymentId::new("d2")).is_some());
+}
+
+#[tokio::test]
+async fn record_writes_require_the_lock() {
+    let b = InMemoryStateBackend::new("primary");
+    let lock = b.lock().await.expect("lock");
+    b.unlock(lock.clone()).await.expect("unlock");
+    let err = b
+        .put_deployment_record(DeploymentRecord::pending(stop_identity("d1")), &lock)
+        .await
+        .expect_err("no lock");
+    assert_eq!(err.code(), STATE_LOCK_NOT_HELD);
+}
+
+#[tokio::test]
+async fn renew_requires_the_held_lock() {
+    let b = InMemoryStateBackend::new("primary");
+    let lock = b.lock().await.expect("lock");
+    b.renew(&lock).await.expect("renew held lock");
+    b.unlock(lock.clone()).await.expect("unlock");
+    assert!(b.renew(&lock).await.is_err());
+}
+
+#[tokio::test]
+async fn lease_keeper_flags_a_lost_lock_and_stops_on_drop() {
+    let b: Arc<dyn StateBackendAdapter> = Arc::new(InMemoryStateBackend::new("primary"));
+    let lock = b.lock().await.expect("lock");
+    let keeper = LeaseKeeper::spawn(Arc::clone(&b), lock.clone(), Duration::from_millis(10));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!keeper.is_lost());
+
+    b.unlock(lock).await.expect("unlock");
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert!(keeper.is_lost(), "renewal failure must surface");
+    drop(keeper);
+}

@@ -92,7 +92,8 @@
 use amicu_core::Graph;
 use amicu_core::adapter::{Adapter, AdapterError, AdapterId, DescribeCapabilities, HealthStatus};
 use amicu_state::{
-    LockHandle, StateBackendAdapter, StateCipher, StateError, StateSnapshot, StateVersion,
+    LockHandle, RuntimeState, StateBackendAdapter, StateCipher, StateError, StateSnapshot,
+    StateVersion,
 };
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -141,8 +142,8 @@ struct EncryptedContent {
 /// `serde_json::to_value(graph)` - byte-for-byte what every version of this
 /// backend before the encryption seam wrote, so existing rows and tests are
 /// unaffected.
-async fn encode_content(
-    graph: &Graph,
+async fn encode_content<T: Serialize + Sync>(
+    graph: &T,
     cipher: Option<&Arc<dyn StateCipher>>,
 ) -> Result<serde_json::Value, AdapterError> {
     let Some(cipher) = cipher else {
@@ -182,10 +183,10 @@ async fn encode_content(
 /// a cipher is turned on. A row that *is* wrapped but no cipher is
 /// configured to decrypt it is reported as [`StateError::Corrupted`] -
 /// explicit, non-retryable failure, never a silent misread.
-async fn decode_content(
+async fn decode_content<T: serde::de::DeserializeOwned>(
     content: serde_json::Value,
     cipher: Option<&Arc<dyn StateCipher>>,
-) -> Result<Graph, AdapterError> {
+) -> Result<T, AdapterError> {
     if !content
         .as_object()
         .is_some_and(|obj| obj.contains_key(CIPHER_MARKER_KEY))
@@ -416,18 +417,20 @@ impl PostgresStateBackend {
         // Mint our own version id and recompute the checksum fresh, exactly
         // like the fake reference backend: the caller-supplied
         // `snapshot.version` is a placeholder and is discarded.
-        let recorded = StateSnapshot::new(
+        let recorded = StateSnapshot::with_runtime(
             format!("v{seq}"),
             &snapshot.recorded_at,
             snapshot.graph.clone(),
+            snapshot.runtime.clone(),
         )?;
         let content = encode_content(&recorded.graph, self.cipher.as_ref()).await?;
+        let runtime = encode_content(&recorded.runtime, self.cipher.as_ref()).await?;
         let created_at = now_unix_seconds();
 
         sqlx::query!(
             "INSERT INTO state_snapshots \
-             (workspace_id, stack_id, seq, version, parent_version, label, recorded_at, checksum, content, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             (workspace_id, stack_id, seq, version, parent_version, label, recorded_at, checksum, content, created_at, runtime) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             wsid,
             stack,
             seq,
@@ -438,6 +441,7 @@ impl PostgresStateBackend {
             recorded.checksum,
             content,
             created_at,
+            runtime,
         )
         .execute(&mut *tx)
         .await
@@ -524,7 +528,7 @@ impl StateBackendAdapter for PostgresStateBackend {
 
         let row = sqlx::query!(
             r#"
-            SELECT s.version, s.recorded_at, s.checksum, s.content
+            SELECT s.version, s.recorded_at, s.checksum, s.content, s.runtime
             FROM state_current c
             JOIN state_snapshots s
               ON s.workspace_id = c.workspace_id
@@ -552,12 +556,14 @@ impl StateBackendAdapter for PostgresStateBackend {
             )?);
         };
 
-        let graph = decode_content(row.content, self.cipher.as_ref()).await?;
+        let graph: Graph = decode_content(row.content, self.cipher.as_ref()).await?;
+        let runtime: RuntimeState = decode_content(row.runtime, self.cipher.as_ref()).await?;
         let snapshot = StateSnapshot {
             version: row.version,
             recorded_at: row.recorded_at,
             checksum: row.checksum,
             graph,
+            runtime,
         };
         snapshot.verify()?;
         Ok(snapshot)
@@ -637,6 +643,35 @@ impl StateBackendAdapter for PostgresStateBackend {
             .await
             .map_err(|_| backend_err("failed to commit lock acquisition"))?;
         Ok(LockHandle::new(self.id.clone(), token))
+    }
+
+    async fn renew(&self, lock: &LockHandle) -> Result<(), AdapterError> {
+        let mut tx = self.begin_tx().await?;
+        let wsid = self.workspace.as_uuid();
+        let stack = self.stack_id();
+        let ttl = self.lease_ttl_seconds;
+
+        // Same authorization as push/rollback (`FOR UPDATE`, holder + token +
+        // not yet expired by Postgres's clock), so an already-expired lease
+        // cannot be renewed back to life: another holder may have taken it.
+        self.authorize(&mut tx, lock).await?;
+
+        sqlx::query!(
+            "UPDATE state_locks \
+             SET expires_at = extract(epoch FROM clock_timestamp())::bigint + $3 \
+             WHERE workspace_id = $1 AND stack_id = $2",
+            wsid,
+            stack,
+            ttl,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| backend_err("failed to renew lock"))?;
+
+        tx.commit()
+            .await
+            .map_err(|_| backend_err("failed to commit lock renewal"))?;
+        Ok(())
     }
 
     async fn unlock(&self, handle: LockHandle) -> Result<(), AdapterError> {
@@ -838,7 +873,7 @@ mod content_cipher_tests {
         );
         // And it round-trips straight back with no cipher, exactly as `pull`
         // always has.
-        let decoded = decode_content(via_seam, None).await.unwrap();
+        let decoded = decode_content::<Graph>(via_seam, None).await.unwrap();
         assert_eq!(decoded, graph);
     }
 
@@ -862,7 +897,9 @@ mod content_cipher_tests {
             "encrypted content must carry the cipher marker key"
         );
 
-        let recovered = decode_content(stored, Some(&cipher)).await.unwrap();
+        let recovered = decode_content::<Graph>(stored, Some(&cipher))
+            .await
+            .unwrap();
         assert_eq!(
             recovered, graph,
             "encrypt -> store -> decrypt must recover the exact original graph"
@@ -885,7 +922,9 @@ mod content_cipher_tests {
         let stored = encode_content(&graph, Some(&dyn_cipher)).await.unwrap();
         assert_eq!(cipher.encrypt_calls.load(Ordering::SeqCst), 1);
 
-        let _ = decode_content(stored, Some(&dyn_cipher)).await.unwrap();
+        let _ = decode_content::<Graph>(stored, Some(&dyn_cipher))
+            .await
+            .unwrap();
         assert_eq!(cipher.decrypt_calls.load(Ordering::SeqCst), 1);
     }
 
@@ -900,7 +939,7 @@ mod content_cipher_tests {
         // backend's cipher was removed/misconfigured after these rows were
         // written. This must fail loudly, never silently return garbage or
         // the wrapper's raw fields mistaken for a graph.
-        let err = decode_content(stored, None).await.unwrap_err();
+        let err = decode_content::<Graph>(stored, None).await.unwrap_err();
         assert!(
             err.to_string().contains("no StateCipher is configured")
                 || format!("{err:?}").contains("no StateCipher is configured"),
@@ -918,7 +957,7 @@ mod content_cipher_tests {
         let legacy_content = serde_json::to_value(&graph).unwrap();
 
         let cipher: Arc<dyn StateCipher> = Arc::new(XorTestCipher::new(0x99));
-        let decoded = decode_content(legacy_content, Some(&cipher))
+        let decoded = decode_content::<Graph>(legacy_content, Some(&cipher))
             .await
             .expect("unwrapped legacy content must decode as a plain graph");
         assert_eq!(decoded, graph);
@@ -935,7 +974,9 @@ mod content_cipher_tests {
         let mut stored = encode_content(&graph, Some(&cipher)).await.unwrap();
         stored["__amicu_state_cipher_v__"] = serde_json::json!(u8::MAX);
 
-        let err = decode_content(stored, Some(&cipher)).await.unwrap_err();
+        let err = decode_content::<Graph>(stored, Some(&cipher))
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("not supported")
                 || format!("{err:?}").contains("not supported"),

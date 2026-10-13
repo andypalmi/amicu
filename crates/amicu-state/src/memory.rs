@@ -184,7 +184,12 @@ impl StateBackendAdapter for InMemoryStateBackend {
         let version = format!("v{}", inner.next_version);
         inner.next_version += 1;
         let parent = inner.current.as_ref().map(|s| s.version.clone());
-        let recorded = StateSnapshot::new(&version, &snapshot.recorded_at, snapshot.graph.clone())?;
+        let recorded = StateSnapshot::with_runtime(
+            &version,
+            &snapshot.recorded_at,
+            snapshot.graph.clone(),
+            snapshot.runtime.clone(),
+        )?;
         inner.snapshots.insert(version.clone(), recorded.clone());
         inner
             .history
@@ -207,6 +212,16 @@ impl StateBackendAdapter for InMemoryStateBackend {
         let token = OsRng.next_u64();
         inner.lock = Some(token);
         Ok(LockHandle::new(self.id.clone(), token))
+    }
+
+    async fn renew(&self, lock: &LockHandle) -> Result<(), AdapterError> {
+        // The in-memory lock has no TTL, so there is no lease to extend; this
+        // only verifies the handle is the live holder, like Postgres does.
+        let inner = self.inner.lock().expect("state backend poisoned");
+        match inner.lock {
+            Some(held) if held == lock.token() && lock.holder() == &self.id => Ok(()),
+            _ => Err(StateError::LockNotHeld.into()),
+        }
     }
 
     async fn unlock(&self, handle: LockHandle) -> Result<(), AdapterError> {

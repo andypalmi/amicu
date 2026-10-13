@@ -6,7 +6,9 @@ use async_trait::async_trait;
 
 use crate::drift::{self, DriftReport};
 use crate::lock::LockHandle;
+use crate::runtime::DeploymentRecord;
 use crate::snapshot::{StateSnapshot, StateVersion};
+use amicu_core::id::DeploymentId;
 
 /// A backend that stores canonical state and mediates concurrent access to it.
 ///
@@ -43,6 +45,17 @@ pub trait StateBackendAdapter: Adapter + DescribeCapabilities {
     /// waiting indefinitely.
     async fn lock(&self) -> Result<LockHandle, AdapterError>;
 
+    /// Extend the lease on the held `lock`, so an operation longer than the
+    /// backend's lease TTL keeps exclusive access.
+    ///
+    /// Like [`push`](Self::push), implementations MUST verify that `lock` is the
+    /// lock currently guarding the state *and* that its lease has not already
+    /// expired (judged by the backend's own clock): an expired lease cannot be
+    /// resurrected by renewing it, because another holder may already have
+    /// taken over. Failure is [`StateError::LockNotHeld`](crate::StateError::LockNotHeld).
+    /// See [`LeaseKeeper`](crate::LeaseKeeper) for periodic renewal.
+    async fn renew(&self, lock: &LockHandle) -> Result<(), AdapterError>;
+
     /// Release the lock identified by `handle`.
     async fn unlock(&self, handle: LockHandle) -> Result<(), AdapterError>;
 
@@ -61,5 +74,58 @@ pub trait StateBackendAdapter: Adapter + DescribeCapabilities {
     /// no I/O, no side effects.
     fn detect_drift(&self, desired: &Graph, actual: &StateSnapshot) -> DriftReport {
         drift::detect_drift(desired, actual)
+    }
+
+    /// Persist (insert or replace) one deployment's runtime record under the
+    /// held `lock`, leaving the graph and every other record untouched.
+    ///
+    /// This is the per-resource write-ahead primitive: record a
+    /// [`Pending`](crate::DeploymentPhase::Pending) record with its
+    /// [`StopIdentity`](crate::StopIdentity) *before* creating the resource,
+    /// then replace it with the `Running` record once the handle is known. It
+    /// is a read-modify-write (`pull` then `push`) made atomic by the lock: no
+    /// other writer can interleave while the lease is live, and `push`
+    /// re-verifies the lease, so an expired lease fails the write. Each call
+    /// records a new, append-only snapshot version.
+    async fn put_deployment_record(
+        &self,
+        record: DeploymentRecord,
+        lock: &LockHandle,
+    ) -> Result<(), AdapterError> {
+        let current = self.pull().await?;
+        let mut runtime = current.runtime;
+        runtime.upsert(record);
+        let next = StateSnapshot::with_runtime(
+            current.version,
+            current.recorded_at,
+            current.graph,
+            runtime,
+        )?;
+        self.push(&next, lock).await
+    }
+
+    /// Drop one deployment's runtime record under the held `lock`. Returns
+    /// whether a record was present.
+    ///
+    /// Call only after the stop is confirmed: a deployment leaves state only
+    /// once its resource is known to be gone.
+    async fn remove_deployment_record(
+        &self,
+        deployment: &DeploymentId,
+        lock: &LockHandle,
+    ) -> Result<bool, AdapterError> {
+        let current = self.pull().await?;
+        let mut runtime = current.runtime;
+        if runtime.remove(deployment).is_none() {
+            return Ok(false);
+        }
+        let next = StateSnapshot::with_runtime(
+            current.version,
+            current.recorded_at,
+            current.graph,
+            runtime,
+        )?;
+        self.push(&next, lock).await?;
+        Ok(true)
     }
 }

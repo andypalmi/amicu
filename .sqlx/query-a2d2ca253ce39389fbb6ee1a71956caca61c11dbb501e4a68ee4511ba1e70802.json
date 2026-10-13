@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT s.version, s.recorded_at, s.checksum, s.content\n            FROM state_current c\n            JOIN state_snapshots s\n              ON s.workspace_id = c.workspace_id\n             AND s.stack_id = c.stack_id\n             AND s.version = c.version\n            WHERE c.workspace_id = $1 AND c.stack_id = $2\n            ",
+  "query": "\n            SELECT s.version, s.recorded_at, s.checksum, s.content, s.runtime\n            FROM state_current c\n            JOIN state_snapshots s\n              ON s.workspace_id = c.workspace_id\n             AND s.stack_id = c.stack_id\n             AND s.version = c.version\n            WHERE c.workspace_id = $1 AND c.stack_id = $2\n            ",
   "describe": {
     "columns": [
       {
@@ -22,6 +22,11 @@
         "ordinal": 3,
         "name": "content",
         "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "runtime",
+        "type_info": "Jsonb"
       }
     ],
     "parameters": {
@@ -34,8 +39,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "0a28f393966d52446b5598adb196150227f85bcd141b159134aefe2af4eaf988"
+  "hash": "a2d2ca253ce39389fbb6ee1a71956caca61c11dbb501e4a68ee4511ba1e70802"
 }
