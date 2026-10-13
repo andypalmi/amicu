@@ -100,6 +100,7 @@ mod tests {
             variants: Vec::new(),
             n_layers: None,
             n_kv_heads: None,
+            n_kv_layers: None,
             head_dim: None,
         }
     }
@@ -1260,9 +1261,43 @@ mod tests {
         g.models[0].n_layers = Some(32);
         g.models[0].n_kv_heads = Some(8);
         g.models[0].head_dim = Some(128);
+        g.models[0].n_kv_layers = Some(8);
         let formatted = format_graph(&g).unwrap();
         let reparsed = parse_graph(&formatted).unwrap();
         assert_eq!(g, reparsed, "round trip through:\n{formatted}");
+    }
+
+    fn model_hcl(shape: &str) -> String {
+        format!(
+            "resource \"model\" \"m\" {{\n  source {{\n    registry = \"hugging_face\"\n    \
+             reference = \"org/m\"\n  }}\n  architecture = \"llama\"\n  artifact {{\n    \
+             format = \"safetensors\"\n  }}\n{shape}}}\n"
+        )
+    }
+
+    #[test]
+    fn model_shape_rejects_zero_and_oversized_kv_layers() {
+        for bad in [
+            "  n_layers = 0\n",
+            "  n_kv_heads = 0\n",
+            "  head_dim = 0\n",
+            "  n_kv_layers = 0\n",
+            "  n_layers = 8\n  n_kv_layers = 9\n",
+        ] {
+            assert!(parse_graph(&model_hcl(bad)).is_err(), "accepted: {bad}");
+        }
+    }
+
+    #[test]
+    fn model_shape_accepts_n_kv_layers_within_bounds_or_alone() {
+        for ok in [
+            "  n_layers = 8\n  n_kv_layers = 8\n",
+            "  n_layers = 48\n  n_kv_layers = 12\n",
+            // Alone, it supplies the layer count for the estimate.
+            "  n_kv_layers = 12\n",
+        ] {
+            parse_graph(&model_hcl(ok)).unwrap_or_else(|e| panic!("rejected {ok}: {e}"));
+        }
     }
 
     #[test]
@@ -1273,6 +1308,7 @@ mod tests {
         assert!(!formatted.contains("n_layers"));
         assert!(!formatted.contains("n_kv_heads"));
         assert!(!formatted.contains("head_dim"));
+        assert!(!formatted.contains("n_kv_layers"));
     }
 
     #[test]

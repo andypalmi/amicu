@@ -82,13 +82,17 @@ Health is checked against `GET /health` on the configured port.
 - `amicu validate`/`amicu plan` now actually check this (amicu-planning#152):
   weights (dtype-based; the model's `artifact.quantization`, defaulting to
   `bf16` when unset) plus a KV-cache estimate (when the model declares
-  `n_layers`/`n_kv_heads`/`head_dim`) against
+  `n_layers`/`n_kv_heads`/`head_dim`; `n_kv_layers` restricts the layer count
+  for hybrid-attention models) against
   `gpu_memory_utilization × per-GPU memory × tensor_parallel_size`. Unlike
   llama.cpp's fit check, there is no separate flat overhead band on top -
   `gpu_memory_utilization` already *is* vLLM's own usable-fraction knob - so
   the plan's `cost_performance.assumptions` always carries "vllm fit
   estimate: weights + kv cache only" as a reminder that this is a first-order
-  estimate, not activation/fragmentation-aware.
+  estimate, not activation/fragmentation-aware. When the model shape is
+  unknown that note becomes "kv cache: not estimated (model shape unknown; set
+  n_layers, n_kv_heads, head_dim on the model)", the peak memory is labelled
+  "(weights only)", and validate/plan warn with `AMICU-CAP-010`.
 
 ## Throughput tips
 

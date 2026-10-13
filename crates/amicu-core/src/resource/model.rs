@@ -33,6 +33,25 @@ pub struct Model {
     /// Per-head dimension, declared. See [`Model::n_layers`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_dim: Option<u32>,
+    /// Number of layers that hold a KV cache growing with context, declared.
+    /// Hybrid-attention models (Qwen3.5 / Qwen3-Next: linear attention on most
+    /// layers, full attention on a few) keep a per-token KV cache on the
+    /// full-attention layers only; set this below [`Model::n_layers`] so the
+    /// estimator does not overcount. Must be positive and, when `n_layers` is
+    /// set, at most `n_layers` (enforced when parsing HCL). Unset means every
+    /// layer does (a plain transformer); set without `n_layers`, it alone
+    /// supplies the layer count - see [`Model::kv_layers`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub n_kv_layers: Option<u32>,
+}
+
+impl Model {
+    /// Layer count the KV-cache estimate multiplies by: [`Model::n_kv_layers`]
+    /// when declared (hybrid attention), else [`Model::n_layers`].
+    #[must_use]
+    pub fn kv_layers(&self) -> Option<u32> {
+        self.n_kv_layers.or(self.n_layers).filter(|n| *n > 0)
+    }
 }
 
 /// Where a model's weights are fetched from.

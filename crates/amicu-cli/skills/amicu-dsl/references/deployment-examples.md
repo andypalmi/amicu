@@ -71,6 +71,27 @@ These three fields are declared, not derived - amicu has no GGUF header
 parser - so leave them unset if you don't know them; the estimator falls back
 to the flat overhead band exactly as before.
 
+For vLLM the same three fields are required for any KV-cache estimate, and
+there is no overhead band to fall back on: without them `amicu plan` labels
+the peak memory "(weights only)", adds the assumption `kv cache: not estimated
+(model shape unknown; set n_layers, n_kv_heads, head_dim on the model)`, and
+`amicu validate`/`plan` raise the warning `AMICU-CAP-010`. A fit pass in that
+state says nothing about the KV cache, which at a long `context_length` can
+exceed the weights.
+
+Hybrid-attention models (Qwen3.5, Qwen3-Next) use linear attention on most
+layers and full attention on only a few; only the full-attention layers hold a
+KV cache that grows with context. Set the optional `n_kv_layers` to that count
+(less than `n_layers`) so the estimate does not overcount; unset means every
+layer counts:
+
+```hcl
+  n_layers    = 48
+  n_kv_layers = 12   # full-attention layers only
+  n_kv_heads  = 2
+  head_dim    = 256
+```
+
 ## llama.cpp: chat template, jinja, reasoning format, build pin, artifact checksum (amicu-planning#151 PR B)
 
 ```hcl
