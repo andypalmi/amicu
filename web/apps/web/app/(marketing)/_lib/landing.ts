@@ -67,6 +67,38 @@ export const HERO_PLAN: TermLine[] = [
   },
 ];
 
+export interface ChatSession {
+  client: string;
+  model: string;
+  host: string;
+  /** Auth scheme the client sends, matching the deployment's api_key. */
+  auth: string;
+  user: string;
+  reply: string[];
+  status: string;
+  hint: string;
+}
+
+/**
+ * Illustrative chat session against the endpoint `apply` prints. amicu has no
+ * chat command; this is any OpenAI-compatible client sending the deployment's
+ * api_key as a Bearer token, and the answer is an example, not recorded model
+ * output.
+ */
+export const CHAT_SESSION: ChatSession = {
+  client: 'chat',
+  model: 'RedHatAI/Qwen3.5-9B-FP8-dynamic',
+  host: '<workspace>--amicu-chat-server.<region>.modal.direct',
+  auth: 'Bearer $CHAT_API_KEY',
+  user: 'Draft a retention notice for our EU customers.',
+  reply: [
+    'We keep customer data only in EU regions, and delete it 30 days after you close your account.',
+    'You can ask for earlier deletion at any time by contacting our privacy team.',
+  ],
+  status: '2.1s · 24 tok/s',
+  hint: 'enter send · ctrl+c quit',
+};
+
 /**
  * A request to the endpoint `apply` prints. The endpoint is OpenAI-compatible
  * and protected by the deployment's `api_key`; Modal endpoints also need the

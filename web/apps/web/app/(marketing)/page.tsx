@@ -3,9 +3,11 @@ import Link from 'next/link';
 import { Button } from '@amicu/ui';
 import { appName, appTagline, siteUrl } from '@/lib/shared';
 import { HclCode, Transcript } from './_components/code';
+import { TerminalChat } from './_components/terminal-chat';
 import { CodePanel, Container, CTABand, Section, FactList, SectionHeader } from './_components/marketing';
 import { githubUrl, quickstartUrl } from './_lib/content';
 import {
+  CHAT_SESSION,
   GPU_LAUNCH,
   HERO_HCL,
   HERO_PLAN,
@@ -73,19 +75,24 @@ export default function LandingPage() {
             </Button>
           </div>
 
-          <div className="mt-14 grid items-start gap-4 text-left sm:mt-20 lg:grid-cols-2">
+          <div className="mt-14 grid items-start gap-4 text-left sm:mt-20 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
             <CodePanel caption="amicu.hcl">
               <HclCode code={HERO_HCL} className="[&_pre]:px-5 [&_pre]:py-4" />
             </CodePanel>
-            <CodePanel caption="terminal">
-              <Transcript
-                lines={HERO_PLAN}
-                reveal
-                wrap
-                label="Output of amicu plan for the example file"
-                className="px-5 py-4"
-              />
-            </CodePanel>
+            <div className="flex min-w-0 flex-col gap-4">
+              <CodePanel caption="terminal">
+                <Transcript
+                  lines={HERO_PLAN}
+                  reveal
+                  wrap
+                  label="Output of amicu plan for the example file"
+                  className="px-5 py-4"
+                />
+              </CodePanel>
+              <CodePanel caption="chat client (illustrative)">
+                <TerminalChat session={CHAT_SESSION} />
+              </CodePanel>
+            </div>
           </div>
         </Container>
       </section>
