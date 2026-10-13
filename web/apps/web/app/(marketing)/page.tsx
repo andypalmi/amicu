@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { Button } from '@amicu/ui';
 import { appName, appTagline, siteUrl } from '@/lib/shared';
 import { HclCode, Transcript } from './_components/code';
+import { TerminalChat } from './_components/terminal-chat';
 import { CodePanel, Container, CTABand, Section, FactList, SectionHeader, StatusNote } from './_components/marketing';
 import { githubUrl, quickstartUrl } from './_lib/content';
 import {
@@ -89,15 +90,20 @@ export default function LandingPage() {
             <CodePanel caption="amicu.hcl">
               <HclCode code={HERO_HCL} className="px-5 py-4" />
             </CodePanel>
-            <CodePanel caption="terminal">
-              <Transcript
-                lines={HERO_PLAN}
-                reveal
-                wrap
-                label="Output of amicu plan for the example file"
-                className="px-5 py-4"
-              />
-            </CodePanel>
+            <div className="flex min-w-0 flex-col gap-4">
+              <CodePanel caption="terminal">
+                <Transcript
+                  lines={HERO_PLAN}
+                  reveal
+                  wrap
+                  label="Output of amicu plan for the example file"
+                  className="px-5 py-4"
+                />
+              </CodePanel>
+              <CodePanel caption="chat client (illustrative)">
+                <TerminalChat session={CHAT_SESSION} />
+              </CodePanel>
+            </div>
           </div>
         </Container>
       </section>
@@ -131,22 +137,6 @@ export default function LandingPage() {
               </li>
             ))}
           </ol>
-          <div className="grid gap-6 border-t border-border py-10 md:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] md:gap-12">
-            <div>
-              <h3 className="text-xl font-semibold tracking-tight">Use the endpoint</h3>
-              <p className="mt-3 max-w-prose text-pretty leading-relaxed text-muted-foreground">
-                The server speaks the OpenAI API, so any compatible client can talk to it.
-              </p>
-            </div>
-            <CodePanel caption="chat client (illustrative)" className="self-start">
-              <Transcript
-                lines={CHAT_SESSION}
-                wrap
-                label="Example chat session against the deployed endpoint"
-                className="px-5 py-4"
-              />
-            </CodePanel>
-          </div>
       </Section>
 
       {/* What you get */}
