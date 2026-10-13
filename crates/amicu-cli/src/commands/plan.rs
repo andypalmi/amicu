@@ -135,7 +135,7 @@ pub(crate) fn print_human(
                 io(writeln!(out, "      artifact: {}", artifact.name))?;
             }
             // The endpoint API key: always redacted, and only the secret's name
-            // is shown - the value is resolved at apply time, never here.
+            // is shown - the value is never read at plan time.
             if let Some(shown) = item.action.runtime.iter().find(|s| s.key == "api_key") {
                 let secret = graph
                     .deployments
@@ -145,7 +145,7 @@ pub(crate) fn print_human(
                 match secret {
                     Some(r) => io(writeln!(
                         out,
-                        "      api_key:  {} (secret \"{}\", resolved at apply)",
+                        "      api_key:  {} (secret \"{}\")",
                         shown.value, r.name
                     ))?,
                     None => io(writeln!(out, "      api_key:  {}", shown.value))?,
@@ -338,6 +338,7 @@ mod tests {
             .unwrap_or_else(|| panic!("no api_key line in:\n{text}"));
         assert!(line.contains("******"), "{line}");
         assert!(line.contains("CHAT_API_KEY"), "{line}");
+        assert_eq!(line.trim(), "api_key:  ****** (secret \"CHAT_API_KEY\")");
         // Planning never resolves: even with the variable set, its value is
         // nowhere in the output.
         assert!(!text.contains("--api-key"), "{text}");

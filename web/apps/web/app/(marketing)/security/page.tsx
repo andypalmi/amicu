@@ -42,7 +42,7 @@ const SECRET_PLAN: TermLine[] = [
   { text: '  + deployment.chat', tone: 'add' },
   { text: '      action:   create' },
   { text: '      hardware: gpu.l4' },
-  { text: '      api_key:  ****** (secret "CHAT_API_KEY", resolved at apply)' },
+  { text: '      api_key:  ****** (secret "CHAT_API_KEY")' },
 ];
 
 const ENDPOINT_CHECK: TermLine[] = [
