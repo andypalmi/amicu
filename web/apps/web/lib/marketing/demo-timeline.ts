@@ -66,7 +66,7 @@ export const DEMO_STEPS: Step[] = [
   L(970, '      hardware: gpu.l4'),
   // plan.rs also prints a `launch:` line for some actions; trimmed here.
   L(1050, '      target:   modal (region eu-west)'),
-  L(1130, '      api_key:  ****** (secret "CHAT_API_KEY", resolved at apply)'),
+  L(1130, '      api_key:  ****** (secret "CHAT_API_KEY")'),
   L(1500, 'Apply these changes? [y/N] y'),
   // Output lands ~450ms after the `y` (the owner's budget is 500ms).
   L(1950, ' '),
