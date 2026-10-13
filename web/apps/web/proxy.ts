@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { isMarkdownPreferred, rewritePath } from 'fumadocs-core/negotiation';
-import { docsContentRoute, docsRoute } from '@/lib/shared';
+import { appUrl, docsContentRoute, docsRoute, siteUrl } from '@/lib/shared';
+import { resolveHostRoute } from '@/lib/routing/host';
 import { attemptRefresh } from '@/lib/auth/middleware-refresh';
 import {
   ACCESS_COOKIE,
@@ -9,6 +10,7 @@ import {
   COOKIE_SECURE,
   LEGACY_COOKIES,
   SITE_URL,
+  APP_URL,
 } from '@/lib/auth/config';
 import { requestIsSameOrigin } from '@/lib/security/csrf';
 
@@ -54,7 +56,16 @@ const cookieAttrs = {
   path: '/',
 } as const;
 
-async function handleAuth(request: NextRequest): Promise<NextResponse> {
+// Wraps the "continue" response so a host-level rewrite (app.amicu.dev/ -> /app)
+// composes with silent refresh. `rewriteTo` null => plain pass-through.
+function proceed(request: NextRequest, rewriteTo: string | null): NextResponse {
+  if (!rewriteTo) return NextResponse.next({ request });
+  const url = request.nextUrl.clone();
+  url.pathname = rewriteTo;
+  return NextResponse.rewrite(url, { request });
+}
+
+async function handleAuth(request: NextRequest, rewriteTo: string | null): Promise<NextResponse> {
   const outcome = await attemptRefresh(request);
 
   if (outcome.kind === 'rotated') {
@@ -62,7 +73,7 @@ async function handleAuth(request: NextRequest): Promise<NextResponse> {
     // getSession() sees the fresh cookie this request) and the browser response.
     request.cookies.set(ACCESS_COOKIE, outcome.tokens.access_token);
     request.cookies.set(REFRESH_COOKIE, outcome.tokens.refresh_token);
-    const res = NextResponse.next({ request });
+    const res = proceed(request, rewriteTo);
     res.cookies.set(ACCESS_COOKIE, outcome.tokens.access_token, {
       ...cookieAttrs,
       maxAge: outcome.tokens.expires_in ?? 60 * 15,
@@ -77,7 +88,7 @@ async function handleAuth(request: NextRequest): Promise<NextResponse> {
   if (outcome.kind === 'revoked') {
     request.cookies.delete(ACCESS_COOKIE);
     request.cookies.delete(REFRESH_COOKIE);
-    const res = NextResponse.next({ request });
+    const res = proceed(request, rewriteTo);
     // Expire with Secure+Path=/ (a __Host- cookie can't be deleted without them).
     for (const name of [ACCESS_COOKIE, REFRESH_COOKIE, ...LEGACY_COOKIES]) {
       res.cookies.set(name, '', { ...cookieAttrs, maxAge: 0 });
@@ -85,7 +96,7 @@ async function handleAuth(request: NextRequest): Promise<NextResponse> {
     return res;
   }
 
-  return NextResponse.next();
+  return proceed(request, rewriteTo);
 }
 
 export default async function proxy(request: NextRequest) {
@@ -95,10 +106,27 @@ export default async function proxy(request: NextRequest) {
   // actions get Next's own Origin/Host check; this covers /api/*.)
   if (
     (pathname === '/api' || pathname.startsWith('/api/')) &&
-    !requestIsSameOrigin(request, SITE_URL)
+    !requestIsSameOrigin(request, SITE_URL, APP_URL)
   ) {
     return NextResponse.json({ error: 'cross-origin request rejected' }, { status: 403 });
   }
+
+  // Host split (amicu.dev marketing/docs vs app.amicu.dev console + auth). Inert
+  // unless the request host is one of the two configured hosts (so localhost and
+  // previews serve every route). /api/* is never redirected.
+  const host =
+    request.headers.get('x-forwarded-host') ?? request.headers.get('host') ?? request.nextUrl.host;
+  const hostAction = resolveHostRoute({
+    host,
+    pathname,
+    search: request.nextUrl.search,
+    siteOrigin: siteUrl,
+    appOrigin: appUrl,
+  });
+  if (hostAction.kind === 'redirect') {
+    return NextResponse.redirect(hostAction.url, hostAction.status === 301 ? 301 : 307);
+  }
+  const rewriteTo = hostAction.kind === 'rewrite' ? hostAction.pathname : null;
 
   // Docs content negotiation (markdown rewrites) - unchanged.
   const suffix = rewriteSuffix(pathname);
@@ -116,9 +144,10 @@ export default async function proxy(request: NextRequest) {
   }
 
   // Silent session refresh for authed surfaces.
-  if (REFRESH_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
-    return handleAuth(request);
+  const effectivePath = rewriteTo ?? pathname;
+  if (REFRESH_PREFIXES.some((p) => effectivePath === p || effectivePath.startsWith(`${p}/`))) {
+    return handleAuth(request, rewriteTo);
   }
 
-  return NextResponse.next();
+  return rewriteTo ? proceed(request, rewriteTo) : NextResponse.next();
 }

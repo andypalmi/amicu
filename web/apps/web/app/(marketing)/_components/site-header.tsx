@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { Container } from './marketing';
 import { ThemeToggle } from './theme-toggle';
+import { appHref } from '@/lib/shared';
 import { githubUrl } from '../_lib/content';
 
 const productLinks = [
@@ -47,7 +48,7 @@ export function SiteHeader() {
 
         <div className="ml-auto flex items-center gap-2 text-sm">
           <Link
-            href="/login"
+            href={appHref('/login')}
             className="rounded-md px-3 py-1.5 font-medium text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
             Sign in

@@ -33,6 +33,8 @@ export interface CsrfInput {
   requestOrigin: string;
   /** Configured public site URL (NEXT_PUBLIC_SITE_URL), if any. */
   siteUrl?: string | null;
+  /** Configured app URL (NEXT_PUBLIC_APP_URL), if any - the app.amicu.dev host. */
+  appUrl?: string | null;
 }
 
 /** The set of origins considered "ourselves" for this request. */
@@ -40,6 +42,7 @@ export function allowedOrigins(input: CsrfInput): Set<string> {
   const out = new Set<string>();
   const add = (o: string | null) => o && out.add(o);
   add(originOf(input.siteUrl));
+  add(originOf(input.appUrl));
   add(originOf(input.requestOrigin));
   const proto = (input.forwardedProto?.split(',')[0]?.trim() || new URL(input.requestOrigin).protocol.replace(':', ''));
   for (const h of [input.forwardedHost, input.host]) {
@@ -68,7 +71,11 @@ export function isSameOriginRequest(input: CsrfInput): boolean {
 }
 
 /** Adapter for a Fetch `Request` (NextRequest included). */
-export function requestIsSameOrigin(request: Request, siteUrl?: string | null): boolean {
+export function requestIsSameOrigin(
+  request: Request,
+  siteUrl?: string | null,
+  appUrl?: string | null,
+): boolean {
   const h = request.headers;
   return isSameOriginRequest({
     method: request.method,
@@ -79,5 +86,6 @@ export function requestIsSameOrigin(request: Request, siteUrl?: string | null): 
     forwardedProto: h.get('x-forwarded-proto'),
     requestOrigin: new URL(request.url).origin,
     siteUrl,
+    appUrl,
   });
 }

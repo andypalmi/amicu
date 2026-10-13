@@ -1,10 +1,18 @@
 import type { MetadataRoute } from 'next';
-import { siteUrl } from '@/lib/shared';
+import { headers } from 'next/headers';
+import { appUrl, siteUrl } from '@/lib/shared';
+import { classifyHost } from '@/lib/routing/host';
 
-// Allow the public marketing + docs surface; keep the authed product routes,
-// the auth screens, and the BFF API out of crawlers. These paths mirror the
-// (app) and (auth) route groups (which live at the site root) plus /api.
-export default function robots(): MetadataRoute.Robots {
+// Marketing + docs host: allow the public surface; keep the authed product
+// routes, the auth screens, and the BFF API out of crawlers (they are redirected
+// to the app host anyway, and the paths stay listed for non-split deployments).
+// App host (app.amicu.dev): the whole origin is private, so disallow everything.
+export default async function robots(): Promise<MetadataRoute.Robots> {
+  const h = await headers();
+  const host = h.get('x-forwarded-host') ?? h.get('host');
+  if (classifyHost(host, siteUrl, appUrl) === 'app') {
+    return { rules: { userAgent: '*', disallow: '/' } };
+  }
   return {
     rules: {
       userAgent: '*',

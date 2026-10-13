@@ -47,7 +47,8 @@ async function challengeFailure(
   formData: FormData,
   action: TurnstileAction,
 ): Promise<AuthFormState | null> {
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL;
+  // Auth forms live on the app host, so the widget is solved there.
+  const siteUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_SITE_URL;
   let expectedHostname: string | null = null;
   try {
     expectedHostname = siteUrl ? new URL(siteUrl).hostname : null;

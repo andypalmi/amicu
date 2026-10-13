@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Button } from '@amicu/ui';
-import { appName, appTagline, siteUrl } from '@/lib/shared';
+import { appHref, appName, appTagline, siteUrl } from '@/lib/shared';
 import { HclCode, Transcript } from './_components/code';
 import { TerminalChat } from './_components/terminal-chat';
 import { CodePanel, Container, CTABand, Section, FactList, SectionHeader, StatusNote } from './_components/marketing';
@@ -186,7 +186,7 @@ export default function LandingPage() {
               everything yourself, with state in your project or in your own Postgres. The
               hosted console adds the guided wizard, saved configs and shared workspaces;
               sign-ups are closed during early access, but existing accounts can{' '}
-              <Link href="/login" className="text-foreground underline underline-offset-4">
+              <Link href={appHref('/login')} className="text-foreground underline underline-offset-4">
                 sign in
               </Link>
               .
