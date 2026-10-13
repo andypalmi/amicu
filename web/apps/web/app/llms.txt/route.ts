@@ -17,7 +17,7 @@ const marketing: Array<{ path: string; label: string; note: string }> = [
   {
     path: '/pricing',
     label: 'Pricing',
-    note: 'Community, Pro, Enterprise, and Hosted tiers with the full feature matrix.',
+    note: 'The CLI is free and open source (AGPL-3.0); team and enterprise plans are planned.',
   },
   {
     path: '/providers',
@@ -51,12 +51,14 @@ export function GET() {
 
 > ${appTagline}
 
-${appName} is an open-source (AGPL-3.0) web client. Planning, recommendations,
-policy, and capability logic live in the amicu Rust Management API; the web app
-renders those decisions rather than owning them. Two entry paths: a guided
-"help me choose" wizard, and a direct HCL editor for authoring, validating, and
-planning declarative serving stacks. Residency-aware by design: apply works
-on your own machine and Modal today; other clouds have untested provisioning adapters or planning and residency data only.
+${appName} is a command-line tool for self-hosted LLM inference. You describe
+models, hardware, and deployments in HCL (amicu.hcl). \`amicu validate\` checks
+the configuration, \`amicu plan\` shows a diff against recorded state, and
+\`amicu apply\` runs llama.cpp or vLLM for you, on your own machine or on
+Modal. It is not a hosted service and is not stable yet.
+
+Start with the [Introduction](${absolute('/docs')}) and the
+[Quickstart](${absolute('/docs/quickstart')}).
 
 ## Key pages
 ${marketingLines}
