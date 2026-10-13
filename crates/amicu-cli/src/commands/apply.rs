@@ -250,7 +250,31 @@ fn preflight(result: &PlanResult) -> Result<(), CliError> {
             }
         }
     }
+    let any_modal = result.items.iter().any(|i| {
+        i.launch.as_ref().is_some_and(|l| {
+            dispatch_for(l.runtime, i.action.provider.as_deref()) == Some(Dispatch::Modal)
+        })
+    });
+    if any_modal {
+        require_modal_proxy_token(&amicu_modal::proxy_auth::TokenConfig::from_env())?;
+    }
     Ok(())
+}
+
+/// Modal deployments are verified through the proxy; refuse to deploy without
+/// the proxy token, since an anonymous-only check proves nothing about the
+/// runtime's own key.
+fn require_modal_proxy_token(cfg: &amicu_modal::proxy_auth::TokenConfig) -> Result<(), CliError> {
+    use amicu_modal::proxy_auth::{TOKEN_ID_ENV_VAR, TOKEN_SECRET_ENV_VAR, TokenConfig};
+    if matches!(cfg, TokenConfig::Complete(_)) {
+        return Ok(());
+    }
+    Err(CliError::Message(format!(
+        "Modal deployments need {TOKEN_ID_ENV_VAR} and {TOKEN_SECRET_ENV_VAR} set to valid values \
+         so apply can verify the endpoint's API key through Modal's proxy; set them from your \
+         keychain or shell environment (create a Proxy Auth Token in the Modal dashboard) - \
+         nothing was started"
+    )))
 }
 
 /// Start every actionable deployment, register endpoints, stop removed ones.
@@ -442,26 +466,9 @@ async fn verify_handle(
     } else {
         CheckTiming::LOCAL
     };
-    // A gateway whose credentials are not configured here cannot be passed
-    // through: still prove the endpoint refuses anonymous requests, but the
-    // key itself cannot be exercised from this machine.
-    let gateway = match gateway_headers(&handle.exposure) {
-        Ok(headers) => headers,
-        Err(missing) => {
-            eprintln!(
-                "note: {missing}; verified that the endpoint refuses unauthenticated requests, \
-                 but could not verify the API key works"
-            );
-            return amicu_runtime::exposure::ensure_rejects_unauthenticated(
-                &handle.endpoint,
-                PROBE_PATH,
-                timing.reject_timeout,
-                timing.interval,
-            )
-            .await
-            .map_err(|e| e.detail().to_owned());
-        }
-    };
+    // Fail closed: without the gateway credentials the runtime key cannot be
+    // verified (the preflight normally stops this before anything is deployed).
+    let gateway = gateway_headers(&handle.exposure)?;
     eprintln!(
         "verifying endpoint authentication at {} ...",
         handle.endpoint
@@ -570,6 +577,16 @@ fn report(
     Ok(0)
 }
 
+/// `s` as one single-quoted POSIX shell word (`'` becomes `'\''`).
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// `s` as a double-quoted string literal valid in both JSON and Python.
+fn py_str(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_owned())
+}
+
 /// Whether `name` can be written as a shell `$NAME` variable.
 fn is_shell_ident(name: &str) -> bool {
     !name.is_empty()
@@ -591,6 +608,15 @@ fn usage_snippets(
     use std::fmt::Write as _;
     let base = handle.endpoint.trim_end_matches('/');
     let model = model.unwrap_or("MODEL");
+    // Values interpolated into the shell and Python snippets are escaped for
+    // their context (single-quoted shell word, JSON/Python string literal).
+    let sh_url = sh_quote(&format!("{base}/v1/chat/completions"));
+    let sh_body = sh_quote(&format!(
+        "{{\"model\": {}, \"messages\": [{{\"role\": \"user\", \"content\": \"Hello\"}}]}}",
+        py_str(model)
+    ));
+    let py_base = py_str(&format!("{base}/v1"));
+    let py_model = py_str(model);
     // The variable the key lives in on the caller's machine. A secret name that
     // is not a shell identifier gets a stand-in the caller sets from it.
     let (key_var, key_note) = match api_key {
@@ -626,14 +652,11 @@ fn usage_snippets(
         let _ = writeln!(out, "      note:   {note}");
     }
     let _ = writeln!(out, "      curl:");
-    let _ = writeln!(out, "        curl {base}/v1/chat/completions \\");
+    let _ = writeln!(out, "        curl {sh_url} \\");
     for h in &curl_headers {
         let _ = writeln!(out, "          {h} \\");
     }
-    let _ = writeln!(
-        out,
-        "          -d '{{\"model\": \"{model}\", \"messages\": [{{\"role\": \"user\", \"content\": \"Hello\"}}]}}'"
-    );
+    let _ = writeln!(out, "          -d {sh_body}");
     let _ = writeln!(out, "      python (openai):");
     let _ = writeln!(out, "        import os");
     let _ = writeln!(out, "        from openai import OpenAI");
@@ -644,7 +667,7 @@ fn usage_snippets(
     };
     if proxy_auth {
         let _ = writeln!(out, "        client = OpenAI(");
-        let _ = writeln!(out, "            base_url=\"{base}/v1\",");
+        let _ = writeln!(out, "            base_url={py_base},");
         let _ = writeln!(out, "            api_key={api_key_expr},");
         let _ = writeln!(out, "            default_headers={{");
         let _ = writeln!(
@@ -660,12 +683,12 @@ fn usage_snippets(
     } else {
         let _ = writeln!(
             out,
-            "        client = OpenAI(base_url=\"{base}/v1\", api_key={api_key_expr})"
+            "        client = OpenAI(base_url={py_base}, api_key={api_key_expr})"
         );
     }
     let _ = writeln!(
         out,
-        "        client.chat.completions.create(model=\"{model}\", messages=[{{\"role\": \"user\", \"content\": \"Hello\"}}])"
+        "        client.chat.completions.create(model={py_model}, messages=[{{\"role\": \"user\", \"content\": \"Hello\"}}])"
     );
     out.push('\n');
     out
@@ -1163,6 +1186,28 @@ mod exposure_tests {
             "{text}"
         );
         assert!(text.contains("org/model"), "{text}");
+    }
+
+    #[test]
+    fn modal_without_proxy_tokens_fails_before_deploying() {
+        use amicu_modal::proxy_auth::TokenConfig;
+        let err = super::require_modal_proxy_token(&TokenConfig::None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("MODAL_PROXY_TOKEN_ID"), "{err}");
+        assert!(err.contains("MODAL_PROXY_TOKEN_SECRET"), "{err}");
+        assert!(err.contains("nothing was started"), "{err}");
+        let ok = TokenConfig::from_values(Some("wk-1".into()), Some("ws-1".into()));
+        super::require_modal_proxy_token(&ok).unwrap();
+    }
+
+    #[test]
+    fn snippets_escape_hostile_model_and_url_values() {
+        let h = handle("http://h/'; touch x; '", EndpointExposure::Loopback);
+        let text = usage_snippets(&h, None, Some("m'\"; $(id)"));
+        assert!(text.contains("'\\''"), "{text}");
+        assert!(!text.contains("curl http://h/'; touch"), "{text}");
+        assert!(text.contains("\\\""), "{text}");
     }
 
     #[test]

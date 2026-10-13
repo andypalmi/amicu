@@ -204,6 +204,8 @@ async fn probe(
 
 fn client() -> Result<reqwest::Client, ExposureError> {
     reqwest::Client::builder()
+        // The Bearer key must never be sent through an environment HTTP proxy.
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
         .build()

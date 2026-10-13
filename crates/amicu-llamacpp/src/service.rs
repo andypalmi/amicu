@@ -506,7 +506,14 @@ fn write_private(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), LlamaCppEr
     let mut file = opts
         .open(path)
         .map_err(|e| LlamaCppError::Supervisor(format!("create {}: {e}", path.display())))?;
-    file.write_all(bytes)
-        .map_err(|e| LlamaCppError::Supervisor(format!("write {}: {e}", path.display())))?;
+    if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        // Never leave a partially written secrets file behind.
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(LlamaCppError::Supervisor(format!(
+            "write {}: {e}",
+            path.display()
+        )));
+    }
     Ok(())
 }
