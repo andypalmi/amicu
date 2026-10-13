@@ -168,6 +168,9 @@ struct Progress {
     started: Vec<RuntimeHandle>,
     /// Deployments stopped because they were removed from the config.
     stopped: Vec<DeploymentId>,
+    /// The deployment being started when `apply_all` failed, if any. Its
+    /// state entry is left as it was and may no longer match reality.
+    in_flight: Option<DeploymentId>,
 }
 
 /// The graph to persist after a partial apply: the prior graph, plus each
@@ -183,7 +186,22 @@ fn partial_graph(prior: Option<&Graph>, graph: &Graph, progress: &Progress) -> G
         };
         out.deployments.retain(|x| x.id != d.id);
         out.deployments.push(d.clone());
-        if let Some(m) = graph.models.iter().find(|m| m.id == d.model) {
+        // A model or hardware profile still referenced by a deployment that
+        // was not (re)started keeps its prior definition: change detection
+        // compares the resolved closure, so overwriting it would make that
+        // deployment look unchanged and it would never be re-applied.
+        let shared = |uses: &dyn Fn(&Deployment) -> bool| {
+            prior.is_some_and(|p| {
+                p.deployments.iter().any(|x| {
+                    uses(x)
+                        && !progress.stopped.contains(&x.id)
+                        && !progress.started.iter().any(|s| s.deployment == x.id)
+                })
+            })
+        };
+        if let Some(m) = graph.models.iter().find(|m| m.id == d.model)
+            && !(shared(&|x| x.model == m.id) && out.models.iter().any(|x| x.id == m.id))
+        {
             out.models.retain(|x| x.id != m.id);
             out.models.push(m.clone());
         }
@@ -191,6 +209,8 @@ fn partial_graph(prior: Option<&Graph>, graph: &Graph, progress: &Progress) -> G
             .hardware_profiles
             .iter()
             .find(|x| x.id == d.hardware_profile)
+            && !(shared(&|x| x.hardware_profile == hw.id)
+                && out.hardware_profiles.iter().any(|x| x.id == hw.id))
         {
             out.hardware_profiles.retain(|x| x.id != hw.id);
             out.hardware_profiles.push(hw.clone());
@@ -243,7 +263,14 @@ fn record_partial(
     if !stopped.is_empty() {
         done.push(format!("stopped: {stopped}"));
     }
-    let done = done.join("; ");
+    let mut done = done.join("; ");
+    if let Some(id) = &progress.in_flight {
+        done.push_str(&format!(
+            "; '{id}' failed mid-start, its state entry was left unchanged and may be out of \
+             sync with what is running - check it directly (`launchctl list` / `systemctl \
+             --user list-units` / `modal app list`) before re-running"
+        ));
+    }
     match project.save_state(&state) {
         Ok(()) => CliError::Message(format!(
             "{err}\n\napply stopped part-way; already done and recorded in state ({done}). \
@@ -441,12 +468,14 @@ async fn apply_all(
                 (amicu_runtime::RuntimeKind::LlamaCpp, Dispatch::Host) => &llama_adapter,
                 (amicu_runtime::RuntimeKind::Vllm, Dispatch::Host) => &vllm_adapter,
             };
+            progress.in_flight = Some(item.deployment.clone());
             let handle = adapter.apply(launch, &resolver).await?;
             // Shared post-deploy check, for every adapter: an endpoint that is
             // not protected as declared is torn down and apply fails.
             secure_endpoint(adapter, &handle, launch, dispatch, &resolver).await?;
             registry.register(&handle);
             progress.started.push(handle);
+            progress.in_flight = None;
         } else {
             // Destroy: stop the prior instance if we still hold its handle.
             // Both `host_supervisor()` implementations manage the launchd/
@@ -1038,6 +1067,7 @@ resource "deployment" "beta" {
         let progress = Progress {
             started: vec![handle(&graph, "alpha", "http://alpha")],
             stopped: Vec::new(),
+            in_flight: Some(handle(&graph, "beta", "x").deployment),
         };
         let err = record_partial(
             &project,
@@ -1050,6 +1080,7 @@ resource "deployment" "beta" {
         assert!(err.contains("beta failed to start"), "{err}");
         assert!(err.contains("started: alpha"), "{err}");
         assert!(err.contains("recorded in state"), "{err}");
+        assert!(err.contains("'beta' failed mid-start"), "{err}");
 
         let state = project.load_state().unwrap().expect("state was saved");
         let ids: Vec<_> = state
@@ -1066,6 +1097,49 @@ resource "deployment" "beta" {
         let next = build_plan(&graph, Some(&state.graph)).unwrap();
         let pending: Vec<_> = next.items.iter().map(|i| i.deployment.as_str()).collect();
         assert_eq!(pending, vec!["beta"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shared_model_keeps_its_prior_definition_for_unreached_deployments() {
+        let dir = std::env::temp_dir().join(format!("amicu-partial-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = Project::new(&dir);
+
+        // Prior state: alpha and beta share model m. The config then changes m.
+        let prior_graph = amicu_hcl::parse_graph(CONFIG).unwrap();
+        let prior = crate::project::LocalState {
+            version: crate::project::LocalState::VERSION.to_owned(),
+            graph: prior_graph.clone(),
+            endpoints: vec![
+                handle(&prior_graph, "alpha", "http://old-alpha"),
+                handle(&prior_graph, "beta", "http://old-beta"),
+            ],
+        };
+        let graph = amicu_hcl::parse_graph(&CONFIG.replace("model.gguf", "model-q5.gguf")).unwrap();
+        // alpha was restarted; beta was never reached.
+        let progress = Progress {
+            started: vec![handle(&graph, "alpha", "http://new-alpha")],
+            stopped: Vec::new(),
+            in_flight: None,
+        };
+        record_partial(
+            &project,
+            &graph,
+            Some(&prior),
+            &progress,
+            CliError::Message("boom".to_owned()),
+        );
+        let state = project.load_state().unwrap().unwrap();
+        let next = build_plan(&graph, Some(&state.graph)).unwrap();
+        let mut pending: Vec<_> = next.items.iter().map(|i| i.deployment.as_str()).collect();
+        pending.sort_unstable();
+        assert_eq!(
+            pending,
+            vec!["alpha", "beta"],
+            "beta must not look unchanged"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
