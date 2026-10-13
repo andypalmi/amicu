@@ -132,7 +132,7 @@ export function FeatureLinks({
 }) {
   const items = all ? [...links, all] : links;
   return (
-    <div className={cn(GAP_LINKS, MEASURE)}>
+    <div className={cn(GAP_LINKS, 'w-full')}>
       <p className="mb-3 font-mono text-xs uppercase tracking-wider text-muted-foreground">
         Features
       </p>
