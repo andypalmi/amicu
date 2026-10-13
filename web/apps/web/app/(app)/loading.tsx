@@ -12,8 +12,8 @@ export default function Loading() {
           <div className="h-7 w-48 animate-pulse rounded-md bg-muted" />
           <div className="h-4 w-80 max-w-full animate-pulse rounded-md bg-muted" />
         </div>
-        <div className="h-48 animate-pulse rounded-xl bg-muted" />
-        <div className="h-32 animate-pulse rounded-xl bg-muted" />
+        <div className="h-48 animate-pulse rounded-md bg-muted" />
+        <div className="h-32 animate-pulse rounded-md bg-muted" />
       </div>
     </PageShell>
   );

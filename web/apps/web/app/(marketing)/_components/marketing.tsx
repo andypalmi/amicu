@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
-import { cn } from '@amicu/ui';
+import Link from 'next/link';
+import { Button, cn, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@amicu/ui';
 
 /** Constrained page shell with consistent horizontal padding. */
 export function Container({
@@ -15,28 +16,17 @@ export function Container({
 }
 
 /** Centered page header used at the top of each marketing route. */
-export function PageHeader({
-  eyebrow,
-  title,
-  description,
-}: {
-  eyebrow?: string;
-  title: string;
-  description: string;
-}) {
+export function PageHeader({ title, description }: { title: string; description?: string }) {
   return (
     <header className="mx-auto max-w-3xl text-center">
-      {eyebrow ? (
-        <p className="mb-3 text-sm font-medium text-muted-foreground">
-          {eyebrow}
-        </p>
-      ) : null}
       <h1 className="text-balance text-4xl font-bold tracking-tight sm:text-5xl">
         {title}
       </h1>
-      <p className="mx-auto mt-4 max-w-2xl text-pretty text-lg text-muted-foreground">
-        {description}
-      </p>
+      {description ? (
+        <p className="mx-auto mt-4 max-w-2xl text-pretty text-lg text-muted-foreground">
+          {description}
+        </p>
+      ) : null}
     </header>
   );
 }
@@ -76,5 +66,160 @@ export function Section({
         {children}
       </Container>
     </section>
+  );
+}
+
+/** Left-aligned heading for a section inside a page; `lead` is one short sentence. */
+export function SectionHeader({
+  id,
+  title,
+  lead,
+}: {
+  id?: string;
+  title: string;
+  lead?: string;
+}) {
+  return (
+    <div className="max-w-2xl">
+      <h2
+        id={id}
+        className="scroll-mt-24 text-balance text-3xl font-semibold tracking-tight sm:text-4xl"
+      >
+        {title}
+      </h2>
+      {lead ? <p className="mt-3 text-pretty text-lg text-muted-foreground">{lead}</p> : null}
+    </div>
+  );
+}
+
+/**
+ * Ruled term/detail rows: the one list pattern for outcomes, support facts,
+ * security pillars and providers.
+ */
+export function FactList({
+  items,
+  className,
+}: {
+  items: { term: ReactNode; detail: ReactNode }[];
+  className?: string;
+}) {
+  return (
+    <dl className={cn('border-b border-border', className)}>
+      {items.map((item, i) => (
+        <div
+          key={i}
+          className="grid gap-2 border-t border-border py-6 md:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] md:gap-12"
+        >
+          <dt className="font-medium">{item.term}</dt>
+          <dd className="max-w-prose text-pretty leading-relaxed text-muted-foreground">
+            {item.detail}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/** Bordered figure with a mono caption bar: code files and terminal output. */
+export function CodePanel({
+  caption,
+  children,
+  className,
+}: {
+  caption: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <figure
+      className={cn(
+        'flex min-w-0 flex-col overflow-hidden rounded-md border border-border bg-card',
+        className,
+      )}
+    >
+      <figcaption className="border-b border-border px-5 py-2.5 font-mono text-xs text-muted-foreground">
+        {caption}
+      </figcaption>
+      {children}
+    </figure>
+  );
+}
+
+/** Flat, filled note for a state the reader should know about. */
+export function StatusNote({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <p
+      className={cn(
+        'rounded-md border border-border bg-muted px-4 py-3 text-sm text-muted-foreground',
+        className,
+      )}
+    >
+      {children}
+    </p>
+  );
+}
+
+/** Closing call to action: one short sentence and two actions. */
+export function CTABand({
+  title,
+  lede,
+  primary,
+  secondary,
+}: {
+  title: string;
+  lede?: ReactNode;
+  primary: { label: string; href: string; external?: boolean };
+  secondary?: { label: string; href: string; external?: boolean };
+}) {
+  const action = (a: { label: string; href: string; external?: boolean }, variant?: 'outline') => (
+    <Button asChild size="lg" variant={variant}>
+      {a.external ? <a href={a.href}>{a.label}</a> : <Link href={a.href}>{a.label}</Link>}
+    </Button>
+  );
+  return (
+    <div className="flex flex-col items-start gap-6">
+      <SectionHeader title={title} lead={undefined} />
+      {lede ? <p className="max-w-2xl text-pretty text-lg text-muted-foreground">{lede}</p> : null}
+      <div className="flex flex-wrap items-center gap-3">
+        {action(primary)}
+        {secondary ? action(secondary, 'outline') : null}
+      </div>
+    </div>
+  );
+}
+
+/** Table with a text-plus-glyph status column; never colour alone. */
+export function ComparisonTable({
+  columns,
+  rows,
+}: {
+  columns: string[];
+  rows: ReactNode[][];
+}) {
+  return (
+    <div className="overflow-x-auto rounded-md border border-border">
+      <Table className="min-w-[36rem]">
+        <TableHeader>
+          <TableRow className="bg-muted/40 hover:bg-muted/40">
+            {columns.map((c) => (
+              <TableHead key={c} className="p-4 text-sm font-medium normal-case tracking-normal text-foreground">
+                {c}
+              </TableHead>
+            ))}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {rows.map((row, i) => (
+            <TableRow key={i} className="hover:bg-transparent">
+              {row.map((cell, j) => (
+                <TableCell key={j} className="p-4 align-top text-sm">
+                  {cell}
+                </TableCell>
+              ))}
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
   );
 }

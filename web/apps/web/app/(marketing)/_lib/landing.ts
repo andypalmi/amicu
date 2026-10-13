@@ -76,6 +76,16 @@ export const HERO_PLAN: TermLine[] = [
   { text: '      note:     vllm fit estimate: weights + kv cache only', tone: 'muted' },
 ];
 
+/** `amicu plan` after changing the hero example's region to us-east. */
+export const HERO_PLAN_BLOCKED: TermLine[] = [
+  { text: '$ amicu plan', tone: 'cmd' },
+  { text: 'Cannot plan: configuration has errors.' },
+  {
+    text: "  error [AMICU-POLICY-002] region 'us-east' (us) violates the data residency allowlist",
+    tone: 'error',
+  },
+];
+
 export interface Step {
   /** Anchor-safe id. */
   id: string;
@@ -94,7 +104,10 @@ export const STEPS: Step[] = [
       { text: '$ amicu init', tone: 'cmd' },
       { text: '  create amicu.hcl' },
       { text: '  create variables.amicu.hcl' },
+      { text: '  create .amicu/' },
+      { text: '  create .amicu/config.yaml' },
       { text: '  create .amicu/state/' },
+      { text: '  create .amicu/state/.gitkeep' },
       { text: 'Initialized Amicu project (6 item(s) created).', tone: 'muted' },
     ],
   },
@@ -123,6 +136,9 @@ export const STEPS: Step[] = [
       { text: '      target:   modal (region eu-west)', tone: 'muted' },
       { text: '' },
       { text: 'Apply these changes? [y/N] y' },
+      { text: '' },
+      { text: 'Applied 1 deployment(s):' },
+      { text: '  deployment.chat -> https://<workspace>--amicu-chat-server.<region>.modal.direct', tone: 'muted' },
     ],
   },
   {
@@ -131,8 +147,7 @@ export const STEPS: Step[] = [
     body: 'Check status, logs and metrics from the CLI. Give the tuning engine a metrics snapshot and it compares measured throughput and latency with the plan’s estimates, then suggests changes with the evidence behind each one. Suggestions are advisory: nothing changes until you edit the file and apply.',
     transcript: [
       { text: '$ amicu modal status amicu-chat', tone: 'cmd' },
-      { text: '$ amicu modal logs amicu-chat', tone: 'cmd' },
-      { text: '$ amicu modal metrics amicu-chat', tone: 'cmd' },
+      { text: 'app amicu-chat (ap-…): deployed', tone: 'muted' },
     ],
   },
 ];
@@ -185,7 +200,7 @@ export const SUPPORT: Support[] = [
   },
   {
     label: 'Residency and pricing data',
-    value: 'Region catalogs for Hetzner, OVHcloud, Scaleway, Nebius, RunPod, Modal, AWS, Azure and GCP feed the residency checks and recommendations. Provisioning on those clouds is not shipped yet.',
+    value: 'Region and pricing data for Hetzner, OVHcloud, Scaleway, Nebius, RunPod, Modal, AWS, Azure and GCP feed the residency checks and recommendations. Their adapters are in preview and not wired into apply.',
   },
   {
     label: 'Models',

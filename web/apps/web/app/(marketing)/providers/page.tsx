@@ -1,21 +1,13 @@
 import type { Metadata } from 'next';
-import Link from 'next/link';
-import {
-  Badge,
-  Button,
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from '@amicu/ui';
-import { PageHeader, Section } from '../_components/marketing';
-import { providers } from '../_lib/content';
+import { Check, Minus } from 'lucide-react';
+import { ComparisonTable, CTABand, PageHeader, Section, SectionHeader } from '../_components/marketing';
+import { providerStatusLabel, providers } from '../_lib/content';
 import { pageMetadata } from '../_lib/seo';
 
 export const metadata: Metadata = pageMetadata({
   title: 'Providers',
   description:
-    'Provider-agnostic coverage: Hetzner, OVHcloud, Scaleway, Nebius, RunPod, Modal, AWS, Azure, GCP, and self-hosted / SSH - declare your stack once, run it anywhere. Residency and region are first-class planning inputs.',
+    'Amicu applies to your own machine and Modal today. Hetzner, OVHcloud, Scaleway, Nebius, RunPod, AWS, Azure, GCP and SSH hosts have adapters that are not yet tested live.',
   path: '/providers',
 });
 
@@ -24,51 +16,45 @@ export default function ProvidersPage() {
     <main className="flex flex-1 flex-col">
       <Section size="lg">
         <PageHeader
-          eyebrow="Providers"
-          title="Provider-agnostic coverage, your rules."
-          description="Amicu plans against any provider through one declarative model - EU-native clouds, hyperscaler regions, or your own hardware over SSH. Pin a fully EU-only stack, an air-gapped one, or a cost-optimized multi-cloud one; residency and region are first-class planning inputs."
+          title="Where amicu applies"
+          description="Your machine and Modal are supported. Every other adapter is built but not yet tested live."
         />
 
-        <div className="mt-14 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-          {providers.map((provider) => {
-            return (
-              <Card key={provider.name} className="flex flex-col">
-                <CardHeader className="gap-2">
-                  <div className="flex items-start justify-between gap-3">
-                    <CardTitle className="text-lg">{provider.name}</CardTitle>
-                    {provider.euNative ? (
-                      <Badge variant="secondary">EU-native</Badge>
-                    ) : null}
-                  </div>
-                  <p className="text-sm text-muted-foreground">{provider.kind}</p>
-                </CardHeader>
-                <CardContent className="mt-auto">
-                  <p className="text-xs text-muted-foreground">
-                    Residency
-                  </p>
-                  <p className="mt-1 text-sm">{provider.residency}</p>
-                </CardContent>
-              </Card>
-            );
-          })}
+        <div className="mt-14">
+          <ComparisonTable
+            columns={['Provider', 'Category', 'Residency', 'Status']}
+            rows={providers.map((p) => [
+              <span key="n" className="font-medium">{p.name}</span>,
+              <span key="k" className="text-muted-foreground">{p.kind}</span>,
+              <span key="r" className="text-muted-foreground">{p.residency}</span>,
+              <span key="s" className="inline-flex items-center gap-1.5">
+                {p.status === 'supported' ? (
+                  <Check className="size-4" aria-hidden />
+                ) : (
+                  <Minus className="size-4 text-muted-foreground" aria-hidden />
+                )}
+                {providerStatusLabel[p.status]}
+              </span>,
+            ])}
+          />
+          <p className="mt-3 text-sm text-muted-foreground">
+            Preview: adapter built, not yet tested live, and not wired into apply.
+          </p>
         </div>
 
-        <section className="mt-16 rounded-xl border border-border bg-muted/30 p-8">
-          <h2 className="text-xl font-semibold tracking-tight">
-            Residency → Region → Zone
-          </h2>
-          <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
-            Residency and region are the only required planning inputs. Zone is an
-            optional, adapter-owned third level - resolved region-to-zone for
-            zone-addressed provider APIs, with an advanced override when you need it.
-            Multi-AZ redundancy is an Enterprise HA policy, not a base primitive.
-          </p>
-          <div className="mt-6">
-            <Button asChild variant="outline">
-              <Link href="/docs">Read the regions reference</Link>
-            </Button>
-          </div>
-        </section>
+        <div className="mt-20">
+          <SectionHeader
+            title="Plans check residency and region"
+            lead="Zone is an optional default the adapter picks from the region, and you can override it."
+          />
+        </div>
+
+        <div className="mt-16">
+          <CTABand
+            title="Read the regions reference"
+            primary={{ label: 'Open the docs', href: '/docs' }}
+          />
+        </div>
       </Section>
     </main>
   );

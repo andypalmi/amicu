@@ -3,12 +3,13 @@ import Link from 'next/link';
 import { Button } from '@amicu/ui';
 import { appName, appTagline, siteUrl } from '@/lib/shared';
 import { HclCode, Transcript } from './_components/code';
-import { Container } from './_components/marketing';
+import { CodePanel, Container, CTABand, FactList, SectionHeader, StatusNote } from './_components/marketing';
 import { githubUrl, quickstartUrl } from './_lib/content';
 import {
   GPU_LAUNCH,
   HERO_HCL,
   HERO_PLAN,
+  HERO_PLAN_BLOCKED,
   LAPTOP_LAUNCH,
   OUTCOMES,
   STEPS,
@@ -44,17 +45,6 @@ const jsonLd = {
   sameAs: [githubUrl],
 };
 
-function SectionHeading({ id, title, lead }: { id?: string; title: string; lead?: string }) {
-  return (
-    <div className="max-w-2xl">
-      <h2 id={id} className="scroll-mt-24 text-balance text-3xl font-semibold tracking-tight sm:text-4xl">
-        {title}
-      </h2>
-      {lead ? <p className="mt-4 text-pretty text-lg text-muted-foreground">{lead}</p> : null}
-    </div>
-  );
-}
-
 function PrimaryCtas() {
   return (
     <div className="flex flex-wrap items-center gap-3">
@@ -82,44 +72,45 @@ export default function LandingPage() {
       <section>
         <Container className="pt-16 pb-20 sm:pt-24 sm:pb-28">
           <h1 className="max-w-4xl text-balance text-4xl font-semibold tracking-tight sm:text-6xl sm:leading-[1.05]">
-            Infrastructure as code for teams that serve their own LLMs.
+            Infrastructure as code for self-hosted LLMs.
           </h1>
           <p className="mt-6 max-w-2xl text-pretty text-lg leading-relaxed text-muted-foreground">
-            Describe the model, the hardware and the runtime in one HCL file. Amicu checks
-            that it fits and that your data stays where it is allowed to, shows you the exact
-            plan, then starts llama.cpp or vLLM on your own machine or on Modal GPUs.
+            Describe model, hardware and runtime in one HCL file. Amicu checks fit and data
+            residency, shows the plan, then applies it.
           </p>
           <div className="mt-8 flex flex-col gap-4">
             <PrimaryCtas />
-            <p className="text-sm text-muted-foreground">
+            <StatusNote className="self-start">
               Open source under AGPL-3.0. Hosted sign-ups are closed for now.
-            </p>
+            </StatusNote>
           </div>
 
           <div className="mt-14 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] sm:mt-20">
-            <figure className="min-w-0 overflow-hidden rounded-md border border-border bg-card">
-              <figcaption className="border-b border-border px-5 py-2.5 font-mono text-xs text-muted-foreground">
-                amicu.hcl
-              </figcaption>
+            <CodePanel caption="amicu.hcl">
               <HclCode code={HERO_HCL} className="px-5 py-4" />
-            </figure>
-            <figure className="flex min-w-0 flex-col overflow-hidden rounded-md border border-border bg-card">
-              <figcaption className="border-b border-border px-5 py-2.5 font-mono text-xs text-muted-foreground">
-                terminal
-              </figcaption>
-              <Transcript
-                lines={HERO_PLAN}
-                reveal
-                wrap
-                label="Output of amicu plan for the example file"
-                className="px-5 py-4"
-              />
-              <p className="mt-auto border-t border-border px-5 py-4 text-sm leading-relaxed text-muted-foreground">
-                The data class keeps customer data in the EU. Change the region to{' '}
-                <code className="font-mono text-foreground">us-east</code> and the plan stops
-                with a residency error before anything is started.
-              </p>
-            </figure>
+            </CodePanel>
+            <div className="flex min-w-0 flex-col gap-4">
+              <CodePanel caption="terminal">
+                <Transcript
+                  lines={HERO_PLAN}
+                  reveal
+                  wrap
+                  label="Output of amicu plan for the example file"
+                  className="px-5 py-4"
+                />
+              </CodePanel>
+              <CodePanel caption='with region = "us-east"' className="flex-1">
+                <Transcript
+                  lines={HERO_PLAN_BLOCKED}
+                  wrap
+                  label="Output of amicu plan when the region breaks the residency rule"
+                  className="px-5 py-4"
+                />
+                <p className="mt-auto border-t border-border px-5 py-4 text-sm leading-relaxed text-muted-foreground">
+                  Customer data must stay in the EU, so the plan stops before anything starts.
+                </p>
+              </CodePanel>
+            </div>
           </div>
         </Container>
       </section>
@@ -127,10 +118,10 @@ export default function LandingPage() {
       {/* How it works */}
       <section className="border-t border-border">
         <Container className="py-20 sm:py-28">
-          <SectionHeading
+          <SectionHeader
             id="how-it-works"
             title="How it works"
-            lead="The same loop you already use for the rest of your infrastructure, applied to model serving."
+            lead="Declare, plan, apply, observe."
           />
           <ol className="mt-14">
             {STEPS.map((step, i) => (
@@ -160,53 +151,29 @@ export default function LandingPage() {
       {/* What you get */}
       <section className="border-t border-border">
         <Container className="py-20 sm:py-28">
-          <SectionHeading
+          <SectionHeader
             title="From a laptop to a GPU without rewriting your setup"
-            lead="Prototype with llama.cpp on a MacBook, then point the same workflow at an L4 for vLLM. The plan tells you what will change before it does."
+            lead="Same workflow on a MacBook with llama.cpp and an L4 with vLLM."
           />
           <div className="mt-10 grid gap-4 lg:grid-cols-2">
             <LaunchLine where="On your laptop, llama.cpp" command={LAPTOP_LAUNCH} />
             <LaunchLine where="On Modal in eu-west, vLLM" command={GPU_LAUNCH} />
           </div>
-          <dl className="mt-16">
-            {OUTCOMES.map((o) => (
-              <div
-                key={o.title}
-                className="grid gap-2 border-t border-border py-8 md:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] md:gap-12"
-              >
-                <dt className="text-lg font-semibold tracking-tight">{o.title}</dt>
-                <dd className="max-w-prose text-pretty leading-relaxed text-muted-foreground">
-                  {o.body}
-                </dd>
-              </div>
-            ))}
-          </dl>
+          <FactList className="mt-16" items={OUTCOMES.map((o) => ({ term: o.title, detail: o.body }))} />
         </Container>
       </section>
 
       {/* Where it runs today */}
       <section className="border-t border-border">
         <Container className="py-20 sm:py-28">
-          <SectionHeading
+          <SectionHeader
             id="where-it-runs"
             title="Where it runs today"
-            lead="What ships now, without the roadmap mixed in."
+            lead="What ships now."
           />
-          <dl className="mt-12">
-            {SUPPORT.map((s) => (
-              <div
-                key={s.label}
-                className="grid gap-2 border-t border-border py-6 md:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] md:gap-12"
-              >
-                <dt className="font-medium">{s.label}</dt>
-                <dd className="max-w-prose text-pretty leading-relaxed text-muted-foreground">
-                  {s.value}
-                </dd>
-              </div>
-            ))}
-          </dl>
+          <FactList className="mt-12" items={SUPPORT.map((x) => ({ term: x.label, detail: x.value }))} />
           <p className="mt-6 text-sm text-muted-foreground">
-            Per-provider regions and residency are listed on the{' '}
+            Per-provider status and regions are on the{' '}
             <Link href="/providers" className="text-foreground underline underline-offset-4">
               providers page
             </Link>
@@ -244,22 +211,13 @@ export default function LandingPage() {
 
       {/* Closing CTA */}
       <section className="border-t border-border">
-        <Container className="flex flex-col items-start gap-6 py-20 sm:py-28">
-          <h2 className="max-w-2xl text-balance text-3xl font-semibold tracking-tight sm:text-4xl">
-            Try it on your laptop first.
-          </h2>
-          <p className="max-w-2xl text-pretty text-lg text-muted-foreground">
-            Build the CLI, run <code className="font-mono text-foreground">amicu init</code>,
-            and read the plan for a llama.cpp deployment on your own machine.
-          </p>
-          <div className="flex flex-wrap items-center gap-3">
-            <Button asChild size="lg">
-              <a href={quickstartUrl}>Read the quickstart</a>
-            </Button>
-            <Button asChild size="lg" variant="outline">
-              <a href={githubUrl}>View on GitHub</a>
-            </Button>
-          </div>
+        <Container className="py-20 sm:py-28">
+          <CTABand
+            title="Try it on your laptop first."
+            lede="Build the CLI, run amicu init and read the plan."
+            primary={{ label: 'Read the quickstart', href: quickstartUrl, external: true }}
+            secondary={{ label: 'View on GitHub', href: githubUrl, external: true }}
+          />
         </Container>
       </section>
     </main>

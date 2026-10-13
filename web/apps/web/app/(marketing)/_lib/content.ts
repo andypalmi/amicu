@@ -28,7 +28,8 @@ export interface Tier {
   /** Neutral price label - no invented numbers (RFC §1 non-goal). */
   priceLabel: string;
   description: string;
-  cta: { label: string; href: string };
+  /** `href: null` renders a disabled button (not purchasable yet). */
+  cta: { label: string; href: string | null };
   /** Rendered with visual emphasis. */
   featured?: boolean;
   /** Short bullet summary shown on the tier card. */
@@ -58,7 +59,7 @@ export const tiers: Tier[] = [
     priceLabel: 'Paid',
     description:
       'Everything in Community, plus performance-DB-backed recommendations, performance-DB queries and filtered comparison, and shared team state with locking and roles.',
-    cta: { label: 'Sign in', href: '/login' },
+    cta: { label: 'Sign-ups closed', href: null },
     featured: true,
     highlights: [
       'Advanced perf-DB-backed recommendations',
@@ -210,72 +211,89 @@ export const featureMatrix: FeatureRow[] = [
   },
 ];
 
+export type ProviderStatus = 'supported' | 'preview';
+
 export interface Provider {
   name: string;
   /** Short qualifier shown under the name. */
   kind: string;
+  /**
+   * `supported`: wired into `amicu apply` (this machine, Modal).
+   * `preview`: adapter built and tested against mocks only; not live-tested
+   * and not wired into apply.
+   */
+  status: ProviderStatus;
   /** Residency note for this provider. */
   residency: string;
-  /** True for European-headquartered providers (drives the EU-native badge). */
-  euNative?: boolean;
 }
 
-// Adapter coverage, provider-agnostic: one declarative model spans EU-native
-// providers, the hyperscalers via their regions, and self-hosted/SSH. EU-only is
-// one stack you can pin, alongside air-gapped, cost-optimized, or multi-cloud.
+export const providerStatusLabel: Record<ProviderStatus, string> = {
+  supported: 'Supported',
+  preview: 'Preview',
+};
+
+// Verified against crates/amicu-cli/src/commands/apply.rs (dispatch is local
+// launchd/systemd or Modal) and the catalogs in crates/amicu-providers.
 export const providers: Provider[] = [
   {
-    name: 'Hetzner',
-    kind: 'European cloud & dedicated GPU',
-    residency: 'Germany, Finland',
-    euNative: true,
-  },
-  {
-    name: 'OVHcloud',
-    kind: 'European cloud',
-    residency: 'France & EU regions',
-    euNative: true,
-  },
-  {
-    name: 'Scaleway',
-    kind: 'European cloud & GPU',
-    residency: 'France, Netherlands, Poland',
-    euNative: true,
-  },
-  {
-    name: 'Nebius',
-    kind: 'GPU cloud',
-    residency: 'EU regions (Finland)',
-    euNative: true,
-  },
-  {
-    name: 'RunPod',
-    kind: 'GPU cloud',
-    residency: 'EU region selection',
+    name: 'This machine',
+    kind: 'launchd or systemd service',
+    status: 'supported',
+    residency: 'Wherever the machine is',
   },
   {
     name: 'Modal',
     kind: 'Serverless GPU cloud',
-    residency: 'EU region selection (pin to eu / eu-north)',
+    status: 'supported',
+    residency: 'Region pinning, EU included (for example eu-west)',
+  },
+  { name: 'Hetzner', kind: 'European cloud', status: 'preview', residency: 'Germany, Finland' },
+  {
+    name: 'OVHcloud',
+    kind: 'European cloud',
+    status: 'preview',
+    residency: 'France, Germany, Poland, plus non-EU regions',
+  },
+  {
+    name: 'Scaleway',
+    kind: 'European cloud',
+    status: 'preview',
+    residency: 'France, Netherlands, Poland',
+  },
+  {
+    name: 'Nebius',
+    kind: 'GPU cloud',
+    status: 'preview',
+    residency: 'EU regions, plus a US region',
+  },
+  {
+    name: 'RunPod',
+    kind: 'GPU cloud',
+    status: 'preview',
+    residency: 'EU and EEA data centers, plus US, Canada and APAC',
   },
   {
     name: 'AWS',
     kind: 'Hyperscaler',
-    residency: 'EU regions (Frankfurt, Ireland, Paris, Stockholm…)',
+    status: 'preview',
+    residency: 'Ireland, Frankfurt, Stockholm, Milan, Paris, plus US and APAC',
   },
   {
     name: 'Azure',
     kind: 'Hyperscaler',
-    residency: 'EU regions (West/North Europe, France, Sweden…)',
+    status: 'preview',
+    residency: 'West and North Europe, Germany, Sweden, France, plus UK, US and APAC',
   },
   {
     name: 'GCP',
     kind: 'Hyperscaler',
-    residency: 'EU regions (Belgium, Frankfurt, Finland…)',
+    status: 'preview',
+    residency: 'Belgium, Netherlands, Finland, Frankfurt, Paris, plus US and APAC',
   },
   {
-    name: 'Self-hosted / SSH',
-    kind: 'Your own hardware',
-    residency: 'Wherever you run it - full residency control',
+    name: 'Self-hosted over SSH',
+    kind: 'Hosts you declare',
+    status: 'preview',
+    residency: 'The location you declare for each host',
   },
 ];

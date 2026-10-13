@@ -2,7 +2,6 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Check, Lock, Minus } from 'lucide-react';
 import {
-  Badge,
   Button,
   Card,
   CardContent,
@@ -17,7 +16,7 @@ import {
   TableHeader,
   TableRow,
 } from '@amicu/ui';
-import { PageHeader, Section } from '../_components/marketing';
+import { PageHeader, Section, StatusNote } from '../_components/marketing';
 import {
   type Availability,
   featureMatrix,
@@ -72,7 +71,6 @@ function TierCard({ tier }: { tier: Tier }) {
       <CardHeader className="gap-3">
         <div className="flex items-center justify-between">
           <CardTitle className="text-xl">{tier.name}</CardTitle>
-          {tier.featured ? <Badge>Most popular</Badge> : null}
         </div>
         <p className="text-sm text-muted-foreground">{tier.tagline}</p>
         <p className="text-2xl font-semibold tracking-tight">{tier.priceLabel}</p>
@@ -89,13 +87,15 @@ function TierCard({ tier }: { tier: Tier }) {
         </ul>
       </CardContent>
       <CardFooter>
-        <Button
-          asChild
-          className="w-full"
-          variant={tier.featured ? 'default' : 'outline'}
-        >
-          <Link href={tier.cta.href}>{tier.cta.label}</Link>
-        </Button>
+        {tier.cta.href ? (
+          <Button asChild className="w-full" variant={tier.featured ? 'default' : 'outline'}>
+            <Link href={tier.cta.href}>{tier.cta.label}</Link>
+          </Button>
+        ) : (
+          <Button className="w-full" variant="outline" disabled>
+            {tier.cta.label}
+          </Button>
+        )}
       </CardFooter>
     </Card>
   );
@@ -106,12 +106,15 @@ export default function PricingPage() {
     <main className="flex flex-1 flex-col">
       <Section size="lg">
         <PageHeader
-          eyebrow="Pricing"
           title="One rail, four tiers."
-          description="Everything a single operator needs stays free in Community. Pro adds advanced recommendations and team collaboration; Enterprise adds governance and production scale; Hosted runs it all for you. Tiers are enforced by the API, never by withholding the open-source UI."
+          description="Community is free. Pro, Enterprise and Hosted add team and production features."
         />
 
-        <div className="mt-14 grid gap-6 lg:grid-cols-4">
+        <StatusNote className="mx-auto mt-8 max-w-3xl text-center">
+          Hosted sign-ups are closed for now. Community is open source and free.
+        </StatusNote>
+
+        <div className="mt-10 grid gap-6 lg:grid-cols-4">
           {tiers.map((tier) => (
             <TierCard key={tier.id} tier={tier} />
           ))}
@@ -126,7 +129,7 @@ export default function PricingPage() {
             the action regardless of what the UI shows.
           </p>
 
-          <div className="mt-6 overflow-hidden rounded-xl border border-border">
+          <div className="mt-6 overflow-hidden rounded-md border border-border">
             <Table className="min-w-[720px]">
               <TableHeader>
                 <TableRow className="bg-muted/40 hover:bg-muted/40">
