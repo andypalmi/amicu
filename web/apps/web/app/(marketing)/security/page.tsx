@@ -23,9 +23,9 @@ export const metadata: Metadata = pageMetadata({
   path: '/security',
 });
 
-// Excerpts follow the CLI behaviour documented in content/docs/security and
-// the plan renderer in crates/amicu-cli/src/commands/plan.rs. Update them if
-// either changes.
+// Excerpts (trimmed, not full output) following the CLI behaviour documented
+// in content/docs/security and the plan renderer in
+// crates/amicu-cli/src/commands/plan.rs. Update them if either changes.
 
 const SECRET_HCL = `resource "deployment" "chat" {
   model    = model.qwen.id
@@ -41,30 +41,33 @@ const SECRET_PLAN: TermLine[] = [
   { text: ' ' },
   { text: '  + deployment.chat', tone: 'add' },
   { text: '      action:   create' },
-  { text: '      target:   modal (region eu-west)' },
+  { text: '      hardware: gpu.l4' },
   { text: '      api_key:  ****** (secret "CHAT_API_KEY", resolved at apply)' },
 ];
 
 const ENDPOINT_CHECK: TermLine[] = [
   { text: 'after apply: GET /v1/models', tone: 'cmd' },
   { text: ' ' },
-  { text: '1  no credentials             401 or 403' },
-  { text: '2  gateway credentials only   401 or 403' },
-  { text: '3  Bearer <api_key>           2xx' },
+  { text: '1  no credentials      401/403' },
+  { text: '2  gateway only        401/403' },
+  { text: '3  Bearer <api_key>    2xx' },
   { text: ' ' },
-  { text: 'Open at step 1 or 2: endpoint stopped, apply fails.', tone: 'muted' },
-  { text: 'Cannot be verified: not reported as deployed.', tone: 'muted' },
+  { text: 'Open at 1 or 2: endpoint stopped,', tone: 'muted' },
+  { text: 'apply fails.', tone: 'muted' },
+  { text: 'Unverifiable: not reported as', tone: 'muted' },
+  { text: 'deployed.', tone: 'muted' },
 ];
 
-const LOCAL_HCL = `resource "hardware_profile" "laptop" {
-  provider = "local"  # endpoint binds 127.0.0.1
+const LOCAL_HCL = `resource "hardware_profile" "dev" {
+  # endpoint binds 127.0.0.1
+  provider = "local"
 }
 
 resource "deployment" "chat" {
   model    = model.qwen.id
-  hardware = hardware_profile.laptop.id
+  hardware = hardware_profile.dev.id
   runtime  = "llama_cpp"
-  api_key  = secret("LOCAL_API_KEY")  # optional on loopback
+  api_key  = secret("LOCAL_API_KEY")
 }
 `;
 
@@ -85,14 +88,19 @@ const STATE_CONTENTS: TermLine[] = [
 const NETWORK: TermLine[] = [
   { text: 'connections the CLI makes', tone: 'cmd' },
   { text: ' ' },
-  { text: 'validate fmt init doctor   none', tone: 'muted' },
-  { text: 'plan                       none, or Modal if state' },
-  { text: '                           has a Modal deployment' },
-  { text: 'apply (this machine)       127.0.0.1:<port>' },
-  { text: 'apply (Modal)              api.modal.com:443, then' },
-  { text: '                           your Modal endpoint' },
+  { text: 'validate, fmt, init, doctor', tone: 'muted' },
+  { text: '  none' },
+  { text: 'plan', tone: 'muted' },
+  { text: '  none, or Modal if state holds' },
+  { text: '  a Modal deployment' },
+  { text: 'apply on this machine', tone: 'muted' },
+  { text: '  127.0.0.1:<port>' },
+  { text: 'apply on Modal', tone: 'muted' },
+  { text: '  api.modal.com:443' },
+  { text: '  your Modal endpoint' },
   { text: ' ' },
-  { text: 'No telemetry, analytics or update checks.', tone: 'muted' },
+  { text: 'No telemetry, analytics or update', tone: 'muted' },
+  { text: 'checks.', tone: 'muted' },
 ];
 
 const SECRET_LINKS: FeatureLink[] = [{ label: 'Secrets', href: '/docs/security/secrets' }];
