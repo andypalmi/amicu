@@ -217,6 +217,10 @@ jobs:
       - name: Generated-client drift check
         run: pnpm check:generated
 
+      # Colours come only from tokens.css (also part of `pnpm lint`; run first for a fast, explicit failure).
+      - name: Token-only colours
+        run: pnpm check:colors
+
       - name: Lint
         run: pnpm lint
 

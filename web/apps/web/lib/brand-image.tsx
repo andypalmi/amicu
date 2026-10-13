@@ -1,4 +1,5 @@
 import { ImageResponse } from 'next/og';
+import { tokens } from '@/lib/generated/tokens';
 
 // Square icon PNG for the apple-touch icon and the PWA manifest icons: the
 // lowercase "a" of the typed "amicu" wordmark, set in the same semibold weight
@@ -13,8 +14,8 @@ export function monogramImage(size: number) {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          background: '#0a0a0a',
-          color: '#fafafa',
+          background: tokens.dark.background,
+          color: tokens.dark.foreground,
           fontSize: Math.round(size * 0.72),
           fontWeight: 600,
           lineHeight: 1,

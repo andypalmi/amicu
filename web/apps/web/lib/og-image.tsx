@@ -1,4 +1,5 @@
 import { ImageResponse } from 'next/og';
+import { tokens } from '@/lib/generated/tokens';
 
 export const ogSize = { width: 1200, height: 630 };
 
@@ -14,8 +15,8 @@ export function ogImage() {
           display: 'flex',
           flexDirection: 'column',
           justifyContent: 'space-between',
-          background: '#0a0a0a',
-          color: '#fafafa',
+          background: tokens.dark.background,
+          color: tokens.dark.foreground,
           padding: 72,
         }}
       >
@@ -24,7 +25,7 @@ export function ogImage() {
           <div style={{ fontSize: 76, fontWeight: 700, lineHeight: 1.05, letterSpacing: -2 }}>
             Infrastructure as code for open-weight LLMs.
           </div>
-          <div style={{ fontSize: 30, color: '#a3a3a3' }}>
+          <div style={{ fontSize: 30, color: tokens.dark.mutedForeground }}>
             Describe the model, hardware and runtime in HCL. Plan, then apply.
           </div>
         </div>

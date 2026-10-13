@@ -10,6 +10,18 @@ if [ -n "$common" ] && [ -x "$common/hooks/pre-commit" ]; then
   "$common/hooks/pre-commit" "$@" || exit $?
 fi
 
+# Token-only colours: scan staged web sources (needs only node, no install).
+staged_web=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '^web/(apps|packages)/' || true)
+if [ -n "$staged_web" ] && command -v node >/dev/null 2>&1; then
+  top=$(git rev-parse --show-toplevel) || exit 0
+  echo "pre-commit: checking token-only colours (check:colors)..."
+  # shellcheck disable=SC2086
+  (cd "$top" && node web/scripts/check-colors.mjs $staged_web) || {
+    echo "pre-commit: hard-coded colours found; use the design tokens (web/packages/ui/src/styles/tokens.css) or bypass with 'git commit --no-verify'." >&2
+    exit 1
+  }
+fi
+
 if git diff --cached --name-only | grep -q '^web/'; then
   if ! command -v pnpm >/dev/null 2>&1; then
     echo "pre-commit: pnpm not found, skipping web link check (CI still runs it)." >&2
