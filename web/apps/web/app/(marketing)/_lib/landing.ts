@@ -69,6 +69,17 @@ export const PROVIDER_DIFF: DiffLine[] = [
   { tone: 'ctx', text: '}' },
 ];
 
+/** `amicu plan` for the provider switch above (same `Plan:` block as apply). */
+export const PROVIDER_PLAN: TermLine[] = [
+  { text: '$ amicu plan', tone: 'cmd' },
+  { text: 'Plan: 1 action(s).' },
+  { text: ' ' },
+  { text: '  + deployment.chat', tone: 'add' },
+  { text: '      action:   create' },
+  { text: '      hardware: gpu.l4' },
+  { text: '      target:   modal (region eu-west)' },
+];
+
 /** A governance rule that rejects a region outside the EU. */
 export const RESIDENCY_HCL = `resource "data_class" "customer" {
   residency = ["eu"]

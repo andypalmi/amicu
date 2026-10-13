@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Button, cn } from '@amicu/ui';
@@ -12,7 +13,10 @@ import {
   HomeSection,
   MockWindow,
   ProofLine,
-  StackedWindows,
+  Snapshot,
+  WindowPair,
+  GAP_HEAD,
+  MEASURE,
 } from './_components/home';
 import { githubUrl, providers, quickstartUrl, type ProviderStatus } from './_lib/content';
 import {
@@ -21,6 +25,7 @@ import {
   DEPLOYMENT_HCL,
   POLICY_LINKS,
   PROVIDER_DIFF,
+  PROVIDER_PLAN,
   PROVIDER_SWITCH_LINKS,
   RESIDENCY_HCL,
   RESIDENCY_PLAN,
@@ -78,14 +83,14 @@ export default function LandingPage() {
       />
 
       {/* Hero */}
-      <HomeSection className="flex flex-col items-center text-center sm:min-h-0 min-h-[calc(100svh-4rem)] justify-center">
-        <Headline as="h1" className="max-w-4xl [font-size:clamp(2.75rem,9vw,5.5rem)]">
+      <HomeSection>
+        <Headline as="h1">
           Open-weight LLMs, deployed as code.
         </Headline>
-        <p className="mt-6 font-mono text-sm text-muted-foreground sm:text-base">
+        <p className={cn('mt-6 font-mono text-sm text-muted-foreground sm:text-base', MEASURE)}>
           On your laptop, your servers or a cloud GPU.
         </p>
-        <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+        <div className="mt-8 flex flex-wrap items-center gap-3">
           <Button asChild size="lg">
             <Link href={quickstartUrl}>Get started</Link>
           </Button>
@@ -93,20 +98,20 @@ export default function LandingPage() {
             <a href={githubUrl}>GitHub</a>
           </Button>
         </div>
-        <ApplyDemo className="mt-14 w-full max-w-2xl sm:mt-20" />
+        <ApplyDemo className={GAP_HEAD} />
       </HomeSection>
 
       {/* Describe, apply */}
       <HomeSection id="how-it-works">
         <Headline>Describe a model. Get an endpoint.</Headline>
-        <StackedWindows
-          back={
+        <WindowPair
+          left={
             <MockWindow title="amicu.hcl">
-              <HclCode code={DEPLOYMENT_HCL} className="[&_pre]:px-4 [&_pre]:pt-4 [&_pre]:pb-10" />
+              <HclCode code={DEPLOYMENT_HCL} className="[&_pre]:p-4" />
             </MockWindow>
           }
-          front={
-            <MockWindow title="terminal" className="shadow-sm">
+          right={
+            <MockWindow title="terminal">
               <Transcript
                 lines={APPLY_OUTPUT}
                 wrap
@@ -126,9 +131,26 @@ export default function LandingPage() {
       {/* Target switch */}
       <HomeSection>
         <Headline>Laptop or cloud GPU. Same file.</Headline>
-        <MockWindow title="amicu.hcl" className="mt-12 max-w-2xl sm:mt-16">
-          <DiffBody lines={PROVIDER_DIFF} label="Switching the provider of a hardware profile between a laptop and a cloud GPU" />
-        </MockWindow>
+        <WindowPair
+          left={
+            <MockWindow title="amicu.hcl">
+              <DiffBody
+                lines={PROVIDER_DIFF}
+                label="Switching the provider of a hardware profile between a laptop and a cloud GPU"
+              />
+            </MockWindow>
+          }
+          right={
+            <MockWindow title="terminal">
+              <Transcript
+                lines={PROVIDER_PLAN}
+                wrap
+                label="Output of amicu plan after switching the provider to Modal"
+                className="px-4 py-4"
+              />
+            </MockWindow>
+          }
+        />
         <ProofLine
           lead="Change the provider line to switch targets:"
           rest="your machine or a cloud GPU (Modal)."
@@ -139,14 +161,14 @@ export default function LandingPage() {
       {/* Residency */}
       <HomeSection>
         <Headline>Your data stays where you say.</Headline>
-        <StackedWindows
-          back={
+        <WindowPair
+          left={
             <MockWindow title="amicu.hcl">
-              <HclCode code={RESIDENCY_HCL} className="[&_pre]:px-4 [&_pre]:pt-4 [&_pre]:pb-10" />
+              <HclCode code={RESIDENCY_HCL} className="[&_pre]:p-4" />
             </MockWindow>
           }
-          front={
-            <MockWindow title="terminal" className="shadow-sm">
+          right={
+            <MockWindow title="terminal">
               <Transcript
                 lines={RESIDENCY_PLAN}
                 wrap
@@ -166,32 +188,43 @@ export default function LandingPage() {
       {/* Providers */}
       <HomeSection>
         <Headline>Pick a provider. Change it later.</Headline>
-        <MockWindow title="providers" className="mt-12 max-w-2xl sm:mt-16">
-          <ul className="px-4 font-mono text-sm">
-            {sortedProviders.map((p) => (
-              <li key={p.name} className="border-b border-border last:border-b-0">
-                <Link
-                  href={['/docs/providers', p.slug].join('/')}
-                  className="-mx-4 flex items-center justify-between gap-3 px-4 py-2.5 transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        <Snapshot>
+          <MockWindow title="providers">
+            <ul
+              className="px-4 font-mono text-sm lg:grid lg:grid-flow-col lg:grid-cols-2 lg:gap-x-8 lg:[grid-template-rows:repeat(var(--rows),auto)]"
+              style={{ '--rows': Math.ceil(sortedProviders.length / 2) } as CSSProperties}
+            >
+              {sortedProviders.map((p, i) => (
+                <li
+                  key={p.name}
+                  className={cn(
+                    'border-b border-border last:border-b-0',
+                    (i + 1) % Math.ceil(sortedProviders.length / 2) === 0 && 'lg:border-b-0',
+                  )}
                 >
-                  <span className="min-w-0 truncate">{p.name}</span>
-                  <span
-                    className={cn(
-                      'shrink-0 rounded-full border px-2.5 py-0.5 text-xs',
-                      p.status === 'supported'
-                        ? 'border-transparent bg-foreground text-background'
-                        : p.status === 'preview'
-                          ? 'border-border text-foreground'
-                          : 'border-border text-muted-foreground',
-                    )}
+                  <Link
+                    href={['/docs/providers', p.slug].join('/')}
+                    className="-mx-4 flex items-center justify-between gap-3 px-4 py-2.5 transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                   >
-                    {statusLabel[p.status]}
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </MockWindow>
+                    <span className="min-w-0 truncate">{p.name}</span>
+                    <span
+                      className={cn(
+                        'shrink-0 rounded-full border px-2.5 py-0.5 text-xs',
+                        p.status === 'supported'
+                          ? 'border-transparent bg-foreground text-background'
+                          : p.status === 'preview'
+                            ? 'border-border text-foreground'
+                            : 'border-border text-muted-foreground',
+                      )}
+                    >
+                      {statusLabel[p.status]}
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </MockWindow>
+        </Snapshot>
         <ProofLine
           lead="Apply runs on your machine, on-prem hosts and Modal today."
           rest={`${previewCount} more, such as Hetzner and Scaleway, are in preview.`}
@@ -205,7 +238,7 @@ export default function LandingPage() {
       {/* Built in */}
       <HomeSection>
         <Headline>Built for operators.</Headline>
-        <div className="mt-12 grid gap-4 sm:mt-16 md:grid-cols-3">
+        <div className={cn('grid gap-6 md:grid-cols-3', GAP_HEAD)}>
           {TILES.map((t) => (
             <FeatureTile key={t.title} {...t} />
           ))}
@@ -215,7 +248,7 @@ export default function LandingPage() {
       {/* Closing CTA */}
       <HomeSection className="flex flex-col items-center text-center">
         <Headline>Plan your first deployment.</Headline>
-        <p className="mt-6 font-mono text-sm text-muted-foreground sm:text-base">
+        <p className={cn('mt-6 font-mono text-sm text-muted-foreground sm:text-base', MEASURE)}>
           Open source, AGPL-3.0. No account needed.
         </p>
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">

@@ -25,7 +25,7 @@ export async function HclCode({ code, className }: { code: string; className?: s
   return (
     <div
       className={cn(
-        'font-mono text-[0.8125rem] leading-6 [&_pre]:overflow-x-auto [&_pre]:px-0 [&_pre]:py-3.5 [&_pre]:outline-none [&_pre]:focus-visible:ring-2 [&_pre]:focus-visible:ring-inset [&_pre]:focus-visible:ring-ring',
+        'font-mono text-xs leading-6 sm:text-[0.8125rem] [&_pre]:overflow-x-auto [&_pre]:[scrollbar-width:thin] [&_pre]:[scrollbar-color:var(--color-muted-foreground)_transparent] [&_pre]:px-0 [&_pre]:py-3.5 [&_pre]:outline-none [&_pre]:focus-visible:ring-2 [&_pre]:focus-visible:ring-inset [&_pre]:focus-visible:ring-ring',
         className,
       )}
     >
@@ -65,7 +65,7 @@ export function Transcript({
       tabIndex={0}
       aria-label={label}
       className={cn(
-        'overflow-x-auto px-4 py-3.5 font-mono text-[0.8125rem] leading-6 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
+        'overflow-x-auto [scrollbar-width:thin] [scrollbar-color:var(--color-muted-foreground)_transparent] px-4 py-3.5 font-mono text-xs sm:text-[0.8125rem] leading-6 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
         className,
       )}
     >
@@ -75,7 +75,7 @@ export function Transcript({
             // Lines are static content; index keys are stable.
             key={i}
             className={cn(
-              wrap ? 'block whitespace-pre-wrap break-words' : 'block whitespace-pre',
+              wrap ? 'block whitespace-pre-wrap' : 'block whitespace-pre',
               toneClass[line.tone ?? 'plain'],
               reveal &&
                 'motion-safe:transition-opacity motion-safe:duration-500 motion-safe:ease-out motion-safe:starting:opacity-0',
