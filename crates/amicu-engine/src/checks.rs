@@ -523,6 +523,7 @@ mod vllm_dispatch_tests {
             variants: Vec::new(),
             n_layers: None,
             n_kv_heads: None,
+            n_kv_layers: None,
             head_dim: None,
         }
     }

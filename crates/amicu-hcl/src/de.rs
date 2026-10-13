@@ -78,6 +78,13 @@ pub fn parse_graph(src: &str) -> Result<Graph> {
 
 fn model(name: &str, f: &Fields) -> Result<Model> {
     let src = f.block("source")?;
+    let n_layers = f.opt_positive_u32("n_layers")?;
+    let n_kv_layers = f.opt_positive_u32("n_kv_layers")?;
+    if let (Some(kv), Some(all)) = (n_kv_layers, n_layers)
+        && kv > all
+    {
+        return Err(f.bad("n_kv_layers", "at most `n_layers`"));
+    }
     Ok(Model {
         id: name.into(),
         source: ModelSource {
@@ -109,9 +116,10 @@ fn model(name: &str, f: &Fields) -> Result<Model> {
         // Declared shape metadata feeding the KV-cache estimator
         // (amicu-planning#151) - there is no GGUF header parser in-tree, so
         // these are never derived.
-        n_layers: f.opt_u32("n_layers")?,
-        n_kv_heads: f.opt_u32("n_kv_heads")?,
-        head_dim: f.opt_u32("head_dim")?,
+        n_layers,
+        n_kv_heads: f.opt_positive_u32("n_kv_heads")?,
+        head_dim: f.opt_positive_u32("head_dim")?,
+        n_kv_layers,
     })
 }
 
@@ -583,6 +591,15 @@ impl<'a> Fields<'a> {
 
     fn opt_u32(&self, key: &str) -> Result<Option<u32>> {
         self.attr(key).map_or(Ok(None), |_| self.u32(key).map(Some))
+    }
+
+    /// As [`Fields::opt_u32`], rejecting 0: a zero layer/head count would
+    /// silently zero the KV-cache estimate.
+    fn opt_positive_u32(&self, key: &str) -> Result<Option<u32>> {
+        match self.opt_u32(key)? {
+            Some(0) => Err(self.bad(key, "a positive integer")),
+            v => Ok(v),
+        }
     }
 
     fn opt_i32(&self, key: &str) -> Result<Option<i32>> {

@@ -69,6 +69,7 @@ fn gguf_model(sizes: &[(Quantization, &str, u64)]) -> Model {
             .collect(),
         n_layers: None,
         n_kv_heads: None,
+        n_kv_layers: None,
         head_dim: None,
     }
 }
@@ -343,11 +344,13 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(tag: &str) -> Self {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("amicu-task-007-{tag}-{nanos}"));
+        // Clock nanos alone can collide between parallel tests sharing a tag
+        // (one's Drop then deletes the other's dir); a process-wide counter
+        // makes every dir unique.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("amicu-task-007-{tag}-{}-{n}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }
@@ -1279,6 +1282,35 @@ fn validate_and_plan_launch_compute_kv_cache_when_model_shape_and_cache_type_are
         Some(amicu_core::ByteSize::from_bytes(2_281_701_376))
     );
     assert!(plan.estimate.estimated_memory.bytes() >= 2_281_701_376);
+}
+
+#[test]
+fn kv_cache_counts_only_n_kv_layers_for_hybrid_models() {
+    // 40 layers, 10 full-attention: 4x smaller than the plain-transformer case.
+    let mut model = gguf_model(&[(Quantization::Q4KM, "tiny.Q4_K_M.gguf", 4 * GIB)]);
+    model.n_layers = Some(40);
+    model.n_kv_layers = Some(10);
+    model.n_kv_heads = Some(8);
+    model.head_dim = Some(128);
+    let catalog = MapCatalog::new()
+        .with_model(model, 7_000_000_000)
+        .with_hardware(apple_silicon(16));
+    let adapter = LlamaCppAdapter::new(Box::new(catalog), Box::new(FakeSupervisor::default()));
+    let mut d = deployment();
+    let Runtime::LlamaCpp(s) = &mut d.runtime else {
+        unreachable!("deployment() always builds a llama_cpp runtime");
+    };
+    s.context_length = 32768;
+    s.cache_type_k = Some(amicu_core::resource::KvCacheType::F16);
+    s.cache_type_v = Some(amicu_core::resource::KvCacheType::F16);
+    let plan = adapter.plan_launch(&d).expect("plan");
+    // 32768 * 10 * 8 * 128 * 2 (K+V) * 2 bytes (f16).
+    assert_eq!(
+        plan.estimate.kv_cache,
+        Some(amicu_core::ByteSize::from_bytes(
+            32768 * 10 * 8 * 128 * 2 * 2
+        ))
+    );
 }
 
 #[test]

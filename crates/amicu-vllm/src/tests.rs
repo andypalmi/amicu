@@ -95,6 +95,7 @@ fn safetensors_model() -> Model {
         variants: Vec::new(),
         n_layers: None,
         n_kv_heads: None,
+        n_kv_layers: None,
         head_dim: None,
     }
 }
@@ -407,6 +408,73 @@ fn plan_launch_estimate_combines_weights_and_kv_cache() {
     let plan = a.plan_launch(&deployment(settings)).expect("plan_launch");
     assert!(plan.estimate.kv_cache.is_some());
     assert!(plan.estimate.estimated_memory.bytes() > plan.estimate.kv_cache.unwrap().bytes());
+}
+
+/// A model with a full shape, so `kv_cache_params` yields a KV estimate.
+fn shaped_model() -> Model {
+    let mut model = safetensors_model();
+    model.n_layers = Some(32);
+    model.n_kv_heads = Some(8);
+    model.head_dim = Some(128);
+    model
+}
+
+fn kv_bytes(model: Model, context_length: u32) -> u64 {
+    let mut settings = base_settings();
+    settings.context_length = context_length;
+    let a = adapter(model, gpu_hardware(80, 1), LLAMA_8B);
+    let plan = a.plan_launch(&deployment(settings)).expect("plan_launch");
+    plan.estimate.kv_cache.expect("kv cache estimated").bytes()
+}
+
+#[test]
+fn kv_cache_estimate_scales_with_context() {
+    // 8192 ctx x 32 layers x 8 heads x 128 dim x 2 (K+V) x 2 bytes (auto).
+    assert_eq!(kv_bytes(shaped_model(), 8192), 8192 * 32 * 8 * 128 * 2 * 2);
+    assert_eq!(
+        kv_bytes(shaped_model(), 16384),
+        2 * kv_bytes(shaped_model(), 8192)
+    );
+}
+
+#[test]
+fn hybrid_attention_counts_only_kv_layers() {
+    // 40 layers, but only 10 full-attention ones hold a KV cache.
+    let mut model = shaped_model();
+    model.n_layers = Some(40);
+    model.n_kv_layers = Some(10);
+    assert_eq!(kv_bytes(model, 8192), 8192 * 10 * 8 * 128 * 2 * 2);
+}
+
+#[test]
+fn n_kv_layers_alone_supplies_the_layer_count() {
+    let mut model = shaped_model();
+    model.n_layers = None;
+    model.n_kv_layers = Some(10);
+    assert_eq!(kv_bytes(model, 8192), 8192 * 10 * 8 * 128 * 2 * 2);
+}
+
+#[test]
+fn validate_warns_when_kv_cache_cannot_be_estimated() {
+    let a = adapter(safetensors_model(), gpu_hardware(80, 1), LLAMA_8B);
+    let diags = a.validate(&deployment(base_settings()));
+    let diag = diags
+        .iter()
+        .find(|d| d.code == catalog::CAP_KV_CACHE_NOT_ESTIMATED)
+        .expect("AMICU-CAP-010 warning");
+    assert_eq!(diag.severity, Severity::Warning);
+    assert!(diag.message.contains("kv cache: not estimated"));
+}
+
+#[test]
+fn validate_does_not_warn_when_kv_cache_is_estimated() {
+    let a = adapter(shaped_model(), gpu_hardware(80, 1), LLAMA_8B);
+    let diags = a.validate(&deployment(base_settings()));
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == catalog::CAP_KV_CACHE_NOT_ESTIMATED)
+    );
 }
 
 // ---- capabilities / health --------------------------------------------------

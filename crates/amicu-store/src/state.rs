@@ -783,6 +783,7 @@ mod content_cipher_tests {
                 variants: vec![],
                 n_layers: None,
                 n_kv_heads: None,
+                n_kv_layers: None,
                 head_dim: None,
             }],
             ..Graph::new()

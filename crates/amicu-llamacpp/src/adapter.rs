@@ -264,7 +264,7 @@ fn diagnostic(error: &LlamaCppError) -> Diagnostic {
 /// today's behavior.
 fn kv_cache_params(model: &Model, settings: &LlamaCppSettings) -> Option<KvCacheParams> {
     let (Some(n_layers), Some(n_kv_heads), Some(head_dim)) =
-        (model.n_layers, model.n_kv_heads, model.head_dim)
+        (model.kv_layers(), model.n_kv_heads, model.head_dim)
     else {
         return None;
     };

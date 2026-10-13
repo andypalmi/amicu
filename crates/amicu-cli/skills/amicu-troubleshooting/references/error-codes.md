@@ -26,6 +26,21 @@ signal; the number identifies the specific check.
   Free-form maps (`env {}`, `labels {}`) accept any key.
 - `AMICU-REF-001` - a referenced resource id was not found.
 - `AMICU-CAP-001` - capability mismatch (e.g. runtime cannot serve the artifact).
+- `AMICU-CAP-002` - an `extra_args` flag duplicates a typed field's flag.
+- `AMICU-CAP-003` - an `extra_args` flag or `env` key is denylisted.
+- `AMICU-CAP-004` - info: `extra_args` is non-empty, so the memory/fit verdict
+  is unverified.
+- `AMICU-CAP-005` - a `llama_cpp` block sets both `chat_template` and
+  `chat_template_file`.
+- `AMICU-CAP-006` - warning: the artifact is GGUF but the runtime is vLLM
+  (experimental there).
+- `AMICU-CAP-007` - a `speculative` draft model is the deployment's own
+  primary model.
+- `AMICU-CAP-008` - invalid `scaling {}` values.
+- `AMICU-CAP-009` - `scaling {}` on a provider with no scaling mapping.
+- `AMICU-CAP-010` - warning: vLLM KV cache not estimated because the model
+  lacks `n_layers`/`n_kv_heads`/`head_dim`; the fit check covers weights only.
+  Declare the shape on the model.
 - `AMICU-MEM-001` / `AMICU-MEM-002` - capacity/memory fit failures.
 - `AMICU-POLICY-001` - a governance/residency rule was violated.
 - `AMICU-STATE-001..004` - state lock/drift/read/write problems.

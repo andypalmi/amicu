@@ -51,8 +51,8 @@
   --card-foreground: oklch(0.19 0.004 90);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.19 0.004 90);
-  --primary: oklch(0.64 0.19 42);
-  --primary-foreground: oklch(0.17 0.02 42);
+  --primary: oklch(0.55 0.19 40);
+  --primary-foreground: oklch(0.99 0 0);
   --secondary: oklch(0.945 0.002 90);
   --secondary-foreground: oklch(0.19 0.004 90);
   --muted: oklch(0.945 0.002 90);
@@ -73,7 +73,7 @@
   --code-string: oklch(0.42 0.08 240);
   --border: oklch(0.86 0.003 90);
   --input: oklch(0.86 0.003 90);
-  --ring: oklch(0.58 0.19 42);
+  --ring: oklch(0.55 0.19 40);
 }
 
 .dark {
@@ -84,8 +84,8 @@
   --card-foreground: oklch(0.95 0.003 90);
   --popover: oklch(0.2 0.003 90);
   --popover-foreground: oklch(0.95 0.003 90);
-  --primary: oklch(0.7 0.18 45);
-  --primary-foreground: oklch(0.16 0.02 45);
+  --primary: oklch(0.55 0.19 40);
+  --primary-foreground: oklch(0.99 0 0);
   --secondary: oklch(0.235 0.003 90);
   --secondary-foreground: oklch(0.95 0.003 90);
   --muted: oklch(0.235 0.003 90);
@@ -103,7 +103,7 @@
   --code-string: oklch(0.8 0.07 240);
   --border: oklch(0.32 0.004 90);
   --input: oklch(0.32 0.004 90);
-  --ring: oklch(0.7 0.18 45);
+  --ring: oklch(0.62 0.19 40);
 }
 
 @media (prefers-reduced-motion: reduce) {

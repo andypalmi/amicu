@@ -274,6 +274,9 @@ fn model_block(m: &Model) -> Block {
     if let Some(v) = m.head_dim {
         body = body.add_attribute(("head_dim", v));
     }
+    if let Some(v) = m.n_kv_layers {
+        body = body.add_attribute(("n_kv_layers", v));
+    }
     resource("model", m.id.as_str(), body.build())
 }
 
