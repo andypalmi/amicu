@@ -7,8 +7,9 @@ if [ $? -ne 0 ]; then
   echo "commit-msg: commit blocked, Claude attribution is not allowed in commit messages." >&2
   echo "Removed these lines from the message:" >&2
   printf '%s\n' "$removed" >&2
-  echo "The cleaned message is in .git/COMMIT_EDITMSG. Re-commit with:" >&2
-  echo "  git commit -F .git/COMMIT_EDITMSG    (or: git commit -e -F .git/COMMIT_EDITMSG)" >&2
+  msg="$(git rev-parse --git-dir)/COMMIT_EDITMSG"
+  echo "The cleaned message is in $msg. Re-commit with:" >&2
+  echo "  git commit -F $msg    (or: git commit -e -F $msg)" >&2
   exit 1
 fi
 
