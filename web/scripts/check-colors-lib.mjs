@@ -29,9 +29,9 @@ const SHADE = '50|100|200|300|400|500|600|700|800|900|950';
 const TW_PREFIX =
   'text|bg|border(?:-[xytrblse])?|from|via|to|ring-offset|ring|inset-ring|inset-shadow|drop-shadow|fill|stroke|decoration|outline|shadow|accent|caret|divide|placeholder';
 const COLOR_PROPS =
-  'color|background(?:-color)?|border(?:-(?:top|right|bottom|left|block|inline)(?:-(?:start|end))?)?(?:-color)?|outline(?:-color)?|fill|stroke|stop-color|flood-color|lighting-color|caret-color|accent-color|text-decoration(?:-color)?|text-shadow|box-shadow|column-rule(?:-color)?|scrollbar-color|-webkit-text-fill-color|-webkit-text-stroke(?:-color)?|text-emphasis-color|filter';
+  'color|background(?:-color)?|border(?:-(?:top|right|bottom|left|block|inline)(?:-(?:start|end))?)?(?:-color)?|outline(?:-color)?|fill|stroke|stop-color|flood-color|lighting-color|caret-color|accent-color|text-decoration(?:-color)?|text-shadow|box-shadow|column-rule(?:-color)?|scrollbar-color|-webkit-text-fill-color|-webkit-text-stroke(?:-color)?|text-emphasis-color|filter|--[\\w-]+';
 const JS_KEYS =
-  '\\w*[Cc]olou?r|fill|stroke|background|foreground|fg|bg|border|outline|boxShadow|textShadow|fillStyle|strokeStyle|filter|stop-color|flood-color|lighting-color';
+  '\\w*[Cc]olou?r|fill|stroke|background|foreground|fg|bg|border|outline|boxShadow|textShadow|fillStyle|strokeStyle|filter|stop-color|flood-color|lighting-color|--[\\w-]+';
 
 /** Blank out var()/url()/theme() so token references never count as literals. */
 function stripSafe(s) {
@@ -63,7 +63,7 @@ function balanced(text, open) {
   return text.slice(open + 1, open + 200);
 }
 
-const LITERAL_FN = /(?<![\w-])(rgba?|hsla?|hwb|lab|lch|oklab|oklch|color-mix|color)\(/gi;
+const LITERAL_FN = /(?<![A-Za-z0-9-])(rgba?|hsla?|hwb|lab|lch|oklab|oklch|color-mix|color)\(/gi;
 const COLOR_SPACES = /^(srgb|srgb-linear|display-p3|a98-rgb|prophoto-rgb|rec2020|xyz|xyz-d50|xyz-d65)\b/i;
 
 function fnIsLiteral(name, args) {
@@ -83,13 +83,16 @@ function fnIsLiteral(name, args) {
 }
 
 const ANCHOR_PREFIX =
-  /(?:href|src|action|to|id|for|xlink:href|data-[\w-]+|aria-[\w-]+|url\(|\]\()\s*[=:(]?\s*\{?["'`]?$/i;
+  /(?:(?<![\w-])(?:href|src|action|to|id|for|xlink:href|data-[\w-]+|aria-[\w-]+)|url\(|\]\()\s*[=:(]?\s*\{?["'`]?$/i;
 
 export function findColors(text, filename = 'x.ts') {
   const ext = (filename.match(/\.([a-z0-9]+)$/i)?.[1] ?? '').toLowerCase();
   const isCss = ext === 'css';
   const isProse = ext === 'md' || ext === 'mdx';
   const hits = [];
+  const commentRanges = [...text.matchAll(/\/\*[\s\S]*?\*\/|<!--[\s\S]*?-->/g)].map((c) => [c.index, c.index + c[0].length]);
+  const inComment = (index, lineBefore) =>
+    commentRanges.some(([a, b]) => index >= a && index < b) || /(^|[^:])\/\/|^\s*(#|\*)\s/.test(lineBefore);
   const add = (index, str, rule) => hits.push({ index, text: str, rule });
 
   // 1. Hex (#rgb #rgba #rrggbb #rrggbbaa)
@@ -101,11 +104,10 @@ export function findColors(text, filename = 'x.ts') {
     if (ANCHOR_PREFIX.test(lineBefore)) continue;
     const prev = text[m.index - 1] ?? '';
     if (/^\d+$/.test(digits)) {
-      // Issue refs ("#191") look like all-digit hex: need an unambiguous colour context.
-      const quoted = /["'`[_]/.test(prev);
-      const cssValue = isCss && /[\w-]\s*:\s*$|[(,]\s*$/.test(lineBefore);
-      if (!quoted && !cssValue) continue;
+      // Issue refs ("#191") look like all-digit hex. Exempt them only in prose
+      // (markdown text) and comments; in code strings and CSS values they are colours.
       if (isProse && !/["'`]/.test(prev)) continue;
+      if (inComment(m.index, lineBefore)) continue;
     }
     if (isCss) {
       // `#add { ... }` is an id selector, not a colour.
@@ -136,6 +138,24 @@ export function findColors(text, filename = 'x.ts') {
   for (const m of text.matchAll(js)) {
     const vstart = m.index + m[0].indexOf(m[1]) + 1;
     for (const h of namedHits(m[2])) add(vstart + h.index, h.text, 'named');
+  }
+  // 3c. Colour-name strings inside colour config arrays/objects: colors: ['red'], palette: { a: 'blue' }
+  for (const m of text.matchAll(/(?<![\w-])["']?(?:\w*[Cc]olou?rs?|palette\w*|swatch\w*)["']?\s*[:=]\s*[[{]/g)) {
+    const open = m.index + m[0].length - 1;
+    const close = text[open] === '[' ? ']' : '}';
+    let depth = 0;
+    let end = Math.min(text.length, open + 2000);
+    for (let i = open; i < end; i++) {
+      if (text[i] === text[open]) depth++;
+      else if (text[i] === close && --depth === 0) {
+        end = i;
+        break;
+      }
+    }
+    for (const sm of text.slice(open, end).matchAll(/(["'`])([^"'`\n]*)\1/g)) {
+      const word = sm[2].trim().toLowerCase();
+      if (NAMED_COLORS.has(word)) add(open + sm.index + 1 + sm[2].indexOf(sm[2].trim()), sm[2].trim(), 'named');
+    }
   }
   for (const m of text.matchAll(/addColorStop\(\s*[^,()]+,\s*(["'`])([^"'`]*)\1/g)) {
     const vstart = m.index + m[0].indexOf(m[1]) + 1;

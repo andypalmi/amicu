@@ -55,20 +55,22 @@ export default function GlobalError({
 
 // Built from the design tokens (generated from packages/ui tokens.css, since
 // the app stylesheet is unavailable here). Light + dark via prefers-color-scheme.
-const geVars = (t: typeof tokens.light | typeof tokens.dark) => `
+// Light: primary + its foreground. Dark: the lighter accent-text orange with its
+// dark foreground (keeps the original light-orange-with-dark-text look, AA).
+const geVars = (t: typeof tokens.light | typeof tokens.dark, btn: readonly [string, string]) => `
     --ge-bg: ${t.background};
     --ge-fg: ${t.foreground};
     --ge-card: ${t.card};
     --ge-muted: ${t.mutedForeground};
     --ge-border: ${t.border};
-    --ge-primary: ${t.primary};
-    --ge-primary-fg: ${t.primaryForeground};
+    --ge-primary: ${btn[0]};
+    --ge-primary-fg: ${btn[1]};
     --ge-accent: ${t.accent};`;
 const globalErrorStyles = `
-  :root {${geVars(tokens.light)}
+  :root {${geVars(tokens.light, [tokens.light.primary, tokens.light.primaryForeground])}
   }
   @media (prefers-color-scheme: dark) {
-    :root {${geVars(tokens.dark)}
+    :root {${geVars(tokens.dark, [tokens.dark.accentText, tokens.dark.accentTextForeground])}
     }
   }
   :root { color-scheme: light dark; }

@@ -20,7 +20,10 @@ test('hex in all lengths and contexts', () => {
 });
 
 test('hex false positives', () => {
-  clean('Fixes #191 and see (#217) or Part of andypalmi/amicu-planning#201');
+  clean('Fixes #191 and see (#217) or Part of andypalmi/amicu-planning#201', 'a.md');
+  clean('// TODO(#191): see #123456 and #217', 'a.ts');
+  clean('/* Part of #191 */ .a { margin: 0 }', 'a.css');
+  clean('{/* see #1234 */}');
   clean('See issue #123456 for details', 'a.md');
   clean('<a href="#add">x</a> <a href="/docs#fade">y</a> [t](#dead)');
   clean('&#39; &#x27; &#123;');
@@ -145,4 +148,35 @@ test('reports line and column', () => {
   assert.equal(f.line, 2);
   assert.equal(f.col, 11);
   assert.equal(f.text, '#fff');
+});
+
+test('review fixes: all-digit hex in code strings and CSS values', () => {
+  flagged('.a { border:1px solid #000; }', 'a.css');
+  flagged('.a { box-shadow: 0 0 0 1px #111; }', 'a.css');
+  flagged('.a { color:#000 }', 'a.css');
+  flagged('const s = `x #000`;');
+  flagged('<div style={{boxShadow:"0 0 0 1px #000"}} />');
+  flagged('const c = x ? #123456 : 1;');
+  flagged('const s = "a #123456";');
+  flagged('.a { background: linear-gradient(to right, #111 0%, #222 100%); }', 'a.css');
+  flagged('<rect style="fill: #000" />', 'a.svg');
+});
+
+test('review fixes: underscore-separated Tailwind arbitrary colour functions', () => {
+  flagged('className="shadow-[0_0_0_1px_rgba(0,0,0,.1)]"');
+  flagged('className="shadow-[0_0_0_1px_hsl(0,0%,0%)]"');
+  flagged('className="shadow-[0_0_0_1px_oklch(0.5_0.1_40)]"');
+});
+
+test('review fixes: colour names in custom properties and colour config', () => {
+  flagged('@theme { --color-foo: red; }', 'a.css');
+  flagged('a { --x: white; }', 'a.css');
+  flagged('<div style={{"--x":"red"}} />');
+  flagged("<div style={{ '--x': 'white' }} />");
+  flagged("const chart = { colors: ['red', 'blue'] };");
+  flagged("const chart = { palette: { a: 'steelblue' } };");
+  flagged('{"colors": ["white", "black"]}', 'theme.json');
+  clean('a { --x: var(--foreground); --y: transparent; --z: 4px; }', 'a.css');
+  clean("const chart = { colors: ['var(--primary)', 'var(--accent-text)'] };");
+  clean("const chart = { colors: ['primary', 'chart-1'] };");
 });

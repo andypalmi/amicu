@@ -11,12 +11,13 @@ if [ -n "$common" ] && [ -x "$common/hooks/pre-commit" ]; then
 fi
 
 # Token-only colours: scan staged web sources (needs only node, no install).
-staged_web=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '^web/(apps|packages)/' || true)
-if [ -n "$staged_web" ] && command -v node >/dev/null 2>&1; then
+if command -v node >/dev/null 2>&1 && \
+   [ -n "$(git diff -z --cached --name-only --diff-filter=ACMR -- web/apps web/packages | tr -d '\0')" ]; then
   top=$(git rev-parse --show-toplevel) || exit 0
   echo "pre-commit: checking token-only colours (check:colors)..."
-  # shellcheck disable=SC2086
-  (cd "$top" && node web/scripts/check-colors.mjs $staged_web) || {
+  # NUL-separated so names with spaces / non-ASCII characters are passed intact.
+  (cd "$top" && git diff -z --cached --name-only --diff-filter=ACMR -- web/apps web/packages \
+    | xargs -0 node web/scripts/check-colors.mjs) || {
     echo "pre-commit: hard-coded colours found; use the design tokens (web/packages/ui/src/styles/tokens.css) or bypass with 'git commit --no-verify'." >&2
     exit 1
   }
