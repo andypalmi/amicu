@@ -872,12 +872,45 @@ async fn probe_status(endpoint: &str, authed: bool) -> Option<u16> {
 /// (401/403, other statuses, network errors) is not an exposure.
 async fn unauthenticated_exposure(endpoint: &str) -> Option<String> {
     let code = probe_status(endpoint, false).await?;
-    (200..300).contains(&code).then(|| {
-        format!(
-            "endpoint answered an unauthenticated request ({code}); Modal proxy auth is not \
-             enforced, so the endpoint is open to anyone with its URL"
-        )
-    })
+    (200..300).contains(&code).then(|| exposure_message(code))
+}
+
+fn exposure_message(code: u16) -> String {
+    format!(
+        "endpoint answered an unauthenticated request ({code}); Modal proxy auth is not \
+         enforced, so the endpoint is open to anyone with its URL"
+    )
+}
+
+/// How long [`ensure_not_exposed`] keeps retrying while the proxy gives no
+/// definite answer.
+const EXPOSURE_CHECK_TIMEOUT: Duration = Duration::from_secs(120);
+const EXPOSURE_CHECK_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Blocks until Modal's proxy gives a definite answer to an unauthenticated
+/// request: `401`/`403` means the endpoint is closed (`Ok`); a `2xx` means it is
+/// open to anyone with the URL (`Err`). Anything else (network error, `5xx`
+/// while the container warms up) is retried until `timeout`, then fails closed:
+/// an endpoint whose auth cannot be verified is not reported deployed.
+async fn ensure_not_exposed(
+    endpoint: &str,
+    timeout: Duration,
+    interval: Duration,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match probe_status(endpoint, false).await {
+            Some(code) if (200..300).contains(&code) => return Err(exposure_message(code)),
+            Some(401 | 403) => return Ok(()),
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(
+                "could not verify that the endpoint rejects unauthenticated requests".to_owned(),
+            );
+        }
+        tokio::time::sleep(interval).await;
+    }
 }
 
 /// One-line phase note printed to stderr before the (possibly slow) deploy.
@@ -1007,6 +1040,20 @@ impl ProcessSupervisor for ModalSupervisor {
         let deployed = client.deploy_server(&spec, &mut on_log).await;
         sink.finish();
         let deployment = deployed.map_err(|e| modal_err(&e))?;
+        // Fail closed: never hand back (and so register/print) an endpoint that
+        // answers without proxy auth. Tear the app down instead.
+        if let Err(detail) = ensure_not_exposed(
+            &deployment.url,
+            EXPOSURE_CHECK_TIMEOUT,
+            EXPOSURE_CHECK_INTERVAL,
+        )
+        .await
+        {
+            let _ = client.stop_app(&deployment.app_id).await;
+            return Err(LlamaCppError::Supervisor(format!(
+                "{detail}; the Modal app was stopped"
+            )));
+        }
         Ok(RuntimeHandle {
             id: deployment.app_id,
             deployment: plan.deployment.clone(),
@@ -1391,6 +1438,21 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[tokio::test]
+    async fn ensure_not_exposed_passes_401_and_fails_closed_otherwise() {
+        let t = Duration::from_millis(50);
+        assert!(
+            ensure_not_exposed(&serve_once("401 Unauthorized").await, t, t)
+                .await
+                .is_ok()
+        );
+        let open = ensure_not_exposed(&serve_once("200 OK").await, t, t).await;
+        assert!(open.expect_err("open").contains("unauthenticated"));
+        // Unreachable: unverifiable is a failure, not a pass.
+        let down = ensure_not_exposed("http://127.0.0.1:1", t, t).await;
+        assert!(down.expect_err("down").contains("could not verify"));
     }
 
     // --- reject_local_path_model -----------------------------------------

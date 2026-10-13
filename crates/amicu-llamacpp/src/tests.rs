@@ -1991,6 +1991,59 @@ fn systemd_start_failure_removes_the_env_file() {
 }
 
 #[test]
+fn systemd_stop_removes_the_env_file_even_when_stop_fails() {
+    let dir = TempDir::new("systemd-stop");
+    let mut spec = service_spec();
+    spec.env = vec![("api_key".into(), "v".into())];
+    SystemdManager::new(FakeExec::new(true, ""), &dir.0)
+        .start(&spec)
+        .expect("start");
+    let manager = SystemdManager::new(FakeExec::new(false, ""), &dir.0);
+    assert!(manager.stop(&spec.label).is_err());
+    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+}
+
+#[test]
+fn systemd_env_file_replaces_preexisting_files_and_symlinks() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new("systemd-replace");
+    let mut spec = service_spec();
+    spec.env = vec![("k".into(), "line1\nline2".into())];
+    let file = dir.0.join(format!("{}.env", spec.label));
+    // A pre-existing world-readable file is not reused.
+    std::fs::write(&file, "old").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let manager = SystemdManager::new(FakeExec::new(true, ""), &dir.0);
+    manager.start(&spec).expect("start");
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // A planted symlink is replaced, not followed.
+    let target = dir.file("target");
+    std::fs::write(&target, "untouched").unwrap();
+    std::fs::remove_file(&file).unwrap();
+    std::os::unix::fs::symlink(&target, &file).unwrap();
+    manager.start(&spec).expect("start");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "untouched");
+    // Multi-line values are written raw inside the quotes.
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "k=\"line1\nline2\"\n"
+    );
+}
+
+#[test]
+fn systemd_refuses_to_write_secrets_without_an_absolute_dir() {
+    let mut spec = service_spec();
+    spec.env = vec![("k".into(), "v".into())];
+    let err = SystemdManager::new(FakeExec::new(true, ""), "")
+        .start(&spec)
+        .expect_err("no dir");
+    assert!(err.to_string().contains("HOME"));
+}
+
+#[test]
 fn systemd_state_maps_is_active_output() {
     assert_eq!(
         SystemdManager::new(FakeExec::new(true, "active\n"), "/unused-env-dir")

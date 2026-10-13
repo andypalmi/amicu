@@ -130,7 +130,8 @@ impl LaunchdManager<HostExec> {
     /// Construct with host defaults (`~/Library/LaunchAgents`, `~/Library/Logs/amicu`).
     #[must_use]
     pub fn host() -> Self {
-        let home = home_dir();
+        // Unset HOME leaves the dirs empty; `start` then refuses to write.
+        let home = home_dir().unwrap_or_default();
         Self::new(
             HostExec,
             home.join("Library/LaunchAgents"),
@@ -141,6 +142,7 @@ impl LaunchdManager<HostExec> {
 
 impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
+        require_absolute(&self.agents_dir)?;
         write_private(
             &self.plist_path(&spec.label),
             &self.agents_dir,
@@ -298,7 +300,11 @@ impl SystemdManager<HostExec> {
         let dir = std::env::var_os("XDG_RUNTIME_DIR")
             .filter(|d| !d.is_empty())
             .map_or_else(
-                || home_dir().join(".local/state/amicu/env"),
+                || {
+                    // Unset HOME leaves the dir empty; `start` then refuses to
+                    // write secrets relative to the cwd.
+                    home_dir().map_or_else(PathBuf::new, |h| h.join(".local/state/amicu/env"))
+                },
                 |d| PathBuf::from(d).join("amicu"),
             );
         Self::new(HostExec, dir)
@@ -306,7 +312,9 @@ impl SystemdManager<HostExec> {
 }
 
 /// Render `spec.env` as a systemd `EnvironmentFile`: `KEY="value"` lines with
-/// `\`, `"` and newlines escaped. Keys must be plain identifiers.
+/// `\` and `"` escaped (and `$`/backtick are literal in EnvironmentFile).
+/// Newlines are written raw: inside double quotes systemd follows POSIX rules,
+/// which would keep a `\n` escape as a literal backslash sequence. Keys must be plain identifiers.
 fn environment_file(env: &[(String, String)]) -> Result<String, LlamaCppError> {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -316,11 +324,7 @@ fn environment_file(env: &[(String, String)]) -> Result<String, LlamaCppError> {
                 "invalid environment variable name '{k}'"
             )));
         }
-        let escaped = v
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r");
+        let escaped = v.replace('\\', "\\\\").replace('"', "\\\"");
         let _ = writeln!(out, "{k}=\"{escaped}\"");
     }
     Ok(out)
@@ -335,6 +339,7 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
         let env_path = self.env_path(&spec.label);
         let property;
         if !spec.env.is_empty() {
+            require_absolute(&self.env_dir)?;
             let body = environment_file(&spec.env)?;
             write_private(&env_path, &self.env_dir, body.as_bytes())?;
             property = format!("--property=EnvironmentFile={}", env_path.display());
@@ -375,14 +380,17 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
     }
 
     fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
-        let out = self.exec.exec("systemctl", &["--user", "stop", label])?;
+        let out = self.exec.exec("systemctl", &["--user", "stop", label]);
+        // Always drop the secrets file, even when stop fails (a crashed
+        // `--collect` unit is "not loaded" and its stop errors).
+        remove_env_file(&self.env_path(label));
+        let out = out?;
         if !out.success {
             return Err(LlamaCppError::Supervisor(format!(
                 "systemctl stop failed: {}",
                 out.stderr.trim()
             )));
         }
-        remove_env_file(&self.env_path(label));
         Ok(())
     }
 
@@ -412,25 +420,58 @@ fn remove_env_file(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
-fn home_dir() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from)
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
 }
 
+/// Refuse a relative or empty directory: it means `HOME` was unset, and secrets
+/// must never be written relative to the cwd.
+fn require_absolute(dir: &Path) -> Result<(), LlamaCppError> {
+    if dir.is_absolute() {
+        Ok(())
+    } else {
+        Err(LlamaCppError::Supervisor(
+            "cannot locate a private directory for service files: HOME is not set".to_owned(),
+        ))
+    }
+}
+
+/// Create `dir` (and parents), the leaf owner-only (0700) on unix.
 fn ensure_dir(dir: &Path) -> Result<(), LlamaCppError> {
-    std::fs::create_dir_all(dir)
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(dir)
         .map_err(|e| LlamaCppError::Supervisor(format!("create {}: {e}", dir.display())))
 }
 
-/// Write `bytes` to `path` (creating `dir`), owner-readable only - the plist can
-/// hold `EnvironmentVariables`, so it must not be world-readable.
+/// Write `bytes` to `path` (creating `dir`), owner-readable only - the plist and
+/// env files hold secrets, so they must not be world-readable.
 fn write_private(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), LlamaCppError> {
     use std::io::Write as _;
     ensure_dir(dir)?;
-    // Create 0600 atomically so there is no world/group-readable window; truncate
-    // to overwrite any existing plist. On non-unix, mode() is unavailable but the
-    // rest of this module is unix-only, so a plain create is acceptable there.
+    // Never reuse an existing file or symlink (its mode/owner/target are not
+    // ours): remove it, then create exclusively (`O_EXCL` also refuses to follow
+    // a symlink planted in between) with 0600 so there is no readable window.
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(LlamaCppError::Supervisor(format!(
+                "remove {}: {e}",
+                path.display()
+            )));
+        }
+    }
     let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
