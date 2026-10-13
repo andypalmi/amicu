@@ -7,22 +7,22 @@ Hardware profiles with `provider` set to `local`, `local_apple`, `local_cpu`, or
 
 ## How it runs
 
-`apply` renders the runtime's command line from your `llama_cpp {}` or `vllm {}` block, registers it as a per-user service, and waits for it to answer health checks.
+`apply` renders the runtime's command line from your `llama_cpp {}` or `vllm {}` block, registers it as a per-user service, and waits until the endpoint is ready. If it never becomes ready, apply stops the service and fails.
 
 | OS | Service manager | Details |
 |---|---|---|
-| macOS | launchd | A LaunchAgent plist in `~/Library/LaunchAgents/`, loaded with `launchctl`. Logs go to `~/Library/Logs/amicu/`. |
-| Linux | systemd | A transient `--user` unit started with `systemd-run`. |
+| macOS | launchd | A LaunchAgent plist in `~/Library/LaunchAgents/`, loaded with `launchctl`. It has `RunAtLoad`, so the service starts again when you log in. Logs go to `~/Library/Logs/amicu/`. |
+| Linux | systemd | A transient `--user` unit started with `systemd-run`. It does not survive a reboot or logout; run `amicu apply` again to start it. |
 
-The llama.cpp service label is `io.amicu.llama.<deployment id>`. The server binds to `127.0.0.1` on the `port` you set. The host is not configurable.
+The service label is `io.amicu.llama.<deployment id>`, for both llama.cpp and vLLM deployments. The server binds to `127.0.0.1` on the `port` you set. The host is not configurable.
 
-If a matching service is already running, `apply` reuses it. When you remove a deployment from the configuration, `apply` stops and unloads its service.
+When you change a deployment, `apply` replaces the running service. When you remove a deployment from the configuration, `apply` stops and unloads its service.
 
 ## Requirements
 
-- **llama.cpp runtime:** `llama-server` on `PATH`. Run `amicu doctor` to confirm it is found.
+- **llama.cpp runtime:** `llama-server` on `PATH`. `apply` resolves it to an absolute path and fails if it is not found. Run `amicu doctor` to confirm it is found.
 - **vLLM runtime:** `vllm` on `PATH`. A native single-process vLLM run needs a supported GPU (NVIDIA CUDA, AMD ROCm, or Intel XPU).
-- **Model file:** for llama.cpp, a GGUF file at the path shown in the `launch:` line of `amicu plan` (`models/<model id>/<variant file>`). Amicu does not download model files for local deployments in this version.
+- **Model file:** for llama.cpp, a GGUF file that you download yourself; amicu does not download weights. Put it at `models/<model resource id>/<variant.file>` relative to the project directory, or set `variant.file` to an absolute path. `amicu plan` shows the resolved absolute path in the `launch:` line. See the [Quickstart](/docs/quickstart) for a download command.
 
 ## Example
 
@@ -74,7 +74,7 @@ On Apple Silicon, `n_gpu_layers = -1` offloads every layer to Metal. Lower it, o
 
 ## Endpoint key
 
-A local deployment may omit `api_key`; its endpoint is loopback only. If you set it, `apply` reads the value from the environment variable of that name and passes it to the service as `LLAMA_API_KEY` (llama.cpp) or `VLLM_API_KEY` (vLLM) through a private file, never the command line. After start, amicu confirms anonymous requests are rejected. See [Secrets](/docs/security/secrets).
+A local deployment may omit `api_key`; its endpoint is loopback only. If you set it, `apply` reads the value from the environment variable of that name and passes it to the service as `LLAMA_API_KEY` (llama.cpp) or `VLLM_API_KEY` (vLLM) through a private file, never the command line. After start, amicu confirms anonymous requests are rejected. Without an `api_key`, the endpoint is loopback only and that check is skipped. See [Secrets](/docs/security/secrets).
 
 ```bash
 export LOCAL_API_KEY=$(openssl rand -hex 32)

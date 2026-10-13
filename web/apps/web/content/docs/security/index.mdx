@@ -17,5 +17,5 @@ These pages describe what amicu does with credentials and where data goes. They 
 - Secrets are references (`secret("NAME")`). Values are read from your environment at apply time.
 - Values never appear in HCL, plan output, state, logs, or command-line arguments. They reach the runtime through its environment, in a file readable only by you.
 - Every deployment that is reachable off the machine must have an API key.
-- After every deploy, amicu checks that an anonymous request is refused. If it is not, amicu stops the endpoint and fails the apply.
+- After every deploy that has an `api_key`, or that is reachable off the machine, amicu checks that an anonymous request is refused. If it is not, amicu stops the endpoint and fails the apply. Loopback endpoints without an `api_key` skip the check.
 - The CLI sends no telemetry.

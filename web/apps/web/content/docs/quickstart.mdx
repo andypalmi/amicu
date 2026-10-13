@@ -7,7 +7,7 @@ description: Install amicu, deploy a model on your machine or on Modal, send a r
 
 | Provider | Runtime | Status |
 |---|---|---|
-| This machine (macOS or Linux) | llama.cpp | Supported |
+| This machine (macOS or Linux) | llama.cpp or vLLM | Supported |
 | Modal | llama.cpp or vLLM | Supported |
 | Hetzner, OVHcloud, Scaleway, RunPod, SSH | | Preview: `apply` is not wired up yet |
 | AWS, Azure, GCP, Nebius | | Planned |
@@ -39,15 +39,32 @@ amicu init
 
 ## Path A: this machine (llama.cpp)
 
-Requirements: `llama-server` from llama.cpp on your `PATH`, and a GGUF file for the model. `amicu doctor` reports whether `llama-server` is found.
+Requirements:
 
-The starter `amicu.hcl` describes a Qwen GGUF on Apple Silicon:
+- `llama-server` from llama.cpp on your `PATH` (on macOS, `brew install llama.cpp`). `apply` resolves it to an absolute path and fails with an error if it is not found. `amicu doctor` reports whether it is found.
+- A GGUF file for the model. Amicu does not download it; you do, once.
+
+### Get a GGUF
+
+The model resource id decides where the file goes. This quickstart uses the id `qwen3_8b`, so the file lives at `models/qwen3_8b/<file name>` relative to the project directory (or give an absolute path in `variant.file`). The example below uses `Qwen/Qwen3-8B-GGUF`, file `Qwen3-8B-Q4_K_M.gguf` (about 5 GB):
+
+```bash
+mkdir -p models/qwen3_8b
+curl -L -o models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf \
+  https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf
+```
+
+For gated or private repos, add `-H "Authorization: Bearer $HF_TOKEN"`.
+
+### Configure
+
+`amicu init` writes a starter that points at a placeholder repository. Replace the contents of `amicu.hcl` with this, and edit `hardware_profile` to match your machine:
 
 ```hcl
-resource "model" "starter_chat" {
+resource "model" "qwen3_8b" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen3.5-8B-Instruct"
+    reference = "Qwen/Qwen3-8B-GGUF"
   }
   architecture   = "qwen3"
   modalities     = ["text"]
@@ -55,11 +72,11 @@ resource "model" "starter_chat" {
     format       = "gguf"
     quantization = "q4_k_m"
   }
-  context_length = 100000
+  context_length = 32768
   variant {
     quantization = "q4_k_m"
-    file         = "qwen3.5-8b-instruct-q4_k_m.gguf"
-    size         = "5GiB"
+    file         = "Qwen3-8B-Q4_K_M.gguf"
+    size         = "5027783488"
   }
 }
 
@@ -74,45 +91,42 @@ resource "hardware_profile" "local_dev" {
   memory = "48GiB"
 }
 
-resource "deployment" "starter_chat_local" {
-  model    = model.starter_chat.id
+resource "deployment" "qwen3_local" {
+  model    = model.qwen3_8b.id
   hardware = hardware_profile.local_dev.id
   runtime  = "llama_cpp"
   llama_cpp {
-    context_length = 100000
+    context_length = 8192
     port           = 8000
     n_gpu_layers   = -1
   }
 }
 ```
 
-Edit the hardware profile to match your machine. On Linux without a GPU use `provider = "local_cpu"` with a `cpu {}` block instead; see [Hardware profile](/docs/configuration/hardware-profile).
+`variant.size` is the file size in bytes, written as an integer string (a unit suffix such as `MiB` is also accepted; fractions are not). On Linux without a GPU use `provider = "local_cpu"` with a `cpu {}` block instead; see [Hardware profile](/docs/configuration/hardware-profile).
 
-Validate and plan:
+### Validate, plan, apply
 
 ```bash
 amicu doctor
 amicu validate
 amicu plan
-```
-
-`plan` prints the exact `llama-server` command it will run, including the GGUF path (`models/<model id>/<file>`). Amicu does not download the GGUF for local deployments in this version, so place the file at the path shown in the `launch:` line before you apply.
-
-Apply:
-
-```bash
 amicu apply
 ```
 
-`apply` shows the plan, asks for approval, installs a user service (launchd on macOS, systemd on Linux), and starts it. See [This machine](/docs/providers/local).
+`plan` prints the exact `llama-server` command, including the absolute path of the GGUF and of the binary. `apply` shows the plan, asks for approval, installs a user service (launchd on macOS, systemd on Linux), starts it, and waits until the endpoint answers. If the endpoint does not become ready, apply stops it and fails. See [This machine](/docs/providers/local).
 
-Send a request. The starter deployment has no `api_key`, so no header is needed; the endpoint is bound to `127.0.0.1`.
+### Send a request
+
+The deployment has no `api_key`, so no header is needed; the endpoint is bound to `127.0.0.1`.
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "Qwen/Qwen3.5-8B-Instruct", "messages": [{"role": "user", "content": "Hello"}]}'
+  -d '{"model": "Qwen/Qwen3-8B-GGUF", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
+
+If the request fails, check that the service is running and read its log: on macOS `~/Library/Logs/amicu/`, on Linux `journalctl --user`. A missing or wrong GGUF path is the usual cause; confirm the file exists where the plan's `launch:` line says.
 
 To require a key even locally, add `api_key = secret("LOCAL_API_KEY")` to the deployment and export `LOCAL_API_KEY` before `apply`. See the next path for the request format.
 
@@ -187,6 +201,8 @@ curl "$URL/v1/chat/completions" \
   -H "Content-Type: application/json" \
   -d '{"model": "Qwen/Qwen3-8B", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
+
+`validate` and `plan` print the warning `AMICU-CAP-010` here, because the model does not declare `n_layers`, `n_kv_heads`, and `head_dim`. It is expected: the fit check then covers weights only. Declare the shape on the model to silence it.
 
 A `503` while the container cold-starts is normal. Watch it with `amicu modal logs amicu-chat --follow`.
 

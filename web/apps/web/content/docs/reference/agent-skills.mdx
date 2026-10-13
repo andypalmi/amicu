@@ -17,8 +17,8 @@ amicu skill export --target generic --path ./agent-guidance
 | `claude-code` | `.claude/skills/<skill>/SKILL.md` with `references/` |
 | `cursor` | `.cursor/rules/<skill>/` |
 | `windsurf` | `.windsurf/rules/<skill>/` |
-| `generic` | Plain markdown under `--path` (required) |
+| `generic` | Plain markdown under `./agent-guidance/` |
 
 `--path` overrides the default directory. The command works without a project.
 
-The skills cover core workflow, writing HCL, local llama.cpp, vLLM, model selection, routing and policy, and troubleshooting. Some of them mention commands that are planned but not implemented (`schema`, `capabilities`, `models`, `presets`, `recommend`); those do not exist in the CLI yet.
+Eight skills are exported: core workflow, writing HCL (`amicu-dsl`), local llama.cpp, production vLLM, model selection, routing and policy, presets, and troubleshooting. Some of them mention commands that are planned but not implemented (`schema`, `capabilities`, `models`, `presets`, `recommend`); those do not exist in the CLI yet.

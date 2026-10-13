@@ -138,7 +138,7 @@ The region also selects the proxy region of the web endpoint: `eu`, `eu-west`, `
 
 ## GPU types
 
-Set `accelerator.kind = "gpu"` and `accelerator.model` to one of these. The name is upper-cased and passed to Modal. Only GPU accelerators are valid; `tpu` and `apple_silicon` are rejected before any call.
+Set `accelerator.kind = "gpu"` and `accelerator.model` to one of these. The name is upper-cased and passed to Modal. Only GPU accelerators are valid; `tpu`, `cpu`, and `apple_silicon` are rejected before any call.
 
 | `model` | VRAM | Maximum count |
 |---|---|---|

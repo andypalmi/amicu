@@ -21,7 +21,7 @@ The workflow is the one Terraform users know: configuration is declarative, ever
 - Checks that the model fits the hardware before anything starts.
 - Treats data residency and provider allowlists as resources that `validate` and `plan` enforce.
 - Keeps credentials out of configuration, plans, state, and command lines. See [Secrets](/docs/security/secrets).
-- Verifies after every deploy that the endpoint rejects anonymous requests. See [Endpoint auth](/docs/security/endpoint-auth).
+- Verifies after every deploy that the endpoint rejects anonymous requests (loopback endpoints without an `api_key` skip this check). See [Endpoint auth](/docs/security/endpoint-auth).
 
 ## What it is not
 

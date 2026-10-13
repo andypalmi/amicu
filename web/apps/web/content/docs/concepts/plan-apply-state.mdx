@@ -19,7 +19,7 @@ Amicu works in four steps. Each reads the same configuration; only `apply` chang
 - Syntax and schema checks. Unknown attributes and blocks are errors, with a suggestion for near misses (`AMICU-SCHEMA-003`).
 - Reference checks: every `model.<id>.id`, `hardware_profile.<id>.id` and similar reference must resolve (`AMICU-REF-001`).
 - Capacity checks: the model weights plus KV cache must fit the accelerator or host memory (`AMICU-MEM-*`).
-- Policy checks: residency, provider allowlists, secret handling, and endpoint API keys (`AMICU-POLICY-*`).
+- Policy checks: residency, provider allowlists, secret handling, and endpoint API keys (`AMICU-POLICY-*`). Budgets are recorded but not enforced.
 
 Only diagnostics with severity `error` fail the command (exit code 1). Warnings and info diagnostics are printed but do not fail it. `--output json` emits a stable report.
 
@@ -31,7 +31,6 @@ Only diagnostics with severity `error` fail the command (exit code 1). Warnings 
 |---|---|
 | `create` | The deployment does not exist yet. |
 | `update` | The deployment exists and a setting changed. |
-| `replace` | The deployment is destroyed and recreated. |
 | `destroy` | The deployment is no longer in the configuration. |
 
 For each deployment the plan shows the hardware, the provider, the model artifact, the exact launch command, and notes such as the estimated peak memory. Secret-designated fields show as `******`. A plan never reads secret values.

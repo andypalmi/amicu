@@ -28,7 +28,7 @@ There is no `destroy` command. To remove a deployment, delete its resource from 
 
 | Command | Description |
 |---|---|
-| `amicu skill export --target <target> [--path <dir>]` | Write agent skills. Targets: `claude-code`, `cursor`, `windsurf`, `generic`. `--path` overrides the default directory and is required for `generic`. |
+| `amicu skill export --target <target> [--path <dir>]` | Write agent skills. Targets: `claude-code`, `cursor`, `windsurf`, `generic`. `--path` overrides the default directory. The `generic` target defaults to `./agent-guidance/`. |
 
 See [Agent skills](/docs/reference/agent-skills).
 
@@ -52,12 +52,15 @@ These read `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` from the environment, never
 | `1` | Error-severity diagnostics, `fmt --check` drift, or a missing Modal app |
 | non-zero with an `error:` line | Operational failure such as an I/O or parse error |
 
+`amicu doctor` also exits `1` when a check has status `fail` (a `warn` does not).
+
 ## JSON output
 
-`validate`, `plan`, `apply`, and `doctor` accept `--output json`. `validate` and `plan` emit a diagnostic report:
+`validate`, `plan`, `apply`, and `doctor` accept `--output json`.
 
-```json
-{ "version": "v1", "valid": true, "diagnostics": [] }
-```
+- `validate` emits a diagnostic report: `{ "version": "v1", "valid": true, "diagnostics": [] }`. A `plan` that fails on errors emits the same shape.
+- A successful `plan` emits the plan: `{ "version": "v1", "actions": [...] }`.
+- `doctor` emits `{ "version": "v1", "ok": true, "checks": [...] }`.
+- With `apply --output json`, stdout carries only the resulting endpoint handles; the plan preview and approval prompt go to stderr.
 
-Each diagnostic has a `code`, a `severity`, and a `message`. `doctor` emits `{ "version": "v1", "ok": true, "checks": [...] }`. With `apply --output json`, stdout carries only the resulting endpoint handles; the plan preview and approval prompt go to stderr. See [Error codes](/docs/reference/error-codes).
+Each diagnostic has a `code`, a `severity`, and a `message`. See [Error codes](/docs/reference/error-codes).

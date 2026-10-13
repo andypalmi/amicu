@@ -9,7 +9,8 @@ The amicu CLI sends no telemetry, analytics, crash reports, or update checks. Th
 
 | When | Destination | What is sent |
 |---|---|---|
-| `validate`, `plan`, `fmt`, `init`, `doctor`, `skill export` | None | Nothing. These commands are offline. Provider region and GPU catalogs are compiled in. |
+| `validate`, `fmt`, `init`, `doctor`, `skill export` | None | Nothing. These commands are offline. Provider region and GPU catalogs are compiled in. |
+| `plan` | None, unless state records a Modal deployment | Offline for local-only projects. If state holds a Modal deployment, `plan` first asks Modal whether the app still exists (see the Modal row below). |
 | `apply` on this machine | `127.0.0.1:<port>` | Health probes and the endpoint auth check (`GET /v1/models`) to the service amicu just started. If you set an `api_key`, the check sends it as a Bearer header to that loopback address. |
 | `apply`, `plan`, `amicu modal ...` when Modal is involved | `api.modal.com:443` (gRPC over TLS) | Your Modal token pair for authentication, and the app, image, and function definitions needed to deploy: image build steps, the launch command, GPU and region request, and a Modal Secret holding the endpoint API key (and `HF_TOKEN` if set). `plan` and `apply` also look up whether recorded apps still exist whenever state contains a Modal deployment. |
 | `apply` on Modal | The deployment's Modal URL | The endpoint auth check, and the proxy token headers (`Modal-Key`, `Modal-Secret`). |

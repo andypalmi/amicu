@@ -61,8 +61,8 @@ resource "model" "chat_prod" {
 | `variant` | block, repeatable | no | A concrete GGUF file; one per quantization you intend to serve |
 | `variant.quantization` | string | yes | Quantization of this file |
 | `variant.file` | string | yes | File name |
-| `variant.size` | size string | no | File size, for example `"4GiB"`. On Modal it must be an integer byte size such as `"8350MiB"`. |
-| `variant.sha256` | string | no | 64 hex characters. Checked against the resolved artifact before a download. |
+| `variant.size` | size string | no | File size as an integer with an optional unit, for example `"4GiB"` or `"8350MiB"`. Fractions such as `"4.5GiB"` are not accepted. |
+| `variant.sha256` | string | no | 64 hex characters. Parsed and stored; not checked yet, because amicu does not download weights. |
 | `n_layers` | number | no | Transformer layers. Feeds the KV-cache estimate. |
 | `n_kv_heads` | number | no | Key/value heads. Feeds the KV-cache estimate. |
 | `head_dim` | number | no | Attention head dimension. Feeds the KV-cache estimate. |

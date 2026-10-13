@@ -47,7 +47,7 @@ resource "model" "starter_chat" {
 - **Attributes** are `name = value`. Strings are quoted, lists use brackets, numbers and booleans are bare.
 - **References** are `<kind>.<id>.id`. See [Resources and references](/docs/concepts/resources).
 - **Secrets** are `secret("NAME")`. See [Secrets](/docs/security/secrets).
-- **Sizes** are strings with a unit: `"48GiB"`, `"8350MiB"`, `"16GB"`. Binary units (`KiB`, `MiB`, `GiB`, `TiB`) use powers of 1024; decimal units (`KB`, `MB`, `GB`, `TB`) use powers of 1000. A bare number is bytes.
+- **Sizes** are strings with a unit: `"48GiB"`, `"8350MiB"`, `"16GB"`. Binary units (`KiB`, `MiB`, `GiB`, `TiB`) use powers of 1024; decimal units (`KB`, `MB`, `GB`, `TB`) use powers of 1000. A bare number is bytes. Values must be integers; `"4.5GiB"` is not accepted.
 - **Money** is a block: `limit { amount = 2000  currency = "EUR" }`.
 - **Unknown keys are errors.** A misspelled attribute or block fails with `AMICU-SCHEMA-003` and a suggestion. The free-form maps `env {}` and `labels {}` accept any key.
 - **Variables.** `variables.amicu.hcl` is reserved; there is no variable syntax yet, and `secret(...)` is the only function.

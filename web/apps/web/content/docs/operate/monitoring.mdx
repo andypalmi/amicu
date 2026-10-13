@@ -19,7 +19,7 @@ Local deployments are user services.
 - macOS: logs are written under `~/Library/Logs/amicu/`. Inspect the service with `launchctl list` and the plist in `~/Library/LaunchAgents/`.
 - Linux: the service is a transient systemd user unit. Use `systemctl --user status <label>` and the user journal.
 
-The label is `io.amicu.llama.<deployment id>` for llama.cpp. Both runtimes expose `GET /health` and `GET /v1/models` on the port you set. llama.cpp's `/health` is open by design even when an API key is set; `/v1/models` needs the key.
+The label is `io.amicu.llama.<deployment id>`, for both llama.cpp and vLLM deployments. Both runtimes expose `GET /health` and `GET /v1/models` on the port you set. llama.cpp's `/health` is open by design even when an API key is set; `/v1/models` needs the key.
 
 llama-server serves Prometheus metrics at `/metrics` because amicu adds `--metrics`.
 
@@ -35,7 +35,7 @@ The `amicu modal` commands work without a project directory. They read `MODAL_TO
 | `amicu modal metrics <app> [--watch] [--interval N]` | Runtime and hardware snapshot |
 | `amicu modal stop <app>` | Stops the app. Inside a project it also removes the deployment from local state. |
 
-`logs` without `--follow` makes one call held open for about 5 seconds, then returns. `--follow` streams until the app ends or you press Ctrl-C. `--since` resumes just past a log entry id.
+`logs` without `--follow` prints the logs available now, then returns. `--follow` streams until the app ends or you press Ctrl-C. `--since` resumes just past a log entry id.
 
 A missing app prints `no deployment named <app>` and exits 1.
 

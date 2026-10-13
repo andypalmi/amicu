@@ -41,7 +41,7 @@ Diagnostics have the form `AMICU-<CATEGORY>-<NNN>`. The category is the fastest 
 
 | Code | Severity | Meaning | Fix |
 |---|---|---|---|
-| `AMICU-CAP-001` | error | The runtime cannot serve the artifact (llama.cpp needs GGUF), or a checksum mismatch | Change the runtime or artifact, or fix `variant.sha256` |
+| `AMICU-CAP-001` | error | The runtime cannot serve the artifact (llama.cpp needs GGUF) | Change the runtime or artifact |
 | `AMICU-CAP-002` | error | An `extra_args` flag duplicates a typed field's flag | Use the typed field |
 | `AMICU-CAP-003` | error | An `extra_args` flag or `env` key is denylisted | Remove it. Use `api_key` for keys. |
 | `AMICU-CAP-004` | info | `extra_args` is non-empty, so the memory fit result is unverified | Check real memory use |
@@ -63,7 +63,6 @@ Diagnostics have the form `AMICU-<CATEGORY>-<NNN>`. The category is the fastest 
 
 | Code | Severity | Meaning | Fix |
 |---|---|---|---|
-| `AMICU-POLICY-001` | error | A deployment exceeds a configured budget | Adjust the stack or the budget |
 | `AMICU-POLICY-002` | error | A region violates the residency or allowed-regions policy, or a deny rule. Also reported when a `secret("NAME")` variable is not set at apply time. | Change the region, or set the environment variable named in the message |
 | `AMICU-POLICY-003` | error | A provider is not allowed, or is denied | Change the provider or the rule |
 | `AMICU-POLICY-004` | error | A secret-designated field was given as a literal | Use `secret("NAME")` |
@@ -71,11 +70,21 @@ Diagnostics have the form `AMICU-<CATEGORY>-<NNN>`. The category is the fastest 
 | `AMICU-POLICY-006` | warning | A runtime `env` value looks like a secret | Use a `secret(...)` reference |
 | `AMICU-POLICY-007` | error | An off-machine deployment has no `api_key` | Add `api_key = secret("NAME")` and export `NAME` |
 | `AMICU-POLICY-008` | error | The resolved key is unusable: empty, or has a comma, whitespace, or non-ASCII characters | Regenerate it, for example `openssl rand -hex 32` |
-| `AMICU-POLICY-010` | error | A referenced secret is unavailable | Provide the secret in the secret backend |
-| `AMICU-POLICY-011` | error | The secret backend does not support the requested operation | Use a supported operation or backend |
-| `AMICU-POLICY-012` | error | The secret backend failed transiently | Retry |
 
-## STATE
+## Not emitted by the CLI
+
+`AMICU-POLICY-001` (budget exceeded) is defined but budgets are not enforced. These codes exist in the shared catalog and in the server and provider libraries. The `amicu` CLI does not emit them today; they are listed so you can recognize them in server output. The CLI reports state-lock and provider failures as plain `error:` messages instead.
+
+### POLICY
+
+| Code | Severity | Meaning |
+|---|---|---|
+| `AMICU-POLICY-001` | error | A deployment exceeds a configured budget |
+| `AMICU-POLICY-010` | error | A referenced secret is unavailable |
+| `AMICU-POLICY-011` | error | The secret backend does not support the requested operation |
+| `AMICU-POLICY-012` | error | The secret backend failed transiently |
+
+### STATE
 
 | Code | Severity | Meaning | Fix |
 |---|---|---|---|
@@ -85,7 +94,7 @@ Diagnostics have the form `AMICU-<CATEGORY>-<NNN>`. The category is the fastest 
 | `AMICU-STATE-004` | error | The requested history version does not exist | Pick an existing version |
 | `AMICU-STATE-005` | error | The state backend's storage failed (connectivity, driver) | Check the backend and retry |
 
-## PROVIDER
+### PROVIDER
 
 | Code | Severity | Meaning | Fix |
 |---|---|---|---|

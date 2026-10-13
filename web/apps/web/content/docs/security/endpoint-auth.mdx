@@ -1,6 +1,6 @@
 ---
 title: Endpoint auth
-description: How amicu verifies, after every deploy, that an endpoint rejects anonymous requests and accepts its key.
+description: How amicu verifies, after each keyed or public deploy, that an endpoint rejects anonymous requests and accepts its key.
 ---
 
 A running inference server that accepts anonymous requests is a free GPU for anyone who finds the URL. Amicu does not trust that the key is enforced; it tests.
@@ -17,11 +17,11 @@ After `apply` starts an endpoint, it sends requests to `GET /v1/models`. This ro
 
 - A `2xx` at step 1 or 2 means the endpoint is open. Amicu stops it and fails the apply. If the stop itself fails, the error names the command to run by hand.
 - Any other answer to steps 1 and 2 (connection refused, `404`, `5xx` while the server warms up) is retried, then fails closed: an endpoint whose protection cannot be verified is not reported as deployed.
-- Step 3 retries while the model is still loading (`503`).
+- Step 3 retries while the model is still loading (`503`). A `401` or `403` with the correct key fails immediately (`endpoint rejected the configured API key`) with no retry.
 - Retry windows: remote endpoints up to 2 minutes for steps 1 and 2 and 10 minutes for step 3; local endpoints up to 15 minutes each.
 - The request goes straight to the endpoint: no environment HTTP proxy is used, and redirects are not followed, so the key is never sent anywhere else.
 
-Loopback endpoints with no `api_key` skip the check.
+Loopback endpoints with no `api_key` skip the check; there is nothing to protect and the endpoint is not reachable off the machine.
 
 ## Modal fails closed
 
