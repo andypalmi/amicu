@@ -210,6 +210,22 @@ export const featureMatrix: FeatureRow[] = [
 
 export type ProviderStatus = 'supported' | 'preview' | 'planned';
 
+export const PROVIDER_STATUS_ORDER: ProviderStatus[] = ['supported', 'preview', 'planned'];
+
+export const PROVIDER_STATUS_LABEL: Record<ProviderStatus, string> = {
+  supported: 'Supported',
+  preview: 'Preview',
+  planned: 'Planned',
+};
+
+/** What each status means, shown under its heading on the registry list. */
+export const PROVIDER_STATUS_NOTE: Record<ProviderStatus, string> = {
+  supported:
+    'Wired into amicu apply: this machine (local, local_apple, local_cpu, on_prem) and Modal. Modal is the only one tested end to end.',
+  preview: 'An adapter exists and is tested against mocks. Not wired into apply.',
+  planned: 'No adapter yet. Region and GPU catalog data only.',
+};
+
 export interface Provider {
   /** Docs page: `/docs/providers/<slug>`. */
   slug: string;

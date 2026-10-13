@@ -1,13 +1,12 @@
 import type { ReactNode } from 'react';
-import { providers } from '@/app/(marketing)/_lib/content';
-import { StatusPill } from './status-pill';
+import { PROVIDER_STATUS_LABEL, providers } from '@/app/(marketing)/_lib/content';
 
 /** Header facts for a provider docs page: status, kind, ids, regions. */
 export function ProviderFacts({ slug, ids }: { slug: string; ids: string }) {
   const p = providers.find((x) => x.slug === slug);
   if (!p) throw new Error(`ProviderFacts: unknown provider slug "${slug}"`);
   const rows: [string, ReactNode][] = [
-    ['Status', <StatusPill key="s" status={p.status} />],
+    ['Status', PROVIDER_STATUS_LABEL[p.status]],
     ['Kind', p.kind],
     ['Provider id', <code key="i">{ids}</code>],
     ['Regions and residency', p.residency],
