@@ -215,7 +215,7 @@ export type ProviderStatus = 'supported' | 'preview';
 
 export interface Provider {
   name: string;
-  /** Short qualifier shown under the name. */
+  /** Category (preview providers are grouped by it) or a one-line description. */
   kind: string;
   /**
    * `supported`: wired into `amicu apply` (this machine, Modal).
@@ -226,11 +226,6 @@ export interface Provider {
   /** Residency note for this provider. */
   residency: string;
 }
-
-export const providerStatusLabel: Record<ProviderStatus, string> = {
-  supported: 'Supported',
-  preview: 'Preview',
-};
 
 // Verified against crates/amicu-cli/src/commands/apply.rs (dispatch is local
 // launchd/systemd or Modal) and the catalogs in crates/amicu-providers.
@@ -292,7 +287,7 @@ export const providers: Provider[] = [
   },
   {
     name: 'Self-hosted over SSH',
-    kind: 'Hosts you declare',
+    kind: 'Self-hosted',
     status: 'preview',
     residency: 'The location you declare for each host',
   },

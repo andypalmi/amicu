@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import Link from 'next/link';
-import { Button, cn, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@amicu/ui';
+import { Button, cn } from '@amicu/ui';
 
 /** Constrained page shell with consistent horizontal padding. */
 export function Container({
@@ -188,38 +188,39 @@ export function CTABand({
   );
 }
 
-/** Table with a text-plus-glyph status column; never colour alone. */
-export function ComparisonTable({
-  columns,
-  rows,
+/**
+ * A titled group of name/note entries that reflows into columns. The group
+ * heading carries the meaning, so entries need no per-row badge.
+ */
+export function GroupedList({
+  title,
+  note,
+  groups,
 }: {
-  columns: string[];
-  rows: ReactNode[][];
+  title: string;
+  note?: string;
+  groups: { label?: string; entries: { name: string; note: string; detail?: string }[] }[];
 }) {
   return (
-    <div className="overflow-x-auto rounded-md border border-border">
-      <Table className="min-w-[36rem]">
-        <TableHeader>
-          <TableRow className="bg-muted/40 hover:bg-muted/40">
-            {columns.map((c) => (
-              <TableHead key={c} className="p-4 text-sm font-medium normal-case tracking-normal text-foreground">
-                {c}
-              </TableHead>
-            ))}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((row, i) => (
-            <TableRow key={i} className="hover:bg-transparent">
-              {row.map((cell, j) => (
-                <TableCell key={j} className="p-4 align-top text-sm">
-                  {cell}
-                </TableCell>
+    <section className="border-t border-border pt-8 first:border-t-0 first:pt-0">
+      <h2 className="text-2xl font-semibold tracking-tight">{title}</h2>
+      {note ? <p className="mt-2 text-muted-foreground">{note}</p> : null}
+      <div className="mt-6 space-y-8">
+        {groups.map((g) => (
+          <div key={g.label ?? title}>
+            {g.label ? <h3 className="mb-3 text-sm text-muted-foreground">{g.label}</h3> : null}
+            <ul className="grid gap-x-10 gap-y-5 sm:grid-cols-2 lg:grid-cols-3">
+              {g.entries.map((e) => (
+                <li key={e.name} className="min-w-0">
+                  <p className="font-medium">{e.name}</p>
+                  {e.detail ? <p className="text-sm">{e.detail}</p> : null}
+                  <p className="text-sm text-muted-foreground">{e.note}</p>
+                </li>
               ))}
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
+            </ul>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }

@@ -1,7 +1,6 @@
 import type { Metadata } from 'next';
-import { Check, Minus } from 'lucide-react';
-import { ComparisonTable, CTABand, PageHeader, Section, SectionHeader } from '../_components/marketing';
-import { providerStatusLabel, providers } from '../_lib/content';
+import { CTABand, GroupedList, PageHeader, Section, SectionHeader } from '../_components/marketing';
+import { providers } from '../_lib/content';
 import { pageMetadata } from '../_lib/seo';
 
 export const metadata: Metadata = pageMetadata({
@@ -11,7 +10,11 @@ export const metadata: Metadata = pageMetadata({
   path: '/providers',
 });
 
+const CATEGORIES = ['European cloud', 'GPU cloud', 'Hyperscaler', 'Self-hosted'];
+
 export default function ProvidersPage() {
+  const supported = providers.filter((p) => p.status === 'supported');
+  const preview = providers.filter((p) => p.status === 'preview');
   return (
     <main className="flex flex-1 flex-col">
       <Section size="lg">
@@ -20,26 +23,25 @@ export default function ProvidersPage() {
           description="Your machine and Modal are supported. Every other adapter is built but not yet tested live."
         />
 
-        <div className="mt-14">
-          <ComparisonTable
-            columns={['Provider', 'Category', 'Residency', 'Status']}
-            rows={providers.map((p) => [
-              <span key="n" className="font-medium">{p.name}</span>,
-              <span key="k" className="text-muted-foreground">{p.kind}</span>,
-              <span key="r" className="text-muted-foreground">{p.residency}</span>,
-              <span key="s" className="inline-flex items-center gap-1.5">
-                {p.status === 'supported' ? (
-                  <Check className="size-4" aria-hidden />
-                ) : (
-                  <Minus className="size-4 text-muted-foreground" aria-hidden />
-                )}
-                {providerStatusLabel[p.status]}
-              </span>,
-            ])}
+        <div className="mt-14 space-y-12">
+          <GroupedList
+            title="Supported"
+            groups={[
+              {
+                entries: supported.map((p) => ({ name: p.name, detail: p.kind, note: p.residency })),
+              },
+            ]}
           />
-          <p className="mt-3 text-sm text-muted-foreground">
-            Preview: adapter built, not yet tested live, and not wired into apply.
-          </p>
+          <GroupedList
+            title="Preview"
+            note="Adapter built, not yet tested live."
+            groups={CATEGORIES.map((c) => ({
+              label: c,
+              entries: preview
+                .filter((p) => p.kind === c)
+                .map((p) => ({ name: p.name, note: p.residency })),
+            })).filter((g) => g.entries.length > 0)}
+          />
         </div>
 
         <div className="mt-20">
@@ -50,10 +52,7 @@ export default function ProvidersPage() {
         </div>
 
         <div className="mt-16">
-          <CTABand
-            title="Read the regions reference"
-            primary={{ label: 'Open the docs', href: '/docs' }}
-          />
+          <CTABand title="Read the regions reference" primary={{ label: 'Open the docs', href: '/docs' }} />
         </div>
       </Section>
     </main>

@@ -85,7 +85,7 @@ export default function LandingPage() {
             </StatusNote>
           </div>
 
-          <div className="mt-14 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] sm:mt-20">
+          <div className="mt-14 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] sm:mt-20">
             <CodePanel caption="amicu.hcl">
               <HclCode code={HERO_HCL} className="px-5 py-4" />
             </CodePanel>
@@ -99,14 +99,14 @@ export default function LandingPage() {
                   className="px-5 py-4"
                 />
               </CodePanel>
-              <CodePanel caption='with region = "us-east"' className="flex-1">
+              <CodePanel caption='with region = "us-east"'>
                 <Transcript
                   lines={HERO_PLAN_BLOCKED}
                   wrap
                   label="Output of amicu plan when the region breaks the residency rule"
                   className="px-5 py-4"
                 />
-                <p className="mt-auto border-t border-border px-5 py-4 text-sm leading-relaxed text-muted-foreground">
+                <p className="border-t border-border px-5 py-4 text-sm leading-relaxed text-muted-foreground">
                   Customer data must stay in the EU, so the plan stops before anything starts.
                 </p>
               </CodePanel>
