@@ -1,0 +1,29 @@
+#!/bin/sh
+# Pre-commit: broken internal link check for the website/docs.
+# Enable once per clone: `git config core.hooksPath .githooks`
+# (done automatically by `pnpm install` in web/ via its `prepare` script).
+# Only runs when files under web/ are staged; skipped without pnpm.
+
+# Chain to the clone-local hook (core.hooksPath replaces .git/hooks).
+common=$(git rev-parse --git-common-dir 2>/dev/null)
+if [ -n "$common" ] && [ -x "$common/hooks/pre-commit" ]; then
+  "$common/hooks/pre-commit" "$@" || exit $?
+fi
+
+if git diff --cached --name-only | grep -q '^web/'; then
+  if ! command -v pnpm >/dev/null 2>&1; then
+    echo "pre-commit: pnpm not found, skipping web link check (CI still runs it)." >&2
+    exit 0
+  fi
+  top=$(git rev-parse --show-toplevel) || exit 0
+  if [ ! -d "$top/web/node_modules" ]; then
+    echo "pre-commit: web/ dependencies not installed, skipping link check (run 'pnpm install' in web/)." >&2
+    exit 0
+  fi
+  echo "pre-commit: checking internal links (pnpm lint:links)..."
+  (cd "$top/web" && pnpm lint:links) || {
+    echo "pre-commit: broken internal links found; fix them or bypass with 'git commit --no-verify'." >&2
+    exit 1
+  }
+fi
+exit 0

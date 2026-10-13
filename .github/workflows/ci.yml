@@ -200,6 +200,9 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      - name: Internal link check
+        run: pnpm lint:links
+
       - name: Test
         run: pnpm test
 

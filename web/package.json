@@ -11,10 +11,12 @@
     "build": "turbo run build",
     "dev": "turbo run dev",
     "lint": "turbo run lint",
+    "lint:links": "pnpm --filter @amicu/web lint:links",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "check:generated": "turbo run check:generated",
-    "clean": "turbo run clean"
+    "clean": "turbo run clean",
+    "prepare": "git rev-parse --git-dir >/dev/null 2>&1 && git config core.hooksPath .githooks || true"
   },
   "devDependencies": {
     "turbo": "2.10.11",

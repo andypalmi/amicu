@@ -1,0 +1,7 @@
+#!/bin/sh
+# Chain to the clone-local commit-msg hook (core.hooksPath replaces .git/hooks).
+common=$(git rev-parse --git-common-dir 2>/dev/null)
+if [ -n "$common" ] && [ -x "$common/hooks/commit-msg" ]; then
+  "$common/hooks/commit-msg" "$@" || exit $?
+fi
+exit 0
