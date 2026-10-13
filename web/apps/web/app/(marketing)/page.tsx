@@ -93,9 +93,7 @@ export default function LandingPage() {
             <a href={githubUrl}>GitHub</a>
           </Button>
         </div>
-        <MockWindow title="terminal" className="mt-14 w-full max-w-2xl sm:mt-20">
-          <ApplyDemo />
-        </MockWindow>
+        <ApplyDemo className="mt-14 w-full max-w-2xl sm:mt-20" />
       </HomeSection>
 
       {/* Describe, apply */}

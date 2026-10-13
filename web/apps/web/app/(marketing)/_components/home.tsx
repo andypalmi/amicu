@@ -50,10 +50,13 @@ export function Headline({
 /** Mock window: hairline border, 12px radius, quiet title bar, mono body. */
 export function MockWindow({
   title,
+  action,
   children,
   className,
 }: {
   title: string;
+  /** Optional control rendered right-aligned in the title bar. */
+  action?: ReactNode;
   children: ReactNode;
   className?: string;
 }) {
@@ -64,8 +67,9 @@ export function MockWindow({
         className,
       )}
     >
-      <figcaption className="border-b border-border bg-muted/40 px-4 py-2.5 font-mono text-xs text-muted-foreground">
-        {title}
+      <figcaption className="flex items-center justify-between gap-2 border-b border-border bg-muted/40 px-4 py-2.5 font-mono text-xs text-muted-foreground">
+        <span>{title}</span>
+        {action ? <span className="-my-1.5 -mr-1.5 flex">{action}</span> : null}
       </figcaption>
       {children}
     </figure>
