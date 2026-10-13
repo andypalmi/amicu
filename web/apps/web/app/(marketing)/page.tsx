@@ -83,7 +83,7 @@ export default function LandingPage() {
           Self-hosted LLMs, as code.
         </Headline>
         <p className="mt-6 font-mono text-sm text-muted-foreground sm:text-base">
-          For any GPU, on any provider.
+          On your laptop or a GPU provider.
         </p>
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
           <Button asChild size="lg">
@@ -133,7 +133,7 @@ export default function LandingPage() {
 
       {/* Laptop to GPU */}
       <HomeSection>
-        <Headline>Start local. Deploy to any GPU provider with one line.</Headline>
+        <Headline>Start local. Move to a GPU provider with one line.</Headline>
         <MockWindow title="amicu.hcl" className="mt-12 max-w-2xl sm:mt-16">
           <DiffBody lines={PROVIDER_DIFF} label="Changing the provider of a hardware profile" />
         </MockWindow>
@@ -220,7 +220,7 @@ export default function LandingPage() {
 
       {/* Closing CTA */}
       <HomeSection className="flex flex-col items-center text-center">
-        <Headline>Try it on your laptop first.</Headline>
+        <Headline>Plan your first deployment.</Headline>
         <p className="mt-6 font-mono text-sm text-muted-foreground sm:text-base">
           Open source, AGPL-3.0. No account needed.
         </p>
@@ -229,7 +229,7 @@ export default function LandingPage() {
             <Link href={quickstartUrl}>Get started</Link>
           </Button>
           <Button asChild size="lg" variant="outline">
-            <a href={githubUrl}>GitHub</a>
+            <Link href="/providers">Providers</Link>
           </Button>
         </div>
       </HomeSection>

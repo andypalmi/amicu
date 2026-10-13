@@ -24,7 +24,7 @@ export const HERO_PLAN: TermLine[] = [
   { text: '      action:   create' },
   { text: '      hardware: gpu.l4' },
   { text: '      target:   modal (region eu-west)' },
-  { text: '      api_key:  ****** (secret "CHAT_API_KEY")' },
+  { text: '      api_key:  ****** (secret "CHAT_API_KEY", resolved at apply)' },
 ];
 
 /** Excerpt of the config that produces HERO_PLAN. */
@@ -45,8 +45,7 @@ export const APPLY_OUTPUT: TermLine[] = [
   { text: '$ amicu apply', tone: 'cmd' },
   { text: 'Apply these changes? [y/N] y' },
   { text: 'Applied 1 deployment(s):' },
-  { text: '  deployment.chat ->', tone: 'muted' },
-  { text: '  https://<workspace>--amicu-chat-server.<region>.modal.direct', tone: 'muted' },
+  { text: '  deployment.chat -> https://<workspace>--amicu-chat-server.<region>.modal.direct', tone: 'muted' },
 ];
 
 export type DiffTone = 'add' | 'del' | 'ctx';
@@ -74,6 +73,11 @@ export const RESIDENCY_HCL = `resource "data_class" "customer" {
 resource "governance_rule" "eu_only" {
   effect          = "allow"
   allowed_regions = ["eu", "eu-west"]
+}
+
+resource "hardware_profile" "gpu" {
+  provider = "modal"
+  region   = "us-east"
 }
 `;
 
