@@ -22,9 +22,8 @@ export async function HclCode({ code, className }: { code: string; className?: s
   return (
     <div
       className={cn(
-        'font-mono text-[0.8125rem] leading-6 [&_pre]:overflow-x-auto [&_pre]:py-3.5 [&_pre]:outline-none [&_pre]:focus-visible:ring-2 [&_pre]:focus-visible:ring-inset [&_pre]:focus-visible:ring-ring',
+        'font-mono text-[0.8125rem] leading-6 [&_pre]:overflow-x-auto [&_pre]:px-0 [&_pre]:py-3.5 [&_pre]:outline-none [&_pre]:focus-visible:ring-2 [&_pre]:focus-visible:ring-inset [&_pre]:focus-visible:ring-ring',
         className,
-        '[&_pre]:px-0 [&_pre]:py-3.5',
       )}
     >
       {rendered}
@@ -63,9 +62,8 @@ export function Transcript({
       tabIndex={0}
       aria-label={label}
       className={cn(
-        'overflow-x-auto px-4 font-mono text-[0.8125rem] leading-6 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
+        'overflow-x-auto px-4 py-3.5 font-mono text-[0.8125rem] leading-6 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
         className,
-        'px-4 py-3.5',
       )}
     >
       <code className={cn('block', !wrap && 'min-w-max')}>

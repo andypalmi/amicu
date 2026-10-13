@@ -86,7 +86,7 @@ svg .stroke-fd-primary,
 /* No highlighted-line stripe either: Fumadocs draws a left border on
    `.highlighted` lines; the tinted fill alone marks them. */
 .shiki .highlighted::after {
-  display: none;
+  border-left-width: 0;
 }
 
 /* ---- Shared prose + code styling (docs `.prose`, marketing `.amicu-prose`) ----
@@ -131,7 +131,7 @@ svg .stroke-fd-primary,
 }
 
 /* Code blocks: one frame for Fumadocs figures and the marketing CodePanel
-   (radius 10px, hairline border, card fill, 38px title bar, mono 13px body). */
+   (radius 10px, 1.5px border, card fill, 38px title bar, mono 13px body). */
 figure.shiki,
 .code-frame {
   border: 1.5px solid var(--border);

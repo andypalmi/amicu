@@ -11,17 +11,18 @@ import { Check, Clipboard } from 'lucide-react';
 export function CopyButton() {
   const ref = useRef<HTMLButtonElement>(null);
   const [checked, setChecked] = useState(false);
-  const [hidden, setHidden] = useState(false);
+  // Rendered hidden until mounted and a <pre> is detected, so panels without
+  // code never flash a button.
+  const [visible, setVisible] = useState(false);
 
   useEffect(() => {
-    if (!ref.current?.closest('figure')?.querySelector('pre')) setHidden(true);
+    if (ref.current?.closest('figure')?.querySelector('pre')) setVisible(true);
   }, []);
-
-  if (hidden) return null;
 
   return (
     <button
       ref={ref}
+      style={visible ? undefined : { display: 'none' }}
       type="button"
       data-checked={checked || undefined}
       aria-label={checked ? 'Copied text' : 'Copy text'}
@@ -29,9 +30,13 @@ export function CopyButton() {
       onClick={() => {
         const pre = ref.current?.closest('figure')?.querySelector('pre');
         if (!pre) return;
-        void navigator.clipboard.writeText(pre.textContent ?? '');
-        setChecked(true);
-        window.setTimeout(() => setChecked(false), 1500);
+        navigator.clipboard
+          .writeText(pre.textContent ?? '')
+          .then(() => {
+            setChecked(true);
+            window.setTimeout(() => setChecked(false), 1500);
+          })
+          .catch(() => {});
       }}
     >
       {checked ? <Check aria-hidden /> : <Clipboard aria-hidden />}
