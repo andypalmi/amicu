@@ -156,14 +156,41 @@ enum Dispatch {
     Modal,
 }
 
+/// Hardware profile `provider` values that mean "this machine" and so run
+/// under the local host supervisor. Any other provider is not applied locally:
+/// silently starting a process here for a declared cloud provider would run the
+/// workload somewhere the user did not ask for.
+const LOCAL_PROVIDERS: [&str; 4] = ["local", "local_apple", "local_cpu", "on_prem"];
+
+/// Providers `apply` can deploy to today, for the error message.
+const SUPPORTED_PROVIDERS: &str = "local, local_apple, local_cpu, on_prem, modal";
+
 /// Computes [`Dispatch`] for one deployment's runtime family and hardware
-/// profile provider.
-fn dispatch_for(runtime: amicu_runtime::RuntimeKind, provider: Option<&str>) -> Dispatch {
+/// profile provider. `None` when `apply` has no path for that provider.
+fn dispatch_for(runtime: amicu_runtime::RuntimeKind, provider: Option<&str>) -> Option<Dispatch> {
     use amicu_runtime::RuntimeKind::{LlamaCpp, Vllm};
     match (runtime, provider) {
-        (LlamaCpp | Vllm, Some(MODAL_PROVIDER)) => Dispatch::Modal,
-        (LlamaCpp | Vllm, _) => Dispatch::Host,
+        (LlamaCpp | Vllm, Some(MODAL_PROVIDER)) => Some(Dispatch::Modal),
+        // A profile with no provider has always meant the local host.
+        (LlamaCpp | Vllm, None) => Some(Dispatch::Host),
+        (LlamaCpp | Vllm, Some(p)) if LOCAL_PROVIDERS.contains(&p) => Some(Dispatch::Host),
+        (LlamaCpp | Vllm, Some(_)) => None,
     }
+}
+
+/// [`dispatch_for`] as an apply-time error naming the unsupported provider.
+fn require_dispatch(
+    runtime: amicu_runtime::RuntimeKind,
+    provider: Option<&str>,
+    deployment: &amicu_core::id::DeploymentId,
+) -> Result<Dispatch, CliError> {
+    dispatch_for(runtime, provider).ok_or_else(|| {
+        CliError::Message(format!(
+            "deployment '{deployment}': provider \"{}\" is not supported by apply yet; \
+             supported: {SUPPORTED_PROVIDERS}",
+            provider.unwrap_or_default()
+        ))
+    })
 }
 
 /// Builds the [`ModalSupervisor`] for one deployment from its hardware profile.
@@ -222,9 +249,24 @@ async fn apply_all(
     let registry = EndpointRegistry::new();
     let mut handles = Vec::new();
 
+    // Reject unsupported providers before anything is started or stopped.
     for item in &result.items {
         if let Some(launch) = &item.launch {
-            let dispatch = dispatch_for(launch.runtime, item.action.provider.as_deref());
+            require_dispatch(
+                launch.runtime,
+                item.action.provider.as_deref(),
+                &item.deployment,
+            )?;
+        }
+    }
+
+    for item in &result.items {
+        if let Some(launch) = &item.launch {
+            let dispatch = require_dispatch(
+                launch.runtime,
+                item.action.provider.as_deref(),
+                &item.deployment,
+            )?;
             let handle = match (launch.runtime, dispatch) {
                 (runtime, Dispatch::Modal) => {
                     let supervisor = modal_supervisor(graph, &catalog, &item.deployment, runtime)?;
@@ -275,7 +317,10 @@ async fn apply_all(
                     .map_or(amicu_runtime::RuntimeKind::LlamaCpp, |d| {
                         amicu_runtime::RuntimeKind::of(&d.runtime)
                     });
-                match dispatch_for(prior_runtime_kind, prior_provider) {
+                // A prior provider this version cannot apply (state written
+                // when such providers fell back to the host) is still stopped
+                // through the host supervisor so nothing is left running.
+                match dispatch_for(prior_runtime_kind, prior_provider).unwrap_or(Dispatch::Host) {
                     Dispatch::Modal => {
                         let supervisor =
                             ModalSupervisor::new(app_name_for(item.deployment.as_str()));
@@ -397,36 +442,80 @@ mod dispatch_tests {
     fn vllm_on_modal_selects_the_modal_supervisor() {
         assert_eq!(
             dispatch_for(RuntimeKind::Vllm, Some("modal")),
-            Dispatch::Modal
+            Some(Dispatch::Modal)
         );
     }
 
     #[test]
-    fn vllm_on_a_non_modal_provider_still_selects_the_host_supervisor() {
-        for provider in [Some("runpod"), Some("local_apple"), Some("on_prem"), None] {
+    fn vllm_on_a_local_provider_selects_the_host_supervisor() {
+        for provider in [
+            Some("local"),
+            Some("local_apple"),
+            Some("local_cpu"),
+            Some("on_prem"),
+            None,
+        ] {
             assert_eq!(
                 dispatch_for(RuntimeKind::Vllm, provider),
-                Dispatch::Host,
+                Some(Dispatch::Host),
                 "{provider:?}"
             );
         }
     }
 
     #[test]
+    fn vllm_on_an_unsupported_provider_is_not_dispatched() {
+        for provider in ["runpod", "hetzner", "aws", "ssh"] {
+            assert_eq!(
+                dispatch_for(RuntimeKind::Vllm, Some(provider)),
+                None,
+                "{provider}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_provider_error_names_it_and_the_supported_set() {
+        let id = amicu_core::id::DeploymentId::from("dep");
+        let err = super::require_dispatch(RuntimeKind::Vllm, Some("runpod"), &id)
+            .expect_err("runpod is not applyable")
+            .to_string();
+        assert!(err.contains("provider \"runpod\" is not supported by apply yet"));
+        assert!(err.contains("modal"));
+    }
+
+    #[test]
     fn llama_cpp_on_modal_selects_the_modal_supervisor() {
         assert_eq!(
             dispatch_for(RuntimeKind::LlamaCpp, Some("modal")),
-            Dispatch::Modal
+            Some(Dispatch::Modal)
         );
     }
 
     #[test]
-    fn llama_cpp_on_a_non_modal_provider_still_selects_the_host_supervisor() {
-        for provider in [Some("runpod"), Some("local_apple"), Some("on_prem"), None] {
+    fn llama_cpp_on_a_local_provider_selects_the_host_supervisor() {
+        for provider in [
+            Some("local"),
+            Some("local_apple"),
+            Some("local_cpu"),
+            Some("on_prem"),
+            None,
+        ] {
             assert_eq!(
                 dispatch_for(RuntimeKind::LlamaCpp, provider),
-                Dispatch::Host,
+                Some(Dispatch::Host),
                 "{provider:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn llama_cpp_on_an_unsupported_provider_is_not_dispatched() {
+        for provider in ["runpod", "hetzner", "aws", "ssh"] {
+            assert_eq!(
+                dispatch_for(RuntimeKind::LlamaCpp, Some(provider)),
+                None,
+                "{provider}"
             );
         }
     }

@@ -846,17 +846,88 @@ impl ModalSupervisor {
 /// proxy `401` can be told apart from "not up yet"); proxy auth headers are
 /// attached when `MODAL_PROXY_TOKEN_*` are set.
 async fn health_status(endpoint: &str) -> Option<u16> {
+    probe_status(endpoint, true).await
+}
+
+/// `GET <endpoint>/health`, with the proxy auth headers only when `authed`.
+async fn probe_status(endpoint: &str, authed: bool) -> Option<u16> {
     let url = format!("{}/health", endpoint.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
         .build()
         .ok()?;
-    let resp = crate::proxy_auth::apply(client.get(url))
-        .send()
-        .await
-        .ok()?;
-    Some(resp.status().as_u16())
+    let request = client.get(url);
+    let request = if authed {
+        crate::proxy_auth::apply(request)
+    } else {
+        request
+    };
+    Some(request.send().await.ok()?.status().as_u16())
+}
+
+/// Fail-closed exposure check: an UNauthenticated `GET <endpoint>/health` must
+/// be refused by Modal's proxy. A `2xx` means the endpoint is open to anyone
+/// with the URL, so the deployment must not be reported healthy. Anything else
+/// (401/403, other statuses, network errors) is not an exposure.
+async fn unauthenticated_exposure(endpoint: &str) -> Option<String> {
+    let code = probe_status(endpoint, false).await?;
+    (200..300).contains(&code).then(|| exposure_message(code))
+}
+
+fn exposure_message(code: u16) -> String {
+    format!(
+        "endpoint answered an unauthenticated request ({code}); Modal proxy auth is not \
+         enforced, so the endpoint is open to anyone with its URL"
+    )
+}
+
+/// How long [`ensure_not_exposed`] keeps retrying while the proxy gives no
+/// definite answer.
+const EXPOSURE_CHECK_TIMEOUT: Duration = Duration::from_secs(120);
+const EXPOSURE_CHECK_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Blocks until Modal's proxy gives a definite answer to an unauthenticated
+/// request: `401`/`403` means the endpoint is closed (`Ok`); a `2xx` means it is
+/// open to anyone with the URL (`Err`). Anything else (network error, `5xx`
+/// while the container warms up) is retried until `timeout`, then fails closed:
+/// an endpoint whose auth cannot be verified is not reported deployed.
+async fn ensure_not_exposed(
+    endpoint: &str,
+    timeout: Duration,
+    interval: Duration,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match probe_status(endpoint, false).await {
+            Some(code) if (200..300).contains(&code) => return Err(exposure_message(code)),
+            Some(401 | 403) => return Ok(()),
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(
+                "could not verify that the endpoint rejects unauthenticated requests".to_owned(),
+            );
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// The error `start` returns for an unsafe endpoint: the original `detail`, plus
+/// whether the app was stopped. A failed teardown is spelled out so the user can
+/// stop the (open) app by hand; the app id is not a secret.
+async fn teardown_error<F, Fut>(detail: &str, app_id: &str, stop: F) -> LlamaCppError
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    LlamaCppError::Supervisor(match stop().await {
+        Ok(()) => format!("{detail}; the Modal app was stopped"),
+        Err(e) => format!(
+            "{detail}; teardown FAILED ({e}): stop app {app_id} manually \
+             (`modal app stop {app_id}`)"
+        ),
+    })
 }
 
 /// One-line phase note printed to stderr before the (possibly slow) deploy.
@@ -986,6 +1057,23 @@ impl ProcessSupervisor for ModalSupervisor {
         let deployed = client.deploy_server(&spec, &mut on_log).await;
         sink.finish();
         let deployment = deployed.map_err(|e| modal_err(&e))?;
+        // Fail closed: never hand back (and so register/print) an endpoint that
+        // answers without proxy auth. Tear the app down instead.
+        if let Err(detail) = ensure_not_exposed(
+            &deployment.url,
+            EXPOSURE_CHECK_TIMEOUT,
+            EXPOSURE_CHECK_INTERVAL,
+        )
+        .await
+        {
+            return Err(teardown_error(&detail, &deployment.app_id, || async {
+                client
+                    .stop_app(&deployment.app_id)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+            .await);
+        }
         Ok(RuntimeHandle {
             id: deployment.app_id,
             deployment: plan.deployment.clone(),
@@ -995,7 +1083,11 @@ impl ProcessSupervisor for ModalSupervisor {
 
     async fn status(&self, handle: &RuntimeHandle) -> Result<RuntimeStatus, LlamaCppError> {
         let code = health_status(&handle.endpoint).await;
-        Ok(if matches!(code, Some(c) if (200..300).contains(&c)) {
+        let healthy = matches!(code, Some(c) if (200..300).contains(&c));
+        if healthy && let Some(detail) = unauthenticated_exposure(&handle.endpoint).await {
+            return Ok(RuntimeStatus::Failed { detail });
+        }
+        Ok(if healthy {
             RuntimeStatus::Running {
                 detail: "healthy".to_owned(),
             }
@@ -1327,6 +1419,70 @@ mod tests {
         let out = bind_all_interfaces(&argv);
         assert_eq!(out.last(), Some(&"0.0.0.0".to_owned()));
         assert_eq!(out[out.len() - 2], "--host");
+    }
+
+    #[test]
+    fn bind_all_interfaces_rewrites_llama_loopback_host() {
+        let argv: Vec<String> = ["llama-server", "--host", "127.0.0.1", "--port", "8080"]
+            .map(str::to_owned)
+            .to_vec();
+        let out = bind_all_interfaces(&argv);
+        assert_eq!(out.iter().filter(|a| *a == "--host").count(), 1);
+        let idx = out.iter().position(|a| a == "--host").unwrap();
+        assert_eq!(out[idx + 1], "0.0.0.0");
+        assert!(!out.contains(&"127.0.0.1".to_owned()));
+    }
+
+    /// Serves one canned HTTP response on a loopback port; returns its URL.
+    async fn serve_once(status: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let head = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 2048];
+            let _ = sock.read(&mut buf).await;
+            sock.write_all(head.as_bytes()).await.unwrap();
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn open_endpoint_is_flagged_and_proxy_refusal_is_not() {
+        let open = unauthenticated_exposure(&serve_once("200 OK").await).await;
+        assert!(open.expect("2xx is an exposure").contains("200"));
+        for status in ["401 Unauthorized", "403 Forbidden"] {
+            assert_eq!(
+                unauthenticated_exposure(&serve_once(status).await).await,
+                None
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_not_exposed_passes_401_and_fails_closed_otherwise() {
+        let t = Duration::from_millis(50);
+        assert!(
+            ensure_not_exposed(&serve_once("401 Unauthorized").await, t, t)
+                .await
+                .is_ok()
+        );
+        let open = ensure_not_exposed(&serve_once("200 OK").await, t, t).await;
+        assert!(open.expect_err("open").contains("unauthenticated"));
+        // Unreachable: unverifiable is a failure, not a pass.
+        let down = ensure_not_exposed("http://127.0.0.1:1", t, t).await;
+        assert!(down.expect_err("down").contains("could not verify"));
+    }
+
+    #[tokio::test]
+    async fn teardown_error_reports_stopped_or_failed_and_keeps_the_cause() {
+        let ok = teardown_error("open", "ap-1", || async { Ok(()) }).await;
+        assert!(ok.to_string().contains("open; the Modal app was stopped"));
+        let bad = teardown_error("open", "ap-1", || async { Err("rpc down".to_owned()) }).await;
+        let msg = bad.to_string();
+        assert!(msg.contains("open;") && msg.contains("teardown FAILED"));
+        assert!(msg.contains("modal app stop ap-1"));
     }
 
     // --- reject_local_path_model -----------------------------------------

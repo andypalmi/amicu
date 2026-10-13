@@ -30,6 +30,9 @@ resource "hardware_profile" "cpu_box" {
 
 ## NVIDIA GPU (cloud, EU region)
 
+Plan-only: `amicu apply` supports only local providers (`local`, `local_apple`,
+`local_cpu`, `on_prem`) and `modal`; any other provider fails at apply.
+
 ```hcl
 resource "hardware_profile" "eu_a100" {
   provider = "hetzner"

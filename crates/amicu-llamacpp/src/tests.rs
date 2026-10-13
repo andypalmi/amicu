@@ -1935,42 +1935,130 @@ fn launchd_state_maps_pid_exit_and_missing() {
 }
 
 #[test]
-fn systemd_start_builds_transient_unit_with_setenv() {
+fn systemd_start_passes_env_via_0600_environment_file_not_argv() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new("systemd-env");
     let exec = std::sync::Arc::new(FakeExec::new(true, ""));
     let mut spec = service_spec();
-    spec.env = vec![("api_key".into(), "v".into())];
-    SystemdManager::new(exec.clone())
-        .start(&spec)
-        .expect("start");
+    spec.env = vec![("api_key".into(), "s3\"cr\\et".into())];
+    let manager = SystemdManager::new(exec.clone(), &dir.0);
+    manager.start(&spec).expect("start");
     let call = exec.last();
     assert_eq!(call[0], "systemd-run");
     assert!(call.contains(&"--user".to_owned()));
     assert!(call.contains(&"--unit=io.amicu.llama.support_chat_local".to_owned()));
-    assert!(call.contains(&"--setenv=api_key=v".to_owned()));
+    // The secret never reaches argv.
+    assert!(
+        !call
+            .iter()
+            .any(|a| a.contains("s3") || a.contains("--setenv"))
+    );
+    let file = &dir.0.join("io.amicu.llama.support_chat_local.env");
+    assert!(call.contains(&format!("--property=EnvironmentFile={}", file.display())));
+    assert_eq!(
+        std::fs::read_to_string(file.as_path()).unwrap(),
+        "api_key=\"s3\\\"cr\\\\et\"\n"
+    );
+    assert_eq!(
+        std::fs::metadata(file.as_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
     // The argv follows the options, program first.
     let prog = call
         .iter()
         .position(|a| a == "llama-server")
         .expect("program");
     assert!(call[prog..].contains(&"/models/tiny.gguf".to_owned()));
+    // Stop removes the env file.
+    manager
+        .stop("io.amicu.llama.support_chat_local")
+        .expect("stop");
+    assert!(!file.exists());
+}
+
+#[test]
+fn systemd_start_failure_removes_the_env_file() {
+    let dir = TempDir::new("systemd-env");
+    let mut spec = service_spec();
+    spec.env = vec![("api_key".into(), "v".into())];
+    let manager = SystemdManager::new(FakeExec::new(false, ""), &dir.0);
+    assert!(manager.start(&spec).is_err());
+    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+}
+
+#[test]
+fn systemd_stop_removes_the_env_file_even_when_stop_fails() {
+    let dir = TempDir::new("systemd-stop");
+    let mut spec = service_spec();
+    spec.env = vec![("api_key".into(), "v".into())];
+    SystemdManager::new(FakeExec::new(true, ""), &dir.0)
+        .start(&spec)
+        .expect("start");
+    let manager = SystemdManager::new(FakeExec::new(false, ""), &dir.0);
+    assert!(manager.stop(&spec.label).is_err());
+    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+}
+
+#[test]
+fn systemd_env_file_replaces_preexisting_files_and_symlinks() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new("systemd-replace");
+    let mut spec = service_spec();
+    spec.env = vec![("k".into(), "line1\nline2".into())];
+    let file = dir.0.join(format!("{}.env", spec.label));
+    // A pre-existing world-readable file is not reused.
+    std::fs::write(&file, "old").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let manager = SystemdManager::new(FakeExec::new(true, ""), &dir.0);
+    manager.start(&spec).expect("start");
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // A planted symlink is replaced, not followed.
+    let target = dir.file("target");
+    std::fs::write(&target, "untouched").unwrap();
+    std::fs::remove_file(&file).unwrap();
+    std::os::unix::fs::symlink(&target, &file).unwrap();
+    manager.start(&spec).expect("start");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "untouched");
+    // Multi-line values are written raw inside the quotes.
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "k=\"line1\nline2\"\n"
+    );
+}
+
+#[test]
+fn systemd_refuses_to_write_secrets_without_an_absolute_dir() {
+    let mut spec = service_spec();
+    spec.env = vec![("k".into(), "v".into())];
+    let err = SystemdManager::new(FakeExec::new(true, ""), "")
+        .start(&spec)
+        .expect_err("no dir");
+    assert!(err.to_string().contains("HOME"));
 }
 
 #[test]
 fn systemd_state_maps_is_active_output() {
     assert_eq!(
-        SystemdManager::new(FakeExec::new(true, "active\n"))
+        SystemdManager::new(FakeExec::new(true, "active\n"), "/unused-env-dir")
             .state("x")
             .unwrap(),
         ServiceState::Active
     );
     assert_eq!(
-        SystemdManager::new(FakeExec::new(false, "failed\n"))
+        SystemdManager::new(FakeExec::new(false, "failed\n"), "/unused-env-dir")
             .state("x")
             .unwrap(),
         ServiceState::Failed
     );
     assert_eq!(
-        SystemdManager::new(FakeExec::new(false, "inactive\n"))
+        SystemdManager::new(FakeExec::new(false, "inactive\n"), "/unused-env-dir")
             .state("x")
             .unwrap(),
         ServiceState::Inactive
@@ -1980,7 +2068,7 @@ fn systemd_state_maps_is_active_output() {
 #[test]
 fn systemd_logs_use_journalctl_with_tail() {
     let exec = std::sync::Arc::new(FakeExec::new(true, "line1\nline2\n"));
-    let lines = SystemdManager::new(exec.clone())
+    let lines = SystemdManager::new(exec.clone(), "/unused-env-dir")
         .logs(
             "io.amicu.llama.support_chat_local",
             LogOptions {
