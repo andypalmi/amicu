@@ -206,6 +206,10 @@ pub fn render_command(
         "llama-server".to_owned(),
         "-m".to_owned(),
         model_path.display().to_string(),
+        // Explicit loopback bind, like the vLLM renderer: never rely on
+        // llama-server's default. The Modal supervisor rewrites it to 0.0.0.0.
+        "--host".to_owned(),
+        "127.0.0.1".to_owned(),
         "--port".to_owned(),
         settings.port.to_string(),
         "--ctx-size".to_owned(),
