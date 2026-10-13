@@ -6,37 +6,26 @@
 // If the CLI's output format changes, re-run the commands and update these
 // strings rather than editing them by hand.
 
-/** Hero example: an EU-pinned vLLM deployment on a Modal L4 GPU. */
-export const HERO_HCL = `# Customer prompts must stay in the EU.
-resource "data_class" "customer_data" {
-  sensitivity = "confidential"
-  residency   = ["eu"]
-}
-
-resource "model" "qwen" {
+/** Hero example: one model, served by vLLM on a Modal L4 GPU in eu-west. */
+export const HERO_HCL = `resource "model" "qwen" {
   source {
     registry  = "hugging_face"
     reference = "Qwen/Qwen2.5-7B-Instruct"
   }
-  architecture   = "qwen2"
-  modalities     = ["text"]
-  artifact {
-    format       = "safetensors"
-    quantization = "bf16"
-  }
-  context_length = 32768
+  architecture = "qwen2"
+  artifact { format = "safetensors" }
 }
 
 resource "hardware_profile" "gpu" {
   provider = "modal"
   region   = "eu-west"
+  memory   = "32GiB"
   accelerator {
     kind   = "gpu"
     model  = "l4"
     count  = 1
     memory = "24GiB"
   }
-  memory = "32GiB"
 }
 
 resource "deployment" "chat" {
