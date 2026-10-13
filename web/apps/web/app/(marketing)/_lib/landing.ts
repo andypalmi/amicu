@@ -52,12 +52,11 @@ resource "deployment" "chat" {
 
 /**
  * One line of terminal output. `tone` maps to a semantic token only:
- * `cmd` is the prompt line, `add` a created resource, `error` a blocking
- * diagnostic, `muted` secondary detail.
+ * `cmd` is the prompt line, `add` a created resource, `muted` secondary detail.
  */
 export interface TermLine {
   text: string;
-  tone?: 'cmd' | 'add' | 'error' | 'muted';
+  tone?: 'cmd' | 'add' | 'muted';
 }
 
 /** `amicu plan` against HERO_HCL. */
@@ -94,7 +93,10 @@ export const STEPS: Step[] = [
       { text: '$ amicu init', tone: 'cmd' },
       { text: '  create amicu.hcl' },
       { text: '  create variables.amicu.hcl' },
+      { text: '  create .amicu/' },
+      { text: '  create .amicu/config.yaml' },
       { text: '  create .amicu/state/' },
+      { text: '  create .amicu/state/.gitkeep' },
       { text: 'Initialized Amicu project (6 item(s) created).', tone: 'muted' },
     ],
   },
@@ -102,14 +104,7 @@ export const STEPS: Step[] = [
     id: 'plan',
     title: 'Check it and read the plan',
     body: 'Before anything starts, amicu checks references, whether the model fits the memory you gave it, and every residency and governance rule. The plan then shows each change against recorded state, with the exact launch command it will run.',
-    transcript: [
-      { text: '$ amicu plan', tone: 'cmd' },
-      { text: 'Cannot plan: configuration has errors.' },
-      {
-        text: "  error [AMICU-POLICY-002] region 'us-east' (us) violates the data residency allowlist",
-        tone: 'error',
-      },
-    ],
+    transcript: HERO_PLAN,
   },
   {
     id: 'apply',
@@ -123,6 +118,9 @@ export const STEPS: Step[] = [
       { text: '      target:   modal (region eu-west)', tone: 'muted' },
       { text: '' },
       { text: 'Apply these changes? [y/N] y' },
+      { text: '' },
+      { text: 'Applied 1 deployment(s):' },
+      { text: '  deployment.chat -> https://<workspace>--amicu-chat-server.<region>.modal.direct', tone: 'muted' },
     ],
   },
   {
@@ -131,10 +129,25 @@ export const STEPS: Step[] = [
     body: 'Check status, logs and metrics from the CLI. Give the tuning engine a metrics snapshot and it compares measured throughput and latency with the plan’s estimates, then suggests changes with the evidence behind each one. Suggestions are advisory: nothing changes until you edit the file and apply.',
     transcript: [
       { text: '$ amicu modal status amicu-chat', tone: 'cmd' },
-      { text: '$ amicu modal logs amicu-chat', tone: 'cmd' },
-      { text: '$ amicu modal metrics amicu-chat', tone: 'cmd' },
+      { text: 'app amicu-chat (ap-…): deployed', tone: 'muted' },
     ],
   },
+];
+
+/**
+ * Illustrative chat session against the endpoint `apply` prints. amicu has no
+ * chat command; this is any OpenAI-compatible client, and the answer is an
+ * example, not recorded model output.
+ */
+export const CHAT_SESSION: TermLine[] = [
+  { text: 'Qwen/Qwen2.5-7B-Instruct', tone: 'cmd' },
+  { text: 'https://<workspace>--amicu-chat-server.<region>.modal.direct/v1', tone: 'muted' },
+  { text: '' },
+  { text: '> Draft a retention notice for our EU customers.' },
+  { text: '' },
+  { text: 'We keep customer data only in EU regions, and delete it 30 days after you close your account.▍' },
+  { text: '' },
+  { text: '> ▍', tone: 'muted' },
 ];
 
 /** Same model resource, two hardware profiles: real launch lines from `plan`. */
@@ -185,7 +198,7 @@ export const SUPPORT: Support[] = [
   },
   {
     label: 'Residency and pricing data',
-    value: 'Region catalogs for Hetzner, OVHcloud, Scaleway, Nebius, RunPod, Modal, AWS, Azure and GCP feed the residency checks and recommendations. Provisioning on those clouds is not shipped yet.',
+    value: 'Region and pricing data for Hetzner, OVHcloud, Scaleway, Nebius, RunPod, Modal, AWS, Azure and GCP feed the residency checks and recommendations. Provisioning adapters for Hetzner, OVHcloud, Scaleway, RunPod and SSH hosts exist but are untested live and not wired into apply; AWS, Azure, GCP and Nebius have none yet.',
   },
   {
     label: 'Models',

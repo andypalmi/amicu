@@ -13,7 +13,7 @@ export const siteUrl =
 
 /** One-line product summary reused across metadata and llms.txt. */
 export const appTagline =
-  'A thin, open-source client over the Amicu Rust Management API for designing, deploying, and operating EU-first LLM serving stacks.';
+  'Open-source infrastructure as code for self-hosted LLMs: describe the model, hardware and runtime in HCL, check fit and data residency, then apply.';
 
 export const gitConfig = {
   user: 'andypalmi',

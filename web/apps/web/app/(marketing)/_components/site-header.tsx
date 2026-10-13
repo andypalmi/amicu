@@ -25,7 +25,7 @@ const linkCls =
 export function SiteHeader() {
   const all = [...productLinks, ...siteLinks];
   return (
-    <header className="sticky top-0 z-40 border-b border-border bg-background/90 backdrop-blur supports-[backdrop-filter]:bg-background/75">
+    <header className="sticky top-0 z-40 border-b border-border bg-background">
       <Container className="flex h-14 items-center gap-6">
         <Link
           href="/"

@@ -22,7 +22,7 @@ const marketing: Array<{ path: string; label: string; note: string }> = [
   {
     path: '/providers',
     label: 'Providers',
-    note: 'EU-first provider coverage and data residency model.',
+    note: 'Where apply works today, planning data for other clouds, and the residency model.',
   },
   {
     path: '/security',
@@ -55,9 +55,8 @@ ${appName} is an open-source (AGPL-3.0) web client. Planning, recommendations,
 policy, and capability logic live in the Amicu Rust Management API; the web app
 renders those decisions rather than owning them. Two entry paths: a guided
 "help me choose" wizard, and a direct HCL editor for authoring, validating, and
-planning declarative serving stacks. EU-first by design: European-native
-providers first, hyperscalers via their EU regions, and self-hosted / SSH for
-full residency control.
+planning declarative serving stacks. Residency-aware by design: apply works
+on your own machine and Modal today; other clouds have untested provisioning adapters or planning and residency data only.
 
 ## Key pages
 ${marketingLines}

@@ -42,7 +42,6 @@ export async function HclCode({ code, className }: { code: string; className?: s
 const toneClass: Record<NonNullable<TermLine['tone']> | 'plain', string> = {
   cmd: 'text-foreground font-semibold',
   add: 'text-success',
-  error: 'text-destructive',
   muted: 'text-muted-foreground',
   plain: 'text-foreground',
 };

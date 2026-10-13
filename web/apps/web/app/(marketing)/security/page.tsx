@@ -1,9 +1,5 @@
 import type { Metadata } from 'next';
-import Link from 'next/link';
-import {
-  Button,
-} from '@amicu/ui';
-import { PageHeader, Section } from '../_components/marketing';
+import { FactList, PageHeader, Section, CTABand } from '../_components/marketing';
 import { pageMetadata } from '../_lib/seo';
 
 const pillars = [
@@ -21,7 +17,7 @@ const pillars = [
   },
   {
     title: 'Data residency you choose',
-    body: 'Residency and region are first-class planning inputs. Deploy on EU-native providers, hyperscaler EU regions, or your own hardware over SSH for complete residency control.',
+    body: 'Residency and region are first-class planning inputs. Plans are checked against the regions your data class allows, so a stack that would leave them is rejected before anything starts.',
   },
   {
     title: 'Open source, auditable',
@@ -36,51 +32,31 @@ const pillars = [
 export const metadata: Metadata = pageMetadata({
   title: 'Security',
   description:
-    'How Amicu handles trust: API-enforced tier gating, asymmetric verifiable sessions, secrets by reference, EU data residency, and a fully open-source auditable frontend.',
+    'How Amicu handles trust: API-enforced tier gating, asymmetric verifiable sessions, secrets by reference, residency checks in plans, and a fully open-source auditable frontend.',
   path: '/security',
 });
 
 export default function SecurityPage() {
   return (
     <main className="flex flex-1 flex-col">
-      <Section size="lg">
+      <Section>
         <PageHeader
-          eyebrow="Security"
           title="Trust the boundary, not the browser."
-          description="Amicu is a thin client. Planning, policy, and capability logic live in the API - and so does enforcement. The web app renders decisions, it never makes the ones that guard your infrastructure."
+          description="The web app renders decisions. The API makes and enforces them."
         />
 
-        <dl className="mt-14 divide-y divide-border border-y border-border">
-          {pillars.map((pillar) => (
-            <div
-              key={pillar.title}
-              className="grid gap-2 py-6 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] md:gap-10"
-            >
-              <dt className="text-lg font-semibold">{pillar.title}</dt>
-              <dd className="text-sm leading-relaxed text-muted-foreground">
-                {pillar.body}
-              </dd>
-            </div>
-          ))}
-        </dl>
+        <FactList
+          className="mt-14"
+          items={pillars.map((x) => ({ term: x.title, detail: x.body }))}
+        />
 
-        <section className="mt-16 rounded-xl border border-border bg-muted/30 p-8">
-          <h2 className="text-xl font-semibold tracking-tight">
-            The thin-client boundary
-          </h2>
-          <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
-            The frontend reads <code className="text-foreground">tier</code> and{' '}
-            <code className="text-foreground">roles</code> claims to decide what to show
-            or lock - but it never trusts them for enforcement. Every write goes to the
-            API, which verifies the session and re-checks authorization before acting.
-            Compromising the browser cannot grant capabilities the server did not.
-          </p>
-          <div className="mt-6">
-            <Button asChild variant="outline">
-              <Link href="/docs">Read the security docs</Link>
-            </Button>
-          </div>
-        </section>
+        <div className="mt-16">
+          <CTABand
+            title="The thin-client boundary"
+            lede="Compromising the browser cannot grant capabilities the server did not."
+            primary={{ label: 'Read the security docs', href: '/docs' }}
+          />
+        </div>
       </Section>
     </main>
   );
