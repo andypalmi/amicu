@@ -5,6 +5,7 @@ use std::io::Write;
 use amicu_core::adapter::AdapterError;
 use amicu_core::diagnostic::{DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
+use amicu_core::id::DeploymentId;
 use amicu_core::resource::{Deployment, Runtime, is_local_provider};
 use amicu_core::secret::{SecretResolver, SecretValue};
 use amicu_llamacpp::{Catalog, LlamaCppAdapter, host_supervisor};
@@ -99,10 +100,31 @@ pub(crate) fn run(
     }
 
     let rt = crate::commands::build_runtime()?;
-    let handles = rt.block_on(apply_all(&graph, &result, prior_state.as_ref()))?;
+    let mut progress = Progress::default();
+    if let Err(err) = rt.block_on(apply_all(
+        &graph,
+        &result,
+        prior_state.as_ref(),
+        &mut progress,
+    )) {
+        return Err(record_partial(
+            project,
+            &graph,
+            prior_state.as_ref(),
+            &progress,
+            err,
+        ));
+    }
+    let handles = progress.started;
 
     let prior_endpoints = prior_state.as_ref().map_or(&[][..], |s| &s.endpoints[..]);
-    let endpoints = merge_endpoints(prior_endpoints, &graph, &result, &handles);
+    let destroyed: Vec<DeploymentId> = result
+        .items
+        .iter()
+        .filter(|i| i.launch.is_none())
+        .map(|i| i.deployment.clone())
+        .collect();
+    let endpoints = merge_endpoints(prior_endpoints, &graph, &destroyed, &handles);
     let state = LocalState {
         version: LocalState::VERSION.to_owned(),
         graph,
@@ -120,15 +142,10 @@ pub(crate) fn run(
 fn merge_endpoints(
     prior: &[RuntimeHandle],
     graph: &Graph,
-    result: &PlanResult,
+    destroyed: &[DeploymentId],
     handles: &[RuntimeHandle],
 ) -> Vec<RuntimeHandle> {
-    let destroyed = |h: &RuntimeHandle| {
-        result
-            .items
-            .iter()
-            .any(|i| i.launch.is_none() && i.deployment == h.deployment)
-    };
+    let destroyed = |h: &RuntimeHandle| destroyed.contains(&h.deployment);
     let mut merged: Vec<RuntimeHandle> = prior
         .iter()
         .filter(|h| {
@@ -140,6 +157,103 @@ fn merge_endpoints(
         .collect();
     merged.extend(handles.iter().cloned());
     merged
+}
+
+/// What `apply_all` has already done to the real world when it returns, so a
+/// failure part-way through can still be recorded in state
+/// (amicu-planning#203).
+#[derive(Default)]
+struct Progress {
+    /// Deployments started and verified, in plan order.
+    started: Vec<RuntimeHandle>,
+    /// Deployments stopped because they were removed from the config.
+    stopped: Vec<DeploymentId>,
+}
+
+/// The graph to persist after a partial apply: the prior graph, plus each
+/// deployment that was started (with the model and hardware profile it was
+/// started from), minus each one that was stopped. Deployments that were not
+/// reached keep their prior definition, so the next `plan` still sees them
+/// as pending.
+fn partial_graph(prior: Option<&Graph>, graph: &Graph, progress: &Progress) -> Graph {
+    let mut out = prior.cloned().unwrap_or_else(Graph::new);
+    for h in &progress.started {
+        let Some(d) = find_deployment(graph, &h.deployment) else {
+            continue;
+        };
+        out.deployments.retain(|x| x.id != d.id);
+        out.deployments.push(d.clone());
+        if let Some(m) = graph.models.iter().find(|m| m.id == d.model) {
+            out.models.retain(|x| x.id != m.id);
+            out.models.push(m.clone());
+        }
+        if let Some(hw) = graph
+            .hardware_profiles
+            .iter()
+            .find(|x| x.id == d.hardware_profile)
+        {
+            out.hardware_profiles.retain(|x| x.id != hw.id);
+            out.hardware_profiles.push(hw.clone());
+        }
+    }
+    out.deployments
+        .retain(|d| !progress.stopped.contains(&d.id));
+    out
+}
+
+/// Persist what a failed apply did get done, and return `err` annotated with
+/// which deployments were started and recorded (amicu-planning#203). Without
+/// this they would keep running (and billing) with no state entry, invisible
+/// to `destroy` and re-created by the next `apply`.
+fn record_partial(
+    project: &Project,
+    graph: &Graph,
+    prior: Option<&LocalState>,
+    progress: &Progress,
+    err: CliError,
+) -> CliError {
+    if progress.started.is_empty() && progress.stopped.is_empty() {
+        return err;
+    }
+    let partial = partial_graph(prior.map(|s| &s.graph), graph, progress);
+    let prior_endpoints = prior.map_or(&[][..], |s| &s.endpoints[..]);
+    let state = LocalState {
+        version: LocalState::VERSION.to_owned(),
+        endpoints: merge_endpoints(
+            prior_endpoints,
+            &partial,
+            &progress.stopped,
+            &progress.started,
+        ),
+        graph: partial,
+    };
+    let names = |ids: Vec<&str>| ids.join(", ");
+    let started = names(
+        progress
+            .started
+            .iter()
+            .map(|h| h.deployment.as_str())
+            .collect(),
+    );
+    let stopped = names(progress.stopped.iter().map(DeploymentId::as_str).collect());
+    let mut done = Vec::new();
+    if !started.is_empty() {
+        done.push(format!("started: {started}"));
+    }
+    if !stopped.is_empty() {
+        done.push(format!("stopped: {stopped}"));
+    }
+    let done = done.join("; ");
+    match project.save_state(&state) {
+        Ok(()) => CliError::Message(format!(
+            "{err}\n\napply stopped part-way; already done and recorded in state ({done}). \
+             Fix the error and re-run `amicu apply` to finish the rest"
+        )),
+        Err(save_err) => CliError::Message(format!(
+            "{err}\n\napply stopped part-way ({done}) and recording that in state FAILED: \
+             {save_err}. Those deployments may still be running; stop them by hand"
+        )),
+    }
 }
 
 /// Hardware profile `provider` value that routes a deployment through
@@ -282,7 +396,8 @@ async fn apply_all(
     graph: &Graph,
     result: &PlanResult,
     prior: Option<&LocalState>,
-) -> Result<Vec<RuntimeHandle>, CliError> {
+    progress: &mut Progress,
+) -> Result<(), CliError> {
     // Dispatch to the adapter matching each deployment's own runtime family
     // (amicu-planning#152) - previously `apply` only ever started/stopped
     // llama.cpp instances. amicu-planning#158 PR 5 adds a second axis: a
@@ -297,8 +412,6 @@ async fn apply_all(
     let vllm_adapter = VllmAdapter::new(Box::new(catalog.clone()), amicu_vllm::host_supervisor());
     let resolver = EnvSecretResolver;
     let registry = EndpointRegistry::new();
-    let mut handles = Vec::new();
-
     preflight(result)?;
 
     for item in &result.items {
@@ -333,7 +446,7 @@ async fn apply_all(
             // not protected as declared is torn down and apply fails.
             secure_endpoint(adapter, &handle, launch, dispatch, &resolver).await?;
             registry.register(&handle);
-            handles.push(handle);
+            progress.started.push(handle);
         } else {
             // Destroy: stop the prior instance if we still hold its handle.
             // Both `host_supervisor()` implementations manage the launchd/
@@ -391,6 +504,7 @@ async fn apply_all(
                 }
                 registry.deregister(&item.deployment);
             }
+            progress.stopped.push(item.deployment.clone());
         }
     }
 
@@ -398,7 +512,7 @@ async fn apply_all(
         registry.register_policy(policy.clone());
     }
 
-    Ok(handles)
+    Ok(())
 }
 
 /// The shared post-deploy exposure check (amicu-planning#191), run on the
@@ -803,8 +917,9 @@ mod dispatch_tests {
 
 #[cfg(test)]
 mod merge_tests {
-    use super::merge_endpoints;
+    use super::{CliError, Progress, merge_endpoints, record_partial};
     use crate::planner::build_plan;
+    use crate::project::Project;
     use amicu_runtime::RuntimeHandle;
 
     const CONFIG: &str = r#"resource "model" "m" {
@@ -882,7 +997,7 @@ resource "deployment" "beta" {
         assert_eq!(result.items.len(), 1, "only beta is actionable");
 
         let new_beta = handle(&graph, "beta", "http://new-beta");
-        let merged = merge_endpoints(&prior, &graph, &result, std::slice::from_ref(&new_beta));
+        let merged = merge_endpoints(&prior, &graph, &[], std::slice::from_ref(&new_beta));
         let ends: Vec<_> = merged
             .iter()
             .map(|h| (h.deployment.as_str(), h.endpoint.as_str()))
@@ -906,9 +1021,70 @@ resource "deployment" "beta" {
         let result = build_plan(&graph, Some(&prior_graph)).unwrap();
         assert_eq!(result.items.len(), 1, "beta is destroyed");
 
-        let merged = merge_endpoints(&prior, &graph, &result, &[]);
+        let merged = merge_endpoints(&prior, &graph, &[], &[]);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].deployment.as_str(), "alpha");
+    }
+
+    #[test]
+    fn failed_second_deployment_leaves_the_first_in_state() {
+        let dir = std::env::temp_dir().join(format!("amicu-partial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = Project::new(&dir);
+
+        // Fresh project: alpha started, then beta failed.
+        let graph = amicu_hcl::parse_graph(CONFIG).unwrap();
+        let progress = Progress {
+            started: vec![handle(&graph, "alpha", "http://alpha")],
+            stopped: Vec::new(),
+        };
+        let err = record_partial(
+            &project,
+            &graph,
+            None,
+            &progress,
+            CliError::Message("beta failed to start".to_owned()),
+        )
+        .to_string();
+        assert!(err.contains("beta failed to start"), "{err}");
+        assert!(err.contains("started: alpha"), "{err}");
+        assert!(err.contains("recorded in state"), "{err}");
+
+        let state = project.load_state().unwrap().expect("state was saved");
+        let ids: Vec<_> = state
+            .graph
+            .deployments
+            .iter()
+            .map(|d| d.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["alpha"], "beta never ran, so it is not recorded");
+        assert_eq!(state.endpoints.len(), 1);
+        assert_eq!(state.endpoints[0].deployment.as_str(), "alpha");
+
+        // The next plan still wants beta, and leaves alpha alone.
+        let next = build_plan(&graph, Some(&state.graph)).unwrap();
+        let pending: Vec<_> = next.items.iter().map(|i| i.deployment.as_str()).collect();
+        assert_eq!(pending, vec!["beta"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nothing_started_leaves_state_untouched() {
+        let dir = std::env::temp_dir().join(format!("amicu-partial-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let project = Project::new(&dir);
+        let graph = amicu_hcl::parse_graph(CONFIG).unwrap();
+        let err = record_partial(
+            &project,
+            &graph,
+            None,
+            &Progress::default(),
+            CliError::Message("boom".to_owned()),
+        )
+        .to_string();
+        assert_eq!(err, "boom");
+        assert!(project.load_state().unwrap().is_none());
     }
 }
 
