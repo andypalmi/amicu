@@ -8,7 +8,6 @@ import {
   CardFooter,
   CardHeader,
   CardTitle,
-  cn,
   Table,
   TableBody,
   TableCell,
@@ -62,16 +61,9 @@ function AvailabilityCell({ value }: { value: Availability }) {
 
 function TierCard({ tier }: { tier: Tier }) {
   return (
-    <Card
-      className={cn(
-        'flex flex-col',
-        tier.featured && 'border-foreground bg-secondary',
-      )}
-    >
+    <Card className="flex flex-col">
       <CardHeader className="gap-3">
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-xl">{tier.name}</CardTitle>
-        </div>
+        <CardTitle className="text-xl">{tier.name}</CardTitle>
         <p className="text-sm text-muted-foreground">{tier.tagline}</p>
         <p className="text-2xl font-semibold tracking-tight">{tier.priceLabel}</p>
       </CardHeader>
@@ -88,7 +80,7 @@ function TierCard({ tier }: { tier: Tier }) {
       </CardContent>
       <CardFooter>
         {tier.cta.href ? (
-          <Button asChild className="w-full" variant={tier.featured ? 'default' : 'outline'}>
+          <Button asChild className="w-full" variant="outline">
             <Link href={tier.cta.href}>{tier.cta.label}</Link>
           </Button>
         ) : (
@@ -104,7 +96,7 @@ function TierCard({ tier }: { tier: Tier }) {
 export default function PricingPage() {
   return (
     <main className="flex flex-1 flex-col">
-      <Section size="lg">
+      <Section>
         <PageHeader
           title="One rail, four tiers."
           description="Community is free. Pro, Enterprise and Hosted add team and production features."

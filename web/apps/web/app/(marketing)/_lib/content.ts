@@ -30,8 +30,6 @@ export interface Tier {
   description: string;
   /** `href: null` renders a disabled button (not purchasable yet). */
   cta: { label: string; href: string | null };
-  /** Rendered with visual emphasis. */
-  featured?: boolean;
   /** Short bullet summary shown on the tier card. */
   highlights: string[];
 }
@@ -60,7 +58,6 @@ export const tiers: Tier[] = [
     description:
       'Everything in Community, plus performance-DB-backed recommendations, performance-DB queries and filtered comparison, and shared team state with locking and roles.',
     cta: { label: 'Sign-ups closed', href: null },
-    featured: true,
     highlights: [
       'Advanced perf-DB-backed recommendations',
       'Performance-DB query + filtered comparison',
@@ -211,16 +208,17 @@ export const featureMatrix: FeatureRow[] = [
   },
 ];
 
-export type ProviderStatus = 'supported' | 'preview';
+export type ProviderStatus = 'supported' | 'preview' | 'planned';
 
 export interface Provider {
   name: string;
-  /** Category (preview providers are grouped by it) or a one-line description. */
+  /** Category (non-supported providers are grouped by it) or a one-line description. */
   kind: string;
   /**
    * `supported`: wired into `amicu apply` (this machine, Modal).
-   * `preview`: adapter built and tested against mocks only; not live-tested
-   * and not wired into apply.
+   * `preview`: provisioning adapter built (bare machine only), tested against
+   * mocks, not live-tested and not wired into apply.
+   * `planned`: region and pricing data only; provisioning not built.
    */
   status: ProviderStatus;
   /** Residency note for this provider. */
@@ -242,7 +240,7 @@ export const providers: Provider[] = [
     status: 'supported',
     residency: 'Region pinning, EU included (for example eu-west)',
   },
-  { name: 'Hetzner', kind: 'European cloud', status: 'preview', residency: 'Germany, Finland' },
+  { name: 'Hetzner', kind: 'European cloud', status: 'preview', residency: 'Germany, Finland, plus US and APAC' },
   {
     name: 'OVHcloud',
     kind: 'European cloud',
@@ -258,7 +256,7 @@ export const providers: Provider[] = [
   {
     name: 'Nebius',
     kind: 'GPU cloud',
-    status: 'preview',
+    status: 'planned',
     residency: 'EU regions, plus a US region',
   },
   {
@@ -270,19 +268,19 @@ export const providers: Provider[] = [
   {
     name: 'AWS',
     kind: 'Hyperscaler',
-    status: 'preview',
+    status: 'planned',
     residency: 'Ireland, Frankfurt, Stockholm, Milan, Paris, plus US and APAC',
   },
   {
     name: 'Azure',
     kind: 'Hyperscaler',
-    status: 'preview',
+    status: 'planned',
     residency: 'West and North Europe, Germany, Sweden, France, plus UK, US and APAC',
   },
   {
     name: 'GCP',
     kind: 'Hyperscaler',
-    status: 'preview',
+    status: 'planned',
     residency: 'Belgium, Netherlands, Finland, Frankfurt, Paris, plus US and APAC',
   },
   {

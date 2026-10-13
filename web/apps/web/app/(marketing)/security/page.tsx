@@ -17,7 +17,7 @@ const pillars = [
   },
   {
     title: 'Data residency you choose',
-    body: 'Residency and region are first-class planning inputs. Plans are checked against the regions of your own machine, Modal and the catalogs for EU-native clouds and the hyperscalers, so a stack that would leave the allowed regions is rejected.',
+    body: 'Residency and region are first-class planning inputs. Plans are checked against the regions your data class allows, so a stack that would leave them is rejected before anything starts.',
   },
   {
     title: 'Open source, auditable',
@@ -32,14 +32,14 @@ const pillars = [
 export const metadata: Metadata = pageMetadata({
   title: 'Security',
   description:
-    'How Amicu handles trust: API-enforced tier gating, asymmetric verifiable sessions, secrets by reference, EU data residency, and a fully open-source auditable frontend.',
+    'How Amicu handles trust: API-enforced tier gating, asymmetric verifiable sessions, secrets by reference, residency checks in plans, and a fully open-source auditable frontend.',
   path: '/security',
 });
 
 export default function SecurityPage() {
   return (
     <main className="flex flex-1 flex-col">
-      <Section size="lg">
+      <Section>
         <PageHeader
           title="Trust the boundary, not the browser."
           description="The web app renders decisions. The API makes and enforces them."

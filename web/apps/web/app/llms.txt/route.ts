@@ -56,7 +56,7 @@ policy, and capability logic live in the Amicu Rust Management API; the web app
 renders those decisions rather than owning them. Two entry paths: a guided
 "help me choose" wizard, and a direct HCL editor for authoring, validating, and
 planning declarative serving stacks. Residency-aware by design: apply works
-on your own machine and Modal today; other clouds are planning and residency data only.
+on your own machine and Modal today; other clouds have untested provisioning adapters or planning and residency data only.
 
 ## Key pages
 ${marketingLines}

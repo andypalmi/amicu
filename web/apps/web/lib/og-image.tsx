@@ -41,7 +41,7 @@ export function ogImage() {
             Design, deploy, and operate LLM serving stacks.
           </div>
           <div style={{ fontSize: 30, color: '#a3a3a3' }}>
-            Open-source, declarative, EU-first. One HCL config for any provider.
+            Open-source infrastructure as code for self-hosted LLMs.
           </div>
         </div>
       </div>

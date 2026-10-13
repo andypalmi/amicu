@@ -3,9 +3,10 @@ import Link from 'next/link';
 import { Button } from '@amicu/ui';
 import { appName, appTagline, siteUrl } from '@/lib/shared';
 import { HclCode, Transcript } from './_components/code';
-import { CodePanel, Container, CTABand, FactList, SectionHeader, StatusNote } from './_components/marketing';
+import { CodePanel, Container, CTABand, Section, FactList, SectionHeader, StatusNote } from './_components/marketing';
 import { githubUrl, quickstartUrl } from './_lib/content';
 import {
+  CHAT_SESSION,
   GPU_LAUNCH,
   HERO_HCL,
   HERO_PLAN,
@@ -102,8 +103,7 @@ export default function LandingPage() {
       </section>
 
       {/* How it works */}
-      <section className="border-t border-border">
-        <Container className="py-20 sm:py-28">
+      <Section>
           <SectionHeader
             id="how-it-works"
             title="How it works"
@@ -131,12 +131,26 @@ export default function LandingPage() {
               </li>
             ))}
           </ol>
-        </Container>
-      </section>
+          <div className="grid gap-6 border-t border-border py-10 md:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] md:gap-12">
+            <div>
+              <h3 className="text-xl font-semibold tracking-tight">Use the endpoint</h3>
+              <p className="mt-3 max-w-prose text-pretty leading-relaxed text-muted-foreground">
+                The server speaks the OpenAI API, so any compatible client can talk to it.
+              </p>
+            </div>
+            <CodePanel caption="chat client (illustrative)" className="self-start">
+              <Transcript
+                lines={CHAT_SESSION}
+                wrap
+                label="Example chat session against the deployed endpoint"
+                className="px-5 py-4"
+              />
+            </CodePanel>
+          </div>
+      </Section>
 
       {/* What you get */}
-      <section className="border-t border-border">
-        <Container className="py-20 sm:py-28">
+      <Section>
           <SectionHeader
             title="From a laptop to a GPU without rewriting your setup"
             lead="Same workflow on a MacBook with llama.cpp and an L4 with vLLM."
@@ -146,12 +160,10 @@ export default function LandingPage() {
             <LaunchLine where="On Modal in eu-west, vLLM" command={GPU_LAUNCH} />
           </div>
           <FactList className="mt-16" items={OUTCOMES.map((o) => ({ term: o.title, detail: o.body }))} />
-        </Container>
-      </section>
+      </Section>
 
       {/* Where it runs today */}
-      <section className="border-t border-border">
-        <Container className="py-20 sm:py-28">
+      <Section>
           <SectionHeader
             id="where-it-runs"
             title="Where it runs today"
@@ -165,12 +177,10 @@ export default function LandingPage() {
             </Link>
             .
           </p>
-        </Container>
-      </section>
+      </Section>
 
       {/* Who it's for, and how to run it */}
-      <section className="border-t border-border">
-        <Container className="grid gap-12 py-20 sm:py-28 md:grid-cols-2 md:gap-16">
+      <Section containerClassName="grid gap-12 md:grid-cols-2 md:gap-16">
           <div>
             <h2 className="text-2xl font-semibold tracking-tight">Who it is for</h2>
             <p className="mt-4 text-pretty leading-relaxed text-muted-foreground">
@@ -192,20 +202,17 @@ export default function LandingPage() {
               .
             </p>
           </div>
-        </Container>
-      </section>
+      </Section>
 
       {/* Closing CTA */}
-      <section className="border-t border-border">
-        <Container className="py-20 sm:py-28">
+      <Section>
           <CTABand
             title="Try it on your laptop first."
             lede="Build the CLI, run amicu init and read the plan."
             primary={{ label: 'Read the quickstart', href: quickstartUrl, external: true }}
             secondary={{ label: 'View on GitHub', href: githubUrl, external: true }}
           />
-        </Container>
-      </section>
+      </Section>
     </main>
   );
 }

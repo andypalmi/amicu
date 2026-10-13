@@ -134,6 +134,22 @@ export const STEPS: Step[] = [
   },
 ];
 
+/**
+ * Illustrative chat session against the endpoint `apply` prints. amicu has no
+ * chat command; this is any OpenAI-compatible client, and the answer is an
+ * example, not recorded model output.
+ */
+export const CHAT_SESSION: TermLine[] = [
+  { text: 'Qwen/Qwen2.5-7B-Instruct', tone: 'cmd' },
+  { text: 'https://<workspace>--amicu-chat-server.<region>.modal.direct/v1', tone: 'muted' },
+  { text: '' },
+  { text: '> Draft a retention notice for our EU customers.' },
+  { text: '' },
+  { text: 'We keep customer data only in EU regions, and delete it 30 days after you close your account.▍' },
+  { text: '' },
+  { text: '> ▍', tone: 'muted' },
+];
+
 /** Same model resource, two hardware profiles: real launch lines from `plan`. */
 export const LAPTOP_LAUNCH =
   'llama-server -m models/starter_chat/qwen3.5-8b-instruct-q4_k_m.gguf --port 8000 --ctx-size 100000 --n-gpu-layers -1 --metrics';
@@ -182,7 +198,7 @@ export const SUPPORT: Support[] = [
   },
   {
     label: 'Residency and pricing data',
-    value: 'Region and pricing data for Hetzner, OVHcloud, Scaleway, Nebius, RunPod, Modal, AWS, Azure and GCP feed the residency checks and recommendations. Their adapters are in preview and not wired into apply.',
+    value: 'Region and pricing data for Hetzner, OVHcloud, Scaleway, Nebius, RunPod, Modal, AWS, Azure and GCP feed the residency checks and recommendations. Provisioning adapters for Hetzner, OVHcloud, Scaleway, RunPod and SSH hosts exist but are untested live and not wired into apply; AWS, Azure, GCP and Nebius have none yet.',
   },
   {
     label: 'Models',
