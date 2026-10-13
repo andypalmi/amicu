@@ -35,10 +35,10 @@ resource "hardware_profile" "cpu_box" {
 }
 ```
 
-Modal, one L4 GPU in the EU:
+A remote GPU provider (Modal here), one L4 GPU in the EU:
 
 ```hcl
-resource "hardware_profile" "modal_l4" {
+resource "hardware_profile" "gpu_l4" {
   provider = "modal"
   region   = "eu-west"
   accelerator {
@@ -55,7 +55,7 @@ resource "hardware_profile" "modal_l4" {
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `provider` | string | yes | `local`, `local_apple`, `local_cpu`, `on_prem`, `modal`, or a preview/planned provider id |
+| `provider` | string | yes | `local`, `local_apple`, `local_cpu`, `on_prem`, `modal`, or a preview/planned provider id (see [Providers](/docs/providers)) |
 | `region` | string | no | Provider region code. Used for residency checks. |
 | `accelerator` | block | no | GPU, TPU, or Apple Silicon |
 | `accelerator.kind` | string | yes | `gpu`, `tpu`, `apple_silicon`, or `cpu` |
@@ -93,4 +93,4 @@ resource "hardware_profile" "priced" {
 
 Local providers (`local`, `local_apple`, `local_cpu`, `on_prem`) run on this machine and bind to loopback. Every other provider serves the endpoint off-machine, so its deployments must set `api_key`. See [Providers](/docs/providers).
 
-On Modal, `accelerator.model` and `accelerator.count` become the GPU request (`h100` with `count = 2` becomes `H100:2`), `memory` becomes the container memory request, and `cpu { cores }` becomes the CPU request. Only GPU accelerators are valid on Modal.
+How `accelerator`, `memory`, and `cpu` map to a provider's request is provider-specific. For example, on Modal `h100` with `count = 2` becomes `H100:2`. See the [provider page](/docs/providers).

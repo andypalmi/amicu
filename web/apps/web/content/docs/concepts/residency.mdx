@@ -21,7 +21,7 @@ Any other token is accepted and treated as its own jurisdiction.
 
 ## Region
 
-A region is the provider location named in a hardware profile, such as `eu-west` on Modal. Each provider catalog maps its region codes to a residency jurisdiction. For Modal, `eu`, `eu-west`, `eu-north`, and `eu-south` resolve to `eu`; `uk` resolves to `uk`; and so on. See [Modal](/docs/providers/modal) for the full list.
+A region is the provider location named in a hardware profile, such as `eu-west` or `fr-par`. Each provider catalog maps its region codes to a residency jurisdiction (for example, `fr-par` resolves to `eu`, `uksouth` to `uk`). A region the catalog does not know fails closed. Each [provider page](/docs/providers) lists its region codes.
 
 The `region` field is optional. A profile without a region is never flagged by residency checks. A region that the provider catalog does not know cannot be proven to violate a constraint, so it is not flagged by the jurisdiction check either.
 
@@ -47,7 +47,7 @@ Empty allowlists permit everything.
 
 ## Example
 
-An EU-only stack on Modal:
+An EU-only stack on a provider that supports region pinning (this example uses Modal, the remote GPU provider `apply` supports today):
 
 ```hcl
 resource "data_class" "confidential" {

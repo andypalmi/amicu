@@ -25,7 +25,7 @@ Start with `amicu doctor`. Then read the diagnostic code: the category tells you
 
 **`AMICU-POLICY-008`.** The key is empty or contains a comma, whitespace, or non-ASCII characters. Regenerate it with `openssl rand -hex 32`.
 
-**`state is locked by another amicu process`.** Another `amicu apply` or `amicu modal stop` is running. Wait, or use `--lock-timeout <secs>`. The lock is released automatically when the process exits.
+**`state is locked by another amicu process`.** Another `amicu apply` or a provider stop command is running. Wait, or use `--lock-timeout <secs>`. The lock is released automatically when the process exits.
 
 **`llama-server not found on PATH; install with ...`.** Install llama.cpp (macOS: `brew install llama.cpp`) so `llama-server` is on the `PATH` of the shell that runs `amicu apply`. `amicu doctor` reports the same.
 
@@ -43,26 +43,10 @@ Start with `amicu doctor`. Then read the diagnostic code: the category tells you
 
 **`could not verify that the endpoint rejects unauthenticated requests`.** The endpoint never gave a definite `401` or `403`. It may still be loading. Check the logs, then re-run apply.
 
-**If the stop after a failed check also failed,** the error prints the command to stop it by hand: `systemctl --user stop <label>` on Linux, `launchctl unload ~/Library/LaunchAgents/<label>.plist` on macOS, or `amicu modal stop <app>` for Modal.
+**If the stop after a failed check also failed,** the error prints the command to stop it by hand: `systemctl --user stop <label>` on Linux, `launchctl unload ~/Library/LaunchAgents/<label>.plist` on macOS, or the provider's stop command (for Modal, `amicu modal stop <app>`).
 
 **Apply failed partway.** Deployments started before the failure are recorded in state and listed in the error. Fix the cause and apply again; apply finishes the rest. See [State](/docs/security/state).
 
-## Modal
+## Provider-specific
 
-**`MODAL_TOKEN_ID is not set`.** Export `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`. Verify with `amicu modal auth-check`.
-
-**`Modal deployments need MODAL_PROXY_TOKEN_ID and MODAL_PROXY_TOKEN_SECRET ... nothing was started`.** Create a Proxy Auth Token in the Modal dashboard and export both values.
-
-**`503` from the endpoint.** The container is cold-starting. The first run also downloads the weights. Watch `amicu modal logs <app> --follow` and retry.
-
-**`401` or `403` from the endpoint.** Send both layers: `Authorization: Bearer $KEY` and the `Modal-Key` and `Modal-Secret` headers. A proxy token is not an `Authorization: Bearer` value.
-
-**`NCCL error: unhandled cuda error`** on a multi-GPU vLLM deployment (L4 and other non-NVLink GPUs). Add `env { NCCL_P2P_DISABLE = "1" }` to the `vllm` block and apply again.
-
-**`apply` says "No changes" but nothing is running.** The app was stopped outside amicu. Current builds detect this, print a `drift:` line, and recreate it. On older builds, delete `.amicu/state/state.json` or run `amicu modal stop <app>` inside the project, then apply.
-
-**`warning: could not check Modal for live apps`.** The lookup failed (credentials or network). Local state was used as is.
-
-**A thinking model returns `content: null` with `finish_reason=length`.** `max_tokens` was spent on reasoning. Raise `max_tokens`.
-
-**Changing `region` fails on an existing app.** Modal does not allow the routing region to change. Run `amicu modal stop <app>`, then apply.
+Each provider page has its own troubleshooting section: [This machine](/docs/providers/local#troubleshooting), [Modal](/docs/providers/modal#troubleshooting), and the [others](/docs/providers).

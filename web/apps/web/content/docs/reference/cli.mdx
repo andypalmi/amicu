@@ -9,7 +9,7 @@ amicu [--output human|json] <command>
 
 `--output` is global. The default is `human`. Run `amicu <command> --help` for the authoritative flag list of your build.
 
-Commands operate on the project in the current directory. `skill` and `modal` do not need a project.
+Commands operate on the project in the current directory. `skill` and the provider commands (`modal` today) do not need a project.
 
 ## Project commands
 
@@ -32,9 +32,11 @@ There is no `destroy` command. To remove a deployment, delete its resource from 
 
 See [Agent skills](/docs/reference/agent-skills).
 
-## Modal commands
+## Provider commands
 
-These read `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` from the environment, never from flags. `<app>` is the Modal app name: `amicu-` plus the deployment id with `_` replaced by `-`.
+Today only Modal has provider commands. Other providers will add theirs when they are wired into `apply`.
+
+The `modal` commands read `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` from the environment, never from flags. `<app>` is the Modal app name: `amicu-` plus the deployment id with `_` replaced by `-`.
 
 | Command | Description |
 |---|---|
@@ -49,7 +51,7 @@ These read `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` from the environment, never
 | Code | Meaning |
 |---|---|
 | `0` | Success, valid, or no error-severity diagnostics |
-| `1` | Error-severity diagnostics, `fmt --check` drift, or a missing Modal app |
+| `1` | Error-severity diagnostics, `fmt --check` drift, or a missing provider app |
 | non-zero with an `error:` line | Operational failure such as an I/O or parse error |
 
 `amicu doctor` also exits `1` when a check has status `fail` (a `warn` does not).

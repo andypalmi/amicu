@@ -1,9 +1,37 @@
 ---
 title: This machine
-description: Run llama.cpp or vLLM as a launchd or systemd user service.
+description: Run llama.cpp or vLLM as a launchd or systemd user service, on macOS, Linux, Apple Silicon, or CPU.
 ---
 
-Hardware profiles with `provider` set to `local`, `local_apple`, `local_cpu`, or `on_prem` run on the machine where you invoke amicu.
+<ProviderFacts slug="local" ids="local, local_apple, local_cpu, on_prem" />
+
+## Use this provider
+
+```hcl
+resource "hardware_profile" "dev_mac" {
+  provider = "local_apple"
+  accelerator {
+    kind   = "apple_silicon"
+    model  = "m3_pro"
+    count  = 1
+    memory = "36GiB"
+  }
+  memory = "36GiB"
+}
+```
+
+## Overview
+
+Hardware profiles with `provider` set to `local`, `local_apple`, `local_cpu`, or `on_prem` run on the machine where you invoke amicu. The four ids differ in intent, not in how `apply` runs them:
+
+| Provider id | Use it for |
+|---|---|
+| `local` | A generic local machine. |
+| `local_apple` | Apple Silicon, with `accelerator.kind = "apple_silicon"`. |
+| `local_cpu` | CPU-only machines, with a `cpu {}` block. |
+| `on_prem` | A server you own, where you run amicu on the host itself. |
+
+A profile with no `provider` also means the local host.
 
 ## How it runs
 
@@ -24,7 +52,7 @@ When you change a deployment, `apply` replaces the running service; it may wait 
 - **vLLM runtime:** `vllm` on `PATH`; if it is missing, apply fails with `vllm not found on PATH; install with `pip install vllm``. A native single-process vLLM run needs a supported GPU (NVIDIA CUDA, AMD ROCm, or Intel XPU).
 - **Model file:** for llama.cpp, a GGUF file that you download yourself; amicu does not download weights. Put it at `models/<model resource id>/<variant.file>` relative to the project directory, or set `variant.file` to an absolute path. `amicu plan` shows the resolved absolute path, `<project dir>/models/<model id>/<file>`, in the `launch:` line. See the [Quickstart](/docs/quickstart) for a download command.
 
-## Example
+## Full example
 
 ```hcl
 resource "model" "support_chat" {
@@ -88,3 +116,56 @@ If amicu cannot stop a service, `apply` prints the command to run:
 
 - Linux: `systemctl --user stop <label>`
 - macOS: `launchctl unload ~/Library/LaunchAgents/<label>.plist`
+
+## Configuration reference
+
+| Argument | Type | Default | Required | Notes |
+|---|---|---|---|---|
+| `provider` | string | none | yes | `local`, `local_apple`, `local_cpu`, or `on_prem`. |
+| `region` | string | none | no | Not used for placement. Residency checks cannot prove a region for local providers. |
+| `accelerator.kind` | string | none | no | `gpu`, `apple_silicon`, or `cpu`. |
+| `accelerator.model`, `count`, `memory` | string, number, size | none | yes (with `accelerator`) | Used by the fit check. |
+| `cpu.model`, `cpu.cores` | string, number | none | yes (with `cpu`) | For CPU-only machines. |
+| `memory` | size | none | yes | Host RAM, or unified memory on Apple Silicon. |
+| deployment `api_key` | `secret(...)` | none | no | Optional locally; the endpoint is loopback only. |
+| `llama_cpp.port` / `vllm.port` | number | none | yes | The server binds to `127.0.0.1` on this port. |
+
+See [`hardware_profile`](/docs/configuration/hardware-profile) and [`deployment`](/docs/configuration/deployment) for every field.
+
+## GPUs and regions
+
+The accelerator is whatever the machine has; amicu does not provision it. llama.cpp offloads layers with `n_gpu_layers` (Metal on Apple Silicon, CUDA or others per your `llama-server` build). A native single-process vLLM run needs a supported GPU (NVIDIA CUDA, AMD ROCm, or Intel XPU). There are no regions: the endpoint is on the machine, wherever it is.
+
+## Limits
+
+- Loopback only: `127.0.0.1`, not configurable.
+- On Linux the service is a transient systemd user unit; it does not survive a reboot or logout.
+- amicu does not download model weights.
+- One service per deployment, labelled `io.amicu.llama.<deployment id>`.
+
+## Troubleshooting
+
+<Accordions>
+  <Accordion title="llama-server not found on PATH">
+    Install llama.cpp (macOS: `brew install llama.cpp`) so `llama-server` is on the `PATH` of the shell that runs `amicu apply`. `amicu doctor` reports the same.
+  </Accordion>
+  <Accordion title="vllm not found on PATH">
+    Install vLLM into the environment whose `PATH` runs `amicu apply`: `pip install vllm`.
+  </Accordion>
+  <Accordion title="The service exits during startup">
+    Apply fails within seconds, stops the service, and prints where the log is. macOS: `~/Library/Logs/amicu/<label>.out.log` and `<label>.err.log`. Linux: `journalctl --user --unit=<label>`. The usual causes are a missing GGUF at the path in the plan's `launch:` line, or too little memory.
+  </Accordion>
+  <Accordion title="Apply waits and then fails with a health timeout">
+    Apply waits up to 15 minutes for `/health`. If the model never loads, apply stops the service and fails; read the log named in the error.
+  </Accordion>
+  <Accordion title="port N is already serving /health">
+    Something else answers on that port. Stop it or change `llama_cpp.port` or `vllm.port`, then apply again. Apply may wait up to 10 seconds for the previous service of the same deployment to stop before it reports this.
+  </Accordion>
+  <Accordion title="The service is gone after a reboot or logout (Linux)">
+    Linux services are transient systemd user units. Run `amicu apply` again. On macOS the LaunchAgent persists and starts at login.
+  </Accordion>
+</Accordions>
+
+## Source
+
+Supervisors: [`crates/amicu-cli/src/commands/apply.rs`](https://github.com/andypalmi/amicu/blob/main/crates/amicu-cli/src/commands/apply.rs). Status of every provider: [Providers](/docs/providers).

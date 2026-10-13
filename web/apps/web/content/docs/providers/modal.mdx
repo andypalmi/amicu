@@ -3,9 +3,31 @@ title: Modal
 description: Deploy llama.cpp or vLLM to Modal serverless GPUs, with tokens, regions, GPU types, and autoscaling.
 ---
 
+<ProviderFacts slug="modal" ids="modal" />
+
+## Use this provider
+
+```hcl
+resource "hardware_profile" "modal_l4" {
+  provider = "modal"
+  region   = "eu-west"
+  accelerator {
+    kind   = "gpu"
+    model  = "l4"
+    count  = 1
+    memory = "24GiB"
+  }
+  memory = "32GiB"
+}
+```
+
+Modal is one of the providers amicu supports. It is the remote GPU provider `apply` can deploy to today; others are in [preview](/docs/providers).
+
+## Overview
+
 A hardware profile with `provider = "modal"` makes `apply` deploy the deployment to Modal as an app. Both `vllm` and `llama_cpp` runtimes work. The model must come from Hugging Face; the container downloads it.
 
-## Credentials
+## Setup and credentials
 
 Export these in your shell. Never write values into HCL, and never pass them as flags.
 
@@ -118,6 +140,21 @@ resource "deployment" "qwen35_modal" {
 
 Flags that refer to local files (`--mmproj`, `--lora`, `--chat-template-file`, a `speculative {}` draft model) and secret-bearing flags (`--hf-token`, `--api-key`) are rejected before any Modal call.
 
+## Configuration reference
+
+| Argument | Type | Default | Required | Notes |
+|---|---|---|---|---|
+| `provider` | string | none | yes | `"modal"`. |
+| `region` | string | none | no | A Modal region code, see [Regions](#regions). Unpinned apps run anywhere. |
+| `accelerator.kind` | string | none | yes | Must be `gpu`. |
+| `accelerator.model` | string | none | yes | A model from [GPU types](#gpu-types). |
+| `accelerator.count` | number | none | yes | Becomes the `MODEL:count` GPU string. |
+| `accelerator.memory` | size | none | yes | VRAM, for the fit check. |
+| `memory` | size | none | yes | Becomes the container memory request. |
+| `cpu.cores` | number | none | no | Becomes the CPU request. |
+| deployment `api_key` | `secret(...)` | none | yes | Required for every off-machine provider. |
+| deployment `scaling {}` | block | Modal defaults | no | Modal only. See [`deployment`](/docs/configuration/deployment). |
+
 ## Regions
 
 `region` is optional. Pinning a region places the app there and multiplies Modal's base price (about 1.15x for broad regions, about 1.75x for narrow ones, per Modal's published region-selection guide). Each region maps to a residency jurisdiction used by [policy checks](/docs/concepts/residency).
@@ -162,17 +199,6 @@ The GPU string is not validated against Modal's live catalog at parse time. An u
 - The app is named `amicu-` plus the deployment id, lower-cased, with runs of characters outside `[a-z0-9]` replaced by a single `-`. Deployment `chat_modal` becomes app `amicu-chat-modal`. Use this name with `amicu modal` commands.
 - Weights and compile caches live in Modal volumes shared by all amicu deployments in your workspace (`amicu-hf-cache`, `amicu-vllm-cache`, `amicu-llamacpp-cache`). Only the first run of a model is slow.
 
-## Operating
-
-```bash
-amicu modal status amicu-chat
-amicu modal logs amicu-chat --follow
-amicu modal metrics amicu-chat --watch
-amicu modal stop amicu-chat
-```
-
-See [Monitoring](/docs/operate/monitoring). `plan` and `apply` first reconcile state with Modal, as described in [Plan, apply and state](/docs/concepts/plan-apply-state).
-
 ## Calling the endpoint
 
 Two layers of credentials are required: Modal's proxy token and the deployment's key.
@@ -185,3 +211,84 @@ curl "$URL/v1/models" \
 ```
 
 `$URL` is the endpoint `apply` printed, or the `url:` line of `amicu modal status`. A `503` means the container is cold-starting. Thinking models spend `max_tokens` on reasoning, so give a generous `max_tokens` and check `finish_reason`.
+
+## Endpoint auth
+
+Modal puts a proxy in front of the app that requires a Proxy Auth Token. amicu needs that token to prove the runtime enforces its own key behind the proxy. Without `MODAL_PROXY_TOKEN_ID` and `MODAL_PROXY_TOKEN_SECRET`, `apply` stops in preflight with an error that says `nothing was started`. Create the token in the Modal dashboard under Settings, Proxy Auth Tokens.
+
+The check has an extra step for Modal: gateway credentials without the API key must also be rejected with `401` or `403`. vLLM's `--api-key` protects only `/v1/*`; `/metrics` and `/health` stay open behind the proxy, so the proxy token is the second layer. Use both. See [Endpoint auth](/docs/security/endpoint-auth) for the full check.
+
+With the OpenAI Python SDK, pass the proxy headers too:
+
+```python
+client = OpenAI(
+    base_url=f"{url}/v1",
+    api_key=os.environ["CHAT_API_KEY"],
+    default_headers={
+        "Modal-Key": os.environ["MODAL_PROXY_TOKEN_ID"],
+        "Modal-Secret": os.environ["MODAL_PROXY_TOKEN_SECRET"],
+    },
+)
+```
+
+Modal's proxy rejects `Authorization: Bearer` as proxy credentials; `Modal-Key` and `Modal-Secret` are separate headers.
+
+## Monitoring
+
+`amicu modal` commands read `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, and work without a project directory. `<app>` is the app name, `amicu-` plus the deployment id with `_` replaced by `-`.
+
+| Command | Output |
+|---|---|
+| `amicu modal auth-check` | `authenticated`, or an `error:` line if credentials are missing or rejected |
+| `amicu modal status <app>` | App state, then per function `running=N backlog=N` and a `url:` line |
+| `amicu modal logs <app> [--follow] [--since <entry-id>]` | Lines tagged `[stdout]`, `[stderr]`, or `[info]` |
+| `amicu modal metrics <app> [--watch] [--interval N]` | Runtime and hardware snapshot |
+| `amicu modal stop <app>` | Stops the app. Inside a project it also removes the deployment from local state. |
+
+`logs` without `--follow` prints the logs available now, then returns. `--follow` streams until the app ends or you press Ctrl-C. `--since` resumes just past a log entry id. A missing app prints `no deployment named <app>` and exits 1.
+
+`metrics` scrapes the runtime's `/metrics` endpoint through the app's Modal URL and needs the proxy token pair. A scaled-to-zero app is woken by the request, so the first call can be slow. For vLLM it shows request counts, token counts, KV cache usage, preemptions, and latency percentiles; for llama.cpp it shows request and token counters and tokens per second (latency percentiles are `n/a`). Tokens per second needs two scrapes, so use `--watch`. Per-container hardware metrics (utilization, memory, temperature, power) come from a read-only probe in each container; if it fails, they show `n/a`. See [Monitoring](/docs/operate/monitoring) for local services.
+
+## Limits
+
+- Only GPU accelerators are valid; `tpu`, `cpu`, and `apple_silicon` are rejected before any call.
+- The model must come from Hugging Face; the container downloads it.
+- The routing region of an existing app cannot change.
+- Flags that refer to local files and secret-bearing flags are rejected before any Modal call.
+- Without `scaling.max_replicas`, a burst of requests can start many GPU containers.
+
+## Troubleshooting
+
+<Accordions>
+  <Accordion title="MODAL_TOKEN_ID is not set">
+    Export `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`. Verify with `amicu modal auth-check`.
+  </Accordion>
+  <Accordion title="Modal deployments need MODAL_PROXY_TOKEN_ID and MODAL_PROXY_TOKEN_SECRET">
+    The full message ends with `nothing was started`. Create a Proxy Auth Token in the Modal dashboard and export both values.
+  </Accordion>
+  <Accordion title="503 from the endpoint">
+    The container is cold-starting. The first run also downloads the weights. Watch `amicu modal logs <app> --follow` and retry.
+  </Accordion>
+  <Accordion title="401 or 403 from the endpoint">
+    Send both layers: `Authorization: Bearer $KEY` and the `Modal-Key` and `Modal-Secret` headers. A proxy token is not an `Authorization: Bearer` value.
+  </Accordion>
+  <Accordion title="NCCL error: unhandled cuda error">
+    Seen on multi-GPU vLLM deployments on L4 and other non-NVLink GPUs. Add `env { NCCL_P2P_DISABLE = "1" }` to the `vllm` block and apply again.
+  </Accordion>
+  <Accordion title="apply says No changes but nothing is running">
+    The app was stopped outside amicu. Current builds detect this, print a `drift:` line, and recreate it. On older builds, delete `.amicu/state/state.json` or run `amicu modal stop <app>` inside the project, then apply.
+  </Accordion>
+  <Accordion title="warning: could not check Modal for live apps">
+    The lookup failed (credentials or network). Local state was used as is.
+  </Accordion>
+  <Accordion title="A thinking model returns content null with finish_reason length">
+    `max_tokens` was spent on reasoning. Raise `max_tokens`.
+  </Accordion>
+  <Accordion title="Changing region fails on an existing app">
+    Modal does not allow the routing region to change. Run `amicu modal stop <app>`, then apply.
+  </Accordion>
+</Accordions>
+
+## Source
+
+Adapter: [`crates/amicu-providers/src/modal.rs`](https://github.com/andypalmi/amicu/blob/main/crates/amicu-providers/src/modal.rs). Dispatch: [`apply.rs`](https://github.com/andypalmi/amicu/blob/main/crates/amicu-cli/src/commands/apply.rs). Status of every provider: [Providers](/docs/providers).

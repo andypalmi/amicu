@@ -12,7 +12,7 @@ After `apply` starts an endpoint, it sends requests to `GET /v1/models`. This ro
 | Step | Request | Required answer |
 |---|---|---|
 | 1 | No credentials | `401` or `403` |
-| 2 | Gateway credentials only, no API key (Modal only) | `401` or `403` |
+| 2 | Gateway credentials only, no API key (providers with a gateway; Modal today) | `401` or `403` |
 | 3 | `Authorization: Bearer <api_key>` plus gateway credentials | `2xx` |
 
 - A `2xx` at step 1 or 2 means the endpoint is open. Amicu stops it and fails the apply. If the stop itself fails, the error names the command to run by hand.
@@ -23,11 +23,9 @@ After `apply` starts an endpoint, it sends requests to `GET /v1/models`. This ro
 
 Loopback endpoints with no `api_key` skip the check; there is nothing to protect and the endpoint is not reachable off the machine.
 
-## Modal fails closed
+## Providers with a gateway
 
-Modal puts a proxy in front of the app that requires a Proxy Auth Token. Amicu needs that token to prove the runtime enforces its own key behind the proxy. Without `MODAL_PROXY_TOKEN_ID` and `MODAL_PROXY_TOKEN_SECRET`, `apply` stops in preflight with an error that says `nothing was started`. Create the token in the Modal dashboard under Settings, Proxy Auth Tokens.
-
-vLLM's `--api-key` protects only `/v1/*`; `/metrics` and `/health` stay open behind the proxy, so the proxy token is the second layer. Use both.
+Some providers put a gateway in front of the app that requires its own credential. amicu needs that credential to prove the runtime enforces its own key behind the gateway, so `apply` stops in preflight, before anything starts, if it is missing. Today this applies to Modal; see [Modal: endpoint auth](/docs/providers/modal#endpoint-auth).
 
 ## Calling the endpoint
 
@@ -42,16 +40,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model": "Qwen/Qwen3.5-8B-Instruct", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-Modal:
-
-```bash
-curl "$URL/v1/chat/completions" \
-  -H "Authorization: Bearer $CHAT_API_KEY" \
-  -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" \
-  -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "Qwen/Qwen3-8B", "messages": [{"role": "user", "content": "Hello"}]}'
-```
+A remote provider with a gateway needs the gateway headers too. See your [provider page](/docs/providers); for Modal, [the example](/docs/providers/modal#calling-the-endpoint).
 
 With the OpenAI Python SDK:
 
@@ -70,7 +59,7 @@ reply = client.chat.completions.create(
 print(reply.choices[0].message.content)
 ```
 
-For Modal, also pass the proxy headers: `OpenAI(base_url=f"{url}/v1", api_key=..., default_headers={"Modal-Key": ..., "Modal-Secret": ...})`. Modal's proxy rejects `Authorization: Bearer` as proxy credentials; the `Modal-Key` and `Modal-Secret` headers are separate.
+For a provider with a gateway, also pass its headers via `default_headers`. For Modal, see [Modal: endpoint auth](/docs/providers/modal#endpoint-auth).
 
 ## Related codes
 

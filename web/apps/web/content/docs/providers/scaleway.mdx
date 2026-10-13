@@ -1,0 +1,89 @@
+---
+title: Scaleway
+description: "GPU instances from Scaleway. Preview: adapter built, not wired into apply."
+---
+
+<ProviderFacts slug="scaleway" ids="scaleway" />
+
+<Callout type="warning" title="Preview: not wired into apply">
+  The provisioning adapter exists and is tested against mocks. It has not been tested against the live service, and `amicu apply` cannot deploy to it yet.
+</Callout>
+
+## Use this provider
+
+```hcl
+resource "hardware_profile" "scaleway_gpu" {
+  provider = "scaleway"
+  region   = "fr-par"
+  accelerator {
+    kind   = "gpu"
+    model  = "l40s"
+    count  = 1
+    memory = "48GiB"
+  }
+  memory = "96GiB"
+}
+```
+
+Running `amicu apply` against this profile fails before anything starts. To check it today, run `amicu validate` and `amicu plan`.
+
+## Overview
+
+Scaleway is a French sovereign cloud with provider-managed GPU instances. The adapter drives the Instance API to create a server, power it on, inspect it, and delete it. Scaleway has no public spot market, so offerings are on-demand only.
+
+Every Scaleway region in the catalog is in the EU, so the EU filter admits all of them.
+
+## Setup and credentials
+
+The adapter authenticates with a Scaleway secret key. `apply` does not run this provider yet, so there is nothing to configure today. Credentials will be secret references only; never write a token into HCL (see [Secrets](/docs/security/secrets)).
+
+## Configuration reference
+
+| Argument | Type | Default | Required | Notes |
+|---|---|---|---|---|
+| `provider` | string | none | yes | `"scaleway"`. |
+| `region` | string | none | no | One of the region codes below. Used for residency checks and cost estimates. |
+| `accelerator.kind` | string | none | yes (with `accelerator`) | `gpu`. |
+| `accelerator.model` | string | none | yes (with `accelerator`) | A GPU model from the table below. |
+| `accelerator.count` | number | none | yes (with `accelerator`) | Number of accelerators. |
+| `accelerator.memory` | size | none | yes (with `accelerator`) | VRAM, for the fit check. |
+| `memory` | size | none | yes | Host RAM. |
+| `price.per_hour` | money block | none | no | Your own price, for cost planning. |
+
+These are the generic [`hardware_profile`](/docs/configuration/hardware-profile) fields. There are no scaleway-specific arguments.
+
+## GPUs and regions
+
+| Region code | Location | Jurisdiction |
+|---|---|---|
+| `fr-par` | Paris | `eu` |
+| `nl-ams` | Amsterdam | `eu` |
+| `pl-waw` | Warsaw | `eu` |
+
+| `model` | VRAM |
+|---|---|
+| `h100` | 80 GiB |
+| `l40s` | 48 GiB |
+| `l4` | 24 GiB |
+| `p100` | 16 GiB |
+
+## Limits
+
+- Not wired into `apply`.
+- Single-GPU offerings only in the catalog.
+- Prices in the catalog are illustrative values, not live quotes. amicu does not sync live capacity or pricing yet, so cost estimates are indicative.
+
+## Troubleshooting
+
+<Accordions>
+  <Accordion title="apply says the provider is not supported">
+  Expected. The error reads `provider "scaleway" is not supported by apply yet`. `apply` deploys to this machine and Modal only. Provision the machine yourself, install the runtime there, and run amicu on it with the [`on_prem`](/docs/providers/local) provider. The endpoint then binds to loopback on that host.
+  </Accordion>
+  <Accordion title="validate or plan rejects the region">
+  The region code must be one the catalog lists, and its jurisdiction must satisfy your [`data_class`](/docs/configuration/data-class) residency constraint. An unknown code is not guessed at: the residency check fails closed. See [Residency](/docs/concepts/residency).
+  </Accordion>
+</Accordions>
+
+## Source
+
+Adapter: [`crates/amicu-providers/src/scaleway.rs`](https://github.com/andypalmi/amicu/blob/main/crates/amicu-providers/src/scaleway.rs). Status of every provider: [Providers](/docs/providers).

@@ -14,7 +14,7 @@ resource "data_class" "company_confidential" {
 }
 
 resource "governance_rule" "eu_only" {
-  description       = "EU regions on Modal only"
+  description       = "EU regions on one GPU provider only"
   effect            = "allow"
   data_classes      = [data_class.company_confidential.id]
   allowed_providers = ["modal"]
