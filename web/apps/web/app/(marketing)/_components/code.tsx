@@ -26,11 +26,21 @@ const tokenTheme = {
 
 /** Highlighted HCL, rendered on the server (no client JS). */
 export async function HclCode({ code, className }: { code: string; className?: string }) {
-  const rendered = await highlight(code, { lang: 'hcl', theme: tokenTheme });
+  const rendered = await highlight(code, {
+    lang: 'hcl',
+    theme: tokenTheme,
+    transformers: [
+      {
+        pre(node) {
+          node.properties['aria-label'] = 'Example amicu.hcl file';
+        },
+      },
+    ],
+  });
   return (
     <div
       className={cn(
-        'font-mono text-[0.8125rem] leading-6 [&_pre]:overflow-x-auto [&_pre]:outline-none',
+        'font-mono text-xs leading-6 sm:text-[0.8125rem] [&_pre]:overflow-x-auto [&_pre]:outline-none [&_pre]:focus-visible:ring-2 [&_pre]:focus-visible:ring-inset [&_pre]:focus-visible:ring-ring',
         className,
       )}
     >
