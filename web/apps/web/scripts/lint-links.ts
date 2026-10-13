@@ -60,16 +60,16 @@ async function loadDocs() {
  */
 function tsxToLinkDoc(code: string): string {
   // `href="/x"`, `href={'/x'}`, `href: '/x'`, `url: '/x'`, `` href={`/x?${q}`} ``
-  const re = /\b(?:href|url)\s*(?:=\s*\{?|:)\s*(["'`])(\/(?!\/)[^"'`]*)/;
+  const re = /\b(?:href|url)\s*(?:=\s*\{?|:)\s*(["'`])(\/(?!\/)[^"'`]*)/g;
   return code
     .split('\n')
-    .map((line) => {
-      const m = re.exec(line);
-      if (!m) return '';
-      // Cut template interpolations: `/wizard?configId=${id}` -> `/wizard`
-      const href = m[2].split('${')[0].replace(/[?#&=]+$/, '');
-      return `[x](${href})`;
-    })
+    .map((line) =>
+      Array.from(line.matchAll(re), (m) => {
+        // Cut template interpolations: `/wizard?configId=${id}` -> `/wizard`
+        const href = m[2].split('${')[0].replace(/[?#&=]+$/, '');
+        return `[x](${href})`;
+      }).join(' '),
+    )
     .join('\n');
 }
 

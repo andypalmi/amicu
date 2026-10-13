@@ -33,7 +33,7 @@ cd apps/web && NEXT_PUBLIC_SITE_URL=https://amicu.dev pnpm cf:build
 
 ## Link check
 
-`pnpm lint:links` validates every internal link (docs MDX, `#heading` anchors, and `href`s in `app/`, `components/`) against the real route set (`next-validate-link` + Fumadocs source); external links are skipped. It runs in CI and as a git pre-commit hook (`.githooks/pre-commit`, enabled by `pnpm install` through the `prepare` script, or manually with `git config core.hooksPath .githooks`). The hook only runs when `web/` files are staged and is skipped if pnpm is not installed; bypass with `git commit --no-verify`.
+`pnpm lint:links` validates every internal link (docs MDX, `#heading` anchors, and `href`s in `app/`, `components/`) against the real route set (`next-validate-link` + Fumadocs source); external links are skipped. It runs in CI and as a git pre-commit hook (`.githooks/pre-commit`, enabled by `pnpm install` through the `prepare` script, or manually with `git config core.hooksPath .githooks`). The hook only runs when `web/` files are staged and is skipped if pnpm is not installed; bypass with `git commit --no-verify`. Hooks live in `.githooks` and chain to any local `.git/hooks` hook of the same name. The checker validates physical routes only and ignores the `amicu.dev` / `app.amicu.dev` host split.
 
 ## Writing docs
 
