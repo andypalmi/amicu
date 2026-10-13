@@ -11,7 +11,7 @@ Standing up an inference stack today means hand-wiring model downloads, runtime 
 - **One file, laptop to production** - the same HCL describes a local llama.cpp run and a multi-GPU vLLM cluster; `plan` and `apply` reconcile the difference.
 - **Diffable, reviewable infrastructure** - every change is a plan against tracked state you can read before it runs, not a pile of imperative scripts.
 - **Residency and governance as code** - data-class, residency, and routing policies are first-class resources, checked at plan time rather than bolted on later; pin a fully EU-only stack, or air-gapped, cost-optimized, or multi-cloud.
-- **Provider-portable** - AWS, Azure, GCP, Hetzner, OVHcloud, Scaleway, RunPod, Nebius, or your own SSH hosts, behind a single model.
+- **Provider-portable model** - one provider abstraction and catalog covering AWS, Azure, GCP, Hetzner, OVHcloud, Scaleway, RunPod, Nebius, and SSH hosts. `apply` deploys to the local machine and Modal today; see the status below.
 
 ## Quickstart
 
@@ -109,7 +109,9 @@ cargo build --release -p amicu-cli
 
 - **Local runtime (llama.cpp):** macOS (Apple Silicon) and Linux/CPU, run as a native process (launchd on macOS, systemd on Linux).
 - **Production runtime (vLLM):** NVIDIA CUDA, AMD ROCm, and Intel XPU GPUs. Locally as a native single process (launchd/systemd, same as llama.cpp) or deployed via Kubernetes/Helm or k3s.
-- **Provider adapters:** AWS, Azure, GCP, Hetzner, OVHcloud, Scaleway, RunPod, Nebius, and self-hosted (SSH) targets.
+- **Providers:** `apply` supports the local machine (`local`, `local_apple`, `local_cpu`, `on_prem`) and Modal. Any other provider fails at apply with a clear error rather than running locally.
+  - Preview, provisioning adapters not yet wired into `apply`: Hetzner, RunPod, Scaleway, OVHcloud, and SSH.
+  - Catalog and pricing data only: AWS, Azure, GCP, and Nebius.
 
 ### Development database
 
@@ -189,7 +191,7 @@ that module and `amicu-store`'s `state` module docs for details.
 
 ## Status
 
-Early stage. Working today: the HCL DSL and parser, the CLI (`init`, `fmt`, `validate`, `plan`, `apply`, `doctor`, `skill export`), the planner and local state, and the provider adapters listed above. Not yet built: the browser UI, hosted service, and performance-intelligence dataset. Expect breaking changes to the DSL and CLI.
+Early stage. Working today: the HCL DSL and parser, the CLI (`init`, `fmt`, `validate`, `plan`, `apply`, `doctor`, `skill export`), the planner and local state, and the local and Modal providers listed above. Not yet built: the browser UI, hosted service, and performance-intelligence dataset. Expect breaking changes to the DSL and CLI.
 
 ## Learn more
 

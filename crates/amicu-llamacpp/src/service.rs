@@ -267,49 +267,94 @@ fn xml_escape(s: &str) -> String {
 /// systemd-backed manager: a transient `--user` unit started with `systemd-run`,
 /// queried with `systemctl --user`, logs read via `journalctl --user`.
 ///
-/// Secrets are passed with `--setenv`, entering the process environment; no unit
-/// file with plaintext secrets is written to disk.
+/// Env (including secrets) goes in a per-unit 0600 `EnvironmentFile` that is
+/// removed on stop, so values never appear on `systemd-run`'s argv
+/// (`/proc/<pid>/cmdline`) and no unit file holds plaintext secrets.
 #[derive(Debug, Clone)]
 pub struct SystemdManager<E> {
     exec: E,
+    env_dir: PathBuf,
 }
 
 impl<E: CommandExec> SystemdManager<E> {
-    /// Build over an executor.
-    pub fn new(exec: E) -> Self {
-        Self { exec }
+    /// Build over an executor and the directory holding per-unit env files.
+    pub fn new(exec: E, env_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            exec,
+            env_dir: env_dir.into(),
+        }
+    }
+
+    fn env_path(&self, label: &str) -> PathBuf {
+        self.env_dir.join(format!("{label}.env"))
     }
 }
 
 impl SystemdManager<HostExec> {
-    /// Construct with the host executor.
+    /// Construct with the host executor; env files live in
+    /// `$XDG_RUNTIME_DIR/amicu` (tmpfs) or `~/.local/state/amicu/env`.
     #[must_use]
     pub fn host() -> Self {
-        Self::new(HostExec)
+        let dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .filter(|d| !d.is_empty())
+            .map_or_else(
+                || home_dir().join(".local/state/amicu/env"),
+                |d| PathBuf::from(d).join("amicu"),
+            );
+        Self::new(HostExec, dir)
     }
+}
+
+/// Render `spec.env` as a systemd `EnvironmentFile`: `KEY="value"` lines with
+/// `\`, `"` and newlines escaped. Keys must be plain identifiers.
+fn environment_file(env: &[(String, String)]) -> Result<String, LlamaCppError> {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for (k, v) in env {
+        if k.is_empty() || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(LlamaCppError::Supervisor(format!(
+                "invalid environment variable name '{k}'"
+            )));
+        }
+        let escaped = v
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r");
+        let _ = writeln!(out, "{k}=\"{escaped}\"");
+    }
+    Ok(out)
 }
 
 impl<E: CommandExec> ServiceManager for SystemdManager<E> {
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
         let unit = format!("--unit={}", spec.label);
         let mut args = vec!["--user", "--collect", &unit];
-        // --setenv values are visible on systemd-run's own argv (/proc/<pid>/cmdline)
-        // to the same user for the invocation's lifetime; acceptable as this is a
-        // --user unit. A 0600 EnvironmentFile would avoid even that same-user window.
-        let setenvs: Vec<String> = spec
-            .env
-            .iter()
-            .map(|(k, v)| format!("--setenv={k}={v}"))
-            .collect();
-        args.extend(setenvs.iter().map(String::as_str));
+        // Env goes through a 0600 EnvironmentFile, not `--setenv`, whose values
+        // would sit on systemd-run's argv (/proc/<pid>/cmdline).
+        let env_path = self.env_path(&spec.label);
+        let property;
+        if !spec.env.is_empty() {
+            let body = environment_file(&spec.env)?;
+            write_private(&env_path, &self.env_dir, body.as_bytes())?;
+            property = format!("--property=EnvironmentFile={}", env_path.display());
+            args.push(&property);
+        }
         // The rest is the program + its arguments.
         let command: Vec<&str> = spec.argv.iter().map(String::as_str).collect();
         if command.is_empty() {
             return Err(LlamaCppError::Supervisor("empty argv".to_owned()));
         }
         args.extend(command);
-        let out = self.exec.exec("systemd-run", &args)?;
+        let out = match self.exec.exec("systemd-run", &args) {
+            Ok(out) => out,
+            Err(e) => {
+                remove_env_file(&env_path);
+                return Err(e);
+            }
+        };
         if !out.success {
+            remove_env_file(&env_path);
             return Err(LlamaCppError::Supervisor(format!(
                 "systemd-run failed: {}",
                 out.stderr.trim()
@@ -337,6 +382,7 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
                 out.stderr.trim()
             )));
         }
+        remove_env_file(&self.env_path(label));
         Ok(())
     }
 
@@ -359,7 +405,12 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
     }
 }
 
-// ---- fs helpers -------------------------------------------------------------
+// ---- fs helpers -----------------------------------------------------------
+
+/// Best-effort removal of a unit's env file; a missing file is fine.
+fn remove_env_file(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
 
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from)
