@@ -375,6 +375,13 @@ pub mod catalog {
     /// the block's point is to cap spend, so ignoring it would be a lie.
     pub const CAP_SCALING_UNSUPPORTED_PROVIDER: DiagnosticCode =
         DiagnosticCode::new(Category::Cap, 9);
+    // --- amicu-planning#191: never silently drop the KV cache ---
+    /// `AMICU-CAP-010` - a vLLM deployment's model does not declare
+    /// `n_layers`/`n_kv_heads`/`head_dim`, so the KV cache is left out of the
+    /// memory estimate and the fit check covers weights only. Warning, not an
+    /// error: the deployment may well fit, but at long `context_length` the KV
+    /// cache can dominate, so a pass here is not evidence of fit.
+    pub const CAP_KV_CACHE_NOT_ESTIMATED: DiagnosticCode = DiagnosticCode::new(Category::Cap, 10);
     /// `AMICU-MEM-001` - model does not fit in available VRAM.
     pub const MEM_VRAM_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Mem, 1);
     /// `AMICU-MEM-002` - a single artifact/weight file exceeds the available
@@ -454,7 +461,7 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 33] {
+    pub const fn all() -> [DiagnosticCode; 34] {
         [
             PARSE_UNCLOSED_BLOCK,
             PARSE_INVALID_SYNTAX,
@@ -477,6 +484,8 @@ pub mod catalog {
             // amicu-planning#180 additions:
             CAP_SCALING_INVALID,
             CAP_SCALING_UNSUPPORTED_PROVIDER,
+            // amicu-planning#191 addition:
+            CAP_KV_CACHE_NOT_ESTIMATED,
             MEM_VRAM_EXCEEDED,
             MEM_ARTIFACT_OVERSIZE,
             POLICY_BUDGET_EXCEEDED,
@@ -578,6 +587,10 @@ mod tests {
         assert_eq!(
             catalog::CAP_VLLM_GGUF_EXPERIMENTAL.to_string(),
             "AMICU-CAP-006"
+        );
+        assert_eq!(
+            catalog::CAP_KV_CACHE_NOT_ESTIMATED.to_string(),
+            "AMICU-CAP-010"
         );
         assert_eq!(
             catalog::POLICY_RUNTIME_ENV_SECRET_SUSPECTED.to_string(),

@@ -473,9 +473,14 @@ fn cost_performance(
         max: p.per_hour.amount,
         unit: Some("usd_per_hour".to_owned()),
     });
+    // vLLM has no flat overhead band to stand in for an unknown KV cache, so
+    // when the model shape is unknown the figure is weights only - say so
+    // rather than let it read as a full peak (amicu-planning#191).
+    let kv_unknown = matches!(runtime, Runtime::Vllm(_)) && launch.estimate.kv_cache.is_none();
     let mut assumptions = vec![format!(
-        "estimated peak memory {}",
-        launch.estimate.estimated_memory
+        "estimated peak memory {}{}",
+        launch.estimate.estimated_memory,
+        if kv_unknown { " (weights only)" } else { "" }
     )];
     // extra_args is an escape hatch the estimator cannot interpret (e.g. a
     // KV-cache-dtype or speculative-decoding flag) - flag the whole estimate
@@ -490,7 +495,12 @@ fn cost_performance(
     // comment): call that out on every vLLM plan, not just when a fit
     // problem is found (amicu-planning#152).
     if matches!(runtime, Runtime::Vllm(_)) {
-        assumptions.push("vllm fit estimate: weights + kv cache only".to_owned());
+        assumptions.push(if kv_unknown {
+            "kv cache: not estimated (model shape unknown; set n_layers, n_kv_heads, head_dim on the model)"
+                .to_owned()
+        } else {
+            "vllm fit estimate: weights + kv cache only".to_owned()
+        });
     }
     // A `multimodal` block's projector weights aren't sized anywhere - no
     // GGUF header parser in-tree, and the estimator only ever sees the main
@@ -658,6 +668,7 @@ mod tests {
             }],
             n_layers: None,
             n_kv_heads: None,
+            n_kv_layers: None,
             head_dim: None,
         }
     }
@@ -731,6 +742,70 @@ mod tests {
         let result = build_plan(&graph(Vec::new()), None).unwrap();
         let cp = result.items[0].action.cost_performance.as_ref().unwrap();
         assert!(!cp.assumptions.iter().any(|a| a == ASSUMPTION));
+    }
+
+    // --- amicu-planning#191: vLLM never silently drops the KV cache --------
+
+    fn vllm_graph(shaped: bool) -> Graph {
+        let mut g = graph(Vec::new());
+        g.models[0].artifact.format = ArtifactFormat::Safetensors;
+        g.models[0].variants.clear();
+        if shaped {
+            g.models[0].n_layers = Some(32);
+            g.models[0].n_kv_heads = Some(8);
+            g.models[0].head_dim = Some(128);
+        }
+        g.deployments[0].runtime = Runtime::Vllm(VllmSettings {
+            context_length: 200_000,
+            ..Default::default()
+        });
+        g
+    }
+
+    fn assumptions(g: &Graph) -> Vec<String> {
+        let result = build_plan(g, None).unwrap();
+        result.items[0]
+            .action
+            .cost_performance
+            .as_ref()
+            .unwrap()
+            .assumptions
+            .clone()
+    }
+
+    #[test]
+    fn vllm_unknown_shape_says_kv_cache_not_estimated() {
+        let a = assumptions(&vllm_graph(false));
+        assert!(
+            a.iter().any(|s| s.starts_with(
+                "kv cache: not estimated (model shape unknown; set n_layers, n_kv_heads, head_dim"
+            )),
+            "got {a:?}"
+        );
+        assert!(a[0].ends_with("(weights only)"), "got {a:?}");
+        assert!(!a.iter().any(|s| s.contains("weights + kv cache only")));
+    }
+
+    #[test]
+    fn vllm_known_shape_includes_kv_term_and_scales_with_context() {
+        let kv = |ctx: u32| {
+            let mut g = vllm_graph(true);
+            let Runtime::Vllm(s) = &mut g.deployments[0].runtime else {
+                unreachable!()
+            };
+            s.context_length = ctx;
+            let result = build_plan(&g, None).unwrap();
+            let a = result.items[0].action.cost_performance.clone().unwrap();
+            assert!(!a.assumptions[0].contains("weights only"));
+            assert!(!a.assumptions.iter().any(|s| s.contains("not estimated")));
+            a.assumptions
+                .into_iter()
+                .find(|s| s.starts_with("KV cache: "))
+                .expect("KV cache line")
+        };
+        // Differing contexts render differently-sized KV lines.
+        assert_ne!(kv(8192), kv(200_000));
+        assert!(kv(200_000).contains("200000 ctx"));
     }
 
     // --- amicu-planning#151: KV-cache estimator assumption string ----------
