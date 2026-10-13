@@ -12,10 +12,10 @@ use crate::project::Project;
 const AMICU_HCL: &str = r#"# Amicu starter configuration.
 # Edit these resources, then run `amicu validate` and `amicu plan`.
 
-resource "model" "starter_chat" {
+resource "model" "qwen3_8b" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen3.5-8B-Instruct"
+    reference = "Qwen/Qwen3-8B-GGUF"
   }
   architecture   = "qwen3"
   modalities     = ["text"]
@@ -26,8 +26,8 @@ resource "model" "starter_chat" {
   context_length = 100000
   variant {
     quantization = "q4_k_m"
-    file         = "qwen3.5-8b-instruct-q4_k_m.gguf"
-    size         = "5GiB"
+    file         = "Qwen3-8B-Q4_K_M.gguf"
+    size         = "5027783488"
   }
 }
 
@@ -42,8 +42,8 @@ resource "hardware_profile" "local_dev" {
   memory = "48GiB"
 }
 
-resource "deployment" "starter_chat_local" {
-  model    = model.starter_chat.id
+resource "deployment" "qwen3_8b_local" {
+  model    = model.qwen3_8b.id
   hardware = hardware_profile.local_dev.id
   runtime  = "llama_cpp"
   llama_cpp {

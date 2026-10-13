@@ -7,17 +7,22 @@
 //! injectable so unit tests run without a real service manager or network.
 //! [`LaunchdSupervisor`] and [`SystemdSupervisor`] pin the host wiring.
 
+use std::path::Path;
+use std::time::Duration;
+
 use amicu_core::ByteSize;
 use amicu_core::adapter::AdapterError;
 use amicu_core::diagnostic::catalog;
 use amicu_core::resource::Runtime;
 use amicu_core::secret::{SecretResolver, SecretValue};
+use amicu_runtime::exposure::CheckTiming;
 use amicu_runtime::{
     EndpointExposure, LaunchPlan, LogOptions, LogStream, RuntimeHandle, RuntimeMetrics,
     RuntimeStatus,
 };
 use async_trait::async_trait;
 
+use crate::binary::{CommandRunner, HostRunner};
 use crate::error::LlamaCppError;
 use crate::health::{Health, HealthProbe, HttpHealthProbe};
 use crate::service::{
@@ -113,12 +118,114 @@ pub trait ProcessSupervisor: Send + Sync {
 pub struct ServiceSupervisor<M, P> {
     manager: M,
     probe: P,
+    runner: Box<dyn CommandRunner>,
+    ready: ReadyWait,
+}
+
+/// How long [`ServiceSupervisor::start`] waits for the endpoint to answer its
+/// readiness probe, and how often it asks. The default reuses the exposure
+/// check's local window: the service may still be loading multi-GB weights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadyWait {
+    /// Give up (stop the service, fail) after this long. Zero skips the wait.
+    pub timeout: Duration,
+    /// Pause between probes.
+    pub interval: Duration,
+}
+
+impl ReadyWait {
+    /// The default local window, shared with the exposure check.
+    pub const LOCAL: Self = Self {
+        timeout: CheckTiming::LOCAL.accept_timeout,
+        interval: CheckTiming::LOCAL.interval,
+    };
 }
 
 impl<M: ServiceManager, P: HealthProbe> ServiceSupervisor<M, P> {
     /// Build over an injected service manager and health probe.
     pub fn new(manager: M, probe: P) -> Self {
-        Self { manager, probe }
+        Self {
+            manager,
+            probe,
+            runner: Box::new(HostRunner),
+            ready: ReadyWait::LOCAL,
+        }
+    }
+
+    /// Override how the runtime binary is searched for on `PATH` (tests).
+    #[must_use]
+    pub fn with_runner(mut self, runner: Box<dyn CommandRunner>) -> Self {
+        self.runner = runner;
+        self
+    }
+
+    /// Override the readiness window.
+    #[must_use]
+    pub fn with_ready_wait(mut self, ready: ReadyWait) -> Self {
+        self.ready = ready;
+        self
+    }
+
+    /// `argv` with `argv[0]` resolved to an absolute path. launchd and systemd
+    /// run with a minimal `PATH` (no Homebrew), so a bare `llama-server` /
+    /// `vllm` must be located here, on the CLI's own `PATH`.
+    fn resolve_program(&self, mut argv: Vec<String>) -> Result<Vec<String>, LlamaCppError> {
+        let Some(program) = argv.first() else {
+            return Ok(argv);
+        };
+        if Path::new(program).is_absolute() {
+            return Ok(argv);
+        }
+        let found = self
+            .runner
+            .which(program)
+            .and_then(|p| std::path::absolute(p).ok())
+            .ok_or_else(|| LlamaCppError::BinaryNotOnPath {
+                hint: install_hint(program).to_owned(),
+                name: program.clone(),
+            })?;
+        argv[0] = found.to_string_lossy().into_owned();
+        Ok(argv)
+    }
+
+    /// Block until the endpoint is ready. On a crash or timeout the service is
+    /// stopped (fail closed) and the error names where its logs are.
+    async fn wait_ready(&self, label: &str, endpoint: &str) -> Result<(), LlamaCppError> {
+        if self.ready.timeout.is_zero() {
+            return Ok(());
+        }
+        let deadline = tokio::time::Instant::now() + self.ready.timeout;
+        let reason = loop {
+            if self.probe.is_ready(endpoint).await {
+                return Ok(());
+            }
+            if matches!(self.manager.state(label), Ok(ServiceState::Failed)) {
+                break "the service exited abnormally".to_owned();
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break format!(
+                    "{endpoint} was not ready within {}s",
+                    self.ready.timeout.as_secs()
+                );
+            }
+            tokio::time::sleep(self.ready.interval).await;
+        };
+        let logs = self.manager.log_location(label);
+        Err(LlamaCppError::Supervisor(match self.manager.stop(label) {
+            Ok(()) => format!("{reason}; the service was stopped; see logs at {logs}"),
+            Err(e) => format!(
+                "{reason}; stopping it FAILED ({e}): stop {label} manually; see logs at {logs}"
+            ),
+        }))
+    }
+}
+
+/// How to install a runtime binary, for the not-found error.
+fn install_hint(program: &str) -> &'static str {
+    match program {
+        "llama-server" => "`brew install llama.cpp` (macOS) or see github.com/ggml-org/llama.cpp",
+        "vllm" => "`pip install vllm`",
+        _ => "your package manager",
     }
 }
 
@@ -212,14 +319,16 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
         let label = format!("io.amicu.llama.{}", plan.deployment);
         let spec = ServiceSpec {
             label: label.clone(),
-            argv,
+            argv: self.resolve_program(argv)?,
             env,
         };
         self.manager.start(&spec)?;
+        let endpoint = endpoint_for(plan);
+        self.wait_ready(&label, &endpoint).await?;
         Ok(RuntimeHandle {
             id: label,
             deployment: plan.deployment.clone(),
-            endpoint: endpoint_for(plan),
+            endpoint,
             // Every flag set renders `--host 127.0.0.1` explicitly.
             exposure: EndpointExposure::Loopback,
         })

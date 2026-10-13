@@ -25,7 +25,7 @@ use amicu_hcl::{HclError, parse_graph};
 
 pub use catalog::build_catalog;
 pub use checks::report_for;
-pub use planner::{PlanError, PlanItem, PlanResult, build_plan};
+pub use planner::{PlanError, PlanItem, PlanResult, build_plan, build_plan_in};
 
 /// Parse a single HCL configuration document into the canonical graph.
 ///
