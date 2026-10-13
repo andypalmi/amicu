@@ -1571,6 +1571,10 @@ struct FakeManager {
     logs: Vec<String>,
     started: Mutex<Option<ServiceSpec>>,
     stopped: Mutex<bool>,
+    /// Scripted `state()` answers, consumed in order, then `state` repeats.
+    script: Mutex<std::collections::VecDeque<ServiceState>>,
+    stop_ok: bool,
+    released: Mutex<u32>,
 }
 
 impl FakeManager {
@@ -1581,6 +1585,9 @@ impl FakeManager {
             logs: vec!["server listening".into()],
             started: Mutex::new(None),
             stopped: Mutex::new(false),
+            script: Mutex::new(std::collections::VecDeque::new()),
+            stop_ok: true,
+            released: Mutex::new(0),
         }
     }
     fn failing_start() -> Self {
@@ -1600,11 +1607,23 @@ impl ServiceManager for FakeManager {
         Ok(())
     }
     fn state(&self, _label: &str) -> Result<ServiceState, LlamaCppError> {
-        Ok(self.state)
+        Ok(self
+            .script
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(self.state))
     }
     fn stop(&self, _label: &str) -> Result<(), LlamaCppError> {
         *self.stopped.lock().unwrap() = true;
-        Ok(())
+        if self.stop_ok {
+            Ok(())
+        } else {
+            Err(LlamaCppError::Supervisor("Unit not loaded.".into()))
+        }
+    }
+    fn release(&self, _label: &str) {
+        *self.released.lock().unwrap() += 1;
     }
     fn log_location(&self, _label: &str) -> String {
         "/logs/fake.log".into()
@@ -1644,6 +1663,7 @@ fn test_supervisor<M: ServiceManager, P: HealthProbe>(
     ServiceSupervisor::new(manager, probe)
         .with_runner(Box::new(FakeRunner::found("")))
         .with_ready_wait(NO_WAIT)
+        .with_drain(std::time::Duration::ZERO)
 }
 
 fn command_plan() -> LaunchPlan {
@@ -1767,6 +1787,9 @@ impl ServiceManager for SharedManager {
     }
     fn log_location(&self, label: &str) -> String {
         self.0.log_location(label)
+    }
+    fn release(&self, label: &str) {
+        self.0.release(label);
     }
 }
 
@@ -2020,26 +2043,37 @@ async fn start_fails_fast_when_the_service_crashes() {
 }
 
 #[test]
-fn launchd_update_unloads_the_old_job_before_loading_the_new_one() {
+fn launchd_update_releases_the_old_job_by_plist_and_label_before_loading() {
     let tmp = TempDir::new("launchd-update");
-    let agents = tmp.file("agents");
     let exec = std::sync::Arc::new(FakeExec::new(true, ""));
-    let manager = LaunchdManager::new(exec.clone(), &agents, tmp.file("logs"));
+    let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"));
     let spec = service_spec();
     manager.start(&spec).expect("first start");
+    manager.release(&spec.label);
     manager.start(&spec).expect("update");
 
     let calls = exec.calls.lock().unwrap().clone();
     let verbs: Vec<&str> = calls.iter().map(|c| c[1].as_str()).collect();
-    // First start has nothing to replace; the update unloads, then loads.
-    assert_eq!(verbs, ["load", "unload", "load"]);
+    assert_eq!(verbs, ["load", "unload", "remove", "load"]);
+    assert_eq!(calls[2][2], spec.label);
 }
 
 #[test]
-fn systemd_start_stops_a_previous_unit_with_the_same_name_first() {
+fn launchd_release_removes_by_label_even_without_a_plist() {
+    let tmp = TempDir::new("launchd-release");
+    let exec = std::sync::Arc::new(FakeExec::new(true, ""));
+    let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"));
+    manager.release("io.amicu.llama.x");
+    let calls = exec.calls.lock().unwrap().clone();
+    assert_eq!(calls, [["launchctl", "remove", "io.amicu.llama.x"]]);
+}
+
+#[test]
+fn systemd_release_stops_a_previous_unit_with_the_same_name_before_systemd_run() {
     let dir = TempDir::new("systemd-update");
     let exec = std::sync::Arc::new(FakeExec::new(true, ""));
     let manager = SystemdManager::new(exec.clone(), &dir.0);
+    manager.release("io.amicu.llama.support_chat_local");
     manager.start(&service_spec()).expect("start");
 
     let calls = exec.calls.lock().unwrap().clone();
@@ -2053,6 +2087,57 @@ fn systemd_start_stops_a_previous_unit_with_the_same_name_first() {
         ]
     );
     assert_eq!(calls[1][0], "systemd-run");
+}
+
+#[tokio::test]
+async fn supervisor_releases_the_previous_instance_before_starting() {
+    let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
+    let sup = test_supervisor(SharedManager(manager.clone()), FakeProbe { ready: true });
+    sup.start(&command_plan(), &[]).await.expect("start");
+    assert_eq!(*manager.released.lock().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn an_inactive_service_is_treated_as_exited_after_two_reads() {
+    // systemd-like: a crashed `--collect` unit reads inactive, never failed,
+    // and its stop errors ("not loaded"); that must not read as a stop failure.
+    let mut fake = FakeManager::new(ServiceState::Inactive);
+    fake.stop_ok = false;
+    let manager = std::sync::Arc::new(fake);
+    let sup = ServiceSupervisor::new(SharedManager(manager.clone()), FakeProbe { ready: false })
+        .with_runner(Box::new(FakeRunner::found("")))
+        .with_drain(std::time::Duration::ZERO)
+        .with_ready_wait(ReadyWait {
+            timeout: std::time::Duration::from_secs(600),
+            interval: std::time::Duration::from_millis(5),
+        });
+    let err = sup.start(&command_plan(), &[]).await.expect_err("exited");
+    let msg = err.to_string();
+    assert!(msg.contains("the service exited"), "{msg}");
+    assert!(!msg.contains("FAILED"), "{msg}");
+    assert!(msg.contains("/logs/fake.log"), "{msg}");
+}
+
+#[tokio::test]
+async fn a_transient_inactive_read_does_not_abort_the_wait() {
+    // launchd-like: no PID for one read right after load, then running.
+    let fake = FakeManager::new(ServiceState::Active);
+    fake.script.lock().unwrap().extend([
+        ServiceState::Inactive,
+        ServiceState::Active,
+        ServiceState::Inactive,
+        ServiceState::Active,
+    ]);
+    let manager = std::sync::Arc::new(fake);
+    let sup = ServiceSupervisor::new(
+        SharedManager(manager.clone()),
+        ReadyAfter(std::sync::atomic::AtomicU32::new(6)),
+    )
+    .with_runner(Box::new(FakeRunner::found("")))
+    .with_drain(std::time::Duration::ZERO)
+    .with_ready_wait(FAST_WAIT);
+    sup.start(&command_plan(), &[]).await.expect("ready");
+    assert!(!*manager.stopped.lock().unwrap());
 }
 
 // ---- launchd / systemd managers over a fake CommandExec ---------------------

@@ -120,6 +120,7 @@ pub struct ServiceSupervisor<M, P> {
     probe: P,
     runner: Box<dyn CommandRunner>,
     ready: ReadyWait,
+    drain: Duration,
 }
 
 /// How long [`ServiceSupervisor::start`] waits for the endpoint to answer its
@@ -149,6 +150,7 @@ impl<M: ServiceManager, P: HealthProbe> ServiceSupervisor<M, P> {
             probe,
             runner: Box::new(HostRunner),
             ready: ReadyWait::LOCAL,
+            drain: Duration::from_secs(10),
         }
     }
 
@@ -156,6 +158,14 @@ impl<M: ServiceManager, P: HealthProbe> ServiceSupervisor<M, P> {
     #[must_use]
     pub fn with_runner(mut self, runner: Box<dyn CommandRunner>) -> Self {
         self.runner = runner;
+        self
+    }
+
+    /// Override how long an update waits for the old instance to stop
+    /// answering before starting the new one (zero skips the wait).
+    #[must_use]
+    pub fn with_drain(mut self, drain: Duration) -> Self {
+        self.drain = drain;
         self
     }
 
@@ -188,31 +198,61 @@ impl<M: ServiceManager, P: HealthProbe> ServiceSupervisor<M, P> {
         Ok(argv)
     }
 
+    /// Wait (bounded) for a previous instance to stop answering, so the new
+    /// one's readiness probe cannot hit the dying old server. Best effort.
+    async fn wait_released(&self, endpoint: &str) {
+        let deadline = tokio::time::Instant::now() + self.drain;
+        while self.probe.is_ready(endpoint).await && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
     /// Block until the endpoint is ready. On a crash or timeout the service is
     /// stopped (fail closed) and the error names where its logs are.
+    ///
+    /// The service counts as exited when the manager reports `Failed`, or
+    /// `Inactive` on two consecutive reads: systemd's `--collect` garbage-
+    /// collects a crashed unit (so it reads inactive, never failed), while a
+    /// launchd job may briefly show no PID right after load.
     async fn wait_ready(&self, label: &str, endpoint: &str) -> Result<(), LlamaCppError> {
         if self.ready.timeout.is_zero() {
             return Ok(());
         }
         let deadline = tokio::time::Instant::now() + self.ready.timeout;
-        let reason = loop {
+        let mut inactive_reads = 0u32;
+        let (reason, exited) = loop {
             if self.probe.is_ready(endpoint).await {
                 return Ok(());
             }
-            if matches!(self.manager.state(label), Ok(ServiceState::Failed)) {
-                break "the service exited abnormally".to_owned();
+            match self.manager.state(label) {
+                Ok(ServiceState::Failed) => {
+                    break ("the service exited abnormally".to_owned(), true);
+                }
+                Ok(ServiceState::Inactive) => {
+                    inactive_reads += 1;
+                    if inactive_reads >= 2 {
+                        break ("the service exited".to_owned(), true);
+                    }
+                }
+                _ => inactive_reads = 0,
             }
             if tokio::time::Instant::now() >= deadline {
-                break format!(
-                    "{endpoint} was not ready within {}s",
-                    self.ready.timeout.as_secs()
+                break (
+                    format!(
+                        "{endpoint} was not ready within {}s",
+                        self.ready.timeout.as_secs()
+                    ),
+                    false,
                 );
             }
             tokio::time::sleep(self.ready.interval).await;
         };
         let logs = self.manager.log_location(label);
-        Err(LlamaCppError::Supervisor(match self.manager.stop(label) {
+        let stopped = self.manager.stop(label);
+        Err(LlamaCppError::Supervisor(match stopped {
             Ok(()) => format!("{reason}; the service was stopped; see logs at {logs}"),
+            // An exited (collected) unit is "not loaded": its stop error is expected.
+            Err(_) if exited => format!("{reason}; see logs at {logs}"),
             Err(e) => format!(
                 "{reason}; stopping it FAILED ({e}): stop {label} manually; see logs at {logs}"
             ),
@@ -322,8 +362,13 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
             argv: self.resolve_program(argv)?,
             env,
         };
-        self.manager.start(&spec)?;
         let endpoint = endpoint_for(plan);
+        // Update: remove the previous instance and let its port go quiet first.
+        self.manager.release(&label);
+        if !self.drain.is_zero() {
+            self.wait_released(&endpoint).await;
+        }
+        self.manager.start(&spec)?;
         self.wait_ready(&label, &endpoint).await?;
         Ok(RuntimeHandle {
             id: label,

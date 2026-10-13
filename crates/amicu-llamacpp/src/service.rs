@@ -52,8 +52,12 @@ pub enum ServiceState {
 
 /// Load/start, query, stop, and read logs for a supervised service.
 pub trait ServiceManager: Send + Sync {
-    /// Write the service definition and start it, replacing any existing
-    /// instance with the same label (an update re-runs `start`).
+    /// Best-effort removal of any previous instance with this label, so an
+    /// update can start the new one (`systemd-run --unit=<same>` fails while the
+    /// unit exists; a loaded launchd job would keep the old definition). Errors
+    /// are ignored: normally there is nothing to release.
+    fn release(&self, _label: &str) {}
+    /// Write the service definition and start it.
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError>;
     /// The service's current lifecycle state.
     fn state(&self, label: &str) -> Result<ServiceState, LlamaCppError>;
@@ -160,16 +164,19 @@ impl LaunchdManager<HostExec> {
 }
 
 impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
-    fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
-        require_absolute(&self.agents_dir)?;
-        // Replace-on-update: unload a previous job for this label first
-        // (best effort), or `load` would leave the old definition running.
-        let previous = self.plist_path(&spec.label);
-        if previous.exists() {
+    fn release(&self, label: &str) {
+        let plist = self.plist_path(label);
+        if plist.exists() {
             let _ = self
                 .exec
-                .exec("launchctl", &["unload", "-w", &previous.to_string_lossy()]);
+                .exec("launchctl", &["unload", "-w", &plist.to_string_lossy()]);
         }
+        // By label too, even when the plist file is gone but the job is loaded.
+        let _ = self.exec.exec("launchctl", &["remove", label]);
+    }
+
+    fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
+        require_absolute(&self.agents_dir)?;
         write_private(
             &self.plist_path(&spec.label),
             &self.agents_dir,
@@ -381,13 +388,11 @@ fn environment_file(env: &[(String, String)]) -> Result<String, LlamaCppError> {
 }
 
 impl<E: CommandExec> ServiceManager for SystemdManager<E> {
+    fn release(&self, label: &str) {
+        let _ = self.exec.exec("systemctl", &["--user", "stop", label]);
+    }
+
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
-        // Replace-on-update: `systemd-run --unit=<same>` fails while a unit of
-        // that name exists, so stop any previous instance first (best effort;
-        // normally there is none and this fails harmlessly).
-        let _ = self
-            .exec
-            .exec("systemctl", &["--user", "stop", &spec.label]);
         let unit = format!("--unit={}", spec.label);
         let mut args = vec!["--user", "--collect", &unit];
         // Env goes through a 0600 EnvironmentFile, not `--setenv`, whose values
