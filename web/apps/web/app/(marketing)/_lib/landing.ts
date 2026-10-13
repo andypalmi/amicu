@@ -52,12 +52,11 @@ resource "deployment" "chat" {
 
 /**
  * One line of terminal output. `tone` maps to a semantic token only:
- * `cmd` is the prompt line, `add` a created resource, `error` a blocking
- * diagnostic, `muted` secondary detail.
+ * `cmd` is the prompt line, `add` a created resource, `muted` secondary detail.
  */
 export interface TermLine {
   text: string;
-  tone?: 'cmd' | 'add' | 'error' | 'muted';
+  tone?: 'cmd' | 'add' | 'muted';
 }
 
 /** `amicu plan` against HERO_HCL. */
@@ -74,16 +73,6 @@ export const HERO_PLAN: TermLine[] = [
   },
   { text: '      note:     estimated peak memory 14GB', tone: 'muted' },
   { text: '      note:     vllm fit estimate: weights + kv cache only', tone: 'muted' },
-];
-
-/** `amicu plan` after changing the hero example's region to us-east. */
-export const HERO_PLAN_BLOCKED: TermLine[] = [
-  { text: '$ amicu plan', tone: 'cmd' },
-  { text: 'Cannot plan: configuration has errors.' },
-  {
-    text: "  error [AMICU-POLICY-002] region 'us-east' (us) violates the data residency allowlist",
-    tone: 'error',
-  },
 ];
 
 export interface Step {
@@ -115,14 +104,7 @@ export const STEPS: Step[] = [
     id: 'plan',
     title: 'Check it and read the plan',
     body: 'Before anything starts, amicu checks references, whether the model fits the memory you gave it, and every residency and governance rule. The plan then shows each change against recorded state, with the exact launch command it will run.',
-    transcript: [
-      { text: '$ amicu plan', tone: 'cmd' },
-      { text: 'Cannot plan: configuration has errors.' },
-      {
-        text: "  error [AMICU-POLICY-002] region 'us-east' (us) violates the data residency allowlist",
-        tone: 'error',
-      },
-    ],
+    transcript: HERO_PLAN,
   },
   {
     id: 'apply',

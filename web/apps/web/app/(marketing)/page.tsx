@@ -9,7 +9,6 @@ import {
   GPU_LAUNCH,
   HERO_HCL,
   HERO_PLAN,
-  HERO_PLAN_BLOCKED,
   LAPTOP_LAUNCH,
   OUTCOMES,
   STEPS,
@@ -89,28 +88,15 @@ export default function LandingPage() {
             <CodePanel caption="amicu.hcl">
               <HclCode code={HERO_HCL} className="px-5 py-4" />
             </CodePanel>
-            <div className="flex min-w-0 flex-col gap-4">
-              <CodePanel caption="terminal">
-                <Transcript
-                  lines={HERO_PLAN}
-                  reveal
-                  wrap
-                  label="Output of amicu plan for the example file"
-                  className="px-5 py-4"
-                />
-              </CodePanel>
-              <CodePanel caption='with region = "us-east"'>
-                <Transcript
-                  lines={HERO_PLAN_BLOCKED}
-                  wrap
-                  label="Output of amicu plan when the region breaks the residency rule"
-                  className="px-5 py-4"
-                />
-                <p className="border-t border-border px-5 py-4 text-sm leading-relaxed text-muted-foreground">
-                  Customer data must stay in the EU, so the plan stops before anything starts.
-                </p>
-              </CodePanel>
-            </div>
+            <CodePanel caption="terminal">
+              <Transcript
+                lines={HERO_PLAN}
+                reveal
+                wrap
+                label="Output of amicu plan for the example file"
+                className="px-5 py-4"
+              />
+            </CodePanel>
           </div>
         </Container>
       </section>
