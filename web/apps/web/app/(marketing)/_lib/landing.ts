@@ -43,11 +43,11 @@ export interface DiffLine {
   text: string;
 }
 
-/** Moving a hardware profile from this machine to a GPU provider. */
+/** Pointing a hardware profile at a laptop or a cloud GPU provider. */
 export const PROVIDER_DIFF: DiffLine[] = [
   { tone: 'ctx', text: 'resource "hardware_profile" "main" {' },
-  { tone: 'del', text: '  provider = "local"' },
-  { tone: 'add', text: '  provider = "modal"' },
+  { tone: 'del', text: '  provider = "local"  # llama.cpp on your machine' },
+  { tone: 'add', text: '  provider = "modal"  # vLLM on cloud GPUs' },
   { tone: 'add', text: '  region   = "eu-west"' },
   { tone: 'ctx', text: '  ...' },
   { tone: 'ctx', text: '}' },

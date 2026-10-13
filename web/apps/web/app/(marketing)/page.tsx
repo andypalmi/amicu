@@ -29,7 +29,7 @@ import {
 import { pageMetadata } from './_lib/seo';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'Infrastructure as code for self-hosted LLMs',
+  title: 'Infrastructure as code for open-weight LLMs',
   description: appTagline,
   path: '/',
 });
@@ -80,10 +80,10 @@ export default function LandingPage() {
       {/* Hero */}
       <HomeSection className="flex flex-col items-center text-center sm:min-h-0 min-h-[calc(100svh-4rem)] justify-center">
         <Headline as="h1" className="max-w-4xl [font-size:clamp(2.75rem,9vw,5.5rem)]">
-          Self-hosted LLMs, as code.
+          Open-weight LLMs, deployed as code.
         </Headline>
         <p className="mt-6 font-mono text-sm text-muted-foreground sm:text-base">
-          On your laptop or a GPU provider.
+          On your laptop, your servers or a cloud GPU.
         </p>
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
           <Button asChild size="lg">
@@ -125,15 +125,15 @@ export default function LandingPage() {
         <FeatureLinks links={CONFIG_LINKS} />
       </HomeSection>
 
-      {/* Laptop to GPU */}
+      {/* Target switch */}
       <HomeSection>
-        <Headline>Start local. Move to a GPU provider with one line.</Headline>
+        <Headline>Laptop or cloud GPU. Same file.</Headline>
         <MockWindow title="amicu.hcl" className="mt-12 max-w-2xl sm:mt-16">
-          <DiffBody lines={PROVIDER_DIFF} label="Changing the provider of a hardware profile" />
+          <DiffBody lines={PROVIDER_DIFF} label="Switching the provider of a hardware profile between a laptop and a cloud GPU" />
         </MockWindow>
         <ProofLine
-          lead="llama.cpp on your laptop, vLLM on a GPU provider."
-          rest="Same config."
+          lead="Change the provider line to switch targets:"
+          rest="llama.cpp on your machine, vLLM on GPUs."
         />
         <FeatureLinks links={PROVIDER_SWITCH_LINKS} />
       </HomeSection>
@@ -193,7 +193,7 @@ export default function LandingPage() {
           </ul>
         </MockWindow>
         <ProofLine
-          lead="Apply runs on your machine and Modal today."
+          lead="Apply runs on your machine, on-prem hosts and Modal today."
           rest={`${previewCount} more, such as Hetzner and Scaleway, are in preview.`}
         />
         <FeatureLinks

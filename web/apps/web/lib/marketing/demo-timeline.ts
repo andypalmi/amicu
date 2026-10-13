@@ -61,7 +61,7 @@ const RESPONSE = `{
 const L = (at: number, text: string, tone?: Tone): Step => ({ kind: 'line', at, screen: 'term', text, tone });
 
 export const DEMO_STEPS: Step[] = [
-  { kind: 'type', at: 300, screen: 'term', tone: 'cmd', text: '$ amicu apply' },
+  { kind: 'type', at: 150, screen: 'term', tone: 'cmd', text: '$ amicu apply' },
   { kind: 'status', at: 1000, status: 'starting' },
   L(1000, 'Plan: 1 action(s).'),
   L(1100, ' '),

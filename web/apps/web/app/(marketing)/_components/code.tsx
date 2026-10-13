@@ -11,6 +11,9 @@ export async function HclCode({ code, className }: { code: string; className?: s
   const rendered = await highlight(code, {
     lang: 'hcl',
     themes: codeThemes,
+    // Custom themes drop Fumadocs' `defaultColor: false`; without it Shiki
+    // inlines the light colour and the dark switch never wins.
+    defaultColor: false,
     transformers: [
       {
         pre(node) {

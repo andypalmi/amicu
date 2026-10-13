@@ -36,7 +36,7 @@ export function siteHref(path: string): string {
 
 /** One-line product summary reused across metadata and llms.txt. */
 export const appTagline =
-  'Open-source infrastructure as code for self-hosted LLMs: describe the model, hardware and runtime in HCL, check fit and data residency, then apply.';
+  'Open-source infrastructure as code for open-weight LLMs: describe the model, hardware and runtime in HCL, check fit and data residency, then apply.';
 
 export const gitConfig = {
   user: 'andypalmi',

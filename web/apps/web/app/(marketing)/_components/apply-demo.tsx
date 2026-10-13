@@ -13,14 +13,13 @@ import {
 } from '@/lib/marketing/demo-timeline';
 
 // Server-renders the final frame (t = Infinity); after hydration it rewinds
-// to 0 and plays once when scrolled into view. Reduced motion keeps the final
+// to 0 and plays once as soon as it nears the viewport. Reduced motion keeps the final
 // frame. Both panes are always laid out (stacked), so height is reserved up
 // front and the static frame shows the apply output and the curl call.
 
 const TOTAL = demoDuration(DEMO_STEPS);
 const TRANSCRIPT = demoTranscript(DEMO_STEPS);
-const START_RATIO = 0.3;
-const THRESHOLDS = Array.from({ length: 21 }, (_, i) => i / 20);
+const START_MARGIN = '200px 0px';
 const toneClass: Record<Tone, string> = {
   cmd: 'text-accent-text',
   add: 'text-success',
@@ -97,18 +96,14 @@ export function ApplyDemo() {
       setT(0);
       io = new IntersectionObserver(
         ([entry]) => {
+          // Any overlap with the (expanded) viewport starts the demo; this
+          // also holds for short viewports and when already in view on load.
           if (!entry?.isIntersecting) return;
-          // The demo is taller than short (landscape / small) viewports, so a
-          // fixed ratio can never be reached there: also accept a screen
-          // that the demo mostly fills.
-          const fillsViewport =
-            entry.rootBounds != null &&
-            entry.intersectionRect.height >= entry.rootBounds.height * 0.6;
-          if (entry.intersectionRatio < START_RATIO && !fillsViewport) return;
           io?.disconnect();
           play();
         },
-        { threshold: THRESHOLDS },
+        // Start just before the demo scrolls into view.
+        { rootMargin: START_MARGIN },
       );
       io.observe(el);
     };
