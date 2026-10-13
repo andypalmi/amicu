@@ -9,7 +9,7 @@ import { pageMetadata } from '../_lib/seo';
 export const metadata: Metadata = pageMetadata({
   title: 'Providers',
   description:
-    'amicu applies to your own machine, your own servers (on_prem) and Modal today. Other providers are in preview or planned.',
+    'amicu applies to this machine (local, Apple, CPU or on-prem hardware you run amicu on) and Modal today. Other providers are in preview or planned.',
   path: '/providers',
 });
 
