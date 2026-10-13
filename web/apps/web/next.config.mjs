@@ -10,6 +10,14 @@ const siteHost = (() => {
   }
 })();
 
+const appHost = (() => {
+  try {
+    return process.env.NEXT_PUBLIC_APP_URL ? new URL(process.env.NEXT_PUBLIC_APP_URL).host : null;
+  } catch {
+    return null;
+  }
+})();
+
 const isProd = process.env.NODE_ENV === 'production';
 
 // Content-Security-Policy for the whole app.
@@ -81,7 +89,7 @@ const config = {
   // X-Forwarded-Host). Behind Cloudflare the public host may differ from what the
   // Worker sees, so also allow the configured public site host explicitly.
   experimental: {
-    serverActions: { allowedOrigins: siteHost ? [siteHost] : [] },
+    serverActions: { allowedOrigins: [siteHost, appHost].filter(Boolean) },
   },
   transpilePackages: ['@amicu/ui', '@amicu/auth'],
   async headers() {

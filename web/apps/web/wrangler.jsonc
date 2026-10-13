@@ -3,7 +3,8 @@
   // Worker name shown in the Cloudflare dashboard / `wrangler deploy` output.
   // Rename to match the account's chosen Workers service name before deploying.
   "name": "amicu-web",
-  "main": ".open-next/worker.js",
+  // Custom entry wrapping .open-next/worker.js (strips X-Forwarded-Host/Proto).
+  "main": "worker.ts",
   "compatibility_date": "2026-09-16",
   "compatibility_flags": [
     // Required by @opennextjs/cloudflare: Next.js server code uses Node.js
@@ -34,7 +35,12 @@
   // so `wrangler deploy` attaches the Worker to the apex and manages its DNS
   // record + certificate. www.amicu.dev -> apex redirect is handled by infra.
   // The API lives separately on https://api.amicu.dev (Cloud Run).
-  "routes": [{ "pattern": "amicu.dev", "custom_domain": true }],
+  "routes": [
+    { "pattern": "amicu.dev", "custom_domain": true },
+    // The product app (console + auth) is served by this same Worker on its own
+    // host; proxy.ts splits marketing vs app routes by host.
+    { "pattern": "app.amicu.dev", "custom_domain": true },
+  ],
   // Setting routes makes wrangler default workers_dev to OFF; state it
   // explicitly so no public *.workers.dev URL is exposed.
   "workers_dev": false,
@@ -58,6 +64,7 @@
     "AUTH_AUDIENCE": "amicu",
     "AUTH_JWKS_URL": "https://api.amicu.dev/.well-known/jwks.json",
     "NEXT_PUBLIC_SITE_URL": "https://amicu.dev",
+    "NEXT_PUBLIC_APP_URL": "https://app.amicu.dev",
     "NODE_ENV": "production",
     // Public sign-ups closed (fail-closed: only "true" opens them). Pair with
     // AMICU_SIGNUPS_ENABLED on the API, which enforces it.

@@ -54,6 +54,7 @@ secrets (e.g. `TURNSTILE_SECRET_KEY`) belong in the secret store.
 | `AUTH_ISSUER` | Expected JWT `iss` claim | Production: `https://api.amicu.dev`. **MUST equal the API's `AMICU_ISSUER`.** See "Issuer/audience parity" below. |
 | `AUTH_AUDIENCE` | Expected JWT `aud` claim | **MUST equal the API's `AMICU_AUDIENCE`.** Defaults to `amicu` on both sides if unset, but don't rely on that across two independently-configured services - set both explicitly. |
 | `AUTH_JWKS_URL` | JWKS endpoint used to verify access tokens offline (`jose` `createRemoteJWKSet`, see `packages/auth/src/jwt.ts`) | Defaults to `${API_URL}/.well-known/jwks.json` if unset; set explicitly if the API serves JWKS from a different host/path. |
+| `NEXT_PUBLIC_APP_URL` | Origin of the product app (console + auth), `https://app.amicu.dev`. The same Worker serves both hosts; `proxy.ts` 301s app/auth paths on `amicu.dev` to this host and marketing/docs paths on this host back to `amicu.dev`. Unset locally => no host split. Also an accepted CSRF/server-action origin and the expected Turnstile hostname. | Build-time (inlined) and runtime var. |
 | `NEXT_PUBLIC_SITE_URL` | Public site origin, embedded in client bundles. Production: `https://amicu.dev` (also the source of the expected Turnstile hostname) | **Build-time**, not just runtime: `NEXT_PUBLIC_*` vars are inlined into the JS bundle during `next build`/`cf:build`, so this must be set correctly *before* building, not only in the deployed Worker's runtime vars. |
 | `NODE_ENV` | Standard Node env flag | Keep `production` for any real deploy. Also gates `COOKIE_SECURE`'s default (see below) and the CSP's dev-only `'unsafe-eval'` allowance in `next.config.mjs`. |
 | `SIGNUPS_ENABLED` | Whether public sign-ups are open. When not exactly `true`, `/signup` shows "Sign-ups are currently closed", the signup action refuses without calling the API, and the login page hides "Create an account" | **Fail-closed**: unset => closed. Committed as `"false"` in `wrangler.jsonc` for production. The API enforces it independently via `AMICU_SIGNUPS_ENABLED` (also default closed) - set both. Local dev: put `SIGNUPS_ENABLED=true` in `.env.local`. |
@@ -110,7 +111,8 @@ always, whenever either service's issuer/audience config changes.
   request URL/Host/Origin to `amicu.dev`.
 - **Before dispatching the first production deploy**, set the repo variable
   `NEXT_PUBLIC_SITE_URL=https://amicu.dev` (build-time) and add `amicu.dev`
-  to the Turnstile widget's hostnames.
+  to the Turnstile widget's hostnames, plus `app.amicu.dev` (auth forms live
+  there), and set `NEXT_PUBLIC_APP_URL=https://app.amicu.dev`.
   Deploys are manual: Actions → Deploy Web → Run workflow on `main`, or
   `gh workflow run deploy-web.yml --ref main`. Required reviewers are
   unavailable on the free plan, so dispatch is the gate.

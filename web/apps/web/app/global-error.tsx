@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
+import { siteHref } from '@/lib/shared';
 import { reportClientError } from '@/lib/observability/report-error';
 
 // Root error boundary for CATASTROPHIC failures - thrown while rendering the
@@ -40,8 +41,7 @@ export default function GlobalError({
               </button>
               {/* Intentional full-document reload: the router tree that <Link>
                   relies on is what just failed, so a hard navigation is safer. */}
-              {/* eslint-disable-next-line @next/next/no-html-link-for-pages */}
-              <a className="amicu-ge-btn amicu-ge-btn--ghost" href="/">
+              <a className="amicu-ge-btn amicu-ge-btn--ghost" href={siteHref('/')}>
                 Go home
               </a>
             </div>

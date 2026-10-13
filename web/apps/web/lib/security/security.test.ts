@@ -6,6 +6,7 @@ import { sessionCookieNames } from '../auth/cookie-names.ts';
 
 const URL_ = 'https://app.example.com/api/engine/plan';
 const SITE = 'https://app.example.com';
+const APP = 'https://app.example.com';
 const req = (method: string, headers: Record<string, string> = {}, url = URL_) =>
   new Request(url, { method, headers });
 
@@ -19,18 +20,36 @@ test('cross-origin POST is rejected', () => {
 test('same-origin POST is allowed (url, site URL, and forwarded host)', () => {
   assert.equal(requestIsSameOrigin(req('POST', { origin: SITE }), SITE), true);
   assert.equal(requestIsSameOrigin(req('POST', { 'sec-fetch-site': 'same-origin' }), SITE), true);
-  // Worker sees an internal URL; public host arrives via X-Forwarded-*.
+  // Worker sees an internal URL; the public host arrives via the Host header.
   const internal = req(
     'POST',
-    { origin: 'https://public.example.org', 'x-forwarded-host': 'public.example.org', 'x-forwarded-proto': 'https' },
-    'http://127.0.0.1:8787/api/x',
+    { origin: 'https://public.example.org', host: 'public.example.org' },
+    'https://127.0.0.1:8787/api/x',
   );
   assert.equal(requestIsSameOrigin(internal, null), true);
+  // X-Forwarded-Host is client-controllable and must NOT widen the allowed set.
+  const spoofed = req(
+    'POST',
+    { origin: 'https://evil.example', 'x-forwarded-host': 'evil.example', 'x-forwarded-proto': 'https' },
+    'https://127.0.0.1:8787/api/x',
+  );
+  assert.equal(requestIsSameOrigin(spoofed, SITE, APP), false);
   // Configured site URL is honoured even when the host headers differ.
   assert.equal(
     requestIsSameOrigin(req('POST', { origin: SITE }, 'http://internal/api/x'), SITE),
     true,
   );
+});
+
+test('app origin is accepted alongside the site origin; null and evil are rejected', () => {
+  const APP_ = 'https://app.amicu.dev';
+  const SITE_ = 'https://amicu.dev';
+  const u = 'https://app.amicu.dev/api/engine/plan';
+  assert.equal(requestIsSameOrigin(req('POST', { origin: APP_ }, u), SITE_, APP_), true);
+  assert.equal(requestIsSameOrigin(req('POST', { origin: SITE_ }, u), SITE_, APP_), true);
+  assert.equal(requestIsSameOrigin(req('POST', { origin: 'null' }, u), SITE_, APP_), false);
+  assert.equal(requestIsSameOrigin(req('POST', { origin: 'https://evil.example' }, u), SITE_, APP_), false);
+  assert.equal(requestIsSameOrigin(req('POST', { origin: 'https://app.amicu.dev.evil.com' }, u), SITE_, APP_), false);
 });
 
 test('GET/HEAD are unaffected', () => {
