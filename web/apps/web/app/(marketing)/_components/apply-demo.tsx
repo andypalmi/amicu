@@ -19,6 +19,8 @@ import {
 
 const TOTAL = demoDuration(DEMO_STEPS);
 const TRANSCRIPT = demoTranscript(DEMO_STEPS);
+const START_RATIO = 0.3;
+const THRESHOLDS = Array.from({ length: 21 }, (_, i) => i / 20);
 const toneClass: Record<Tone, string> = {
   cmd: 'text-accent-text',
   add: 'text-success',
@@ -87,18 +89,26 @@ export function ApplyDemo() {
     const sync = () => {
       stop();
       if (mql.matches) {
+        // Keep the final frame, but let the visitor opt in to the motion.
         setT(Infinity);
-        setReplayable(false);
+        setReplayable(true);
         return;
       }
       setT(0);
       io = new IntersectionObserver(
         ([entry]) => {
           if (!entry?.isIntersecting) return;
+          // The demo is taller than short (landscape / small) viewports, so a
+          // fixed ratio can never be reached there: also accept a screen
+          // that the demo mostly fills.
+          const fillsViewport =
+            entry.rootBounds != null &&
+            entry.intersectionRect.height >= entry.rootBounds.height * 0.6;
+          if (entry.intersectionRatio < START_RATIO && !fillsViewport) return;
           io?.disconnect();
           play();
         },
-        { threshold: 0.4 },
+        { threshold: THRESHOLDS },
       );
       io.observe(el);
     };
