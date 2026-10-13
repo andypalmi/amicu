@@ -2244,23 +2244,119 @@ fn launchd_start_writes_plist_and_loads() {
     }
 }
 
+/// A launchd stand-in: `list` succeeds while the job is "loaded"; `unload` and
+/// `remove` clear it only when configured to.
+struct LoadedExec {
+    loaded: Mutex<bool>,
+    unload_clears: bool,
+    remove_clears: bool,
+    calls: Mutex<Vec<String>>,
+}
+
+impl LoadedExec {
+    fn new(unload_clears: bool, remove_clears: bool) -> Self {
+        Self {
+            loaded: Mutex::new(true),
+            unload_clears,
+            remove_clears,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl CommandExec for LoadedExec {
+    fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        assert_eq!(program, "launchctl");
+        self.calls.lock().unwrap().push(args[0].to_owned());
+        let mut loaded = self.loaded.lock().unwrap();
+        let success = match args[0] {
+            "list" => *loaded,
+            "unload" => {
+                if self.unload_clears {
+                    *loaded = false;
+                }
+                // The real launchctl exits 0 even when the unload failed.
+                true
+            }
+            "remove" => {
+                if self.remove_clears {
+                    *loaded = false;
+                }
+                true
+            }
+            other => panic!("unexpected launchctl {other}"),
+        };
+        Ok(ExecOutput {
+            success,
+            stdout: String::new(),
+            stderr: "Unload failed: 5: Input/output error".to_owned(),
+        })
+    }
+}
+
 #[test]
 fn launchd_stop_removes_plist() {
     let tmp = TempDir::new("launchd-stop");
     let agents = tmp.file("agents");
     let logs = tmp.file("logs");
-    let manager = LaunchdManager::new(FakeExec::new(true, ""), &agents, &logs);
     let spec = service_spec();
-    manager.start(&spec).expect("start");
-
+    LaunchdManager::new(FakeExec::new(true, ""), &agents, &logs)
+        .start(&spec)
+        .expect("start");
     let plist = agents.join("io.amicu.llama.support_chat_local.plist");
     assert!(plist.exists(), "plist should exist after start");
 
+    let manager = LaunchdManager::new(LoadedExec::new(true, true), &agents, &logs);
     manager.stop(&spec.label).expect("stop");
     assert!(!plist.exists(), "plist must be removed after stop");
 
-    // A second stop (plist already gone) must not fail.
-    manager.stop(&spec.label).expect("stop is idempotent");
+    // A second stop (plist gone, job gone) must not fail.
+    let exec = LoadedExec::new(true, true);
+    *exec.loaded.lock().unwrap() = false;
+    let gone = LaunchdManager::new(exec, &agents, &logs);
+    gone.stop(&spec.label).expect("stop is idempotent");
+}
+
+#[test]
+fn launchd_stop_falls_back_to_remove_when_unload_leaves_the_job_loaded() {
+    let tmp = TempDir::new("launchd-stop-remove");
+    let agents = tmp.file("agents");
+    let spec = service_spec();
+    LaunchdManager::new(FakeExec::new(true, ""), &agents, tmp.file("logs"))
+        .start(&spec)
+        .unwrap();
+    let exec = std::sync::Arc::new(LoadedExec::new(false, true));
+    let manager = LaunchdManager::new(exec.clone(), &agents, tmp.file("logs"));
+    manager.stop(&spec.label).expect("remove confirms the stop");
+    let calls = exec.calls.lock().unwrap().clone();
+    assert!(calls.contains(&"remove".to_owned()), "{calls:?}");
+}
+
+#[test]
+fn launchd_stop_errors_and_keeps_the_plist_when_the_job_stays_loaded() {
+    let tmp = TempDir::new("launchd-stop-fail");
+    let agents = tmp.file("agents");
+    let spec = service_spec();
+    LaunchdManager::new(FakeExec::new(true, ""), &agents, tmp.file("logs"))
+        .start(&spec)
+        .unwrap();
+    let manager = LaunchdManager::new(LoadedExec::new(false, false), &agents, tmp.file("logs"));
+    let err = manager.stop(&spec.label).expect_err("unconfirmed stop");
+    assert!(err.to_string().contains("still loaded"), "{err}");
+    assert!(
+        agents
+            .join("io.amicu.llama.support_chat_local.plist")
+            .exists()
+    );
+}
+
+#[test]
+fn launchd_stop_with_no_plist_still_checks_the_label_is_gone() {
+    let tmp = TempDir::new("launchd-stop-noplist");
+    let manager = LaunchdManager::new(LoadedExec::new(false, false), tmp.file("a"), "/l");
+    assert!(manager.stop("io.amicu.llama.x").is_err());
+    let manager = LaunchdManager::new(LoadedExec::new(false, true), tmp.file("a"), "/l");
+    manager.stop("io.amicu.llama.x").expect("removed by label");
 }
 
 #[test]
@@ -2333,6 +2429,46 @@ fn systemd_start_failure_removes_the_env_file() {
     let manager = SystemdManager::new(FakeExec::new(false, ""), &dir.0);
     assert!(manager.start(&spec).is_err());
     assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+}
+
+/// systemctl stand-in: `stop` fails; `show -p LoadState` answers `load_state`.
+struct StopFailsExec {
+    load_state: &'static str,
+}
+
+impl CommandExec for StopFailsExec {
+    fn exec(&self, _: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        let is_show = args.contains(&"show");
+        Ok(ExecOutput {
+            success: is_show,
+            stdout: if is_show {
+                self.load_state.to_owned()
+            } else {
+                String::new()
+            },
+            // Deliberately localized: confirmation must not parse stderr.
+            stderr: "Die Einheit ist nicht geladen.".to_owned(),
+        })
+    }
+}
+
+#[test]
+fn systemd_stop_failure_is_confirmed_only_by_load_state_not_stderr() {
+    let dir = TempDir::new("systemd-loadstate");
+    let gone = SystemdManager::new(
+        StopFailsExec {
+            load_state: "not-found\n",
+        },
+        &dir.0,
+    );
+    gone.stop("io.amicu.llama.x").expect("unit does not exist");
+    let loaded = SystemdManager::new(
+        StopFailsExec {
+            load_state: "loaded\n",
+        },
+        &dir.0,
+    );
+    assert!(loaded.stop("io.amicu.llama.x").is_err());
 }
 
 #[test]
@@ -3061,7 +3197,9 @@ fn launchd_plist_carries_the_key_in_a_0600_file_removed_on_stop_and_on_failed_lo
         fs::metadata(&plist).unwrap().permissions().mode() & 0o777,
         0o600
     );
-    manager.stop(&spec.label).unwrap();
+    LaunchdManager::new(LoadedExec::new(true, true), &agents, tmp.file("logs"))
+        .stop(&spec.label)
+        .unwrap();
     assert!(!plist.exists());
 
     // A failed `launchctl load` must not leave the secret behind.

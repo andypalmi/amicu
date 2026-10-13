@@ -13,6 +13,7 @@ mod project;
 mod refresh;
 mod secret;
 mod skills;
+mod stops;
 
 use std::io::Write;
 use std::path::PathBuf;

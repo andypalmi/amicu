@@ -139,6 +139,11 @@ impl<E: CommandExec> LaunchdManager<E> {
         self.agents_dir.join(format!("{label}.plist"))
     }
 
+    /// Whether launchd currently has a job loaded under `label`.
+    fn is_loaded(&self, label: &str) -> Result<bool, LlamaCppError> {
+        Ok(self.exec.exec("launchctl", &["list", label])?.success)
+    }
+
     fn stdout_path(&self, label: &str) -> PathBuf {
         self.log_dir.join(format!("{label}.out.log"))
     }
@@ -235,22 +240,31 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
 
     fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
         let plist = self.plist_path(label);
-        // No plist means amicu has nothing loaded under this label: the
-        // service is confirmed absent, which is a successful stop.
-        if !plist.exists() {
-            return Ok(());
+        // `launchctl unload` can exit 0 while the job stays loaded ("Unload
+        // failed: 5: Input/output error"), so never trust its status: confirm
+        // by asking launchd whether the label is still loaded.
+        let mut detail = String::new();
+        if plist.exists() {
+            let out = self
+                .exec
+                .exec("launchctl", &["unload", "-w", &plist.to_string_lossy()])?;
+            out.stderr.trim().clone_into(&mut detail);
         }
-        let out = self
-            .exec
-            .exec("launchctl", &["unload", "-w", &plist.to_string_lossy()])?;
-        if !out.success {
-            return Err(LlamaCppError::Supervisor(format!(
-                "launchctl unload failed: {}",
-                out.stderr.trim()
-            )));
+        if self.is_loaded(label)? {
+            // Fall back to removing by label, as `release` does.
+            let out = self.exec.exec("launchctl", &["remove", label])?;
+            if !out.stderr.trim().is_empty() {
+                out.stderr.trim().clone_into(&mut detail);
+            }
+            if self.is_loaded(label)? {
+                return Err(LlamaCppError::Supervisor(format!(
+                    "launchd job {label} is still loaded after unload and remove: {detail}"
+                )));
+            }
         }
-        // Remove the per-instance plist so its EnvironmentVariables don't linger
-        // on disk; a missing file is fine, any other error is surfaced.
+        // Confirmed gone. Remove the per-instance plist so its
+        // EnvironmentVariables don't linger on disk; a missing file is fine,
+        // any other error is surfaced.
         match std::fs::remove_file(&plist) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -451,17 +465,22 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
         // `--collect` unit is "not loaded" and its stop errors).
         remove_env_file(&self.env_path(label));
         let out = out?;
-        // "Unit ... not loaded": the unit is confirmed absent.
-        if !out.success && out.stderr.contains("not loaded") {
+        if out.success {
             return Ok(());
         }
-        if !out.success {
-            return Err(LlamaCppError::Supervisor(format!(
-                "systemctl stop failed: {}",
-                out.stderr.trim()
-            )));
+        // Stop failed. It is still a confirmed stop if systemd reports the
+        // unit does not exist (checked by property, not by parsing stderr).
+        let load = self.exec.exec(
+            "systemctl",
+            &["--user", "show", "-p", "LoadState", "--value", label],
+        )?;
+        if load.success && load.stdout.trim() == "not-found" {
+            return Ok(());
         }
-        Ok(())
+        Err(LlamaCppError::Supervisor(format!(
+            "systemctl stop failed: {}",
+            out.stderr.trim()
+        )))
     }
 
     fn logs(&self, label: &str, options: LogOptions) -> Result<Vec<String>, LlamaCppError> {

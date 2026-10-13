@@ -55,6 +55,23 @@ impl AppLookup for ModalLookup {
     }
 }
 
+/// The Modal app id recorded for deployment `id`: from its stop record or its
+/// endpoint handle (a Modal handle's `id` is the app id).
+fn recorded_app_id(state: &LocalState, id: &str) -> Option<String> {
+    state
+        .stops
+        .iter()
+        .find(|r| r.deployment.as_str() == id && r.app_id.is_some())
+        .and_then(|r| r.app_id.clone())
+        .or_else(|| {
+            state
+                .endpoints
+                .iter()
+                .find(|h| h.deployment.as_str() == id)
+                .map(|h| h.id.clone())
+        })
+}
+
 /// What a refresh found.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Refresh {
@@ -101,8 +118,23 @@ pub(crate) fn refresh_state(state: &mut LocalState, lookup: &dyn AppLookup) -> R
 
     let mut notes = Vec::new();
     for (id, app) in recorded.iter().filter(|(_, app)| !live.contains(app)) {
+        // Never drop an instance's stop identity on a name lookup alone: a
+        // pending deployment, or one with a recorded app id, stays in state.
+        if state.pending.iter().any(|p| p.as_str() == id) {
+            continue;
+        }
+        if let Some(app_id) = recorded_app_id(state, id) {
+            state.pending.push(id.as_str().into());
+            notes.push(format!(
+                "deployment {id}: app {app} not found on Modal by name; kept in state as \
+                 pending (recorded app id {app_id}): apply will recreate it and destroy \
+                 confirms by id"
+            ));
+            continue;
+        }
         state.graph.deployments.retain(|d| d.id.as_str() != id);
         state.endpoints.retain(|h| h.deployment.as_str() != id);
+        state.stops.retain(|r| r.deployment.as_str() != id);
         notes.push(format!(
             "deployment {id}: app {app} not found on Modal, will be recreated"
         ));
@@ -180,6 +212,8 @@ pub(crate) fn forget_app(project: &Project, app_name: &str) -> Result<Option<Str
     };
     state.graph.deployments.retain(|d| d.id.as_str() != id);
     state.endpoints.retain(|h| h.deployment.as_str() != id);
+    state.stops.retain(|r| r.deployment.as_str() != id);
+    state.pending.retain(|p| p.as_str() != id);
     project.save_state(&state)?;
     Ok(Some(id))
 }
@@ -264,6 +298,7 @@ resource "deployment" "support_modal" {
         LocalState {
             version: LocalState::VERSION.to_owned(),
             pending: Vec::new(),
+            stops: Vec::new(),
             graph,
             endpoints,
         }
@@ -281,7 +316,10 @@ resource "deployment" "support_modal" {
     #[test]
     fn missing_app_is_dropped_and_plan_shows_create() {
         let config = amicu_hcl::parse_graph(MODAL_CONFIG).unwrap();
+        // Legacy state: no app id was ever recorded, so a name lookup is all
+        // there is to go on.
         let mut state = state_for(MODAL_CONFIG);
+        state.endpoints.clear();
         // Stale state: the planner sees no change.
         let before = build_plan(&config, Some(&state.graph)).unwrap();
         assert_eq!(before.items.len(), 0);
@@ -294,6 +332,31 @@ resource "deployment" "support_modal" {
 
         let plan = build_plan(&config, Some(&state.graph)).unwrap();
         assert_eq!(plan.items.len(), 1, "stopped app must be recreated");
+    }
+
+    /// A recorded Modal app id is the instance's stop identity: a name lookup
+    /// that finds nothing must not drop it. It is kept as pending, so apply
+    /// recreates it and destroy can still confirm the stop by id.
+    #[test]
+    fn a_recorded_app_id_is_never_pruned_on_a_name_lookup() {
+        let mut state = state_for(MODAL_CONFIG);
+        assert_eq!(state.endpoints.len(), 1, "fixture records an app id");
+        let refresh = refresh_state(&mut state, &Fake(Ok(vec![])));
+        assert_eq!(refresh.notes.len(), 1);
+        assert!(refresh.notes[0].contains("pending"), "{:?}", refresh.notes);
+        assert_eq!(state.graph.deployments.len(), 1);
+        assert_eq!(state.endpoints.len(), 1);
+        assert_eq!(state.pending.len(), 1);
+    }
+
+    #[test]
+    fn a_pending_deployment_is_never_pruned_or_renoted() {
+        let mut state = state_for(MODAL_CONFIG);
+        state.endpoints.clear();
+        state.pending = vec![state.graph.deployments[0].id.clone()];
+        let refresh = refresh_state(&mut state, &Fake(Ok(vec![])));
+        assert_eq!(refresh.notes.len(), 0);
+        assert_eq!(state.graph.deployments.len(), 1);
     }
 
     #[test]
@@ -389,7 +452,9 @@ resource "deployment" "support_modal" {
         let dir = std::env::temp_dir().join(format!("amicu-json-notes-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let project = Project::new(&dir);
-        project.save_state(&state_for(MODAL_CONFIG)).unwrap();
+        let mut legacy = state_for(MODAL_CONFIG);
+        legacy.endpoints.clear();
+        project.save_state(&legacy).unwrap();
 
         let mut out = Vec::new();
         let (state, pruned) =

@@ -32,10 +32,19 @@ pub(crate) struct LocalState {
     /// Absent in state written before this field existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending: Vec<amicu_core::id::DeploymentId>,
+    /// How to stop every instance that may be running (see [`crate::stops`]).
+    /// Written ahead of each start and removed only once a stop is confirmed.
+    /// Absent in v1 state; the stop identity is then derived from the graph.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stops: Vec<crate::stops::StopRecord>,
 }
 
 impl LocalState {
-    pub const VERSION: &'static str = "v1";
+    /// Written by this version. v2 adds `pending` and `stops`, which a v1-only
+    /// binary would silently drop on its next save.
+    pub const VERSION: &'static str = "v2";
+    /// Versions this binary can read.
+    pub const SUPPORTED: &'static [&'static str] = &["v1", "v2"];
 }
 
 impl Project {
@@ -62,7 +71,7 @@ impl Project {
         self.dot_dir().join("state")
     }
 
-    fn state_file(&self) -> PathBuf {
+    pub(crate) fn state_file(&self) -> PathBuf {
         self.state_dir().join("state.json")
     }
 
@@ -99,7 +108,16 @@ impl Project {
         let path = self.state_file();
         match fs::read_to_string(&path) {
             Ok(text) => {
-                let state = serde_json::from_str(&text)?;
+                let state: LocalState = serde_json::from_str(&text)?;
+                if !LocalState::SUPPORTED.contains(&state.version.as_str()) {
+                    return Err(CliError::Message(format!(
+                        "{} has state version '{}', which this amicu does not understand \
+                         (supported: {}); upgrade amicu rather than overwrite it",
+                        path.display(),
+                        state.version,
+                        LocalState::SUPPORTED.join(", ")
+                    )));
+                }
                 Ok(Some(state))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),

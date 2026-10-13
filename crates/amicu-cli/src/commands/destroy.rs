@@ -10,7 +10,7 @@ use std::io::Write;
 use amicu_core::graph::Graph;
 
 use crate::OutputFormat;
-use crate::commands::apply::{execute, prompt_approval_from};
+use crate::commands::apply::{HostSupervisorFactory, execute, prompt_approval_from};
 use crate::error::CliError;
 use crate::lock::StateLock;
 use crate::planner::{PlanError, PlanResult};
@@ -34,10 +34,12 @@ pub(crate) fn run(
         output,
         out,
         &mut std::io::stdin().lock(),
+        &amicu_llamacpp::host_supervisor,
     )
 }
 
 /// [`run`] with the approval answer read from `input`.
+#[allow(clippy::too_many_arguments)] // run() plus the injected input and host
 pub(crate) fn run_with(
     project: &Project,
     targets: &[String],
@@ -46,6 +48,7 @@ pub(crate) fn run_with(
     output: OutputFormat,
     out: &mut dyn Write,
     input: &mut dyn std::io::BufRead,
+    host: &HostSupervisorFactory,
 ) -> Result<u8, CliError> {
     // Same locking discipline as `apply`: read -> refresh -> plan -> destroy ->
     // save under one state lock.
@@ -108,7 +111,7 @@ pub(crate) fn run_with(
 
     // Same safety rule as `apply`: show the plan and get approval first; in
     // JSON mode stdout carries only the final result, so preview goes to stderr.
-    {
+    let cancelled = {
         let mut stderr = std::io::stderr();
         let preview: &mut dyn Write = if output.is_json() {
             &mut stderr
@@ -118,12 +121,20 @@ pub(crate) fn run_with(
         crate::commands::plan::print_human(&result, prior_graph, preview)?;
         if !auto_approve && !prompt_approval_from(preview, "Destroy these deployments?", input)? {
             writeln!(preview, "Destroy cancelled.").map_err(|e| CliError::io("write failed", e))?;
-            return Ok(0);
+            true
+        } else {
+            false
         }
+    };
+    if cancelled {
+        if output.is_json() {
+            write_json(out, &Vec::<&str>::new())?;
+        }
+        return Ok(0);
     }
 
     let remaining = remaining_graph(prior_graph, &result);
-    let (_, state) = execute(project, remaining, &result, prior_state.as_ref())?;
+    let (_, state) = execute(project, remaining, &result, prior_state.as_ref(), host)?;
 
     let destroyed: Vec<&str> = result.items.iter().map(|i| i.deployment.as_str()).collect();
     if output.is_json() {

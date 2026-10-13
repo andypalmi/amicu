@@ -571,6 +571,7 @@ fn apply_json_stdout_is_a_single_json_value() {
         .save_state(&LocalState {
             version: LocalState::VERSION.to_owned(),
             pending: Vec::new(),
+            stops: Vec::new(),
             graph: prior,
             endpoints: Vec::new(),
         })
@@ -645,13 +646,14 @@ fn state_round_trips() {
     let state = LocalState {
         version: LocalState::VERSION.to_owned(),
         pending: Vec::new(),
+        stops: Vec::new(),
         graph: graph.clone(),
         endpoints: Vec::new(),
     };
     project.save_state(&state).unwrap();
     let loaded = project.load_state().unwrap().unwrap();
     assert_eq!(loaded.graph, graph);
-    assert_eq!(loaded.version, "v1");
+    assert_eq!(loaded.version, LocalState::VERSION);
 }
 
 #[test]
@@ -853,94 +855,385 @@ fn destroy_unknown_target_is_an_error_and_plans_nothing() {
     assert!(msg.contains("support_local"), "lists known names: {msg}");
 }
 
+// ---- destroy end to end, over a fake host supervisor ------------------------
+//
+// None of these touches the real launchctl/systemctl: the host supervisor is
+// injected, so they run (and are safe) on any platform.
+
+use std::sync::{Arc, Mutex};
+
+#[derive(Default)]
+struct StopLog {
+    stopped: Mutex<Vec<String>>,
+}
+
+struct FakeHost {
+    log: Arc<StopLog>,
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl amicu_llamacpp::ProcessSupervisor for FakeHost {
+    async fn start(
+        &self,
+        _: &amicu_runtime::LaunchPlan,
+        _: &[amicu_llamacpp::ResolvedSecret],
+    ) -> Result<amicu_runtime::RuntimeHandle, amicu_llamacpp::LlamaCppError> {
+        unreachable!("destroy never starts anything")
+    }
+    async fn status(
+        &self,
+        _: &amicu_runtime::RuntimeHandle,
+    ) -> Result<amicu_runtime::RuntimeStatus, amicu_llamacpp::LlamaCppError> {
+        unreachable!()
+    }
+    async fn metrics(
+        &self,
+        _: &amicu_runtime::RuntimeHandle,
+    ) -> Result<amicu_runtime::RuntimeMetrics, amicu_llamacpp::LlamaCppError> {
+        unreachable!()
+    }
+    async fn logs(
+        &self,
+        _: &amicu_runtime::RuntimeHandle,
+        _: amicu_runtime::LogOptions,
+    ) -> Result<amicu_runtime::LogStream, amicu_llamacpp::LlamaCppError> {
+        unreachable!()
+    }
+    async fn stop(
+        &self,
+        h: &amicu_runtime::RuntimeHandle,
+    ) -> Result<(), amicu_llamacpp::LlamaCppError> {
+        if self.fail {
+            return Err(amicu_llamacpp::LlamaCppError::Supervisor(
+                "stop could not be confirmed".to_owned(),
+            ));
+        }
+        self.log.stopped.lock().unwrap().push(h.id.clone());
+        Ok(())
+    }
+}
+
+fn fake_host(
+    log: &Arc<StopLog>,
+    fail: bool,
+) -> Box<dyn Fn() -> Box<dyn amicu_llamacpp::ProcessSupervisor>> {
+    let log = log.clone();
+    Box::new(move || {
+        Box::new(FakeHost {
+            log: log.clone(),
+            fail,
+        })
+    })
+}
+
+fn state_with(graph: amicu_core::graph::Graph) -> LocalState {
+    LocalState {
+        version: LocalState::VERSION.to_owned(),
+        graph,
+        endpoints: Vec::new(),
+        pending: Vec::new(),
+        stops: Vec::new(),
+    }
+}
+
+fn run_destroy(
+    project: &Project,
+    targets: &[String],
+    auto_approve: bool,
+    output: OutputFormat,
+    answer: &str,
+    host: &crate::commands::apply::HostSupervisorFactory,
+) -> (Result<u8, crate::error::CliError>, String) {
+    let mut out = Vec::new();
+    let mut input = std::io::Cursor::new(answer.as_bytes().to_vec());
+    let result = commands::destroy::run_with(
+        project,
+        targets,
+        auto_approve,
+        None,
+        output,
+        &mut out,
+        &mut input,
+        host,
+    );
+    (result, utf8(out))
+}
+
+fn label(name: &str) -> String {
+    amicu_llamacpp::host_label(name)
+}
+
 #[test]
 fn destroy_unknown_target_leaves_state_untouched() {
     let td = TempDir::new();
     let project = Project::new(&td.path);
-    let graph = two_deployment_graph();
-    let state = LocalState {
-        version: LocalState::VERSION.to_owned(),
-        pending: Vec::new(),
-        graph,
-        endpoints: Vec::new(),
-    };
+    let state = state_with(two_deployment_graph());
     project.save_state(&state).unwrap();
-    let mut out = Vec::new();
-    let err = commands::destroy::run(
+    let log = Arc::new(StopLog::default());
+    let (result, out) = run_destroy(
         &project,
         &["ghost".to_owned()],
         true,
-        None,
         OutputFormat::Human,
-        &mut out,
-    )
-    .expect_err("unknown target");
+        "",
+        &fake_host(&log, false),
+    );
+    let err = result.expect_err("unknown target");
     assert!(err.to_string().contains("ghost"), "{err}");
     assert_eq!(project.load_state().unwrap().unwrap().graph, state.graph);
-    assert_eq!(out.len(), 0);
+    assert_eq!(out, "");
+    assert_eq!(log.stopped.lock().unwrap().len(), 0);
 }
 
 #[test]
 fn destroy_with_empty_state_prints_nothing_to_destroy() {
     let td = TempDir::new();
     let project = Project::new(&td.path);
-    let mut out = Vec::new();
-    let code =
-        commands::destroy::run(&project, &[], true, None, OutputFormat::Human, &mut out).unwrap();
-    assert_eq!(code, 0);
-    assert_eq!(utf8(out), "Nothing to destroy.\n");
+    let log = Arc::new(StopLog::default());
+    let (result, out) = run_destroy(
+        &project,
+        &[],
+        true,
+        OutputFormat::Human,
+        "",
+        &fake_host(&log, false),
+    );
+    assert_eq!(result.unwrap(), 0);
+    assert_eq!(out, "Nothing to destroy.\n");
     assert!(project.load_state().unwrap().is_none());
 }
 
-// Runs the real host stop path, which is a no-op on macOS when nothing is
-// loaded; elsewhere it would call systemctl, so keep it off other platforms.
-#[cfg(target_os = "macos")]
 #[test]
-fn destroy_updates_state_like_apply() {
+fn destroy_nothing_in_json_mode_is_an_empty_array() {
     let td = TempDir::new();
     let project = Project::new(&td.path);
-    // No recorded endpoints, so executing the destroys stops nothing real.
-    let state = LocalState {
-        version: LocalState::VERSION.to_owned(),
-        pending: Vec::new(),
-        graph: two_deployment_graph(),
-        endpoints: Vec::new(),
-    };
-    project.save_state(&state).unwrap();
-
-    let mut out = Vec::new();
-    let targets = ["support_two".to_owned()];
-    let code = commands::destroy::run(
+    let log = Arc::new(StopLog::default());
+    let (result, out) = run_destroy(
         &project,
-        &targets,
+        &[],
         true,
-        None,
+        OutputFormat::Json,
+        "",
+        &fake_host(&log, false),
+    );
+    result.unwrap();
+    assert_eq!(out.trim(), "[]");
+}
+
+#[test]
+fn destroy_cancel_or_eof_destroys_nothing_and_json_prints_an_empty_array() {
+    for answer in ["", "n\n", "no\n", "\n"] {
+        for output in [OutputFormat::Human, OutputFormat::Json] {
+            let td = TempDir::new();
+            let project = Project::new(&td.path);
+            let state = state_with(two_deployment_graph());
+            project.save_state(&state).unwrap();
+            let log = Arc::new(StopLog::default());
+            let (result, out) = run_destroy(
+                &project,
+                &[],
+                false,
+                output,
+                answer,
+                &fake_host(&log, false),
+            );
+            assert_eq!(result.unwrap(), 0);
+            if output.is_json() {
+                assert_eq!(out.trim(), "[]", "{out}");
+            } else {
+                assert!(out.contains("Destroy these deployments? [y/N]"), "{out}");
+                assert!(out.contains("Destroy cancelled."), "{out}");
+            }
+            assert_eq!(project.load_state().unwrap().unwrap().graph, state.graph);
+            assert_eq!(log.stopped.lock().unwrap().len(), 0);
+        }
+    }
+}
+
+#[test]
+fn destroy_confirmed_stops_via_derived_labels_and_empties_state() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    // v1-style state: no endpoints, no stop records. Identity is derived.
+    project
+        .save_state(&state_with(two_deployment_graph()))
+        .unwrap();
+    let log = Arc::new(StopLog::default());
+    let (result, out) = run_destroy(
+        &project,
+        &[],
+        false,
         OutputFormat::Human,
-        &mut out,
-    )
-    .unwrap();
-    assert_eq!(code, 0);
-    let kept = project.load_state().unwrap().unwrap();
-    let ids: Vec<&str> = kept
+        "y\n",
+        &fake_host(&log, false),
+    );
+    assert_eq!(result.unwrap(), 0);
+    assert!(out.contains("Destroyed 2 deployment(s):"), "{out}");
+    let mut stopped = log.stopped.lock().unwrap().clone();
+    stopped.sort();
+    assert_eq!(stopped, [label("support_local"), label("support_two")]);
+    let after = project.load_state().unwrap().unwrap();
+    assert_eq!(after.graph.deployments.len(), 0);
+    assert_eq!(after.stops.len(), 0);
+}
+
+#[test]
+fn targeted_destroy_preserves_other_deployments_endpoints_and_stop_records() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    let kept = handle("support_local", 8000);
+    let mut state = state_with(two_deployment_graph());
+    state.endpoints = vec![kept.clone()];
+    project.save_state(&state).unwrap();
+    let log = Arc::new(StopLog::default());
+    let (result, _) = run_destroy(
+        &project,
+        &["support_two".to_owned()],
+        true,
+        OutputFormat::Human,
+        "",
+        &fake_host(&log, false),
+    );
+    result.unwrap();
+    assert_eq!(*log.stopped.lock().unwrap(), [label("support_two")]);
+    let after = project.load_state().unwrap().unwrap();
+    assert_eq!(after.endpoints, vec![kept]);
+    let ids: Vec<&str> = after
         .graph
         .deployments
         .iter()
         .map(|d| d.id.as_str())
         .collect();
     assert_eq!(ids, ["support_local"]);
+    // The kept deployment can still be stopped from state afterwards.
+    assert!(
+        after
+            .stops
+            .iter()
+            .all(|r| r.deployment.as_str() == "support_local")
+    );
+}
 
-    let mut out = Vec::new();
-    commands::destroy::run(&project, &[], true, None, OutputFormat::Human, &mut out).unwrap();
-    let text = utf8(out);
-    assert!(text.contains("Destroyed 1 deployment(s):"), "{text}");
-    let left = project
-        .load_state()
-        .unwrap()
-        .unwrap()
-        .graph
-        .deployments
-        .len();
-    assert_eq!(left, 0);
+#[test]
+fn a_failed_stop_keeps_the_deployment_and_its_record_and_errors() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    let mut state = state_with(two_deployment_graph());
+    state.stops = vec![
+        crate::stops::StopRecord::host(&"support_local".into()),
+        crate::stops::StopRecord::host(&"support_two".into()),
+    ];
+    project.save_state(&state).unwrap();
+    let log = Arc::new(StopLog::default());
+    let (result, out) = run_destroy(
+        &project,
+        &[],
+        true,
+        OutputFormat::Human,
+        "",
+        &fake_host(&log, true),
+    );
+    let err = result.expect_err("an unconfirmed stop must fail the command");
+    assert!(err.to_string().contains("could not be confirmed"), "{err}");
+    assert!(!out.contains("Destroyed"), "never claim success: {out}");
+    let after = project.load_state().unwrap().unwrap();
+    assert_eq!(after.graph.deployments.len(), 2);
+    assert_eq!(after.stops, state.stops);
+}
+
+/// A crash between the provider start and the final save leaves only the
+/// write-ahead record: a pending deployment with its stop record and no
+/// endpoint. Destroy must stop it from that record alone.
+#[test]
+fn destroy_stops_a_pending_deployment_from_its_record_alone() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    let mut state = state_with(two_deployment_graph());
+    state.pending = vec!["support_two".into()];
+    state.stops = vec![crate::stops::StopRecord::host(&"support_two".into())];
+    project.save_state(&state).unwrap();
+    let log = Arc::new(StopLog::default());
+    let (result, _) = run_destroy(
+        &project,
+        &["support_two".to_owned()],
+        true,
+        OutputFormat::Human,
+        "",
+        &fake_host(&log, false),
+    );
+    result.unwrap();
+    assert_eq!(*log.stopped.lock().unwrap(), [label("support_two")]);
+    let after = project.load_state().unwrap().unwrap();
+    assert_eq!(after.pending.len(), 0);
+    assert!(
+        after
+            .stops
+            .iter()
+            .all(|r| r.deployment.as_str() == "support_local"),
+        "{:?}",
+        after.stops
+    );
+}
+
+/// Every record of a deployment is stopped (an old identity left by a
+/// provider change as well as the current one), and only then forgotten.
+#[test]
+fn destroy_stops_every_recorded_identity_of_a_deployment() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    let mut state = state_with(two_deployment_graph());
+    let mut old = crate::stops::StopRecord::host(&"support_two".into());
+    old.identity = "io.amicu.llama.old_name".to_owned();
+    state.stops = vec![old, crate::stops::StopRecord::host(&"support_two".into())];
+    project.save_state(&state).unwrap();
+    let log = Arc::new(StopLog::default());
+    let (result, _) = run_destroy(
+        &project,
+        &["support_two".to_owned()],
+        true,
+        OutputFormat::Human,
+        "",
+        &fake_host(&log, false),
+    );
+    result.unwrap();
+    let mut stopped = log.stopped.lock().unwrap().clone();
+    stopped.sort();
+    assert_eq!(
+        stopped,
+        ["io.amicu.llama.old_name".to_owned(), label("support_two")]
+    );
+}
+
+#[test]
+fn state_round_trips_and_refuses_newer_versions() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    let mut state = state_with(two_deployment_graph());
+    state.pending = vec!["support_two".into()];
+    state.stops = vec![crate::stops::StopRecord::host(&"support_two".into())];
+    project.save_state(&state).unwrap();
+    let loaded = project.load_state().unwrap().unwrap();
+    assert_eq!(loaded.version, "v2");
+    assert_eq!(loaded.pending, state.pending);
+    assert_eq!(loaded.stops, state.stops);
+
+    // v1 state (no pending/stops) still loads.
+    let mut v1: serde_json::Value = serde_json::to_value(&state).unwrap();
+    v1["version"] = "v1".into();
+    v1.as_object_mut().unwrap().remove("pending");
+    v1.as_object_mut().unwrap().remove("stops");
+    std::fs::write(project.state_file(), v1.to_string()).unwrap();
+    let old = project.load_state().unwrap().unwrap();
+    assert_eq!(old.version, "v1");
+    assert_eq!(old.stops.len(), 0);
+
+    // A newer version is refused rather than silently downgraded.
+    let mut newer = v1;
+    newer["version"] = "v9".into();
+    std::fs::write(project.state_file(), newer.to_string()).unwrap();
+    let err = project.load_state().expect_err("newer state");
+    assert!(err.to_string().contains("v9"), "{err}");
 }
 
 fn handle(id: &str, port: u16) -> amicu_runtime::RuntimeHandle {
@@ -950,117 +1243,4 @@ fn handle(id: &str, port: u16) -> amicu_runtime::RuntimeHandle {
         endpoint: format!("http://127.0.0.1:{port}"),
         exposure: amicu_runtime::EndpointExposure::Loopback,
     }
-}
-
-#[test]
-fn destroy_cancel_or_eof_destroys_nothing() {
-    for answer in ["", "n\n", "no\n", "\n"] {
-        let td = TempDir::new();
-        let project = Project::new(&td.path);
-        let state = LocalState {
-            version: LocalState::VERSION.to_owned(),
-            pending: Vec::new(),
-            graph: two_deployment_graph(),
-            endpoints: Vec::new(),
-        };
-        project.save_state(&state).unwrap();
-        let mut out = Vec::new();
-        let mut input = std::io::Cursor::new(answer.as_bytes().to_vec());
-        let code = commands::destroy::run_with(
-            &project,
-            &[],
-            false,
-            None,
-            OutputFormat::Human,
-            &mut out,
-            &mut input,
-        )
-        .unwrap();
-        assert_eq!(code, 0);
-        let text = utf8(out);
-        assert!(text.contains("Destroy these deployments? [y/N]"), "{text}");
-        assert!(text.contains("Destroy cancelled."), "{text}");
-        assert_eq!(project.load_state().unwrap().unwrap().graph, state.graph);
-    }
-}
-
-// Runs the real host stop path, which is a no-op on macOS when nothing is
-// loaded; elsewhere it would call systemctl, so keep it off other platforms.
-#[cfg(target_os = "macos")]
-#[test]
-fn destroy_confirmed_with_y_proceeds() {
-    let td = TempDir::new();
-    let project = Project::new(&td.path);
-    let state = LocalState {
-        version: LocalState::VERSION.to_owned(),
-        pending: Vec::new(),
-        graph: two_deployment_graph(),
-        endpoints: Vec::new(),
-    };
-    project.save_state(&state).unwrap();
-    let mut out = Vec::new();
-    let mut input = std::io::Cursor::new(b"y\n".to_vec());
-    commands::destroy::run_with(
-        &project,
-        &[],
-        false,
-        None,
-        OutputFormat::Human,
-        &mut out,
-        &mut input,
-    )
-    .unwrap();
-    assert!(utf8(out).contains("Destroyed 2 deployment(s):"));
-    assert_eq!(
-        project
-            .load_state()
-            .unwrap()
-            .unwrap()
-            .graph
-            .deployments
-            .len(),
-        0
-    );
-}
-
-// Runs the real host stop path, which is a no-op on macOS when nothing is
-// loaded; elsewhere it would call systemctl, so keep it off other platforms.
-#[cfg(target_os = "macos")]
-#[test]
-fn targeted_destroy_preserves_other_deployments_endpoints() {
-    let td = TempDir::new();
-    let project = Project::new(&td.path);
-    // Only the kept deployment has a handle, so nothing real is stopped; the
-    // destroyed one has no handle, so it is stopped via its derived label.
-    let kept = handle("support_local", 8000);
-    let state = LocalState {
-        version: LocalState::VERSION.to_owned(),
-        pending: Vec::new(),
-        graph: two_deployment_graph(),
-        endpoints: vec![kept.clone()],
-    };
-    project.save_state(&state).unwrap();
-    let mut out = Vec::new();
-    let targets = ["support_two".to_owned()];
-    commands::destroy::run(
-        &project,
-        &targets,
-        true,
-        None,
-        OutputFormat::Human,
-        &mut out,
-    )
-    .unwrap();
-    let after = project.load_state().unwrap().unwrap();
-    assert_eq!(after.endpoints, vec![kept]);
-    assert_eq!(after.graph.deployments.len(), 1);
-}
-
-#[test]
-fn destroy_nothing_in_json_mode_is_an_empty_array() {
-    let td = TempDir::new();
-    let project = Project::new(&td.path);
-    let mut out = Vec::new();
-    commands::destroy::run(&project, &[], true, None, OutputFormat::Json, &mut out).unwrap();
-    assert_eq!(utf8(out).trim(), "[]");
 }
