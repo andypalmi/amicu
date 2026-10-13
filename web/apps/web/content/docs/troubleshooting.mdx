@@ -27,9 +27,17 @@ Start with `amicu doctor`. Then read the diagnostic code: the category tells you
 
 **`state is locked by another amicu process`.** Another `amicu apply` or `amicu modal stop` is running. Wait, or use `--lock-timeout <secs>`. The lock is released automatically when the process exits.
 
-**`llama-server binary not found`** (from `doctor`). Install llama.cpp so `llama-server` is on `PATH`.
+**`llama-server not found on PATH; install with ...`.** Install llama.cpp (macOS: `brew install llama.cpp`) so `llama-server` is on the `PATH` of the shell that runs `amicu apply`. `amicu doctor` reports the same.
 
-**The local service starts but never answers.** Check that the GGUF exists at the path in the plan's `launch:` line. Then read the service log (macOS: `~/Library/Logs/amicu/`; Linux: `journalctl --user`).
+**`vllm not found on PATH; install with `pip install vllm``.** Install vLLM into the environment whose `PATH` runs `amicu apply`.
+
+**The local service exits during startup.** Apply fails within seconds, stops the service, and prints where the log is. macOS: `~/Library/Logs/amicu/<label>.out.log` and `<label>.err.log`. Linux: `journalctl --user --unit=<label>`. The usual causes are a missing GGUF at the path in the plan's `launch:` line, or too little memory.
+
+**Apply waits and then fails with a health timeout.** Apply waits up to 15 minutes for `/health`. If the model never loads, apply stops the service and fails; read the log named in the error.
+
+**`port N is already serving /health`.** Something else, such as an older service or another program, answers on that port. Stop it or change `llama_cpp.port` / `vllm.port`, then apply again. Apply may wait up to 10 seconds for the previous service of the same deployment to stop before it reports this.
+
+**The local service is gone after a reboot or logout (Linux).** Linux services are transient systemd user units and do not survive a reboot or logout. Run `amicu apply` again. On macOS the LaunchAgent persists and starts at login.
 
 **`endpoint answered an unauthenticated request ... it is open to anyone with its URL`.** The runtime did not enforce the key. Amicu stopped the endpoint. Make sure `api_key` is set and the runtime is current, then apply again.
 

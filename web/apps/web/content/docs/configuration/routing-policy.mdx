@@ -12,7 +12,7 @@ resource "routing_policy" "chat" {
   aliases      = ["chat", "default"]
   optimize_for = "latency"
   target {
-    deployment = deployment.starter_chat_local.id
+    deployment = deployment.qwen3_8b_local.id
     weight     = 100
   }
   failover {

@@ -23,7 +23,7 @@ Amicu reads every `*.hcl` file under the project root, recursively, skipping `.a
 A file contains only `resource` blocks. A top-level attribute or any other block type is an error.
 
 ```hcl
-resource "model" "starter_chat" {
+resource "model" "qwen3_8b" {
   source {
     registry  = "hugging_face"
     reference = "Qwen/Qwen3.5-8B-Instruct"

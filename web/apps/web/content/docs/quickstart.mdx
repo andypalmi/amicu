@@ -41,24 +41,12 @@ amicu init
 
 Requirements:
 
-- `llama-server` from llama.cpp on your `PATH` (on macOS, `brew install llama.cpp`). `apply` resolves it to an absolute path and fails with an error if it is not found. `amicu doctor` reports whether it is found.
+- `llama-server` from llama.cpp on your `PATH` (on macOS, `brew install llama.cpp`). `apply` resolves it from `PATH` to an absolute path and fails with `llama-server not found on PATH; install with ...` if it is missing. `amicu doctor` reports whether it is found.
 - A GGUF file for the model. Amicu does not download it; you do, once.
 
-### Get a GGUF
+### The starter config
 
-The model resource id decides where the file goes. This quickstart uses the id `qwen3_8b`, so the file lives at `models/qwen3_8b/<file name>` relative to the project directory (or give an absolute path in `variant.file`). The example below uses `Qwen/Qwen3-8B-GGUF`, file `Qwen3-8B-Q4_K_M.gguf` (about 5 GB):
-
-```bash
-mkdir -p models/qwen3_8b
-curl -L -o models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf \
-  https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf
-```
-
-For gated or private repos, add `-H "Authorization: Bearer $HF_TOKEN"`.
-
-### Configure
-
-`amicu init` writes a starter that points at a placeholder repository. Replace the contents of `amicu.hcl` with this, and edit `hardware_profile` to match your machine:
+`amicu init` writes this `amicu.hcl`. It serves `Qwen/Qwen3-8B-GGUF` (`Qwen3-8B-Q4_K_M.gguf`, about 5 GB) with llama.cpp:
 
 ```hcl
 resource "model" "qwen3_8b" {
@@ -72,7 +60,7 @@ resource "model" "qwen3_8b" {
     format       = "gguf"
     quantization = "q4_k_m"
   }
-  context_length = 32768
+  context_length = 100000
   variant {
     quantization = "q4_k_m"
     file         = "Qwen3-8B-Q4_K_M.gguf"
@@ -91,19 +79,31 @@ resource "hardware_profile" "local_dev" {
   memory = "48GiB"
 }
 
-resource "deployment" "qwen3_local" {
+resource "deployment" "qwen3_8b_local" {
   model    = model.qwen3_8b.id
   hardware = hardware_profile.local_dev.id
   runtime  = "llama_cpp"
   llama_cpp {
-    context_length = 8192
+    context_length = 100000
     port           = 8000
     n_gpu_layers   = -1
   }
 }
 ```
 
-`variant.size` is the file size in bytes, written as an integer string (a unit suffix such as `MiB` is also accepted; fractions are not). On Linux without a GPU use `provider = "local_cpu"` with a `cpu {}` block instead; see [Hardware profile](/docs/configuration/hardware-profile).
+Edit `hardware_profile` to match your machine. On Linux without a GPU use `provider = "local_cpu"` with a `cpu {}` block instead; see [Hardware profile](/docs/configuration/hardware-profile). Lower `context_length` if memory is tight.
+
+### Get the GGUF
+
+The model resource id decides where the file goes: `models/<model id>/<variant.file>` relative to the project directory. Here that is `models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf`. You can instead set `variant.file` to an absolute path.
+
+```bash
+mkdir -p models/qwen3_8b
+curl -L -o models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf \
+  https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf
+```
+
+For gated or private repos, add `-H "Authorization: Bearer $HF_TOKEN"`.
 
 ### Validate, plan, apply
 
@@ -114,7 +114,7 @@ amicu plan
 amicu apply
 ```
 
-`plan` prints the exact `llama-server` command, including the absolute path of the GGUF and of the binary. `apply` shows the plan, asks for approval, installs a user service (launchd on macOS, systemd on Linux), starts it, and waits until the endpoint answers. If the endpoint does not become ready, apply stops it and fails. See [This machine](/docs/providers/local).
+`plan` prints the exact `llama-server` command, including the absolute model path `<project dir>/models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf`. `apply` shows the plan, asks for approval, installs a user service (launchd on macOS, systemd on Linux), starts it, and waits up to 15 minutes for `/health` to answer. If the service exits during startup, apply fails within seconds. On any failure it stops the service and the error gives the log location. See [This machine](/docs/providers/local).
 
 ### Send a request
 
@@ -126,7 +126,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model": "Qwen/Qwen3-8B-GGUF", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-If the request fails, check that the service is running and read its log: on macOS `~/Library/Logs/amicu/`, on Linux `journalctl --user`. A missing or wrong GGUF path is the usual cause; confirm the file exists where the plan's `launch:` line says.
+If the request fails, check that the service is running and read its log: on macOS `~/Library/Logs/amicu/<label>.out.log` and `<label>.err.log`, on Linux `journalctl --user --unit=<label>`. The label is `io.amicu.llama.qwen3_8b_local`. A missing or wrong GGUF path is the usual cause; confirm the file exists where the plan's `launch:` line says.
 
 To require a key even locally, add `api_key = secret("LOCAL_API_KEY")` to the deployment and export `LOCAL_API_KEY` before `apply`. See the next path for the request format.
 

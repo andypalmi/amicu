@@ -16,8 +16,8 @@ amicu doctor --output json
 
 Local deployments are user services.
 
-- macOS: logs are written under `~/Library/Logs/amicu/`. Inspect the service with `launchctl list` and the plist in `~/Library/LaunchAgents/`.
-- Linux: the service is a transient systemd user unit. Use `systemctl --user status <label>` and the user journal.
+- macOS: logs are `~/Library/Logs/amicu/<label>.out.log` and `<label>.err.log`. Inspect the service with `launchctl list` and the plist in `~/Library/LaunchAgents/`.
+- Linux: the service is a transient systemd user unit. Use `systemctl --user status <label>` and `journalctl --user --unit=<label>`.
 
 The label is `io.amicu.llama.<deployment id>`, for both llama.cpp and vLLM deployments. Both runtimes expose `GET /health` and `GET /v1/models` on the port you set. llama.cpp's `/health` is open by design even when an API key is set; `/v1/models` needs the key.
 

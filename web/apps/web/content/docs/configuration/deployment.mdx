@@ -11,7 +11,7 @@ llama.cpp on this machine:
 
 ```hcl
 resource "deployment" "support_local" {
-  model    = model.starter_chat.id
+  model    = model.qwen3_8b.id
   hardware = hardware_profile.local_dev.id
   runtime  = "llama_cpp"
   llama_cpp {
@@ -164,7 +164,7 @@ Every field is optional. Omitted fields keep Modal's defaults. On any other prov
 
 ```hcl
 resource "deployment" "tuned" {
-  model    = model.starter_chat.id
+  model    = model.qwen3_8b.id
   hardware = hardware_profile.local_dev.id
   runtime  = "llama_cpp"
   llama_cpp {

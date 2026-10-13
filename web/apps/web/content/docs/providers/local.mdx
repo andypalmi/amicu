@@ -7,7 +7,7 @@ Hardware profiles with `provider` set to `local`, `local_apple`, `local_cpu`, or
 
 ## How it runs
 
-`apply` renders the runtime's command line from your `llama_cpp {}` or `vllm {}` block, registers it as a per-user service, and waits until the endpoint is ready. If it never becomes ready, apply stops the service and fails.
+`apply` renders the runtime's command line from your `llama_cpp {}` or `vllm {}` block, registers it as a per-user service, and waits up to 15 minutes for `/health` to answer. A service that exits during startup fails within seconds. On failure, apply stops the service and the error gives the log location.
 
 | OS | Service manager | Details |
 |---|---|---|
@@ -16,13 +16,13 @@ Hardware profiles with `provider` set to `local`, `local_apple`, `local_cpu`, or
 
 The service label is `io.amicu.llama.<deployment id>`, for both llama.cpp and vLLM deployments. The server binds to `127.0.0.1` on the `port` you set. The host is not configurable.
 
-When you change a deployment, `apply` replaces the running service. When you remove a deployment from the configuration, `apply` stops and unloads its service.
+When you change a deployment, `apply` replaces the running service; it may wait up to 10 seconds for the old one to stop. If something else still answers `/health` on the port, apply fails with `port N is already serving /health`. When you remove a deployment from the configuration, `apply` stops and unloads its service.
 
 ## Requirements
 
-- **llama.cpp runtime:** `llama-server` on `PATH`. `apply` resolves it to an absolute path and fails if it is not found. Run `amicu doctor` to confirm it is found.
-- **vLLM runtime:** `vllm` on `PATH`. A native single-process vLLM run needs a supported GPU (NVIDIA CUDA, AMD ROCm, or Intel XPU).
-- **Model file:** for llama.cpp, a GGUF file that you download yourself; amicu does not download weights. Put it at `models/<model resource id>/<variant.file>` relative to the project directory, or set `variant.file` to an absolute path. `amicu plan` shows the resolved absolute path in the `launch:` line. See the [Quickstart](/docs/quickstart) for a download command.
+- **llama.cpp runtime:** `llama-server` on `PATH`. `apply` resolves it from `PATH` to an absolute path and fails with `llama-server not found on PATH; install with ...` if it is missing. Run `amicu doctor` to confirm it is found.
+- **vLLM runtime:** `vllm` on `PATH`; if it is missing, apply fails with `vllm not found on PATH; install with `pip install vllm``. A native single-process vLLM run needs a supported GPU (NVIDIA CUDA, AMD ROCm, or Intel XPU).
+- **Model file:** for llama.cpp, a GGUF file that you download yourself; amicu does not download weights. Put it at `models/<model resource id>/<variant.file>` relative to the project directory, or set `variant.file` to an absolute path. `amicu plan` shows the resolved absolute path, `<project dir>/models/<model id>/<file>`, in the `launch:` line. See the [Quickstart](/docs/quickstart) for a download command.
 
 ## Example
 
