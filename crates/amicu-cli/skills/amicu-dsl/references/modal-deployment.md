@@ -57,7 +57,10 @@ resource "deployment" "chat" {
   hardware = hardware_profile.modal_l4.id   # provider = "modal"
   runtime  = "vllm"
   api_key  = secret("CHAT_API_KEY")
-  vllm { context_length = 8192  port = 8000 }
+  vllm {
+    context_length = 8192
+    port           = 8000
+  }
 }
 ```
 
@@ -97,7 +100,10 @@ resource "deployment" "chat" {
   hardware = hardware_profile.modal_l4.id   # provider = "modal"
   runtime  = "vllm"
   api_key  = secret("CHAT_API_KEY")
-  vllm { context_length = 8192  port = 8000 }
+  vllm {
+    context_length = 8192
+    port           = 8000
+  }
 
   scaling {
     min_replicas       = 0       # warm containers; 0 = scale to zero

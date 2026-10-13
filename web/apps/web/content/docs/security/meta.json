@@ -1,4 +1,4 @@
 {
   "title": "Security",
-  "pages": ["index", "secrets", "endpoint-auth", "state", "telemetry-and-network"]
+  "pages": ["index", "secrets", "endpoint-auth", "state", "telemetry"]
 }

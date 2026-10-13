@@ -22,15 +22,12 @@ State still describes your infrastructure (URLs, hardware, ids), so treat it as 
 
 ## When apply fails partway
 
-State is written once, at the end of a fully successful apply. Deployments are started one after another, and:
+Deployments are started one after another. If one fails, deployments that were already started in the same run are recorded in state, and the error lists them. Nothing that is running is left untracked.
 
-- If the endpoint check fails for a deployment, amicu stops that endpoint and exits with an error. Nothing is written to state.
-- If apply fails after earlier deployments in the same run were started, those services keep running but the run does not record them. State still reflects the previous apply.
-- Preflight failures (unsupported provider, missing `api_key`, missing Modal proxy tokens) happen before anything starts.
+- If the endpoint check fails for a deployment, amicu stops that endpoint and exits with an error. That deployment is not recorded.
+- Preflight failures (unsupported provider, missing `api_key`, missing Modal proxy tokens) happen before anything starts, so state is unchanged.
 
-To recover, fix the cause and run `amicu apply` again. The plan is recomputed from the last recorded state; a matching running local service is reused, and for Modal the pre-plan refresh compares recorded apps with the ones that exist. If a service you no longer want is still running, stop it with the command printed in the error, or with `amicu modal stop <app>`.
-
-Use `amicu plan` before and after a failed apply to see what amicu thinks is deployed.
+To recover, fix the cause and run `amicu apply` again. The plan is recomputed from the recorded state, so deployments that already succeeded show no change and apply finishes the rest. Use `amicu plan` to see what remains.
 
 ## Backends
 

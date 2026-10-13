@@ -29,6 +29,10 @@ If another amicu process holds the lock, the command fails with a message naming
 amicu apply --lock-timeout 60
 ```
 
+## Partial apply
+
+If an apply fails after starting some deployments, those deployments are recorded in state and the error lists them. Fix the cause and run `apply` again: deployments that already succeeded show no change and apply finishes the rest. See [Security: State](/docs/security/state).
+
 ## Drift
 
 State can fall out of date if something changes a deployment outside amicu.

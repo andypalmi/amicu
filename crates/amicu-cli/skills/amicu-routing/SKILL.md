@@ -13,7 +13,7 @@ governance, and cap spend per tenant.
 ```hcl
 resource "routing_policy" "chat" {
   aliases     = ["chat", "default"]
-  optimize_for = "latency"        # or "cost"/"quality"
+  optimize_for = "latency"        # or "cost"/"balanced"
   target {
     deployment = deployment.chat_prod.id
     weight     = 80

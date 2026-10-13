@@ -46,7 +46,7 @@ For Modal deployments, `plan` and `apply` first ask Modal whether the apps recor
 2. Starts each deployment through its provider.
 3. Verifies that each endpoint is protected. See [Endpoint auth](/docs/security/endpoint-auth).
 4. Stops deployments that were removed from the configuration.
-5. Writes state.
+5. Writes state, including any deployments already started if a later action failed.
 6. Prints each endpoint and a ready-to-copy `curl` and OpenAI SDK snippet.
 
 Apply holds a lock on the state directory for its whole run. Use `--lock-timeout <secs>` to wait for another amicu process instead of failing.
@@ -59,7 +59,7 @@ State is the record of the last successful apply: the resource graph and the end
 
 - The CLI keeps state locally in `.amicu/state/state.json`.
 - State holds secret references (names), never secret values.
-- It is written once, after all actions succeed.
+- Deployments that were started are recorded even if a later action in the same apply fails.
 
 Details, including what happens when an apply fails partway, are in [Security: State](/docs/security/state). Locking and backends are in [Operate: State and backends](/docs/operate/state-and-backends).
 

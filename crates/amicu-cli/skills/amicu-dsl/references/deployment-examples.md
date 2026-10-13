@@ -371,7 +371,7 @@ What actually happens on `amicu apply` for `chat_modal`:
 - Fixed autoscaling/lifecycle defaults (not yet HCL-configurable):
   scaledown window 900s, startup timeout 600s, container timeout 3600s,
   target concurrency 32, `min_containers = 0` (scales to zero).
-- Plain `vllm { env = {...} }` entries are baked into the image at build
+- Plain `vllm { env { ... } }` entries are baked into the image at build
   time (they already cannot hold a secret-shaped value - `AMICU-POLICY-006`
   warns, and vLLM's own `env`/`extra_args` denylists block the obvious
   secret-carrying flags). A resolved `secret` reference in the deployment's
@@ -443,7 +443,7 @@ What actually happens on `amicu apply`:
   image's `ENTRYPOINT` so Modal's runtime is PID 1.
 - `LLAMA_CACHE=/root/.cache/llama.cpp` points at the Modal Volume
   `amicu-llamacpp-cache`, so a restart or cold start reuses the downloaded
-  GGUF. A `llama_cpp { env = { LLAMA_CACHE = ... } }` entry overrides it.
+  GGUF. A `llama_cpp { env { LLAMA_CACHE = ... } }` entry overrides it.
 - `HF_TOKEN` (for gated repos) is forwarded exactly as for vLLM: a resolved
   secret, else the operator's own `HF_TOKEN`, through a Modal Secret only.
 - The shim waits for `GET /health` to return 200 (llama-server opens its port

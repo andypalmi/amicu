@@ -11,7 +11,7 @@ throughput, multi-GPU sharding, and autoscaling.
 
 ## When to use production
 
-- NVIDIA GPU hardware (`accelerator.kind = "nvidia_gpu"`), single or multi-GPU.
+- NVIDIA GPU hardware (`accelerator.kind = "gpu"`), single or multi-GPU.
 - Safetensors artifacts served with vLLM for high throughput.
 - Cloud providers with residency constraints (see `amicu-routing`).
 

@@ -37,7 +37,7 @@ Start with `amicu doctor`. Then read the diagnostic code: the category tells you
 
 **If the stop after a failed check also failed,** the error prints the command to stop it by hand: `systemctl --user stop <label>` on Linux, `launchctl unload ~/Library/LaunchAgents/<label>.plist` on macOS, or `amicu modal stop <app>` for Modal.
 
-**Apply failed partway.** Earlier deployments from the same run may still be running and are not in state. Fix the cause and apply again. See [State](/docs/security/state).
+**Apply failed partway.** Deployments started before the failure are recorded in state and listed in the error. Fix the cause and apply again; apply finishes the rest. See [State](/docs/security/state).
 
 ## Modal
 
