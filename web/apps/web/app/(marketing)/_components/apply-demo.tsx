@@ -6,6 +6,7 @@ import {
   DEMO_STEPS,
   demoDuration,
   demoState,
+  demoTranscript,
   type Row,
   type Status,
   type Tone,
@@ -13,9 +14,11 @@ import {
 
 // Server-renders the final frame (t = Infinity); after hydration it rewinds
 // to 0 and plays once when scrolled into view. Reduced motion keeps the final
-// frame. Both screens share one grid cell, so height is reserved up front.
+// frame. Both panes are always laid out (stacked), so height is reserved up
+// front and the static frame shows the apply output and the curl call.
 
 const TOTAL = demoDuration(DEMO_STEPS);
+const TRANSCRIPT = demoTranscript(DEMO_STEPS);
 const toneClass: Record<Tone, string> = {
   cmd: 'text-accent-text',
   add: 'text-success',
@@ -74,20 +77,36 @@ export function ApplyDemo() {
 
   useIsoLayoutEffect(() => {
     const el = rootRef.current;
-    if (!el || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    setT(0);
-    const io = new IntersectionObserver(
-      ([entry]) => {
-        if (!entry?.isIntersecting) return;
-        io.disconnect();
-        play();
-      },
-      { threshold: 0.4 },
-    );
-    io.observe(el);
-    return () => {
-      io.disconnect();
+    if (!el) return;
+    const mql = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let io: IntersectionObserver | undefined;
+    const stop = () => {
+      io?.disconnect();
       cancelAnimationFrame(raf.current);
+    };
+    const sync = () => {
+      stop();
+      if (mql.matches) {
+        setT(Infinity);
+        setReplayable(false);
+        return;
+      }
+      setT(0);
+      io = new IntersectionObserver(
+        ([entry]) => {
+          if (!entry?.isIntersecting) return;
+          io?.disconnect();
+          play();
+        },
+        { threshold: 0.4 },
+      );
+      io.observe(el);
+    };
+    sync();
+    mql.addEventListener('change', sync);
+    return () => {
+      mql.removeEventListener('change', sync);
+      stop();
     };
   }, [play]);
 
@@ -111,22 +130,18 @@ export function ApplyDemo() {
           Replay
         </button>
       </div>
-      <div className="mt-3 grid">
-        <div
-          aria-label="Output of amicu apply"
-          role="img"
-          className={cn('col-start-1 row-start-1', state.screen !== 'term' && 'invisible')}
-          aria-hidden={state.screen !== 'term'}
-        >
+      <pre className="sr-only">{TRANSCRIPT}</pre>
+      <div aria-hidden className="mt-3">
+        <div>
           {term.map((row, i) => (
             <RowLine key={i} row={row} />
           ))}
         </div>
         <div
-          aria-label="A curl request to the endpoint and its response"
-          role="img"
-          aria-hidden={state.screen !== 'call'}
-          className={cn('col-start-1 row-start-1', state.screen !== 'call' && 'invisible')}
+          className={cn(
+            'mt-4 border-t border-border pt-4',
+            state.screen !== 'call' && 'invisible',
+          )}
         >
           {call.map((row, i) => (
             <RowLine key={i} row={row} className={i === 1 ? 'mt-3' : undefined} />

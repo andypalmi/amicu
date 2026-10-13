@@ -20,12 +20,10 @@ interface Base {
 export type Step =
   | (Base & { kind: 'type'; text: string; msPerChar?: number })
   | (Base & { kind: 'line'; text: string })
-  | (Base & { kind: 'stream'; text: string; msPerToken?: number })
   | { kind: 'status'; at: number; status: Status }
   | { kind: 'screen'; at: number; screen: Screen };
 
 export interface Row {
-  visible: boolean;
   screen: Screen;
   tone: Tone;
   shown: string;
@@ -50,15 +48,20 @@ const CURL_ARGS = [
   '  -H "Content-Type: application/json" \\',
   `  -d '${BODY}'`,
 ];
+// Non-streaming body, as vLLM returns it: the curl above sends no `stream`.
 const RESPONSE = `{
+  "id": "chatcmpl-8f3a1c92d7e4",
+  "object": "chat.completion",
+  "created": 1767225600,
+  "model": "${MODEL}",
   "choices": [
     {
-      "message": {
-        "role": "assistant",
-        "content": "Hello! How can I help you today?"
-      }
+      "index": 0,
+      "message": {"role": "assistant", "content": "Hello! How can I help you today?"},
+      "finish_reason": "stop"
     }
-  ]
+  ],
+  "usage": {"prompt_tokens": 9, "completion_tokens": 10, "total_tokens": 19}
 }`;
 
 const L = (at: number, text: string, tone?: Tone): Step => ({ kind: 'line', at, screen: 'term', text, tone });
@@ -71,6 +74,7 @@ export const DEMO_STEPS: Step[] = [
   L(1200, '  + deployment.chat', 'add'),
   L(1300, '      action:   create'),
   L(1400, '      hardware: gpu.l4'),
+  // plan.rs also prints a `launch:` line for some actions; trimmed here.
   L(1500, '      target:   modal (region eu-west)'),
   L(1600, '      api_key:  ****** (secret "CHAT_API_KEY", resolved at apply)'),
   L(2000, 'Apply these changes? [y/N] y'),
@@ -82,12 +86,8 @@ export const DEMO_STEPS: Step[] = [
   ...CURL_ARGS.map((c, i) => L(4800 + i * 120, '        ' + c, 'muted')),
   { kind: 'screen', at: 7000, screen: 'call' },
   { kind: 'type', at: 7300, screen: 'call', tone: 'cmd', msPerChar: 6, text: '$ ' + CURL_ARGS.join('\n') },
-  { kind: 'stream', at: 9800, screen: 'call', msPerToken: 90, text: RESPONSE },
+  { kind: 'line', at: 10600, screen: 'call', text: RESPONSE },
 ];
-
-function tokens(text: string): string[] {
-  return text.match(/\S+\s*/g) ?? [];
-}
 
 /** Time at which every step has finished. */
 export function demoDuration(steps: Step[]): number {
@@ -95,7 +95,6 @@ export function demoDuration(steps: Step[]): number {
   for (const s of steps) {
     let e = s.at;
     if (s.kind === 'type') e += s.text.length * (s.msPerChar ?? 35);
-    else if (s.kind === 'stream') e += tokens(s.text).length * (s.msPerToken ?? 55);
     end = Math.max(end, e);
   }
   return end;
@@ -118,14 +117,10 @@ export function demoState(steps: Step[], t: number): DemoState {
     let shown = '';
     if (s.kind === 'type') {
       shown = s.text.slice(0, Math.max(0, Math.floor((t - s.at) / (s.msPerChar ?? 35))));
-    } else if (s.kind === 'stream') {
-      const n = Math.floor((t - s.at) / (s.msPerToken ?? 55)) + 1;
-      shown = started ? tokens(s.text).slice(0, n).join('') : '';
     } else {
       shown = started ? s.text : '';
     }
     rows.push({
-      visible: started,
       screen: s.screen,
       tone: s.tone ?? 'plain',
       shown,
@@ -133,4 +128,11 @@ export function demoState(steps: Step[], t: number): DemoState {
     });
   }
   return { screen, status, rows, done: t >= demoDuration(steps) };
+}
+
+/** Plain-text transcript of both panes, for the screen-reader copy. */
+export function demoTranscript(steps: Step[]): string {
+  return steps
+    .flatMap((s) => (s.kind === 'line' || s.kind === 'type' ? [s.text] : []))
+    .join('\n');
 }
