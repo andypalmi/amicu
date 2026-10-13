@@ -14,7 +14,7 @@ use crate::error::LlamaCppError;
 
 /// A service to define and run: its manager label, the argv to exec, and the
 /// environment (resolved secrets) to inject into the process.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServiceSpec {
     /// Manager label / unit name, e.g. `io.amicu.llama.<deployment>`.
     pub label: String,
@@ -22,6 +22,21 @@ pub struct ServiceSpec {
     pub argv: Vec<String>,
     /// Environment injected into the process (secret name/value pairs).
     pub env: Vec<(String, String)>,
+}
+
+/// Redacted: env values may be secrets (the endpoint API key), so `Debug`
+/// shows the variable names only.
+impl std::fmt::Debug for ServiceSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceSpec")
+            .field("label", &self.label)
+            .field("argv", &self.argv)
+            .field(
+                "env",
+                &self.env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 /// The coarse lifecycle state a service manager reports.
@@ -155,10 +170,20 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         )?;
         ensure_dir(&self.log_dir)?;
         let plist = self.plist_path(&spec.label);
-        let out = self
+        let out = match self
             .exec
-            .exec("launchctl", &["load", "-w", &plist.to_string_lossy()])?;
+            .exec("launchctl", &["load", "-w", &plist.to_string_lossy()])
+        {
+            Ok(out) => out,
+            Err(e) => {
+                remove_env_file(&plist);
+                return Err(e);
+            }
+        };
         if !out.success {
+            // The plist holds the environment (secrets): never leave it behind
+            // for a service that did not start.
+            remove_env_file(&plist);
             return Err(LlamaCppError::Supervisor(format!(
                 "launchctl load failed: {}",
                 out.stderr.trim()

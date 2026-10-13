@@ -4,6 +4,8 @@ use amicu_core::ByteSize;
 use amicu_core::id::DeploymentId;
 use serde::{Deserialize, Serialize};
 
+use crate::exposure::{EndpointExposure, GatewayAuth};
+
 /// Identifies a started runtime instance and how to address it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeHandle {
@@ -13,6 +15,18 @@ pub struct RuntimeHandle {
     pub deployment: DeploymentId,
     /// The address the instance serves on, e.g. `http://127.0.0.1:8080`.
     pub endpoint: String,
+    /// How `endpoint` is reachable. Every adapter must declare it explicitly:
+    /// `apply` uses it to decide what must be protected and how to check it.
+    /// State written before this field existed deserializes as public with no
+    /// gateway auth - the fail-closed reading.
+    #[serde(default = "legacy_exposure")]
+    pub exposure: EndpointExposure,
+}
+
+fn legacy_exposure() -> EndpointExposure {
+    EndpointExposure::Public {
+        gateway: GatewayAuth::None,
+    }
 }
 
 /// Lifecycle state of a runtime instance.

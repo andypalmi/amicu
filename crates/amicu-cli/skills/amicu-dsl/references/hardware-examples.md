@@ -80,6 +80,10 @@ Notes:
   fails closed. Pinning to a region multiplies the base price shown here
   (1.15x broad, 1.75x narrow - not reflected in `price` above); see
   `amicu_providers::modal`'s module docs for the source.
+- On Modal the profile's `memory` (and `cpu { cores }` when present) is sent as
+  the container's memory/CPU request (MiB / milli-cores), so size it for the
+  workload, not just the GPU. Deployments on this provider also need an
+  `api_key` (see `modal-deployment.md`).
 - The `region` also picks the web endpoint's proxy region (`eu*`/`uk` ->
   `eu-west`, `us-west` -> `us-west`, `ap*`/`jp`/`au` -> `ap-south`, otherwise
   `us-east`). Modal does not allow a routing region to change after the

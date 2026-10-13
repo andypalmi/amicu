@@ -78,6 +78,12 @@ pub struct LaunchPlan {
     pub settings: Runtime,
     /// Secrets the launch will consume, referenced by name only.
     pub secret_refs: Vec<SecretRef>,
+    /// The deployment's endpoint API key, by reference only. At apply time
+    /// the adapter resolves it and delivers it to the runtime through
+    /// [`RuntimeKind::api_key_env_var`], never argv; the plan shows it
+    /// redacted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<SecretRef>,
     /// The estimated resource footprint.
     pub estimate: ResourceEstimate,
 }

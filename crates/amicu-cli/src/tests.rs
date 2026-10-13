@@ -47,6 +47,7 @@ resource "deployment" "support_local" {
   model    = model.support_chat.id
   hardware = hardware_profile.dev_mac.id
   runtime  = "llama_cpp"
+  api_key  = secret("SUPPORT_LOCAL_API_KEY")
   llama_cpp {
     context_length = 8192
     port           = 8000

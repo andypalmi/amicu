@@ -100,6 +100,13 @@ pub(crate) const DENYLISTED_FLAGS: &[&str] =
 /// review hardening, amicu-planning#150), independent of the `LLAMA_ARG_*`
 /// mapping below. Raises `AMICU-CAP-003`.
 pub(crate) const DENYLISTED_ENV_KEYS: &[&str] = &[
+    // llama-server's env mirror of `--api-key` (`set_env("LLAMA_API_KEY")`,
+    // not `LLAMA_ARG_`-prefixed, so the mirror rule below would miss it). Only
+    // amicu may set it, from the deployment's resolved `api_key` secret
+    // (amicu-planning#191). `LLAMA_ARG_API_KEY` / `LLAMA_ARG_API_KEY_FILE`
+    // mirror the denylisted `--api-key` / `--api-key-file` and are caught by
+    // the flag-mirror rule.
+    "LLAMA_API_KEY",
     "LD_PRELOAD",
     "DYLD_INSERT_LIBRARIES",
     "DYLD_LIBRARY_PATH",

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use amicu_core::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticReport, Severity, catalog};
 use amicu_core::graph::Graph;
-use amicu_core::resource::{Residency, RuleEffect, Runtime};
+use amicu_core::resource::{Deployment, Residency, RuleEffect, Runtime};
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
 use amicu_providers::resolve_residency;
 use amicu_runtime::RuntimeAdapter;
@@ -19,6 +19,7 @@ pub fn report_for(graph: &Graph) -> DiagnosticReport {
     diagnostics.extend(residency_violations(graph));
     diagnostics.extend(amicu_hcl::scan_runtime_env_secrets(graph));
     diagnostics.extend(scaling_diagnostics(graph));
+    diagnostics.extend(api_key_diagnostics(graph));
 
     for missing in graph.missing_references() {
         let mut d = Diagnostic::new(
@@ -93,6 +94,47 @@ fn scaling_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
             diag.resource = Some(resource.clone());
             out.push(diag);
         }
+    }
+    out
+}
+
+/// `AMICU-POLICY-007`: a deployment whose endpoint is reachable off-machine
+/// (any provider other than the local ones) must declare an `api_key`
+/// (amicu-planning#191). Local loopback deployments may omit it. The
+/// diagnostic says how to declare the key and how to supply its value; it
+/// never needs, and never sees, the value.
+fn api_key_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for d in &graph.deployments {
+        if d.api_key.is_some() {
+            continue;
+        }
+        let Some(hw) = graph
+            .hardware_profiles
+            .iter()
+            .find(|h| h.id == d.hardware_profile)
+        else {
+            continue; // reported as a dangling reference
+        };
+        if !Deployment::requires_api_key(&hw.provider) {
+            continue;
+        }
+        let secret = Deployment::suggested_api_key_secret(d.id.as_str());
+        let mut diag = Diagnostic::new(
+            catalog::POLICY_ENDPOINT_API_KEY_REQUIRED,
+            Severity::Error,
+            format!(
+                "deployment `{id}`: provider `{provider}` serves this endpoint off-machine, so it \
+                 must have an `api_key`. Add `api_key = secret(\"{secret}\")` to the deployment, \
+                 then create the key before `amicu apply`: \
+                 `export {secret}=$(openssl rand -hex 32)` (the local secret resolver reads the \
+                 environment variable named like the secret). Keep the value out of the HCL.",
+                id = d.id,
+                provider = hw.provider,
+            ),
+        );
+        diag.resource = Some(format!("deployment.{}", d.id));
+        out.push(diag);
     }
     out
 }
@@ -313,6 +355,7 @@ mod residency_tests {
     fn deployment() -> Deployment {
         Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "m".into(),
             hardware_profile: "hw".into(),
@@ -506,6 +549,7 @@ mod vllm_dispatch_tests {
     fn vllm_deployment(settings: VllmSettings) -> Deployment {
         Deployment {
             scaling: None,
+            api_key: None,
             id: "dep".into(),
             model: "m".into(),
             hardware_profile: "hw".into(),
@@ -627,6 +671,7 @@ mod vllm_dispatch_tests {
         });
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "llama_dep".into(),
             model: "llama_model".into(),
             hardware_profile: "llama_hw".into(),
@@ -648,6 +693,7 @@ mod vllm_dispatch_tests {
         });
         g.deployments.push(Deployment {
             scaling: None,
+            api_key: None,
             id: "vllm_dep".into(),
             model: "meta-llama/Llama-3.1-70B-Instruct".into(),
             hardware_profile: "vllm_hw".into(),
@@ -709,6 +755,7 @@ mod scaling_tests {
         });
         g.deployments.push(Deployment {
             scaling,
+            api_key: None,
             id: "dep".into(),
             model: "m".into(),
             hardware_profile: "hw".into(),
@@ -784,5 +831,89 @@ mod scaling_tests {
                 .iter()
                 .any(|d| d.code.to_string() == "AMICU-CAP-009")
         );
+    }
+}
+
+#[cfg(test)]
+mod api_key_tests {
+    use super::*;
+    use amicu_core::resource::{HardwareProfile, LlamaCppSettings, Runtime};
+    use amicu_core::secret::SecretRef;
+    use amicu_core::units::ByteSize;
+
+    fn graph(provider: &str, api_key: Option<SecretRef>) -> Graph {
+        let mut g = Graph::new();
+        g.hardware_profiles.push(HardwareProfile {
+            id: "hw".into(),
+            provider: provider.to_owned(),
+            region: None,
+            accelerator: None,
+            cpu: None,
+            memory: ByteSize::from_bytes(1024),
+            interconnect: None,
+            price: None,
+        });
+        g.deployments.push(Deployment {
+            scaling: None,
+            api_key,
+            id: "chat-modal".into(),
+            model: "m".into(),
+            hardware_profile: "hw".into(),
+            runtime: Runtime::LlamaCpp(LlamaCppSettings::default()),
+        });
+        g
+    }
+
+    #[test]
+    fn a_remote_provider_without_a_key_is_policy_007_with_actionable_text() {
+        for provider in ["modal", "runpod", "hetzner"] {
+            let diags = api_key_diagnostics(&graph(provider, None));
+            assert_eq!(diags.len(), 1, "{provider}");
+            let d = &diags[0];
+            assert_eq!(d.code.to_string(), "AMICU-POLICY-007");
+            assert_eq!(d.severity, Severity::Error);
+            assert_eq!(d.resource.as_deref(), Some("deployment.chat-modal"));
+            assert!(d.message.contains(provider), "{}", d.message);
+            // How to declare it, and how to create the secret the resolver reads.
+            assert!(
+                d.message
+                    .contains("api_key = secret(\"CHAT_MODAL_API_KEY\")"),
+                "{}",
+                d.message
+            );
+            assert!(
+                d.message.contains("export CHAT_MODAL_API_KEY="),
+                "{}",
+                d.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_declared_key_or_a_local_provider_is_clean() {
+        let clean = |g: Graph| {
+            api_key_diagnostics(&g)
+                .iter()
+                .map(|d| d.code.to_string())
+                .collect::<Vec<_>>()
+        };
+        let key = Some(SecretRef::new("CHAT_API_KEY"));
+        assert_eq!(clean(graph("modal", key.clone())), Vec::<String>::new());
+        assert_eq!(clean(graph("local", None)), Vec::<String>::new());
+        assert_eq!(clean(graph("local_apple", None)), Vec::<String>::new());
+        assert_eq!(clean(graph("on_prem", None)), Vec::<String>::new());
+        assert_eq!(clean(graph("local_cpu", key)), Vec::<String>::new());
+    }
+
+    #[test]
+    fn report_for_blocks_a_keyless_modal_deployment() {
+        let report = report_for(&graph("modal", None));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code.to_string() == "AMICU-POLICY-007")
+        );
+        assert!(!report.valid);
     }
 }

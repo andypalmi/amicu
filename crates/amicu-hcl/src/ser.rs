@@ -406,6 +406,9 @@ fn deployment_block(d: &Deployment) -> Block {
                 .add_block(vllm_block(s));
         }
     }
+    if let Some(key) = &d.api_key {
+        body = body.add_attribute(("api_key", secret_call(key)));
+    }
     if let Some(sc) = &d.scaling {
         body = body.add_block(scaling_block(sc));
     }

@@ -256,6 +256,9 @@ resource "deployment" "support_modal" {
                 id: "app-id".to_owned(),
                 deployment: d.id.clone(),
                 endpoint: "https://example.modal.run".to_owned(),
+                exposure: amicu_runtime::EndpointExposure::Public {
+                    gateway: amicu_runtime::GatewayAuth::ModalProxyToken,
+                },
             })
             .collect();
         LocalState {

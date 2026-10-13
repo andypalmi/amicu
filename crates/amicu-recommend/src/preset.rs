@@ -290,7 +290,7 @@ pub fn build_graph(preset: &Preset, answers: &WizardAnswers) -> Result<Graph, Pr
         )));
     }
 
-    match preset.id.as_str() {
+    let mut graph = match preset.id.as_str() {
         "local_dev_chat" => Ok(build_local_dev_chat(preset, answers)),
         "private_eu_production" => Ok(build_private_eu_production(preset, answers)),
         "cost_optimized_batch" => Ok(build_cost_optimized_batch(preset, answers)),
@@ -301,6 +301,28 @@ pub fn build_graph(preset: &Preset, answers: &WizardAnswers) -> Result<Graph, Pr
         "api_replacement_migration" => Ok(build_api_replacement_migration(preset, answers)),
         "custom_stack" => Ok(build_custom_stack(preset, answers)),
         _ => Err(PresetError::UnknownPreset(preset.id.clone())),
+    }?;
+    declare_endpoint_api_keys(&mut graph);
+    Ok(graph)
+}
+
+/// A deployment whose endpoint is reachable off-machine must declare an
+/// `api_key` (`AMICU-POLICY-007`), so a generated stack on a remote provider
+/// declares one - by reference only. The secret name doubles as the
+/// environment variable the local secret resolver reads; no value is ever
+/// generated or stored here.
+fn declare_endpoint_api_keys(graph: &mut Graph) {
+    for d in &mut graph.deployments {
+        let remote = graph
+            .hardware_profiles
+            .iter()
+            .find(|h| h.id == d.hardware_profile)
+            .is_some_and(|h| Deployment::requires_api_key(&h.provider));
+        if remote && d.api_key.is_none() {
+            d.api_key = Some(amicu_core::secret::SecretRef::new(
+                Deployment::suggested_api_key_secret(d.id.as_str()),
+            ));
+        }
     }
 }
 
@@ -721,6 +743,7 @@ fn build_local_dev_chat(preset: &Preset, answers: &WizardAnswers) -> Graph {
 
     graph.deployments.push(Deployment {
         scaling: None,
+        api_key: None,
         id: format!("{prefix}_deployment").as_str().into(),
         model: model_id.as_str().into(),
         hardware_profile: hw_id.as_str().into(),
@@ -803,6 +826,7 @@ fn build_private_eu_production(preset: &Preset, answers: &WizardAnswers) -> Grap
 
     graph.deployments.push(Deployment {
         scaling: None,
+        api_key: None,
         id: format!("{prefix}_deployment").as_str().into(),
         model: model_id.as_str().into(),
         hardware_profile: hw_id.as_str().into(),
@@ -896,6 +920,7 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
 
     graph.deployments.push(Deployment {
         scaling: None,
+        api_key: None,
         id: format!("{prefix}_deployment").as_str().into(),
         model: model_id.as_str().into(),
         hardware_profile: hw_id.as_str().into(),
@@ -984,6 +1009,7 @@ fn build_internal_knowledge_chatbot(preset: &Preset, answers: &WizardAnswers) ->
 
     graph.deployments.push(Deployment {
         scaling: None,
+        api_key: None,
         id: format!("{prefix}_deployment").as_str().into(),
         model: model_id.as_str().into(),
         hardware_profile: hw_id.as_str().into(),
@@ -1064,6 +1090,7 @@ fn build_customer_support_assistant(preset: &Preset, answers: &WizardAnswers) ->
 
     graph.deployments.push(Deployment {
         scaling: None,
+        api_key: None,
         id: format!("{prefix}_deployment").as_str().into(),
         model: model_id.as_str().into(),
         hardware_profile: hw_id.as_str().into(),
@@ -1144,6 +1171,7 @@ fn build_document_extraction_pipeline(preset: &Preset, answers: &WizardAnswers) 
 
     graph.deployments.push(Deployment {
         scaling: None,
+        api_key: None,
         id: format!("{prefix}_deployment").as_str().into(),
         model: model_id.as_str().into(),
         hardware_profile: hw_id.as_str().into(),
@@ -1225,6 +1253,7 @@ fn build_code_assistant_endpoint(preset: &Preset, answers: &WizardAnswers) -> Gr
 
     graph.deployments.push(Deployment {
         scaling: None,
+        api_key: None,
         id: format!("{prefix}_deployment").as_str().into(),
         model: model_id.as_str().into(),
         hardware_profile: hw_id.as_str().into(),
@@ -1304,6 +1333,7 @@ fn build_api_replacement_migration(preset: &Preset, answers: &WizardAnswers) -> 
 
     graph.deployments.push(Deployment {
         scaling: None,
+        api_key: None,
         id: format!("{prefix}_deployment").as_str().into(),
         model: model_id.as_str().into(),
         hardware_profile: hw_id.as_str().into(),
@@ -1383,6 +1413,7 @@ fn build_custom_stack(preset: &Preset, answers: &WizardAnswers) -> Graph {
 
     graph.deployments.push(Deployment {
         scaling: None,
+        api_key: None,
         id: format!("{prefix}_deployment").as_str().into(),
         model: model_id.as_str().into(),
         hardware_profile: hw_id.as_str().into(),

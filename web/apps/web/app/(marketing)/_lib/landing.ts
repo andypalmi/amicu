@@ -35,6 +35,7 @@ resource "deployment" "chat" {
   model    = model.qwen.id
   hardware = hardware_profile.gpu.id
   runtime  = "vllm"
+  api_key  = secret("CHAT_API_KEY")
   vllm {
     context_length = 200000
     port           = 8000
@@ -60,6 +61,7 @@ export const HERO_PLAN: TermLine[] = [
   { text: '      action:   create' },
   { text: '      hardware: gpu.l4' },
   { text: '      target:   modal (region eu-west)' },
+  { text: '      api_key:  ****** (secret "CHAT_API_KEY", resolved at apply)' },
   {
     text: '      launch:   vllm serve RedHatAI/Qwen3.5-9B-FP8-dynamic --port 8000 --host 0.0.0.0 --max-model-len 200000',
   },

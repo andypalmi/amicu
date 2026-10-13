@@ -245,6 +245,9 @@ fn deployment(name: &str, f: &Fields) -> Result<Deployment> {
     };
     Ok(Deployment {
         scaling: scaling_settings(f)?,
+        // Secret-designated (AMICU-POLICY-004): only `secret("<ref>")`, never
+        // a literal key.
+        api_key: f.opt_secret_ref("api_key")?,
         id: name.into(),
         model: f.reference("model")?.into(),
         hardware_profile: f.reference("hardware")?.into(),

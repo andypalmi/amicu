@@ -223,6 +223,7 @@ mod tests {
             id: format!("i-{deployment}"),
             deployment: DeploymentId::new(deployment),
             endpoint: endpoint.to_owned(),
+            exposure: crate::EndpointExposure::Loopback,
         }
     }
 

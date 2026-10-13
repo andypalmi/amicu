@@ -316,6 +316,7 @@ resource "deployment" "chat_modal" {
   model    = model.chat_prod.id
   hardware = hardware_profile.modal_h100.id
   runtime  = "vllm"
+  api_key  = secret("CHAT_MODAL_API_KEY")   # required off-machine; export it before `apply`
   vllm {
     context_length       = 32768
     port                 = 8000
@@ -354,7 +355,8 @@ What actually happens on `amicu apply` for `chat_modal`:
   warns, and vLLM's own `env`/`extra_args` denylists block the obvious
   secret-carrying flags). A resolved `secret` reference in the deployment's
   `secret_refs` is instead forwarded through a Modal Secret, injected only
-  into the running container - never written to the image. As a narrow,
+  into the running container - never written to the image. The deployment's
+  `api_key` takes the same route, as `VLLM_API_KEY` / `LLAMA_API_KEY`. As a narrow,
   documented bridge until vLLM deployments can declare a secret reference at
   all, `ModalSupervisor` also reads `HF_TOKEN` from the *operator's own*
   local environment (never from the deployment's `env` block) and forwards
@@ -365,6 +367,12 @@ To try this: export `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` (same credentials
 credential is rejected before any Modal call, with neither variable's value
 ever printed.
 
+**Endpoint API key:** `api_key = secret("NAME")` on the deployment is
+required for any off-machine provider (`AMICU-POLICY-007`) and optional for
+local loopback ones. Create the value with `export NAME=$(openssl rand -hex 32)`
+before `apply` (the local resolver reads the environment variable named like the
+secret). Details and the post-deploy exposure check: `modal-deployment.md`.
+
 **Calling the endpoint:**
 
 Modal Servers require proxy auth: unauthenticated requests to the
@@ -374,7 +382,8 @@ Token (Modal dashboard, Settings -> Proxy Auth Tokens) and export
 amicu sends them as `Modal-Key` / `Modal-Secret` on its health/status probes
 (never logged). By hand:
 `curl -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" "$URL/v1/models"`.
-(Not `Authorization: Bearer`, which vLLM's `--api-key` also uses.)
+Add `-H "Authorization: Bearer $CHAT_MODAL_API_KEY"` for the deployment's own
+API key (the proxy token uses different headers, not `Authorization`).
 
 ## llama.cpp on Modal (serverless GPU, amicu-planning#160)
 
@@ -388,6 +397,7 @@ resource "deployment" "gemma_modal" {
   model    = model.gemma_gguf.id
   hardware = hardware_profile.modal_h100.id   # provider = "modal"
   runtime  = "llama_cpp"
+  api_key  = secret("GEMMA_MODAL_API_KEY")
   llama_cpp {
     context_length = 8192
     port           = 8080

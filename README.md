@@ -82,6 +82,7 @@ Six other resource kinds - `routing_policy`, `data_class`, `governance_rule`, `b
 ```bash
 export MODAL_TOKEN_ID=...  MODAL_TOKEN_SECRET=...              # control plane
 export MODAL_PROXY_TOKEN_ID=...  MODAL_PROXY_TOKEN_SECRET=...  # calling the endpoint
+export CHAT_API_KEY=$(openssl rand -hex 32)                    # the endpoint's own API key
 ```
 
 ```hcl
@@ -97,7 +98,30 @@ resource "hardware_profile" "modal_l4" {
 }
 ```
 
-Bind a model to it with a `deployment` as in the quickstart, then `amicu plan` and `amicu apply`. Inspect with `amicu modal status|logs|metrics|stop <app>`, where the app is `amicu-` plus the deployment id with `_` as `-`. The full guide (llama.cpp GGUF example, multi-GPU, metrics, state) is the `modal-deployment.md` reference in the `amicu-dsl` skill: `crates/amicu-cli/skills/amicu-dsl/references/modal-deployment.md`, also available via `amicu skill export`.
+Bind a model to it with a `deployment` as in the quickstart, plus an `api_key` secret reference (required off-machine, see below), then `amicu plan` and `amicu apply`:
+
+```hcl
+resource "deployment" "chat" {
+  model    = model.starter_chat.id
+  hardware = hardware_profile.modal_l4.id
+  runtime  = "vllm"
+  api_key  = secret("CHAT_API_KEY")   # read from the environment variable of that name at apply time
+  vllm {
+    context_length = 8192
+    port           = 8000
+  }
+}
+```
+
+Inspect with `amicu modal status|logs|metrics|stop <app>`, where the app is `amicu-` plus the deployment id with `_` as `-`. The full guide (llama.cpp GGUF example, multi-GPU, metrics, state) is the `modal-deployment.md` reference in the `amicu-dsl` skill: `crates/amicu-cli/skills/amicu-dsl/references/modal-deployment.md`, also available via `amicu skill export`.
+
+## Endpoint API keys
+
+Every deployment can declare an `api_key = secret("NAME")`. It is a reference, never a value: a literal string is rejected (`AMICU-POLICY-004`), `plan` shows `api_key: ******` and never resolves it, and `apply` reads the value from the environment variable `NAME` and hands it to the runtime through its environment (`LLAMA_API_KEY` for llama.cpp, `VLLM_API_KEY` for vLLM), never argv, logs, state, or plan output. Users cannot set those variables or `--api-key` themselves through `extra_args`/`env`.
+
+- **Required off-machine.** A deployment on any provider other than `local`, `local_apple`, `local_cpu` and `on_prem` (Modal today) must have an `api_key`; `amicu validate`/`plan` fail with `AMICU-POLICY-007` otherwise. Local loopback deployments may omit it.
+- **Checked after deploy.** For every endpoint `apply` starts, it sends an unauthenticated `GET /v1/models` (no key, no provider headers). A `401`/`403` passes; a `2xx` means the endpoint is open, so it is stopped and apply fails (a failed stop is reported with the command to run by hand). It then sends the key (plus the Modal proxy headers) and requires a `2xx`. Loopback endpoints without a key skip the check.
+- **Calling it.** After a successful apply the output includes a ready-to-copy `curl` and OpenAI SDK snippet that refer to the key and, on Modal, the `Modal-Key`/`Modal-Secret` proxy token by environment variable name.
 
 ## Install & platforms
 

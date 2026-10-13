@@ -28,7 +28,7 @@ use crate::command::{
     DENYLISTED_ENV_KEYS, DENYLISTED_FLAGS, is_typed_flag, llama_arg_env_flag, render_command,
 };
 use crate::error::LlamaCppError;
-use crate::supervisor::{ProcessSupervisor, ResolvedSecret};
+use crate::supervisor::{ProcessSupervisor, resolve_launch_secrets};
 
 /// A model resolved for planning: the resource plus its parameter count (used
 /// for weight-fit when a variant declares no explicit size).
@@ -559,6 +559,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
             rendered: RenderedLaunch::Command { argv, text },
             settings: d.runtime.clone(),
             secret_refs: Vec::new(),
+            api_key: d.api_key.clone(),
             estimate: ResourceEstimate {
                 estimated_memory,
                 gpu_count,
@@ -572,15 +573,9 @@ impl RuntimeAdapter for LlamaCppAdapter {
         p: &LaunchPlan,
         s: &dyn SecretResolver,
     ) -> Result<RuntimeHandle, AdapterError> {
-        // Resolve referenced secrets at apply time; values never touch the plan.
-        let mut secrets = Vec::with_capacity(p.secret_refs.len());
-        for reference in &p.secret_refs {
-            let value = s.resolve(reference).await?;
-            secrets.push(ResolvedSecret {
-                name: reference.name.clone(),
-                value,
-            });
-        }
+        // Resolve referenced secrets (and the endpoint API key, which lands in
+        // `LLAMA_API_KEY`) at apply time; values never touch the plan or argv.
+        let secrets = resolve_launch_secrets(p, s).await?;
         self.supervisor
             .start(p, &secrets)
             .await
