@@ -1,34 +1,16 @@
 import type { CSSProperties } from 'react';
 import { highlight } from 'fumadocs-core/highlight';
 import { cn } from '@amicu/ui';
+import { codeThemes } from '@/lib/code-theme';
 import type { TermLine } from '../_lib/landing';
 
-// Server-rendered HCL highlighting via Fumadocs' Shiki wrapper. The theme is
-// a two-tone scheme built only from semantic design tokens (foreground for
-// structure and values, muted-foreground for keys, operators and comments),
-// so it follows light/dark and any palette change without its own colours.
-const fg = 'var(--color-foreground)';
-const muted = 'var(--color-muted-foreground)';
-
-const tokenTheme = {
-  name: 'amicu-tokens',
-  type: 'light' as const,
-  fg,
-  bg: 'transparent',
-  settings: [
-    { settings: { foreground: fg } },
-    { scope: ['entity.name.type'], settings: { foreground: fg, fontStyle: 'bold' } },
-    { scope: ['variable.other.readwrite', 'keyword.operator', 'punctuation'], settings: { foreground: muted } },
-    { scope: ['comment', 'punctuation.definition.comment'], settings: { foreground: muted, fontStyle: 'italic' } },
-    { scope: ['string', 'constant', 'variable.other.enummember', 'variable.other.member'], settings: { foreground: fg } },
-  ],
-};
-
+// Server-rendered HCL highlighting via Fumadocs' Shiki wrapper, using the same
+// light + dark theme as the docs code blocks (lib/code-theme.ts).
 /** Highlighted HCL, rendered on the server (no client JS). */
 export async function HclCode({ code, className }: { code: string; className?: string }) {
   const rendered = await highlight(code, {
     lang: 'hcl',
-    theme: tokenTheme,
+    themes: codeThemes,
     transformers: [
       {
         pre(node) {
@@ -40,8 +22,9 @@ export async function HclCode({ code, className }: { code: string; className?: s
   return (
     <div
       className={cn(
-        'font-mono text-xs leading-6 sm:text-[0.8125rem] [&_pre]:overflow-x-auto [&_pre]:outline-none [&_pre]:focus-visible:ring-2 [&_pre]:focus-visible:ring-inset [&_pre]:focus-visible:ring-ring',
+        'font-mono text-[0.8125rem] leading-6 [&_pre]:overflow-x-auto [&_pre]:py-3.5 [&_pre]:outline-none [&_pre]:focus-visible:ring-2 [&_pre]:focus-visible:ring-inset [&_pre]:focus-visible:ring-ring',
         className,
+        '[&_pre]:px-0 [&_pre]:py-3.5',
       )}
     >
       {rendered}
@@ -50,7 +33,7 @@ export async function HclCode({ code, className }: { code: string; className?: s
 }
 
 const toneClass: Record<NonNullable<TermLine['tone']> | 'plain', string> = {
-  cmd: 'text-foreground font-semibold',
+  cmd: 'text-accent-text font-semibold',
   add: 'text-success',
   muted: 'text-muted-foreground',
   plain: 'text-foreground',
@@ -80,8 +63,9 @@ export function Transcript({
       tabIndex={0}
       aria-label={label}
       className={cn(
-        'overflow-x-auto font-mono text-[0.8125rem] leading-6 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
+        'overflow-x-auto px-4 font-mono text-[0.8125rem] leading-6 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring',
         className,
+        'px-4 py-3.5',
       )}
     >
       <code className={cn('block', !wrap && 'min-w-max')}>

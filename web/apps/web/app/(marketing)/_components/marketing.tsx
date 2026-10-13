@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import Link from 'next/link';
 import { Button, cn } from '@amicu/ui';
+import { CopyButton } from './copy-button';
 
 /** Constrained page shell with consistent horizontal padding. */
 export function Container({
@@ -96,7 +97,7 @@ export function FactList({
   );
 }
 
-/** Bordered figure with a mono caption bar: code files and terminal output. */
+/** Same frame as a docs code block: caption bar, copy button, shared Shiki theme. */
 export function CodePanel({
   caption,
   children,
@@ -107,14 +108,10 @@ export function CodePanel({
   className?: string;
 }) {
   return (
-    <figure
-      className={cn(
-        'flex min-w-0 flex-col overflow-hidden rounded-md border border-border bg-card',
-        className,
-      )}
-    >
-      <figcaption className="border-b border-border px-5 py-2.5 font-mono text-xs text-muted-foreground">
-        {caption}
+    <figure className={cn('code-frame flex min-w-0 flex-col', className)}>
+      <figcaption className="code-bar">
+        <span className="flex-1 truncate">{caption}</span>
+        <CopyButton />
       </figcaption>
       {children}
     </figure>

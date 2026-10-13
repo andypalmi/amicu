@@ -8,7 +8,9 @@ export default function Layout({ children }: LayoutProps<'/'>) {
   return (
     <div className="flex flex-1 flex-col">
       <SiteHeader />
-      <div className="flex flex-1 flex-col">{children}</div>
+      <div data-marketing className="flex flex-1 flex-col">
+        {children}
+      </div>
       <SiteFooter />
     </div>
   );
