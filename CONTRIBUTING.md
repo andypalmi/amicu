@@ -19,15 +19,20 @@ cargo build --release -p amicu-cli   # binary: ./target/release/amicu
 
 ## Tests that need Postgres
 
-`cargo test --workspace` runs without a database. Tests marked `#[ignore]` need a live Postgres through `DATABASE_URL`:
+`cargo test --workspace` runs without a database. Some `#[ignore]`d tests need a live Postgres through `DATABASE_URL`. For the HTTP tenancy tests:
 
 ```bash
 docker compose up -d postgres
 export DATABASE_URL=postgres://amicu_app:amicu_app@localhost:5432/amicu
-cargo test --workspace -- --ignored
+cargo test -p amicu-api --test tenancy_http -- --ignored
 ```
 
 Use the `amicu_app` role, not the bootstrap superuser: row-level security is not enforced for superusers. See "Development database" in the [README](./README.md).
+
+Do not run `cargo test --workspace -- --ignored`: it also runs other ignored tests with their own requirements.
+
+- The `compile_fail` guards in `amicu-core` and `amicu-state` are pinned to rustc 1.97; run them with `cargo +1.97` as in the CI msrv job (see below).
+- The other live Postgres tests need their own setup (custom roles and databases), described in their module docs: `crates/amicu-server/tests/rls_guard_live.rs` and `crates/amicu-server/tests/rate_limit_postgres_live.rs`.
 
 ## Run the CI checks locally
 
