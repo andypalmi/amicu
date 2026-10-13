@@ -148,7 +148,7 @@ export const CHAT_SESSION: ChatSession = {
     'We keep customer data only in EU regions, and delete it 30 days after you close your account.',
     'You can ask for earlier deletion at any time by contacting our privacy team.',
   ],
-  status: '1.4s · 38 tok/s',
+  status: '2.1s · 24 tok/s',
   hint: 'enter send · ctrl+c quit',
 };
 

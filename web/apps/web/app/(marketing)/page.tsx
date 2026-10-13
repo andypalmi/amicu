@@ -88,7 +88,7 @@ export default function LandingPage() {
 
           <div className="mt-14 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)] sm:mt-20">
             <CodePanel caption="amicu.hcl">
-              <HclCode code={HERO_HCL} className="px-5 py-4" />
+              <HclCode code={HERO_HCL} className="[&_pre]:px-5 [&_pre]:py-4" />
             </CodePanel>
             <div className="flex min-w-0 flex-col gap-4">
               <CodePanel caption="terminal">
