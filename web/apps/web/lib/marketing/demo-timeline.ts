@@ -1,4 +1,4 @@
-// Declarative timeline + pure reducer for the home apply-to-online demo.
+// Declarative timeline + pure reducer for the home apply demo.
 // `demoState(steps, t)` maps elapsed ms to what is visible, so the component
 // is a thin clock and the behaviour is unit-testable without a DOM.
 //

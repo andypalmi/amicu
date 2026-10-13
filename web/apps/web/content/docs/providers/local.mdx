@@ -33,7 +33,7 @@ Hardware profiles with `provider` set to `local`, `local_apple`, `local_cpu`, or
 
 A profile with no `provider` also means the local host.
 
-These ids are supported by `apply`, which runs the runtime on the host you invoke it from. Modal is the only provider tested end to end on real GPUs; this path is exercised on the platforms listed below and your hardware may differ.
+These ids are supported by `apply`, which runs the runtime on the host you invoke it from. Modal is the only provider tested end to end on real GPUs; the local path is implemented for macOS (launchd) and Linux (systemd), as described below.
 
 ## How it runs
 
