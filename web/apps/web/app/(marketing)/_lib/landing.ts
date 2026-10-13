@@ -6,14 +6,17 @@
 // If the CLI's output format changes, re-run the commands and update these
 // strings rather than editing them by hand.
 
-/** Hero example: one model, served by vLLM on a Modal L4 GPU in eu-west. */
+/** Hero example: one model, served by vLLM on a Modal L4 GPU in eu-west, with a 200k-token context. */
 export const HERO_HCL = `resource "model" "qwen" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "RedHatAI/Qwen3.5-9B-FP8-dynamic"
   }
-  architecture = "qwen2"
-  artifact { format = "safetensors" }
+  architecture = "qwen3"
+  artifact {
+    format       = "safetensors"
+    quantization = "fp8"
+  }
 }
 
 resource "hardware_profile" "gpu" {
@@ -33,7 +36,7 @@ resource "deployment" "chat" {
   hardware = hardware_profile.gpu.id
   runtime  = "vllm"
   vllm {
-    context_length = 16384
+    context_length = 200000
     port           = 8000
   }
 }
@@ -58,10 +61,8 @@ export const HERO_PLAN: TermLine[] = [
   { text: '      hardware: gpu.l4' },
   { text: '      target:   modal (region eu-west)' },
   {
-    text: '      launch:   vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000 --host 0.0.0.0 --max-model-len 16384',
+    text: '      launch:   vllm serve RedHatAI/Qwen3.5-9B-FP8-dynamic --port 8000 --host 0.0.0.0 --max-model-len 200000',
   },
-  { text: '      note:     estimated peak memory 14GB', tone: 'muted' },
-  { text: '      note:     vllm fit estimate: weights + kv cache only', tone: 'muted' },
 ];
 
 export interface Step {
@@ -129,7 +130,7 @@ export const STEPS: Step[] = [
  * example, not recorded model output.
  */
 export const CHAT_SESSION: TermLine[] = [
-  { text: 'Qwen/Qwen2.5-7B-Instruct', tone: 'cmd' },
+  { text: 'RedHatAI/Qwen3.5-9B-FP8-dynamic', tone: 'cmd' },
   { text: 'https://<workspace>--amicu-chat-server.<region>.modal.direct/v1', tone: 'muted' },
   { text: '' },
   { text: '> Draft a retention notice for our EU customers.' },
@@ -143,7 +144,7 @@ export const CHAT_SESSION: TermLine[] = [
 export const LAPTOP_LAUNCH =
   'llama-server -m models/starter_chat/qwen3.5-8b-instruct-q4_k_m.gguf --port 8000 --ctx-size 100000 --n-gpu-layers -1 --metrics';
 export const GPU_LAUNCH =
-  'vllm serve Qwen/Qwen2.5-7B-Instruct --port 8000 --host 0.0.0.0 --max-model-len 16384';
+  'vllm serve RedHatAI/Qwen3.5-9B-FP8-dynamic --port 8000 --host 0.0.0.0 --max-model-len 200000';
 
 export interface Outcome {
   title: string;
