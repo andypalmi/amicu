@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { appHomeHref, siteHref } from '@/lib/shared';
 import { Compass, Home } from 'lucide-react';
 import {
   Button,
@@ -33,12 +34,12 @@ export default function NotFound() {
         </CardContent>
         <CardFooter className="gap-3">
           <Button asChild>
-            <Link href="/">
+            <Link href={siteHref('/')}>
               <Home /> Go home
             </Link>
           </Button>
           <Button asChild variant="outline">
-            <Link href="/app">
+            <Link href={appHomeHref()}>
               <Compass /> Open the console
             </Link>
           </Button>

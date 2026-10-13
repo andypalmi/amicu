@@ -1,6 +1,8 @@
 //! Turn a graph into an `amicu_plan::Plan` plus the launch artifacts `apply`
 //! needs, diffing against prior state to choose the action kind.
 
+use std::path::Path;
+
 use amicu_core::diagnostic::{Diagnostic, DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
 use amicu_core::id::DeploymentId;
@@ -84,11 +86,29 @@ impl std::error::Error for PlanError {}
 /// triggering `AdapterError`, folded into a [`Diagnostic`]) if a runtime
 /// adapter fails to render a launch plan for some deployment.
 pub fn build_plan(graph: &Graph, prior: Option<&Graph>) -> Result<PlanResult, PlanError> {
+    build_plan_in(graph, prior, None)
+}
+
+/// [`build_plan`] for a project rooted at `project_root` (the directory holding
+/// `amicu.hcl`): GGUF paths in the launch are absolute,
+/// `<root>/models/<model id>/<file>`, because the launchd/systemd service has
+/// no useful working directory. With `None` they stay relative to the cwd.
+///
+/// # Errors
+/// As [`build_plan`].
+pub fn build_plan_in(
+    graph: &Graph,
+    prior: Option<&Graph>,
+    project_root: Option<&Path>,
+) -> Result<PlanResult, PlanError> {
     // Dispatch to the adapter matching each deployment's own runtime family
     // (amicu-planning#152) - previously any non-llama.cpp deployment was
     // skipped entirely (an info diagnostic, no launch, never applied).
     let catalog = build_catalog(graph);
-    let llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), host_supervisor());
+    let mut llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), host_supervisor());
+    if let Some(root) = project_root {
+        llama_adapter = llama_adapter.with_models_dir(root.join("models"));
+    }
     let vllm_adapter = VllmAdapter::new(Box::new(catalog), amicu_vllm::host_supervisor());
     let mut diagnostics = Vec::new();
     let mut items = Vec::new();

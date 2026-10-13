@@ -50,5 +50,8 @@ export const LEGACY_COOKIES = names.legacy;
 /** Public site URL (same env the rest of the app uses) for the CSRF origin check. */
 export const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || null;
 
+/** Public app URL (app.amicu.dev) - also an accepted CSRF origin. */
+export { appUrl as APP_URL } from '@/lib/shared';
+
 /** Refresh-cookie lifetime (30 days). The issuer's own revocation is authoritative. */
 export const REFRESH_MAX_AGE = 60 * 60 * 24 * 30;

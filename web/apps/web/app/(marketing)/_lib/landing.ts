@@ -141,7 +141,7 @@ export const STEPS: Step[] = [
 
 /** Same model resource, two hardware profiles: real launch lines from `plan`. */
 export const LAPTOP_LAUNCH =
-  'llama-server -m models/starter_chat/qwen3.5-8b-instruct-q4_k_m.gguf --port 8000 --ctx-size 100000 --n-gpu-layers -1 --metrics';
+  'llama-server -m models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf --port 8000 --ctx-size 100000 --n-gpu-layers -1 --metrics';
 export const GPU_LAUNCH =
   'vllm serve RedHatAI/Qwen3.5-9B-FP8-dynamic --port 8000 --host 0.0.0.0 --max-model-len 200000';
 

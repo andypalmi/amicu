@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { Brand } from '@/components/common/brand';
 import { Container } from './marketing';
 import { ThemeToggle } from './theme-toggle';
+import { appHref } from '@/lib/shared';
 import { githubUrl } from '../_lib/content';
 
 const siteLinks = [
@@ -44,7 +45,7 @@ export function SiteHeader() {
 
         <div className="ml-auto flex items-center gap-2 text-sm">
           <Link
-            href="/login"
+            href={appHref('/login')}
             className={`${linkCls} px-2`}
           >
             Sign in

@@ -39,6 +39,12 @@ pub enum LlamaCppError {
     #[error("llama-server binary not found (searched PATH and configured path)")]
     BinaryNotFound,
 
+    /// The runtime binary is not on the `PATH` searched at apply time (launchd
+    /// and systemd do not inherit it, so it must be resolved to an absolute
+    /// path). Maps to `AMICU-PROVIDER-001`.
+    #[error("{name} not found on PATH; install with {hint}")]
+    BinaryNotOnPath { name: String, hint: String },
+
     /// The detected `llama-server` is older than the required minimum. Maps to
     /// `AMICU-CAP-001`.
     #[error("llama-server {found} is older than the required minimum {minimum}")]
@@ -140,6 +146,7 @@ impl AdapterErrorKind for LlamaCppError {
             | LlamaCppError::VersionTooOld { .. }
             | LlamaCppError::ChecksumMismatch { .. } => catalog::CAP_RUNTIME_ARTIFACT_MISMATCH,
             LlamaCppError::BinaryNotFound
+            | LlamaCppError::BinaryNotOnPath { .. }
             | LlamaCppError::UnparseableVersion(_)
             | LlamaCppError::Probe(_)
             | LlamaCppError::Supervisor(_) => catalog::PROVIDER_CAPACITY_UNAVAILABLE,

@@ -9,6 +9,8 @@ import {
   fieldErrors,
   type FieldErrors,
 } from '@amicu/auth';
+import { appHomeHref } from '@/lib/shared';
+import { safeNextPath } from '@/lib/auth/safe-next';
 import { authClient } from '@/lib/auth/client';
 import { SIGNUPS_ENABLED } from '@/lib/auth/config';
 import {
@@ -47,7 +49,8 @@ async function challengeFailure(
   formData: FormData,
   action: TurnstileAction,
 ): Promise<AuthFormState | null> {
-  const siteUrl = process.env.NEXT_PUBLIC_SITE_URL;
+  // Auth forms live on the app host, so the widget is solved there.
+  const siteUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.NEXT_PUBLIC_SITE_URL;
   let expectedHostname: string | null = null;
   try {
     expectedHostname = siteUrl ? new URL(siteUrl).hostname : null;
@@ -65,9 +68,7 @@ async function challengeFailure(
 }
 
 function safeNext(raw: FormDataEntryValue | null): string {
-  // Only allow local, absolute in-app paths - never an open redirect.
-  const value = typeof raw === 'string' ? raw : '';
-  return value.startsWith('/') && !value.startsWith('//') ? value : '/app';
+  return safeNextPath(raw, appHomeHref());
 }
 
 export async function loginAction(

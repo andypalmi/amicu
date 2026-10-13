@@ -10,7 +10,7 @@ use amicu_modal::supervisor::app_name_for;
 use crate::OutputFormat;
 use crate::checks::report_for;
 use crate::error::CliError;
-use crate::planner::{PlanError, PlanItem, PlanResult, build_plan};
+use crate::planner::{PlanError, PlanItem, PlanResult, build_project_plan};
 use crate::project::Project;
 use crate::write_json;
 
@@ -33,7 +33,7 @@ pub(crate) fn run(
     let prior =
         crate::refresh::load_refreshed_state(project, &crate::refresh::ModalLookup, output, out)?
             .map(|s| s.graph);
-    let result = match build_plan(&graph, prior.as_ref()) {
+    let result = match build_project_plan(project, &graph, prior.as_ref()) {
         Ok(result) => result,
         // A deployment failed to plan (e.g. a CAP-002/CAP-003 extra_args/env
         // conflict); `build_plan` hands back everything it collected instead
@@ -220,6 +220,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::planner::build_plan;
 
     const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -307,6 +308,15 @@ mod tests {
                     .map(|c| c.trim().to_owned())
             })
             .unwrap_or_else(|| panic!("no launch line in:\n{text}"))
+    }
+
+    #[test]
+    fn project_plan_shows_an_absolute_model_path() {
+        let g = graph("local", llama());
+        let project = Project::new("/proj");
+        let result = crate::planner::build_project_plan(&project, &g, None).expect("plan");
+        let launch = result.items[0].rendered.clone().expect("rendered");
+        assert!(launch.contains("/proj/models/m/"), "{launch}");
     }
 
     fn human_plan(g: &Graph) -> String {

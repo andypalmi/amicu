@@ -39,8 +39,8 @@ pub use service::{
     SystemdManager,
 };
 pub use supervisor::{
-    LaunchdSupervisor, ProcessSupervisor, ResolvedSecret, ServiceSupervisor, SystemdSupervisor,
-    host_supervisor, resolve_launch_secrets,
+    LaunchdSupervisor, ProcessSupervisor, ReadyWait, ResolvedSecret, ServiceSupervisor,
+    SystemdSupervisor, host_supervisor, resolve_launch_secrets,
 };
 
 #[cfg(test)]
