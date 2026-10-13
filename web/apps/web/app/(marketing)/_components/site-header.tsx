@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { Brand } from '@/components/common/brand';
 import { Container } from './marketing';
 import { ThemeToggle } from './theme-toggle';
+import { MobileMenu, type MobileNavCta, type MobileNavItem } from './mobile-menu';
 import { appHref } from '@/lib/shared';
 import { githubUrl } from '../_lib/content';
 
@@ -12,12 +13,35 @@ const siteLinks = [
   { href: '/security', label: 'Security' },
 ];
 
+const mobileItems: MobileNavItem[] = [
+  {
+    href: '/docs',
+    label: 'Docs',
+    children: [
+      { href: '/docs/quickstart', label: 'Quickstart' },
+      { href: '/docs/concepts', label: 'Concepts' },
+      { href: '/docs/configuration', label: 'Configuration' },
+      { href: '/docs/reference/cli', label: 'CLI reference' },
+    ],
+  },
+  { href: '/providers', label: 'Providers' },
+  { href: '/pricing', label: 'Pricing' },
+  { href: '/security', label: 'Security' },
+];
+
+// Outline variants first, the filled primary last.
+const mobileCtas: MobileNavCta[] = [
+  { href: githubUrl, label: 'GitHub', variant: 'outline' },
+  { href: appHref('/login'), label: 'Sign in', variant: 'outline' },
+  { href: appHref('/signup'), label: 'Get started', variant: 'default' },
+];
+
 const linkCls =
   'rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring';
 
 /**
  * Marketing header: the wordmark, site links (docs first), GitHub, a quiet sign-in link and the theme switch. Server-rendered;
- * on narrow screens the links fold into a native <details> menu (no JS).
+ * below md the links fold into a full-screen client menu (mobile-menu.tsx).
  */
 export function SiteHeader() {
   const all = siteLinks;
@@ -32,7 +56,7 @@ export function SiteHeader() {
           <Brand />
         </Link>
 
-        <nav aria-label="Main" className="hidden items-center gap-6 text-sm lg:flex">
+        <nav aria-label="Main" className="hidden items-center gap-6 text-sm md:flex">
           {all.map((l) => (
             <Link key={l.href} href={l.href} className={linkCls}>
               {l.label}
@@ -46,43 +70,12 @@ export function SiteHeader() {
         <div className="ml-auto flex items-center gap-2 text-sm">
           <Link
             href={appHref('/login')}
-            className={`${linkCls} px-2`}
+            className={`${linkCls} hidden px-2 md:inline`}
           >
             Sign in
           </Link>
           <ThemeToggle />
-          <details className="group relative lg:hidden">
-            <summary
-              className="flex size-9 cursor-pointer list-none items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground [&::-webkit-details-marker]:hidden"
-              aria-label="Menu"
-            >
-              <span aria-hidden className="flex w-4 flex-col gap-1">
-                <span className="h-px w-full bg-current" />
-                <span className="h-px w-full bg-current" />
-                <span className="h-px w-full bg-current" />
-              </span>
-            </summary>
-            <nav
-              aria-label="Main"
-              className="absolute right-0 top-11 flex w-56 flex-col rounded-md border border-border bg-popover p-2 text-popover-foreground"
-            >
-              {all.map((l) => (
-                <Link
-                  key={l.href}
-                  href={l.href}
-                  className="rounded-md px-3 py-2 text-muted-foreground hover:bg-accent hover:text-foreground"
-                >
-                  {l.label}
-                </Link>
-              ))}
-              <a
-                href={githubUrl}
-                className="rounded-md px-3 py-2 text-muted-foreground hover:bg-accent hover:text-foreground"
-              >
-                GitHub
-              </a>
-            </nav>
-          </details>
+          <MobileMenu items={mobileItems} ctas={mobileCtas} />
         </div>
       </Container>
     </header>
