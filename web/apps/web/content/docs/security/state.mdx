@@ -5,7 +5,7 @@ description: What amicu records after apply, what it never records, and what hap
 
 ## Where it lives
 
-The CLI keeps state in the project directory, in `.amicu/state/state.json`. Writes are atomic: amicu writes a temporary file and renames it. `local` is the only backend the CLI implements. See [State and backends](/docs/operate/state-and-backends) for locking and recovery.
+The CLI keeps state in the project directory, in `.amicu/state/state.json`. Writes are durable: amicu writes a uniquely named temporary file, syncs it to disk, keeps the previous version as `state.json.bak`, renames the new file into place, and syncs the directory. If `state.json` is ever missing or corrupt, amicu stops with an error that points at `state.json.bak` instead of silently using it. `local` is the only backend the CLI implements. See [State and backends](/docs/operate/state-and-backends) for locking and recovery.
 
 ## What it contains
 
@@ -17,6 +17,8 @@ The CLI keeps state in the project directory, in `.amicu/state/state.json`. Writ
 - Secret values. A secret-designated field is stored as a reference with its name (and optional scope and version), not its value.
 - API keys, Modal tokens, proxy tokens, or `HF_TOKEN`.
 - Prompts or completions. Amicu is not in the request path.
+
+State is per machine. The lock is a local operating-system lock and does not protect state shared through version control or copied between machines, so do not commit `.amicu/`; `amicu init` adds it to `.gitignore`. A state serial with compare-and-swap saves and a shared backend are planned (tracked in amicu-planning#218).
 
 State still describes your infrastructure (URLs, hardware, ids), so treat it as sensitive and keep it out of public repositories.
 

@@ -79,6 +79,8 @@ pub(crate) fn run(project: &Project, out: &mut dyn Write) -> Result<u8, CliError
     ensure_dir(out, &project.state_dir(), &mut created)?;
     created += write_if_absent(out, &project.state_dir().join(".gitkeep"), "")?;
 
+    created += ensure_ignore_entry(out, &root.join(".gitignore"))?;
+
     if created == 0 {
         writeln!(out, "Project already initialized; nothing to do.")
             .map_err(|e| CliError::io("write failed", e))?;
@@ -124,4 +126,40 @@ fn ensure_dir(out: &mut dyn Write, path: &Path, created: &mut u32) -> Result<(),
     writeln!(out, "  create {}/", path.display()).map_err(|e| CliError::io("write failed", e))?;
     *created += 1;
     Ok(())
+}
+
+/// Make sure the ignore file covers `.amicu/`: local state is per-machine
+/// and must not be shared via version control (amicu-planning#218). Appends
+/// when the file exists without the entry; creates it otherwise; idempotent.
+fn ensure_ignore_entry(out: &mut dyn Write, path: &Path) -> Result<u32, CliError> {
+    let existing = match fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(CliError::io(format!("cannot read {}", path.display()), e)),
+    };
+    let Some(mut text) = existing else {
+        fs::write(path, ".amicu/\n")
+            .map_err(|e| CliError::io(format!("cannot write {}", path.display()), e))?;
+        writeln!(out, "  create {}", path.display())
+            .map_err(|e| CliError::io("write failed", e))?;
+        return Ok(1);
+    };
+    let covered = text.lines().map(str::trim).any(|l| {
+        matches!(
+            l,
+            ".amicu" | ".amicu/" | "/.amicu" | "/.amicu/" | ".amicu/*"
+        )
+    });
+    if covered {
+        return Ok(0);
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(".amicu/\n");
+    fs::write(path, text)
+        .map_err(|e| CliError::io(format!("cannot write {}", path.display()), e))?;
+    writeln!(out, "  update {} (added .amicu/)", path.display())
+        .map_err(|e| CliError::io("write failed", e))?;
+    Ok(1)
 }
