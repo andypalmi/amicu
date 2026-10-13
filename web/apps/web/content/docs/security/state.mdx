@@ -1,0 +1,37 @@
+---
+title: State
+description: What amicu records after apply, what it never records, and what happens when apply fails partway.
+---
+
+## Where it lives
+
+The CLI keeps state in the project directory, in `.amicu/state/state.json`. Writes are atomic: amicu writes a temporary file and renames it. `local` is the only backend the CLI implements. See [State and backends](/docs/operate/state-and-backends) for locking and recovery.
+
+## What it contains
+
+- The resource graph from the last successful apply: models, hardware profiles, deployments, and policy resources as parsed from your HCL.
+- The endpoints that were started: deployment id, runtime handle id (the service label or Modal app id), the endpoint URL, and whether it is loopback or public.
+
+## What it never contains
+
+- Secret values. A secret-designated field is stored as a reference with its name (and optional scope and version), not its value.
+- API keys, Modal tokens, proxy tokens, or `HF_TOKEN`.
+- Prompts or completions. Amicu is not in the request path.
+
+State still describes your infrastructure (URLs, hardware, ids), so treat it as sensitive and keep it out of public repositories.
+
+## When apply fails partway
+
+State is written once, at the end of a fully successful apply. Deployments are started one after another, and:
+
+- If the endpoint check fails for a deployment, amicu stops that endpoint and exits with an error. Nothing is written to state.
+- If apply fails after earlier deployments in the same run were started, those services keep running but the run does not record them. State still reflects the previous apply.
+- Preflight failures (unsupported provider, missing `api_key`, missing Modal proxy tokens) happen before anything starts.
+
+To recover, fix the cause and run `amicu apply` again. The plan is recomputed from the last recorded state; a matching running local service is reused, and for Modal the pre-plan refresh compares recorded apps with the ones that exist. If a service you no longer want is still running, stop it with the command printed in the error, or with `amicu modal stop <app>`.
+
+Use `amicu plan` before and after a failed apply to see what amicu thinks is deployed.
+
+## Backends
+
+The state interface supports other backends (the hosted server uses Postgres), and `init` writes `state.backend: local` to `.amicu/config.yaml`. The CLI does not select another backend yet. If you run your own database for a server, encrypt it at rest; amicu does not encrypt state at the application layer by default.

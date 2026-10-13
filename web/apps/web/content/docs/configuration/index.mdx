@@ -1,0 +1,76 @@
+---
+title: Configuration (HCL)
+description: The amicu HCL language, project files, and formatting.
+---
+
+Amicu configuration is HCL. This page covers the rules shared by every resource. Each resource kind has its own page in this section.
+
+## Project files
+
+`amicu init` creates:
+
+| Path | Purpose |
+|---|---|
+| `amicu.hcl` | Your resources |
+| `variables.amicu.hcl` | A placeholder. Reusable values are not supported yet. |
+| `.amicu/config.yaml` | Project config (`version: 1`, `state.backend: local`) |
+| `.amicu/state/` | Local state and the state lock |
+
+Amicu reads every `*.hcl` file under the project root, recursively, skipping `.amicu/`, hidden directories, and `target/`. You can split resources across files in any layout. Ids must be unique per kind across all files (`AMICU-SCHEMA-002`).
+
+## Language
+
+A file contains only `resource` blocks. A top-level attribute or any other block type is an error.
+
+```hcl
+resource "model" "starter_chat" {
+  source {
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen3.5-8B-Instruct"
+  }
+  architecture = "qwen3"
+  modalities   = ["text"]
+  artifact {
+    format       = "gguf"
+    quantization = "q4_k_m"
+  }
+  variant {
+    quantization = "q4_k_m"
+    file         = "qwen3.5-8b-instruct-q4_k_m.gguf"
+    size         = "5GiB"
+  }
+}
+```
+
+- **Blocks.** `resource "<kind>" "<id>" { ... }`. The id is the second label.
+- **Nested blocks** such as `source {}` or `llama_cpp {}` take no labels. Repeatable blocks (`variant`, `target`) can appear more than once.
+- **Attributes** are `name = value`. Strings are quoted, lists use brackets, numbers and booleans are bare.
+- **References** are `<kind>.<id>.id`. See [Resources and references](/docs/concepts/resources).
+- **Secrets** are `secret("NAME")`. See [Secrets](/docs/security/secrets).
+- **Sizes** are strings with a unit: `"48GiB"`, `"8350MiB"`, `"16GB"`. Binary units (`KiB`, `MiB`, `GiB`, `TiB`) use powers of 1024; decimal units (`KB`, `MB`, `GB`, `TB`) use powers of 1000. A bare number is bytes.
+- **Money** is a block: `limit { amount = 2000  currency = "EUR" }`.
+- **Unknown keys are errors.** A misspelled attribute or block fails with `AMICU-SCHEMA-003` and a suggestion. The free-form maps `env {}` and `labels {}` accept any key.
+- **Variables.** `variables.amicu.hcl` is reserved; there is no variable syntax yet, and `secret(...)` is the only function.
+
+## Formatting
+
+```bash
+amicu fmt              # rewrite *.hcl in canonical form
+amicu fmt --check      # exit 1 if any file would change, write nothing
+amicu validate --fix   # apply safe repairs (re-formatting only)
+```
+
+`fmt` re-renders each file from the parsed resources. Comments inside resource files are dropped, and resources are written in a fixed kind order. Use `--check` in CI to detect drift.
+
+## Resource pages
+
+- [model](/docs/configuration/model)
+- [hardware_profile](/docs/configuration/hardware-profile)
+- [deployment](/docs/configuration/deployment)
+- [routing_policy](/docs/configuration/routing-policy)
+- [data_class](/docs/configuration/data-class)
+- [governance_rule](/docs/configuration/governance-rule)
+- [budget](/docs/configuration/budget)
+- [tenant](/docs/configuration/tenant)
+- [use_case](/docs/configuration/use-case)
+- [credential](/docs/configuration/credential)

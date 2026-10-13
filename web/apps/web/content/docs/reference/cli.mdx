@@ -1,0 +1,63 @@
+---
+title: CLI commands
+description: Every amicu command, flag, and exit code.
+---
+
+```text
+amicu [--output human|json] <command>
+```
+
+`--output` is global. The default is `human`. Run `amicu <command> --help` for the authoritative flag list of your build.
+
+Commands operate on the project in the current directory. `skill` and `modal` do not need a project.
+
+## Project commands
+
+| Command | Description |
+|---|---|
+| `amicu init` | Scaffold `amicu.hcl`, `variables.amicu.hcl`, and `.amicu/`. Idempotent; never overwrites. |
+| `amicu fmt [--check]` | Rewrite `*.hcl` in canonical form. With `--check`, write nothing and exit 1 if any file would change. |
+| `amicu validate [--fix]` | Structural, reference, capacity, and policy checks. `--fix` applies safe repairs (re-formatting only). |
+| `amicu plan` | Compute the actions the next apply would take, diffed against state. |
+| `amicu apply [--auto-approve] [--lock-timeout <secs>]` | Execute the plan. Prompts for approval unless `--auto-approve` (alias `--yes`). `--lock-timeout` waits for the state lock instead of failing at once. |
+| `amicu doctor` | Environment and project diagnostics. |
+
+There is no `destroy` command. To remove a deployment, delete its resource from the configuration and run `amicu apply`.
+
+## Skill commands
+
+| Command | Description |
+|---|---|
+| `amicu skill export --target <target> [--path <dir>]` | Write agent skills. Targets: `claude-code`, `cursor`, `windsurf`, `generic`. `--path` overrides the default directory and is required for `generic`. |
+
+See [Agent skills](/docs/reference/agent-skills).
+
+## Modal commands
+
+These read `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` from the environment, never from flags. `<app>` is the Modal app name: `amicu-` plus the deployment id with `_` replaced by `-`.
+
+| Command | Description |
+|---|---|
+| `amicu modal auth-check` | Verify the control-plane token. Prints `authenticated`. |
+| `amicu modal status <app>` | App state and per-function live stats and URL. |
+| `amicu modal logs <app> [--follow] [--since <entry-id>]` | Print logs. `--follow` keeps tailing. `--since` resumes after a log entry id. |
+| `amicu modal metrics <app> [--watch] [--interval <secs>]` | Runtime and hardware metrics. `--interval` defaults to 5 and must be at least 1. Needs `MODAL_PROXY_TOKEN_ID` and `MODAL_PROXY_TOKEN_SECRET`. |
+| `amicu modal stop <app>` | Stop the app. Inside a project, also removes the deployment from local state. |
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success, valid, or no error-severity diagnostics |
+| `1` | Error-severity diagnostics, `fmt --check` drift, or a missing Modal app |
+| non-zero with an `error:` line | Operational failure such as an I/O or parse error |
+
+## JSON output
+
+`validate`, `plan`, `apply`, and `doctor` accept `--output json`. `validate` and `plan` emit a diagnostic report:
+
+```json
+{ "version": "v1", "valid": true, "diagnostics": [] }
+```
+
+Each diagnostic has a `code`, a `severity`, and a `message`. `doctor` emits `{ "version": "v1", "ok": true, "checks": [...] }`. With `apply --output json`, stdout carries only the resulting endpoint handles; the plan preview and approval prompt go to stderr. See [Error codes](/docs/reference/error-codes).

@@ -1,0 +1,28 @@
+---
+title: data_class
+description: Declare data sensitivity and the residency jurisdictions it may be processed in.
+---
+
+A `data_class` names a category of data and the jurisdictions it is allowed in. `validate` compares the jurisdiction of each deployment's region against it. See [Residency and regions](/docs/concepts/residency).
+
+## Example
+
+```hcl
+resource "data_class" "company_confidential" {
+  sensitivity              = "confidential"
+  residency                = ["eu"]
+  allow_external_providers = false
+  handling                 = ["no_logging", "encrypt_at_rest"]
+}
+```
+
+## Fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `sensitivity` | string | yes | `public`, `internal`, `confidential`, or `restricted` |
+| `residency` | list of strings | no | Allowed jurisdictions: `eu`, `uk`, `us`, `ca`, `apac`, or another token |
+| `allow_external_providers` | bool | no | Defaults to `false` |
+| `handling` | list of strings | no | Free-form handling requirements. Recorded, not enforced by amicu. |
+
+A region outside the combined `residency` lists of all data classes fails with `AMICU-POLICY-002`.

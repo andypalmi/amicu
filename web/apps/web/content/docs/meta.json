@@ -1,4 +1,14 @@
 {
   "title": "Documentation",
-  "pages": ["index", "getting-started", "reference"]
+  "pages": [
+    "index",
+    "quickstart",
+    "concepts",
+    "configuration",
+    "providers",
+    "operate",
+    "security",
+    "reference",
+    "troubleshooting"
+  ]
 }

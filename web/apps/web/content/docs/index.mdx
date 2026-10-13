@@ -1,24 +1,50 @@
 ---
 title: Introduction
-description: What Amicu is and how the documentation is organized.
+description: What Amicu is, what it is not, and which providers it can deploy to today.
 ---
 
-Amicu is an open-source web application for designing, deploying, and operating
-LLM serving stacks. It is a **thin client** over the Rust Management API: the UI
-renders questions, candidates, plans, and metrics, but never owns planning,
-recommendation, policy, or capability logic - those live in Rust.
+Amicu is a command-line tool for self-hosted LLM inference. You describe models, hardware, and deployments in HCL (`amicu.hcl`). Amicu checks the configuration, shows a plan against recorded state, and applies it by running llama.cpp or vLLM for you.
 
-## What lives here
+```bash
+amicu init       # scaffold amicu.hcl and .amicu/
+amicu validate   # structural, reference, capacity, and policy checks
+amicu plan       # what apply would do, diffed against state
+amicu apply      # start, update, or stop deployments after approval
+```
 
-- **Getting started** - run the web monorepo locally.
-- **Reference** - a placeholder section that grows as features land.
+The workflow is the one Terraform users know: configuration is declarative, every change is a plan you can read first, and state records what was applied.
 
-<Callout title="Early scaffold">
-  This site is the foundation for the web epic. Most feature docs are authored in
-  later tasks; the structure and tooling (`/docs`, `llms.txt`) are in place now.
-</Callout>
+## What it does
 
-## Licensing
+- Starts a llama.cpp or vLLM server on your machine as a launchd (macOS) or systemd (Linux) user service.
+- Deploys llama.cpp or vLLM to Modal (serverless GPU) with a pinned region and autoscaling limits.
+- Checks that the model fits the hardware before anything starts.
+- Treats data residency and provider allowlists as resources that `validate` and `plan` enforce.
+- Keeps credentials out of configuration, plans, state, and command lines. See [Secrets](/docs/security/secrets).
+- Verifies after every deploy that the endpoint rejects anonymous requests. See [Endpoint auth](/docs/security/endpoint-auth).
 
-The entire frontend - marketing, app, and docs - is **AGPL-3.0-or-later**. Paid
-tiers are gated by the API, not by closed frontend code.
+## What it is not
+
+- Not a hosted service. The CLI runs on your machine and talks only to the providers you deploy to. See [Telemetry and network](/docs/security/telemetry-and-network).
+- Not a model registry or a gateway. It starts the runtime's own OpenAI-compatible server; clients call that server directly.
+- Not a Kubernetes operator. There is no Helm or cluster delivery in the CLI today.
+- Not stable. Expect breaking changes to the HCL schema and the CLI.
+
+## Status
+
+| Provider | Status |
+|---|---|
+| This machine (`local`, `local_apple`, `local_cpu`, `on_prem`) | Supported: `amicu apply` works |
+| Modal | Supported: `amicu apply` works |
+| Hetzner, OVHcloud, Scaleway, RunPod, SSH hosts | Preview: adapter built, not tested live, not wired into `apply` |
+| AWS, Azure, GCP, Nebius | Planned: region and pricing data only |
+
+A deployment on a provider that `apply` does not support fails with an error. It never falls back to running locally. See [Providers](/docs/providers).
+
+## Where to go next
+
+- [Quickstart](/docs/quickstart): install, deploy a model, send a request.
+- [Concepts](/docs/concepts): plan, apply and state; resources; residency.
+- [Configuration](/docs/configuration): the HCL language and every resource kind.
+- [Security](/docs/security): secrets, endpoint auth, state, network.
+- [Reference](/docs/reference): CLI commands and error codes.

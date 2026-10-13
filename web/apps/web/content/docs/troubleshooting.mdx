@@ -1,0 +1,60 @@
+---
+title: Troubleshooting
+description: Common failures and how to fix them.
+---
+
+Start with `amicu doctor`. Then read the diagnostic code: the category tells you where to look. See [Error codes](/docs/reference/error-codes). Never weaken a policy or capacity rule to make a plan pass; change the stack.
+
+## Validate and plan
+
+**`AMICU-SCHEMA-003: unknown attribute`.** A typo, such as `contex_length`. The message names the block and suggests the right key.
+
+**`AMICU-REF-001`.** A reference points at an id that does not exist. Check the spelling of `model.<id>.id`.
+
+**`AMICU-MEM-001`.** The model does not fit. Lower `context_length`, pick a smaller quantization, or use bigger hardware.
+
+**`AMICU-POLICY-004`.** An `api_key` or token was written as a quoted string. Use `secret("NAME")`.
+
+**`AMICU-POLICY-007`.** The provider serves off-machine and the deployment has no `api_key`. Add `api_key = secret("NAME")`.
+
+**`AMICU-POLICY-002` or `-003`.** The region or provider violates a `data_class` or `governance_rule`. See [Residency](/docs/concepts/residency).
+
+## Apply
+
+**`secret 'NAME' is not set in the environment`.** Export the variable named in `secret("NAME")` in the shell that runs `amicu apply`.
+
+**`AMICU-POLICY-008`.** The key is empty or contains a comma, whitespace, or non-ASCII characters. Regenerate it with `openssl rand -hex 32`.
+
+**`state is locked by another amicu process`.** Another `amicu apply` or `amicu modal stop` is running. Wait, or use `--lock-timeout <secs>`. The lock is released automatically when the process exits.
+
+**`llama-server binary not found`** (from `doctor`). Install llama.cpp so `llama-server` is on `PATH`.
+
+**The local service starts but never answers.** Check that the GGUF exists at the path in the plan's `launch:` line. Then read the service log (macOS: `~/Library/Logs/amicu/`; Linux: `journalctl --user`).
+
+**`endpoint answered an unauthenticated request ... it is open to anyone with its URL`.** The runtime did not enforce the key. Amicu stopped the endpoint. Make sure `api_key` is set and the runtime is current, then apply again.
+
+**`could not verify that the endpoint rejects unauthenticated requests`.** The endpoint never gave a definite `401` or `403`. It may still be loading. Check the logs, then re-run apply.
+
+**If the stop after a failed check also failed,** the error prints the command to stop it by hand: `systemctl --user stop <label>` on Linux, `launchctl unload ~/Library/LaunchAgents/<label>.plist` on macOS, or `amicu modal stop <app>` for Modal.
+
+**Apply failed partway.** Earlier deployments from the same run may still be running and are not in state. Fix the cause and apply again. See [State](/docs/security/state).
+
+## Modal
+
+**`MODAL_TOKEN_ID is not set`.** Export `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`. Verify with `amicu modal auth-check`.
+
+**`Modal deployments need MODAL_PROXY_TOKEN_ID and MODAL_PROXY_TOKEN_SECRET ... nothing was started`.** Create a Proxy Auth Token in the Modal dashboard and export both values.
+
+**`503` from the endpoint.** The container is cold-starting. The first run also downloads the weights. Watch `amicu modal logs <app> --follow` and retry.
+
+**`401` or `403` from the endpoint.** Send both layers: `Authorization: Bearer $KEY` and the `Modal-Key` and `Modal-Secret` headers. A proxy token is not an `Authorization: Bearer` value.
+
+**`NCCL error: unhandled cuda error`** on a multi-GPU vLLM deployment (L4 and other non-NVLink GPUs). Add `env { NCCL_P2P_DISABLE = "1" }` to the `vllm` block and apply again.
+
+**`apply` says "No changes" but nothing is running.** The app was stopped outside amicu. Current builds detect this, print a `drift:` line, and recreate it. On older builds, delete `.amicu/state/state.json` or run `amicu modal stop <app>` inside the project, then apply.
+
+**`warning: could not check Modal for live apps`.** The lookup failed (credentials or network). Local state was used as is.
+
+**A thinking model returns `content: null` with `finish_reason=length`.** `max_tokens` was spent on reasoning. Raise `max_tokens`.
+
+**Changing `region` fails on an existing app.** Modal does not allow the routing region to change. Run `amicu modal stop <app>`, then apply.

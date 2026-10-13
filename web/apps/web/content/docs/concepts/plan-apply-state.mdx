@@ -1,0 +1,73 @@
+---
+title: Plan, apply and state
+description: How amicu turns configuration into running deployments and tracks what it did.
+---
+
+Amicu works in four steps. Each reads the same configuration; only `apply` changes anything.
+
+| Step | Command | Effect |
+|---|---|---|
+| Validate | `amicu validate` | Parses every `*.hcl` file and reports diagnostics. Changes nothing. |
+| Plan | `amicu plan` | Computes the actions needed to move from recorded state to the configuration. Changes nothing. |
+| Apply | `amicu apply` | Recomputes the plan, shows it, asks for approval, then executes it and records the result. |
+| Doctor | `amicu doctor` | Checks the host (runtime binary, state directory) and the project. |
+
+## Validate
+
+`validate` loads all `*.hcl` files under the project root, skipping `.amicu/`, hidden directories, and `target/`. It runs:
+
+- Syntax and schema checks. Unknown attributes and blocks are errors, with a suggestion for near misses (`AMICU-SCHEMA-003`).
+- Reference checks: every `model.<id>.id`, `hardware_profile.<id>.id` and similar reference must resolve (`AMICU-REF-001`).
+- Capacity checks: the model weights plus KV cache must fit the accelerator or host memory (`AMICU-MEM-*`).
+- Policy checks: residency, provider allowlists, secret handling, and endpoint API keys (`AMICU-POLICY-*`).
+
+Only diagnostics with severity `error` fail the command (exit code 1). Warnings and info diagnostics are printed but do not fail it. `--output json` emits a stable report.
+
+## Plan
+
+`plan` compares the configuration with the state recorded by the last apply and lists actions per resource.
+
+| Action | Meaning |
+|---|---|
+| `create` | The deployment does not exist yet. |
+| `update` | The deployment exists and a setting changed. |
+| `replace` | The deployment is destroyed and recreated. |
+| `destroy` | The deployment is no longer in the configuration. |
+
+For each deployment the plan shows the hardware, the provider, the model artifact, the exact launch command, and notes such as the estimated peak memory. Secret-designated fields show as `******`. A plan never reads secret values.
+
+For Modal deployments, `plan` and `apply` first ask Modal whether the apps recorded in state still exist. An app that was stopped outside amicu is dropped from state so the plan shows a `create`, and a `drift:` line is printed. If the lookup fails, a `warning:` is printed and local state is used as is.
+
+## Apply
+
+`apply` recomputes the plan and prints it. Unless you pass `--auto-approve` (alias `--yes`) it asks for confirmation. It then:
+
+1. Runs preflight checks before anything starts: the provider must be supported by `apply`, every off-machine deployment must have an `api_key`, and Modal deployments need the proxy tokens.
+2. Starts each deployment through its provider.
+3. Verifies that each endpoint is protected. See [Endpoint auth](/docs/security/endpoint-auth).
+4. Stops deployments that were removed from the configuration.
+5. Writes state.
+6. Prints each endpoint and a ready-to-copy `curl` and OpenAI SDK snippet.
+
+Apply holds a lock on the state directory for its whole run. Use `--lock-timeout <secs>` to wait for another amicu process instead of failing.
+
+If the plan is empty, apply prints `No changes to apply.`
+
+## State
+
+State is the record of the last successful apply: the resource graph and the endpoints that were started. It lets `plan` show a diff and lets `apply` stop what you removed.
+
+- The CLI keeps state locally in `.amicu/state/state.json`.
+- State holds secret references (names), never secret values.
+- It is written once, after all actions succeed.
+
+Details, including what happens when an apply fails partway, are in [Security: State](/docs/security/state). Locking and backends are in [Operate: State and backends](/docs/operate/state-and-backends).
+
+## Exit codes and JSON output
+
+| Code | Meaning |
+|---|---|
+| `0` | Success, valid, or no error-severity diagnostics |
+| `1` | Error-severity diagnostics, or `fmt --check` found drift |
+
+`--output json` (global flag) makes `validate`, `plan`, `apply`, and `doctor` emit machine-readable output. See [CLI commands](/docs/reference/cli).

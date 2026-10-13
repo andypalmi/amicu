@@ -20,7 +20,7 @@ web/                          # pnpm workspace root (Turborepo)
 │       ├── app/docs/         # Fumadocs, single-app (multi-zone deferred)
 │       ├── app/api/          # thin BFF route handlers (no domain logic)
 │       ├── app/llms.txt/     # + llms-full.txt, llms.mdx - AI-agent exports
-│       └── content/docs/     # MDX docs (intro, getting-started, reference)
+│       └── content/docs/     # MDX docs (see CONTRIBUTING.md)
 ├── packages/
 │   ├── ui/                   # shared shadcn design system + Tailwind v4 tokens
 │   ├── config/               # shared tsconfig + eslint presets

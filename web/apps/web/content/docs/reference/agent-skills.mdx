@@ -1,0 +1,24 @@
+---
+title: Agent skills
+description: Export amicu guidance for Claude Code, Cursor, Windsurf, or any coding agent.
+---
+
+The CLI ships a set of skills that teach a coding agent the amicu workflow, the HCL schema, and the safety rules (never apply without a reviewed plan, never reveal secrets). Export them into your project:
+
+```bash
+amicu skill export --target claude-code
+amicu skill export --target cursor
+amicu skill export --target windsurf
+amicu skill export --target generic --path ./agent-guidance
+```
+
+| Target | Default directory |
+|---|---|
+| `claude-code` | `.claude/skills/<skill>/SKILL.md` with `references/` |
+| `cursor` | `.cursor/rules/<skill>/` |
+| `windsurf` | `.windsurf/rules/<skill>/` |
+| `generic` | Plain markdown under `--path` (required) |
+
+`--path` overrides the default directory. The command works without a project.
+
+The skills cover core workflow, writing HCL, local llama.cpp, vLLM, model selection, routing and policy, and troubleshooting. Some of them mention commands that are planned but not implemented (`schema`, `capabilities`, `models`, `presets`, `recommend`); those do not exist in the CLI yet.

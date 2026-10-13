@@ -1,0 +1,31 @@
+---
+title: tenant
+description: Declare a named consumer with quotas and labels.
+---
+
+A `tenant` is a logical consumer of your deployments. Budgets can refer to it. The CLI records quotas; it does not enforce them.
+
+## Example
+
+```hcl
+resource "tenant" "team_research" {
+  display_name = "Research"
+  quota {
+    max_requests_per_minute = 600
+    max_concurrent          = 20
+  }
+  labels {
+    cost_center = "rnd"
+  }
+}
+```
+
+## Fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `display_name` | string | no | Human-readable name. Do not put secrets here. |
+| `quota` | block | no | Request limits |
+| `quota.max_requests_per_minute` | number | no | Requests per minute |
+| `quota.max_concurrent` | number | no | Concurrent requests |
+| `labels` | block | no | Free-form string key/value pairs |

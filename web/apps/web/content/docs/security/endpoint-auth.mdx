@@ -1,0 +1,81 @@
+---
+title: Endpoint auth
+description: How amicu verifies, after every deploy, that an endpoint rejects anonymous requests and accepts its key.
+---
+
+A running inference server that accepts anonymous requests is a free GPU for anyone who finds the URL. Amicu does not trust that the key is enforced; it tests.
+
+## The check
+
+After `apply` starts an endpoint, it sends requests to `GET /v1/models`. This route is authenticated by both llama-server and vLLM. (llama-server's `/health` is public by design, so it cannot test the key.)
+
+| Step | Request | Required answer |
+|---|---|---|
+| 1 | No credentials | `401` or `403` |
+| 2 | Gateway credentials only, no API key (Modal only) | `401` or `403` |
+| 3 | `Authorization: Bearer <api_key>` plus gateway credentials | `2xx` |
+
+- A `2xx` at step 1 or 2 means the endpoint is open. Amicu stops it and fails the apply. If the stop itself fails, the error names the command to run by hand.
+- Any other answer to steps 1 and 2 (connection refused, `404`, `5xx` while the server warms up) is retried, then fails closed: an endpoint whose protection cannot be verified is not reported as deployed.
+- Step 3 retries while the model is still loading (`503`).
+- Retry windows: remote endpoints up to 2 minutes for steps 1 and 2 and 10 minutes for step 3; local endpoints up to 15 minutes each.
+- The request goes straight to the endpoint: no environment HTTP proxy is used, and redirects are not followed, so the key is never sent anywhere else.
+
+Loopback endpoints with no `api_key` skip the check.
+
+## Modal fails closed
+
+Modal puts a proxy in front of the app that requires a Proxy Auth Token. Amicu needs that token to prove the runtime enforces its own key behind the proxy. Without `MODAL_PROXY_TOKEN_ID` and `MODAL_PROXY_TOKEN_SECRET`, `apply` stops in preflight with an error that says `nothing was started`. Create the token in the Modal dashboard under Settings, Proxy Auth Tokens.
+
+vLLM's `--api-key` protects only `/v1/*`; `/metrics` and `/health` stay open behind the proxy, so the proxy token is the second layer. Use both.
+
+## Calling the endpoint
+
+After a successful apply, amicu prints the endpoint with ready-to-copy snippets. They name credentials by environment variable, never by value.
+
+Local, with a key:
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer $LOCAL_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen3.5-8B-Instruct", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+Modal:
+
+```bash
+curl "$URL/v1/chat/completions" \
+  -H "Authorization: Bearer $CHAT_API_KEY" \
+  -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" \
+  -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen3-8B", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+With the OpenAI Python SDK:
+
+```python
+import os
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:8000/v1",
+    api_key=os.environ["LOCAL_API_KEY"],
+)
+reply = client.chat.completions.create(
+    model="Qwen/Qwen3.5-8B-Instruct",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+print(reply.choices[0].message.content)
+```
+
+For Modal, also pass the proxy headers: `OpenAI(base_url=f"{url}/v1", api_key=..., default_headers={"Modal-Key": ..., "Modal-Secret": ...})`. Modal's proxy rejects `Authorization: Bearer` as proxy credentials; the `Modal-Key` and `Modal-Secret` headers are separate.
+
+## Related codes
+
+| Code | Meaning |
+|---|---|
+| `AMICU-POLICY-004` | `api_key` given as a literal |
+| `AMICU-POLICY-007` | Off-machine deployment without `api_key` |
+| `AMICU-POLICY-008` | Resolved key is empty or contains a comma, whitespace, or non-ASCII characters |

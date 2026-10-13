@@ -1,0 +1,59 @@
+---
+title: Status, logs and metrics
+description: Check health, read logs, and scrape runtime metrics for local and Modal deployments.
+---
+
+## Project and host health
+
+```bash
+amicu doctor
+amicu doctor --output json
+```
+
+`doctor` checks the host (OS, memory, free disk), whether `llama-server` is found, whether the project config parses, and whether the state directory is writable. JSON output has the shape `{ "version": "v1", "ok": bool, "checks": [...] }`. A `warn` check does not fail the command; a `fail` check does.
+
+## Local deployments
+
+Local deployments are user services.
+
+- macOS: logs are written under `~/Library/Logs/amicu/`. Inspect the service with `launchctl list` and the plist in `~/Library/LaunchAgents/`.
+- Linux: the service is a transient systemd user unit. Use `systemctl --user status <label>` and the user journal.
+
+The label is `io.amicu.llama.<deployment id>` for llama.cpp. Both runtimes expose `GET /health` and `GET /v1/models` on the port you set. llama.cpp's `/health` is open by design even when an API key is set; `/v1/models` needs the key.
+
+llama-server serves Prometheus metrics at `/metrics` because amicu adds `--metrics`.
+
+## Modal deployments
+
+The `amicu modal` commands work without a project directory. They read `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` from the environment. `<app>` is the app name, `amicu-` plus the deployment id with `_` replaced by `-`.
+
+| Command | Output |
+|---|---|
+| `amicu modal auth-check` | `authenticated`, or an `error:` line if credentials are missing or rejected |
+| `amicu modal status <app>` | App state, then per function `running=N backlog=N` and a `url:` line |
+| `amicu modal logs <app> [--follow] [--since <entry-id>]` | Lines tagged `[stdout]`, `[stderr]`, or `[info]` |
+| `amicu modal metrics <app> [--watch] [--interval N]` | Runtime and hardware snapshot |
+| `amicu modal stop <app>` | Stops the app. Inside a project it also removes the deployment from local state. |
+
+`logs` without `--follow` makes one call held open for about 5 seconds, then returns. `--follow` streams until the app ends or you press Ctrl-C. `--since` resumes just past a log entry id.
+
+A missing app prints `no deployment named <app>` and exits 1.
+
+## Metrics
+
+`amicu modal metrics` scrapes the runtime's `/metrics` endpoint through the app's Modal URL. It needs `MODAL_PROXY_TOKEN_ID` and `MODAL_PROXY_TOKEN_SECRET`. A scaled-to-zero app is woken by the request, so the first call can be slow.
+
+The runtime is detected from the metric names.
+
+| Runtime | Series shown |
+|---|---|
+| vLLM | requests succeeded, running, waiting; prompt and generation tokens; KV cache usage; preemptions; end-to-end latency, time to first token, and time per output token as p50, p90, p99 |
+| llama.cpp | requests processing and deferred; prompt and predicted tokens; tokens per second. Latency percentiles are `n/a`. |
+
+Also shown are per-container hardware metrics (accelerator utilization, memory, temperature, power, container CPU and memory). They come from a fixed read-only probe script run in each container; if it fails, the runtime metrics still print and hardware shows `n/a` with the reason.
+
+Limits:
+
+- Tokens per second needs two scrapes, so it is `n/a (run with --watch)` without `--watch`. The default `--interval` is 5 seconds and the minimum is 1.
+- vLLM percentiles come from lifetime histograms, not a recent window.
+- With `--output json`, each snapshot is one JSON document.
