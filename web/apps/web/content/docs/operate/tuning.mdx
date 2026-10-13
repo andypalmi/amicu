@@ -1,0 +1,36 @@
+---
+title: Tuning
+description: Which deployment fields to change when metrics or memory checks point at a bottleneck.
+---
+
+Amicu has no command that tunes a deployment automatically, and it never changes a running deployment on its own. This page maps what you observe to the fields you can change. Edit the HCL, run `amicu plan`, and apply.
+
+## Before deploying
+
+`validate` and `plan` estimate memory. The plan shows a note such as `estimated peak memory 6656MiB`.
+
+| Finding | What to change |
+|---|---|
+| `AMICU-MEM-001`: model does not fit in VRAM | Smaller quantization, lower `context_length`, more accelerators, or larger hardware |
+| `AMICU-MEM-002`: one artifact exceeds available memory | A smaller variant or different hardware |
+| `AMICU-CAP-010`: vLLM KV cache not estimated | Declare `n_layers`, `n_kv_heads`, and `head_dim` on the [model](/docs/configuration/model) |
+| `AMICU-CAP-004`: `extra_args` set | The fit verdict is unverified; check the real memory use |
+
+Rough sizes: a GGUF file is about parameters times bits per weight divided by 8 (a 7B model at `q4_k_m` is about 4 GiB). vLLM FP16 or BF16 weights are about 2 bytes per parameter, plus KV cache. KV cache grows with `context_length` and concurrency.
+
+## After deploying
+
+Read metrics with [`amicu modal metrics`](/docs/operate/monitoring), then adjust.
+
+| Symptom | Likely cause | Fields to try |
+|---|---|---|
+| High time to first token, healthy time per token | Prefill bound | vLLM: `max_num_batched_tokens`; llama.cpp: `batch_size`, `ubatch_size` |
+| High time per output token | Decode bound | A smaller or more quantized model, faster GPU, `tensor_parallel_size` |
+| Requests waiting, GPU saturated | Under-provisioned | More GPUs, larger-VRAM GPU, `max_replicas` on Modal |
+| vLLM preemptions climbing | KV cache pressure | Raise `gpu_memory_utilization` (up to about 0.95), lower `context_length` or `max_num_seqs`, `kv_cache_dtype = "fp8"` |
+| Low GPU use while you pay for it | Over-provisioned | Fewer or smaller GPUs, lower `min_replicas` |
+| Slow cold starts | Image or compile cost | vLLM: `enforce_eager = true` trades throughput for a faster start |
+
+For llama.cpp memory, `cache_type_k` and `cache_type_v` (for example `q8_0`) shrink the KV cache, and `parallel_slots` splits the total `context_length` across concurrent requests.
+
+These are starting points, not guarantees. Change one field at a time and compare snapshots.

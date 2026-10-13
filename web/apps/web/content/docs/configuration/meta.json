@@ -1,0 +1,16 @@
+{
+  "title": "Configuration",
+  "pages": [
+    "index",
+    "model",
+    "hardware-profile",
+    "deployment",
+    "routing-policy",
+    "data-class",
+    "governance-rule",
+    "budget",
+    "tenant",
+    "use-case",
+    "credential"
+  ]
+}

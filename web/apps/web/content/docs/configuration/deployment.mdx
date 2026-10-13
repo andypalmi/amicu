@@ -1,0 +1,190 @@
+---
+title: deployment
+description: Bind a model to hardware and a runtime, with llama.cpp or vLLM settings.
+---
+
+A `deployment` is the resource that `apply` starts. It binds a `model` to a `hardware_profile` and selects a runtime.
+
+## Examples
+
+llama.cpp on this machine:
+
+```hcl
+resource "deployment" "support_local" {
+  model    = model.qwen3_8b.id
+  hardware = hardware_profile.local_dev.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 8192
+    port           = 8000
+    n_gpu_layers   = -1
+  }
+}
+```
+
+vLLM on Modal with an endpoint key and autoscaling limits:
+
+```hcl
+resource "model" "chat_prod" {
+  source {
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen3-8B"
+  }
+  architecture = "qwen3"
+  modalities   = ["text"]
+  artifact {
+    format = "safetensors"
+  }
+  context_length = 32768
+}
+
+resource "hardware_profile" "modal_a100" {
+  provider = "modal"
+  region   = "eu-west"
+  accelerator {
+    kind   = "gpu"
+    model  = "a100-80gb"
+    count  = 2
+    memory = "80GiB"
+  }
+  memory = "64GiB"
+}
+
+resource "deployment" "chat_prod" {
+  model    = model.chat_prod.id
+  hardware = hardware_profile.modal_a100.id
+  runtime  = "vllm"
+  api_key  = secret("CHAT_API_KEY")
+  vllm {
+    context_length         = 32768
+    port                   = 8000
+    tensor_parallel_size   = 2
+    gpu_memory_utilization = 0.90
+  }
+  scaling {
+    min_replicas     = 0
+    max_replicas     = 1
+    scaledown_window = "15m"
+  }
+}
+```
+
+## Fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `model` | reference | yes | `model.<id>.id` |
+| `hardware` | reference | yes | `hardware_profile.<id>.id` |
+| `runtime` | string | yes | `llama_cpp` or `vllm` |
+| `llama_cpp` | block | with `runtime = "llama_cpp"` | llama.cpp settings |
+| `vllm` | block | with `runtime = "vllm"` | vLLM settings |
+| `api_key` | `secret("NAME")` | off-machine providers | The endpoint's API key, by reference. A literal is rejected (`AMICU-POLICY-004`). Required unless the provider is local (`AMICU-POLICY-007`). |
+| `scaling` | block | no | Autoscaling limits. Modal only. |
+
+### scaling
+
+Every field is optional. Omitted fields keep Modal's defaults. On any other provider the block is an error (`AMICU-CAP-009`).
+
+| Field | Type | Description |
+|---|---|---|
+| `min_replicas` | number | Warm containers. `0` scales to zero. |
+| `max_replicas` | number | Hard cap, at least 1. Omit for unlimited. |
+| `target_concurrency` | number | Requests per container before scaling out, at least 1 |
+| `scaledown_window` | string | Idle time before scale-down: `"90s"`, `"15m"`, `"1h"` |
+
+`min_replicas` must not exceed `max_replicas`. Invalid values are `AMICU-CAP-008`. Without `max_replicas`, a burst of requests can start many GPU containers.
+
+### llama_cpp
+
+`context_length`, `port`, and `n_gpu_layers` are required. Everything else is optional; unset fields use llama-server's defaults.
+
+| Field | Type | llama-server flag | Description |
+|---|---|---|---|
+| `context_length` | number | `--ctx-size` | Total context, shared across slots |
+| `port` | number | `--port` | Bind port. The host is always `127.0.0.1` locally. |
+| `n_gpu_layers` | number | `--n-gpu-layers` | `-1` offloads all layers, `0` is CPU only |
+| `temperature` | number | `--temp` | Sampling temperature |
+| `top_p` | number | `--top-p` | Nucleus cutoff |
+| `top_k` | number | `--top-k` | Top-k cutoff |
+| `min_p` | number | `--min-p` | Min-p cutoff |
+| `repeat_penalty` | number | `--repeat-penalty` | Repetition penalty |
+| `cache_type_k` | string | `--cache-type-k` | `f16`, `bf16`, `q8_0`, `q4_0`, `q4_1`, `q5_0`, `q5_1`, `iq4_nl` |
+| `cache_type_v` | string | `--cache-type-v` | Same values as `cache_type_k` |
+| `batch_size` | number | `--batch-size` | Logical batch size |
+| `ubatch_size` | number | `--ubatch-size` | Physical batch size |
+| `parallel_slots` | number | `--parallel` | Concurrent request slots |
+| `flash_attention` | string | `--flash-attn` | `on`, `off`, or `auto` (not a boolean) |
+| `chat_template` | string | `--chat-template` | Inline Jinja template. Exclusive with `chat_template_file` (`AMICU-CAP-005`). |
+| `chat_template_file` | string | `--chat-template-file` | Path to a Jinja template |
+| `jinja` | bool | `--jinja` / `--no-jinja` | Force Jinja templating on or off |
+| `reasoning_format` | string | `--reasoning-format` | `none`, `deepseek`, `deepseek_legacy`, or `auto` |
+| `build` | string | none | Runtime build pin. Validated and stored; not applied yet. No whitespace. |
+| `extra_args` | list of strings | appended as is | Raw flags. See below. |
+| `env` | block | environment | Extra environment variables. See below. |
+| `speculative` | block | | Speculative decoding |
+| `multimodal` | block | | Vision or audio projector |
+
+`speculative` block:
+
+| Field | Type | Flag | Description |
+|---|---|---|---|
+| `model` | reference | `--model-draft` | The draft `model` resource. It must not be the deployment's own model (`AMICU-CAP-007`). |
+| `n_max` | number | `--spec-draft-n-max` | Maximum drafted tokens per step |
+| `n_min` | number | `--spec-draft-n-min` | Minimum draft tokens |
+| `p_min` | number | `--draft-p-min` | Minimum draft probability |
+| `n_gpu_layers` | number | `--n-gpu-layers-draft` | Draft layers offloaded |
+
+`multimodal` block (llama.cpp only; a `multimodal` block inside `vllm {}` is a schema error):
+
+| Field | Type | Flag | Description |
+|---|---|---|---|
+| `projector` | string | `--mmproj` | Path or reference of the projector GGUF |
+| `offload` | bool | `--mmproj-offload` / `--no-mmproj-offload` | Offload the projector to the accelerator |
+
+### vllm
+
+`context_length` and `port` are required.
+
+| Field | Type | vLLM flag | Description |
+|---|---|---|---|
+| `context_length` | number | `--max-model-len` | Maximum sequence length |
+| `port` | number | `--port` | Bind port |
+| `tensor_parallel_size` | number | `--tensor-parallel-size` | GPUs per replica. Set it to `accelerator.count`; amicu does not derive it. |
+| `gpu_memory_utilization` | number | `--gpu-memory-utilization` | Fraction of VRAM, in (0, 1] |
+| `kv_cache_dtype` | string | `--kv-cache-dtype` | `auto`, `fp8`, `fp8_e5m2`, `fp8_e4m3` |
+| `max_num_seqs` | number | `--max-num-seqs` | Maximum concurrent sequences |
+| `max_num_batched_tokens` | number | `--max-num-batched-tokens` | Maximum batched tokens per iteration |
+| `enforce_eager` | bool | `--enforce-eager` / `--no-enforce-eager` | `true` skips CUDA graph capture for a faster start |
+| `extra_args` | list of strings | appended as is | Raw flags |
+| `env` | block | environment | Extra environment variables |
+
+### extra_args and env
+
+`extra_args` and `env` are the escape hatch for flags that have no typed field.
+
+```hcl
+resource "deployment" "tuned" {
+  model    = model.qwen3_8b.id
+  hardware = hardware_profile.local_dev.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 8192
+    port           = 8001
+    n_gpu_layers   = -1
+    extra_args     = ["--no-warmup"]
+    env {
+      GGML_CUDA_DISABLE_GRAPHS = "1"
+    }
+  }
+}
+```
+
+- A flag that duplicates a typed field is `AMICU-CAP-002`.
+- A denylisted flag or variable is `AMICU-CAP-003`. This covers `--host`, `--api-key`, `--api-key-file`, TLS flags for vLLM, `LLAMA_API_KEY`, `VLLM_API_KEY`, and loader hooks such as `LD_PRELOAD`.
+- Non-empty `extra_args` gives `AMICU-CAP-004` (info): the memory fit result is unverified.
+- Put secrets in `api_key`, never in `env`. An `env` value that looks like a secret gets `AMICU-POLICY-006`.
+
+## Notes
+
+- The plan prints the exact launch command, so you can review every flag.
+- Changing the model, hardware, runtime, or any setting is an `update` action on the next apply.

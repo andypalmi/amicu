@@ -1,0 +1,45 @@
+---
+title: State and backends
+description: Where the CLI keeps state, how locking works, and how to recover from drift.
+---
+
+For what state contains and why it is safe to keep, see [Security: State](/docs/security/state). This page covers operating it.
+
+## Location
+
+The CLI stores state in the project directory:
+
+| Path | Content |
+|---|---|
+| `.amicu/state/state.json` | The applied resource graph and the started endpoints |
+| `.amicu/state/state.lock` | The lock file |
+| `.amicu/config.yaml` | Project config. `init` writes `state.backend: local`. |
+
+`local` is the only state backend the CLI implements. There is no remote state backend for the CLI yet.
+
+Treat `state.json` as sensitive operational data. Do not edit it by hand. Add `.amicu/state/` to version control ignore rules unless you have a reason to share it.
+
+## Locking
+
+`apply` and `amicu modal stop` take an advisory lock on `.amicu/state/state.lock` for their whole read, refresh, plan, apply, and save sequence. The lock belongs to the operating system process: when the process dies, the kernel releases it, so there is no stale lock to clean up.
+
+If another amicu process holds the lock, the command fails with a message naming the holder (pid, command, start time). To wait instead, pass a timeout:
+
+```bash
+amicu apply --lock-timeout 60
+```
+
+## Partial apply
+
+If an apply fails after starting some deployments, those deployments are recorded in state and the error lists them. Fix the cause and run `apply` again: deployments that already succeeded show no change and apply finishes the rest. See [Security: State](/docs/security/state).
+
+## Drift
+
+State can fall out of date if something changes a deployment outside amicu.
+
+- **Modal.** Before each `plan` and `apply`, amicu asks Modal which recorded apps still exist. Apps that are gone are dropped from state and the plan shows a `create`. A `drift:` line is printed (to stderr with `--output json`). If the lookup fails, a `warning: could not check Modal for live apps` is printed and state is used as is.
+- **Local services.** There is no automatic refresh. If you stopped a service by hand, remove the deployment from the configuration and apply, or stop and re-add it. See [Troubleshooting](/docs/troubleshooting).
+
+## Starting over
+
+If state is lost or corrupt, `plan` shows `create` for everything. Stop the running services first (see [This machine](/docs/providers/local) and [Modal](/docs/providers/modal)), then delete the state file and apply. Only do this with explicit intent: amicu forgets what it started.

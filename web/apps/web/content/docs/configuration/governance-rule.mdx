@@ -1,0 +1,40 @@
+---
+title: governance_rule
+description: Allow or deny providers and regions.
+---
+
+A `governance_rule` allows or denies providers and regions. `validate` applies every rule to every deployment.
+
+## Example
+
+```hcl
+resource "data_class" "company_confidential" {
+  sensitivity = "confidential"
+  residency   = ["eu"]
+}
+
+resource "governance_rule" "eu_only" {
+  description       = "EU regions on Modal only"
+  effect            = "allow"
+  data_classes      = [data_class.company_confidential.id]
+  allowed_providers = ["modal"]
+  allowed_regions   = ["eu", "eu-west"]
+}
+```
+
+## Fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `effect` | string | yes | `allow` or `deny` |
+| `description` | string | no | Free text. Do not put secrets here (`AMICU-POLICY-005`). |
+| `data_classes` | list of references | no | `data_class.<id>.id` entries the rule relates to |
+| `allowed_providers` | list of strings | no | Provider ids, for example `modal`, `local_apple` |
+| `allowed_regions` | list of strings | no | Region codes, not jurisdictions |
+
+## Semantics
+
+- With `effect = "allow"`, a provider or region not in the union of all allow lists is rejected. An empty list permits everything.
+- With `effect = "deny"`, a provider or region in the union of all deny lists is rejected. The list fields name what is denied.
+- Provider violations are `AMICU-POLICY-003`; region violations are `AMICU-POLICY-002`.
+- `data_classes` is recorded but does not scope the rule to specific deployments in this version.

@@ -1,0 +1,96 @@
+---
+title: hardware_profile
+description: Declare where a deployment runs.
+---
+
+A `hardware_profile` names the provider, optional region, and the compute a deployment runs on. Capacity checks compare the model against its memory.
+
+## Examples
+
+Apple Silicon, local:
+
+```hcl
+resource "hardware_profile" "dev_mac" {
+  provider = "local_apple"
+  accelerator {
+    kind   = "apple_silicon"
+    model  = "m3_pro"
+    count  = 1
+    memory = "36GiB"
+  }
+  memory = "36GiB"
+}
+```
+
+CPU only, local:
+
+```hcl
+resource "hardware_profile" "cpu_box" {
+  provider = "local_cpu"
+  cpu {
+    model = "ryzen_9_7950x"
+    cores = 16
+  }
+  memory = "64GiB"
+}
+```
+
+Modal, one L4 GPU in the EU:
+
+```hcl
+resource "hardware_profile" "modal_l4" {
+  provider = "modal"
+  region   = "eu-west"
+  accelerator {
+    kind   = "gpu"
+    model  = "l4"
+    count  = 1
+    memory = "24GiB"
+  }
+  memory = "32GiB"
+}
+```
+
+## Fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `provider` | string | yes | `local`, `local_apple`, `local_cpu`, `on_prem`, `modal`, or a preview/planned provider id |
+| `region` | string | no | Provider region code. Used for residency checks. |
+| `accelerator` | block | no | GPU, TPU, or Apple Silicon |
+| `accelerator.kind` | string | yes | `gpu`, `tpu`, `apple_silicon`, or `cpu` |
+| `accelerator.model` | string | yes | Model name, for example `l4`, `h100`, `m4_pro` |
+| `accelerator.count` | number | yes | Number of accelerators |
+| `accelerator.memory` | size | yes | Memory of the accelerator (VRAM or unified memory) |
+| `accelerator.bandwidth_gbps` | number | no | Memory bandwidth in GB/s. Recorded for planning; not read by the fit check yet. |
+| `cpu` | block | no | Host CPU |
+| `cpu.model` | string | yes | CPU model name |
+| `cpu.cores` | number | yes | Core count |
+| `memory` | size | yes | Host RAM |
+| `interconnect` | string | no | `nvlink`, `pcie`, `infiniband`, or `ethernet` |
+| `price` | block | no | Price block with a `per_hour` money block |
+
+```hcl
+resource "hardware_profile" "priced" {
+  provider = "modal"
+  accelerator {
+    kind   = "gpu"
+    model  = "h100"
+    count  = 1
+    memory = "80GiB"
+  }
+  memory = "64GiB"
+  price {
+    per_hour {
+      amount   = 3.95
+      currency = "USD"
+    }
+  }
+}
+```
+
+## Providers
+
+Local providers (`local`, `local_apple`, `local_cpu`, `on_prem`) run on this machine and bind to loopback. Every other provider serves the endpoint off-machine, so its deployments must set `api_key`. See [Providers](/docs/providers).
+
+On Modal, `accelerator.model` and `accelerator.count` become the GPU request (`h100` with `count = 2` becomes `H100:2`), `memory` becomes the container memory request, and `cpu { cores }` becomes the CPU request. Only GPU accelerators are valid on Modal.

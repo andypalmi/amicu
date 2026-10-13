@@ -1,0 +1,187 @@
+---
+title: Modal
+description: Deploy llama.cpp or vLLM to Modal serverless GPUs, with tokens, regions, GPU types, and autoscaling.
+---
+
+A hardware profile with `provider = "modal"` makes `apply` deploy the deployment to Modal as an app. Both `vllm` and `llama_cpp` runtimes work. The model must come from Hugging Face; the container downloads it.
+
+## Credentials
+
+Export these in your shell. Never write values into HCL, and never pass them as flags.
+
+| Variable | Needed for | Notes |
+|---|---|---|
+| `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | `plan`/`apply` refresh, `apply`, every `amicu modal` command | Control plane. A missing one fails with `MODAL_TOKEN_ID is not set` before any Modal call. |
+| `MODAL_PROXY_TOKEN_ID`, `MODAL_PROXY_TOKEN_SECRET` | `apply` verification, calling the endpoint, `amicu modal metrics` | A Proxy Auth Token from the Modal dashboard (Settings, Proxy Auth Tokens). Sent as `Modal-Key` and `Modal-Secret` headers. |
+| The deployment's `api_key` secret, for example `CHAT_API_KEY` | `apply` | The endpoint's own key. Generate it: `export CHAT_API_KEY=$(openssl rand -hex 32)`. |
+| `HF_TOKEN` (optional) | Gated or private Hugging Face repos | Sent as a Modal Secret and injected only into the running container. |
+| `AMICU_MODAL_VLLM_IMAGE`, `AMICU_MODAL_LLAMACPP_IMAGE` (optional) | Override the base image | Process-wide. There is no HCL field for the image. |
+
+Check the control-plane token with `amicu modal auth-check`.
+
+`apply` refuses to start a Modal deployment without the proxy tokens. It needs them to verify that the runtime enforces its own key behind Modal's proxy. Nothing is started if they are missing. See [Endpoint auth](/docs/security/endpoint-auth).
+
+## Example: vLLM
+
+```hcl
+resource "model" "qwen_fp8" {
+  source {
+    registry  = "hugging_face"
+    reference = "RedHatAI/Qwen3.5-9B-FP8-dynamic"
+  }
+  architecture   = "qwen3"
+  modalities     = ["text"]
+  artifact {
+    format       = "safetensors"
+    quantization = "fp8"
+  }
+  context_length = 262144
+}
+
+resource "hardware_profile" "modal_2xl4" {
+  provider = "modal"
+  region   = "eu-west"
+  accelerator {
+    kind   = "gpu"
+    model  = "l4"
+    count  = 2
+    memory = "24GiB"
+  }
+  memory = "64GiB"
+}
+
+resource "deployment" "qwen_tp2" {
+  model    = model.qwen_fp8.id
+  hardware = hardware_profile.modal_2xl4.id
+  runtime  = "vllm"
+  api_key  = secret("QWEN_TP2_API_KEY")
+  vllm {
+    context_length       = 262144
+    port                 = 8000
+    tensor_parallel_size = 2
+    env {
+      NCCL_P2P_DISABLE = "1"
+    }
+  }
+}
+```
+
+`accelerator.count` becomes Modal's GPU string (`L4:2`). Amicu does not derive `tensor_parallel_size` from the count; set it yourself. `NCCL_P2P_DISABLE = "1"` works around an intermittent `NCCL error: unhandled cuda error` on GPUs without NVLink, such as the L4. Plain `env` values are baked into the image, so never put a secret there.
+
+## Example: llama.cpp
+
+A GGUF `variant.file` becomes `-hf <source.reference> -hff <file>`. `variant.size` must be an integer byte size string such as `"8350MiB"`. Amicu appends `--host 0.0.0.0`, `--no-mmproj` (unless the deployment has a `multimodal {}` block), and `--metrics`.
+
+```hcl
+resource "model" "qwen35_9b_gguf" {
+  source {
+    registry  = "hugging_face"
+    reference = "unsloth/Qwen3.5-9B-GGUF"
+  }
+  architecture   = "qwen3"
+  modalities     = ["text"]
+  artifact {
+    format       = "gguf"
+    quantization = "q6_k"
+  }
+  context_length = 32768
+  variant {
+    quantization = "q6_k"
+    file         = "Qwen3.5-9B-UD-Q6_K_XL.gguf"
+    size         = "8350MiB"
+  }
+}
+
+resource "hardware_profile" "modal_l4" {
+  provider = "modal"
+  accelerator {
+    kind   = "gpu"
+    model  = "l4"
+    count  = 1
+    memory = "24GiB"
+  }
+  memory = "32GiB"
+}
+
+resource "deployment" "qwen35_modal" {
+  model    = model.qwen35_9b_gguf.id
+  hardware = hardware_profile.modal_l4.id
+  runtime  = "llama_cpp"
+  api_key  = secret("QWEN35_MODAL_API_KEY")
+  llama_cpp {
+    context_length = 32768
+    port           = 8080
+    n_gpu_layers   = -1
+  }
+}
+```
+
+Flags that refer to local files (`--mmproj`, `--lora`, `--chat-template-file`, a `speculative {}` draft model) and secret-bearing flags (`--hf-token`, `--api-key`) are rejected before any Modal call.
+
+## Regions
+
+`region` is optional. Pinning a region places the app there and multiplies Modal's base price (about 1.15x for broad regions, about 1.75x for narrow ones, per Modal's published region-selection guide). Each region maps to a residency jurisdiction used by [policy checks](/docs/concepts/residency).
+
+| Region code | Jurisdiction | Kind |
+|---|---|---|
+| `us` | `us` | broad |
+| `eu` | `eu` | broad |
+| `ap` | `apac` | broad |
+| `us-east`, `us-central`, `us-south`, `us-west` | `us` | narrow |
+| `eu-west`, `eu-north`, `eu-south` | `eu` | narrow |
+| `uk` | `uk` | narrow |
+| `ca` | `ca` | narrow |
+| `ap-northeast`, `ap-southeast`, `ap-south`, `ap-melbourne`, `jp`, `au` | `apac` | narrow |
+| `me`, `sa`, `af`, `mx` | same as the code | narrow |
+
+The region also selects the proxy region of the web endpoint: `eu`, `eu-west`, `eu-north`, `eu-south`, and `uk` use `eu-west`; `us-west` uses `us-west`; the `ap*`, `jp`, and `au` regions use `ap-south`; everything else uses `us-east`. Modal does not allow the routing region of an existing app to change, so changing `region` on a deployed app requires `amicu modal stop <app>` and a new `apply`.
+
+## GPU types
+
+Set `accelerator.kind = "gpu"` and `accelerator.model` to one of these. The name is upper-cased and passed to Modal. Only GPU accelerators are valid; `tpu`, `cpu`, and `apple_silicon` are rejected before any call.
+
+| `model` | VRAM | Maximum count |
+|---|---|---|
+| `t4` | 16 GiB | 8 |
+| `l4` | 24 GiB | 8 |
+| `a10` | 24 GiB | 4 |
+| `l40s` | 48 GiB | 8 |
+| `a100-40gb` | 40 GiB | 8 |
+| `a100-80gb` | 80 GiB | 8 |
+| `h100` | 80 GiB | 8 |
+| `h200` | 141 GiB | 8 |
+| `b200` | 180 GiB | 8 |
+| `rtx-pro-6000` | 96 GiB | 1 |
+
+The GPU string is not validated against Modal's live catalog at parse time. An unsupported name is rejected by Modal at apply time.
+
+## Resources and defaults
+
+- The profile's `memory` becomes the container memory request. `cpu { cores = N }` becomes the CPU request.
+- Defaults: startup timeout 600 s, scaledown window 900 s, container timeout 3600 s, target concurrency 32, no warm containers, no maximum. Override the autoscaling values with a [`scaling {}`](/docs/configuration/deployment) block.
+- The app is named `amicu-` plus the deployment id, lower-cased, with runs of characters outside `[a-z0-9]` replaced by a single `-`. Deployment `chat_modal` becomes app `amicu-chat-modal`. Use this name with `amicu modal` commands.
+- Weights and compile caches live in Modal volumes shared by all amicu deployments in your workspace (`amicu-hf-cache`, `amicu-vllm-cache`, `amicu-llamacpp-cache`). Only the first run of a model is slow.
+
+## Operating
+
+```bash
+amicu modal status amicu-chat
+amicu modal logs amicu-chat --follow
+amicu modal metrics amicu-chat --watch
+amicu modal stop amicu-chat
+```
+
+See [Monitoring](/docs/operate/monitoring). `plan` and `apply` first reconcile state with Modal, as described in [Plan, apply and state](/docs/concepts/plan-apply-state).
+
+## Calling the endpoint
+
+Two layers of credentials are required: Modal's proxy token and the deployment's key.
+
+```bash
+curl "$URL/v1/models" \
+  -H "Authorization: Bearer $CHAT_API_KEY" \
+  -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" \
+  -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET"
+```
+
+`$URL` is the endpoint `apply` printed, or the `url:` line of `amicu modal status`. A `503` means the container is cold-starting. Thinking models spend `max_tokens` on reasoning, so give a generous `max_tokens` and check `finish_reason`.

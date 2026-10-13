@@ -1,0 +1,113 @@
+---
+title: Error codes
+description: The AMICU-* diagnostic catalog, with meaning and fix.
+---
+
+Diagnostics have the form `AMICU-<CATEGORY>-<NNN>`. The category is the fastest triage signal. Only diagnostics with severity `error` fail a command; warnings and info are advisory.
+
+| Category | Meaning |
+|---|---|
+| `PARSE` | HCL syntax |
+| `SCHEMA` | Missing, unknown, or duplicate fields and ids |
+| `REF` | Reference to a resource that does not exist |
+| `CAP` | Runtime, artifact, or hardware capability mismatch |
+| `MEM` | Model does not fit |
+| `POLICY` | Residency, governance, secrets, endpoint keys |
+| `STATE` | State lock, corruption, or backend |
+| `PROVIDER` | Provider availability, credentials, catalog |
+
+## PARSE
+
+| Code | Severity | Meaning | Fix |
+|---|---|---|---|
+| `AMICU-PARSE-001` | error | An HCL block is not closed | Close the block, then `amicu fmt` |
+| `AMICU-PARSE-002` | error | The HCL text is not syntactically valid | Read the message for the location and fix the syntax |
+
+## SCHEMA
+
+| Code | Severity | Meaning | Fix |
+|---|---|---|---|
+| `AMICU-SCHEMA-001` | error | A required attribute is missing | Add the field named in the message |
+| `AMICU-SCHEMA-002` | error | The same resource id is declared more than once | Rename or remove the duplicate; ids are unique per kind across all files |
+| `AMICU-SCHEMA-003` | error | Unknown attribute or block, usually a typo | Use the suggested name. `env {}` and `labels {}` accept any key. |
+
+## REF
+
+| Code | Severity | Meaning | Fix |
+|---|---|---|---|
+| `AMICU-REF-001` | error | A reference points at an id no resource declares | Correct the `<kind>.<id>.id` expression or add the resource |
+
+## CAP
+
+| Code | Severity | Meaning | Fix |
+|---|---|---|---|
+| `AMICU-CAP-001` | error | The runtime cannot serve the artifact (llama.cpp needs GGUF) | Change the runtime or artifact |
+| `AMICU-CAP-002` | error | An `extra_args` flag duplicates a typed field's flag | Use the typed field |
+| `AMICU-CAP-003` | error | An `extra_args` flag or `env` key is denylisted | Remove it. Use `api_key` for keys. |
+| `AMICU-CAP-004` | info | `extra_args` is non-empty, so the memory fit result is unverified | Check real memory use |
+| `AMICU-CAP-005` | error | `chat_template` and `chat_template_file` are both set | Set one |
+| `AMICU-CAP-006` | warning | GGUF artifact on vLLM (experimental upstream) | Use safetensors, or accept the risk |
+| `AMICU-CAP-007` | error | A `speculative` draft model is the deployment's own model | Reference a different model |
+| `AMICU-CAP-008` | error | Invalid `scaling {}` values | See [deployment](/docs/configuration/deployment) for the allowed ranges |
+| `AMICU-CAP-009` | error | `scaling {}` on a provider with no scaling support | Remove the block or use Modal |
+| `AMICU-CAP-010` | warning | vLLM KV cache not estimated; the model has no `n_layers`, `n_kv_heads`, `head_dim` | Declare the shape on the model |
+
+## MEM
+
+| Code | Severity | Meaning | Fix |
+|---|---|---|---|
+| `AMICU-MEM-001` | error | The model does not fit in available VRAM or memory | Smaller quantization, shorter context, or bigger hardware |
+| `AMICU-MEM-002` | error | A single artifact file exceeds available memory | A smaller variant or different hardware |
+
+## POLICY
+
+| Code | Severity | Meaning | Fix |
+|---|---|---|---|
+| `AMICU-POLICY-002` | error | A region violates the residency or allowed-regions policy, or a deny rule. Also reported when a `secret("NAME")` variable is not set at apply time. | Change the region, or set the environment variable named in the message |
+| `AMICU-POLICY-003` | error | A provider is not allowed, or is denied | Change the provider or the rule |
+| `AMICU-POLICY-004` | error | A secret-designated field was given as a literal | Use `secret("NAME")` |
+| `AMICU-POLICY-005` | warning | A free-text field or comment looks like a secret | Remove it, or add `# amicu:allow` on the line |
+| `AMICU-POLICY-006` | warning | A runtime `env` value looks like a secret | Use a `secret(...)` reference |
+| `AMICU-POLICY-007` | error | An off-machine deployment has no `api_key` | Add `api_key = secret("NAME")` and export `NAME` |
+| `AMICU-POLICY-008` | error | The resolved key is unusable: empty, or has a comma, whitespace, or non-ASCII characters | Regenerate it, for example `openssl rand -hex 32` |
+
+## Not emitted by the CLI
+
+`AMICU-POLICY-001` (budget exceeded) is defined but budgets are not enforced. These codes exist in the shared catalog and in the server and provider libraries. The `amicu` CLI does not emit them today; they are listed so you can recognize them in server output. The CLI reports state-lock and provider failures as plain `error:` messages instead.
+
+### POLICY
+
+| Code | Severity | Meaning |
+|---|---|---|
+| `AMICU-POLICY-001` | error | A deployment exceeds a configured budget |
+| `AMICU-POLICY-010` | error | A referenced secret is unavailable |
+| `AMICU-POLICY-011` | error | The secret backend does not support the requested operation |
+| `AMICU-POLICY-012` | error | The secret backend failed transiently |
+
+### STATE
+
+| Code | Severity | Meaning | Fix |
+|---|---|---|---|
+| `AMICU-STATE-001` | error | State is locked by another operation | Wait, or pass `--lock-timeout` |
+| `AMICU-STATE-002` | error | A push or rollback was attempted without holding the lock | Take the lock first |
+| `AMICU-STATE-003` | error | Recorded state is corrupt | Manual recovery; see [State and backends](/docs/operate/state-and-backends) |
+| `AMICU-STATE-004` | error | The requested history version does not exist | Pick an existing version |
+| `AMICU-STATE-005` | error | The state backend's storage failed (connectivity, driver) | Check the backend and retry |
+
+### PROVIDER
+
+| Code | Severity | Meaning | Fix |
+|---|---|---|---|
+| `AMICU-PROVIDER-001` | error | Requested capacity is unavailable in the region | Try another region or GPU |
+| `AMICU-PROVIDER-002` | error | A model artifact download failed transiently; a retry resumes it | Retry |
+| `AMICU-PROVIDER-003` | warning | Provider capability or pricing data is stale or could not be refreshed | The last snapshot is used; refresh later |
+| `AMICU-PROVIDER-010` | error | The request names an offering the provider does not have | Pick a listed offering |
+| `AMICU-PROVIDER-011` | error | The request names a region the provider does not serve | Pick a listed region |
+| `AMICU-PROVIDER-012` | error | The handle refers to no known provisioned instance | Re-plan |
+| `AMICU-PROVIDER-013` | error | The provider backend failed transiently | Retry |
+| `AMICU-PROVIDER-014` | error | The provider rejected the credential | Check the credential |
+| `AMICU-PROVIDER-015` | error | The operation is permanently unsupported by this adapter (a catalog-only provider) | Use a supported provider; not retryable |
+
+<Callout title="Severity decides">
+  A warning never fails a command. Resolve warnings anyway; for example `AMICU-CAP-010` means the fit check ignores the KV cache.
+</Callout>

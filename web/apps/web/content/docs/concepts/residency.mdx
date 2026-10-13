@@ -1,0 +1,67 @@
+---
+title: Residency and regions
+description: How amicu models data residency, provider regions, and the policy checks built on them.
+---
+
+Placement has two inputs: where data is allowed to be processed (residency), and where a provider runs your deployment (region).
+
+## Residency
+
+Residency is a jurisdiction. A `data_class` lists the jurisdictions it allows:
+
+| Token | Jurisdiction |
+|---|---|
+| `eu` | European Economic Area |
+| `uk` | United Kingdom |
+| `us` | United States |
+| `ca` | Canada |
+| `apac` | Asia-Pacific |
+
+Any other token is accepted and treated as its own jurisdiction.
+
+## Region
+
+A region is the provider location named in a hardware profile, such as `eu-west` on Modal. Each provider catalog maps its region codes to a residency jurisdiction. For Modal, `eu`, `eu-west`, `eu-north`, and `eu-south` resolve to `eu`; `uk` resolves to `uk`; and so on. See [Modal](/docs/providers/modal) for the full list.
+
+The `region` field is optional. A profile without a region is never flagged by residency checks. A region that the provider catalog does not know cannot be proven to violate a constraint, so it is not flagged by the jurisdiction check either.
+
+There is no zone (availability zone) field in the configuration. Adapters that need a zone choose a default for the region.
+
+## What is checked
+
+`validate`, `plan`, and `apply` check every deployment's hardware profile against all `data_class` and `governance_rule` resources in the project:
+
+| Check | Compares | Code |
+|---|---|---|
+| Jurisdiction | The region's jurisdiction against the union of `data_class.residency` | `AMICU-POLICY-002` |
+| Allowed regions | The region code against `allowed_regions` of `allow` rules | `AMICU-POLICY-002` |
+| Denied regions | The region code against `allowed_regions` of `deny` rules | `AMICU-POLICY-002` |
+| Allowed providers | The provider against `allowed_providers` of `allow` rules | `AMICU-POLICY-003` |
+| Denied providers | The provider against `allowed_providers` of `deny` rules | `AMICU-POLICY-003` |
+
+Empty allowlists permit everything.
+
+<Callout title="Scope is project-wide">
+  There is no field that attaches a `data_class` to a single deployment. In this version the checks use the union of every `data_class` and `governance_rule` in the project and apply to every deployment. A violating stack fails validation and never reaches apply.
+</Callout>
+
+## Example
+
+An EU-only stack on Modal:
+
+```hcl
+resource "data_class" "confidential" {
+  sensitivity              = "confidential"
+  residency                = ["eu"]
+  allow_external_providers = false
+}
+
+resource "governance_rule" "eu_only" {
+  effect            = "allow"
+  data_classes      = [data_class.confidential.id]
+  allowed_providers = ["modal"]
+  allowed_regions   = ["eu", "eu-west"]
+}
+```
+
+A deployment whose hardware profile has `provider = "modal"` and `region = "us-east"` now fails with `AMICU-POLICY-002`.

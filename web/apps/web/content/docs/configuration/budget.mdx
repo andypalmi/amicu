@@ -1,0 +1,33 @@
+---
+title: budget
+description: Declare a spend limit per period, optionally for a tenant.
+---
+
+A `budget` records a spend limit and alert thresholds. The CLI parses and stores it; it does not meter spend.
+
+## Example
+
+```hcl
+resource "tenant" "team_research" {
+  display_name = "Research"
+}
+
+resource "budget" "research_monthly" {
+  tenant = tenant.team_research.id
+  limit {
+    amount   = 2000
+    currency = "EUR"
+  }
+  period           = "monthly"
+  alert_thresholds = [0.5, 0.8, 1.0]
+}
+```
+
+## Fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `tenant` | reference | no | `tenant.<id>.id` |
+| `limit` | block | yes | Money block with `amount` (number) and `currency` (string) |
+| `period` | string | yes | `daily`, `weekly`, or `monthly` |
+| `alert_thresholds` | list of numbers | no | Fractions of the limit at which to alert |

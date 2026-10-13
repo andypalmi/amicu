@@ -34,12 +34,17 @@ resource "tenant" "team_research" {
     max_requests_per_minute = 600
     max_concurrent          = 20
   }
-  labels = { cost_center = "rnd" }
+  labels {
+    cost_center = "rnd"
+  }
 }
 
 resource "budget" "research_monthly" {
   tenant           = tenant.team_research.id
-  limit            = "2000 EUR"
+  limit {
+    amount   = 2000
+    currency = "EUR"
+  }
   period           = "monthly"
   alert_thresholds = [0.5, 0.8, 1.0]
 }
@@ -50,4 +55,4 @@ resource "budget" "research_monthly" {
 See the `routing_policy` block in the skill: `target { deployment, weight }` (repeatable)
 splits traffic proportionally; `failover { enabled, health_check_interval_secs,
 max_failures }` drains unhealthy targets. Use `optimize_for` (`latency`, `cost`,
-`quality`) to express intent.
+`balanced`) to express intent.

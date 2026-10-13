@@ -1,0 +1,35 @@
+---
+title: use_case
+description: Describe the requirements a deployment should meet.
+---
+
+A `use_case` records requirements: modalities, context length, latency target, and the data class involved. It is descriptive; `apply` does not act on it.
+
+## Example
+
+```hcl
+resource "data_class" "internal_docs" {
+  sensitivity = "internal"
+  residency   = ["eu"]
+}
+
+resource "use_case" "support_chat" {
+  description         = "Customer support assistant"
+  modalities          = ["text"]
+  min_context_length  = 8192
+  max_latency_ms      = 2000
+  required_data_class = data_class.internal_docs.id
+  priority            = "high"
+}
+```
+
+## Fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `description` | string | no | Free text |
+| `modalities` | list | no | Any of `text`, `vision`, `audio`, `embedding` |
+| `min_context_length` | number | no | Minimum context length |
+| `max_latency_ms` | number | no | Latency target in milliseconds |
+| `required_data_class` | reference | no | `data_class.<id>.id` |
+| `priority` | string | no | `low`, `medium`, or `high` |

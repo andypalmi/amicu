@@ -42,7 +42,11 @@ resource "deployment" "chat_local" {
   model    = model.support_chat.id
   hardware = hardware_profile.dev_mac.id
   runtime  = "llama_cpp"
-  llama_cpp { context_length = 8192, port = 8000, n_gpu_layers = -1 }
+  llama_cpp {
+    context_length = 8192
+    port           = 8000
+    n_gpu_layers   = -1
+  }
 }
 ```
 

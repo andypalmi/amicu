@@ -38,13 +38,18 @@ resource "hardware_profile" "eu_a100" {
   provider = "hetzner"
   region   = "eu-central"
   accelerator {
-    kind   = "nvidia_gpu"
+    kind   = "gpu"
     model  = "a100_80gb"
     count  = 2
     memory = "160GiB"
   }
   memory = "256GiB"
-  price { per_hour = "3.20 EUR" }
+  price {
+    per_hour {
+      amount   = 3.2
+      currency = "EUR"
+    }
+  }
 }
 ```
 
@@ -61,13 +66,18 @@ resource "hardware_profile" "modal_h100" {
   provider = "modal"
   region   = "eu-west"
   accelerator {
-    kind   = "nvidia_gpu"
+    kind   = "gpu"
     model  = "H100"
     count  = 1
     memory = "80GiB"
   }
   memory = "64GiB"
-  price { per_hour = "3.9492 USD" }
+  price {
+    per_hour {
+      amount   = 3.9492
+      currency = "USD"
+    }
+  }
 }
 ```
 

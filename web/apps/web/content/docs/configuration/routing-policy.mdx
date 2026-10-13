@@ -1,0 +1,38 @@
+---
+title: routing_policy
+description: Declare weighted targets, aliases, and failover across deployments.
+---
+
+A `routing_policy` describes how traffic should be split across deployments. It is recorded in the project graph and checked by `validate`. Amicu does not run a gateway for it: clients call each deployment's own endpoint.
+
+## Example
+
+```hcl
+resource "routing_policy" "chat" {
+  aliases      = ["chat", "default"]
+  optimize_for = "latency"
+  target {
+    deployment = deployment.qwen3_8b_local.id
+    weight     = 100
+  }
+  failover {
+    enabled                    = true
+    health_check_interval_secs = 30
+    max_failures               = 3
+  }
+}
+```
+
+## Fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `aliases` | list of strings | no | Names clients use for this policy |
+| `target` | block, repeatable | yes | A deployment and its traffic weight |
+| `target.deployment` | reference | yes | `deployment.<id>.id` |
+| `target.weight` | number | yes | Relative weight |
+| `failover` | block | no | Failover behavior |
+| `failover.enabled` | bool | yes | Turn failover on or off |
+| `failover.health_check_interval_secs` | number | no | Seconds between health checks |
+| `failover.max_failures` | number | no | Failures before a target is drained |
+| `optimize_for` | string | no | `latency`, `cost`, or `balanced` |

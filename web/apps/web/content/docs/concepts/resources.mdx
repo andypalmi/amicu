@@ -1,0 +1,58 @@
+---
+title: Resources and references
+description: The resource kinds amicu understands and how they refer to each other.
+---
+
+Everything in `amicu.hcl` is a `resource` block with two labels: the kind and an id.
+
+```text
+resource "<kind>" "<id>" {
+  # attributes and nested blocks
+}
+```
+
+The id is unique within its kind across all `*.hcl` files in the project. Declaring the same id twice is `AMICU-SCHEMA-002`.
+
+## Kinds
+
+| Kind | Purpose |
+|---|---|
+| [`model`](/docs/configuration/model) | A model, where it comes from, and its artifact |
+| [`hardware_profile`](/docs/configuration/hardware-profile) | The provider, region, accelerator, and memory a deployment runs on |
+| [`deployment`](/docs/configuration/deployment) | Binds a model to hardware and a runtime (`llama_cpp` or `vllm`) |
+| [`routing_policy`](/docs/configuration/routing-policy) | Weighted targets, aliases, and failover across deployments |
+| [`data_class`](/docs/configuration/data-class) | Sensitivity and allowed residency jurisdictions |
+| [`governance_rule`](/docs/configuration/governance-rule) | Allow or deny providers and regions |
+| [`budget`](/docs/configuration/budget) | A spend limit per period |
+| [`tenant`](/docs/configuration/tenant) | A named consumer with quotas and labels |
+| [`use_case`](/docs/configuration/use-case) | A requirements descriptor |
+| [`credential`](/docs/configuration/credential) | A bundle of secret references |
+
+Only `model`, `hardware_profile`, and `deployment` start anything. The other kinds describe policy and intent; `validate` and `plan` check them, and `apply` does not run them as a gateway.
+
+## References
+
+A resource refers to another by id with a traversal expression:
+
+```text
+model    = model.qwen3_8b.id
+hardware = hardware_profile.local_dev.id
+```
+
+The reference form is `<kind>.<id>.id`. A reference to an id that no resource declares fails validation with `AMICU-REF-001`. References create edges in the resource graph; a deployment depends on its model and hardware profile. A `speculative` draft model is also a reference and an edge.
+
+Fields that take a reference:
+
+| Field | Refers to |
+|---|---|
+| `deployment.model` | `model` |
+| `deployment.hardware` | `hardware_profile` |
+| `llama_cpp.speculative.model` | `model` |
+| `routing_policy.target.deployment` | `deployment` |
+| `governance_rule.data_classes` | list of `data_class` |
+| `budget.tenant` | `tenant` |
+| `use_case.required_data_class` | `data_class` |
+
+## Secrets
+
+Secret-designated fields take `secret("NAME")`, not a value. See [Secrets](/docs/security/secrets).

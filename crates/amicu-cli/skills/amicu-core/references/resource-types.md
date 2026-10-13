@@ -7,19 +7,19 @@ another resource by its id: `model.<name>.id`, `hardware_profile.<name>.id`,
 | Kind | Purpose | Key fields |
 |---|---|---|
 | `model` | A servable model + its artifact | `source { registry, reference }`, `architecture`, `modalities`, `artifact { format, quantization }`, `context_length`, `variant { quantization, file, size, sha256 }` (`sha256` verifies the resolved download artifact before fetch, amicu-planning#151), optional shape metadata `n_layers`, `n_kv_heads`, `head_dim` (declared, not derived - feeds the KV-cache estimator, amicu-planning#151), plus optional `n_kv_layers` for hybrid-attention models (see `deployment-examples.md`) |
-| `hardware_profile` | Where a deployment runs | `provider`, `region`, `accelerator { kind, model, count, memory }`, `cpu { model, cores }`, `memory`, `price { per_hour }` |
+| `hardware_profile` | Where a deployment runs | `provider`, `region`, `accelerator { kind, model, count, memory }`, `cpu { model, cores }`, `memory`, `price { per_hour { amount, currency } }` |
 | `deployment` | Binds a model to hardware + runtime | `model`, `hardware`, `runtime` (`llama_cpp`/`vllm`), an optional `api_key = secret("NAME")` (the endpoint's API key by reference; a literal is `AMICU-POLICY-004`; required for any off-machine provider such as `modal`, else `AMICU-POLICY-007`; delivered to the runtime as `LLAMA_API_KEY`/`VLLM_API_KEY`, never argv; `plan` shows `******`; see `modal-deployment.md`), an optional `scaling { min_replicas, max_replicas, target_concurrency, scaledown_window }` block (amicu-planning#180: Modal-only today, invalid values `AMICU-CAP-008`, other providers `AMICU-CAP-009`; see `modal-deployment.md`), plus a `llama_cpp {}` or `vllm {}` settings block (both also take an `extra_args` array and an `env {}` block - the raw-flag escape hatch, amicu-planning#150). `llama_cpp {}` additionally takes `temperature`, `top_p`, `top_k`, `min_p`, `repeat_penalty`, `cache_type_k`/`cache_type_v`, `batch_size`, `ubatch_size`, `parallel_slots`, `flash_attention` (amicu-planning#151 PR A), `chat_template`/`chat_template_file` (mutually exclusive, `AMICU-CAP-005` if both are set), `jinja`, `reasoning_format`, `build` (stored/validated only, not yet rendered - amicu-planning#151 PR B), a nested `speculative {}` block (amicu-planning#151 PR C: a required `model` *reference to a second model resource* - the draft model, a real graph edge - plus optional `n_max`, `n_min`, `p_min`, `n_gpu_layers`; drafting with the deployment's own model is `AMICU-CAP-007`), and a `multimodal { projector, offload }` block (vision/audio projector, backs the `Modality::Vision` capability; llama.cpp-only - a `multimodal` block on `vllm {}` is a schema error - amicu-planning#151 PR D). See `deployment-examples.md`. `vllm {}` additionally takes `kv_cache_dtype`, `max_num_seqs`, `max_num_batched_tokens`, `enforce_eager` (bool; `true` → `--enforce-eager`/no CUDA graphs, `false` → `--no-enforce-eager`, unset → vLLM's own default - amicu-planning#158; same issue, no sampling-defaults equivalent) |
-| `routing_policy` | Traffic routing across deployments | `aliases`, `target { deployment, weight }`, `failover`, `optimize_for` |
+| `routing_policy` | Traffic routing across deployments | `aliases`, `target { deployment, weight }`, `failover`, `optimize_for` (`latency`/`cost`/`balanced`) |
 | `data_class` | Sensitivity + residency | `sensitivity`, `residency` (jurisdictions: `eu`/`uk`/`us`/`ca`/`apac`), `allow_external_providers`, `handling` |
 | `governance_rule` | Allow/deny by policy | `effect`, `data_classes`, `allowed_providers`, `allowed_regions` |
-| `budget` | Spend limits | `tenant`, `limit`, `period`, `alert_thresholds` |
-| `tenant` | Logical consumer | `display_name`, `quota { max_requests_per_minute, max_concurrent }`, `labels` |
+| `budget` | Spend limits | `tenant`, `limit { amount, currency }`, `period`, `alert_thresholds` |
+| `tenant` | Logical consumer | `display_name`, `quota { max_requests_per_minute, max_concurrent }`, `labels {}` (a block of string pairs) |
 | `use_case` | Requirement descriptor | `modalities`, `min_context_length`, `max_latency_ms`, `required_data_class`, `priority` |
 
 Enums seen in validation: runtimes `llama_cpp`, `vllm`; artifact formats
 include `gguf` and `safetensors`; quantizations include `q4_k_m`, `q5_k_m`,
-`q6_k`, `q8_0`, `fp8`, `int8`, `int4`, `f16`, `bf16`, `f32`; accelerator kinds include
-`apple_silicon` and `nvidia_gpu`; `cache_type_k`/`cache_type_v` (llama.cpp)
+`q6_k`, `q8_0`, `fp8`, `int8`, `int4`, `f16`, `bf16`, `f32`; accelerator kinds are
+`gpu`, `tpu`, `apple_silicon` and `cpu`; `cache_type_k`/`cache_type_v` (llama.cpp)
 accept `f16`, `bf16`, `q8_0`, `q4_0`, `q4_1`, `q5_0`, `q5_1`, `iq4_nl`;
 `flash_attention` accepts `on`, `off`, `auto` (not a boolean); `reasoning_format`
 (llama.cpp, amicu-planning#151) accepts `none`, `deepseek`, `deepseek_legacy`,

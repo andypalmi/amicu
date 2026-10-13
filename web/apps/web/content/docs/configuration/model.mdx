@@ -1,0 +1,78 @@
+---
+title: model
+description: Declare a model, its source, and its artifact.
+---
+
+A `model` names what to serve and which artifact to use. It does not start anything on its own.
+
+## Example
+
+```hcl
+resource "model" "support_chat" {
+  source {
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen2.5-7B-Instruct"
+  }
+  architecture   = "qwen2"
+  modalities     = ["text"]
+  artifact {
+    format       = "gguf"
+    quantization = "q4_k_m"
+  }
+  context_length = 8192
+  variant {
+    quantization = "q4_k_m"
+    file         = "qwen2.5-7b-instruct-q4_k_m.gguf"
+    size         = "4GiB"
+  }
+}
+```
+
+For vLLM, use a safetensors artifact and no `variant` blocks:
+
+```hcl
+resource "model" "chat_prod" {
+  source {
+    registry  = "hugging_face"
+    reference = "meta-llama/Llama-3.1-8B-Instruct"
+  }
+  architecture   = "llama"
+  modalities     = ["text"]
+  artifact {
+    format = "safetensors"
+  }
+  context_length = 32768
+}
+```
+
+## Fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `source` | block | yes | Where the model comes from |
+| `source.registry` | string | yes | `hugging_face`, `ollama`, `url`, or `local` |
+| `source.reference` | string | yes | Registry reference, for example `org/name` on Hugging Face |
+| `architecture` | string | yes | Model architecture label, for example `llama`, `qwen3` |
+| `modalities` | list | yes | Any of `text`, `vision`, `audio`, `embedding` |
+| `artifact` | block | yes | The weight format to serve |
+| `artifact.format` | string | yes | `gguf`, `safetensors`, `pytorch`, or `onnx` |
+| `artifact.quantization` | string | no | See quantization values below. Omit for full precision. |
+| `context_length` | number | no | The model's maximum context length |
+| `variant` | block, repeatable | no | A concrete GGUF file; one per quantization you intend to serve |
+| `variant.quantization` | string | yes | Quantization of this file |
+| `variant.file` | string | yes | File name |
+| `variant.size` | size string | no | File size as an integer with an optional unit, for example `"4GiB"` or `"8350MiB"`. Fractions such as `"4.5GiB"` are not accepted. |
+| `variant.sha256` | string | no | 64 hex characters. Parsed and stored; not checked yet, because amicu does not download weights. |
+| `n_layers` | number | no | Transformer layers. Feeds the KV-cache estimate. |
+| `n_kv_heads` | number | no | Key/value heads. Feeds the KV-cache estimate. |
+| `head_dim` | number | no | Attention head dimension. Feeds the KV-cache estimate. |
+| `n_kv_layers` | number | no | Layers that hold a KV cache, for hybrid-attention models. At most `n_layers`. |
+
+Quantization values: `f32`, `f16`, `bf16`, `fp8`, `int8`, `int4`, `q4_k_m`, `q5_k_m`, `q6_k`, `q8_0`.
+
+`n_layers`, `n_kv_heads`, and `head_dim` are declared, never derived. Without them the vLLM fit check covers weights only and `validate` warns with `AMICU-CAP-010`.
+
+## Notes
+
+- llama.cpp needs a GGUF artifact (`AMICU-CAP-001` otherwise). vLLM with GGUF is experimental upstream and warns with `AMICU-CAP-006`.
+- On Modal the model source must be Hugging Face; the container downloads it.

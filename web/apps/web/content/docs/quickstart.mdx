@@ -1,0 +1,225 @@
+---
+title: Quickstart
+description: Install amicu, deploy a model on your machine or on Modal, send a request, and tear it down.
+---
+
+## 1. Choose a provider
+
+| Provider | Runtime | Status |
+|---|---|---|
+| This machine (macOS or Linux) | llama.cpp or vLLM | Supported |
+| Modal | llama.cpp or vLLM | Supported |
+| Hetzner, OVHcloud, Scaleway, RunPod, SSH | | Preview: `apply` is not wired up yet |
+| AWS, Azure, GCP, Nebius | | Planned |
+
+Pick one of the two supported paths below. Steps 2 and 3 are shared.
+
+## 2. Install
+
+There is no published binary yet. Build from source with Rust 1.97 or newer.
+
+```bash
+git clone https://github.com/andypalmi/amicu.git
+cd amicu
+cargo build --release -p amicu-cli
+export PATH="$PWD/target/release:$PATH"
+amicu --help
+```
+
+## 3. Initialize a project
+
+Create an empty directory and run `init` in it.
+
+```bash
+mkdir my-stack && cd my-stack
+amicu init
+```
+
+`init` creates `amicu.hcl` (a starter config), `variables.amicu.hcl` (a placeholder), and `.amicu/` (project config and state). It never overwrites existing files.
+
+## Path A: this machine (llama.cpp)
+
+Requirements:
+
+- `llama-server` from llama.cpp on your `PATH` (on macOS, `brew install llama.cpp`). `apply` resolves it from `PATH` to an absolute path and fails with `llama-server not found on PATH; install with ...` if it is missing. `amicu doctor` reports whether it is found.
+- A GGUF file for the model. Amicu does not download it; you do, once.
+
+### The starter config
+
+`amicu init` writes this `amicu.hcl`. It serves `Qwen/Qwen3-8B-GGUF` (`Qwen3-8B-Q4_K_M.gguf`, about 5 GB) with llama.cpp:
+
+```hcl
+resource "model" "qwen3_8b" {
+  source {
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen3-8B-GGUF"
+  }
+  architecture   = "qwen3"
+  modalities     = ["text"]
+  artifact {
+    format       = "gguf"
+    quantization = "q4_k_m"
+  }
+  context_length = 100000
+  variant {
+    quantization = "q4_k_m"
+    file         = "Qwen3-8B-Q4_K_M.gguf"
+    size         = "5027783488"
+  }
+}
+
+resource "hardware_profile" "local_dev" {
+  provider = "local_apple"
+  accelerator {
+    kind   = "apple_silicon"
+    model  = "m4_pro"
+    count  = 1
+    memory = "48GiB"
+  }
+  memory = "48GiB"
+}
+
+resource "deployment" "qwen3_8b_local" {
+  model    = model.qwen3_8b.id
+  hardware = hardware_profile.local_dev.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 100000
+    port           = 8000
+    n_gpu_layers   = -1
+  }
+}
+```
+
+Edit `hardware_profile` to match your machine. On Linux without a GPU use `provider = "local_cpu"` with a `cpu {}` block instead; see [Hardware profile](/docs/configuration/hardware-profile). Lower `context_length` if memory is tight.
+
+### Get the GGUF
+
+The model resource id decides where the file goes: `models/<model id>/<variant.file>` relative to the project directory. Here that is `models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf`. You can instead set `variant.file` to an absolute path.
+
+```bash
+mkdir -p models/qwen3_8b
+curl -L -o models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf \
+  https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf
+```
+
+For gated or private repos, add `-H "Authorization: Bearer $HF_TOKEN"`.
+
+### Validate, plan, apply
+
+```bash
+amicu doctor
+amicu validate
+amicu plan
+amicu apply
+```
+
+`plan` prints the exact `llama-server` command, including the absolute model path `<project dir>/models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf`. `apply` shows the plan, asks for approval, installs a user service (launchd on macOS, systemd on Linux), starts it, and waits up to 15 minutes for `/health` to answer. If the service exits during startup, apply fails within seconds. On any failure it stops the service and the error gives the log location. See [This machine](/docs/providers/local).
+
+### Send a request
+
+The deployment has no `api_key`, so no header is needed; the endpoint is bound to `127.0.0.1`.
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen3-8B-GGUF", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+If the request fails, check that the service is running and read its log: on macOS `~/Library/Logs/amicu/<label>.out.log` and `<label>.err.log`, on Linux `journalctl --user --unit=<label>`. The label is `io.amicu.llama.qwen3_8b_local`. A missing or wrong GGUF path is the usual cause; confirm the file exists where the plan's `launch:` line says.
+
+To require a key even locally, add `api_key = secret("LOCAL_API_KEY")` to the deployment and export `LOCAL_API_KEY` before `apply`. See the next path for the request format.
+
+## Path B: Modal
+
+Requirements: a Modal account, and four token values exported in your shell. `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` authenticate the control plane. `MODAL_PROXY_TOKEN_ID` and `MODAL_PROXY_TOKEN_SECRET` are a Proxy Auth Token (Modal dashboard, Settings, Proxy Auth Tokens); `apply` uses them to verify the endpoint and you use them to call it. Every Modal deployment also needs its own API key.
+
+```bash
+export MODAL_TOKEN_ID=...
+export MODAL_TOKEN_SECRET=...
+export MODAL_PROXY_TOKEN_ID=...
+export MODAL_PROXY_TOKEN_SECRET=...
+export CHAT_API_KEY=$(openssl rand -hex 32)
+amicu modal auth-check
+```
+
+Replace the contents of `amicu.hcl` with:
+
+```hcl
+resource "model" "qwen" {
+  source {
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen3-8B"
+  }
+  architecture   = "qwen3"
+  modalities     = ["text"]
+  artifact {
+    format = "safetensors"
+  }
+  context_length = 32768
+}
+
+resource "hardware_profile" "modal_l4" {
+  provider = "modal"
+  region   = "eu-west"
+  accelerator {
+    kind   = "gpu"
+    model  = "l4"
+    count  = 1
+    memory = "24GiB"
+  }
+  memory = "32GiB"
+}
+
+resource "deployment" "chat" {
+  model    = model.qwen.id
+  hardware = hardware_profile.modal_l4.id
+  runtime  = "vllm"
+  api_key  = secret("CHAT_API_KEY")
+  vllm {
+    context_length = 8192
+    port           = 8000
+  }
+}
+```
+
+```bash
+amicu validate
+amicu plan
+amicu apply
+```
+
+`plan` shows `api_key: ******` and never reads `CHAT_API_KEY`. `apply` builds the image, starts the app, and then checks that the endpoint rejects anonymous requests and accepts your key. The first deploy downloads the weights and can take several minutes. See [Modal](/docs/providers/modal).
+
+When apply finishes it prints the endpoint URL and a ready-to-copy `curl` command. Both layers of credentials are required:
+
+```bash
+curl "$URL/v1/chat/completions" \
+  -H "Authorization: Bearer $CHAT_API_KEY" \
+  -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" \
+  -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "Qwen/Qwen3-8B", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+`validate` and `plan` print the warning `AMICU-CAP-010` here, because the model does not declare `n_layers`, `n_kv_heads`, and `head_dim`. It is expected: the fit check then covers weights only. Declare the shape on the model to silence it.
+
+A `503` while the container cold-starts is normal. Watch it with `amicu modal logs amicu-chat --follow`.
+
+## 4. Tear down
+
+There is no `destroy` command. Amicu removes what is no longer declared: delete the `deployment` resource from your HCL and run `amicu apply`. The plan shows a `destroy` action and apply stops the service.
+
+For a Modal app you can also stop it directly:
+
+```bash
+amicu modal stop amicu-chat
+```
+
+Run this inside the project directory to also remove the deployment from local state.
+
+## Next
+
+- [Plan, apply and state](/docs/concepts/plan-apply-state)
+- [Configuration](/docs/configuration)
+- [Troubleshooting](/docs/troubleshooting)

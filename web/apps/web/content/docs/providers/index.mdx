@@ -1,0 +1,28 @@
+---
+title: Providers
+description: Where amicu can deploy today, and what is still in preview.
+---
+
+A provider is set by `provider` on a [`hardware_profile`](/docs/configuration/hardware-profile). It decides where `apply` runs the deployment.
+
+| Provider id | Where | `apply` | Endpoint |
+|---|---|---|---|
+| `local`, `local_apple`, `local_cpu`, `on_prem` | This machine | Supported | Loopback. `api_key` optional. |
+| `modal` | Modal serverless GPU | Supported | Public. `api_key` required. |
+| `hetzner`, `ovhcloud`, `scaleway`, `runpod`, SSH hosts | | Preview: not wired into `apply` | |
+| `aws`, `azure`, `gcp`, `nebius` | | Planned: catalog data only | |
+
+A deployment whose provider `apply` cannot run fails with an error before anything starts. It does not fall back to running locally.
+
+- [This machine](/docs/providers/local): launchd and systemd user services.
+- [Modal](/docs/providers/modal): tokens, regions, GPU types, scaling.
+- [Preview providers](/docs/providers/preview): status of the rest.
+
+## Off-machine providers
+
+Every provider other than the four local ones serves the endpoint off the machine, so:
+
+- the deployment must declare `api_key = secret("NAME")` (`AMICU-POLICY-007` otherwise), and
+- `apply` verifies the endpoint rejects anonymous requests.
+
+See [Endpoint auth](/docs/security/endpoint-auth).
