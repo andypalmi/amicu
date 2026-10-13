@@ -141,7 +141,7 @@ export function CandidateReview({
         onChange={(e) => editHcl(e.target.value)}
         spellCheck={false}
         className="min-h-[24rem] resize-y font-mono text-xs leading-relaxed"
-        aria-label="Editable Amicu HCL configuration for this candidate"
+        aria-label="Editable amicu HCL configuration for this candidate"
       />
       <p className="text-xs text-muted-foreground">
         Edit the HCL, then Review changes to re-validate it and diff it against this

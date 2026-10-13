@@ -5,7 +5,7 @@ import { Body, LegalPage, requireEnabled } from '../_components/legal';
 
 export const metadata: Metadata = pageMetadata({
   title: 'Terms of Service',
-  description: 'Terms governing use of Amicu.',
+  description: 'Terms governing use of amicu.',
   path: '/terms',
 });
 

@@ -17,7 +17,7 @@ export default async function AppHomePage() {
     <PageShell size="lg">
       <PageHeader
         title="Console"
-        description="Write your Amicu configuration, validate it, and plan the changes Amicu would apply. Toggle a prior configuration to see a diff."
+        description="Write your amicu configuration, validate it, and plan the changes amicu would apply. Toggle a prior configuration to see a diff."
       />
 
       <EngineConsole />

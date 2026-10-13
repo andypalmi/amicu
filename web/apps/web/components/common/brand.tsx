@@ -1,67 +1,18 @@
-import type { SVGProps } from 'react';
 import { cn } from '@amicu/ui';
-import { appName } from '@/lib/shared';
-import { brandMarkShapes } from '@/lib/brand-shapes';
 
-// Shared product brand mark. The app otherwise presents itself as a plain text
-// wordmark (see `appName` / the fumadocs nav title), so the mark here is the
-// first real logo the product has. It is deliberately monochrome: the "Signal"
-// palette is neutral graphite and keeps its orange for primary actions, focus
-// and key highlights only, so the mark draws with `currentColor` and inherits
-// the surrounding foreground in either theme.
-//
-// Inline SVG only (strict CSP forbids external images/fonts). Reusable: import
-// `BrandMark` for the glyph alone, or `Brand` for the mark + wordmark lockup.
-
-/**
- * The Amicu monogram: an outline "A" set in a rounded square, drawn in
- * `currentColor`. Decorative by default (`aria-hidden`) since the wordmark
- * carries the accessible name in the `Brand` lockup; pass a `title`/role via
- * props when used on its own.
- */
-export function BrandMark({ className, ...props }: SVGProps<SVGSVGElement>) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.75}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={cn('h-6 w-6', className)}
-      aria-hidden
-      {...props}
-    >
-      {brandMarkShapes()}
-    </svg>
-  );
-}
+// Shared product logo: the typed lowercase "amicu" wordmark, set in the
+// foreground colour so it follows light and dark themes. The marketing header,
+// footer and auth screens all render this one component.
 
 export interface BrandProps {
-  /** Size of the monogram; the wordmark scales with the surrounding text. */
+  /** Size and spacing overrides; the wordmark scales with the font size. */
   className?: string;
-  /** Additional classes for the mark glyph. */
-  markClassName?: string;
-  /** Hide the wordmark and render the monogram only. */
-  markOnly?: boolean;
 }
 
-/**
- * Brand lockup: monogram + "Amicu" wordmark. Neutral, token-driven, and safe to
- * drop anywhere the current foreground color is appropriate (auth surface,
- * headers, footers). Render inside a `<Link>` or `<a>` when it should navigate.
- */
-export function Brand({ className, markClassName, markOnly = false }: BrandProps) {
+export function Brand({ className }: BrandProps) {
   return (
-    <span
-      className={cn('inline-flex items-center gap-2 tracking-tight', className)}
-    >
-      <BrandMark className={markClassName} />
-      {markOnly ? (
-        <span className="sr-only">{appName}</span>
-      ) : (
-        <span className="text-lg font-semibold leading-none">{appName}</span>
-      )}
+    <span className={cn('text-xl font-semibold leading-none tracking-tight', className)}>
+      amicu
     </span>
   );
 }

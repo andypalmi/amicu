@@ -5,7 +5,7 @@ import { Body, LegalPage, requireEnabled } from '../_components/legal';
 
 export const metadata: Metadata = pageMetadata({
   title: 'Privacy Policy',
-  description: 'How Amicu handles personal data and cookies.',
+  description: 'How amicu handles personal data and cookies.',
   path: '/privacy',
 });
 
@@ -26,7 +26,7 @@ export default function PrivacyPage() {
       {/* Factual inventory of what the app sets in the browser. */}
       <h2>Cookies and local storage</h2>
       <p>
-        Amicu sets only strictly necessary storage. No analytics or advertising cookies are used.
+        amicu sets only strictly necessary storage. No analytics or advertising cookies are used.
       </p>
       <ul>
         <li>

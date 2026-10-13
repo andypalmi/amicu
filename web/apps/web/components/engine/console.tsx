@@ -125,7 +125,7 @@ export function EngineConsole() {
           onChange={(e) => setConfig(e.target.value)}
           spellCheck={false}
           className={editorClass}
-          aria-label="Amicu HCL configuration"
+          aria-label="amicu HCL configuration"
         />
 
         <label className="flex items-center gap-2 text-sm">
@@ -150,7 +150,7 @@ export function EngineConsole() {
               spellCheck={false}
               placeholder="Leave empty to plan everything as a fresh create."
               className={editorClass}
-              aria-label="Prior Amicu HCL configuration"
+              aria-label="Prior amicu HCL configuration"
             />
           </div>
         ) : null}
@@ -176,7 +176,7 @@ export function EngineConsole() {
           <p className="text-sm text-muted-foreground">
             {pending
               ? 'Running…'
-              : 'Validate to check the configuration, or Plan to see the actions Amicu would take.'}
+              : 'Validate to check the configuration, or Plan to see the actions amicu would take.'}
           </p>
         ) : null}
 

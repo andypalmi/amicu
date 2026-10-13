@@ -18,7 +18,7 @@ export default async function ManualConfigPage() {
     <PageShell size="lg">
       <PageHeader
         title="New configuration"
-        description="Write your own Amicu HCL from scratch, validate it against the engine, and save it - nothing is applied."
+        description="Write your own amicu HCL from scratch, validate it against the engine, and save it - nothing is applied."
       />
 
       <HclResult result={{ hcl: '' }} />
