@@ -100,6 +100,25 @@ enum Command {
         #[command(subcommand)]
         command: ModalCommand,
     },
+    /// Opt in or out of anonymous performance telemetry. Off by default; does
+    /// not require a project.
+    ///
+    /// Overrides: `AMICU_TELEMETRY=0|1`, and `DO_NOT_TRACK=1` always forces
+    /// off. No telemetry data is collected or sent yet.
+    Telemetry {
+        #[command(subcommand)]
+        command: TelemetryCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TelemetryCommand {
+    /// Opt in to sharing aggregate performance metrics.
+    Enable,
+    /// Opt out (the default).
+    Disable,
+    /// Show the effective setting and where it comes from.
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -241,7 +260,20 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
         };
     }
 
+    if let Command::Telemetry { command } = &cli.command {
+        return match command {
+            TelemetryCommand::Enable => commands::telemetry::enable(out),
+            TelemetryCommand::Disable => commands::telemetry::disable(out),
+            TelemetryCommand::Status => commands::telemetry::status(cli.output, out),
+        };
+    }
+
     let project = Project::discover()?;
+    // One-time, interactive-only consent question (amicu-planning#229). Lives
+    // here, not in the command bodies, so command tests never reach a TTY.
+    if matches!(cli.command, Command::Init | Command::Apply { .. }) {
+        commands::telemetry::consent_prompt();
+    }
     match &cli.command {
         Command::Init => commands::init::run(&project, out),
         Command::Fmt { check } => commands::fmt::run(&project, *check, out),
@@ -259,7 +291,7 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
         ),
         Command::Doctor => commands::doctor::run(&project, cli.output, out),
         Command::Orphans => commands::orphans::run(&project, cli.output, out),
-        Command::Skill { .. } | Command::Modal { .. } => {
+        Command::Skill { .. } | Command::Modal { .. } | Command::Telemetry { .. } => {
             unreachable!("handled before project discovery")
         }
     }
