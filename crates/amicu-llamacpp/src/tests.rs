@@ -69,6 +69,7 @@ fn gguf_model(sizes: &[(Quantization, &str, u64)]) -> Model {
             .collect(),
         n_layers: None,
         n_kv_heads: None,
+        n_kv_layers: None,
         head_dim: None,
     }
 }

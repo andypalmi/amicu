@@ -151,9 +151,10 @@ fn vllm_kv_bytes_per_element(dtype: amicu_core::resource::VllmKvCacheDtype) -> f
 /// declares full shape metadata (amicu-planning#152's fit-estimate formula:
 /// "weights + kv cache only").
 ///
-/// `ctx × n_layers × n_kv_heads × head_dim × 2 × bytes_per_element(dtype)`:
-/// one K vector and one V vector per attention head per layer per cached
-/// token - vLLM applies a single `--kv-cache-dtype` to both K and V, unlike
+/// `ctx × kv_layers × n_kv_heads × head_dim × 2 × bytes_per_element(dtype)`,
+/// where `kv_layers` is [`amicu_core::resource::Model::kv_layers`] (only the
+/// full-attention layers for a hybrid-attention model): one K vector and one
+/// V vector per attention head per KV-holding layer per cached token - vLLM applies a single `--kv-cache-dtype` to both K and V, unlike
 /// llama.cpp's independently-settable `-ctk`/`-ctv`. `dtype` defaults to
 /// [`amicu_core::resource::VllmKvCacheDtype::Auto`] when
 /// `settings.kv_cache_dtype` is unset, matching vLLM's own CLI default.
@@ -162,7 +163,7 @@ fn kv_cache_params(
     settings: &VllmSettings,
 ) -> Option<ByteSize> {
     let (Some(n_layers), Some(n_kv_heads), Some(head_dim)) =
-        (model.n_layers, model.n_kv_heads, model.head_dim)
+        (model.kv_layers(), model.n_kv_heads, model.head_dim)
     else {
         return None;
     };
@@ -182,6 +183,22 @@ fn kv_cache_params(
     Some(ByteSize::from_bytes(
         bytes.round().clamp(0.0, u64::MAX as f64) as u64,
     ))
+}
+
+/// `AMICU-CAP-010`: the model's shape is unknown, so the KV cache is not in
+/// the memory estimate. Warning, not a block - see
+/// [`catalog::CAP_KV_CACHE_NOT_ESTIMATED`].
+fn kv_cache_not_estimated_diagnostic(settings: &VllmSettings) -> Diagnostic {
+    Diagnostic::new(
+        catalog::CAP_KV_CACHE_NOT_ESTIMATED,
+        Severity::Warning,
+        format!(
+            "kv cache: not estimated (model shape unknown; set n_layers, n_kv_heads, head_dim \
+             on the model); the fit check covers weights only, and a {}-token context may need \
+             far more",
+            settings.context_length
+        ),
+    )
 }
 
 /// The leading flag token of one `extra_args` entry. See
@@ -344,6 +361,9 @@ impl RuntimeAdapter for VllmAdapter {
         );
         if let Some(diag) = report.diagnostic {
             out.push(diag);
+        }
+        if kv_cache.is_none() {
+            out.push(kv_cache_not_estimated_diagnostic(settings));
         }
         out
     }

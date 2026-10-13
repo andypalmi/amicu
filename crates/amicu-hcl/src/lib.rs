@@ -100,6 +100,7 @@ mod tests {
             variants: Vec::new(),
             n_layers: None,
             n_kv_heads: None,
+            n_kv_layers: None,
             head_dim: None,
         }
     }
@@ -1260,6 +1261,7 @@ mod tests {
         g.models[0].n_layers = Some(32);
         g.models[0].n_kv_heads = Some(8);
         g.models[0].head_dim = Some(128);
+        g.models[0].n_kv_layers = Some(8);
         let formatted = format_graph(&g).unwrap();
         let reparsed = parse_graph(&formatted).unwrap();
         assert_eq!(g, reparsed, "round trip through:\n{formatted}");
@@ -1273,6 +1275,7 @@ mod tests {
         assert!(!formatted.contains("n_layers"));
         assert!(!formatted.contains("n_kv_heads"));
         assert!(!formatted.contains("head_dim"));
+        assert!(!formatted.contains("n_kv_layers"));
     }
 
     #[test]

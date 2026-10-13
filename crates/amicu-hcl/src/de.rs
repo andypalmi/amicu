@@ -112,6 +112,7 @@ fn model(name: &str, f: &Fields) -> Result<Model> {
         n_layers: f.opt_u32("n_layers")?,
         n_kv_heads: f.opt_u32("n_kv_heads")?,
         head_dim: f.opt_u32("head_dim")?,
+        n_kv_layers: f.opt_u32("n_kv_layers")?,
     })
 }
 
