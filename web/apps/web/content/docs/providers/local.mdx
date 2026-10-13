@@ -33,6 +33,8 @@ Hardware profiles with `provider` set to `local`, `local_apple`, `local_cpu`, or
 
 A profile with no `provider` also means the local host.
 
+These ids are supported by `apply`, which runs the runtime on the host you invoke it from. Modal is the only provider tested end to end on real GPUs; this path is exercised on the platforms listed below and your hardware may differ.
+
 ## How it runs
 
 `apply` renders the runtime's command line from your `llama_cpp {}` or `vllm {}` block, registers it as a per-user service, and waits up to 15 minutes for `/health` to answer. A service that exits during startup fails within seconds. On failure, apply stops the service and the error gives the log location.

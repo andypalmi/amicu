@@ -10,7 +10,6 @@
 
 export type Tone = 'cmd' | 'add' | 'muted' | 'plain';
 export type Screen = 'term' | 'call';
-export type Status = 'starting' | 'online';
 
 interface Base {
   at: number;
@@ -20,7 +19,6 @@ interface Base {
 export type Step =
   | (Base & { kind: 'type'; text: string; msPerChar?: number })
   | (Base & { kind: 'line'; text: string })
-  | { kind: 'status'; at: number; status: Status }
   | { kind: 'screen'; at: number; screen: Screen };
 
 export interface Row {
@@ -32,7 +30,6 @@ export interface Row {
 }
 export interface DemoState {
   screen: Screen;
-  status: Status | null;
   rows: Row[];
   done: boolean;
 }
@@ -62,7 +59,6 @@ const L = (at: number, text: string, tone?: Tone): Step => ({ kind: 'line', at, 
 
 export const DEMO_STEPS: Step[] = [
   { kind: 'type', at: 150, screen: 'term', tone: 'cmd', text: '$ amicu apply' },
-  { kind: 'status', at: 1000, status: 'starting' },
   L(1000, 'Plan: 1 action(s).'),
   L(1100, ' '),
   L(1200, '  + deployment.chat', 'add'),
@@ -75,7 +71,6 @@ export const DEMO_STEPS: Step[] = [
   L(4200, ' '),
   L(4200, 'Applied 1 deployment(s):'),
   L(4400, `  deployment.chat -> ${URL}`, 'muted'),
-  { kind: 'status', at: 4400, status: 'online' },
   // apply.rs then prints a `curl:` / `python (openai):` usage snippet; trimmed here,
   // the request is shown once, in the next pane.
   { kind: 'screen', at: 5600, screen: 'call' },
@@ -96,16 +91,11 @@ export function demoDuration(steps: Step[]): number {
 
 export function demoState(steps: Step[], t: number): DemoState {
   let screen: Screen = 'term';
-  let status: Status | null = null;
   const rows: Row[] = [];
   for (const s of steps) {
     const started = t >= s.at;
     if (s.kind === 'screen') {
       if (started) screen = s.screen;
-      continue;
-    }
-    if (s.kind === 'status') {
-      if (started) status = s.status;
       continue;
     }
     let shown = '';
@@ -121,7 +111,7 @@ export function demoState(steps: Step[], t: number): DemoState {
       rest: s.text.slice(shown.length),
     });
   }
-  return { screen, status, rows, done: t >= demoDuration(steps) };
+  return { screen, rows, done: t >= demoDuration(steps) };
 }
 
 /** Plain-text transcript of both panes, for the screen-reader copy. */
