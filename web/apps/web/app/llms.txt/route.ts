@@ -17,7 +17,7 @@ const marketing: Array<{ path: string; label: string; note: string }> = [
   {
     path: '/pricing',
     label: 'Pricing',
-    note: 'Community, Pro, Enterprise, and Hosted tiers with the full feature matrix.',
+    note: 'The CLI is free and open source (AGPL-3.0); team and enterprise plans are planned.',
   },
   {
     path: '/providers',
@@ -51,12 +51,20 @@ export function GET() {
 
 > ${appTagline}
 
-${appName} is an open-source (AGPL-3.0) web client. Planning, recommendations,
-policy, and capability logic live in the amicu Rust Management API; the web app
-renders those decisions rather than owning them. Two entry paths: a guided
-"help me choose" wizard, and a direct HCL editor for authoring, validating, and
-planning declarative serving stacks. Residency-aware by design: apply works
-on your own machine and Modal today; other clouds have untested provisioning adapters or planning and residency data only.
+${appName} is a command-line tool for self-hosted LLM inference. You describe
+models, hardware, and deployments in HCL (amicu.hcl); \`amicu validate\` checks
+the configuration (structure, references, hardware fit, data residency, policy),
+\`amicu plan\` shows a diff against recorded state, and \`amicu apply\` runs
+llama.cpp or vLLM for you, on your own machine (launchd or systemd user
+service) or on Modal (serverless GPU, pinned region). Same workflow as
+Terraform: declarative config, a plan you read first, and state. Credentials
+stay out of configuration, plans, and state. It is not a hosted service, a
+model registry, or a gateway, and it is not stable yet: expect breaking
+changes. Other providers (Hetzner, OVHcloud, Scaleway, RunPod, SSH hosts) are
+previews; AWS, Azure, GCP, and Nebius have planning and residency data only.
+
+Start with the [Introduction](${absolute('/docs')}) and the
+[Quickstart](${absolute('/docs/quickstart')}).
 
 ## Key pages
 ${marketingLines}
