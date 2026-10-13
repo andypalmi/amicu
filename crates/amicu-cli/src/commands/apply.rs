@@ -265,11 +265,12 @@ fn record_partial(
     }
     let mut done = done.join("; ");
     if let Some(id) = &progress.in_flight {
-        done.push_str(&format!(
+        let note = format!(
             "; '{id}' failed mid-start, its state entry was left unchanged and may be out of \
              sync with what is running - check it directly (`launchctl list` / `systemctl \
              --user list-units` / `modal app list`) before re-running"
-        ));
+        );
+        done.push_str(&note);
     }
     match project.save_state(&state) {
         Ok(()) => CliError::Message(format!(
