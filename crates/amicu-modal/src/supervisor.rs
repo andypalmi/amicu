@@ -913,6 +913,23 @@ async fn ensure_not_exposed(
     }
 }
 
+/// The error `start` returns for an unsafe endpoint: the original `detail`, plus
+/// whether the app was stopped. A failed teardown is spelled out so the user can
+/// stop the (open) app by hand; the app id is not a secret.
+async fn teardown_error<F, Fut>(detail: &str, app_id: &str, stop: F) -> LlamaCppError
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    LlamaCppError::Supervisor(match stop().await {
+        Ok(()) => format!("{detail}; the Modal app was stopped"),
+        Err(e) => format!(
+            "{detail}; teardown FAILED ({e}): stop app {app_id} manually \
+             (`modal app stop {app_id}`)"
+        ),
+    })
+}
+
 /// One-line phase note printed to stderr before the (possibly slow) deploy.
 const BUILD_PHASE_NOTE: &str =
     "building image and deploying to Modal (first build of an image can take several minutes)...";
@@ -1049,10 +1066,13 @@ impl ProcessSupervisor for ModalSupervisor {
         )
         .await
         {
-            let _ = client.stop_app(&deployment.app_id).await;
-            return Err(LlamaCppError::Supervisor(format!(
-                "{detail}; the Modal app was stopped"
-            )));
+            return Err(teardown_error(&detail, &deployment.app_id, || async {
+                client
+                    .stop_app(&deployment.app_id)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+            .await);
         }
         Ok(RuntimeHandle {
             id: deployment.app_id,
@@ -1453,6 +1473,16 @@ mod tests {
         // Unreachable: unverifiable is a failure, not a pass.
         let down = ensure_not_exposed("http://127.0.0.1:1", t, t).await;
         assert!(down.expect_err("down").contains("could not verify"));
+    }
+
+    #[tokio::test]
+    async fn teardown_error_reports_stopped_or_failed_and_keeps_the_cause() {
+        let ok = teardown_error("open", "ap-1", || async { Ok(()) }).await;
+        assert!(ok.to_string().contains("open; the Modal app was stopped"));
+        let bad = teardown_error("open", "ap-1", || async { Err("rpc down".to_owned()) }).await;
+        let msg = bad.to_string();
+        assert!(msg.contains("open;") && msg.contains("teardown FAILED"));
+        assert!(msg.contains("modal app stop ap-1"));
     }
 
     // --- reject_local_path_model -----------------------------------------

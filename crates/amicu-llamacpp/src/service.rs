@@ -314,7 +314,8 @@ impl SystemdManager<HostExec> {
 /// Render `spec.env` as a systemd `EnvironmentFile`: `KEY="value"` lines with
 /// `\` and `"` escaped (and `$`/backtick are literal in EnvironmentFile).
 /// Newlines are written raw: inside double quotes systemd follows POSIX rules,
-/// which would keep a `\n` escape as a literal backslash sequence. Keys must be plain identifiers.
+/// which would keep a `\n` escape as a literal backslash sequence.
+/// Keys must be plain identifiers.
 fn environment_file(env: &[(String, String)]) -> Result<String, LlamaCppError> {
     use std::fmt::Write as _;
     let mut out = String::new();
