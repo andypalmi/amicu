@@ -69,7 +69,7 @@ export CHAT_API_KEY=$(openssl rand -hex 32)   # the secret resolver reads the en
 amicu apply
 ```
 
-- `plan` shows `api_key: ****** (secret "CHAT_API_KEY", resolved at apply)`; it
+- `plan` shows `api_key: ****** (secret "CHAT_API_KEY")`; it
   never reads the variable.
 - The value reaches the container as `VLLM_API_KEY` (vLLM) or `LLAMA_API_KEY`
   (llama-server) through a Modal Secret, never argv or image env. `extra_args`

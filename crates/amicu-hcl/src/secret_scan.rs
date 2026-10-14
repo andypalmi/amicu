@@ -88,17 +88,102 @@ pub fn scan_secret_leaks(src: &str) -> Vec<Diagnostic> {
 pub fn scan_runtime_env_secrets(graph: &Graph) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for deployment in &graph.deployments {
-        let (block, env) = match &deployment.runtime {
-            Runtime::LlamaCpp(s) => ("llama_cpp", &s.env),
-            Runtime::Vllm(s) => ("vllm", &s.env),
+        let (block, env, extra_args) = match &deployment.runtime {
+            Runtime::LlamaCpp(s) => ("llama_cpp", &s.env, &s.extra_args),
+            Runtime::Vllm(s) => ("vllm", &s.env, &s.extra_args),
         };
         for (key, value) in env {
-            if looks_like_secret_value(value) {
+            if value_is_secret(key, value) {
                 out.push(env_secret_finding(&deployment.id, block, key, value));
+            }
+        }
+        // `extra_args` land in argv (and in state / the service plist), so
+        // check both `--flag=value` and `--flag value` forms (#225).
+        let mut consumed = vec![false; extra_args.len()];
+        for (idx, arg) in extra_args.iter().enumerate() {
+            if consumed[idx] {
+                continue;
+            }
+            let hit = if arg.starts_with('-') {
+                if let Some((flag, value)) = arg.split_once('=') {
+                    !is_structured_value_flag(flag) && value_is_secret(flag, value)
+                } else if let Some(next) = extra_args.get(idx + 1).filter(|n| !n.starts_with('-')) {
+                    // The value belongs to this flag whether or not it is flagged.
+                    consumed[idx + 1] = true;
+                    !is_structured_value_flag(arg) && value_is_secret(arg, next)
+                } else {
+                    false
+                }
+            } else {
+                looks_like_secret_value(arg) && !is_env_reference(arg)
+            };
+            if hit {
+                let path = format!("{block}.extra_args[{idx}]");
+                out.push(secret_finding_at(&deployment.id, &path, arg));
             }
         }
     }
     out
+}
+
+/// Whether `value` (set under `name`) is a literal secret: it has a known
+/// secret shape, or sits under a secret-named key. Env references such as
+/// `${VAR}` are never literals.
+fn value_is_secret(name: &str, value: &str) -> bool {
+    !is_env_reference(value)
+        && (looks_like_secret_value(value)
+            || (is_secret_name(name) && is_literal_secret_candidate(value)))
+}
+
+/// `${NAME}` or `$NAME`: a reference to an environment variable.
+fn is_env_reference(value: &str) -> bool {
+    let name = value
+        .strip_prefix("${")
+        .and_then(|v| v.strip_suffix('}'))
+        .or_else(|| value.strip_prefix('$'));
+    name.is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+}
+
+/// Flags whose value is structured `key=type:value` data (model metadata
+/// overrides, tensor placement), where words like `token` are field names.
+fn is_structured_value_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--override-kv"
+            | "--override-tensor"
+            | "-ot"
+            | "--override-generation-config"
+            | "--hf-overrides"
+            | "--chat-template-kwargs"
+    )
+}
+
+/// Whether a flag or env-var name designates a secret: any `_`/`-`
+/// separated word is `key`, `token`, `secret`, `password`, `passwd` or
+/// `apikey` (case-insensitive), unless it names a file/path/dir holding one.
+fn is_secret_name(name: &str) -> bool {
+    let upper = name.trim_start_matches('-').to_ascii_uppercase();
+    let words: Vec<&str> = upper.split(['_', '-', '.', ':']).collect();
+    if words.iter().any(|w| matches!(*w, "FILE" | "PATH" | "DIR")) {
+        return false;
+    }
+    words.iter().any(|w| {
+        matches!(
+            *w,
+            "KEY" | "TOKEN" | "SECRET" | "PASSWORD" | "PASSWD" | "APIKEY"
+        )
+    })
+}
+
+/// A value under a secret-named key that is plausibly a real literal: long
+/// enough, not a path, and not a plain number or boolean.
+fn is_literal_secret_candidate(value: &str) -> bool {
+    value.len() >= 8
+        && !value.starts_with('/')
+        && !value.starts_with("./")
+        && !value.starts_with("~/")
+        && !value.chars().all(|c| c.is_ascii_digit() || c == '.')
+        && !matches!(value.to_ascii_lowercase().as_str(), "true" | "false")
 }
 
 /// Build the `AMICU-POLICY-006` finding for one suspicious `env` value.
@@ -108,18 +193,25 @@ fn env_secret_finding(
     key: &str,
     value: &str,
 ) -> Diagnostic {
-    let path = format!("{block}.env.{key}");
+    secret_finding_at(deployment_id, &format!("{block}.env.{key}"), value)
+}
+
+/// Build the `AMICU-POLICY-006` finding for the runtime setting at `path`.
+fn secret_finding_at(deployment_id: &DeploymentId, path: &str, value: &str) -> Diagnostic {
     let mut d = Diagnostic::new(
         catalog::POLICY_RUNTIME_ENV_SECRET_SUSPECTED,
         Severity::Warning,
         format!(
-            "deployment `{deployment_id}` {path} looks like it contains a secret value ({}). \
-             Move it to a `credential` resource's secret-designated `env` instead.",
+            "deployment `{deployment_id}` {path} looks like it contains a literal secret ({}). \
+             Literals here are stored in state and visible in the process arguments or service \
+             definition. Reference the secret instead: put it in a `credential` resource's \
+             `env` as `secret(\"NAME\")`, and set `api_key = secret(\"NAME\")` on the \
+             deployment for the endpoint key.",
             redact(value)
         ),
     );
     d.resource = Some(format!("deployment.{deployment_id}"));
-    d.path = Some(path);
+    d.path = Some(path.to_string());
     d
 }
 
@@ -227,6 +319,9 @@ fn classify_token(token: &str) -> Option<&'static str> {
     if is_jwt(token) {
         return Some("a JWT");
     }
+    if is_vendor_prefixed_token(token) {
+        return Some("an access token");
+    }
     if is_high_entropy(token) {
         return Some("a high-entropy token");
     }
@@ -254,6 +349,18 @@ fn is_openai_style_key(token: &str) -> bool {
         && rest
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Hugging Face (`hf_`) and GitHub (`ghp_`, `gho_`, `ghs_`, `ghu_`,
+/// `github_pat_`) tokens: a well-known prefix then a long alphanumeric body.
+fn is_vendor_prefixed_token(token: &str) -> bool {
+    ["hf_", "ghp_", "gho_", "ghs_", "ghu_", "github_pat_"]
+        .iter()
+        .any(|prefix| {
+            token.strip_prefix(prefix).is_some_and(|rest| {
+                rest.len() >= 30 && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+        })
 }
 
 /// Three dot-separated base64url segments, the first starting with `eyJ`

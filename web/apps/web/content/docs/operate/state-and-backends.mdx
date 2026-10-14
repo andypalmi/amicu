@@ -12,12 +12,13 @@ The CLI stores state in the project directory:
 | Path | Content |
 |---|---|
 | `.amicu/state/state.json` | The applied resource graph and the started endpoints |
+| `.amicu/state/state.json.bak` | The previous version of `state.json`, copied on save only when the current file is valid |
 | `.amicu/state/state.lock` | The lock file |
 | `.amicu/config.yaml` | Project config. `init` writes `state.backend: local`. |
 
 `local` is the only state backend the CLI implements. There is no remote state backend for the CLI yet.
 
-Treat `state.json` as sensitive operational data. Do not edit it by hand. Add `.amicu/state/` to version control ignore rules unless you have a reason to share it.
+Treat `state.json` as sensitive operational data. Do not edit it by hand. `amicu init` adds `.amicu/` to `.gitignore`. Do not share state through version control: the lock is local to one machine, so two people applying from a committed `state.json` can overwrite each other and orphan running resources. A state serial with compare-and-swap saves is planned (amicu-planning#218).
 
 ## Locking
 
@@ -42,4 +43,4 @@ State can fall out of date if something changes a deployment outside amicu.
 
 ## Starting over
 
-If state is lost or corrupt, `plan` shows `create` for everything. Stop the running services first (see [This machine](/docs/providers/local) and your [provider's page](/docs/providers)), then delete the state file and apply. Only do this with explicit intent: amicu forgets what it started.
+If `state.json` is corrupt or missing but `state.json.bak` is valid, amicu refuses to continue and names the backup. Inspect it, and if it is correct restore it with `cp .amicu/state/state.json.bak .amicu/state/state.json`. If state is lost or corrupt with no usable backup, `plan` shows `create` for everything. Stop the running services first (see [This machine](/docs/providers/local) and your [provider's page](/docs/providers)), then delete `state.json` and `state.json.bak` and apply. Only do this with explicit intent: amicu forgets what it started.
