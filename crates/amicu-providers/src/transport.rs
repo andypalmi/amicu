@@ -219,7 +219,12 @@ impl HttpTransport for ReqwestTransport {
 /// A canned response registered on a [`MockTransport`], keyed by method and
 /// URL suffix.
 #[cfg(test)]
-type CannedResponse = (HttpMethod, String, Result<HttpResponse, TransportError>);
+type CannedResponse = (
+    HttpMethod,
+    String,
+    bool,
+    Result<HttpResponse, TransportError>,
+);
 
 /// A test [`HttpTransport`] returning canned responses keyed by
 /// `(method, url-suffix)` and recording the requests it saw, so adapter tests
@@ -249,7 +254,22 @@ impl MockTransport {
         self.responses
             .lock()
             .unwrap()
-            .push((method, suffix.into(), Ok(response)));
+            .push((method, suffix.into(), false, Ok(response)));
+        self
+    }
+
+    /// Register a canned successful response for a `(method, url-substring)`
+    /// match (for URLs whose tail varies, e.g. a query with a random name).
+    pub(crate) fn on_contains(
+        self,
+        method: HttpMethod,
+        needle: &str,
+        response: HttpResponse,
+    ) -> Self {
+        self.responses
+            .lock()
+            .unwrap()
+            .push((method, needle.into(), true, Ok(response)));
         self
     }
 
@@ -258,7 +278,7 @@ impl MockTransport {
         self.responses
             .lock()
             .unwrap()
-            .push((method, suffix.into(), Err(error)));
+            .push((method, suffix.into(), false, Err(error)));
         self
     }
 
@@ -279,13 +299,18 @@ impl HttpTransport for MockTransport {
             headers: request.headers.clone(),
         });
         let responses = self.responses.lock().unwrap();
-        let hit = responses
-            .iter()
-            .find(|(m, suffix, _)| *m == request.method && request.url.ends_with(suffix));
+        let hit = responses.iter().find(|(m, needle, contains, _)| {
+            *m == request.method
+                && if *contains {
+                    request.url.contains(needle.as_str())
+                } else {
+                    request.url.ends_with(needle.as_str())
+                }
+        });
         match hit {
-            Some((_, _, Ok(r))) => Ok(r.clone()),
-            Some((_, _, Err(TransportError::Timeout))) => Err(TransportError::Timeout),
-            Some((_, _, Err(TransportError::Connection(m)))) => {
+            Some((_, _, _, Ok(r))) => Ok(r.clone()),
+            Some((_, _, _, Err(TransportError::Timeout))) => Err(TransportError::Timeout),
+            Some((_, _, _, Err(TransportError::Connection(m)))) => {
                 Err(TransportError::Connection(m.clone()))
             }
             None => Ok(HttpResponse::new(404, b"no mock".to_vec())),

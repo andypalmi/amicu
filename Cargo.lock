@@ -247,8 +247,10 @@ dependencies = [
  "russh",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -359,6 +361,7 @@ dependencies = [
  "amicu-runtime",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

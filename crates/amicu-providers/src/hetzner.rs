@@ -46,7 +46,9 @@ use crate::capability::{
 };
 use crate::provider::{
     Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
+    ResourceIdentity, TeardownOutcome,
 };
+use crate::rest_lifecycle::{self, Found, ServerApi};
 use crate::transport::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport, TransportError};
 
 /// The adapter identity Hetzner registers under.
@@ -182,6 +184,27 @@ struct CreateServerRequest<'a> {
     image: &'a str,
 }
 
+/// A `{"name": ...}` sub-object.
+#[derive(Deserialize)]
+struct NamedObject {
+    name: Option<String>,
+}
+
+/// An hcloud datacenter sub-object (`datacenter.location.name`).
+#[derive(Deserialize)]
+struct DatacenterObject {
+    location: Option<NamedObject>,
+}
+
+/// Page size for identity listings (the hcloud maximum).
+const PER_PAGE: usize = 50;
+
+/// The hcloud `{"servers":[...]}` list envelope.
+#[derive(Deserialize)]
+struct ServerList {
+    servers: Vec<ServerObject>,
+}
+
 /// The hcloud `{"server":{...}}` envelope returned by create and status.
 #[derive(Deserialize)]
 struct ServerEnvelope {
@@ -193,6 +216,15 @@ struct ServerEnvelope {
 struct ServerObject {
     /// Provider-assigned server id (an integer in the hcloud API).
     id: i64,
+    /// The server name (carries the identity).
+    #[serde(default)]
+    name: Option<String>,
+    /// The server type (the offering), when listed.
+    #[serde(default)]
+    server_type: Option<NamedObject>,
+    /// The data center, when listed.
+    #[serde(default)]
+    datacenter: Option<DatacenterObject>,
     /// Lifecycle status, e.g. `"running"`.
     status: Option<String>,
 }
@@ -306,7 +338,7 @@ impl HetznerProvider {
     /// Swap in a transport and base URL. Test-only: adapter tests inject a mock
     /// so the provisioning path runs with no network, credentials, or spend.
     #[cfg(test)]
-    fn with_transport(
+    pub(crate) fn with_transport(
         mut self,
         transport: Arc<dyn HttpTransport>,
         base_url: impl Into<String>,
@@ -419,6 +451,22 @@ impl HetznerProvider {
             .is_some_and(|o| o.regions.iter().any(|r| r == region))
     }
 
+    /// Check `offering_id` is offered and sold in `region`; the residency and
+    /// availability filter, run before any backend call.
+    fn validate(&self, offering_id: &str, region: &str) -> Result<(), AdapterError> {
+        if !self.has_offering(offering_id) {
+            return Err(AdapterError::from_kind(ProviderError::UnknownOffering {
+                offering: offering_id.to_string(),
+            }));
+        }
+        if !self.offering_serves_region(offering_id, region) {
+            return Err(AdapterError::from_kind(ProviderError::UnknownRegion {
+                region: region.to_string(),
+            }));
+        }
+        Ok(())
+    }
+
     /// Build a request for `{base}{path}`, attaching `token` as a bearer when
     /// present.
     fn build_request(&self, method: HttpMethod, path: &str, token: Option<&str>) -> HttpRequest {
@@ -491,32 +539,43 @@ impl Provider for HetznerProvider {
         self.capabilities.clone()
     }
 
-    async fn provision(
+    fn prepare(
         &self,
         request: &ProvisionRequest,
+        identity: ResourceIdentity,
+    ) -> Result<ProvisioningHandle, AdapterError> {
+        self.validate(&request.offering_id, &request.region)?;
+        let mut record = ProvisioningHandle::prepared(self.id.clone(), request, identity);
+        record.scope = Some(self.scope_of(&record)?);
+        Ok(record)
+    }
+
+    async fn provision(
+        &self,
+        mut prepared: ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningHandle, AdapterError> {
-        if !self.has_offering(&request.offering_id) {
-            return Err(AdapterError::from_kind(ProviderError::UnknownOffering {
-                offering: request.offering_id.clone(),
-            }));
-        }
-        // Residency + availability filter: the offering must be sold in the
-        // requested region. A non-EU data center, or an EU one that does not
-        // host this GPU line, is rejected here.
-        if !self.offering_serves_region(&request.offering_id, &request.region) {
-            return Err(AdapterError::from_kind(ProviderError::UnknownRegion {
-                region: request.region.clone(),
-            }));
+        self.validate(&prepared.offering_id, &prepared.region)?;
+        if prepared.identity.name.is_empty() {
+            return Err(rest_lifecycle::refuse("record has no resource identity"));
         }
         let token = self
-            .resolve_token(resolver, request.credentials.as_ref())
+            .resolve_token(resolver, prepared.credentials.as_ref())
             .await?;
+        rest_lifecycle::bind(&mut prepared, token.as_deref())?;
+        rest_lifecycle::guard_scope(self, &prepared, token.as_deref()).await?;
+
+        // Adopt a server already created under this identity (retry after a
+        // crash) instead of creating a duplicate.
+        if let Some(found) = rest_lifecycle::adopt(self, &prepared, token.as_deref()).await? {
+            let state = map_server_state(found.state.as_deref());
+            return Ok(prepared.completed("server_id", found.id, state));
+        }
 
         let create = CreateServerRequest {
-            name: "amicu-server",
-            server_type: request.offering_id.as_str(),
-            location: request.region.as_str(),
+            name: prepared.identity.name.as_str(),
+            server_type: prepared.offering_id.as_str(),
+            location: prepared.region.as_str(),
             image: DEFAULT_IMAGE,
         };
         let body = serde_json::to_value(&create).map_err(|_| {
@@ -538,11 +597,11 @@ impl Provider for HetznerProvider {
                     detail: "Hetzner rejected the API token".into(),
                 },
                 404 => ProviderError::UnknownOffering {
-                    offering: request.offering_id.clone(),
+                    offering: prepared.offering_id.clone(),
                 },
                 409 | 429 => ProviderError::CapacityUnavailable {
-                    offering: request.offering_id.clone(),
-                    region: request.region.clone(),
+                    offering: prepared.offering_id.clone(),
+                    region: prepared.region.clone(),
                 },
                 status => ProviderError::Backend {
                     detail: format!("Hetzner API returned HTTP {status}"),
@@ -555,15 +614,8 @@ impl Provider for HetznerProvider {
                 detail: "malformed Hetzner create response".into(),
             })
         })?;
-        Ok(ProvisioningHandle {
-            id: envelope.server.id.to_string(),
-            provider: self.id.clone(),
-            region: request.region.clone(),
-            zone: None,
-            offering_id: request.offering_id.clone(),
-            credentials: request.credentials.clone(),
-            state: map_server_state(envelope.server.status.as_deref()),
-        })
+        let state = map_server_state(envelope.server.status.as_deref());
+        Ok(prepared.completed("server_id", envelope.server.id.to_string(), state))
     }
 
     async fn status(
@@ -571,6 +623,7 @@ impl Provider for HetznerProvider {
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningState, AdapterError> {
+        rest_lifecycle::check_record(handle)?;
         let token = self
             .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
@@ -596,27 +649,137 @@ impl Provider for HetznerProvider {
         &self,
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<TeardownOutcome, AdapterError> {
         let token = self
             .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
-        let path = format!("/servers/{}", handle.id);
-        let request = self.build_request(HttpMethod::Delete, &path, token.as_deref());
+        rest_lifecycle::teardown(self, handle, token.as_deref()).await
+    }
+}
+
+#[async_trait]
+impl ServerApi for HetznerProvider {
+    fn scope_of(&self, handle: &ProvisioningHandle) -> Result<String, AdapterError> {
+        // The hcloud token is itself bound to one project, so the region is the
+        // only scope part the record can carry.
+        Ok(format!("{PROVIDER_ID}|{}||", handle.region))
+    }
+
+    async fn verify_scope(
+        &self,
+        _handle: &ProvisioningHandle,
+        token: Option<&str>,
+    ) -> Result<Option<String>, AdapterError> {
+        let request = self.build_request(HttpMethod::Get, "/servers?per_page=1", token);
         let response = self
             .transport
             .execute(request)
             .await
             .map_err(|e| transport_error(&e))?;
         if !response.is_success() {
-            return Err(lifecycle_error(response.status, &handle.id));
+            return Err(lifecycle_error(response.status, "servers"));
         }
-        Ok(())
+        Ok(None)
+    }
+
+    async fn list_by_identity(
+        &self,
+        handle: &ProvisioningHandle,
+        token: Option<&str>,
+    ) -> Result<Vec<Found>, AdapterError> {
+        let name = handle.identity.name.as_str();
+        if name.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out: Vec<Found> = Vec::new();
+        for page in 1..=rest_lifecycle::MAX_PAGES {
+            let path = format!("/servers?name={name}&page={page}&per_page={PER_PAGE}");
+            let request = self.build_request(HttpMethod::Get, &path, token);
+            let response = self
+                .transport
+                .execute(request)
+                .await
+                .map_err(|e| transport_error(&e))?;
+            if !response.is_success() {
+                // A collection-level 404 is a scope error, never "no servers".
+                return Err(lifecycle_error(response.status, "servers"));
+            }
+            let list: ServerList = response.json().map_err(|_| {
+                AdapterError::from_kind(ProviderError::Backend {
+                    detail: "malformed Hetzner list response".into(),
+                })
+            })?;
+            let returned = list.servers.len();
+            let mut fresh = 0;
+            for s in list.servers {
+                let id = s.id.to_string();
+                if out.iter().any(|f| f.id == id) {
+                    continue;
+                }
+                fresh += 1;
+                if s.name.as_deref() == Some(name) {
+                    out.push(Found {
+                        account: None,
+                        id,
+                        offering: s.server_type.and_then(|t| t.name),
+                        region: s.datacenter.and_then(|d| d.location).and_then(|l| l.name),
+                        state: s.status,
+                    });
+                }
+            }
+            if returned < PER_PAGE || fresh == 0 {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    async fn delete(
+        &self,
+        _handle: &ProvisioningHandle,
+        id: &str,
+        token: Option<&str>,
+    ) -> Result<(), AdapterError> {
+        let path = format!("/servers/{id}");
+        let request = self.build_request(HttpMethod::Delete, &path, token);
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if response.is_success() || response.status == 404 {
+            return Ok(());
+        }
+        Err(lifecycle_error(response.status, id))
+    }
+
+    async fn exists(
+        &self,
+        _handle: &ProvisioningHandle,
+        id: &str,
+        token: Option<&str>,
+    ) -> Result<bool, AdapterError> {
+        let path = format!("/servers/{id}");
+        let request = self.build_request(HttpMethod::Get, &path, token);
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if response.status == 404 {
+            return Ok(false);
+        }
+        if response.is_success() {
+            return Ok(true);
+        }
+        Err(lifecycle_error(response.status, id))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ProvisionCompat;
     use crate::transport::{HttpResponse, MockTransport};
     use amicu_core::adapter::Registry;
     use amicu_core::diagnostic::{Category as DiagCategory, DiagnosticCode};
@@ -655,6 +818,22 @@ mod tests {
 
     fn no_creds() -> TestResolver {
         TestResolver::default()
+    }
+
+    /// A mock that already answers the scope probe and an empty identity listing,
+    /// as an account with no servers would.
+    fn scoped_mock() -> MockTransport {
+        MockTransport::default()
+            .on(
+                HttpMethod::Get,
+                "?per_page=1",
+                HttpResponse::new(200, br#"{"servers":[]}"#.to_vec()),
+            )
+            .on_contains(
+                HttpMethod::Get,
+                "/servers?name=",
+                HttpResponse::new(200, br#"{"servers":[]}"#.to_vec()),
+            )
     }
 
     /// A Hetzner provider whose transport is `mock` and whose base URL points at
@@ -759,7 +938,7 @@ mod tests {
     #[tokio::test]
     async fn provision_in_eu_region_then_teardown() {
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(HttpMethod::Post, "/servers", created(42))
                 .on(
                     HttpMethod::Get,
@@ -775,20 +954,30 @@ mod tests {
         let p = mock_provider(mock.clone());
         let req = ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1");
 
-        let handle = p.provision(&req, &no_creds()).await.unwrap();
+        let handle = p.provision_request(&req, &no_creds()).await.unwrap();
         assert!(handle.state.is_ready());
         assert_eq!(handle.id, "42");
         assert_eq!(handle.provider, AdapterId::new("hetzner"));
 
         assert!(p.status(&handle, &no_creds()).await.unwrap().is_ready());
-        p.teardown(&handle, &no_creds()).await.unwrap();
+        // The canned GET keeps reporting the resource after the delete, so absence is
+        // unconfirmed (the conformance harness covers the confirmed path).
+        assert!(
+            !p.teardown(&handle, &no_creds())
+                .await
+                .unwrap()
+                .is_confirmed_gone()
+        );
 
         // The lifecycle hit the expected REST endpoints in order.
         let seen = mock.requests();
-        assert_eq!(seen[0].method, HttpMethod::Post);
-        assert!(seen[0].url.ends_with("/servers"));
-        assert_eq!(seen[1].method, HttpMethod::Get);
-        assert_eq!(seen[2].method, HttpMethod::Delete);
+        // The identity lookup (adoption check) comes first, then the create.
+        assert_eq!(seen[0].method, HttpMethod::Get);
+        assert!(
+            seen.iter()
+                .any(|r| r.method == HttpMethod::Post && r.url.ends_with("/servers"))
+        );
+        assert!(seen.iter().any(|r| r.method == HttpMethod::Delete));
     }
 
     #[tokio::test]
@@ -799,7 +988,7 @@ mod tests {
         let p = HetznerProvider::new();
         for region in ["ash", "hil", "sin"] {
             let err = p
-                .provision(
+                .provision_request(
                     &ProvisionRequest::new("gpu.rtx-4000-ada.1x", region),
                     &no_creds(),
                 )
@@ -813,7 +1002,7 @@ mod tests {
     #[tokio::test]
     async fn provision_unknown_offering_is_rejected() {
         let err = HetznerProvider::new()
-            .provision(&ProvisionRequest::new("nope", "nbg1"), &no_creds())
+            .provision_request(&ProvisionRequest::new("nope", "nbg1"), &no_creds())
             .await
             .expect_err("unknown offering");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-010");
@@ -827,7 +1016,7 @@ mod tests {
         let p = HetznerProvider::for_residencies(&[Residency::Eu, Residency::Us]);
         assert!(p.capabilities().regions.iter().any(|r| r.code == "ash"));
         let err = p
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.rtx-4000-ada.1x", "ash"),
                 &no_creds(),
             )
@@ -843,7 +1032,7 @@ mod tests {
         let req = ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1")
             .with_credentials(SecretRef::new("hetzner_token"));
         let err = p
-            .provision(&req, &resolver)
+            .provision_request(&req, &resolver)
             .await
             .expect_err("empty credential rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
@@ -857,7 +1046,7 @@ mod tests {
         let req = ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1")
             .with_credentials(SecretRef::new("hetzner_token"));
         let err = p
-            .provision(&req, &resolver)
+            .provision_request(&req, &resolver)
             .await
             .expect_err("non-UTF-8 credential rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
@@ -866,7 +1055,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_401_to_credentials_rejected() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/servers",
             HttpResponse::new(401, b"unauthorized".to_vec()),
@@ -876,7 +1065,7 @@ mod tests {
             .with_credentials(SecretRef::new("hetzner_token"));
         let resolver = TestResolver::default().with("hetzner_token", "bad");
         let err = p
-            .provision(&req, &resolver)
+            .provision_request(&req, &resolver)
             .await
             .expect_err("401 must reject credentials");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
@@ -885,13 +1074,13 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_404_to_unknown_offering() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/servers",
             HttpResponse::new(404, b"no such server type".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1"),
                 &no_creds(),
             )
@@ -903,13 +1092,13 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_429_to_capacity_unavailable() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/servers",
             HttpResponse::new(429, b"rate_limit_exceeded".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1"),
                 &no_creds(),
             )
@@ -921,13 +1110,13 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_500_to_retryable_backend() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/servers",
             HttpResponse::new(500, b"boom".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1"),
                 &no_creds(),
             )
@@ -939,13 +1128,13 @@ mod tests {
 
     #[tokio::test]
     async fn provision_malformed_success_body_is_backend_error() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/servers",
             HttpResponse::new(201, b"not json".to_vec()),
         ));
         let err = mock_provider(mock)
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1"),
                 &no_creds(),
             )
@@ -957,7 +1146,7 @@ mod tests {
     #[tokio::test]
     async fn status_maps_404_to_unknown_instance() {
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(HttpMethod::Post, "/servers", created(7))
                 .on(
                     HttpMethod::Get,
@@ -967,7 +1156,7 @@ mod tests {
         );
         let p = mock_provider(mock);
         let handle = p
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1"),
                 &no_creds(),
             )
@@ -982,9 +1171,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn teardown_maps_404_to_unknown_instance() {
+    async fn teardown_404_is_confirmed_gone() {
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(HttpMethod::Post, "/servers", created(7))
                 .on(
                     HttpMethod::Delete,
@@ -994,29 +1183,23 @@ mod tests {
         );
         let p = mock_provider(mock);
         let handle = p
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1"),
                 &no_creds(),
             )
             .await
             .unwrap();
-        let err = p
-            .teardown(&handle, &no_creds())
-            .await
-            .expect_err("teardown 404 maps to unknown instance");
-        assert_eq!(err.code().to_string(), "AMICU-PROVIDER-012");
-        assert!(!err.is_retryable());
+        // Idempotent: a 404 on delete means already gone.
+        let outcome = p.teardown(&handle, &no_creds()).await.unwrap();
+        assert_eq!(outcome, TeardownOutcome::ConfirmedGone);
     }
 
     #[tokio::test]
     async fn transport_failure_maps_to_retryable_backend() {
-        let mock = Arc::new(MockTransport::default().on_error(
-            HttpMethod::Post,
-            "/servers",
-            TransportError::Timeout,
-        ));
+        let mock =
+            Arc::new(scoped_mock().on_error(HttpMethod::Post, "/servers", TransportError::Timeout));
         let err = mock_provider(mock)
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1"),
                 &no_creds(),
             )
@@ -1030,7 +1213,7 @@ mod tests {
     async fn credentials_never_leak_into_serialized_artifacts() {
         let secret_value = "leak-me-hetzner-token";
         let resolver = TestResolver::default().with("hetzner_token", secret_value);
-        let mock = Arc::new(MockTransport::default().on(HttpMethod::Post, "/servers", created(9)));
+        let mock = Arc::new(scoped_mock().on(HttpMethod::Post, "/servers", created(9)));
         let p = mock_provider(mock.clone());
         let req = ProvisionRequest::new("gpu.rtx-4000-ada.1x", "nbg1")
             .with_credentials(SecretRef::new("hetzner_token"));
@@ -1039,7 +1222,7 @@ mod tests {
         assert!(req_json.contains("hetzner_token"));
         assert!(!req_json.contains(secret_value));
 
-        let handle = p.provision(&req, &resolver).await.unwrap();
+        let handle = p.provision_request(&req, &resolver).await.unwrap();
         let handle_json = serde_json::to_string(&handle).unwrap();
         assert!(handle_json.contains("hetzner_token"));
         assert!(!handle_json.contains(secret_value));
@@ -1067,12 +1250,12 @@ mod tests {
 
     #[tokio::test]
     async fn discoverable_as_a_provider_trait_object() {
-        let mock = Arc::new(MockTransport::default().on(HttpMethod::Post, "/servers", created(3)));
+        let mock = Arc::new(scoped_mock().on(HttpMethod::Post, "/servers", created(3)));
         let mut registry: Registry<dyn Provider> = Registry::new();
         registry.register(Arc::new(mock_provider(mock)));
         let found: Arc<dyn Provider> = registry.get(&AdapterId::new("hetzner")).unwrap();
         let handle = found
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("gpu.rtx-6000-ada.1x", "fsn1"),
                 &no_creds(),
             )
