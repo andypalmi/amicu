@@ -406,6 +406,10 @@ pub struct ProvisioningHandle {
     /// Scaleway project), checked before any absence is trusted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// Organization the backend reported for the scope (Scaleway), recorded at
+    /// create next to the project in `account_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
     /// Pinned SSH host-key fingerprint (`SHA256:...`) for self-hosted records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_host_key: Option<String>,
@@ -465,6 +469,10 @@ struct RawHandle {
     /// Scaleway project), checked before any absence is trusted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// Organization the backend reported for the scope (Scaleway), recorded at
+    /// create next to the project in `account_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
     /// Pinned SSH host-key fingerprint (`SHA256:...`) for self-hosted records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_host_key: Option<String>,
@@ -490,6 +498,11 @@ impl From<RawHandle> for ProvisioningHandle {
         } else {
             raw.resources.remove("account_id");
         }
+        if raw.organization_id.is_none() {
+            raw.organization_id = raw.resources.remove("organization_id");
+        } else {
+            raw.resources.remove("organization_id");
+        }
         Self {
             schema_version: raw.schema_version,
             id: raw.id,
@@ -502,6 +515,7 @@ impl From<RawHandle> for ProvisioningHandle {
             scope: raw.scope,
             credential_binding: raw.credential_binding,
             account_id: raw.account_id,
+            organization_id: raw.organization_id,
             ssh_host_key: raw.ssh_host_key,
             resources: raw.resources,
             state: raw.state,
@@ -529,6 +543,7 @@ impl ProvisioningHandle {
             scope: None,
             credential_binding: None,
             account_id: None,
+            organization_id: None,
             ssh_host_key: None,
             resources: BTreeMap::new(),
             state: ProvisioningState::Requested,
@@ -864,10 +879,12 @@ mod tests {
     #[test]
     fn old_records_with_resource_map_fields_are_migrated() {
         let json = r#"{"provider":"self-hosted","region":"r","resources":
-            {"ssh_host_key":"SHA256:abc","account_id":"proj-9","ssh_host":"h"}}"#;
+            {"ssh_host_key":"SHA256:abc","account_id":"proj-9","organization_id":"org-9","ssh_host":"h"}}"#;
         let h: ProvisioningHandle = serde_json::from_str(json).unwrap();
         assert_eq!(h.ssh_host_key.as_deref(), Some("SHA256:abc"));
         assert_eq!(h.account_id.as_deref(), Some("proj-9"));
+        assert_eq!(h.organization_id.as_deref(), Some("org-9"));
+        assert!(!h.resources.contains_key("organization_id"));
         assert!(!h.resources.contains_key("ssh_host_key"));
         assert!(!h.resources.contains_key("account_id"));
         assert_eq!(h.resources.get("ssh_host").map(String::as_str), Some("h"));

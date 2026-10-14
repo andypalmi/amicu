@@ -631,9 +631,7 @@ impl Provider for ScalewayProvider {
             prepared.account_id = Some(project);
         }
         if let Some(organization) = organization {
-            prepared
-                .resources
-                .insert("organization_id".into(), organization);
+            prepared.organization_id = Some(organization);
         }
 
         // A freshly created Scaleway server is stopped; boot it explicitly. On

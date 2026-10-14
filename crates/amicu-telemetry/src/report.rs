@@ -140,17 +140,45 @@ impl Label {
     }
 
     /// Best effort for an *optional* label, on the client side: the value if
-    /// valid; an IP-shaped version coarsened to its first three components; and
-    /// `None` (drop the label) if it is still not acceptable. One bad optional
-    /// label must never cost the whole report. Server-side decoding stays strict
-    /// ([`Label::new`]), and required labels use that strict constructor too.
+    /// valid, otherwise `None` (drop the label). An IP-shaped value is dropped
+    /// outright, never coarsened. One bad optional label must never cost the
+    /// whole report. Server-side decoding stays strict ([`Label::new`]), and
+    /// required labels use that strict constructor too.
     #[must_use]
     pub fn sanitized(value: &str) -> Option<Self> {
+        Self::new(value).ok()
+    }
+
+    /// Like [`sanitized`](Self::sanitized), for a runtime *version* only: a
+    /// four-part numeric version that merely looks like an IP address (for
+    /// example `12.4.1.0`) is coarsened to its first three components, but only
+    /// when it cannot be a real or private address (first component above 40, or
+    /// a private/loopback/link-local range, or any component of 100 or more, is
+    /// dropped instead) and the result is no longer IP-shaped. A bare
+    /// `a.b.c.d` can never be told apart from a public address with certainty,
+    /// so this is deliberately conservative.
+    #[must_use]
+    pub fn sanitized_version(value: &str) -> Option<Self> {
         match Self::new(value) {
             Ok(label) => Some(label),
             Err(ValidationError::IpLikeLabel) => {
-                let coarse: Vec<&str> = value.split('.').take(3).collect();
-                Self::new(coarse.join(".")).ok()
+                let parts: Vec<&str> = value.split('.').collect();
+                // Only a plain four-part numeric version is a coarsening candidate.
+                if parts.len() != 4 {
+                    return None;
+                }
+                let octets: Vec<u16> = parts
+                    .iter()
+                    .map(|p| p.parse::<u16>().ok())
+                    .collect::<Option<_>>()?;
+                let private = matches!(
+                    (octets[0], octets[1]),
+                    (10 | 127, _) | (169, 254) | (172, 16..=31) | (192, 168) | (100, 64..=127)
+                );
+                if private || octets[0] > 40 || octets.iter().any(|o| *o >= 100) {
+                    return None;
+                }
+                Self::new(parts[..3].join(".")).ok()
             }
             Err(_) => None,
         }
@@ -403,11 +431,11 @@ impl RuntimeInfo {
         }
     }
 
-    /// Set the version from raw text, coarsening an IP-shaped version to three
-    /// components and dropping it if still unacceptable (never an error).
+    /// Set the version from raw text via [`Label::sanitized_version`]: coarsened
+    /// to three components only when safe, otherwise dropped (never an error).
     #[must_use]
     pub fn with_version(mut self, version: &str) -> Self {
-        self.version = Label::sanitized(version);
+        self.version = Label::sanitized_version(version);
         self
     }
 }
@@ -856,9 +884,21 @@ mod tests {
 
     #[test]
     fn optional_labels_are_coarsened_or_dropped_never_fatal() {
-        // An IP-shaped version is coarsened to three components...
-        let rt = RuntimeInfo::new(Label::new("vllm").unwrap()).with_version("10.0.0.1");
-        assert_eq!(rt.version.as_ref().map(Label::as_str), Some("10.0.0"));
+        // A version that merely looks like an address is coarsened to three
+        // components only when it cannot be a private or real address...
+        let rt = RuntimeInfo::new(Label::new("vllm").unwrap()).with_version("12.4.1.0");
+        assert_eq!(rt.version.as_ref().map(Label::as_str), Some("12.4.1"));
+        // ...and dropped when it looks like one.
+        for ip in [
+            "10.0.0.1",
+            "192.168.1.20",
+            "172.16.0.9",
+            "127.0.0.1",
+            "203.0.113.7",
+        ] {
+            let rt = RuntimeInfo::new(Label::new("vllm").unwrap()).with_version(ip);
+            assert!(rt.version.is_none(), "{ip}");
+        }
         // ...a four-part version in the non-routable range is kept as is...
         let rt = RuntimeInfo::new(Label::new("vllm").unwrap()).with_version("0.6.3.1");
         assert_eq!(rt.version.as_ref().map(Label::as_str), Some("0.6.3.1"));
@@ -875,8 +915,23 @@ mod tests {
         let mut r = report();
         r.runtime = RuntimeInfo::new(Label::new("vllm").unwrap()).with_version("sk-secret-1");
         r.model.quantization = Label::sanitized("a b");
+        // Provider, region, quantization and accelerator are never coarsened:
+        // an IP-shaped value is dropped outright.
         let r = r.with_provider("10.1.2.3").with_region("nbg1");
-        assert!(r.provider.as_ref().is_some_and(|p| p.as_str() == "10.1.2"));
+        assert!(r.provider.is_none());
+        assert!(Label::sanitized("192.168.0.1").is_none());
+        assert!(
+            ModelInfo::new(Label::new("m").unwrap())
+                .with_quantization("12.4.1.0")
+                .quantization
+                .is_none()
+        );
+        assert!(
+            HardwareInfo::default()
+                .with_accelerator("12.4.1.0", 1)
+                .accelerator
+                .is_none()
+        );
         assert_eq!(
             TelemetryReport::from_json(&r.to_json().unwrap()).unwrap(),
             r
