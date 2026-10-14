@@ -45,7 +45,7 @@ The first interactive `amicu init` or `amicu apply` asks once whether to share a
 
 - stdin, stdout or stderr is not a terminal,
 - `--output json` is set,
-- a CI environment variable is set (for example `CI` or `GITHUB_ACTIONS`),
+- one of `CI`, `GITHUB_ACTIONS`, `GITLAB_CI`, `BUILDKITE`, `CIRCLECI`, `TF_BUILD`, `JENKINS_URL` or `TEAMCITY_VERSION` is set to a non-empty value other than `0` or `false`,
 - `AMICU_TELEMETRY` or `DO_NOT_TRACK` is set, or
 - a choice is already stored.
 
