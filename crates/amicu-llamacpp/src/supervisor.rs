@@ -122,6 +122,17 @@ pub trait ProcessSupervisor: Send + Sync {
         self.stop(handle).await
     }
 
+    /// [`stop_recorded`](Self::stop_recorded), also deleting the recorded
+    /// secrets environment file (systemd). `None`: derive it.
+    async fn stop_recorded_with_env(
+        &self,
+        handle: &RuntimeHandle,
+        definition: Option<&Path>,
+        _env: Option<&Path>,
+    ) -> Result<(), LlamaCppError> {
+        self.stop_recorded(handle, definition).await
+    }
+
     /// A one-line advisory to show after a host start (see
     /// [`ServiceManager::boot_hint`](crate::service::ServiceManager::boot_hint)).
     fn boot_hint(&self) -> Option<String> {
@@ -505,6 +516,16 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
         definition: Option<&Path>,
     ) -> Result<(), LlamaCppError> {
         self.manager.stop_recorded(&handle.id, definition)
+    }
+
+    async fn stop_recorded_with_env(
+        &self,
+        handle: &RuntimeHandle,
+        definition: Option<&Path>,
+        env: Option<&Path>,
+    ) -> Result<(), LlamaCppError> {
+        self.manager
+            .stop_recorded_with_env(&handle.id, definition, env)
     }
 
     fn host_context(&self) -> Option<crate::service::HostContext> {

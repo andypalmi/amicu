@@ -94,6 +94,9 @@ pub struct ServicePaths {
     pub definition: PathBuf,
     /// Log files the manager writes (empty for systemd: the journal).
     pub logs: Vec<PathBuf>,
+    /// systemd only: the 0600 `EnvironmentFile` holding the injected
+    /// environment (secrets); `None` for launchd (they are in the plist).
+    pub env: Option<PathBuf>,
 }
 
 /// Load/start, query, stop, and read logs for a supervised service.
@@ -133,6 +136,17 @@ pub trait ServiceManager: Send + Sync {
     /// recomputed from `$HOME`. `None`: recompute (legacy records).
     fn stop_recorded(&self, label: &str, _definition: Option<&Path>) -> Result<(), LlamaCppError> {
         self.stop(label)
+    }
+    /// [`stop_recorded`](Self::stop_recorded), also deleting the secrets
+    /// environment file recorded in state at `env` (systemd). `None`: derive it
+    /// (records that predate the field).
+    fn stop_recorded_with_env(
+        &self,
+        label: &str,
+        definition: Option<&Path>,
+        _env: Option<&Path>,
+    ) -> Result<(), LlamaCppError> {
+        self.stop_recorded(label, definition)
     }
     /// A one-line advisory to show after a successful start, when this host
     /// would not bring the service back after a reboot as is (systemd user
@@ -311,6 +325,7 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         Some(ServicePaths {
             definition: self.plist_path(label),
             logs: vec![self.stdout_path(label), self.stderr_path(label)],
+            env: None,
         })
     }
 
@@ -554,6 +569,9 @@ pub struct SystemdManager<E> {
     exec: E,
     unit_dir: PathBuf,
     env_dir: PathBuf,
+    /// Where transient-era units kept their env file (`$XDG_RUNTIME_DIR/amicu`,
+    /// tmpfs); cleaned up best effort on stop.
+    legacy_env_dir: Option<PathBuf>,
 }
 
 impl<E: CommandExec> SystemdManager<E> {
@@ -564,7 +582,15 @@ impl<E: CommandExec> SystemdManager<E> {
             exec,
             unit_dir: unit_dir.into(),
             env_dir: env_dir.into(),
+            legacy_env_dir: None,
         }
+    }
+
+    /// Also clean up a transient-era env file in `dir` when stopping.
+    #[must_use]
+    pub fn with_legacy_env_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.legacy_env_dir = Some(dir.into());
+        self
     }
 
     fn unit_path(&self, label: &str) -> PathBuf {
@@ -582,15 +608,42 @@ impl<E: CommandExec> SystemdManager<E> {
     }
 
     /// Undo a start that did not complete: disable and stop whatever got
-    /// loaded, then remove both files (the env file holds secrets).
-    fn abandon(&self, label: &str) {
+    /// loaded and, only once systemd confirms it is not running (the disable
+    /// succeeded or the unit is not found), remove both files (the env file
+    /// holds secrets). Returns the error to report: `cause`, or one saying the
+    /// unit may still be loaded, in which case the files are kept.
+    fn abandon(&self, label: &str, cause: &str) -> LlamaCppError {
         let unit = format!("{label}.service");
-        let _ = self
+        let disabled = self
             .exec
-            .exec("systemctl", &["--user", "disable", "--now", &unit]);
+            .exec("systemctl", &["--user", "disable", "--now", &unit])
+            .is_ok_and(|o| o.success);
+        if !disabled && !self.not_found(label).unwrap_or(false) {
+            return LlamaCppError::Supervisor(format!(
+                "{cause}; the unit {unit} may still be loaded, so its files were kept: stop it \
+                 with `systemctl --user disable --now {unit}`"
+            ));
+        }
         remove_env_file(&self.unit_path(label));
         remove_env_file(&self.env_path(label));
         self.daemon_reload();
+        LlamaCppError::Supervisor(cause.to_owned())
+    }
+
+    /// The `EnvironmentFile=` an installed unit names, accepted only when it
+    /// is exactly this unit's own env file (`<label>.env`, clean absolute).
+    fn env_file_named_by(unit_file: &Path, label: &str) -> Option<PathBuf> {
+        let text = std::fs::read_to_string(unit_file).ok()?;
+        let line = text
+            .lines()
+            .find_map(|l| l.strip_prefix("EnvironmentFile="))?;
+        let path = PathBuf::from(line.replace("%%", "%"));
+        let clean = path.is_absolute()
+            && !path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir));
+        (clean && path.file_name().and_then(|n| n.to_str()) == Some(&format!("{label}.env")))
+            .then_some(path)
     }
 
     /// Whether systemd confirms it has no unit called `label` loaded
@@ -606,21 +659,21 @@ impl<E: CommandExec> SystemdManager<E> {
 
 impl SystemdManager<HostExec> {
     /// Construct with the host executor: unit files in
-    /// `$XDG_CONFIG_HOME/systemd/user` (default `~/.config/systemd/user`), env
-    /// files in `~/.local/state/amicu/env`.
+    /// `~/.config/systemd/user`, env files in `~/.local/state/amicu/env`
+    /// (fixed locations, so a recorded path can be validated against them).
     #[must_use]
     pub fn host() -> Self {
         // Unset HOME leaves the dirs empty; `start` then refuses to write.
         let home = home_dir().unwrap_or_default();
-        let config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|d| d.is_absolute())
-            .unwrap_or_else(|| home.join(".config"));
-        Self::new(
+        let manager = Self::new(
             HostExec,
-            config.join("systemd/user"),
+            home.join(".config/systemd/user"),
             home.join(".local/state/amicu/env"),
-        )
+        );
+        match std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
+            Some(run) => manager.with_legacy_env_dir(PathBuf::from(run).join("amicu")),
+            None => manager,
+        }
     }
 }
 
@@ -711,6 +764,7 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
         Some(ServicePaths {
             definition: self.unit_path(label),
             logs: Vec::new(),
+            env: Some(self.env_path(label)),
         })
     }
 
@@ -800,18 +854,17 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
         ] {
             let out = match self.exec.exec("systemctl", &args) {
                 Ok(out) => out,
-                Err(e) => {
-                    self.abandon(&spec.label);
-                    return Err(e);
-                }
+                Err(e) => return Err(self.abandon(&spec.label, &e.to_string())),
             };
             if !out.success {
-                self.abandon(&spec.label);
-                return Err(LlamaCppError::Supervisor(format!(
-                    "systemctl {} failed: {}",
-                    args[1..].join(" "),
-                    out.stderr.trim()
-                )));
+                return Err(self.abandon(
+                    &spec.label,
+                    &format!(
+                        "systemctl {} failed: {}",
+                        args[1..].join(" "),
+                        out.stderr.trim()
+                    ),
+                ));
             }
         }
         Ok(())
@@ -833,6 +886,15 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
     }
 
     fn stop_recorded(&self, label: &str, definition: Option<&Path>) -> Result<(), LlamaCppError> {
+        self.stop_recorded_with_env(label, definition, None)
+    }
+
+    fn stop_recorded_with_env(
+        &self,
+        label: &str,
+        definition: Option<&Path>,
+        env: Option<&Path>,
+    ) -> Result<(), LlamaCppError> {
         check_label(label)?;
         let unit = format!("{label}.service");
         // Disable and stop in one go. A unit with no unit file to disable (a
@@ -857,20 +919,32 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
             Some(p) if p.extension().is_some_and(|e| e == "service") => p.to_path_buf(),
             _ => self.unit_path(label),
         };
-        match std::fs::remove_file(&unit_path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(LlamaCppError::Supervisor(format!(
-                    "remove {}: {e}",
-                    unit_path.display()
-                )));
-            }
+        // The secrets file goes FIRST and a failure to delete it is an error
+        // that leaves the unit file (and so the record) in place: the record
+        // must never be dropped while the secrets are still on disk. The path
+        // is the recorded one, else the one the installed unit names, else the
+        // computed one.
+        let mut env_files: Vec<PathBuf> = Vec::new();
+        if let Some(p) = env {
+            env_files.push(p.to_path_buf());
         }
-        remove_env_file(&self.env_path(label));
+        if let Some(p) = Self::env_file_named_by(&unit_path, label) {
+            env_files.push(p);
+        }
+        env_files.push(self.env_path(label));
+        // A legacy (transient-era) record names the env file as its definition.
         if let Some(p) = definition.filter(|p| p.extension().is_some_and(|e| e == "env")) {
-            remove_env_file(p);
+            env_files.push(p.to_path_buf());
         }
+        env_files.dedup();
+        for path in &env_files {
+            remove_file_strict(path)?;
+        }
+        // Transient-era units kept it on tmpfs; best effort, as before.
+        if let Some(dir) = &self.legacy_env_dir {
+            remove_env_file(&dir.join(format!("{label}.env")));
+        }
+        remove_file_strict(&unit_path)?;
         self.daemon_reload();
         Ok(())
     }
@@ -903,6 +977,18 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
 /// Best-effort removal of a unit's env file; a missing file is fine.
 fn remove_env_file(path: &Path) {
     let _ = std::fs::remove_file(path);
+}
+
+/// Remove `path`; a missing file is fine, any other error is surfaced.
+fn remove_file_strict(path: &Path) -> Result<(), LlamaCppError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(LlamaCppError::Supervisor(format!(
+            "remove {}: {e}",
+            path.display()
+        ))),
+    }
 }
 
 fn home_dir() -> Option<PathBuf> {

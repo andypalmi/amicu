@@ -85,6 +85,10 @@ pub(crate) struct StopRecord {
     /// than one recomputed from `$HOME`, and the systemd unit's secrets file goes with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<String>,
+    /// systemd only: the 0600 environment file (secrets) the unit reads,
+    /// recorded before the start with the unit path and deleted before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_file: Option<String>,
     /// Host only: log files the service writes; removed by `destroy --purge`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logs: Vec<String>,
@@ -108,6 +112,7 @@ impl StopRecord {
             workspace: None,
             environment: None,
             definition: None,
+            env_file: None,
             logs: Vec::new(),
             volumes: Vec::new(),
         }
@@ -125,6 +130,7 @@ impl StopRecord {
         rec.identity = amicu_llamacpp::project_host_label(project_id, deployment.as_str());
         if let Some(p) = paths {
             rec.definition = Some(p.definition.to_string_lossy().into_owned());
+            rec.env_file = p.env.map(|e| e.to_string_lossy().into_owned());
             rec.logs = p
                 .logs
                 .iter()
@@ -156,6 +162,7 @@ impl StopRecord {
             workspace: workspace.map(|w| w.name.clone()),
             environment: workspace.map(|w| w.environment.clone()),
             definition: None,
+            env_file: None,
             logs: Vec::new(),
             volumes: Vec::new(),
         }
@@ -196,10 +203,32 @@ impl StopRecord {
             Backend::HostSystemd if path.extension().is_some_and(|e| e == "env") => {
                 ("env", &["amicu", "amicu/env"])
             }
-            Backend::HostSystemd => ("service", &["systemd/user"]),
+            Backend::HostSystemd => ("service", &[".config/systemd/user"]),
             Backend::Modal => return Err(format!("a Modal record has a service file '{def}'")),
         };
         Self::check_file(&path, &format!("{}.{ext}", self.identity), dirs)?;
+        Ok(Some(path))
+    }
+
+    /// The recorded systemd secrets file, validated: absolute, no `..`, named
+    /// exactly `<identity>.env`, in `.../.local/state/amicu/env`. `Ok(None)`:
+    /// none recorded (the manager then derives it).
+    pub(crate) fn env_path(&self) -> Result<Option<PathBuf>, String> {
+        let Some(env) = &self.env_file else {
+            return Ok(None);
+        };
+        if self.backend != Backend::HostSystemd {
+            return Err(format!(
+                "a {} record has an env file '{env}'",
+                self.backend.name()
+            ));
+        }
+        let path = PathBuf::from(env);
+        Self::check_file(
+            &path,
+            &format!("{}.env", self.identity),
+            &[".local/state/amicu/env"],
+        )?;
         Ok(Some(path))
     }
 

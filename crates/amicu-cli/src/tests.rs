@@ -1972,6 +1972,7 @@ fn scoped_rec(project_id: &str, name: &str, home: &std::path::Path) -> StopRecor
             } else {
                 Vec::new()
             },
+            env: None,
         }),
     )
 }
@@ -2078,6 +2079,43 @@ fn systemd_env_files_are_validated_in_the_env_dir_only() {
     assert!(check("/home/me/.config/systemd/user/sshd.service".into()).is_err());
     assert!(check(format!("/etc/systemd/system/{label}.service")).is_err());
     assert!(check(format!("/home/me/.config/systemd/user/../{label}.service")).is_err());
+    // Not just any `systemd/user` directory.
+    assert!(check(format!("/tmp/systemd/user/{label}.service")).is_err());
+}
+
+#[test]
+fn the_recorded_systemd_secrets_file_is_validated_before_anything_is_deleted() {
+    let mut rec = StopRecord::host_in(
+        "aaaa1111",
+        &"chat".into(),
+        Some(&amicu_llamacpp::HostContext {
+            backend: amicu_llamacpp::HostBackend::Systemd,
+            uid: 501,
+            domain: None,
+        }),
+        Some(amicu_llamacpp::ServicePaths {
+            definition: "/home/me/.config/systemd/user/x.service".into(),
+            logs: Vec::new(),
+            env: Some("/home/me/.local/state/amicu/env/x.env".into()),
+        }),
+    );
+    // The env path is written ahead with the unit path.
+    assert_eq!(
+        rec.env_file.as_deref(),
+        Some("/home/me/.local/state/amicu/env/x.env")
+    );
+    let label = rec.identity.clone();
+    let mut check = |d: String| {
+        rec.env_file = Some(d);
+        rec.env_path()
+    };
+    assert!(check(format!("/home/me/.local/state/amicu/env/{label}.env")).is_ok());
+    assert!(check("/home/me/.local/state/amicu/env/other.env".to_owned()).is_err());
+    assert!(check(format!("/home/me/.ssh/{label}.env")).is_err());
+    assert!(check(format!("/home/me/.local/state/amicu/env/../{label}.env")).is_err());
+    assert!(check(format!("relative/{label}.env")).is_err());
+    rec.env_file = None;
+    assert_eq!(rec.env_path(), Ok(None));
 }
 
 #[test]

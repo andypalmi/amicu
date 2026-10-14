@@ -2558,10 +2558,89 @@ fn systemd_start_failure_removes_the_unit_and_the_env_file() {
     let dir = TempDir::new("systemd-env");
     let mut spec = service_spec();
     spec.env = vec![("api_key".into(), "v".into())];
-    let manager = systemd_manager(FakeExec::new(false, ""), &dir);
+    // Everything fails but systemd confirms the unit does not exist.
+    let manager = systemd_manager(
+        StopFailsExec {
+            load_state: "not-found\n",
+        },
+        &dir,
+    );
     assert!(manager.start(&spec).is_err());
     assert_eq!(dir_entries(&dir.file("units")), 0);
     assert_eq!(dir_entries(&dir.file("env")), 0);
+}
+
+#[test]
+fn systemd_start_failure_keeps_the_files_when_the_unit_may_still_be_loaded() {
+    let dir = TempDir::new("systemd-abandon");
+    let mut spec = service_spec();
+    spec.env = vec![("api_key".into(), "v".into())];
+    let manager = systemd_manager(
+        StopFailsExec {
+            load_state: "loaded\n",
+        },
+        &dir,
+    );
+    let err = manager.start(&spec).expect_err("start fails").to_string();
+    assert!(err.contains("may still be loaded"), "{err}");
+    assert_eq!(dir_entries(&dir.file("units")), 1);
+    assert_eq!(dir_entries(&dir.file("env")), 1);
+}
+
+/// A stop that succeeds, but where the secrets file cannot be deleted (it is a
+/// non-empty directory): the unit file and so the record must stay.
+#[test]
+fn systemd_env_delete_failure_keeps_the_unit_file_and_errors() {
+    let dir = TempDir::new("systemd-envfail");
+    let spec = service_spec();
+    let manager = systemd_manager(FakeExec::new(true, ""), &dir);
+    manager.start(&spec).expect("start");
+    let env = dir.file("env").join(format!("{}.env", spec.label));
+    fs::create_dir_all(env.join("blocker")).unwrap();
+    let err = manager.stop(&spec.label).expect_err("env not deletable");
+    assert!(err.to_string().contains("remove"), "{err}");
+    assert!(manager.paths(&spec.label).unwrap().definition.exists());
+}
+
+#[test]
+fn systemd_stop_deletes_the_recorded_env_path_and_the_one_the_unit_names() {
+    let dir = TempDir::new("systemd-recorded-env");
+    let mut spec = service_spec();
+    spec.env = vec![("k".into(), "v".into())];
+    let manager = systemd_manager(FakeExec::new(true, ""), &dir);
+    manager.start(&spec).expect("start");
+    let paths = manager.paths(&spec.label).unwrap();
+    let env = paths.env.clone().expect("env path recorded");
+    assert_eq!(env, dir.file("env").join(format!("{}.env", spec.label)));
+    // A manager rooted elsewhere (HOME changed since the start) still deletes
+    // the recorded file, and the unit's own `EnvironmentFile=`.
+    let elsewhere = TempDir::new("systemd-elsewhere");
+    let other = systemd_manager(FakeExec::new(true, ""), &elsewhere);
+    other
+        .stop_recorded_with_env(&spec.label, Some(&paths.definition), Some(&env))
+        .expect("stop");
+    assert!(!env.exists() && !paths.definition.exists());
+
+    // Without a recorded env path, the unit file names it.
+    manager.start(&spec).expect("restart");
+    other
+        .stop_recorded_with_env(&spec.label, Some(&paths.definition), None)
+        .expect("stop");
+    assert!(!env.exists() && !paths.definition.exists());
+}
+
+#[test]
+fn systemd_stop_of_a_legacy_record_removes_the_tmpfs_env_file_too() {
+    let dir = TempDir::new("systemd-legacy-run");
+    let run = TempDir::new("systemd-legacy-xdg");
+    let leftover = run.file("amicu/io.amicu.llama.x.env");
+    fs::create_dir_all(run.file("amicu")).unwrap();
+    fs::write(&leftover, "k=\"v\"\n").unwrap();
+    systemd_manager(TransientExec(Mutex::new(Vec::new())), &dir)
+        .with_legacy_env_dir(run.file("amicu"))
+        .stop_recorded("io.amicu.llama.x", None)
+        .expect("stopped");
+    assert!(!leftover.exists());
 }
 
 /// systemctl stand-in: `disable` and `stop` fail; `show -p LoadState` answers
