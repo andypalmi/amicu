@@ -10,7 +10,12 @@ operations guide.
 ## Setup
 
 Environment variables (never pass them as flags; never write real values into
-HCL, logs or chat):
+HCL, - **App name**: `amicu-<project>-<deployment>-<digest>` (project id, the
+  deployment id lower-cased with other characters as `-`, and a digest of the
+  exact ids). It is recorded in state; use it with
+  `amicu modal status|logs|metrics|stop`. Apps made by older versions are
+  `amicu-` + the deployment id; `apply` replaces them once (new URL, brief
+  downtime, no rollback). or chat):
 
 | Variable | Needed for | Notes |
 |---|---|---|
