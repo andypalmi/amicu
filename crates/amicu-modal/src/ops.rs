@@ -404,6 +404,27 @@ impl ModalClient {
         }))
     }
 
+    /// The name of the workspace the configured token belongs to
+    /// (`WorkspaceNameLookup`).
+    #[allow(deprecated)] // `workspace_name` is deprecated in favour of `username`
+    pub async fn workspace_name(&mut self) -> Result<String, ModalError> {
+        let response = self
+            .stub()
+            .workspace_name_lookup(())
+            .await
+            .map_err(|status| ModalError::from_status("WorkspaceNameLookup", status))?
+            .into_inner();
+        let name = if response.workspace_name.is_empty() {
+            response.username
+        } else {
+            response.workspace_name
+        };
+        if name.is_empty() {
+            return Err(ModalError::EmptyWorkspaceName);
+        }
+        Ok(name)
+    }
+
     /// Lists apps in the current environment, mirroring `modal app list`
     /// (`modal/cli/app.py:46-80`) minus its table rendering.
     pub async fn list_apps(&mut self) -> Result<Vec<AppSummary>, ModalError> {

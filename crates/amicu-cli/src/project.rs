@@ -26,10 +26,25 @@ pub(crate) struct LocalState {
     pub graph: Graph,
     #[serde(default)]
     pub endpoints: Vec<RuntimeHandle>,
+    /// Deployments whose start was begun (state is written ahead of the
+    /// provider call) but not confirmed. Each is also in `graph`, so it can be
+    /// found and stopped from state alone even if amicu died mid-start.
+    /// Absent in state written before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<amicu_core::id::DeploymentId>,
+    /// How to stop every instance that may be running (see [`crate::stops`]).
+    /// Written ahead of each start and removed only once a stop is confirmed.
+    /// Absent in v1 state; the stop identity is then derived from the graph.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stops: Vec<crate::stops::StopRecord>,
 }
 
 impl LocalState {
-    pub const VERSION: &'static str = "v1";
+    /// Written by this version. v2 adds `pending` and `stops`, which a v1-only
+    /// binary would silently drop on its next save.
+    pub const VERSION: &'static str = "v2";
+    /// Versions this binary can read.
+    pub const SUPPORTED: &'static [&'static str] = &["v1", "v2"];
 }
 
 impl Project {
@@ -56,7 +71,7 @@ impl Project {
         self.dot_dir().join("state")
     }
 
-    fn state_file(&self) -> PathBuf {
+    pub(crate) fn state_file(&self) -> PathBuf {
         self.state_dir().join("state.json")
     }
 
@@ -92,9 +107,15 @@ impl Project {
     pub fn load_state(&self) -> Result<Option<LocalState>, CliError> {
         let path = self.state_file();
         let problem = match fs::read_to_string(&path) {
-            Ok(text) => match serde_json::from_str(&text) {
+            Ok(text) => match parse_state(&text) {
                 Ok(state) => return Ok(Some(state)),
-                Err(e) => format!("{} is corrupt or unreadable ({e})", path.display()),
+                // A newer state must never be "restored" from an older backup.
+                Err(StateParseError::Unsupported(msg)) => {
+                    return Err(CliError::Message(format!("{}: {msg}", path.display())));
+                }
+                Err(StateParseError::Corrupt(e)) => {
+                    format!("{} is corrupt or unreadable ({e})", path.display())
+                }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 if !self.backup_parses() {
@@ -125,8 +146,7 @@ impl Project {
     }
 
     fn backup_parses(&self) -> bool {
-        fs::read_to_string(self.state_backup_file())
-            .is_ok_and(|t| serde_json::from_str::<LocalState>(&t).is_ok())
+        fs::read_to_string(self.state_backup_file()).is_ok_and(|t| parse_state(&t).is_ok())
     }
 
     /// Durably replace `state.json`: write a uniquely named temp file in the
@@ -141,6 +161,16 @@ impl Project {
         fs::create_dir_all(&dir)
             .map_err(|e| CliError::io(format!("cannot create {}", dir.display()), e))?;
         let path = self.state_file();
+        // Never overwrite a state this amicu does not understand (written by a
+        // newer version): that would silently downgrade or destroy it.
+        if let Ok(existing) = fs::read_to_string(&path)
+            && let Err(StateParseError::Unsupported(msg)) = parse_state(&existing)
+        {
+            return Err(CliError::Message(format!(
+                "refusing to overwrite {}: it {msg}",
+                path.display()
+            )));
+        }
         let text = serde_json::to_string_pretty(state)?;
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -187,8 +217,7 @@ impl Project {
     /// a copy as fallback; it is installed by rename so it is never torn.
     fn rotate_backup(&self, dir: &Path, unique: &str) -> Result<(), CliError> {
         let path = self.state_file();
-        let valid =
-            fs::read_to_string(&path).is_ok_and(|t| serde_json::from_str::<LocalState>(&t).is_ok());
+        let valid = fs::read_to_string(&path).is_ok_and(|t| parse_state(&t).is_ok());
         if !valid {
             return Ok(());
         }
@@ -203,6 +232,32 @@ impl Project {
             let _ = fs::remove_file(&bak_tmp);
             CliError::io(format!("cannot write {}", bak.display()), e)
         })
+    }
+}
+
+/// Why a state file did not load.
+enum StateParseError {
+    /// Not valid state JSON.
+    Corrupt(String),
+    /// Valid JSON of a version this amicu does not understand.
+    Unsupported(String),
+}
+
+/// Parse state text, accepting only the versions this binary understands.
+/// Used for loading and for deciding whether a file (or backup) is valid, so
+/// an unsupported-version file is never treated as a good generation.
+fn parse_state(text: &str) -> Result<LocalState, StateParseError> {
+    let state: LocalState =
+        serde_json::from_str(text).map_err(|e| StateParseError::Corrupt(e.to_string()))?;
+    if LocalState::SUPPORTED.contains(&state.version.as_str()) {
+        Ok(state)
+    } else {
+        Err(StateParseError::Unsupported(format!(
+            "has state version '{}', which this amicu does not understand (supported: {}); \
+             upgrade amicu rather than overwrite it",
+            state.version,
+            LocalState::SUPPORTED.join(", ")
+        )))
     }
 }
 
@@ -295,10 +350,14 @@ mod durability_tests {
     }
 
     fn state(tag: &str) -> LocalState {
+        // The generation tag rides in `pending`: `version` must stay a
+        // supported one or the state would (rightly) not load.
         LocalState {
-            version: tag.to_owned(),
+            version: LocalState::VERSION.to_owned(),
             graph: Graph::new(),
             endpoints: Vec::new(),
+            pending: vec![tag.into()],
+            stops: Vec::new(),
         }
     }
 
@@ -311,10 +370,10 @@ mod durability_tests {
         p.save_state(&state("gen2")).unwrap();
         p.save_state(&state("gen3")).unwrap();
 
-        assert_eq!(p.load_state().unwrap().unwrap().version, "gen3");
+        assert_eq!(p.load_state().unwrap().unwrap().pending[0].as_str(), "gen3");
         let bak: LocalState =
             serde_json::from_str(&fs::read_to_string(p.state_backup_file()).unwrap()).unwrap();
-        assert_eq!(bak.version, "gen2");
+        assert_eq!(bak.pending[0].as_str(), "gen2");
         let leftovers: Vec<_> = fs::read_dir(p.state_dir())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -354,9 +413,9 @@ mod durability_tests {
         let p = Project::new(&root);
         p.save_state(&state("good")).unwrap();
         fs::write(p.state_dir().join("state.json.123.abc.tmp"), "{ torn").unwrap();
-        assert_eq!(p.load_state().unwrap().unwrap().version, "good");
+        assert_eq!(p.load_state().unwrap().unwrap().pending[0].as_str(), "good");
         p.save_state(&state("next")).unwrap();
-        assert_eq!(p.load_state().unwrap().unwrap().version, "next");
+        assert_eq!(p.load_state().unwrap().unwrap().pending[0].as_str(), "next");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -401,7 +460,46 @@ mod durability_tests {
         p.save_state(&state("fresh")).unwrap();
         let bak: LocalState =
             serde_json::from_str(&fs::read_to_string(p.state_backup_file()).unwrap()).unwrap();
-        assert_eq!(bak.version, "old");
+        assert_eq!(bak.pending[0].as_str(), "old");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_unsupported_version_is_never_a_valid_state_or_backup() {
+        let root = scratch("unsupported");
+        let p = Project::new(&root);
+        p.save_state(&state("good")).unwrap();
+        p.save_state(&state("good2")).unwrap();
+        // A newer-version file replaces state.json (e.g. written by a newer amicu).
+        let mut newer = serde_json::to_value(state("future")).unwrap();
+        newer["version"] = "v9".into();
+        fs::write(p.state_file(), newer.to_string()).unwrap();
+        let err = p.load_state().expect_err("unsupported");
+        assert!(err.to_string().contains("v9"), "{err}");
+        assert!(
+            !err.to_string().contains("cp "),
+            "never advise restoring over it: {err}"
+        );
+        // Saving must refuse to overwrite it (and so cannot rotate it into
+        // the backup either).
+        let err = p
+            .save_state(&state("next"))
+            .expect_err("must not overwrite");
+        assert!(err.to_string().contains("refusing to overwrite"), "{err}");
+        assert_eq!(
+            fs::read_to_string(p.state_file()).unwrap(),
+            newer.to_string()
+        );
+        let bak: LocalState =
+            serde_json::from_str(&fs::read_to_string(p.state_backup_file()).unwrap()).unwrap();
+        assert_eq!(
+            bak.pending[0].as_str(),
+            "good",
+            "backup kept the last valid one"
+        );
+        // And an unsupported backup does not count as a valid previous generation.
+        fs::write(p.state_backup_file(), newer.to_string()).unwrap();
+        assert!(!p.backup_parses());
+        let _ = fs::remove_dir_all(&root);
     }
 }

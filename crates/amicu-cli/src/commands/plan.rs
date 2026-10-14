@@ -32,7 +32,12 @@ pub(crate) fn run(
 
     let prior =
         crate::refresh::load_refreshed_state(project, &crate::refresh::ModalLookup, output, out)?
-            .map(|s| s.graph);
+            .map(|s| {
+                // A pending deployment (start unconfirmed) is planned as absent.
+                let mut g = s.graph;
+                g.deployments.retain(|d| !s.pending.contains(&d.id));
+                g
+            });
     let result = match build_project_plan(project, &graph, prior.as_ref()) {
         Ok(result) => result,
         // A deployment failed to plan (e.g. a CAP-002/CAP-003 extra_args/env

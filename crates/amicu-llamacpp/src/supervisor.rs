@@ -110,6 +110,18 @@ pub trait ProcessSupervisor: Send + Sync {
 
     /// Stop the instance.
     async fn stop(&self, handle: &RuntimeHandle) -> Result<(), LlamaCppError>;
+
+    /// Who the host service manager acts as (backend, uid, launchd domain),
+    /// when this supervisor is host-based. Recorded with started instances.
+    fn host_context(&self) -> Option<crate::service::HostContext> {
+        None
+    }
+
+    /// The uid that owns an existing instance's service definition, when it
+    /// can be told (launchd plist owner).
+    fn instance_owner(&self, _label: &str) -> Option<u32> {
+        None
+    }
 }
 
 /// The real supervisor: a [`ServiceManager`] runs the process, a [`HealthProbe`]
@@ -323,6 +335,13 @@ fn endpoint_for(plan: &LaunchPlan) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
+/// The launchd label / systemd unit the host supervisor uses for a
+/// deployment. Deterministic, so a stop handle can be derived from state alone.
+#[must_use]
+pub fn host_label(deployment: &str) -> String {
+    format!("io.amicu.llama.{deployment}")
+}
+
 #[async_trait]
 impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<M, P> {
     async fn start(
@@ -366,7 +385,7 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
             })?;
             env.push((s.name.clone(), value.to_owned()));
         }
-        let label = format!("io.amicu.llama.{}", plan.deployment);
+        let label = host_label(plan.deployment.as_str());
         let spec = ServiceSpec {
             label: label.clone(),
             argv: self.resolve_program(argv)?,
@@ -431,5 +450,13 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
 
     async fn stop(&self, handle: &RuntimeHandle) -> Result<(), LlamaCppError> {
         self.manager.stop(&handle.id)
+    }
+
+    fn host_context(&self) -> Option<crate::service::HostContext> {
+        self.manager.context()
+    }
+
+    fn instance_owner(&self, label: &str) -> Option<u32> {
+        self.manager.instance_owner(label)
     }
 }

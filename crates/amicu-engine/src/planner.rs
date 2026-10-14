@@ -201,6 +201,18 @@ fn resolve<'a>(graph: &'a Graph, d: &'a Deployment) -> Resolved<'a> {
     )
 }
 
+/// A destroy plan item for `id` that needs no deployment in any graph (for
+/// an instance known only from its stop record).
+#[must_use]
+pub fn destroy_item(id: &DeploymentId) -> PlanItem {
+    PlanItem {
+        action: destroy_action(id),
+        launch: None,
+        deployment: id.clone(),
+        rendered: None,
+    }
+}
+
 fn destroy_action(id: &DeploymentId) -> PlannedAction {
     PlannedAction {
         kind: ActionKind::Destroy,

@@ -401,7 +401,7 @@ fn region_residency_violation_blocks_validate_plan_and_apply() {
 
     // apply never reaches a side effect
     let mut out = Vec::new();
-    let code = commands::apply::run(&project, true, None, OutputFormat::Json, &mut out).unwrap();
+    let code = run_apply(&project, OutputFormat::Json, &mut out).unwrap();
     assert_eq!(code, 1);
     let report: amicu_core::diagnostic::DiagnosticReport = serde_json::from_slice(&out).unwrap();
     assert!(has_code(&report, "AMICU-POLICY-002"));
@@ -595,6 +595,8 @@ fn apply_json_stdout_is_a_single_json_value() {
     project
         .save_state(&LocalState {
             version: LocalState::VERSION.to_owned(),
+            pending: Vec::new(),
+            stops: Vec::new(),
             graph: prior,
             endpoints: Vec::new(),
         })
@@ -602,7 +604,7 @@ fn apply_json_stdout_is_a_single_json_value() {
     write(&td.path, "amicu.hcl", SECOND_MODEL);
 
     let mut out = Vec::new();
-    let code = commands::apply::run(&project, true, None, OutputFormat::Json, &mut out).unwrap();
+    let code = run_apply(&project, OutputFormat::Json, &mut out).unwrap();
     assert_eq!(code, 0);
     // The whole stdout buffer must parse as one JSON value.
     let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
@@ -668,13 +670,15 @@ fn state_round_trips() {
 
     let state = LocalState {
         version: LocalState::VERSION.to_owned(),
+        pending: Vec::new(),
+        stops: Vec::new(),
         graph: graph.clone(),
         endpoints: Vec::new(),
     };
     project.save_state(&state).unwrap();
     let loaded = project.load_state().unwrap().unwrap();
     assert_eq!(loaded.graph, graph);
-    assert_eq!(loaded.version, "v1");
+    assert_eq!(loaded.version, LocalState::VERSION);
 }
 
 #[test]
@@ -685,7 +689,7 @@ fn apply_fails_fast_when_state_is_locked() {
 
     let _held = crate::lock::StateLock::acquire(&project.state_dir(), "apply", None).unwrap();
     let mut out = Vec::new();
-    let err = commands::apply::run(&project, true, None, OutputFormat::Human, &mut out)
+    let err = run_apply(&project, OutputFormat::Human, &mut out)
         .expect_err("a locked state must fail apply");
     assert!(
         matches!(err, crate::error::CliError::StateLocked(_)),
@@ -799,4 +803,1055 @@ fn approval_parsing() {
     assert!(!commands::apply::approved("n"));
     assert!(!commands::apply::approved(""));
     assert!(!commands::apply::approved("no"));
+}
+
+/// `VALID_CONFIG` plus a second deployment, `support_two`, on another port.
+fn two_deployments() -> String {
+    let second = r#"
+resource "deployment" "support_two" {
+  model    = model.support_chat.id
+  hardware = hardware_profile.dev_mac.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 8192
+    port           = 8001
+    n_gpu_layers   = -1
+  }
+}
+"#;
+    format!("{VALID_CONFIG}{second}")
+}
+
+fn two_deployment_graph() -> amicu_core::graph::Graph {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", &two_deployments());
+    project.load_graph().unwrap()
+}
+
+fn destroyed_ids(result: &crate::planner::PlanResult) -> Vec<String> {
+    result
+        .items
+        .iter()
+        .map(|i| i.deployment.as_str().to_owned())
+        .collect()
+}
+
+#[test]
+fn destroy_plans_every_deployment_in_state() {
+    let prior = two_deployment_graph();
+    let result = commands::destroy::plan_destroy(&prior, &[], &[]).unwrap();
+    assert_eq!(result.plan.actions.len(), 2);
+    assert!(
+        result
+            .plan
+            .actions
+            .iter()
+            .all(|a| a.kind == amicu_plan::contract::ActionKind::Destroy)
+    );
+    assert!(result.items.iter().all(|i| i.launch.is_none()));
+    assert_eq!(destroyed_ids(&result), ["support_local", "support_two"]);
+}
+
+#[test]
+fn destroy_target_limits_the_plan_to_the_named_deployments() {
+    let prior = two_deployment_graph();
+    let result = commands::destroy::plan_destroy(&prior, &[], &["support_two".to_owned()]).unwrap();
+    assert_eq!(destroyed_ids(&result), ["support_two"]);
+    assert_eq!(result.plan.actions.len(), 1);
+    assert_eq!(result.plan.actions[0].address, "deployment.support_two");
+}
+
+#[test]
+fn destroy_unknown_target_is_an_error_and_plans_nothing() {
+    let prior = two_deployment_graph();
+    let err = commands::destroy::plan_destroy(
+        &prior,
+        &[],
+        &["support_two".to_owned(), "ghost".to_owned()],
+    )
+    .err()
+    .expect("unknown target must fail");
+    let commands::destroy::DestroyPlanError::UnknownTarget(msg) = err else {
+        panic!("expected UnknownTarget");
+    };
+    assert!(msg.contains("ghost"), "{msg}");
+    assert!(
+        msg.starts_with("unknown --target deployment(s): ghost;"),
+        "only the unknown name is reported: {msg}"
+    );
+    assert!(msg.contains("support_local"), "lists known names: {msg}");
+}
+
+// ---- apply / destroy end to end, over fake host and Modal -------------------
+//
+// None of these touches the real launchctl/systemctl or the network: the host
+// supervisor and Modal are injected, and `TempDir::new` arms a guard that
+// panics if a real service command is ever spawned.
+
+use std::sync::{Arc, Mutex};
+
+use crate::commands::apply::Env;
+use crate::modal_ops::{ModalOps, Workspace};
+use crate::refresh::AppLookup;
+use crate::stops::{Backend, StopRecord};
+
+#[derive(Default)]
+struct StopLog {
+    stopped: Mutex<Vec<String>>,
+}
+
+struct FakeHost {
+    log: Arc<StopLog>,
+    fail: bool,
+    ctx: Option<amicu_llamacpp::HostContext>,
+    owner: Option<u32>,
+}
+
+#[async_trait::async_trait]
+impl amicu_llamacpp::ProcessSupervisor for FakeHost {
+    async fn start(
+        &self,
+        _: &amicu_runtime::LaunchPlan,
+        _: &[amicu_llamacpp::ResolvedSecret],
+    ) -> Result<amicu_runtime::RuntimeHandle, amicu_llamacpp::LlamaCppError> {
+        unreachable!("these tests never start anything")
+    }
+    async fn status(
+        &self,
+        _: &amicu_runtime::RuntimeHandle,
+    ) -> Result<amicu_runtime::RuntimeStatus, amicu_llamacpp::LlamaCppError> {
+        unreachable!()
+    }
+    async fn metrics(
+        &self,
+        _: &amicu_runtime::RuntimeHandle,
+    ) -> Result<amicu_runtime::RuntimeMetrics, amicu_llamacpp::LlamaCppError> {
+        unreachable!()
+    }
+    async fn logs(
+        &self,
+        _: &amicu_runtime::RuntimeHandle,
+        _: amicu_runtime::LogOptions,
+    ) -> Result<amicu_runtime::LogStream, amicu_llamacpp::LlamaCppError> {
+        unreachable!()
+    }
+    async fn stop(
+        &self,
+        h: &amicu_runtime::RuntimeHandle,
+    ) -> Result<(), amicu_llamacpp::LlamaCppError> {
+        if self.fail {
+            return Err(amicu_llamacpp::LlamaCppError::Supervisor(
+                "stop could not be confirmed".to_owned(),
+            ));
+        }
+        self.log.stopped.lock().unwrap().push(h.id.clone());
+        Ok(())
+    }
+    fn host_context(&self) -> Option<amicu_llamacpp::HostContext> {
+        self.ctx.clone()
+    }
+    fn instance_owner(&self, _label: &str) -> Option<u32> {
+        self.owner
+    }
+}
+
+/// A scripted Modal: which workspace the token is for, which apps exist by
+/// name, and which app ids Modal reports as unknown.
+struct FakeModal {
+    workspace: Workspace,
+    apps: Mutex<Vec<(String, String)>>,
+    unknown_ids: Vec<String>,
+    stopped: Mutex<Vec<String>>,
+    live: Option<Vec<String>>,
+    /// App ids the token's workspace can see (besides `apps`).
+    visible_ids: Vec<String>,
+}
+
+impl Default for FakeModal {
+    fn default() -> Self {
+        Self {
+            workspace: ws("acme"),
+            apps: Mutex::new(Vec::new()),
+            unknown_ids: Vec::new(),
+            stopped: Mutex::new(Vec::new()),
+            live: None,
+            visible_ids: Vec::new(),
+        }
+    }
+}
+
+fn ws(name: &str) -> Workspace {
+    Workspace {
+        name: name.to_owned(),
+        environment: "default".to_owned(),
+    }
+}
+
+#[async_trait::async_trait]
+impl ModalOps for FakeModal {
+    async fn workspace(&self) -> Result<Workspace, crate::error::CliError> {
+        Ok(self.workspace.clone())
+    }
+    async fn list_app_ids(&self) -> Result<Vec<String>, crate::error::CliError> {
+        Ok(self.visible())
+    }
+    async fn find_app(&self, name: &str) -> Result<Option<String>, crate::error::CliError> {
+        Ok(self
+            .apps
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, id)| id.clone()))
+    }
+    async fn stop_app(&self, app_id: &str) -> Result<bool, crate::error::CliError> {
+        if self.unknown_ids.iter().any(|i| i == app_id) {
+            return Ok(false);
+        }
+        self.stopped.lock().unwrap().push(app_id.to_owned());
+        Ok(true)
+    }
+}
+
+impl FakeModal {
+    fn visible(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .apps
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, id)| id.clone())
+            .collect();
+        v.extend(self.visible_ids.clone());
+        v
+    }
+}
+
+impl AppLookup for FakeModal {
+    fn app_ids(&self) -> Result<Option<std::collections::HashSet<String>>, String> {
+        Ok(Some(self.visible().into_iter().collect()))
+    }
+    fn live_apps(&self, app_names: &[String]) -> Result<std::collections::HashSet<String>, String> {
+        Ok(self
+            .live
+            .clone()
+            .unwrap_or_else(|| app_names.to_vec())
+            .into_iter()
+            .collect())
+    }
+    fn active_workspace(&self) -> Result<Option<Workspace>, String> {
+        Ok(Some(self.workspace.clone()))
+    }
+}
+
+struct Rig {
+    log: Arc<StopLog>,
+    host: Box<dyn Fn() -> Box<dyn amicu_llamacpp::ProcessSupervisor>>,
+    modal: FakeModal,
+    forget: bool,
+}
+
+impl Rig {
+    fn new() -> Self {
+        Self::build(false, Some(platform_ctx()), None)
+    }
+    fn failing() -> Self {
+        Self::build(true, Some(platform_ctx()), None)
+    }
+    fn with_ctx(ctx: amicu_llamacpp::HostContext) -> Self {
+        Self::build(false, Some(ctx), None)
+    }
+    fn no_ctx() -> Self {
+        Self::build(false, None, None)
+    }
+    fn with_owner(owner: u32) -> Self {
+        Self::build(false, Some(platform_ctx()), Some(owner))
+    }
+    fn build(fail: bool, ctx: Option<amicu_llamacpp::HostContext>, owner: Option<u32>) -> Self {
+        let log = Arc::new(StopLog::default());
+        let l = log.clone();
+        Self {
+            log,
+            host: Box::new(move || {
+                Box::new(FakeHost {
+                    log: l.clone(),
+                    fail,
+                    ctx: ctx.clone(),
+                    owner,
+                })
+            }),
+            modal: FakeModal::default(),
+            forget: false,
+        }
+    }
+    fn env(&self) -> Env<'_> {
+        Env {
+            host: &*self.host,
+            modal: &self.modal,
+            forget_unconfirmed: self.forget,
+        }
+    }
+    fn stopped(&self) -> Vec<String> {
+        let mut v = self.log.stopped.lock().unwrap().clone();
+        v.sort();
+        v
+    }
+}
+
+/// The identity of the machine the tests run on, as a user 501 would see it.
+fn platform_ctx() -> amicu_llamacpp::HostContext {
+    if cfg!(target_os = "macos") {
+        amicu_llamacpp::HostContext {
+            backend: amicu_llamacpp::HostBackend::Launchd,
+            uid: 501,
+            domain: Some("gui/501".to_owned()),
+        }
+    } else {
+        amicu_llamacpp::HostContext {
+            backend: amicu_llamacpp::HostBackend::Systemd,
+            uid: 501,
+            domain: None,
+        }
+    }
+}
+
+fn run_apply(
+    project: &Project,
+    output: OutputFormat,
+    out: &mut Vec<u8>,
+) -> Result<u8, crate::error::CliError> {
+    let rig = Rig::new();
+    commands::apply::run_with(
+        project,
+        true,
+        None,
+        output,
+        out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &rig.env(),
+    )
+}
+
+fn state_with(graph: amicu_core::graph::Graph) -> LocalState {
+    LocalState {
+        version: LocalState::VERSION.to_owned(),
+        graph,
+        endpoints: Vec::new(),
+        pending: Vec::new(),
+        stops: Vec::new(),
+    }
+}
+
+fn run_destroy(
+    project: &Project,
+    targets: &[String],
+    auto_approve: bool,
+    output: OutputFormat,
+    answer: &str,
+    rig: &Rig,
+) -> (Result<u8, crate::error::CliError>, String) {
+    let mut out = Vec::new();
+    let mut input = std::io::Cursor::new(answer.as_bytes().to_vec());
+    let result = commands::destroy::run_with(
+        project,
+        targets,
+        auto_approve,
+        None,
+        output,
+        &mut out,
+        &mut input,
+        &rig.env(),
+    );
+    (result, utf8(out))
+}
+
+fn label(name: &str) -> String {
+    amicu_llamacpp::host_label(name)
+}
+
+fn host_rec(name: &str) -> StopRecord {
+    StopRecord::host(&name.into(), None)
+}
+
+fn modal_rec(name: &str, app_id: Option<&str>, workspace: Option<&str>) -> StopRecord {
+    StopRecord::modal(
+        &name.into(),
+        app_id.map(str::to_owned),
+        workspace.map(ws).as_ref(),
+    )
+}
+
+fn stops_for(project: &Project, name: &str) -> Vec<StopRecord> {
+    project
+        .load_state()
+        .unwrap()
+        .unwrap()
+        .stops
+        .into_iter()
+        .filter(|r| r.deployment.as_str() == name)
+        .collect()
+}
+
+fn saved(td: &TempDir, state: &LocalState) -> Project {
+    let project = Project::new(&td.path);
+    project.save_state(state).unwrap();
+    project
+}
+
+#[test]
+fn applying_a_removal_stops_via_the_fake_host_not_the_real_one() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let prior = project.load_graph().unwrap();
+    project.save_state(&state_with(prior)).unwrap();
+    write(&td.path, "amicu.hcl", SECOND_MODEL);
+
+    let rig = Rig::new();
+    let mut out = Vec::new();
+    let code = commands::apply::run_with(
+        &project,
+        true,
+        None,
+        OutputFormat::Json,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &rig.env(),
+    )
+    .unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(rig.stopped(), [label("support_local")]);
+    let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(value.is_array());
+}
+
+#[test]
+#[should_panic(expected = "inject a fake service manager")]
+fn the_real_host_exec_refuses_service_commands_under_test() {
+    let _ = amicu_llamacpp::CommandExec::exec(&amicu_llamacpp::HostExec, "launchctl", &["list"]);
+}
+
+#[test]
+fn destroy_unknown_target_leaves_state_untouched() {
+    let td = TempDir::new();
+    let state = state_with(two_deployment_graph());
+    let project = saved(&td, &state);
+    let rig = Rig::new();
+    let (result, out) = run_destroy(
+        &project,
+        &["ghost".to_owned()],
+        true,
+        OutputFormat::Human,
+        "",
+        &rig,
+    );
+    let err = result.expect_err("unknown target");
+    assert!(err.to_string().contains("ghost"), "{err}");
+    assert_eq!(project.load_state().unwrap().unwrap().graph, state.graph);
+    assert_eq!(out, "");
+    assert_eq!(rig.stopped().len(), 0);
+}
+
+#[test]
+fn destroy_with_empty_state_prints_nothing_to_destroy() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    let (result, out) = run_destroy(&project, &[], true, OutputFormat::Human, "", &Rig::new());
+    assert_eq!(result.unwrap(), 0);
+    assert_eq!(out, "Nothing to destroy.\n");
+    assert!(project.load_state().unwrap().is_none());
+}
+
+#[test]
+fn destroy_nothing_in_json_mode_is_an_empty_array() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    let (result, out) = run_destroy(&project, &[], true, OutputFormat::Json, "", &Rig::new());
+    result.unwrap();
+    assert_eq!(out.trim(), "[]");
+}
+
+#[test]
+fn destroy_cancel_or_eof_destroys_nothing_and_json_prints_an_empty_array() {
+    for answer in ["", "n\n", "no\n", "\n"] {
+        for output in [OutputFormat::Human, OutputFormat::Json] {
+            let td = TempDir::new();
+            let state = state_with(two_deployment_graph());
+            let project = saved(&td, &state);
+            let rig = Rig::new();
+            let (result, out) = run_destroy(&project, &[], false, output, answer, &rig);
+            assert_eq!(result.unwrap(), 0);
+            if output.is_json() {
+                assert_eq!(out.trim(), "[]", "{out}");
+            } else {
+                assert!(out.contains("Destroy these deployments? [y/N]"), "{out}");
+                assert!(out.contains("Destroy cancelled."), "{out}");
+            }
+            assert_eq!(project.load_state().unwrap().unwrap().graph, state.graph);
+            assert_eq!(rig.stopped().len(), 0);
+        }
+    }
+}
+
+#[test]
+fn destroy_confirmed_stops_via_derived_labels_and_empties_state() {
+    let td = TempDir::new();
+    // v1-style state: no endpoints, no stop records. Identity is derived.
+    let project = saved(&td, &state_with(two_deployment_graph()));
+    let rig = Rig::new();
+    let (result, out) = run_destroy(&project, &[], false, OutputFormat::Human, "y\n", &rig);
+    assert_eq!(result.unwrap(), 0);
+    assert!(out.contains("Destroyed 2 deployment(s):"), "{out}");
+    assert_eq!(
+        rig.stopped(),
+        [label("support_local"), label("support_two")]
+    );
+    let after = project.load_state().unwrap().unwrap();
+    assert_eq!(after.graph.deployments.len(), 0);
+    assert_eq!(after.stops.len(), 0);
+}
+
+#[test]
+fn targeted_destroy_preserves_other_deployments_endpoints_and_stop_records() {
+    let td = TempDir::new();
+    let kept = handle("support_local", 8000);
+    let mut state = state_with(two_deployment_graph());
+    state.endpoints = vec![kept.clone()];
+    let project = saved(&td, &state);
+    let rig = Rig::new();
+    let (result, _) = run_destroy(
+        &project,
+        &["support_two".to_owned()],
+        true,
+        OutputFormat::Human,
+        "",
+        &rig,
+    );
+    result.unwrap();
+    assert_eq!(rig.stopped(), [label("support_two")]);
+    let after = project.load_state().unwrap().unwrap();
+    assert_eq!(after.endpoints, vec![kept]);
+    let ids: Vec<&str> = after
+        .graph
+        .deployments
+        .iter()
+        .map(|d| d.id.as_str())
+        .collect();
+    assert_eq!(ids, ["support_local"]);
+    assert!(
+        after
+            .stops
+            .iter()
+            .all(|r| r.deployment.as_str() == "support_local")
+    );
+}
+
+#[test]
+fn a_failed_stop_keeps_the_deployment_and_its_record_and_errors_with_a_hint() {
+    let td = TempDir::new();
+    let mut state = state_with(two_deployment_graph());
+    state.stops = vec![host_rec("support_local"), host_rec("support_two")];
+    let project = saved(&td, &state);
+    let rig = Rig::failing();
+    let (result, out) = run_destroy(&project, &[], true, OutputFormat::Human, "", &rig);
+    let err = result.expect_err("an unconfirmed stop must fail the command");
+    let msg = err.to_string();
+    assert!(msg.contains("could not be confirmed"), "{msg}");
+    // First-stop failure: nothing changed, and the hint names the command.
+    assert!(msg.contains("amicu destroy"), "{msg}");
+    assert!(!out.contains("Destroyed"), "never claim success: {out}");
+    let after = project.load_state().unwrap().unwrap();
+    assert_eq!(after.graph.deployments.len(), 2);
+    assert_eq!(after.stops, state.stops);
+}
+
+/// A crash between the provider start and the final save leaves only the
+/// write-ahead record: a pending deployment with its stop record and no
+/// endpoint. Destroy stops it from that record alone.
+#[test]
+fn destroy_stops_a_pending_deployment_from_its_record_alone() {
+    let td = TempDir::new();
+    let mut state = state_with(two_deployment_graph());
+    state.pending = vec!["support_two".into()];
+    state.stops = vec![host_rec("support_two")];
+    let project = saved(&td, &state);
+    let rig = Rig::new();
+    let (result, _) = run_destroy(
+        &project,
+        &["support_two".to_owned()],
+        true,
+        OutputFormat::Human,
+        "",
+        &rig,
+    );
+    result.unwrap();
+    assert_eq!(rig.stopped(), [label("support_two")]);
+    let after = project.load_state().unwrap().unwrap();
+    assert_eq!(after.pending.len(), 0);
+    assert!(
+        after
+            .stops
+            .iter()
+            .all(|r| r.deployment.as_str() == "support_local"),
+        "{:?}",
+        after.stops
+    );
+}
+
+#[test]
+fn destroy_stops_every_recorded_identity_of_a_deployment() {
+    let td = TempDir::new();
+    let mut state = state_with(two_deployment_graph());
+    let mut old = host_rec("support_two");
+    old.identity = "io.amicu.llama.old_name".to_owned();
+    state.stops = vec![old, host_rec("support_two")];
+    let project = saved(&td, &state);
+    let rig = Rig::new();
+    let (result, _) = run_destroy(
+        &project,
+        &["support_two".to_owned()],
+        true,
+        OutputFormat::Human,
+        "",
+        &rig,
+    );
+    result.unwrap();
+    assert_eq!(
+        rig.stopped(),
+        ["io.amicu.llama.old_name".to_owned(), label("support_two")]
+    );
+}
+
+/// Stop records whose deployment is no longer in the graph are still
+/// instances that may be running: destroy plans and stops them too, and they
+/// are valid `--target`s.
+#[test]
+fn destroy_acts_on_orphan_stop_records() {
+    let td = TempDir::new();
+    let mut state = state_with(two_deployment_graph());
+    state.stops = vec![host_rec("ghost")];
+    let project = saved(&td, &state);
+
+    let rig = Rig::new();
+    let (result, _) = run_destroy(
+        &project,
+        &["ghost".to_owned()],
+        true,
+        OutputFormat::Human,
+        "",
+        &rig,
+    );
+    result.unwrap();
+    assert_eq!(rig.stopped(), [label("ghost")]);
+    let after = project.load_state().unwrap().unwrap();
+    assert_eq!(after.graph.deployments.len(), 2, "others untouched");
+    assert!(after.stops.iter().all(|r| r.deployment.as_str() != "ghost"));
+}
+
+// ---- host identity: backend, uid, launchd domain ----------------------------
+
+fn ctx(
+    backend: amicu_llamacpp::HostBackend,
+    uid: u32,
+    domain: Option<&str>,
+) -> amicu_llamacpp::HostContext {
+    amicu_llamacpp::HostContext {
+        backend,
+        uid,
+        domain: domain.map(str::to_owned),
+    }
+}
+
+fn destroy_one_host_record(
+    rec: StopRecord,
+    rig: &Rig,
+) -> (Result<u8, crate::error::CliError>, Project, TempDir) {
+    let td = TempDir::new();
+    let mut state = state_with(two_deployment_graph());
+    state.stops = vec![rec];
+    let project = saved(&td, &state);
+    let (result, _) = run_destroy(
+        &project,
+        &["support_two".to_owned()],
+        true,
+        OutputFormat::Human,
+        "",
+        rig,
+    );
+    (result, project, td)
+}
+
+#[test]
+fn host_records_remember_uid_and_launchd_domain() {
+    let c = ctx(amicu_llamacpp::HostBackend::Launchd, 501, Some("gui/501"));
+    let rec = StopRecord::host(&"support_two".into(), Some(&c));
+    assert_eq!(rec.backend, Backend::HostLaunchd);
+    assert_eq!(rec.uid, Some(501));
+    assert_eq!(rec.domain.as_deref(), Some("gui/501"));
+    let back: StopRecord = serde_json::from_str(&serde_json::to_string(&rec).unwrap()).unwrap();
+    assert_eq!(back, rec);
+}
+
+#[test]
+fn a_matching_uid_and_domain_stops_and_an_old_record_without_them_is_accepted() {
+    let c = ctx(amicu_llamacpp::HostBackend::Launchd, 501, Some("gui/501"));
+    let rec = StopRecord::host(&"support_two".into(), Some(&c));
+    let (result, _, _td) = destroy_one_host_record(rec, &Rig::with_ctx(c.clone()));
+    result.unwrap();
+
+    // Old record: backend only, no uid/domain.
+    let mut old = host_rec("support_two");
+    old.backend = Backend::HostLaunchd;
+    let (result, _, _td) = destroy_one_host_record(old, &Rig::with_ctx(c));
+    result.unwrap();
+}
+
+#[test]
+fn a_different_uid_domain_or_backend_is_refused_and_nothing_is_stopped() {
+    let started = ctx(amicu_llamacpp::HostBackend::Launchd, 501, Some("gui/501"));
+    let cases = [
+        (
+            "uid",
+            ctx(amicu_llamacpp::HostBackend::Launchd, 502, Some("gui/501")),
+        ),
+        (
+            "domain",
+            ctx(amicu_llamacpp::HostBackend::Launchd, 501, Some("user/501")),
+        ),
+        (
+            "backend",
+            ctx(amicu_llamacpp::HostBackend::Systemd, 501, None),
+        ),
+    ];
+    for (what, now) in cases {
+        let rec = StopRecord::host(&"support_two".into(), Some(&started));
+        let rig = Rig::with_ctx(now);
+        let (result, project, _td) = destroy_one_host_record(rec.clone(), &rig);
+        let err = result.expect_err(what);
+        assert!(
+            err.to_string().contains("Nothing was changed"),
+            "{what}: {err}"
+        );
+        assert_eq!(rig.stopped().len(), 0, "{what}");
+        let after = project.load_state().unwrap().unwrap();
+        assert_eq!(after.stops, vec![rec], "{what}: record kept");
+    }
+}
+
+#[test]
+fn launchd_and_systemd_records_are_not_the_same_target() {
+    let mut launchd = host_rec("support_two");
+    launchd.backend = Backend::HostLaunchd;
+    let mut systemd = host_rec("support_two");
+    systemd.backend = Backend::HostSystemd;
+    assert!(!launchd.same_target(&systemd));
+    assert!(launchd.same_target(&launchd.clone()));
+}
+
+// ---- Modal: workspace, app ids, unconfirmed names ---------------------------
+
+fn modal_graph() -> amicu_core::graph::Graph {
+    amicu_hcl::parse_graph(&two_deployments().replace("local_apple", "modal")).unwrap()
+}
+
+fn destroy_modal(
+    rec: StopRecord,
+    rig: &Rig,
+) -> (Result<u8, crate::error::CliError>, Project, TempDir) {
+    let td = TempDir::new();
+    let mut state = state_with(modal_graph());
+    state.stops = vec![rec];
+    let project = saved(&td, &state);
+    let (result, _) = run_destroy(
+        &project,
+        &["support_two".to_owned()],
+        true,
+        OutputFormat::Human,
+        "",
+        rig,
+    );
+    (result, project, td)
+}
+
+#[test]
+fn modal_destroy_stops_by_recorded_app_id_in_the_matching_workspace() {
+    let rig = Rig::new();
+    let (result, project, _td) =
+        destroy_modal(modal_rec("support_two", Some("ap-2"), Some("acme")), &rig);
+    result.unwrap();
+    assert_eq!(*rig.modal.stopped.lock().unwrap(), ["ap-2"]);
+    assert_eq!(stops_for(&project, "support_two").len(), 0);
+}
+
+#[test]
+fn modal_not_found_for_a_recorded_id_is_confirmed_only_in_the_matching_workspace() {
+    let mut rig = Rig::new();
+    rig.modal.unknown_ids = vec!["ap-2".to_owned()];
+    // Same workspace: Modal says it is gone, so it is confirmed.
+    let (result, project, _td) =
+        destroy_modal(modal_rec("support_two", Some("ap-2"), Some("acme")), &rig);
+    result.unwrap();
+    assert_eq!(stops_for(&project, "support_two").len(), 0);
+
+    // Another workspace: refused before asking Modal, and the record is kept.
+    let rec = modal_rec("support_two", Some("ap-2"), Some("other-co"));
+    let (result, project, _td) = destroy_modal(rec.clone(), &rig);
+    let msg = result.expect_err("workspace mismatch").to_string();
+    assert!(msg.contains("other-co") && msg.contains("acme"), "{msg}");
+    assert!(msg.contains("MODAL_TOKEN_ID"), "{msg}");
+    assert_eq!(stops_for(&project, "support_two"), vec![rec]);
+}
+
+#[test]
+fn modal_name_only_record_that_cannot_be_found_is_kept_unless_forgotten() {
+    let rig = Rig::new();
+    let rec = modal_rec("support_two", None, Some("acme"));
+    let (result, project, _td) = destroy_modal(rec.clone(), &rig);
+    let msg = result.expect_err("unconfirmed").to_string();
+    assert!(msg.contains("--forget-unconfirmed"), "{msg}");
+    assert!(!msg.contains("state.json"), "no hand-editing advice: {msg}");
+    assert_eq!(
+        project.load_state().unwrap().unwrap().stops,
+        vec![rec.clone()]
+    );
+
+    // Found by name: stopped by the id Modal reports.
+    rig.modal
+        .apps
+        .lock()
+        .unwrap()
+        .push(("amicu-support-two".to_owned(), "ap-found".to_owned()));
+    let (result, _, _td) = destroy_modal(rec.clone(), &rig);
+    result.unwrap();
+    assert_eq!(*rig.modal.stopped.lock().unwrap(), ["ap-found"]);
+
+    // The user checked the dashboard and opts in.
+    let mut rig = Rig::new();
+    rig.forget = true;
+    let (result, project, _td) = destroy_modal(rec, &rig);
+    result.unwrap();
+    assert_eq!(stops_for(&project, "support_two").len(), 0);
+}
+
+#[test]
+fn a_workspace_less_modal_record_is_stopped_only_once_its_app_is_proven_visible() {
+    // Proven: the active workspace lists the app id, so it is stopped and
+    // the record (stamped with the workspace) is then removed.
+    let mut rig = Rig::new();
+    rig.modal.visible_ids = vec!["ap-2".to_owned()];
+    let (result, project, _td) = destroy_modal(modal_rec("support_two", Some("ap-2"), None), &rig);
+    result.unwrap();
+    assert_eq!(*rig.modal.stopped.lock().unwrap(), ["ap-2"]);
+    assert_eq!(stops_for(&project, "support_two").len(), 0);
+
+    // Not visible: ownership is unproven, so nothing is stopped or dropped,
+    // even when Modal would say "not found".
+    let mut rig = Rig::new();
+    rig.modal.unknown_ids = vec!["ap-2".to_owned()];
+    let rec = modal_rec("support_two", Some("ap-2"), None);
+    let (result, project, _td) = destroy_modal(rec.clone(), &rig);
+    let msg = result.expect_err("unproven").to_string();
+    assert!(msg.contains("cannot see that app"), "{msg}");
+    assert!(msg.contains("MODAL_TOKEN_ID"), "{msg}");
+    assert!(!msg.contains("MODAL_ENVIRONMENT"), "{msg}");
+    assert_eq!(rig.modal.stopped.lock().unwrap().len(), 0);
+    assert_eq!(stops_for(&project, "support_two"), vec![rec]);
+}
+
+/// A v1 state (Modal handle, no stop records) under a token for another
+/// workspace: both apply and destroy refuse before doing anything, so there is
+/// no duplicate deploy and nothing is dropped.
+#[test]
+fn v1_modal_state_under_another_workspaces_token_blocks_apply_and_destroy() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let mut state = state_with(modal_graph());
+    state.endpoints = vec![handle("support_local", 8000), handle("support_two", 8001)];
+    for h in &mut state.endpoints {
+        h.id = format!("ap-{}", h.deployment);
+        h.exposure = amicu_runtime::EndpointExposure::Loopback;
+    }
+    project.save_state(&state).unwrap();
+    let before = std::fs::read_to_string(project.state_file()).unwrap();
+
+    let mut rig = Rig::new();
+    rig.modal.workspace = ws("other-co");
+    // The other workspace cannot see those app ids.
+    let mut out = Vec::new();
+    let err = commands::apply::run_with(
+        &project,
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &rig.env(),
+    )
+    .expect_err("apply must refuse");
+    assert!(err.to_string().contains("cannot see that app"), "{err}");
+
+    let (result, _) = run_destroy(&project, &[], true, OutputFormat::Human, "", &rig);
+    let err = result.expect_err("destroy must refuse");
+    assert!(err.to_string().contains("cannot see that app"), "{err}");
+
+    assert_eq!(rig.modal.stopped.lock().unwrap().len(), 0);
+    assert_eq!(rig.stopped().len(), 0);
+    assert_eq!(
+        std::fs::read_to_string(project.state_file()).unwrap(),
+        before,
+        "state untouched: nothing dropped"
+    );
+}
+
+#[test]
+fn forget_unconfirmed_needs_explicit_targets() {
+    let td = TempDir::new();
+    let mut state = state_with(modal_graph());
+    state.stops = vec![modal_rec("support_two", None, Some("acme"))];
+    let project = saved(&td, &state);
+    let mut rig = Rig::new();
+    rig.forget = true;
+    let (result, _) = run_destroy(&project, &[], true, OutputFormat::Human, "", &rig);
+    let msg = result.expect_err("no targets").to_string();
+    assert!(msg.contains("--target"), "{msg}");
+    assert_eq!(stops_for(&project, "support_two").len(), 1);
+}
+
+#[test]
+fn forget_unconfirmed_is_refused_for_a_record_without_a_known_workspace() {
+    let mut rig = Rig::new();
+    rig.forget = true;
+    let rec = modal_rec("support_two", None, None);
+    let (result, project, _td) = destroy_modal(rec.clone(), &rig);
+    let msg = result.expect_err("unknown workspace").to_string();
+    // Dead end: it points at the targeted recovery, not at the flag that is
+    // refused here.
+    assert!(msg.contains("recorded with no workspace"), "{msg}");
+    assert!(msg.contains("modal app list"), "{msg}");
+    assert!(msg.contains("amicu modal stop amicu-support-two"), "{msg}");
+    assert!(!msg.contains("--forget-unconfirmed"), "{msg}");
+    assert_eq!(stops_for(&project, "support_two"), vec![rec]);
+}
+
+#[test]
+fn forget_unconfirmed_lists_what_it_will_forget_and_needs_confirmation() {
+    let td = TempDir::new();
+    let mut state = state_with(modal_graph());
+    state.stops = vec![modal_rec("support_two", None, Some("acme"))];
+    let project = saved(&td, &state);
+    let mut rig = Rig::new();
+    rig.forget = true;
+    // Interactive and declined: nothing is forgotten.
+    let (result, out) = run_destroy(
+        &project,
+        &["support_two".to_owned()],
+        false,
+        OutputFormat::Human,
+        "n\n",
+        &rig,
+    );
+    assert_eq!(result.unwrap(), 0);
+    assert!(out.contains("WITHOUT confirming"), "{out}");
+    assert!(
+        out.contains("support_two") && out.contains("amicu-support-two"),
+        "{out}"
+    );
+    assert_eq!(stops_for(&project, "support_two").len(), 1);
+    // Confirmed: forgotten.
+    let (result, _) = run_destroy(
+        &project,
+        &["support_two".to_owned()],
+        false,
+        OutputFormat::Human,
+        "y\n",
+        &rig,
+    );
+    result.unwrap();
+    assert_eq!(stops_for(&project, "support_two").len(), 0);
+}
+
+// ---- host identity edge cases ------------------------------------------------
+
+#[test]
+fn an_unknown_host_identity_refuses_every_stop() {
+    let (result, project, _td) = destroy_one_host_record(host_rec("support_two"), &Rig::no_ctx());
+    let msg = result.expect_err("unknown context").to_string();
+    assert!(msg.contains("cannot determine which user"), "{msg}");
+    assert_eq!(stops_for(&project, "support_two").len(), 1);
+}
+
+#[test]
+fn a_record_without_an_owner_is_refused_for_root_or_a_foreign_plist_owner() {
+    let mut root = platform_ctx();
+    root.uid = 0;
+    let (result, _, _td) = destroy_one_host_record(host_rec("support_two"), &Rig::with_ctx(root));
+    assert!(result.expect_err("root").to_string().contains("root"));
+
+    let (result, _, _td) = destroy_one_host_record(host_rec("support_two"), &Rig::with_owner(999));
+    assert!(
+        result
+            .expect_err("owner")
+            .to_string()
+            .contains("belongs to uid 999")
+    );
+
+    // The plist is ours: fine.
+    let (result, _, _td) = destroy_one_host_record(host_rec("support_two"), &Rig::with_owner(501));
+    result.unwrap();
+}
+
+#[test]
+fn a_gui_domain_record_after_logout_gets_a_targeted_recovery_command() {
+    let started = ctx(amicu_llamacpp::HostBackend::Launchd, 501, Some("gui/501"));
+    let rec = StopRecord::host(&"support_two".into(), Some(&started));
+    let now = ctx(amicu_llamacpp::HostBackend::Launchd, 501, Some("user/501"));
+    let (result, _, _td) = destroy_one_host_record(rec, &Rig::with_ctx(now));
+    let msg = result.expect_err("domain mismatch").to_string();
+    assert!(
+        msg.contains("launchctl print gui/501/io.amicu.llama.support_two"),
+        "{msg}"
+    );
+    assert!(msg.contains("amicu destroy --target support_two"), "{msg}");
+}
+
+#[test]
+fn state_round_trips_and_refuses_newer_versions() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    let mut state = state_with(two_deployment_graph());
+    state.pending = vec!["support_two".into()];
+    state.stops = vec![host_rec("support_two")];
+    project.save_state(&state).unwrap();
+    let loaded = project.load_state().unwrap().unwrap();
+    assert_eq!(loaded.version, "v2");
+    assert_eq!(loaded.pending, state.pending);
+    assert_eq!(loaded.stops, state.stops);
+
+    // v1 state (no pending/stops) still loads.
+    let mut v1: serde_json::Value = serde_json::to_value(&state).unwrap();
+    v1["version"] = "v1".into();
+    v1.as_object_mut().unwrap().remove("pending");
+    v1.as_object_mut().unwrap().remove("stops");
+    std::fs::write(project.state_file(), v1.to_string()).unwrap();
+    let old = project.load_state().unwrap().unwrap();
+    assert_eq!(old.version, "v1");
+    assert_eq!(old.stops.len(), 0);
+
+    // A newer version is refused rather than silently downgraded.
+    let mut newer = v1;
+    newer["version"] = "v9".into();
+    std::fs::write(project.state_file(), newer.to_string()).unwrap();
+    let err = project.load_state().expect_err("newer state");
+    assert!(err.to_string().contains("v9"), "{err}");
+}
+
+fn handle(id: &str, port: u16) -> amicu_runtime::RuntimeHandle {
+    amicu_runtime::RuntimeHandle {
+        id: id.to_owned(),
+        deployment: id.into(),
+        endpoint: format!("http://127.0.0.1:{port}"),
+        exposure: amicu_runtime::EndpointExposure::Loopback,
+    }
 }
