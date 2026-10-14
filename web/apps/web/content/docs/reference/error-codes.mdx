@@ -67,7 +67,7 @@ Diagnostics have the form `AMICU-<CATEGORY>-<NNN>`. The category is the fastest 
 | `AMICU-POLICY-003` | error | A provider is not allowed, or is denied | Change the provider or the rule |
 | `AMICU-POLICY-004` | error | A secret-designated field was given as a literal | Use `secret("NAME")` |
 | `AMICU-POLICY-005` | warning | A free-text field or comment looks like a secret | Remove it, or add `# amicu:allow` on the line |
-| `AMICU-POLICY-006` | warning | A runtime `env` value looks like a secret | Use a `secret(...)` reference |
+| `AMICU-POLICY-006` | warning | A runtime `env` value or `extra_args` entry looks like a secret: a known token shape, or a literal under a name containing key, token, secret, or password | Move it to a `credential` `env` as `secret("NAME")`; literals are stored in state and visible in process arguments |
 | `AMICU-POLICY-007` | error | An off-machine deployment has no `api_key` | Add `api_key = secret("NAME")` and export `NAME` |
 | `AMICU-POLICY-008` | error | The resolved key is unusable: empty, or has a comma, whitespace, or non-ASCII characters | Regenerate it, for example `openssl rand -hex 32` |
 
