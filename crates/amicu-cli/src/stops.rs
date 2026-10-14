@@ -80,10 +80,9 @@ pub(crate) struct StopRecord {
     /// Modal only: the environment the app was deployed in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
-    /// Host only: the service definition file (launchd plist / systemd env
-    /// file) recorded before the start. It holds the injected environment
-    /// (the API key), so it is deleted with the stop, from this path rather
-    /// than one recomputed from `$HOME`.
+    /// Host only: the service definition file (launchd plist / systemd unit
+    /// file) recorded before the start. It is deleted with the stop, from this path rather
+    /// than one recomputed from `$HOME`, and the systemd unit's secrets file goes with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<String>,
     /// Host only: log files the service writes; removed by `destroy --purge`.
@@ -178,9 +177,11 @@ impl StopRecord {
     }
 
     /// The recorded service definition, validated: absolute, no `..`, named
-    /// exactly `<identity>.plist` (launchd) / `<identity>.env` (systemd), in
-    /// the directory amicu writes it to (`.../Library/LaunchAgents`, or the
-    /// systemd env dir `.../amicu` / `.../amicu/env`). `Ok(None)`: none
+    /// exactly `<identity>.plist` (launchd) / `<identity>.service` (systemd; or
+    /// `<identity>.env` in records written when units were transient), in the
+    /// directory amicu writes it to (`.../Library/LaunchAgents`, the systemd
+    /// user unit dir `.../systemd/user`, or the legacy env dir `.../amicu` /
+    /// `.../amicu/env`). `Ok(None)`: none
     /// recorded (a legacy record). Anything else is refused, so a tampered
     /// state file can never make amicu delete an unrelated file.
     pub(crate) fn definition_path(&self) -> Result<Option<PathBuf>, String> {
@@ -190,7 +191,12 @@ impl StopRecord {
         let path = PathBuf::from(def);
         let (ext, dirs): (&str, &[&str]) = match self.backend {
             Backend::HostLaunchd => ("plist", &["Library/LaunchAgents"]),
-            Backend::HostSystemd => ("env", &["amicu", "amicu/env"]),
+            // Persistent user unit; legacy (transient-era) records name the
+            // unit's env file instead.
+            Backend::HostSystemd if path.extension().is_some_and(|e| e == "env") => {
+                ("env", &["amicu", "amicu/env"])
+            }
+            Backend::HostSystemd => ("service", &["systemd/user"]),
             Backend::Modal => return Err(format!("a Modal record has a service file '{def}'")),
         };
         Self::check_file(&path, &format!("{}.{ext}", self.identity), dirs)?;

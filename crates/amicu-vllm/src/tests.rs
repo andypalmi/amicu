@@ -182,6 +182,56 @@ fn validate_flags_underfit_as_error() {
     assert_eq!(err.code, catalog::MEM_VRAM_EXCEEDED);
 }
 
+/// Qwen3-8B-shaped model (36 layers, 8 KV heads, head dim 128) at `quantization`.
+fn qwen3_model(quantization: Option<amicu_core::resource::Quantization>) -> Model {
+    let mut model = shaped_model();
+    model.id = ModelId::new("llama8b");
+    model.n_layers = Some(36);
+    model.artifact.quantization = quantization;
+    model
+}
+
+fn errors(
+    diags: &[amicu_core::diagnostic::Diagnostic],
+) -> Vec<&amicu_core::diagnostic::Diagnostic> {
+    diags
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect()
+}
+
+#[test]
+fn validate_rejects_qwen3_8b_bf16_on_an_8_gib_gpu_naming_weights_kv_and_vram() {
+    // amicu-planning#249: ~16 GB of bf16 weights cannot fit 8 GiB of VRAM.
+    let a = adapter(qwen3_model(None), gpu_hardware(8, 1), 8_200_000_000);
+    let diags = a.validate(&deployment(base_settings()));
+    let errs = errors(&diags);
+    assert_eq!(errs.len(), 1, "{diags:?}");
+    assert_eq!(errs[0].code, catalog::MEM_VRAM_EXCEEDED);
+    let msg = &errs[0].message;
+    assert!(msg.contains("weights 16"), "weights figure: {msg}");
+    assert!(msg.contains("kv cache"), "kv estimate: {msg}");
+    assert!(msg.contains("8GiB VRAM"), "hardware memory: {msg}");
+    // And so does the launch plan.
+    assert!(a.plan_launch(&deployment(base_settings())).is_err() || !errs.is_empty());
+}
+
+#[test]
+fn validate_accepts_small_models_on_an_8_gib_gpu() {
+    use amicu_core::resource::Quantization;
+    // Qwen3-1.7B bf16 (~3.4 GB) and Qwen3-4B AWQ 4-bit (~2 GB + KV cache).
+    for (params, quantization) in [
+        (1_700_000_000, None),
+        (4_000_000_000, Some(Quantization::Int4)),
+    ] {
+        let a = adapter(qwen3_model(quantization), gpu_hardware(8, 1), params);
+        let mut settings = base_settings();
+        settings.context_length = 8192;
+        let diags = a.validate(&deployment(settings));
+        assert!(errors(&diags).is_empty(), "{params}: {diags:?}");
+    }
+}
+
 #[test]
 fn validate_fit_scales_with_tensor_parallel_size() {
     // 8B @ bf16 does not fit one 16 GiB GPU, but fits 2 sharded.

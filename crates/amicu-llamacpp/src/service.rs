@@ -90,7 +90,7 @@ pub struct HostContext {
 /// not depend on recomputing them from `$HOME` / the environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServicePaths {
-    /// The launchd plist / systemd environment file.
+    /// The launchd plist / systemd unit file.
     pub definition: PathBuf,
     /// Log files the manager writes (empty for systemd: the journal).
     pub logs: Vec<PathBuf>,
@@ -112,8 +112,8 @@ pub trait ServiceManager: Send + Sync {
         None
     }
     /// Best-effort removal of any previous instance with this label, so an
-    /// update can start the new one (`systemd-run --unit=<same>` fails while the
-    /// unit exists; a loaded launchd job would keep the old definition). Errors
+    /// update can start the new one (a loaded launchd job would keep the old
+    /// definition; a running systemd unit would not pick up the new one). Errors
     /// are ignored: normally there is nothing to release.
     fn release(&self, _label: &str) {}
     /// Read-only probe of an instance recorded as `label` (and, for launchd,
@@ -133,6 +133,13 @@ pub trait ServiceManager: Send + Sync {
     /// recomputed from `$HOME`. `None`: recompute (legacy records).
     fn stop_recorded(&self, label: &str, _definition: Option<&Path>) -> Result<(), LlamaCppError> {
         self.stop(label)
+    }
+    /// A one-line advisory to show after a successful start, when this host
+    /// would not bring the service back after a reboot as is (systemd user
+    /// lingering off). Read-only; `None` when there is nothing to say or it
+    /// cannot be told.
+    fn boot_hint(&self) -> Option<String> {
+        None
     }
     /// Read the service's captured log lines.
     fn logs(&self, label: &str, options: LogOptions) -> Result<Vec<String>, LlamaCppError>;
@@ -165,7 +172,7 @@ static ALLOW_SERVICE_COMMANDS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Opt in to running real service commands (`launchctl`, `systemctl`,
-/// `systemd-run`, `journalctl`). Off by default, so any test in any crate that
+/// `loginctl`, `journalctl`). Off by default, so any test in any crate that
 /// reaches a real [`HostExec`] panics instead of touching the developer's
 /// services, regardless of test order. Only the `amicu` binary calls this.
 pub fn allow_service_commands() {
@@ -182,7 +189,7 @@ impl CommandExec for HostExec {
             ALLOW_SERVICE_COMMANDS.load(std::sync::atomic::Ordering::SeqCst)
                 || !matches!(
                     program,
-                    "launchctl" | "systemctl" | "systemd-run" | "journalctl"
+                    "launchctl" | "systemctl" | "loginctl" | "journalctl"
                 ),
             "refusing to run the real `{program} {}`: service commands are only enabled in the \
              amicu binary; inject a fake service manager",
@@ -526,52 +533,94 @@ fn xml_escape(s: &str) -> String {
 
 // ---- systemd ----------------------------------------------------------------
 
-/// systemd-backed manager: a transient `--user` unit started with `systemd-run`,
-/// queried with `systemctl --user`, logs read via `journalctl --user`.
+/// systemd-backed manager: a persistent `--user` unit file written to
+/// `~/.config/systemd/user`, enabled (`WantedBy=default.target`) and started
+/// with `systemctl --user enable --now`, queried with `systemctl --user`, logs
+/// read via `journalctl --user`.
 ///
-/// Transient units do not survive a reboot or logout (unlike the launchd
-/// plist, which has `RunAtLoad`): after either, `amicu apply` must be re-run.
-/// Known limitation for now; persistent units are future work.
+/// This matches the launchd plist (`RunAtLoad`): a deployment `apply` created
+/// comes back after a reboot, and `Restart=on-failure` restarts a crashed
+/// server. Without `loginctl enable-linger` a user unit starts at the user's
+/// first login rather than at boot ([`ServiceManager::boot_hint`] reports
+/// that); amicu never enables lingering itself.
 ///
-/// Env (including secrets) goes in a per-unit 0600 `EnvironmentFile` that is
-/// removed on stop, so values never appear on `systemd-run`'s argv
-/// (`/proc/<pid>/cmdline`) and no unit file holds plaintext secrets.
+/// Env (including secrets) goes in a per-unit 0600 `EnvironmentFile` under the
+/// persistent env dir (not tmpfs: it must exist again after a reboot), so the
+/// unit file itself holds no secrets and values never appear on any argv. Stop
+/// disables and stops the unit and, only once that is confirmed, removes both
+/// files.
 #[derive(Debug, Clone)]
 pub struct SystemdManager<E> {
     exec: E,
+    unit_dir: PathBuf,
     env_dir: PathBuf,
 }
 
 impl<E: CommandExec> SystemdManager<E> {
-    /// Build over an executor and the directory holding per-unit env files.
-    pub fn new(exec: E, env_dir: impl Into<PathBuf>) -> Self {
+    /// Build over an executor, the directory holding unit files, and the
+    /// directory holding per-unit env files.
+    pub fn new(exec: E, unit_dir: impl Into<PathBuf>, env_dir: impl Into<PathBuf>) -> Self {
         Self {
             exec,
+            unit_dir: unit_dir.into(),
             env_dir: env_dir.into(),
         }
+    }
+
+    fn unit_path(&self, label: &str) -> PathBuf {
+        self.unit_dir.join(format!("{label}.service"))
     }
 
     fn env_path(&self, label: &str) -> PathBuf {
         self.env_dir.join(format!("{label}.env"))
     }
+
+    /// Best-effort `systemctl --user daemon-reload`, so systemd forgets a
+    /// removed unit file / reads a rewritten one.
+    fn daemon_reload(&self) {
+        let _ = self.exec.exec("systemctl", &["--user", "daemon-reload"]);
+    }
+
+    /// Undo a start that did not complete: disable and stop whatever got
+    /// loaded, then remove both files (the env file holds secrets).
+    fn abandon(&self, label: &str) {
+        let unit = format!("{label}.service");
+        let _ = self
+            .exec
+            .exec("systemctl", &["--user", "disable", "--now", &unit]);
+        remove_env_file(&self.unit_path(label));
+        remove_env_file(&self.env_path(label));
+        self.daemon_reload();
+    }
+
+    /// Whether systemd confirms it has no unit called `label` loaded
+    /// (checked by property, not by parsing stderr).
+    fn not_found(&self, label: &str) -> Result<bool, LlamaCppError> {
+        let load = self.exec.exec(
+            "systemctl",
+            &["--user", "show", "-p", "LoadState", "--value", label],
+        )?;
+        Ok(load.success && load.stdout.trim() == "not-found")
+    }
 }
 
 impl SystemdManager<HostExec> {
-    /// Construct with the host executor; env files live in
-    /// `$XDG_RUNTIME_DIR/amicu` (tmpfs) or `~/.local/state/amicu/env`.
+    /// Construct with the host executor: unit files in
+    /// `$XDG_CONFIG_HOME/systemd/user` (default `~/.config/systemd/user`), env
+    /// files in `~/.local/state/amicu/env`.
     #[must_use]
     pub fn host() -> Self {
-        let dir = std::env::var_os("XDG_RUNTIME_DIR")
-            .filter(|d| !d.is_empty())
-            .map_or_else(
-                || {
-                    // Unset HOME leaves the dir empty; `start` then refuses to
-                    // write secrets relative to the cwd.
-                    home_dir().map_or_else(PathBuf::new, |h| h.join(".local/state/amicu/env"))
-                },
-                |d| PathBuf::from(d).join("amicu"),
-            );
-        Self::new(HostExec, dir)
+        // Unset HOME leaves the dirs empty; `start` then refuses to write.
+        let home = home_dir().unwrap_or_default();
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|d| d.is_absolute())
+            .unwrap_or_else(|| home.join(".config"));
+        Self::new(
+            HostExec,
+            config.join("systemd/user"),
+            home.join(".local/state/amicu/env"),
+        )
     }
 }
 
@@ -595,10 +644,72 @@ fn environment_file(env: &[(String, String)]) -> Result<String, LlamaCppError> {
     Ok(out)
 }
 
+/// One `ExecStart=` word: double-quoted, with the characters systemd would
+/// otherwise interpret escaped (`\`, `"`, newline, and the `%`/`$` specifier
+/// and variable introducers).
+fn exec_word(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    for c in arg.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '%' => out.push_str("%%"),
+            '$' => out.push_str("$$"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Render the persistent user unit for `spec`. `env_file` is the 0600
+/// `EnvironmentFile` holding the injected environment, when there is one.
+fn unit_file(spec: &ServiceSpec, env_file: Option<&Path>) -> String {
+    use std::fmt::Write as _;
+    let exec = spec
+        .argv
+        .iter()
+        .map(|a| exec_word(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut out = format!(
+        "[Unit]\nDescription=amicu {}\n\n[Service]\nType=simple\nExecStart={exec}\n",
+        spec.label
+    );
+    if let Some(path) = env_file {
+        // Specifiers (`%`) apply here too; the path is amicu's own.
+        let _ = writeln!(
+            out,
+            "EnvironmentFile={}",
+            path.to_string_lossy().replace('%', "%%")
+        );
+    }
+    out.push_str("Restart=on-failure\n\n[Install]\nWantedBy=default.target\n");
+    out
+}
+
+/// A label becomes a file name and a unit name: refuse anything that is not
+/// one plain component, so a tampered record cannot reach another file.
+fn check_label(label: &str) -> Result<(), LlamaCppError> {
+    let bad = label.is_empty()
+        || label.starts_with('.')
+        || label
+            .chars()
+            .any(|c| c == '/' || c == '\\' || c == '%' || c.is_whitespace() || c.is_control());
+    if bad {
+        return Err(LlamaCppError::Supervisor(format!(
+            "'{label}' is not a valid service name"
+        )));
+    }
+    Ok(())
+}
+
 impl<E: CommandExec> ServiceManager for SystemdManager<E> {
     fn paths(&self, label: &str) -> Option<ServicePaths> {
         Some(ServicePaths {
-            definition: self.env_path(label),
+            definition: self.unit_path(label),
             logs: Vec::new(),
         })
     }
@@ -608,6 +719,20 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
             backend: HostBackend::Systemd,
             uid: effective_uid(&self.exec).ok()?,
             domain: None,
+        })
+    }
+
+    fn boot_hint(&self) -> Option<String> {
+        let uid = effective_uid(&self.exec).ok()?;
+        let out = self
+            .exec
+            .exec("loginctl", &["show-user", &uid.to_string(), "-p", "Linger"])
+            .ok()?;
+        (out.success && out.stdout.trim() == "Linger=no").then(|| {
+            "note: user lingering is off, so systemd starts this deployment at your next login, \
+             not at boot. To have it come back after a reboot without logging in, run \
+             `sudo loginctl enable-linger $USER` (amicu does not do this for you)."
+                .to_owned()
         })
     }
 
@@ -637,6 +762,8 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
     }
 
     fn release(&self, label: &str) {
+        // Stop only: `start` rewrites the unit file and reloads, so an update
+        // never has to remove the definition first.
         let _ = self.exec.exec("systemctl", &["--user", "stop", label]);
     }
 
@@ -644,38 +771,48 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
         if spec.argv.is_empty() {
             return Err(LlamaCppError::Supervisor("empty argv".to_owned()));
         }
-        let unit = format!("--unit={}", spec.label);
-        let mut args = vec!["--user", "--collect", &unit];
-        // Env goes through a 0600 EnvironmentFile, not `--setenv`, whose values
-        // would sit on systemd-run's argv (/proc/<pid>/cmdline).
+        check_label(&spec.label)?;
+        require_absolute(&self.unit_dir)?;
         let env_path = self.env_path(&spec.label);
-        let property;
-        if !spec.env.is_empty() {
+        let unit_path = self.unit_path(&spec.label);
+        let has_env = !spec.env.is_empty();
+        // Everything that can fail before a secret is on disk happens first.
+        let env_body = if has_env {
             require_absolute(&self.env_dir)?;
-            let body = environment_file(&spec.env)?;
-            write_private(&env_path, &self.env_dir, body.as_bytes())?;
-            property = format!("--property=EnvironmentFile={}", env_path.display());
-            args.push(&property);
-        }
-        // The rest is the program + its arguments.
-        let command: Vec<&str> = spec.argv.iter().map(String::as_str).collect();
-        if command.is_empty() {
-            return Err(LlamaCppError::Supervisor("empty argv".to_owned()));
-        }
-        args.extend(command);
-        let out = match self.exec.exec("systemd-run", &args) {
-            Ok(out) => out,
-            Err(e) => {
-                remove_env_file(&env_path);
-                return Err(e);
-            }
+            Some(environment_file(&spec.env)?)
+        } else {
+            None
         };
-        if !out.success {
+        let unit_body = unit_file(spec, has_env.then_some(env_path.as_path()));
+        // The env file (secrets) is written first, so the unit never refers to
+        // a file that is not there yet; a failure removes whatever was written.
+        if let Some(body) = &env_body {
+            write_private(&env_path, &self.env_dir, body.as_bytes())?;
+        }
+        if let Err(e) = write_private(&unit_path, &self.unit_dir, unit_body.as_bytes()) {
             remove_env_file(&env_path);
-            return Err(LlamaCppError::Supervisor(format!(
-                "systemd-run failed: {}",
-                out.stderr.trim()
-            )));
+            return Err(e);
+        }
+        let unit = format!("{}.service", spec.label);
+        for args in [
+            vec!["--user", "daemon-reload"],
+            vec!["--user", "enable", "--now", unit.as_str()],
+        ] {
+            let out = match self.exec.exec("systemctl", &args) {
+                Ok(out) => out,
+                Err(e) => {
+                    self.abandon(&spec.label);
+                    return Err(e);
+                }
+            };
+            if !out.success {
+                self.abandon(&spec.label);
+                return Err(LlamaCppError::Supervisor(format!(
+                    "systemctl {} failed: {}",
+                    args[1..].join(" "),
+                    out.stderr.trim()
+                )));
+            }
         }
         Ok(())
     }
@@ -696,30 +833,46 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
     }
 
     fn stop_recorded(&self, label: &str, definition: Option<&Path>) -> Result<(), LlamaCppError> {
-        let out = self.exec.exec("systemctl", &["--user", "stop", label]);
-        // Always drop the secrets file, even when stop fails (a crashed
-        // `--collect` unit is "not loaded" and its stop errors).
-        match definition {
-            Some(path) => remove_env_file(path),
-            None => remove_env_file(&self.env_path(label)),
+        check_label(label)?;
+        let unit = format!("{label}.service");
+        // Disable and stop in one go. A unit with no unit file to disable (a
+        // legacy transient unit, or one already removed) falls back to a plain
+        // stop. The files stay until the stop is confirmed: a unit that may
+        // still run must remain findable and restartable by amicu.
+        let out = self
+            .exec
+            .exec("systemctl", &["--user", "disable", "--now", &unit])?;
+        if !out.success {
+            let stop = self.exec.exec("systemctl", &["--user", "stop", label])?;
+            if !stop.success && !self.not_found(label)? {
+                return Err(LlamaCppError::Supervisor(format!(
+                    "systemctl stop failed: {}",
+                    stop.stderr.trim()
+                )));
+            }
         }
-        let out = out?;
-        if out.success {
-            return Ok(());
+        // Confirmed stopped: drop the unit file (the recorded one, when it is
+        // the unit; a legacy record names the env file) and the secrets file.
+        let unit_path = match definition {
+            Some(p) if p.extension().is_some_and(|e| e == "service") => p.to_path_buf(),
+            _ => self.unit_path(label),
+        };
+        match std::fs::remove_file(&unit_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(LlamaCppError::Supervisor(format!(
+                    "remove {}: {e}",
+                    unit_path.display()
+                )));
+            }
         }
-        // Stop failed. It is still a confirmed stop if systemd reports the
-        // unit does not exist (checked by property, not by parsing stderr).
-        let load = self.exec.exec(
-            "systemctl",
-            &["--user", "show", "-p", "LoadState", "--value", label],
-        )?;
-        if load.success && load.stdout.trim() == "not-found" {
-            return Ok(());
+        remove_env_file(&self.env_path(label));
+        if let Some(p) = definition.filter(|p| p.extension().is_some_and(|e| e == "env")) {
+            remove_env_file(p);
         }
-        Err(LlamaCppError::Supervisor(format!(
-            "systemctl stop failed: {}",
-            out.stderr.trim()
-        )))
+        self.daemon_reload();
+        Ok(())
     }
 
     fn logs(&self, label: &str, options: LogOptions) -> Result<Vec<String>, LlamaCppError> {

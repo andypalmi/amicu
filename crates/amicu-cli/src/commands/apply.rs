@@ -161,7 +161,16 @@ pub(crate) fn run_with(
         env,
         Op::Apply,
     )?;
-    report(&handles, &state.graph, output, out)
+    let code = report(&handles, &state.graph, output, out)?;
+    // A host deployment comes back after a reboot; tell the user when this
+    // machine would only do so at their next login (systemd lingering off).
+    if !output.is_json()
+        && handles.iter().any(|h| h.id.starts_with("io.amicu."))
+        && let Some(hint) = (env.host)().boot_hint()
+    {
+        writeln!(out, "\n{hint}").map_err(|e| CliError::io("write failed", e))?;
+    }
+    Ok(code)
 }
 
 /// The recorded instances of `deployment` that are not the one about to be
@@ -1112,7 +1121,7 @@ async fn secure_endpoint(
     let hint = match dispatch {
         Dispatch::Modal => format!("`modal app stop {}`", handle.id),
         Dispatch::Host => format!(
-            "`systemctl --user stop {id}` on Linux, or `launchctl bootout \
+            "`systemctl --user disable --now {id}` on Linux, or `launchctl bootout \
              gui/$(id -u)/{id}` on macOS",
             id = handle.id
         ),
