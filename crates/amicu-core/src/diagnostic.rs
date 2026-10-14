@@ -480,37 +480,26 @@ pub mod catalog {
             PARSE_INVALID_SYNTAX,
             SCHEMA_MISSING_REQUIRED,
             SCHEMA_DUPLICATE_ID,
-            // addition:
             SCHEMA_UNKNOWN_ATTRIBUTE,
             REF_UNKNOWN_RESOURCE,
             CAP_RUNTIME_ARTIFACT_MISMATCH,
-            // additions:
             CAP_EXTRA_ARG_DUPLICATES_TYPED,
             CAP_EXTRA_ARG_DENYLISTED,
             CAP_EXTRA_ARGS_PRESENT,
-            // additions:
             CAP_CHAT_TEMPLATE_CONFLICT,
-            // addition:
             CAP_VLLM_GGUF_EXPERIMENTAL,
-            // speculative-decoding addition:
             CAP_SPECULATIVE_DRAFT_IS_PRIMARY,
-            // additions:
             CAP_SCALING_INVALID,
             CAP_SCALING_UNSUPPORTED_PROVIDER,
-            // addition:
             CAP_KV_CACHE_NOT_ESTIMATED,
             MEM_VRAM_EXCEEDED,
             MEM_ARTIFACT_OVERSIZE,
             POLICY_BUDGET_EXCEEDED,
-            // additions:
             POLICY_REGION_RESIDENCY,
             POLICY_PROVIDER_NOT_ALLOWED,
-            // additions:
             POLICY_SECRET_LITERAL_REJECTED,
             POLICY_SECRET_PATTERN_SUSPECTED,
-            // addition:
             POLICY_RUNTIME_ENV_SECRET_SUSPECTED,
-            // addition:
             POLICY_ENDPOINT_API_KEY_REQUIRED,
             POLICY_ENDPOINT_API_KEY_INVALID,
             STATE_LOCKED,
@@ -522,7 +511,6 @@ pub mod catalog {
             PROVIDER_UNKNOWN_INSTANCE,
             PROVIDER_BACKEND,
             PROVIDER_CREDENTIALS_REJECTED,
-            // addition:
             PROVIDER_UNSUPPORTED_OPERATION,
         ]
     }

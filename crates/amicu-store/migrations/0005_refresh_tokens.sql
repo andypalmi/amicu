@@ -5,13 +5,13 @@
 -- GLOBAL user identity, so it is keyed by user_id, not by workspace: like
 -- `users` (and reset/verify tokens), it is control-plane and carries no
 -- workspace RLS. The active-workspace binding the epic wants in the ACCESS token
--- is a signed `wsid` claim minted per issuance (andypalmi/amicu-planning#129),
+-- is a signed `wsid` claim minted per issuance,
 -- not a property of the stored refresh row; if that issue needs the refresh row
 -- pinned to a workspace it adds a `wsid` column then.
 --
 -- user_id is a REAL foreign key to users(id) with ON DELETE CASCADE: deleting a
 -- user tears down their refresh tokens automatically. This resolves the soft-FK
--- note the old schema carried (andypalmi/amicu-planning#114) - account deletion
+-- note the old schema carried - account deletion
 -- now exists in the model, so the cascade is defined rather than deferred.
 --
 -- expires_at is Unix seconds (BIGINT). No chrono.

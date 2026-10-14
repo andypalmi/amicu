@@ -1,9 +1,8 @@
 name: Deploy API (Cloud Run)
 
-# Standard Cloud Run deploy job shape
-# (WIF auth -> build/push -> migrate Job -> deploy service), adapted to
-# amicu's names from the infrastructure outputs (see
-# docs/deploy/cloud-run.md for the full vars/secrets table).
+# Standard Cloud Run deploy job shape (WIF auth -> build/push -> migrate Job
+# -> deploy service), adapted to amicu's names from the infrastructure
+# outputs (see docs/deploy/cloud-run.md for the full vars/secrets table).
 on:
   # Manual only: GitHub's free plan has no required reviewers on environments
   # for private repos, so the `production` environment can't gate deploys.

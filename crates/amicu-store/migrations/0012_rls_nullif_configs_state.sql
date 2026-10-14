@@ -1,5 +1,4 @@
--- Fail-closed backport for the config/state row-level-security policies
--- (andypalmi/amicu-planning#130, deferred review item N2).
+-- Fail-closed backport for the config/state row-level-security policies.
 --
 -- The 0008/0009 policies compared `workspace_id` against
 -- `current_setting('app.current_workspace', true)::uuid` DIRECTLY. That is a

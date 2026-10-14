@@ -6,7 +6,7 @@
 -- to WorkspaceId::DEFAULT on a self-host deployment and FK to workspaces(id),
 -- so this row must exist for their first insert to satisfy the foreign key.
 -- (Threading a real per-request workspace into those stores is
--- andypalmi/amicu-planning#116, out of scope here.) Idempotent.
+-- out of scope here.) Idempotent.
 --
 -- created_at is Unix seconds (BIGINT); 0 (the epoch) marks it as the seeded
 -- bootstrap workspace rather than a user-provisioned one.

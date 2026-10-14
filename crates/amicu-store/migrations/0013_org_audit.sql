@@ -1,5 +1,5 @@
--- Append-only audit log for the Enterprise organization console
--- (andypalmi/amicu-planning#130). Every privileged membership mutation
+-- Append-only audit log for the Enterprise organization console.
+-- Every privileged membership mutation
 -- (member added / role changed / member removed) writes exactly one row here, in
 -- the SAME transaction as the `workspace_members` mutation it records, so a
 -- mutation can never land without its audit record and vice versa (the #117

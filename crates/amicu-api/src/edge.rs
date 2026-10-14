@@ -2,7 +2,7 @@
 //!
 //! On the target Cloud Run topology, the request chain is: browser ->
 //! Cloudflare edge (proxied CNAME) -> the Cloudflare **api-proxy Worker**
-//! (`amicu-infra/fallback/api-proxy-worker`, which rewrites `Host` and strips
+//! (the infrastructure repo's `fallback/api-proxy-worker`, which rewrites `Host` and strips
 //! hop-by-hop headers) -> Google's front end -> Cloud Run. The direct peer
 //! Cloud Run sees is Google's own proxy, and `X-Forwarded-For` ends with
 //! Cloudflare's egress IP - it never carries the real client IP. The real
@@ -14,7 +14,7 @@
 //! `CF-Connecting-IP` value it likes. The api-proxy Worker closes that gap by
 //! attaching a shared-secret header, [`EDGE_TOKEN_HEADER`], to every request
 //! it forwards (`env.EDGE_TOKEN`, provisioned via `wrangler secret put` -
-//! never in Terraform state; see `amicu-infra`'s `AMICU_EDGE_TOKEN` secret
+//! never in Terraform state; see the infrastructure repo's `AMICU_EDGE_TOKEN` secret
 //! shell and docs/env-matrix.md). A raw `*.run.app` request can never produce
 //! a matching token, since it never passed through the Worker.
 //!

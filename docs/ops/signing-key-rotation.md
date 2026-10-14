@@ -164,8 +164,8 @@ decoding key to be evicted — see `KeyringJwksProvider`'s doc comment in
 ## Infra ownership
 
 The `AMICU_SIGNING_KEY_PEM` (and `AMICU_SIGNING_KEYS_RETIRING_PEM`) secret is
-expected to be managed by the infra Terraform repo,
-`github.com/andypalmi/amicu-infra` (a separate repo, out of scope for this
+expected to be managed by the infra Terraform repo
+(a separate, private repo, out of scope for this
 document) — that is where the secret-manager resource, its versions, and the
 per-replica env wiring should live. This runbook only covers the operational
 procedure once that plumbing exists.

@@ -2,7 +2,7 @@
 -- org). A workspace is the unit a plan/tier and a billing relationship attach
 -- to, and the row-level-security boundary every tenant-scoped table keys on.
 -- Workspace ids are ALWAYS server-generated (never caller-chosen); provisioning
--- is server-authoritative (see the epic, andypalmi/amicu-planning#127).
+-- is server-authoritative.
 --
 -- This is the control plane, so `workspaces` itself carries NO row-level
 -- security: the registry of workspaces is global (a user must be able to look

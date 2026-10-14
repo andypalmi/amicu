@@ -2,7 +2,7 @@
 -- role. The server stores only the SHA-256 hash of the opaque invite token
 -- (BYTEA, 32 bytes), never the token itself (it is mailed in the invite link).
 -- Redeeming the token is what turns an invite into a workspace_members row
--- (that acceptance flow lands in andypalmi/amicu-planning#130; this migration
+-- (that acceptance flow lands later; this migration
 -- is the data layer it builds on).
 --
 -- id is a server-generated UUID. workspace_id FKs to the inviting workspace

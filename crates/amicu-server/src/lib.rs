@@ -160,7 +160,7 @@
 //! path the auth flows' notifier IS that queue - and actually delivered by
 //! `POST /internal/outbox/drain`, INSIDE a request, where CPU is allocated.
 //!
-//! The scheduler contract, matching `amicu-infra/modules/scheduler`:
+//! The scheduler contract, matching the infrastructure repo's `modules/scheduler`:
 //!
 //! | | |
 //! |---|---|
@@ -223,7 +223,7 @@
 //! just dev: unlike `DATABASE_URL`/RLS-bypass, turning this on requires an
 //! operator to have actually provisioned the Worker + token pair first (it is
 //! explicitly gated behind `optional_secrets_enabled.AMICU_EDGE_TOKEN` in
-//! amicu-infra), so defaulting it to `true` would break the very first
+//! the infrastructure repo), so defaulting it to `true` would break the very first
 //! production boot before that provisioning step ever runs. Booting with
 //! `AMICU_REQUIRE_EDGE_TOKEN=true` and no `AMICU_EDGE_TOKEN` configured is a
 //! hard startup error ([`Error::MissingEdgeToken`]) in every environment - such
@@ -465,7 +465,7 @@ pub struct Config {
     /// Required `aud` claim on the Google-issued OIDC ID token that
     /// authenticates `POST /internal/outbox/drain`.
     /// Defaults to the effective `base_url`
-    /// when unset, which is what `amicu-infra`'s `modules/scheduler` mints by
+    /// when unset, which is what the infrastructure repo's `modules/scheduler` mints by
     /// default (the Cloud Run SERVICE URL - not the `/internal/outbox/drain`
     /// path - matching Google's own documented pattern).
     #[arg(long, env = "AMICU_INTERNAL_AUDIENCE")]

@@ -1,5 +1,5 @@
--- Bind each refresh token to the workspace its session is scoped to
--- (andypalmi/amicu-planning#129). This is the column 0005 explicitly anticipated:
+-- Bind each refresh token to the workspace its session is scoped to.
+-- This is the column 0005 explicitly anticipated:
 -- the active-workspace context lives in the signed ACCESS token, but the refresh
 -- row must REMEMBER which workspace it was minted for so rotation can re-validate
 -- membership in exactly that workspace and re-mint the access token scoped to it.

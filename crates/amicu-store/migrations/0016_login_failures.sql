@@ -1,4 +1,4 @@
--- Per-account sign-in backoff counters (andypalmi/amicu-planning#194).
+-- Per-account sign-in backoff counters.
 --
 -- One row per throttle key = a keyed PSEUDONYM of the normalized email (never
 -- the plaintext address; see `amicu_auth::security::pseudonym`), created

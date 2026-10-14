@@ -1,4 +1,4 @@
--- Transactional email outbox (andypalmi/amicu-planning#141).
+-- Transactional email outbox.
 --
 -- WHY: on Cloud Run the CPU is throttled to near-zero the moment a response is
 -- written, so the previous pattern - `tokio::spawn`-ing the SMTP send after the

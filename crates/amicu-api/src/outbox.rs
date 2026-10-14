@@ -61,7 +61,7 @@ pub const DEFAULT_DRAIN_BATCH_SIZE: u32 = 50;
 /// Default wall-clock budget for one drain request, in milliseconds.
 ///
 /// Cloud Scheduler's HTTP attempt deadline for this job is 30s
-/// (`amicu-infra/modules/scheduler`), so the drain must return comfortably
+/// (the infrastructure repo's `modules/scheduler`), so the drain must return comfortably
 /// inside that even when every send is slow. 20s leaves 10s of headroom; the
 /// remaining messages are simply claimed by the next scheduled invocation.
 pub const DEFAULT_DRAIN_BUDGET_MS: u64 = 20_000;
