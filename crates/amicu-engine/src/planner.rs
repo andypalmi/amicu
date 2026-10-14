@@ -369,37 +369,111 @@ fn describe_config_changes(prev: Resolved<'_>, next: Resolved<'_>) -> Option<Str
     })
 }
 
-/// Whether a flattened field is baked into the launch command (so a change
-/// needs a restart): everything except descriptive metadata.
+/// Whether a flattened field is baked into the llama-server / vLLM launch (so
+/// a change needs a restart). Keys are the flattened serde names of
+/// `Deployment` (unprefixed), `Model` (`model.`) and `HardwareProfile`
+/// (`hardware.`). Everything not listed (price, region, memory/cpu sizing,
+/// `memory_check`, `scaling.*`, model variant checksums and architecture
+/// metadata) is bookkeeping that does not alter the launched process.
 fn is_launch_field(key: &str) -> bool {
-    const NON_LAUNCH: [&str; 4] = ["name", "description", "labels", "tags"];
-    let head = key.split('.').next().unwrap_or(key);
-    !NON_LAUNCH.contains(&head)
+    const EXACT: [&str; 31] = [
+        "runtime",
+        "model",
+        "hardware_profile",
+        "context_length",
+        "port",
+        "n_gpu_layers",
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "repeat_penalty",
+        "cache_type_k",
+        "cache_type_v",
+        "batch_size",
+        "ubatch_size",
+        "parallel_slots",
+        "flash_attention",
+        "chat_template",
+        "chat_template_file",
+        "jinja",
+        "reasoning_format",
+        "extra_args",
+        "build",
+        "tensor_parallel_size",
+        "gpu_memory_utilization",
+        "kv_cache_dtype",
+        "max_num_seqs",
+        "max_num_batched_tokens",
+        "enforce_eager",
+        "speculative",
+        "multimodal",
+    ];
+    const PREFIXES: [&str; 8] = [
+        "env.",
+        "api_key",
+        "speculative.",
+        "multimodal.",
+        "model.source.",
+        "model.artifact.",
+        "hardware.provider",
+        "hardware.accelerator.",
+    ];
+    EXACT.contains(&key) || PREFIXES.iter().any(|p| key.starts_with(p))
 }
 
-/// One change line. Values under `env.*` and `extra_args` can hold literal
-/// secrets, so only the key is named; other values are truncated.
+/// Keys whose old/new values are printed: fixed known-safe numeric, boolean
+/// or enum launch settings. Every other key (URLs, templates, paths, env,
+/// extra args, ...) is named only, since free-form strings can hold secrets.
+fn is_value_safe(key: &str) -> bool {
+    const SAFE: [&str; 25] = [
+        "context_length",
+        "port",
+        "n_gpu_layers",
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "repeat_penalty",
+        "cache_type_k",
+        "cache_type_v",
+        "batch_size",
+        "ubatch_size",
+        "parallel_slots",
+        "flash_attention",
+        "jinja",
+        "reasoning_format",
+        "tensor_parallel_size",
+        "gpu_memory_utilization",
+        "kv_cache_dtype",
+        "max_num_seqs",
+        "max_num_batched_tokens",
+        "enforce_eager",
+        "speculative.n_max",
+        "speculative.n_min",
+        "speculative.p_min",
+    ];
+    SAFE.contains(&key)
+        || matches!(
+            key,
+            "speculative.n_gpu_layers"
+                | "multimodal.offload"
+                | "model.artifact.quantization"
+                | "model.artifact.format"
+                | "memory_check"
+        )
+}
+
+/// One change line: `key: old -> new` for allowlisted scalar settings, else
+/// just `key changed`.
 fn describe_change(key: &str, old: Option<&String>, new: Option<&String>) -> String {
-    const MAX: usize = 40;
-    if key.starts_with("env.") {
+    if !is_value_safe(key) {
         return format!("{key} changed");
     }
-    if key == "extra_args" || key.starts_with("extra_args.") {
-        return "extra_args changed".to_owned();
-    }
-    let short = |s: &str| -> String {
-        if s.chars().count() > MAX {
-            let cut: String = s.chars().take(MAX).collect();
-            format!("{cut}...")
-        } else {
-            s.to_owned()
-        }
-    };
     match (old, new) {
-        (Some(a), Some(b)) => format!("{key}: {} -> {}", short(a), short(b)),
-        (None, Some(b)) => format!("{key}: added ({})", short(b)),
-        (Some(a), None) => format!("{key}: removed (was {})", short(a)),
-        (None, None) => key.to_owned(),
+        (Some(a), Some(b)) => format!("{key}: {a} -> {b}"),
+        (None, Some(b)) => format!("{key}: added ({b})"),
+        (a, None) => format!("{key}: removed (was {})", a.map_or("", |s| s.as_str())),
     }
 }
 
@@ -1497,7 +1571,7 @@ mod tests {
     }
 
     #[test]
-    fn the_reason_line_never_prints_env_values_or_extra_args() {
+    fn the_reason_line_never_prints_free_form_values() {
         let prior = graph(Vec::new());
         let mut next = graph(Vec::new());
         let Runtime::LlamaCpp(s) = &mut next.deployments[0].runtime else {
@@ -1506,24 +1580,67 @@ mod tests {
         s.env
             .insert("HF_TOKEN".to_owned(), "hf_literal_secret_value".to_owned());
         s.extra_args = vec!["--seed".to_owned(), "sk-literal-token".to_owned()];
+        s.chat_template = Some("{{ tmpl_secret_marker }}".to_owned());
+        next.models[0].source.reference = "https://user:tok@host/m.gguf?token=SECRET".to_owned();
         let item = &build_plan(&next, Some(&prior)).unwrap().items[0];
         let reason = item.reason.as_deref().expect("reason line");
-        assert!(!reason.contains("hf_literal_secret_value"), "{reason}");
-        assert!(!reason.contains("sk-literal-token"), "{reason}");
-        assert!(!reason.contains("--seed"), "{reason}");
+        for leaked in [
+            "hf_literal_secret_value",
+            "sk-literal-token",
+            "--seed",
+            "tmpl_secret_marker",
+            "tok@host",
+            "SECRET",
+            "user:",
+        ] {
+            assert!(!reason.contains(leaked), "{leaked} in {reason}");
+        }
         assert!(reason.contains("env.HF_TOKEN changed"), "{reason}");
         assert!(reason.contains("extra_args changed"), "{reason}");
+        assert!(reason.contains("chat_template changed"), "{reason}");
+        assert!(
+            reason.contains("model.source.reference changed"),
+            "{reason}"
+        );
     }
 
     #[test]
-    fn launch_fields_sort_first_and_metadata_only_changes_do_not_claim_a_restart() {
+    fn allowlisted_scalars_show_values_and_price_only_changes_claim_no_restart() {
         assert!(is_launch_field("context_length"));
         assert!(is_launch_field("env.X"));
-        assert!(!is_launch_field("description"));
-        assert!(!is_launch_field("labels.team"));
-        let long = "x".repeat(100);
-        let shown = describe_change("chat_template", Some(&long), None);
-        assert!(shown.len() < 80, "{shown}");
+        assert!(is_launch_field("model.source.reference"));
+        assert!(!is_launch_field("hardware.price.per_hour.amount"));
+        assert!(!is_launch_field("hardware.region.code"));
+        assert!(!is_launch_field("scaling.min_replicas"));
+        assert!(!is_launch_field("memory_check"));
+
+        let (m, hw) = (model(), hardware());
+        let dep = deployment(Vec::new());
+
+        // Price-only change: reported, but no restart claim.
+        let mut hw2 = hw.clone();
+        hw2.price = Some(amicu_core::resource::Price {
+            per_hour: amicu_core::resource::Money::new(1.5, "USD"),
+        });
+        let text =
+            describe_config_changes((&dep, Some(&m), Some(&hw)), (&dep, Some(&m), Some(&hw2)))
+                .expect("a difference");
+        assert!(text.contains("hardware.price"), "{text}");
+        assert!(!text.contains("restarted"), "{text}");
+
+        // Mixed change: the launch key sorts ahead of the hardware keys.
+        let mut dep2 = dep.clone();
+        let Runtime::LlamaCpp(s) = &mut dep2.runtime else {
+            unreachable!()
+        };
+        s.context_length = 16384;
+        let mut hw3 = hw2.clone();
+        hw3.region = Some(amicu_core::resource::Region::from_code("eu-west-1"));
+        let text =
+            describe_config_changes((&dep, Some(&m), Some(&hw)), (&dep2, Some(&m), Some(&hw3)))
+                .expect("a difference");
+        assert!(text.starts_with("context_length: 8192 -> 16384"), "{text}");
+        assert!(text.contains("restarted"), "{text}");
     }
 
     // --- change detection beyond the graph -------------

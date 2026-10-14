@@ -1607,7 +1607,11 @@ fn version_parses_build_number() {
             "{unknown}"
         );
     }
-    // A seen `version:` line ends the scrape: the compiler version is not a build.
+    // The `version:` line alone decides; a `build N` on a later line does not count.
+    assert!(matches!(
+        LlamaVersion::parse("version: 0 (unknown)\nbuilt with clang, build 18").unwrap_err(),
+        LlamaCppError::UnparseableVersion(_)
+    ));
     assert!(matches!(
         LlamaVersion::parse("version: 0 (unknown)\nbuilt with clang version 18 (x)").unwrap_err(),
         LlamaCppError::UnparseableVersion(_)

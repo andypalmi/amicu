@@ -45,24 +45,29 @@ impl LlamaVersion {
             }
             digits.parse().ok().filter(|b| *b > 0)
         };
-        // An explicit `build <n>` (Homebrew's format).
-        let explicit = lower
-            .match_indices("build ")
-            .find_map(|(i, m)| leading_build(lower[i + m.len()..].trim_start()));
-        let build = explicit.or_else(|| {
-            // Once a `version:` line has been seen (even an unparseable one),
-            // later lines such as `built with clang version 18 (...)` are
-            // not build numbers.
-            let mut seen_version_line = false;
-            lower.lines().find_map(|line| {
-                if seen_version_line {
-                    return None;
-                }
-                seen_version_line = line.trim_start().starts_with("version:");
-                let rest = line.split("version").nth(1)?;
-                leading_build(rest.trim_start_matches(|c: char| !c.is_ascii_digit()))
+        // Build number within one chunk of text: an explicit `build <n>`
+        // (Homebrew's format) wins over the leading number after `version`.
+        let scan = |text: &str| -> Option<u32> {
+            let explicit = text
+                .match_indices("build ")
+                .find_map(|(i, m)| leading_build(text[i + m.len()..].trim_start()));
+            explicit.or_else(|| {
+                text.lines().find_map(|line| {
+                    let rest = line.split("version").nth(1)?;
+                    leading_build(rest.trim_start_matches(|c: char| !c.is_ascii_digit()))
+                })
             })
-        });
+        };
+        // The `version:` line is authoritative: when present (even if
+        // unparseable) later lines such as `built with clang version 18 (...)`
+        // are not build numbers. Only without one is the whole output scanned.
+        let build = match lower
+            .lines()
+            .find(|l| l.trim_start().starts_with("version:"))
+        {
+            Some(line) => scan(line),
+            None => scan(&lower),
+        };
         build
             .map(LlamaVersion::new)
             .ok_or_else(|| LlamaCppError::UnparseableVersion(output.to_string()))
