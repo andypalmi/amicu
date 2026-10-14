@@ -596,7 +596,7 @@ impl Provider for SelfHostedProvider {
             .resources
             .insert("ssh_port".into(), target.port.to_string());
         if let Some(fingerprint) = target.pinned_host_key {
-            record.resources.insert("ssh_host_key".into(), fingerprint);
+            record.ssh_host_key = Some(fingerprint);
         }
         Ok(record)
     }
@@ -681,7 +681,7 @@ impl Provider for SelfHostedProvider {
         if target.pinned_host_key.is_none()
             && let Some(fingerprint) = output.host_key
         {
-            record.resources.insert("ssh_host_key".into(), fingerprint);
+            record.ssh_host_key = Some(fingerprint);
         }
         Ok(record)
     }
@@ -797,6 +797,18 @@ impl SelfHostedProvider {
             handle.resources.get("ssh_host"),
             handle.resources.get("ssh_user"),
         ) {
+            // The scope fingerprint fixed at `prepare` must match the target the
+            // record now names: a record edited to point elsewhere is refused.
+            let port_text = handle
+                .resources
+                .get("ssh_port")
+                .map_or("22", String::as_str);
+            let expected = format!("{PROVIDER_ID}|{}||{host}:{port_text}", handle.region);
+            if handle.scope.as_deref() != Some(expected.as_str()) {
+                return Err(AdapterError::from_kind(ProviderError::Backend {
+                    detail: "stop record scope does not match its SSH target".into(),
+                }));
+            }
             let mut target = SshTarget::new(host.clone(), user.clone());
             if let Some(port) = handle.resources.get("ssh_port") {
                 target = target.with_port(port.parse().map_err(|_| {
@@ -805,7 +817,7 @@ impl SelfHostedProvider {
                     })
                 })?);
             }
-            if let Some(fingerprint) = handle.resources.get("ssh_host_key") {
+            if let Some(fingerprint) = &handle.ssh_host_key {
                 target = target.with_pinned_host_key(fingerprint.clone());
             }
             return Ok((target, false));

@@ -17,6 +17,8 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 russh = { version = "0.63", default-features = false, features = ["ring", "flate2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Credential binding fingerprint (truncated, domain-separated SHA-256).
+sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["time"] }
 # Random identity nonce (UUIDv4 entropy).

@@ -556,7 +556,7 @@ impl Provider for RunPodProvider {
 
     async fn provision(
         &self,
-        prepared: ProvisioningHandle,
+        mut prepared: ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningHandle, AdapterError> {
         self.validate(&prepared.offering_id, &prepared.region)?;
@@ -566,6 +566,7 @@ impl Provider for RunPodProvider {
         let token = self
             .resolve_token(resolver, prepared.credentials.as_ref())
             .await?;
+        rest_lifecycle::bind(&mut prepared, token.as_deref())?;
         rest_lifecycle::guard_scope(self, &prepared, token.as_deref()).await?;
 
         // Adopt a pod already created under this identity (retry after a
@@ -716,6 +717,7 @@ impl ServerApi for RunPodProvider {
             .into_iter()
             .filter(|p| p.name.as_deref() == Some(name))
             .map(|p| Found {
+                account: None,
                 id: p.id,
                 offering: p.machine.as_ref().and_then(|m| m.gpu_type_id.clone()),
                 region: p.machine.and_then(|m| m.data_center_id),

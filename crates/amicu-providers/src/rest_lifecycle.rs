@@ -29,6 +29,8 @@ pub(crate) struct Found {
     pub region: Option<String>,
     /// Raw provider state string, when the API exposes it.
     pub state: Option<String>,
+    /// Account/project the resource belongs to, when the API exposes it.
+    pub account: Option<String>,
 }
 
 /// Pages fetched at most per identity listing (loop guard).
@@ -80,6 +82,54 @@ pub(crate) trait ServerApi: Sync {
     ) -> Result<bool, AdapterError>;
 }
 
+/// Fingerprint of the token about to be used (see
+/// [`credential_binding`](crate::credential_binding)).
+pub(crate) fn binding_of_token(token: Option<&str>) -> String {
+    // A credential-free provider has no credential to confuse: it binds to a
+    // fixed sentinel, so such records are bound too.
+    token.map_or_else(
+        || crate::provider::NO_CREDENTIAL_BINDING.to_string(),
+        |t| crate::provider::binding_of_bytes(t.as_bytes()),
+    )
+}
+
+/// Bind a record to the credential `provision` is about to use, or refuse if it
+/// is bound to a different one.
+pub(crate) fn bind(
+    record: &mut ProvisioningHandle,
+    token: Option<&str>,
+) -> Result<(), AdapterError> {
+    let current = binding_of_token(token);
+    match &record.credential_binding {
+        Some(recorded) if *recorded != current => Err(refuse(
+            "credential differs from the one this record is bound to; rebind explicitly",
+        )),
+        Some(_) => Ok(()),
+        None => {
+            record.credential_binding = Some(current);
+            Ok(())
+        }
+    }
+}
+
+/// `Some(reason)` when a bound record is being operated on with a different
+/// credential. Another account's token sees an empty collection and 404s on
+/// every id, which would otherwise read as "gone".
+pub(crate) fn credential_mismatch(
+    handle: &ProvisioningHandle,
+    token: Option<&str>,
+) -> Option<String> {
+    match &handle.credential_binding {
+        Some(recorded) if *recorded == binding_of_token(token) => None,
+        Some(_) => Some(
+            "credential differs from the one that created the resource; absence cannot be \
+             confirmed (rebind the record explicitly if the credential was rotated)"
+                .into(),
+        ),
+        None => None,
+    }
+}
+
 /// A backend-contract failure with a clear, secret-free message.
 pub(crate) fn refuse(detail: impl Into<String>) -> AdapterError {
     AdapterError::from_kind(ProviderError::Backend {
@@ -125,7 +175,7 @@ pub(crate) async fn guard_scope<A: ServerApi>(
         None => return Err(refuse("stop record has no scope fingerprint")),
     }
     let observed = api.verify_scope(handle, token).await?;
-    if let (Some(recorded), Some(seen)) = (handle.resources.get("account_id"), &observed)
+    if let (Some(recorded), Some(seen)) = (&handle.account_id, &observed)
         && recorded != seen
     {
         return Err(refuse(
@@ -157,9 +207,16 @@ pub(crate) async fn adopt<A: ServerApi>(
     let differs = |recorded: &Option<String>, expected: &str| {
         recorded.as_deref().is_some_and(|r| r != expected)
     };
-    if differs(&one.offering, &prepared.offering_id) || differs(&one.region, &prepared.region) {
+    let wrong_account = match (&one.account, &prepared.account_id) {
+        (Some(found), Some(recorded)) => found != recorded,
+        _ => false,
+    };
+    if wrong_account
+        || differs(&one.offering, &prepared.offering_id)
+        || differs(&one.region, &prepared.region)
+    {
         return Err(refuse(
-            "existing resource with this identity has a different offering or region",
+            "existing resource with this identity has a different offering, region or account",
         ));
     }
     Ok(Some(one))
@@ -171,6 +228,10 @@ pub(crate) async fn teardown<A: ServerApi>(
     handle: &ProvisioningHandle,
     token: Option<&str>,
 ) -> Result<TeardownOutcome, AdapterError> {
+    check_record(handle)?;
+    if let Some(reason) = credential_mismatch(handle, token) {
+        return Ok(TeardownOutcome::Unconfirmed { reason });
+    }
     guard_scope(api, handle, token).await?;
     // Recorded id plus anything found under the identity (covers a crash before
     // the id was recorded, and duplicates from a retried provision).
@@ -185,7 +246,18 @@ pub(crate) async fn teardown<A: ServerApi>(
             reason: "record has neither a resource id nor an identity".into(),
         });
     }
-    for f in api.list_by_identity(handle, token).await? {
+    let listed = api.list_by_identity(handle, token).await?;
+    // A record never bound to a credential cannot vouch for absence: an empty
+    // listing may just be another account's view. Only a resource actually seen
+    // under identity (a positive observation) lets it proceed.
+    if handle.credential_binding.is_none() && listed.is_empty() {
+        return Ok(TeardownOutcome::Unconfirmed {
+            reason: "record is not bound to a credential, so an empty listing cannot be \
+                     trusted as absence (bind the record, or rebind it explicitly)"
+                .into(),
+        });
+    }
+    for f in listed {
         if !ids.contains(&f.id) {
             ids.push(f.id);
         }
@@ -238,7 +310,7 @@ pub(crate) fn adopt_in_memory(
     }
     if one.offering_id != prepared.offering_id || one.region != prepared.region {
         return Err(refuse(
-            "existing instance with this identity has a different offering or region",
+            "existing instance with this identity has a different offering, region or account",
         ));
     }
     Ok(Some(one.clone()))

@@ -207,6 +207,12 @@ struct ServerObject {
     commercial_type: Option<String>,
     /// Lifecycle state, e.g. `"running"`.
     state: Option<String>,
+    /// Owning project, when reported.
+    #[serde(default)]
+    project: Option<String>,
+    /// Owning organization, when reported.
+    #[serde(default)]
+    organization: Option<String>,
 }
 
 /// Map a Scaleway server state string onto a [`ProvisioningState`].
@@ -553,7 +559,7 @@ impl Provider for ScalewayProvider {
 
     async fn provision(
         &self,
-        prepared: ProvisioningHandle,
+        mut prepared: ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningHandle, AdapterError> {
         self.validate(&prepared.offering_id, &prepared.region)?;
@@ -564,20 +570,24 @@ impl Provider for ScalewayProvider {
         let token = self
             .resolve_token(resolver, prepared.credentials.as_ref())
             .await?;
+        rest_lifecycle::bind(&mut prepared, token.as_deref())?;
         rest_lifecycle::guard_scope(self, &prepared, token.as_deref()).await?;
 
         // Adopt a server already created under this identity (retry after a
         // crash) instead of creating a duplicate. An adopted server may still be
         // stopped (the crash can have happened before the boot action), so it is
         // booted below unless it is already running or starting.
-        let server_id =
+        let (server_id, project, organization) =
             if let Some(found) = rest_lifecycle::adopt(self, &prepared, token.as_deref()).await? {
                 let running = matches!(found.state.as_deref(), Some("running" | "starting"));
                 if running {
                     let state = map_server_state(found.state.as_deref());
+                    if let Some(project) = found.account {
+                        prepared.account_id = Some(project);
+                    }
                     return Ok(prepared.completed("server_id", found.id, state));
                 }
-                found.id
+                (found.id, found.account, None)
             } else {
                 let create = CreateServerRequest {
                     name: prepared.identity.name.as_str(),
@@ -609,8 +619,22 @@ impl Provider for ScalewayProvider {
                         detail: "malformed Scaleway create response".into(),
                     })
                 })?;
-                envelope.server.id
+                (
+                    envelope.server.id,
+                    envelope.server.project,
+                    envelope.server.organization,
+                )
             };
+        // Record where the server really lives so teardown filters and checks by
+        // project: another project's (or account's) view must not read as "gone".
+        if let Some(project) = project {
+            prepared.account_id = Some(project);
+        }
+        if let Some(organization) = organization {
+            prepared
+                .resources
+                .insert("organization_id".into(), organization);
+        }
 
         // A freshly created Scaleway server is stopped; boot it explicitly. On
         // failure there is no best-effort cleanup that swallows its result: the
@@ -744,7 +768,16 @@ impl ServerApi for ScalewayProvider {
         let mut out: Vec<Found> = Vec::new();
         let mut seen: Vec<String> = Vec::new();
         for page in 1..=rest_lifecycle::MAX_PAGES {
-            let path = format!("/zones/{zone}/servers?name={name}&page={page}&per_page={PER_PAGE}");
+            let project_filter = match handle.account_id.as_deref() {
+                Some(p) if safe_id(p) => format!("&project={p}"),
+                Some(_) => {
+                    return Err(rest_lifecycle::refuse("stop record has an invalid project"));
+                }
+                None => String::new(),
+            };
+            let path = format!(
+                "/zones/{zone}/servers?name={name}{project_filter}&page={page}&per_page={PER_PAGE}"
+            );
             let request = self.build_request(HttpMethod::Get, &path, token);
             let response = self
                 .transport
@@ -769,7 +802,15 @@ impl ServerApi for ScalewayProvider {
                 fresh += 1;
                 seen.push(s.id.clone());
                 if s.name.as_deref() == Some(name) {
+                    if let (Some(recorded), Some(found)) = (&handle.account_id, &s.project)
+                        && recorded != found
+                    {
+                        return Err(rest_lifecycle::refuse(
+                            "a resource with this identity belongs to a different project",
+                        ));
+                    }
                     out.push(Found {
+                        account: s.project,
                         id: s.id,
                         offering: s.commercial_type,
                         // The zone is path-scoped, so region is implied.
@@ -821,10 +862,28 @@ impl ServerApi for ScalewayProvider {
             return Ok(false);
         }
         if response.is_success() {
+            if let (Some(recorded), Ok(envelope)) =
+                (&handle.account_id, response.json::<ServerEnvelope>())
+                && let Some(found) = envelope.server.project
+                && *recorded != found
+            {
+                return Err(rest_lifecycle::refuse(
+                    "the server belongs to a different project than the stop record",
+                ));
+            }
             return Ok(true);
         }
         Err(lifecycle_error(response.status, id))
     }
+}
+
+/// Whether `id` is safe to place in a URL query (project ids are UUIDs).
+fn safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
 #[cfg(test)]

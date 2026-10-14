@@ -552,7 +552,7 @@ impl Provider for HetznerProvider {
 
     async fn provision(
         &self,
-        prepared: ProvisioningHandle,
+        mut prepared: ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningHandle, AdapterError> {
         self.validate(&prepared.offering_id, &prepared.region)?;
@@ -562,6 +562,7 @@ impl Provider for HetznerProvider {
         let token = self
             .resolve_token(resolver, prepared.credentials.as_ref())
             .await?;
+        rest_lifecycle::bind(&mut prepared, token.as_deref())?;
         rest_lifecycle::guard_scope(self, &prepared, token.as_deref()).await?;
 
         // Adopt a server already created under this identity (retry after a
@@ -718,6 +719,7 @@ impl ServerApi for HetznerProvider {
                 fresh += 1;
                 if s.name.as_deref() == Some(name) {
                     out.push(Found {
+                        account: None,
                         id,
                         offering: s.server_type.and_then(|t| t.name),
                         region: s.datacenter.and_then(|d| d.location).and_then(|l| l.name),

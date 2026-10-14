@@ -24,7 +24,11 @@
 //!    to guess among several;
 //! 10. a 404 at the wrong scope (zone, project, account, host) is never
 //!     "confirmed gone";
-//! 11. tampered records (bad names/ids, forged scope, unpinned host) are refused.
+//! 11. tampered records (bad names/ids, forged scope or credential binding,
+//!     unpinned host) are refused;
+//! 12. another account's credential, which sees an empty collection and 404s on
+//!     every id, never yields "confirmed gone"; and a record never bound to a
+//!     credential cannot vouch for absence.
 //!
 //! Adding an adapter: implement [`Fixture`] over a mock backend that honours
 //! the [`Fault`]s, and call [`run`] from a test. Catalog-only adapters (no
@@ -69,6 +73,9 @@ pub(crate) enum Fault {
     /// (404s, or a host presenting another key), while the resource still
     /// exists.
     WrongScope,
+    /// The backend answers as another account would: a 200 but empty
+    /// collection, and 404 for every id.
+    OtherAccount,
 }
 
 /// A mock backend plus the adapter wired to it.
@@ -93,6 +100,10 @@ pub(crate) trait Fixture {
     /// In-memory simulators cannot (their memory may simply be lost).
     fn absent_is_gone(&self) -> bool {
         true
+    }
+    /// Whether the adapter binds records to the credential that created them.
+    fn binds_credentials(&self) -> bool {
+        false
     }
     /// Whether prepared records carry a scope fingerprint.
     fn has_scope(&self) -> bool {
@@ -134,6 +145,25 @@ impl SecretResolver for Resolver {
     }
 }
 
+/// Resolves the same reference to a different token: another account.
+struct OtherResolver;
+
+#[async_trait]
+impl SecretResolver for OtherResolver {
+    async fn resolve(&self, _secret: &SecretRef) -> Result<SecretValue, AdapterError> {
+        Ok(SecretValue::new("another-accounts-token".to_string()))
+    }
+}
+
+/// Prepare a record and bind it to the credential, as `apply` does before it
+/// persists the record.
+async fn bound<F: Fixture>(f: &F, p: &F::P) -> ProvisioningHandle {
+    let mut record = p.prepare(&req(f), identity()).unwrap();
+    let secret = Resolver.resolve(&SecretRef::new("cred")).await.unwrap();
+    record.bind_credential(&secret).unwrap();
+    record
+}
+
 fn identity() -> ResourceIdentity {
     ResourceIdentity::new("deployment-1", "project-1")
 }
@@ -157,6 +187,8 @@ pub(crate) async fn run<F: Fixture>(make: impl Fn() -> F) {
     adoption_refuses_mismatch_and_ambiguity(&make()).await;
     wrong_scope_is_not_gone(&make()).await;
     tampered_records_are_refused(&make()).await;
+    other_credential_never_confirms(&make()).await;
+    unbound_record_cannot_vouch_for_absence(&make()).await;
 }
 
 fn req<F: Fixture>(f: &F) -> ProvisionRequest {
@@ -182,13 +214,14 @@ async fn prepare_creates_nothing_and_record_is_self_describing<F: Fixture>(f: &F
     assert_eq!(prepared.scope.is_some(), f.has_scope());
     assert_eq!(round_trip(&prepared), prepared);
     // Two records for the same deployment never share a name.
-    let other = p.prepare(&req(f), identity()).unwrap();
+    let other = bound(f, &p).await;
     assert_ne!(prepared.identity.name, other.identity.name);
 
     let done = p
         .provision(prepared.clone(), &Resolver)
         .await
         .expect("provision");
+    assert_eq!(done.credential_binding.is_some(), f.binds_credentials());
     assert_eq!(f.live_resources(), 1);
     assert!(done.has_resource_id(), "provision records the resource id");
     assert_eq!(done.identity, prepared.identity);
@@ -196,7 +229,7 @@ async fn prepare_creates_nothing_and_record_is_self_describing<F: Fixture>(f: &F
 }
 
 async fn teardown_from_record_only<F: Fixture>(f: &F) {
-    let prepared = f.provider().prepare(&req(f), identity()).unwrap();
+    let prepared = bound(f, &f.provider()).await;
     let done = f.provider().provision(prepared, &Resolver).await.unwrap();
     let stored = round_trip(&done);
     let outcome = f
@@ -211,7 +244,7 @@ async fn teardown_from_record_only<F: Fixture>(f: &F) {
 async fn teardown_is_idempotent<F: Fixture>(f: &F) {
     let p = f.provider();
     // Never created.
-    let prepared = p.prepare(&req(f), identity()).unwrap();
+    let prepared = bound(f, &p).await;
     let outcome = p.teardown(&prepared, &Resolver).await.unwrap();
     if f.absent_is_gone() {
         assert_eq!(outcome, TeardownOutcome::ConfirmedGone);
@@ -233,7 +266,7 @@ async fn teardown_is_idempotent<F: Fixture>(f: &F) {
 
 async fn unconfirmed_is_not_success<F: Fixture>(f: &F) {
     let p = f.provider();
-    let prepared = p.prepare(&req(f), identity()).unwrap();
+    let prepared = bound(f, &p).await;
     let done = p.provision(prepared, &Resolver).await.unwrap();
 
     if f.supports(Fault::DeleteLingers) {
@@ -268,7 +301,7 @@ async fn crash_between_create_and_record_is_stoppable<F: Fixture>(f: &F) {
         return;
     }
     let p = f.provider();
-    let prepared = p.prepare(&req(f), identity()).unwrap();
+    let prepared = bound(f, &p).await;
     let persisted = round_trip(&prepared); // all the caller has after a crash
     f.set_fault(Fault::CreateResponseLost, true);
     assert!(p.provision(prepared, &Resolver).await.is_err());
@@ -294,7 +327,7 @@ async fn crash_between_create_and_record_is_stoppable<F: Fixture>(f: &F) {
 
 async fn provision_adopts_instead_of_duplicating<F: Fixture>(f: &F) {
     let p = f.provider();
-    let prepared = p.prepare(&req(f), identity()).unwrap();
+    let prepared = bound(f, &p).await;
     if f.supports(Fault::CreateResponseLost) {
         f.set_fault(Fault::CreateResponseLost, true);
         assert!(p.provision(prepared.clone(), &Resolver).await.is_err());
@@ -322,7 +355,7 @@ async fn failure_after_create_is_stoppable_and_retry_recovers<F: Fixture>(f: &F)
     }
     let p = f.provider();
     // (a) Stop after the failure.
-    let prepared = p.prepare(&req(f), identity()).unwrap();
+    let prepared = bound(f, &p).await;
     f.set_fault(Fault::PostCreateStepFails, true);
     assert!(p.provision(prepared.clone(), &Resolver).await.is_err());
     assert_eq!(f.live_resources(), 1);
@@ -337,7 +370,7 @@ async fn failure_after_create_is_stoppable_and_retry_recovers<F: Fixture>(f: &F)
     );
 
     // (b) Retry after the failure: the stopped server is adopted and booted.
-    let prepared = p.prepare(&req(f), identity()).unwrap();
+    let prepared = bound(f, &p).await;
     assert!(p.provision(prepared.clone(), &Resolver).await.is_err());
     f.set_fault(Fault::PostCreateStepFails, false);
     let done = p.provision(prepared, &Resolver).await.unwrap();
@@ -352,8 +385,8 @@ async fn failure_after_create_is_stoppable_and_retry_recovers<F: Fixture>(f: &F)
 async fn foreign_resources_are_untouched<F: Fixture>(f: &F) {
     let p = f.provider();
     let request = f.request();
-    let ours = p.prepare(&req(f), identity()).unwrap();
-    let sibling = p.prepare(&req(f), identity()).unwrap();
+    let ours = bound(f, &p).await;
+    let sibling = bound(f, &p).await;
     if !f.seed(
         &sibling.identity.name,
         &request.offering_id,
@@ -385,7 +418,7 @@ async fn foreign_resources_are_untouched<F: Fixture>(f: &F) {
 async fn adoption_refuses_mismatch_and_ambiguity<F: Fixture>(f: &F) {
     let p = f.provider();
     let request = f.request();
-    let prepared = p.prepare(&req(f), identity()).unwrap();
+    let prepared = bound(f, &p).await;
     if !f.seed(&prepared.identity.name, "other-offering", &request.region) {
         return;
     }
@@ -422,7 +455,7 @@ async fn wrong_scope_is_not_gone<F: Fixture>(f: &F) {
         return;
     }
     let p = f.provider();
-    let prepared = p.prepare(&req(f), identity()).unwrap();
+    let prepared = bound(f, &p).await;
     let done = p.provision(prepared, &Resolver).await.unwrap();
     f.set_fault(Fault::WrongScope, true);
     let outcome = f.bare_provider().teardown(&done, &Resolver).await;
@@ -438,9 +471,67 @@ async fn wrong_scope_is_not_gone<F: Fixture>(f: &F) {
     );
 }
 
+async fn other_credential_never_confirms<F: Fixture>(f: &F) {
+    if !f.supports(Fault::OtherAccount) {
+        return;
+    }
+    let p = f.provider();
+    let prepared = bound(f, &p).await;
+    // A bound record refuses to provision under another credential.
+    assert!(p.provision(prepared.clone(), &OtherResolver).await.is_err());
+    assert_eq!(f.live_resources(), 0);
+
+    let mut done = p.provision(prepared, &Resolver).await.unwrap();
+    f.set_fault(Fault::OtherAccount, true);
+    let outcome = f.bare_provider().teardown(&done, &OtherResolver).await;
+    assert!(
+        matches!(outcome, Ok(TeardownOutcome::Unconfirmed { .. })),
+        "another account's empty view must read as unconfirmed, got {outcome:?}"
+    );
+    assert_eq!(f.live_resources(), 1);
+    f.set_fault(Fault::OtherAccount, false);
+
+    // Rebinding is an explicit act; once done, the new credential is trusted.
+    let other = OtherResolver
+        .resolve(&SecretRef::new("cred"))
+        .await
+        .unwrap();
+    done.rebind_credential(&other);
+    assert_eq!(
+        p.teardown(&done, &OtherResolver).await.unwrap(),
+        TeardownOutcome::ConfirmedGone
+    );
+    assert_eq!(f.live_resources(), 0);
+}
+
+async fn unbound_record_cannot_vouch_for_absence<F: Fixture>(f: &F) {
+    if !f.binds_credentials() {
+        return;
+    }
+    let p = f.provider();
+    // Nothing exists and the record was never bound: an empty listing may be
+    // another account's view, so this is unconfirmed, not gone.
+    let raw = p.prepare(&req(f), identity()).unwrap();
+    assert!(raw.credential_binding.is_none());
+    let outcome = p.teardown(&raw, &Resolver).await.unwrap();
+    assert!(matches!(outcome, TeardownOutcome::Unconfirmed { .. }));
+    // But a resource positively found under the identity can still be stopped
+    // and confirmed (crash before the binding was persisted).
+    if f.supports(Fault::CreateResponseLost) {
+        f.set_fault(Fault::CreateResponseLost, true);
+        assert!(p.provision(raw.clone(), &Resolver).await.is_err());
+        assert_eq!(f.live_resources(), 1);
+        assert_eq!(
+            p.teardown(&raw, &Resolver).await.unwrap(),
+            TeardownOutcome::ConfirmedGone
+        );
+        assert_eq!(f.live_resources(), 0);
+    }
+}
+
 async fn tampered_records_are_refused<F: Fixture>(f: &F) {
     let p = f.provider();
-    let prepared = p.prepare(&req(f), identity()).unwrap();
+    let prepared = bound(f, &p).await;
     let done = p.provision(prepared, &Resolver).await.unwrap();
     for bad in f.bad_records(&done) {
         let outcome = f.bare_provider().teardown(&bad, &Resolver).await;
@@ -485,6 +576,9 @@ struct Res {
     /// Provider-native state string.
     state: String,
 }
+
+const MOCK_PROJECT_ID: &str = "proj-1";
+const MOCK_ORG_ID: &str = "org-1";
 
 #[derive(Default)]
 struct Store {
@@ -553,6 +647,7 @@ impl Dialect {
             }),
             Dialect::Scaleway => json!({
                 "id": r.id, "name": r.name, "state": r.state, "commercial_type": r.offering,
+                "project": MOCK_PROJECT_ID, "organization": MOCK_ORG_ID,
             }),
             Dialect::Ovh => json!({
                 "id": r.id, "name": r.name, "status": r.state,
@@ -634,6 +729,15 @@ impl crate::transport::HttpTransport for HttpCloud {
             Dialect::Scaleway if segs.get(1) != Some(&MOCK_ZONE) => return not_found(),
             Dialect::Ovh if segs.get(2) != Some(&MOCK_PROJECT) => return not_found(),
             _ => {}
+        }
+        // Another account's view: an empty collection (200) and unknown ids (404).
+        if st.faults.has(Fault::OtherAccount) && !(d == Dialect::Ovh && segs.len() == 3) {
+            if request.method == HttpMethod::Get && segs.last() == Some(&coll) {
+                return Ok(json_response(200, &d.list(Vec::new())));
+            }
+            if segs.len() >= 2 && segs[segs.len() - 2] == coll {
+                return not_found();
+            }
         }
         // OVH project probe.
         if d == Dialect::Ovh && segs.len() == 3 {
@@ -907,6 +1011,10 @@ impl<P: Provider> Fixture for HttpFixture<P> {
         true
     }
 
+    fn binds_credentials(&self) -> bool {
+        true
+    }
+
     fn bad_records(&self, good: &ProvisioningHandle) -> Vec<ProvisioningHandle> {
         let mut out = Vec::new();
         let mut tamper = |f: &dyn Fn(&mut ProvisioningHandle)| {
@@ -920,6 +1028,8 @@ impl<P: Provider> Fixture for HttpFixture<P> {
         // Forged or missing scope fingerprint.
         tamper(&|r| r.scope = Some("forged".into()));
         tamper(&|r| r.scope = None);
+        // A forged credential binding (another account's token).
+        tamper(&|r| r.credential_binding = Some("amicu-cred-v1:forged".into()));
         match self.dialect {
             Dialect::Scaleway => {
                 // A different zone, and no zone (no region fallback).
@@ -935,10 +1045,7 @@ impl<P: Provider> Fixture for HttpFixture<P> {
                     r.resources.remove("project");
                 });
                 // A different account behind the same project name.
-                tamper(&|r| {
-                    r.resources
-                        .insert("account_id".into(), "someone-else".into());
-                });
+                tamper(&|r| r.account_id = Some("someone-else".into()));
             }
             _ => {}
         }
@@ -995,7 +1102,7 @@ impl Fixture for SelfHostedFixture {
     }
 
     fn supports(&self, fault: Fault) -> bool {
-        fault != Fault::PostCreateStepFails
+        !matches!(fault, Fault::PostCreateStepFails | Fault::OtherAccount)
     }
 
     fn seed(&self, name: &str, offering: &str, region: &str) -> bool {
@@ -1022,8 +1129,15 @@ impl Fixture for SelfHostedFixture {
         // Never pinned: the host's word alone must not confirm. (A wrong pin is
         // covered by `WrongScope`.)
         let mut unpinned = good.clone();
-        unpinned.resources.remove("ssh_host_key");
-        vec![unpinned]
+        unpinned.ssh_host_key = None;
+        // A record edited to point at another host no longer matches its scope.
+        let mut redirected = good.clone();
+        redirected
+            .resources
+            .insert("ssh_host".into(), "elsewhere.example".into());
+        let mut unscoped = good.clone();
+        unscoped.scope = None;
+        vec![unpinned, redirected, unscoped]
     }
 }
 
@@ -1233,12 +1347,9 @@ mod adapters {
         };
         let p = f.provider();
         let prepared = p.prepare(&req(&f), identity()).unwrap();
-        assert!(!prepared.resources.contains_key("ssh_host_key"));
+        assert!(prepared.ssh_host_key.is_none());
         let done = p.provision(prepared, &Resolver).await.unwrap();
-        assert_eq!(
-            done.resources.get("ssh_host_key").map(String::as_str),
-            Some(HOST_KEY)
-        );
+        assert_eq!(done.ssh_host_key.as_deref(), Some(HOST_KEY));
         assert_eq!(
             f.bare_provider().teardown(&done, &Resolver).await.unwrap(),
             TeardownOutcome::ConfirmedGone
@@ -1268,9 +1379,11 @@ mod adapters {
         let p = f.provider();
         let prepared = p.prepare(&req(&f), identity()).unwrap();
         let mut legacy = p.provision(prepared, &Resolver).await.unwrap();
-        for key in ["ssh_host", "ssh_user", "ssh_port", "ssh_host_key"] {
+        for key in ["ssh_host", "ssh_user", "ssh_port"] {
             legacy.resources.remove(key);
         }
+        legacy.ssh_host_key = None;
+        legacy.scope = None;
         assert_eq!(
             p.teardown(&legacy, &Resolver).await.unwrap(),
             TeardownOutcome::ConfirmedGone

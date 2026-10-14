@@ -138,6 +138,23 @@ impl Label {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Best effort for an *optional* label, on the client side: the value if
+    /// valid; an IP-shaped version coarsened to its first three components; and
+    /// `None` (drop the label) if it is still not acceptable. One bad optional
+    /// label must never cost the whole report. Server-side decoding stays strict
+    /// ([`Label::new`]), and required labels use that strict constructor too.
+    #[must_use]
+    pub fn sanitized(value: &str) -> Option<Self> {
+        match Self::new(value) {
+            Ok(label) => Some(label),
+            Err(ValidationError::IpLikeLabel) => {
+                let coarse: Vec<&str> = value.split('.').take(3).collect();
+                Self::new(coarse.join(".")).ok()
+            }
+            Err(_) => None,
+        }
+    }
 }
 
 impl TryFrom<String> for Label {
@@ -305,6 +322,15 @@ pub struct HardwareInfo {
 }
 
 impl HardwareInfo {
+    /// Set the accelerator model from raw text and its count; the model label
+    /// is dropped if unacceptable (the count is kept).
+    #[must_use]
+    pub fn with_accelerator(mut self, model: &str, count: u32) -> Self {
+        self.accelerator = Label::sanitized(model);
+        self.accelerator_count = count;
+        self
+    }
+
     fn validate(&self) -> Result<(), ValidationError> {
         if self.accelerator_count > MAX_ACCELERATORS {
             return Err(ValidationError::BadNumber("hardware.accelerator_count"));
@@ -318,9 +344,9 @@ impl HardwareInfo {
         if self.memory_bytes.is_some_and(|b| b > MAX_BYTES) {
             return Err(ValidationError::BadNumber("hardware.memory_bytes"));
         }
-        // An accelerator model without a count (or a count without a model) is
-        // inconsistent.
-        if self.accelerator.is_some() != (self.accelerator_count > 0) {
+        // A named accelerator needs a count (the converse is allowed: the model
+        // label is optional and may have been dropped client-side).
+        if self.accelerator.is_some() && self.accelerator_count == 0 {
             return Err(ValidationError::BadNumber("hardware.accelerator_count"));
         }
         Ok(())
@@ -338,14 +364,52 @@ pub struct ModelInfo {
     pub quantization: Option<Label>,
 }
 
+impl ModelInfo {
+    /// A model with no quantization.
+    #[must_use]
+    pub fn new(name: Label) -> Self {
+        Self {
+            name,
+            quantization: None,
+        }
+    }
+
+    /// Set the quantization from raw text; dropped if unacceptable.
+    #[must_use]
+    pub fn with_quantization(mut self, quantization: &str) -> Self {
+        self.quantization = Label::sanitized(quantization);
+        self
+    }
+}
+
 /// The serving runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeInfo {
     /// Runtime name, e.g. `vllm`, `llama.cpp`.
     pub name: Label,
-    /// Runtime version.
-    pub version: Label,
+    /// Runtime version (optional; see [`RuntimeInfo::with_version`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<Label>,
+}
+
+impl RuntimeInfo {
+    /// A runtime with no version.
+    #[must_use]
+    pub fn new(name: Label) -> Self {
+        Self {
+            name,
+            version: None,
+        }
+    }
+
+    /// Set the version from raw text, coarsening an IP-shaped version to three
+    /// components and dropping it if still unacceptable (never an error).
+    #[must_use]
+    pub fn with_version(mut self, version: &str) -> Self {
+        self.version = Label::sanitized(version);
+        self
+    }
 }
 
 /// The measured rollup for the window. Aggregates only.
@@ -515,6 +579,20 @@ pub struct TelemetryReport {
 }
 
 impl TelemetryReport {
+    /// Set the provider label from raw text; dropped if unacceptable.
+    #[must_use]
+    pub fn with_provider(mut self, provider: &str) -> Self {
+        self.provider = Label::sanitized(provider);
+        self
+    }
+
+    /// Set the region label from raw text; dropped if unacceptable.
+    #[must_use]
+    pub fn with_region(mut self, region: &str) -> Self {
+        self.region = Label::sanitized(region);
+        self
+    }
+
     /// Check the whole report: schema version, window, and every number.
     ///
     /// # Errors
@@ -593,10 +671,7 @@ mod tests {
                 name: Label::new("meta-llama/Llama-3.1-8B-Instruct").unwrap(),
                 quantization: Some(Label::new("fp8").unwrap()),
             },
-            runtime: RuntimeInfo {
-                name: Label::new("vllm").unwrap(),
-                version: Label::new("0.11.0").unwrap(),
-            },
+            runtime: RuntimeInfo::new(Label::new("vllm").unwrap()).with_version("0.11.0"),
             provider: Some(Label::new("hetzner").unwrap()),
             region: Some(Label::new("nbg1").unwrap()),
             metrics: Rollup::new(1000, 5)
@@ -754,7 +829,10 @@ mod tests {
         r.hardware.cpu_cores = Some(10_000_000);
         assert!(r.validate().is_err());
         let mut r = report();
-        r.hardware.accelerator = None; // count 1 without a model
+        r.hardware.accelerator = None; // model label dropped client-side: fine
+        assert!(r.validate().is_ok());
+        let mut r = report();
+        r.hardware.accelerator_count = 0; // a named accelerator needs a count
         assert!(r.validate().is_err());
         let mut r = report();
         r.metrics.requests = u64::MAX;
@@ -774,6 +852,39 @@ mod tests {
         let mut r = report();
         r.window.start_unix_s = u64::MAX;
         assert!(r.validate().is_err());
+    }
+
+    #[test]
+    fn optional_labels_are_coarsened_or_dropped_never_fatal() {
+        // An IP-shaped version is coarsened to three components...
+        let rt = RuntimeInfo::new(Label::new("vllm").unwrap()).with_version("10.0.0.1");
+        assert_eq!(rt.version.as_ref().map(Label::as_str), Some("10.0.0"));
+        // ...a four-part version in the non-routable range is kept as is...
+        let rt = RuntimeInfo::new(Label::new("vllm").unwrap()).with_version("0.6.3.1");
+        assert_eq!(rt.version.as_ref().map(Label::as_str), Some("0.6.3.1"));
+        // ...and anything still suspicious is dropped rather than failing.
+        for bad in ["sk-proj-abc123", "has spaces in it", "user@host", ""] {
+            let rt = RuntimeInfo::new(Label::new("vllm").unwrap()).with_version(bad);
+            assert!(rt.version.is_none(), "{bad:?}");
+            let m = ModelInfo::new(Label::new("m").unwrap()).with_quantization(bad);
+            assert!(m.quantization.is_none(), "{bad:?}");
+        }
+        let hw = HardwareInfo::default().with_accelerator("hf_notamodel", 2);
+        assert!(hw.accelerator.is_none() && hw.accelerator_count == 2);
+        // The report still builds, validates and round-trips.
+        let mut r = report();
+        r.runtime = RuntimeInfo::new(Label::new("vllm").unwrap()).with_version("sk-secret-1");
+        r.model.quantization = Label::sanitized("a b");
+        let r = r.with_provider("10.1.2.3").with_region("nbg1");
+        assert!(r.provider.as_ref().is_some_and(|p| p.as_str() == "10.1.2"));
+        assert_eq!(
+            TelemetryReport::from_json(&r.to_json().unwrap()).unwrap(),
+            r
+        );
+        // Server-side decoding stays strict.
+        let mut v = serde_json::to_value(&r).unwrap();
+        v["runtime"]["version"] = "10.0.0.1".into();
+        assert!(TelemetryReport::from_json(&v.to_string()).is_err());
     }
 
     #[test]

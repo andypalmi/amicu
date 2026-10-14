@@ -606,10 +606,11 @@ impl Provider for OvhCloudProvider {
         let token = self
             .resolve_token(resolver, prepared.credentials.as_ref())
             .await?;
+        rest_lifecycle::bind(&mut prepared, token.as_deref())?;
         if let Some(account) =
             rest_lifecycle::guard_scope(self, &prepared, token.as_deref()).await?
         {
-            prepared.resources.insert("account_id".into(), account);
+            prepared.account_id = Some(account);
         }
 
         // Adopt an instance already created under this identity (retry after a
@@ -769,6 +770,7 @@ impl ServerApi for OvhCloudProvider {
             .into_iter()
             .filter(|i| i.name.as_deref() == Some(name))
             .map(|i| Found {
+                account: None,
                 id: i.id,
                 offering: i.flavor_id,
                 region: i.region,

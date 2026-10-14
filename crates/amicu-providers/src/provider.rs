@@ -54,7 +54,14 @@
 //!    scope fingerprint (zone, project, ...) that is verified against the record
 //!    and probed on the backend before any 404 counts as gone. A 404 at the
 //!    wrong zone/project/account is an error, never confirmation.
-//! 5. **Confirmed or not.** [`Provider::teardown`] returns
+//! 5. **Right credential.** The record is bound to a fingerprint of the
+//!    credential that created the resource ([`credential_binding`]; never the
+//!    token). Another account's token sees an empty collection and 404s, which
+//!    would read as "gone", so teardown under a different credential returns
+//!    [`TeardownOutcome::Unconfirmed`]. Changing the binding is an explicit act
+//!    ([`ProvisioningHandle::rebind_credential`]); a record never bound cannot
+//!    vouch for absence at all.
+//! 6. **Confirmed or not.** [`Provider::teardown`] returns
 //!    [`TeardownOutcome::ConfirmedGone`] only after the backend confirmed the
 //!    resource absent; otherwise [`TeardownOutcome::Unconfirmed`] (or an error).
 //!    Callers keep the record in state until `ConfirmedGone`. There is no
@@ -69,7 +76,7 @@ use amicu_core::adapter::{
     Adapter, AdapterError, AdapterErrorKind, AdapterId, DescribeCapabilities,
 };
 use amicu_core::diagnostic::{DiagnosticCode, Severity, catalog};
-use amicu_core::secret::{SecretRef, SecretResolver};
+use amicu_core::secret::{SecretRef, SecretResolver, SecretValue};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -218,7 +225,7 @@ impl ProvisioningState {
 }
 
 /// Current schema version of [`ProvisioningHandle`].
-pub const HANDLE_SCHEMA_VERSION: u32 = 1;
+pub const HANDLE_SCHEMA_VERSION: u32 = 2;
 
 fn default_schema_version() -> u32 {
     HANDLE_SCHEMA_VERSION
@@ -238,6 +245,31 @@ const _: () = {
     impl<T: ?Sized + Serialize> AmbiguousIfSerialize<u8> for T {}
     let _ = <amicu_core::secret::SecretValue as AmbiguousIfSerialize<_>>::probe;
 };
+
+/// Domain-separated, truncated SHA-256 fingerprint of a credential's secret
+/// bytes: `amicu-cred-v1:` + 32 hex chars (128 bits). It identifies *which*
+/// credential created a resource without being usable as one.
+#[must_use]
+pub fn credential_binding(secret: &SecretValue) -> String {
+    binding_of_bytes(secret.expose_secret())
+}
+
+/// The binding of a record that uses no credential.
+pub(crate) const NO_CREDENTIAL_BINDING: &str = "amicu-cred-v1:none";
+
+pub(crate) fn binding_of_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let mut hasher = Sha256::new();
+    hasher.update(b"amicu-cred-v1:");
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    let mut out = String::from("amicu-cred-v1:");
+    for byte in &digest[..16] {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
 
 /// The identity a resource is created under.
 ///
@@ -331,6 +363,7 @@ impl ResourceIdentity {
 /// assertion keeps `SecretValue` non-`Serialize`, so no secret can be stored.
 /// Fields have serde defaults so older/newer records stay readable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RawHandle")]
 pub struct ProvisioningHandle {
     /// Schema version of this record.
     #[serde(default = "default_schema_version")]
@@ -361,6 +394,21 @@ pub struct ProvisioningHandle {
     /// record and the backend scope is reachable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
+    /// Fingerprint of the credential that created the resource
+    /// (`amicu-cred-v1:` + hex of a truncated, domain-separated SHA-256 of the
+    /// token; never the token). Teardown refuses to treat "absent" as gone under
+    /// a different credential: another account's token sees an empty world. Bind
+    /// it with [`bind_credential`](Self::bind_credential) right after `prepare`,
+    /// before the record is persisted; `provision` binds it if still unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_binding: Option<String>,
+    /// Account/project id the backend reported for the scope (OVH project id,
+    /// Scaleway project), checked before any absence is trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    /// Pinned SSH host-key fingerprint (`SHA256:...`) for self-hosted records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_host_key: Option<String>,
     /// Further provider resource ids / addressing needed to stop the resource
     /// (e.g. `ssh_host`, `ssh_user`, `ssh_port`, `agent_id` for self-hosted).
     /// Ids and addresses only - never secret values.
@@ -369,6 +417,96 @@ pub struct ProvisioningHandle {
     /// The resource's lifecycle state.
     #[serde(default = "default_state")]
     pub state: ProvisioningState,
+}
+
+/// Wire shape of [`ProvisioningHandle`]: identical, but records written before
+/// `account_id` and `ssh_host_key` became typed fields kept them in `resources`;
+/// `From` moves them across so old records stay readable.
+#[derive(Deserialize)]
+struct RawHandle {
+    /// Schema version of this record.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    /// Primary provider-assigned resource id. Empty until `provision` has
+    /// recorded one; an empty id still stops via [`identity`](Self::identity).
+    #[serde(default)]
+    pub id: String,
+    /// The provider kind that owns the resource.
+    pub provider: AdapterId,
+    /// The region the resource runs in.
+    pub region: String,
+    /// The zone (AZ), when the adapter resolved one; carried so later
+    /// zone-addressed calls target the same zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
+    /// The offering that was provisioned.
+    #[serde(default)]
+    pub offering_id: String,
+    /// Reference to the credential used for backend operations (name only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<SecretRef>,
+    /// The identity the resource is created under.
+    #[serde(default)]
+    pub identity: ResourceIdentity,
+    /// Scope fingerprint (provider, zone/region, project) fixed at `prepare`.
+    /// Teardown refuses to trust an "absent" answer unless this matches the
+    /// record and the backend scope is reachable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Fingerprint of the credential that created the resource
+    /// (`amicu-cred-v1:` + hex of a truncated, domain-separated SHA-256 of the
+    /// token; never the token). Teardown refuses to treat "absent" as gone under
+    /// a different credential: another account's token sees an empty world. Bind
+    /// it with [`bind_credential`](Self::bind_credential) right after `prepare`,
+    /// before the record is persisted; `provision` binds it if still unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_binding: Option<String>,
+    /// Account/project id the backend reported for the scope (OVH project id,
+    /// Scaleway project), checked before any absence is trusted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    /// Pinned SSH host-key fingerprint (`SHA256:...`) for self-hosted records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_host_key: Option<String>,
+    /// Further provider resource ids / addressing needed to stop the resource
+    /// (e.g. `ssh_host`, `ssh_user`, `ssh_port`, `agent_id` for self-hosted).
+    /// Ids and addresses only - never secret values.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resources: BTreeMap<String, String>,
+    /// The resource's lifecycle state.
+    #[serde(default = "default_state")]
+    pub state: ProvisioningState,
+}
+
+impl From<RawHandle> for ProvisioningHandle {
+    fn from(mut raw: RawHandle) -> Self {
+        if raw.ssh_host_key.is_none() {
+            raw.ssh_host_key = raw.resources.remove("ssh_host_key");
+        } else {
+            raw.resources.remove("ssh_host_key");
+        }
+        if raw.account_id.is_none() {
+            raw.account_id = raw.resources.remove("account_id");
+        } else {
+            raw.resources.remove("account_id");
+        }
+        Self {
+            schema_version: raw.schema_version,
+            id: raw.id,
+            provider: raw.provider,
+            region: raw.region,
+            zone: raw.zone,
+            offering_id: raw.offering_id,
+            credentials: raw.credentials,
+            identity: raw.identity,
+            scope: raw.scope,
+            credential_binding: raw.credential_binding,
+            account_id: raw.account_id,
+            ssh_host_key: raw.ssh_host_key,
+            resources: raw.resources,
+            state: raw.state,
+        }
+    }
 }
 
 impl ProvisioningHandle {
@@ -389,6 +527,9 @@ impl ProvisioningHandle {
             credentials: request.credentials.clone(),
             identity: identity.with_fresh_nonce(),
             scope: None,
+            credential_binding: None,
+            account_id: None,
+            ssh_host_key: None,
             resources: BTreeMap::new(),
             state: ProvisioningState::Requested,
         }
@@ -408,6 +549,37 @@ impl ProvisioningHandle {
         self.id = id;
         self.state = state;
         self
+    }
+
+    /// Bind the record to the credential that will operate on it. Idempotent for
+    /// the same credential; an error if the record is already bound to a
+    /// different one (use [`rebind_credential`](Self::rebind_credential) for a
+    /// deliberate change).
+    ///
+    /// # Errors
+    /// [`ProviderError::CredentialsRejected`] when bound to another credential.
+    pub fn bind_credential(&mut self, secret: &SecretValue) -> Result<(), AdapterError> {
+        let binding = credential_binding(secret);
+        match &self.credential_binding {
+            Some(existing) if *existing != binding => Err(AdapterError::from_kind(
+                ProviderError::CredentialsRejected {
+                    detail: "credential differs from the one this record is bound to".into(),
+                },
+            )),
+            _ => {
+                self.credential_binding = Some(binding);
+                Ok(())
+            }
+        }
+    }
+
+    /// Deliberately re-bind the record to a different credential, e.g. after a
+    /// token rotation or when adopting a record whose binding was never set.
+    /// This is an explicit operator act: nothing in this crate calls it, and it
+    /// must never be done silently, because the old binding is what stops
+    /// another account's empty view from being mistaken for "gone".
+    pub fn rebind_credential(&mut self, secret: &SecretValue) {
+        self.credential_binding = Some(credential_binding(secret));
     }
 
     /// Whether a provider resource id has been recorded.
@@ -687,6 +859,43 @@ mod tests {
         assert_eq!(min.schema_version, HANDLE_SCHEMA_VERSION);
         assert!(min.scope.is_none());
         assert!(!min.has_resource_id());
+    }
+
+    #[test]
+    fn old_records_with_resource_map_fields_are_migrated() {
+        let json = r#"{"provider":"self-hosted","region":"r","resources":
+            {"ssh_host_key":"SHA256:abc","account_id":"proj-9","ssh_host":"h"}}"#;
+        let h: ProvisioningHandle = serde_json::from_str(json).unwrap();
+        assert_eq!(h.ssh_host_key.as_deref(), Some("SHA256:abc"));
+        assert_eq!(h.account_id.as_deref(), Some("proj-9"));
+        assert!(!h.resources.contains_key("ssh_host_key"));
+        assert!(!h.resources.contains_key("account_id"));
+        assert_eq!(h.resources.get("ssh_host").map(String::as_str), Some("h"));
+    }
+
+    #[test]
+    fn credential_binding_is_a_fingerprint_not_the_token() {
+        let secret = SecretValue::new("tok-123".to_string());
+        let binding = credential_binding(&secret);
+        assert!(binding.starts_with("amicu-cred-v1:"));
+        assert_eq!(binding.len(), "amicu-cred-v1:".len() + 32);
+        assert!(!binding.contains("tok-123"));
+        assert_ne!(
+            binding,
+            credential_binding(&SecretValue::new("tok-124".to_string()))
+        );
+
+        let mut h = ProvisioningHandle::prepared(
+            AdapterId::new("p"),
+            &ProvisionRequest::new("o", "r"),
+            ResourceIdentity::new("d", "p"),
+        );
+        h.bind_credential(&secret).unwrap();
+        h.bind_credential(&secret).unwrap(); // same credential: idempotent
+        let other = SecretValue::new("tok-124".to_string());
+        assert!(h.bind_credential(&other).is_err(), "never rebinds silently");
+        h.rebind_credential(&other);
+        assert_eq!(h.credential_binding, Some(credential_binding(&other)));
     }
 
     #[test]
