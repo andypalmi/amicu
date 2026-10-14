@@ -271,7 +271,7 @@ pub(crate) fn discover(env: &Env<'_>, tracked: &Tracked) -> OrphansReport {
                     tracked: tracked.modal_names.contains(&app.name)
                         || tracked.modal_ids.contains(&app.id),
                     ownership: Ownership::Unknown,
-                    stop_command: format!("amicu modal stop {}", app.name),
+                    stop_command: format!("amicu modal stop {}", shell_quote(&app.name)),
                     identity: app.name,
                     state: app.state,
                 });
@@ -329,6 +329,20 @@ fn source(name: &'static str, status: &'static str, detail: Option<String>) -> S
         name,
         status,
         detail,
+    }
+}
+
+/// POSIX single-quote escape for a value interpolated into a printed shell
+/// command. Plain tokens stay bare for readability; everything else is wrapped
+/// in `'...'` with each `'` written as `'\''`.
+fn shell_quote(s: &str) -> String {
+    let plain = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._/@:+=-".contains(c));
+    if plain {
+        s.to_owned()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
     }
 }
 
@@ -391,7 +405,10 @@ fn launchd(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
                 kind: Kind::LaunchdJob,
                 tracked: tracked.has_label(&label),
                 ownership: ownership_of_label(&label, tracked.project_id.as_deref()),
-                stop_command: format!("launchctl unload -w {plist} && rm {plist}"),
+                stop_command: {
+                    let q = shell_quote(&plist);
+                    format!("launchctl unload -w {q} && rm {q}")
+                },
                 identity: label,
                 state,
             }
@@ -441,7 +458,7 @@ fn systemd(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
             kind: Kind::SystemdUnit,
             tracked: tracked.has_label(label),
             ownership: ownership_of_label(label, tracked.project_id.as_deref()),
-            stop_command: format!("systemctl --user stop {unit}"),
+            stop_command: format!("systemctl --user stop {}", shell_quote(unit)),
             identity: (*unit).to_owned(),
             state,
         });
@@ -523,6 +540,16 @@ mod tests {
     use amicu_llamacpp::{ExecOutput, LlamaCppError};
     use amicu_runtime::RuntimeHandle;
     use std::sync::Mutex;
+
+    #[test]
+    fn shell_quote_leaves_plain_and_escapes_unsafe() {
+        assert_eq!(shell_quote("io.amicu.llama.x"), "io.amicu.llama.x");
+        assert_eq!(shell_quote("/home/a/x.plist"), "/home/a/x.plist");
+        assert_eq!(shell_quote("/Users/a b/x.plist"), "'/Users/a b/x.plist'");
+        assert_eq!(shell_quote("x;touch y"), "'x;touch y'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote(""), "''");
+    }
 
     struct FakeExec {
         calls: Mutex<Vec<String>>,

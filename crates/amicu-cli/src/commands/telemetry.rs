@@ -46,6 +46,8 @@ pub(crate) enum SourceKind {
     DoNotTrack,
     EnvAmicuTelemetry,
     Config,
+    /// The config file exists but cannot be read or parsed; treated as not set.
+    ConfigUnreadable,
     Default,
 }
 
@@ -55,6 +57,7 @@ impl SourceKind {
             SourceKind::DoNotTrack => "DO_NOT_TRACK environment variable",
             SourceKind::EnvAmicuTelemetry => "AMICU_TELEMETRY environment variable",
             SourceKind::Config => "user config file",
+            SourceKind::ConfigUnreadable => "config unreadable (treated as not set)",
             SourceKind::Default => "default (not asked yet; off)",
         }
     }
@@ -223,6 +226,8 @@ struct StatusReport {
     config_path: Option<String>,
     collecting: bool,
     note: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<String>,
 }
 
 /// `amicu telemetry status`.
@@ -237,11 +242,21 @@ fn status_with(
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
-    let stored = match store {
-        Some(s) => s.load()?,
+    // A corrupt or unreadable file must not make `status` fail: degrade to the
+    // default (off) and say so. Env overrides still win via `effective`.
+    let mut warning = None;
+    let stored = match store.map(ConfigStore::load) {
+        Some(Ok(v)) => v,
+        Some(Err(e)) => {
+            warning = Some(format!("telemetry config is unreadable: {e}"));
+            None
+        }
         None => None,
     };
-    let eff = effective(env, stored);
+    let mut eff = effective(env, stored);
+    if warning.is_some() && eff.source == SourceKind::Default {
+        eff.source = SourceKind::ConfigUnreadable;
+    }
     if output.is_json() {
         write_json(
             out,
@@ -252,6 +267,7 @@ fn status_with(
                 config_path: store.map(|s| s.path().display().to_string()),
                 collecting: false,
                 note: NOT_COLLECTING,
+                warning,
             },
         )?;
         return Ok(0);
@@ -265,6 +281,9 @@ fn status_with(
     .map_err(io_err)?;
     if let Some(s) = store {
         writeln!(out, "config:    {}", s.path().display()).map_err(io_err)?;
+    }
+    if let Some(w) = &warning {
+        writeln!(out, "warning:   {w}").map_err(io_err)?;
     }
     writeln!(out, "\n{NOT_COLLECTING}").map_err(io_err)?;
     Ok(0)
@@ -466,6 +485,35 @@ mod tests {
 
         set(&store, false, &env, &mut Vec::new()).unwrap();
         assert_eq!(store.load().unwrap(), Some(false));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn status_degrades_on_corrupt_config() {
+        let (store, dir) = temp_store("corrupt");
+        std::fs::create_dir_all(store.path().parent().unwrap()).unwrap();
+        std::fs::write(store.path(), "{not json").unwrap();
+        let env = env_of(&[]);
+
+        let mut human = Vec::new();
+        assert_eq!(
+            status_with(Some(&store), &env, OutputFormat::Human, &mut human).unwrap(),
+            0
+        );
+        let human = String::from_utf8(human).unwrap();
+        assert!(human.contains("telemetry: disabled"));
+        assert!(human.contains("config unreadable (treated as not set)"));
+        assert!(human.contains("warning:"));
+
+        let mut buf = Vec::new();
+        status_with(Some(&store), &env, OutputFormat::Json, &mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["enabled"], false);
+        assert_eq!(v["source"], "config_unreadable");
+        assert!(v["warning"].is_string());
+
+        // The consent prompt still treats a corrupt file as already asked.
+        assert!(!ask(&store, &[], true, "y").0);
         let _ = std::fs::remove_dir_all(dir);
     }
 
