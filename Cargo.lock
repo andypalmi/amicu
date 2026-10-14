@@ -358,6 +358,7 @@ dependencies = [
  "amicu-runtime",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]
