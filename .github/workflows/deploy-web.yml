@@ -53,7 +53,7 @@ jobs:
           c=$(gh run list --workflow ci.yml --commit "$GITHUB_SHA" --event push --branch main -L 1 --json conclusion -q '.[0].conclusion')
           [ "$c" = "success" ] || { echo "::error::CI for $GITHUB_SHA is '${c:-none/in_progress}'"; exit 1; }
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -63,7 +63,7 @@ jobs:
       # `web` job gets from pnpm/action-setup's package_json_file input —
       # corepack is the more direct way to honor that pin from a plain
       # actions/setup-node step.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
       - name: Enable corepack

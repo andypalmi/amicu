@@ -8,6 +8,11 @@ version = "0.1.0"
 license = "AGPL-3.0-only"
 repository = "https://github.com/andypalmi/amicu"
 rust-version = "1.97"
+description = "Terraform for AI inference infrastructure: declarative HCL config, planner and apply engine"
+homepage = "https://amicu.dev"
+readme = "README.md"
+keywords = ["llm", "inference", "cli", "infrastructure", "gpu"]
+categories = ["command-line-utilities"]
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -19,3 +24,8 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 doc_markdown = "allow"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

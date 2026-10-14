@@ -142,7 +142,7 @@ cargo build --release -p amicu-cli   # binary: ./target/release/amicu
 
 Prebuilt binaries, a shell installer and Homebrew are coming with the first release.
 
-- **Local runtime (llama.cpp):** macOS (Apple Silicon) and Linux/CPU, run as a native process (launchd on macOS, systemd on Linux).
+- **Local runtime (llama.cpp):** macOS (Apple Silicon), Linux/CPU and Linux with an NVIDIA GPU (CUDA), run as a native process (launchd on macOS, a persistent systemd user unit on Linux). A deployment `apply` created comes back after a reboot (`RunAtLoad` / enabled unit with `Restart=on-failure`); on Linux this happens at boot only if user lingering is on (`sudo loginctl enable-linger $USER`), otherwise at your next login, and `apply` prints a hint when lingering is off. For GPU offload the `llama-server` on `PATH` must be a CUDA build (amicu offloads per `n_gpu_layers`, `-1` = all layers; a CPU-only build silently runs on the CPU), and the memory-fit check is made against the card's VRAM.
 - **Production runtime (vLLM):** NVIDIA CUDA, AMD ROCm, and Intel XPU GPUs. Locally as a native single process (launchd/systemd, same as llama.cpp) or deployed via Kubernetes/Helm or k3s.
 - **Providers:** `apply` supports the local machine (`local`, `local_apple`, `local_cpu`, `on_prem`) and Modal. Any other provider fails at apply with a clear error rather than running locally.
   - Preview, provisioning adapters not yet wired into `apply`: Hetzner, RunPod, Scaleway, OVHcloud, and SSH.

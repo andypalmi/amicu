@@ -5,6 +5,10 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+publish = false
+
+[package.metadata.dist]
+dist = false
 
 [[bin]]
 name = "amicu-server"

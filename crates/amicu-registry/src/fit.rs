@@ -435,9 +435,9 @@ pub fn check_vllm_fit(
             pool.diagnostic_code(),
             Severity::Error,
             format!(
-                "model weights{kv} need {demand} but only {available} of {device_memory} {pool}{across} \
-                 is usable at {pct:.0}% gpu_memory_utilization",
-                kv = if kv_cache.is_some() { " + kv cache" } else { "" },
+                "model weights {weights}{kv} need {demand} but only {available} of {device_memory} \
+                 {pool}{across} is usable at {pct:.0}% gpu_memory_utilization",
+                kv = kv_cache.map_or_else(String::new, |k| format!(" + kv cache {k}")),
                 pool = pool.label(),
                 pct = util * 100.0,
             ),

@@ -167,7 +167,16 @@ pub(crate) fn run_with(
         env,
         Op::Apply,
     )?;
-    report(&handles, &state.graph, output, out)
+    let code = report(&handles, &state.graph, output, out)?;
+    // A host deployment comes back after a reboot; tell the user when this
+    // machine would only do so at their next login (systemd lingering off).
+    if !output.is_json()
+        && handles.iter().any(|h| h.id.starts_with("io.amicu."))
+        && let Some(hint) = (env.host)().boot_hint()
+    {
+        writeln!(out, "\n{hint}").map_err(|e| CliError::io("write failed", e))?;
+    }
+    Ok(code)
 }
 
 /// The recorded instances of `deployment` that are not the one about to be
@@ -1124,7 +1133,7 @@ async fn secure_endpoint(
     let hint = match dispatch {
         Dispatch::Modal => format!("`modal app stop {}`", handle.id),
         Dispatch::Host => format!(
-            "`systemctl --user stop {id}` on Linux, or `launchctl bootout \
+            "`systemctl --user disable --now {id}` on Linux, or `launchctl bootout \
              gui/$(id -u)/{id}` on macOS",
             id = handle.id
         ),
@@ -1403,22 +1412,32 @@ async fn stop_record(
                     record.describe()
                 ))
             })?;
-            // Stop, then delete the service definition (it holds the endpoint
-            // API key) at the recorded path; a failure to delete is an error
-            // and the record stays in state.
+            let env_file = record.env_path().map_err(|why| {
+                CliError::Message(format!(
+                    "{} has a recorded secrets file that amicu will not delete: {why}. Check \
+                     the state file; the record was kept and nothing was changed",
+                    record.describe()
+                ))
+            })?;
+            // Stop, then delete the service definition (a launchd plist holds
+            // the endpoint API key; a systemd unit's key is in its env file,
+            // deleted first) at the recorded paths; a failure to delete is an
+            // error and the record stays in state.
             probe
-                .stop_recorded(&handle, definition.as_deref())
+                .stop_recorded_with_env(&handle, definition.as_deref(), env_file.as_deref())
                 .await
                 .map_err(|e| {
                     CliError::Adapter(amicu_core::adapter::AdapterErrorKind::into_adapter_error(e))
                 })?;
-            if let Some(path) = &definition
-                && path.exists()
+            if let Some(path) = definition
+                .iter()
+                .chain(env_file.iter())
+                .find(|p| p.exists())
             {
                 return Err(CliError::Message(format!(
-                    "{} is stopped but its service file {} (it holds the endpoint API key) \
-                     could not be removed. Delete it by hand; the record was kept so a re-run \
-                     retries",
+                    "{} is stopped but its service file {} (a plist, or the systemd secrets \
+                     file, holds the endpoint API key) could not be removed. Delete it by hand; \
+                     the record was kept so a re-run retries",
                     record.describe(),
                     path.display()
                 )));

@@ -89,6 +89,7 @@ Commit these when their source changes; CI fails on drift.
 - Commit subjects look like `area: summary`, for example `web: rebuild providers page as a plain registry list` or `docs: accurate install instructions`. Keep them short and imperative. `fix(area): ...` / `feat(area): ...` also appear in history.
 - Open PRs against `main`, reference the issue they address (for example `Closes #123`), and keep each PR to one concern. Dependency bumps go in their own PR.
 - CI must be green before merge.
+- PR titles are checked by CI and, because PRs are squash-merged with the PR title as the commit message, must be Conventional Commits: `type(scope)!: summary`. Types: feat, fix, docs, chore, refactor, perf, test, ci, build. Scopes: cli, engine, providers, state, modal, web, docs, server. `feat` releases a minor, `fix`/`perf` a patch. See [`RELEASING.md`](./RELEASING.md).
 
 ## License
 

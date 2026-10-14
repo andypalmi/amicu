@@ -122,6 +122,23 @@ pub trait ProcessSupervisor: Send + Sync {
         self.stop(handle).await
     }
 
+    /// [`stop_recorded`](Self::stop_recorded), also deleting the recorded
+    /// secrets environment file (systemd). `None`: derive it.
+    async fn stop_recorded_with_env(
+        &self,
+        handle: &RuntimeHandle,
+        definition: Option<&Path>,
+        _env: Option<&Path>,
+    ) -> Result<(), LlamaCppError> {
+        self.stop_recorded(handle, definition).await
+    }
+
+    /// A one-line advisory to show after a host start (see
+    /// [`ServiceManager::boot_hint`](crate::service::ServiceManager::boot_hint)).
+    fn boot_hint(&self) -> Option<String> {
+        None
+    }
+
     /// Who the host service manager acts as (backend, uid, launchd domain),
     /// when this supervisor is host-based. Recorded with started instances.
     fn host_context(&self) -> Option<crate::service::HostContext> {
@@ -261,9 +278,9 @@ impl<M: ServiceManager, P: HealthProbe> ServiceSupervisor<M, P> {
     /// stopped (fail closed) and the error names where its logs are.
     ///
     /// The service counts as exited when the manager reports `Failed`, or
-    /// `Inactive` on two consecutive reads: systemd's `--collect` garbage-
-    /// collects a crashed unit (so it reads inactive, never failed), while a
-    /// launchd job may briefly show no PID right after load.
+    /// `Inactive` on two consecutive reads: a launchd job may briefly show no
+    /// PID right after load. (A crashing systemd unit restarts via
+    /// `Restart=on-failure` and reads `Failed` once its start limit is hit.)
     async fn wait_ready(&self, label: &str, endpoint: &str) -> Result<(), LlamaCppError> {
         if self.ready.timeout.is_zero() {
             return Ok(());
@@ -322,7 +339,7 @@ fn install_hint(program: &str) -> &'static str {
 /// The launchd (macOS) supervisor: a LaunchAgent plist driven by `launchctl`.
 pub type LaunchdSupervisor = ServiceSupervisor<LaunchdManager<HostExec>, HttpHealthProbe>;
 
-/// The systemd (Linux) supervisor: a transient `--user` unit driven by `systemctl`.
+/// The systemd (Linux) supervisor: a persistent `--user` unit driven by `systemctl`.
 pub type SystemdSupervisor = ServiceSupervisor<SystemdManager<HostExec>, HttpHealthProbe>;
 
 impl LaunchdSupervisor {
@@ -501,8 +518,22 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
         self.manager.stop_recorded(&handle.id, definition)
     }
 
+    async fn stop_recorded_with_env(
+        &self,
+        handle: &RuntimeHandle,
+        definition: Option<&Path>,
+        env: Option<&Path>,
+    ) -> Result<(), LlamaCppError> {
+        self.manager
+            .stop_recorded_with_env(&handle.id, definition, env)
+    }
+
     fn host_context(&self) -> Option<crate::service::HostContext> {
         self.manager.context()
+    }
+
+    fn boot_hint(&self) -> Option<String> {
+        self.manager.boot_hint()
     }
 
     fn instance_owner(&self, label: &str) -> Option<u32> {
