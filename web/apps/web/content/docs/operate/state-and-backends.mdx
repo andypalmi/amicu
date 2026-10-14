@@ -32,7 +32,7 @@ amicu apply --lock-timeout 60
 
 ## State version
 
-Current state files are version `v3`. amicu also reads `v1` and `v2` files. Besides the graph and endpoints, v3 holds these fields:
+Current state files are version `v3`. amicu reads `v1`, `v2` and `v3` files, and migrates older files forward on load, one version at a time (v1 to v2, then v2 to v3). The file on disk becomes v3 the next time amicu saves it, for example on `apply` or `destroy`. Besides the graph and endpoints, v3 holds these fields:
 
 - **`project_id`**: an 8-digit hex id, minted when state is first written. It scopes the host service labels (see [Host service labels](#host-service-labels)).
 - **`pending`**: deployments whose start was begun but not confirmed. Amicu writes them before the provider starts anything. `plan` treats them as absent, so `apply` recreates them, and `destroy` tries to confirm their stop.
@@ -41,13 +41,15 @@ Current state files are version `v3`. amicu also reads `v1` and `v2` files. Besi
 
 Amicu refuses to act on a record when the current machine or account does not match it. Each refusal names the mismatch and says how to fix it: switch `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` to the recorded Modal workspace, or re-run as the user that started the host instance. Nothing is changed in that case.
 
-State written by v1 amicu has no `pending` or `stops`. The stop records are derived from the graph on load, and a v1 Modal app is stamped with a workspace only after amicu proves the app is in the active one. State written by v2 has no `project_id`. An older amicu that saves a v3 file drops these fields, so do not run an older build on a project after a v3 apply.
+State written by v1 amicu has no `pending` or `stops`. The stop records are derived from the graph on load, and a v1 Modal app is stamped with a workspace only after amicu proves the app is in the active one. State written by v2 has no `project_id`.
+
+amicu refuses a state file written by a newer version, and says to upgrade amicu rather than overwrite the file. Unknown top-level fields and unknown fields in stop records are kept on save. An unknown field in an endpoint is an error with the same advice, because endpoints cannot keep unknown fields. A build that only knows v1 and v2 refuses a v3 file, so do not run one on a project after `destroy` or `apply` has saved v3.
 
 ## Host service labels
 
 A local deployment runs as a launchd job or systemd user unit labelled `io.amicu.llama.<project_id>.<deployment>`. The `project_id` is stored in `.amicu/state/state.json`, so two projects never share a label.
 
-- To stop a service by hand: `launchctl bootout gui/$(id -u)/<label>` on macOS, or `systemctl --user stop <label>` on Linux. Then run `amicu destroy` so that state and the service file are cleaned up too.
+- To stop a service by hand: `launchctl bootout gui/$(id -u)/<label>` on macOS, or `systemctl --user disable --now <label>` on Linux. Then run `amicu destroy` so that state and the service file are cleaned up too.
 - Deployments created before v3 keep the unscoped label `io.amicu.llama.<deployment>` until their next `apply`. That `apply` stops the old job and confirms the stop before it starts the new one.
 - Do not copy `.amicu/` to another checkout. Both copies would have the same `project_id`, and each could stop the other's instances. To work from another checkout, run `amicu destroy` in the first one, then apply in the second.
 - Do not delete state while instances are running. Their stop identity exists only in state, so deleting it orphans them. Run `amicu destroy` first.
@@ -75,4 +77,4 @@ If a host update fails, the deployment stays `pending` in state with its stop re
 
 If `state.json` is corrupt or missing but `state.json.bak` is valid, amicu refuses to continue and names the backup. Inspect it, and if it is correct restore it with `cp .amicu/state/state.json.bak .amicu/state/state.json`.
 
-If state is lost or corrupt with no usable backup, `plan` shows `create` for everything, and amicu no longer knows how to stop what it started. Stop each instance by hand first: `launchctl bootout gui/$(id -u)/<label>` on macOS, `systemctl --user stop <label>` on Linux, or `amicu modal stop <app>` for Modal. The labels are `io.amicu.llama.<project_id>.<deployment>` (or `io.amicu.llama.<deployment>` for older deployments). Then delete `state.json` and `state.json.bak` and apply. Do not delete state while instances are running: the instances are then orphaned, and the stop identity that only state held is gone. Only do this with explicit intent.
+If state is lost or corrupt with no usable backup, `plan` shows `create` for everything, and amicu no longer knows how to stop what it started. Stop each instance by hand first: `launchctl bootout gui/$(id -u)/<label>` on macOS, `systemctl --user disable --now <label>` on Linux, or `amicu modal stop <app>` for Modal. The labels are `io.amicu.llama.<project_id>.<deployment>` (or `io.amicu.llama.<deployment>` for older deployments). Then delete `state.json` and `state.json.bak` and apply. Do not delete state while instances are running: the instances are then orphaned, and the stop identity that only state held is gone. Only do this with explicit intent.
