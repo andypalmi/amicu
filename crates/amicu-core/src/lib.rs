@@ -85,6 +85,7 @@ mod tests {
     fn sample_deployment() -> Deployment {
         Deployment {
             scaling: None,
+            memory_check: crate::resource::MemoryCheck::default(),
             api_key: None,
             id: DeploymentId::new("support_chat_prod"),
             model: ModelId::new("support_chat"),

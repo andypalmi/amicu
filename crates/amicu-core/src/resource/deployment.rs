@@ -350,8 +350,41 @@ pub struct Deployment {
     /// loopback-only local deployments. See [`Deployment::requires_api_key`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<SecretRef>,
+    /// Whether a memory-fit failure blocks this deployment (`enforce`, the
+    /// default) or is downgraded to a warning (`warn`). See [`MemoryCheck`].
+    #[serde(default, skip_serializing_if = "MemoryCheck::is_enforce")]
+    pub memory_check: MemoryCheck,
     #[serde(flatten)]
     pub runtime: Runtime,
+}
+
+/// Per-deployment `memory_check`: what a memory-fit failure (estimated weights
+/// plus KV cache and overhead exceeding the available memory) does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryCheck {
+    /// The failure is an error and blocks plan and apply (default).
+    #[default]
+    Enforce,
+    /// The failure is reported as a warning; plan and apply continue.
+    Warn,
+}
+
+impl MemoryCheck {
+    /// Whether this is the default, so it is left out of serialized output.
+    #[must_use]
+    pub const fn is_enforce(&self) -> bool {
+        matches!(self, MemoryCheck::Enforce)
+    }
+
+    /// The HCL spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            MemoryCheck::Enforce => "enforce",
+            MemoryCheck::Warn => "warn",
+        }
+    }
 }
 
 /// Hardware profile `provider` values that mean "this machine": the endpoint

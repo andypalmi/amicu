@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use amicu_core::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticReport, Severity, catalog};
 use amicu_core::graph::Graph;
-use amicu_core::resource::{Deployment, Residency, RuleEffect, Runtime};
+use amicu_core::resource::{Deployment, MemoryCheck, Residency, RuleEffect, Runtime};
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
 use amicu_providers::resolve_residency;
 use amicu_runtime::RuntimeAdapter;
@@ -42,7 +42,7 @@ pub fn report_for(graph: &Graph) -> DiagnosticReport {
             Runtime::LlamaCpp(_) => llama_adapter.validate(deployment),
             Runtime::Vllm(_) => vllm_adapter.validate(deployment),
         };
-        for mut d in diags {
+        for mut d in apply_memory_check(deployment, diags) {
             if d.resource.is_none() {
                 d.resource = Some(format!("deployment.{}", deployment.id));
             }
@@ -51,6 +51,43 @@ pub fn report_for(graph: &Graph) -> DiagnosticReport {
     }
 
     DiagnosticReport::new(diagnostics)
+}
+
+/// Apply a deployment's `memory_check` to the diagnostics its adapter raised.
+///
+/// Memory-fit errors (`AMICU-MEM-001` / `AMICU-MEM-002`, whose message already
+/// states the estimate and the available memory) stay errors under `enforce`,
+/// with a pointer to the opt-out; under `warn` they become warnings that say
+/// the check was bypassed by config. Only this deployment's diagnostics are
+/// touched, so other deployments keep enforcing.
+pub(crate) fn apply_memory_check(
+    deployment: &Deployment,
+    diagnostics: Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
+    diagnostics
+        .into_iter()
+        .map(|mut d| {
+            let is_fit_error = d.severity == Severity::Error
+                && (d.code == catalog::MEM_VRAM_EXCEEDED
+                    || d.code == catalog::MEM_ARTIFACT_OVERSIZE);
+            if !is_fit_error {
+                return d;
+            }
+            match deployment.memory_check {
+                MemoryCheck::Enforce => d
+                    .message
+                    .push_str(" (to try anyway, set `memory_check = \"warn\"` on this deployment)"),
+                MemoryCheck::Warn => {
+                    d.severity = Severity::Warning;
+                    d.message.push_str(
+                        " - memory check bypassed by config (`memory_check = \"warn\"`); \
+                         the deployment may fail to start",
+                    );
+                }
+            }
+            d
+        })
+        .collect()
 }
 
 /// Hardware-profile `provider` value whose deployments honor `scaling {}`.
@@ -355,6 +392,7 @@ mod residency_tests {
     fn deployment() -> Deployment {
         Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "m".into(),
@@ -550,6 +588,7 @@ mod vllm_dispatch_tests {
     fn vllm_deployment(settings: VllmSettings) -> Deployment {
         Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "m".into(),
@@ -677,6 +716,74 @@ mod vllm_dispatch_tests {
         );
     }
 
+    /// Two over-sized deployments on one graph (a 16 GB model on an 8 GiB
+    /// card), the first optionally bypassed.
+    fn two_oversized(first: MemoryCheck) -> Graph {
+        let mut g = Graph::new();
+        let mut m = model("Qwen/Qwen3-8B");
+        m.n_layers = Some(36);
+        m.n_kv_heads = Some(8);
+        m.head_dim = Some(128);
+        g.models.push(m);
+        g.hardware_profiles.push(hw(8));
+        let mut a = vllm_deployment(vllm_settings());
+        a.id = "a".into();
+        a.memory_check = first;
+        let mut b = vllm_deployment(vllm_settings());
+        b.id = "b".into();
+        g.deployments.push(a);
+        g.deployments.push(b);
+        g
+    }
+
+    #[test]
+    fn memory_check_default_enforces_and_names_the_attribute() {
+        let report = report_for(&two_oversized(MemoryCheck::Enforce));
+        assert!(!report.valid);
+        let errs: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error && d.code == catalog::MEM_VRAM_EXCEEDED)
+            .collect();
+        assert_eq!(errs.len(), 2, "{:?}", report.diagnostics);
+        assert!(errs.iter().all(|d| d.message.contains("memory_check")));
+    }
+
+    #[test]
+    fn memory_check_warn_downgrades_only_that_deployment() {
+        let report = report_for(&two_oversized(MemoryCheck::Warn));
+        let for_dep = |id: &str, sev: Severity| {
+            report.diagnostics.iter().any(|d| {
+                d.code == catalog::MEM_VRAM_EXCEEDED
+                    && d.severity == sev
+                    && d.resource.as_deref() == Some(&format!("deployment.{id}"))
+            })
+        };
+        assert!(for_dep("a", Severity::Warning), "{:?}", report.diagnostics);
+        assert!(!for_dep("a", Severity::Error));
+        assert!(for_dep("b", Severity::Error));
+        assert!(!report.valid, "b still enforces");
+        let warn = report
+            .diagnostics
+            .iter()
+            .find(|d| d.severity == Severity::Warning && d.code == catalog::MEM_VRAM_EXCEEDED)
+            .unwrap();
+        assert!(warn.message.contains("weights 16"), "{}", warn.message);
+        assert!(warn.message.contains("8GiB VRAM"), "{}", warn.message);
+        assert!(
+            warn.message.contains("bypassed by config"),
+            "{}",
+            warn.message
+        );
+    }
+
+    #[test]
+    fn memory_check_warn_alone_leaves_the_report_valid() {
+        let mut g = two_oversized(MemoryCheck::Warn);
+        g.deployments.pop();
+        assert!(report_for(&g).valid);
+    }
+
     /// GGUF-on-vLLM: a warning, not a block,
     /// `AMICU-CAP-006`, reached the same way through the dispatcher.
     #[test]
@@ -736,6 +843,7 @@ mod vllm_dispatch_tests {
         });
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "llama_dep".into(),
             model: "llama_model".into(),
@@ -758,6 +866,7 @@ mod vllm_dispatch_tests {
         });
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "vllm_dep".into(),
             model: "meta-llama/Llama-3.1-70B-Instruct".into(),
@@ -820,6 +929,7 @@ mod scaling_tests {
         });
         g.deployments.push(Deployment {
             scaling,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "m".into(),
@@ -920,6 +1030,7 @@ mod api_key_tests {
         });
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key,
             id: "chat-modal".into(),
             model: "m".into(),

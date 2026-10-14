@@ -11,10 +11,10 @@ use serde::de::DeserializeOwned;
 use amicu_core::graph::Graph;
 use amicu_core::resource::{
     Accelerator, Artifact, Budget, Cpu, Credential, DataClass, Deployment, FlashAttention,
-    GgufVariant, GovernanceRule, HardwareProfile, KvCacheType, LlamaCppSettings, Model,
-    ModelSource, Money, MultimodalSettings, Price, Quota, ReasoningFormat, Region, Residency,
-    RoutingPolicy, RoutingTarget, Runtime, ScalingSettings, SpeculativeSettings, Tenant, UseCase,
-    VllmKvCacheDtype, VllmSettings,
+    GgufVariant, GovernanceRule, HardwareProfile, KvCacheType, LlamaCppSettings, MemoryCheck,
+    Model, ModelSource, Money, MultimodalSettings, Price, Quota, ReasoningFormat, Region,
+    Residency, RoutingPolicy, RoutingTarget, Runtime, ScalingSettings, SpeculativeSettings, Tenant,
+    UseCase, VllmKvCacheDtype, VllmSettings,
 };
 use amicu_core::secret::SecretRef;
 use amicu_core::units::ByteSize;
@@ -256,6 +256,9 @@ fn deployment(name: &str, f: &Fields) -> Result<Deployment> {
         // Secret-designated (AMICU-POLICY-004): only `secret("<ref>")`, never
         // a literal key.
         api_key: f.opt_secret_ref("api_key")?,
+        memory_check: f
+            .opt_enum::<MemoryCheck>("memory_check")?
+            .unwrap_or_default(),
         id: name.into(),
         model: f.reference("model")?.into(),
         hardware_profile: f.reference("hardware")?.into(),

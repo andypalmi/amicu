@@ -245,6 +245,7 @@ mod tests {
     fn deployment(id: &str, model_ref: &str, hw_ref: &str) -> Deployment {
         Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: id.into(),
             model: model_ref.into(),
@@ -670,6 +671,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
@@ -690,6 +692,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
@@ -736,6 +739,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
@@ -769,6 +773,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
@@ -805,6 +810,7 @@ mod tests {
             let mut g = Graph::new();
             g.deployments.push(Deployment {
                 scaling: None,
+                memory_check: amicu_core::resource::MemoryCheck::default(),
                 api_key: None,
                 id: "dep".into(),
                 model: "phantom_model".into(),
@@ -832,6 +838,7 @@ mod tests {
             let mut g = Graph::new();
             g.deployments.push(Deployment {
                 scaling: None,
+                memory_check: amicu_core::resource::MemoryCheck::default(),
                 api_key: None,
                 id: "dep".into(),
                 model: "phantom_model".into(),
@@ -917,6 +924,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
@@ -945,6 +953,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
@@ -971,6 +980,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
@@ -1003,6 +1013,7 @@ mod tests {
             let mut g = Graph::new();
             g.deployments.push(Deployment {
                 scaling: None,
+                memory_check: amicu_core::resource::MemoryCheck::default(),
                 api_key: None,
                 id: "dep".into(),
                 model: "phantom_model".into(),
@@ -1058,6 +1069,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
@@ -1117,6 +1129,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
@@ -1205,6 +1218,7 @@ mod tests {
             let mut g = Graph::new();
             g.deployments.push(Deployment {
                 scaling: None,
+                memory_check: amicu_core::resource::MemoryCheck::default(),
                 api_key: None,
                 id: "dep".into(),
                 model: "phantom_model".into(),
@@ -1235,6 +1249,7 @@ mod tests {
             let mut g = Graph::new();
             g.deployments.push(Deployment {
                 scaling: None,
+                memory_check: amicu_core::resource::MemoryCheck::default(),
                 api_key: None,
                 id: "dep".into(),
                 model: "phantom_model".into(),
@@ -1257,6 +1272,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
@@ -1452,6 +1468,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
@@ -1478,6 +1495,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
@@ -1503,6 +1521,7 @@ mod tests {
         let mut g2 = Graph::new();
         g2.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
@@ -1528,6 +1547,7 @@ mod tests {
         let mut g3 = Graph::new();
         g3.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),
@@ -1615,6 +1635,33 @@ mod tests {
             }}
         "#
         )
+    }
+
+    #[test]
+    fn memory_check_defaults_to_enforce_and_warn_round_trips() {
+        use amicu_core::resource::MemoryCheck;
+        let none = parse_graph(&scaling_src("")).unwrap();
+        assert_eq!(none.deployments[0].memory_check, MemoryCheck::Enforce);
+        assert!(!format_graph(&none).unwrap().contains("memory_check"));
+
+        let g = parse_graph(&scaling_src(r#"memory_check = "warn""#)).unwrap();
+        assert_eq!(g.deployments[0].memory_check, MemoryCheck::Warn);
+        let formatted = format_graph(&g).unwrap();
+        assert!(formatted.contains("memory_check"));
+        assert_eq!(parse_graph(&formatted).unwrap(), g);
+
+        let e = parse_graph(&scaling_src(r#"memory_check = "enforce""#)).unwrap();
+        assert_eq!(e.deployments[0].memory_check, MemoryCheck::Enforce);
+    }
+
+    #[test]
+    fn memory_check_rejects_unknown_values() {
+        for bad in [r#"memory_check = "off""#, "memory_check = true"] {
+            assert!(
+                matches!(parse_graph(&scaling_src(bad)), Err(HclError::Schema(_))),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
@@ -1730,6 +1777,7 @@ mod tests {
         let mut g = Graph::new();
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "phantom_model".into(),

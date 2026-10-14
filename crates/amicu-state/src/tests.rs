@@ -76,6 +76,7 @@ fn sample_hardware() -> HardwareProfile {
 fn sample_deployment() -> Deployment {
     Deployment {
         scaling: None,
+        memory_check: amicu_core::resource::MemoryCheck::default(),
         api_key: None,
         id: DeploymentId::new("support_chat_prod"),
         model: ModelId::new("support_chat"),
