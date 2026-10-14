@@ -35,12 +35,28 @@ pub(crate) trait AppLookup {
     fn active_workspace(&self) -> Result<Option<Workspace>, String> {
         Ok(None)
     }
+
+    /// Every app id the active workspace can see, when it can be listed. The
+    /// default (`None`) skips proving ownership of workspace-less records.
+    fn app_ids(&self) -> Result<Option<HashSet<String>>, String> {
+        Ok(None)
+    }
 }
 
 /// The real lookup: the same `find_app` call `amicu modal status` is built on.
 pub(crate) struct ModalLookup;
 
 impl AppLookup for ModalLookup {
+    fn app_ids(&self) -> Result<Option<HashSet<String>>, String> {
+        let run = || -> Result<Vec<String>, CliError> {
+            let rt = build_runtime()?;
+            rt.block_on(crate::modal_ops::ModalOps::list_app_ids(self))
+        };
+        run()
+            .map(|v| Some(v.into_iter().collect()))
+            .map_err(|e| e.to_string())
+    }
+
     fn active_workspace(&self) -> Result<Option<Workspace>, String> {
         let run = || -> Result<Workspace, CliError> {
             let rt = build_runtime()?;
@@ -121,21 +137,71 @@ pub(crate) fn refresh_state(state: &mut LocalState, lookup: &dyn AppLookup) -> R
         return Refresh::default();
     }
 
-    // Refuse to reason about apps recorded under a different workspace.
-    if let Ok(Some(active)) = lookup.active_workspace() {
-        for r in state.stops.iter().filter(|r| r.backend.is_modal()) {
-            if let Err(e) = check_workspace(
-                r.deployment.as_str(),
-                r.workspace.as_deref(),
-                r.environment.as_deref(),
-                &active,
-            ) {
-                return Refresh {
-                    mismatch: Some(e.to_string()),
-                    ..Refresh::default()
-                };
+    // Refuse to reason about apps recorded under a different workspace. With
+    // Modal instances recorded, an unknown workspace is a refusal too.
+    let active = match lookup.active_workspace() {
+        Ok(active) => active,
+        Err(error) => {
+            return Refresh {
+                mismatch: Some(format!(
+                    "cannot determine the active Modal workspace ({error}); refusing to touch \
+                     recorded Modal instances without knowing which workspace they are in. \
+                     Check MODAL_TOKEN_ID and MODAL_TOKEN_SECRET and retry; nothing was changed"
+                )),
+                ..Refresh::default()
+            };
+        }
+    };
+    if let Some(active) = active {
+        // Include v1-derived records (no workspace yet): each must be proven
+        // to belong to the active workspace before anything acts on it.
+        let mut records = crate::commands::apply::effective_stops(Some(state));
+        for r in records.iter_mut().filter(|r| r.backend.is_modal()) {
+            if r.workspace.is_some() {
+                if let Err(e) = check_workspace(
+                    r.deployment.as_str(),
+                    r.workspace.as_deref(),
+                    r.environment.as_deref(),
+                    &active,
+                ) {
+                    return Refresh {
+                        mismatch: Some(e.to_string()),
+                        ..Refresh::default()
+                    };
+                }
+            } else if let Some(app_id) = r.app_id.clone() {
+                match lookup.app_ids() {
+                    Ok(Some(ids)) if ids.contains(&app_id) => {
+                        r.workspace = Some(active.name.clone());
+                        r.environment = Some(active.environment.clone());
+                    }
+                    Ok(Some(_)) => {
+                        return Refresh {
+                            mismatch: Some(
+                                crate::modal_ops::unproven_workspace(
+                                    r.deployment.as_str(),
+                                    &app_id,
+                                    &active,
+                                )
+                                .to_string(),
+                            ),
+                            ..Refresh::default()
+                        };
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        return Refresh {
+                            mismatch: Some(format!(
+                                "cannot list the apps of {active} to prove ownership of \
+                                 {app_id} ({e}); nothing was changed"
+                            )),
+                            ..Refresh::default()
+                        };
+                    }
+                }
             }
         }
+        state.stops = records;
     }
 
     let names: Vec<String> = recorded.iter().map(|(_, app)| app.clone()).collect();
@@ -272,7 +338,12 @@ pub(crate) fn forget_app(
         !(r.deployment.as_str() == id
             && r.backend.is_modal()
             && r.identity == app_name
-            && r.app_id.as_deref().is_none_or(|a| a == stopped_id))
+            && match r.app_id.as_deref() {
+                Some(a) => a == stopped_id,
+                // Without a known workspace, never match an id-less record
+                // by name: it could be another workspace's app.
+                None => active.is_some(),
+            })
     });
     let others_remain = records.iter().any(|r| r.deployment.as_str() == id);
     state.stops = records;
@@ -553,7 +624,7 @@ resource "deployment" "support_modal" {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    struct WsFake(Workspace);
+    struct WsFake(Workspace, Option<HashSet<String>>);
 
     impl AppLookup for WsFake {
         fn live_apps(&self, names: &[String]) -> Result<HashSet<String>, String> {
@@ -561,6 +632,20 @@ resource "deployment" "support_modal" {
         }
         fn active_workspace(&self) -> Result<Option<Workspace>, String> {
             Ok(Some(self.0.clone()))
+        }
+        fn app_ids(&self) -> Result<Option<HashSet<String>>, String> {
+            Ok(self.1.clone())
+        }
+    }
+
+    struct BrokenWorkspace;
+
+    impl AppLookup for BrokenWorkspace {
+        fn live_apps(&self, names: &[String]) -> Result<HashSet<String>, String> {
+            Ok(names.iter().cloned().collect())
+        }
+        fn active_workspace(&self) -> Result<Option<Workspace>, String> {
+            Err("missing credentials".to_owned())
         }
     }
 
@@ -585,7 +670,7 @@ resource "deployment" "support_modal" {
     #[test]
     fn refresh_refuses_when_the_active_workspace_differs() {
         let mut state = modal_state_in("acme");
-        let refresh = refresh_state(&mut state, &WsFake(acme("other-co")));
+        let refresh = refresh_state(&mut state, &WsFake(acme("other-co"), None));
         let msg = refresh.mismatch.expect("mismatch");
         assert!(msg.contains("acme") && msg.contains("other-co"), "{msg}");
         assert!(msg.contains("MODAL_TOKEN_ID"), "{msg}");
@@ -599,7 +684,7 @@ resource "deployment" "support_modal" {
         let mut out = Vec::new();
         let err = load_refreshed(
             &project,
-            &WsFake(acme("other-co")),
+            &WsFake(acme("other-co"), None),
             OutputFormat::Human,
             &mut out,
         )
@@ -610,10 +695,55 @@ resource "deployment" "support_modal" {
         // Same workspace: fine.
         let mut state = modal_state_in("acme");
         assert!(
-            refresh_state(&mut state, &WsFake(acme("acme")))
+            refresh_state(&mut state, &WsFake(acme("acme"), None))
                 .mismatch
                 .is_none()
         );
+    }
+
+    #[test]
+    fn an_unknown_workspace_with_modal_records_is_a_refusal() {
+        let mut state = modal_state_in("acme");
+        let refresh = refresh_state(&mut state, &BrokenWorkspace);
+        let msg = refresh.mismatch.expect("must refuse");
+        assert!(
+            msg.contains("cannot determine the active Modal workspace"),
+            "{msg}"
+        );
+    }
+
+    /// v1 state has no stop records; its derived Modal record must be proven
+    /// to belong to the active workspace, and is then stamped with it.
+    #[test]
+    fn v1_derived_records_are_proven_then_stamped_or_refused() {
+        let mut state = state_for(MODAL_CONFIG);
+        assert!(state.stops.is_empty());
+        let ids: HashSet<String> = ["app-id".to_owned()].into_iter().collect();
+        let refresh = refresh_state(&mut state, &WsFake(acme("acme"), Some(ids)));
+        assert!(refresh.mismatch.is_none());
+        let rec = &state.stops[0];
+        assert_eq!(rec.workspace.as_deref(), Some("acme"));
+
+        let mut state = state_for(MODAL_CONFIG);
+        let refresh = refresh_state(&mut state, &WsFake(acme("other-co"), Some(HashSet::new())));
+        let msg = refresh.mismatch.expect("unproven");
+        assert!(msg.contains("cannot see that app"), "{msg}");
+        assert!(state.stops.is_empty(), "nothing stamped");
+    }
+
+    /// Without a known active workspace, only the exact stopped app id is
+    /// forgotten; an id-less record is never matched by name.
+    #[test]
+    fn forget_app_with_an_unknown_workspace_never_removes_id_less_records() {
+        let mut state = modal_state_in("acme");
+        let id = state.graph.deployments[0].id.clone();
+        state.stops = vec![crate::stops::StopRecord::modal(&id, None, None)];
+        let (project, dir) = project_with(&state, "unknown-ws");
+        forget_app(&project, APP, "app-id", None).unwrap();
+        let after = project.load_state().unwrap().unwrap();
+        assert_eq!(after.stops.len(), 1, "id-less record kept");
+        assert_eq!(after.graph.deployments.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn project_with(state: &LocalState, tag: &str) -> (Project, std::path::PathBuf) {

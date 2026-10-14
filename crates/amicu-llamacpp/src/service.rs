@@ -77,6 +77,11 @@ pub trait ServiceManager: Send + Sync {
     fn context(&self) -> Option<HostContext> {
         None
     }
+    /// The uid that owns the definition of an existing instance (a launchd
+    /// plist), if it can be told. Used to refuse stopping someone else's job.
+    fn instance_owner(&self, _label: &str) -> Option<u32> {
+        None
+    }
     /// Best-effort removal of any previous instance with this label, so an
     /// update can start the new one (`systemd-run --unit=<same>` fails while the
     /// unit exists; a loaded launchd job would keep the old definition). Errors
@@ -104,6 +109,8 @@ pub struct ExecOutput {
     pub stdout: String,
     /// Combined stderr.
     pub stderr: String,
+    /// The exit code, when the process exited normally.
+    pub code: Option<i32>,
 }
 
 /// Runs external commands. Injectable so managers are testable without a real
@@ -113,14 +120,15 @@ pub trait CommandExec: Send + Sync {
     fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError>;
 }
 
-static FORBID_SERVICE_COMMANDS: std::sync::atomic::AtomicBool =
+static ALLOW_SERVICE_COMMANDS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Test guard: after this is called, [`HostExec`] panics instead of spawning
-/// `launchctl`, `systemctl`, `systemd-run` or `journalctl`, so a test that
-/// forgot to inject a fake can never touch the developer's real services.
-pub fn forbid_service_commands() {
-    FORBID_SERVICE_COMMANDS.store(true, std::sync::atomic::Ordering::SeqCst);
+/// Opt in to running real service commands (`launchctl`, `systemctl`,
+/// `systemd-run`, `journalctl`). Off by default, so any test in any crate that
+/// reaches a real [`HostExec`] panics instead of touching the developer's
+/// services, regardless of test order. Only the `amicu` binary calls this.
+pub fn allow_service_commands() {
+    ALLOW_SERVICE_COMMANDS.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// The real executor: spawns the process and captures its output.
@@ -130,12 +138,13 @@ pub struct HostExec;
 impl CommandExec for HostExec {
     fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
         assert!(
-            !(FORBID_SERVICE_COMMANDS.load(std::sync::atomic::Ordering::SeqCst)
-                && matches!(
+            ALLOW_SERVICE_COMMANDS.load(std::sync::atomic::Ordering::SeqCst)
+                || !matches!(
                     program,
                     "launchctl" | "systemctl" | "systemd-run" | "journalctl"
-                )),
-            "test tried to run the real `{program} {}`; inject a fake service manager",
+                ),
+            "refusing to run the real `{program} {}`: service commands are only enabled in the \
+             amicu binary; inject a fake service manager",
             args.join(" ")
         );
         let output = Command::new(program)
@@ -146,13 +155,14 @@ impl CommandExec for HostExec {
             success: output.status.success(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            code: output.status.code(),
         })
     }
 }
 
 /// The effective uid, from `id -u`.
 fn effective_uid(exec: &dyn CommandExec) -> Result<u32, LlamaCppError> {
-    let out = exec.exec("id", &["-u"])?;
+    let out = exec.exec("/usr/bin/id", &["-u"])?;
     out.stdout.trim().parse().map_err(|_| {
         LlamaCppError::Supervisor(format!(
             "cannot determine the effective uid from `id -u`: {:?}",
@@ -209,7 +219,19 @@ impl<E: CommandExec> LaunchdManager<E> {
     /// Whether launchd currently has the job loaded in `domain`.
     fn is_loaded(&self, domain: &str, label: &str) -> Result<bool, LlamaCppError> {
         let target = format!("{domain}/{label}");
-        Ok(self.exec.exec("launchctl", &["print", &target])?.success)
+        let out = self.exec.exec("launchctl", &["print", &target])?;
+        if out.success {
+            Ok(true)
+        } else if out.code == Some(113) {
+            // 113: "Could not find service" - the job is not loaded.
+            Ok(false)
+        } else {
+            Err(LlamaCppError::Supervisor(format!(
+                "launchctl print {target} failed unexpectedly (exit {:?}): {}",
+                out.code,
+                out.stderr.trim()
+            )))
+        }
     }
 
     fn stdout_path(&self, label: &str) -> PathBuf {
@@ -237,6 +259,19 @@ impl LaunchdManager<HostExec> {
 }
 
 impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
+    fn instance_owner(&self, label: &str) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(self.plist_path(label)).ok()?)
+                .into()
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = label;
+            None
+        }
+    }
+
     fn context(&self) -> Option<HostContext> {
         let (uid, domain) = self.domain().ok()?;
         Some(HostContext {

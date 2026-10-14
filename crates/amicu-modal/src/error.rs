@@ -76,6 +76,11 @@ pub enum ModalError {
     #[error("Modal created the server function but returned no endpoint URL")]
     MissingServerUrl,
 
+    /// Modal returned no workspace name for the token, so nothing can be
+    /// proven about which workspace it acts in.
+    #[error("Modal returned an empty workspace name for this token")]
+    EmptyWorkspaceName,
+
     /// An RPC returned a non-OK, non-UNAUTHENTICATED gRPC status.
     ///
     /// Only the status `code` and `message` are kept, never the raw

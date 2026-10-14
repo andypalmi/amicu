@@ -116,6 +116,12 @@ pub trait ProcessSupervisor: Send + Sync {
     fn host_context(&self) -> Option<crate::service::HostContext> {
         None
     }
+
+    /// The uid that owns an existing instance's service definition, when it
+    /// can be told (launchd plist owner).
+    fn instance_owner(&self, _label: &str) -> Option<u32> {
+        None
+    }
 }
 
 /// The real supervisor: a [`ServiceManager`] runs the process, a [`HealthProbe`]
@@ -448,5 +454,9 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
 
     fn host_context(&self) -> Option<crate::service::HostContext> {
         self.manager.context()
+    }
+
+    fn instance_owner(&self, label: &str) -> Option<u32> {
+        self.manager.instance_owner(label)
     }
 }

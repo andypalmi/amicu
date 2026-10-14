@@ -52,6 +52,16 @@ pub(crate) fn run_with(
     input: &mut dyn std::io::BufRead,
     env: &Env,
 ) -> Result<u8, CliError> {
+    // `--forget-unconfirmed` drops records WITHOUT confirming a stop, so it
+    // only ever applies to targets the user names explicitly.
+    if env.forget_unconfirmed && targets.is_empty() {
+        return Err(CliError::Message(
+            "--forget-unconfirmed requires at least one explicit --target; it is never applied \
+             to everything at once"
+                .to_owned(),
+        ));
+    }
+
     // Same locking discipline as `apply`: read -> refresh -> plan -> destroy ->
     // save under one state lock.
     let _lock = StateLock::acquire(&project.state_dir(), "destroy", lock_timeout)?;
@@ -127,6 +137,29 @@ pub(crate) fn run_with(
             &mut *out
         };
         crate::commands::plan::print_human(&result, prior_graph, preview)?;
+        if env.forget_unconfirmed {
+            // Exactly what may be forgotten without a confirmed stop.
+            let mut lines = Vec::new();
+            for r in crate::commands::apply::effective_stops(prior_state.as_ref())
+                .iter()
+                .filter(|r| {
+                    r.backend.is_modal()
+                        && r.app_id.is_none()
+                        && targets.iter().any(|t| t == r.deployment.as_str())
+                })
+            {
+                lines.push(format!("  {} (Modal app '{}')", r.deployment, r.identity));
+            }
+            if !lines.is_empty() {
+                writeln!(
+                    preview,
+                    "--forget-unconfirmed: if Modal cannot find these apps they will be \
+                     forgotten WITHOUT confirming they are stopped:\n{}",
+                    lines.join("\n")
+                )
+                .map_err(|e| CliError::io("write failed", e))?;
+            }
+        }
         if !auto_approve && !prompt_approval_from(preview, "Destroy these deployments?", input)? {
             writeln!(preview, "Destroy cancelled.").map_err(|e| CliError::io("write failed", e))?;
             true

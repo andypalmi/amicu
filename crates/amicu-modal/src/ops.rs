@@ -414,11 +414,15 @@ impl ModalClient {
             .await
             .map_err(|status| ModalError::from_status("WorkspaceNameLookup", status))?
             .into_inner();
-        Ok(if response.workspace_name.is_empty() {
+        let name = if response.workspace_name.is_empty() {
             response.username
         } else {
             response.workspace_name
-        })
+        };
+        if name.is_empty() {
+            return Err(ModalError::EmptyWorkspaceName);
+        }
+        Ok(name)
     }
 
     /// Lists apps in the current environment, mirroring `modal app list`

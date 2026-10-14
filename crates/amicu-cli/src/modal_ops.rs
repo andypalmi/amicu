@@ -34,6 +34,8 @@ impl std::fmt::Display for Workspace {
 pub(crate) trait ModalOps: Send + Sync {
     /// The workspace the configured token belongs to.
     async fn workspace(&self) -> Result<Workspace, CliError>;
+    /// Every app id visible to the active workspace.
+    async fn list_app_ids(&self) -> Result<Vec<String>, CliError>;
     /// The app id published under `name`, if any.
     async fn find_app(&self, name: &str) -> Result<Option<String>, CliError>;
     /// Stop an app by id. `Ok(false)`: Modal says no such app exists.
@@ -60,6 +62,16 @@ impl ModalOps for ModalLookup {
         })
     }
 
+    async fn list_app_ids(&self) -> Result<Vec<String>, CliError> {
+        Ok(connect()
+            .await?
+            .list_apps()
+            .await?
+            .into_iter()
+            .map(|a| a.app_id)
+            .collect())
+    }
+
     async fn find_app(&self, name: &str) -> Result<Option<String>, CliError> {
         Ok(connect().await?.find_app(name).await?)
     }
@@ -82,8 +94,8 @@ pub(crate) fn workspace_mismatch(
 ) -> CliError {
     CliError::Message(format!(
         "deployment '{deployment}' lives in Modal {recorded}, but the active token is for \
-         {active}. Switch MODAL_TOKEN_ID and MODAL_TOKEN_SECRET (and MODAL_ENVIRONMENT) to \
-         {recorded} and retry; nothing was changed"
+         {active}. Switch MODAL_TOKEN_ID and MODAL_TOKEN_SECRET to {recorded} and retry; \
+         nothing was changed"
     ))
 }
 
@@ -107,4 +119,15 @@ pub(crate) fn check_workspace(
     } else {
         Err(workspace_mismatch(deployment, &recorded, active))
     }
+}
+
+/// A record with an app id but no workspace whose app the active workspace
+/// cannot see: ownership is unproven, so refuse.
+pub(crate) fn unproven_workspace(deployment: &str, app_id: &str, active: &Workspace) -> CliError {
+    CliError::Message(format!(
+        "deployment '{deployment}' has Modal app id {app_id} recorded without a workspace, and \
+         the active token ({active}) cannot see that app, so amicu cannot tell it belongs here. \
+         If it was created in another workspace, switch MODAL_TOKEN_ID and MODAL_TOKEN_SECRET \
+         to that workspace and retry; nothing was changed"
+    ))
 }

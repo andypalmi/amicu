@@ -2200,6 +2200,7 @@ impl FakeExec {
                 success,
                 stdout: stdout.to_owned(),
                 stderr: String::new(),
+                code: Some(i32::from(!success)),
             },
             calls: Mutex::new(Vec::new()),
         }
@@ -2216,11 +2217,12 @@ impl FakeExec {
 
 impl CommandExec for FakeExec {
     fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
-        if program == "id" {
+        if program.ends_with("/id") {
             return Ok(ExecOutput {
                 success: true,
                 stdout: "501\n".to_owned(),
                 stderr: String::new(),
+                code: Some(0),
             });
         }
         let mut call = vec![program.to_owned()];
@@ -2295,11 +2297,12 @@ impl LoadedExec {
 
 impl CommandExec for LoadedExec {
     fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
-        if program == "id" {
+        if program.ends_with("/id") {
             return Ok(ExecOutput {
                 success: true,
                 stdout: "501\n".to_owned(),
                 stderr: String::new(),
+                code: Some(0),
             });
         }
         assert_eq!(program, "launchctl");
@@ -2329,6 +2332,7 @@ impl CommandExec for LoadedExec {
             success,
             stdout: String::new(),
             stderr: "Unload failed: 5: Input/output error".to_owned(),
+            code: Some(if success { 0 } else { 113 }),
         })
     }
 }
@@ -2487,6 +2491,7 @@ impl CommandExec for StopFailsExec {
             },
             // Deliberately localized: confirmation must not parse stderr.
             stderr: "Die Einheit ist nicht geladen.".to_owned(),
+            code: Some(i32::from(!is_show)),
         })
     }
 }
@@ -3280,9 +3285,10 @@ struct NoGuiExec;
 
 impl CommandExec for NoGuiExec {
     fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
-        let id = program == "id";
+        let id = program.ends_with("/id");
         let gui = args.first() == Some(&"print") && args[1].starts_with("gui/");
         Ok(ExecOutput {
+            code: Some(if gui { 113 } else { 0 }),
             success: !gui,
             stdout: if id {
                 "501\n".to_owned()
@@ -3302,4 +3308,42 @@ fn systemd_reports_its_uid() {
     assert_eq!(ctx.backend, crate::HostBackend::Systemd);
     assert_eq!(ctx.uid, 501);
     assert_eq!(ctx.domain, None);
+}
+
+/// launchctl that fails with an exit code other than 113 on `print <label>`.
+struct OddExitExec;
+
+impl CommandExec for OddExitExec {
+    fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        let id = program.ends_with("/id");
+        let label_print = args.first() == Some(&"print") && args[1].contains("/io.");
+        Ok(ExecOutput {
+            success: !label_print,
+            stdout: if id {
+                "501\n".to_owned()
+            } else {
+                String::new()
+            },
+            stderr: "boom".to_owned(),
+            code: Some(if label_print { 5 } else { 0 }),
+        })
+    }
+}
+
+#[test]
+fn launchd_only_exit_113_means_gone_other_failures_are_errors() {
+    let tmp = TempDir::new("launchd-odd-exit");
+    let manager = LaunchdManager::new(OddExitExec, tmp.file("agents"), tmp.file("logs"));
+    let err = manager
+        .stop("io.amicu.llama.x")
+        .expect_err("exit 5 is not 'gone'");
+    assert!(err.to_string().contains("failed unexpectedly"), "{err}");
+}
+
+#[test]
+fn the_real_host_exec_refuses_service_commands_unless_enabled() {
+    let result = std::panic::catch_unwind(|| {
+        let _ = HostExec.exec("launchctl", &["list"]);
+    });
+    assert!(result.is_err(), "must panic instead of spawning launchctl");
 }

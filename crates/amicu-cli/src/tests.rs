@@ -224,8 +224,6 @@ struct TempDir {
 impl TempDir {
     fn new() -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
-        // No test may ever spawn the real launchctl/systemctl.
-        amicu_llamacpp::forbid_service_commands();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -907,6 +905,7 @@ struct FakeHost {
     log: Arc<StopLog>,
     fail: bool,
     ctx: Option<amicu_llamacpp::HostContext>,
+    owner: Option<u32>,
 }
 
 #[async_trait::async_trait]
@@ -952,6 +951,9 @@ impl amicu_llamacpp::ProcessSupervisor for FakeHost {
     fn host_context(&self) -> Option<amicu_llamacpp::HostContext> {
         self.ctx.clone()
     }
+    fn instance_owner(&self, _label: &str) -> Option<u32> {
+        self.owner
+    }
 }
 
 /// A scripted Modal: which workspace the token is for, which apps exist by
@@ -962,6 +964,8 @@ struct FakeModal {
     unknown_ids: Vec<String>,
     stopped: Mutex<Vec<String>>,
     live: Option<Vec<String>>,
+    /// App ids the token's workspace can see (besides `apps`).
+    visible_ids: Vec<String>,
 }
 
 impl Default for FakeModal {
@@ -972,6 +976,7 @@ impl Default for FakeModal {
             unknown_ids: Vec::new(),
             stopped: Mutex::new(Vec::new()),
             live: None,
+            visible_ids: Vec::new(),
         }
     }
 }
@@ -987,6 +992,9 @@ fn ws(name: &str) -> Workspace {
 impl ModalOps for FakeModal {
     async fn workspace(&self) -> Result<Workspace, crate::error::CliError> {
         Ok(self.workspace.clone())
+    }
+    async fn list_app_ids(&self) -> Result<Vec<String>, crate::error::CliError> {
+        Ok(self.visible())
     }
     async fn find_app(&self, name: &str) -> Result<Option<String>, crate::error::CliError> {
         Ok(self
@@ -1006,7 +1014,24 @@ impl ModalOps for FakeModal {
     }
 }
 
+impl FakeModal {
+    fn visible(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .apps
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, id)| id.clone())
+            .collect();
+        v.extend(self.visible_ids.clone());
+        v
+    }
+}
+
 impl AppLookup for FakeModal {
+    fn app_ids(&self) -> Result<Option<std::collections::HashSet<String>>, String> {
+        Ok(Some(self.visible().into_iter().collect()))
+    }
     fn live_apps(&self, app_names: &[String]) -> Result<std::collections::HashSet<String>, String> {
         Ok(self
             .live
@@ -1029,15 +1054,21 @@ struct Rig {
 
 impl Rig {
     fn new() -> Self {
-        Self::build(false, None)
+        Self::build(false, Some(platform_ctx()), None)
     }
     fn failing() -> Self {
-        Self::build(true, None)
+        Self::build(true, Some(platform_ctx()), None)
     }
     fn with_ctx(ctx: amicu_llamacpp::HostContext) -> Self {
-        Self::build(false, Some(ctx))
+        Self::build(false, Some(ctx), None)
     }
-    fn build(fail: bool, ctx: Option<amicu_llamacpp::HostContext>) -> Self {
+    fn no_ctx() -> Self {
+        Self::build(false, None, None)
+    }
+    fn with_owner(owner: u32) -> Self {
+        Self::build(false, Some(platform_ctx()), Some(owner))
+    }
+    fn build(fail: bool, ctx: Option<amicu_llamacpp::HostContext>, owner: Option<u32>) -> Self {
         let log = Arc::new(StopLog::default());
         let l = log.clone();
         Self {
@@ -1047,6 +1078,7 @@ impl Rig {
                     log: l.clone(),
                     fail,
                     ctx: ctx.clone(),
+                    owner,
                 })
             }),
             modal: FakeModal::default(),
@@ -1064,6 +1096,23 @@ impl Rig {
         let mut v = self.log.stopped.lock().unwrap().clone();
         v.sort();
         v
+    }
+}
+
+/// The identity of the machine the tests run on, as a user 501 would see it.
+fn platform_ctx() -> amicu_llamacpp::HostContext {
+    if cfg!(target_os = "macos") {
+        amicu_llamacpp::HostContext {
+            backend: amicu_llamacpp::HostBackend::Launchd,
+            uid: 501,
+            domain: Some("gui/501".to_owned()),
+        }
+    } else {
+        amicu_llamacpp::HostContext {
+            backend: amicu_llamacpp::HostBackend::Systemd,
+            uid: 501,
+            domain: None,
+        }
     }
 }
 
@@ -1180,7 +1229,6 @@ fn applying_a_removal_stops_via_the_fake_host_not_the_real_one() {
 #[test]
 #[should_panic(expected = "inject a fake service manager")]
 fn the_real_host_exec_refuses_service_commands_under_test() {
-    amicu_llamacpp::forbid_service_commands();
     let _ = amicu_llamacpp::CommandExec::exec(&amicu_llamacpp::HostExec, "launchctl", &["list"]);
 }
 
@@ -1587,11 +1635,180 @@ fn modal_name_only_record_that_cannot_be_found_is_kept_unless_forgotten() {
 }
 
 #[test]
-fn a_legacy_modal_record_without_a_workspace_is_still_usable() {
-    let rig = Rig::new();
-    let (result, _, _td) = destroy_modal(modal_rec("support_two", Some("ap-2"), None), &rig);
+fn a_workspace_less_modal_record_is_stopped_only_once_its_app_is_proven_visible() {
+    // Proven: the active workspace lists the app id, so it is stopped and
+    // the record (stamped with the workspace) is then removed.
+    let mut rig = Rig::new();
+    rig.modal.visible_ids = vec!["ap-2".to_owned()];
+    let (result, project, _td) = destroy_modal(modal_rec("support_two", Some("ap-2"), None), &rig);
     result.unwrap();
     assert_eq!(*rig.modal.stopped.lock().unwrap(), ["ap-2"]);
+    assert_eq!(stops_for(&project, "support_two").len(), 0);
+
+    // Not visible: ownership is unproven, so nothing is stopped or dropped,
+    // even when Modal would say "not found".
+    let mut rig = Rig::new();
+    rig.modal.unknown_ids = vec!["ap-2".to_owned()];
+    let rec = modal_rec("support_two", Some("ap-2"), None);
+    let (result, project, _td) = destroy_modal(rec.clone(), &rig);
+    let msg = result.expect_err("unproven").to_string();
+    assert!(msg.contains("cannot see that app"), "{msg}");
+    assert!(msg.contains("MODAL_TOKEN_ID"), "{msg}");
+    assert!(!msg.contains("MODAL_ENVIRONMENT"), "{msg}");
+    assert_eq!(rig.modal.stopped.lock().unwrap().len(), 0);
+    assert_eq!(stops_for(&project, "support_two"), vec![rec]);
+}
+
+/// A v1 state (Modal handle, no stop records) under a token for another
+/// workspace: both apply and destroy refuse before doing anything, so there is
+/// no duplicate deploy and nothing is dropped.
+#[test]
+fn v1_modal_state_under_another_workspaces_token_blocks_apply_and_destroy() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let mut state = state_with(modal_graph());
+    state.endpoints = vec![handle("support_local", 8000), handle("support_two", 8001)];
+    for h in &mut state.endpoints {
+        h.id = format!("ap-{}", h.deployment);
+        h.exposure = amicu_runtime::EndpointExposure::Loopback;
+    }
+    project.save_state(&state).unwrap();
+    let before = std::fs::read_to_string(project.state_file()).unwrap();
+
+    let mut rig = Rig::new();
+    rig.modal.workspace = ws("other-co");
+    // The other workspace cannot see those app ids.
+    let mut out = Vec::new();
+    let err = commands::apply::run_with(
+        &project,
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &rig.env(),
+    )
+    .expect_err("apply must refuse");
+    assert!(err.to_string().contains("cannot see that app"), "{err}");
+
+    let (result, _) = run_destroy(&project, &[], true, OutputFormat::Human, "", &rig);
+    let err = result.expect_err("destroy must refuse");
+    assert!(err.to_string().contains("cannot see that app"), "{err}");
+
+    assert_eq!(rig.modal.stopped.lock().unwrap().len(), 0);
+    assert_eq!(rig.stopped().len(), 0);
+    assert_eq!(
+        std::fs::read_to_string(project.state_file()).unwrap(),
+        before,
+        "state untouched: nothing dropped"
+    );
+}
+
+#[test]
+fn forget_unconfirmed_needs_explicit_targets() {
+    let td = TempDir::new();
+    let mut state = state_with(modal_graph());
+    state.stops = vec![modal_rec("support_two", None, Some("acme"))];
+    let project = saved(&td, &state);
+    let mut rig = Rig::new();
+    rig.forget = true;
+    let (result, _) = run_destroy(&project, &[], true, OutputFormat::Human, "", &rig);
+    let msg = result.expect_err("no targets").to_string();
+    assert!(msg.contains("--target"), "{msg}");
+    assert_eq!(stops_for(&project, "support_two").len(), 1);
+}
+
+#[test]
+fn forget_unconfirmed_is_refused_for_a_record_without_a_known_workspace() {
+    let mut rig = Rig::new();
+    rig.forget = true;
+    let rec = modal_rec("support_two", None, None);
+    let (result, project, _td) = destroy_modal(rec.clone(), &rig);
+    let msg = result.expect_err("unknown workspace").to_string();
+    assert!(msg.contains("no known workspace"), "{msg}");
+    assert_eq!(stops_for(&project, "support_two"), vec![rec]);
+}
+
+#[test]
+fn forget_unconfirmed_lists_what_it_will_forget_and_needs_confirmation() {
+    let td = TempDir::new();
+    let mut state = state_with(modal_graph());
+    state.stops = vec![modal_rec("support_two", None, Some("acme"))];
+    let project = saved(&td, &state);
+    let mut rig = Rig::new();
+    rig.forget = true;
+    // Interactive and declined: nothing is forgotten.
+    let (result, out) = run_destroy(
+        &project,
+        &["support_two".to_owned()],
+        false,
+        OutputFormat::Human,
+        "n\n",
+        &rig,
+    );
+    assert_eq!(result.unwrap(), 0);
+    assert!(out.contains("WITHOUT confirming"), "{out}");
+    assert!(
+        out.contains("support_two") && out.contains("amicu-support-two"),
+        "{out}"
+    );
+    assert_eq!(stops_for(&project, "support_two").len(), 1);
+    // Confirmed: forgotten.
+    let (result, _) = run_destroy(
+        &project,
+        &["support_two".to_owned()],
+        false,
+        OutputFormat::Human,
+        "y\n",
+        &rig,
+    );
+    result.unwrap();
+    assert_eq!(stops_for(&project, "support_two").len(), 0);
+}
+
+// ---- host identity edge cases ------------------------------------------------
+
+#[test]
+fn an_unknown_host_identity_refuses_every_stop() {
+    let (result, project, _td) = destroy_one_host_record(host_rec("support_two"), &Rig::no_ctx());
+    let msg = result.expect_err("unknown context").to_string();
+    assert!(msg.contains("cannot determine which user"), "{msg}");
+    assert_eq!(stops_for(&project, "support_two").len(), 1);
+}
+
+#[test]
+fn a_record_without_an_owner_is_refused_for_root_or_a_foreign_plist_owner() {
+    let mut root = platform_ctx();
+    root.uid = 0;
+    let (result, _, _td) = destroy_one_host_record(host_rec("support_two"), &Rig::with_ctx(root));
+    assert!(result.expect_err("root").to_string().contains("root"));
+
+    let (result, _, _td) = destroy_one_host_record(host_rec("support_two"), &Rig::with_owner(999));
+    assert!(
+        result
+            .expect_err("owner")
+            .to_string()
+            .contains("belongs to uid 999")
+    );
+
+    // The plist is ours: fine.
+    let (result, _, _td) = destroy_one_host_record(host_rec("support_two"), &Rig::with_owner(501));
+    result.unwrap();
+}
+
+#[test]
+fn a_gui_domain_record_after_logout_gets_a_targeted_recovery_command() {
+    let started = ctx(amicu_llamacpp::HostBackend::Launchd, 501, Some("gui/501"));
+    let rec = StopRecord::host(&"support_two".into(), Some(&started));
+    let now = ctx(amicu_llamacpp::HostBackend::Launchd, 501, Some("user/501"));
+    let (result, _, _td) = destroy_one_host_record(rec, &Rig::with_ctx(now));
+    let msg = result.expect_err("domain mismatch").to_string();
+    assert!(
+        msg.contains("launchctl print gui/501/io.amicu.llama.support_two"),
+        "{msg}"
+    );
+    assert!(msg.contains("amicu destroy --target support_two"), "{msg}");
 }
 
 #[test]

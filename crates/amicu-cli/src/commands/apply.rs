@@ -22,7 +22,7 @@ use crate::catalog::build_catalog;
 use crate::checks::report_for;
 use crate::error::CliError;
 use crate::lock::StateLock;
-use crate::modal_ops::{ModalBackend, check_workspace};
+use crate::modal_ops::{ModalBackend, Workspace, check_workspace, unproven_workspace};
 use crate::planner::{PlanError, PlanResult, build_project_plan};
 use crate::project::{LocalState, Project};
 use crate::secret::EnvSecretResolver;
@@ -731,7 +731,8 @@ async fn apply_all(
     let catalog = build_catalog(graph);
     let llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), (env.host)());
     let vllm_adapter = VllmAdapter::new(Box::new(catalog.clone()), (env.host)());
-    let host_ctx = (env.host)().host_context();
+    let host_probe = (env.host)();
+    let host_ctx = host_probe.host_context();
     let resolver = EnvSecretResolver;
     let registry = EndpointRegistry::new();
     preflight(result)?;
@@ -788,6 +789,15 @@ async fn apply_all(
                     )?;
                 }
             } else {
+                // Never start something whose owner cannot be recorded.
+                if host_ctx.is_none() {
+                    return Err(CliError::Message(format!(
+                        "cannot determine which user and service manager amicu acts as on this \
+                         machine, so '{}' was not started (it could not be recorded for a safe \
+                         stop later)",
+                        item.deployment
+                    )));
+                }
                 // An in-place restart of a host unit started as someone else
                 // would leave the old one behind: refuse.
                 for r in progress
@@ -795,7 +805,7 @@ async fn apply_all(
                     .iter()
                     .filter(|r| r.deployment == item.deployment && r.same_target(&new_stop))
                 {
-                    check_host_context(r, host_ctx.as_ref())?;
+                    check_host_context(r, host_ctx.as_ref(), &*host_probe)?;
                 }
             }
             // A provider (or identity) change: stop what is running under the
@@ -812,10 +822,11 @@ async fn apply_all(
                     &llama_adapter,
                     &vllm_adapter,
                     env,
-                    host_ctx.as_ref(),
+                    &*host_probe,
+                    &mut progress.stops,
                 )
                 .await?;
-                progress.stops.retain(|r| r != &old);
+                progress.stops.retain(|r| !r.same_instance(&old));
             }
             // Write-ahead: record the deployment as pending, with its stop
             // identity, BEFORE the provider starts anything, so a crash can
@@ -856,10 +867,11 @@ async fn apply_all(
                     &llama_adapter,
                     &vllm_adapter,
                     env,
-                    host_ctx.as_ref(),
+                    &*host_probe,
+                    &mut progress.stops,
                 )
                 .await?;
-                progress.stops.retain(|r| r != &old);
+                progress.stops.retain(|r| !r.same_instance(&old));
             }
         } else {
             // Destroy: stop every recorded instance of this deployment. A
@@ -888,10 +900,11 @@ async fn apply_all(
                     &llama_adapter,
                     &vllm_adapter,
                     env,
-                    host_ctx.as_ref(),
+                    &*host_probe,
+                    &mut progress.stops,
                 )
                 .await?;
-                progress.stops.retain(|r| r != &record);
+                progress.stops.retain(|r| !r.same_instance(&record));
             }
             registry.deregister(&item.deployment);
             progress.stopped.push(item.deployment.clone());
@@ -1089,13 +1102,22 @@ fn record_modal_start(
 
 /// Refuse a host stop that would act as someone else: launchd and systemd are
 /// never interchangeable, and the uid / launchd domain must match the ones the
-/// instance was started with. Records without uid/domain (older state) are
-/// accepted for the current user.
+/// instance was started with. An unknown current identity is a refusal. A
+/// record without a uid (older state) is accepted only for a non-root user who
+/// owns the instance's service definition.
 fn check_host_context(
     record: &StopRecord,
     current: Option<&amicu_llamacpp::HostContext>,
+    probe: &dyn ProcessSupervisor,
 ) -> Result<(), CliError> {
-    let expected = current.map_or_else(Backend::host, |c| Backend::from_host(c.backend));
+    let Some(cur) = current else {
+        return Err(CliError::Message(format!(
+            "cannot determine which user and service manager amicu acts as on this machine, so \
+             it will not act on {}. Nothing was changed",
+            record.describe()
+        )));
+    };
+    let expected = Backend::from_host(cur.backend);
     if record.backend != expected {
         return Err(CliError::Message(format!(
             "{} was started under {} but this machine uses {}; stop it on the machine and as \
@@ -1105,24 +1127,48 @@ fn check_host_context(
             expected.name()
         )));
     }
-    if let (Some(rec), Some(cur)) = (record.uid, current.map(|c| c.uid))
-        && rec != cur
-    {
-        return Err(CliError::Message(format!(
-            "{} was started as uid {rec}, but you are uid {cur}; re-run as that user. Nothing \
-             was changed",
-            record.describe()
-        )));
+    match record.uid {
+        Some(rec) if rec != cur.uid => {
+            return Err(CliError::Message(format!(
+                "{} was started as uid {rec}, but you are uid {}; re-run as that user. Nothing \
+                 was changed",
+                record.describe(),
+                cur.uid
+            )));
+        }
+        Some(_) => {}
+        None => {
+            if cur.uid == 0 {
+                return Err(CliError::Message(format!(
+                    "{} has no recorded owner and you are root, so amicu cannot tell whose job \
+                     it is; re-run as the user that started it. Nothing was changed",
+                    record.describe()
+                )));
+            }
+            if let Some(owner) = probe.instance_owner(&record.identity)
+                && owner != cur.uid
+            {
+                return Err(CliError::Message(format!(
+                    "{} belongs to uid {owner}, but you are uid {}; re-run as that user. \
+                     Nothing was changed",
+                    record.describe(),
+                    cur.uid
+                )));
+            }
+        }
     }
-    if let (Some(rec), Some(cur)) = (
-        record.domain.as_deref(),
-        current.and_then(|c| c.domain.as_deref()),
-    ) && rec != cur
+    if let (Some(rec), Some(now)) = (record.domain.as_deref(), cur.domain.as_deref())
+        && rec != now
     {
         return Err(CliError::Message(format!(
-            "{} was started in launchd domain {rec}, but the current domain is {cur}; re-run \
-             from the same login session. Nothing was changed",
-            record.describe()
+            "{} was started in launchd domain {rec}, but the current domain is {now}. Re-run \
+             from the same login session. If that session has ended (you logged out), its job \
+             ended with it: confirm with `launchctl print {rec}/{}` (exit status 113 means it is \
+             gone), log back in as that user, and run `amicu destroy --target {}` again. \
+             Nothing was changed",
+            record.describe(),
+            record.identity,
+            record.deployment
         )));
     }
     Ok(())
@@ -1137,11 +1183,12 @@ async fn stop_record(
     llama: &LlamaCppAdapter,
     vllm: &VllmAdapter,
     env: &Env<'_>,
-    host_ctx: Option<&amicu_llamacpp::HostContext>,
+    probe: &dyn ProcessSupervisor,
+    stops: &mut [StopRecord],
 ) -> Result<(), CliError> {
     match record.backend {
         Backend::HostLaunchd | Backend::HostSystemd => {
-            check_host_context(record, host_ctx)?;
+            check_host_context(record, probe.host_context().as_ref(), probe)?;
             let handle = host_handle(&record.deployment, &record.identity);
             // Both adapters share one supervisor that manages the unit purely
             // by the handle's id; dispatch on the declared runtime anyway.
@@ -1151,34 +1198,67 @@ async fn stop_record(
             }
             Ok(())
         }
-        Backend::Modal => stop_modal(record, env).await,
+        Backend::Modal => stop_modal(record, env, stops).await,
     }
 }
 
-/// Stop a Modal app. The active workspace must be the one the app was
-/// created in. By recorded app id, "not found" is a confirmed stop (the
-/// workspace was just checked). With only a name, a lookup that finds nothing
-/// cannot confirm (the app may exist unpublished): an error, unless the user
-/// passed `--forget-unconfirmed` after checking.
-async fn stop_modal(record: &StopRecord, env: &Env<'_>) -> Result<(), CliError> {
+/// Record that `record`'s app was proven to live in `active`.
+fn stamp_workspace(stops: &mut [StopRecord], record: &StopRecord, active: &Workspace) {
+    for r in stops.iter_mut().filter(|r| r.same_instance(record)) {
+        r.workspace = Some(active.name.clone());
+        r.environment = Some(active.environment.clone());
+    }
+}
+
+/// Stop a Modal app. A "not found" counts as confirmed only when the record's
+/// workspace is KNOWN and matches the active one. A record without a
+/// workspace must first be proven to belong to it (its app id appears in the
+/// active workspace's app list), and is then stamped with it. With only a
+/// name, a lookup that finds nothing cannot confirm (the app may exist
+/// unpublished): an error, unless the user passed `--forget-unconfirmed` for
+/// this explicit target AND the record's workspace is known and matches.
+async fn stop_modal(
+    record: &StopRecord,
+    env: &Env<'_>,
+    stops: &mut [StopRecord],
+) -> Result<(), CliError> {
     let active = env.modal.workspace().await?;
-    check_workspace(
-        record.deployment.as_str(),
-        record.workspace.as_deref(),
-        record.environment.as_deref(),
-        &active,
-    )?;
+    if record.workspace.is_some() {
+        check_workspace(
+            record.deployment.as_str(),
+            record.workspace.as_deref(),
+            record.environment.as_deref(),
+            &active,
+        )?;
+    } else if let Some(id) = &record.app_id {
+        if !env.modal.list_app_ids().await?.contains(id) {
+            return Err(unproven_workspace(record.deployment.as_str(), id, &active));
+        }
+        stamp_workspace(stops, record, &active);
+    }
     let app_id = match &record.app_id {
         Some(id) => id.clone(),
         None => match env.modal.find_app(&record.identity).await? {
-            Some(id) => id,
-            None if env.forget_unconfirmed => {
+            Some(id) => {
+                // Found in the active workspace by name: it lives here.
+                stamp_workspace(stops, record, &active);
+                id
+            }
+            None if env.forget_unconfirmed && record.workspace.is_some() => {
                 eprintln!(
                     "warning: no Modal app '{}' found in {active}; forgetting '{}' as you asked \
                      (--forget-unconfirmed)",
                     record.identity, record.deployment
                 );
                 return Ok(());
+            }
+            None if env.forget_unconfirmed => {
+                return Err(CliError::Message(format!(
+                    "refusing --forget-unconfirmed for '{}': its record has no known workspace, \
+                     so amicu cannot tell the app is not in another workspace. Nothing was \
+                     changed",
+                    record.deployment
+                )));
             }
             None => {
                 return Err(CliError::Message(format!(
@@ -1193,8 +1273,8 @@ async fn stop_modal(record: &StopRecord, env: &Env<'_>) -> Result<(), CliError> 
             }
         },
     };
-    // `false`: Modal reports no such app. For a recorded id in the matching
-    // workspace, that is a confirmed stop.
+    // `false`: Modal reports no such app. The workspace is known and matches
+    // by now, so that is a confirmed stop.
     env.modal.stop_app(&app_id).await?;
     Ok(())
 }

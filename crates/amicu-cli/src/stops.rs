@@ -120,6 +120,15 @@ impl StopRecord {
         self.backend == other.backend && self.identity == other.identity
     }
 
+    /// Whether `other` is the very same recorded instance (ignoring the
+    /// workspace stamp, which is filled in after the fact).
+    pub(crate) fn same_instance(&self, other: &Self) -> bool {
+        self.deployment == other.deployment
+            && self.backend == other.backend
+            && self.identity == other.identity
+            && self.app_id == other.app_id
+    }
+
     /// A human description naming the exact label / app id, for recovery text.
     pub(crate) fn describe(&self) -> String {
         match self.backend {

@@ -96,7 +96,7 @@ enum Command {
         /// Forget a Modal deployment whose app cannot be found by name and has
         /// no recorded app id, instead of refusing. Use only after checking in
         /// the Modal dashboard that nothing is running.
-        #[arg(long)]
+        #[arg(long, requires = "target")]
         forget_unconfirmed: bool,
     },
     /// Run environment and project diagnostics.
@@ -216,6 +216,9 @@ impl SkillTarget {
 /// Parse arguments, run the selected command, and map it to a process exit code.
 #[must_use]
 pub fn run() -> ExitCode {
+    // Only the real binary may run launchctl/systemctl; library callers and
+    // tests get a panic instead.
+    amicu_llamacpp::allow_service_commands();
     let cli = Cli::parse();
     let mut stdout = std::io::stdout();
     match dispatch(&cli, &mut stdout) {

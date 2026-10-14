@@ -453,4 +453,35 @@ mod durability_tests {
         assert_eq!(bak.pending[0].as_str(), "old");
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn an_unsupported_version_is_never_a_valid_state_or_backup() {
+        let root = scratch("unsupported");
+        let p = Project::new(&root);
+        p.save_state(&state("good")).unwrap();
+        p.save_state(&state("good2")).unwrap();
+        // A newer-version file replaces state.json (e.g. written by a newer amicu).
+        let mut newer = serde_json::to_value(state("future")).unwrap();
+        newer["version"] = "v9".into();
+        fs::write(p.state_file(), newer.to_string()).unwrap();
+        let err = p.load_state().expect_err("unsupported");
+        assert!(err.to_string().contains("v9"), "{err}");
+        assert!(
+            !err.to_string().contains("cp "),
+            "never advise restoring over it: {err}"
+        );
+        // Saving must not rotate the unsupported file in as the backup.
+        p.save_state(&state("next")).unwrap();
+        let bak: LocalState =
+            serde_json::from_str(&fs::read_to_string(p.state_backup_file()).unwrap()).unwrap();
+        assert_eq!(
+            bak.pending[0].as_str(),
+            "good",
+            "backup kept the last valid one"
+        );
+        // And an unsupported backup does not count as a valid previous generation.
+        fs::write(p.state_backup_file(), newer.to_string()).unwrap();
+        assert!(!p.backup_parses());
+        let _ = fs::remove_dir_all(&root);
+    }
 }
