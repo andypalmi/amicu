@@ -189,8 +189,8 @@ pub(crate) struct Env<'a> {
     /// Destroy only: treat a Modal app that cannot be found by name (and has
     /// no recorded id) as gone, instead of refusing to forget it.
     pub forget_unconfirmed: bool,
-    /// Destroy only: also delete the host log files and (once no Modal
-    /// deployment remains) the Modal cache Volumes recorded in state.
+    /// Destroy only: also delete the recorded host log files (Modal volumes
+    /// are never deleted).
     pub purge: bool,
 }
 

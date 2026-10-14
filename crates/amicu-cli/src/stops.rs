@@ -89,8 +89,8 @@ pub(crate) struct StopRecord {
     /// Host only: log files the service writes; removed by `destroy --purge`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub logs: Vec<String>,
-    /// Modal only: the shared cache Volumes the app mounts; deleted by
-    /// `destroy --purge` once no Modal deployment remains.
+    /// Modal only: the shared cache Volumes the app mounts. Recorded so
+    /// destroy can list them; never deleted by amicu (other projects share them).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<String>,
 }
