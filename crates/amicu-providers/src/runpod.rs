@@ -42,7 +42,7 @@ use crate::provider::{
     Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
     ResourceIdentity, TeardownOutcome,
 };
-use crate::rest_lifecycle::{self, ServerApi};
+use crate::rest_lifecycle::{self, Found, ServerApi};
 use crate::transport::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport, TransportError};
 
 /// The adapter identity RunPod registers under.
@@ -235,14 +235,26 @@ struct CreatePodRequest<'a> {
     data_center_ids: [&'a str; 1],
 }
 
+/// The placement sub-object of a listed pod.
+#[derive(Deserialize)]
+struct PodMachine {
+    #[serde(rename = "gpuTypeId", default)]
+    gpu_type_id: Option<String>,
+    #[serde(rename = "dataCenterId", default)]
+    data_center_id: Option<String>,
+}
+
 /// The subset of a RunPod pod object the adapter consumes.
 #[derive(Deserialize)]
 struct PodResponse {
     /// Provider-assigned pod id.
     id: String,
-    /// The pod name (carries the deterministic identity).
+    /// The pod name (carries the identity).
     #[serde(default)]
     name: Option<String>,
+    /// Placement details, when listed.
+    #[serde(default)]
+    machine: Option<PodMachine>,
     /// Desired lifecycle status, e.g. `"RUNNING"`.
     #[serde(rename = "desiredStatus")]
     desired_status: Option<String>,
@@ -537,11 +549,9 @@ impl Provider for RunPodProvider {
         identity: ResourceIdentity,
     ) -> Result<ProvisioningHandle, AdapterError> {
         self.validate(&request.offering_id, &request.region)?;
-        Ok(ProvisioningHandle::prepared(
-            self.id.clone(),
-            request,
-            identity,
-        ))
+        let mut record = ProvisioningHandle::prepared(self.id.clone(), request, identity);
+        record.scope = Some(self.scope_of(&record)?);
+        Ok(record)
     }
 
     async fn provision(
@@ -551,29 +561,18 @@ impl Provider for RunPodProvider {
     ) -> Result<ProvisioningHandle, AdapterError> {
         self.validate(&prepared.offering_id, &prepared.region)?;
         if prepared.identity.name.is_empty() {
-            return Err(AdapterError::from_kind(ProviderError::Backend {
-                detail: "record has no resource identity".into(),
-            }));
+            return Err(rest_lifecycle::refuse("record has no resource identity"));
         }
         let token = self
             .resolve_token(resolver, prepared.credentials.as_ref())
             .await?;
+        rest_lifecycle::guard_scope(self, &prepared, token.as_deref()).await?;
 
         // Adopt a pod already created under this identity (retry after a
         // crash) instead of creating a duplicate.
-        if let Some(id) = self
-            .list_by_identity(&prepared, token.as_deref())
-            .await?
-            .into_iter()
-            .next()
-        {
-            return Ok(prepared.completed(
-                "pod_id",
-                id,
-                ProvisioningState::Provisioning {
-                    detail: "adopted existing pod".into(),
-                },
-            ));
+        if let Some(found) = rest_lifecycle::adopt(self, &prepared, token.as_deref()).await? {
+            let state = map_pod_state(found.state.as_deref());
+            return Ok(prepared.completed("pod_id", found.id, state));
         }
 
         let create = CreatePodRequest {
@@ -628,6 +627,7 @@ impl Provider for RunPodProvider {
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningState, AdapterError> {
+        rest_lifecycle::check_record(handle)?;
         let token = self
             .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
@@ -663,15 +663,39 @@ impl Provider for RunPodProvider {
 
 #[async_trait]
 impl ServerApi for RunPodProvider {
+    fn scope_of(&self, handle: &ProvisioningHandle) -> Result<String, AdapterError> {
+        // The RunPod API key is account-bound; the data center is the only
+        // scope part the record carries.
+        Ok(format!("{PROVIDER_ID}|{}||", handle.region))
+    }
+
+    async fn verify_scope(
+        &self,
+        _handle: &ProvisioningHandle,
+        token: Option<&str>,
+    ) -> Result<Option<String>, AdapterError> {
+        let request = self.build_request(HttpMethod::Get, "/pods", token);
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
+        if !response.is_success() {
+            return Err(lifecycle_error(response.status, "pods"));
+        }
+        Ok(None)
+    }
+
     async fn list_by_identity(
         &self,
         handle: &ProvisioningHandle,
         token: Option<&str>,
-    ) -> Result<Vec<String>, AdapterError> {
+    ) -> Result<Vec<Found>, AdapterError> {
         let name = handle.identity.name.as_str();
         if name.is_empty() {
             return Ok(Vec::new());
         }
+        // The pods endpoint returns the full set in one response (no paging).
         let path = format!("/pods?name={name}");
         let request = self.build_request(HttpMethod::Get, &path, token);
         let response = self
@@ -679,11 +703,9 @@ impl ServerApi for RunPodProvider {
             .execute(request)
             .await
             .map_err(|e| transport_error(&e))?;
-        if response.status == 404 {
-            return Ok(Vec::new());
-        }
         if !response.is_success() {
-            return Err(lifecycle_error(response.status, name));
+            // A collection-level 404 is a scope error, never "no pods".
+            return Err(lifecycle_error(response.status, "pods"));
         }
         let pods: Vec<PodResponse> = response.json().map_err(|_| {
             AdapterError::from_kind(ProviderError::Backend {
@@ -693,7 +715,12 @@ impl ServerApi for RunPodProvider {
         Ok(pods
             .into_iter()
             .filter(|p| p.name.as_deref() == Some(name))
-            .map(|p| p.id)
+            .map(|p| Found {
+                id: p.id,
+                offering: p.machine.as_ref().and_then(|m| m.gpu_type_id.clone()),
+                region: p.machine.and_then(|m| m.data_center_id),
+                state: p.desired_status,
+            })
             .collect())
     }
 
@@ -783,6 +810,22 @@ mod tests {
         TestResolver::default()
     }
 
+    /// A mock that already answers the scope probe and an empty identity listing,
+    /// as an account with no pods would.
+    fn scoped_mock() -> MockTransport {
+        MockTransport::default()
+            .on(
+                HttpMethod::Get,
+                "/pods",
+                HttpResponse::new(200, b"[]".to_vec()),
+            )
+            .on_contains(
+                HttpMethod::Get,
+                "/pods?name=",
+                HttpResponse::new(200, b"[]".to_vec()),
+            )
+    }
+
     /// A RunPod provider whose transport is `mock` and whose base URL points at a
     /// harmless test host (the mock matches on the URL suffix).
     fn mock_provider(mock: Arc<MockTransport>) -> RunPodProvider {
@@ -853,7 +896,7 @@ mod tests {
     #[tokio::test]
     async fn provision_in_eu_region_then_teardown() {
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(HttpMethod::Post, "/pods", created("pod-xyz"))
                 .on(
                     HttpMethod::Get,
@@ -940,7 +983,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_401_to_credentials_rejected() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/pods",
             HttpResponse::new(401, b"unauthorized".to_vec()),
@@ -959,7 +1002,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_429_to_capacity_unavailable() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/pods",
             HttpResponse::new(429, b"slow down".to_vec()),
@@ -978,7 +1021,7 @@ mod tests {
     #[tokio::test]
     async fn status_maps_404_to_unknown_instance() {
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(HttpMethod::Post, "/pods", created("pod-1"))
                 .on(
                     HttpMethod::Get,
@@ -1004,11 +1047,8 @@ mod tests {
 
     #[tokio::test]
     async fn transport_failure_maps_to_retryable_backend() {
-        let mock = Arc::new(MockTransport::default().on_error(
-            HttpMethod::Post,
-            "/pods",
-            TransportError::Timeout,
-        ));
+        let mock =
+            Arc::new(scoped_mock().on_error(HttpMethod::Post, "/pods", TransportError::Timeout));
         let err = mock_provider(mock)
             .provision_request(
                 &ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1"),
@@ -1022,7 +1062,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_404_to_unknown_offering() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/pods",
             HttpResponse::new(404, b"no such gpu type".to_vec()),
@@ -1040,7 +1080,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_500_to_retryable_backend() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/pods",
             HttpResponse::new(500, b"boom".to_vec()),
@@ -1058,7 +1098,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_malformed_success_body_is_backend_error() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/pods",
             HttpResponse::new(201, b"not json".to_vec()),
@@ -1076,7 +1116,7 @@ mod tests {
     #[tokio::test]
     async fn teardown_404_is_confirmed_gone() {
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(HttpMethod::Post, "/pods", created("pod-1"))
                 .on(
                     HttpMethod::Delete,
@@ -1115,8 +1155,7 @@ mod tests {
     async fn credentials_never_leak_into_serialized_artifacts() {
         let secret_value = "leak-me-runpod-token";
         let resolver = TestResolver::default().with("runpod_token", secret_value);
-        let mock =
-            Arc::new(MockTransport::default().on(HttpMethod::Post, "/pods", created("pod-1")));
+        let mock = Arc::new(scoped_mock().on(HttpMethod::Post, "/pods", created("pod-1")));
         let p = mock_provider(mock.clone());
         let req = ProvisionRequest::new("gpu.a100-80gb.1x", "EU-RO-1")
             .with_credentials(SecretRef::new("runpod_token"));
@@ -1151,8 +1190,7 @@ mod tests {
 
     #[tokio::test]
     async fn discoverable_as_a_provider_trait_object() {
-        let mock =
-            Arc::new(MockTransport::default().on(HttpMethod::Post, "/pods", created("pod-1")));
+        let mock = Arc::new(scoped_mock().on(HttpMethod::Post, "/pods", created("pod-1")));
         let mut registry: Registry<dyn Provider> = Registry::new();
         registry.register(Arc::new(mock_provider(mock)));
         let found: Arc<dyn Provider> = registry.get(&AdapterId::new("runpod")).unwrap();

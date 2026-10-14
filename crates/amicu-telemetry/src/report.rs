@@ -48,6 +48,25 @@ pub const MAX_WINDOW_SECONDS: u32 = 86_400;
 /// Longest allowed [`Label`].
 pub const MAX_LABEL_LEN: usize = 64;
 
+/// Earliest plausible window start (2024-01-01T00:00:00Z).
+pub const MIN_START_UNIX_S: u64 = 1_704_067_200;
+/// Latest plausible window start (2100-01-01T00:00:00Z).
+pub const MAX_START_UNIX_S: u64 = 4_102_444_800;
+/// Most requests one deployment can plausibly serve in one window.
+pub const MAX_REQUESTS: u64 = 10_000_000_000;
+/// Largest plausible byte quantity (1 PiB).
+pub const MAX_BYTES: u64 = 1 << 50;
+/// Largest plausible per-second rate (tokens or requests).
+pub const MAX_RATE: f64 = 10_000_000.0;
+/// Largest plausible latency, ms (one day).
+pub const MAX_LATENCY_MS: f64 = 86_400_000.0;
+/// Largest plausible cost per hour, EUR.
+pub const MAX_COST_PER_HOUR_EUR: f64 = 1_000_000.0;
+/// Most accelerators one deployment can plausibly use.
+pub const MAX_ACCELERATORS: u32 = 1_024;
+/// Most CPU cores one host can plausibly have.
+pub const MAX_CPU_CORES: u32 = 65_536;
+
 /// Why a report or label was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
@@ -108,6 +127,9 @@ impl Label {
         if looks_like_ipv4(&value) {
             return Err(ValidationError::IpLikeLabel);
         }
+        if looks_like_credential(&value) {
+            return Err(ValidationError::BadLabel("looks like a credential".into()));
+        }
         Ok(Self(value))
     }
 
@@ -131,17 +153,68 @@ impl From<Label> for String {
     }
 }
 
-/// Whether `s` contains four dot-separated numeric groups (an IPv4 shape),
-/// anywhere in the string.
+/// Whether `s` contains an IPv4-shaped run: four dot-separated numeric groups,
+/// each at most 255. Addresses in `0.0.0.0/8` ("this network", never a host)
+/// are not flagged, so a four-part version such as `0.6.3.1` stays usable; any
+/// other four-part numeric version must be written differently (e.g. `12.4.1-0`).
 fn looks_like_ipv4(s: &str) -> bool {
-    let groups: Vec<&str> = s.split(|c: char| !c.is_ascii_digit() && c != '.').collect();
-    groups.iter().any(|g| {
-        let parts: Vec<&str> = g.split('.').collect();
-        parts.windows(4).any(|w| {
-            w.iter()
-                .all(|p| !p.is_empty() && p.len() <= 3 && p.bytes().all(|b| b.is_ascii_digit()))
+    s.split(|c: char| !c.is_ascii_digit() && c != '.')
+        .any(|run| {
+            let parts: Vec<&str> = run.split('.').collect();
+            parts.windows(4).any(|w| {
+                let octets: Option<Vec<u16>> = w
+                    .iter()
+                    .map(|p| {
+                        (!p.is_empty() && p.len() <= 3)
+                            .then(|| p.parse::<u16>().ok())
+                            .flatten()
+                            .filter(|v| *v <= 255)
+                    })
+                    .collect();
+                octets.is_some_and(|o| o[0] != 0)
+            })
         })
-    })
+}
+
+/// Whether `s` is shaped like an API token or key: a well-known credential
+/// prefix at the start of the label or of any `/` segment, a long hex string, or
+/// a long mixed alphanumeric run.
+fn looks_like_credential(s: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "hf_",
+        "sk-",
+        "sk_",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "glpat-",
+        "xoxb-",
+        "xoxp-",
+        "akia",
+        "asia",
+        "aiza",
+        "ya29.",
+    ];
+    let lower = s.to_ascii_lowercase();
+    if lower
+        .split('/')
+        .any(|seg| PREFIXES.iter().any(|p| seg.starts_with(p)))
+    {
+        return true;
+    }
+    if lower.len() >= 32 && lower.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return true;
+    }
+    lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|run| {
+            run.len() >= 40
+                && run.bytes().any(|b| b.is_ascii_digit())
+                && run.bytes().any(|b| b.is_ascii_alphabetic())
+        })
 }
 
 /// The observation window a report covers.
@@ -188,7 +261,7 @@ impl Percentiles {
     fn validate(&self, field: &'static str) -> Result<(), ValidationError> {
         let ok = [self.p50, self.p95, self.p99]
             .iter()
-            .all(|v| v.is_finite() && *v >= 0.0)
+            .all(|v| v.is_finite() && (0.0..=MAX_LATENCY_MS).contains(v))
             && self.p50 <= self.p95
             && self.p95 <= self.p99;
         if ok {
@@ -229,6 +302,29 @@ pub struct HardwareInfo {
     /// Host system memory, bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_bytes: Option<u64>,
+}
+
+impl HardwareInfo {
+    fn validate(&self) -> Result<(), ValidationError> {
+        if self.accelerator_count > MAX_ACCELERATORS {
+            return Err(ValidationError::BadNumber("hardware.accelerator_count"));
+        }
+        if self.cpu_cores.is_some_and(|c| c > MAX_CPU_CORES) {
+            return Err(ValidationError::BadNumber("hardware.cpu_cores"));
+        }
+        if self.vram_bytes.is_some_and(|b| b > MAX_BYTES) {
+            return Err(ValidationError::BadNumber("hardware.vram_bytes"));
+        }
+        if self.memory_bytes.is_some_and(|b| b > MAX_BYTES) {
+            return Err(ValidationError::BadNumber("hardware.memory_bytes"));
+        }
+        // An accelerator model without a count (or a count without a model) is
+        // inconsistent.
+        if self.accelerator.is_some() != (self.accelerator_count > 0) {
+            return Err(ValidationError::BadNumber("hardware.accelerator_count"));
+        }
+        Ok(())
+    }
 }
 
 /// The served model.
@@ -355,30 +451,33 @@ impl Rollup {
     }
 
     fn validate(&self) -> Result<(), ValidationError> {
-        if self.errors > self.requests {
-            return Err(ValidationError::BadNumber("errors"));
+        if self.requests > MAX_REQUESTS || self.errors > self.requests {
+            return Err(ValidationError::BadNumber("requests"));
         }
         self.latency_e2e_ms.validate("latency_e2e_ms")?;
         if let Some(t) = &self.latency_ttft_ms {
             t.validate("latency_ttft_ms")?;
         }
-        let non_negative = |v: f64, field| {
-            if v.is_finite() && v >= 0.0 {
+        let bounded = |v: f64, max: f64, field| {
+            if v.is_finite() && (0.0..=max).contains(&v) {
                 Ok(())
             } else {
                 Err(ValidationError::BadNumber(field))
             }
         };
+        if self.memory_used_bytes.is_some_and(|b| b > MAX_BYTES) {
+            return Err(ValidationError::BadNumber("memory_used_bytes"));
+        }
         let fraction = |v: Option<f64>, field| match v {
             Some(v) if !(v.is_finite() && (0.0..=1.0).contains(&v)) => {
                 Err(ValidationError::BadNumber(field))
             }
             _ => Ok(()),
         };
-        non_negative(self.output_tokens_per_s, "output_tokens_per_s")?;
-        non_negative(self.requests_per_s, "requests_per_s")?;
+        bounded(self.output_tokens_per_s, MAX_RATE, "output_tokens_per_s")?;
+        bounded(self.requests_per_s, MAX_RATE, "requests_per_s")?;
         if let Some(c) = self.cost_per_hour_eur {
-            non_negative(c, "cost_per_hour_eur")?;
+            bounded(c, MAX_COST_PER_HOUR_EUR, "cost_per_hour_eur")?;
         }
         fraction(self.kv_cache_utilization, "kv_cache_utilization")?;
         fraction(self.gpu_utilization, "gpu_utilization")
@@ -427,6 +526,10 @@ impl TelemetryReport {
         if self.window.duration_s == 0 || self.window.duration_s > MAX_WINDOW_SECONDS {
             return Err(ValidationError::BadNumber("window.duration_s"));
         }
+        if !(MIN_START_UNIX_S..=MAX_START_UNIX_S).contains(&self.window.start_unix_s) {
+            return Err(ValidationError::BadNumber("window.start_unix_s"));
+        }
+        self.hardware.validate()?;
         self.metrics.validate()
     }
 
@@ -445,8 +548,21 @@ impl TelemetryReport {
     /// # Errors
     /// [`ValidationError`].
     pub fn from_json(json: &str) -> Result<Self, ValidationError> {
-        let report: Self =
+        let value: serde_json::Value =
             serde_json::from_str(json).map_err(|e| ValidationError::Malformed(e.to_string()))?;
+        // Read the version first: a newer schema legitimately has fields this
+        // one denies, and must be reported as unsupported, not as malformed.
+        let version = value
+            .get("schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| ValidationError::Malformed("missing schema_version".into()))?;
+        if version != u64::from(TELEMETRY_SCHEMA_VERSION) {
+            return Err(ValidationError::UnsupportedSchema(
+                u32::try_from(version).unwrap_or(u32::MAX),
+            ));
+        }
+        let report: Self =
+            serde_json::from_value(value).map_err(|e| ValidationError::Malformed(e.to_string()))?;
         report.validate()?;
         Ok(report)
     }
@@ -463,7 +579,7 @@ mod tests {
             install_id: InstallId::from_random_bytes([1; 16]),
             deployment_id: AnonDeploymentId::from_random_bytes([2; 16]),
             window: Window {
-                start_unix_s: 1_700_000_000,
+                start_unix_s: 1_750_000_000,
                 duration_s: 300,
             },
             hardware: HardwareInfo {
@@ -576,11 +692,25 @@ mod tests {
             "10.0.0.1",
             "gpu-192.168.1.20",
             "::1",
+            "hf_abcdefghijklmnop",
+            "sk-proj-abc123",
+            "ghp_abcdefghijklmnop",
+            "github_pat_11ABCDEFG",
+            "meta/sk-abc123",
+            "0123456789abcdef0123456789abcdef",
             &"x".repeat(MAX_LABEL_LEN + 1),
         ] {
             assert!(Label::new(bad).is_err(), "{bad:?} must be rejected");
         }
-        for good in ["h100-80gb", "Q4_K_M", "0.11.0", "meta-llama/Llama-3.1-8B"] {
+        for good in [
+            "h100-80gb",
+            "Q4_K_M",
+            "0.11.0",
+            "0.6.3.1",
+            "1.2.3",
+            "meta-llama/Llama-3.1-8B",
+            "skylake",
+        ] {
             assert!(Label::new(good).is_ok(), "{good:?} must be accepted");
         }
         // Rejected during deserialization too, not just construction.
@@ -610,6 +740,57 @@ mod tests {
         r.schema_version = 99;
         assert_eq!(r.validate(), Err(ValidationError::UnsupportedSchema(99)));
         assert!(r.to_json().is_err(), "invalid reports are never serialized");
+    }
+
+    #[test]
+    fn hardware_and_plausibility_bounds() {
+        let mut r = report();
+        r.hardware.accelerator_count = 5_000;
+        assert!(r.validate().is_err());
+        let mut r = report();
+        r.hardware.vram_bytes = Some(u64::MAX);
+        assert!(r.validate().is_err());
+        let mut r = report();
+        r.hardware.cpu_cores = Some(10_000_000);
+        assert!(r.validate().is_err());
+        let mut r = report();
+        r.hardware.accelerator = None; // count 1 without a model
+        assert!(r.validate().is_err());
+        let mut r = report();
+        r.metrics.requests = u64::MAX;
+        assert!(r.validate().is_err());
+        let mut r = report();
+        r.metrics.output_tokens_per_s = 1e12;
+        assert!(r.validate().is_err());
+        let mut r = report();
+        r.metrics.latency_e2e_ms = Percentiles::new(1.0, 2.0, 1e12);
+        assert!(r.validate().is_err());
+        let mut r = report();
+        r.metrics.cost_per_hour_eur = Some(1e12);
+        assert!(r.validate().is_err());
+        let mut r = report();
+        r.window.start_unix_s = 0;
+        assert!(r.validate().is_err());
+        let mut r = report();
+        r.window.start_unix_s = u64::MAX;
+        assert!(r.validate().is_err());
+    }
+
+    #[test]
+    fn newer_schema_is_unsupported_not_malformed() {
+        let mut v = serde_json::to_value(report()).unwrap();
+        v["schema_version"] = 2.into();
+        v["a_field_from_the_future"] = 1.into();
+        assert_eq!(
+            TelemetryReport::from_json(&v.to_string()),
+            Err(ValidationError::UnsupportedSchema(2))
+        );
+        let mut v = serde_json::to_value(report()).unwrap();
+        v.as_object_mut().unwrap().remove("schema_version");
+        assert!(matches!(
+            TelemetryReport::from_json(&v.to_string()),
+            Err(ValidationError::Malformed(_))
+        ));
     }
 
     #[test]

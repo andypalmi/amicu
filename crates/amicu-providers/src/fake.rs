@@ -248,6 +248,12 @@ impl Provider for FakeProvider {
             .await?;
 
         let mut state = self.lock();
+        // Idempotent: a retried provision adopts the instance already created
+        // under this identity instead of duplicating it.
+        if let Some(existing) = crate::rest_lifecycle::adopt_in_memory(&state.instances, &prepared)?
+        {
+            return Ok(existing);
+        }
         state.counter += 1;
         let id = format!("{}-instance-{}", self.id, state.counter);
 
@@ -307,21 +313,31 @@ impl Provider for FakeProvider {
             .await?;
 
         let mut state = self.lock();
-        // Idempotent: an unknown instance is already gone.
-        let Some(instance) = state.instances.get_mut(&handle.id) else {
-            return Ok(TeardownOutcome::ConfirmedGone);
-        };
-        instance.state = ProvisioningState::Terminated {
-            detail: "fake instance torn down".into(),
-        };
-        let entry = state.history.entry(handle.id.clone()).or_default();
-        entry.push(ProvisioningState::Stopping {
-            detail: "fake instance stopping".into(),
-        });
-        entry.push(ProvisioningState::Terminated {
-            detail: "fake instance torn down".into(),
-        });
-        state.teardowns.push(handle.id.clone());
+        let keys = crate::rest_lifecycle::matching_keys(&state.instances, handle);
+        // An in-memory simulator that has never seen the record cannot vouch
+        // that the resource is gone (its memory may simply have been lost).
+        if keys.is_empty() {
+            return Ok(TeardownOutcome::Unconfirmed {
+                reason: "instance unknown to this simulator; absence cannot be confirmed".into(),
+            });
+        }
+        for key in keys {
+            let instance = state.instances.get_mut(&key).expect("key just matched");
+            if matches!(instance.state, ProvisioningState::Terminated { .. }) {
+                continue;
+            }
+            instance.state = ProvisioningState::Terminated {
+                detail: "fake instance torn down".into(),
+            };
+            let entry = state.history.entry(key.clone()).or_default();
+            entry.push(ProvisioningState::Stopping {
+                detail: "fake instance stopping".into(),
+            });
+            entry.push(ProvisioningState::Terminated {
+                detail: "fake instance torn down".into(),
+            });
+            state.teardowns.push(key);
+        }
         Ok(TeardownOutcome::ConfirmedGone)
     }
 }
@@ -606,7 +622,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn teardown_unknown_instance_is_confirmed_gone() {
+    async fn teardown_unknown_instance_is_unconfirmed() {
         let p = provider();
         let mut phantom = ProvisioningHandle::prepared(
             AdapterId::new("fake-cloud"),
@@ -614,9 +630,9 @@ mod tests {
             ResourceIdentity::new("d", "p"),
         );
         phantom.id = "ghost".into();
-        // Idempotent: an unknown instance is already gone.
+        // An unknown instance is never reported as confirmed gone.
         let outcome = p.teardown(&phantom, &no_creds()).await.unwrap();
-        assert_eq!(outcome, TeardownOutcome::ConfirmedGone);
+        assert!(matches!(outcome, TeardownOutcome::Unconfirmed { .. }));
     }
 
     #[tokio::test]

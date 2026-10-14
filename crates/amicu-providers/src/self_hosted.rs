@@ -116,6 +116,10 @@ pub struct DeclaredHost {
     user: String,
     /// SSH TCP port.
     ssh_port: u16,
+    /// Operator-declared host-key fingerprint (`SHA256:...`). When set it is
+    /// copied into every stop record at `prepare`, so teardown can verify the
+    /// machine even if the process died before the first connection.
+    host_key: Option<String>,
 }
 
 impl DeclaredHost {
@@ -134,7 +138,17 @@ impl DeclaredHost {
             address: None,
             user: "amicu".into(),
             ssh_port: 22,
+            host_key: None,
         }
+    }
+
+    /// Declare the host's SSH host-key fingerprint (`SHA256:...`) so it is pinned
+    /// in stop records from `prepare` on. Without it the key is pinned on first
+    /// use at `provision` (see amicu-planning#70).
+    #[must_use]
+    pub fn with_host_key(mut self, fingerprint: impl Into<String>) -> Self {
+        self.host_key = Some(fingerprint.into());
+        self
     }
 
     /// Declare the host's SSH address and login user. The address defaults to the
@@ -156,7 +170,11 @@ impl DeclaredHost {
     /// The SSH target for this host: its address (or id) and login user/port.
     fn ssh_target(&self) -> SshTarget {
         let address = self.address.clone().unwrap_or_else(|| self.id.clone());
-        SshTarget::new(address, self.user.clone()).with_port(self.ssh_port)
+        let target = SshTarget::new(address, self.user.clone()).with_port(self.ssh_port);
+        match &self.host_key {
+            Some(key) => target.with_pinned_host_key(key.clone()),
+            None => target,
+        }
     }
 
     /// Declare the host's accelerator.
@@ -556,17 +574,7 @@ impl Provider for SelfHostedProvider {
         request: &ProvisionRequest,
         identity: ResourceIdentity,
     ) -> Result<ProvisioningHandle, AdapterError> {
-        if !self.has_offering(&request.offering_id) {
-            return Err(AdapterError::from_kind(ProviderError::UnknownOffering {
-                offering: request.offering_id.clone(),
-            }));
-        }
-        // The offering and region must correspond to a declared host.
-        if !self.offering_serves_region(&request.offering_id, &request.region) {
-            return Err(AdapterError::from_kind(ProviderError::UnknownRegion {
-                region: request.region.clone(),
-            }));
-        }
+        self.validate_offering(&request.offering_id, &request.region)?;
         let target = self
             .host_for(&request.offering_id)
             .ok_or_else(|| {
@@ -578,11 +586,18 @@ impl Provider for SelfHostedProvider {
         // Everything needed to reach the host again lives in the record, so
         // teardown never depends on the adapter's declared-host config.
         let mut record = ProvisioningHandle::prepared(self.id.clone(), request, identity);
+        record.scope = Some(format!(
+            "{PROVIDER_ID}|{}||{}:{}",
+            record.region, target.host, target.port
+        ));
         record.resources.insert("ssh_host".into(), target.host);
         record.resources.insert("ssh_user".into(), target.user);
         record
             .resources
             .insert("ssh_port".into(), target.port.to_string());
+        if let Some(fingerprint) = target.pinned_host_key {
+            record.resources.insert("ssh_host_key".into(), fingerprint);
+        }
         Ok(record)
     }
 
@@ -591,15 +606,38 @@ impl Provider for SelfHostedProvider {
         prepared: ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningHandle, AdapterError> {
+        self.validate_offering(&prepared.offering_id, &prepared.region)?;
         if prepared.identity.name.is_empty() {
             return Err(AdapterError::from_kind(ProviderError::Backend {
                 detail: "record has no resource identity".into(),
             }));
         }
+        // The record's target must be the declared host for this offering: a
+        // persisted (hence untrusted) record must not redirect provisioning to
+        // an arbitrary machine.
+        let declared = self
+            .host_for(&prepared.offering_id)
+            .ok_or_else(|| {
+                AdapterError::from_kind(ProviderError::UnknownOffering {
+                    offering: prepared.offering_id.clone(),
+                })
+            })?
+            .ssh_target();
+        let (target, _) = self.target_for(&prepared)?;
+        if (target.host.as_str(), target.user.as_str(), target.port)
+            != (
+                declared.host.as_str(),
+                declared.user.as_str(),
+                declared.port,
+            )
+        {
+            return Err(AdapterError::from_kind(ProviderError::Backend {
+                detail: "stop record's SSH target does not match the declared host".into(),
+            }));
+        }
         let key = self
             .resolve_key(resolver, prepared.credentials.as_ref())
             .await?;
-        let target = target_of(&prepared)?;
 
         // Prepare/register the declared host over SSH. The host agent keys the
         // registration by `--name` and is idempotent on it (adopts an existing
@@ -615,6 +653,7 @@ impl Provider for SelfHostedProvider {
             .run(&target, &command, &key)
             .await
             .map_err(|e| transport_error(&e))?;
+        check_pin(&target, &output)?;
         if !output.is_success() {
             return Err(AdapterError::from_kind(ProviderError::Backend {
                 detail: format!(
@@ -630,13 +669,21 @@ impl Provider for SelfHostedProvider {
                 detail: "self-hosted host agent did not report an instance id".into(),
             }));
         }
-        Ok(prepared.completed(
+        let mut record = prepared.completed(
             "agent_id",
             id,
             ProvisioningState::Ready {
                 detail: "host ready".into(),
             },
-        ))
+        );
+        // Trust on first use: pin the host key seen at provision so teardown can
+        // later require the same machine before believing it (#70).
+        if target.pinned_host_key.is_none()
+            && let Some(fingerprint) = output.host_key
+        {
+            record.resources.insert("ssh_host_key".into(), fingerprint);
+        }
+        Ok(record)
     }
 
     async fn status(
@@ -647,12 +694,13 @@ impl Provider for SelfHostedProvider {
         let key = self
             .resolve_key(resolver, handle.credentials.as_ref())
             .await?;
-        let target = target_of(handle)?;
+        let (target, _) = self.target_for(handle)?;
         let output = self
             .transport
             .run(&target, &agent_command("status", handle), &key)
             .await
             .map_err(|e| transport_error(&e))?;
+        check_pin(&target, &output)?;
         if !output.is_success() {
             return Err(command_error(&output, &handle.id));
         }
@@ -667,7 +715,7 @@ impl Provider for SelfHostedProvider {
         let key = self
             .resolve_key(resolver, handle.credentials.as_ref())
             .await?;
-        let target = target_of(handle)?;
+        let (target, _) = self.target_for(handle)?;
         if !handle.has_resource_id() && handle.identity.name.is_empty() {
             return Ok(TeardownOutcome::Unconfirmed {
                 reason: "record has neither an agent id nor an identity".into(),
@@ -678,6 +726,7 @@ impl Provider for SelfHostedProvider {
             .run(&target, &agent_command("teardown", handle), &key)
             .await
             .map_err(|e| transport_error(&e))?;
+        check_pin(&target, &output)?;
         // "Not found" means already gone (idempotent); any other failure is an
         // error and the record stays.
         if !output.is_success() && output.exit_status != EXIT_NOT_FOUND {
@@ -689,45 +738,103 @@ impl Provider for SelfHostedProvider {
             .run(&target, &agent_command("status", handle), &key)
             .await
             .map_err(|e| transport_error(&e))?;
-        if check.exit_status == EXIT_NOT_FOUND {
-            return Ok(TeardownOutcome::ConfirmedGone);
-        }
-        if check.is_success() {
-            if let ProvisioningState::Terminated { .. } = map_status(&check.stdout) {
-                return Ok(TeardownOutcome::ConfirmedGone);
-            }
+        check_pin(&target, &check)?;
+        let gone = if check.exit_status == EXIT_NOT_FOUND {
+            true
+        } else if check.is_success() {
+            matches!(
+                map_status(&check.stdout),
+                ProvisioningState::Terminated { .. }
+            )
+        } else {
+            return Err(command_error(&check, &handle.id));
+        };
+        if !gone {
             return Ok(TeardownOutcome::Unconfirmed {
                 reason: "host agent still reports the host after teardown".into(),
             });
         }
-        Err(command_error(&check, &handle.id))
+        // The host's word is only believed when it is provably the recorded
+        // machine: a pinned host key that the confirming exchange presented.
+        // Until host-key verification exists (#70), a record without a pin can
+        // never reach ConfirmedGone.
+        match (&target.pinned_host_key, &check.host_key) {
+            (Some(pinned), Some(seen)) if pinned == seen => Ok(TeardownOutcome::ConfirmedGone),
+            (None, _) => Ok(TeardownOutcome::Unconfirmed {
+                reason: "host key was never pinned; the host's report of absence is unverified \
+                         (amicu-planning#70)"
+                    .into(),
+            }),
+            _ => Ok(TeardownOutcome::Unconfirmed {
+                reason: "host key was not observed on the confirming exchange".into(),
+            }),
+        }
     }
 }
 
-/// The SSH target recorded in the stop record (never the adapter's config).
-fn target_of(handle: &ProvisioningHandle) -> Result<SshTarget, AdapterError> {
-    let missing = |what: &str| {
-        AdapterError::from_kind(ProviderError::Backend {
-            detail: format!("stop record is missing {what}"),
-        })
-    };
-    let host = handle
-        .resources
-        .get("ssh_host")
-        .ok_or_else(|| missing("ssh_host"))?;
-    let user = handle
-        .resources
-        .get("ssh_user")
-        .ok_or_else(|| missing("ssh_user"))?;
-    let mut target = SshTarget::new(host.clone(), user.clone());
-    if let Some(port) = handle.resources.get("ssh_port") {
-        target = target.with_port(port.parse().map_err(|_| missing("a valid ssh_port"))?);
+impl SelfHostedProvider {
+    /// Whether the offering is declared and sold in `region`.
+    fn validate_offering(&self, offering_id: &str, region: &str) -> Result<(), AdapterError> {
+        if !self.has_offering(offering_id) {
+            return Err(AdapterError::from_kind(ProviderError::UnknownOffering {
+                offering: offering_id.to_string(),
+            }));
+        }
+        if !self.offering_serves_region(offering_id, region) {
+            return Err(AdapterError::from_kind(ProviderError::UnknownRegion {
+                region: region.to_string(),
+            }));
+        }
+        Ok(())
     }
-    Ok(target)
+
+    /// The SSH target for a record: its own recorded target (with the pinned
+    /// host key), or, for a legacy record that predates recorded targets, the
+    /// declared host for its offering (pinned only if the operator declared a host key). The flag is `true` for the
+    /// legacy fallback.
+    fn target_for(&self, handle: &ProvisioningHandle) -> Result<(SshTarget, bool), AdapterError> {
+        if let (Some(host), Some(user)) = (
+            handle.resources.get("ssh_host"),
+            handle.resources.get("ssh_user"),
+        ) {
+            let mut target = SshTarget::new(host.clone(), user.clone());
+            if let Some(port) = handle.resources.get("ssh_port") {
+                target = target.with_port(port.parse().map_err(|_| {
+                    AdapterError::from_kind(ProviderError::Backend {
+                        detail: "stop record has an invalid ssh_port".into(),
+                    })
+                })?);
+            }
+            if let Some(fingerprint) = handle.resources.get("ssh_host_key") {
+                target = target.with_pinned_host_key(fingerprint.clone());
+            }
+            return Ok((target, false));
+        }
+        let host = self.host_for(&handle.offering_id).ok_or_else(|| {
+            AdapterError::from_kind(ProviderError::UnknownInstance {
+                id: handle.id.clone(),
+            })
+        })?;
+        Ok((host.ssh_target(), true))
+    }
 }
 
-/// A host-agent command addressing the record's agent id, or its deterministic
-/// name when the id was never recorded.
+/// A transport that reports the host key must report the pinned one: the real
+/// transport already refuses a mismatch at connect time, this also covers
+/// transports that only report it.
+fn check_pin(target: &SshTarget, output: &CommandOutput) -> Result<(), AdapterError> {
+    if let (Some(pinned), Some(seen)) = (&target.pinned_host_key, &output.host_key)
+        && pinned != seen
+    {
+        return Err(AdapterError::from_kind(ProviderError::Backend {
+            detail: "SSH host key does not match the key pinned in the stop record".into(),
+        }));
+    }
+    Ok(())
+}
+
+/// A host-agent command addressing the record's agent id, or its identity name
+/// when the id was never recorded.
 fn agent_command(verb: &str, handle: &ProvisioningHandle) -> String {
     if handle.has_resource_id() {
         format!("{HOST_AGENT} {verb} {}", sh_quote(&handle.id))

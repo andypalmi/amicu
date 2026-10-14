@@ -23,8 +23,31 @@ macro_rules! random_id {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*
         #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-        #[serde(transparent)]
+        #[serde(try_from = "Uuid", into = "Uuid")]
         pub struct $name(Uuid);
+
+        impl TryFrom<Uuid> for $name {
+            type Error = InvalidId;
+
+            /// Only random (version 4), non-nil UUIDs are valid ids: anything
+            /// else (a name-derived v5, a time-based v1 carrying a MAC, nil)
+            /// could encode identity.
+            fn try_from(value: Uuid) -> Result<Self, InvalidId> {
+                if value.is_nil() {
+                    Err(InvalidId("nil id"))
+                } else if value.get_version() != Some(uuid::Version::Random) {
+                    Err(InvalidId("id is not a random (v4) UUID"))
+                } else {
+                    Ok(Self(value))
+                }
+            }
+        }
+
+        impl From<$name> for Uuid {
+            fn from(id: $name) -> Uuid {
+                id.0
+            }
+        }
 
         impl $name {
             /// A fresh id from the operating system's random source.
@@ -33,11 +56,11 @@ macro_rules! random_id {
                 Self(Uuid::new_v4())
             }
 
-            /// An id from caller-supplied random bytes (for tests and for
-            /// callers with their own entropy source). The bytes are used as
-            /// is, apart from the UUIDv4 version bits.
+            /// An id from fixed bytes, apart from the UUIDv4 version bits.
+            /// Test-only: production ids come from [`generate`](Self::generate).
+            #[cfg(test)]
             #[must_use]
-            pub fn from_random_bytes(bytes: [u8; 16]) -> Self {
+            pub(crate) fn from_random_bytes(bytes: [u8; 16]) -> Self {
                 Self(uuid::Builder::from_random_bytes(bytes).into_uuid())
             }
 
@@ -70,6 +93,18 @@ random_id!(
     /// Anonymous, random id of one deployment; never the deployment's name.
     AnonDeploymentId
 );
+
+/// A rejected id value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidId(pub &'static str);
+
+impl fmt::Display for InvalidId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for InvalidId {}
 
 /// A persistence failure (opaque, secret-free).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -279,6 +314,16 @@ mod tests {
             InstallId::from_random_bytes([7; 16]),
             InstallId::from_random_bytes([7; 16])
         );
+    }
+
+    #[test]
+    fn only_random_non_nil_uuids_are_accepted() {
+        let nil = format!("\"{}\"", Uuid::nil());
+        assert!(serde_json::from_str::<InstallId>(&nil).is_err());
+        let v5 = "\"6ba7b810-9dad-11d1-80b4-00c04fd430c8\"".to_string(); // a v1 (time/MAC-based) UUID
+        assert!(serde_json::from_str::<AnonDeploymentId>(&v5).is_err());
+        let v4 = format!("\"{}\"", Uuid::new_v4());
+        assert!(serde_json::from_str::<InstallId>(&v4).is_ok());
     }
 
     #[test]

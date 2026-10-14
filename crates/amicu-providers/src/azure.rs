@@ -437,6 +437,12 @@ impl Provider for AzureProvider {
             .await?;
 
         let mut state = self.lock();
+        // Idempotent: a retried provision adopts the instance already created
+        // under this identity instead of duplicating it.
+        if let Some(existing) = crate::rest_lifecycle::adopt_in_memory(&state.instances, &prepared)?
+        {
+            return Ok(existing);
+        }
         state.counter += 1;
         let id = format!("azure-{}-{}", prepared.region, state.counter);
 
@@ -483,20 +489,30 @@ impl Provider for AzureProvider {
             .await?;
 
         let mut state = self.lock();
-        // Idempotent: an unknown instance is already gone.
-        let Some(instance) = state.instances.get_mut(&handle.id) else {
-            return Ok(TeardownOutcome::ConfirmedGone);
-        };
-        instance.state = ProvisioningState::Terminated {
-            detail: "instance terminated".into(),
-        };
-        let entry = state.history.entry(handle.id.clone()).or_default();
-        entry.push(ProvisioningState::Stopping {
-            detail: "instance stopping".into(),
-        });
-        entry.push(ProvisioningState::Terminated {
-            detail: "instance terminated".into(),
-        });
+        let keys = crate::rest_lifecycle::matching_keys(&state.instances, handle);
+        // An in-memory simulator that has never seen the record cannot vouch
+        // that the resource is gone (its memory may simply have been lost).
+        if keys.is_empty() {
+            return Ok(TeardownOutcome::Unconfirmed {
+                reason: "instance unknown to this simulator; absence cannot be confirmed".into(),
+            });
+        }
+        for key in keys {
+            let instance = state.instances.get_mut(&key).expect("key just matched");
+            if matches!(instance.state, ProvisioningState::Terminated { .. }) {
+                continue;
+            }
+            instance.state = ProvisioningState::Terminated {
+                detail: "instance terminated".into(),
+            };
+            let entry = state.history.entry(key.clone()).or_default();
+            entry.push(ProvisioningState::Stopping {
+                detail: "instance stopping".into(),
+            });
+            entry.push(ProvisioningState::Terminated {
+                detail: "instance terminated".into(),
+            });
+        }
         Ok(TeardownOutcome::ConfirmedGone)
     }
 }

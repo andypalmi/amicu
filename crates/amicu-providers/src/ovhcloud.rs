@@ -49,7 +49,7 @@ use crate::provider::{
     Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
     ResourceIdentity, TeardownOutcome,
 };
-use crate::rest_lifecycle::{self, ServerApi};
+use crate::rest_lifecycle::{self, Found, ServerApi};
 use crate::transport::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport, TransportError};
 
 /// The adapter identity OVHcloud registers under.
@@ -232,14 +232,28 @@ struct CreateInstanceRequest<'a> {
     region: &'a str,
 }
 
+/// The subset of an OVH project object the adapter consumes.
+#[derive(Deserialize)]
+struct ProjectResponse {
+    /// The account-side project id, when reported.
+    #[serde(default)]
+    project_id: Option<String>,
+}
+
 /// The subset of an OVH instance object the adapter consumes.
 #[derive(Deserialize)]
 struct InstanceResponse {
     /// Provider-assigned instance id.
     id: String,
-    /// The instance name (carries the deterministic identity).
+    /// The instance name (carries the identity).
     #[serde(default)]
     name: Option<String>,
+    /// The flavor (the offering), when listed.
+    #[serde(rename = "flavorId", default)]
+    flavor_id: Option<String>,
+    /// The region, when listed.
+    #[serde(default)]
+    region: Option<String>,
     /// Lifecycle status, e.g. `"ACTIVE"`.
     status: Option<String>,
 }
@@ -275,8 +289,29 @@ fn map_instance_state(status: Option<&str>) -> ProvisioningState {
 
 /// The instance path under the placeholder project, with an optional `/{id}`
 /// suffix.
-fn instance_path(suffix: &str) -> String {
-    format!("/cloud/project/{SERVICE_NAME}/instance{suffix}")
+fn instance_path(project: &str, suffix: &str) -> String {
+    format!("/cloud/project/{project}/instance{suffix}")
+}
+
+/// The cloud project the record's instance lives in. Taken from the record,
+/// never from adapter config, and validated before it enters a URL.
+fn project_of(handle: &ProvisioningHandle) -> Result<&str, AdapterError> {
+    let project = handle
+        .resources
+        .get("project")
+        .map(String::as_str)
+        .ok_or_else(|| rest_lifecycle::refuse("stop record has no OVHcloud project"))?;
+    if project.is_empty()
+        || project.len() > 64
+        || !project
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        return Err(rest_lifecycle::refuse(
+            "stop record has an invalid OVHcloud project",
+        ));
+    }
+    Ok(project)
 }
 
 /// Fold a transport failure (the exchange never completed) into a retryable
@@ -549,43 +584,39 @@ impl Provider for OvhCloudProvider {
         identity: ResourceIdentity,
     ) -> Result<ProvisioningHandle, AdapterError> {
         self.validate(&request.offering_id, &request.region)?;
-        Ok(ProvisioningHandle::prepared(
-            self.id.clone(),
-            request,
-            identity,
-        ))
+        let mut record = ProvisioningHandle::prepared(self.id.clone(), request, identity);
+        // The project is part of the record: teardown must hit the same project
+        // and must never treat an unknown-project 404 as "gone".
+        record
+            .resources
+            .insert("project".into(), SERVICE_NAME.to_string());
+        record.scope = Some(self.scope_of(&record)?);
+        Ok(record)
     }
 
     async fn provision(
         &self,
-        prepared: ProvisioningHandle,
+        mut prepared: ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningHandle, AdapterError> {
         self.validate(&prepared.offering_id, &prepared.region)?;
         if prepared.identity.name.is_empty() {
-            return Err(AdapterError::from_kind(ProviderError::Backend {
-                detail: "record has no resource identity".into(),
-            }));
+            return Err(rest_lifecycle::refuse("record has no resource identity"));
         }
         let token = self
             .resolve_token(resolver, prepared.credentials.as_ref())
             .await?;
+        if let Some(account) =
+            rest_lifecycle::guard_scope(self, &prepared, token.as_deref()).await?
+        {
+            prepared.resources.insert("account_id".into(), account);
+        }
 
         // Adopt an instance already created under this identity (retry after a
         // crash) instead of creating a duplicate.
-        if let Some(id) = self
-            .list_by_identity(&prepared, token.as_deref())
-            .await?
-            .into_iter()
-            .next()
-        {
-            return Ok(prepared.completed(
-                "instance_id",
-                id,
-                ProvisioningState::Provisioning {
-                    detail: "adopted existing instance".into(),
-                },
-            ));
+        if let Some(found) = rest_lifecycle::adopt(self, &prepared, token.as_deref()).await? {
+            let state = map_instance_state(found.state.as_deref());
+            return Ok(prepared.completed("instance_id", found.id, state));
         }
 
         let create = CreateInstanceRequest {
@@ -598,7 +629,7 @@ impl Provider for OvhCloudProvider {
                 detail: "failed to encode OVHcloud create request".into(),
             })
         })?;
-        let path = instance_path("");
+        let path = instance_path(project_of(&prepared)?, "");
         let http_request = self
             .build_request(HttpMethod::Post, &path, token.as_deref())
             .with_json(body);
@@ -639,10 +670,11 @@ impl Provider for OvhCloudProvider {
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningState, AdapterError> {
+        rest_lifecycle::check_record(handle)?;
         let token = self
             .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
-        let path = instance_path(&format!("/{}", handle.id));
+        let path = instance_path(project_of(handle)?, &format!("/{}", handle.id));
         let request = self.build_request(HttpMethod::Get, &path, token.as_deref());
         let response = self
             .transport
@@ -674,27 +706,59 @@ impl Provider for OvhCloudProvider {
 
 #[async_trait]
 impl ServerApi for OvhCloudProvider {
-    async fn list_by_identity(
+    fn scope_of(&self, handle: &ProvisioningHandle) -> Result<String, AdapterError> {
+        Ok(format!(
+            "{PROVIDER_ID}|{}||{}",
+            handle.region,
+            project_of(handle)?
+        ))
+    }
+
+    async fn verify_scope(
         &self,
         handle: &ProvisioningHandle,
         token: Option<&str>,
-    ) -> Result<Vec<String>, AdapterError> {
-        let name = handle.identity.name.as_str();
-        if name.is_empty() {
-            return Ok(Vec::new());
-        }
-        let path = instance_path(&format!("?region={}", handle.region));
+    ) -> Result<Option<String>, AdapterError> {
+        // The project itself must exist for this credential: an unknown-project
+        // 404 means wrong scope, not "instance gone".
+        let path = format!("/cloud/project/{}", project_of(handle)?);
         let request = self.build_request(HttpMethod::Get, &path, token);
         let response = self
             .transport
             .execute(request)
             .await
             .map_err(|e| transport_error(&e))?;
-        if response.status == 404 {
+        if !response.is_success() {
+            return Err(lifecycle_error(response.status, "project"));
+        }
+        let project: ProjectResponse = response.json().map_err(|_| {
+            AdapterError::from_kind(ProviderError::Backend {
+                detail: "malformed OVHcloud project response".into(),
+            })
+        })?;
+        Ok(project.project_id)
+    }
+
+    async fn list_by_identity(
+        &self,
+        handle: &ProvisioningHandle,
+        token: Option<&str>,
+    ) -> Result<Vec<Found>, AdapterError> {
+        let name = handle.identity.name.as_str();
+        if name.is_empty() {
             return Ok(Vec::new());
         }
+        // The instance endpoint returns the full set in one response.
+        let path = instance_path(project_of(handle)?, &format!("?region={}", handle.region));
+        let request = self.build_request(HttpMethod::Get, &path, token);
+        let response = self
+            .transport
+            .execute(request)
+            .await
+            .map_err(|e| transport_error(&e))?;
         if !response.is_success() {
-            return Err(lifecycle_error(response.status, name));
+            // A collection-level 404 is a scope error, never "no instances".
+            return Err(lifecycle_error(response.status, "instances"));
         }
         let list: Vec<InstanceResponse> = response.json().map_err(|_| {
             AdapterError::from_kind(ProviderError::Backend {
@@ -704,17 +768,22 @@ impl ServerApi for OvhCloudProvider {
         Ok(list
             .into_iter()
             .filter(|i| i.name.as_deref() == Some(name))
-            .map(|i| i.id)
+            .map(|i| Found {
+                id: i.id,
+                offering: i.flavor_id,
+                region: i.region,
+                state: i.status,
+            })
             .collect())
     }
 
     async fn delete(
         &self,
-        _handle: &ProvisioningHandle,
+        handle: &ProvisioningHandle,
         id: &str,
         token: Option<&str>,
     ) -> Result<(), AdapterError> {
-        let path = instance_path(&format!("/{id}"));
+        let path = instance_path(project_of(handle)?, &format!("/{id}"));
         let request = self.build_request(HttpMethod::Delete, &path, token);
         let response = self
             .transport
@@ -729,11 +798,11 @@ impl ServerApi for OvhCloudProvider {
 
     async fn exists(
         &self,
-        _handle: &ProvisioningHandle,
+        handle: &ProvisioningHandle,
         id: &str,
         token: Option<&str>,
     ) -> Result<bool, AdapterError> {
-        let path = instance_path(&format!("/{id}"));
+        let path = instance_path(project_of(handle)?, &format!("/{id}"));
         let request = self.build_request(HttpMethod::Get, &path, token);
         let response = self
             .transport
@@ -792,6 +861,22 @@ mod tests {
 
     fn no_creds() -> TestResolver {
         TestResolver::default()
+    }
+
+    /// A mock that already answers the project probe and an empty identity
+    /// listing, as a project with no instances would.
+    fn scoped_mock() -> MockTransport {
+        MockTransport::default()
+            .on(
+                HttpMethod::Get,
+                "/cloud/project/amicu-project",
+                HttpResponse::new(200, br#"{"project_id":"proj-1"}"#.to_vec()),
+            )
+            .on_contains(
+                HttpMethod::Get,
+                "/instance?region=",
+                HttpResponse::new(200, b"[]".to_vec()),
+            )
     }
 
     /// An OVHcloud provider whose transport is `mock` and whose base URL points
@@ -890,7 +975,7 @@ mod tests {
     #[tokio::test]
     async fn provision_in_eu_region_then_teardown() {
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(HttpMethod::Post, "/instance", created("ovh-1"))
                 .on(
                     HttpMethod::Get,
@@ -997,7 +1082,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_401_to_credentials_rejected() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/instance",
             HttpResponse::new(403, b"forbidden".to_vec()),
@@ -1016,7 +1101,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_404_to_unknown_offering() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/instance",
             HttpResponse::new(404, b"no such flavor".to_vec()),
@@ -1031,7 +1116,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_429_to_capacity_unavailable() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/instance",
             HttpResponse::new(429, b"quota".to_vec()),
@@ -1046,7 +1131,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_500_to_retryable_backend() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/instance",
             HttpResponse::new(500, b"boom".to_vec()),
@@ -1061,7 +1146,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_malformed_success_body_is_backend_error() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/instance",
             HttpResponse::new(201, b"not json".to_vec()),
@@ -1076,7 +1161,7 @@ mod tests {
     #[tokio::test]
     async fn status_maps_404_to_unknown_instance() {
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(HttpMethod::Post, "/instance", created("ovh-2"))
                 .on(
                     HttpMethod::Get,
@@ -1100,7 +1185,7 @@ mod tests {
     #[tokio::test]
     async fn teardown_404_is_confirmed_gone() {
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(HttpMethod::Post, "/instance", created("ovh-2"))
                 .on(
                     HttpMethod::Delete,
@@ -1120,7 +1205,7 @@ mod tests {
 
     #[tokio::test]
     async fn transport_failure_maps_to_retryable_backend() {
-        let mock = Arc::new(MockTransport::default().on_error(
+        let mock = Arc::new(scoped_mock().on_error(
             HttpMethod::Post,
             "/instance",
             TransportError::Timeout,
@@ -1137,8 +1222,7 @@ mod tests {
     async fn credentials_never_leak_into_serialized_artifacts() {
         let secret_value = "leak-me-ovh-api-key";
         let resolver = TestResolver::default().with("ovh_api_key", secret_value);
-        let mock =
-            Arc::new(MockTransport::default().on(HttpMethod::Post, "/instance", created("ovh-3")));
+        let mock = Arc::new(scoped_mock().on(HttpMethod::Post, "/instance", created("ovh-3")));
         let p = mock_provider(mock.clone());
         let req = ProvisionRequest::new("gpu.a100.1x", "GRA")
             .with_credentials(SecretRef::new("ovh_api_key"));
@@ -1180,8 +1264,7 @@ mod tests {
 
     #[tokio::test]
     async fn discoverable_as_a_provider_trait_object() {
-        let mock =
-            Arc::new(MockTransport::default().on(HttpMethod::Post, "/instance", created("ovh-4")));
+        let mock = Arc::new(scoped_mock().on(HttpMethod::Post, "/instance", created("ovh-4")));
         let mut registry: Registry<dyn Provider> = Registry::new();
         registry.register(Arc::new(mock_provider(mock)));
         let found: Arc<dyn Provider> = registry.get(&AdapterId::new("ovhcloud")).unwrap();

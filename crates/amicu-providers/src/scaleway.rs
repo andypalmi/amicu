@@ -48,7 +48,7 @@ use crate::provider::{
     Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
     ResourceIdentity, TeardownOutcome,
 };
-use crate::rest_lifecycle::{self, ServerApi};
+use crate::rest_lifecycle::{self, Found, ServerApi};
 use crate::transport::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport, TransportError};
 
 /// The adapter identity Scaleway registers under.
@@ -179,6 +179,9 @@ struct ServerActionRequest {
     action: &'static str,
 }
 
+/// Page size for identity listings.
+const PER_PAGE: usize = 50;
+
 /// The Scaleway `{"servers":[...]}` list envelope.
 #[derive(Deserialize)]
 struct ServerList {
@@ -196,9 +199,12 @@ struct ServerEnvelope {
 struct ServerObject {
     /// Provider-assigned server id (a UUID).
     id: String,
-    /// The server name (carries the deterministic identity).
+    /// The server name (carries the identity).
     #[serde(default)]
     name: Option<String>,
+    /// The commercial type (the offering), when listed.
+    #[serde(default)]
+    commercial_type: Option<String>,
     /// Lifecycle state, e.g. `"running"`.
     state: Option<String>,
 }
@@ -541,6 +547,7 @@ impl Provider for ScalewayProvider {
         let zone = self.resolve_zone(&request.region, request.zone.as_deref());
         let mut record = ProvisioningHandle::prepared(self.id.clone(), request, identity);
         record.zone = Some(zone);
+        record.scope = Some(self.scope_of(&record)?);
         Ok(record)
     }
 
@@ -551,73 +558,65 @@ impl Provider for ScalewayProvider {
     ) -> Result<ProvisioningHandle, AdapterError> {
         self.validate(&prepared.offering_id, &prepared.region)?;
         if prepared.identity.name.is_empty() {
-            return Err(AdapterError::from_kind(ProviderError::Backend {
-                detail: "record has no resource identity".into(),
-            }));
+            return Err(rest_lifecycle::refuse("record has no resource identity"));
         }
-        let zone = prepared
-            .zone
-            .clone()
-            .unwrap_or_else(|| prepared.region.clone());
+        let zone = zone_of(&prepared)?.to_string();
         let token = self
             .resolve_token(resolver, prepared.credentials.as_ref())
             .await?;
+        rest_lifecycle::guard_scope(self, &prepared, token.as_deref()).await?;
 
         // Adopt a server already created under this identity (retry after a
-        // crash) instead of creating a duplicate.
-        if let Some(id) = self
-            .list_by_identity(&prepared, token.as_deref())
-            .await?
-            .into_iter()
-            .next()
-        {
-            return Ok(prepared.completed(
-                "server_id",
-                id,
-                ProvisioningState::Provisioning {
-                    detail: "adopted existing server".into(),
-                },
-            ));
-        }
+        // crash) instead of creating a duplicate. An adopted server may still be
+        // stopped (the crash can have happened before the boot action), so it is
+        // booted below unless it is already running or starting.
+        let server_id =
+            if let Some(found) = rest_lifecycle::adopt(self, &prepared, token.as_deref()).await? {
+                let running = matches!(found.state.as_deref(), Some("running" | "starting"));
+                if running {
+                    let state = map_server_state(found.state.as_deref());
+                    return Ok(prepared.completed("server_id", found.id, state));
+                }
+                found.id
+            } else {
+                let create = CreateServerRequest {
+                    name: prepared.identity.name.as_str(),
+                    commercial_type: prepared.offering_id.as_str(),
+                };
+                let body = serde_json::to_value(&create).map_err(|_| {
+                    AdapterError::from_kind(ProviderError::Backend {
+                        detail: "failed to encode Scaleway create request".into(),
+                    })
+                })?;
+                let servers_path = format!("/zones/{zone}/servers");
+                let create_request = self
+                    .build_request(HttpMethod::Post, &servers_path, token.as_deref())
+                    .with_json(body);
+                let response = self
+                    .transport
+                    .execute(create_request)
+                    .await
+                    .map_err(|e| transport_error(&e))?;
+                if !response.is_success() {
+                    return Err(create_error(
+                        response.status,
+                        &prepared.offering_id,
+                        &prepared.region,
+                    ));
+                }
+                let envelope: ServerEnvelope = response.json().map_err(|_| {
+                    AdapterError::from_kind(ProviderError::Backend {
+                        detail: "malformed Scaleway create response".into(),
+                    })
+                })?;
+                envelope.server.id
+            };
 
-        let create = CreateServerRequest {
-            name: prepared.identity.name.as_str(),
-            commercial_type: prepared.offering_id.as_str(),
-        };
-        let body = serde_json::to_value(&create).map_err(|_| {
-            AdapterError::from_kind(ProviderError::Backend {
-                detail: "failed to encode Scaleway create request".into(),
-            })
-        })?;
-        let servers_path = format!("/zones/{zone}/servers");
-        let create_request = self
-            .build_request(HttpMethod::Post, &servers_path, token.as_deref())
-            .with_json(body);
-        let response = self
-            .transport
-            .execute(create_request)
-            .await
-            .map_err(|e| transport_error(&e))?;
-        if !response.is_success() {
-            return Err(create_error(
-                response.status,
-                &prepared.offering_id,
-                &prepared.region,
-            ));
-        }
-        let envelope: ServerEnvelope = response.json().map_err(|_| {
-            AdapterError::from_kind(ProviderError::Backend {
-                detail: "malformed Scaleway create response".into(),
-            })
-        })?;
-        let server_id = envelope.server.id;
-        let state = map_server_state(envelope.server.state.as_deref());
-        // The id is now known: fold it into the record so a failure below
-        // still leaves the caller a stoppable record (the prepared one finds
-        // the server by identity regardless).
-        let record = prepared.completed("server_id", server_id.clone(), state);
-
-        // A freshly created Scaleway server is stopped; boot it explicitly.
+        // A freshly created Scaleway server is stopped; boot it explicitly. On
+        // failure there is no best-effort cleanup that swallows its result: the
+        // server is stopped via the caller's prepared record (identity lookup),
+        // whose teardown is confirmed, and a retried `provision` adopts and boots
+        // it.
         let action_body =
             serde_json::to_value(ServerActionRequest { action: "poweron" }).map_err(|_| {
                 AdapterError::from_kind(ProviderError::Backend {
@@ -634,12 +633,15 @@ impl Provider for ScalewayProvider {
             .await
             .map_err(|e| transport_error(&e))?;
         if !action_response.is_success() {
-            // No best-effort cleanup that swallows its result: the created
-            // server is stopped via the caller's prepared record (identity
-            // lookup), whose teardown is confirmed.
             return Err(lifecycle_error(action_response.status, &server_id));
         }
-        Ok(record)
+        Ok(prepared.completed(
+            "server_id",
+            server_id,
+            ProvisioningState::Provisioning {
+                detail: "instance booting".into(),
+            },
+        ))
     }
 
     async fn status(
@@ -647,10 +649,11 @@ impl Provider for ScalewayProvider {
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
     ) -> Result<ProvisioningState, AdapterError> {
+        rest_lifecycle::check_record(handle)?;
         let token = self
             .resolve_token(resolver, handle.credentials.as_ref())
             .await?;
-        let zone = handle.zone.as_deref().unwrap_or(&handle.region);
+        let zone = zone_of(handle)?;
         let path = format!("/zones/{zone}/servers/{}", handle.id);
         let request = self.build_request(HttpMethod::Get, &path, token.as_deref());
         let response = self
@@ -681,45 +684,105 @@ impl Provider for ScalewayProvider {
     }
 }
 
-fn zone_of(handle: &ProvisioningHandle) -> &str {
-    handle.zone.as_deref().unwrap_or(&handle.region)
+/// The zone the record lives in. There is deliberately no fallback to the
+/// region: a region is not a valid Instance API scope, and guessing it could make
+/// a wrong-scope 404 look like "gone".
+fn zone_of(handle: &ProvisioningHandle) -> Result<&str, AdapterError> {
+    let zone = handle
+        .zone
+        .as_deref()
+        .ok_or_else(|| rest_lifecycle::refuse("stop record has no Scaleway zone"))?;
+    if zone.is_empty()
+        || zone.len() > 32
+        || !zone
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(rest_lifecycle::refuse("stop record has an invalid zone"));
+    }
+    Ok(zone)
 }
 
 #[async_trait]
 impl ServerApi for ScalewayProvider {
-    async fn list_by_identity(
+    fn scope_of(&self, handle: &ProvisioningHandle) -> Result<String, AdapterError> {
+        Ok(format!(
+            "{PROVIDER_ID}|{}|{}|",
+            handle.region,
+            zone_of(handle)?
+        ))
+    }
+
+    async fn verify_scope(
         &self,
         handle: &ProvisioningHandle,
         token: Option<&str>,
-    ) -> Result<Vec<String>, AdapterError> {
-        let name = handle.identity.name.as_str();
-        if name.is_empty() {
-            return Ok(Vec::new());
-        }
-        let path = format!("/zones/{}/servers?name={name}", zone_of(handle));
+    ) -> Result<Option<String>, AdapterError> {
+        let path = format!("/zones/{}/servers?per_page=1", zone_of(handle)?);
         let request = self.build_request(HttpMethod::Get, &path, token);
         let response = self
             .transport
             .execute(request)
             .await
             .map_err(|e| transport_error(&e))?;
-        if response.status == 404 {
+        if !response.is_success() {
+            return Err(lifecycle_error(response.status, "servers"));
+        }
+        Ok(None)
+    }
+
+    async fn list_by_identity(
+        &self,
+        handle: &ProvisioningHandle,
+        token: Option<&str>,
+    ) -> Result<Vec<Found>, AdapterError> {
+        let name = handle.identity.name.as_str();
+        if name.is_empty() {
             return Ok(Vec::new());
         }
-        if !response.is_success() {
-            return Err(lifecycle_error(response.status, name));
+        let zone = zone_of(handle)?;
+        let mut out: Vec<Found> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        for page in 1..=rest_lifecycle::MAX_PAGES {
+            let path = format!("/zones/{zone}/servers?name={name}&page={page}&per_page={PER_PAGE}");
+            let request = self.build_request(HttpMethod::Get, &path, token);
+            let response = self
+                .transport
+                .execute(request)
+                .await
+                .map_err(|e| transport_error(&e))?;
+            if !response.is_success() {
+                // A collection-level 404 is a scope error, never "no servers".
+                return Err(lifecycle_error(response.status, "servers"));
+            }
+            let list: ServerList = response.json().map_err(|_| {
+                AdapterError::from_kind(ProviderError::Backend {
+                    detail: "malformed Scaleway list response".into(),
+                })
+            })?;
+            let returned = list.servers.len();
+            let mut fresh = 0;
+            for s in list.servers {
+                if seen.contains(&s.id) {
+                    continue;
+                }
+                fresh += 1;
+                seen.push(s.id.clone());
+                if s.name.as_deref() == Some(name) {
+                    out.push(Found {
+                        id: s.id,
+                        offering: s.commercial_type,
+                        // The zone is path-scoped, so region is implied.
+                        region: None,
+                        state: s.state,
+                    });
+                }
+            }
+            if returned < PER_PAGE || fresh == 0 {
+                break;
+            }
         }
-        let list: ServerList = response.json().map_err(|_| {
-            AdapterError::from_kind(ProviderError::Backend {
-                detail: "malformed Scaleway list response".into(),
-            })
-        })?;
-        Ok(list
-            .servers
-            .into_iter()
-            .filter(|s| s.name.as_deref() == Some(name))
-            .map(|s| s.id)
-            .collect())
+        Ok(out)
     }
 
     async fn delete(
@@ -728,7 +791,7 @@ impl ServerApi for ScalewayProvider {
         id: &str,
         token: Option<&str>,
     ) -> Result<(), AdapterError> {
-        let path = format!("/zones/{}/servers/{id}", zone_of(handle));
+        let path = format!("/zones/{}/servers/{id}", zone_of(handle)?);
         let request = self.build_request(HttpMethod::Delete, &path, token);
         let response = self
             .transport
@@ -747,7 +810,7 @@ impl ServerApi for ScalewayProvider {
         id: &str,
         token: Option<&str>,
     ) -> Result<bool, AdapterError> {
-        let path = format!("/zones/{}/servers/{id}", zone_of(handle));
+        let path = format!("/zones/{}/servers/{id}", zone_of(handle)?);
         let request = self.build_request(HttpMethod::Get, &path, token);
         let response = self
             .transport
@@ -806,6 +869,22 @@ mod tests {
 
     fn no_creds() -> TestResolver {
         TestResolver::default()
+    }
+
+    /// A mock that already answers the scope probe and an empty identity listing,
+    /// as a zone with no servers would.
+    fn scoped_mock() -> MockTransport {
+        MockTransport::default()
+            .on(
+                HttpMethod::Get,
+                "/servers?per_page=1",
+                HttpResponse::new(200, br#"{"servers":[]}"#.to_vec()),
+            )
+            .on_contains(
+                HttpMethod::Get,
+                "/servers?name=",
+                HttpResponse::new(200, br#"{"servers":[]}"#.to_vec()),
+            )
     }
 
     /// A Scaleway provider whose transport is `mock` and whose base URL points at
@@ -879,7 +958,7 @@ mod tests {
     #[tokio::test]
     async fn provision_in_eu_region_then_teardown() {
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(
                     HttpMethod::Post,
                     "/zones/fr-par-1/servers",
@@ -904,7 +983,10 @@ mod tests {
         let req = ProvisionRequest::new("gpu.l40s.1x", "fr-par");
 
         let handle = p.provision_request(&req, &no_creds()).await.unwrap();
-        assert!(handle.state.is_ready());
+        assert!(matches!(
+            handle.state,
+            ProvisioningState::Provisioning { .. }
+        ));
         assert_eq!(handle.id, "srv-1");
         assert_eq!(handle.provider, AdapterId::new("scaleway"));
 
@@ -990,7 +1072,7 @@ mod tests {
         // swallowed; the caller stops the server via its prepared record (see the
         // conformance harness).
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(
                     HttpMethod::Post,
                     "/zones/fr-par-1/servers",
@@ -1020,7 +1102,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_401_to_credentials_rejected() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/zones/fr-par-1/servers",
             HttpResponse::new(401, b"denied".to_vec()),
@@ -1039,7 +1121,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_404_to_unknown_offering() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/zones/fr-par-1/servers",
             HttpResponse::new(404, b"no such commercial_type".to_vec()),
@@ -1054,7 +1136,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_429_to_capacity_unavailable() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/zones/fr-par-1/servers",
             HttpResponse::new(429, b"too many requests".to_vec()),
@@ -1069,7 +1151,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_maps_500_to_retryable_backend() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/zones/fr-par-1/servers",
             HttpResponse::new(500, b"boom".to_vec()),
@@ -1084,7 +1166,7 @@ mod tests {
 
     #[tokio::test]
     async fn provision_malformed_success_body_is_backend_error() {
-        let mock = Arc::new(MockTransport::default().on(
+        let mock = Arc::new(scoped_mock().on(
             HttpMethod::Post,
             "/zones/fr-par-1/servers",
             HttpResponse::new(201, b"not json".to_vec()),
@@ -1099,7 +1181,7 @@ mod tests {
     #[tokio::test]
     async fn status_maps_404_to_unknown_instance() {
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(
                     HttpMethod::Post,
                     "/zones/fr-par-1/servers",
@@ -1128,7 +1210,7 @@ mod tests {
     #[tokio::test]
     async fn teardown_404_is_confirmed_gone() {
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(
                     HttpMethod::Post,
                     "/zones/fr-par-1/servers",
@@ -1153,7 +1235,7 @@ mod tests {
 
     #[tokio::test]
     async fn transport_failure_maps_to_retryable_backend() {
-        let mock = Arc::new(MockTransport::default().on_error(
+        let mock = Arc::new(scoped_mock().on_error(
             HttpMethod::Post,
             "/zones/fr-par-1/servers",
             TransportError::Timeout,
@@ -1171,7 +1253,7 @@ mod tests {
         let secret_value = "leak-me-scaleway-secret-key";
         let resolver = TestResolver::default().with("scaleway_secret_key", secret_value);
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(
                     HttpMethod::Post,
                     "/zones/fr-par-1/servers",
@@ -1222,7 +1304,7 @@ mod tests {
     #[tokio::test]
     async fn discoverable_as_a_provider_trait_object() {
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(
                     HttpMethod::Post,
                     "/zones/nl-ams-1/servers",
@@ -1237,7 +1319,10 @@ mod tests {
             .provision_request(&ProvisionRequest::new("gpu.l4.1x", "nl-ams"), &no_creds())
             .await
             .unwrap();
-        assert!(handle.state.is_ready());
+        assert!(matches!(
+            handle.state,
+            ProvisioningState::Provisioning { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1268,7 +1353,7 @@ mod tests {
         // (`fr-par`): the create call must address the resolved zone, and the
         // handle records it for later zone-addressed calls.
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(
                     HttpMethod::Post,
                     "/zones/fr-par-1/servers",
@@ -1297,7 +1382,7 @@ mod tests {
         // An advanced explicit override replaces the region's default zone across
         // create, status, and teardown.
         let mock = Arc::new(
-            MockTransport::default()
+            scoped_mock()
                 .on(
                     HttpMethod::Post,
                     "/zones/fr-par-2/servers",

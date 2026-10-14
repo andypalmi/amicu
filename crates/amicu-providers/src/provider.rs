@@ -39,14 +39,21 @@
 //!    returns the record *before* any resource exists. The caller persists it,
 //!    and only then calls [`Provider::provision`]. A record whose `id` is empty
 //!    means "may or may not exist"; it is still stoppable.
-//! 3. **Deterministic identity.** `provision` names/tags the resource with the
-//!    identity derived from deployment id + project id, and adopts an existing
-//!    resource carrying that identity rather than creating a duplicate. If the
-//!    process dies between the create call and persisting the returned ids, or
-//!    `provision` fails midway, [`Provider::teardown`] finds the resource by its
-//!    identity.
+//! 3. **Unique, pre-known identity.** `prepare` derives the resource name from
+//!    deployment id + project id plus a random nonce generated once and kept in
+//!    the record, so the name is known before any API call yet cannot collide
+//!    with another deployment's resource. `provision` names/tags the resource
+//!    with it and adopts an existing resource carrying that exact identity
+//!    (and the same offering and region) rather than creating a duplicate; more
+//!    than one match is an error, never a guess. If the process dies between
+//!    the create call and persisting the returned ids, or `provision` fails
+//!    midway, [`Provider::teardown`] finds the resource by its identity.
 //! 4. **Teardown works from the record alone**, never from adapter
 //!    configuration, and is idempotent: an absent resource is confirmed gone.
+//!    "Absent" is only trusted inside the right scope: the record carries a
+//!    scope fingerprint (zone, project, ...) that is verified against the record
+//!    and probed on the backend before any 404 counts as gone. A 404 at the
+//!    wrong zone/project/account is an error, never confirmation.
 //! 5. **Confirmed or not.** [`Provider::teardown`] returns
 //!    [`TeardownOutcome::ConfirmedGone`] only after the backend confirmed the
 //!    resource absent; otherwise [`TeardownOutcome::Unconfirmed`] (or an error).
@@ -232,11 +239,13 @@ const _: () = {
     let _ = <amicu_core::secret::SecretValue as AmbiguousIfSerialize<_>>::probe;
 };
 
-/// The deterministic identity a resource is created under.
+/// The identity a resource is created under.
 ///
-/// Derived from the deployment id and project id, so it is known before any
-/// API call and lets teardown find a resource whose provider id was never
-/// recorded (crash between create and persist).
+/// Built from the deployment id and project id plus a random nonce generated
+/// once, in [`Provider::prepare`], and persisted in the record. The name is
+/// therefore known before any API call, stable across retries and crashes, and
+/// unique per prepared record: two records for the same deployment and project
+/// never share a name, and the name cannot collide with another deployment's.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ResourceIdentity {
     /// The deployment this resource belongs to.
@@ -245,8 +254,12 @@ pub struct ResourceIdentity {
     /// The project this resource belongs to.
     #[serde(default)]
     pub project_id: String,
-    /// The provider-safe resource name/tag derived from the two ids
-    /// (lowercase alphanumerics and `-`, at most 63 characters).
+    /// Random 128-bit nonce (32 lowercase hex chars); empty until `prepare`.
+    #[serde(default)]
+    pub nonce: String,
+    /// The provider-safe resource name/tag: `amicu-<project>-<deployment>-<nonce>`
+    /// (lowercase alphanumerics and `-`, at most 63 characters). Empty until
+    /// the nonce is set.
     #[serde(default)]
     pub name: String,
 }
@@ -255,13 +268,34 @@ impl ResourceIdentity {
     /// Maximum length of the derived name (a DNS label).
     pub const MAX_NAME_LEN: usize = 63;
 
-    /// Derive the identity for `deployment_id` in `project_id`. Pure and
-    /// deterministic: the same inputs always yield the same name, and distinct
-    /// inputs yield distinct names.
+    /// An identity for `deployment_id` in `project_id`, not yet nonced. The
+    /// nonce (and so the name) is added by [`Provider::prepare`] through
+    /// [`ProvisioningHandle::prepared`].
     #[must_use]
     pub fn new(deployment_id: impl Into<String>, project_id: impl Into<String>) -> Self {
-        let deployment_id = deployment_id.into();
-        let project_id = project_id.into();
+        Self {
+            deployment_id: deployment_id.into(),
+            project_id: project_id.into(),
+            nonce: String::new(),
+            name: String::new(),
+        }
+    }
+
+    /// Set a fresh random nonce, unless one is already present, and derive the
+    /// name. Idempotent on an already-nonced identity.
+    #[must_use]
+    pub fn with_fresh_nonce(self) -> Self {
+        if self.nonce.is_empty() {
+            let nonce = uuid::Uuid::new_v4().simple().to_string();
+            self.with_nonce(&nonce)
+        } else {
+            self
+        }
+    }
+
+    /// Set `nonce` (lowercase hex) and derive the name from it.
+    #[must_use]
+    pub fn with_nonce(mut self, nonce: &str) -> Self {
         let slug = |v: &str| -> String {
             v.chars()
                 .map(|c| {
@@ -275,27 +309,15 @@ impl ResourceIdentity {
                 .trim_matches('-')
                 .to_string()
         };
-        // FNV-1a over the raw ids: keeps names unique even when slugging or
-        // truncation would collapse distinct ids.
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in project_id
-            .bytes()
-            .chain(std::iter::once(0))
-            .chain(deployment_id.bytes())
-        {
-            hash ^= u64::from(b);
-            hash = hash.wrapping_mul(0x0100_0000_01b3);
-        }
-        let suffix = format!("{:08x}", hash & 0xffff_ffff);
-        let mut base = format!("amicu-{}-{}", slug(&project_id), slug(&deployment_id));
-        let budget = Self::MAX_NAME_LEN - suffix.len() - 1;
-        base.truncate(budget);
-        let name = format!("{}-{suffix}", base.trim_end_matches('-'));
-        Self {
-            deployment_id,
-            project_id,
-            name,
-        }
+        let mut base = format!(
+            "amicu-{}-{}",
+            slug(&self.project_id),
+            slug(&self.deployment_id)
+        );
+        base.truncate(Self::MAX_NAME_LEN - nonce.len() - 1);
+        self.name = format!("{}-{nonce}", base.trim_end_matches('-'));
+        self.nonce = nonce.to_string();
+        self
     }
 }
 
@@ -331,9 +353,14 @@ pub struct ProvisioningHandle {
     /// Reference to the credential used for backend operations (name only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials: Option<SecretRef>,
-    /// The deterministic identity the resource is created under.
+    /// The identity the resource is created under.
     #[serde(default)]
     pub identity: ResourceIdentity,
+    /// Scope fingerprint (provider, zone/region, project) fixed at `prepare`.
+    /// Teardown refuses to trust an "absent" answer unless this matches the
+    /// record and the backend scope is reachable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     /// Further provider resource ids / addressing needed to stop the resource
     /// (e.g. `ssh_host`, `ssh_user`, `ssh_port`, `agent_id` for self-hosted).
     /// Ids and addresses only - never secret values.
@@ -360,7 +387,8 @@ impl ProvisioningHandle {
             zone: request.zone.clone(),
             offering_id: request.offering_id.clone(),
             credentials: request.credentials.clone(),
-            identity,
+            identity: identity.with_fresh_nonce(),
+            scope: None,
             resources: BTreeMap::new(),
             state: ProvisioningState::Requested,
         }
@@ -657,22 +685,38 @@ mod tests {
         let min: ProvisioningHandle =
             serde_json::from_str(r#"{"provider":"hetzner","region":"nbg1"}"#).unwrap();
         assert_eq!(min.schema_version, HANDLE_SCHEMA_VERSION);
+        assert!(min.scope.is_none());
         assert!(!min.has_resource_id());
     }
 
     #[test]
-    fn identity_is_deterministic_dns_safe_and_collision_resistant() {
-        let a = ResourceIdentity::new("Dep_1", "My Project");
-        assert_eq!(a, ResourceIdentity::new("Dep_1", "My Project"));
-        assert!(a.name.len() <= ResourceIdentity::MAX_NAME_LEN);
+    fn identity_is_unique_per_prepare_dns_safe_and_stable_once_nonced() {
+        let req = ProvisionRequest::new("o", "r");
+        let a = ProvisioningHandle::prepared(
+            AdapterId::new("p"),
+            &req,
+            ResourceIdentity::new("Dep_1", "My Project"),
+        );
+        let b = ProvisioningHandle::prepared(
+            AdapterId::new("p"),
+            &req,
+            ResourceIdentity::new("Dep_1", "My Project"),
+        );
+        // Same inputs, different records: names never collide.
+        assert_ne!(a.identity.name, b.identity.name);
+        assert_eq!(a.identity.nonce.len(), 32);
+        assert!(a.identity.name.len() <= ResourceIdentity::MAX_NAME_LEN);
         assert!(
-            a.name
+            a.identity
+                .name
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         );
-        assert_ne!(a.name, ResourceIdentity::new("dep-1", "my-project").name);
-        let long = ResourceIdentity::new("d".repeat(200), "p".repeat(200));
+        // Re-nonced identity keeps its nonce (stable across retries).
+        assert_eq!(a.identity.clone().with_fresh_nonce(), a.identity);
+        let long = ResourceIdentity::new("d".repeat(200), "p".repeat(200)).with_fresh_nonce();
         assert!(long.name.len() <= ResourceIdentity::MAX_NAME_LEN);
+        assert!(long.name.ends_with(&long.nonce));
     }
 
     #[test]
