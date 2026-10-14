@@ -18,7 +18,7 @@ pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 /// Resolve and download a model's GGUF artifact to `dest`, resuming across
 /// transient failures for up to `max_attempts` tries.
 ///
-/// `expected_sha256`, when `Some` (amicu-planning#151, the `GgufVariant.sha256`
+/// `expected_sha256`, when `Some` (the `GgufVariant.sha256`
 /// declared on the model), is checked against the resolved artifact's own
 /// `checksum` (an optional case-insensitive `"sha256:"` prefix is stripped
 /// before comparing) *before* any bytes are fetched - a mismatch fails fast

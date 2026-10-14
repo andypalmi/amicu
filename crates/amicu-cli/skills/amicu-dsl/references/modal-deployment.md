@@ -88,7 +88,7 @@ amicu apply
 - After a successful apply amicu prints the endpoint with a ready-to-copy
   `curl` and OpenAI SDK snippet naming the credentials by environment variable.
 
-## Capping autoscaling: `scaling {}` (amicu-planning#180)
+## Capping autoscaling: `scaling {}`
 
 An optional deployment-level block (a sibling of `llama_cpp {}`/`vllm {}`,
 works with both runtimes). Every field is optional; omitted fields keep the
@@ -124,8 +124,8 @@ into many GPU containers.
   a string with a single `s`/`m`/`h` unit (anything else is a schema error).
   Modal's client only requires the window to be greater than zero; amicu does
   not invent an upper bound.
-- Providers other than Modal have no scaling mapping yet (tracked in
-  amicu-planning#181): a `scaling {}` block on them is `AMICU-CAP-009`
+- Providers other than Modal have no scaling mapping yet:
+  a `scaling {}` block on them is `AMICU-CAP-009`
   (error), never silently ignored.
 - `plan` lists the fields you set as `scaling_min_replicas`,
   `scaling_max_replicas`, `scaling_target_concurrency`,

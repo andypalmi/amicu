@@ -1,16 +1,14 @@
 name: Deploy Web (Cloudflare Workers)
 
-# Mirrors geometra/safecheck-frontend's frontend.yml `deploy` job shape
+# Cloudflare Workers deploy job shape
 # (pnpm install --frozen-lockfile -> build -> cloudflare/wrangler-action),
 # adapted for amicu's OpenNext Worker (a real server Worker with a `main`
-# script, not safecheck-frontend's pure-static-assets Vite/React SPA — see
-# web/apps/web/wrangler.jsonc and README-deploy-cloudflare.md, added by
-# amicu-planning#144).
+# script, not a pure-static-assets SPA — see
+# web/apps/web/wrangler.jsonc and README-deploy-cloudflare.md).
 #
-# Deviates from frontend.yml in one way, on amicu-infra README's explicit
-# instruction ("What the amicu app repo must add"): gated behind the same
+# Gated behind the same
 # `production` GitHub environment as deploy-api.yml (restricted to `main`),
-# where safecheck-frontend's own deploy job has no environment gate at all.
+# so production deploys need that environment's approval.
 on:
   # Manual only: GitHub's free plan has no required reviewers on environments
   # for private repos, so the `production` environment can't gate deploys.
@@ -87,7 +85,6 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           # Public/build-time only (baked into the client bundle either
           # way, per web/apps/web/README-deploy-cloudflare.md) — a repo
-          # variable, not a secret, same convention as safecheck-frontend's
-          # VITE_* build vars.
+          # variable, not a secret.
           NEXT_PUBLIC_SITE_URL: ${{ vars.NEXT_PUBLIC_SITE_URL }}
           NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL || 'https://app.amicu.dev' }}

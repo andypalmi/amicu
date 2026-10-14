@@ -2,7 +2,7 @@ import { cn } from '@amicu/ui';
 
 // Shared step indicator for both wizard flows: the classic three-step preset
 // wizard (components/wizard/wizard.tsx) and the five-step guided wizard
-// (components/wizard/guided/guided-wizard.tsx, andypalmi/amicu-planning#85).
+// (components/wizard/guided/guided-wizard.tsx).
 // Takes its labels as a prop since the two flows have a different step count.
 export function Stepper({ steps, current }: { steps: readonly string[]; current: number }) {
   return (

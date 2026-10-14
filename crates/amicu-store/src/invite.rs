@@ -2,8 +2,8 @@
 //!
 //! An invite is a pending, tokenized offer to join a workspace at a role. The
 //! server stores only the SHA-256 hash of the opaque token (never the token
-//! itself); the acceptance flow that turns an invite into a membership lands in
-//! andypalmi/amicu-planning#130 - this is the data layer it builds on.
+//! itself); the acceptance flow that turns an invite into a membership lands in a follow-up;
+//! this is the data layer it builds on.
 //!
 //! Workspace-scoped for create/accept/expire (bound via
 //! [`begin_scoped`](crate::begin_scoped)); redemption
@@ -70,7 +70,7 @@ pub struct AcceptedInvite {
 /// role is `actor` (re-read under the mutation's own transaction and row lock).
 ///
 /// Delegates to the SHARED [`amicu_auth::authorize_invite_create`]
-/// (andypalmi/amicu-planning#133) - the same function `amicu-api`'s handlers
+/// - the same function `amicu-api`'s handlers
 /// consult for their cheap pre-check - so there is exactly one definition of
 /// the rule: only an actor holding `InviteMember` may invite at all, and only
 /// one holding `AssignPrivilegedRole` (Owner) may invite a privileged
@@ -92,7 +92,7 @@ fn authorize_invite_revoke(actor: Option<Role>) -> std::result::Result<(), Invit
 }
 
 /// Re-read `workspace`'s CURRENT tier inside `tx` and reject the invite
-/// mutation if it no longer meets Enterprise (andypalmi/amicu-planning#132):
+/// mutation if it no longer meets Enterprise:
 /// the claim-based Enterprise gate keys on the access token's `claims.tier`,
 /// so a workspace DOWNGRADED from Enterprise still passes it until the token
 /// expires (<=5 min). Re-reading here, inside the SAME transaction as the
@@ -265,7 +265,7 @@ impl PostgresInviteStore {
     }
 
     // -----------------------------------------------------------------------
-    // Authorized invite lifecycle (andypalmi/amicu-planning#131): create with an
+    // Authorized invite lifecycle: create with an
     // in-transaction actor RBAC re-check, list the workspace's pending invites,
     // and redeem-and-enroll atomically.
     // -----------------------------------------------------------------------

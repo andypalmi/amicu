@@ -1,5 +1,5 @@
-//! Integration tests for the workspace-claim session surface
-//! (andypalmi/amicu-planning#129): `GET /workspaces` and
+//! Integration tests for the workspace-claim session surface:
+//! `GET /workspaces` and
 //! `POST /session/workspace`.
 //!
 //! These exercise the real router, gate, and auth service end-to-end over the

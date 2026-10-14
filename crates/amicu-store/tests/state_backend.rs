@@ -188,7 +188,7 @@ fn backend(pool: PgPool, workspace: WorkspaceId, stack: &str) -> PostgresStateBa
 }
 
 /// A reversible (XOR, not real cryptography) test-only [`StateCipher`] for
-/// the encryption-at-rest seam (amicu-planning#126). Good enough to prove
+/// the encryption-at-rest seam. Good enough to prove
 /// `PostgresStateBackend` actually routes snapshot content through a
 /// configured cipher on the way to and from Postgres, and that the round
 /// trip recovers the exact original graph.
@@ -589,7 +589,7 @@ async fn detect_drift_reports_added_removed_changed_against_pulled_state() {
     assert!(report.has_drift());
 }
 
-/// amicu-planning#126: with a [`StateCipher`] configured, a push-then-pull
+/// with a [`StateCipher`] configured, a push-then-pull
 /// round trip through a real `PostgresStateBackend`/Postgres still recovers
 /// the exact original graph, and what actually lands in the `content` column
 /// is genuinely opaque - not the plaintext graph JSON.
@@ -630,7 +630,7 @@ async fn push_pull_round_trip_with_cipher_encrypts_at_rest_and_recovers_original
     );
 }
 
-/// amicu-planning#126: with no cipher configured (the default), a backend's
+/// with no cipher configured (the default), a backend's
 /// push writes the plaintext graph JSON to `content` exactly as every
 /// version of this backend did before the encryption seam existed - proving
 /// the no-op default preserves current on-disk behavior byte-for-byte, not
@@ -664,7 +664,7 @@ async fn push_with_no_cipher_configured_writes_plaintext_content_unchanged() {
     );
 }
 
-// --- lease renewal and runtime records (amicu-planning#223) -------------------
+// --- lease renewal and runtime records -------------------
 
 fn stop_identity(deployment: &str) -> amicu_state::StopIdentity {
     amicu_state::StopIdentity {

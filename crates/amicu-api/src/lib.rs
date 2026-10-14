@@ -21,8 +21,8 @@
 //!   /recommend`'s advisory tuning diagnosis: nothing here reads a measured
 //!   metrics snapshot.
 //! - Customize: the stateless, auth-gated [`POST
-//!   /recommend/customize`](customize::customize_handler) endpoint
-//!   (andypalmi/amicu-planning#35), which re-parses a (possibly user-edited)
+//!   /recommend/customize`](customize::customize_handler) endpoint,
+//! which re-parses a (possibly user-edited)
 //!   wizard candidate's HCL, validates it, and plans/diffs it against the
 //!   candidate's original graph - the same `amicu-engine` orchestration
 //!   `POST /plan` runs, reused rather than reimplemented.
@@ -32,13 +32,13 @@
 //!   content canonicalized so it and every diff stay stable.
 //!
 //! - Health: unauthenticated, unthrottled [`GET /healthz` and `GET
-//!   /readyz`](health) for the Cloud Run / load-balancer health contract
-//!   (andypalmi/amicu-planning#139). Deliberately kept out of the OpenAPI
+//!   /readyz`](health) for the Cloud Run / load-balancer health contract.
+//! Deliberately kept out of the OpenAPI
 //!   document - infra plumbing, not client-facing API - so wire it in via
 //!   [`health_router`] alongside [`api_router`], not through it.
 //! - Outbox: the authenticated [`POST /internal/outbox/drain`](outbox) that
 //!   Cloud Scheduler calls once a minute to actually send the queued
-//!   transactional email (andypalmi/amicu-planning#141). Kept out of the
+//!   transactional email. Kept out of the
 //!   OpenAPI document for the same reason as the health routes, and wired in
 //!   the same way - via [`outbox_router`] alongside [`api_router`].
 //!

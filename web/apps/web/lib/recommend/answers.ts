@@ -1,5 +1,5 @@
-// Pure, framework-free answer-building logic for the guided wizard
-// (andypalmi/amicu-planning#85), extracted from the #31/#35 exercise route's
+// Pure, framework-free answer-building logic for the guided wizard,
+// extracted from the #31/#35 exercise route's
 // `rankCandidates` (see components/wizard/candidate-picker.tsx, since removed)
 // so it can be unit-tested in isolation from React and reused by
 // <QuestionForm>/<GuidedWizard>.

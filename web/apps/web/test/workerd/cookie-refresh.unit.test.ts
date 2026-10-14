@@ -1,4 +1,4 @@
-// Unit test for amicu-planning#146(a): exercise the silent-refresh cookie-rotation
+// Unit test: exercise the silent-refresh cookie-rotation
 // path (proxy.ts's handleAuth() -> attemptRefresh()) with the SAME Request/Response
 // classes the Workers runtime (workerd) uses under @opennextjs/cloudflare - Next's
 // `next/server` NextRequest/NextResponse are thin wrappers around the standard Web

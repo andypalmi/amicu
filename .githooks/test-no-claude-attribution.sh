@@ -30,7 +30,7 @@ expect ok 'fix .claude/settings.json path'
 expect ok 'update CLAUDE.md with new rules'
 expect ok 'move .claude/worktrees/foo into ignore'
 expect ok 'feat: add the thing'
-expect ok 'Closes andypalmi/amicu-planning#191'
+expect ok 'Closes andypalmi/other-repo#191'
 
 # comment lines are ignored
 printf '# Claude Code was here\nfix: thing\n' >"$tmp"

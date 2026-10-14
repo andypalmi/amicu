@@ -27,8 +27,8 @@
 //!
 //! The [`ProviderCapabilities`] descriptor carries Hetzner's real data centers
 //! and a representative slice of the GEX dedicated-server catalog with monthly
-//! on-demand pricing. Real-time capacity/pricing sync is out of scope here
-//! (amicu-planning#23); prices are illustrative catalog values, not a live quote.
+//! on-demand pricing. Real-time capacity/pricing sync is out of scope here;
+//! prices are illustrative catalog values, not a live quote.
 
 use std::sync::Arc;
 
@@ -58,7 +58,7 @@ pub const PROVIDER_ID: &str = "hetzner";
 const BASE_URL: &str = "https://api.hetzner.cloud/v1";
 
 /// Placeholder OS image for the create body. Live provisioning selects the real
-/// image (amicu-planning#23).
+/// image.
 const DEFAULT_IMAGE: &str = "ubuntu-22.04";
 
 /// A Hetzner data center: its location code, residency jurisdiction, ISO
@@ -149,7 +149,7 @@ struct GpuSpec {
 
 /// A representative slice of Hetzner's GEX GPU dedicated-server line. These are
 /// large bare-metal boxes, not cloud slices. Prices are illustrative catalog
-/// values in EUR/month, not a live quote (real-time pricing is amicu-planning#23).
+/// values in EUR/month, not a live quote (real-time pricing is not yet supported).
 const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "gpu.rtx-4000-ada.1x",
@@ -175,7 +175,7 @@ const GPUS: &[GpuSpec] = &[
 ///
 /// A minimal create body: the offering id stands in for Hetzner's `server_type`
 /// and the region for its `location`. Richer fields (SSH keys, volumes, user
-/// data) arrive with live provisioning (amicu-planning#23).
+/// data) arrive with live provisioning.
 #[derive(Serialize)]
 struct CreateServerRequest<'a> {
     name: &'a str,

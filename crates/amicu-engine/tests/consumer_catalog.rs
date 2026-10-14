@@ -1,7 +1,6 @@
 //! Consumer/on-prem hardware catalog entries resolve through the existing
 //! `Catalog`/`MapCatalog` hardware-profile lookup path (the same one
 //! `amicu-llamacpp`'s adapter uses), and pass the existing weight-fit check
-//! (amicu-planning#152).
 
 use amicu_core::resource::Quantization;
 use amicu_llamacpp::{Catalog, MapCatalog};

@@ -57,8 +57,8 @@ Setup and details: amicu-dsl `references/modal-deployment.md`. App name is
   other non-NVLink GPUs, intermittent, at the first all-reduce) - add
   `env { NCCL_P2P_DISABLE = "1" }` to the `vllm` block and re-apply.
 - `apply` says "No changes" but nothing is running - the app was stopped
-  behind amicu's back. Builds that include the state refresh (amicu-planning#170,
-  and later) detect this, print a `drift:` line and recreate it. On an older
+  behind amicu's back. Builds that include the state refresh
+  detect this, print a `drift:` line and recreate it. On an older
   build, delete `.amicu/state` (or run `amicu modal stop <app>` inside the
   project) and re-apply.
 - Qwen3.5-style thinking models return `content: null` with

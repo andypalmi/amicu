@@ -21,8 +21,8 @@ impl RuntimeKind {
         }
     }
 
-    /// The environment variable this runtime reads its endpoint API key from
-    /// (amicu-planning#191). Verified against upstream: llama-server's
+    /// The environment variable this runtime reads its endpoint API key from.
+    /// Verified against upstream: llama-server's
     /// `--api-key` is `set_env("LLAMA_API_KEY")` (`common/arg.cpp`), vLLM's is
     /// `VLLM_API_KEY` (`vllm/envs.py`). amicu sets it, from the resolved
     /// secret, in the process/container environment - never on argv.

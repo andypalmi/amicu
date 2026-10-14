@@ -1,17 +1,16 @@
 //! Rate limiting for the auth credential routes: a [`RateLimiter`] trait plus
 //! two implementations, selected by `amicu-server`'s bootstrap
-//! (andypalmi/amicu-planning#142).
 //!
 //! * [`InMemoryRateLimiter`] - the original process-local fixed-window
 //!   counter. Single-node only: across N Cloud Run replicas each one grants
 //!   its own full quota (an effective Nx limit), and every counter resets on
 //!   every cold start. Kept for dev/tests and any DB-less deployment.
 //! * [`PostgresRateLimiter`] - a fixed-window counter shared by every replica
-//!   over the one Postgres pool each replica already holds
-//!   (andypalmi/amicu-planning#139), backed by
+//!   over the one Postgres pool each replica already holds,
+//! backed by
 //!   [`amicu_store::PostgresRateLimitStore`]'s single-round-trip atomic
 //!   upsert. This is the one `AMICU_ENV=production` requires (consistent with
-//!   the fail-fast posture andypalmi/amicu-planning#127 established for a
+//!   the fail-fast posture established for a
 //!   missing `DATABASE_URL`) - see `amicu-server`'s `Config` docs. There is no
 //!   Redis in this stack; Postgres is the only shared store available.
 //!
@@ -22,12 +21,10 @@
 //! [`PostgresRateLimiter::fail_open_count`] - so an operator can alert on
 //! sustained failures): a transient Postgres hiccup must not turn into a
 //! total login/signup outage. This is a deliberate availability-over-strict-
-//! limiting trade-off for exactly the credential routes this backs - see the
-//! andypalmi/amicu-planning#142 PR description for the full rationale.
+//! limiting trade-off for exactly the credential routes this backs.
 //!
 //! Two hardening properties matter for both implementations (see
-//! amicu-planning#94, extended by #142 for the Cloudflare edge case - see
-//! [`crate::edge`]):
+//! [`crate::edge`] for the Cloudflare edge case):
 //!
 //! * **Trustworthy client identity.** `X-Forwarded-For` is client-supplied and
 //!   trivially spoofed, so it is only honored when the *peer* socket address is
@@ -256,7 +253,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_millis(1_000);
 const WARN_SAMPLE_EVERY: u64 = 100;
 
 /// Shared fixed-window counter backed by
-/// [`amicu_store::PostgresRateLimitStore`] (andypalmi/amicu-planning#142) -
+/// [`amicu_store::PostgresRateLimitStore`] -
 /// see the module docs for the production-selection and fail-open rules.
 pub struct PostgresRateLimiter {
     store: amicu_store::PostgresRateLimitStore,
@@ -478,7 +475,7 @@ impl TrustedProxies {
     /// `X-Amicu-Edge-Token`, so it is safe to trust unconditionally here.
     /// Falls back to [`Self::client_key`] (and its `None`-on-no-peer
     /// fail-open behavior) when `edge_ip` is `None` - the non-Cloudflare or
-    /// no-valid-token path, unchanged from before andypalmi/amicu-planning#142.
+    /// no-valid-token path, unchanged from before the edge-token gate.
     #[must_use]
     pub fn client_key_with_edge(
         &self,

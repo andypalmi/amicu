@@ -202,7 +202,7 @@ fn errors(
 
 #[test]
 fn validate_rejects_qwen3_8b_bf16_on_an_8_gib_gpu_naming_weights_kv_and_vram() {
-    // amicu-planning#249: ~16 GB of bf16 weights cannot fit 8 GiB of VRAM.
+    // ~16 GB of bf16 weights cannot fit 8 GiB of VRAM.
     let a = adapter(qwen3_model(None), gpu_hardware(8, 1), 8_200_000_000);
     let diags = a.validate(&deployment(base_settings()));
     let errs = errors(&diags);
@@ -577,7 +577,7 @@ impl SecretResolver for FakeResolver {
     }
 }
 
-// ---- endpoint API key (amicu-planning#191) -----------------------------------
+// ---- endpoint API key -----------------------------------
 
 const KEY_VALUE: &str = "vllm-endpoint-key-123";
 

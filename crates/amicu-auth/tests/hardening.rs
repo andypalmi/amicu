@@ -1,5 +1,4 @@
 //! Sign-in backoff and security events at the service layer
-//! (andypalmi/amicu-planning#194).
 
 use std::sync::Arc;
 

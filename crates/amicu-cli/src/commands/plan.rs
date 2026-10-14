@@ -54,7 +54,7 @@ pub(crate) fn run(
         // A deployment failed to plan (e.g. a CAP-002/CAP-003 extra_args/env
         // conflict); `build_plan` hands back everything it collected instead
         // of a bare adapter error, so render it the same way as any other
-        // blocking report (amicu-planning#150 review hardening).
+        // blocking report.
         Err(PlanError(report)) => {
             emit_report(&report, output, out)?;
             return Ok(1);
@@ -261,7 +261,7 @@ pub(crate) fn print_human_with(
             }
             // `provider`/`region` were already computed by `action_for`
             // (`amicu_engine::planner`) for every hardware profile, not just
-            // Modal's - this just surfaces them (amicu-planning#158 PR 5).
+            // Modal's - this just surfaces them.
             // The exact Modal `gpu=` string (`"H100:2"`) is not shown here:
             // deriving it needs `amicu-modal`'s mapping, and this print path
             // is shared with the HTTP API's `/plan` display contract, so

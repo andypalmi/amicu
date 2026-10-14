@@ -1,6 +1,6 @@
 //! The vLLM [`RuntimeAdapter`] implementation.
 //!
-//! Mirrors `amicu_llamacpp::adapter`'s shape (amicu-planning#152) but reuses
+//! Mirrors `amicu_llamacpp::adapter`'s shape but reuses
 //! that crate's [`Catalog`], [`MapCatalog`], [`ProcessSupervisor`],
 //! [`ServiceSupervisor`], and `host_supervisor` directly rather than
 //! re-deriving them: both are single-process HTTP servers launched the same
@@ -148,7 +148,7 @@ fn vllm_kv_bytes_per_element(dtype: amicu_core::resource::VllmKvCacheDtype) -> f
 }
 
 /// Estimated total KV-cache memory for one vLLM deployment, when the model
-/// declares full shape metadata (amicu-planning#152's fit-estimate formula:
+/// declares full shape metadata (the fit-estimate formula:
 /// "weights + kv cache only").
 ///
 /// `ctx × kv_layers × n_kv_heads × head_dim × 2 × bytes_per_element(dtype)`:

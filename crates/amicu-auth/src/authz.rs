@@ -1,6 +1,5 @@
 //! Role-based access control: the single shared permission model, enforced
 //! identically by every backend (in-memory + Postgres) and every handler
-//! (andypalmi/amicu-planning#133).
 //!
 //! [`Permission`] is the enforcement primitive. It is DERIVED from the [`Role`]
 //! carried on the access token's `wsrole` claim - never a second, separately

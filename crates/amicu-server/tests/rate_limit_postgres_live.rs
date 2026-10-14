@@ -1,5 +1,5 @@
-//! Live-database coverage for the Postgres-backed shared rate limiter
-//! (andypalmi/amicu-planning#142): concurrency across two simulated replicas
+//! Live-database coverage for the Postgres-backed shared rate limiter:
+//! concurrency across two simulated replicas
 //! sharing one database, window expiry, and fail-open on a database error.
 //!
 //! `#[ignore]`d like the other live-DB tests in this workspace (see
@@ -41,7 +41,7 @@ fn unique_key(test_name: &str) -> String {
 
 /// Two `PostgresRateLimiter` instances - each over its OWN pool, exactly as
 /// two separate Cloud Run replicas each holding their own shared pool would
-/// (andypalmi/amicu-planning#139) - sharing ONE database. N+1 `check` calls
+/// - sharing ONE database. N+1 `check` calls
 /// interleaved across the two instances for the SAME key admit exactly N: the
 /// atomic upsert (`crates/amicu-store/migrations/0014_rate_limit_buckets.sql`)
 /// is what makes the budget genuinely shared rather than each replica

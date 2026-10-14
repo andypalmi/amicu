@@ -1,5 +1,5 @@
 // Pure, framework-free helpers for the guided-wizard candidate flow
-// (andypalmi/amicu-planning#31 questions/candidates, #35 customize). Kept free
+// Kept free
 // of React so the type re-exports and label/guard helpers can be unit-tested
 // and reused by both the candidate picker and <CandidateReview>.
 

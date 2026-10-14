@@ -1,7 +1,7 @@
 # @amicu/auth
 
 Client-side session/tier helpers for the web app, consuming the **TASK-078**
-auth service (andypalmi/amicu-planning#78). Implements RFC 0001 §6–§7 and
+auth service. Implements RFC 0001 §6–§7 and
 decision §11.6.
 
 Two entry points keep server-only code out of client bundles:
@@ -22,6 +22,6 @@ Management API re-checks every mutation.
 
 - The auth API client is hand-written against TASK-078's endpoint shapes and is
   **TODO-marked to be replaced by the generated `@amicu/api-client`**
-  (andypalmi/amicu-planning#83) once the OpenAPI spec lands.
+  once the OpenAPI spec lands.
 - Password-reset (`/recover`) is not in TASK-078's acceptance criteria yet - the
   wrapper and UI exist, but the backend endpoint needs confirming.

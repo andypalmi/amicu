@@ -21,7 +21,6 @@
 //! the authenticated `POST /internal/outbox/drain` request - which is also a
 //! `Notifier` call, against the real mailer. That indirection is what makes
 //! delivery survive Cloud Run freezing an instance the moment it responds
-//! (andypalmi/amicu-planning#141).
 
 use amicu_core::secret::SecretValue;
 use async_trait::async_trait;

@@ -22,8 +22,8 @@ path = "src/lib.rs"
 amicu-api = { path = "../amicu-api" }
 amicu-auth = { path = "../amicu-auth" }
 # SecretValue, to read AMICU_EDGE_TOKEN without ever letting it flow through a
-# clap flag (see the crate docs' "Cloudflare edge trust" section,
-# andypalmi/amicu-planning#142). Previously a dev-only dependency (the SMTP
+# clap flag (see the crate docs' "Cloudflare edge trust" section).
+# Previously a dev-only dependency (the SMTP
 # render tests already used it); promoted to a real dependency here. Also
 # wraps the raw signing-key PEM read from AMICU_SIGNING_KEY_PEM /
 # AMICU_SIGNING_KEYS_RETIRING_PEM in a redacted, zeroizing SecretValue the

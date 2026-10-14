@@ -7,7 +7,7 @@ import { PageShell } from '@/components/common/page-shell';
 
 export const metadata: Metadata = { title: 'New configuration' };
 
-// Dual-mode entry point (andypalmi/amicu-planning#85): "Help me choose" sends
+// Dual-mode entry point: "Help me choose" sends
 // the user through the guided wizard at `/new/guided` (preset -> questions ->
 // candidates -> review -> confirm); "I know my stack" skips straight to a
 // blank-HCL editor at `/new/manual`. Neither path touches the backend

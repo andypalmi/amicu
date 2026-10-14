@@ -771,7 +771,7 @@ impl From<TuningReport> for TuningReportDto {
 }
 
 // ---------------------------------------------------------------------------
-// `POST /recommend/customize` (andypalmi/amicu-planning#35)
+// `POST /recommend/customize`
 // ---------------------------------------------------------------------------
 //
 // The customize DTOs below are unrelated to the `/recommend`+`/monitor`

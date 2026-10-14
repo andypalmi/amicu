@@ -27,7 +27,7 @@
 //! typed [`ProviderError`]s (`401`/`403` → credentials rejected, `404` → unknown
 //! instance/offering, `409`/`429` → capacity unavailable, other non-`2xx` →
 //! retryable backend); a transport failure maps to a retryable backend error.
-//! Real-time capacity/pricing sync is out of scope here (amicu-planning#23); prices are
+//! Real-time capacity/pricing sync is out of scope here; prices are
 //! illustrative catalog values in EUR/hr, not a live quote.
 
 use std::sync::Arc;
@@ -121,8 +121,8 @@ struct GpuSpec {
 }
 
 /// A representative slice of Scaleway's single-GPU catalog. Prices are
-/// illustrative catalog values in EUR/hr, not a live quote (real-time pricing is
-/// amicu-planning#23). On-demand only - Scaleway has no public spot market.
+/// illustrative catalog values in EUR/hr, not a live quote (real-time pricing is not yet supported).
+/// On-demand only - Scaleway has no public spot market.
 const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "gpu.h100.1x",
@@ -166,7 +166,7 @@ const GPUS: &[GpuSpec] = &[
 ///
 /// A minimal create body: the offering id stands in for Scaleway's
 /// `commercial_type`. Richer fields (image, volumes, project) arrive with live
-/// provisioning (amicu-planning#23).
+/// provisioning.
 #[derive(Serialize)]
 struct CreateServerRequest<'a> {
     name: &'a str,

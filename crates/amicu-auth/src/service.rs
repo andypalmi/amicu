@@ -36,8 +36,8 @@ use crate::verify::{self, VerifyStore};
 /// store insert, out-of-band send) onto a background task, so the response
 /// returned in account-independent time. On Cloud Run that is fatal: CPU is
 /// throttled to near-zero the moment the response is written, so the detached
-/// task stalls or dies and the email is silently dropped
-/// (andypalmi/amicu-planning#141). The work therefore moved back ON to the
+/// task stalls or dies and the email is silently dropped.
+/// The work therefore moved back ON to the
 /// request path - where CPU is allocated - and is now durable (it ends in an
 /// `email_outbox` row, not an SMTP round trip).
 ///
@@ -236,7 +236,7 @@ impl<C: Clock> AuthService<C> {
             // Swallow the collision: surfacing it would enable enumeration.
             //
             // Instead notify the *real* owner out-of-band via the notification
-            // seam (amicu-planning#102): an "account already exists / reset your
+            // seam: an "account already exists / reset your
             // password" nudge that the requester never observes on the identical
             // HTTP response. The Created path (above) queues a verification link
             // over the same seam; both outcomes stay identical on the HTTP
@@ -439,7 +439,7 @@ impl<C: Clock> AuthService<C> {
     /// `202`, whether or not the email is registered, and this call always takes
     /// the same wall-clock time - see [`ANTI_ENUMERATION_FLOOR`] for exactly how
     /// and why (it replaced a `tokio::spawn` that Cloud Run's post-response CPU
-    /// throttling made unreliable, andypalmi/amicu-planning#141).
+    /// throttling made unreliable).
     ///
     /// All of the account-dependent work now runs INLINE, on the request path,
     /// where CPU is guaranteed: the lookup, and - only when the account exists -
@@ -673,7 +673,7 @@ impl<C: Clock> AuthService<C> {
     ///
     /// Called only on the sign-up account-created path. This used to be a
     /// detached `tokio::spawn`, which Cloud Run's post-response CPU throttling
-    /// makes unreliable (andypalmi/amicu-planning#141); it now runs on the
+    /// makes unreliable; it now runs on the
     /// request path and ends in a durable `email_outbox` row rather than an SMTP
     /// round trip, with the token row and the queued email committed in ONE
     /// transaction on the Postgres path (see

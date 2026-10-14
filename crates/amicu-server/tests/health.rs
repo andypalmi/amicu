@@ -1,5 +1,4 @@
 //! Health/readiness and production-gate coverage for the Cloud Run bootstrap
-//! (andypalmi/amicu-planning#139).
 //!
 //! Real-socket style, matching `smoke.rs`: a genuine HTTP client over a live
 //! TCP connection, so these exercise the actual served routes rather than an

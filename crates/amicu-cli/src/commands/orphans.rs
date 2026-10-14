@@ -1,5 +1,5 @@
 //! `amicu orphans [--output json]` - list amicu-owned resources that this
-//! project's state does not record (amicu-planning#213).
+//! project's state does not record.
 //!
 //! Strictly read-only: it enumerates Modal apps (`amicu-` prefix), launchd
 //! jobs/plists (`io.amicu.` prefix) and systemd `--user` units, marks each as

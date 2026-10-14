@@ -1,5 +1,4 @@
 //! Unauthenticated liveness/readiness probes for the Cloud Run contract
-//! (andypalmi/amicu-planning#139).
 //!
 //! `GET /healthz` never touches a dependency: a `200` means only that the
 //! process is up and serving. `GET /readyz` additionally proves the shared

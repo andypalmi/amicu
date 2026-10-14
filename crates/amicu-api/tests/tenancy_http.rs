@@ -1,5 +1,5 @@
 //! Live-database HTTP integration tests for additional-workspace provisioning
-//! and workspace invitations (andypalmi/amicu-planning#131), the closing
+//! and workspace invitations, the closing
 //! vertical of the authenticated multi-tenant workspaces epic.
 //!
 //! These exercise the REAL router - `POST /workspaces`, `POST /org/invites`,
@@ -127,7 +127,7 @@ async fn harness() -> Harness {
 }
 
 /// Like [`harness`], but with the per-user workspace-creation cap
-/// (andypalmi/amicu-planning#132) overridden - a small cap exercises the `403`
+/// overridden - a small cap exercises the `403`
 /// cheaply without provisioning dozens of workspaces.
 async fn harness_with_workspace_cap(max_workspaces_per_user: u32) -> Harness {
     let url =
@@ -279,7 +279,7 @@ async fn create_workspace_ignores_caller_supplied_id_and_owns_the_result() {
     );
 }
 
-/// N1 (andypalmi/amicu-planning#132): `POST /workspaces` enforces the per-user
+/// N1: `POST /workspaces` enforces the per-user
 /// workspace-creation cap and answers `403` once reached (there is no
 /// `DELETE /workspaces`, so this is a hard ceiling).
 #[tokio::test]

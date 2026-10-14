@@ -1,5 +1,5 @@
 //! HTTP surface for additional-workspace provisioning and workspace invitations
-//! (andypalmi/amicu-planning#131) - the final vertical of the authenticated
+//! - the final vertical of the authenticated
 //! multi-tenant workspaces epic.
 //!
 //! Three server-authoritative, audited-or-atomic operations, all wired against
@@ -71,7 +71,6 @@ pub enum TenancyError {
     /// number of workspaces they may OWN, across every workspace including
     /// their personal one (a hard ceiling - there is no `DELETE /workspaces`),
     /// checked and enforced INSIDE the creating transaction: `403`
-    /// (andypalmi/amicu-planning#132).
     LimitReached(u32),
     /// The presented invite token maps to no live invite - unknown, expired, or
     /// already accepted (kept deliberately indistinct): `400`.

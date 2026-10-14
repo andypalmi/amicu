@@ -1,6 +1,6 @@
 //! The vLLM adapter error enum, classified into the uniform `AdapterError`.
 //!
-//! Mirrors `amicu_llamacpp::error::LlamaCppError`'s shape (amicu-planning#152):
+//! Mirrors `amicu_llamacpp::error::LlamaCppError`'s shape:
 //! the same diagnostic codes, the same escape-hatch conflict classification,
 //! reused rather than re-derived.
 

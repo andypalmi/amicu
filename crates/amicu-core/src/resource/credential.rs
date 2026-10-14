@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::id::CredentialId;
 use crate::secret::SecretRef;
 
-/// A named bundle of secret-designated fields (amicu-planning#119).
+/// A named bundle of secret-designated fields.
 ///
 /// Every field here holds a [`SecretRef`] - a pointer to a secret in a
 /// backend - never secret bytes. The HCL front end (`amicu-hcl`) enforces

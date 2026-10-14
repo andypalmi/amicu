@@ -39,7 +39,7 @@ pub struct Graph {
     pub tenants: Vec<Tenant>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub use_cases: Vec<UseCase>,
-    /// Named credential bundles (amicu-planning#119); see [`Credential`] for
+    /// Named credential bundles; see [`Credential`] for
     /// why this holds only [`crate::secret::SecretRef`] pointers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<Credential>,
@@ -104,7 +104,7 @@ impl Graph {
                 d.hardware_profile.as_str(),
             );
             // A llama.cpp `speculative { model = ... }` draft model is a real
-            // second model edge (amicu-planning#151 PR C), checked exactly like
+            // second model edge, checked exactly like
             // the primary `model` reference above.
             if let Some(draft) = speculative_draft(d) {
                 check(
@@ -179,7 +179,7 @@ fn id_set<'a>(ids: impl Iterator<Item = &'a str>) -> HashSet<&'a str> {
 }
 
 /// The draft-model reference of a deployment's llama.cpp `speculative {}`
-/// block, when it has one (amicu-planning#151 PR C). `None` for a vLLM
+/// block, when it has one. `None` for a vLLM
 /// deployment or a llama.cpp one with no speculative block.
 fn speculative_draft(d: &Deployment) -> Option<&str> {
     match &d.runtime {

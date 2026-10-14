@@ -1,5 +1,5 @@
-//! Postgres-backed [`amicu_auth::throttle::KnownNetworks`]
-//! (andypalmi/amicu-planning#194), shared by every replica.
+//! Postgres-backed [`amicu_auth::throttle::KnownNetworks`],
+//! shared by every replica.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

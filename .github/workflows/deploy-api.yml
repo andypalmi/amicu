@@ -1,8 +1,8 @@
 name: Deploy API (Cloud Run)
 
-# Mirrors geometra/safecheck-backend's backend.yml `deploy` job shape
+# Standard Cloud Run deploy job shape
 # (WIF auth -> build/push -> migrate Job -> deploy service), adapted to
-# amicu's names from amicu-infra's envs/prod/outputs.tf (see
+# amicu's names from the infrastructure outputs (see
 # docs/deploy/cloud-run.md for the full vars/secrets table).
 on:
   # Manual only: GitHub's free plan has no required reviewers on environments
@@ -35,11 +35,10 @@ jobs:
     if: github.ref == 'refs/heads/main'
     env:
       REGION: ${{ vars.GCP_REGION }}
-      # amicu-infra's module.gcp_project.artifact_registry_path output, e.g.
+      # The infrastructure's Artifact Registry path output, e.g.
       # europe-west1-docker.pkg.dev/amicu-prod/amicu — one Artifact Registry
-      # repo (id "amicu", modules/gcp-project/variables.tf's
-      # artifact_registry_repo_id default, not overridden in
-      # envs/prod/terraform.tfvars) holds the single image both Cloud Run
+      # repo (id "amicu", the infrastructure's default id, not overridden
+      # in the prod environment) holds the single image both Cloud Run
       # resources use. Hardcoded, not a repo variable: this is a fixed
       # Terraform-module default, not something meant to vary per deploy.
       IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/amicu/amicu-api
@@ -93,15 +92,13 @@ jobs:
 
       # Migrate FIRST — fail the whole deploy before anything user-facing
       # changes if the migration fails, rather than rolling amicu-api
-      # forward onto a schema it doesn't match (same order as
-      # safecheck-backend's deploy job). Job name "amicu-migrate" is
-      # amicu-infra's envs/prod/variables.tf `migrate_job_name` default
-      # (hardcoded here, not a repo variable, for the same reason as the AR
-      # repo id above). That Job's `command` is Terraform-managed
-      # (amicu-infra's module.cloud_run_job_migrate.command =
-      # ["/usr/local/bin/amicu-server", "migrate"]) — only the image is
-      # updated here, never the command/env, so this workflow can never
-      # fight Terraform's ownership of that Job's invocation or config.
+      # forward onto a schema it doesn't match (the usual order for this
+      # kind of deploy). Job name "amicu-migrate" is the infrastructure's
+      # `migrate_job_name` default (hardcoded here, not a repo variable, for the
+      # same reason as the AR repo id above). That Job's `command` is
+      # Terraform-managed (`["/usr/local/bin/amicu-server", "migrate"]`) — only
+      # the image is updated here, never the command/env, so this workflow can
+      # never fight Terraform's ownership of that Job's invocation or config.
       - name: Run database migration (amicu-migrate job)
         run: |
           gcloud run jobs update amicu-migrate \
@@ -113,11 +110,11 @@ jobs:
 
       # `--image` only, deliberately — every other setting (env vars, secret
       # refs, scaling, probes, ingress) is Terraform-managed
-      # (amicu-infra/modules/cloud-run-api) and explicitly `ignore_changes`d
+      # (the infrastructure's Cloud Run module) and explicitly `ignore_changes`d
       # on `template[0].containers[0].image`/`client`/`client_version` ONLY,
       # so this deploy and a later `terraform apply` never fight over
       # anything else. Never add --set-env-vars / --set-secrets here. Service
-      # name "amicu-api" is amicu-infra's envs/prod/variables.tf
+      # name "amicu-api" is the infrastructure's
       # `api_service_name` default (hardcoded here for the same reason as
       # the AR repo id / job name above).
       - name: Deploy amicu-api

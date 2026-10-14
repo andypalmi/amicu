@@ -99,7 +99,7 @@ pub trait ResetStore: Send + Sync {
     /// Persist `record` AND durably hand `message` off for out-of-band
     /// delivery, atomically where the implementation can manage it.
     ///
-    /// This is the seam andypalmi/amicu-planning#141 needs: a durable store
+    /// This is the seam the durable outbox needs: a durable store
     /// (the Postgres one) writes the token row and the outbox row inside ONE
     /// transaction, so a minted reset token and the email that carries it
     /// commit together or not at all - there is no window in which a token

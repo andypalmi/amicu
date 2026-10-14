@@ -1,4 +1,4 @@
-//! Cloudflare edge trust (andypalmi/amicu-planning#142).
+//! Cloudflare edge trust.
 //!
 //! On the target Cloud Run topology, the request chain is: browser ->
 //! Cloudflare edge (proxied CNAME) -> the Cloudflare **api-proxy Worker**

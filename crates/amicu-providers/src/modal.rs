@@ -1,16 +1,15 @@
 //! The Modal [`Provider`] adapter: a **catalog entry only**.
 //!
 //! Modal (modal.com) has no REST API; the only supported way in is the
-//! Sandbox API over gRPC, which is out of scope here (amicu-planning#158 PR 2).
+//! Sandbox API over gRPC, which is out of scope here.
 //! This adapter therefore carries a real [`ProviderCapabilities`] GPU catalog,
 //! so the wizard/recommend engine can offer Modal as a candidate and cost
 //! estimation can quote it, but [`provision`](ModalProvider::provision),
 //! [`status`](ModalProvider::status) and [`teardown`](ModalProvider::teardown)
 //! all reject with [`ProviderError::Backend`]: there is no transport behind
-//! them yet, fake or otherwise. Once amicu-modal's gRPC Sandbox supervisor
-//! lands, `amicu apply` will route Modal deployments through that target
-//! directly (per the planning issue) rather than through this trait's
-//! provisioning surface.
+//! them yet, fake or otherwise. Modal deployments do not go through this
+//! trait's provisioning surface: `amicu apply` routes them through
+//! `amicu-modal`'s gRPC Sandbox supervisor (`ModalSupervisor`) directly.
 //!
 //! Modal *is* regionalized: a caller can pin a Function/Sandbox to a broad
 //! region (`"us"`, `"eu"`, `"ap"`) or a narrower one (`"us-west"`,
@@ -49,7 +48,7 @@
 //! figures and Modal does not document which form factor it runs) and B200
 //! (nvidia.com publishes only aggregate 8-GPU HGX system figures, not a
 //! per-GPU number). Prices are illustrative catalog values, not a live quote,
-//! same convention as every other adapter here (amicu-planning#23).
+//! same convention as every other adapter here.
 
 use amicu_core::adapter::{Adapter, AdapterError, AdapterId, DescribeCapabilities, HealthStatus};
 use amicu_core::resource::{Accelerator, AcceleratorKind, Money};
@@ -402,7 +401,7 @@ fn offering(g: &GpuSpec, count: u32, region_codes: &[String]) -> ComputeOffering
 fn not_yet_provisionable() -> AdapterError {
     AdapterError::from_kind(ProviderError::Unsupported {
         detail: "Modal provisioning is not implemented by this catalog-only adapter; \
-                 use the Modal sandbox target added in amicu-planning#158 PR 2"
+                 use the Modal sandbox target"
             .into(),
     })
 }

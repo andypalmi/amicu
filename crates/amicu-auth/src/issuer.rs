@@ -48,7 +48,7 @@ impl IssuerConfig {
     /// Config with 5-minute access, 30-day refresh, 1-hour reset, and 24-hour
     /// email-verification lifetimes.
     ///
-    /// The access TTL is deliberately SHORT (andypalmi/amicu-planning#129): the
+    /// The access TTL is deliberately SHORT: the
     /// active-workspace claim (`wsid`/`wsrole`/`tier`) is only re-validated
     /// against `workspace_members` on refresh rotation, so this is the window
     /// within which a removal or role change (revocation) lands. 5 minutes keeps

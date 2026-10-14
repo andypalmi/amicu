@@ -1,4 +1,4 @@
-//! Verifier for Google-issued OIDC ID tokens (andypalmi/amicu-planning#141).
+//! Verifier for Google-issued OIDC ID tokens.
 //!
 //! This is what authenticates Cloud Scheduler's once-a-minute
 //! `POST /internal/outbox/drain` call. Cloud Scheduler mints a Google-SIGNED ID

@@ -1,5 +1,4 @@
 //! The internal outbox drain: `POST /internal/outbox/drain`
-//! (andypalmi/amicu-planning#141).
 //!
 //! # Why this endpoint exists
 //!

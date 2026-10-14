@@ -1,7 +1,7 @@
 # vLLM engine args
 
 Amicu builds the `vllm serve` argv from the `vllm {}` block
-(amicu-planning#152 - `amicu-vllm`'s `render_command`, mirroring
+(`amicu-vllm`'s `render_command`, mirroring
 `amicu-llamacpp`'s `render_command`). You do not pass these by hand; this
 table explains what each field becomes so you can reason about behavior and
 diagnostics.
@@ -17,12 +17,12 @@ diagnostics.
 | `kv_cache_dtype` | `--kv-cache-dtype <auto\|fp8\|fp8_e5m2\|fp8_e4m3>` | KV-cache quantization; vLLM's own value set (distinct from llama.cpp's `cache_type_k`/`cache_type_v`). |
 | `max_num_seqs` | `--max-num-seqs <n>` | Maximum concurrent sequences; vLLM's rough equivalent of llama.cpp's `parallel_slots`. |
 | `max_num_batched_tokens` | `--max-num-batched-tokens <n>` | Maximum batched tokens per iteration; vLLM's rough equivalent of llama.cpp's `batch_size`. |
-| `enforce_eager` | `Some(true)` → `--enforce-eager`; `Some(false)` → `--no-enforce-eager`; `None` → nothing | Disables CUDA-graph capture at startup when `true` (amicu-planning#158). Trade-off: `true` skips graph capture entirely, so the server finishes starting faster (fast boot) at the cost of per-request throughput once serving; `false` forces graph capture even over an inherited default that would skip it; unset leaves vLLM's own default (graphs captured) in effect. |
+| `enforce_eager` | `Some(true)` → `--enforce-eager`; `Some(false)` → `--no-enforce-eager`; `None` → nothing | Disables CUDA-graph capture at startup when `true`. Trade-off: `true` skips graph capture entirely, so the server finishes starting faster (fast boot) at the cost of per-request throughput once serving; `false` forces graph capture even over an inherited default that would skip it; unset leaves vLLM's own default (graphs captured) in effect. |
 
 No typed `dtype` (model weight dtype) field exists yet in `VllmSettings` - use
 `extra_args` (`--dtype bfloat16`, etc.) until it is promoted to a typed field.
 
-## GGUF on vLLM (amicu-planning#152)
+## GGUF on vLLM
 
 vLLM can load a single-file GGUF checkpoint, but the support is experimental
 upstream, unlike llama.cpp where GGUF is the native format. A deployment whose
@@ -30,9 +30,9 @@ model artifact is GGUF but whose runtime is `vllm` gets a non-blocking
 `AMICU-CAP-006` warning at `validate`/plan time - the deployment still plans
 and applies, the warning is informational. (Numbered 006, not 005: `AMICU-
 CAP-005` is a llama.cpp chat-template conflict registered by
-amicu-planning#151's typed-fields PR.)
+the typed-fields PR.)
 
-## `extra_args` / `env` escape hatch (amicu-planning#150, extended to vLLM by #152)
+## `extra_args` / `env` escape hatch (extended to vLLM by #152)
 
 Anything past the typed fields above goes in `extra_args` (raw `vllm serve`
 flags, appended verbatim after the typed ones, in declaration order) and
@@ -79,7 +79,7 @@ Health is checked against `GET /health` on the configured port.
   the remainder governed by `gpu_memory_utilization`.
 - If weights + KV-cache exceed a single GPU, raise `tensor_parallel_size` and
   provision more accelerators in the hardware profile.
-- `amicu validate`/`amicu plan` now actually check this (amicu-planning#152):
+- `amicu validate`/`amicu plan` now actually check this:
   weights (dtype-based; the model's `artifact.quantization`, defaulting to
   `bf16` when unset) plus a KV-cache estimate (when the model declares
   `n_layers`/`n_kv_heads`/`head_dim`; `n_kv_layers` restricts the layer count
@@ -102,7 +102,7 @@ Health is checked against `GET /health` on the configured port.
 - Quantized safetensors (e.g. AWQ/GPTQ) reduce VRAM at some quality cost; see
   amicu-model-selection for the trade-off.
 
-## Testing a Modal deployment (amicu-planning#158)
+## Testing a Modal deployment
 
 Modal (modal.com) is a serverless GPU target reached over gRPC, deployed by
 `amicu apply` for a `provider = "modal"` hardware profile (setup, multi-GPU and

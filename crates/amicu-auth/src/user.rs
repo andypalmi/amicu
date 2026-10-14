@@ -38,7 +38,7 @@ pub struct User {
     pub email_verified: bool,
     /// The workspace provisioned for this user at sign-up, where they are Owner.
     /// This is their DEFAULT active workspace: a fresh sign-in mints a token
-    /// scoped here (andypalmi/amicu-planning#129). Server-generated at
+    /// scoped here. Server-generated at
     /// registration; the store persists it and reads resolve tier/billing
     /// through it (the transitional bridge from #128).
     pub personal_workspace_id: WorkspaceId,

@@ -44,7 +44,7 @@ impl Rate {
 /// Pricing for a compute offering: an on-demand rate and, when the provider
 /// offers interruptible capacity, a spot rate.
 ///
-/// Both rates are exposed so cost estimation (amicu-planning#16) can produce a range
+/// Both rates are exposed so cost estimation can produce a range
 /// spanning the interruptible floor and the on-demand ceiling.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pricing {

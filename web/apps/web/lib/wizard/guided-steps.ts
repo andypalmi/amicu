@@ -1,5 +1,5 @@
 // Pure, framework-free step-transition logic for the guided wizard
-// (andypalmi/amicu-planning#85, `/new/guided`). Kept free of React so the
+// (`/new/guided`). Kept free of React so the
 // transitions are unit-testable in isolation (see guided-steps.test.ts).
 //
 // `GuidedWizard` (components/wizard/guided/guided-wizard.tsx) drives a

@@ -1,7 +1,7 @@
 //! Durable signing-key loading: `AMICU_SIGNING_KEY_PEM` (+`_FILE`) and
 //! `AMICU_SIGNING_KEYS_RETIRING_PEM` (+`_FILE`) → a [`Keyring`] shared by
-//! every replica that carries the same secret-injected env
-//! (andypalmi/amicu-planning#140). See the crate docs and
+//! every replica that carries the same secret-injected env.
+//! See the crate docs and
 //! `docs/ops/signing-key-rotation.md` for the operational rotation
 //! procedure.
 //!

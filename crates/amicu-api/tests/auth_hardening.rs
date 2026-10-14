@@ -1,4 +1,4 @@
-//! API auth hardening (andypalmi/amicu-planning#194): security headers, body
+//! API auth hardening: security headers, body
 //! limits, password max length, per-email buckets, per-account backoff, and
 //! security-event emission (with a no-secrets-in-events check).
 

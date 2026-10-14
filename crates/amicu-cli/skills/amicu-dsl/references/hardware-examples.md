@@ -165,7 +165,7 @@ Notes:
   from the pre-existing `"local_apple"` / `"local_cpu"` examples above, which
   predate this catalog and are left as-is.
 
-## Modal (serverless GPU, amicu-planning#158)
+## Modal (serverless GPU)
 
 ```hcl
 resource "hardware_profile" "modal_h100" {

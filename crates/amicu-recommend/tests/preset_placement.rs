@@ -110,8 +110,8 @@ fn non_eu_edit_is_rejected() {
 #[test]
 fn every_preset_honors_eu_residency_required_without_an_invalid_graph() {
     // Generalizes the local_dev_chat/cost_optimized_batch regressions guarded
-    // in `amicu_recommend::preset`'s own tests to every catalog preset
-    // (amicu-planning#149): whatever shape a preset's base graph takes,
+    // in `amicu_recommend::preset`'s own tests to every catalog preset:
+    // whatever shape a preset's base graph takes,
     // setting `eu_residency_required = true` must never produce a graph
     // `report_for` rejects.
     let mut a = answers();

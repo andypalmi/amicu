@@ -127,7 +127,7 @@ mod tests {
         assert_eq!(missing[0].to_id, "does_not_exist");
     }
 
-    // --- amicu-planning#151 PR C: the speculative draft model is a real
+    // --- the speculative draft model is a real
     // second model edge, not a path string ------------------------------
 
     /// `sample_graph()` whose deployment drafts with `draft`.

@@ -103,7 +103,6 @@ pub trait VerifyStore: Send + Sync {
     /// verification-link twin of
     /// [`ResetStore::insert_and_notify`](crate::reset::ResetStore::insert_and_notify)
     /// - see that method's docs for the full rationale
-    /// (andypalmi/amicu-planning#141).
     ///
     /// # Errors
     /// Store errors from the insert, or transport errors from the delivery.

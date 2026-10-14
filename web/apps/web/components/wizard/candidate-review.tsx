@@ -28,7 +28,7 @@ type ReviewState =
   | { kind: 'error'; message: string; upgrade?: boolean }
   | { kind: 'result'; result: CustomizeResponseDto };
 
-// The deterministic "customize" review panel (andypalmi/amicu-planning#35): an
+// The deterministic "customize" review panel: an
 // editable HCL textarea seeded from a wizard candidate, a "Review changes"
 // action that re-parses/validates/plans the CURRENT editor text against the
 // candidate's original graph via POST /api/recommend/customize, and an

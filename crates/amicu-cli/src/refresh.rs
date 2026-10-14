@@ -3,7 +3,7 @@
 //! `amicu modal stop` (or the Modal dashboard) can end an app behind the
 //! project's back, leaving `.amicu/state/state.json` recording a deployment
 //! that no longer exists; diffing the config against that stale state yields
-//! "No changes" forever (amicu-planning#175). Before `plan`/`apply` diff,
+//! "No changes" forever. Before `plan`/`apply` diff,
 //! [`refresh_state`] asks Modal which recorded apps are still live and drops
 //! the ones that are not, so the planner shows a create.
 

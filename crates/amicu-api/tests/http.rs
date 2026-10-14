@@ -97,8 +97,8 @@ struct CapturingNotifier {
 impl CapturingNotifier {
     /// The most recently captured reset token.
     ///
-    /// Read SYNCHRONOUSLY, with no yielding: since
-    /// andypalmi/amicu-planning#141 the delivery hand-off happens ON the
+    /// Read SYNCHRONOUSLY, with no yielding:
+    /// the delivery hand-off happens ON the
     /// request path (it is a durable enqueue, not an SMTP send), so by the time
     /// `/recover` has responded the notifier has already been called. This used
     /// to poll `yield_now` in a loop because the work was detached onto
@@ -826,7 +826,7 @@ async fn verify_with_bogus_token_is_generic_failure() {
 }
 
 // ---------------------------------------------------------------------------
-// Durable outbox hand-off (andypalmi/amicu-planning#141)
+// Durable outbox hand-off
 //
 // These flows used to detach the whole lookup -> mint -> store -> send sequence
 // onto `tokio::spawn`, which Cloud Run freezes once the response is written. The

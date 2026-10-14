@@ -10,8 +10,8 @@
 //!     cargo test -p amicu-store -- --ignored
 //! ```
 //!
-//! Connect as the non-superuser, non-BYPASSRLS `amicu_app` role (see
-//! andypalmi/amicu-planning#114) to also exercise the row-level-security
+//! Connect as the non-superuser, non-BYPASSRLS `amicu_app` role
+//! to also exercise the row-level-security
 //! backstop on the workspace-scoped tables; the always-on query predicates make
 //! these tests pass under any role, but only `amicu_app` engages RLS too.
 //!
@@ -283,7 +283,7 @@ async fn deleting_a_user_cascades_their_tokens() {
     assert!(refresh.get(&hash).await.expect("get").is_some());
 
     // Deleting the user must cascade the refresh token (real FK, ON DELETE
-    // CASCADE) - the soft-FK note in andypalmi/amicu-planning#114 is resolved.
+    // CASCADE) - the soft-FK note is resolved.
     users.delete(&user).await.expect("delete user");
     assert!(refresh.get(&hash).await.expect("get").is_none());
 }

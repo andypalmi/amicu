@@ -21,8 +21,8 @@
 //!
 //! # Identity, membership, and auth stores
 //!
-//! Identity is GLOBAL; membership is the join (see
-//! andypalmi/amicu-planning#127). [`user`] ([`PostgresUserStore`]) is the global
+//! Identity is GLOBAL; membership is the join.
+//! [`user`] ([`PostgresUserStore`]) is the global
 //! identity store, keyed by email/id with no workspace scoping; [`workspace`]
 //! ([`PostgresWorkspaceStore`]) owns the workspace registry (tier + billing),
 //! also global. [`membership`] ([`PostgresMembershipStore`]) and [`invite`]
@@ -40,7 +40,7 @@
 //!
 //! There is no `WorkspaceId::DEFAULT` fallback in any of these reworked stores;
 //! [`WorkspaceId::DEFAULT`] survives only for the not-yet-reworked self-host
-//! config/state stores (andypalmi/amicu-planning#116).
+//! config/state stores.
 //!
 //! # Config store
 //!
@@ -63,7 +63,7 @@
 //! # Email outbox
 //!
 //! [`outbox`] is the durable transactional outbox behind every verification /
-//! password-reset / account-exists email (andypalmi/amicu-planning#141). The
+//! password-reset / account-exists email. The
 //! request path only ever *enqueues* (one constant-cost `INSERT`, joinable to
 //! the caller's own transaction via [`outbox::enqueue`]); the SMTP send happens
 //! later inside `POST /internal/outbox/drain`, driven by Cloud Scheduler, where
@@ -119,8 +119,8 @@ pub use workspace::{
 /// The control-plane isolation boundary: a workspace (unified with the
 /// Enterprise org).
 ///
-/// The type moved to `amicu-auth` (`amicu_auth::tenant`) in
-/// andypalmi/amicu-planning#129 so the always-compiled `Claims` can carry a
+/// The type moved to `amicu-auth` (`amicu_auth::tenant`)
+/// so the always-compiled `Claims` can carry a
 /// `wsid` without `amicu-auth` depending on `amicu-store` (the dependency runs
 /// the other way). It is re-exported here unchanged, so `amicu_store::WorkspaceId`
 /// keeps resolving for every existing call site.
@@ -143,7 +143,7 @@ pub enum StoreError {
 /// / `AMICU_DB_ACQUIRE_TIMEOUT_SECS`, see that crate's `Config`).
 ///
 /// Defaults are deliberately small. Cloud Run autoscales 0..N *stateless*
-/// replicas, and (as of andypalmi/amicu-planning#139) each replica now holds
+/// replicas, and each replica now holds
 /// exactly ONE shared pool for every store, so a generous per-replica ceiling
 /// multiplies against replica count: 100 replicas x a 50-connection pool would
 /// blow through a typical ~100-connection Cloud SQL ceiling on its own, before
@@ -217,8 +217,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), StoreError> {
 /// create `_sqlx_migrations`: this is read-only (`SELECT version FROM
 /// _sqlx_migrations`), so it works over a role that only has DML on
 /// pre-existing tables - exactly the non-owning production runtime role (see
-/// [`probe_rls_bypass_risk`] and amicu-server's two-role production model,
-/// andypalmi/amicu-planning#139). A missing `_sqlx_migrations` table (nothing
+/// [`probe_rls_bypass_risk`] and amicu-server's two-role production model).
+/// A missing `_sqlx_migrations` table (nothing
 /// has ever migrated this database) is reported as every embedded migration
 /// being pending, not an error.
 pub async fn pending_migrations(pool: &PgPool) -> Result<Vec<i64>, StoreError> {
@@ -250,7 +250,7 @@ pub async fn pending_migrations(pool: &PgPool) -> Result<Vec<i64>, StoreError> {
 /// table/index/etc., not merely connect. Used by amicu-server's `migrate` to
 /// fail with a friendly, specific error up front instead of a raw
 /// permission-denied surfacing from deep inside a migration transaction (see
-/// the two-role production model, andypalmi/amicu-planning#139: only the
+/// the two-role production model: only the
 /// schema-OWNING role has this privilege by design; the runtime `amicu_app`
 /// role never does).
 ///
@@ -322,7 +322,6 @@ impl RlsBypassRisk {
 /// that owns none of the `FORCE ROW LEVEL SECURITY` tables; this is the
 /// startup guard amicu-server runs in production to catch a misconfigured
 /// `DATABASE_URL` before it silently bypasses every FORCE RLS policy
-/// (andypalmi/amicu-planning#139).
 ///
 /// Runtime `query`/`query_scalar`, not the `query!` macro: `pg_roles` /
 /// `pg_class` / `pg_namespace` are system catalogs outside the `.sqlx`
@@ -400,8 +399,8 @@ pub(crate) fn tier_from_str(text: &str) -> Result<amicu_auth::Tier, AuthError> {
 /// [`Tier::Hosted`](amicu_auth::Tier::Hosted). Mirrors `amicu-api`'s
 /// `tier_rank` ordering (Community < Pro < Enterprise < Hosted).
 ///
-/// Used by the org-console audited mutations' in-transaction tier re-check
-/// (andypalmi/amicu-planning#132): the claim-based Enterprise gate keys on the
+/// Used by the org-console audited mutations' in-transaction tier re-check:
+/// the claim-based Enterprise gate keys on the
 /// access token's `claims.tier`, so a workspace DOWNGRADED from Enterprise
 /// still passes it until the token expires (<=5 min). Re-reading the
 /// workspace's CURRENT tier inside the mutation's own transaction closes that

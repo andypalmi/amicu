@@ -1,5 +1,5 @@
 //! Postgres-backed [`StateBackendAdapter`]: the first production
-//! implementation of the state-backend family (amicu-planning#123).
+//! implementation of the state-backend family.
 //!
 //! # Scoping
 //!

@@ -10,7 +10,7 @@
 //!
 //! [`insert_and_notify`](ResetStore::insert_and_notify) additionally writes the
 //! delivery into the `email_outbox` queue inside the SAME transaction as the
-//! token row (andypalmi/amicu-planning#141), so a minted reset token and the
+//! token row, so a minted reset token and the
 //! email that carries it commit together or not at all.
 
 use amicu_auth::notify::{Notification, Notifier};

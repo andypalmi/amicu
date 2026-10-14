@@ -2,9 +2,8 @@
 #
 # amicu-server container image.
 #
-# One image, two Cloud Run resources (amicu-planning#143, amicu-infra's
-# envs/prod/main.tf): the `amicu-api` SERVICE runs it with no arguments
-# (ENTRYPOINT only, binds $PORT); the `amicu-migrate` JOB overrides the
+# One image, two Cloud Run resources: the `amicu-api` SERVICE runs it with no
+# arguments (ENTRYPOINT only, binds $PORT); the `amicu-migrate` JOB overrides the
 # container `command` entirely (Cloud Run Job semantics) with
 # `["/usr/local/bin/amicu-server", "migrate"]` to apply pending schema
 # migrations, connected as the schema-owning role, and exit — see

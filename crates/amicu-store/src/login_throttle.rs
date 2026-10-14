@@ -1,5 +1,5 @@
-//! Postgres-backed [`amicu_auth::throttle::LoginThrottle`]
-//! (andypalmi/amicu-planning#194), shared by every Cloud Run replica.
+//! Postgres-backed [`amicu_auth::throttle::LoginThrottle`],
+//! shared by every Cloud Run replica.
 //!
 //! [`PostgresLoginThrottle::begin_attempt`] is ONE round trip: a single atomic
 //! upsert that counts the attempt, arms the lock, and records (in

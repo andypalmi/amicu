@@ -1,6 +1,6 @@
 # Deploying amicu (Cloud Run + Cloudflare Workers)
 
-Short runbook for **this** repo's deploy artifacts (amicu-planning#143). The
+Short runbook for **this** repo's deploy artifacts. The
 durable infra (Cloud Run service/Job, Secret Manager, IAM, WIF, Cloudflare
 DNS) lives in the separate Terraform repo — **the master plan is
 `amicu-infra/docs/plans/cloud-run-deploy.md`**; read that first for the
@@ -16,7 +16,7 @@ amicu-infra provisions:
 | Resource | amicu-infra name | Invocation |
 | --- | --- | --- |
 | Service | `amicu-api` | `ENTRYPOINT` only, no args — binds `$PORT` (Cloud Run's injected env var; `AMICU_BIND`/`--bind` overrides it, see `crates/amicu-server/src/lib.rs`). |
-| Job | `amicu-migrate` | Terraform-managed `command` override: `["/usr/local/bin/amicu-server", "migrate"]` (amicu-planning#127's `Command::Migrate` in `crates/amicu-server/src/main.rs`) — applies pending schema migrations as the schema-owning role, prints how many it applied, and exits. No RLS-bypass guard runs (the migrator is expected to own the schema). |
+| Job | `amicu-migrate` | Terraform-managed `command` override: `["/usr/local/bin/amicu-server", "migrate"]` (the `Command::Migrate` in `crates/amicu-server/src/main.rs`) — applies pending schema migrations as the schema-owning role, prints how many it applied, and exits. No RLS-bypass guard runs (the migrator is expected to own the schema). |
 
 - **Health/readiness**: `GET /healthz` (startup probe) and `GET /readyz`
   (liveness probe, checks the Postgres pool with a `SELECT 1` under
@@ -36,7 +36,7 @@ amicu-infra provisions:
 - **Required env** — see amicu-infra's `docs/env-matrix.md` for the
   authoritative, component-by-component table (secret-backed vs plain, every
   Cloud Run resource, every gating flag). Short version: `DATABASE_URL` +
-  `AMICU_SIGNING_KEY_PEM` (amicu-planning#140) are the only two secrets
+  `AMICU_SIGNING_KEY_PEM` are the only two secrets
   required before the Cloud Run resources can even start;
   `AMICU_ISSUER`/`AMICU_AUDIENCE`/`AMICU_WEB_URL`/`AMICU_TRUSTED_PROXIES` and
   the rest are plain env vars Terraform sets directly. The outbox-drain
@@ -46,7 +46,7 @@ amicu-infra provisions:
   optional `AMICU_INTERNAL_TOKEN` secret) are covered in "Cloud Scheduler →
   outbox drain" below.
 
-## Signing key (amicu-planning#140)
+## Signing key
 
 `amicu-server` no longer generates an ephemeral signing key at boot: the
 ACTIVE key comes from `AMICU_SIGNING_KEY_PEM` (Ed25519 PKCS#8 PEM), identical
@@ -71,7 +71,7 @@ in-repo rationale (stable `kid` derivation, retention-window math, what
 breaks if a retiring key is dropped too early) lives in
 `docs/ops/signing-key-rotation.md`.
 
-## Shared rate limiter + Cloudflare edge trust (amicu-planning#142)
+## Shared rate limiter + Cloudflare edge trust
 
 Cloud Run autoscales `0..N` stateless replicas behind Google's own load
 balancer, which in turn sits behind the Cloudflare **api-proxy Worker**
@@ -81,10 +81,10 @@ consequences for anything keyed on "the client":
 - The credential-route rate limiter (`crates/amicu-api/src/ratelimit.rs`) is
   **Postgres-backed and shared across every replica** whenever `DATABASE_URL`
   is set — the same single shared pool every replica already opens
-  (amicu-planning#139) backs `PostgresRateLimitStore`'s one-round-trip atomic
+  backs `PostgresRateLimitStore`'s one-round-trip atomic
   upsert (`crates/amicu-store/migrations/0014_rate_limit_buckets.sql`).
   `AMICU_ENV=production` requires this path: it already refuses to boot
-  without `DATABASE_URL` (amicu-planning#127's fail-fast gate), so the
+  without `DATABASE_URL` (the fail-fast gate), so the
   in-memory limiter — kept only for dev/tests/DB-less self-host, where a
   process-local counter resetting on every cold start is an accepted
   trade-off — is never reachable in production. **Fails open** on a database
@@ -119,7 +119,7 @@ untouched by this change; once a valid edge token is presented,
 `CF-Connecting-IP` is used instead and `AMICU_TRUSTED_PROXIES` is not
 consulted for that request at all.
 
-## Auth hardening env (amicu-planning#194)
+## Auth hardening env
 
 | Env var | Secret? | Default | Purpose |
 | --- | --- | --- | --- |
@@ -151,7 +151,7 @@ password-reset and account-exists messages are therefore written to the
 `email_outbox` table inside the request that triggers them (in the same
 transaction as the token mint, on the Postgres path), and actually delivered by
 an authenticated endpoint that `amicu-infra`'s `modules/scheduler` calls on a
-fixed cadence — amicu-planning#141.
+fixed cadence.
 
 | | |
 | --- | --- |
@@ -210,7 +210,7 @@ fixed cadence — amicu-planning#141.
 
 ## `amicu_app` / `amicu_owner` DB roles
 
-`ops/sql/provision_app_role.sql` (landed with amicu-planning#127) is the
+`ops/sql/provision_app_role.sql` is the
 canonical provisioning script: a schema-**owning** `amicu_owner` role (runs
 `amicu-server migrate`) and a least-privilege, DML-only `amicu_app` role
 (runs the service), least-privilege enforced by `AMICU_ENV=production`'s

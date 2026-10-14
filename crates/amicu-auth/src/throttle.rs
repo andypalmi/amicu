@@ -1,4 +1,4 @@
-//! Per-account failed-sign-in backoff (andypalmi/amicu-planning#194).
+//! Per-account failed-sign-in backoff.
 //!
 //! The throttle counts every sign-in ATTEMPT per key (the pseudonym of the
 //! normalized email - tracked identically whether or not the account exists,

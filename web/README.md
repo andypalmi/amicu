@@ -16,7 +16,7 @@ web/                          # pnpm workspace root (Turborepo)
 ├── apps/
 │   └── web/                  # Next.js App Router: marketing + app + docs
 │       ├── app/(marketing)/  # public landing (SSG)
-│       ├── app/(app)/        # authed product shell (placeholder; amicu-planning#78 wires auth)
+│       ├── app/(app)/        # authed product shell (placeholder; wires auth)
 │       ├── app/docs/         # Fumadocs, single-app (multi-zone deferred)
 │       ├── app/api/          # thin BFF route handlers (no domain logic)
 │       ├── app/llms.txt/     # + llms-full.txt, llms.mdx - AI-agent exports
@@ -25,7 +25,7 @@ web/                          # pnpm workspace root (Turborepo)
 │   ├── ui/                   # shared shadcn design system + Tailwind v4 tokens
 │   ├── config/               # shared tsconfig + eslint presets
 │   ├── api-client/           # STUB - generated-only client (see its README)
-│   └── auth/                 # STUB - JWKS verify + session (amicu-planning#78)
+│   └── auth/                 # STUB - JWKS verify + session
 ├── turbo.json
 └── pnpm-workspace.yaml
 ```

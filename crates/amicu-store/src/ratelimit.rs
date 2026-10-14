@@ -1,13 +1,12 @@
-//! Postgres-backed shared rate-limit counter (andypalmi/amicu-planning#142).
+//! Postgres-backed shared rate-limit counter.
 //!
 //! Backs [`crate`] callers (via `amicu-api`'s `PostgresRateLimiter`, see that
 //! crate's `ratelimit` module) that need a fixed-window request counter shared
 //! by every Cloud Run replica, instead of the process-local
 //! `Mutex<HashMap<..>>` that gives each replica its own full quota. There is
-//! no Redis in this stack (see andypalmi/amicu-planning#142's design
+//! no Redis in this stack (see the design
 //! decision), so the shared counter lives in the same Postgres the rest of
 //! the control plane already uses, over the one pool per replica
-//! (andypalmi/amicu-planning#139).
 //!
 //! # Atomicity
 //!
@@ -97,8 +96,8 @@ impl PostgresRateLimitStore {
     /// Returns [`StoreError::Database`] if the upsert (or, on the
     /// [`Self::with_cleanup_every`]-th call, the opportunistic cleanup) fails.
     /// Callers that want to fail OPEN on a database error (recommended for a
-    /// login-availability-over-strict-limiting posture - see
-    /// andypalmi/amicu-planning#142) should catch this at the call site rather
+    /// login-availability-over-strict-limiting posture)
+    /// should catch this at the call site rather
     /// than propagate it as a hard failure.
     pub async fn hit(&self, key: &str, window_secs: i64) -> Result<i64, StoreError> {
         let window_secs = window_secs.max(1);

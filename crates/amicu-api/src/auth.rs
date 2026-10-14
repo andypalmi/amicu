@@ -149,7 +149,7 @@ impl AuthApiState {
         }
     }
 
-    /// Install the per-EMAIL limiters (andypalmi/amicu-planning#194), applied
+    /// Install the per-EMAIL limiters, applied
     /// in addition to the per-IP limiter: `recover_and_resend` guards
     /// `/recover` and `/verify/resend`, `signin` guards `/signin` and `/token`.
     /// Keys are pseudonyms of the normalized email, so unknown emails are
@@ -275,7 +275,7 @@ impl AuthApiState {
         self
     }
 
-    /// Configure the Cloudflare edge-trust policy (andypalmi/amicu-planning#142):
+    /// Configure the Cloudflare edge-trust policy:
     /// when a request presents a valid `X-Amicu-Edge-Token`, its
     /// `CF-Connecting-IP` header is trusted as the rate-limit client identity
     /// in place of the peer/`X-Forwarded-For` path. See [`crate::edge`].
@@ -821,7 +821,7 @@ pub(crate) fn to_response(pair: &TokenPair) -> Result<TokenResponse, ApiError> {
 /// The bucket key is per route and per client. Client identity, in order of
 /// preference:
 /// 1. `CF-Connecting-IP`, but ONLY when the request presents a valid
-///    `X-Amicu-Edge-Token` (andypalmi/amicu-planning#142 - see
+///    `X-Amicu-Edge-Token` (see
 ///    [`crate::edge::EdgeTrust`]): on Cloud Run behind Cloudflare, neither the
 ///    peer address (Google's LB) nor `X-Forwarded-For` (ends in Cloudflare's
 ///    own egress IP) is the real client, so this is the only trustworthy
@@ -848,7 +848,7 @@ async fn rate_limit(State(state): State<AuthApiState>, request: Request, next: N
         .headers()
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok());
-    // andypalmi/amicu-planning#142: on Cloud Run behind Cloudflare, prefer the
+    // on Cloud Run behind Cloudflare, prefer the
     // real client IP (`CF-Connecting-IP`) once the edge token proves the
     // request actually passed through the api-proxy Worker; otherwise fall
     // back to the existing peer/XFF logic unchanged. `trusted_client_ip`

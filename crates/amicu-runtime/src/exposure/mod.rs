@@ -1,5 +1,5 @@
 //! How a started endpoint is reachable, and the shared post-deploy check that
-//! it is actually protected (amicu-planning#191).
+//! it is actually protected.
 //!
 //! Every [`RuntimeHandle`](crate::RuntimeHandle) carries an
 //! [`EndpointExposure`]: an adapter must say whether the endpoint it returns

@@ -1,5 +1,5 @@
-// Pure-logic tests for the guided-wizard answer-building helper
-// (andypalmi/amicu-planning#85). Uses Node's built-in test runner
+// Pure-logic tests for the guided-wizard answer-building helper.
+// Uses Node's built-in test runner
 // (`node --test`, with type-stripping) so no test framework is added.
 // Run: `pnpm --filter @amicu/web test`.
 

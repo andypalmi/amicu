@@ -1,5 +1,5 @@
 //! HTTP surface for the deterministic "customize" flow: `POST
-//! /recommend/customize` (andypalmi/amicu-planning#35).
+//! /recommend/customize`.
 //!
 //! A wizard candidate's generated HCL (see [`crate::recommend_wizard::CandidateDto::hcl`])
 //! is a starting point, not a final answer: a user may hand-edit it before
@@ -75,8 +75,8 @@ use crate::engine::EngineApiState;
 /// is *not* a variant here (it is folded into the `422` [`DiagnosticReport`]
 /// response body, per this module's doc-comment) - only failures that are
 /// not representable as a diagnostic reach this type. A runtime adapter
-/// failure while planning is not one of those either (amicu-planning#150
-/// review hardening): see `EngineHttpError`'s doc-comment - the same
+/// failure while planning is not one of those either:
+/// see `EngineHttpError`'s doc-comment - the same
 /// [`amicu_engine::PlanError`] handling applies here.
 pub(crate) enum CustomizeHttpError {
     /// `base_graph` is present but is not valid JSON for a
@@ -213,8 +213,8 @@ pub(crate) async fn customize_handler(
     let result = match amicu_engine::build_plan(&graph, base_graph.as_ref()) {
         Ok(result) => result,
         // See `engine::plan_handler`'s matching arm: `build_plan` hands back
-        // every collected diagnostic instead of a bare adapter error
-        // (amicu-planning#150 review hardening), so this stays a `422`.
+        // every collected diagnostic instead of a bare adapter error,
+        // so this stays a `422`.
         Err(amicu_engine::PlanError(report)) => {
             return Ok((
                 StatusCode::UNPROCESSABLE_ENTITY,

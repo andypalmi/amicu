@@ -1,5 +1,5 @@
 #!/bin/sh
-# amicu hardware probe (issue andypalmi/amicu-planning#179).
+# amicu hardware probe.
 #
 # One fixed, read-only script. It is embedded in the binary (`include_str!`)
 # and run verbatim, locally or inside a Modal container through

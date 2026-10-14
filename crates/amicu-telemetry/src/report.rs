@@ -1,5 +1,5 @@
 //! The opt-in telemetry payload: a versioned, aggregates-only, content-free
-//! report (andypalmi/amicu-planning#228).
+//! report.
 //!
 //! # What is collected
 //!

@@ -8,7 +8,7 @@
 -- two-role split instead - a separate schema-owning migrator role plus this
 -- kind of non-owning runtime role - which the guard actively enforces; see
 -- `ops/sql/provision_app_role.sql` and the README's "Production database
--- (two-role split)" section (andypalmi/amicu-planning#139).
+-- (two-role split)" section.
 --
 -- `amicu-store`'s migrations enable `FORCE ROW LEVEL SECURITY` on every
 -- workspace-scoped table (see e.g. 0003_refresh_tokens.sql) as a backstop

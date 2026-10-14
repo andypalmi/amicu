@@ -107,8 +107,7 @@ const GGUF_QUANTIZATIONS: &[Quantization] = &[
 ///
 /// Planning (`capabilities`/`validate`/`plan_launch`) is pure and resolves the
 /// deployment's model/hardware through a [`Catalog`]. Apply/runtime-time methods
-/// delegate to a [`ProcessSupervisor`]; real launchd/systemd supervisors land in
-/// amicu-planning#8.
+/// delegate to a [`ProcessSupervisor`]; real launchd/systemd supervisors land later.
 pub struct LlamaCppAdapter {
     id: AdapterId,
     catalog: Box<dyn Catalog>,
@@ -194,8 +193,8 @@ impl LlamaCppAdapter {
         Ok((resolved, hardware))
     }
 
-    /// Resolve the `speculative {}` block's draft model (amicu-planning#151
-    /// PR C) to its resource and the GGUF variant llama.cpp would serve.
+    /// Resolve the `speculative {}` block's draft model
+    /// to its resource and the GGUF variant llama.cpp would serve.
     ///
     /// The draft `model` is a reference to a second `model` resource, so it
     /// goes through the same [`Catalog`] the primary [`Deployment::model`]
@@ -260,8 +259,8 @@ fn is_plain_file_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
 }
 
-/// The draft-model weights a speculative deployment adds to the fit check
-/// (amicu-planning#151 PR C), derived exactly the way the primary model's
+/// The draft-model weights a speculative deployment adds to the fit check,
+/// derived exactly the way the primary model's
 /// weights are. `None` when there is no speculative block.
 fn draft_weights(draft: Option<&(ResolvedModel, GgufVariant)>) -> Option<ByteSize> {
     draft.map(|(m, v)| variant_weights(m.total_parameters, v))
@@ -272,7 +271,7 @@ fn diagnostic(error: &LlamaCppError) -> Diagnostic {
     Diagnostic::new(error.code(), error.severity(), error.to_string())
 }
 
-/// Assemble [`KvCacheParams`] for the KV-cache estimator (amicu-planning#151),
+/// Assemble [`KvCacheParams`] for the KV-cache estimator,
 /// when the inputs it needs are actually present: every one of the model's
 /// three declared shape fields, and at least one of the deployment's two
 /// cache-type fields (the other, if unset, defaults to
@@ -306,7 +305,7 @@ fn kv_cache_params(model: &Model, settings: &LlamaCppSettings) -> Option<KvCache
 /// that happens to start with `-` but names no flag amicu tracks) yields
 /// `None` only when it starts with neither `-` nor `--` - anything
 /// dash-prefixed is still returned so a short alias (`-m`, `-c`, `-ngl`)
-/// is checked the same as its long form (amicu-planning#150 review
+/// is checked the same as its long form (review
 /// hardening).
 fn flag_token(arg: &str) -> Option<&str> {
     if !arg.starts_with('-') || arg == "-" {
@@ -316,7 +315,7 @@ fn flag_token(arg: &str) -> Option<&str> {
 }
 
 /// Diagnose `settings.chat_template`/`chat_template_file` for a schema/
-/// capability conflict (amicu-planning#151): both fields set is ambiguous -
+/// capability conflict: both fields set is ambiguous -
 /// they render mutually exclusive flags (`--chat-template` vs
 /// `--chat-template-file`), and [`crate::command::render_command`] renders
 /// neither when both are present rather than guessing which one wins. `None`
@@ -345,7 +344,7 @@ fn flag_conflict(flag: &str) -> Option<LlamaCppError> {
 /// Diagnose one settings `env` key: `AMICU-CAP-003` if it is one of the
 /// fixed dynamic-loader-hook names, or if its `LLAMA_ARG_*` mirror names a
 /// denylisted flag; `AMICU-CAP-002` if its `LLAMA_ARG_*` mirror names a
-/// typed field's flag (amicu-planning#150 review hardening: llama-server
+/// typed field's flag (review hardening: llama-server
 /// reads `LLAMA_ARG_<X>` env vars as equivalent to `--<x>`, so `env` is a
 /// second channel to the same conflicts `extra_args` already guards).
 /// `None` if clean - including any `env` key with no `LLAMA_ARG_` prefix
@@ -499,8 +498,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
             return out;
         }
         // The speculative draft model is a second graph edge: resolve it the
-        // same way, and report its problems with the same codes
-        // (amicu-planning#151 PR C).
+        // same way, and report its problems with the same codes.
         let draft = match self.resolve_draft(d, settings) {
             Ok(draft) => draft,
             Err(e) => {
@@ -561,7 +559,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
             .map_err(LlamaCppError::into_adapter_error)?;
         // The draft GGUF is staged under its own model id, exactly like the
         // primary one - `--model-draft` gets a resolved path, never the HCL
-        // reference (amicu-planning#151 PR C).
+        // reference.
         let draft_path = draft
             .as_ref()
             .map(|(m, v)| self.model_path(&m.model.id, v))

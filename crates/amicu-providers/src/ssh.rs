@@ -190,7 +190,7 @@ impl Default for RusshTransport {
 /// other key. Without a pin the first key is accepted (trust on first use); the
 /// adapter stores the observed fingerprint in its stop record so every later
 /// connection is pinned.
-// TODO(amicu-planning#70): verify against a known-hosts store instead of TOFU.
+// TODO: verify against a known-hosts store instead of TOFU.
 struct PinningHandler {
     pinned: Option<String>,
     observed: std::sync::Arc<std::sync::Mutex<Option<String>>>,

@@ -1,7 +1,7 @@
 //! Postgres-backed [`UserStore`]: GLOBAL identity.
 //!
 //! A user is one person, identified by a globally-unique email, independent of
-//! any workspace (see andypalmi/amicu-planning#127). `users` carries no
+//! any workspace. `users` carries no
 //! workspace scoping and no RLS, so lookups by email/id need no workspace
 //! context - which is exactly what sign-in requires, before any workspace is
 //! selected.
@@ -11,7 +11,7 @@
 //! The [`User`] the auth service and billing surface consume still exposes a
 //! `tier` and Stripe customer/subscription. In the new model those live on the
 //! WORKSPACE, not the user: the workspace is the billing entity. Until the
-//! access token carries a workspace claim (`wsid`, andypalmi/amicu-planning#129)
+//! access token carries a workspace claim (`wsid`)
 //! there is no per-request workspace to read them from, so this store resolves
 //! them through `users.personal_workspace_id` - the one workspace provisioned
 //! for the user at sign-up, where they are Owner. Both `users` and `workspaces`

@@ -14,7 +14,7 @@ export const metadata: Metadata = { title: 'Classic preset wizard' };
 // The preset catalog is Community-minimum - tier is enforced by the API, and the
 // UI adds no gating of its own.
 //
-// Superseded as the primary entry point by `/new` (andypalmi/amicu-planning#85),
+// Superseded as the primary entry point by `/new`,
 // which is what the nav's "New config" link now points to - this route stays
 // reachable directly because `components/configs/detail.tsx`'s "Load into
 // classic wizard" link (?configId=<id>) targets it.

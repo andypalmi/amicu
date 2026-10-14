@@ -30,17 +30,17 @@ reason about behavior and diagnostics.
 | `speculative.n_min` | `--spec-draft-n-min <n>` | Min draft tokens to use. |
 | `speculative.p_min` | `--draft-p-min <n>` | Min draft probability, below which drafting stops. |
 | `speculative.n_gpu_layers` | `--n-gpu-layers-draft <n>` | Draft-model layers offloaded to the accelerator. |
-| `build` (model-level: `variant.sha256`) | *(not rendered)* | `build` is a stored/validated-only runtime build pin (amicu-planning#151 PR B); `sha256` verifies the resolved download artifact's checksum in `download_gguf`, before any bytes are fetched - neither appears in argv. |
+| `build` (model-level: `variant.sha256`) | *(not rendered)* | `build` is a stored/validated-only runtime build pin; `sha256` verifies the resolved download artifact's checksum in `download_gguf`, before any bytes are fetched - neither appears in argv. |
 | `multimodal.projector` | `--mmproj <value>`/`-mm` | Path or HF-style reference to the mmproj GGUF. A plain string, not a second `model` resource reference; not validated for existence at plan time. |
 | `multimodal.offload` | `--mmproj-offload` (`true`) / `--no-mmproj-offload` (`false`) | Paired bare flags (no value), like `jinja`; llama-server defaults to enabled. `Some(false)` renders `--no-mmproj-offload` explicitly, `None` renders nothing. |
 
-## Sampling, KV cache, batching, flash-attn, parallel slots (amicu-planning#151)
+## Sampling, KV cache, batching, flash-attn, parallel slots
 
 All twelve fields above are optional and independent - set only what you need,
 the rest fall back to llama-server's own defaults. See
 `amicu-dsl/references/deployment-examples.md` for a full example.
 
-## Chat template, jinja, reasoning format, build pin, artifact checksum (amicu-planning#151 PR B)
+## Chat template, jinja, reasoning format, build pin, artifact checksum
 
 `chat_template`/`chat_template_file`, `jinja`, and `reasoning_format` are
 optional and independent of each other and of the PR A fields above -
@@ -70,7 +70,7 @@ validated at parse time but do not affect argv:
   fetched; a mismatch fails fast as `LlamaCppError::ChecksumMismatch`
   (`AMICU-CAP-001`) rather than downloading a file already known to be wrong.
 
-## Multimodal projector (amicu-planning#151 PR D)
+## Multimodal projector
 
 `multimodal { projector, offload }` backs the `Modality::Vision` capability
 the llama.cpp adapter already declares (`LlamaCppAdapter::capabilities`).
@@ -122,7 +122,7 @@ the only memory-beyond-weights figure), and shows up in the plan's
 unset (there is no GGUF header parser in-tree to derive them) to keep the
 flat overhead band - nothing else about the fit check changes.
 
-## Speculative decoding (amicu-planning#151 PR C)
+## Speculative decoding
 
 `speculative {}` is an optional nested block inside `llama_cpp {}`. Omitting it
 is exactly today's behavior: no draft model is resolved, no draft flag is
@@ -210,13 +210,13 @@ Two deliberate omissions:
   metadata whenever a draft path is set, so passing the draft model alone is
   how draft-model speculative decoding is turned on.
 
-## `extra_args` / `env` escape hatch (amicu-planning#150)
+## `extra_args` / `env` escape hatch
 
 Anything past the typed fields above goes in `extra_args` (raw
 `llama-server` flags, appended verbatim after the typed ones, in declaration
 order) and `env` (process environment variables). See
 `amicu-dsl/references/deployment-examples.md` for a full example (the
-speculative type/ngram knobs remain untyped as of amicu-planning#151 PR D).
+speculative type/ngram knobs remain untyped).
 
 Both channels are checked against the same typed-field/denylist tables the
 typed fields themselves use, so amicu-owned settings cannot be silently
@@ -270,11 +270,11 @@ re-asserted:
   runtime flags present" - the estimator cannot interpret flags it has no
   typed model for.
 - Setting both `chat_template` and `chat_template_file` is `AMICU-CAP-005`
-  (amicu-planning#151 PR B) - see above.
+  - see above.
 - A `speculative {}` block whose draft `model` is the deployment's own model is
-  `AMICU-CAP-007` (amicu-planning#151 PR C) - see above.
+  `AMICU-CAP-007` - see above.
 - A `multimodal { ... }` block on the `vllm {}` settings block is a
-  structural schema error at parse time (amicu-planning#151 PR D), not a
+  structural schema error at parse time, not a
   capability diagnostic - see the "Multimodal projector" section above.
 
 ## Service supervision

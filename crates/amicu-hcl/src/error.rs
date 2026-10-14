@@ -18,7 +18,7 @@ pub enum HclError {
     InvalidIdentifier { resource: String, value: String },
     /// A secret-designated field (`api_key`, `token`, `password`, or an
     /// `env` map value) was given as a literal instead of a `secret(...)`
-    /// reference (amicu-planning#119). Structural, hard rejection: `code` is
+    /// reference. Structural, hard rejection: `code` is
     /// [`catalog::POLICY_SECRET_LITERAL_REJECTED`], `resource` locates the
     /// block, `field` names the offending attribute.
     SecretLiteral {
@@ -26,8 +26,8 @@ pub enum HclError {
         resource: String,
         field: String,
     },
-    /// An attribute or nested block the schema does not define
-    /// (amicu-planning#157). `code` is [`catalog::SCHEMA_UNKNOWN_ATTRIBUTE`],
+    /// An attribute or nested block the schema does not define.
+    /// `code` is [`catalog::SCHEMA_UNKNOWN_ATTRIBUTE`],
     /// `context` locates the enclosing block (e.g. `deployment chat.llama_cpp`),
     /// `kind` is `"attribute"` or `"block"`, `name` the offending key, and
     /// `suggestion` a known key within a small edit distance, if any.

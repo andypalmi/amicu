@@ -32,7 +32,7 @@ enum Command {
     /// is expected to own the schema (see `ops/sql/provision_app_role.sql`).
     Migrate,
     /// Generate a fresh Ed25519 PKCS#8 signing key and print ONLY its PEM to
-    /// stdout, then exit (andypalmi/amicu-planning#140). Nothing else is
+    /// stdout, then exit. Nothing else is
     /// written to stdout, so the output is safe to pipe straight into a
     /// secret manager, e.g.:
     ///
@@ -75,7 +75,7 @@ async fn main() -> ExitCode {
 
 /// Install the `tracing` subscriber: one JSON object per line on stderr, which
 /// Cloud Run / Cloud Logging ingest as structured entries. Carries the
-/// `amicu::security` events (andypalmi/amicu-planning#194); those hold only
+/// `amicu::security` events; those hold only
 /// pseudonymized identifiers, never plaintext emails, IPs, passwords or tokens.
 fn init_logging() {
     let _ = tracing_subscriber::fmt()

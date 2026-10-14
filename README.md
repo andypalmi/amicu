@@ -188,7 +188,7 @@ production should use the two-role split below.
 
 ### Production database (two-role split)
 
-`AMICU_ENV=production` (andypalmi/amicu-planning#139) changes two things from the dev
+`AMICU_ENV=production` changes two things from the dev
 shape above:
 
 1. `amicu-server` no longer migrates at boot. Apply migrations separately, as a
