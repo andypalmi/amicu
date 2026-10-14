@@ -58,9 +58,11 @@ A local deployment runs as a launchd job or systemd user unit labelled `io.amicu
 
 If an apply or destroy fails after starting or stopping some deployments, those changes are recorded in state and the error lists them. Fix the cause and re-run the same command: deployments that already succeeded show no change and the command finishes the rest. See [Security: State](/docs/security/state) and [Plan, apply and state](/docs/concepts/plan-apply-state#destroy).
 
-## Known limitations
+## Modal app names
 
-- **Modal app name collisions.** Amicu names a Modal app `amicu-` plus the deployment id, lowercased, with any non-alphanumeric character turned into `-` and runs of `-` collapsed into one. Two deployment ids that differ only in case or separator (for example `support_chat` and `Support-Chat`) map to the same app name. Amicu does not reject this yet, so do not give two deployments such ids. Name-based lookups can then find the wrong app.
+A Modal app is named `amicu-<project>-<deployment>-<digest>`: a short form of the project id, the deployment id lowercased, and a digest of the exact project and deployment ids. Deployment ids that differ only in case or separator, and the same id in two projects, get different apps. The name is recorded in the stop record, so stop, refresh and `amicu modal stop` always use the recorded name.
+
+**One-time migration.** State written by an earlier version records an app named `amicu-` plus the deployment id. The next `amicu apply` that launches such a deployment stops the old app, waits for the stop to be confirmed, then starts the new one. `amicu plan` shows this as a `destroy old` step. Expect the endpoint URL to change (clients must update), a short downtime, and no rollback to the previous version if the new deploy fails. The old app is never left running: if its stop is not confirmed, apply aborts and keeps its record.
 
 ## Drift
 

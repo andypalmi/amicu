@@ -19,8 +19,8 @@
 
 Project-independent (no `*.hcl` needed). They read `MODAL_TOKEN_ID` /
 `MODAL_TOKEN_SECRET` from the environment (never flags). `<app>` is the Modal
-app name: `amicu-` + the deployment id with `_` replaced by `-`
-(`chat_modal` -> `amicu-chat-modal`). See amicu-dsl `references/modal-deployment.md`.
+app name recorded in state: `amicu-<project>-<deployment>-<digest>`
+(apps made by older versions: `amicu-` + the deployment id). See amicu-dsl `references/modal-deployment.md`.
 
 | Command | Prints | Exit |
 |---|---|---|

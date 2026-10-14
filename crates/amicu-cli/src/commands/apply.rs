@@ -149,7 +149,11 @@ pub(crate) fn run_with(
         let switches = prior_state
             .as_ref()
             .map(|s| {
-                crate::commands::plan::provider_switches(&result, &s.stops, s.project_id.as_deref())
+                crate::commands::plan::provider_switches(
+                    &result,
+                    &effective_stops(Some(s)),
+                    s.project_id.as_deref(),
+                )
             })
             .unwrap_or_default();
         crate::commands::plan::print_human_with(&result, &graph, &switches, preview)?;

@@ -41,8 +41,8 @@ the command (exit 1). Categories: `PARSE`, `SCHEMA`, `REF`, `CAP`, `MEM`,
 
 ## Modal
 
-Setup and details: amicu-dsl `references/modal-deployment.md`. App name is
-`amicu-` + deployment id with `_` as `-`; inspect with
+Setup and details: amicu-dsl `references/modal-deployment.md`. App name is the one recorded in state
+(`amicu-<project>-<deployment>-<digest>`; older apps: `amicu-` + deployment id); inspect with
 `amicu modal status|logs <app>`.
 
 - `MODAL_TOKEN_ID is not set` (or `MODAL_TOKEN_SECRET`) - export the control

@@ -426,6 +426,9 @@ pub fn app_name_for(deployment_id: &str) -> String {
 /// The longest app name amicu asks Modal for.
 const MAX_APP_NAME: usize = 63;
 
+/// The most of the project id that appears in an app name.
+const MAX_PROJECT_SLUG: usize = 16;
+
 /// App name for `deployment_id` in the project `project_id`:
 /// `amicu-<project>-<readable slug>-<12 hex digits>`.
 ///
@@ -437,7 +440,13 @@ const MAX_APP_NAME: usize = 63;
 /// derived from state alone. Always `[a-z0-9-]`, at most 63 bytes.
 #[must_use]
 pub fn project_app_name(project_id: &str, deployment_id: &str) -> String {
-    let project = slug(project_id);
+    // Capped so a long project id cannot push the name past Modal's limit; the
+    // digest below still covers the whole id.
+    let mut project = slug(project_id);
+    project.truncate(MAX_PROJECT_SLUG);
+    while project.ends_with('-') {
+        project.pop();
+    }
     let digest = fnv1a(&[project_id.as_bytes(), &[0], deployment_id.as_bytes()]);
     let hex = format!("{:012x}", digest & 0xffff_ffff_ffff);
     let head = if project.is_empty() {
@@ -1493,6 +1502,14 @@ mod tests {
     }
 
     #[test]
+    fn a_long_project_id_is_capped_but_still_tells_projects_apart() {
+        let (a, b) = ("p".repeat(60) + "a", "p".repeat(60) + "b");
+        let (na, nb) = (project_app_name(&a, "chat"), project_app_name(&b, "chat"));
+        assert!(na.len() <= 63 && nb.len() <= 63, "{na} {nb}");
+        assert_ne!(na, nb, "the digest covers the whole project id");
+    }
+
+    #[test]
     fn project_app_names_are_stable_and_modal_safe() {
         // Pinned below: the name is recorded in state, so it must never drift.
         assert_eq!(
@@ -1503,6 +1520,8 @@ mod tests {
             ("", ""),
             ("--", "//"),
             ("P.1", &"x".repeat(200)[..]),
+            (&"p".repeat(100)[..], "dep"),
+            (&"p".repeat(100)[..], &"d".repeat(100)[..]),
             ("aaaa1111", "Support_Chat.01"),
         ] {
             let n = project_app_name(p, d);
