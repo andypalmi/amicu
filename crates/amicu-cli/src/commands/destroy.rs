@@ -19,12 +19,14 @@ use crate::project::{LocalState, Project};
 use crate::write_json;
 
 /// Plan, confirm, destroy, and persist state.
+#[allow(clippy::too_many_arguments)] // mirrors the CLI flags
 pub(crate) fn run(
     project: &Project,
     targets: &[String],
     auto_approve: bool,
     lock_timeout: Option<std::time::Duration>,
     forget_unconfirmed: bool,
+    purge: bool,
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
@@ -36,7 +38,7 @@ pub(crate) fn run(
         output,
         out,
         &mut std::io::stdin().lock(),
-        &Env::real(forget_unconfirmed),
+        &Env::real(forget_unconfirmed, purge),
     )
 }
 
@@ -175,6 +177,9 @@ pub(crate) fn run_with(
     }
 
     let remaining = remaining_graph(prior_graph, &result);
+    // What the destroyed deployments leave behind, read from their records
+    // BEFORE the stop removes those records.
+    let leftovers = Leftovers::of(prior_state.as_ref(), &result);
     let (_, state) = execute(
         project,
         remaining,
@@ -205,7 +210,110 @@ pub(crate) fn run_with(
             ))?;
         }
     }
-    Ok(0)
+    let modal_remains = state.stops.iter().any(|r| r.backend.is_modal());
+    leftovers.finish(env, modal_remains, output, out)
+}
+
+/// Secondary resources of destroyed deployments that a stop does not remove.
+#[derive(Default)]
+struct Leftovers {
+    logs: Vec<String>,
+    volumes: Vec<String>,
+}
+
+impl Leftovers {
+    fn of(prior: Option<&LocalState>, result: &PlanResult) -> Self {
+        let mut me = Self::default();
+        for r in crate::commands::apply::effective_stops(prior)
+            .iter()
+            .filter(|r| result.items.iter().any(|i| i.deployment == r.deployment))
+        {
+            for l in &r.logs {
+                if !me.logs.contains(l) {
+                    me.logs.push(l.clone());
+                }
+            }
+            for v in &r.volumes {
+                if !me.volumes.contains(v) {
+                    me.volumes.push(v.clone());
+                }
+            }
+        }
+        me
+    }
+
+    /// With `--purge`, delete them; otherwise say what stays and how to
+    /// remove it. Volumes are shared by every Modal deployment in the
+    /// workspace, so they are only deleted once none remains in state.
+    /// Deployments are already out of state and stopped here, so a failure
+    /// is reported (exit 1) without touching that.
+    fn finish(
+        self,
+        env: &Env,
+        modal_remains: bool,
+        output: OutputFormat,
+        out: &mut dyn Write,
+    ) -> Result<u8, CliError> {
+        let io = |r: std::io::Result<()>| r.map_err(|e| CliError::io("write failed", e));
+        let human = !output.is_json();
+        if !env.purge {
+            if human && (!self.logs.is_empty() || !self.volumes.is_empty()) {
+                io(writeln!(
+                    out,
+                    "Left in place (remove with `amicu destroy --purge`):"
+                ))?;
+                for l in &self.logs {
+                    io(writeln!(out, "  log file {l}"))?;
+                }
+                for v in &self.volumes {
+                    io(writeln!(out, "  Modal volume {v} (shared model cache)"))?;
+                }
+            }
+            return Ok(0);
+        }
+        let mut failures = Vec::new();
+        for l in &self.logs {
+            match std::fs::remove_file(l) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => failures.push(format!("log file {l}: {e}")),
+            }
+        }
+        if modal_remains && !self.volumes.is_empty() {
+            if human {
+                io(writeln!(
+                    out,
+                    "Kept the Modal volumes: other Modal deployments still use them."
+                ))?;
+            }
+        } else {
+            for v in &self.volumes {
+                if let Err(e) = futures_block(env.modal.delete_volume(v)) {
+                    failures.push(format!("Modal volume {v}: {e}"));
+                }
+            }
+        }
+        if failures.is_empty() {
+            if human && (!self.logs.is_empty() || !self.volumes.is_empty()) {
+                io(writeln!(
+                    out,
+                    "Purged logs and volumes left by destroyed deployments."
+                ))?;
+            }
+            return Ok(0);
+        }
+        Err(CliError::Message(format!(
+            "the deployments were destroyed, but purge could not remove: {}. Remove them by \
+             hand",
+            failures.join("; ")
+        )))
+    }
+}
+
+fn futures_block<T>(
+    fut: impl std::future::Future<Output = Result<T, CliError>>,
+) -> Result<T, CliError> {
+    crate::commands::build_runtime()?.block_on(fut)
 }
 
 /// Why [`plan_destroy`] produced no plan.

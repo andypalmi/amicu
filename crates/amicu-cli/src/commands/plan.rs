@@ -316,12 +316,16 @@ mod tests {
     }
 
     #[test]
-    fn project_plan_shows_an_absolute_model_path() {
+    fn project_plan_keeps_the_model_path_relative() {
         let g = graph("local", llama());
         let project = Project::new("/proj");
         let result = crate::planner::build_project_plan(&project, &g, None).expect("plan");
         let launch = result.items[0].rendered.clone().expect("rendered");
-        assert!(launch.contains("/proj/models/m/"), "{launch}");
+        assert!(launch.contains("models/m/"), "{launch}");
+        assert!(
+            !launch.contains("/proj"),
+            "no absolute project path: {launch}"
+        );
     }
 
     fn human_plan(g: &Graph) -> String {

@@ -504,6 +504,7 @@ resource "deployment" "support_modal" {
             .collect();
         LocalState {
             version: LocalState::VERSION.to_owned(),
+            project_id: None,
             pending: Vec::new(),
             stops: Vec::new(),
             graph,

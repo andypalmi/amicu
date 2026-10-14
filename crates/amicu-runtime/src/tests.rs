@@ -217,6 +217,7 @@ impl RuntimeAdapter for FakeRuntime {
             settings: d.runtime.clone(),
             secret_refs: self.secret_refs(),
             api_key: d.api_key.clone(),
+            service_label: None,
             estimate,
         })
     }

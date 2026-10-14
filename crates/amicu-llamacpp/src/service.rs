@@ -71,8 +71,24 @@ pub struct HostContext {
     pub domain: Option<String>,
 }
 
+/// The files a service leaves on the host: its definition (which holds the
+/// injected environment, so it is a secret-bearing file) and its log files.
+/// Recorded in state before the service starts so a later stop or purge does
+/// not depend on recomputing them from `$HOME` / the environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServicePaths {
+    /// The launchd plist / systemd environment file.
+    pub definition: PathBuf,
+    /// Log files the manager writes (empty for systemd: the journal).
+    pub logs: Vec<PathBuf>,
+}
+
 /// Load/start, query, stop, and read logs for a supervised service.
 pub trait ServiceManager: Send + Sync {
+    /// Where this manager keeps `label`'s definition and logs, if it can tell.
+    fn paths(&self, _label: &str) -> Option<ServicePaths> {
+        None
+    }
     /// The backend, uid and domain this manager acts as, if it can tell.
     fn context(&self) -> Option<HostContext> {
         None
@@ -259,6 +275,13 @@ impl LaunchdManager<HostExec> {
 }
 
 impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
+    fn paths(&self, label: &str) -> Option<ServicePaths> {
+        Some(ServicePaths {
+            definition: self.plist_path(label),
+            logs: vec![self.stdout_path(label), self.stderr_path(label)],
+        })
+    }
+
     fn instance_owner(&self, label: &str) -> Option<u32> {
         #[cfg(unix)]
         {
@@ -293,6 +316,9 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
 
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
         require_absolute(&self.agents_dir)?;
+        // Everything that can fail before the secret is on disk happens first,
+        // so a failure here never leaves the plist behind.
+        ensure_dir(&self.log_dir)?;
         write_private(
             &self.plist_path(&spec.label),
             &self.agents_dir,
@@ -303,7 +329,6 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
             )
             .as_bytes(),
         )?;
-        ensure_dir(&self.log_dir)?;
         let plist = self.plist_path(&spec.label);
         let (_, domain) = self.domain().inspect_err(|_| remove_env_file(&plist))?;
         let out = match self.exec.exec(
@@ -516,6 +541,13 @@ fn environment_file(env: &[(String, String)]) -> Result<String, LlamaCppError> {
 }
 
 impl<E: CommandExec> ServiceManager for SystemdManager<E> {
+    fn paths(&self, label: &str) -> Option<ServicePaths> {
+        Some(ServicePaths {
+            definition: self.env_path(label),
+            logs: Vec::new(),
+        })
+    }
+
     fn context(&self) -> Option<HostContext> {
         Some(HostContext {
             backend: HostBackend::Systemd,
@@ -529,6 +561,9 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
     }
 
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
+        if spec.argv.is_empty() {
+            return Err(LlamaCppError::Supervisor("empty argv".to_owned()));
+        }
         let unit = format!("--unit={}", spec.label);
         let mut args = vec!["--user", "--collect", &unit];
         // Env goes through a 0600 EnvironmentFile, not `--setenv`, whose values

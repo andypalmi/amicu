@@ -40,6 +40,8 @@ pub(crate) trait ModalOps: Send + Sync {
     async fn find_app(&self, name: &str) -> Result<Option<String>, CliError>;
     /// Stop an app by id. `Ok(false)`: Modal says no such app exists.
     async fn stop_app(&self, app_id: &str) -> Result<bool, CliError>;
+    /// Delete a Volume by name. `Ok(false)`: no such volume exists.
+    async fn delete_volume(&self, name: &str) -> Result<bool, CliError>;
 }
 
 /// Everything the commands need from Modal: lookups for refresh and the
@@ -82,6 +84,10 @@ impl ModalOps for ModalLookup {
             Err(e) if e.is_not_found() => Ok(false),
             Err(e) => Err(e.into()),
         }
+    }
+
+    async fn delete_volume(&self, name: &str) -> Result<bool, CliError> {
+        Ok(connect().await?.delete_volume(name).await?)
     }
 }
 

@@ -98,6 +98,11 @@ enum Command {
         /// the Modal dashboard that nothing is running.
         #[arg(long, requires = "target")]
         forget_unconfirmed: bool,
+        /// After destroying, also delete what is left behind: the host log files
+        /// and, once no Modal deployment remains in state, the shared Modal cache
+        /// Volumes (model downloads).
+        #[arg(long)]
+        purge: bool,
     },
     /// Run environment and project diagnostics.
     Doctor,
@@ -276,12 +281,14 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
             auto_approve,
             lock_timeout,
             forget_unconfirmed,
+            purge,
         } => commands::destroy::run(
             &project,
             target,
             *auto_approve,
             lock_timeout.map(std::time::Duration::from_secs),
             *forget_unconfirmed,
+            *purge,
             cli.output,
             out,
         ),

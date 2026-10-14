@@ -595,6 +595,7 @@ fn apply_json_stdout_is_a_single_json_value() {
     project
         .save_state(&LocalState {
             version: LocalState::VERSION.to_owned(),
+            project_id: None,
             pending: Vec::new(),
             stops: Vec::new(),
             graph: prior,
@@ -670,6 +671,7 @@ fn state_round_trips() {
 
     let state = LocalState {
         version: LocalState::VERSION.to_owned(),
+        project_id: None,
         pending: Vec::new(),
         stops: Vec::new(),
         graph: graph.clone(),
@@ -966,6 +968,7 @@ struct FakeModal {
     live: Option<Vec<String>>,
     /// App ids the token's workspace can see (besides `apps`).
     visible_ids: Vec<String>,
+    deleted_volumes: Mutex<Vec<String>>,
 }
 
 impl Default for FakeModal {
@@ -977,6 +980,7 @@ impl Default for FakeModal {
             stopped: Mutex::new(Vec::new()),
             live: None,
             visible_ids: Vec::new(),
+            deleted_volumes: Mutex::new(Vec::new()),
         }
     }
 }
@@ -1004,6 +1008,10 @@ impl ModalOps for FakeModal {
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, id)| id.clone()))
+    }
+    async fn delete_volume(&self, name: &str) -> Result<bool, crate::error::CliError> {
+        self.deleted_volumes.lock().unwrap().push(name.to_owned());
+        Ok(true)
     }
     async fn stop_app(&self, app_id: &str) -> Result<bool, crate::error::CliError> {
         if self.unknown_ids.iter().any(|i| i == app_id) {
@@ -1050,6 +1058,7 @@ struct Rig {
     host: Box<dyn Fn() -> Box<dyn amicu_llamacpp::ProcessSupervisor>>,
     modal: FakeModal,
     forget: bool,
+    purge: bool,
 }
 
 impl Rig {
@@ -1083,6 +1092,7 @@ impl Rig {
             }),
             modal: FakeModal::default(),
             forget: false,
+            purge: false,
         }
     }
     fn env(&self) -> Env<'_> {
@@ -1090,6 +1100,7 @@ impl Rig {
             host: &*self.host,
             modal: &self.modal,
             forget_unconfirmed: self.forget,
+            purge: self.purge,
         }
     }
     fn stopped(&self) -> Vec<String> {
@@ -1136,6 +1147,7 @@ fn run_apply(
 fn state_with(graph: amicu_core::graph::Graph) -> LocalState {
     LocalState {
         version: LocalState::VERSION.to_owned(),
+        project_id: None,
         graph,
         endpoints: Vec::new(),
         pending: Vec::new(),
@@ -1825,7 +1837,7 @@ fn state_round_trips_and_refuses_newer_versions() {
     state.stops = vec![host_rec("support_two")];
     project.save_state(&state).unwrap();
     let loaded = project.load_state().unwrap().unwrap();
-    assert_eq!(loaded.version, "v2");
+    assert_eq!(loaded.version, "v3");
     assert_eq!(loaded.pending, state.pending);
     assert_eq!(loaded.stops, state.stops);
 
@@ -1854,4 +1866,206 @@ fn handle(id: &str, port: u16) -> amicu_runtime::RuntimeHandle {
         endpoint: format!("http://127.0.0.1:{port}"),
         exposure: amicu_runtime::EndpointExposure::Loopback,
     }
+}
+
+// ---- project-scoped labels, recorded files, purge (#212, #214) ---------------
+
+fn scoped_rec(project_id: &str, name: &str, dir: &std::path::Path) -> StopRecord {
+    let label = amicu_llamacpp::project_host_label(project_id, name);
+    StopRecord::host_in(
+        project_id,
+        &name.into(),
+        Some(&platform_ctx()),
+        Some(amicu_llamacpp::ServicePaths {
+            definition: dir.join(format!("{label}.plist")),
+            logs: vec![dir.join(format!("{label}.out.log"))],
+        }),
+    )
+}
+
+#[test]
+fn two_projects_with_the_same_deployment_name_get_distinct_labels() {
+    let td = TempDir::new();
+    let a = scoped_rec("aaaa1111", "chat", &td.path);
+    let b = scoped_rec("bbbb2222", "chat", &td.path);
+    assert_ne!(a.identity, b.identity);
+    assert_eq!(a.identity, "io.amicu.llama.aaaa1111.chat");
+    assert!(!a.same_target(&b), "one project must never stop the other");
+    assert_ne!(a.definition, b.definition);
+    // The legacy, unscoped label is a different target again.
+    assert!(!a.same_target(&StopRecord::host(&"chat".into(), None)));
+}
+
+#[test]
+fn minted_project_ids_differ_per_project() {
+    let a = Project::new("/tmp/proj-a").mint_id();
+    let b = Project::new("/tmp/proj-b").mint_id();
+    assert_eq!(a.len(), 8);
+    assert_ne!(a, b);
+}
+
+#[test]
+fn v2_state_without_project_id_or_files_still_loads() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    let state = state_with(two_deployment_graph());
+    project.save_state(&state).unwrap();
+    let mut v: serde_json::Value = serde_json::to_value(&state).unwrap();
+    v["version"] = "v2".into();
+    v.as_object_mut().unwrap().remove("project_id");
+    std::fs::write(project.state_file(), v.to_string()).unwrap();
+    let loaded = project.load_state().unwrap().unwrap();
+    assert!(loaded.project_id.is_none());
+}
+
+fn destroy_scoped(
+    rec: StopRecord,
+    rig: &Rig,
+    purge: bool,
+) -> (Result<u8, crate::error::CliError>, Project, TempDir, String) {
+    let td = TempDir::new();
+    let mut state = state_with(two_deployment_graph());
+    state.stops = vec![rec];
+    let project = saved(&td, &state);
+    let mut rig_env = rig.env();
+    rig_env.purge = purge;
+    let mut out = Vec::new();
+    let result = commands::destroy::run_with(
+        &project,
+        &["support_two".to_owned()],
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &rig_env,
+    );
+    (result, project, td, utf8(out))
+}
+
+#[test]
+fn destroy_removes_the_recorded_plist_and_leaves_logs_unless_purged() {
+    let dir = TempDir::new();
+    let rec = scoped_rec("aaaa1111", "support_two", &dir.path);
+    let plist = std::path::PathBuf::from(rec.definition.clone().unwrap());
+    let log = std::path::PathBuf::from(rec.logs[0].clone());
+    std::fs::write(&plist, "secret").unwrap();
+    std::fs::write(&log, "log").unwrap();
+    let rig = Rig::new();
+    let (result, project, _td, out) = destroy_scoped(rec, &rig, false);
+    result.unwrap();
+    assert!(
+        !plist.exists(),
+        "secret-bearing plist deleted with the stop"
+    );
+    assert!(log.exists(), "logs stay without --purge");
+    assert!(
+        out.contains("amicu destroy --purge") && out.contains("out.log"),
+        "{out}"
+    );
+    assert_eq!(stops_for(&project, "support_two").len(), 0);
+    assert_eq!(rig.stopped(), ["io.amicu.llama.aaaa1111.support_two"]);
+}
+
+#[test]
+fn destroy_purge_deletes_logs() {
+    let dir = TempDir::new();
+    let rec = scoped_rec("aaaa1111", "support_two", &dir.path);
+    let log = std::path::PathBuf::from(rec.logs[0].clone());
+    std::fs::write(&log, "log").unwrap();
+    let (result, _p, _td, _out) = destroy_scoped(rec, &Rig::new(), true);
+    result.unwrap();
+    assert!(!log.exists());
+}
+
+#[test]
+fn a_failed_stop_keeps_the_record_with_its_recorded_files() {
+    let dir = TempDir::new();
+    let rec = scoped_rec("aaaa1111", "support_two", &dir.path);
+    let (result, project, _td, _) = destroy_scoped(rec.clone(), &Rig::failing(), true);
+    result.unwrap_err();
+    assert_eq!(stops_for(&project, "support_two"), vec![rec]);
+}
+
+#[test]
+fn a_recorded_definition_that_is_not_an_amicu_file_is_never_deleted() {
+    let dir = TempDir::new();
+    let victim = dir.path.join("precious.txt");
+    std::fs::write(&victim, "keep").unwrap();
+    let mut rec = scoped_rec("aaaa1111", "support_two", &dir.path);
+    rec.definition = Some(victim.to_string_lossy().into_owned());
+    let (result, project, _td, _) = destroy_scoped(rec, &Rig::new(), false);
+    result.unwrap_err();
+    assert!(victim.exists());
+    assert_eq!(stops_for(&project, "support_two").len(), 1, "record kept");
+}
+
+#[test]
+fn modal_destroy_purge_deletes_the_recorded_volumes_once_no_modal_deployment_remains() {
+    let rig = Rig::new();
+    let td = TempDir::new();
+    let mut state = state_with(modal_graph());
+    state.stops = vec![
+        modal_rec("support_two", Some("ap-2"), Some("acme"))
+            .with_volumes(&["amicu-hf-cache", "amicu-vllm-cache"]),
+        modal_rec("support_local", Some("ap-1"), Some("acme"))
+            .with_volumes(&["amicu-hf-cache", "amicu-vllm-cache"]),
+    ];
+    let project = saved(&td, &state);
+    let mut env = rig.env();
+    env.purge = true;
+    let mut out = Vec::new();
+    commands::destroy::run_with(
+        &project,
+        &[],
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &env,
+    )
+    .unwrap();
+    assert_eq!(
+        *rig.modal.deleted_volumes.lock().unwrap(),
+        ["amicu-hf-cache", "amicu-vllm-cache"]
+    );
+}
+
+#[test]
+fn modal_destroy_purge_keeps_shared_volumes_while_another_modal_deployment_remains() {
+    let rig = Rig::new();
+    let td = TempDir::new();
+    let mut state = state_with(modal_graph());
+    state.stops = vec![
+        modal_rec("support_two", Some("ap-2"), Some("acme")).with_volumes(&["amicu-hf-cache"]),
+        modal_rec("support_local", Some("ap-1"), Some("acme")).with_volumes(&["amicu-hf-cache"]),
+    ];
+    let project = saved(&td, &state);
+    let mut env = rig.env();
+    env.purge = true;
+    let mut out = Vec::new();
+    commands::destroy::run_with(
+        &project,
+        &["support_two".to_owned()],
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &env,
+    )
+    .unwrap();
+    assert!(rig.modal.deleted_volumes.lock().unwrap().is_empty());
+    assert!(utf8(out).contains("Kept the Modal volumes"));
+}
+
+#[test]
+fn modal_destroy_without_purge_keeps_volumes_and_says_so() {
+    let rig = Rig::new();
+    let rec =
+        modal_rec("support_two", Some("ap-2"), Some("acme")).with_volumes(&["amicu-hf-cache"]);
+    let (result, _p, _td) = destroy_modal(rec, &rig);
+    result.unwrap();
+    assert!(rig.modal.deleted_volumes.lock().unwrap().is_empty());
 }

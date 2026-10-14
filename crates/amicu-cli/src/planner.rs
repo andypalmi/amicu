@@ -20,6 +20,8 @@ pub(crate) fn build_project_plan(
     graph: &Graph,
     prior: Option<&Graph>,
 ) -> Result<PlanResult, PlanError> {
-    let root = std::path::absolute(project.root()).ok();
-    amicu_engine::planner::build_plan_in(graph, prior, root.as_deref())
+    // Model paths stay relative to the project: `apply` makes them absolute at
+    // start, so no plan or state carries an absolute project path.
+    let _ = project;
+    amicu_engine::planner::build_plan_in(graph, prior, None)
 }

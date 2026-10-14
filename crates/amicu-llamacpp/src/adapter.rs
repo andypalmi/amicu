@@ -560,6 +560,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
             settings: d.runtime.clone(),
             secret_refs: Vec::new(),
             api_key: d.api_key.clone(),
+            service_label: None,
             estimate: ResourceEstimate {
                 estimated_memory,
                 gpu_count,

@@ -79,6 +79,19 @@ pub(crate) struct StopRecord {
     /// Modal only: the environment the app was deployed in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
+    /// Host only: the service definition file (launchd plist / systemd env
+    /// file) recorded before the start. It holds the injected environment
+    /// (the API key), so it is deleted with the stop, from this path rather
+    /// than one recomputed from `$HOME`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<String>,
+    /// Host only: log files the service writes; removed by `destroy --purge`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logs: Vec<String>,
+    /// Modal only: the shared cache Volumes the app mounts; deleted by
+    /// `destroy --purge` once no Modal deployment remains.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<String>,
 }
 
 impl StopRecord {
@@ -94,7 +107,38 @@ impl StopRecord {
             domain: context.and_then(|c| c.domain.clone()),
             workspace: None,
             environment: None,
+            definition: None,
+            logs: Vec::new(),
+            volumes: Vec::new(),
         }
+    }
+
+    /// A host instance of the project `project_id`: its label is scoped to
+    /// the project, and the files it will leave on the host are recorded.
+    pub(crate) fn host_in(
+        project_id: &str,
+        deployment: &DeploymentId,
+        context: Option<&HostContext>,
+        paths: Option<amicu_llamacpp::ServicePaths>,
+    ) -> Self {
+        let mut rec = Self::host(deployment, context);
+        rec.identity = amicu_llamacpp::project_host_label(project_id, deployment.as_str());
+        if let Some(p) = paths {
+            rec.definition = Some(p.definition.to_string_lossy().into_owned());
+            rec.logs = p
+                .logs
+                .iter()
+                .map(|l| l.to_string_lossy().into_owned())
+                .collect();
+        }
+        rec
+    }
+
+    /// Record the Volumes a Modal app mounts.
+    #[must_use]
+    pub(crate) fn with_volumes(mut self, volumes: &[&str]) -> Self {
+        self.volumes = volumes.iter().map(|v| (*v).to_owned()).collect();
+        self
     }
 
     pub(crate) fn modal(
@@ -111,6 +155,9 @@ impl StopRecord {
             domain: None,
             workspace: workspace.map(|w| w.name.clone()),
             environment: workspace.map(|w| w.environment.clone()),
+            definition: None,
+            logs: Vec::new(),
+            volumes: Vec::new(),
         }
     }
 

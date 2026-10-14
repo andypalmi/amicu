@@ -26,7 +26,8 @@ use crate::binary::{CommandRunner, HostRunner};
 use crate::error::LlamaCppError;
 use crate::health::{Health, HealthProbe, HttpHealthProbe};
 use crate::service::{
-    HostExec, LaunchdManager, ServiceManager, ServiceSpec, ServiceState, SystemdManager,
+    HostExec, LaunchdManager, ServiceManager, ServicePaths, ServiceSpec, ServiceState,
+    SystemdManager,
 };
 
 /// A resolved secret handed to a supervisor at start time: its name and value.
@@ -120,6 +121,13 @@ pub trait ProcessSupervisor: Send + Sync {
     /// The uid that owns an existing instance's service definition, when it
     /// can be told (launchd plist owner).
     fn instance_owner(&self, _label: &str) -> Option<u32> {
+        None
+    }
+
+    /// Where the instance `label` keeps its definition (which holds secrets)
+    /// and logs on this host, so they can be recorded in state before the
+    /// start.
+    fn service_paths(&self, _label: &str) -> Option<ServicePaths> {
         None
     }
 }
@@ -335,11 +343,21 @@ fn endpoint_for(plan: &LaunchPlan) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-/// The launchd label / systemd unit the host supervisor uses for a
-/// deployment. Deterministic, so a stop handle can be derived from state alone.
+/// The legacy launchd label / systemd unit: not scoped to a project, so two
+/// projects with a deployment of the same name collide. Only instances
+/// started before project-scoped labels carry it; new ones use
+/// [`project_host_label`].
 #[must_use]
 pub fn host_label(deployment: &str) -> String {
     format!("io.amicu.llama.{deployment}")
+}
+
+/// The launchd label / systemd unit for `deployment` in the project
+/// identified by `project_id`. Deterministic, so a stop handle can be derived
+/// from state alone, and distinct per project.
+#[must_use]
+pub fn project_host_label(project_id: &str, deployment: &str) -> String {
+    format!("io.amicu.llama.{project_id}.{deployment}")
 }
 
 #[async_trait]
@@ -385,7 +403,10 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
             })?;
             env.push((s.name.clone(), value.to_owned()));
         }
-        let label = host_label(plan.deployment.as_str());
+        let label = plan
+            .service_label
+            .clone()
+            .unwrap_or_else(|| host_label(plan.deployment.as_str()));
         let spec = ServiceSpec {
             label: label.clone(),
             argv: self.resolve_program(argv)?,
@@ -458,5 +479,9 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
 
     fn instance_owner(&self, label: &str) -> Option<u32> {
         self.manager.instance_owner(label)
+    }
+
+    fn service_paths(&self, label: &str) -> Option<ServicePaths> {
+        self.manager.paths(label)
     }
 }
