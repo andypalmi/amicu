@@ -12,7 +12,7 @@ The CLI stores state in the project directory:
 | Path | Content |
 |---|---|
 | `.amicu/state/state.json` | The applied resource graph and the started endpoints |
-| `.amicu/state/state.json.bak` | The previous version of `state.json`, kept on every save |
+| `.amicu/state/state.json.bak` | The previous version of `state.json`, copied on save only when the current file is valid |
 | `.amicu/state/state.lock` | The lock file |
 | `.amicu/config.yaml` | Project config. `init` writes `state.backend: local`. |
 
