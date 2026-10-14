@@ -398,6 +398,14 @@ fn error_enum_maps_cap_and_mem_and_provider() {
         available: ByteSize::from_bytes(MIB),
     });
     assert_eq!(mem.code(), catalog::MEM_VRAM_EXCEEDED);
+    assert_eq!(
+        RuntimeError::InsufficientMemory {
+            required: ByteSize::from_bytes(2 * MIB),
+            available: ByteSize::from_bytes(MIB),
+        }
+        .to_string(),
+        "model needs 2.0 MiB but only 1.0 MiB is available"
+    );
 
     let started = AdapterError::from_kind(RuntimeError::LaunchFailed("oom".into()));
     assert_eq!(started.code(), catalog::PROVIDER_CAPACITY_UNAVAILABLE);

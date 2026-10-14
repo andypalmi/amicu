@@ -21,7 +21,7 @@ pub enum RuntimeError {
 
     /// The model does not fit in the available device memory. Maps to
     /// `AMICU-MEM-001`.
-    #[error("model needs {required} but only {available} is available")]
+    #[error("model needs {} but only {} is available", fmt_pair(*.required, *.available).0, fmt_pair(*.required, *.available).1)]
     InsufficientMemory {
         required: ByteSize,
         available: ByteSize,
@@ -50,4 +50,9 @@ impl AdapterErrorKind for RuntimeError {
         // A failed start may succeed on retry; capability/memory misfits will not.
         matches!(self, RuntimeError::LaunchFailed(_))
     }
+}
+
+/// Human-readable comparison pair that never renders both sides equal.
+fn fmt_pair(required: ByteSize, available: ByteSize) -> (String, String) {
+    required.human_pair(available)
 }
