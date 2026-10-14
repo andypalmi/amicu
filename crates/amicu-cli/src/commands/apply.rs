@@ -30,6 +30,7 @@ use crate::project::{LocalState, Project};
 use crate::secret::EnvSecretResolver;
 use crate::stops::{Backend, StopRecord};
 use crate::write_json;
+use amicu_engine::fingerprint::Fingerprint;
 
 /// Recompute the plan, gate on approval, apply, and persist state.
 pub(crate) fn run(
@@ -84,7 +85,11 @@ pub(crate) fn run_with(
         g.deployments.retain(|d| !s.pending.contains(&d.id));
         g
     });
-    let result = match build_project_plan(project, &graph, prior_graph.as_ref()) {
+    let recorded = prior_state
+        .as_ref()
+        .map(|s| s.fingerprints.clone())
+        .unwrap_or_default();
+    let result = match build_project_plan(project, &graph, prior_graph.as_ref(), &recorded) {
         Ok(result) => result,
         // See `commands::plan::run`'s matching arm: `build_plan` hands back
         // every collected diagnostic instead of a bare adapter error.
@@ -116,8 +121,14 @@ pub(crate) fn run_with(
     if result.items.is_empty() {
         // The refresh may have dropped apps that are gone from Modal and from
         // the config; persist that so the drift note does not repeat forever.
-        if pruned && let Some(state) = &prior_state {
-            project.save_state(state)?;
+        // Unchanged deployments with no recorded fingerprint get a baseline
+        // now, so a later secret/image/binary change is detected.
+        if let Some(state) = &prior_state {
+            let mut next = state.clone();
+            adopt_baselines(&mut next.fingerprints, &graph, Some(state), &result);
+            if pruned || next.fingerprints != state.fingerprints {
+                project.save_state(&next)?;
+            }
         }
         writeln!(out, "No changes to apply.").map_err(|e| CliError::io("write failed", e))?;
         return Ok(0);
@@ -283,7 +294,10 @@ pub(crate) fn execute(
     op: Op,
 ) -> Result<(Vec<RuntimeHandle>, LocalState), CliError> {
     let rt = crate::commands::build_runtime()?;
-    let mut progress = Progress::new(project, prior_state);
+    let mut progress = Progress::new(prior_state);
+    if progress.project_id.is_empty() {
+        progress.project_id = project.mint_id();
+    }
     if let Err(err) = rt.block_on(apply_all(
         project,
         &graph,
@@ -301,7 +315,7 @@ pub(crate) fn execute(
             op,
         ));
     }
-    let handles = progress.started;
+    let handles = progress.started.clone();
 
     let prior_endpoints = prior_state.map_or(&[][..], |s| &s.endpoints[..]);
     let destroyed: Vec<DeploymentId> = result
@@ -318,13 +332,53 @@ pub(crate) fn execute(
         version: LocalState::VERSION.to_owned(),
         project_id: Some(progress.project_id.clone()),
         pending,
-        stops: progress.stops,
+        stops: progress.stops.clone(),
+        fingerprints: final_fingerprints(prior_state, &graph, &progress, result),
         graph,
         endpoints,
     };
     project.save_state(&state)?;
 
     Ok((handles, state))
+}
+
+/// Fingerprints for a fully successful run: as [`merged_fingerprints`], plus
+/// a baseline (the current fingerprint) for every unchanged deployment that has
+/// none recorded yet, so later changes to it are detected. Never overwrites a
+/// recorded fingerprint of an unchanged deployment: that would hide a change.
+fn final_fingerprints(
+    prior: Option<&LocalState>,
+    graph: &Graph,
+    progress_or_none: &Progress,
+    result: &PlanResult,
+) -> std::collections::BTreeMap<DeploymentId, Fingerprint> {
+    let mut out = merged_fingerprints(prior, graph, progress_or_none);
+    adopt_baselines(&mut out, graph, prior, result);
+    out
+}
+
+/// Add the current fingerprint of each deployment in `graph` that is unchanged
+/// (not in the plan, still in the prior graph, not pending) and has no record.
+fn adopt_baselines(
+    out: &mut std::collections::BTreeMap<DeploymentId, Fingerprint>,
+    graph: &Graph,
+    prior: Option<&LocalState>,
+    result: &PlanResult,
+) {
+    let Some(prior) = prior else { return };
+    for (id, current) in &result.fingerprints {
+        let planned = result.items.iter().any(|i| &i.deployment == id);
+        if planned
+            || prior.pending.contains(id)
+            || find_deployment(graph, id).is_none()
+            || find_deployment(&prior.graph, id).is_none()
+        {
+            continue;
+        }
+        out.entry(id.clone())
+            .and_modify(|f| f.fill_missing(current))
+            .or_insert_with(|| current.clone());
+    }
 }
 
 /// Prior pending deployments that remain unresolved: still in `graph` and not
@@ -354,18 +408,33 @@ fn write_ahead_state(
     progress: &Progress,
     next: &DeploymentId,
 ) -> LocalState {
-    let ahead = Progress {
-        started: progress.started.clone(),
-        stopped: progress.stopped.clone(),
-        in_flight: Some(next.clone()),
-        stops: Vec::new(),
-        project_id: progress.project_id.clone(),
-    };
-    let partial = partial_graph(prior.map(|s| &s.graph), graph, &ahead);
+    let mut ahead = progress.clone();
+    ahead.in_flight = Some(next.clone());
+    recorded_state(prior, graph, &ahead)
+}
+
+/// The state that records exactly what `progress` did to the real world: the
+/// single place a mid-run state is assembled (write-ahead and failure paths).
+/// Pure, so every position of failure is table tested without a provider.
+fn recorded_state(prior: Option<&LocalState>, graph: &Graph, progress: &Progress) -> LocalState {
+    let started: Vec<DeploymentId> = progress
+        .started
+        .iter()
+        .map(|h| h.deployment.clone())
+        .collect();
+    let partial = partial_graph(
+        prior.map(|s| &s.graph),
+        graph,
+        &started,
+        progress.in_flight.as_ref(),
+        &progress.stopped,
+    );
     let prior_endpoints = prior.map_or(&[][..], |s| &s.endpoints[..]);
     let mut pending = pending_after(prior, &partial, &progress.started);
-    if !pending.contains(next) {
-        pending.push(next.clone());
+    if let Some(id) = &progress.in_flight
+        && !pending.contains(id)
+    {
+        pending.push(id.clone());
     }
     LocalState {
         version: LocalState::VERSION.to_owned(),
@@ -378,8 +447,33 @@ fn write_ahead_state(
         ),
         pending,
         stops: progress.stops.clone(),
+        fingerprints: merged_fingerprints(prior, &partial, progress),
         graph: partial,
     }
+}
+
+/// Fingerprints to keep: the prior ones for deployments still in `graph`,
+/// replaced by those of deployments confirmed started in this run. A deployment
+/// that was stopped or removed loses its fingerprint; an in-flight one keeps
+/// its OLD fingerprint (its new start is unconfirmed, so it still counts as
+/// changed on the next plan).
+fn merged_fingerprints(
+    prior: Option<&LocalState>,
+    graph: &Graph,
+    progress: &Progress,
+) -> std::collections::BTreeMap<DeploymentId, Fingerprint> {
+    let mut out: std::collections::BTreeMap<_, _> = prior
+        .map(|s| s.fingerprints.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(id, _)| find_deployment(graph, id).is_some() && !progress.stopped.contains(id))
+        .collect();
+    for (id, fp) in &progress.fingerprints {
+        if find_deployment(graph, id).is_some() {
+            out.insert(id.clone(), fp.clone());
+        }
+    }
+    out
 }
 
 /// The endpoints to record after an apply: the prior (refreshed) endpoints of
@@ -409,7 +503,7 @@ fn merge_endpoints(
 /// What `apply_all` has already done to the real world when it returns, so a
 /// failure part-way through can still be recorded in state
 /// (amicu-planning#203).
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Progress {
     /// Deployments started and verified, in plan order.
     started: Vec<RuntimeHandle>,
@@ -425,35 +519,39 @@ struct Progress {
     /// The project's stable id (minted on the first run), used to scope host
     /// service labels.
     project_id: String,
+    /// The fingerprint each started deployment was started with.
+    fingerprints: std::collections::BTreeMap<DeploymentId, Fingerprint>,
 }
 
 impl Progress {
-    fn new(project: &Project, prior: Option<&LocalState>) -> Self {
+    fn new(prior: Option<&LocalState>) -> Self {
         Self {
             stops: effective_stops(prior),
+            // Empty until `execute` mints one for a project that has none.
             project_id: prior
                 .and_then(|s| s.project_id.clone())
-                .unwrap_or_else(|| project.mint_id()),
+                .unwrap_or_default(),
             ..Self::default()
         }
     }
 }
 
 /// The graph to persist after a partial apply: the prior graph, plus each
-/// deployment that was started (with the model and hardware profile it was
-/// started from), minus each one that was stopped. Deployments that were not
-/// reached keep their prior definition, so the next `plan` still sees them
-/// as pending.
-fn partial_graph(prior: Option<&Graph>, graph: &Graph, progress: &Progress) -> Graph {
+/// `started` deployment and the `in_flight` one (with the model and hardware
+/// profile it was started from), minus each `stopped` one. Deployments that
+/// were not reached keep their prior definition, so the next `plan` still sees
+/// them as pending. Pure: no provider, no state, no I/O.
+fn partial_graph(
+    prior: Option<&Graph>,
+    graph: &Graph,
+    started: &[DeploymentId],
+    in_flight: Option<&DeploymentId>,
+    stopped: &[DeploymentId],
+) -> Graph {
     let mut out = prior.cloned().unwrap_or_else(Graph::new);
     // The in-flight deployment is recorded too (as pending): it may be running.
-    let started_ids: Vec<DeploymentId> = progress
-        .started
-        .iter()
-        .map(|h| h.deployment.clone())
-        .chain(progress.in_flight.clone())
-        .collect();
-    for id in &started_ids {
+    let touched: Vec<DeploymentId> = started.iter().chain(in_flight).cloned().collect();
+    for id in &touched {
         let Some(d) = find_deployment(graph, id) else {
             continue;
         };
@@ -465,9 +563,9 @@ fn partial_graph(prior: Option<&Graph>, graph: &Graph, progress: &Progress) -> G
         // deployment look unchanged and it would never be re-applied.
         let shared = |uses: &dyn Fn(&Deployment) -> bool| {
             prior.is_some_and(|p| {
-                p.deployments.iter().any(|x| {
-                    uses(x) && !progress.stopped.contains(&x.id) && !started_ids.contains(&x.id)
-                })
+                p.deployments
+                    .iter()
+                    .any(|x| uses(x) && !stopped.contains(&x.id) && !touched.contains(&x.id))
             })
         };
         if let Some(m) = graph.models.iter().find(|m| m.id == d.model)
@@ -487,8 +585,7 @@ fn partial_graph(prior: Option<&Graph>, graph: &Graph, progress: &Progress) -> G
             out.hardware_profiles.push(hw.clone());
         }
     }
-    out.deployments
-        .retain(|d| !progress.stopped.contains(&d.id));
+    out.deployments.retain(|d| !stopped.contains(&d.id));
     out
 }
 
@@ -519,29 +616,7 @@ fn record_partial(
         }
         return err;
     }
-    let partial = partial_graph(prior.map(|s| &s.graph), graph, progress);
-    let prior_endpoints = prior.map_or(&[][..], |s| &s.endpoints[..]);
-    let state = LocalState {
-        version: LocalState::VERSION.to_owned(),
-        project_id: Some(progress.project_id.clone()),
-        endpoints: merge_endpoints(
-            prior_endpoints,
-            &partial,
-            &progress.stopped,
-            &progress.started,
-        ),
-        pending: {
-            let mut pending = pending_after(prior, &partial, &progress.started);
-            if let Some(id) = &progress.in_flight
-                && !pending.contains(id)
-            {
-                pending.push(id.clone());
-            }
-            pending
-        },
-        stops: progress.stops.clone(),
-        graph: partial,
-    };
+    let state = recorded_state(prior, graph, progress);
     let names = |ids: Vec<&str>| ids.join(", ");
     let started = names(
         progress
@@ -896,6 +971,11 @@ async fn apply_all(
                 );
             }
             progress.started.push(handle);
+            if let Some(fp) = &item.fingerprint {
+                progress
+                    .fingerprints
+                    .insert(item.deployment.clone(), fp.clone());
+            }
             progress.in_flight = None;
             for old in superseded {
                 stop_record(
@@ -1781,6 +1861,7 @@ resource "deployment" "beta" {
             stopped: Vec::new(),
             in_flight: Some(handle(&graph, "beta", "x").deployment),
             stops: Vec::new(),
+            fingerprints: std::collections::BTreeMap::default(),
         };
         let err = record_partial(
             &project,
@@ -1839,6 +1920,7 @@ resource "deployment" "beta" {
             project_id: None,
             pending: Vec::new(),
             stops: Vec::new(),
+            fingerprints: std::collections::BTreeMap::default(),
             graph: prior_graph.clone(),
             endpoints: vec![
                 handle(&prior_graph, "alpha", "http://old-alpha"),
@@ -1853,6 +1935,7 @@ resource "deployment" "beta" {
             stopped: Vec::new(),
             in_flight: None,
             stops: Vec::new(),
+            fingerprints: std::collections::BTreeMap::default(),
         };
         record_partial(
             &project,
@@ -2237,6 +2320,7 @@ mod stop_invariant_tests {
             endpoints: Vec::new(),
             pending: Vec::new(),
             stops: Vec::new(),
+            fingerprints: std::collections::BTreeMap::default(),
         }
     }
 
@@ -2507,5 +2591,231 @@ mod scoped_tests {
         assert!(!is_service_file(std::path::Path::new(
             "io.amicu.llama.x.plist"
         )));
+    }
+}
+
+/// Table tests for the pure partial-state functions (amicu-planning#222):
+/// failure at every position, update vs create vs destroy, in-flight entries.
+#[cfg(test)]
+mod partial_state_tests {
+    use super::*;
+    use crate::commands::apply::merge_tests::CONFIG;
+    use amicu_core::resource::LlamaCppSettings;
+
+    fn id(s: &str) -> DeploymentId {
+        DeploymentId::new(s)
+    }
+
+    fn ids(v: &[&str]) -> Vec<DeploymentId> {
+        v.iter().map(|s| id(s)).collect()
+    }
+
+    /// alpha, beta, gamma, all on model `m` / hardware `hw`; `port_base` makes
+    /// the deployment definitions differ between "prior" and "desired".
+    fn graph(names: &[&str], port_base: u16) -> Graph {
+        let mut g = amicu_hcl::parse_graph(CONFIG).unwrap();
+        let template = g.deployments[0].clone();
+        g.deployments.clear();
+        for (i, n) in names.iter().enumerate() {
+            let mut d = template.clone();
+            d.id = id(n);
+            if let Runtime::LlamaCpp(LlamaCppSettings { port, .. }) = &mut d.runtime {
+                *port = port_base + u16::try_from(i).unwrap();
+            }
+            g.deployments.push(d);
+        }
+        g
+    }
+
+    fn port(g: &Graph, n: &str) -> u16 {
+        match &find_deployment(g, &id(n)).unwrap().runtime {
+            Runtime::LlamaCpp(s) => s.port,
+            Runtime::Vllm(_) => unreachable!(),
+        }
+    }
+
+    fn handle(n: &str) -> RuntimeHandle {
+        RuntimeHandle {
+            id: format!("unit-{n}"),
+            deployment: id(n),
+            endpoint: format!("http://{n}"),
+            exposure: EndpointExposure::Loopback,
+        }
+    }
+
+    fn fp(tag: &str) -> Fingerprint {
+        Fingerprint {
+            secrets: Some(tag.to_owned()),
+            ..Fingerprint::default()
+        }
+    }
+
+    fn prior_state(g: Graph, pending: &[&str]) -> LocalState {
+        LocalState {
+            version: LocalState::VERSION.to_owned(),
+            project_id: None,
+            endpoints: g
+                .deployments
+                .iter()
+                .map(|d| handle(d.id.as_str()))
+                .collect(),
+            fingerprints: g
+                .deployments
+                .iter()
+                .map(|d| (d.id.clone(), fp("old")))
+                .collect(),
+            pending: ids(pending),
+            stops: Vec::new(),
+            graph: g,
+        }
+    }
+
+    const ALL: [&str; 3] = ["alpha", "beta", "gamma"];
+
+    /// Failure at each position of an update-everything run: everything before
+    /// the failure is recorded as new, the failed one is new AND pending, and
+    /// everything after keeps its prior definition.
+    #[test]
+    fn failure_at_each_position_records_exactly_what_happened() {
+        let prior = graph(&ALL, 8000);
+        let desired = graph(&ALL, 9000);
+        for fail_at in 0..=ALL.len() {
+            let started = &ALL[..fail_at];
+            let in_flight = ALL.get(fail_at).map(|s| id(s));
+            let got = partial_graph(
+                Some(&prior),
+                &desired,
+                &ids(started),
+                in_flight.as_ref(),
+                &[],
+            );
+            assert_eq!(got.deployments.len(), 3, "position {fail_at}");
+            for (i, n) in ALL.iter().enumerate() {
+                let want = if i <= fail_at && (i < fail_at || in_flight.is_some()) {
+                    port(&desired, n)
+                } else {
+                    port(&prior, n)
+                };
+                assert_eq!(port(&got, n), want, "position {fail_at}, {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn recorded_state_marks_only_the_in_flight_one_pending_and_keeps_its_old_fingerprint() {
+        let prior = prior_state(graph(&ALL, 8000), &[]);
+        let desired = graph(&ALL, 9000);
+        let mut progress = Progress::new(Some(&prior));
+        progress.started.push(handle("alpha"));
+        progress.fingerprints.insert(id("alpha"), fp("new"));
+        progress.in_flight = Some(id("beta"));
+        let s = recorded_state(Some(&prior), &desired, &progress);
+        assert_eq!(s.pending, ids(&["beta"]));
+        assert_eq!(s.fingerprints[&id("alpha")], fp("new"));
+        // Unconfirmed: still differs from what is running, so still an Update.
+        assert_eq!(s.fingerprints[&id("beta")], fp("old"));
+        assert_eq!(s.fingerprints[&id("gamma")], fp("old"));
+        assert_eq!(port(&s.graph, "gamma"), 8002);
+    }
+
+    /// Create + update + destroy in one run, with the destroy confirmed and a
+    /// later create failing mid-start.
+    #[test]
+    fn create_update_and_destroy_mix() {
+        let prior = prior_state(graph(&["alpha", "beta"], 8000), &[]);
+        let mut desired = graph(&["alpha", "delta"], 9000);
+        desired.deployments.retain(|d| d.id != id("beta"));
+        let mut progress = Progress::new(Some(&prior));
+        progress.stopped.push(id("beta"));
+        progress.started.push(handle("alpha"));
+        progress.fingerprints.insert(id("alpha"), fp("new"));
+        progress.in_flight = Some(id("delta"));
+        let s = recorded_state(Some(&prior), &desired, &progress);
+        let names: Vec<&str> = s.graph.deployments.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"alpha") && names.contains(&"delta"));
+        assert!(!names.contains(&"beta"), "a confirmed stop leaves state");
+        assert_eq!(s.pending, ids(&["delta"]));
+        assert!(!s.fingerprints.contains_key(&id("beta")));
+        assert!(s.endpoints.iter().all(|h| h.deployment != id("beta")));
+        assert_eq!(
+            s.endpoints
+                .iter()
+                .find(|h| h.deployment == id("alpha"))
+                .unwrap()
+                .endpoint,
+            "http://alpha"
+        );
+    }
+
+    /// An unconfirmed stop never drops anything: the deployment (and so its
+    /// pending/stop bookkeeping) stays when it is not in `stopped`.
+    #[test]
+    fn an_unstopped_removed_deployment_stays_in_state() {
+        let prior = prior_state(graph(&["alpha", "beta"], 8000), &[]);
+        let desired = graph(&["alpha"], 8000);
+        let progress = Progress::new(Some(&prior));
+        let s = recorded_state(Some(&prior), &desired, &progress);
+        assert_eq!(s.graph.deployments.len(), 2);
+        assert!(s.fingerprints.contains_key(&id("beta")));
+    }
+
+    #[test]
+    fn existing_pending_survives_unless_confirmed_started() {
+        let prior = prior_state(graph(&ALL, 8000), &["alpha", "beta"]);
+        let desired = graph(&ALL, 8000);
+        let mut progress = Progress::new(Some(&prior));
+        progress.started.push(handle("alpha"));
+        let s = recorded_state(Some(&prior), &desired, &progress);
+        assert_eq!(s.pending, ids(&["beta"]));
+    }
+
+    #[test]
+    fn a_model_shared_with_an_unreached_deployment_keeps_its_prior_definition() {
+        let prior = graph(&["alpha", "beta"], 8000);
+        let mut desired = graph(&["alpha", "beta"], 8000);
+        desired.models[0].context_length = Some(1);
+        let got = partial_graph(Some(&prior), &desired, &ids(&["alpha"]), None, &[]);
+        assert_eq!(got.models[0], prior.models[0]);
+        // Once nothing unreached uses it, it moves to the new definition.
+        let got = partial_graph(Some(&prior), &desired, &ids(&["alpha", "beta"]), None, &[]);
+        assert_eq!(got.models[0], desired.models[0]);
+    }
+
+    #[test]
+    fn no_prior_and_a_failed_first_start_records_it_pending() {
+        let desired = graph(&["alpha"], 8000);
+        let progress = Progress {
+            in_flight: Some(id("alpha")),
+            ..Progress::default()
+        };
+        let s = recorded_state(None, &desired, &progress);
+        assert_eq!(s.pending, ids(&["alpha"]));
+        assert_eq!(s.graph.deployments.len(), 1);
+    }
+
+    #[test]
+    fn unchanged_deployments_get_a_baseline_and_recorded_ones_are_never_overwritten() {
+        let g = graph(&["alpha", "beta"], 8000);
+        let mut prior = prior_state(g.clone(), &[]);
+        prior.fingerprints.remove(&id("beta"));
+        let result = PlanResult {
+            plan: amicu_plan::Plan {
+                version: amicu_plan::Plan::VERSION.to_owned(),
+                actions: Vec::new(),
+                policy: None,
+            },
+            items: Vec::new(),
+            diagnostics: Vec::new(),
+            fingerprints: [(id("alpha"), fp("now")), (id("beta"), fp("now"))].into(),
+        };
+        let mut out = prior.fingerprints.clone();
+        adopt_baselines(&mut out, &g, Some(&prior), &result);
+        assert_eq!(
+            out[&id("alpha")],
+            fp("old"),
+            "never overwrite a recorded one"
+        );
+        assert_eq!(out[&id("beta")], fp("now"));
     }
 }

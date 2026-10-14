@@ -598,6 +598,7 @@ fn apply_json_stdout_is_a_single_json_value() {
             project_id: None,
             pending: Vec::new(),
             stops: Vec::new(),
+            fingerprints: std::collections::BTreeMap::default(),
             graph: prior,
             endpoints: Vec::new(),
         })
@@ -674,6 +675,7 @@ fn state_round_trips() {
         project_id: None,
         pending: Vec::new(),
         stops: Vec::new(),
+        fingerprints: std::collections::BTreeMap::default(),
         graph: graph.clone(),
         endpoints: Vec::new(),
     };
@@ -1152,6 +1154,7 @@ fn state_with(graph: amicu_core::graph::Graph) -> LocalState {
         endpoints: Vec::new(),
         pending: Vec::new(),
         stops: Vec::new(),
+        fingerprints: std::collections::BTreeMap::default(),
     }
 }
 
@@ -2068,4 +2071,71 @@ fn modal_destroy_without_purge_keeps_volumes_and_says_so() {
     let (result, _p, _td) = destroy_modal(rec, &rig);
     result.unwrap();
     assert!(rig.modal.deleted_volumes.lock().unwrap().is_empty());
+}
+
+#[test]
+fn apply_with_no_changes_records_a_fingerprint_baseline_and_changes_nothing_else() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let graph = project.load_graph().unwrap();
+    project.save_state(&state_with(graph.clone())).unwrap();
+
+    let mut out = Vec::new();
+    let code = run_apply(&project, OutputFormat::Human, &mut out).unwrap();
+    assert_eq!(code, 0);
+    assert!(utf8(out).contains("No changes to apply."));
+    let state = project.load_state().unwrap().unwrap();
+    assert_eq!(state.graph, graph);
+    assert!(state.pending.is_empty() && state.stops.is_empty());
+    assert_eq!(state.fingerprints.len(), graph.deployments.len());
+    // Only digests are stored.
+    let text = std::fs::read_to_string(project.state_dir().join("state.json")).unwrap_or_default();
+    assert!(!text.contains("llama-server"));
+}
+
+struct P;
+impl amicu_engine::fingerprint::EnvProbe for P {
+    fn image(
+        &self,
+        _: &amicu_core::resource::Deployment,
+        _: Option<&amicu_core::resource::HardwareProfile>,
+    ) -> amicu_engine::fingerprint::Fact {
+        amicu_engine::fingerprint::Fact::NotApplicable
+    }
+    fn binary(
+        &self,
+        _: &amicu_core::resource::Deployment,
+        _: Option<&amicu_core::resource::HardwareProfile>,
+    ) -> amicu_engine::fingerprint::Fact {
+        amicu_engine::fingerprint::Fact::Known("/opt/llama-server".to_owned())
+    }
+}
+
+#[test]
+fn plan_shows_why_an_unchanged_config_is_an_update() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let graph = project.load_graph().unwrap();
+    let d = &graph.deployments[0];
+    let mut recorded = std::collections::BTreeMap::new();
+    recorded.insert(
+        d.id.clone(),
+        amicu_engine::fingerprint::Fingerprint {
+            binary: Some("0".repeat(64)),
+            ..Default::default()
+        },
+    );
+    let result =
+        crate::planner::build_project_plan_with(&project, &graph, Some(&graph), &recorded, &P)
+            .unwrap();
+    let mut out = Vec::new();
+    commands::plan::print_human(&result, &graph, &mut out).unwrap();
+    let text = utf8(out);
+    assert!(text.contains("action:   update"), "{text}");
+    assert!(
+        text.contains("reason:   binary path changed since it was last started"),
+        "{text}"
+    );
 }

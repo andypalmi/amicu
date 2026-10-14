@@ -42,6 +42,14 @@ pub(crate) struct LocalState {
     /// Absent in v1 state; the stop identity is then derived from the graph.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stops: Vec<crate::stops::StopRecord>,
+    /// Digests of the out-of-graph inputs (secret pins, image, binary path)
+    /// each deployment was last confirmed started with, so a change to one is
+    /// planned as an Update. Absent in older state: nothing is then compared.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub fingerprints: std::collections::BTreeMap<
+        amicu_core::id::DeploymentId,
+        amicu_engine::fingerprint::Fingerprint,
+    >,
 }
 
 impl LocalState {
@@ -381,6 +389,7 @@ mod durability_tests {
             endpoints: Vec::new(),
             pending: vec![tag.into()],
             stops: Vec::new(),
+            fingerprints: std::collections::BTreeMap::default(),
         }
     }
 

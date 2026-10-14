@@ -1,6 +1,7 @@
 //! Turn a graph into an `amicu_plan::Plan` plus the launch artifacts `apply`
 //! needs, diffing against prior state to choose the action kind.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use amicu_core::diagnostic::{Diagnostic, DiagnosticReport, Severity};
@@ -18,6 +19,7 @@ use amicu_runtime::{LaunchPlan, RuntimeAdapter};
 use amicu_vllm::VllmAdapter;
 
 use crate::catalog::build_catalog;
+use crate::fingerprint::{EnvProbe, Fingerprint, NoProbe};
 
 /// One line item of a plan: the contract action plus what `apply` needs.
 pub struct PlanItem {
@@ -28,6 +30,12 @@ pub struct PlanItem {
     pub deployment: DeploymentId,
     /// Rendered command text for human display, when available.
     pub rendered: Option<String>,
+    /// The out-of-graph inputs this launch starts with; recorded in state once
+    /// the start is confirmed. `None` for destroys.
+    pub fingerprint: Option<Fingerprint>,
+    /// Why an Update was planned although the config is unchanged (a secret
+    /// pin, image or binary path changed since the last start).
+    pub reason: Option<String>,
 }
 
 /// The full result of planning a graph.
@@ -35,6 +43,20 @@ pub struct PlanResult {
     pub plan: Plan,
     pub items: Vec<PlanItem>,
     pub diagnostics: Vec<Diagnostic>,
+    /// The current fingerprint of every deployment in the desired graph,
+    /// changed or not, so unchanged ones can have a baseline recorded.
+    pub fingerprints: BTreeMap<DeploymentId, Fingerprint>,
+}
+
+/// Everything beyond the two graphs that planning needs.
+pub struct PlanInputs<'a> {
+    /// The directory holding `amicu.hcl`; see [`build_plan_in`].
+    pub project_root: Option<&'a Path>,
+    /// Fingerprints recorded when each prior deployment was last confirmed
+    /// started. A deployment with none is never reported as changed by them.
+    pub recorded: &'a BTreeMap<DeploymentId, Fingerprint>,
+    /// Reads the environment-dependent inputs (image, binary path).
+    pub probe: &'a dyn EnvProbe,
 }
 
 impl PlanResult {
@@ -101,6 +123,29 @@ pub fn build_plan_in(
     prior: Option<&Graph>,
     project_root: Option<&Path>,
 ) -> Result<PlanResult, PlanError> {
+    build_plan_with(
+        graph,
+        prior,
+        &PlanInputs {
+            project_root,
+            recorded: &BTreeMap::new(),
+            probe: &NoProbe,
+        },
+    )
+}
+
+/// [`build_plan_in`] that also detects changes outside the graph: a
+/// deployment whose config is unchanged is still planned as an Update when
+/// its recorded [`Fingerprint`] provably differs from the current one.
+///
+/// # Errors
+/// As [`build_plan`].
+pub fn build_plan_with(
+    graph: &Graph,
+    prior: Option<&Graph>,
+    inputs: &PlanInputs<'_>,
+) -> Result<PlanResult, PlanError> {
+    let project_root = inputs.project_root;
     // Dispatch to the adapter matching each deployment's own runtime family
     // (amicu-planning#152) - previously any non-llama.cpp deployment was
     // skipped entirely (an info diagnostic, no launch, never applied).
@@ -112,6 +157,7 @@ pub fn build_plan_in(
     let vllm_adapter = VllmAdapter::new(Box::new(catalog), amicu_vllm::host_supervisor());
     let mut diagnostics = Vec::new();
     let mut items = Vec::new();
+    let mut fingerprints = BTreeMap::new();
 
     for d in &graph.deployments {
         let adapter: &dyn RuntimeAdapter = match &d.runtime {
@@ -121,12 +167,38 @@ pub fn build_plan_in(
 
         diagnostics.extend(adapter.validate(d));
 
-        let kind = match prior.and_then(|p| find_deployment(p, &d.id).map(|prev| (p, prev))) {
-            None => ActionKind::Create,
-            // Unchanged only if the deployment and everything it references match.
-            Some((pg, prev)) if resolve(pg, prev) == resolve(graph, d) => continue,
-            Some(_) => ActionKind::Update,
-        };
+        let hardware = graph
+            .hardware_profiles
+            .iter()
+            .find(|h| h.id == d.hardware_profile);
+        let fingerprint = Fingerprint::compute(d, hardware, inputs.probe);
+        fingerprints.insert(d.id.clone(), fingerprint.clone());
+
+        let (kind, reason) =
+            match prior.and_then(|p| find_deployment(p, &d.id).map(|prev| (p, prev))) {
+                None => (ActionKind::Create, None),
+                // Unchanged only if the deployment and everything it references
+                // match, and nothing it was started with has changed outside
+                // the config.
+                Some((pg, prev)) if resolve(pg, prev) == resolve(graph, d) => {
+                    let changes = inputs
+                        .recorded
+                        .get(&d.id)
+                        .map(|r| fingerprint.changes_from(r))
+                        .unwrap_or_default();
+                    if changes.is_empty() {
+                        continue;
+                    }
+                    (
+                        ActionKind::Update,
+                        Some(format!(
+                            "{} changed since it was last started",
+                            changes.join(", ")
+                        )),
+                    )
+                }
+                Some(_) => (ActionKind::Update, None),
+            };
 
         let launch = match adapter.plan_launch(d) {
             Ok(launch) => launch,
@@ -146,6 +218,8 @@ pub fn build_plan_in(
             launch: Some(launch),
             deployment: d.id.clone(),
             rendered: Some(rendered),
+            fingerprint: Some(fingerprint),
+            reason,
         });
     }
 
@@ -158,6 +232,8 @@ pub fn build_plan_in(
                     launch: None,
                     deployment: prev.id.clone(),
                     rendered: None,
+                    fingerprint: None,
+                    reason: None,
                 });
             }
         }
@@ -172,6 +248,7 @@ pub fn build_plan_in(
         plan,
         items,
         diagnostics,
+        fingerprints,
     })
 }
 
@@ -210,6 +287,8 @@ pub fn destroy_item(id: &DeploymentId) -> PlanItem {
         launch: None,
         deployment: id.clone(),
         rendered: None,
+        fingerprint: None,
+        reason: None,
     }
 }
 
@@ -1219,5 +1298,159 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].action.kind, ActionKind::Update);
         assert!(build_plan(&next, Some(&next)).unwrap().items.is_empty());
+    }
+
+    // --- amicu-planning#220: change detection beyond the graph -------------
+
+    use crate::fingerprint::Fact;
+    use amicu_core::secret::SecretRef;
+
+    struct Probe {
+        image: Fact,
+        binary: Fact,
+    }
+
+    impl EnvProbe for Probe {
+        fn image(&self, _: &Deployment, _: Option<&HardwareProfile>) -> Fact {
+            self.image.clone()
+        }
+        fn binary(&self, _: &Deployment, _: Option<&HardwareProfile>) -> Fact {
+            self.binary.clone()
+        }
+    }
+
+    fn probe(image: Fact, binary: Fact) -> Probe {
+        Probe { image, binary }
+    }
+
+    fn known(v: &str) -> Fact {
+        Fact::Known(v.to_owned())
+    }
+
+    fn keyed(version: Option<&str>) -> Graph {
+        let mut g = graph(Vec::new());
+        let mut r = SecretRef::new("key");
+        r.version = version.map(str::to_owned);
+        g.deployments[0].api_key = Some(r);
+        g
+    }
+
+    /// Plan `g` against itself with `recorded` taken from `then`, probed as `now`.
+    fn replan(g: &Graph, then: &Probe, now: &Probe) -> PlanResult {
+        let mut recorded = BTreeMap::new();
+        for d in &g.deployments {
+            recorded.insert(d.id.clone(), Fingerprint::compute(d, None, then));
+        }
+        build_plan_with(
+            g,
+            Some(g),
+            &PlanInputs {
+                project_root: None,
+                recorded: &recorded,
+                probe: now,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn identical_inputs_plan_no_changes() {
+        let p = || probe(known("img:1"), known("/bin/llama"));
+        assert!(replan(&keyed(Some("3")), &p(), &p()).items.is_empty());
+    }
+
+    #[test]
+    fn a_secret_version_change_is_an_update() {
+        let p = || probe(Fact::Unknown, Fact::Unknown);
+        let mut recorded = BTreeMap::new();
+        let before = keyed(Some("3"));
+        recorded.insert(
+            before.deployments[0].id.clone(),
+            Fingerprint::compute(&before.deployments[0], None, &p()),
+        );
+        let after = keyed(Some("4"));
+        let r = build_plan_with(
+            &after,
+            Some(&after),
+            &PlanInputs {
+                project_root: None,
+                recorded: &recorded,
+                probe: &p(),
+            },
+        )
+        .unwrap();
+        assert_eq!(r.items.len(), 1);
+        assert_eq!(r.items[0].action.kind, ActionKind::Update);
+        assert!(r.items[0].reason.as_deref().unwrap().contains("secret"));
+        assert!(r.items[0].fingerprint.is_some());
+    }
+
+    #[test]
+    fn an_image_change_is_an_update() {
+        let r = replan(
+            &graph(Vec::new()),
+            &probe(known("img:1"), Fact::NotApplicable),
+            &probe(known("img:2"), Fact::NotApplicable),
+        );
+        assert_eq!(r.items.len(), 1);
+        assert_eq!(r.items[0].action.kind, ActionKind::Update);
+        assert!(r.items[0].reason.as_deref().unwrap().contains("image"));
+    }
+
+    #[test]
+    fn a_binary_path_change_is_an_update() {
+        let r = replan(
+            &graph(Vec::new()),
+            &probe(Fact::NotApplicable, known("/old/llama-server")),
+            &probe(Fact::NotApplicable, known("/new/llama-server")),
+        );
+        assert_eq!(r.items.len(), 1);
+        assert_eq!(r.items[0].action.kind, ActionKind::Update);
+        assert!(r.items[0].reason.as_deref().unwrap().contains("binary"));
+    }
+
+    #[test]
+    fn unknown_or_unrecorded_inputs_never_invent_a_change() {
+        // Binary recorded, now not found: unknown is not a change.
+        let r = replan(
+            &graph(Vec::new()),
+            &probe(Fact::NotApplicable, known("/bin/llama")),
+            &probe(Fact::NotApplicable, Fact::Unknown),
+        );
+        assert!(r.items.is_empty());
+        // Nothing recorded at all (older state): never a change.
+        let g = graph(Vec::new());
+        let r = build_plan_with(
+            &g,
+            Some(&g),
+            &PlanInputs {
+                project_root: None,
+                recorded: &BTreeMap::new(),
+                probe: &probe(known("img:9"), known("/bin/x")),
+            },
+        )
+        .unwrap();
+        assert!(r.items.is_empty());
+        // ... but the baseline is reported for adoption.
+        assert!(r.fingerprints.values().all(|f| f.image.is_some()));
+    }
+
+    #[test]
+    fn fingerprints_never_contain_raw_values() {
+        let fp = Fingerprint::compute(
+            &keyed(Some("3")).deployments[0],
+            None,
+            &probe(known("registry/secret-image"), known("/home/u/bin")),
+        );
+        let json = serde_json::to_string(&fp).unwrap_or_default();
+        assert!(!json.contains("secret-image") && !json.contains("/home/u"));
+    }
+
+    #[test]
+    fn a_new_deployment_is_a_create_with_its_fingerprint() {
+        let g = keyed(None);
+        let r = build_plan(&g, None).unwrap();
+        assert_eq!(r.items[0].action.kind, ActionKind::Create);
+        assert!(r.items[0].fingerprint.is_some());
     }
 }

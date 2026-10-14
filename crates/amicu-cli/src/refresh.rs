@@ -507,6 +507,7 @@ resource "deployment" "support_modal" {
             project_id: None,
             pending: Vec::new(),
             stops: Vec::new(),
+            fingerprints: std::collections::BTreeMap::default(),
             graph,
             endpoints,
         }
