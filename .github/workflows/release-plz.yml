@@ -5,11 +5,11 @@ on:
     branches: [main]
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read   # all writes use RELEASE_TOKEN, not GITHUB_TOKEN
 
 jobs:
   release-pr:
+    if: github.repository == 'andypalmi/amicu'
     # Opens/updates the release PR (version bump, Cargo.lock, CHANGELOG.md).
     runs-on: ubuntu-latest
     concurrency:
@@ -31,6 +31,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
 
   release:
+    if: github.repository == 'andypalmi/amicu'
+    concurrency:
+      group: release-plz-release
+      cancel-in-progress: false
     # Pushes the tag v<version> once a release PR is merged; release.yml
     # (cargo-dist) reacts to the tag and creates the GitHub Release.
     runs-on: ubuntu-latest

@@ -3,10 +3,11 @@
 [workspace]
 # One shared version (workspace.package.version), one tag, one changelog.
 changelog_path = "./CHANGELOG.md"
-changelog_update = true
+changelog_update = false        # only amicu-cli writes the changelog (below)
 git_release_enable = false      # cargo-dist creates the GitHub Release
 git_tag_enable = false          # only the CLI package tags (below)
-publish = false                 # no crates.io in v1
+git_only = true                 # versions come from git tags (not on crates.io); skips cargo publish
+release_always = false          # tag only when a release PR is merged
 semver_check = false            # no published baseline yet
 release_commits = "^(feat|fix|perf|refactor)"
 
@@ -15,6 +16,7 @@ release_commits = "^(feat|fix|perf|refactor)"
 name = "amicu-cli"
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
+changelog_path = "./CHANGELOG.md"
 changelog_update = true
 changelog_include = [
   "amicu-core", "amicu-hcl", "amicu-plan", "amicu-engine", "amicu-llamacpp",

@@ -247,7 +247,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: taiki-e/install-action@977cdbe2e748fc9d5798e3098868c4c4463bf31b # cargo-audit
+      - uses: taiki-e/install-action@977cdbe2e748fc9d5798e3098868c4c4463bf31b # tag cargo-audit (same commit; the tool is chosen by `tool:`)
         with:
           tool: cargo-dist@0.33.0
 
