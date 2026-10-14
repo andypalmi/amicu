@@ -33,6 +33,7 @@ Commands operate on the project in the current directory. `skill` and the provid
 | Line | Meaning |
 |---|---|
 | `reason:   <list> changed since it was last started` | Shown under an `update`. The list names what changed: `secret references` (a pinned `version` in an `api_key` reference), `container image` (the Modal image variable or the amicu default image), or `binary path` (`llama-server` or `vllm` resolves to another path on `PATH`). |
+| `  - destroy old (<backend> <identity>) for <address>` | A provider or identity change. The old instance is stopped and confirmed before the new one starts. If that stop fails, apply stops there and starts nothing new. See [Plan, apply and state](/docs/concepts/plan-apply-state#provider-switch). |
 | `drift: deployment <id>: ...` | A recorded host service or Modal app is gone. The deployment is kept in state as pending. See [State and backends](/docs/operate/state-and-backends#drift). |
 | `warning: could not check host services (...)` or `warning: could not check Modal for live apps (...)` | The check failed. The command uses local state as it is. The failed check does not change state. |
 

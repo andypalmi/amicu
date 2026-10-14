@@ -37,7 +37,7 @@ Start with `amicu doctor`. Then read the diagnostic code: the category tells you
 
 **`port N is already serving /health`.** Something else, such as an older service or another program, answers on that port. Stop it or change `llama_cpp.port` / `vllm.port`, then apply again. Apply may wait up to 10 seconds for the previous service of the same deployment to stop before it reports this.
 
-**`drift: deployment <id>: ... is not running (reboot, crash or manual removal)`.** The service manager confirmed that the host service is gone. The deployment is kept in state as pending. `plan` shows a `create`; `apply` restarts the service. On Linux, transient systemd user units do not survive a reboot or logout, so this is the usual cause there.
+**`drift: deployment <id>: ... is not running (reboot, crash or manual removal)`.** The service manager confirmed that the host service is gone. The deployment is kept in state as pending. `plan` shows a `create`; `apply` restarts the service. On Linux, without lingering the unit starts at your next login, so it is not running after a reboot until you log in. See [This machine](/docs/providers/local).
 
 **`warning: could not check host services (<id>: <reason>); using local state as-is`.** The check failed: `launchctl` or `systemctl` returned an error, or the service was started by another user. State is unchanged. A service that is starting or stopping, or a launchd record with no domain, is left alone without a warning. Fix the cause, or run `amicu apply` once you are sure the service is running.
 
@@ -49,7 +49,7 @@ Start with `amicu doctor`. Then read the diagnostic code: the category tells you
 
 **`could not verify that the endpoint rejects unauthenticated requests`.** The endpoint never gave a definite `401` or `403`. It may still be loading. Check the logs, then re-run apply.
 
-**If the stop after a failed check also failed,** the error prints the command to stop it by hand: `systemctl --user stop <label>` on Linux, `launchctl bootout gui/$(id -u)/<label>` on macOS, or the provider's stop command (for Modal, `amicu modal stop <app>`). Run `amicu destroy` afterwards so that state and the service file are cleaned up.
+**If the stop after a failed check also failed,** the error prints the command to stop it by hand: `systemctl --user disable --now <label>` on Linux, `launchctl bootout gui/$(id -u)/<label>` on macOS, or the provider's stop command (for Modal, `amicu modal stop <app>`). Run `amicu destroy` afterwards so that state and the service file are cleaned up.
 
 **Apply failed partway.** Deployments started before the failure are recorded in state and listed in the error. Fix the cause and apply again; apply finishes the rest. A deployment whose start was not confirmed stays `pending` in state, with a stop record. `amicu destroy` (or a re-run of apply) cleans it up. See [State](/docs/security/state).
 

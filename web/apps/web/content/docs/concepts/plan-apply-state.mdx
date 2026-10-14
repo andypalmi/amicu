@@ -59,12 +59,18 @@ Two cases are not detected:
 
 The recorded values are SHA-256 digests in the `fingerprints` map of state. amicu does not store the raw values. Deleting that map resets the baseline.
 
+### Provider switch
+
+When a deployment's provider or host identity changes, `plan` shows a `destroy old (<backend> <identity>)` step before that deployment's `create` or `update`. For example, `destroy old (launchd io.amicu.llama.<project_id>.<deployment>)` appears when a deployment moves from a local service to Modal. The same step appears when a legacy unscoped host label is replaced by a project-scoped one.
+
+Apply stops the old instance and confirms the stop before it starts the new one. If that stop fails, apply fails and starts nothing for that deployment. The old record stays in state. The JSON plan (`--output json`) lists the step as a Destroy action directly before the deployment's create or update.
+
 ## Apply
 
 `apply` recomputes the plan and prints it. Unless you pass `--auto-approve` (alias `--yes`) it asks for confirmation. It then:
 
 1. Runs preflight checks before anything starts: the provider must be supported by `apply`, every off-machine deployment must have an `api_key`, and the provider's own credentials must be present (on Modal, the proxy tokens).
-2. Starts each deployment through its provider.
+2. Starts each deployment through its provider. If the deployment has a provider switch, the old instance is stopped and confirmed first (see [Provider switch](#provider-switch)).
 3. Verifies that each endpoint is protected. See [Endpoint auth](/docs/security/endpoint-auth). If a Modal update fails this check, and the new deployment went into the same Modal app that was serving, amicu rolls the app back to the previous version and checks that version again before it reports it as serving. Otherwise the app is stopped. If the rollback or the re-check fails, if there is no previous version, or if amicu cannot read the app's version history, the whole app is stopped. Either way apply fails. See [Security: State](/docs/security/state#when-apply-fails-partway).
 4. Stops deployments that were removed from the configuration.
 5. Writes state, including any deployments already started if a later action failed.
@@ -78,7 +84,7 @@ If the plan is empty, apply prints `No changes to apply.`
 
 `destroy` works like `terraform destroy`. It plans against an empty desired configuration, so every deployment in state is a `destroy` action (or only the `--target`s you name), shows the same plan preview as `apply`, and asks `Destroy these deployments? [y/N]`. `--auto-approve` (alias `--yes`) skips the prompt. `--lock-timeout <secs>` waits for the state lock, as in `apply`. Unknown `--target` names fail before anything is changed.
 
-For each host service that is stopped, destroy also deletes the service file (the launchd plist or systemd environment file), which holds the endpoint API key. With `--purge`, it also deletes the host log files recorded for the destroyed deployments. Modal cache volumes are never deleted. When a destroyed deployment mounts one, destroy lists it with the `modal volume delete <name>` command, for you to run yourself if no other project or app uses it.
+For each host service that is stopped, destroy also deletes its service files: the launchd plist, or on Linux the systemd unit file and the environment file that holds the endpoint API key. Destroy disables the systemd unit before it stops it, so it does not start again at login. With `--purge`, it also deletes the host log files recorded for the destroyed deployments. Modal cache volumes are never deleted. When a destroyed deployment mounts one, destroy lists it with the `modal volume delete <name>` command, for you to run yourself if no other project or app uses it.
 
 Each deployment follows the same no-orphans rule as apply:
 
