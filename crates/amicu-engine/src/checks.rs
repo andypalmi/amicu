@@ -659,7 +659,7 @@ mod vllm_dispatch_tests {
             .iter()
             .find(|d| d.severity == Severity::Error && d.code == catalog::MEM_VRAM_EXCEEDED)
             .unwrap_or_else(|| panic!("expected MEM_VRAM_EXCEEDED: {:?}", report.diagnostics));
-        assert!(err.message.contains("weights 16"), "{}", err.message);
+        assert!(err.message.contains("weights ~"), "{}", err.message);
         assert!(err.message.contains("kv cache"), "{}", err.message);
         assert!(err.message.contains("8GiB VRAM"), "{}", err.message);
     }
@@ -832,7 +832,7 @@ mod vllm_dispatch_tests {
             .iter()
             .find(|d| d.severity == Severity::Warning && d.code == catalog::MEM_VRAM_EXCEEDED)
             .unwrap();
-        assert!(warn.message.contains("weights 16"), "{}", warn.message);
+        assert!(warn.message.contains("weights ~"), "{}", warn.message);
         assert!(warn.message.contains("8GiB VRAM"), "{}", warn.message);
         assert!(
             warn.message.contains("bypassed by config"),

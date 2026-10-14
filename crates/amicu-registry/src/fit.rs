@@ -307,6 +307,8 @@ fn evaluate(weights: ByteSize, hw: &HardwareProfile, cfg: &FitConfig) -> FitRepo
             format!(
                 "model weights need {weights} but only {available} of {device_memory} {pool}{across} \
                  is available after a {reserve} reserve",
+                weights = weights.approx(),
+                available = available.human(),
                 pool = pool.label(),
             ),
         )
@@ -440,7 +442,10 @@ fn apply_peak(report: &mut FitReport, kv_bytes: ByteSize, cfg: &FitConfig) {
                 "estimated peak memory {peak} (weights {weights} + kv cache/overhead {beyond}) \
                  exceeds the {usable} of {pool} usable; lower `context_length`, use a smaller \
                  quantization or a quantized KV cache",
-                weights = report.weights,
+                peak = peak.approx(),
+                beyond = beyond.approx(),
+                usable = usable.human(),
+                weights = report.weights.approx(),
                 pool = report.pool.label(),
             ),
         ));
@@ -503,7 +508,10 @@ pub fn check_vllm_fit(
             format!(
                 "model weights {weights}{kv} need {demand} but only {available} of {device_memory} \
                  {pool}{across} is usable at {pct:.0}% gpu_memory_utilization",
-                kv = kv_cache.map_or_else(String::new, |k| format!(" + kv cache {k}")),
+                kv = kv_cache.map_or_else(String::new, |k| format!(" + kv cache {}", k.approx())),
+                weights = weights.approx(),
+                demand = demand.approx(),
+                available = available.human(),
                 pool = pool.label(),
                 pct = util * 100.0,
             ),

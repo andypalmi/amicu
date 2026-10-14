@@ -61,6 +61,33 @@ impl ByteSize {
     pub const fn bytes(self) -> u64 {
         self.0
     }
+
+    /// Rounded binary rendering for user-facing text, e.g. `11.5 GiB`
+    /// (one decimal; `MiB`/`KiB`/`B` below a GiB). Not lossless - use
+    /// [`Display`](fmt::Display) for anything that must round-trip.
+    #[must_use]
+    pub fn human(self) -> String {
+        // One-decimal rounding done in integer tenths to avoid float casts.
+        let tenths = |factor: u64| {
+            let t = (u128::from(self.0) * 10 + u128::from(factor) / 2) / u128::from(factor);
+            format!("{}.{}", t / 10, t % 10)
+        };
+        if self.0 >= GIB {
+            format!("{} GiB", tenths(GIB))
+        } else if self.0 >= MIB {
+            format!("{} MiB", tenths(MIB))
+        } else if self.0 >= KIB {
+            format!("{} KiB", tenths(KIB))
+        } else {
+            format!("{} B", self.0)
+        }
+    }
+
+    /// [`human`](Self::human) prefixed with `~`, for estimates.
+    #[must_use]
+    pub fn approx(self) -> String {
+        format!("~{}", self.human())
+    }
 }
 
 impl From<u64> for ByteSize {
@@ -190,6 +217,17 @@ mod tests {
         assert_eq!(ByteSize::from_bytes(0).to_string(), "0B");
         // A non-round value has no coarse divisor and falls back to bytes.
         assert_eq!(ByteSize::from_bytes(7 * MIB + 3).to_string(), "7340035B");
+    }
+
+    #[test]
+    fn human_rounds_for_display() {
+        assert_eq!(ByteSize::from_bytes(12_385_752_662).human(), "11.5 GiB");
+        assert_eq!(ByteSize::from_bytes(12_385_752_662).approx(), "~11.5 GiB");
+        assert_eq!(ByteSize::from_bytes(48 * GIB).human(), "48.0 GiB");
+        assert_eq!(ByteSize::from_bytes(512 * MIB).human(), "512.0 MiB");
+        assert_eq!(ByteSize::from_bytes(1536).human(), "1.5 KiB");
+        assert_eq!(ByteSize::from_bytes(0).human(), "0 B");
+        assert!(ByteSize::from_bytes(u64::MAX).human().ends_with("GiB"));
     }
 
     #[test]

@@ -210,7 +210,7 @@ fn validate_rejects_qwen3_8b_bf16_on_an_8_gib_gpu_naming_weights_kv_and_vram() {
     assert_eq!(errs.len(), 1, "{diags:?}");
     assert_eq!(errs[0].code, catalog::MEM_VRAM_EXCEEDED);
     let msg = &errs[0].message;
-    assert!(msg.contains("weights 16"), "weights figure: {msg}");
+    assert!(msg.contains("weights ~"), "weights figure: {msg}");
     assert!(msg.contains("kv cache"), "kv estimate: {msg}");
     assert!(msg.contains("8GiB VRAM"), "hardware memory: {msg}");
 }

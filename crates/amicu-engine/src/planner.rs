@@ -803,7 +803,7 @@ fn cost_performance(
     let kv_unknown = matches!(runtime, Runtime::Vllm(_)) && launch.estimate.kv_cache.is_none();
     let mut assumptions = vec![format!(
         "estimated peak memory {}{}",
-        launch.estimate.estimated_memory,
+        launch.estimate.estimated_memory.approx(),
         if kv_unknown { " (weights only)" } else { "" }
     )];
     // extra_args is an escape hatch the estimator cannot interpret (e.g. a
@@ -900,7 +900,8 @@ fn kv_cache_assumption(
                 (None, None) => "f16".to_owned(),
             };
             Some(format!(
-                "KV cache: {kv_bytes} at {dtype} for {} ctx",
+                "KV cache: {} at {dtype} for {} ctx",
+                kv_bytes.approx(),
                 s.context_length
             ))
         }
@@ -909,7 +910,8 @@ fn kv_cache_assumption(
                 .kv_cache_dtype
                 .map_or_else(|| "auto".to_owned(), |d| d.to_string());
             Some(format!(
-                "KV cache: {kv_bytes} at {dtype} for {} ctx",
+                "KV cache: {} at {dtype} for {} ctx",
+                kv_bytes.approx(),
                 s.context_length
             ))
         }
