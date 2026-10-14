@@ -52,7 +52,7 @@ When you change a deployment, `apply` replaces the running service; it may wait 
 
 ## Requirements
 
-- **llama.cpp runtime:** `llama-server` on `PATH`. `apply` resolves it from `PATH` to an absolute path and fails with `llama-server not found on PATH; install with ...` if it is missing. Run `amicu doctor` to confirm it is found. On NVIDIA GPUs, this must be a CUDA build of `llama-server`. A CPU-only build starts and runs on the CPU, and amicu does not detect it.
+- **llama.cpp runtime:** `llama-server` on `PATH`. `apply` resolves it from `PATH` to an absolute path and fails with `llama-server not found on PATH; install with ...` if it is missing. Run `amicu doctor` to confirm it is found. amicu does not check which build you have; use a CUDA build of `llama-server` for GPU offload.
 - **vLLM runtime:** `vllm` on `PATH`; if it is missing, apply fails with `vllm not found on PATH; install with `pip install vllm``. A native single-process vLLM run needs a supported GPU (NVIDIA CUDA, AMD ROCm, or Intel XPU).
 - **Model file:** for llama.cpp, a GGUF file that you download yourself; amicu does not download weights. Put it at `models/<model resource id>/<variant.file>` relative to the project directory, or set `variant.file` to an absolute path. `amicu plan` shows the path relative to the project, `models/<model id>/<file>`. `apply` makes it absolute when it starts the service. A relative file name must be a plain name: not empty, not `.` or `..`, and without `/`, `\` or NUL. See the [Quickstart](/docs/quickstart) for a download command.
 
@@ -142,7 +142,7 @@ See [`hardware_profile`](/docs/configuration/hardware-profile) and [`deployment`
 
 The accelerator is whatever the machine has; amicu does not provision it. llama.cpp offloads layers with `n_gpu_layers` (Metal on Apple Silicon, CUDA on NVIDIA per your `llama-server` build). `n_gpu_layers = -1` offloads all layers to the GPU. A native single-process vLLM run needs a supported GPU (NVIDIA CUDA, AMD ROCm, or Intel XPU). There are no regions: the endpoint is on the machine, wherever it is.
 
-For a `gpu` accelerator, the fit check counts the model weights against VRAM (`accelerator.memory` times `count`). It does not read `n_gpu_layers`, so partial offload is not modelled: all weights are counted against VRAM whatever the value. A model that does not fit fails `plan` with `AMICU-MEM-001`. See [Error codes](/docs/reference/error-codes).
+For a `gpu` accelerator, the fit check counts the model weights against VRAM (`accelerator.memory` times `count`, minus a reserve per card). For llama.cpp, the check counts weights only. vLLM also adds the KV cache and uses `gpu_memory_utilization`. The check does not read `n_gpu_layers`, so partial offload is not modelled: all weights are counted against VRAM whatever the value. A model that does not fit fails `plan` with `AMICU-MEM-001`. See [Error codes](/docs/reference/error-codes).
 
 ## Limits
 

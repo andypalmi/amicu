@@ -56,7 +56,7 @@ Diagnostics have the form `AMICU-<CATEGORY>-<NNN>`. The category is the fastest 
 
 | Code | Severity | Meaning | Fix |
 |---|---|---|---|
-| `AMICU-MEM-001` | error | The model does not fit in available VRAM or memory. The message names the model weights, the KV cache (vLLM), and the usable and total memory. | Smaller quantization, shorter context, or bigger hardware |
+| `AMICU-MEM-001` | error | The model does not fit in available GPU VRAM. The message names the model weights and the usable and total memory. For vLLM the message includes the KV cache when the model shape is known. Unified or system memory is `AMICU-MEM-002`. | Smaller quantization, shorter context, or bigger hardware |
 | `AMICU-MEM-002` | error | A single artifact file exceeds available memory | A smaller variant or different hardware |
 
 ## POLICY

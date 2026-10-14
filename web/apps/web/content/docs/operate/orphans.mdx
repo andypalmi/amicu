@@ -18,7 +18,7 @@ Run it in the project directory. It reads `.amicu/state/state.json`. If the proj
 |---|---|---|
 | `modal` | Apps in the Modal workspace for `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` | Only apps whose name starts with `amicu-`. Apps in state `stopped` are skipped. |
 | `launchd` | macOS: `launchctl list` and plists in `~/Library/LaunchAgents/` | Labels that start with `io.amicu.`. A plist that is not loaded is reported as `plist only (not loaded)`. |
-| `systemd` | Linux: `systemctl --user list-units` and `list-unit-files` | Units that start with `io.amicu.` or `amicu`. A unit file that is enabled but not loaded is reported as `not loaded`. |
+| `systemd` | Linux: `systemctl --user list-units` and `list-unit-files` | Units that start with `io.amicu.` or `amicu`. A unit file that is installed but not loaded is reported as `not loaded (<unit file state>)`, for example `not loaded (enabled)`. |
 
 On other platforms, the host sources are skipped. Without Modal credentials, the `modal` source reports an error. The local sources still print.
 
