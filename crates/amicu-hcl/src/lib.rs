@@ -1422,6 +1422,29 @@ mod tests {
         assert_eq!(scan_runtime_env_secrets(&g), Vec::new());
     }
 
+    #[test]
+    fn runtime_secret_scan_regressions() {
+        let args = [
+            "--override-kv",
+            "tokenizer.ggml.add_bos_token=bool:false",
+            "--hf-token",
+            "hf_abcdefghijklmnopqrstuvwxyz0123456789",
+            "--api-key=${VLLM_KEY}",
+            "--api-key",
+            "$VLLM_KEY",
+        ]
+        .map(String::from)
+        .to_vec();
+        let mut env = BTreeMap::new();
+        env.insert("HF_TOKEN".to_string(), "${HF_TOKEN}".to_string());
+        let g = llama_cpp_deployment_with(args, env);
+        let paths: Vec<_> = scan_runtime_env_secrets(&g)
+            .into_iter()
+            .map(|d| d.path.unwrap())
+            .collect();
+        assert_eq!(paths, ["llama_cpp.extra_args[2]"]);
+    }
+
     // --- amicu-planning#151 PR D: multimodal projector block ---------------
 
     #[test]

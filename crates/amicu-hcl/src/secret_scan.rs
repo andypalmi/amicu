@@ -93,29 +93,32 @@ pub fn scan_runtime_env_secrets(graph: &Graph) -> Vec<Diagnostic> {
             Runtime::Vllm(s) => ("vllm", &s.env, &s.extra_args),
         };
         for (key, value) in env {
-            if looks_like_secret_value(value)
-                || (is_secret_name(key) && is_literal_secret_candidate(value))
-            {
+            if value_is_secret(key, value) {
                 out.push(env_secret_finding(&deployment.id, block, key, value));
             }
         }
         // `extra_args` land in argv (and in state / the service plist), so
         // check both `--flag=value` and `--flag value` forms (#225).
+        let mut consumed = vec![false; extra_args.len()];
         for (idx, arg) in extra_args.iter().enumerate() {
-            let path = format!("{block}.extra_args[{idx}]");
-            let hit = if let Some((flag, value)) = arg.split_once('=') {
-                looks_like_secret_value(value)
-                    || (is_secret_name(flag) && is_literal_secret_candidate(value))
-            } else if arg.starts_with('-') {
-                extra_args.get(idx + 1).is_some_and(|next| {
-                    !next.starts_with('-')
-                        && (looks_like_secret_value(next)
-                            || (is_secret_name(arg) && is_literal_secret_candidate(next)))
-                })
+            if consumed[idx] {
+                continue;
+            }
+            let hit = if arg.starts_with('-') {
+                if let Some((flag, value)) = arg.split_once('=') {
+                    !is_structured_value_flag(flag) && value_is_secret(flag, value)
+                } else if let Some(next) = extra_args.get(idx + 1).filter(|n| !n.starts_with('-')) {
+                    // The value belongs to this flag whether or not it is flagged.
+                    consumed[idx + 1] = true;
+                    !is_structured_value_flag(arg) && value_is_secret(arg, next)
+                } else {
+                    false
+                }
             } else {
-                looks_like_secret_value(arg)
+                looks_like_secret_value(arg) && !is_env_reference(arg)
             };
             if hit {
+                let path = format!("{block}.extra_args[{idx}]");
                 out.push(secret_finding_at(&deployment.id, &path, arg));
             }
         }
@@ -123,12 +126,44 @@ pub fn scan_runtime_env_secrets(graph: &Graph) -> Vec<Diagnostic> {
     out
 }
 
+/// Whether `value` (set under `name`) is a literal secret: it has a known
+/// secret shape, or sits under a secret-named key. Env references such as
+/// `${VAR}` are never literals.
+fn value_is_secret(name: &str, value: &str) -> bool {
+    !is_env_reference(value)
+        && (looks_like_secret_value(value)
+            || (is_secret_name(name) && is_literal_secret_candidate(value)))
+}
+
+/// `${NAME}` or `$NAME`: a reference to an environment variable.
+fn is_env_reference(value: &str) -> bool {
+    let name = value
+        .strip_prefix("${")
+        .and_then(|v| v.strip_suffix('}'))
+        .or_else(|| value.strip_prefix('$'));
+    name.is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+}
+
+/// Flags whose value is structured `key=type:value` data (model metadata
+/// overrides, tensor placement), where words like `token` are field names.
+fn is_structured_value_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--override-kv"
+            | "--override-tensor"
+            | "-ot"
+            | "--override-generation-config"
+            | "--hf-overrides"
+            | "--chat-template-kwargs"
+    )
+}
+
 /// Whether a flag or env-var name designates a secret: any `_`/`-`
 /// separated word is `key`, `token`, `secret`, `password`, `passwd` or
 /// `apikey` (case-insensitive), unless it names a file/path/dir holding one.
 fn is_secret_name(name: &str) -> bool {
     let upper = name.trim_start_matches('-').to_ascii_uppercase();
-    let words: Vec<&str> = upper.split(['_', '-']).collect();
+    let words: Vec<&str> = upper.split(['_', '-', '.', ':']).collect();
     if words.iter().any(|w| matches!(*w, "FILE" | "PATH" | "DIR")) {
         return false;
     }

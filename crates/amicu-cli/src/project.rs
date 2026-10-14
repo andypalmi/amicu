@@ -112,8 +112,8 @@ impl Project {
                 "{problem}. {} holds the previous valid state; inspect it and, if correct, \
                  restore it with `cp {} {}`",
                 bak.display(),
-                bak.display(),
-                path.display()
+                shell_quote(&bak),
+                shell_quote(&path)
             )))
         } else {
             Err(CliError::Message(problem))
@@ -154,19 +154,31 @@ impl Project {
         let write_err = |p: &Path, e| CliError::io(format!("cannot write {}", p.display()), e);
 
         let result = (|| {
-            let mut file = fs::File::create(&tmp).map_err(|e| write_err(&tmp, e))?;
+            let mut opts = fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+            let mut file = opts.open(&tmp).map_err(|e| write_err(&tmp, e))?;
             file.write_all(text.as_bytes())
                 .and_then(|()| file.sync_all())
                 .map_err(|e| write_err(&tmp, e))?;
             drop(file);
             self.rotate_backup(&dir, &unique)?;
-            fs::rename(&tmp, &path).map_err(|e| write_err(&path, e))?;
-            sync_dir(&dir).map_err(|e| write_err(&dir, e))
+            fs::rename(&tmp, &path).map_err(|e| write_err(&path, e))
         })();
         if result.is_err() {
             let _ = fs::remove_file(&tmp);
+            return result;
         }
-        result
+        // The new state is already in place; a failed directory sync only
+        // weakens crash durability, so warn rather than fail the save.
+        if let Err(e) = sync_dir(&dir) {
+            eprintln!(
+                "warning: state saved but could not sync {}: {e}",
+                dir.display()
+            );
+        }
+        Ok(())
     }
 
     /// Keep the current `state.json` as `state.json.bak`, but only when it is
@@ -192,6 +204,11 @@ impl Project {
             CliError::io(format!("cannot write {}", bak.display()), e)
         })
     }
+}
+
+/// Single-quote a path for safe pasting into a POSIX shell.
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
 
 /// fsync a directory so a rename inside it survives power loss (unix only;
@@ -304,6 +321,30 @@ mod durability_tests {
             .filter(|n| n.contains(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recovery_hint_shell_quotes_paths() {
+        let root = scratch("quote it");
+        let p = Project::new(&root);
+        p.save_state(&state("a")).unwrap();
+        p.save_state(&state("b")).unwrap();
+        fs::write(p.state_file(), "x").unwrap();
+        let err = p.load_state().unwrap_err().to_string();
+        assert!(err.contains("cp '") && err.contains("quote it"), "{err}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("mode");
+        let p = Project::new(&root);
+        p.save_state(&state("a")).unwrap();
+        let mode = fs::metadata(p.state_file()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
         let _ = fs::remove_dir_all(root);
     }
 
