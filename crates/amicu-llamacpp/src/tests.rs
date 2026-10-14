@@ -1355,9 +1355,9 @@ fn kv_cache_counts_only_n_kv_layers_for_hybrid_models() {
 }
 
 #[test]
-fn plan_launch_kv_cache_is_none_when_shape_present_but_no_cache_type_set() {
-    // Shape metadata alone (with no cache_type_k/v) must not trigger the
-    // estimator - "at least one cache type" is required too.
+fn plan_launch_estimates_kv_cache_at_f16_when_only_shape_is_set() {
+    // Shape metadata alone (no cache_type_k/v) activates the estimator at
+    // llama-server's own default dtype, f16 - the conservative choice.
     let mut model = gguf_model(&[(Quantization::Q4KM, "tiny.Q4_K_M.gguf", 4 * GIB)]);
     model.n_layers = Some(32);
     model.n_kv_heads = Some(8);
@@ -1368,7 +1368,138 @@ fn plan_launch_kv_cache_is_none_when_shape_present_but_no_cache_type_set() {
     let adapter = LlamaCppAdapter::new(Box::new(catalog), Box::new(FakeSupervisor::default()));
 
     let plan = adapter.plan_launch(&deployment()).expect("plan");
-    assert_eq!(plan.estimate.kv_cache, None);
+    // 8192 * 32 * 8 * 128 * 2 (K+V) * 2 bytes (f16).
+    assert_eq!(
+        plan.estimate.kv_cache,
+        Some(amicu_core::ByteSize::from_bytes(
+            8192 * 32 * 8 * 128 * 2 * 2
+        ))
+    );
+}
+
+#[test]
+fn plan_launch_estimate_never_drops_below_the_flat_overhead_band() {
+    // A tiny context makes the KV figure smaller than the flat band; the
+    // reported peak memory must still include the band.
+    let mut model = gguf_model(&[(Quantization::Q4KM, "tiny.Q4_K_M.gguf", 4 * GIB)]);
+    model.n_layers = Some(32);
+    model.n_kv_heads = Some(8);
+    model.head_dim = Some(128);
+    let catalog = MapCatalog::new()
+        .with_model(model, 7_000_000_000)
+        .with_hardware(apple_silicon(16));
+    let adapter = LlamaCppAdapter::new(Box::new(catalog), Box::new(FakeSupervisor::default()));
+    let mut d = deployment();
+    let Runtime::LlamaCpp(s) = &mut d.runtime else {
+        unreachable!("deployment() always builds a llama_cpp runtime");
+    };
+    s.context_length = 512;
+
+    let plan = adapter.plan_launch(&d).expect("plan");
+    let kv = plan.estimate.kv_cache.expect("kv estimate");
+    let band_high = 4 * GIB * 30 / 100;
+    assert!(kv.bytes() < band_high);
+    // Rounding slack of a few bytes from the f64 band computation.
+    assert!(plan.estimate.estimated_memory.bytes() + 16 >= 4 * GIB + band_high);
+}
+
+// ---- typed-field range checks --------------------------
+
+/// Run `validate` on `deployment()` after `edit`, keeping only AMICU-CAP-011.
+fn field_diagnostics(edit: impl FnOnce(&mut LlamaCppSettings)) -> Vec<String> {
+    let mut d = deployment();
+    let Runtime::LlamaCpp(s) = &mut d.runtime else {
+        unreachable!("deployment() always builds a llama_cpp runtime");
+    };
+    edit(s);
+    fitting_adapter()
+        .validate(&d)
+        .into_iter()
+        .filter(|diag| diag.code == amicu_core::diagnostic::catalog::CAP_RUNTIME_FIELD_INVALID)
+        .map(|diag| {
+            assert_eq!(diag.severity, amicu_core::diagnostic::Severity::Error);
+            assert_eq!(
+                diag.resource.as_deref(),
+                Some("deployment.support_chat_local")
+            );
+            diag.message
+        })
+        .collect()
+}
+
+#[test]
+fn validate_accepts_in_range_typed_fields() {
+    let msgs = field_diagnostics(|s| {
+        s.temperature = Some(0.0);
+        s.top_p = Some(1.0);
+        s.top_k = Some(0);
+        s.min_p = Some(0.05);
+        s.repeat_penalty = Some(1.1);
+        s.batch_size = Some(2048);
+        s.ubatch_size = Some(2048);
+        s.parallel_slots = Some(1);
+    });
+    assert!(msgs.is_empty(), "{msgs:?}");
+}
+
+#[test]
+fn validate_rejects_out_of_range_sampling_fields() {
+    let msgs = field_diagnostics(|s| {
+        s.temperature = Some(-0.5);
+        s.top_p = Some(1.5);
+        s.min_p = Some(-0.1);
+        s.repeat_penalty = Some(0.0);
+    });
+    assert_eq!(msgs.len(), 4, "{msgs:?}");
+    for (msg, field) in msgs
+        .iter()
+        .zip(["temperature", "top_p", "min_p", "repeat_penalty"])
+    {
+        assert!(
+            msg.starts_with("deployment.support_chat_local: ") && msg.contains(field),
+            "{msg}"
+        );
+    }
+}
+
+#[test]
+fn validate_rejects_non_finite_sampling_fields() {
+    let msgs = field_diagnostics(|s| {
+        s.temperature = Some(f32::NAN);
+        s.top_p = Some(f32::NAN);
+    });
+    assert_eq!(msgs.len(), 2, "{msgs:?}");
+}
+
+#[test]
+fn validate_rejects_zero_batch_and_slot_fields() {
+    let msgs = field_diagnostics(|s| {
+        s.batch_size = Some(0);
+        s.ubatch_size = Some(0);
+        s.parallel_slots = Some(0);
+    });
+    assert_eq!(msgs.len(), 3, "{msgs:?}");
+    assert!(msgs[2].contains("parallel_slots"), "{msgs:?}");
+}
+
+#[test]
+fn validate_rejects_ubatch_above_batch() {
+    let msgs = field_diagnostics(|s| {
+        s.batch_size = Some(512);
+        s.ubatch_size = Some(1024);
+    });
+    assert_eq!(msgs.len(), 1, "{msgs:?}");
+    assert!(msgs[0].contains("`ubatch_size` (1024) must not exceed `batch_size` (512)"));
+}
+
+#[test]
+fn validate_rejects_bad_port_and_gpu_layers() {
+    let msgs = field_diagnostics(|s| {
+        s.port = 0;
+        s.n_gpu_layers = -2;
+    });
+    assert_eq!(msgs.len(), 2, "{msgs:?}");
+    assert!(msgs[0].contains("`port`") && msgs[1].contains("`n_gpu_layers`"));
 }
 
 #[test]

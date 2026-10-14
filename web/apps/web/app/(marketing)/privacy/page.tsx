@@ -14,9 +14,10 @@ export default function PrivacyPage() {
   return (
     <LegalPage title="Privacy Policy" effective={company.privacyEffectiveDate}>
       <p>
-        Controller: {company.legalName}, {company.address}, {company.country}. Contact:{' '}
-        <a className="underline" href={`mailto:${company.contactEmail}`}>
-          {company.contactEmail}
+        Controller: {company.legalName}, {company.address}, {company.country}. Contact for
+        privacy requests:{' '}
+        <a className="underline" href={`mailto:${company.privacyEmail}`}>
+          {company.privacyEmail}
         </a>
         .
       </p>

@@ -14,8 +14,10 @@ export interface CompanyConfig {
   /** Commercial register / company number. */
   registrationId: string | null;
   vatId: string | null;
-  /** Public contact address (also used for privacy requests). */
+  /** General public contact address. */
   contactEmail: string | null;
+  /** Address for privacy and data requests. */
+  privacyEmail: string | null;
   /** ISO dates (YYYY-MM-DD). */
   privacyEffectiveDate: string | null;
   termsEffectiveDate: string | null;
@@ -30,7 +32,8 @@ export const company: CompanyConfig = {
   country: null,
   registrationId: null,
   vatId: null,
-  contactEmail: null,
+  contactEmail: 'hello@amicu.dev',
+  privacyEmail: 'privacy@amicu.dev',
   privacyEffectiveDate: null,
   termsEffectiveDate: null,
   privacyBody: null,

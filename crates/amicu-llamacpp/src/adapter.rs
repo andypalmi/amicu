@@ -271,23 +271,24 @@ fn diagnostic(error: &LlamaCppError) -> Diagnostic {
     Diagnostic::new(error.code(), error.severity(), error.to_string())
 }
 
-/// Assemble [`KvCacheParams`] for the KV-cache estimator,
-/// when the inputs it needs are actually present: every one of the model's
-/// three declared shape fields, and at least one of the deployment's two
-/// cache-type fields (the other, if unset, defaults to
-/// [`KvCacheType::F16`] - llama-server's own per-flag default for whichever
-/// of `-ctk`/`-ctv` is left unset). Returns `None` otherwise, leaving the
-/// flat overhead band as the only memory-beyond-weights estimate - exactly
-/// today's behavior.
+/// Assemble [`KvCacheParams`] for the KV-cache estimator, when the model
+/// declares all three shape fields. Returns `None` otherwise, leaving the flat
+/// overhead band as the only memory-beyond-weights estimate.
+///
+/// An unset `cache_type_k`/`cache_type_v` defaults to [`KvCacheType::F16`]:
+/// that is llama-server's own per-flag default (`-ctk`/`-ctv` each), so the
+/// estimate describes what will actually run, and f16 is also the widest
+/// common dtype, so assuming it never under-counts. Shape metadata alone
+/// therefore activates the estimate; the alternative (estimate only when a
+/// cache type is set) silently fell back to the flat band, which badly
+/// under-counts a long `context_length`. A user who wants a smaller footprint
+/// sets a quantized cache type, which the estimate then honors.
 fn kv_cache_params(model: &Model, settings: &LlamaCppSettings) -> Option<KvCacheParams> {
     let (Some(n_layers), Some(n_kv_heads), Some(head_dim)) =
         (model.kv_layers(), model.n_kv_heads, model.head_dim)
     else {
         return None;
     };
-    if settings.cache_type_k.is_none() && settings.cache_type_v.is_none() {
-        return None;
-    }
     Some(KvCacheParams {
         context_length: settings.context_length,
         n_layers,
@@ -296,6 +297,73 @@ fn kv_cache_params(model: &Model, settings: &LlamaCppSettings) -> Option<KvCache
         cache_type_k: settings.cache_type_k.unwrap_or(KvCacheType::F16),
         cache_type_v: settings.cache_type_v.unwrap_or(KvCacheType::F16),
     })
+}
+
+/// Range- and consistency-check the typed numeric fields, one `AMICU-CAP-011`
+/// error per problem so a caller sees every one at once. These are the values
+/// `llama-server` would otherwise reject (or silently misread) only at spawn
+/// time. Every message is prefixed `deployment.<id>:` and names the field.
+///
+/// Deliberately unchecked: `top_k` (any `u32`; `0` disables it) and
+/// `context_length` (`0` means "the model's trained context" to llama-server).
+fn runtime_field_diagnostics(d: &Deployment, s: &LlamaCppSettings) -> Vec<Diagnostic> {
+    let mut problems: Vec<String> = Vec::new();
+    if s.port == 0 {
+        problems.push("`port` must be between 1 and 65535".to_owned());
+    }
+    if s.n_gpu_layers < -1 {
+        problems.push(format!(
+            "`n_gpu_layers` is {}; use -1 to offload all layers, or 0 or more",
+            s.n_gpu_layers
+        ));
+    }
+    if let Some(t) = s.temperature
+        && !(t.is_finite() && t >= 0.0)
+    {
+        problems.push(format!("`temperature` is {t}; it must be 0 or more"));
+    }
+    for (name, value) in [("top_p", s.top_p), ("min_p", s.min_p)] {
+        if let Some(v) = value
+            && !(0.0..=1.0).contains(&v)
+        {
+            problems.push(format!("`{name}` is {v}; it must be between 0 and 1"));
+        }
+    }
+    if let Some(r) = s.repeat_penalty
+        && !(r.is_finite() && r > 0.0)
+    {
+        problems.push(format!(
+            "`repeat_penalty` is {r}; it must be greater than 0 (1.0 disables it)"
+        ));
+    }
+    for (name, value) in [
+        ("batch_size", s.batch_size),
+        ("ubatch_size", s.ubatch_size),
+        ("parallel_slots", s.parallel_slots),
+    ] {
+        if value == Some(0) {
+            problems.push(format!("`{name}` must be at least 1"));
+        }
+    }
+    if let (Some(batch), Some(ubatch)) = (s.batch_size, s.ubatch_size)
+        && ubatch > batch
+    {
+        problems.push(format!(
+            "`ubatch_size` ({ubatch}) must not exceed `batch_size` ({batch})"
+        ));
+    }
+    problems
+        .into_iter()
+        .map(|problem| {
+            let mut diag = Diagnostic::new(
+                catalog::CAP_RUNTIME_FIELD_INVALID,
+                Severity::Error,
+                format!("deployment.{}: {problem}", d.id),
+            );
+            diag.resource = Some(format!("deployment.{}", d.id));
+            diag
+        })
+        .collect()
 }
 
 /// The leading flag token of one `extra_args` entry: a long (`--foo`,
@@ -483,6 +551,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
             }
         };
         out.extend(extra_args_and_env_diagnostics(settings));
+        out.extend(runtime_field_diagnostics(d, settings));
         let (resolved, hardware) = match self.resolve(d) {
             Ok(pair) => pair,
             Err(e) => {
@@ -570,8 +639,12 @@ impl RuntimeAdapter for LlamaCppAdapter {
         let gpu_count = u32::from(hardware.accelerator.is_some() && settings.n_gpu_layers != 0);
         // Prefer the KV-cache estimate over the flat overhead band when it is
         // known - it is a real number for this deployment, not a fraction of
-        // weights standing in for it.
-        let beyond_weights = report.kv_cache.unwrap_or(report.overhead.high);
+        // weights standing in for it - but never report less than the band:
+        // the KV figure leaves out compute buffers and runtime overhead, so a
+        // small context must not make the estimate drop below the flat high.
+        let beyond_weights = report
+            .kv_cache
+            .map_or(report.overhead.high, |kv| kv.max(report.overhead.high));
         let estimated_memory =
             ByteSize::from_bytes(report.weights.bytes() + beyond_weights.bytes());
 
