@@ -4,6 +4,8 @@ pub mod aws;
 pub mod azure;
 pub mod capability;
 pub mod catalog;
+#[cfg(test)]
+pub(crate) mod conformance;
 pub mod consumer;
 pub mod cost;
 pub mod fake;
@@ -13,6 +15,7 @@ pub mod modal;
 pub mod nebius;
 pub mod ovhcloud;
 pub mod provider;
+pub(crate) mod rest_lifecycle;
 pub mod runpod;
 pub mod scaleway;
 pub mod secret;
@@ -32,7 +35,8 @@ pub use modal::ModalProvider;
 pub use nebius::NebiusProvider;
 pub use ovhcloud::OvhCloudProvider;
 pub use provider::{
-    Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
+    HANDLE_SCHEMA_VERSION, Provider, ProviderError, ProvisionRequest, ProvisioningHandle,
+    ProvisioningState, ResourceIdentity, TeardownOutcome,
 };
 pub use runpod::RunPodProvider;
 pub use scaleway::ScalewayProvider;
