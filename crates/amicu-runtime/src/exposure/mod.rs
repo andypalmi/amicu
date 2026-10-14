@@ -377,5 +377,62 @@ where
     }
 }
 
+/// Like [`teardown_report`], for an UPDATE of an instance that was already
+/// serving a good version. When `previous` names that version (e.g.
+/// `"version 3"`), the new one is rolled back first and the endpoint is
+/// re-verified; only a rollback that worked AND re-verifies closed keeps the
+/// previous deployment alive. Anything else falls back to stopping the whole
+/// deployment (fail closed), and the report says why. With no `previous`
+/// (a fresh deployment) this is exactly [`teardown_report`].
+///
+/// Returns the report and whether the previous version is still serving.
+pub async fn rollback_or_teardown<RB, RBF, RV, RVF, S, SF>(
+    detail: &str,
+    instance: &str,
+    manual_hint: &str,
+    previous: Option<&str>,
+    rollback: RB,
+    reverify: RV,
+    stop: S,
+) -> (String, bool)
+where
+    RB: FnOnce() -> RBF,
+    RBF: std::future::Future<Output = Result<(), String>>,
+    RV: FnOnce() -> RVF,
+    RVF: std::future::Future<Output = Result<(), String>>,
+    S: FnOnce() -> SF,
+    SF: std::future::Future<Output = Result<(), String>>,
+{
+    let Some(previous) = previous else {
+        return (
+            teardown_report(detail, instance, manual_hint, stop).await,
+            false,
+        );
+    };
+    let why = match rollback().await {
+        Err(e) => format!("rolling back to {previous} failed ({e})"),
+        Ok(()) => match reverify().await {
+            Ok(()) => {
+                return (
+                    format!(
+                        "{detail}; the new version was rolled back to {previous} and verified;                          the previous deployment ({instance}) is still serving"
+                    ),
+                    true,
+                );
+            }
+            Err(e) => {
+                format!(
+                    "after rolling back to {previous} the endpoint still failed its check ({e})"
+                )
+            }
+        },
+    };
+    let detail = format!("{detail}; {why}, so the whole deployment is being stopped");
+    (
+        teardown_report(&detail, instance, manual_hint, stop).await,
+        false,
+    )
+}
+
 #[cfg(test)]
 mod tests;

@@ -899,11 +899,14 @@ use crate::stops::{Backend, StopRecord};
 #[derive(Default)]
 struct StopLog {
     stopped: Mutex<Vec<String>>,
+    started: Mutex<Vec<String>>,
 }
 
 struct FakeHost {
     log: Arc<StopLog>,
     fail: bool,
+    /// `start` fails, as a bad model path would.
+    start_fails: bool,
     ctx: Option<amicu_llamacpp::HostContext>,
     owner: Option<u32>,
 }
@@ -912,10 +915,22 @@ struct FakeHost {
 impl amicu_llamacpp::ProcessSupervisor for FakeHost {
     async fn start(
         &self,
-        _: &amicu_runtime::LaunchPlan,
+        plan: &amicu_runtime::LaunchPlan,
         _: &[amicu_llamacpp::ResolvedSecret],
     ) -> Result<amicu_runtime::RuntimeHandle, amicu_llamacpp::LlamaCppError> {
-        unreachable!("these tests never start anything")
+        if self.start_fails {
+            return Err(amicu_llamacpp::LlamaCppError::Supervisor(
+                "model file not found".to_owned(),
+            ));
+        }
+        let id = amicu_llamacpp::host_label(plan.deployment.as_str());
+        self.log.started.lock().unwrap().push(id.clone());
+        Ok(amicu_runtime::RuntimeHandle {
+            id,
+            deployment: plan.deployment.clone(),
+            endpoint: "http://127.0.0.1:8000".to_owned(),
+            exposure: amicu_runtime::EndpointExposure::Loopback,
+        })
     }
     async fn status(
         &self,
@@ -966,6 +981,8 @@ struct FakeModal {
     live: Option<Vec<String>>,
     /// App ids the token's workspace can see (besides `apps`).
     visible_ids: Vec<String>,
+    /// Deployments whose host service the fake service manager reports down.
+    host_down: Vec<String>,
 }
 
 impl Default for FakeModal {
@@ -977,6 +994,7 @@ impl Default for FakeModal {
             stopped: Mutex::new(Vec::new()),
             live: None,
             visible_ids: Vec::new(),
+            host_down: Vec::new(),
         }
     }
 }
@@ -1043,6 +1061,20 @@ impl AppLookup for FakeModal {
     fn active_workspace(&self) -> Result<Option<Workspace>, String> {
         Ok(Some(self.workspace.clone()))
     }
+    fn host_unit(&self, record: &StopRecord) -> Result<crate::refresh::HostUnit, String> {
+        use crate::refresh::HostUnit;
+        Ok(
+            if self
+                .host_down
+                .iter()
+                .any(|d| d == record.deployment.as_str())
+            {
+                HostUnit::Down
+            } else {
+                HostUnit::Running
+            },
+        )
+    }
 }
 
 struct Rig {
@@ -1068,6 +1100,20 @@ impl Rig {
     fn with_owner(owner: u32) -> Self {
         Self::build(false, Some(platform_ctx()), Some(owner))
     }
+    fn failing_start() -> Self {
+        let mut rig = Self::new();
+        let log = rig.log.clone();
+        rig.host = Box::new(move || {
+            Box::new(FakeHost {
+                log: log.clone(),
+                fail: false,
+                start_fails: true,
+                ctx: Some(platform_ctx()),
+                owner: None,
+            })
+        });
+        rig
+    }
     fn build(fail: bool, ctx: Option<amicu_llamacpp::HostContext>, owner: Option<u32>) -> Self {
         let log = Arc::new(StopLog::default());
         let l = log.clone();
@@ -1077,6 +1123,7 @@ impl Rig {
                 Box::new(FakeHost {
                     log: l.clone(),
                     fail,
+                    start_fails: false,
                     ctx: ctx.clone(),
                     owner,
                 })
@@ -1854,4 +1901,130 @@ fn handle(id: &str, port: u16) -> amicu_runtime::RuntimeHandle {
         endpoint: format!("http://127.0.0.1:{port}"),
         exposure: amicu_runtime::EndpointExposure::Loopback,
     }
+}
+
+// ---- host refresh and failed updates (amicu-planning#211, #209) -------------
+
+fn single_graph() -> amicu_core::graph::Graph {
+    amicu_hcl::parse_graph(VALID_CONFIG).unwrap()
+}
+
+fn apply_with(project: &Project, rig: &Rig) -> Result<u8, crate::error::CliError> {
+    commands::apply::run_with(
+        project,
+        true,
+        None,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &mut std::io::Cursor::new(Vec::new()),
+        &rig.env(),
+    )
+}
+
+fn plan_text(project: &Project, rig: &Rig) -> String {
+    let mut out = Vec::new();
+    let state =
+        crate::refresh::load_refreshed_state(project, &rig.modal, OutputFormat::Human, &mut out)
+            .unwrap()
+            .unwrap();
+    format!("{}|pending={:?}", utf8(out), state.pending)
+}
+
+fn running_host_state() -> LocalState {
+    let mut state = state_with(single_graph());
+    state.stops = vec![StopRecord::host(
+        &"support_local".into(),
+        Some(&platform_ctx()),
+    )];
+    state
+}
+
+#[test]
+fn a_dead_host_service_is_drift_kept_in_state_and_planned_as_a_create() {
+    let td = TempDir::new();
+    let project = saved(&td, &running_host_state());
+    let mut rig = Rig::new();
+    rig.modal.host_down = vec!["support_local".to_owned()];
+    let text = plan_text(&project, &rig);
+    assert!(text.contains("drift: deployment support_local"), "{text}");
+    assert!(text.contains("is not running"), "{text}");
+    assert!(text.contains("|pending=["), "{text}");
+    assert!(!text.contains("pending=[]"), "{text}");
+    // Read-only: the state on disk is untouched, and nothing was stopped.
+    let on_disk = project.load_state().unwrap().unwrap();
+    assert_eq!(on_disk.pending.len(), 0);
+    assert_eq!(on_disk.stops.len(), 1);
+    assert_eq!(rig.stopped().len(), 0);
+}
+
+#[test]
+fn a_running_host_service_is_not_drift() {
+    let td = TempDir::new();
+    let project = saved(&td, &running_host_state());
+    let text = plan_text(&project, &Rig::new());
+    assert!(!text.contains("drift"), "{text}");
+}
+
+#[test]
+fn apply_restarts_a_dead_host_service_and_clears_pending() {
+    let td = TempDir::new();
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let project = saved(&td, &running_host_state());
+    let mut rig = Rig::new();
+    rig.modal.host_down = vec!["support_local".to_owned()];
+    assert_eq!(apply_with(&project, &rig).unwrap(), 0);
+    assert_eq!(*rig.log.started.lock().unwrap(), [label("support_local")]);
+    let after = project.load_state().unwrap().unwrap();
+    assert_eq!(after.pending.len(), 0);
+    assert_eq!(after.stops.len(), 1, "stop identity kept");
+}
+
+#[test]
+fn destroy_confirms_the_stop_of_a_dead_host_service_before_forgetting_it() {
+    let td = TempDir::new();
+    let project = saved(&td, &running_host_state());
+    let mut rig = Rig::new();
+    rig.modal.host_down = vec!["support_local".to_owned()];
+    let (result, _) = run_destroy(&project, &[], true, OutputFormat::Human, "", &rig);
+    result.unwrap();
+    assert_eq!(rig.stopped(), [label("support_local")]);
+    assert_eq!(project.load_state().unwrap().unwrap().stops.len(), 0);
+}
+
+#[test]
+fn a_failed_host_update_leaves_the_deployment_pending_with_its_stop_record() {
+    let td = TempDir::new();
+    // State holds the old definition (port 8001); the config says 8000.
+    let old = amicu_hcl::parse_graph(&VALID_CONFIG.replace("8000", "8001")).unwrap();
+    let mut state = state_with(old);
+    state.stops = vec![StopRecord::host(
+        &"support_local".into(),
+        Some(&platform_ctx()),
+    )];
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let project = saved(&td, &state);
+    let rig = Rig::failing_start();
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("model file not found"), "{err}");
+    assert!(err.contains("recorded as pending"), "{err}");
+    assert!(
+        err.contains("amicu destroy --target support_local"),
+        "{err}"
+    );
+    let after = project.load_state().unwrap().unwrap();
+    assert_eq!(after.pending, ["support_local".into()]);
+    assert_eq!(after.stops, state.stops, "the old instance stays stoppable");
+    // The next plan no longer says "No changes": it plans a create.
+    let plan = crate::refresh::load_refreshed_state(
+        &project,
+        &rig.modal,
+        OutputFormat::Human,
+        &mut Vec::new(),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(plan.pending.iter().any(|p| p.as_str() == "support_local"));
+    // And destroy still stops it from state alone.
+    let (result, _) = run_destroy(&project, &[], true, OutputFormat::Human, "", &Rig::new());
+    result.unwrap();
 }
