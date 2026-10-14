@@ -31,19 +31,25 @@ Start with `amicu doctor`. Then read the diagnostic code: the category tells you
 
 **`vllm not found on PATH; install with `pip install vllm``.** Install vLLM into the environment whose `PATH` runs `amicu apply`.
 
-**The local service exits during startup.** Apply fails within seconds, stops the service, and prints where the log is. macOS: `~/Library/Logs/amicu/<label>.out.log` and `<label>.err.log`. Linux: `journalctl --user --unit=<label>`. The usual causes are a missing GGUF at the path in the plan's `launch:` line, or too little memory.
+**The local service exits during startup.** Apply fails within seconds, stops the service, and prints where the log is. macOS: `~/Library/Logs/amicu/<label>.out.log` and `<label>.err.log`. Linux: `journalctl --user --unit=<label>`. The usual causes are a missing GGUF at `models/<model id>/<file>` in the project directory, or too little memory.
 
 **Apply waits and then fails with a health timeout.** Apply waits up to 15 minutes for `/health`. If the model never loads, apply stops the service and fails; read the log named in the error.
 
 **`port N is already serving /health`.** Something else, such as an older service or another program, answers on that port. Stop it or change `llama_cpp.port` / `vllm.port`, then apply again. Apply may wait up to 10 seconds for the previous service of the same deployment to stop before it reports this.
 
-**The local service is gone after a reboot or logout (Linux).** Linux services are transient systemd user units and do not survive a reboot or logout. Run `amicu apply` again. On macOS the LaunchAgent persists and starts at login.
+**`drift: deployment <id>: ... is not running (reboot, crash or manual removal)`.** The service manager confirmed that the host service is gone. The deployment is kept in state as pending. `plan` shows a `create`; `apply` restarts the service. On Linux, transient systemd user units do not survive a reboot or logout, so this is the usual cause there.
+
+**`warning: could not check host services (<id>: <reason>); using local state as-is`.** amicu could not get a definite answer from launchd or systemd (for example a bus error, a service that is starting or stopping, a service started by another user, or an old record with no launchd domain). State is unchanged. Fix the cause, or run `amicu apply` once you are sure the service is running.
+
+**`reason: ... changed since it was last started`** in a plan. This is not an error. A pinned secret `version`, the container image, or the `llama-server` or `vllm` path changed, so the deployment is updated. Apply it, or revert the change.
+
+**`... the new version was rolled back to version N and verified; the previous deployment (<app id>) is still serving`.** A Modal update failed its endpoint check. amicu restored the previous version, and apply fails. Read the error for the cause, fix it, and apply again. If the message instead says the whole deployment is being stopped, the rollback did not work. If it also says `teardown FAILED`, the message gives the command to stop the app by hand (`modal app stop <app id>`). Check the Modal dashboard and stop the app if it still runs.
 
 **`endpoint answered an unauthenticated request ... it is open to anyone with its URL`.** The runtime did not enforce the key. Amicu stopped the endpoint. Make sure `api_key` is set and the runtime is current, then apply again.
 
 **`could not verify that the endpoint rejects unauthenticated requests`.** The endpoint never gave a definite `401` or `403`. It may still be loading. Check the logs, then re-run apply.
 
-**If the stop after a failed check also failed,** the error prints the command to stop it by hand: `systemctl --user stop <label>` on Linux, `launchctl unload ~/Library/LaunchAgents/<label>.plist` on macOS, or the provider's stop command (for Modal, `amicu modal stop <app>`).
+**If the stop after a failed check also failed,** the error prints the command to stop it by hand: `systemctl --user stop <label>` on Linux, `launchctl bootout gui/$(id -u)/<label>` on macOS, or the provider's stop command (for Modal, `amicu modal stop <app>`). Run `amicu destroy` afterwards so that state and the service file are cleaned up.
 
 **Apply failed partway.** Deployments started before the failure are recorded in state and listed in the error. Fix the cause and apply again; apply finishes the rest. A deployment whose start was not confirmed stays `pending` in state, with a stop record. `amicu destroy` (or a re-run of apply) cleans it up. See [State](/docs/security/state).
 

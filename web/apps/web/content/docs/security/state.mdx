@@ -12,7 +12,11 @@ The CLI keeps state in the project directory, in `.amicu/state/state.json`. Writ
 - The resource graph from the last successful apply: models, hardware profiles, deployments, and policy resources as parsed from your HCL.
 - The endpoints that were started: deployment id, runtime handle id (the service label or Modal app id), the endpoint URL, and whether it is loopback or public.
 - Deployments marked `pending`: starts not yet confirmed, or Modal apps that a drift check could not find by name. Apply and destroy write them before a provider starts or stops anything.
-- Stop records: for each deployment, what is needed to stop it later (the backend and identity, plus the host uid and launchd domain, or the Modal app id and workspace). A record is removed only after its stop is confirmed.
+- Stop records: for each deployment, what is needed to stop it later (the backend and identity, plus the host uid and launchd domain, or the Modal app id and workspace). For a host service, the record also holds the path of its service file and of its log files. For a Modal app, it holds the names of the cache volumes the app mounts. A record is removed only after its stop is confirmed.
+- Fingerprints: SHA-256 digests of the secret pins (the `version` of each `api_key` reference), the container image, and the binary path, used to detect changes between plans. The raw values are not stored.
+- The project id, which scopes the host service labels.
+
+The service file of a host deployment (the launchd plist or systemd environment file) is outside state. It holds the endpoint API key, and `amicu destroy` deletes it when it stops the service. See [Secrets](/docs/security/secrets).
 
 ## What it never contains
 
@@ -28,7 +32,8 @@ State still describes your infrastructure (URLs, hardware, ids), so treat it as 
 
 Deployments are started one after another. Before a provider starts a deployment, amicu records it in state as pending, with a stop record that says how to stop it, so a failure mid-start still leaves something `amicu destroy` can stop. If one fails, deployments that were already started in the same run stay recorded, and the error lists them. A Modal app that is recorded but not found by name is kept in state, not forgotten. Known gaps, such as Modal app name collisions, are listed in [State and backends](/docs/operate/state-and-backends#known-limitations).
 
-- If the endpoint check fails for a deployment, amicu tries to stop that endpoint and exits with an error. The deployment stays in state as pending, because it may still be running. `amicu destroy --target <name>` confirms its stop.
+- If the endpoint check fails for a new deployment, amicu stops that endpoint and exits with an error. The deployment stays in state as pending, because it may still be running. `amicu destroy --target <name>` confirms its stop.
+- If the endpoint check fails after a Modal update, amicu rolls the app back to the previous version and checks that version again with the full key check. If that succeeds, apply still fails, and the error says the new version was rolled back to version N and verified, and that the previous deployment (its app id) is still serving. If the rollback fails, if the previous version is not closed, if there is no previous version, or if amicu cannot read the app's version history, amicu stops the whole app (fail closed). If that stop also fails, the error gives the `modal app stop <app id>` command to run by hand.
 - Preflight failures (unsupported provider, missing `api_key`, missing Modal proxy tokens) happen before anything starts, so state is unchanged.
 
 To recover, fix the cause and run `amicu apply` again. The plan is recomputed from the recorded state, so deployments that already succeeded show no change and apply finishes the rest. Use `amicu plan` to see what remains.

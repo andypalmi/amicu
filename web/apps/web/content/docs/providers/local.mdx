@@ -44,7 +44,7 @@ These ids are supported by `apply`, which runs the runtime on the host you invok
 | macOS | launchd | A LaunchAgent plist in `~/Library/LaunchAgents/`, loaded with `launchctl`. It has `RunAtLoad`, so the service starts again when you log in. Logs go to `~/Library/Logs/amicu/`. |
 | Linux | systemd | A transient `--user` unit started with `systemd-run`. It does not survive a reboot or logout; run `amicu apply` again to start it. |
 
-The service label is `io.amicu.llama.<deployment id>`, for both llama.cpp and vLLM deployments. The server binds to `127.0.0.1` on the `port` you set. The host is not configurable.
+The service label is `io.amicu.llama.<project_id>.<deployment id>`, for both llama.cpp and vLLM deployments. `project_id` is stored in `.amicu/state/state.json`, so two projects never share a label. The server binds to `127.0.0.1` on the `port` you set. The host is not configurable.
 
 When you change a deployment, `apply` replaces the running service; it may wait up to 10 seconds for the old one to stop. If something else still answers `/health` on the port, apply fails with `port N is already serving /health`. When you remove a deployment from the configuration, `apply` stops and unloads its service.
 
@@ -52,7 +52,7 @@ When you change a deployment, `apply` replaces the running service; it may wait 
 
 - **llama.cpp runtime:** `llama-server` on `PATH`. `apply` resolves it from `PATH` to an absolute path and fails with `llama-server not found on PATH; install with ...` if it is missing. Run `amicu doctor` to confirm it is found.
 - **vLLM runtime:** `vllm` on `PATH`; if it is missing, apply fails with `vllm not found on PATH; install with `pip install vllm``. A native single-process vLLM run needs a supported GPU (NVIDIA CUDA, AMD ROCm, or Intel XPU).
-- **Model file:** for llama.cpp, a GGUF file that you download yourself; amicu does not download weights. Put it at `models/<model resource id>/<variant.file>` relative to the project directory, or set `variant.file` to an absolute path. `amicu plan` shows the resolved absolute path, `<project dir>/models/<model id>/<file>`, in the `launch:` line. See the [Quickstart](/docs/quickstart) for a download command.
+- **Model file:** for llama.cpp, a GGUF file that you download yourself; amicu does not download weights. Put it at `models/<model resource id>/<variant.file>` relative to the project directory, or set `variant.file` to an absolute path. `amicu plan` shows the path relative to the project, `models/<model id>/<file>`. `apply` makes it absolute when it starts the service. A relative file name may not contain `/`, `\`, `..` or NUL. See the [Quickstart](/docs/quickstart) for a download command.
 
 ## Full example
 
@@ -117,7 +117,9 @@ curl http://127.0.0.1:8000/v1/models -H "Authorization: Bearer $LOCAL_API_KEY"
 If amicu cannot stop a service, `apply` prints the command to run:
 
 - Linux: `systemctl --user stop <label>`
-- macOS: `launchctl unload ~/Library/LaunchAgents/<label>.plist`
+- macOS: `launchctl bootout gui/$(id -u)/<label>`
+
+After a stop by hand, run `amicu destroy` so that state and the service file are cleaned up. Until then, the next `plan` or `apply` reports the service as a drift: it is kept in state as pending and restarted by `apply`.
 
 ## Configuration reference
 
@@ -143,7 +145,7 @@ The accelerator is whatever the machine has; amicu does not provision it. llama.
 - Loopback only: `127.0.0.1`, not configurable.
 - On Linux the service is a transient systemd user unit; it does not survive a reboot or logout.
 - amicu does not download model weights.
-- One service per deployment, labelled `io.amicu.llama.<deployment id>`.
+- One service per deployment, labelled `io.amicu.llama.<project_id>.<deployment id>`. Deployments from before the project-scoped labels keep the unscoped label until their next `apply`, which stops the old job first.
 
 ## Troubleshooting
 
@@ -155,7 +157,7 @@ The accelerator is whatever the machine has; amicu does not provision it. llama.
     Install vLLM into the environment whose `PATH` runs `amicu apply`: `pip install vllm`.
   </Accordion>
   <Accordion title="The service exits during startup">
-    Apply fails within seconds, stops the service, and prints where the log is. macOS: `~/Library/Logs/amicu/<label>.out.log` and `<label>.err.log`. Linux: `journalctl --user --unit=<label>`. The usual causes are a missing GGUF at the path in the plan's `launch:` line, or too little memory.
+    Apply fails within seconds, stops the service, and prints where the log is. macOS: `~/Library/Logs/amicu/<label>.out.log` and `<label>.err.log`. Linux: `journalctl --user --unit=<label>`. The usual causes are a missing GGUF at `models/<model id>/<file>` in the project directory, or too little memory.
   </Accordion>
   <Accordion title="Apply waits and then fails with a health timeout">
     Apply waits up to 15 minutes for `/health`. If the model never loads, apply stops the service and fails; read the log named in the error.
