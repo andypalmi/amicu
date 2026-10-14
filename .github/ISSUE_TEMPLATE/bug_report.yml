@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Security problems do not go here. Report them privately, see [SECURITY.md](../../SECURITY.md).
+        Security problems do not go here. Report them privately, see https://github.com/andypalmi/amicu/security/policy.
   - type: input
     id: version
     attributes:

@@ -1,6 +1,6 @@
 ## What and why
 
-<!-- What changes, and why. Link the issue: Closes #N (same repo) or Closes andypalmi/amicu-planning#N. -->
+<!-- What changes, and why. Link the issue: Closes #N. -->
 
 ## How tested
 
