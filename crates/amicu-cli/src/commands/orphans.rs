@@ -271,7 +271,7 @@ pub(crate) fn discover(env: &Env<'_>, tracked: &Tracked) -> OrphansReport {
                     tracked: tracked.modal_names.contains(&app.name)
                         || tracked.modal_ids.contains(&app.id),
                     ownership: Ownership::Unknown,
-                    stop_command: format!("amicu modal stop {}", shell_quote(&app.name)),
+                    stop_command: format!("amicu modal stop -- {}", shell_quote(&app.name)),
                     identity: app.name,
                     state: app.state,
                 });
@@ -346,10 +346,16 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
-fn plist_path(dir: Option<&Path>, label: &str) -> String {
+/// The plist path as a shell word. Without a known agents dir it falls back to
+/// `~/...`, quoting only the part after `~/` so the shell still expands the
+/// tilde.
+fn plist_arg(dir: Option<&Path>, label: &str) -> String {
     dir.map_or_else(
-        || format!("~/Library/LaunchAgents/{label}.plist"),
-        |d| d.join(format!("{label}.plist")).display().to_string(),
+        || {
+            let rest = format!("Library/LaunchAgents/{label}.plist");
+            format!("~/{}", shell_quote(&rest))
+        },
+        |d| shell_quote(&d.join(format!("{label}.plist")).display().to_string()),
     )
 }
 
@@ -400,15 +406,12 @@ fn launchd(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
     Ok(labels
         .into_iter()
         .map(|(label, state)| {
-            let plist = plist_path(env.agents_dir.as_deref(), &label);
+            let q = plist_arg(env.agents_dir.as_deref(), &label);
             Found {
                 kind: Kind::LaunchdJob,
                 tracked: tracked.has_label(&label),
                 ownership: ownership_of_label(&label, tracked.project_id.as_deref()),
-                stop_command: {
-                    let q = shell_quote(&plist);
-                    format!("launchctl unload -w {q} && rm {q}")
-                },
+                stop_command: format!("launchctl unload -w {q} && rm {q}"),
                 identity: label,
                 state,
             }
@@ -458,7 +461,7 @@ fn systemd(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
             kind: Kind::SystemdUnit,
             tracked: tracked.has_label(label),
             ownership: ownership_of_label(label, tracked.project_id.as_deref()),
-            stop_command: format!("systemctl --user stop {}", shell_quote(unit)),
+            stop_command: format!("systemctl --user stop -- {}", shell_quote(unit)),
             identity: (*unit).to_owned(),
             state,
         });
@@ -630,6 +633,7 @@ mod tests {
             pending: Vec::new(),
             stops,
             fingerprints: BTreeMap::default(),
+            extra: std::collections::BTreeMap::default(),
         }
     }
 
@@ -699,7 +703,7 @@ mod tests {
         assert_eq!(got, [("amicu-old", false), ("amicu-chat", true)]);
         assert_eq!(
             report.resources[0].stop_command,
-            "amicu modal stop amicu-old"
+            "amicu modal stop -- amicu-old"
         );
         assert!(exec.calls().is_empty(), "no commands on Other");
     }
@@ -758,6 +762,45 @@ mod tests {
     }
 
     #[test]
+    fn plist_fallback_keeps_tilde_unquoted() {
+        assert_eq!(
+            plist_arg(None, "io.amicu.llama.x"),
+            "~/Library/LaunchAgents/io.amicu.llama.x.plist"
+        );
+        assert_eq!(
+            plist_arg(None, "io.amicu.a b"),
+            "~/'Library/LaunchAgents/io.amicu.a b.plist'"
+        );
+        assert_eq!(
+            plist_arg(Some(Path::new("/Users/a b/Agents")), "io.amicu.x"),
+            "'/Users/a b/Agents/io.amicu.x.plist'"
+        );
+    }
+
+    #[test]
+    fn operands_come_after_double_dash_and_stay_quoted() {
+        let exec = FakeExec::new("", "amicu-x;y.service loaded active running amicu\n");
+        let modal = FakeModal(Ok(vec![app("amicu-it's", "deployed")]));
+        let report = discover(
+            &env(Platform::Linux, &exec, &modal, None),
+            &tracked_of(vec![]),
+        );
+        let cmds: Vec<_> = report
+            .resources
+            .iter()
+            .map(|r| r.stop_command.as_str())
+            .collect();
+        assert!(
+            cmds.contains(&"amicu modal stop -- 'amicu-it'\\''s'"),
+            "{cmds:?}"
+        );
+        assert!(
+            cmds.contains(&"systemctl --user stop -- 'amicu-x;y.service'"),
+            "{cmds:?}"
+        );
+    }
+
+    #[test]
     fn launchctl_failure_is_a_source_error() {
         let exec = FakeExec {
             calls: Mutex::new(Vec::new()),
@@ -801,7 +844,7 @@ unrelated.service loaded active running nope\n";
         );
         assert_eq!(
             report.resources[0].stop_command,
-            "systemctl --user stop io.amicu.llama.lost.service"
+            "systemctl --user stop -- io.amicu.llama.lost.service"
         );
         assert!(exec.calls()[0].starts_with("systemctl --user list-units"));
     }
@@ -830,7 +873,7 @@ unrelated.service loaded active running nope\n";
         let mut human = Vec::new();
         render(&report, OutputFormat::Human, &mut human).unwrap();
         let human = String::from_utf8(human).unwrap();
-        assert!(human.contains("stop: amicu modal stop amicu-x"));
+        assert!(human.contains("stop: amicu modal stop -- amicu-x"));
         assert!(human.contains("may belong to another project"));
     }
 

@@ -599,6 +599,7 @@ fn apply_json_stdout_is_a_single_json_value() {
             pending: Vec::new(),
             stops: Vec::new(),
             fingerprints: std::collections::BTreeMap::default(),
+            extra: std::collections::BTreeMap::default(),
             graph: prior,
             endpoints: Vec::new(),
         })
@@ -676,6 +677,7 @@ fn state_round_trips() {
         pending: Vec::new(),
         stops: Vec::new(),
         fingerprints: std::collections::BTreeMap::default(),
+        extra: std::collections::BTreeMap::default(),
         graph: graph.clone(),
         endpoints: Vec::new(),
     };
@@ -904,6 +906,8 @@ use crate::stops::{Backend, StopRecord};
 struct StopLog {
     stopped: Mutex<Vec<String>>,
     started: Mutex<Vec<String>>,
+    /// Every start and stop, host and Modal, in the order they happened.
+    events: Mutex<Vec<String>>,
 }
 
 struct FakeHost {
@@ -929,6 +933,11 @@ impl amicu_llamacpp::ProcessSupervisor for FakeHost {
         }
         let id = amicu_llamacpp::host_label(plan.deployment.as_str());
         self.log.started.lock().unwrap().push(id.clone());
+        self.log
+            .events
+            .lock()
+            .unwrap()
+            .push(format!("start host {id}"));
         Ok(amicu_runtime::RuntimeHandle {
             id,
             deployment: plan.deployment.clone(),
@@ -965,6 +974,11 @@ impl amicu_llamacpp::ProcessSupervisor for FakeHost {
             ));
         }
         self.log.stopped.lock().unwrap().push(h.id.clone());
+        self.log
+            .events
+            .lock()
+            .unwrap()
+            .push(format!("stop host {}", h.id));
         Ok(())
     }
     async fn stop_recorded(
@@ -1001,6 +1015,10 @@ struct FakeModal {
     host_down: Vec<String>,
     /// The fake service manager cannot answer (bus error, unknown state).
     host_unanswered: bool,
+    /// `stop_app` errors, as an unreachable control plane would.
+    stop_fails: bool,
+    /// Shared with the host fake so cross-provider ordering is observable.
+    log: Arc<StopLog>,
 }
 
 impl Default for FakeModal {
@@ -1014,6 +1032,8 @@ impl Default for FakeModal {
             visible_ids: Vec::new(),
             host_down: Vec::new(),
             host_unanswered: false,
+            stop_fails: false,
+            log: Arc::default(),
         }
     }
 }
@@ -1049,10 +1069,20 @@ impl ModalOps for FakeModal {
         Ok(())
     }
     async fn stop_app(&self, app_id: &str) -> Result<bool, crate::error::CliError> {
+        if self.stop_fails {
+            return Err(crate::error::CliError::Message(
+                "modal stop could not be confirmed".to_owned(),
+            ));
+        }
         if self.unknown_ids.iter().any(|i| i == app_id) {
             return Ok(false);
         }
         self.stopped.lock().unwrap().push(app_id.to_owned());
+        self.log
+            .events
+            .lock()
+            .unwrap()
+            .push(format!("stop modal {app_id}"));
         Ok(true)
     }
 }
@@ -1146,6 +1176,10 @@ impl Rig {
     fn build(fail: bool, ctx: Option<amicu_llamacpp::HostContext>, owner: Option<u32>) -> Self {
         let log = Arc::new(StopLog::default());
         let l = log.clone();
+        let modal = FakeModal {
+            log: log.clone(),
+            ..FakeModal::default()
+        };
         Self {
             log,
             host: Box::new(move || {
@@ -1157,7 +1191,7 @@ impl Rig {
                     owner,
                 })
             }),
-            modal: FakeModal::default(),
+            modal,
             forget: false,
             purge: false,
         }
@@ -1220,6 +1254,7 @@ fn state_with(graph: amicu_core::graph::Graph) -> LocalState {
         pending: Vec::new(),
         stops: Vec::new(),
         fingerprints: std::collections::BTreeMap::default(),
+        extra: std::collections::BTreeMap::default(),
     }
 }
 
@@ -1916,7 +1951,7 @@ fn state_round_trips_and_refuses_newer_versions() {
     v1.as_object_mut().unwrap().remove("stops");
     std::fs::write(project.state_file(), v1.to_string()).unwrap();
     let old = project.load_state().unwrap().unwrap();
-    assert_eq!(old.version, "v1");
+    assert_eq!(old.version, "v3", "migrated on load");
     assert_eq!(old.stops.len(), 0);
 
     // A newer version is refused rather than silently downgraded.
@@ -2476,4 +2511,163 @@ fn a_host_service_that_cannot_be_probed_is_a_warning_never_drift() {
         "{warning}"
     );
     assert!(warning.contains("Failed to connect to bus"), "{warning}");
+}
+
+// Provider switches (amicu-planning#208): the old instance is stopped and
+// confirmed before the new one starts, and is never dropped from state
+// otherwise.
+
+/// `support_local` on Modal (a Hugging Face GGUF, llama.cpp).
+fn modal_config() -> String {
+    let model = VALID_CONFIG
+        .split("resource \"hardware_profile\"")
+        .next()
+        .unwrap();
+    format!(
+        r#"{model}
+resource "hardware_profile" "modal_l4" {{
+  provider = "modal"
+  region   = "eu-west"
+  accelerator {{
+    kind   = "gpu"
+    model  = "L4"
+    count  = 1
+    memory = "24GiB"
+  }}
+  memory = "32GiB"
+}}
+
+resource "deployment" "support_local" {{
+  model    = model.support_chat.id
+  hardware = hardware_profile.modal_l4.id
+  runtime  = "llama_cpp"
+  api_key  = secret("AMICU_TEST_UNSET_208_KEY")
+  llama_cpp {{
+    context_length = 8192
+    port           = 8000
+    n_gpu_layers   = -1
+  }}
+}}
+"#
+    )
+}
+
+fn modal_support_graph() -> amicu_core::graph::Graph {
+    amicu_hcl::parse_graph(&modal_config()).unwrap()
+}
+
+fn running_modal_state() -> LocalState {
+    let mut state = state_with(modal_support_graph());
+    state.stops = vec![modal_rec("support_local", Some("ap-old"), Some("acme"))];
+    state
+}
+
+fn plan_text_for(config: &str, state: &LocalState) -> String {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", config);
+    let graph = project.load_graph().unwrap();
+    let result = crate::planner::build_project_plan_with(
+        &project,
+        &graph,
+        Some(&state.graph),
+        &state.fingerprints,
+        &P,
+    )
+    .unwrap();
+    let switches = commands::plan::provider_switches(&result, &state.stops);
+    let mut out = Vec::new();
+    commands::plan::print_human_with(&result, &graph, &switches, &mut out).unwrap();
+    utf8(out)
+}
+
+#[test]
+fn plan_shows_a_destroy_old_step_before_the_create_on_a_provider_switch() {
+    let host_label = label("support_local");
+    let text = plan_text_for(&modal_config(), &running_host_state());
+    let destroy = text
+        .find("destroy old (")
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(text.contains(&host_label), "{text}");
+    assert!(
+        destroy < text.find("action:   update").unwrap(),
+        "destroy-old comes first: {text}"
+    );
+
+    let text = plan_text_for(VALID_CONFIG, &running_modal_state());
+    assert!(
+        text.contains("destroy old (modal amicu-support-local)"),
+        "{text}"
+    );
+
+    // No switch, no extra step.
+    let text = plan_text_for(VALID_CONFIG, &running_host_state());
+    assert!(!text.contains("destroy old"), "{text}");
+}
+
+#[test]
+fn modal_to_host_stops_and_confirms_the_old_app_before_starting_the_host() {
+    let td = TempDir::new();
+    let project = saved(&td, &running_modal_state());
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let rig = Rig::new();
+    rig.modal
+        .apps
+        .lock()
+        .unwrap()
+        .push(("amicu-support-local".to_owned(), "ap-old".to_owned()));
+    apply_with(&project, &rig).unwrap();
+
+    let events = rig.log.events.lock().unwrap().clone();
+    assert_eq!(
+        events,
+        [
+            "stop modal ap-old".to_owned(),
+            format!("start host {}", label("support_local")),
+        ]
+    );
+    let stops = stops_for(&project, "support_local");
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    assert_eq!(stops[0].backend, Backend::host());
+}
+
+#[test]
+fn modal_to_host_with_an_unconfirmed_old_stop_fails_and_keeps_the_old_record() {
+    let td = TempDir::new();
+    let project = saved(&td, &running_modal_state());
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let mut rig = Rig::new();
+    rig.modal
+        .apps
+        .lock()
+        .unwrap()
+        .push(("amicu-support-local".to_owned(), "ap-old".to_owned()));
+    rig.modal.stop_fails = true;
+    let err = apply_with(&project, &rig).expect_err("stop not confirmed");
+    assert!(err.to_string().contains("could not be confirmed"), "{err}");
+
+    assert!(
+        rig.log.started.lock().unwrap().is_empty(),
+        "the new instance must not start"
+    );
+    let stops = stops_for(&project, "support_local");
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    assert!(stops[0].backend.is_modal());
+    assert_eq!(stops[0].app_id.as_deref(), Some("ap-old"));
+}
+
+#[test]
+fn host_to_modal_with_an_unconfirmed_old_stop_fails_and_keeps_the_old_record() {
+    let td = TempDir::new();
+    let project = saved(&td, &running_host_state());
+    write(&td.path, "amicu.hcl", &modal_config());
+    let rig = Rig::failing();
+    // apply_with is Err whichever check refuses first; what matters is that
+    // nothing was started and the old host record is still in state.
+    apply_with(&project, &rig).expect_err("must not succeed");
+    assert!(rig.log.started.lock().unwrap().is_empty());
+    assert!(rig.modal.stopped.lock().unwrap().is_empty());
+    let stops = stops_for(&project, "support_local");
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    assert_eq!(stops[0].backend, Backend::host());
 }

@@ -1,9 +1,11 @@
 //! `amicu plan [--output json]`.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 
 use amicu_core::diagnostic::{DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
+use amicu_core::id::DeploymentId;
 use amicu_modal::ModalSupervisor;
 use amicu_modal::supervisor::app_name_for;
 
@@ -12,6 +14,7 @@ use crate::checks::report_for;
 use crate::error::CliError;
 use crate::planner::{PlanError, PlanItem, PlanResult, build_project_plan};
 use crate::project::Project;
+use crate::stops::StopRecord;
 use crate::write_json;
 
 /// Build and render the plan; exits non-zero when validation errors block it.
@@ -36,6 +39,7 @@ pub(crate) fn run(
         .as_ref()
         .map(|s| s.fingerprints.clone())
         .unwrap_or_default();
+    let stops = state.as_ref().map(|s| s.stops.clone()).unwrap_or_default();
     let prior = state.map(|s| {
         // A pending deployment (start unconfirmed) is planned as absent.
         let mut g = s.graph;
@@ -63,7 +67,8 @@ pub(crate) fn run(
     if output.is_json() {
         write_json(out, &result.plan)?;
     } else {
-        print_human(&result, &graph, out)?;
+        let switches = provider_switches(&result, &stops);
+        print_human_with(&result, &graph, &switches, out)?;
     }
     Ok(0)
 }
@@ -100,9 +105,44 @@ fn emit_report(
     Ok(())
 }
 
+/// Per deployment, the recorded instances (`<backend> <identity>`) that a
+/// provider change leaves behind: they are stopped and confirmed before the
+/// new instance is started, so the plan shows that as its own step.
+pub(crate) type ProviderSwitches = BTreeMap<DeploymentId, Vec<String>>;
+
+/// The provider-switch destroy steps for `result` given the recorded `stops`.
+/// Only a launch whose provider (Modal vs host) differs from a recorded
+/// instance of the same deployment counts; destroys are not switches.
+pub(crate) fn provider_switches(result: &PlanResult, stops: &[StopRecord]) -> ProviderSwitches {
+    let mut switches = ProviderSwitches::new();
+    for item in result.items.iter().filter(|i| i.launch.is_some()) {
+        let to_modal = item.action.provider.as_deref() == Some("modal");
+        let old: Vec<String> = stops
+            .iter()
+            .filter(|r| r.deployment == item.deployment && r.backend.is_modal() != to_modal)
+            .map(|r| format!("{} {}", r.backend.name(), r.identity))
+            .collect();
+        if !old.is_empty() {
+            switches.insert(item.deployment.clone(), old);
+        }
+    }
+    switches
+}
+
 pub(crate) fn print_human(
     result: &PlanResult,
     graph: &Graph,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    print_human_with(result, graph, &ProviderSwitches::new(), out)
+}
+
+/// [`print_human`], plus a `destroy old` step before each provider-switch
+/// create.
+pub(crate) fn print_human_with(
+    result: &PlanResult,
+    graph: &Graph,
+    switches: &ProviderSwitches,
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
     let io = |r: std::io::Result<()>| r.map_err(|e| CliError::io("write failed", e));
@@ -113,8 +153,24 @@ pub(crate) fn print_human(
             "No changes. Infrastructure matches the configuration."
         ))?;
     } else {
-        io(writeln!(out, "Plan: {} action(s).\n", result.items.len()))?;
+        let steps: usize = switches.values().map(Vec::len).sum();
+        io(writeln!(
+            out,
+            "Plan: {} action(s).\n",
+            result.items.len() + steps
+        ))?;
         for item in &result.items {
+            for old in switches.get(&item.deployment).into_iter().flatten() {
+                io(writeln!(
+                    out,
+                    "  - destroy old ({old}) for {}",
+                    item.action.address
+                ))?;
+                io(writeln!(
+                    out,
+                    "      stopped and confirmed before the new instance starts\n"
+                ))?;
+            }
             let kind = format!("{:?}", item.action.kind).to_lowercase();
             io(writeln!(out, "  {} {}", symbol(&kind), item.action.address))?;
             io(writeln!(out, "      action:   {kind}"))?;

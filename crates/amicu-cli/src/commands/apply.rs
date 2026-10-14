@@ -146,7 +146,11 @@ pub(crate) fn run_with(
         } else {
             &mut *out
         };
-        crate::commands::plan::print_human(&result, &graph, preview)?;
+        let switches = prior_state
+            .as_ref()
+            .map(|s| crate::commands::plan::provider_switches(&result, &s.stops))
+            .unwrap_or_default();
+        crate::commands::plan::print_human_with(&result, &graph, &switches, preview)?;
         if !auto_approve && !prompt_approval_from(preview, "Apply these changes?", input)? {
             writeln!(preview, "Apply cancelled.").map_err(|e| CliError::io("write failed", e))?;
             return Ok(0);
@@ -338,6 +342,7 @@ pub(crate) fn execute(
         fingerprints: final_fingerprints(prior_state, &graph, &progress, result),
         graph,
         endpoints,
+        extra: prior_state.map(|s| s.extra.clone()).unwrap_or_default(),
     };
     project.save_state(&state)?;
 
@@ -451,6 +456,7 @@ fn recorded_state(prior: Option<&LocalState>, graph: &Graph, progress: &Progress
         stops: progress.stops.clone(),
         fingerprints: merged_fingerprints(prior, &partial, progress),
         graph: partial,
+        extra: prior.map(|s| s.extra.clone()).unwrap_or_default(),
     }
 }
 
@@ -1998,6 +2004,7 @@ resource "deployment" "beta" {
             pending: Vec::new(),
             stops: Vec::new(),
             fingerprints: std::collections::BTreeMap::default(),
+            extra: std::collections::BTreeMap::default(),
             graph: prior_graph.clone(),
             endpoints: vec![
                 handle(&prior_graph, "alpha", "http://old-alpha"),
@@ -2528,6 +2535,7 @@ mod stop_invariant_tests {
             pending: Vec::new(),
             stops: Vec::new(),
             fingerprints: std::collections::BTreeMap::default(),
+            extra: std::collections::BTreeMap::default(),
         }
     }
 
@@ -2874,6 +2882,7 @@ mod partial_state_tests {
                 .collect(),
             pending: ids(pending),
             stops: Vec::new(),
+            extra: std::collections::BTreeMap::default(),
             graph: g,
         }
     }

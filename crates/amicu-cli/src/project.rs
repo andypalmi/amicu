@@ -50,6 +50,10 @@ pub(crate) struct LocalState {
         amicu_core::id::DeploymentId,
         amicu_engine::fingerprint::Fingerprint,
     >,
+    /// Top-level fields this amicu does not know (written by a newer build of
+    /// the same version). Kept verbatim so a load-save cycle never drops them.
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl LocalState {
@@ -57,8 +61,60 @@ impl LocalState {
     /// `project_id` and the per-record files and volumes, which an older
     /// binary would silently drop on its next save.
     pub const VERSION: &'static str = "v3";
-    /// Versions this binary can read.
+    /// Versions this binary can read: every `from` in [`MIGRATIONS`] plus
+    /// [`Self::VERSION`].
     pub const SUPPORTED: &'static [&'static str] = &["v1", "v2", "v3"];
+}
+
+/// One step `from` -> `to` applied to the raw state JSON on load, so
+/// [`LocalState`] only ever deserializes the current shape.
+struct Migration {
+    from: &'static str,
+    to: &'static str,
+    apply: fn(&mut serde_json::Map<String, serde_json::Value>),
+}
+
+/// Ordered, contiguous chain ending at [`LocalState::VERSION`]. A schema bump
+/// appends one entry here and bumps `VERSION` and `SUPPORTED`.
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        from: "v1",
+        to: "v2",
+        // v2 added `pending` and `stops`. v1 has neither; an empty `stops`
+        // makes the stop identity be derived from the graph.
+        apply: |state| {
+            state
+                .entry("pending")
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+            state
+                .entry("stops")
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        },
+    },
+    Migration {
+        from: "v2",
+        to: "v3",
+        // v3 added `project_id` (minted on the next save when absent) and
+        // per-record files and volumes (all optional): nothing to rewrite.
+        apply: |_| {},
+    },
+];
+
+/// Run every migration from `version` up to [`LocalState::VERSION`] in order.
+fn migrate(
+    mut version: String,
+    state: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    while version != LocalState::VERSION {
+        let step = MIGRATIONS
+            .iter()
+            .find(|m| m.from == version)
+            .ok_or_else(|| format!("no migration from state version '{version}'"))?;
+        (step.apply)(state);
+        version = step.to.to_owned();
+        state.insert("version".into(), version.clone().into());
+    }
+    Ok(())
 }
 
 impl Project {
@@ -277,18 +333,25 @@ enum StateParseError {
 /// Used for loading and for deciding whether a file (or backup) is valid, so
 /// an unsupported-version file is never treated as a good generation.
 fn parse_state(text: &str) -> Result<LocalState, StateParseError> {
-    let state: LocalState =
-        serde_json::from_str(text).map_err(|e| StateParseError::Corrupt(e.to_string()))?;
-    if LocalState::SUPPORTED.contains(&state.version.as_str()) {
-        Ok(state)
-    } else {
-        Err(StateParseError::Unsupported(format!(
-            "has state version '{}', which this amicu does not understand (supported: {}); \
-             upgrade amicu rather than overwrite it",
-            state.version,
-            LocalState::SUPPORTED.join(", ")
-        )))
+    let corrupt = |e: serde_json::Error| StateParseError::Corrupt(e.to_string());
+    let mut value: serde_json::Value = serde_json::from_str(text).map_err(corrupt)?;
+    let version = value
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    if let Some(version) = version {
+        if !LocalState::SUPPORTED.contains(&version.as_str()) {
+            return Err(StateParseError::Unsupported(format!(
+                "has state version '{version}', which this amicu does not understand \
+                 (supported: {}); upgrade amicu rather than overwrite it",
+                LocalState::SUPPORTED.join(", ")
+            )));
+        }
+        if let Some(map) = value.as_object_mut() {
+            migrate(version, map).map_err(StateParseError::Corrupt)?;
+        }
     }
+    serde_json::from_value(value).map_err(corrupt)
 }
 
 /// Single-quote a path for safe pasting into a POSIX shell.
@@ -390,6 +453,7 @@ mod durability_tests {
             pending: vec![tag.into()],
             stops: Vec::new(),
             fingerprints: std::collections::BTreeMap::default(),
+            extra: std::collections::BTreeMap::default(),
         }
     }
 
@@ -532,6 +596,90 @@ mod durability_tests {
         // And an unsupported backup does not count as a valid previous generation.
         fs::write(p.state_backup_file(), newer.to_string()).unwrap();
         assert!(!p.backup_parses());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn migrated(from: &str, mut v: serde_json::Value) -> serde_json::Value {
+        let map = v.as_object_mut().unwrap();
+        let step = MIGRATIONS.iter().find(|m| m.from == from).unwrap();
+        (step.apply)(map);
+        v
+    }
+
+    #[test]
+    fn migration_chain_is_contiguous_and_ends_at_current_version() {
+        let mut at = MIGRATIONS[0].from;
+        assert_eq!(LocalState::SUPPORTED[0], at);
+        for (m, supported) in MIGRATIONS.iter().zip(LocalState::SUPPORTED) {
+            assert_eq!(m.from, at);
+            assert_eq!(*supported, at);
+            at = m.to;
+        }
+        assert_eq!(at, LocalState::VERSION);
+        assert_eq!(LocalState::SUPPORTED.last(), Some(&LocalState::VERSION));
+        assert_eq!(LocalState::SUPPORTED.len(), MIGRATIONS.len() + 1);
+    }
+
+    #[test]
+    fn v1_to_v2_adds_pending_and_stops_without_touching_existing_values() {
+        let v1 = serde_json::json!({"version": "v1", "graph": {}});
+        let out = migrated("v1", v1);
+        assert_eq!(out["pending"], serde_json::json!([]));
+        assert_eq!(out["stops"], serde_json::json!([]));
+        let kept = serde_json::json!({"pending": ["a"], "stops": []});
+        assert_eq!(migrated("v1", kept)["pending"], serde_json::json!(["a"]));
+    }
+
+    #[test]
+    fn v2_to_v3_leaves_the_document_unchanged() {
+        let v2 = serde_json::json!({"version": "v2", "pending": [], "stops": []});
+        assert_eq!(migrated("v2", v2.clone()), v2);
+    }
+
+    #[test]
+    fn old_versions_load_and_are_stamped_current() {
+        let root = scratch("migrate");
+        let p = Project::new(&root);
+        p.save_state(&state("g")).unwrap();
+        let base: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(p.state_file()).unwrap()).unwrap();
+        for old in ["v1", "v2"] {
+            let mut v = base.clone();
+            v["version"] = old.into();
+            v.as_object_mut().unwrap().remove("pending");
+            v.as_object_mut().unwrap().remove("stops");
+            fs::write(p.state_file(), v.to_string()).unwrap();
+            let loaded = p.load_state().unwrap().unwrap();
+            // v2 predates neither field being optional: both default to empty.
+            assert_eq!(loaded.version, LocalState::VERSION, "{old}");
+            assert!(loaded.pending.is_empty() && loaded.stops.is_empty());
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn newer_version_is_refused_even_when_its_shape_differs() {
+        let text = r#"{"version": "v4", "graph": "not a graph any more"}"#;
+        assert!(matches!(
+            parse_state(text),
+            Err(StateParseError::Unsupported(m)) if m.contains("v4") && m.contains("upgrade amicu")
+        ));
+    }
+
+    #[test]
+    fn unknown_top_level_fields_survive_a_load_save_cycle() {
+        let root = scratch("unknown");
+        let p = Project::new(&root);
+        p.save_state(&state("g")).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(p.state_file()).unwrap()).unwrap();
+        v["from_the_future"] = serde_json::json!({"k": [1, 2]});
+        fs::write(p.state_file(), v.to_string()).unwrap();
+        let loaded = p.load_state().unwrap().unwrap();
+        p.save_state(&loaded).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(p.state_file()).unwrap()).unwrap();
+        assert_eq!(saved["from_the_future"], serde_json::json!({"k": [1, 2]}));
         let _ = fs::remove_dir_all(&root);
     }
 }
