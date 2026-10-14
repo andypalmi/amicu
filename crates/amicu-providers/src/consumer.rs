@@ -129,96 +129,150 @@ pub fn rx_7900_xtx() -> HardwareProfile {
     discrete_gpu("rx_7900_xtx", "24GiB", 960)
 }
 
-/// Apple M4 Pro, 24 GB configuration: ~273 GB/s unified memory bandwidth
-/// (Apple spec sheet).
-#[must_use]
-pub fn m4_pro_24gb() -> HardwareProfile {
-    apple_silicon("m4_pro_24gb", "24GiB", 273)
+/// One unified-memory configuration an Apple Silicon chip ships in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryConfig {
+    /// Unified memory, in GiB.
+    pub memory_gib: u32,
+    /// Unified memory bandwidth of this configuration, in GB/s (Apple spec
+    /// sheet). It can differ between configurations of one chip (binned
+    /// M4 Max parts).
+    pub bandwidth_gbps: u32,
 }
 
-/// Apple M4 Pro, 48 GB configuration: ~273 GB/s unified memory bandwidth
-/// (Apple spec sheet).
-#[must_use]
-pub fn m4_pro_48gb() -> HardwareProfile {
-    apple_silicon("m4_pro_48gb", "48GiB", 273)
+/// An Apple Silicon chip and the memory configurations it is sold in.
+///
+/// The catalog id is the **chip only** (`m4_pro`, `m5_pro`, ...): the memory
+/// size is not part of the id. A user's HCL sets it with the profile's own
+/// `memory` field and `accelerator.model` is free-form, so baking the size
+/// into the id would only duplicate it. The sizes a chip is available in are
+/// data here, for the wizard/recommend engine to enumerate candidates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppleSiliconChip {
+    /// The chip id, also the profile id and `accelerator.model`.
+    pub id: &'static str,
+    /// Available memory configurations, smallest first.
+    pub configs: &'static [MemoryConfig],
 }
 
-/// Apple M5 Pro, 24 GB configuration: 307 GB/s unified memory bandwidth
-/// (Apple spec sheet).
-#[must_use]
-pub fn m5_pro_24gb() -> HardwareProfile {
-    apple_silicon("m5_pro_24gb", "24GiB", 307)
+const fn cfg(memory_gib: u32, bandwidth_gbps: u32) -> MemoryConfig {
+    MemoryConfig {
+        memory_gib,
+        bandwidth_gbps,
+    }
 }
 
-/// Apple M5 Pro, 48 GB configuration: 307 GB/s unified memory bandwidth
-/// (Apple spec sheet).
+const APPLE_SILICON_CHIPS: &[AppleSiliconChip] = &[
+    AppleSiliconChip {
+        id: "m4_pro",
+        configs: &[cfg(24, 273), cfg(48, 273)],
+    },
+    AppleSiliconChip {
+        id: "m5_pro",
+        configs: &[cfg(24, 307), cfg(48, 307), cfg(64, 307)],
+    },
+    AppleSiliconChip {
+        id: "m4_max",
+        configs: &[cfg(36, 410), cfg(128, 546)],
+    },
+    AppleSiliconChip {
+        id: "m3_ultra",
+        configs: &[cfg(96, 819), cfg(256, 819), cfg(512, 819)],
+    },
+    AppleSiliconChip {
+        id: "m2_ultra",
+        configs: &[cfg(64, 800), cfg(192, 800)],
+    },
+];
+
+/// Every Apple Silicon chip in the catalog, with its memory configurations.
 #[must_use]
-pub fn m5_pro_48gb() -> HardwareProfile {
-    apple_silicon("m5_pro_48gb", "48GiB", 307)
+pub fn apple_silicon_chips() -> &'static [AppleSiliconChip] {
+    APPLE_SILICON_CHIPS
 }
 
-/// Apple M5 Pro, 64 GB configuration: 307 GB/s unified memory bandwidth
-/// (Apple spec sheet).
+/// The Apple Silicon chip with this id (`m4_pro`, ...), if catalogued.
 #[must_use]
-pub fn m5_pro_64gb() -> HardwareProfile {
-    apple_silicon("m5_pro_64gb", "64GiB", 307)
+pub fn apple_silicon_chip(id: &str) -> Option<&'static AppleSiliconChip> {
+    APPLE_SILICON_CHIPS.iter().find(|c| c.id == id)
 }
 
-/// Apple M4 Max, 36 GB configuration: ~410 GB/s unified memory bandwidth
-/// (Apple spec sheet; the lower of the two M4 Max memory-bus bins).
-#[must_use]
-pub fn m4_max_36gb() -> HardwareProfile {
-    apple_silicon("m4_max_36gb", "36GiB", 410)
+impl AppleSiliconChip {
+    /// The profile for the `memory_gib` configuration, or `None` when the chip
+    /// is not sold with that much memory. The profile id and
+    /// `accelerator.model` are the chip id; memory lives in the profile's
+    /// `memory` (and `accelerator.memory`) fields.
+    #[must_use]
+    pub fn profile(&self, memory_gib: u32) -> Option<HardwareProfile> {
+        let config = self.configs.iter().find(|c| c.memory_gib == memory_gib)?;
+        Some(self.profile_for(*config))
+    }
+
+    /// The profile for the chip's smallest memory configuration.
+    #[must_use]
+    pub fn base_profile(&self) -> HardwareProfile {
+        self.profile_for(self.configs[0])
+    }
+
+    fn profile_for(&self, config: MemoryConfig) -> HardwareProfile {
+        apple_silicon(
+            self.id,
+            &format!("{}GiB", config.memory_gib),
+            config.bandwidth_gbps,
+        )
+    }
 }
 
-/// Apple M4 Max, 128 GB configuration: ~546 GB/s unified memory bandwidth
-/// (Apple spec sheet; the full memory-bus bin).
+/// Apple M4 Pro (24 or 48 GB), ~273 GB/s unified memory bandwidth (Apple spec
+/// sheet). The profile is the 24 GB configuration; see
+/// [`AppleSiliconChip::profile`] for the others.
 #[must_use]
-pub fn m4_max_128gb() -> HardwareProfile {
-    apple_silicon("m4_max_128gb", "128GiB", 546)
+pub fn m4_pro() -> HardwareProfile {
+    chip_base("m4_pro")
 }
 
-/// Apple M3 Ultra, 96 GB configuration: ~819 GB/s unified memory bandwidth
-/// (Apple spec sheet).
+/// Apple M5 Pro (24, 48 or 64 GB), 307 GB/s unified memory bandwidth (Apple
+/// spec sheet). The profile is the 24 GB configuration.
 #[must_use]
-pub fn m3_ultra_96gb() -> HardwareProfile {
-    apple_silicon("m3_ultra_96gb", "96GiB", 819)
+pub fn m5_pro() -> HardwareProfile {
+    chip_base("m5_pro")
 }
 
-/// Apple M3 Ultra, 256 GB configuration: ~819 GB/s unified memory bandwidth
-/// (Apple spec sheet).
+/// Apple M4 Max (36 or 128 GB), 410 / 546 GB/s unified memory bandwidth
+/// (Apple spec sheet). The profile is the 36 GB configuration.
 #[must_use]
-pub fn m3_ultra_256gb() -> HardwareProfile {
-    apple_silicon("m3_ultra_256gb", "256GiB", 819)
+pub fn m4_max() -> HardwareProfile {
+    chip_base("m4_max")
 }
 
-/// Apple M3 Ultra, 512 GB configuration: ~819 GB/s unified memory bandwidth
-/// (Apple spec sheet).
+/// Apple M3 Ultra (96, 256 or 512 GB), 819 GB/s unified memory bandwidth
+/// (Apple spec sheet). The profile is the 96 GB configuration.
 #[must_use]
-pub fn m3_ultra_512gb() -> HardwareProfile {
-    apple_silicon("m3_ultra_512gb", "512GiB", 819)
+pub fn m3_ultra() -> HardwareProfile {
+    chip_base("m3_ultra")
 }
 
-/// Apple M2 Ultra, 64 GB configuration: ~800 GB/s unified memory bandwidth
-/// (Apple spec sheet).
+/// Apple M2 Ultra (64 or 192 GB), 800 GB/s unified memory bandwidth (Apple
+/// spec sheet). The profile is the 64 GB configuration.
 #[must_use]
-pub fn m2_ultra_64gb() -> HardwareProfile {
-    apple_silicon("m2_ultra_64gb", "64GiB", 800)
+pub fn m2_ultra() -> HardwareProfile {
+    chip_base("m2_ultra")
 }
 
-/// Apple M2 Ultra, 192 GB configuration: ~800 GB/s unified memory bandwidth
-/// (Apple spec sheet).
-#[must_use]
-pub fn m2_ultra_192gb() -> HardwareProfile {
-    apple_silicon("m2_ultra_192gb", "192GiB", 800)
+fn chip_base(id: &str) -> HardwareProfile {
+    apple_silicon_chip(id)
+        .expect("chip is in the catalog")
+        .base_profile()
 }
 
 /// Every consumer/on-prem hardware profile this module catalogs: six NVIDIA
-/// desktop GPUs, one AMD desktop GPU, and twelve Apple Silicon unified-memory
-/// configurations.
+/// desktop GPUs, one AMD desktop GPU (memory is fixed per model), and one entry
+/// per Apple Silicon chip at its smallest memory configuration. Apple Silicon
+/// memory is chosen with the HCL `memory` field; the sizes a chip comes in are
+/// [`apple_silicon_chips`].
 #[must_use]
 pub fn catalog() -> Vec<HardwareProfile> {
-    vec![
+    let mut entries = vec![
         rtx_5090(),
         rtx_4090(),
         rtx_3090(),
@@ -226,19 +280,13 @@ pub fn catalog() -> Vec<HardwareProfile> {
         rtx_4070_ti_super(),
         rtx_3060_ti(),
         rx_7900_xtx(),
-        m4_pro_24gb(),
-        m4_pro_48gb(),
-        m5_pro_24gb(),
-        m5_pro_48gb(),
-        m5_pro_64gb(),
-        m4_max_36gb(),
-        m4_max_128gb(),
-        m3_ultra_96gb(),
-        m3_ultra_256gb(),
-        m3_ultra_512gb(),
-        m2_ultra_64gb(),
-        m2_ultra_192gb(),
-    ]
+    ];
+    entries.extend(
+        APPLE_SILICON_CHIPS
+            .iter()
+            .map(AppleSiliconChip::base_profile),
+    );
+    entries
 }
 
 #[cfg(test)]
@@ -246,8 +294,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_nineteen_entries() {
-        assert_eq!(catalog().len(), 19);
+    fn catalog_has_twelve_entries() {
+        // Seven discrete GPUs and five Apple Silicon chips.
+        assert_eq!(catalog().len(), 12);
+    }
+
+    #[test]
+    fn apple_silicon_ids_are_chip_only() {
+        for chip in apple_silicon_chips() {
+            assert!(
+                !chip.id.ends_with("gb"),
+                "{} bakes in a memory size",
+                chip.id
+            );
+            assert_ne!(chip.configs, []);
+        }
+        let ids: Vec<_> = apple_silicon_chips().iter().map(|c| c.id).collect();
+        assert_eq!(ids, ["m4_pro", "m5_pro", "m4_max", "m3_ultra", "m2_ultra"]);
+    }
+
+    #[test]
+    fn chip_profiles_carry_the_memory_as_data() {
+        let m5 = apple_silicon_chip("m5_pro").unwrap();
+        let sizes: Vec<u32> = m5.configs.iter().map(|c| c.memory_gib).collect();
+        assert_eq!(sizes, [24, 48, 64]);
+        let hw = m5.profile(64).expect("64 GiB config");
+        assert_eq!(hw.id.as_str(), "m5_pro");
+        assert_eq!(hw.memory, "64GiB".parse().unwrap());
+        let accel = hw.accelerator.unwrap();
+        assert_eq!(accel.model, "m5_pro");
+        assert_eq!(accel.memory, "64GiB".parse().unwrap());
+        assert_eq!(accel.memory_bandwidth_gbps, Some(307));
+        assert!(m5.profile(32).is_none());
+        // Bandwidth is per configuration (binned M4 Max).
+        let max = apple_silicon_chip("m4_max").unwrap();
+        assert_eq!(
+            max.profile(128)
+                .unwrap()
+                .accelerator
+                .unwrap()
+                .memory_bandwidth_gbps,
+            Some(546)
+        );
+        assert_eq!(m4_pro().memory, "24GiB".parse().unwrap());
     }
 
     #[test]

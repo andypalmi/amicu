@@ -512,7 +512,9 @@ impl Adapter for LlamaCppAdapter {
     async fn health(&self) -> Result<HealthStatus, AdapterError> {
         Ok(match self.detect_binary() {
             Ok(_) => HealthStatus::Healthy,
-            Err(e @ LlamaCppError::VersionTooOld { .. }) => HealthStatus::Degraded {
+            Err(
+                e @ (LlamaCppError::VersionTooOld { .. } | LlamaCppError::UnparseableVersion(_)),
+            ) => HealthStatus::Degraded {
                 detail: e.to_string(),
             },
             Err(e) => HealthStatus::Unavailable {
@@ -643,11 +645,10 @@ impl RuntimeAdapter for LlamaCppAdapter {
         let (argv, text) = render_command(&model_path, draft_path.as_deref(), settings);
 
         let gpu_count = u32::from(hardware.accelerator.is_some() && settings.n_gpu_layers != 0);
-        // Prefer the KV-cache estimate over the flat overhead band when it is
-        // known - it is a real number for this deployment, not a fraction of
-        // weights standing in for it - but never report less than the band:
-        // the KV figure leaves out compute buffers and runtime overhead, so a
-        // small context must not make the estimate drop below the flat high.
+        // With a KV-cache estimate the peak is weights + KV cache + runtime
+        // overhead (additive: they are separate allocations), so it moves with
+        // `context_length` at every size; without one it is weights + the flat
+        // overhead band.
         // The fit check in `validate` compares this same figure to the device.
         let estimated_memory = estimated_peak(&report, report.kv_cache);
 

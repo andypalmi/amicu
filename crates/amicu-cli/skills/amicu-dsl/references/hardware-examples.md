@@ -7,7 +7,7 @@ resource "hardware_profile" "dev_mac" {
   provider = "local_apple"
   accelerator {
     kind   = "apple_silicon"
-    model  = "m4_pro_48gb"
+    model  = "m4_pro"
     count  = 1
     memory = "48GiB"
   }
@@ -131,7 +131,7 @@ resource "hardware_profile" "studio_m4_max" {
   provider = "on_prem"
   accelerator {
     kind           = "apple_silicon"
-    model          = "m4_max_128gb"
+    model          = "m4_max"
     count          = 1
     memory         = "128GiB"
     bandwidth_gbps = 546
@@ -160,7 +160,10 @@ Notes:
 - `bandwidth_gbps` records the accelerator's memory bandwidth (GB/s) for
   planning purposes; it is optional and not yet read by the fit check.
 - These three examples match `amicu_providers::consumer`'s `rtx_4090()`,
-  `m4_max_128gb()`, and `rx_7900_xtx()` catalog entries. `provider =
+  `m4_max()`, and `rx_7900_xtx()` catalog entries. Apple Silicon ids are the
+  chip only (`m4_pro`, `m5_pro`, `m4_max`, `m3_ultra`, `m2_ultra`): set the
+  memory size with the `memory` fields, not in `model`. Discrete GPU ids keep
+  their fixed memory (`rtx_4090` is 24 GiB). `provider =
   "on_prem"` is the convention for hardware the user already owns - distinct
   from the pre-existing `"local_apple"` / `"local_cpu"` examples above, which
   predate this catalog and are left as-is.

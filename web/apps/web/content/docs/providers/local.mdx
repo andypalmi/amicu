@@ -12,7 +12,7 @@ resource "hardware_profile" "dev_mac" {
   provider = "local_apple"
   accelerator {
     kind   = "apple_silicon"
-    model  = "m4_pro_48gb"
+    model  = "m4_pro"
     count  = 1
     memory = "48GiB"
   }
@@ -82,7 +82,7 @@ resource "hardware_profile" "dev_mac" {
   provider = "local_apple"
   accelerator {
     kind   = "apple_silicon"
-    model  = "m4_pro_48gb"
+    model  = "m4_pro"
     count  = 1
     memory = "48GiB"
   }
@@ -142,7 +142,7 @@ See [`hardware_profile`](/docs/configuration/hardware-profile) and [`deployment`
 
 The accelerator is whatever the machine has; amicu does not provision it. llama.cpp offloads layers with `n_gpu_layers` (Metal on Apple Silicon, CUDA on NVIDIA per your `llama-server` build). `n_gpu_layers = -1` offloads all layers to the GPU. A native single-process vLLM run needs a supported GPU (NVIDIA CUDA, AMD ROCm, or Intel XPU). There are no regions: the endpoint is on the machine, wherever it is.
 
-For a `gpu` accelerator, the fit check counts the model weights against VRAM (`accelerator.memory` times `count`, minus a reserve per card). For llama.cpp, the check counts weights only unless the model declares `n_layers`, `n_kv_heads`, and `head_dim`. With those, it also estimates the KV cache from `context_length`, and the estimated peak (weights plus the larger of the KV cache and overhead) must fit in device memory. The 2 GiB reserve applies to the weights check only. vLLM also adds the KV cache and uses `gpu_memory_utilization`. The check does not read `n_gpu_layers`, so partial offload is not modelled: all weights are counted against VRAM whatever the value. A model that does not fit fails `plan` with `AMICU-MEM-001`. See [Error codes](/docs/reference/error-codes).
+For a `gpu` accelerator, the fit check counts the model weights against VRAM (`accelerator.memory` times `count`, minus a reserve per card). For llama.cpp, the check counts weights only unless the model declares `n_layers`, `n_kv_heads`, and `head_dim`. With those, it also estimates the KV cache from `context_length`, and the estimated peak (weights + KV cache + runtime overhead, about 10% of the weights) must fit in device memory. The 2 GiB reserve applies to the weights check only. vLLM also adds the KV cache and uses `gpu_memory_utilization`. The check does not read `n_gpu_layers`, so partial offload is not modelled: all weights are counted against VRAM whatever the value. A model that does not fit fails `plan` with `AMICU-MEM-001`. See [Error codes](/docs/reference/error-codes).
 
 ## Limits
 

@@ -216,9 +216,9 @@ pub struct FitReport {
     /// A computed KV-cache memory estimate, present only
     /// when [`check_variant_fit_with_kv_cache`] was given full
     /// [`KvCacheParams`]. Distinct from [`Self::overhead`] (the flat band);
-    /// When set, [`Self::fits`] also requires the estimated peak (weights plus
-    /// the larger of this and the overhead band high) to fit the usable device
-    /// memory.
+    /// When set, [`Self::fits`] also requires the estimated peak (weights +
+    /// this + the runtime overhead, see [`estimated_peak`]) to fit the usable
+    /// device memory.
     pub kv_cache: Option<ByteSize>,
 }
 
@@ -390,15 +390,24 @@ pub fn check_variant_fit_with_draft(
     report
 }
 
-/// The estimated peak memory for a llama.cpp deployment whose KV cache is
-/// known: weights plus the larger of the KV estimate and the flat overhead
-/// band's high end (the KV figure omits compute buffers, so a small context
-/// must not drop the estimate below the band). This is the figure the launch
-/// plan prints as its estimated memory.
+/// The estimated peak memory for a llama.cpp deployment. This is the figure
+/// the launch plan prints as its estimated memory and the figure the fit check
+/// compares with the device.
+///
+/// With a known KV cache the peak is **additive**: weights + KV cache +
+/// compute/runtime overhead. The KV cache and the runtime's own buffers
+/// (compute graph, logits, scratch space) are separate allocations, so one does
+/// not absorb the other. The runtime overhead is the *low* end of the overhead
+/// band (10% of weights by default): the band's wide 10-30% span was sized to
+/// stand in for KV cache and runtime together, and the KV cache is now counted
+/// on its own. Without a KV estimate the peak is weights + the band's high end,
+/// as before.
 #[must_use]
 pub fn estimated_peak(report: &FitReport, kv_cache: Option<ByteSize>) -> ByteSize {
-    let beyond = kv_cache.map_or(report.overhead.high, |kv| kv.max(report.overhead.high));
-    ByteSize::from_bytes(report.weights.bytes().saturating_add(beyond.bytes()))
+    let beyond = kv_cache.map_or(report.overhead.high.bytes(), |kv| {
+        kv.bytes().saturating_add(report.overhead.low.bytes())
+    });
+    ByteSize::from_bytes(report.weights.bytes().saturating_add(beyond))
 }
 
 /// Fold the KV-cache-aware peak into the fit decision: the deployment also has
@@ -992,6 +1001,37 @@ mod tests {
         // Weights alone still fit, so the weights-only check is unchanged.
         let weights_only = check_variant_fit(9_000_000_000, &variant, &gpu_8_gib(), &cfg);
         assert!(weights_only.fits);
+    }
+
+    #[test]
+    fn peak_is_additive_and_moves_with_context_below_100k() {
+        // Qwen3.5-9B Q8_0 (9527502048 B) on a 32 GiB Mac: the peak must be
+        // weights + KV cache + runtime overhead, so it differs between 8192
+        // and 16384 context (it used to sit on a flat floor below ~100k).
+        let variant = sized_variant(9_527_502_048);
+        let cfg = FitConfig::default();
+        let hw = apple_silicon(32);
+        let peak_at = |ctx: u32| {
+            let report = check_variant_fit_with_kv_cache(
+                9_000_000_000,
+                &variant,
+                &hw,
+                &cfg,
+                Some(qwen35_9b_kv(ctx)),
+            );
+            let kv = report.kv_cache.expect("kv");
+            let peak = estimated_peak(&report, Some(kv));
+            assert_eq!(
+                peak.bytes(),
+                report.weights.bytes() + kv.bytes() + report.overhead.low.bytes()
+            );
+            (peak.bytes(), kv.bytes())
+        };
+        let (p8k, kv8k) = peak_at(8192);
+        let (p16k, kv16k) = peak_at(16384);
+        assert!(p16k > p8k);
+        assert_eq!(p16k - p8k, kv16k - kv8k);
+        assert_eq!(kv16k, 512 * 1024 * 1024);
     }
 
     // --- speculative draft-model weights ----------

@@ -1379,9 +1379,9 @@ fn plan_launch_estimates_kv_cache_at_f16_when_only_shape_is_set() {
 }
 
 #[test]
-fn plan_launch_estimate_never_drops_below_the_flat_overhead_band() {
-    // A tiny context makes the KV figure smaller than the flat band; the
-    // reported peak memory must still include the band.
+fn plan_launch_peak_is_weights_plus_kv_plus_runtime_overhead_at_every_context() {
+    // KV cache and runtime overhead are additive, so the estimate moves with
+    // `context_length` even for small contexts (no floor from the overhead band).
     let mut model = gguf_model(&[(Quantization::Q4KM, "tiny.Q4_K_M.gguf", 4 * GIB)]);
     model.n_layers = Some(32);
     model.n_kv_heads = Some(8);
@@ -1390,18 +1390,23 @@ fn plan_launch_estimate_never_drops_below_the_flat_overhead_band() {
         .with_model(model, 7_000_000_000)
         .with_hardware(apple_silicon(16));
     let adapter = LlamaCppAdapter::new(Box::new(catalog), Box::new(FakeSupervisor::default()));
-    let mut d = deployment();
-    let Runtime::LlamaCpp(s) = &mut d.runtime else {
-        unreachable!("deployment() always builds a llama_cpp runtime");
+    let peak_at = |context_length: u32| {
+        let mut d = deployment();
+        let Runtime::LlamaCpp(s) = &mut d.runtime else {
+            unreachable!("deployment() always builds a llama_cpp runtime");
+        };
+        s.context_length = context_length;
+        let plan = adapter.plan_launch(&d).expect("plan");
+        let kv = plan.estimate.kv_cache.expect("kv estimate").bytes();
+        (plan.estimate.estimated_memory.bytes(), kv)
     };
-    s.context_length = 512;
-
-    let plan = adapter.plan_launch(&d).expect("plan");
-    let kv = plan.estimate.kv_cache.expect("kv estimate");
-    let band_high = 4 * GIB * 30 / 100;
-    assert!(kv.bytes() < band_high);
+    let runtime_overhead = 4 * GIB / 10;
+    let (small, kv_small) = peak_at(512);
+    let (large, kv_large) = peak_at(8192);
     // Rounding slack of a few bytes from the f64 band computation.
-    assert!(plan.estimate.estimated_memory.bytes() + 16 >= 4 * GIB + band_high);
+    assert!(small.abs_diff(4 * GIB + kv_small + runtime_overhead) <= 16);
+    assert!(large.abs_diff(4 * GIB + kv_large + runtime_overhead) <= 16);
+    assert!(large > small);
 }
 
 // ---- typed-field range checks --------------------------
@@ -1583,6 +1588,34 @@ fn version_parses_build_number() {
         LlamaVersion::parse("llama-server version b4200").unwrap(),
         LlamaVersion::new(4200)
     );
+    // Homebrew prints the release number first and the build in parens.
+    assert_eq!(
+        LlamaVersion::parse("version: 0.6.0 (build 11429, commit d81235049)").unwrap(),
+        LlamaVersion::new(11429)
+    );
+    // No build metadata: not a build number, never "b0".
+    for unknown in [
+        "version: 0 (unknown)",
+        "version: 0.6.0",
+        "version: 1.2.3 (abc)",
+    ] {
+        assert!(
+            matches!(
+                LlamaVersion::parse(unknown).unwrap_err(),
+                LlamaCppError::UnparseableVersion(_)
+            ),
+            "{unknown}"
+        );
+    }
+    // The `version:` line alone decides; a `build N` on a later line does not count.
+    assert!(matches!(
+        LlamaVersion::parse("version: 0 (unknown)\nbuilt with clang, build 18").unwrap_err(),
+        LlamaCppError::UnparseableVersion(_)
+    ));
+    assert!(matches!(
+        LlamaVersion::parse("version: 0 (unknown)\nbuilt with clang version 18 (x)").unwrap_err(),
+        LlamaCppError::UnparseableVersion(_)
+    ));
     assert!(matches!(
         LlamaVersion::parse("no build here").unwrap_err(),
         LlamaCppError::UnparseableVersion(_)
@@ -1624,6 +1657,14 @@ fn detect_binary_version_too_old() {
 async fn health_reports_binary_state() {
     let adapter = fitting_adapter().with_runner(Box::new(FakeRunner::found("version: 3901 (a)")));
     assert!(adapter.health().await.unwrap().is_healthy());
+
+    // An unknown build (Homebrew without metadata) is a warning, not an outage.
+    let unknown =
+        fitting_adapter().with_runner(Box::new(FakeRunner::found("version: 0 (unknown)")));
+    assert!(matches!(
+        unknown.health().await.unwrap(),
+        HealthStatus::Degraded { .. }
+    ));
 
     let missing = fitting_adapter().with_runner(Box::new(FakeRunner::missing()));
     assert!(matches!(

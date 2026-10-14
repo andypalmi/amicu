@@ -202,7 +202,10 @@ pub fn build_plan_with(
                         )),
                     )
                 }
-                Some(_) => (ActionKind::Update, None),
+                Some((pg, prev)) => (
+                    ActionKind::Update,
+                    describe_config_changes(resolve(pg, prev), resolve(graph, d)),
+                ),
             };
 
         let launch = match adapter.plan_launch(d) {
@@ -281,6 +284,197 @@ fn resolve<'a>(graph: &'a Graph, d: &'a Deployment) -> Resolved<'a> {
             .iter()
             .find(|h| h.id == d.hardware_profile),
     )
+}
+
+/// Why a deployment whose configuration changed is an update: what changed
+/// (`field: old -> new`, secrets are references so only the reference name is
+/// ever shown) and why that needs a restart. `None` when no field differs
+/// (nothing to say beyond the update itself).
+fn describe_config_changes(prev: Resolved<'_>, next: Resolved<'_>) -> Option<String> {
+    use std::collections::BTreeMap;
+
+    const SHOWN: usize = 6;
+
+    fn flatten(prefix: &str, v: &serde_json::Value, out: &mut BTreeMap<String, String>) {
+        match v {
+            serde_json::Value::Object(map) => {
+                for (k, v) in map {
+                    let key = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{prefix}.{k}")
+                    };
+                    flatten(&key, v, out);
+                }
+            }
+            serde_json::Value::String(s) => {
+                out.insert(prefix.to_owned(), s.clone());
+            }
+            other => {
+                out.insert(prefix.to_owned(), other.to_string());
+            }
+        }
+    }
+
+    fn fields<T: serde::Serialize>(label: &str, v: Option<&T>) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        if let Some(v) = v.and_then(|v| serde_json::to_value(v).ok()) {
+            flatten(label, &v, &mut out);
+        }
+        out
+    }
+
+    let collect = |r: Resolved<'_>| {
+        let mut all = fields("", Some(r.0));
+        all.extend(fields("model", r.1));
+        all.extend(fields("hardware", r.2));
+        all
+    };
+    let (old, new) = (collect(prev), collect(next));
+    let mut keys: Vec<&String> = old.keys().chain(new.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    // Launch-relevant fields first, so the cut at `SHOWN` never hides them.
+    let mut diffs: Vec<(bool, String)> = keys
+        .into_iter()
+        .filter_map(|k| {
+            let (a, b) = (old.get(k), new.get(k));
+            if a == b {
+                return None;
+            }
+            Some((is_launch_field(k), describe_change(k, a, b)))
+        })
+        .collect();
+    if diffs.is_empty() {
+        return None;
+    }
+    let launch = diffs.iter().any(|(l, _)| *l);
+    // Stable: launch fields first, key order otherwise preserved.
+    diffs.sort_by_key(|(l, _)| !*l);
+    let mut changes: Vec<String> = diffs.into_iter().map(|(_, c)| c).collect();
+    if changes.len() > SHOWN {
+        let more = changes.len() - SHOWN;
+        changes.truncate(SHOWN);
+        changes.push(format!("and {more} more"));
+    }
+    let joined = changes.join(", ");
+    Some(if launch {
+        format!(
+            "{joined}. Launch settings are fixed when the service starts, so it is restarted to apply them"
+        )
+    } else {
+        format!(
+            "{joined}. The recorded configuration differs from the last start, so it is updated"
+        )
+    })
+}
+
+/// Whether a flattened field is baked into the llama-server / vLLM launch (so
+/// a change needs a restart). Keys are the flattened serde names of
+/// `Deployment` (unprefixed), `Model` (`model.`) and `HardwareProfile`
+/// (`hardware.`). Everything not listed (price, region, memory/cpu sizing,
+/// `memory_check`, `scaling.*`, model variant checksums and architecture
+/// metadata) is bookkeeping that does not alter the launched process.
+fn is_launch_field(key: &str) -> bool {
+    const EXACT: [&str; 31] = [
+        "runtime",
+        "model",
+        "hardware_profile",
+        "context_length",
+        "port",
+        "n_gpu_layers",
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "repeat_penalty",
+        "cache_type_k",
+        "cache_type_v",
+        "batch_size",
+        "ubatch_size",
+        "parallel_slots",
+        "flash_attention",
+        "chat_template",
+        "chat_template_file",
+        "jinja",
+        "reasoning_format",
+        "extra_args",
+        "build",
+        "tensor_parallel_size",
+        "gpu_memory_utilization",
+        "kv_cache_dtype",
+        "max_num_seqs",
+        "max_num_batched_tokens",
+        "enforce_eager",
+        "speculative",
+        "multimodal",
+    ];
+    const PREFIXES: [&str; 8] = [
+        "env.",
+        "api_key",
+        "speculative.",
+        "multimodal.",
+        "model.source.",
+        "model.artifact.",
+        "hardware.provider",
+        "hardware.accelerator.",
+    ];
+    EXACT.contains(&key) || PREFIXES.iter().any(|p| key.starts_with(p))
+}
+
+/// Keys whose old/new values are printed: fixed known-safe numeric, boolean
+/// or enum launch settings. Every other key (URLs, templates, paths, env,
+/// extra args, ...) is named only, since free-form strings can hold secrets.
+fn is_value_safe(key: &str) -> bool {
+    const SAFE: [&str; 25] = [
+        "context_length",
+        "port",
+        "n_gpu_layers",
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "repeat_penalty",
+        "cache_type_k",
+        "cache_type_v",
+        "batch_size",
+        "ubatch_size",
+        "parallel_slots",
+        "flash_attention",
+        "jinja",
+        "reasoning_format",
+        "tensor_parallel_size",
+        "gpu_memory_utilization",
+        "kv_cache_dtype",
+        "max_num_seqs",
+        "max_num_batched_tokens",
+        "enforce_eager",
+        "speculative.n_max",
+        "speculative.n_min",
+        "speculative.p_min",
+    ];
+    SAFE.contains(&key)
+        || matches!(
+            key,
+            "speculative.n_gpu_layers"
+                | "multimodal.offload"
+                | "model.artifact.quantization"
+                | "model.artifact.format"
+                | "memory_check"
+        )
+}
+
+/// One change line: `key: old -> new` for allowlisted scalar settings, else
+/// just `key changed`.
+fn describe_change(key: &str, old: Option<&String>, new: Option<&String>) -> String {
+    if !is_value_safe(key) {
+        return format!("{key} changed");
+    }
+    match (old, new) {
+        (Some(a), Some(b)) => format!("{key}: {a} -> {b}"),
+        (None, Some(b)) => format!("{key}: added ({b})"),
+        (a, None) => format!("{key}: removed (was {})", a.map_or("", |s| s.as_str())),
+    }
 }
 
 /// A destroy plan item for `id` that needs no deployment in any graph (for
@@ -1349,6 +1543,104 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].action.kind, ActionKind::Update);
         assert!(build_plan(&next, Some(&next)).unwrap().items.is_empty());
+    }
+
+    #[test]
+    fn an_update_from_a_config_change_says_what_changed_and_why_it_restarts() {
+        let prior = graph(Vec::new());
+        let mut next = graph(Vec::new());
+        let Runtime::LlamaCpp(s) = &mut next.deployments[0].runtime else {
+            unreachable!("graph() builds a llama_cpp deployment")
+        };
+        let old = s.context_length;
+        s.context_length = old + 4096;
+        let item = &build_plan(&next, Some(&prior)).unwrap().items[0];
+        assert_eq!(item.action.kind, ActionKind::Update);
+        let reason = item.reason.as_deref().expect("reason line");
+        assert!(
+            reason.contains(&format!("context_length: {old} -> {}", old + 4096)),
+            "{reason}"
+        );
+        assert!(reason.contains("restarted"), "{reason}");
+
+        // Adding an api_key names the field and shows only the reference.
+        let keyed = with_key(graph(Vec::new()), "CHAT_API_KEY");
+        let item = &build_plan(&keyed, Some(&prior)).unwrap().items[0];
+        let reason = item.reason.as_deref().expect("reason line");
+        assert!(reason.contains("api_key"), "{reason}");
+    }
+
+    #[test]
+    fn the_reason_line_never_prints_free_form_values() {
+        let prior = graph(Vec::new());
+        let mut next = graph(Vec::new());
+        let Runtime::LlamaCpp(s) = &mut next.deployments[0].runtime else {
+            unreachable!("graph() builds a llama_cpp deployment")
+        };
+        s.env
+            .insert("HF_TOKEN".to_owned(), "hf_literal_secret_value".to_owned());
+        s.extra_args = vec!["--seed".to_owned(), "sk-literal-token".to_owned()];
+        s.chat_template = Some("{{ tmpl_secret_marker }}".to_owned());
+        next.models[0].source.reference = "https://user:tok@host/m.gguf?token=SECRET".to_owned();
+        let item = &build_plan(&next, Some(&prior)).unwrap().items[0];
+        let reason = item.reason.as_deref().expect("reason line");
+        for leaked in [
+            "hf_literal_secret_value",
+            "sk-literal-token",
+            "--seed",
+            "tmpl_secret_marker",
+            "tok@host",
+            "SECRET",
+            "user:",
+        ] {
+            assert!(!reason.contains(leaked), "{leaked} in {reason}");
+        }
+        assert!(reason.contains("env.HF_TOKEN changed"), "{reason}");
+        assert!(reason.contains("extra_args changed"), "{reason}");
+        assert!(reason.contains("chat_template changed"), "{reason}");
+        assert!(
+            reason.contains("model.source.reference changed"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn allowlisted_scalars_show_values_and_price_only_changes_claim_no_restart() {
+        assert!(is_launch_field("context_length"));
+        assert!(is_launch_field("env.X"));
+        assert!(is_launch_field("model.source.reference"));
+        assert!(!is_launch_field("hardware.price.per_hour.amount"));
+        assert!(!is_launch_field("hardware.region.code"));
+        assert!(!is_launch_field("scaling.min_replicas"));
+        assert!(!is_launch_field("memory_check"));
+
+        let (m, hw) = (model(), hardware());
+        let dep = deployment(Vec::new());
+
+        // Price-only change: reported, but no restart claim.
+        let mut hw2 = hw.clone();
+        hw2.price = Some(amicu_core::resource::Price {
+            per_hour: amicu_core::resource::Money::new(1.5, "USD"),
+        });
+        let text =
+            describe_config_changes((&dep, Some(&m), Some(&hw)), (&dep, Some(&m), Some(&hw2)))
+                .expect("a difference");
+        assert!(text.contains("hardware.price"), "{text}");
+        assert!(!text.contains("restarted"), "{text}");
+
+        // Mixed change: the launch key sorts ahead of the hardware keys.
+        let mut dep2 = dep.clone();
+        let Runtime::LlamaCpp(s) = &mut dep2.runtime else {
+            unreachable!()
+        };
+        s.context_length = 16384;
+        let mut hw3 = hw2.clone();
+        hw3.region = Some(amicu_core::resource::Region::from_code("eu-west-1"));
+        let text =
+            describe_config_changes((&dep, Some(&m), Some(&hw)), (&dep2, Some(&m), Some(&hw3)))
+                .expect("a difference");
+        assert!(text.starts_with("context_length: 8192 -> 16384"), "{text}");
+        assert!(text.contains("restarted"), "{text}");
     }
 
     // --- change detection beyond the graph -------------
