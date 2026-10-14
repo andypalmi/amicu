@@ -105,6 +105,15 @@ enum Command {
     },
     /// Run environment and project diagnostics.
     Doctor,
+    /// List amicu-owned resources (Modal apps, launchd jobs, systemd units)
+    /// that this project's state does not record, with the manual stop
+    /// command for each. Read-only.
+    ///
+    /// Resources from other projects on this machine or Modal workspace also
+    /// appear: labels are not project-scoped yet. Needs `MODAL_TOKEN_ID` and
+    /// `MODAL_TOKEN_SECRET` to inspect Modal; without them that backend is
+    /// reported as unavailable and the local ones still print.
+    Orphans,
     /// Export coding-agent skills. Does not require a project.
     Skill {
         #[command(subcommand)]
@@ -115,6 +124,25 @@ enum Command {
         #[command(subcommand)]
         command: ModalCommand,
     },
+    /// Opt in or out of anonymous performance telemetry. Off by default; does
+    /// not require a project.
+    ///
+    /// Overrides: `AMICU_TELEMETRY=0|1`, and `DO_NOT_TRACK=1` always forces
+    /// off. No telemetry data is collected or sent yet.
+    Telemetry {
+        #[command(subcommand)]
+        command: TelemetryCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum TelemetryCommand {
+    /// Opt in to sharing aggregate performance metrics.
+    Enable,
+    /// Opt out (the default).
+    Disable,
+    /// Show the effective setting and where it comes from.
+    Status,
 }
 
 #[derive(Debug, Subcommand)]
@@ -259,7 +287,20 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
         };
     }
 
+    if let Command::Telemetry { command } = &cli.command {
+        return match command {
+            TelemetryCommand::Enable => commands::telemetry::enable(out),
+            TelemetryCommand::Disable => commands::telemetry::disable(out),
+            TelemetryCommand::Status => commands::telemetry::status(cli.output, out),
+        };
+    }
+
     let project = Project::discover()?;
+    // One-time, interactive-only consent question (amicu-planning#229). Lives
+    // here, not in the command bodies, so command tests never reach a TTY.
+    if matches!(cli.command, Command::Init | Command::Apply { .. }) {
+        commands::telemetry::consent_prompt(cli.output);
+    }
     match &cli.command {
         Command::Init => commands::init::run(&project, out),
         Command::Fmt { check } => commands::fmt::run(&project, *check, out),
@@ -292,7 +333,8 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
             out,
         ),
         Command::Doctor => commands::doctor::run(&project, cli.output, out),
-        Command::Skill { .. } | Command::Modal { .. } => {
+        Command::Orphans => commands::orphans::run(&project, cli.output, out),
+        Command::Skill { .. } | Command::Modal { .. } | Command::Telemetry { .. } => {
             unreachable!("handled before project discovery")
         }
     }

@@ -6,8 +6,10 @@ pub(crate) mod doctor;
 pub(crate) mod fmt;
 pub(crate) mod init;
 pub(crate) mod modal;
+pub(crate) mod orphans;
 pub(crate) mod plan;
 pub(crate) mod skill;
+pub(crate) mod telemetry;
 pub(crate) mod validate;
 
 /// A fresh current-thread Tokio runtime with every driver (IO, time) enabled.
