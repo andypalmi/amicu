@@ -52,7 +52,7 @@ When you change a deployment, `apply` replaces the running service; it may wait 
 
 - **llama.cpp runtime:** `llama-server` on `PATH`. `apply` resolves it from `PATH` to an absolute path and fails with `llama-server not found on PATH; install with ...` if it is missing. Run `amicu doctor` to confirm it is found.
 - **vLLM runtime:** `vllm` on `PATH`; if it is missing, apply fails with `vllm not found on PATH; install with `pip install vllm``. A native single-process vLLM run needs a supported GPU (NVIDIA CUDA, AMD ROCm, or Intel XPU).
-- **Model file:** for llama.cpp, a GGUF file that you download yourself; amicu does not download weights. Put it at `models/<model resource id>/<variant.file>` relative to the project directory, or set `variant.file` to an absolute path. `amicu plan` shows the path relative to the project, `models/<model id>/<file>`. `apply` makes it absolute when it starts the service. A relative file name may not contain `/`, `\`, `..` or NUL. See the [Quickstart](/docs/quickstart) for a download command.
+- **Model file:** for llama.cpp, a GGUF file that you download yourself; amicu does not download weights. Put it at `models/<model resource id>/<variant.file>` relative to the project directory, or set `variant.file` to an absolute path. `amicu plan` shows the path relative to the project, `models/<model id>/<file>`. `apply` makes it absolute when it starts the service. A relative file name must be a plain name: not empty, not `.` or `..`, and without `/`, `\` or NUL. See the [Quickstart](/docs/quickstart) for a download command.
 
 ## Full example
 
