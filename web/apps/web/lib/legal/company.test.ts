@@ -2,12 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { company, resolveLegalPages } from './company.ts';
 
-test('default config enables nothing', () => {
+test('default config enables only the contact link', () => {
   assert.deepEqual(resolveLegalPages(company), {
     privacy: false,
     terms: false,
     imprint: false,
-    contact: false,
+    contact: true,
   });
 });
 
