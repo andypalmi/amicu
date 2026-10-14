@@ -70,6 +70,7 @@ resource "deployment" "qwen3_8b_local" {
 amicu validate  # structural, reference, and capacity checks
 amicu plan      # shows what apply would do, diffed against state
 amicu apply     # executes the plan (prompts for approval)
+amicu destroy   # stops and removes the recorded deployments (prompts for approval)
 ```
 
 Six other resource kinds - `routing_policy`, `data_class`, `governance_rule`, `budget`, `tenant`, `use_case` - extend the same graph with traffic splitting, residency/sensitivity constraints, and spend limits. Full reference: https://amicu.dev/docs.
@@ -225,7 +226,7 @@ that module and `amicu-store`'s `state` module docs for details.
 
 ## Status
 
-Early stage. Working today: the HCL DSL and parser, the CLI (`init`, `fmt`, `validate`, `plan`, `apply`, `doctor`, `skill export`), the planner and local state, and the local and Modal providers listed above. Not yet built: the browser UI, hosted service, and performance-intelligence dataset. Expect breaking changes to the DSL and CLI.
+Early stage. Working today: the HCL DSL and parser, the CLI (`init`, `fmt`, `validate`, `plan`, `apply`, `destroy`, `doctor`, `skill export`), the planner and local state (with write-ahead stop records, so `destroy` can stop what may be running), and the local and Modal providers listed above. Not yet built: the browser UI, hosted service, and performance-intelligence dataset. Expect breaking changes to the DSL and CLI.
 
 ## Learn more
 
