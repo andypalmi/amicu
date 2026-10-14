@@ -138,6 +138,7 @@ fn base_settings() -> VllmSettings {
 fn deployment(settings: VllmSettings) -> Deployment {
     Deployment {
         scaling: None,
+        memory_check: amicu_core::resource::MemoryCheck::default(),
         api_key: None,
         id: DeploymentId::new("dep"),
         model: ModelId::new("llama8b"),

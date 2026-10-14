@@ -412,6 +412,9 @@ fn deployment_block(d: &Deployment) -> Block {
     if let Some(key) = &d.api_key {
         body = body.add_attribute(("api_key", secret_call(key)));
     }
+    if !d.memory_check.is_enforce() {
+        body = body.add_attribute(("memory_check", d.memory_check.as_str()));
+    }
     if let Some(sc) = &d.scaling {
         body = body.add_block(scaling_block(sc));
     }

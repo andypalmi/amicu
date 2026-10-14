@@ -165,7 +165,12 @@ pub fn build_plan_with(
             Runtime::Vllm(_) => &vllm_adapter,
         };
 
-        diagnostics.extend(adapter.validate(d));
+        for mut diag in crate::checks::apply_memory_check(d, adapter.validate(d)) {
+            if diag.resource.is_none() {
+                diag.resource = Some(format!("deployment.{}", d.id));
+            }
+            diagnostics.push(diag);
+        }
 
         let hardware = graph
             .hardware_profiles
@@ -362,6 +367,9 @@ fn runtime_settings_with_scaling(d: &Deployment) -> Vec<Setting> {
     // time: the plan carries the reference only.
     if d.api_key.is_some() {
         settings.push(setting("api_key", API_KEY_REDACTED));
+    }
+    if !d.memory_check.is_enforce() {
+        settings.push(setting("memory_check", d.memory_check.as_str()));
     }
     if let Some(s) = &d.scaling {
         if let Some(v) = s.min_replicas {
@@ -830,6 +838,7 @@ mod tests {
     fn deployment(extra_args: Vec<String>) -> Deployment {
         Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "m".into(),
@@ -854,6 +863,50 @@ mod tests {
     }
 
     const ASSUMPTION: &str = "unverified: raw runtime flags present";
+
+    /// A llama.cpp deployment whose weights cannot fit the hardware.
+    fn oversized(memory_check: amicu_core::resource::MemoryCheck) -> Graph {
+        let mut g = graph(Vec::new());
+        g.hardware_profiles[0].memory = ByteSize::from_bytes(GIB);
+        g.hardware_profiles[0].accelerator.as_mut().unwrap().memory = ByteSize::from_bytes(GIB);
+        g.deployments[0].memory_check = memory_check;
+        g
+    }
+
+    #[test]
+    fn memory_check_enforce_blocks_the_plan() {
+        let result =
+            build_plan(&oversized(amicu_core::resource::MemoryCheck::Enforce), None).unwrap();
+        assert!(result.has_errors(), "{:?}", result.diagnostics);
+    }
+
+    #[test]
+    fn memory_check_warn_plans_and_shows_the_bypass_in_json() {
+        use amicu_core::resource::MemoryCheck;
+        let result = build_plan(&oversized(MemoryCheck::Warn), None).unwrap();
+        assert!(!result.has_errors(), "{:?}", result.diagnostics);
+        assert!(result.diagnostics.iter().any(|d| {
+            d.severity == Severity::Warning && d.message.contains("bypassed by config")
+        }));
+        assert_eq!(result.items.len(), 1);
+        let json = serde_json::to_value(&result.plan).unwrap();
+        let runtime = json["actions"][0]["runtime"].as_array().unwrap();
+        assert!(
+            runtime
+                .iter()
+                .any(|s| s["key"] == "memory_check" && s["value"] == "warn"),
+            "{runtime:?}"
+        );
+        // Enforce (default) adds no setting.
+        let fits = build_plan(&graph(Vec::new()), None).unwrap();
+        assert!(
+            !fits.items[0]
+                .action
+                .runtime
+                .iter()
+                .any(|s| s.key == "memory_check")
+        );
+    }
 
     #[test]
     fn assumption_present_when_extra_args_nonempty() {

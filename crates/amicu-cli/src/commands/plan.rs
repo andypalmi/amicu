@@ -298,6 +298,14 @@ pub(crate) fn print_human_with(
                     None => io(writeln!(out, "      api_key:  {}", shown.value))?,
                 }
             }
+            if item
+                .action
+                .runtime
+                .iter()
+                .any(|s| s.key == "memory_check" && s.value == "warn")
+            {
+                io(writeln!(out, "      memory_check: warn (bypassed)"))?;
+            }
             if let Some(cmd) = &item.rendered {
                 // On Modal the supervisor rewrites the argv before launch
                 // (`-hf`/`-hff`, `--no-mmproj`, `--host 0.0.0.0`); show what
@@ -324,7 +332,10 @@ pub(crate) fn print_human_with(
             Severity::Warning => "warn",
             Severity::Info => "info",
         };
-        io(writeln!(out, "  {marker}: {}", d.message))?;
+        match &d.resource {
+            Some(resource) => io(writeln!(out, "  {marker}: {resource}: {}", d.message))?,
+            None => io(writeln!(out, "  {marker}: {}", d.message))?,
+        }
     }
     Ok(())
 }
@@ -415,6 +426,7 @@ mod tests {
         });
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "m".into(),
@@ -499,6 +511,34 @@ mod tests {
         // Planning never resolves: even with the variable set, its value is
         // nowhere in the output.
         assert!(!text.contains("--api-key"), "{text}");
+    }
+
+    #[test]
+    fn human_plan_names_the_deployment_whose_memory_check_is_bypassed() {
+        let mut g = graph("local", llama());
+        let mut tight = g.hardware_profiles[0].clone();
+        tight.id = "tight".into();
+        tight.memory = ByteSize::from_bytes(GIB / 2);
+        tight.accelerator.as_mut().unwrap().memory = ByteSize::from_bytes(GIB / 2);
+        g.hardware_profiles.push(tight);
+        let mut bypassed = g.deployments[0].clone();
+        bypassed.id = "bypassed".into();
+        bypassed.hardware_profile = "tight".into();
+        bypassed.memory_check = amicu_core::resource::MemoryCheck::Warn;
+        g.deployments.push(bypassed);
+
+        let text = human_plan(&g);
+        assert_eq!(
+            text.matches("memory_check: warn (bypassed)").count(),
+            1,
+            "{text}"
+        );
+        let warn = text
+            .lines()
+            .find(|l| l.trim().starts_with("warn:"))
+            .unwrap_or_else(|| panic!("no warning in:\n{text}"));
+        assert!(warn.contains("deployment.bypassed:"), "{warn}");
+        assert!(warn.contains("bypassed by config"), "{warn}");
     }
 
     #[test]
