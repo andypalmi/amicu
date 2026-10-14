@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use amicu_runtime::LogOptions;
 
@@ -250,7 +251,13 @@ pub struct LaunchdManager<E> {
     exec: E,
     agents_dir: PathBuf,
     log_dir: PathBuf,
+    /// How long to wait for launchd to finish an (asynchronous) `bootout`.
+    settle_timeout: Duration,
 }
+
+/// Default bound on waiting for a `bootout` to complete. llama-server frees
+/// its model on SIGTERM, which can take several seconds for a large one.
+const LAUNCHD_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl<E: CommandExec> LaunchdManager<E> {
     /// Build over an executor and the LaunchAgents / log directories.
@@ -259,6 +266,34 @@ impl<E: CommandExec> LaunchdManager<E> {
             exec,
             agents_dir: agents_dir.into(),
             log_dir: log_dir.into(),
+            settle_timeout: LAUNCHD_SETTLE_TIMEOUT,
+        }
+    }
+
+    /// Bound how long to wait for `bootout` to finish (tests use a short one).
+    #[must_use]
+    pub fn with_settle_timeout(mut self, timeout: Duration) -> Self {
+        self.settle_timeout = timeout;
+        self
+    }
+
+    /// `launchctl bootout` returns before the job is gone: the job stays
+    /// listed (state `SIGTERMed`) until its process has exited. Poll
+    /// `launchctl print` with a short backoff until the job is unloaded.
+    /// `Ok(true)` once gone, `Ok(false)` if still loaded after the timeout.
+    fn wait_unloaded(&self, domain: &str, label: &str) -> Result<bool, LlamaCppError> {
+        let started = Instant::now();
+        let mut delay = Duration::from_millis(50);
+        loop {
+            if !self.is_loaded(domain, label)? {
+                return Ok(true);
+            }
+            let left = self.settle_timeout.saturating_sub(started.elapsed());
+            if left.is_zero() {
+                return Ok(false);
+            }
+            std::thread::sleep(delay.min(left));
+            delay = (delay * 2).min(Duration::from_millis(500));
         }
     }
 
@@ -320,8 +355,11 @@ impl LaunchdManager<HostExec> {
     }
 }
 
-/// Whether `launchctl print` output says the job's own state is
-/// `not running`: a line that is exactly `state = not running` at the job's
+/// Whether `launchctl print` output says the job's own state is not
+/// `running`: `not running`, or `SIGTERMed`/`SIGKILLed` (right after a
+/// `bootout` the job stays listed while its process is torn down, and must
+/// count as down, not as a healthy service). A line that is exactly one of
+/// those at the job's
 /// top level, not the same text nested in a sub-block (an endpoint, a
 /// dispatch-state entry) that says nothing about the job.
 fn job_not_running(print_output: &str) -> bool {
@@ -339,8 +377,13 @@ fn job_not_running(print_output: &str) -> bool {
     let Some(top) = body.iter().map(|l| indent(l)).min() else {
         return false;
     };
-    body.iter()
-        .any(|l| indent(l) == top && l.trim() == "state = not running")
+    body.iter().any(|l| {
+        indent(l) == top
+            && matches!(
+                l.trim(),
+                "state = not running" | "state = SIGTERMed" | "state = SIGKILLed"
+            )
+    })
 }
 
 impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
@@ -401,13 +444,23 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
     }
 
     fn release(&self, label: &str) {
-        if let Ok((_, domain)) = self.domain() {
+        let domain = self.domain().ok().map(|(_, d)| d);
+        if let Some(domain) = &domain {
             let _ = self
                 .exec
                 .exec("launchctl", &["bootout", &format!("{domain}/{label}")]);
+            // Bootout is asynchronous: wait for the label to be released so the
+            // next bootstrap does not race it (error 5). Best effort: if the
+            // job lingers, fall through to remove and let `start` report it.
+            if matches!(self.wait_unloaded(domain, label), Ok(true)) {
+                return;
+            }
         }
         // By label too, even when the job is loaded under another name.
         let _ = self.exec.exec("launchctl", &["remove", label]);
+        if let Some(domain) = &domain {
+            let _ = self.wait_unloaded(domain, label);
+        }
     }
 
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
@@ -484,13 +537,15 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         // `launchctl print` that the job is gone.
         let out = self.exec.exec("launchctl", &["bootout", &target])?;
         let mut detail = out.stderr.trim().to_owned();
-        if self.is_loaded(&domain, label)? {
+        // Bootout is asynchronous: the job stays listed until its process has
+        // exited, so wait for it rather than checking once.
+        if !self.wait_unloaded(&domain, label)? {
             // Fall back to removing by label, as `release` does.
             let out = self.exec.exec("launchctl", &["remove", label])?;
             if !out.stderr.trim().is_empty() {
                 out.stderr.trim().clone_into(&mut detail);
             }
-            if self.is_loaded(&domain, label)? {
+            if !self.wait_unloaded(&domain, label)? {
                 return Err(LlamaCppError::Supervisor(format!(
                     "launchd job {target} is still loaded after bootout and remove: {detail}"
                 )));
