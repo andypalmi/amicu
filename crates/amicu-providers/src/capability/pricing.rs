@@ -1,5 +1,7 @@
 //! Provider pricing: on-demand and spot rates, and billing granularity.
 
+use std::collections::BTreeMap;
+
 use amicu_core::resource::Money;
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +55,12 @@ pub struct Pricing {
     /// The interruptible spot rate, when offered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spot: Option<Rate>,
+    /// Per-region price multipliers applied on top of both rates when a
+    /// deployment pins a region (e.g. Modal charges 1.15x for a broad region
+    /// and 1.75x for a narrow one). Keyed by region code; a region with no
+    /// entry - and an unpinned deployment - is charged the base rate (1.0x).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub region_multipliers: BTreeMap<String, f64>,
 }
 
 impl Pricing {
@@ -62,6 +70,7 @@ impl Pricing {
         Self {
             on_demand: rate,
             spot: None,
+            region_multipliers: BTreeMap::new(),
         }
     }
 
@@ -70,6 +79,23 @@ impl Pricing {
     pub fn with_spot(mut self, rate: Rate) -> Self {
         self.spot = Some(rate);
         self
+    }
+
+    /// Charge `multiplier` times the base rate in `region`.
+    #[must_use]
+    pub fn with_region_multiplier(mut self, region: impl Into<String>, multiplier: f64) -> Self {
+        self.region_multipliers.insert(region.into(), multiplier);
+        self
+    }
+
+    /// The price multiplier for `region`: the registered one, or `1.0` for an
+    /// unpinned (`None`) or unlisted region.
+    #[must_use]
+    pub fn region_multiplier(&self, region: Option<&str>) -> f64 {
+        region
+            .and_then(|r| self.region_multipliers.get(r))
+            .copied()
+            .unwrap_or(1.0)
     }
 
     /// The on-demand rate.

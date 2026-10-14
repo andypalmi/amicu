@@ -31,11 +31,11 @@
 //! by 1.15x, narrow regions by 1.75x (same source, checked 2026-09-18:
 //! "Broad (e.g. `us`) | 1.15x", "Narrow (e.g. `us-west`) | 1.75x"; the
 //! smaller multiplier applies when multiple regions spanning both
-//! categories are given). [`ComputeOffering`]/[`Pricing`] have no per-region
-//! rate field, so this adapter cannot represent that multiplier structurally
-//! (see [`regions`] for that decision) - the stored `on_demand` rate is
-//! Modal's *unpinned* base price, and amicu does not yet apply the
-//! multiplier automatically.
+//! categories are given). The stored `on_demand` rate is Modal's *unpinned* base
+//! price; every offering also carries the per-region multipliers in
+//! [`Pricing::region_multipliers`] (see [`region_multiplier`]), which
+//! [`estimate_cost`](crate::estimate_cost) applies when the usage pins a
+//! region.
 //!
 //! GPU models, VRAM and on-demand USD/hr prices were read from
 //! <https://modal.com/pricing> on 2026-09-18 (Modal bills per second; the
@@ -363,13 +363,30 @@ const GPUS: &[GpuSpec] = &[
     },
 ];
 
+/// Modal's price multiplier for a broad region (`us`, `eu`, `ap`).
+const BROAD_REGION_MULTIPLIER: f64 = 1.15;
+/// Modal's price multiplier for a narrow region (every other code in
+/// [`RAW_REGIONS`]).
+const NARROW_REGION_MULTIPLIER: f64 = 1.75;
+
+/// The multiplier Modal charges over its base rate when a function is pinned
+/// to `code`: 1.15x broad, 1.75x narrow. Source:
+/// <https://modal.com/docs/guide/region-selection>, checked 2026-09-18.
+fn region_multiplier(code: &str) -> f64 {
+    if matches!(code, "us" | "eu" | "ap") {
+        BROAD_REGION_MULTIPLIER
+    } else {
+        NARROW_REGION_MULTIPLIER
+    }
+}
+
 /// Build a [`ComputeOffering`] for `g` at `count` GPUs, sold in every region
 /// in `region_codes` (Modal does not document per-region GPU availability,
 /// so every GPU is assumed available everywhere - same simplifying
 /// assumption as [`RunPodProvider`](crate::RunPodProvider) and
 /// [`AwsProvider`](crate::AwsProvider) make for their own region-agnostic
-/// catalogs). The stored price is Modal's unpinned base rate; see the
-/// module docs for the region price multiplier this does not include.
+/// catalogs). The stored price is Modal's unpinned base rate; the region
+/// price multipliers ride along in [`Pricing::region_multipliers`].
 fn offering(g: &GpuSpec, count: u32, region_codes: &[String]) -> ComputeOffering {
     ComputeOffering {
         id: format!("gpu.{}.{count}x", g.id),
@@ -386,10 +403,13 @@ fn offering(g: &GpuSpec, count: u32, region_codes: &[String]) -> ComputeOffering
         vcpus: None,
         memory: None,
         regions: region_codes.to_vec(),
-        pricing: Pricing::on_demand(Rate::new(
-            Money::new(g.per_gpu_hourly * f64::from(count), "USD"),
-            RateUnit::PerHour,
-        )),
+        pricing: region_codes.iter().fold(
+            Pricing::on_demand(Rate::new(
+                Money::new(g.per_gpu_hourly * f64::from(count), "USD"),
+                RateUnit::PerHour,
+            )),
+            |pricing, code| pricing.with_region_multiplier(code.clone(), region_multiplier(code)),
+        ),
         availability: Availability::new(g.availability),
     }
 }
@@ -781,5 +801,48 @@ mod tests {
         let describe_json = serde_json::to_string(&ModalProvider::new().describe()).unwrap();
         assert!(describe_json.contains("\"credentials\":\"api_key\""));
         assert!(!describe_json.contains("MODAL_TOKEN"));
+    }
+
+    #[test]
+    fn pinned_region_estimates_apply_the_documented_multipliers() {
+        use crate::{Usage, estimate_cost};
+        let caps = ModalProvider::new().capabilities();
+        let h100 = caps
+            .compute
+            .iter()
+            .find(|o| o.id == "gpu.h100.1x")
+            .expect("h100 1x offering");
+        let base = h100.pricing.on_demand_rate().price.amount;
+        let cost = |usage: Usage| estimate_cost(&h100.pricing, &usage).unwrap().high().amount;
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+
+        // Unpinned: the base rate. Narrow `eu-west`: 1.75x. Broad `eu`: 1.15x.
+        assert!(close(cost(Usage::for_hours(1.0)), base));
+        assert!(close(
+            cost(Usage::for_hours(1.0).in_region("eu-west")),
+            base * 1.75
+        ));
+        assert!(close(
+            cost(Usage::for_hours(1.0).in_region("eu")),
+            base * 1.15
+        ));
+        // A region Modal does not list is charged the base rate.
+        assert!(close(
+            cost(Usage::for_hours(1.0).in_region("nowhere")),
+            base
+        ));
+    }
+
+    #[test]
+    fn every_modal_region_has_a_multiplier() {
+        for o in ModalProvider::new().capabilities().compute {
+            for r in &o.regions {
+                let m = o.pricing.region_multiplier(Some(r));
+                assert!(
+                    (m - 1.15).abs() < 1e-9 || (m - 1.75).abs() < 1e-9,
+                    "{r}: {m}"
+                );
+            }
+        }
     }
 }

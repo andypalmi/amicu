@@ -115,18 +115,18 @@ Every field is optional. Omitted fields keep the provider's defaults (see [Modal
 | Field | Type | llama-server flag | Description |
 |---|---|---|---|
 | `context_length` | number | `--ctx-size` | Total context, shared across slots |
-| `port` | number | `--port` | Bind port. The host is always `127.0.0.1` locally. |
-| `n_gpu_layers` | number | `--n-gpu-layers` | `-1` offloads all layers, `0` is CPU only |
-| `temperature` | number | `--temp` | Sampling temperature |
-| `top_p` | number | `--top-p` | Nucleus cutoff |
+| `port` | number | `--port` | Bind port, 1 to 65535. The host is always `127.0.0.1` locally. |
+| `n_gpu_layers` | number | `--n-gpu-layers` | `-1` offloads all layers, `0` is CPU only, below `-1` is rejected |
+| `temperature` | number | `--temp` | Sampling temperature, 0 or more |
+| `top_p` | number | `--top-p` | Nucleus cutoff, 0 to 1 |
 | `top_k` | number | `--top-k` | Top-k cutoff |
-| `min_p` | number | `--min-p` | Min-p cutoff |
-| `repeat_penalty` | number | `--repeat-penalty` | Repetition penalty |
+| `min_p` | number | `--min-p` | Min-p cutoff, 0 to 1 |
+| `repeat_penalty` | number | `--repeat-penalty` | Repetition penalty, greater than 0 (`1.0` disables) |
 | `cache_type_k` | string | `--cache-type-k` | `f16`, `bf16`, `q8_0`, `q4_0`, `q4_1`, `q5_0`, `q5_1`, `iq4_nl` |
 | `cache_type_v` | string | `--cache-type-v` | Same values as `cache_type_k` |
-| `batch_size` | number | `--batch-size` | Logical batch size |
-| `ubatch_size` | number | `--ubatch-size` | Physical batch size |
-| `parallel_slots` | number | `--parallel` | Concurrent request slots |
+| `batch_size` | number | `--batch-size` | Logical batch size, at least 1 |
+| `ubatch_size` | number | `--ubatch-size` | Physical batch size, at least 1 and not above `batch_size` |
+| `parallel_slots` | number | `--parallel` | Concurrent request slots, at least 1 |
 | `flash_attention` | string | `--flash-attn` | `on`, `off`, or `auto` (not a boolean) |
 | `chat_template` | string | `--chat-template` | Inline Jinja template. Exclusive with `chat_template_file` (`AMICU-CAP-005`). |
 | `chat_template_file` | string | `--chat-template-file` | Path to a Jinja template |
@@ -137,6 +137,10 @@ Every field is optional. Omitted fields keep the provider's defaults (see [Modal
 | `env` | block | environment | Extra environment variables. See below. |
 | `speculative` | block | | Speculative decoding |
 | `multimodal` | block | | Vision or audio projector |
+
+Out-of-range or inconsistent values in the typed fields above (for example `top_p` outside 0 to 1, `ubatch_size` above `batch_size`, or `parallel_slots = 0`) are rejected at plan time with `AMICU-CAP-011`, so they do not wait for llama-server to fail at start.
+
+When the model declares `n_layers`, `n_kv_heads`, and `head_dim`, `amicu plan` estimates the KV cache from `context_length`. An unset `cache_type_k` or `cache_type_v` is counted at `f16`, llama-server's own default, so the estimate never assumes a smaller cache than the one that runs. Set a quantized cache type (for example `q8_0`) to shrink it.
 
 `speculative` block:
 
