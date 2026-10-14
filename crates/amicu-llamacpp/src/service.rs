@@ -320,6 +320,29 @@ impl LaunchdManager<HostExec> {
     }
 }
 
+/// Whether `launchctl print` output says the job's own state is
+/// `not running`: a line that is exactly `state = not running` at the job's
+/// top level, not the same text nested in a sub-block (an endpoint, a
+/// dispatch-state entry) that says nothing about the job.
+fn job_not_running(print_output: &str) -> bool {
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let mut body: Vec<&str> = print_output
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    // The `<domain>/<label> = {` header and its closing brace are not the job's
+    // own properties.
+    if body.first().is_some_and(|l| l.trim_end().ends_with('{')) {
+        body.remove(0);
+    }
+    body.retain(|l| l.trim() != "}");
+    let Some(top) = body.iter().map(|l| indent(l)).min() else {
+        return false;
+    };
+    body.iter()
+        .any(|l| indent(l) == top && l.trim() == "state = not running")
+}
+
 impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
     fn paths(&self, label: &str) -> Option<ServicePaths> {
         Some(ServicePaths {
@@ -360,7 +383,7 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         let target = format!("{domain}/{label}");
         let out = self.exec.exec("launchctl", &["print", &target])?;
         if out.success {
-            return Ok(if out.stdout.contains("state = not running") {
+            return Ok(if job_not_running(&out.stdout) {
                 Presence::Down
             } else {
                 Presence::Running

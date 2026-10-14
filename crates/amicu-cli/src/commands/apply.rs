@@ -12,7 +12,7 @@ use amicu_core::resource::{Deployment, is_local_provider};
 use amicu_core::secret::{SecretResolver, SecretValue};
 use amicu_llamacpp::{Catalog, LlamaCppAdapter, ProcessSupervisor, host_supervisor};
 use amicu_modal::ModalSupervisor;
-use amicu_modal::supervisor::app_name_for;
+use amicu_modal::supervisor::project_app_name;
 use amicu_runtime::exposure::{CheckTiming, EndpointCheck, PROBE_PATH};
 use amicu_runtime::{
     EndpointExposure, EndpointRegistry, GatewayAuth, LaunchPlan, RuntimeAdapter, RuntimeHandle,
@@ -149,7 +149,11 @@ pub(crate) fn run_with(
         let switches = prior_state
             .as_ref()
             .map(|s| {
-                crate::commands::plan::provider_switches(&result, &s.stops, s.project_id.as_deref())
+                crate::commands::plan::provider_switches(
+                    &result,
+                    &effective_stops(Some(s)),
+                    s.project_id.as_deref(),
+                )
             })
             .unwrap_or_default();
         crate::commands::plan::print_human_with(&result, &graph, &switches, preview)?;
@@ -777,6 +781,7 @@ fn modal_supervisor(
     graph: &Graph,
     catalog: &dyn Catalog,
     id: &amicu_core::id::DeploymentId,
+    app_name: String,
     runtime: amicu_runtime::RuntimeKind,
     previous_endpoint: Option<String>,
 ) -> Result<ModalSupervisor, CliError> {
@@ -793,7 +798,7 @@ fn modal_supervisor(
                 deployment.hardware_profile
             ))
         })?;
-    let supervisor = ModalSupervisor::for_hardware(app_name_for(id.as_str()), &hardware)
+    let supervisor = ModalSupervisor::for_hardware(app_name, &hardware)
         .map_err(|e| CliError::Adapter(AdapterError::from_kind(e)))?;
     let supervisor = supervisor
         .with_scaling(deployment.scaling.as_ref())
@@ -894,6 +899,9 @@ async fn apply_all(
             )?;
             // Modal builds a per-deployment adapter; the host adapters are shared.
             let modal_adapter: Box<dyn RuntimeAdapter>;
+            // Set for Modal: the id of the app `start` deployed, readable even when
+            // `start` fails after the deploy (see below).
+            let mut deployed_app = None;
             let adapter: &dyn RuntimeAdapter = match (launch.runtime, dispatch) {
                 (runtime, Dispatch::Modal) => {
                     let previous_endpoint = prior
@@ -903,9 +911,11 @@ async fn apply_all(
                         graph,
                         &catalog,
                         &item.deployment,
+                        project_app_name(&progress.project_id, item.deployment.as_str()),
                         runtime,
                         previous_endpoint,
                     )?;
+                    deployed_app = Some(supervisor.deployed_app());
                     modal_adapter = match runtime {
                         amicu_runtime::RuntimeKind::Vllm => Box::new(VllmAdapter::new(
                             Box::new(catalog.clone()),
@@ -941,8 +951,13 @@ async fn apply_all(
                         host_probe.service_paths(&label),
                     )
                 }
-                Dispatch::Modal => StopRecord::modal(&item.deployment, None, active_ws.as_ref())
-                    .with_volumes(&modal_volume_names(launch.runtime)),
+                Dispatch::Modal => StopRecord::modal_in(
+                    &progress.project_id,
+                    &item.deployment,
+                    None,
+                    active_ws.as_ref(),
+                )
+                .with_volumes(&modal_volume_names(launch.runtime)),
             };
             // The instance is started under the label recorded in state, and
             // a relative model path is resolved against the project root now,
@@ -1015,7 +1030,24 @@ async fn apply_all(
             } else {
                 None
             };
-            let handle = adapter.apply(launch, &resolver).await?;
+            let handle = match adapter.apply(launch, &resolver).await {
+                Ok(handle) => handle,
+                Err(e) => {
+                    // The supervisor may have rolled back or stopped an app it had
+                    // already deployed: its id is known even though no handle came
+                    // back. Record it, so a later destroy stops by id without
+                    // `--forget-unconfirmed`.
+                    if let Some(app_id) = deployed_app_id(deployed_app.as_ref()) {
+                        record_modal_start(
+                            &mut progress.stops,
+                            &new_stop.identity,
+                            &item.deployment,
+                            &app_id,
+                        );
+                    }
+                    return Err(e.into());
+                }
+            };
             // Shared post-deploy check, for every adapter: an endpoint that is
             // not protected as declared is rolled back (Modal update) or torn
             // down, and apply fails.
@@ -1314,6 +1346,13 @@ fn host_handle(id: &DeploymentId, label: &str) -> RuntimeHandle {
 
 fn dispatch_is_modal(r: &StopRecord) -> bool {
     r.backend.is_modal()
+}
+
+/// The app id a [`ModalSupervisor`] reported deploying, if any.
+fn deployed_app_id(
+    slot: Option<&std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+) -> Option<String> {
+    slot?.lock().ok()?.clone()
 }
 
 /// Apply the result of a successful Modal start to the stop records: the
@@ -2597,6 +2636,46 @@ mod stop_invariant_tests {
             serial: 0,
             extra: std::collections::BTreeMap::default(),
         }
+    }
+
+    /// A name-scheme change must never lose a live app: the record under the old
+    /// name is stale for the new target, so apply stops it (and confirms) first.
+    #[test]
+    fn a_legacy_modal_record_is_stale_for_the_project_scoped_target() {
+        let dep = id("alpha");
+        let legacy = StopRecord::modal(&dep, Some("ap-OLD".to_owned()), None);
+        let target = StopRecord::modal_in("aaaa1111", &dep, None, None);
+        assert_ne!(legacy.identity, target.identity);
+        let stale = stale_records(std::slice::from_ref(&legacy), &dep, &target);
+        assert_eq!(stale, vec![legacy.clone()]);
+        // A record under the new name is the target itself, not stale.
+        let none: Vec<StopRecord> = Vec::new();
+        assert_eq!(
+            stale_records(std::slice::from_ref(&target), &dep, &target),
+            none
+        );
+        // Another project's app for the same deployment id is a different target.
+        let other = StopRecord::modal_in("bbbb2222", &dep, Some("ap-2".to_owned()), None);
+        assert!(!other.same_target(&target));
+    }
+
+    /// A supervisor that rolled the app back or stopped it still leaves its id
+    /// behind, and it lands on the placeholder record.
+    #[test]
+    fn the_app_id_of_a_supervisor_side_rollback_fills_the_placeholder() {
+        let dep = id("alpha");
+        let supervisor = amicu_modal::ModalSupervisor::new("amicu-x");
+        let slot = supervisor.deployed_app();
+        assert_eq!(super::deployed_app_id(Some(&slot)), None);
+        *slot.lock().unwrap() = Some("ap-9".to_owned());
+        let app_id = super::deployed_app_id(Some(&slot)).unwrap();
+        let mut stops = vec![StopRecord::modal_in("aaaa1111", &dep, None, None)];
+        let identity = stops[0].identity.clone();
+        let superseded = super::record_modal_start(&mut stops, &identity, &dep, &app_id);
+        assert_eq!(superseded, Vec::<StopRecord>::new());
+        assert_eq!(stops.len(), 1);
+        assert_eq!(stops[0].app_id.as_deref(), Some("ap-9"));
+        assert_eq!(super::deployed_app_id(None), None);
     }
 
     /// Crash between the provider start and the final save: only the

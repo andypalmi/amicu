@@ -51,7 +51,7 @@ See [Agent skills](/docs/reference/agent-skills).
 
 Today only Modal has provider commands. Other providers will add theirs when they are wired into `apply`.
 
-The `modal` commands read `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` from the environment, never from flags. `<app>` is the Modal app name: `amicu-` plus the deployment id with `_` replaced by `-`.
+The `modal` commands read `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` from the environment, never from flags. `<app>` is the Modal app name recorded in state, of the form `amicu-<project>-<deployment>-<digest>`; older apps are `amicu-` plus the deployment id.
 
 | Command | Description |
 |---|---|

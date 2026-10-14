@@ -35,10 +35,15 @@
 //! `email_outbox` is a single GLOBAL queue with no per-test scoping column, and
 //! claiming is by definition a whole-queue operation. Scenarios therefore cannot
 //! run concurrently against it: two `#[tokio::test]`s would claim each other's
-//! rows. They are sequenced inside [`outbox_claiming_lifecycle`] instead, which
-//! is simpler - and more honest - than a cross-test lock held across `await`s.
+//! rows. They are sequenced inside [`outbox_claiming_lifecycle`] instead.
 //! Each scenario still leases away whatever is already due (see [`quiesce`]) and
 //! works only with rows it enqueued itself, identified by a unique recipient.
+//!
+//! Any other test that commits a DUE row to the queue must hold [`QUEUE`] while
+//! it does, for the same reason: tests in one binary run in parallel, and a row
+//! enqueued mid-scenario by another test takes a slot in a size-limited claim
+//! (the "second claimer must take the other three" assertion) or is claimed by
+//! a scenario that does not own it.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -56,6 +61,10 @@ use uuid::Uuid;
 
 /// Big enough to sweep the whole queue in one statement.
 const SWEEP: i64 = 100_000;
+
+/// Serializes the tests that put due rows into the global queue (see the module
+/// docs). A `tokio` mutex: it is held across `await`s and never poisons.
+static QUEUE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn pool() -> PgPool {
     let url = std::env::var("DATABASE_URL")
@@ -334,6 +343,7 @@ async fn exhausted_messages_are_dead_lettered_and_stop_being_claimed(pool: &PgPo
 #[tokio::test]
 #[ignore = "requires a live Postgres via DATABASE_URL; see this file's module docs"]
 async fn outbox_claiming_lifecycle() {
+    let _queue = QUEUE.lock().await;
     let pool = pool().await;
     enqueue_then_claim_then_mark_sent(&pool).await;
     concurrent_claimers_never_receive_the_same_message(&pool).await;
@@ -375,6 +385,7 @@ async fn enqueue_joins_the_callers_transaction() {
 #[tokio::test]
 #[ignore = "requires a live Postgres via DATABASE_URL; see this file's module docs"]
 async fn reset_token_and_its_email_commit_together() {
+    let _queue = QUEUE.lock().await;
     let pool = pool().await;
 
     // A real user to hang the token's foreign key off, created through the

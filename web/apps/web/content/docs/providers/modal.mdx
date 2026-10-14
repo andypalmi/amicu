@@ -196,7 +196,7 @@ The GPU string is not validated against Modal's live catalog at parse time. An u
 
 - The profile's `memory` becomes the container memory request. `cpu { cores = N }` becomes the CPU request.
 - Defaults: startup timeout 600 s, scaledown window 900 s, container timeout 3600 s, target concurrency 32, no warm containers, no maximum. Override the autoscaling values with a [`scaling {}`](/docs/configuration/deployment) block.
-- The app is named `amicu-` plus the deployment id, lower-cased, with runs of characters outside `[a-z0-9]` replaced by a single `-`. Deployment `chat_modal` becomes app `amicu-chat-modal`. Use this name with `amicu modal` commands.
+- The app is named `amicu-<project>-<deployment>-<digest>`: a short form of the project id, the deployment id lower-cased with other characters as `-`, and a digest of the exact ids. The name is recorded in state; use it with `amicu modal` commands. Apps made by older versions are renamed once on the next apply, see [Modal app names](/docs/operate/state-and-backends#modal-app-names).
 - Weights and compile caches live in Modal volumes shared by all amicu deployments in your workspace (`amicu-hf-cache`, `amicu-vllm-cache`, `amicu-llamacpp-cache`). Only the first run of a model is slow.
 
 ## Calling the endpoint
@@ -235,7 +235,7 @@ Modal's proxy rejects `Authorization: Bearer` as proxy credentials; `Modal-Key` 
 
 ## Monitoring
 
-`amicu modal` commands read `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, and work without a project directory. `<app>` is the app name, `amicu-` plus the deployment id with `_` replaced by `-`.
+`amicu modal` commands read `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, and work without a project directory. `<app>` is the app name recorded in state (see [State and backends](/docs/operate/state-and-backends#modal-app-names)); it is also listed by `modal app list`.
 
 | Command | Output |
 |---|---|

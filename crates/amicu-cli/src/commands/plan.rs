@@ -7,7 +7,7 @@ use amicu_core::diagnostic::{DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
 use amicu_core::id::DeploymentId;
 use amicu_modal::ModalSupervisor;
-use amicu_modal::supervisor::app_name_for;
+use amicu_modal::supervisor::project_app_name;
 use amicu_plan::Plan;
 use amicu_plan::contract::{ActionKind, PlannedAction, Setting};
 
@@ -41,7 +41,9 @@ pub(crate) fn run(
         .as_ref()
         .map(|s| s.fingerprints.clone())
         .unwrap_or_default();
-    let stops = state.as_ref().map(|s| s.stops.clone()).unwrap_or_default();
+    // The same records apply acts on: the recorded ones plus the legacy-named
+    // ones derived for state written before stop records existed.
+    let stops = crate::commands::apply::effective_stops(state.as_ref());
     let project_id = state.as_ref().and_then(|s| s.project_id.clone());
     let prior = state.map(|s| {
         // A pending deployment (start unconfirmed) is planned as absent.
@@ -121,6 +123,8 @@ pub(crate) type ProviderSwitches = BTreeMap<DeploymentId, Vec<OldInstance>>;
 pub(crate) struct OldInstance {
     pub backend: &'static str,
     pub identity: String,
+    /// A Modal app replaced by another Modal app (the name scheme changed).
+    pub modal_rename: bool,
 }
 
 impl OldInstance {
@@ -144,7 +148,7 @@ pub(crate) fn provider_switches(
     for item in result.items.iter().filter(|i| i.launch.is_some()) {
         let id = item.deployment.as_str();
         let (backend, identity) = if item.action.provider.as_deref() == Some("modal") {
-            (Backend::Modal, Some(app_name_for(id)))
+            (Backend::Modal, project_id.map(|p| project_app_name(p, id)))
         } else {
             // Without a project id apply mints one, so no recorded host label
             // can match the new one.
@@ -162,6 +166,7 @@ pub(crate) fn provider_switches(
             .map(|r| OldInstance {
                 backend: r.backend.name(),
                 identity: r.identity.clone(),
+                modal_rename: r.backend == Backend::Modal && backend == Backend::Modal,
             })
             .collect();
         if !old.is_empty() {
@@ -207,6 +212,23 @@ pub(crate) fn add_switch_actions(plan: &mut Plan, switches: &ProviderSwitches) {
     plan.actions = actions;
 }
 
+/// The `destroy old` step of a provider switch, with what a Modal rename costs.
+fn write_destroy_old(out: &mut dyn Write, old: &OldInstance, address: &str) -> std::io::Result<()> {
+    writeln!(out, "  - destroy old ({}) for {address}", old.describe())?;
+    if old.modal_rename {
+        writeln!(
+            out,
+            "      one-time rename of the Modal app: the endpoint URL changes (clients must \
+             update), the app is down until the new one is up, and there is no rollback \
+             to the previous version if the new deploy fails"
+        )?;
+    }
+    writeln!(
+        out,
+        "      stopped and confirmed before the new instance starts\n"
+    )
+}
+
 pub(crate) fn print_human(
     result: &PlanResult,
     graph: &Graph,
@@ -239,16 +261,7 @@ pub(crate) fn print_human_with(
         ))?;
         for item in &result.items {
             for old in switches.get(&item.deployment).into_iter().flatten() {
-                io(writeln!(
-                    out,
-                    "  - destroy old ({}) for {}",
-                    old.describe(),
-                    item.action.address
-                ))?;
-                io(writeln!(
-                    out,
-                    "      stopped and confirmed before the new instance starts\n"
-                ))?;
+                io(write_destroy_old(out, old, &item.action.address))?;
             }
             let kind = format!("{:?}", item.action.kind).to_lowercase();
             io(writeln!(out, "  {} {}", symbol(&kind), item.action.address))?;
@@ -345,7 +358,8 @@ pub(crate) fn print_human_with(
 /// `apply` surfaces the underlying error).
 fn modal_launch_text(graph: &Graph, item: &PlanItem) -> Option<String> {
     let launch = item.launch.as_ref()?;
-    let mut supervisor = ModalSupervisor::new(app_name_for(item.deployment.as_str()));
+    // The app name is not part of the launch line, so a placeholder will do.
+    let mut supervisor = ModalSupervisor::new("amicu-plan");
     if let Some(model) = graph
         .deployments
         .iter()

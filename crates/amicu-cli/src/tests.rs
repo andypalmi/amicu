@@ -2673,8 +2673,11 @@ fn plan_text_for(config: &str, state: &LocalState) -> (String, amicu_plan::Plan)
         &P,
     )
     .unwrap();
-    let switches =
-        commands::plan::provider_switches(&result, &state.stops, state.project_id.as_deref());
+    let switches = commands::plan::provider_switches(
+        &result,
+        &commands::apply::effective_stops(Some(state)),
+        state.project_id.as_deref(),
+    );
     let mut out = Vec::new();
     commands::plan::print_human_with(&result, &graph, &switches, &mut out).unwrap();
     // The JSON plan carries the same steps, so the counts agree.
@@ -2711,6 +2714,34 @@ fn plan_shows_a_destroy_old_step_before_the_create_on_a_provider_switch() {
     assert!(
         text.contains("destroy old (modal amicu-support-local)"),
         "{text}"
+    );
+}
+
+#[test]
+fn plan_shows_the_modal_rename_for_v1_state_without_stop_records() {
+    // v1 state: no stop records, only the graph. Apply derives the legacy-named
+    // record and replaces that app, so the plan must show the same step.
+    let mut state = state_with(modal_support_graph());
+    state.project_id = Some("aaaa1111".to_owned());
+    assert_eq!(state.stops, Vec::<StopRecord>::new());
+    // A recorded fingerprint that differs, so the deployment is re-launched.
+    state.fingerprints.insert(
+        "support_local".into(),
+        amicu_engine::fingerprint::Fingerprint {
+            binary: Some("0".repeat(64)),
+            ..Default::default()
+        },
+    );
+    let (text, plan) = plan_text_for(&modal_config(), &state);
+    assert!(
+        text.contains("destroy old (modal amicu-support-local)"),
+        "{text}"
+    );
+    assert!(text.contains("endpoint URL changes"), "{text}");
+    assert!(text.contains("no rollback"), "{text}");
+    assert_eq!(
+        plan.actions[0].kind,
+        amicu_plan::contract::ActionKind::Destroy
     );
 }
 

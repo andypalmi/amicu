@@ -10,7 +10,12 @@ operations guide.
 ## Setup
 
 Environment variables (never pass them as flags; never write real values into
-HCL, logs or chat):
+HCL, - **App name**: `amicu-<project>-<deployment>-<digest>` (project id, the
+  deployment id lower-cased with other characters as `-`, and a digest of the
+  exact ids). It is recorded in state; use it with
+  `amicu modal status|logs|metrics|stop`. Apps made by older versions are
+  `amicu-` + the deployment id; `apply` replaces them once (new URL, brief
+  downtime, no rollback). or chat):
 
 | Variable | Needed for | Notes |
 |---|---|---|
@@ -24,10 +29,12 @@ Quick check: `amicu modal auth-check`.
 
 Fixed names and constants (not configurable in HCL today):
 
-- **App name**: `amicu-` + the deployment id lower-cased, with every run of
-  characters outside `[a-z0-9]` (so `_` too) replaced by a single `-`. Deployment
-  `chat_modal` becomes app `amicu-chat-modal`. Use this name with
-  `amicu modal status|logs|metrics|stop`.
+- **App name**: `amicu-<project>-<deployment>-<digest>` (project id, the
+  deployment id lower-cased with other characters as `-`, and a digest of the
+  exact ids). It is recorded in state; use it with
+  `amicu modal status|logs|metrics|stop`. Apps made by older versions are
+  `amicu-` + the deployment id; `apply` replaces them once (new URL, brief
+  downtime, no rollback).
 - **Cache volumes** (shared by every amicu deployment in the Modal workspace):
   `amicu-hf-cache` at `/root/.cache/huggingface` and `amicu-vllm-cache` at
   `/root/.cache/vllm` (vLLM); `amicu-llamacpp-cache` at `/root/.cache/llama.cpp`
@@ -187,7 +194,7 @@ resource "deployment" "qwen35_modal" {
 }
 ```
 
-App name: `amicu-qwen35-modal`. Local-file flags (`--mmproj`, `--lora`,
+App name: recorded in state (`amicu-<project>-qwen35-modal-<digest>`). Local-file flags (`--mmproj`, `--lora`,
 `--chat-template-file`, a `speculative {}` draft model) and secret-bearing
 flags (`--hf-token`, `--api-key`; use the `api_key` attribute) are rejected
 before any Modal call.
