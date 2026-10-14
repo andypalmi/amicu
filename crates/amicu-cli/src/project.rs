@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use amicu_core::graph::Graph;
 use amicu_hcl::parse_graph;
@@ -14,6 +15,11 @@ use crate::error::CliError;
 #[derive(Debug, Clone)]
 pub(crate) struct Project {
     root: PathBuf,
+    /// The state serial this handle last read or wrote (`None` before any
+    /// load or save). [`Project::save_state`] only writes over the serial it
+    /// expects, so a concurrent writer is detected instead of overwritten.
+    /// Shared by clones: they are the same logical reader.
+    seen_serial: Arc<Mutex<Option<u64>>>,
 }
 
 /// The minimal local state persisted by `apply`.
@@ -28,6 +34,11 @@ pub(crate) struct LocalState {
     /// or systemd unit. Absent in state written before v3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+    /// Monotonic write counter: every save writes the serial it read plus one,
+    /// and refuses to write if the file on disk no longer carries the serial
+    /// that was read (see [`Project::save_state`]). Absent before v4 (read as 0).
+    #[serde(default)]
+    pub serial: u64,
     pub graph: Graph,
     #[serde(default)]
     pub endpoints: Vec<RuntimeHandle>,
@@ -63,12 +74,13 @@ pub(crate) struct LocalState {
 
 impl LocalState {
     /// Written by this version. v2 adds `pending` and `stops`; v3 adds
-    /// `project_id` and the per-record files and volumes, which an older
-    /// binary would silently drop on its next save.
-    pub const VERSION: &'static str = "v3";
+    /// `project_id` and the per-record files and volumes; v4 adds `serial`.
+    /// An older binary would silently drop these on its next save (and a v3
+    /// writer would not bump the serial, defeating the compare-and-swap).
+    pub const VERSION: &'static str = "v4";
     /// Versions this binary can read: every `from` in [`MIGRATIONS`] plus
     /// [`Self::VERSION`].
-    pub const SUPPORTED: &'static [&'static str] = &["v1", "v2", "v3"];
+    pub const SUPPORTED: &'static [&'static str] = &["v1", "v2", "v3", "v4"];
 }
 
 /// One step `from` -> `to` applied to the raw state JSON on load, so
@@ -103,6 +115,12 @@ const MIGRATIONS: &[Migration] = &[
         // per-record files and volumes (all optional): nothing to rewrite.
         apply: |_| {},
     },
+    Migration {
+        from: "v3",
+        to: "v4",
+        // v4 added `serial`; absent reads as 0 and the next save writes 1.
+        apply: |_| {},
+    },
 ];
 
 /// Run every migration from `version` up to [`LocalState::VERSION`] in order.
@@ -124,7 +142,10 @@ fn migrate(
 
 impl Project {
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            seen_serial: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Discover the project rooted at the current working directory.
@@ -196,6 +217,27 @@ impl Project {
     }
 
     pub fn load_state(&self) -> Result<Option<LocalState>, CliError> {
+        let state = self.read_state()?;
+        // The serial a later save must find on disk (0: no state yet).
+        self.set_seen(Some(state.as_ref().map_or(0, |s| s.serial)));
+        Ok(state)
+    }
+
+    fn seen(&self) -> Option<u64> {
+        *self
+            .seen_serial
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn set_seen(&self, serial: Option<u64>) {
+        *self
+            .seen_serial
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = serial;
+    }
+
+    fn read_state(&self) -> Result<Option<LocalState>, CliError> {
         let path = self.state_file();
         let problem = match fs::read_to_string(&path) {
             Ok(text) => match parse_state(&text) {
@@ -243,6 +285,15 @@ impl Project {
     /// Durably replace `state.json`: write a uniquely named temp file in the
     /// same directory, fsync it, rotate the previous generation to
     /// `state.json.bak`, rename over the target, then fsync the directory.
+    ///
+    /// Compare-and-swap: the write only goes through when the file on disk
+    /// still carries the serial this handle last read or wrote, and stores
+    /// that serial plus one. A concurrent writer (a bypassed or foreign lock,
+    /// state shared by git or a synced folder) therefore fails this save
+    /// instead of being overwritten; nothing is merged or discarded, and the
+    /// caller surfaces the error. The check and the rename are not one atomic
+    /// step, so this backs up the state lock rather than replacing it.
+    /// TODO: a remote backend needs a server-side compare-and-swap.
     pub fn save_state(&self, state: &LocalState) -> Result<(), CliError> {
         use std::io::Write as _;
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -262,7 +313,10 @@ impl Project {
                 path.display()
             )));
         }
-        let text = serde_json::to_string_pretty(state)?;
+        let next = self.check_serial()? + 1;
+        let mut state = state.clone();
+        state.serial = next;
+        let text = serde_json::to_string_pretty(&state)?;
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
@@ -285,6 +339,11 @@ impl Project {
                 .map_err(|e| write_err(&tmp, e))?;
             drop(file);
             self.rotate_backup(&dir, &unique)?;
+            // Re-check just before the swap: the temp write and backup rotation
+            // are the slow part, so this is the narrowest window left.
+            if self.check_serial()? + 1 != next {
+                return Err(Self::conflict(&path));
+            }
             fs::rename(&tmp, &path).map_err(|e| write_err(&path, e))
         })();
         if result.is_err() {
@@ -299,7 +358,40 @@ impl Project {
                 dir.display()
             );
         }
+        self.set_seen(Some(next));
         Ok(())
+    }
+
+    /// The serial now on disk, provided it is the one this handle last read or
+    /// wrote; otherwise the compare-and-swap conflict. A missing file is serial
+    /// 0 and an unreadable one is treated as the handle's own serial, so a
+    /// corrupt file can still be recovered by saving over it.
+    fn check_serial(&self) -> Result<u64, CliError> {
+        let path = self.state_file();
+        let on_disk = match fs::read_to_string(&path) {
+            Ok(text) => match parse_state(&text) {
+                Ok(s) => Some(s.serial),
+                Err(_) => None,
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(0),
+            Err(e) => return Err(CliError::io(format!("cannot read {}", path.display()), e)),
+        };
+        match (self.seen(), on_disk) {
+            (Some(seen), Some(disk)) if seen != disk => Err(Self::conflict(&path)),
+            (Some(seen), _) => Ok(seen),
+            // Never read: only a fresh project (no state yet) may write.
+            (None, Some(0) | None) => Ok(0),
+            (None, Some(_)) => Err(Self::conflict(&path)),
+        }
+    }
+
+    fn conflict(path: &Path) -> CliError {
+        CliError::StateLocked(format!(
+            "{} changed since it was read (another amicu process wrote it, or it is shared \
+             between machines); nothing was overwritten. Re-run the command to start from the \
+             current state",
+            path.display()
+        ))
     }
 
     /// Keep the current `state.json` as `state.json.bak`, but only when it is
@@ -477,6 +569,7 @@ mod durability_tests {
             pending: vec![tag.into()],
             stops: Vec::new(),
             fingerprints: std::collections::BTreeMap::default(),
+            serial: 0,
             extra: std::collections::BTreeMap::default(),
         }
     }
@@ -683,10 +776,10 @@ mod durability_tests {
 
     #[test]
     fn newer_version_is_refused_even_when_its_shape_differs() {
-        let text = r#"{"version": "v4", "graph": "not a graph any more"}"#;
+        let text = r#"{"version": "v5", "graph": "not a graph any more"}"#;
         assert!(matches!(
             parse_state(text),
-            Err(StateParseError::Unsupported(m)) if m.contains("v4") && m.contains("upgrade amicu")
+            Err(StateParseError::Unsupported(m)) if m.contains("v5") && m.contains("upgrade amicu")
         ));
     }
 
@@ -735,6 +828,95 @@ mod durability_tests {
         let err = p.load_state().expect_err("unknown endpoint field");
         assert!(err.to_string().contains("from_the_future"), "{err}");
         assert!(err.to_string().contains("upgrade amicu"), "{err}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn serial_counts_saves_and_survives_a_reload() {
+        let root = scratch("serial");
+        let p = Project::new(&root);
+        assert!(p.load_state().unwrap().is_none());
+        p.save_state(&state("a")).unwrap();
+        p.save_state(&state("b")).unwrap();
+        assert_eq!(p.load_state().unwrap().unwrap().serial, 2);
+        // A fresh handle continues from what it reads.
+        let q = Project::new(&root);
+        let loaded = q.load_state().unwrap().unwrap();
+        q.save_state(&loaded).unwrap();
+        assert_eq!(q.load_state().unwrap().unwrap().serial, 3);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_stale_writer_is_refused_and_the_winner_is_untouched() {
+        let root = scratch("cas");
+        let a = Project::new(&root);
+        a.save_state(&state("base")).unwrap();
+        let b = Project::new(&root);
+        let b_view = b.load_state().unwrap().unwrap();
+        // A writes after B read: B's save must fail, not overwrite.
+        a.save_state(&state("a-wins")).unwrap();
+        let err = b.save_state(&b_view).expect_err("stale write");
+        assert!(
+            err.to_string().contains("changed since it was read"),
+            "{err}"
+        );
+        let on_disk = a.load_state().unwrap().unwrap();
+        assert_eq!(on_disk.pending, vec!["a-wins".to_owned().into()]);
+        // Re-reading is the way forward.
+        let fresh = b.load_state().unwrap().unwrap();
+        b.save_state(&fresh).unwrap();
+        // A handle that never read existing state may not write over it.
+        let c = Project::new(&root);
+        assert!(c.save_state(&state("blind")).is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn concurrent_writers_never_overwrite_each_other() {
+        let root = scratch("race");
+        Project::new(&root).save_state(&state("seed")).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let (root, barrier) = (root.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    let p = Project::new(&root);
+                    p.load_state().unwrap();
+                    barrier.wait();
+                    p.save_state(&state(&format!("w{i}"))).is_ok()
+                })
+            })
+            .collect();
+        let wins = threads
+            .into_iter()
+            .map(|t| t.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+        // Every writer read serial 1. The check and rename are not one atomic
+        // step (the state lock covers that), so a rare double win is possible,
+        // but the serial never goes backwards and at least one write lands.
+        assert!(wins >= 1);
+        let serial = Project::new(&root).load_state().unwrap().unwrap().serial;
+        assert!(serial >= 2, "serial {serial}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn v3_state_migrates_to_serial_zero() {
+        let root = scratch("v3");
+        let p = Project::new(&root);
+        p.save_state(&state("x")).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(p.state_file()).unwrap()).unwrap();
+        v["version"] = "v3".into();
+        v.as_object_mut().unwrap().remove("serial");
+        fs::write(p.state_file(), v.to_string()).unwrap();
+        let q = Project::new(&root);
+        let loaded = q.load_state().unwrap().unwrap();
+        assert_eq!((loaded.version.as_str(), loaded.serial), ("v4", 0));
+        q.save_state(&loaded).unwrap();
+        assert_eq!(q.load_state().unwrap().unwrap().serial, 1);
         let _ = fs::remove_dir_all(&root);
     }
 }

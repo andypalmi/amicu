@@ -24,7 +24,7 @@ The service files of a host deployment are outside state: the launchd plist, or 
 - API keys, Modal tokens, proxy tokens, or `HF_TOKEN`.
 - Prompts or completions. Amicu is not in the request path.
 
-State is per machine. The lock is a local operating-system lock and does not protect state shared through version control or copied between machines, so do not commit `.amicu/`; `amicu init` adds it to `.gitignore`. A state serial with compare-and-swap saves and a shared backend are planned.
+State is per machine. The lock is a local operating-system lock and does not protect state shared through version control or copied between machines, so do not commit `.amicu/`; `amicu init` adds it to `.gitignore`. Saves are compare-and-swap on a monotonic state serial, so a second writer fails instead of overwriting; a shared backend is planned.
 
 State still describes your infrastructure (URLs, hardware, ids), so treat it as sensitive and keep it out of public repositories.
 

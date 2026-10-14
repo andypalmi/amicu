@@ -357,9 +357,23 @@ pub(crate) fn execute(
         fingerprints: final_fingerprints(prior_state, &graph, &progress, result),
         graph,
         endpoints,
+        serial: prior_state.map_or(0, |s| s.serial),
         extra: prior_state.map(|s| s.extra.clone()).unwrap_or_default(),
     };
-    project.save_state(&state)?;
+    if let Err(save_err) = project.save_state(&state) {
+        // Everything above is already running: never lose track of it. State
+        // on disk is untouched (or was written ahead), so name what to stop.
+        let running: Vec<String> = state.stops.iter().map(StopRecord::describe).collect();
+        return Err(CliError::Message(format!(
+            "the run finished but recording it in state FAILED: {save_err}. These instances \
+             may be running untracked; stop each by hand: {}",
+            if running.is_empty() {
+                "(none recorded)".to_owned()
+            } else {
+                running.join("; ")
+            }
+        )));
+    }
 
     Ok((handles, state))
 }
@@ -471,6 +485,7 @@ fn recorded_state(prior: Option<&LocalState>, graph: &Graph, progress: &Progress
         stops: progress.stops.clone(),
         fingerprints: merged_fingerprints(prior, &partial, progress),
         graph: partial,
+        serial: prior.map_or(0, |s| s.serial),
         extra: prior.map(|s| s.extra.clone()).unwrap_or_default(),
     }
 }
@@ -2027,6 +2042,7 @@ resource "deployment" "beta" {
             pending: Vec::new(),
             stops: Vec::new(),
             fingerprints: std::collections::BTreeMap::default(),
+            serial: 0,
             extra: std::collections::BTreeMap::default(),
             graph: prior_graph.clone(),
             endpoints: vec![
@@ -2558,6 +2574,7 @@ mod stop_invariant_tests {
             pending: Vec::new(),
             stops: Vec::new(),
             fingerprints: std::collections::BTreeMap::default(),
+            serial: 0,
             extra: std::collections::BTreeMap::default(),
         }
     }
@@ -2905,6 +2922,7 @@ mod partial_state_tests {
                 .collect(),
             pending: ids(pending),
             stops: Vec::new(),
+            serial: 0,
             extra: std::collections::BTreeMap::default(),
             graph: g,
         }
