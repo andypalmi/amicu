@@ -985,6 +985,9 @@ impl amicu_llamacpp::ProcessSupervisor for FakeHost {
     fn instance_owner(&self, _label: &str) -> Option<u32> {
         self.owner
     }
+    fn boot_hint(&self) -> Option<String> {
+        Some("note: fake lingering hint".to_owned())
+    }
 }
 
 /// A scripted Modal: which workspace the token is for, which apps exist by
@@ -1969,6 +1972,7 @@ fn scoped_rec(project_id: &str, name: &str, home: &std::path::Path) -> StopRecor
             } else {
                 Vec::new()
             },
+            env: None,
         }),
     )
 }
@@ -2068,6 +2072,50 @@ fn systemd_env_files_are_validated_in_the_env_dir_only() {
     assert!(check(format!("/home/me/{label}.env")).is_err());
     assert!(check("/run/user/501/amicu/secrets.env".into()).is_err());
     assert!(check(format!("/run/user/501/amicu/../{label}.env")).is_err());
+    // Persistent user units: the unit file in the systemd user dir only.
+    assert!(check(format!("/home/me/.config/systemd/user/{label}.service")).is_ok());
+    assert!(check(format!("/home/me/.config/systemd/user/{label}.env")).is_err());
+    assert!(check(format!("/home/me/{label}.service")).is_err());
+    assert!(check("/home/me/.config/systemd/user/sshd.service".into()).is_err());
+    assert!(check(format!("/etc/systemd/system/{label}.service")).is_err());
+    assert!(check(format!("/home/me/.config/systemd/user/../{label}.service")).is_err());
+    // Not just any `systemd/user` directory.
+    assert!(check(format!("/tmp/systemd/user/{label}.service")).is_err());
+}
+
+#[test]
+fn the_recorded_systemd_secrets_file_is_validated_before_anything_is_deleted() {
+    let mut rec = StopRecord::host_in(
+        "aaaa1111",
+        &"chat".into(),
+        Some(&amicu_llamacpp::HostContext {
+            backend: amicu_llamacpp::HostBackend::Systemd,
+            uid: 501,
+            domain: None,
+        }),
+        Some(amicu_llamacpp::ServicePaths {
+            definition: "/home/me/.config/systemd/user/x.service".into(),
+            logs: Vec::new(),
+            env: Some("/home/me/.local/state/amicu/env/x.env".into()),
+        }),
+    );
+    // The env path is written ahead with the unit path.
+    assert_eq!(
+        rec.env_file.as_deref(),
+        Some("/home/me/.local/state/amicu/env/x.env")
+    );
+    let label = rec.identity.clone();
+    let mut check = |d: String| {
+        rec.env_file = Some(d);
+        rec.env_path()
+    };
+    assert!(check(format!("/home/me/.local/state/amicu/env/{label}.env")).is_ok());
+    assert!(check("/home/me/.local/state/amicu/env/other.env".to_owned()).is_err());
+    assert!(check(format!("/home/me/.ssh/{label}.env")).is_err());
+    assert!(check(format!("/home/me/.local/state/amicu/env/../{label}.env")).is_err());
+    assert!(check(format!("relative/{label}.env")).is_err());
+    rec.env_file = None;
+    assert_eq!(rec.env_path(), Ok(None));
 }
 
 #[test]
@@ -2326,6 +2374,30 @@ fn apply_restarts_a_dead_host_service_and_clears_pending() {
     let after = project.load_state().unwrap().unwrap();
     assert_eq!(after.pending.len(), 0);
     assert_eq!(after.stops.len(), 1, "stop identity kept");
+}
+
+#[test]
+fn apply_prints_the_boot_hint_for_a_host_deployment_in_human_output_only() {
+    for (output, shown) in [(OutputFormat::Human, true), (OutputFormat::Json, false)] {
+        let td = TempDir::new();
+        write(&td.path, "amicu.hcl", VALID_CONFIG);
+        let project = saved(&td, &running_host_state());
+        let mut rig = Rig::new();
+        rig.modal.host_down = vec!["support_local".to_owned()];
+        let mut out = Vec::new();
+        let code = commands::apply::run_with(
+            &project,
+            true,
+            None,
+            output,
+            &mut out,
+            &mut std::io::Cursor::new(Vec::new()),
+            &rig.env(),
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(utf8(out).contains("fake lingering hint"), shown);
+    }
 }
 
 #[test]

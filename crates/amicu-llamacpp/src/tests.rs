@@ -137,6 +137,45 @@ fn fitting_adapter() -> LlamaCppAdapter {
     LlamaCppAdapter::new(Box::new(catalog), Box::new(FakeSupervisor::default()))
 }
 
+/// A single NVIDIA card (RTX 3060 Ti class) in a desktop with `sys_gib` of RAM.
+fn nvidia_gpu(vram_gib: u64, sys_gib: u64) -> HardwareProfile {
+    HardwareProfile {
+        id: HardwareProfileId::new("rtx3060ti"),
+        provider: "local".into(),
+        region: None,
+        accelerator: Some(Accelerator {
+            kind: AcceleratorKind::Gpu,
+            model: "rtx_3060_ti".into(),
+            count: 1,
+            memory: ByteSize::from_bytes(vram_gib * GIB),
+            memory_bandwidth_gbps: None,
+        }),
+        cpu: None,
+        memory: ByteSize::from_bytes(sys_gib * GIB),
+        interconnect: None,
+        price: None,
+    }
+}
+
+/// `deployment()` pointed at the `nvidia_gpu` profile.
+fn nvidia_deployment() -> Deployment {
+    let mut d = deployment();
+    d.hardware_profile = HardwareProfileId::new("rtx3060ti");
+    d
+}
+
+/// Adapter for an 8 GiB NVIDIA card with 48 GiB of RAM and one GGUF variant of
+/// `variant_bytes` on disk.
+fn nvidia_adapter(variant_bytes: u64, params: u64) -> LlamaCppAdapter {
+    let catalog = MapCatalog::new()
+        .with_model(
+            gguf_model(&[(Quantization::Q4KM, "m.Q4_K_M.gguf", variant_bytes)]),
+            params,
+        )
+        .with_hardware(nvidia_gpu(8, 48));
+    LlamaCppAdapter::new(Box::new(catalog), Box::new(FakeSupervisor::default()))
+}
+
 // ---- fake binary runner -----------------------------------------------------
 
 struct FakeRunner {
@@ -374,6 +413,7 @@ fn capabilities_reflect_llama_cpp() {
     assert_eq!(caps.artifact_formats, vec![ArtifactFormat::Gguf]);
     assert!(caps.platforms.contains(&Platform::Cpu));
     assert!(caps.platforms.contains(&Platform::Metal));
+    assert!(caps.platforms.contains(&Platform::Cuda));
     assert!(!caps.parallelism.tensor);
     assert_eq!(caps.parallelism.max_gpus, 1);
     assert!(caps.lora);
@@ -2095,10 +2135,10 @@ fn launchd_release_removes_by_label_even_without_a_plist() {
 }
 
 #[test]
-fn systemd_release_stops_a_previous_unit_with_the_same_name_before_systemd_run() {
+fn systemd_release_stops_a_previous_unit_with_the_same_name_before_rewriting_it() {
     let dir = TempDir::new("systemd-update");
     let exec = std::sync::Arc::new(FakeExec::new(true, ""));
-    let manager = SystemdManager::new(exec.clone(), &dir.0);
+    let manager = SystemdManager::new(exec.clone(), &dir.0, &dir.0);
     manager.release("io.amicu.llama.support_chat_local");
     manager.start(&service_spec()).expect("start");
 
@@ -2112,7 +2152,8 @@ fn systemd_release_stops_a_previous_unit_with_the_same_name_before_systemd_run()
             "io.amicu.llama.support_chat_local"
         ]
     );
-    assert_eq!(calls[1][0], "systemd-run");
+    assert_eq!(calls[1], ["systemctl", "--user", "daemon-reload"]);
+    assert_eq!(calls[2][..3], ["systemctl", "--user", "enable"]);
 }
 
 #[tokio::test]
@@ -2418,64 +2459,192 @@ fn launchd_state_maps_pid_exit_and_missing() {
     let gone = LaunchdManager::new(FakeExec::new(false, ""), "/a", "/l");
     assert_eq!(gone.state("x").unwrap(), ServiceState::Inactive);
 }
+/// A manager over `exec` with separate unit and env directories under `dir`.
+fn systemd_manager<E: CommandExec>(exec: E, dir: &TempDir) -> SystemdManager<E> {
+    SystemdManager::new(exec, dir.file("units"), dir.file("env"))
+}
+
+fn dir_entries(dir: &Path) -> usize {
+    fs::read_dir(dir).map_or(0, Iterator::count)
+}
 
 #[test]
-fn systemd_start_passes_env_via_0600_environment_file_not_argv() {
+fn systemd_start_writes_a_persistent_enabled_unit_with_a_0600_env_file() {
     use std::os::unix::fs::PermissionsExt;
     let dir = TempDir::new("systemd-env");
     let exec = std::sync::Arc::new(FakeExec::new(true, ""));
     let mut spec = service_spec();
     spec.env = vec![("api_key".into(), "s3\"cr\\et".into())];
-    let manager = SystemdManager::new(exec.clone(), &dir.0);
+    let manager = systemd_manager(exec.clone(), &dir);
     manager.start(&spec).expect("start");
-    let call = exec.last();
-    assert_eq!(call[0], "systemd-run");
-    assert!(call.contains(&"--user".to_owned()));
-    assert!(call.contains(&"--unit=io.amicu.llama.support_chat_local".to_owned()));
-    // The secret never reaches argv.
-    assert!(
-        !call
-            .iter()
-            .any(|a| a.contains("s3") || a.contains("--setenv"))
-    );
-    let file = &dir.0.join("io.amicu.llama.support_chat_local.env");
-    assert!(call.contains(&format!("--property=EnvironmentFile={}", file.display())));
+
+    // Persistent, not transient: reload, then enable + start in one step.
+    let calls = exec.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert_eq!(calls[0], ["systemctl", "--user", "daemon-reload"]);
     assert_eq!(
-        std::fs::read_to_string(file.as_path()).unwrap(),
+        calls[1],
+        [
+            "systemctl",
+            "--user",
+            "enable",
+            "--now",
+            "io.amicu.llama.support_chat_local.service"
+        ]
+    );
+    // The secret never reaches any argv.
+    assert!(calls.iter().flatten().all(|a| !a.contains("s3")));
+
+    let unit = dir.file("units/io.amicu.llama.support_chat_local.service");
+    let env = dir.file("env/io.amicu.llama.support_chat_local.env");
+    let body = fs::read_to_string(&unit).unwrap();
+    assert!(
+        body.contains(
+            "ExecStart=\"llama-server\" \"-m\" \"/models/tiny.gguf\" \"--port\" \"8080\"\n"
+        ),
+        "{body}"
+    );
+    assert!(body.contains("Restart=on-failure\n"), "{body}");
+    assert!(body.contains("WantedBy=default.target\n"), "{body}");
+    assert!(
+        body.contains(&format!("EnvironmentFile={}\n", env.display())),
+        "{body}"
+    );
+    // Secrets live only in the 0600 env file, never in the unit.
+    assert!(!body.contains("s3"), "{body}");
+    assert_eq!(
+        fs::read_to_string(&env).unwrap(),
         "api_key=\"s3\\\"cr\\\\et\"\n"
     );
     assert_eq!(
-        std::fs::metadata(file.as_path())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
+        fs::metadata(&env).unwrap().permissions().mode() & 0o777,
         0o600
     );
-    // The argv follows the options, program first.
-    let prog = call
-        .iter()
-        .position(|a| a == "llama-server")
-        .expect("program");
-    assert!(call[prog..].contains(&"/models/tiny.gguf".to_owned()));
-    // Stop removes the env file.
-    manager
-        .stop("io.amicu.llama.support_chat_local")
-        .expect("stop");
-    assert!(!file.exists());
+    // The recorded definition is the unit file.
+    assert_eq!(manager.paths(&spec.label).unwrap().definition, unit);
+
+    // Stop disables + stops it, then removes both files.
+    manager.stop(&spec.label).expect("stop");
+    assert!(!unit.exists() && !env.exists());
+    let calls = exec.calls.lock().unwrap().clone();
+    assert!(
+        calls.contains(&vec![
+            "systemctl".to_owned(),
+            "--user".to_owned(),
+            "disable".to_owned(),
+            "--now".to_owned(),
+            "io.amicu.llama.support_chat_local.service".to_owned()
+        ]),
+        "{calls:?}"
+    );
 }
 
 #[test]
-fn systemd_start_failure_removes_the_env_file() {
+fn systemd_unit_without_env_has_no_environment_file_and_escapes_exec_words() {
+    let dir = TempDir::new("systemd-noenv");
+    let mut spec = service_spec();
+    spec.argv.push("a $b %h \"q\" \\".into());
+    let manager = systemd_manager(FakeExec::new(true, ""), &dir);
+    manager.start(&spec).expect("start");
+    let body =
+        fs::read_to_string(dir.file("units/io.amicu.llama.support_chat_local.service")).unwrap();
+    assert!(!body.contains("EnvironmentFile"), "{body}");
+    assert!(body.contains(r#""a $$b %%h \"q\" \\""#), "{body}");
+    assert_eq!(dir_entries(&dir.file("env")), 0);
+}
+
+#[test]
+fn systemd_start_failure_removes_the_unit_and_the_env_file() {
     let dir = TempDir::new("systemd-env");
     let mut spec = service_spec();
     spec.env = vec![("api_key".into(), "v".into())];
-    let manager = SystemdManager::new(FakeExec::new(false, ""), &dir.0);
+    // Everything fails but systemd confirms the unit does not exist.
+    let manager = systemd_manager(
+        StopFailsExec {
+            load_state: "not-found\n",
+        },
+        &dir,
+    );
     assert!(manager.start(&spec).is_err());
-    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+    assert_eq!(dir_entries(&dir.file("units")), 0);
+    assert_eq!(dir_entries(&dir.file("env")), 0);
 }
 
-/// systemctl stand-in: `stop` fails; `show -p LoadState` answers `load_state`.
+#[test]
+fn systemd_start_failure_keeps_the_files_when_the_unit_may_still_be_loaded() {
+    let dir = TempDir::new("systemd-abandon");
+    let mut spec = service_spec();
+    spec.env = vec![("api_key".into(), "v".into())];
+    let manager = systemd_manager(
+        StopFailsExec {
+            load_state: "loaded\n",
+        },
+        &dir,
+    );
+    let err = manager.start(&spec).expect_err("start fails").to_string();
+    assert!(err.contains("may still be loaded"), "{err}");
+    assert_eq!(dir_entries(&dir.file("units")), 1);
+    assert_eq!(dir_entries(&dir.file("env")), 1);
+}
+
+/// A stop that succeeds, but where the secrets file cannot be deleted (it is a
+/// non-empty directory): the unit file and so the record must stay.
+#[test]
+fn systemd_env_delete_failure_keeps_the_unit_file_and_errors() {
+    let dir = TempDir::new("systemd-envfail");
+    let spec = service_spec();
+    let manager = systemd_manager(FakeExec::new(true, ""), &dir);
+    manager.start(&spec).expect("start");
+    let env = dir.file("env").join(format!("{}.env", spec.label));
+    fs::create_dir_all(env.join("blocker")).unwrap();
+    let err = manager.stop(&spec.label).expect_err("env not deletable");
+    assert!(err.to_string().contains("remove"), "{err}");
+    assert!(manager.paths(&spec.label).unwrap().definition.exists());
+}
+
+#[test]
+fn systemd_stop_deletes_the_recorded_env_path_and_the_one_the_unit_names() {
+    let dir = TempDir::new("systemd-recorded-env");
+    let mut spec = service_spec();
+    spec.env = vec![("k".into(), "v".into())];
+    let manager = systemd_manager(FakeExec::new(true, ""), &dir);
+    manager.start(&spec).expect("start");
+    let paths = manager.paths(&spec.label).unwrap();
+    let env = paths.env.clone().expect("env path recorded");
+    assert_eq!(env, dir.file("env").join(format!("{}.env", spec.label)));
+    // A manager rooted elsewhere (HOME changed since the start) still deletes
+    // the recorded file, and the unit's own `EnvironmentFile=`.
+    let elsewhere = TempDir::new("systemd-elsewhere");
+    let other = systemd_manager(FakeExec::new(true, ""), &elsewhere);
+    other
+        .stop_recorded_with_env(&spec.label, Some(&paths.definition), Some(&env))
+        .expect("stop");
+    assert!(!env.exists() && !paths.definition.exists());
+
+    // Without a recorded env path, the unit file names it.
+    manager.start(&spec).expect("restart");
+    other
+        .stop_recorded_with_env(&spec.label, Some(&paths.definition), None)
+        .expect("stop");
+    assert!(!env.exists() && !paths.definition.exists());
+}
+
+#[test]
+fn systemd_stop_of_a_legacy_record_removes_the_tmpfs_env_file_too() {
+    let dir = TempDir::new("systemd-legacy-run");
+    let run = TempDir::new("systemd-legacy-xdg");
+    let leftover = run.file("amicu/io.amicu.llama.x.env");
+    fs::create_dir_all(run.file("amicu")).unwrap();
+    fs::write(&leftover, "k=\"v\"\n").unwrap();
+    systemd_manager(TransientExec(Mutex::new(Vec::new())), &dir)
+        .with_legacy_env_dir(run.file("amicu"))
+        .stop_recorded("io.amicu.llama.x", None)
+        .expect("stopped");
+    assert!(!leftover.exists());
+}
+
+/// systemctl stand-in: `disable` and `stop` fail; `show -p LoadState` answers
+/// `load_state`.
 struct StopFailsExec {
     load_state: &'static str,
 }
@@ -2500,33 +2669,96 @@ impl CommandExec for StopFailsExec {
 #[test]
 fn systemd_stop_failure_is_confirmed_only_by_load_state_not_stderr() {
     let dir = TempDir::new("systemd-loadstate");
-    let gone = SystemdManager::new(
+    let gone = systemd_manager(
         StopFailsExec {
             load_state: "not-found\n",
         },
-        &dir.0,
+        &dir,
     );
     gone.stop("io.amicu.llama.x").expect("unit does not exist");
-    let loaded = SystemdManager::new(
+    let loaded = systemd_manager(
         StopFailsExec {
             load_state: "loaded\n",
         },
-        &dir.0,
+        &dir,
     );
     assert!(loaded.stop("io.amicu.llama.x").is_err());
 }
 
 #[test]
-fn systemd_stop_removes_the_env_file_even_when_stop_fails() {
+fn systemd_unconfirmed_stop_keeps_the_unit_and_env_files() {
+    // No orphans: while the unit may still be running (and restarting), its
+    // definition stays so amicu can still find and stop it.
     let dir = TempDir::new("systemd-stop");
     let mut spec = service_spec();
     spec.env = vec![("api_key".into(), "v".into())];
-    SystemdManager::new(FakeExec::new(true, ""), &dir.0)
+    systemd_manager(FakeExec::new(true, ""), &dir)
         .start(&spec)
         .expect("start");
-    let manager = SystemdManager::new(FakeExec::new(false, ""), &dir.0);
+    let manager = systemd_manager(FakeExec::new(false, ""), &dir);
     assert!(manager.stop(&spec.label).is_err());
-    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+    assert_eq!(dir_entries(&dir.file("units")), 1);
+    assert_eq!(dir_entries(&dir.file("env")), 1);
+}
+
+/// systemctl stand-in where `disable` fails (a transient unit cannot be
+/// disabled) but `stop` succeeds.
+struct TransientExec(Mutex<Vec<String>>);
+
+impl CommandExec for TransientExec {
+    fn exec(&self, _: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        self.0.lock().unwrap().push(args.join(" "));
+        let ok = !args.contains(&"disable");
+        Ok(ExecOutput {
+            success: ok,
+            stdout: String::new(),
+            stderr: String::new(),
+            code: Some(i32::from(!ok)),
+        })
+    }
+}
+
+#[test]
+fn systemd_stop_falls_back_to_a_plain_stop_for_a_legacy_transient_unit() {
+    let dir = TempDir::new("systemd-legacy");
+    let exec = std::sync::Arc::new(TransientExec(Mutex::new(Vec::new())));
+    let manager = systemd_manager(exec.clone(), &dir);
+    // A legacy record names the (tmpfs-era) env file as its definition.
+    let legacy_env = dir.file("env/io.amicu.llama.x.env");
+    fs::create_dir_all(dir.file("env")).unwrap();
+    fs::write(&legacy_env, "k=\"v\"\n").unwrap();
+    manager
+        .stop_recorded("io.amicu.llama.x", Some(&legacy_env))
+        .expect("stopped");
+    let calls = exec.0.lock().unwrap().clone();
+    assert!(calls.iter().any(|c| c == "--user stop io.amicu.llama.x"));
+    assert!(!legacy_env.exists());
+}
+
+#[test]
+fn systemd_stop_removes_the_recorded_unit_file_after_a_confirmed_stop() {
+    let dir = TempDir::new("systemd-recorded");
+    let manager = systemd_manager(FakeExec::new(true, ""), &dir);
+    let spec = service_spec();
+    manager.start(&spec).expect("start");
+    let unit = manager.paths(&spec.label).unwrap().definition;
+    assert!(unit.exists());
+    manager
+        .stop_recorded(&spec.label, Some(&unit))
+        .expect("stop");
+    assert!(!unit.exists());
+}
+
+#[test]
+fn systemd_refuses_a_label_that_is_not_one_plain_name() {
+    let dir = TempDir::new("systemd-label");
+    let manager = systemd_manager(FakeExec::new(true, ""), &dir);
+    for bad in ["../evil", "a/b", "", ".hidden", "a b"] {
+        assert!(manager.stop(bad).is_err(), "{bad:?}");
+        let mut spec = service_spec();
+        spec.label = bad.to_owned();
+        assert!(manager.start(&spec).is_err(), "{bad:?}");
+    }
 }
 
 #[test]
@@ -2535,58 +2767,91 @@ fn systemd_env_file_replaces_preexisting_files_and_symlinks() {
     let dir = TempDir::new("systemd-replace");
     let mut spec = service_spec();
     spec.env = vec![("k".into(), "line1\nline2".into())];
-    let file = dir.0.join(format!("{}.env", spec.label));
+    let file = dir.file("env").join(format!("{}.env", spec.label));
+    fs::create_dir_all(dir.file("env")).unwrap();
     // A pre-existing world-readable file is not reused.
-    std::fs::write(&file, "old").unwrap();
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-    let manager = SystemdManager::new(FakeExec::new(true, ""), &dir.0);
+    fs::write(&file, "old").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    let manager = systemd_manager(FakeExec::new(true, ""), &dir);
     manager.start(&spec).expect("start");
     assert_eq!(
-        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        fs::metadata(&file).unwrap().permissions().mode() & 0o777,
         0o600
     );
     // A planted symlink is replaced, not followed.
     let target = dir.file("target");
-    std::fs::write(&target, "untouched").unwrap();
-    std::fs::remove_file(&file).unwrap();
+    fs::write(&target, "untouched").unwrap();
+    fs::remove_file(&file).unwrap();
     std::os::unix::fs::symlink(&target, &file).unwrap();
     manager.start(&spec).expect("start");
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "untouched");
+    assert_eq!(fs::read_to_string(&target).unwrap(), "untouched");
     // Multi-line values are written raw inside the quotes.
-    assert_eq!(
-        std::fs::read_to_string(&file).unwrap(),
-        "k=\"line1\nline2\"\n"
-    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), "k=\"line1\nline2\"\n");
 }
 
 #[test]
 fn systemd_refuses_to_write_secrets_without_an_absolute_dir() {
     let mut spec = service_spec();
     spec.env = vec![("k".into(), "v".into())];
-    let err = SystemdManager::new(FakeExec::new(true, ""), "")
+    let err = SystemdManager::new(FakeExec::new(true, ""), "", "")
         .start(&spec)
         .expect_err("no dir");
     assert!(err.to_string().contains("HOME"));
 }
 
 #[test]
+fn systemd_boot_hint_only_when_lingering_is_off() {
+    let hint = |success: bool, stdout: &str| {
+        SystemdManager::new(FakeExec::new(success, stdout), "/u", "/e").boot_hint()
+    };
+    let text = hint(true, "Linger=no\n").expect("hint when linger is off");
+    assert!(text.contains("enable-linger"), "{text}");
+    assert_eq!(hint(true, "Linger=yes\n"), None);
+    // Unreadable (no logind, no session): no hint, never an error.
+    assert_eq!(hint(false, ""), None);
+    assert_eq!(hint(true, "garbage"), None);
+}
+
+#[test]
+fn systemd_boot_hint_reads_linger_read_only_for_the_current_uid() {
+    let exec = std::sync::Arc::new(FakeExec::new(true, "Linger=no\n"));
+    let _ = SystemdManager::new(exec.clone(), "/u", "/e").boot_hint();
+    assert_eq!(
+        exec.last(),
+        ["loginctl", "show-user", "501", "-p", "Linger"]
+    );
+}
+
+#[test]
 fn systemd_state_maps_is_active_output() {
     assert_eq!(
-        SystemdManager::new(FakeExec::new(true, "active\n"), "/unused-env-dir")
-            .state("x")
-            .unwrap(),
+        SystemdManager::new(
+            FakeExec::new(true, "active\n"),
+            "/unused-unit-dir",
+            "/unused-env-dir"
+        )
+        .state("x")
+        .unwrap(),
         ServiceState::Active
     );
     assert_eq!(
-        SystemdManager::new(FakeExec::new(false, "failed\n"), "/unused-env-dir")
-            .state("x")
-            .unwrap(),
+        SystemdManager::new(
+            FakeExec::new(false, "failed\n"),
+            "/unused-unit-dir",
+            "/unused-env-dir"
+        )
+        .state("x")
+        .unwrap(),
         ServiceState::Failed
     );
     assert_eq!(
-        SystemdManager::new(FakeExec::new(false, "inactive\n"), "/unused-env-dir")
-            .state("x")
-            .unwrap(),
+        SystemdManager::new(
+            FakeExec::new(false, "inactive\n"),
+            "/unused-unit-dir",
+            "/unused-env-dir"
+        )
+        .state("x")
+        .unwrap(),
         ServiceState::Inactive
     );
 }
@@ -2594,7 +2859,7 @@ fn systemd_state_maps_is_active_output() {
 #[test]
 fn systemd_logs_use_journalctl_with_tail() {
     let exec = std::sync::Arc::new(FakeExec::new(true, "line1\nline2\n"));
-    let lines = SystemdManager::new(exec.clone(), "/unused-env-dir")
+    let lines = SystemdManager::new(exec.clone(), "/unused-unit-dir", "/unused-env-dir")
         .logs(
             "io.amicu.llama.support_chat_local",
             LogOptions {
@@ -2607,6 +2872,46 @@ fn systemd_logs_use_journalctl_with_tail() {
     let call = exec.last();
     assert_eq!(call[0], "journalctl");
     assert!(call.contains(&"--lines=5".to_owned()));
+}
+
+// ---- NVIDIA / CUDA (amicu-planning#247) ----------------------------------------
+
+#[test]
+fn an_8_gib_nvidia_card_accepts_an_8b_q4_gguf_with_full_gpu_offload() {
+    // ~4.7 GB Q4_K_M weights (8B params) against 8 GiB of VRAM (6 GiB after the
+    // 2 GiB reserve).
+    let a = nvidia_adapter(4_700_000_000, 8_000_000_000);
+    let d = nvidia_deployment();
+    let diags = a.validate(&d);
+    assert!(
+        !diags
+            .iter()
+            .any(|x| x.severity == amicu_core::diagnostic::Severity::Error),
+        "unexpected error(s): {diags:?}"
+    );
+    let plan = a.plan_launch(&d).expect("plan");
+    let RenderedLaunch::Command { argv, .. } = &plan.rendered else {
+        panic!("expected a command launch");
+    };
+    let at = argv
+        .iter()
+        .position(|x| x == "--n-gpu-layers")
+        .expect("-ngl rendered");
+    assert_eq!(argv[at + 1], "-1", "offload every layer to the GPU");
+    assert_eq!(plan.estimate.gpu_count, 1);
+}
+
+#[test]
+fn memory_fit_on_an_nvidia_card_is_checked_against_vram_not_system_ram() {
+    // 9 GB of weights fit 48 GiB of system RAM but not 8 GiB of VRAM.
+    let a = nvidia_adapter(9_000_000_000, 14_000_000_000);
+    let diags = a.validate(&nvidia_deployment());
+    let err = diags
+        .iter()
+        .find(|x| x.severity == amicu_core::diagnostic::Severity::Error)
+        .expect("VRAM over-fit is an error");
+    assert_eq!(err.code, catalog::MEM_VRAM_EXCEEDED);
+    assert!(err.message.contains("VRAM"), "{}", err.message);
 }
 
 // ---- amicu-planning#151 PR C: speculative decoding --------------------------
@@ -3304,7 +3609,7 @@ impl CommandExec for NoGuiExec {
 #[test]
 fn systemd_reports_its_uid() {
     let tmp = TempDir::new("systemd-context");
-    let manager = SystemdManager::new(FakeExec::new(true, ""), &tmp.0);
+    let manager = SystemdManager::new(FakeExec::new(true, ""), &tmp.0, &tmp.0);
     let ctx = manager.context().expect("context");
     assert_eq!(ctx.backend, crate::HostBackend::Systemd);
     assert_eq!(ctx.uid, 501);
@@ -3433,7 +3738,7 @@ fn launchd_presence_uses_the_recorded_domain_and_never_guesses_without_one() {
 
 fn systemd_presence(exec: OneAnswer) -> Result<Presence, LlamaCppError> {
     let dir = TempDir::new("presence-sd");
-    SystemdManager::new(exec, &dir.0).presence(PRESENCE_LABEL, None)
+    SystemdManager::new(exec, &dir.0, &dir.0).presence(PRESENCE_LABEL, None)
 }
 
 #[test]

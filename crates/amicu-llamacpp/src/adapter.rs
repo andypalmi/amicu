@@ -461,7 +461,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
         RuntimeCapabilities {
             runtime: RuntimeKind::LlamaCpp,
             artifact_formats: vec![ArtifactFormat::Gguf],
-            platforms: vec![Platform::Cpu, Platform::Metal],
+            platforms: vec![Platform::Cpu, Platform::Cuda, Platform::Metal],
             parallelism: Parallelism {
                 tensor: false,
                 pipeline: false,

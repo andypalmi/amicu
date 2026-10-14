@@ -589,6 +589,70 @@ mod vllm_dispatch_tests {
         );
     }
 
+    fn vllm_settings() -> VllmSettings {
+        VllmSettings {
+            context_length: 8192,
+            port: 8000,
+            tensor_parallel_size: Some(1),
+            gpu_memory_utilization: Some(0.9),
+            ..Default::default()
+        }
+    }
+
+    /// amicu-planning#249: `Qwen/Qwen3-8B` in bf16 (~16 GB of weights) on an
+    /// 8 GiB card is rejected, and the message names the weights, the KV
+    /// estimate (the model declares its shape) and the hardware memory.
+    #[test]
+    fn vllm_qwen3_8b_bf16_on_8_gib_vram_is_rejected_with_a_useful_message() {
+        let mut g = Graph::new();
+        let mut m = model("Qwen/Qwen3-8B");
+        m.n_layers = Some(36);
+        m.n_kv_heads = Some(8);
+        m.head_dim = Some(128);
+        g.models.push(m);
+        g.hardware_profiles.push(hw(8));
+        g.deployments.push(vllm_deployment(vllm_settings()));
+
+        let report = report_for(&g);
+        assert!(!report.valid);
+        let err = report
+            .diagnostics
+            .iter()
+            .find(|d| d.severity == Severity::Error && d.code == catalog::MEM_VRAM_EXCEEDED)
+            .unwrap_or_else(|| panic!("expected MEM_VRAM_EXCEEDED: {:?}", report.diagnostics));
+        assert!(err.message.contains("weights 16"), "{}", err.message);
+        assert!(err.message.contains("kv cache"), "{}", err.message);
+        assert!(err.message.contains("8GiB VRAM"), "{}", err.message);
+    }
+
+    /// ...while the small models #249 names still pass on the same card.
+    #[test]
+    fn vllm_small_models_still_pass_on_8_gib_vram() {
+        for (reference, quantization) in [
+            ("Qwen/Qwen3-1.7B", None),
+            ("Qwen/Qwen3-4B-AWQ", Some(Quantization::Int4)),
+        ] {
+            let mut g = Graph::new();
+            let mut m = model(reference);
+            m.artifact.quantization = quantization;
+            m.n_layers = Some(28);
+            m.n_kv_heads = Some(8);
+            m.head_dim = Some(128);
+            g.models.push(m);
+            g.hardware_profiles.push(hw(8));
+            g.deployments.push(vllm_deployment(vllm_settings()));
+            let report = report_for(&g);
+            assert!(
+                !report
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.severity == Severity::Error),
+                "{reference}: {:?}",
+                report.diagnostics
+            );
+        }
+    }
+
     #[test]
     fn vllm_deployment_that_fits_has_no_error() {
         let mut g = Graph::new();

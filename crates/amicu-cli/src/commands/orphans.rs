@@ -416,6 +416,14 @@ fn launchd(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
         .collect())
 }
 
+/// The command that stops a systemd unit and keeps it from coming back:
+/// `disable --now` for a persistent unit, else a plain stop (a legacy
+/// transient unit cannot be disabled).
+fn systemd_stop_command(unit: &str) -> String {
+    let q = shell_quote(unit);
+    format!("systemctl --user disable --now {q} || systemctl --user stop {q}")
+}
+
 fn systemd(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
     // Amicu's own units are `io.amicu.llama.<id>`; `amicu*` covers any plainly
     // named unit.
@@ -458,10 +466,47 @@ fn systemd(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
             kind: Kind::SystemdUnit,
             tracked: tracked.has_label(label),
             ownership: ownership_of_label(label, tracked.project_id.as_deref()),
-            stop_command: format!("systemctl --user stop {}", shell_quote(unit)),
+            stop_command: systemd_stop_command(unit),
             identity: (*unit).to_owned(),
             state,
         });
+    }
+    // Persistent units that are installed but not loaded (never started this
+    // boot, or stopped but still enabled) are invisible to `list-units`, yet
+    // would start again at the next login/boot: list the unit files too. Best
+    // effort - the loaded-unit listing above is the authoritative part.
+    if let Ok(files) = env.exec.exec(
+        "systemctl",
+        &[
+            "--user",
+            "list-unit-files",
+            "io.amicu.*",
+            "amicu*",
+            "--no-legend",
+            "--plain",
+            "--no-pager",
+        ],
+    ) && files.success
+    {
+        for line in files.stdout.lines() {
+            // UNIT STATE PRESET
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            let Some(unit) = cols.first() else { continue };
+            if !(unit.starts_with("amicu") || unit.starts_with(LAUNCHD_PREFIX))
+                || found.iter().any(|f| f.identity == *unit)
+            {
+                continue;
+            }
+            let label = unit.strip_suffix(".service").unwrap_or(unit);
+            found.push(Found {
+                kind: Kind::SystemdUnit,
+                tracked: tracked.has_label(label),
+                ownership: ownership_of_label(label, tracked.project_id.as_deref()),
+                stop_command: systemd_stop_command(unit),
+                identity: (*unit).to_owned(),
+                state: format!("not loaded ({})", cols.get(1).unwrap_or(&"unknown")),
+            });
+        }
     }
     Ok(found)
 }
@@ -555,6 +600,8 @@ mod tests {
         calls: Mutex<Vec<String>>,
         launchctl: Result<String, String>,
         systemctl: Result<String, String>,
+        /// Answer for `list-unit-files`; `None` falls back to `systemctl`.
+        unit_files: Option<String>,
     }
 
     impl FakeExec {
@@ -563,6 +610,7 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 launchctl: Ok(launchctl.to_owned()),
                 systemctl: Ok(systemctl.to_owned()),
+                unit_files: None,
             }
         }
 
@@ -577,8 +625,12 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("{program} {}", args.join(" ")));
+            let unit_files = self.unit_files.clone().map(Ok);
             let r = match program {
                 "launchctl" => &self.launchctl,
+                "systemctl" if args.contains(&"list-unit-files") && unit_files.is_some() => {
+                    unit_files.as_ref().unwrap()
+                }
                 "systemctl" => &self.systemctl,
                 other => panic!("unexpected program {other}"),
             };
@@ -763,6 +815,7 @@ mod tests {
             calls: Mutex::new(Vec::new()),
             launchctl: Err("boom".to_owned()),
             systemctl: Ok(String::new()),
+            unit_files: None,
         };
         let modal = FakeModal(Ok(vec![]));
         let report = discover(
@@ -801,9 +854,46 @@ unrelated.service loaded active running nope\n";
         );
         assert_eq!(
             report.resources[0].stop_command,
-            "systemctl --user stop io.amicu.llama.lost.service"
+            "systemctl --user disable --now io.amicu.llama.lost.service || \
+             systemctl --user stop io.amicu.llama.lost.service"
         );
         assert!(exec.calls()[0].starts_with("systemctl --user list-units"));
+    }
+
+    #[test]
+    fn systemd_lists_persistent_units_that_are_installed_but_not_loaded() {
+        // `list-units` only shows loaded units; a persistent unit that is
+        // enabled but not running is found through `list-unit-files`.
+        let exec = FakeExec {
+            unit_files: Some(
+                "io.amicu.llama.a1b2c3d4.chat.service enabled enabled\n\
+io.amicu.llama.a1b2c3d4.idle.service enabled enabled\n\
+unrelated.service enabled enabled\n"
+                    .to_owned(),
+            ),
+            ..FakeExec::new(
+                "",
+                "io.amicu.llama.a1b2c3d4.chat.service loaded active running c\n",
+            )
+        };
+        let modal = FakeModal(Ok(vec![]));
+        let report = discover(&env(Platform::Linux, &exec, &modal, None), &tracked_chat());
+        let got: Vec<_> = report
+            .resources
+            .iter()
+            .map(|r| (r.identity.as_str(), r.state.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (
+                    "io.amicu.llama.a1b2c3d4.idle.service",
+                    "not loaded (enabled)"
+                ),
+                ("io.amicu.llama.a1b2c3d4.chat.service", "active (running)"),
+            ]
+        );
+        assert!(exec.calls().iter().any(|c| c.contains("list-unit-files")));
     }
 
     #[test]
