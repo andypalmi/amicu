@@ -321,6 +321,7 @@ name = "amicu-state"
 version = "0.1.0"
 dependencies = [
  "amicu-core",
+ "amicu-runtime",
  "async-trait",
  "rand 0.8.7",
  "rustversion",

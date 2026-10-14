@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::adapter::StateBackendAdapter;
 use crate::error::StateError;
 use crate::lock::LockHandle;
+use crate::runtime::RuntimeState;
 use crate::snapshot::{StateSnapshot, StateVersion};
 
 /// The version id and (empty) content a backend with no recorded state
@@ -55,6 +56,26 @@ struct Inner {
     lock: Option<u64>,
     next_version: u64,
     corrupt: bool,
+}
+
+impl Inner {
+    /// Mint the next version holding `graph` + `runtime` and make it current.
+    fn append(
+        &mut self,
+        graph: Graph,
+        runtime: RuntimeState,
+        recorded_at: &str,
+        label: &str,
+    ) -> Result<(), AdapterError> {
+        let version = format!("v{}", self.next_version);
+        self.next_version += 1;
+        let parent = self.current.as_ref().map(|s| s.version.clone());
+        let recorded = StateSnapshot::with_runtime(&version, recorded_at, graph, runtime)?;
+        self.snapshots.insert(version.clone(), recorded.clone());
+        self.history.push(StateVersion::new(version, parent, label));
+        self.current = Some(recorded);
+        Ok(())
+    }
 }
 
 /// Dev/single-node in-memory [`StateBackendAdapter`]. Zero configuration, all
@@ -181,16 +202,43 @@ impl StateBackendAdapter for InMemoryStateBackend {
             return Err(StateError::LockNotHeld.into());
         }
 
-        let version = format!("v{}", inner.next_version);
-        inner.next_version += 1;
-        let parent = inner.current.as_ref().map(|s| s.version.clone());
-        let recorded = StateSnapshot::new(&version, &snapshot.recorded_at, snapshot.graph.clone())?;
-        inner.snapshots.insert(version.clone(), recorded.clone());
-        inner
-            .history
-            .push(StateVersion::new(version, parent, "push"));
-        inner.current = Some(recorded);
-        Ok(())
+        // Graph-only: carry the current records forward untouched.
+        let runtime = inner
+            .current
+            .as_ref()
+            .map(|s| s.runtime.clone())
+            .unwrap_or_default();
+        inner.append(
+            snapshot.graph.clone(),
+            runtime,
+            &snapshot.recorded_at,
+            "push",
+        )
+    }
+
+    async fn replace_runtime(
+        &self,
+        runtime: &RuntimeState,
+        recorded_at: &str,
+        lock: &LockHandle,
+    ) -> Result<(), AdapterError> {
+        let mut inner = self.inner.lock().expect("state backend poisoned");
+        if inner.corrupt {
+            return Err(StateError::Corrupted {
+                detail: "refusing to overwrite corrupt state".into(),
+            }
+            .into());
+        }
+        let held = inner.lock.ok_or(StateError::LockNotHeld)?;
+        if lock.holder() != &self.id || lock.token() != held {
+            return Err(StateError::LockNotHeld.into());
+        }
+        let graph = inner
+            .current
+            .as_ref()
+            .map(|s| s.graph.clone())
+            .unwrap_or_default();
+        inner.append(graph, runtime.clone(), recorded_at, "runtime")
     }
 
     async fn lock(&self) -> Result<LockHandle, AdapterError> {
@@ -207,6 +255,16 @@ impl StateBackendAdapter for InMemoryStateBackend {
         let token = OsRng.next_u64();
         inner.lock = Some(token);
         Ok(LockHandle::new(self.id.clone(), token))
+    }
+
+    async fn renew(&self, lock: &LockHandle) -> Result<(), AdapterError> {
+        // The in-memory lock has no TTL, so there is no lease to extend; this
+        // only verifies the handle is the live holder, like Postgres does.
+        let inner = self.inner.lock().expect("state backend poisoned");
+        match inner.lock {
+            Some(held) if held == lock.token() && lock.holder() == &self.id => Ok(()),
+            _ => Err(StateError::LockNotHeld.into()),
+        }
     }
 
     async fn unlock(&self, handle: LockHandle) -> Result<(), AdapterError> {
@@ -251,7 +309,12 @@ impl StateBackendAdapter for InMemoryStateBackend {
                 version: version.id.clone(),
             }
         })?;
-        inner.current = Some(target);
-        Ok(())
+        // Roll back the graph only; the current runtime records stay.
+        let runtime = inner
+            .current
+            .as_ref()
+            .map(|s| s.runtime.clone())
+            .unwrap_or_default();
+        inner.append(target.graph, runtime, &target.recorded_at, "rollback")
     }
 }

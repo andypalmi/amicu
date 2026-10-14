@@ -274,6 +274,31 @@ fn init_creates_expected_files_and_is_idempotent() {
 }
 
 #[test]
+fn init_ignores_dot_amicu_idempotently() {
+    let read = |td: &TempDir| std::fs::read_to_string(td.path.join(".gitignore")).unwrap();
+    // No ignore file: created.
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    commands::init::run(&project, &mut Vec::new()).unwrap();
+    commands::init::run(&project, &mut Vec::new()).unwrap();
+    assert_eq!(read(&td), ".amicu/\n");
+
+    // Existing file without trailing newline: appended, other entries kept.
+    let td = TempDir::new();
+    write(&td.path, ".gitignore", "target");
+    let project = Project::new(&td.path);
+    commands::init::run(&project, &mut Vec::new()).unwrap();
+    commands::init::run(&project, &mut Vec::new()).unwrap();
+    assert_eq!(read(&td), "target\n.amicu/\n");
+
+    // Already covered (alternate spelling): untouched.
+    let td = TempDir::new();
+    write(&td.path, ".gitignore", "/.amicu\n");
+    commands::init::run(&Project::new(&td.path), &mut Vec::new()).unwrap();
+    assert_eq!(read(&td), "/.amicu\n");
+}
+
+#[test]
 fn fmt_check_detects_and_fixes_drift() {
     let td = TempDir::new();
     let project = Project::new(&td.path);

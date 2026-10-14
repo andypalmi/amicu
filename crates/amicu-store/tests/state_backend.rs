@@ -27,8 +27,9 @@ use amicu_core::resource::{
 };
 use amicu_core::units::ByteSize;
 use amicu_state::{
-    LockHandle, STATE_LOCK_NOT_HELD, STATE_LOCKED, STATE_VERSION_NOT_FOUND, StateBackendAdapter,
-    StateCipher, StateError, StateSnapshot, StateVersion,
+    LockHandle, STATE_LOCK_NOT_HELD, STATE_LOCKED, STATE_STOP_NOT_CONFIRMED,
+    STATE_VERSION_NOT_FOUND, StateBackendAdapter, StateCipher, StateError, StateSnapshot,
+    StateVersion,
 };
 use amicu_store::{PostgresStateBackend, WorkspaceId, connect, run_migrations};
 use async_trait::async_trait;
@@ -660,5 +661,340 @@ async fn push_with_no_cipher_configured_writes_plaintext_content_unchanged() {
     assert!(
         raw.get("__amicu_state_ciphertext__").is_none(),
         "no cipher configured must never write the encrypted wrapper"
+    );
+}
+
+// --- lease renewal and runtime records (amicu-planning#223) -------------------
+
+fn stop_identity(deployment: &str) -> amicu_state::StopIdentity {
+    amicu_state::StopIdentity {
+        deployment: DeploymentId::new(deployment),
+        backend: "modal".into(),
+        fields: [("app".to_string(), format!("app-{deployment}"))].into(),
+    }
+}
+
+/// A lease that would have expired mid-operation survives because `renew`
+/// pushed `expires_at` out, and the push at the end still succeeds.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn renew_extends_the_lease_so_a_long_operation_can_still_push() {
+    let pool = pool().await;
+    let stack = unique("stack");
+    let b = backend(pool, WorkspaceId::DEFAULT, &stack).with_lease_ttl_seconds(2);
+    let lock = b.lock().await.expect("lock");
+
+    // Lease expiry is judged in whole epoch seconds, so renew well inside the
+    // worst-case remaining window (>= 1s) three times: 2.1s elapsed, past the
+    // original 2s TTL, so only the renewals keep the lease live.
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        b.renew(&lock).await.expect("renew while live");
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    b.push(&snapshot(sample_graph()), &lock)
+        .await
+        .expect("push after renew");
+}
+
+/// Without renewal the same schedule loses the lease, and push is rejected.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn push_after_the_lease_expired_fails() {
+    let pool = pool().await;
+    let stack = unique("stack");
+    let b = backend(pool, WorkspaceId::DEFAULT, &stack).with_lease_ttl_seconds(1);
+    let lock = b.lock().await.expect("lock");
+    tokio::time::sleep(Duration::from_millis(2200)).await;
+    let err = b
+        .push(&snapshot(sample_graph()), &lock)
+        .await
+        .expect_err("expired lease must not push");
+    assert_eq!(err.code(), STATE_LOCK_NOT_HELD);
+}
+
+/// An expired lease cannot be resurrected by renewing it, and a forged token
+/// cannot renew a live one.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn renew_rejects_expired_and_forged_handles() {
+    let pool = pool().await;
+    let stack = unique("stack");
+
+    let expired = backend(pool.clone(), WorkspaceId::DEFAULT, &stack).with_lease_ttl_seconds(-1);
+    let stale = expired.lock().await.expect("lock");
+    let err = expired.renew(&stale).await.expect_err("expired");
+    assert_eq!(err.code(), STATE_LOCK_NOT_HELD);
+
+    let live = backend(pool, WorkspaceId::DEFAULT, &stack);
+    let real = live.lock().await.expect("reacquire expired lease");
+    let forged = LockHandle::new(real.holder().clone(), real.token().wrapping_add(1));
+    let err = live.renew(&forged).await.expect_err("forged");
+    assert_eq!(err.code(), STATE_LOCK_NOT_HELD);
+    live.renew(&real).await.expect("real handle renews");
+}
+
+/// `LeaseKeeper` keeps a short lease alive across a long operation.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn lease_keeper_keeps_the_lease_alive_until_dropped() {
+    let pool = pool().await;
+    let stack = unique("stack");
+    let b: Arc<dyn StateBackendAdapter> =
+        Arc::new(backend(pool, WorkspaceId::DEFAULT, &stack).with_lease_ttl_seconds(2));
+    let lock = b.lock().await.expect("lock");
+    let keeper = amicu_state::LeaseKeeper::spawn(
+        Arc::clone(&b),
+        lock.clone(),
+        Duration::from_millis(500),
+        Duration::from_secs(2),
+    )
+    .expect("valid interval");
+    tokio::time::sleep(Duration::from_millis(3500)).await;
+    assert!(!keeper.is_lost());
+    b.push(&snapshot(sample_graph()), &lock)
+        .await
+        .expect("push after 3.5s on a 2s lease");
+
+    drop(keeper);
+    tokio::time::sleep(Duration::from_millis(2600)).await;
+    assert!(
+        b.push(&snapshot(sample_graph()), &lock).await.is_err(),
+        "lease must lapse once the keeper is dropped"
+    );
+}
+
+/// Write-ahead records survive a round trip with a v2 checksum; per-deployment
+/// put/remove touch only their own record; history stays append-only.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn per_deployment_records_round_trip_and_update_independently() {
+    use amicu_state::{ConfirmedStop, DeploymentPhase, DeploymentRecord};
+
+    let pool = pool().await;
+    let stack = unique("stack");
+    let b = backend(pool, WorkspaceId::DEFAULT, &stack);
+    let lock = b.lock().await.expect("lock");
+    b.push(&snapshot(sample_graph()), &lock)
+        .await
+        .expect("seed");
+
+    b.put_deployment_record(DeploymentRecord::pending(stop_identity("d1")), &lock)
+        .await
+        .expect("write-ahead d1");
+    b.put_deployment_record(DeploymentRecord::pending(stop_identity("d2")), &lock)
+        .await
+        .expect("write-ahead d2");
+    let mut running = DeploymentRecord::pending(stop_identity("d1"));
+    running.phase = DeploymentPhase::Running;
+    b.put_deployment_record(running.clone(), &lock)
+        .await
+        .expect("d1 running");
+
+    let pulled = b.pull().await.expect("pull verifies checksum");
+    assert!(pulled.checksum.starts_with("sha256-v2:"));
+    assert_eq!(pulled.graph, sample_graph(), "graph untouched");
+    assert_eq!(pulled.runtime.get(&DeploymentId::new("d1")), Some(&running));
+    assert_eq!(
+        pulled
+            .runtime
+            .get(&DeploymentId::new("d2"))
+            .map(|r| r.phase),
+        Some(DeploymentPhase::Pending)
+    );
+
+    // Running/Pending records cannot leave state.
+    let err = b
+        .remove_deployment_record(&ConfirmedStop::new(DeploymentId::new("d2")), &lock)
+        .await
+        .expect_err("pending record must not be removable");
+    assert_eq!(err.code(), STATE_STOP_NOT_CONFIRMED);
+
+    for id in ["d2", "d1"] {
+        let mut stopping = DeploymentRecord::pending(stop_identity(id));
+        stopping.phase = DeploymentPhase::Stopping;
+        b.put_deployment_record(stopping, &lock)
+            .await
+            .expect("mark stopping");
+    }
+    assert!(
+        b.remove_deployment_record(&ConfirmedStop::new(DeploymentId::new("d2")), &lock)
+            .await
+            .expect("confirmed stop")
+    );
+    let pulled = b.pull().await.expect("pull");
+    assert_eq!(pulled.runtime.deployments.len(), 1);
+    assert_eq!(b.history().await.expect("history").len(), 7);
+
+    // Dropping the last record returns to the graph-only v1 checksum.
+    b.remove_deployment_record(&ConfirmedStop::new(DeploymentId::new("d1")), &lock)
+        .await
+        .expect("remove d1");
+    assert!(
+        b.pull()
+            .await
+            .expect("pull")
+            .checksum
+            .starts_with("sha256-v1:")
+    );
+}
+
+fn running_record(id: &str) -> amicu_state::DeploymentRecord {
+    let mut r = amicu_state::DeploymentRecord::pending(stop_identity(id));
+    r.phase = amicu_state::DeploymentPhase::Running;
+    r
+}
+
+/// A graph-only push must not wipe the records; rollback restores only the
+/// graph and keeps the current records (no orphans).
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn push_and_rollback_never_drop_runtime_records() {
+    let pool = pool().await;
+    let stack = unique("stack");
+    let b = backend(pool, WorkspaceId::DEFAULT, &stack);
+    let lock = b.lock().await.expect("lock");
+
+    let g1 = sample_graph();
+    b.push(&snapshot(g1.clone()), &lock).await.expect("v0");
+    let v0 = b.history().await.expect("history")[0].clone();
+    b.put_deployment_record(running_record("d1"), &lock)
+        .await
+        .expect("record");
+
+    // `snapshot()` = StateSnapshot::new: empty runtime. Records must survive.
+    let mut g2 = sample_graph();
+    g2.deployments.clear();
+    b.push(&snapshot(g2.clone()), &lock)
+        .await
+        .expect("graph push");
+    let pulled = b.pull().await.expect("pull");
+    assert_eq!(pulled.graph, g2);
+    assert!(pulled.runtime.get(&DeploymentId::new("d1")).is_some());
+
+    // Rolling back to v0, which predates the record, keeps the record.
+    b.rollback(&v0, &lock).await.expect("rollback");
+    let pulled = b.pull().await.expect("pull verifies checksum");
+    assert_eq!(pulled.graph, g1);
+    assert!(
+        pulled.runtime.get(&DeploymentId::new("d1")).is_some(),
+        "rollback must not drop the running record"
+    );
+    // Rollback appended a version; history is untouched.
+    let history = b.history().await.expect("history");
+    assert_eq!(history.last().expect("last").label, "rollback");
+}
+
+/// A writer that predates the runtime column (bare `'{}'` default) is refused
+/// once the stack holds records, rather than silently wiping them.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn a_pre_runtime_writer_cannot_wipe_records() {
+    let pool = pool().await;
+    let stack = unique("stack");
+    let b = backend(pool.clone(), WorkspaceId::DEFAULT, &stack);
+    let lock = b.lock().await.expect("lock");
+    b.push(&snapshot(sample_graph()), &lock).await.expect("v0");
+    b.put_deployment_record(running_record("d1"), &lock)
+        .await
+        .expect("record");
+
+    // What an old binary does: INSERT without the runtime column.
+    let mut tx = pool.begin().await.expect("begin");
+    sqlx::query("SELECT set_config('app.current_workspace', $1, true)")
+        .bind(WorkspaceId::DEFAULT.as_uuid().to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("bind");
+    let graph_json = serde_json::to_value(sample_graph()).expect("graph json");
+    let old_writer_insert = sqlx::query(
+        "INSERT INTO state_snapshots \
+         (workspace_id, stack_id, seq, version, parent_version, label, recorded_at, checksum, content, created_at) \
+         VALUES ($1, $2, 99, 'v99', NULL, 'push', '', 'sha256-v1:x', $3, 0)",
+    )
+    .bind(WorkspaceId::DEFAULT.as_uuid())
+    .bind(&stack)
+    .bind(graph_json)
+    .execute(&mut *tx)
+    .await;
+    assert!(
+        old_writer_insert.is_err(),
+        "an insert that omits runtime must be refused while records exist"
+    );
+    tx.rollback().await.expect("rollback");
+
+    // Upgraded writers are unaffected.
+    b.push(&snapshot(sample_graph()), &lock)
+        .await
+        .expect("upgraded push still works");
+}
+
+/// Record writes need a live lease.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn record_write_after_the_lease_expired_fails() {
+    let pool = pool().await;
+    let stack = unique("stack");
+    let b = backend(pool, WorkspaceId::DEFAULT, &stack).with_lease_ttl_seconds(-1);
+    let lock = b.lock().await.expect("lock");
+    let err = b
+        .put_deployment_record(
+            amicu_state::DeploymentRecord::pending(stop_identity("d1")),
+            &lock,
+        )
+        .await
+        .expect_err("expired");
+    assert_eq!(err.code(), STATE_LOCK_NOT_HELD);
+}
+
+/// With a cipher configured
+/// the runtime column is encrypted at rest and decrypts on pull.
+#[tokio::test]
+#[ignore = "requires a live Postgres via DATABASE_URL; run with -- --ignored"]
+async fn runtime_is_encrypted_at_rest_when_a_cipher_is_configured() {
+    let pool = pool().await;
+    let stack = unique("stack");
+    let b = backend(pool.clone(), WorkspaceId::DEFAULT, &stack)
+        .with_cipher(Arc::new(XorTestCipher { key: 0x5A }));
+    let lock = b.lock().await.expect("lock");
+    b.push(&snapshot(sample_graph()), &lock)
+        .await
+        .expect("seed");
+    b.put_deployment_record(
+        amicu_state::DeploymentRecord::pending(stop_identity("secret_dep")),
+        &lock,
+    )
+    .await
+    .expect("put");
+
+    let mut tx = pool.begin().await.expect("begin");
+    sqlx::query("SELECT set_config('app.current_workspace', $1, true)")
+        .bind(WorkspaceId::DEFAULT.as_uuid().to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("bind");
+    let runtime: serde_json::Value = sqlx::query(
+        "SELECT runtime FROM state_snapshots WHERE workspace_id = $1 AND stack_id = $2 \
+         ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(WorkspaceId::DEFAULT.as_uuid())
+    .bind(&stack)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("raw")
+    .try_get("runtime")
+    .expect("runtime column");
+    tx.rollback().await.expect("rollback");
+    assert!(
+        !runtime.to_string().contains("secret_dep"),
+        "runtime must be ciphertext at rest: {runtime}"
+    );
+
+    let pulled = b.pull().await.expect("pull decrypts");
+    assert!(
+        pulled
+            .runtime
+            .get(&DeploymentId::new("secret_dep"))
+            .is_some()
     );
 }

@@ -29,6 +29,10 @@ pub const STATE_VERSION_NOT_FOUND: DiagnosticCode = DiagnosticCode::new(Category
 /// is not known to be bad, the backend simply could not be reached right now.
 pub const STATE_BACKEND: DiagnosticCode = DiagnosticCode::new(Category::State, 5);
 
+/// `AMICU-STATE-006` - a deployment record cannot leave state because its
+/// stop is not confirmed.
+pub const STATE_STOP_NOT_CONFIRMED: DiagnosticCode = DiagnosticCode::new(Category::State, 6);
+
 /// Failures a state backend can surface, each mapped to an `AMICU-STATE-*` code.
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
@@ -61,6 +65,17 @@ pub enum StateError {
         version: String,
     },
 
+    /// A deployment record was asked to leave state before its stop was
+    /// confirmed: only a record in the `stopping` phase, with a matching
+    /// [`ConfirmedStop`](crate::ConfirmedStop), may be removed.
+    #[error("deployment {deployment} cannot leave state: its stop is not confirmed ({detail})")]
+    StopNotConfirmed {
+        /// The deployment whose record was refused removal.
+        deployment: String,
+        /// Why (e.g. the phase the record is in).
+        detail: String,
+    },
+
     /// The backend's underlying storage failed (connectivity, driver error).
     /// Unlike [`StateError::Corrupted`], the recorded state itself is not
     /// known to be bad; the backend simply could not be reached right now, so
@@ -80,6 +95,7 @@ impl AdapterErrorKind for StateError {
             StateError::Corrupted { .. } => STATE_CORRUPTED,
             StateError::VersionNotFound { .. } => STATE_VERSION_NOT_FOUND,
             StateError::Backend { .. } => STATE_BACKEND,
+            StateError::StopNotConfirmed { .. } => STATE_STOP_NOT_CONFIRMED,
         }
     }
 

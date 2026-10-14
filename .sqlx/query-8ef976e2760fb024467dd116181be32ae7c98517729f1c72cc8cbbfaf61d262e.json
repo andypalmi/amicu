@@ -1,0 +1,48 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT version, recorded_at, checksum, content, runtime FROM state_snapshots WHERE workspace_id = $1 AND stack_id = $2 AND version = $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "recorded_at",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "checksum",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "content",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "runtime",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "8ef976e2760fb024467dd116181be32ae7c98517729f1c72cc8cbbfaf61d262e"
+}
