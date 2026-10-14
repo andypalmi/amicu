@@ -37,6 +37,7 @@ use crate::capability::{
 };
 use crate::provider::{
     Provider, ProviderError, ProvisionRequest, ProvisioningHandle, ProvisioningState,
+    ResourceIdentity, TeardownOutcome,
 };
 
 /// The adapter identity AWS registers under.
@@ -416,10 +417,10 @@ impl Provider for AwsProvider {
         self.capabilities.clone()
     }
 
-    async fn provision(
+    fn prepare(
         &self,
         request: &ProvisionRequest,
-        resolver: &dyn SecretResolver,
+        identity: ResourceIdentity,
     ) -> Result<ProvisioningHandle, AdapterError> {
         if !self.has_offering(&request.offering_id) {
             return Err(AdapterError::from_kind(ProviderError::UnknownOffering {
@@ -434,12 +435,30 @@ impl Provider for AwsProvider {
                 region: request.region.clone(),
             }));
         }
-        self.authenticate(resolver, request.credentials.as_ref())
+        Ok(ProvisioningHandle::prepared(
+            self.id.clone(),
+            request,
+            identity,
+        ))
+    }
+
+    async fn provision(
+        &self,
+        prepared: ProvisioningHandle,
+        resolver: &dyn SecretResolver,
+    ) -> Result<ProvisioningHandle, AdapterError> {
+        self.authenticate(resolver, prepared.credentials.as_ref())
             .await?;
 
         let mut state = self.lock();
+        // Idempotent: a retried provision adopts the instance already created
+        // under this identity instead of duplicating it.
+        if let Some(existing) = crate::rest_lifecycle::adopt_in_memory(&state.instances, &prepared)?
+        {
+            return Ok(existing);
+        }
         state.counter += 1;
-        let id = format!("aws-{}-{}", request.region, state.counter);
+        let id = format!("aws-{}-{}", prepared.region, state.counter);
 
         let ready = ProvisioningState::Ready {
             detail: "instance ready".into(),
@@ -451,15 +470,7 @@ impl Provider for AwsProvider {
             },
             ready.clone(),
         ];
-        let handle = ProvisioningHandle {
-            id: id.clone(),
-            provider: self.id.clone(),
-            region: request.region.clone(),
-            zone: None,
-            offering_id: request.offering_id.clone(),
-            credentials: request.credentials.clone(),
-            state: ready,
-        };
+        let handle = prepared.completed("instance_id", id.clone(), ready);
         state.history.insert(id.clone(), transitions);
         state.instances.insert(id, handle.clone());
         Ok(handle)
@@ -487,33 +498,43 @@ impl Provider for AwsProvider {
         &self,
         handle: &ProvisioningHandle,
         resolver: &dyn SecretResolver,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<TeardownOutcome, AdapterError> {
         self.authenticate(resolver, handle.credentials.as_ref())
             .await?;
 
         let mut state = self.lock();
-        let Some(instance) = state.instances.get_mut(&handle.id) else {
-            return Err(AdapterError::from_kind(ProviderError::UnknownInstance {
-                id: handle.id.clone(),
-            }));
-        };
-        instance.state = ProvisioningState::Terminated {
-            detail: "instance terminated".into(),
-        };
-        let entry = state.history.entry(handle.id.clone()).or_default();
-        entry.push(ProvisioningState::Stopping {
-            detail: "instance stopping".into(),
-        });
-        entry.push(ProvisioningState::Terminated {
-            detail: "instance terminated".into(),
-        });
-        Ok(())
+        let keys = crate::rest_lifecycle::matching_keys(&state.instances, handle);
+        // An in-memory simulator that has never seen the record cannot vouch
+        // that the resource is gone (its memory may simply have been lost).
+        if keys.is_empty() {
+            return Ok(TeardownOutcome::Unconfirmed {
+                reason: "instance unknown to this simulator; absence cannot be confirmed".into(),
+            });
+        }
+        for key in keys {
+            let instance = state.instances.get_mut(&key).expect("key just matched");
+            if matches!(instance.state, ProvisioningState::Terminated { .. }) {
+                continue;
+            }
+            instance.state = ProvisioningState::Terminated {
+                detail: "instance terminated".into(),
+            };
+            let entry = state.history.entry(key.clone()).or_default();
+            entry.push(ProvisioningState::Stopping {
+                detail: "instance stopping".into(),
+            });
+            entry.push(ProvisioningState::Terminated {
+                detail: "instance terminated".into(),
+            });
+        }
+        Ok(TeardownOutcome::ConfirmedGone)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::ProvisionCompat;
     use amicu_core::adapter::Registry;
     use amicu_core::diagnostic::{Category as DiagCategory, DiagnosticCode};
     use amicu_core::secret::SecretValue;
@@ -649,7 +670,7 @@ mod tests {
         let resolver = no_creds();
         let req = ProvisionRequest::new("g6.xlarge", "eu-central-1");
 
-        let handle = p.provision(&req, &resolver).await.unwrap();
+        let handle = p.provision_request(&req, &resolver).await.unwrap();
         assert!(handle.state.is_ready());
         assert_eq!(handle.provider, AdapterId::new("aws"));
         assert!(handle.id.starts_with("aws-eu-central-1-"));
@@ -659,7 +680,12 @@ mod tests {
         assert!(matches!(history[0], ProvisioningState::Requested));
         assert!(history.last().unwrap().is_ready());
 
-        p.teardown(&handle, &resolver).await.unwrap();
+        assert!(
+            p.teardown(&handle, &resolver)
+                .await
+                .unwrap()
+                .is_confirmed_gone()
+        );
         assert_eq!(p.live_instances(), Vec::new());
         assert!(p.status(&handle, &resolver).await.unwrap().is_terminal());
     }
@@ -669,7 +695,7 @@ mod tests {
         // us-east-1 is a real AWS region, but the EU adapter does not admit it.
         let p = AwsProvider::new();
         let err = p
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("g6.xlarge", "us-east-1"),
                 &no_creds(),
             )
@@ -683,7 +709,7 @@ mod tests {
     #[tokio::test]
     async fn provision_unknown_offering_is_rejected() {
         let err = AwsProvider::new()
-            .provision(&ProvisionRequest::new("nope", "eu-west-1"), &no_creds())
+            .provision_request(&ProvisionRequest::new("nope", "eu-west-1"), &no_creds())
             .await
             .expect_err("unknown offering");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-010");
@@ -696,7 +722,7 @@ mod tests {
         let req = ProvisionRequest::new("g6.xlarge", "eu-west-1")
             .with_credentials(SecretRef::new("aws_access_key"));
         let err = p
-            .provision(&req, &resolver)
+            .provision_request(&req, &resolver)
             .await
             .expect_err("empty credential rejected");
         assert_eq!(err.code().to_string(), "AMICU-PROVIDER-014");
@@ -715,7 +741,7 @@ mod tests {
         assert!(req_json.contains("aws_access_key"));
         assert!(!req_json.contains(secret_value));
 
-        let handle = p.provision(&req, &resolver).await.unwrap();
+        let handle = p.provision_request(&req, &resolver).await.unwrap();
         let handle_json = serde_json::to_string(&handle).unwrap();
         assert!(handle_json.contains("aws_access_key"));
         assert!(!handle_json.contains(secret_value));
@@ -740,7 +766,7 @@ mod tests {
         registry.register(Arc::new(AwsProvider::new()));
         let found: Arc<dyn Provider> = registry.get(&AdapterId::new("aws")).unwrap();
         let handle = found
-            .provision(
+            .provision_request(
                 &ProvisionRequest::new("g5.xlarge", "eu-north-1"),
                 &no_creds(),
             )

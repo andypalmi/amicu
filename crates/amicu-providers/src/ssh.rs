@@ -27,6 +27,9 @@ pub struct SshTarget {
     pub user: String,
     /// TCP port; 22 by default.
     pub port: u16,
+    /// Expected server host-key fingerprint (`SHA256:...`). When set, the
+    /// transport refuses to talk to a server presenting any other key.
+    pub pinned_host_key: Option<String>,
 }
 
 impl SshTarget {
@@ -37,7 +40,15 @@ impl SshTarget {
             host: host.into(),
             user: user.into(),
             port: 22,
+            pinned_host_key: None,
         }
+    }
+
+    /// Pin the expected server host-key fingerprint.
+    #[must_use]
+    pub fn with_pinned_host_key(mut self, fingerprint: impl Into<String>) -> Self {
+        self.pinned_host_key = Some(fingerprint.into());
+        self
     }
 
     /// Override the TCP port.
@@ -63,6 +74,10 @@ pub struct CommandOutput {
     pub stdout: Vec<u8>,
     /// Raw standard error.
     pub stderr: Vec<u8>,
+    /// Fingerprint (`SHA256:...`) of the host key the server presented, when
+    /// the transport can observe it. Lets callers pin it (trust on first use)
+    /// and later require it before believing the host.
+    pub host_key: Option<String>,
 }
 
 impl CommandOutput {
@@ -73,7 +88,15 @@ impl CommandOutput {
             exit_status,
             stdout: stdout.into(),
             stderr: stderr.into(),
+            host_key: None,
         }
+    }
+
+    /// Attach the observed host-key fingerprint.
+    #[must_use]
+    pub fn with_host_key(mut self, fingerprint: impl Into<String>) -> Self {
+        self.host_key = Some(fingerprint.into());
+        self
     }
 
     /// Whether the command exited with status 0.
@@ -163,22 +186,37 @@ impl Default for RusshTransport {
     }
 }
 
-/// Accepts the server host key. Host-key pinning against a known-hosts store is
-/// out of scope for this phase.
-// TODO(amicu-planning#70): verify the server host key instead of accepting it.
-struct AcceptingHandler;
+/// Records the server host-key fingerprint and, when a pin is set, refuses any
+/// other key. Without a pin the first key is accepted (trust on first use); the
+/// adapter stores the observed fingerprint in its stop record so every later
+/// connection is pinned.
+// TODO(amicu-planning#70): verify against a known-hosts store instead of TOFU.
+struct PinningHandler {
+    pinned: Option<String>,
+    observed: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
 
-impl russh::client::Handler for AcceptingHandler {
+impl russh::client::Handler for PinningHandler {
     type Error = russh::Error;
 
-    // The `async` is required by russh's `Handler` trait; this impl just accepts
-    // the key with no awaiting (clippy 1.98+ `unused_async_trait_impl`).
+    // The `async` is required by russh's `Handler` trait; this impl has no
+    // awaiting (clippy 1.98+ `unused_async_trait_impl`).
     #[allow(clippy::unused_async_trait_impl)]
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::PublicKeyOrCertificate,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        Ok(true)
+        let fingerprint = match server_public_key {
+            russh::keys::PublicKeyOrCertificate::PublicKey { key, .. } => {
+                key.fingerprint(russh::keys::HashAlg::Sha256).to_string()
+            }
+            russh::keys::PublicKeyOrCertificate::Certificate(cert) => cert
+                .public_key()
+                .fingerprint(russh::keys::HashAlg::Sha256)
+                .to_string(),
+        };
+        *self.observed.lock().expect("host key lock") = Some(fingerprint.clone());
+        Ok(self.pinned.as_ref().is_none_or(|p| *p == fingerprint))
     }
 }
 
@@ -201,10 +239,14 @@ impl SshTransport for RusshTransport {
             .map_err(|e| SshTransportError::Auth(format!("ssh key could not be decoded: {e}")))?;
 
         let config = Arc::new(russh::client::Config::default());
+        let observed = Arc::new(std::sync::Mutex::new(None));
         let connect = russh::client::connect(
             config,
             (target.host.as_str(), target.port),
-            AcceptingHandler,
+            PinningHandler {
+                pinned: target.pinned_host_key.clone(),
+                observed: observed.clone(),
+            },
         );
         let mut handle = tokio::time::timeout(self.timeout, connect)
             .await
@@ -250,10 +292,12 @@ impl SshTransport for RusshTransport {
                 _ => {}
             }
         }
+        let host_key = observed.lock().expect("host key lock").clone();
         Ok(CommandOutput {
             exit_status,
             stdout,
             stderr,
+            host_key,
         })
     }
 }

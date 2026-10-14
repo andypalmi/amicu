@@ -1383,6 +1383,68 @@ mod tests {
         assert_eq!(scan_runtime_env_secrets(&g), Vec::new());
     }
 
+    #[test]
+    fn runtime_secret_scan_flags_secret_named_env_literal_and_extra_args() {
+        let mut env = BTreeMap::new();
+        env.insert("MY_API_TOKEN".to_string(), "abc123xyz789".to_string());
+        let args = vec![
+            "--api-key".to_string(),
+            "supersecretvalue".to_string(),
+            "--hf-token=hf_abcdefghijklmnopqrstuvwxyz0123456789".to_string(),
+            "--ctx-size".to_string(),
+            "4096".to_string(),
+        ];
+        let g = llama_cpp_deployment_with(args, env);
+        let paths: Vec<_> = scan_runtime_env_secrets(&g)
+            .into_iter()
+            .map(|d| d.path.unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "llama_cpp.env.MY_API_TOKEN",
+                "llama_cpp.extra_args[0]",
+                "llama_cpp.extra_args[2]"
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_secret_scan_has_no_false_positives_on_normal_settings() {
+        let mut env = BTreeMap::new();
+        env.insert("HF_HUB_OFFLINE".to_string(), "1".to_string());
+        env.insert("HF_TOKEN_FILE".to_string(), "/run/secrets/hf".to_string());
+        env.insert("API_KEY".to_string(), "true".to_string());
+        let args = ["--ctx-size", "4096", "--cache-type-k", "q8_0", "--keep=256"]
+            .map(String::from)
+            .to_vec();
+        let g = llama_cpp_deployment_with(args, env);
+        assert_eq!(scan_runtime_env_secrets(&g), Vec::new());
+    }
+
+    #[test]
+    fn runtime_secret_scan_regressions() {
+        let args = [
+            "--override-kv",
+            "tokenizer.ggml.add_bos_token=bool:false",
+            "--hf-token",
+            "hf_abcdefghijklmnopqrstuvwxyz0123456789",
+            "--api-key=${VLLM_KEY}",
+            "--api-key",
+            "$VLLM_KEY",
+        ]
+        .map(String::from)
+        .to_vec();
+        let mut env = BTreeMap::new();
+        env.insert("HF_TOKEN".to_string(), "${HF_TOKEN}".to_string());
+        let g = llama_cpp_deployment_with(args, env);
+        let paths: Vec<_> = scan_runtime_env_secrets(&g)
+            .into_iter()
+            .map(|d| d.path.unwrap())
+            .collect();
+        assert_eq!(paths, ["llama_cpp.extra_args[2]"]);
+    }
+
     // --- amicu-planning#151 PR D: multimodal projector block ---------------
 
     #[test]

@@ -11,17 +11,18 @@ The CLI stores state in the project directory:
 
 | Path | Content |
 |---|---|
-| `.amicu/state/state.json` | The applied resource graph and the started endpoints |
+| `.amicu/state/state.json` | The applied resource graph, the started endpoints, the `pending` deployments and the stop records (below) |
+| `.amicu/state/state.json.bak` | The previous version of `state.json`, copied on save only when the current file is valid |
 | `.amicu/state/state.lock` | The lock file |
 | `.amicu/config.yaml` | Project config. `init` writes `state.backend: local`. |
 
 `local` is the only state backend the CLI implements. There is no remote state backend for the CLI yet.
 
-Treat `state.json` as sensitive operational data. Do not edit it by hand. Add `.amicu/state/` to version control ignore rules unless you have a reason to share it.
+Treat `state.json` as sensitive operational data. Do not edit it by hand. `amicu init` adds `.amicu/` to `.gitignore`. Do not share state through version control: the lock is local to one machine, so two people applying from a committed `state.json` can overwrite each other and orphan running resources. A state serial with compare-and-swap saves is planned (amicu-planning#218).
 
 ## Locking
 
-`apply` and `amicu modal stop` take an advisory lock on `.amicu/state/state.lock` for their whole read, refresh, plan, apply, and save sequence. The lock belongs to the operating system process: when the process dies, the kernel releases it, so there is no stale lock to clean up.
+`apply`, `destroy` and `amicu modal stop` take an advisory lock on `.amicu/state/state.lock` for their whole read, refresh, plan, apply, and save sequence. The lock belongs to the operating system process: when the process dies, the kernel releases it, so there is no stale lock to clean up.
 
 If another amicu process holds the lock, the command fails with a message naming the holder (pid, command, start time). To wait instead, pass a timeout:
 
@@ -29,17 +30,49 @@ If another amicu process holds the lock, the command fails with a message naming
 amicu apply --lock-timeout 60
 ```
 
-## Partial apply
+## State version
 
-If an apply fails after starting some deployments, those deployments are recorded in state and the error lists them. Fix the cause and run `apply` again: deployments that already succeeded show no change and apply finishes the rest. See [Security: State](/docs/security/state).
+Current state files are version `v3`. amicu also reads `v1` and `v2` files. Besides the graph and endpoints, v3 holds these fields:
+
+- **`project_id`**: an 8-digit hex id, minted when state is first written. It scopes the host service labels (see [Host service labels](#host-service-labels)).
+- **`pending`**: deployments whose start was begun but not confirmed. Amicu writes them before the provider starts anything. `plan` treats them as absent, so `apply` recreates them, and `destroy` tries to confirm their stop.
+- **`stops`**: one stop record per instance that may be running. Each record carries what is needed to stop it from state alone: the backend (`launchd`, `systemd` or `modal`), the identity (launchd label, systemd unit or Modal app name), and the provider's id once known. Host records also keep the uid, for launchd the domain (`gui/<uid>` or `user/<uid>`), the path of the service file, and the log files. Modal records keep the workspace, the environment, and the names of the cache volumes the app mounts. A record is removed only after its stop is confirmed.
+- **`fingerprints`**: SHA-256 digests of the secret pins, container image and binary path each deployment was last confirmed started with. See [Plan, apply and state](/docs/concepts/plan-apply-state#change-detection). Deleting this map only resets the baseline.
+
+Amicu refuses to act on a record when the current machine or account does not match it. Each refusal names the mismatch and says how to fix it: switch `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` to the recorded Modal workspace, or re-run as the user that started the host instance. Nothing is changed in that case.
+
+State written by v1 amicu has no `pending` or `stops`. The stop records are derived from the graph on load, and a v1 Modal app is stamped with a workspace only after amicu proves the app is in the active one. State written by v2 has no `project_id`. An older amicu that saves a v3 file drops these fields, so do not run an older build on a project after a v3 apply.
+
+## Host service labels
+
+A local deployment runs as a launchd job or systemd user unit labelled `io.amicu.llama.<project_id>.<deployment>`. The `project_id` is stored in `.amicu/state/state.json`, so two projects never share a label.
+
+- To stop a service by hand: `launchctl bootout gui/$(id -u)/<label>` on macOS, or `systemctl --user stop <label>` on Linux. Then run `amicu destroy` so that state and the service file are cleaned up too.
+- Deployments created before v3 keep the unscoped label `io.amicu.llama.<deployment>` until their next `apply`. That `apply` stops the old job and confirms the stop before it starts the new one.
+- Do not copy `.amicu/` to another checkout. Both copies would have the same `project_id`, and each could stop the other's instances. To work from another checkout, run `amicu destroy` in the first one, then apply in the second.
+- Do not delete state while instances are running. Their stop identity exists only in state, so deleting it orphans them. Run `amicu destroy` first.
+
+## Partial apply and destroy
+
+If an apply or destroy fails after starting or stopping some deployments, those changes are recorded in state and the error lists them. Fix the cause and re-run the same command: deployments that already succeeded show no change and the command finishes the rest. See [Security: State](/docs/security/state) and [Plan, apply and state](/docs/concepts/plan-apply-state#destroy).
+
+## Known limitations
+
+- **Modal app name collisions.** Amicu names a Modal app `amicu-` plus the deployment id, lowercased, with any non-alphanumeric character turned into `-` and runs of `-` collapsed into one. Two deployment ids that differ only in case or separator (for example `support_chat` and `Support-Chat`) map to the same app name. Amicu does not reject this yet, so do not give two deployments such ids. Name-based lookups can then find the wrong app.
 
 ## Drift
 
 State can fall out of date if something changes a deployment outside amicu.
 
-- **Remote providers (Modal today).** Before each `plan` and `apply`, amicu asks Modal which recorded apps still exist. Apps that are gone are dropped from state and the plan shows a `create`. A `drift:` line is printed (to stderr with `--output json`). If the lookup fails, a `warning: could not check Modal for live apps` is printed and state is used as is.
-- **Local services.** There is no automatic refresh. If you stopped a service by hand, remove the deployment from the configuration and apply, or stop and re-add it. See [Troubleshooting](/docs/troubleshooting).
+- **Remote providers (Modal today).** Before each `plan`, `apply` and `destroy`, amicu asks Modal which recorded apps still exist. A deployment whose app is not found by name is kept in state as `pending`, and a `drift:` line is printed (to stderr with `--output json`). `plan` then shows a `create`, `apply` recreates the app, and `destroy` tries to confirm the stop by app id or, if none is recorded, by name. If the lookup fails, amicu prints a `warning: could not check Modal for live apps` and uses state as is.
+- **Local services.** Before `plan`, `apply` and `destroy`, amicu asks launchd or systemd whether each recorded service is running. A service that is confirmed gone (after a reboot, a crash, or a manual removal) is kept in state as `pending`, and a `drift:` line is printed. `plan` then shows a `create`, `apply` restarts the service, and `destroy` stops it and confirms the stop. If the check cannot be completed, amicu prints `warning: could not check host services` and uses state as is. See [This machine](/docs/providers/local).
+
+## Failed updates
+
+If a host update fails, the deployment stays `pending` in state with its stop record. The next `plan` shows a `create`, and `amicu destroy --target <id>` stops the instance and confirms the stop.
 
 ## Starting over
 
-If state is lost or corrupt, `plan` shows `create` for everything. Stop the running services first (see [This machine](/docs/providers/local) and your [provider's page](/docs/providers)), then delete the state file and apply. Only do this with explicit intent: amicu forgets what it started.
+If `state.json` is corrupt or missing but `state.json.bak` is valid, amicu refuses to continue and names the backup. Inspect it, and if it is correct restore it with `cp .amicu/state/state.json.bak .amicu/state/state.json`.
+
+If state is lost or corrupt with no usable backup, `plan` shows `create` for everything, and amicu no longer knows how to stop what it started. Stop each instance by hand first: `launchctl bootout gui/$(id -u)/<label>` on macOS, `systemctl --user stop <label>` on Linux, or `amicu modal stop <app>` for Modal. The labels are `io.amicu.llama.<project_id>.<deployment>` (or `io.amicu.llama.<deployment>` for older deployments). Then delete `state.json` and `state.json.bak` and apply. Do not delete state while instances are running: the instances are then orphaned, and the stop identity that only state held is gone. Only do this with explicit intent.

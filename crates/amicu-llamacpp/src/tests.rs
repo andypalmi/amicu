@@ -34,8 +34,8 @@ use crate::download::download_gguf;
 use crate::error::LlamaCppError;
 use crate::health::HealthProbe;
 use crate::service::{
-    CommandExec, ExecOutput, HostExec, LaunchdManager, ServiceManager, ServiceSpec, ServiceState,
-    SystemdManager,
+    CommandExec, ExecOutput, HostExec, LaunchdManager, Presence, ServiceManager, ServiceSpec,
+    ServiceState, SystemdManager,
 };
 use crate::supervisor::{ProcessSupervisor, ReadyWait, ResolvedSecret, ServiceSupervisor};
 use crate::{LlamaCppAdapter, MapCatalog};
@@ -1685,6 +1685,7 @@ fn manifest_plan() -> LaunchPlan {
         }),
         secret_refs: vec![],
         api_key: None,
+        service_label: None,
         estimate: ResourceEstimate {
             estimated_memory: ByteSize::from_bytes(0),
             gpu_count: 0,
@@ -2055,9 +2056,18 @@ fn launchd_update_releases_the_old_job_by_plist_and_label_before_loading() {
     manager.release(&spec.label);
     manager.start(&spec).expect("update");
 
-    let calls = exec.calls.lock().unwrap().clone();
+    // `print` is the domain probe; the rest is the real sequence.
+    let calls: Vec<Vec<String>> = exec
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c[1] != "print")
+        .cloned()
+        .collect();
     let verbs: Vec<&str> = calls.iter().map(|c| c[1].as_str()).collect();
-    assert_eq!(verbs, ["load", "unload", "remove", "load"]);
+    assert_eq!(verbs, ["bootstrap", "bootout", "remove", "bootstrap"]);
+    assert_eq!(calls[1][2], format!("gui/501/{}", spec.label));
     assert_eq!(calls[2][2], spec.label);
 }
 
@@ -2067,8 +2077,21 @@ fn launchd_release_removes_by_label_even_without_a_plist() {
     let exec = std::sync::Arc::new(FakeExec::new(true, ""));
     let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"));
     manager.release("io.amicu.llama.x");
-    let calls = exec.calls.lock().unwrap().clone();
-    assert_eq!(calls, [["launchctl", "remove", "io.amicu.llama.x"]]);
+    let calls: Vec<Vec<String>> = exec
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c[1] != "print")
+        .cloned()
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            vec!["launchctl", "bootout", "gui/501/io.amicu.llama.x"],
+            vec!["launchctl", "remove", "io.amicu.llama.x"]
+        ]
+    );
 }
 
 #[test]
@@ -2178,6 +2201,7 @@ impl FakeExec {
                 success,
                 stdout: stdout.to_owned(),
                 stderr: String::new(),
+                code: Some(i32::from(!success)),
             },
             calls: Mutex::new(Vec::new()),
         }
@@ -2194,6 +2218,14 @@ impl FakeExec {
 
 impl CommandExec for FakeExec {
     fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        if program.ends_with("/id") {
+            return Ok(ExecOutput {
+                success: true,
+                stdout: "501\n".to_owned(),
+                stderr: String::new(),
+                code: Some(0),
+            });
+        }
         let mut call = vec![program.to_owned()];
         call.extend(args.iter().map(|a| (*a).to_owned()));
         self.calls.lock().unwrap().push(call);
@@ -2244,23 +2276,131 @@ fn launchd_start_writes_plist_and_loads() {
     }
 }
 
+/// A launchd stand-in: `list` succeeds while the job is "loaded"; `unload` and
+/// `remove` clear it only when configured to.
+struct LoadedExec {
+    loaded: Mutex<bool>,
+    unload_clears: bool,
+    remove_clears: bool,
+    calls: Mutex<Vec<String>>,
+}
+
+impl LoadedExec {
+    fn new(unload_clears: bool, remove_clears: bool) -> Self {
+        Self {
+            loaded: Mutex::new(true),
+            unload_clears,
+            remove_clears,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl CommandExec for LoadedExec {
+    fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        if program.ends_with("/id") {
+            return Ok(ExecOutput {
+                success: true,
+                stdout: "501\n".to_owned(),
+                stderr: String::new(),
+                code: Some(0),
+            });
+        }
+        assert_eq!(program, "launchctl");
+        self.calls.lock().unwrap().push(args[0].to_owned());
+        let mut loaded = self.loaded.lock().unwrap();
+        let success = match args[0] {
+            // `print gui/501` is the domain probe; `print gui/501/<label>`
+            // asks whether the job is loaded.
+            "print" if args[1] == "gui/501" => true,
+            "print" => *loaded,
+            "bootout" => {
+                if self.unload_clears {
+                    *loaded = false;
+                }
+                // The real launchctl can exit 0 even when the bootout failed.
+                true
+            }
+            "remove" => {
+                if self.remove_clears {
+                    *loaded = false;
+                }
+                true
+            }
+            other => panic!("unexpected launchctl {other}"),
+        };
+        Ok(ExecOutput {
+            success,
+            stdout: String::new(),
+            stderr: "Unload failed: 5: Input/output error".to_owned(),
+            code: Some(if success { 0 } else { 113 }),
+        })
+    }
+}
+
 #[test]
 fn launchd_stop_removes_plist() {
     let tmp = TempDir::new("launchd-stop");
     let agents = tmp.file("agents");
     let logs = tmp.file("logs");
-    let manager = LaunchdManager::new(FakeExec::new(true, ""), &agents, &logs);
     let spec = service_spec();
-    manager.start(&spec).expect("start");
-
+    LaunchdManager::new(FakeExec::new(true, ""), &agents, &logs)
+        .start(&spec)
+        .expect("start");
     let plist = agents.join("io.amicu.llama.support_chat_local.plist");
     assert!(plist.exists(), "plist should exist after start");
 
+    let manager = LaunchdManager::new(LoadedExec::new(true, true), &agents, &logs);
     manager.stop(&spec.label).expect("stop");
     assert!(!plist.exists(), "plist must be removed after stop");
 
-    // A second stop (plist already gone) must not fail.
-    manager.stop(&spec.label).expect("stop is idempotent");
+    // A second stop (plist gone, job gone) must not fail.
+    let exec = LoadedExec::new(true, true);
+    *exec.loaded.lock().unwrap() = false;
+    let gone = LaunchdManager::new(exec, &agents, &logs);
+    gone.stop(&spec.label).expect("stop is idempotent");
+}
+
+#[test]
+fn launchd_stop_falls_back_to_remove_when_unload_leaves_the_job_loaded() {
+    let tmp = TempDir::new("launchd-stop-remove");
+    let agents = tmp.file("agents");
+    let spec = service_spec();
+    LaunchdManager::new(FakeExec::new(true, ""), &agents, tmp.file("logs"))
+        .start(&spec)
+        .unwrap();
+    let exec = std::sync::Arc::new(LoadedExec::new(false, true));
+    let manager = LaunchdManager::new(exec.clone(), &agents, tmp.file("logs"));
+    manager.stop(&spec.label).expect("remove confirms the stop");
+    let calls = exec.calls.lock().unwrap().clone();
+    assert!(calls.contains(&"remove".to_owned()), "{calls:?}");
+}
+
+#[test]
+fn launchd_stop_errors_and_keeps_the_plist_when_the_job_stays_loaded() {
+    let tmp = TempDir::new("launchd-stop-fail");
+    let agents = tmp.file("agents");
+    let spec = service_spec();
+    LaunchdManager::new(FakeExec::new(true, ""), &agents, tmp.file("logs"))
+        .start(&spec)
+        .unwrap();
+    let manager = LaunchdManager::new(LoadedExec::new(false, false), &agents, tmp.file("logs"));
+    let err = manager.stop(&spec.label).expect_err("unconfirmed stop");
+    assert!(err.to_string().contains("still loaded"), "{err}");
+    assert!(
+        agents
+            .join("io.amicu.llama.support_chat_local.plist")
+            .exists()
+    );
+}
+
+#[test]
+fn launchd_stop_with_no_plist_still_checks_the_label_is_gone() {
+    let tmp = TempDir::new("launchd-stop-noplist");
+    let manager = LaunchdManager::new(LoadedExec::new(false, false), tmp.file("a"), "/l");
+    assert!(manager.stop("io.amicu.llama.x").is_err());
+    let manager = LaunchdManager::new(LoadedExec::new(false, true), tmp.file("a"), "/l");
+    manager.stop("io.amicu.llama.x").expect("removed by label");
 }
 
 #[test]
@@ -2333,6 +2473,47 @@ fn systemd_start_failure_removes_the_env_file() {
     let manager = SystemdManager::new(FakeExec::new(false, ""), &dir.0);
     assert!(manager.start(&spec).is_err());
     assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+}
+
+/// systemctl stand-in: `stop` fails; `show -p LoadState` answers `load_state`.
+struct StopFailsExec {
+    load_state: &'static str,
+}
+
+impl CommandExec for StopFailsExec {
+    fn exec(&self, _: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        let is_show = args.contains(&"show");
+        Ok(ExecOutput {
+            success: is_show,
+            stdout: if is_show {
+                self.load_state.to_owned()
+            } else {
+                String::new()
+            },
+            // Deliberately localized: confirmation must not parse stderr.
+            stderr: "Die Einheit ist nicht geladen.".to_owned(),
+            code: Some(i32::from(!is_show)),
+        })
+    }
+}
+
+#[test]
+fn systemd_stop_failure_is_confirmed_only_by_load_state_not_stderr() {
+    let dir = TempDir::new("systemd-loadstate");
+    let gone = SystemdManager::new(
+        StopFailsExec {
+            load_state: "not-found\n",
+        },
+        &dir.0,
+    );
+    gone.stop("io.amicu.llama.x").expect("unit does not exist");
+    let loaded = SystemdManager::new(
+        StopFailsExec {
+            load_state: "loaded\n",
+        },
+        &dir.0,
+    );
+    assert!(loaded.stop("io.amicu.llama.x").is_err());
 }
 
 #[test]
@@ -3061,11 +3242,240 @@ fn launchd_plist_carries_the_key_in_a_0600_file_removed_on_stop_and_on_failed_lo
         fs::metadata(&plist).unwrap().permissions().mode() & 0o777,
         0o600
     );
-    manager.stop(&spec.label).unwrap();
+    LaunchdManager::new(LoadedExec::new(true, true), &agents, tmp.file("logs"))
+        .stop(&spec.label)
+        .unwrap();
     assert!(!plist.exists());
 
     // A failed `launchctl load` must not leave the secret behind.
     let failing = LaunchdManager::new(FakeExec::new(false, ""), &agents, tmp.file("logs"));
     assert!(failing.start(&spec).is_err());
     assert!(!plist.exists(), "plist with the key must be removed");
+}
+
+#[test]
+fn launchd_start_bootstraps_into_the_domain_and_reports_its_context() {
+    let tmp = TempDir::new("launchd-domain");
+    let exec = std::sync::Arc::new(FakeExec::new(true, ""));
+    let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"));
+    manager.start(&service_spec()).expect("start");
+    let calls = exec.calls.lock().unwrap().clone();
+    let bootstrap = calls
+        .iter()
+        .find(|c| c[1] == "bootstrap")
+        .expect("bootstrap");
+    assert_eq!(bootstrap[2], "gui/501");
+    assert!(bootstrap[3].ends_with("io.amicu.llama.support_chat_local.plist"));
+
+    let ctx = manager.context().expect("context");
+    assert_eq!(ctx.backend, crate::HostBackend::Launchd);
+    assert_eq!(ctx.uid, 501);
+    assert_eq!(ctx.domain.as_deref(), Some("gui/501"));
+}
+
+#[test]
+fn launchd_falls_back_to_the_user_domain_without_a_gui_session() {
+    let tmp = TempDir::new("launchd-user-domain");
+    // `launchctl print gui/501` fails: no GUI session.
+    let manager = LaunchdManager::new(NoGuiExec, tmp.file("agents"), tmp.file("logs"));
+    let ctx = manager.context().expect("context");
+    assert_eq!(ctx.domain.as_deref(), Some("user/501"));
+}
+
+struct NoGuiExec;
+
+impl CommandExec for NoGuiExec {
+    fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        let id = program.ends_with("/id");
+        let gui = args.first() == Some(&"print") && args[1].starts_with("gui/");
+        Ok(ExecOutput {
+            code: Some(if gui { 113 } else { 0 }),
+            success: !gui,
+            stdout: if id {
+                "501\n".to_owned()
+            } else {
+                String::new()
+            },
+            stderr: String::new(),
+        })
+    }
+}
+
+#[test]
+fn systemd_reports_its_uid() {
+    let tmp = TempDir::new("systemd-context");
+    let manager = SystemdManager::new(FakeExec::new(true, ""), &tmp.0);
+    let ctx = manager.context().expect("context");
+    assert_eq!(ctx.backend, crate::HostBackend::Systemd);
+    assert_eq!(ctx.uid, 501);
+    assert_eq!(ctx.domain, None);
+}
+
+/// launchctl that fails with an exit code other than 113 on `print <label>`.
+struct OddExitExec;
+
+impl CommandExec for OddExitExec {
+    fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        let id = program.ends_with("/id");
+        let label_print = args.first() == Some(&"print") && args[1].contains("/io.");
+        Ok(ExecOutput {
+            success: !label_print,
+            stdout: if id {
+                "501\n".to_owned()
+            } else {
+                String::new()
+            },
+            stderr: "boom".to_owned(),
+            code: Some(if label_print { 5 } else { 0 }),
+        })
+    }
+}
+
+#[test]
+fn launchd_only_exit_113_means_gone_other_failures_are_errors() {
+    let tmp = TempDir::new("launchd-odd-exit");
+    let manager = LaunchdManager::new(OddExitExec, tmp.file("agents"), tmp.file("logs"));
+    let err = manager
+        .stop("io.amicu.llama.x")
+        .expect_err("exit 5 is not 'gone'");
+    assert!(err.to_string().contains("failed unexpectedly"), "{err}");
+}
+
+#[test]
+fn the_real_host_exec_refuses_service_commands_unless_enabled() {
+    let result = std::panic::catch_unwind(|| {
+        let _ = HostExec.exec("launchctl", &["list"]);
+    });
+    assert!(result.is_err(), "must panic instead of spawning launchctl");
+}
+
+// ---- presence probes (host drift refresh): Down only when confirmed ----------
+
+/// Answers every non-`id` command with one scripted result.
+struct OneAnswer(Result<ExecOutput, String>, Mutex<Vec<Vec<String>>>);
+
+impl OneAnswer {
+    fn new(success: bool, code: i32, stdout: &str, stderr: &str) -> Self {
+        Self(
+            Ok(ExecOutput {
+                success,
+                stdout: stdout.to_owned(),
+                stderr: stderr.to_owned(),
+                code: Some(code),
+            }),
+            Mutex::new(Vec::new()),
+        )
+    }
+}
+
+impl CommandExec for OneAnswer {
+    fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        let mut call = vec![program.to_owned()];
+        call.extend(args.iter().map(|a| (*a).to_owned()));
+        self.1.lock().unwrap().push(call);
+        self.0.clone().map_err(LlamaCppError::Supervisor)
+    }
+}
+
+const PRESENCE_LABEL: &str = "io.amicu.llama.support_chat_local";
+
+fn launchd_presence(exec: OneAnswer, domain: Option<&str>) -> Result<Presence, LlamaCppError> {
+    let tmp = TempDir::new("presence");
+    LaunchdManager::new(exec, tmp.file("agents"), tmp.file("logs")).presence(PRESENCE_LABEL, domain)
+}
+
+#[test]
+fn launchd_presence_is_down_only_for_exit_113() {
+    let domain = Some("gui/501");
+    assert_eq!(
+        launchd_presence(
+            OneAnswer::new(false, 113, "", "Could not find service"),
+            domain
+        )
+        .unwrap(),
+        Presence::Down
+    );
+    for code in [1, 2, 5, 36, 125] {
+        let err = launchd_presence(OneAnswer::new(false, code, "", "boom"), domain);
+        assert!(err.is_err(), "exit {code} must not mean down: {err:?}");
+    }
+    assert_eq!(
+        launchd_presence(OneAnswer::new(true, 0, "\tstate = running\n", ""), domain).unwrap(),
+        Presence::Running
+    );
+    assert_eq!(
+        launchd_presence(
+            OneAnswer::new(true, 0, "\tstate = not running\n", ""),
+            domain
+        )
+        .unwrap(),
+        Presence::Down
+    );
+}
+
+#[test]
+fn launchd_presence_uses_the_recorded_domain_and_never_guesses_without_one() {
+    let exec = std::sync::Arc::new(OneAnswer::new(false, 113, "", ""));
+    let tmp = TempDir::new("presence-domain");
+    let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"));
+    manager.presence(PRESENCE_LABEL, Some("user/501")).unwrap();
+    assert_eq!(
+        exec.1.lock().unwrap().clone(),
+        [["launchctl", "print", &format!("user/501/{PRESENCE_LABEL}")]]
+    );
+    let calls_before = exec.1.lock().unwrap().len();
+    assert_eq!(
+        manager.presence(PRESENCE_LABEL, None).unwrap(),
+        Presence::Unknown
+    );
+    assert_eq!(exec.1.lock().unwrap().len(), calls_before, "no command run");
+}
+
+fn systemd_presence(exec: OneAnswer) -> Result<Presence, LlamaCppError> {
+    let dir = TempDir::new("presence-sd");
+    SystemdManager::new(exec, &dir.0).presence(PRESENCE_LABEL, None)
+}
+
+#[test]
+fn systemd_presence_reads_load_and_active_state_and_only_confirmed_is_down() {
+    let show = |load: &str, active: &str| {
+        OneAnswer::new(
+            true,
+            0,
+            &format!("LoadState={load}\nActiveState={active}\n"),
+            "",
+        )
+    };
+    assert_eq!(
+        systemd_presence(show("not-found", "inactive")).unwrap(),
+        Presence::Down
+    );
+    assert_eq!(
+        systemd_presence(show("loaded", "failed")).unwrap(),
+        Presence::Down
+    );
+    assert_eq!(
+        systemd_presence(show("loaded", "inactive")).unwrap(),
+        Presence::Down
+    );
+    assert_eq!(
+        systemd_presence(show("loaded", "active")).unwrap(),
+        Presence::Running
+    );
+    // In transition or unrecognised: never reported down.
+    for active in ["deactivating", "activating", "weird"] {
+        assert_eq!(
+            systemd_presence(show("loaded", active)).unwrap(),
+            Presence::Unknown,
+            "{active}"
+        );
+    }
+    // A bus error / failed command is an error, never down.
+    let bus = OneAnswer::new(false, 1, "", "Failed to connect to bus: No medium found");
+    assert!(systemd_presence(bus).is_err());
+    // Success with empty output is not proof of anything.
+    assert_eq!(
+        systemd_presence(OneAnswer::new(true, 0, "", "")).unwrap(),
+        Presence::Unknown
+    );
 }

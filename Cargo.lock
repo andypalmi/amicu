@@ -176,6 +176,9 @@ dependencies = [
  "amicu-registry",
  "amicu-runtime",
  "amicu-vllm",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -247,8 +250,10 @@ dependencies = [
  "russh",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -320,6 +325,7 @@ name = "amicu-state"
 version = "0.1.0"
 dependencies = [
  "amicu-core",
+ "amicu-runtime",
  "async-trait",
  "rand 0.8.7",
  "rustversion",
@@ -358,6 +364,7 @@ dependencies = [
  "amicu-runtime",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

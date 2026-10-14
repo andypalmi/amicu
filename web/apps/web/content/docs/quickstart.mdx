@@ -127,7 +127,7 @@ amicu plan
 amicu apply
 ```
 
-`plan` prints the exact `llama-server` command, including the absolute model path `<project dir>/models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf`. `apply` shows the plan, asks for approval, installs a user service (launchd on macOS, systemd on Linux), starts it, and waits up to 15 minutes for `/health` to answer. If the service exits during startup, apply fails within seconds. On any failure it stops the service and the error gives the log location. See [This machine](/docs/providers/local).
+`plan` prints the exact `llama-server` command, with the model path relative to the project, `models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf`. The service runs with the absolute path. `apply` shows the plan, asks for approval, installs a user service (launchd on macOS, systemd on Linux), starts it, and waits up to 15 minutes for `/health` to answer. If the service exits during startup, apply fails within seconds. On any failure it stops the service and the error gives the log location. See [This machine](/docs/providers/local).
 
 ### Send a request
 
@@ -139,7 +139,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model": "Qwen/Qwen3-8B-GGUF", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-If the request fails, check that the service is running and read its log: on macOS `~/Library/Logs/amicu/<label>.out.log` and `<label>.err.log`, on Linux `journalctl --user --unit=<label>`. The label is `io.amicu.llama.qwen3_8b_local`. A missing or wrong GGUF path is the usual cause; confirm the file exists where the plan's `launch:` line says.
+If the request fails, check that the service is running and read its log: on macOS `~/Library/Logs/amicu/<label>.out.log` and `<label>.err.log`, on Linux `journalctl --user --unit=<label>`. The label is `io.amicu.llama.<project_id>.qwen3_8b_local`, where `project_id` is in `.amicu/state/state.json`. A missing or wrong GGUF path is the usual cause; confirm the file exists at `models/qwen3_8b/` in the project directory.
 
 To require a key even locally, add `api_key = secret("LOCAL_API_KEY")` to the deployment and export `LOCAL_API_KEY` before `apply`, then send `Authorization: Bearer $LOCAL_API_KEY`.
 
@@ -229,7 +229,15 @@ Today, `apply` supports Modal as a remote GPU provider. Hetzner, OVHcloud, Scale
 
 ## 4. Tear down
 
-There is no `destroy` command. Amicu removes what is no longer declared: delete the `deployment` resource from your HCL and run `amicu apply`. The plan shows a `destroy` action and apply stops the service.
+```bash
+amicu destroy
+```
+
+`destroy` lists every deployment recorded in state, asks `Destroy these deployments? [y/N]`, and then stops each one and removes it from state. To tear down only some of them, pass `--target <name>` (repeatable). Use `--auto-approve` (alias `--yes`) to skip the prompt.
+
+A deployment leaves state only after its stop is confirmed. If a stop fails, the command exits with an error, the deployment stays in state, and you can re-run `amicu destroy`. On macOS and Linux, destroy also deletes the service file, which holds the endpoint API key. Add `--purge` to also delete the host log files of the destroyed deployments. Modal cache volumes are never deleted. See [Plan, apply and state](/docs/concepts/plan-apply-state#destroy).
+
+You can also delete a `deployment` from your HCL and run `amicu apply`; the plan then shows a `destroy` action for it.
 
 Some providers also have a direct stop command; see the provider page (for example [Modal](/docs/providers/modal#monitoring)).
 

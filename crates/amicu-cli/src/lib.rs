@@ -8,11 +8,13 @@ mod checks;
 mod commands;
 mod error;
 mod lock;
+mod modal_ops;
 mod planner;
 mod project;
 mod refresh;
 mod secret;
 mod skills;
+mod stops;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -78,6 +80,28 @@ enum Command {
         /// immediately when another amicu process holds it.
         #[arg(long, value_name = "SECS")]
         lock_timeout: Option<u64>,
+    },
+    /// Destroy deployments recorded in state (everything, or only `--target`s).
+    Destroy {
+        /// Destroy only this deployment (repeatable). Unknown names are an error.
+        #[arg(long, value_name = "NAME")]
+        target: Vec<String>,
+        /// Skip the interactive approval prompt.
+        #[arg(long, visible_alias = "yes")]
+        auto_approve: bool,
+        /// Wait up to this many seconds for the state lock instead of failing
+        /// immediately when another amicu process holds it.
+        #[arg(long, value_name = "SECS")]
+        lock_timeout: Option<u64>,
+        /// Forget a Modal deployment whose app cannot be found by name and has
+        /// no recorded app id, instead of refusing. Use only after checking in
+        /// the Modal dashboard that nothing is running.
+        #[arg(long, requires = "target")]
+        forget_unconfirmed: bool,
+        /// After destroying, also delete the host log files recorded for the
+        /// destroyed deployments. Modal cache volumes are never deleted.
+        #[arg(long)]
+        purge: bool,
     },
     /// Run environment and project diagnostics.
     Doctor,
@@ -224,6 +248,9 @@ impl SkillTarget {
 /// Parse arguments, run the selected command, and map it to a process exit code.
 #[must_use]
 pub fn run() -> ExitCode {
+    // Only the real binary may run launchctl/systemctl; library callers and
+    // tests get a panic instead.
+    amicu_llamacpp::allow_service_commands();
     let cli = Cli::parse();
     let mut stdout = std::io::stdout();
     match dispatch(&cli, &mut stdout) {
@@ -286,6 +313,22 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
             &project,
             *auto_approve,
             lock_timeout.map(std::time::Duration::from_secs),
+            cli.output,
+            out,
+        ),
+        Command::Destroy {
+            target,
+            auto_approve,
+            lock_timeout,
+            forget_unconfirmed,
+            purge,
+        } => commands::destroy::run(
+            &project,
+            target,
+            *auto_approve,
+            lock_timeout.map(std::time::Duration::from_secs),
+            *forget_unconfirmed,
+            *purge,
             cli.output,
             out,
         ),

@@ -12,6 +12,7 @@ amicu-runtime = { path = "../amicu-runtime" }
 serde = { version = "1", features = ["derive"] }
 # `hardware`: amd-smi / rocm-smi / xpu-smi report JSON.
 serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [lints]
 workspace = true

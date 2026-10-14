@@ -72,7 +72,7 @@ use amicu_providers::modal::modal_proxy_region;
 
 use crate::client::ModalClient;
 use crate::credentials::Credentials;
-use crate::deploy::ServerSpec;
+use crate::deploy::{Deployment, ServerSpec};
 use crate::error::ModalError;
 use crate::image::ImageSpec;
 
@@ -230,6 +230,7 @@ pub struct ModalSupervisor {
     gguf: Option<GgufSource>,
     memory_mb: Option<u32>,
     milli_cpu: Option<u32>,
+    previous_endpoint: Option<String>,
 }
 
 /// A GGUF file on Hugging Face: what a Modal-deployed llama-server fetches
@@ -259,7 +260,17 @@ impl ModalSupervisor {
             scaling: ScalingSettings::default(),
             memory_mb: None,
             milli_cpu: None,
+            previous_endpoint: None,
         }
+    }
+
+    /// The endpoint state recorded for the version being replaced. After a
+    /// failed update is rolled back, this URL is re-verified closed too, not
+    /// only the new deploy's.
+    #[must_use]
+    pub fn with_previous_endpoint(mut self, endpoint: Option<String>) -> Self {
+        self.previous_endpoint = endpoint;
+        self
     }
 
     /// Requests container memory and CPU from a hardware profile's `memory`
@@ -939,23 +950,123 @@ async fn ensure_not_exposed(
         .map_err(|e| e.detail().to_owned())
 }
 
-/// The error `start` returns for an unsafe endpoint: the original `detail`, plus
-/// whether the app was stopped. A failed teardown is spelled out so the user can
-/// stop the (open) app by hand; the app id is not a secret.
-async fn teardown_error<F, Fut>(detail: &str, app_id: &str, stop: F) -> LlamaCppError
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = Result<(), String>>,
-{
-    LlamaCppError::Supervisor(
-        amicu_runtime::exposure::teardown_report(
-            detail,
-            app_id,
-            &format!("`modal app stop {app_id}`"),
-            stop,
-        )
-        .await,
+/// The two Modal reads that find the version serving before an update.
+#[async_trait]
+trait VersionSource: Send {
+    async fn find_app(&mut self, name: &str) -> Result<Option<String>, String>;
+    async fn latest_version(&mut self, app_id: &str) -> Result<Option<u32>, String>;
+}
+
+#[async_trait]
+impl VersionSource for ModalClient {
+    async fn find_app(&mut self, name: &str) -> Result<Option<String>, String> {
+        ModalClient::find_app(self, name)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    async fn latest_version(&mut self, app_id: &str) -> Result<Option<u32>, String> {
+        self.latest_app_version(app_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// The `(app id, newest version)` serving under `app_name` right now, if the
+/// app exists and its history can be read. Best effort: `None` means an update
+/// that fails its exposure check is stopped rather than rolled back.
+async fn previous_version<S: VersionSource>(
+    source: &mut S,
+    app_name: &str,
+) -> Option<(String, u32)> {
+    let app_id = source.find_app(app_name).await.ok()??;
+    let version = source.latest_version(&app_id).await.ok()??;
+    Some((app_id, version))
+}
+
+/// The version to roll back to: only when the deploy went into the very app
+/// that was serving it.
+fn rollback_target(previous: Option<(String, u32)>, deployed_app_id: &str) -> Option<u32> {
+    previous
+        .filter(|(app_id, _)| app_id == deployed_app_id)
+        .map(|(_, version)| version)
+}
+
+/// What the exposure-failure handler does to Modal, so it is testable without
+/// the network.
+#[async_trait]
+trait UpdateControl: Send {
+    async fn rollback(&mut self, app_id: &str, version: u32) -> Result<(), String>;
+    async fn stop(&mut self, app_id: &str) -> Result<(), String>;
+    /// `Ok` when an unauthenticated request to `endpoint` is refused.
+    async fn closed(&mut self, endpoint: &str) -> Result<(), String>;
+}
+
+struct ModalUpdateControl<'a> {
+    client: &'a mut ModalClient,
+}
+
+#[async_trait]
+impl UpdateControl for ModalUpdateControl<'_> {
+    async fn rollback(&mut self, app_id: &str, version: u32) -> Result<(), String> {
+        self.client
+            .rollback_app(app_id, version)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    async fn stop(&mut self, app_id: &str) -> Result<(), String> {
+        self.client
+            .stop_app(app_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    async fn closed(&mut self, endpoint: &str) -> Result<(), String> {
+        ensure_not_exposed(endpoint, EXPOSURE_CHECK_TIMEOUT, EXPOSURE_CHECK_INTERVAL).await
+    }
+}
+
+/// The error `start` returns when the new version's endpoint is open. With a
+/// `previous` version of the same app the new version alone is rolled back and
+/// re-verified; otherwise (fresh app, no history, rollback failed or did not
+/// close the endpoint) the whole app is stopped. Either way the report says
+/// exactly what happened to the app.
+async fn exposure_failure<C: UpdateControl>(
+    control: &mut C,
+    detail: &str,
+    deployment: &Deployment,
+    previous: Option<u32>,
+    previous_endpoint: Option<&str>,
+) -> LlamaCppError {
+    let app_id = deployment.app_id.as_str();
+    // The endpoint recorded for the previous version first, then the new
+    // deploy's (usually the same URL): every one must be closed.
+    let mut urls: Vec<&str> = previous_endpoint.into_iter().collect();
+    if !urls.contains(&deployment.url.as_str()) {
+        urls.push(deployment.url.as_str());
+    }
+    let label = previous.map(|v| format!("version {v}"));
+    let control = tokio::sync::Mutex::new(control);
+    let (message, _kept) = amicu_runtime::exposure::rollback_or_teardown(
+        detail,
+        app_id,
+        &format!("`modal app stop {app_id}`"),
+        label.as_deref(),
+        || async {
+            control
+                .lock()
+                .await
+                .rollback(app_id, previous.unwrap_or_default())
+                .await
+        },
+        || async {
+            for url in &urls {
+                control.lock().await.closed(url).await?;
+            }
+            Ok(())
+        },
+        || async { control.lock().await.stop(app_id).await },
     )
+    .await;
+    LlamaCppError::Supervisor(message)
 }
 
 /// One-line phase note printed to stderr before the (possibly slow) deploy.
@@ -1076,6 +1187,10 @@ impl ProcessSupervisor for ModalSupervisor {
             hf_token_fallback.as_deref(),
         )?;
         let mut client = self.connect().await?;
+        // An update redeploys under the existing app. Remember the version
+        // that is serving now, so a new version that fails the exposure check
+        // is rolled back instead of taking the good one down with it.
+        let previous = previous_version(&mut client, &spec.app_name).await;
         // Stream the image build to stderr (stdout stays clean so
         // `--output json` is one JSON value). Lines are scrubbed of every
         // image-env and secret value first, see `BuildLogSink`.
@@ -1086,7 +1201,8 @@ impl ProcessSupervisor for ModalSupervisor {
         sink.finish();
         let deployment = deployed.map_err(|e| modal_err(&e))?;
         // Fail closed: never hand back (and so register/print) an endpoint that
-        // answers without proxy auth. Tear the app down instead.
+        // answers without proxy auth. Roll an update back to the version that
+        // was serving (verified closed again), or tear the app down.
         if let Err(detail) = ensure_not_exposed(
             &deployment.url,
             EXPOSURE_CHECK_TIMEOUT,
@@ -1094,12 +1210,16 @@ impl ProcessSupervisor for ModalSupervisor {
         )
         .await
         {
-            return Err(teardown_error(&detail, &deployment.app_id, || async {
-                client
-                    .stop_app(&deployment.app_id)
-                    .await
-                    .map_err(|e| e.to_string())
-            })
+            let previous = rollback_target(previous, &deployment.app_id);
+            return Err(exposure_failure(
+                &mut ModalUpdateControl {
+                    client: &mut client,
+                },
+                &detail,
+                &deployment,
+                previous,
+                self.previous_endpoint.as_deref(),
+            )
             .await);
         }
         Ok(RuntimeHandle {
@@ -1263,6 +1383,7 @@ mod tests {
             settings: Runtime::Vllm(settings),
             secret_refs: Vec::new(),
             api_key: None,
+            service_label: None,
             estimate: ResourceEstimate {
                 estimated_memory: ByteSize::from_bytes(0),
                 gpu_count: 1,
@@ -1605,17 +1726,200 @@ mod tests {
         assert!(down.expect_err("down").contains("could not verify"));
     }
 
+    /// Records what the exposure-failure handler did to a fake Modal.
+    struct FakeControl {
+        calls: Vec<String>,
+        rollback: Result<(), String>,
+        closed: Result<(), String>,
+        stop: Result<(), String>,
+    }
+
+    impl FakeControl {
+        fn new() -> Self {
+            Self {
+                calls: Vec::new(),
+                rollback: Ok(()),
+                closed: Ok(()),
+                stop: Ok(()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl UpdateControl for FakeControl {
+        async fn rollback(&mut self, app_id: &str, version: u32) -> Result<(), String> {
+            self.calls.push(format!("rollback {app_id} v{version}"));
+            self.rollback.clone()
+        }
+        async fn stop(&mut self, app_id: &str) -> Result<(), String> {
+            self.calls.push(format!("stop {app_id}"));
+            self.stop.clone()
+        }
+        async fn closed(&mut self, endpoint: &str) -> Result<(), String> {
+            self.calls.push(format!("closed {endpoint}"));
+            self.closed.clone()
+        }
+    }
+
+    fn deployed() -> Deployment {
+        Deployment {
+            app_id: "ap-1".to_owned(),
+            function_id: "fu-1".to_owned(),
+            url: "https://x.modal.direct".to_owned(),
+        }
+    }
+
     #[tokio::test]
-    async fn teardown_error_reports_stopped_or_failed_and_keeps_the_cause() {
-        let ok = teardown_error("open", "ap-1", || async { Ok(()) }).await;
+    async fn a_failed_modal_update_rolls_back_only_the_new_version() {
+        let mut c = FakeControl::new();
+        let err = exposure_failure(&mut c, "open", &deployed(), Some(4), None).await;
+        assert_eq!(
+            c.calls,
+            ["rollback ap-1 v4", "closed https://x.modal.direct"],
+            "the previous version keeps serving: the app is never stopped"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("rolled back to version 4"), "{msg}");
+        assert!(msg.contains("still serving"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn the_previous_endpoint_recorded_in_state_is_reverified_too() {
+        let mut c = FakeControl::new();
+        exposure_failure(
+            &mut c,
+            "open",
+            &deployed(),
+            Some(4),
+            Some("https://old.modal.direct"),
+        )
+        .await;
+        assert_eq!(
+            c.calls,
+            [
+                "rollback ap-1 v4",
+                "closed https://old.modal.direct",
+                "closed https://x.modal.direct"
+            ]
+        );
+        // The previous endpoint still open: the app is stopped.
+        let mut c = FakeControl::new();
+        c.closed = Err("open".to_owned());
+        exposure_failure(
+            &mut c,
+            "x",
+            &deployed(),
+            Some(4),
+            Some("https://old.modal.direct"),
+        )
+        .await;
+        assert_eq!(
+            c.calls,
+            [
+                "rollback ap-1 v4",
+                "closed https://old.modal.direct",
+                "stop ap-1"
+            ]
+        );
+    }
+
+    struct FakeVersions {
+        app: Result<Option<String>, String>,
+        version: Result<Option<u32>, String>,
+        asked: Vec<String>,
+    }
+
+    #[async_trait]
+    impl VersionSource for FakeVersions {
+        async fn find_app(&mut self, name: &str) -> Result<Option<String>, String> {
+            self.asked.push(format!("find {name}"));
+            self.app.clone()
+        }
+        async fn latest_version(&mut self, app_id: &str) -> Result<Option<u32>, String> {
+            self.asked.push(format!("version {app_id}"));
+            self.version.clone()
+        }
+    }
+
+    fn versions(
+        app: Result<Option<&str>, &str>,
+        version: Result<Option<u32>, &str>,
+    ) -> FakeVersions {
+        FakeVersions {
+            app: app.map(|a| a.map(str::to_owned)).map_err(str::to_owned),
+            version: version.map_err(str::to_owned),
+            asked: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_previous_version_is_read_by_app_name_and_only_trusted_for_the_same_app() {
+        let mut v = versions(Ok(Some("ap-1")), Ok(Some(7)));
+        let previous = previous_version(&mut v, "amicu-alpha").await;
+        assert_eq!(v.asked, ["find amicu-alpha", "version ap-1"]);
+        assert_eq!(previous, Some(("ap-1".to_owned(), 7)));
+        // Same app: roll back to it. A different app id: never.
+        assert_eq!(rollback_target(previous.clone(), "ap-1"), Some(7));
+        assert_eq!(rollback_target(previous, "ap-2"), None);
+        assert_eq!(rollback_target(None, "ap-1"), None);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_history_means_no_rollback_target() {
+        // No such app (a fresh deploy): history is never read.
+        let mut v = versions(Ok(None), Ok(Some(7)));
+        assert_eq!(previous_version(&mut v, "a").await, None);
+        assert_eq!(v.asked, ["find a"]);
+        // No recorded version, or either read failing.
+        assert_eq!(
+            previous_version(&mut versions(Ok(Some("ap-1")), Ok(None)), "a").await,
+            None
+        );
+        assert_eq!(
+            previous_version(&mut versions(Ok(Some("ap-1")), Err("rpc")), "a").await,
+            None
+        );
+        assert_eq!(
+            previous_version(&mut versions(Err("rpc"), Ok(Some(1))), "a").await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_modal_rollback_that_fails_or_stays_open_stops_the_app() {
+        let mut c = FakeControl::new();
+        c.rollback = Err("rpc down".to_owned());
+        let err = exposure_failure(&mut c, "open", &deployed(), Some(4), None).await;
+        assert_eq!(c.calls, ["rollback ap-1 v4", "stop ap-1"]);
+        assert!(err.to_string().contains("was stopped"));
+
+        let mut c = FakeControl::new();
+        c.closed = Err("still open".to_owned());
+        exposure_failure(&mut c, "open", &deployed(), Some(4), None).await;
+        assert_eq!(
+            c.calls,
+            [
+                "rollback ap-1 v4",
+                "closed https://x.modal.direct",
+                "stop ap-1"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fresh_modal_app_with_an_open_endpoint_is_stopped_and_a_failed_stop_is_reported() {
+        let mut c = FakeControl::new();
+        let ok = exposure_failure(&mut c, "open", &deployed(), None, None).await;
+        assert_eq!(c.calls, ["stop ap-1"]);
         assert!(
             ok.to_string()
                 .contains("open; the deployment (ap-1) was stopped")
         );
-        let bad = teardown_error("open", "ap-1", || async { Err("rpc down".to_owned()) }).await;
+        let mut c = FakeControl::new();
+        c.stop = Err("rpc down".to_owned());
+        let bad = exposure_failure(&mut c, "open", &deployed(), None, None).await;
         let msg = bad.to_string();
-        assert!(msg.contains("open;") && msg.contains("teardown FAILED"));
-        assert!(msg.contains("modal app stop ap-1"));
+        assert!(msg.contains("teardown FAILED") && msg.contains("modal app stop ap-1"));
     }
 
     // --- reject_local_path_model -----------------------------------------

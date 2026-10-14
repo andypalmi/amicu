@@ -276,7 +276,7 @@ Modal's proxy rejects `Authorization: Bearer` as proxy credentials; `Modal-Key` 
     Seen on multi-GPU vLLM deployments on L4 and other non-NVLink GPUs. Add `env { NCCL_P2P_DISABLE = "1" }` to the `vllm` block and apply again.
   </Accordion>
   <Accordion title="apply says No changes but nothing is running">
-    The app was stopped outside amicu. Current builds detect this, print a `drift:` line, and recreate it. On older builds, delete `.amicu/state/state.json` or run `amicu modal stop <app>` inside the project, then apply.
+    The app was stopped outside amicu. Current builds detect this, print a `drift:` line, and recreate it. On older builds, run `amicu modal stop <app>` inside the project, then apply. Do not delete `.amicu/state/state.json` to clear this: state holds the stop identity of the other instances too. See [State and backends](/docs/operate/state-and-backends#starting-over).
   </Accordion>
   <Accordion title="warning: could not check Modal for live apps">
     The lookup failed (credentials or network). Local state was used as is.

@@ -26,7 +26,8 @@ use crate::binary::{CommandRunner, HostRunner};
 use crate::error::LlamaCppError;
 use crate::health::{Health, HealthProbe, HttpHealthProbe};
 use crate::service::{
-    HostExec, LaunchdManager, ServiceManager, ServiceSpec, ServiceState, SystemdManager,
+    HostExec, LaunchdManager, ServiceManager, ServicePaths, ServiceSpec, ServiceState,
+    SystemdManager,
 };
 
 /// A resolved secret handed to a supervisor at start time: its name and value.
@@ -110,6 +111,45 @@ pub trait ProcessSupervisor: Send + Sync {
 
     /// Stop the instance.
     async fn stop(&self, handle: &RuntimeHandle) -> Result<(), LlamaCppError>;
+
+    /// Stop the instance, deleting its service definition at the recorded
+    /// path (`None`: recompute it, for records that predate the field).
+    async fn stop_recorded(
+        &self,
+        handle: &RuntimeHandle,
+        _definition: Option<&Path>,
+    ) -> Result<(), LlamaCppError> {
+        self.stop(handle).await
+    }
+
+    /// Who the host service manager acts as (backend, uid, launchd domain),
+    /// when this supervisor is host-based. Recorded with started instances.
+    fn host_context(&self) -> Option<crate::service::HostContext> {
+        None
+    }
+
+    /// The uid that owns an existing instance's service definition, when it
+    /// can be told (launchd plist owner).
+    fn instance_owner(&self, _label: &str) -> Option<u32> {
+        None
+    }
+
+    /// Where the instance `label` keeps its definition (which holds secrets)
+    /// and logs on this host, so they can be recorded in state before the
+    /// start.
+    fn service_paths(&self, _label: &str) -> Option<ServicePaths> {
+        None
+    }
+
+    /// Read-only: is the instance `label` (started in launchd `domain`, if
+    /// recorded) running? `Down` only when confirmed gone.
+    fn presence(
+        &self,
+        _label: &str,
+        _domain: Option<&str>,
+    ) -> Result<crate::service::Presence, LlamaCppError> {
+        Ok(crate::service::Presence::Unknown)
+    }
 }
 
 /// The real supervisor: a [`ServiceManager`] runs the process, a [`HealthProbe`]
@@ -323,6 +363,23 @@ fn endpoint_for(plan: &LaunchPlan) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
+/// The legacy launchd label / systemd unit: not scoped to a project, so two
+/// projects with a deployment of the same name collide. Only instances
+/// started before project-scoped labels carry it; new ones use
+/// [`project_host_label`].
+#[must_use]
+pub fn host_label(deployment: &str) -> String {
+    format!("io.amicu.llama.{deployment}")
+}
+
+/// The launchd label / systemd unit for `deployment` in the project
+/// identified by `project_id`. Deterministic, so a stop handle can be derived
+/// from state alone, and distinct per project.
+#[must_use]
+pub fn project_host_label(project_id: &str, deployment: &str) -> String {
+    format!("io.amicu.llama.{project_id}.{deployment}")
+}
+
 #[async_trait]
 impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<M, P> {
     async fn start(
@@ -366,7 +423,10 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
             })?;
             env.push((s.name.clone(), value.to_owned()));
         }
-        let label = format!("io.amicu.llama.{}", plan.deployment);
+        let label = plan
+            .service_label
+            .clone()
+            .unwrap_or_else(|| host_label(plan.deployment.as_str()));
         let spec = ServiceSpec {
             label: label.clone(),
             argv: self.resolve_program(argv)?,
@@ -431,5 +491,33 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
 
     async fn stop(&self, handle: &RuntimeHandle) -> Result<(), LlamaCppError> {
         self.manager.stop(&handle.id)
+    }
+
+    async fn stop_recorded(
+        &self,
+        handle: &RuntimeHandle,
+        definition: Option<&Path>,
+    ) -> Result<(), LlamaCppError> {
+        self.manager.stop_recorded(&handle.id, definition)
+    }
+
+    fn host_context(&self) -> Option<crate::service::HostContext> {
+        self.manager.context()
+    }
+
+    fn instance_owner(&self, label: &str) -> Option<u32> {
+        self.manager.instance_owner(label)
+    }
+
+    fn service_paths(&self, label: &str) -> Option<ServicePaths> {
+        self.manager.paths(label)
+    }
+
+    fn presence(
+        &self,
+        label: &str,
+        domain: Option<&str>,
+    ) -> Result<crate::service::Presence, LlamaCppError> {
+        self.manager.presence(label, domain)
     }
 }

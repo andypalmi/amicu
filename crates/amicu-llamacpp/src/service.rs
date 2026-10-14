@@ -50,19 +50,90 @@ pub enum ServiceState {
     Failed,
 }
 
+/// What a read-only probe of a recorded host instance found. `Down` is only
+/// ever returned when the service manager CONFIRMS the instance is not
+/// running; anything uncertain is `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// Loaded and running.
+    Running,
+    /// Confirmed not loaded, or loaded and not running.
+    Down,
+    /// Could not be told (unknown state, no recorded domain, ...).
+    Unknown,
+}
+
+/// Which host service manager runs amicu's instances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostBackend {
+    /// launchd (macOS).
+    Launchd,
+    /// systemd user units (Linux).
+    Systemd,
+}
+
+/// Who the host service manager acts as. Recorded with every started
+/// instance so a later stop can refuse when it would act as someone else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostContext {
+    pub backend: HostBackend,
+    /// The effective uid the manager acts for.
+    pub uid: u32,
+    /// launchd only: the domain jobs are bootstrapped into (`gui/<uid>` or
+    /// `user/<uid>`).
+    pub domain: Option<String>,
+}
+
+/// The files a service leaves on the host: its definition (which holds the
+/// injected environment, so it is a secret-bearing file) and its log files.
+/// Recorded in state before the service starts so a later stop or purge does
+/// not depend on recomputing them from `$HOME` / the environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServicePaths {
+    /// The launchd plist / systemd environment file.
+    pub definition: PathBuf,
+    /// Log files the manager writes (empty for systemd: the journal).
+    pub logs: Vec<PathBuf>,
+}
+
 /// Load/start, query, stop, and read logs for a supervised service.
 pub trait ServiceManager: Send + Sync {
+    /// Where this manager keeps `label`'s definition and logs, if it can tell.
+    fn paths(&self, _label: &str) -> Option<ServicePaths> {
+        None
+    }
+    /// The backend, uid and domain this manager acts as, if it can tell.
+    fn context(&self) -> Option<HostContext> {
+        None
+    }
+    /// The uid that owns the definition of an existing instance (a launchd
+    /// plist), if it can be told. Used to refuse stopping someone else's job.
+    fn instance_owner(&self, _label: &str) -> Option<u32> {
+        None
+    }
     /// Best-effort removal of any previous instance with this label, so an
     /// update can start the new one (`systemd-run --unit=<same>` fails while the
     /// unit exists; a loaded launchd job would keep the old definition). Errors
     /// are ignored: normally there is nothing to release.
     fn release(&self, _label: &str) {}
+    /// Read-only probe of an instance recorded as `label` (and, for launchd,
+    /// started in `domain`). Never acts as a different domain than recorded.
+    /// `Err` means the manager could not answer.
+    fn presence(&self, _label: &str, _domain: Option<&str>) -> Result<Presence, LlamaCppError> {
+        Ok(Presence::Unknown)
+    }
     /// Write the service definition and start it.
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError>;
     /// The service's current lifecycle state.
     fn state(&self, label: &str) -> Result<ServiceState, LlamaCppError>;
     /// Stop and unload the service.
     fn stop(&self, label: &str) -> Result<(), LlamaCppError>;
+    /// [`stop`](Self::stop), deleting the service definition at `definition`
+    /// (the path recorded in state when it was written) instead of the one
+    /// recomputed from `$HOME`. `None`: recompute (legacy records).
+    fn stop_recorded(&self, label: &str, _definition: Option<&Path>) -> Result<(), LlamaCppError> {
+        self.stop(label)
+    }
     /// Read the service's captured log lines.
     fn logs(&self, label: &str, options: LogOptions) -> Result<Vec<String>, LlamaCppError>;
     /// Where a human finds the service's logs (file paths or a command), for
@@ -79,6 +150,8 @@ pub struct ExecOutput {
     pub stdout: String,
     /// Combined stderr.
     pub stderr: String,
+    /// The exit code, when the process exited normally.
+    pub code: Option<i32>,
 }
 
 /// Runs external commands. Injectable so managers are testable without a real
@@ -88,12 +161,33 @@ pub trait CommandExec: Send + Sync {
     fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError>;
 }
 
+static ALLOW_SERVICE_COMMANDS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Opt in to running real service commands (`launchctl`, `systemctl`,
+/// `systemd-run`, `journalctl`). Off by default, so any test in any crate that
+/// reaches a real [`HostExec`] panics instead of touching the developer's
+/// services, regardless of test order. Only the `amicu` binary calls this.
+pub fn allow_service_commands() {
+    ALLOW_SERVICE_COMMANDS.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// The real executor: spawns the process and captures its output.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HostExec;
 
 impl CommandExec for HostExec {
     fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        assert!(
+            ALLOW_SERVICE_COMMANDS.load(std::sync::atomic::Ordering::SeqCst)
+                || !matches!(
+                    program,
+                    "launchctl" | "systemctl" | "systemd-run" | "journalctl"
+                ),
+            "refusing to run the real `{program} {}`: service commands are only enabled in the \
+             amicu binary; inject a fake service manager",
+            args.join(" ")
+        );
         let output = Command::new(program)
             .args(args)
             .output()
@@ -102,8 +196,20 @@ impl CommandExec for HostExec {
             success: output.status.success(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            code: output.status.code(),
         })
     }
+}
+
+/// The effective uid, from `id -u`.
+fn effective_uid(exec: &dyn CommandExec) -> Result<u32, LlamaCppError> {
+    let out = exec.exec("/usr/bin/id", &["-u"])?;
+    out.stdout.trim().parse().map_err(|_| {
+        LlamaCppError::Supervisor(format!(
+            "cannot determine the effective uid from `id -u`: {:?}",
+            out.stdout.trim()
+        ))
+    })
 }
 
 fn tail<T>(mut lines: Vec<T>, options: LogOptions) -> Vec<T> {
@@ -139,6 +245,36 @@ impl<E: CommandExec> LaunchdManager<E> {
         self.agents_dir.join(format!("{label}.plist"))
     }
 
+    /// The launchd domain jobs live in: `gui/<uid>` when the user has a GUI
+    /// session, else `user/<uid>`.
+    fn domain(&self) -> Result<(u32, String), LlamaCppError> {
+        let uid = effective_uid(&self.exec)?;
+        let gui = format!("gui/{uid}");
+        if self.exec.exec("launchctl", &["print", &gui])?.success {
+            Ok((uid, gui))
+        } else {
+            Ok((uid, format!("user/{uid}")))
+        }
+    }
+
+    /// Whether launchd currently has the job loaded in `domain`.
+    fn is_loaded(&self, domain: &str, label: &str) -> Result<bool, LlamaCppError> {
+        let target = format!("{domain}/{label}");
+        let out = self.exec.exec("launchctl", &["print", &target])?;
+        if out.success {
+            Ok(true)
+        } else if out.code == Some(113) {
+            // 113: "Could not find service" - the job is not loaded.
+            Ok(false)
+        } else {
+            Err(LlamaCppError::Supervisor(format!(
+                "launchctl print {target} failed unexpectedly (exit {:?}): {}",
+                out.code,
+                out.stderr.trim()
+            )))
+        }
+    }
+
     fn stdout_path(&self, label: &str) -> PathBuf {
         self.log_dir.join(format!("{label}.out.log"))
     }
@@ -164,19 +300,76 @@ impl LaunchdManager<HostExec> {
 }
 
 impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
+    fn paths(&self, label: &str) -> Option<ServicePaths> {
+        Some(ServicePaths {
+            definition: self.plist_path(label),
+            logs: vec![self.stdout_path(label), self.stderr_path(label)],
+        })
+    }
+
+    fn instance_owner(&self, label: &str) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(self.plist_path(label)).ok()?)
+                .into()
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = label;
+            None
+        }
+    }
+
+    fn context(&self) -> Option<HostContext> {
+        let (uid, domain) = self.domain().ok()?;
+        Some(HostContext {
+            backend: HostBackend::Launchd,
+            uid,
+            domain: Some(domain),
+        })
+    }
+
+    fn presence(&self, label: &str, domain: Option<&str>) -> Result<Presence, LlamaCppError> {
+        // Without the domain the job was started in, `launchctl` could answer
+        // for a different one: do not guess.
+        let Some(domain) = domain else {
+            return Ok(Presence::Unknown);
+        };
+        let target = format!("{domain}/{label}");
+        let out = self.exec.exec("launchctl", &["print", &target])?;
+        if out.success {
+            return Ok(if out.stdout.contains("state = not running") {
+                Presence::Down
+            } else {
+                Presence::Running
+            });
+        }
+        if out.code == Some(113) {
+            // 113: "Could not find service".
+            return Ok(Presence::Down);
+        }
+        Err(LlamaCppError::Supervisor(format!(
+            "launchctl print {target} failed unexpectedly (exit {:?}): {}",
+            out.code,
+            out.stderr.trim()
+        )))
+    }
+
     fn release(&self, label: &str) {
-        let plist = self.plist_path(label);
-        if plist.exists() {
+        if let Ok((_, domain)) = self.domain() {
             let _ = self
                 .exec
-                .exec("launchctl", &["unload", "-w", &plist.to_string_lossy()]);
+                .exec("launchctl", &["bootout", &format!("{domain}/{label}")]);
         }
-        // By label too, even when the plist file is gone but the job is loaded.
+        // By label too, even when the job is loaded under another name.
         let _ = self.exec.exec("launchctl", &["remove", label]);
     }
 
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
         require_absolute(&self.agents_dir)?;
+        // Everything that can fail before the secret is on disk happens first,
+        // so a failure here never leaves the plist behind.
+        ensure_dir(&self.log_dir)?;
         write_private(
             &self.plist_path(&spec.label),
             &self.agents_dir,
@@ -187,12 +380,12 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
             )
             .as_bytes(),
         )?;
-        ensure_dir(&self.log_dir)?;
         let plist = self.plist_path(&spec.label);
-        let out = match self
-            .exec
-            .exec("launchctl", &["load", "-w", &plist.to_string_lossy()])
-        {
+        let (_, domain) = self.domain().inspect_err(|_| remove_env_file(&plist))?;
+        let out = match self.exec.exec(
+            "launchctl",
+            &["bootstrap", &domain, &plist.to_string_lossy()],
+        ) {
             Ok(out) => out,
             Err(e) => {
                 remove_env_file(&plist);
@@ -204,7 +397,7 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
             // for a service that did not start.
             remove_env_file(&plist);
             return Err(LlamaCppError::Supervisor(format!(
-                "launchctl load failed: {}",
+                "launchctl bootstrap failed: {}",
                 out.stderr.trim()
             )));
         }
@@ -234,18 +427,33 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
     }
 
     fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
-        let plist = self.plist_path(label);
-        let out = self
-            .exec
-            .exec("launchctl", &["unload", "-w", &plist.to_string_lossy()])?;
-        if !out.success {
-            return Err(LlamaCppError::Supervisor(format!(
-                "launchctl unload failed: {}",
-                out.stderr.trim()
-            )));
+        self.stop_recorded(label, None)
+    }
+
+    fn stop_recorded(&self, label: &str, definition: Option<&Path>) -> Result<(), LlamaCppError> {
+        let plist = definition.map_or_else(|| self.plist_path(label), Path::to_path_buf);
+        let (_, domain) = self.domain()?;
+        let target = format!("{domain}/{label}");
+        // `bootout` can exit 0 while the job stays loaded ("Boot-out failed:
+        // 5: Input/output error"), so never trust its status: confirm with
+        // `launchctl print` that the job is gone.
+        let out = self.exec.exec("launchctl", &["bootout", &target])?;
+        let mut detail = out.stderr.trim().to_owned();
+        if self.is_loaded(&domain, label)? {
+            // Fall back to removing by label, as `release` does.
+            let out = self.exec.exec("launchctl", &["remove", label])?;
+            if !out.stderr.trim().is_empty() {
+                out.stderr.trim().clone_into(&mut detail);
+            }
+            if self.is_loaded(&domain, label)? {
+                return Err(LlamaCppError::Supervisor(format!(
+                    "launchd job {target} is still loaded after bootout and remove: {detail}"
+                )));
+            }
         }
-        // Remove the per-instance plist so its EnvironmentVariables don't linger
-        // on disk; a missing file is fine, any other error is surfaced.
+        // Confirmed gone. Remove the per-instance plist so its
+        // EnvironmentVariables don't linger on disk; a missing file is fine,
+        // any other error is surfaced.
         match std::fs::remove_file(&plist) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -388,11 +596,54 @@ fn environment_file(env: &[(String, String)]) -> Result<String, LlamaCppError> {
 }
 
 impl<E: CommandExec> ServiceManager for SystemdManager<E> {
+    fn paths(&self, label: &str) -> Option<ServicePaths> {
+        Some(ServicePaths {
+            definition: self.env_path(label),
+            logs: Vec::new(),
+        })
+    }
+
+    fn context(&self) -> Option<HostContext> {
+        Some(HostContext {
+            backend: HostBackend::Systemd,
+            uid: effective_uid(&self.exec).ok()?,
+            domain: None,
+        })
+    }
+
+    fn presence(&self, label: &str, _domain: Option<&str>) -> Result<Presence, LlamaCppError> {
+        let out = self.exec.exec(
+            "systemctl",
+            &["--user", "show", "-p", "LoadState,ActiveState", label],
+        )?;
+        if !out.success {
+            return Err(LlamaCppError::Supervisor(format!(
+                "systemctl show {label} failed: {}",
+                out.stderr.trim()
+            )));
+        }
+        let prop = |name: &str| {
+            out.stdout
+                .lines()
+                .find_map(|l| l.trim().strip_prefix(name)?.strip_prefix('='))
+                .map(str::trim)
+        };
+        Ok(match (prop("LoadState"), prop("ActiveState")) {
+            (Some("not-found"), _) | (Some(_), Some("inactive" | "failed")) => Presence::Down,
+            (Some(_), Some("active" | "reloading")) => Presence::Running,
+            // activating, deactivating, anything else or unparsed.
+            _ => Presence::Unknown,
+        })
+    }
+
     fn release(&self, label: &str) {
         let _ = self.exec.exec("systemctl", &["--user", "stop", label]);
     }
 
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
+        if spec.argv.is_empty() {
+            return Err(LlamaCppError::Supervisor("empty argv".to_owned()));
+        }
         let unit = format!("--unit={}", spec.label);
         let mut args = vec!["--user", "--collect", &unit];
         // Env goes through a 0600 EnvironmentFile, not `--setenv`, whose values
@@ -441,18 +692,34 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
     }
 
     fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
+        self.stop_recorded(label, None)
+    }
+
+    fn stop_recorded(&self, label: &str, definition: Option<&Path>) -> Result<(), LlamaCppError> {
         let out = self.exec.exec("systemctl", &["--user", "stop", label]);
         // Always drop the secrets file, even when stop fails (a crashed
         // `--collect` unit is "not loaded" and its stop errors).
-        remove_env_file(&self.env_path(label));
-        let out = out?;
-        if !out.success {
-            return Err(LlamaCppError::Supervisor(format!(
-                "systemctl stop failed: {}",
-                out.stderr.trim()
-            )));
+        match definition {
+            Some(path) => remove_env_file(path),
+            None => remove_env_file(&self.env_path(label)),
         }
-        Ok(())
+        let out = out?;
+        if out.success {
+            return Ok(());
+        }
+        // Stop failed. It is still a confirmed stop if systemd reports the
+        // unit does not exist (checked by property, not by parsing stderr).
+        let load = self.exec.exec(
+            "systemctl",
+            &["--user", "show", "-p", "LoadState", "--value", label],
+        )?;
+        if load.success && load.stdout.trim() == "not-found" {
+            return Ok(());
+        }
+        Err(LlamaCppError::Supervisor(format!(
+            "systemctl stop failed: {}",
+            out.stderr.trim()
+        )))
     }
 
     fn logs(&self, label: &str, options: LogOptions) -> Result<Vec<String>, LlamaCppError> {
