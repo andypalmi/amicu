@@ -685,6 +685,7 @@ mod tests {
             pending: Vec::new(),
             stops,
             fingerprints: BTreeMap::default(),
+            serial: 0,
             extra: std::collections::BTreeMap::default(),
         }
     }

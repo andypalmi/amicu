@@ -618,6 +618,7 @@ resource "deployment" "support_modal" {
             pending: Vec::new(),
             stops: Vec::new(),
             fingerprints: std::collections::BTreeMap::default(),
+            serial: 0,
             extra: std::collections::BTreeMap::default(),
             graph,
             endpoints,
