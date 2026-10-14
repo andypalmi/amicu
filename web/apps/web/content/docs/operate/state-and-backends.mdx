@@ -34,7 +34,7 @@ amicu apply --lock-timeout 60
 
 Current state files are version `v4`. amicu reads `v1` to `v4` files, and migrates older files forward on load, one version at a time (v1 to v2, v2 to v3, then v3 to v4). The file on disk becomes v4 the next time amicu saves it, for example on `apply` or `destroy`. Besides the graph and endpoints, v4 holds these fields:
 
-- **`serial`**: a counter that goes up by one on every save. A save only goes through when the file on disk still has the serial that amicu read, so a second writer that got past the lock (or state shared between machines) makes the save fail with a "changed since it was read" error instead of overwriting the other run. Nothing is merged or discarded; re-run the command. Older files read as serial 0.
+- **`serial`**: a counter that goes up by one on every save. A save only goes through when the file on disk still has the serial that amicu read, so a second concurrent amicu run on the same machine that got past the lock makes the save fail with a "changed since it was read" error instead of overwriting the other run. Nothing is merged or discarded; re-run the command. The check is not a distributed lock: state shared through version control or a synced folder is unsupported. Older files read as serial 0.
 
 - **`project_id`**: an 8-digit hex id, minted when state is first written. It scopes the host service labels (see [Host service labels](#host-service-labels)).
 - **`pending`**: deployments whose start was begun but not confirmed. Amicu writes them before the provider starts anything. `plan` treats them as absent, so `apply` recreates them, and `destroy` tries to confirm their stop.

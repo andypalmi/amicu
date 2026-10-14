@@ -904,12 +904,26 @@ use crate::modal_ops::{ModalOps, Workspace};
 use crate::refresh::AppLookup;
 use crate::stops::{Backend, StopRecord};
 
+type Hook = Box<dyn FnOnce() + Send>;
+
 #[derive(Default)]
 struct StopLog {
     stopped: Mutex<Vec<String>>,
     started: Mutex<Vec<String>>,
     /// Every start and stop, host and Modal, in the order they happened.
     events: Mutex<Vec<String>>,
+    /// One-shot hooks fired by name (`ctx`, `start`, `stop`) from the fake host,
+    /// to simulate another amicu writing state at that moment.
+    hooks: Mutex<std::collections::HashMap<&'static str, Hook>>,
+}
+
+impl StopLog {
+    fn fire(&self, name: &str) {
+        let hook = self.hooks.lock().unwrap().remove(name);
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
 }
 
 struct FakeHost {
@@ -935,6 +949,7 @@ impl amicu_llamacpp::ProcessSupervisor for FakeHost {
         }
         let id = amicu_llamacpp::host_label(plan.deployment.as_str());
         self.log.started.lock().unwrap().push(id.clone());
+        self.log.fire("start");
         self.log
             .events
             .lock()
@@ -981,6 +996,7 @@ impl amicu_llamacpp::ProcessSupervisor for FakeHost {
             ));
         }
         self.log.stopped.lock().unwrap().push(h.id.clone());
+        self.log.fire("stop");
         self.log
             .events
             .lock()
@@ -1001,6 +1017,7 @@ impl amicu_llamacpp::ProcessSupervisor for FakeHost {
         Ok(())
     }
     fn host_context(&self) -> Option<amicu_llamacpp::HostContext> {
+        self.log.fire("ctx");
         self.ctx.clone()
     }
     fn instance_owner(&self, _label: &str) -> Option<u32> {
@@ -2806,4 +2823,92 @@ fn host_to_modal_with_an_unconfirmed_old_stop_fails_and_keeps_the_old_record() {
     let stops = stops_for(&project, "support_local");
     assert_eq!(stops.len(), 1, "{stops:?}");
     assert_eq!(stops[0].backend, Backend::host());
+}
+
+// ---- compare-and-swap conflicts reach the user with the right advice --------
+
+/// A hook that makes another amicu process write state, bumping its serial.
+fn concurrent_writer(root: &std::path::Path) -> Box<dyn FnOnce() + Send> {
+    let root = root.to_path_buf();
+    Box::new(move || {
+        let other = Project::new(&root);
+        let state = other.load_state().unwrap().unwrap();
+        other.save_state(&state).unwrap();
+    })
+}
+
+/// State with `support_local` running, and a config that also adds
+/// `support_two`, which apply will start.
+fn running_one_apply_adds_another(td: &TempDir) -> Project {
+    write(&td.path, "amicu.hcl", &two_deployments());
+    saved(td, &running_host_state())
+}
+
+#[test]
+fn apply_final_save_conflict_lists_only_what_this_run_started() {
+    let td = TempDir::new();
+    let project = running_one_apply_adds_another(&td);
+    let rig = Rig::new();
+    rig.log
+        .hooks
+        .lock()
+        .unwrap()
+        .insert("start", concurrent_writer(&td.path));
+    let msg = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(msg.contains("changed since it was read"), "{msg}");
+    assert!(msg.contains("support_two"), "{msg}");
+    assert!(msg.contains("recorded in state as pending"), "{msg}");
+    assert!(msg.contains("amicu apply"), "{msg}");
+    assert!(
+        !msg.contains("support_local"),
+        "an untouched deployment must not be listed as untracked: {msg}"
+    );
+}
+
+#[test]
+fn apply_write_ahead_conflict_says_nothing_was_started() {
+    let td = TempDir::new();
+    let project = running_one_apply_adds_another(&td);
+    let rig = Rig::new();
+    rig.log
+        .hooks
+        .lock()
+        .unwrap()
+        .insert("ctx", concurrent_writer(&td.path));
+    let msg = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(msg.contains("changed since it was read"), "{msg}");
+    assert!(msg.contains("Nothing was started by this run"), "{msg}");
+    assert!(!msg.contains("stop each by hand"), "{msg}");
+    assert_eq!(rig.log.started.lock().unwrap().len(), 0);
+}
+
+#[test]
+fn destroy_conflict_says_rerun_and_never_lists_kept_deployments() {
+    let td = TempDir::new();
+    let mut state = state_with(two_deployment_graph());
+    state.stops = vec![host_rec("support_local"), host_rec("support_two")];
+    let project = saved(&td, &state);
+    let rig = Rig::new();
+    rig.log
+        .hooks
+        .lock()
+        .unwrap()
+        .insert("stop", concurrent_writer(&td.path));
+    let (result, _) = run_destroy(
+        &project,
+        &["support_local".to_owned()],
+        true,
+        OutputFormat::Human,
+        "",
+        &rig,
+    );
+    let msg = result.expect_err("conflict").to_string();
+    assert!(msg.contains("changed since it was read"), "{msg}");
+    assert!(msg.contains("re-run of `amicu destroy`"), "{msg}");
+    assert!(!msg.contains("stop each by hand"), "{msg}");
+    assert!(!msg.contains("still be running"), "{msg}");
+    assert!(
+        !msg.contains("support_two"),
+        "a kept deployment must not be listed: {msg}"
+    );
 }

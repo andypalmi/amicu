@@ -291,8 +291,9 @@ impl Project {
     /// that serial plus one. A concurrent writer (a bypassed or foreign lock,
     /// state shared by git or a synced folder) therefore fails this save
     /// instead of being overwritten; nothing is merged or discarded, and the
-    /// caller surfaces the error. The check and the rename are not one atomic
-    /// step, so this backs up the state lock rather than replacing it.
+    /// caller surfaces the error. The final check and the swap are atomic with
+    /// respect to other savers (a short lock on `state.cas`); the state lock
+    /// still covers the whole read-plan-apply-save sequence.
     /// TODO: a remote backend needs a server-side compare-and-swap.
     pub fn save_state(&self, state: &LocalState) -> Result<(), CliError> {
         use std::io::Write as _;
@@ -313,7 +314,13 @@ impl Project {
                 path.display()
             )));
         }
-        let next = self.check_serial()? + 1;
+        let (base, readable) = self.check_serial()?;
+        let next = base.checked_add(1).ok_or_else(|| {
+            CliError::Message(format!(
+                "{} has the maximum state serial; treating it as corrupt, nothing was written",
+                path.display()
+            ))
+        })?;
         let mut state = state.clone();
         state.serial = next;
         let text = serde_json::to_string_pretty(&state)?;
@@ -338,12 +345,22 @@ impl Project {
                 .and_then(|()| file.sync_all())
                 .map_err(|e| write_err(&tmp, e))?;
             drop(file);
-            self.rotate_backup(&dir, &unique)?;
-            // Re-check just before the swap: the temp write and backup rotation
-            // are the slow part, so this is the narrowest window left.
-            if self.check_serial()? + 1 != next {
+            // The final check, backup rotation and swap run under a short
+            // exclusive lock on `state.cas`, so two savers cannot both pass
+            // the check. The OS drops it with the process: nothing to clean up.
+            let cas = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(dir.join("state.cas"))
+                .map_err(|e| write_err(&dir.join("state.cas"), e))?;
+            cas.lock()
+                .map_err(|e| write_err(&dir.join("state.cas"), e))?;
+            let (again, still_readable) = self.check_serial()?;
+            if again != base || still_readable != readable {
                 return Err(Self::conflict(&path));
             }
+            self.rotate_backup(&dir, &unique)?;
             fs::rename(&tmp, &path).map_err(|e| write_err(&path, e))
         })();
         if result.is_err() {
@@ -363,33 +380,41 @@ impl Project {
     }
 
     /// The serial now on disk, provided it is the one this handle last read or
-    /// wrote; otherwise the compare-and-swap conflict. A missing file is serial
-    /// 0 and an unreadable one is treated as the handle's own serial, so a
-    /// corrupt file can still be recovered by saving over it.
-    fn check_serial(&self) -> Result<u64, CliError> {
+    /// wrote; otherwise the compare-and-swap conflict. Also reports whether the
+    /// file was readable. A missing file is serial 0, and an unreadable (corrupt)
+    /// one is treated as the handle's own serial so it can be recovered by
+    /// saving over it. A file of an unsupported (newer) version is always
+    /// refused.
+    fn check_serial(&self) -> Result<(u64, bool), CliError> {
         let path = self.state_file();
         let on_disk = match fs::read_to_string(&path) {
             Ok(text) => match parse_state(&text) {
                 Ok(s) => Some(s.serial),
-                Err(_) => None,
+                Err(StateParseError::Unsupported(msg)) => {
+                    return Err(CliError::Message(format!(
+                        "refusing to overwrite {}: it {msg}",
+                        path.display()
+                    )));
+                }
+                Err(StateParseError::Corrupt(_)) => None,
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(0),
             Err(e) => return Err(CliError::io(format!("cannot read {}", path.display()), e)),
         };
+        let readable = on_disk.is_some();
         match (self.seen(), on_disk) {
             (Some(seen), Some(disk)) if seen != disk => Err(Self::conflict(&path)),
-            (Some(seen), _) => Ok(seen),
+            (Some(seen), _) => Ok((seen, readable)),
             // Never read: only a fresh project (no state yet) may write.
-            (None, Some(0) | None) => Ok(0),
+            (None, Some(0) | None) => Ok((0, readable)),
             (None, Some(_)) => Err(Self::conflict(&path)),
         }
     }
 
     fn conflict(path: &Path) -> CliError {
         CliError::StateLocked(format!(
-            "{} changed since it was read (another amicu process wrote it, or it is shared \
-             between machines); nothing was overwritten. Re-run the command to start from the \
-             current state",
+            "{} changed since it was read (another amicu process wrote it); \
+             nothing was overwritten. Re-run the command to start from the current state",
             path.display()
         ))
     }
@@ -872,33 +897,85 @@ mod durability_tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// Eight writers each add their own tag to `pending` by read-modify-write,
+    /// retrying from a fresh read when refused. Without the compare-and-swap,
+    /// concurrent writers lose each other's tags (and the serial undercounts).
     #[test]
     fn concurrent_writers_never_overwrite_each_other() {
+        const WRITERS: usize = 8;
         let root = scratch("race");
         Project::new(&root).save_state(&state("seed")).unwrap();
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
-        let threads: Vec<_> = (0..8)
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+        let threads: Vec<_> = (0..WRITERS)
             .map(|i| {
                 let (root, barrier) = (root.clone(), barrier.clone());
                 std::thread::spawn(move || {
                     let p = Project::new(&root);
-                    p.load_state().unwrap();
                     barrier.wait();
-                    p.save_state(&state(&format!("w{i}"))).is_ok()
+                    let mut refused = 0usize;
+                    loop {
+                        let mut s = p.load_state().unwrap().unwrap();
+                        s.pending.push(format!("w{i}").into());
+                        match p.save_state(&s) {
+                            Ok(()) => return refused,
+                            Err(e) => {
+                                assert!(e.to_string().contains("changed since"), "{e}");
+                                refused += 1;
+                            }
+                        }
+                    }
                 })
             })
             .collect();
-        let wins = threads
-            .into_iter()
-            .map(|t| t.join().unwrap())
-            .filter(|ok| *ok)
-            .count();
-        // Every writer read serial 1. The check and rename are not one atomic
-        // step (the state lock covers that), so a rare double win is possible,
-        // but the serial never goes backwards and at least one write lands.
-        assert!(wins >= 1);
-        let serial = Project::new(&root).load_state().unwrap().unwrap().serial;
-        assert!(serial >= 2, "serial {serial}");
+        let refused: usize = threads.into_iter().map(|t| t.join().unwrap()).sum();
+        let last = Project::new(&root).load_state().unwrap().unwrap();
+        let mut tags: Vec<String> = last.pending.iter().map(|d| d.as_str().to_owned()).collect();
+        tags.sort();
+        let mut want: Vec<String> = (0..WRITERS).map(|i| format!("w{i}")).collect();
+        want.push("seed".into());
+        want.sort();
+        assert_eq!(
+            tags, want,
+            "a writer's update was lost ({refused} refusals)"
+        );
+        assert_eq!(last.serial, 1 + WRITERS as u64);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_max_serial_is_refused_not_wrapped() {
+        let root = scratch("max");
+        let p = Project::new(&root);
+        p.save_state(&state("x")).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(p.state_file()).unwrap()).unwrap();
+        v["serial"] = u64::MAX.into();
+        fs::write(p.state_file(), v.to_string()).unwrap();
+        let q = Project::new(&root);
+        let loaded = q.load_state().unwrap().unwrap();
+        let err = q.save_state(&loaded).expect_err("overflow");
+        assert!(err.to_string().contains("maximum state serial"), "{err}");
+        assert_eq!(
+            Project::new(&root).load_state().unwrap().unwrap().serial,
+            u64::MAX
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_newer_version_file_is_refused_by_the_cas_check() {
+        let root = scratch("newer-cas");
+        let p = Project::new(&root);
+        p.save_state(&state("x")).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(p.state_file()).unwrap()).unwrap();
+        v["version"] = "v9".into();
+        let newer = v.to_string();
+        fs::write(p.state_file(), &newer).unwrap();
+        let err = p.check_serial().expect_err("newer version");
+        assert!(err.to_string().contains("v9"), "{err}");
+        assert!(p.save_state(&state("y")).is_err());
+        assert_eq!(fs::read_to_string(p.state_file()).unwrap(), newer);
         let _ = fs::remove_dir_all(&root);
     }
 

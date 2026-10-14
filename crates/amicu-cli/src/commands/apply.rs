@@ -357,21 +357,13 @@ pub(crate) fn execute(
         fingerprints: final_fingerprints(prior_state, &graph, &progress, result),
         graph,
         endpoints,
+        // Placeholder: `save_state` overwrites it with the serial it read plus one.
         serial: prior_state.map_or(0, |s| s.serial),
         extra: prior_state.map(|s| s.extra.clone()).unwrap_or_default(),
     };
     if let Err(save_err) = project.save_state(&state) {
-        // Everything above is already running: never lose track of it. State
-        // on disk is untouched (or was written ahead), so name what to stop.
-        let running: Vec<String> = state.stops.iter().map(StopRecord::describe).collect();
-        return Err(CliError::Message(format!(
-            "the run finished but recording it in state FAILED: {save_err}. These instances \
-             may be running untracked; stop each by hand: {}",
-            if running.is_empty() {
-                "(none recorded)".to_owned()
-            } else {
-                running.join("; ")
-            }
+        return Err(CliError::Message(save_failed_message(
+            op, &progress, &save_err,
         )));
     }
 
@@ -485,6 +477,7 @@ fn recorded_state(prior: Option<&LocalState>, graph: &Graph, progress: &Progress
         stops: progress.stops.clone(),
         fingerprints: merged_fingerprints(prior, &partial, progress),
         graph: partial,
+        // Placeholder: `save_state` overwrites it with the serial it read plus one.
         serial: prior.map_or(0, |s| s.serial),
         extra: prior.map(|s| s.extra.clone()).unwrap_or_default(),
     }
@@ -685,19 +678,46 @@ fn record_partial(
             "{err}\n\n{verb} stopped part-way; already done and recorded in state ({done}). \
              Fix the error and re-run {retry} to finish the rest"
         )),
-        Err(save_err) => {
-            let running: Vec<String> = progress.stops.iter().map(StopRecord::describe).collect();
-            CliError::Message(format!(
-                "{err}\n\n{verb} stopped part-way ({done}) and recording that in state FAILED: \
-                 {save_err}. These instances may still be running; stop each by hand: {}",
-                if running.is_empty() {
-                    "(none recorded)".to_owned()
-                } else {
-                    running.join("; ")
-                }
-            ))
-        }
+        Err(save_err) => CliError::Message(format!(
+            "{err}\n\n{verb} stopped part-way ({done}) and recording that in state FAILED: {}",
+            save_failed_message(op, progress, &save_err)
+        )),
     }
+}
+
+/// What to tell the user when the state save at the end of (or part-way through) a
+/// run fails, e.g. on a compare-and-swap conflict. Only instances this run
+/// started or changed can be untracked: deployments it left alone are not
+/// listed, since stopping them would cause an outage. Destroy starts nothing,
+/// so for it the state on disk still lists everything and a re-run confirms.
+fn save_failed_message(op: Op, progress: &Progress, save_err: &CliError) -> String {
+    if op == Op::Destroy {
+        return format!(
+            "{save_err}. Entries this run destroyed may still be in state, and \
+             a re-run of `amicu destroy` confirms they are gone. Nothing needs stopping by hand"
+        );
+    }
+    let touched = |d: &DeploymentId| {
+        progress.in_flight.as_ref() == Some(d)
+            || progress.started.iter().any(|h| &h.deployment == d)
+    };
+    let running: Vec<String> = progress
+        .stops
+        .iter()
+        .filter(|r| touched(&r.deployment))
+        .map(StopRecord::describe)
+        .collect();
+    if running.is_empty() {
+        return format!(
+            "{save_err}. Nothing was started by this run; re-run `amicu apply` from the current state"
+        );
+    }
+    format!(
+        "{save_err}. Started by this run and recorded in state as pending before each start: {}. \
+         Re-running `amicu apply` (or `amicu destroy --target <name>`) handles them; only if \
+         the state file was replaced meanwhile, stop each by hand",
+        running.join("; ")
+    )
 }
 
 /// Hardware profile `provider` value that routes a deployment through
@@ -2760,11 +2780,20 @@ mod stop_invariant_tests {
         // The state dir cannot be created under a regular file.
         let project = crate::project::Project::new(&file);
         let graph = amicu_hcl::parse_graph(CONFIG).unwrap();
-        let mut progress = Progress::default();
-        progress.stopped.push(id("beta"));
+        let mut progress = Progress {
+            in_flight: Some(id("alpha")),
+            started: vec![amicu_runtime::RuntimeHandle {
+                id: "h".to_owned(),
+                deployment: id("beta"),
+                endpoint: "http://127.0.0.1:1".to_owned(),
+                exposure: amicu_runtime::EndpointExposure::Loopback,
+            }],
+            ..Progress::default()
+        };
         progress.stops = vec![
             StopRecord::host(&id("alpha"), None),
             StopRecord::modal(&id("beta"), Some("ap-777".to_owned()), None),
+            StopRecord::host(&id("gamma"), None),
         ];
         let msg = record_partial(
             &project,
@@ -2781,6 +2810,7 @@ mod stop_invariant_tests {
             msg.contains("ap-777") && msg.contains("amicu-beta"),
             "{msg}"
         );
+        assert!(!msg.contains("gamma"), "untouched deployment listed: {msg}");
         let _ = std::fs::remove_file(&file);
     }
 }
