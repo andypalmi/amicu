@@ -38,7 +38,26 @@ For each deployment the plan shows the hardware, the provider, the model artifac
 
 For remote provider deployments (Modal today), `plan`, `apply` and `destroy` first ask the provider whether the apps recorded in state still exist. An app that is not found by name is kept in state as pending (its stop identity is never dropped on a name lookup alone), and a `drift:` line is printed. `apply` recreates it; `destroy` tries to confirm its stop. If the lookup fails, `plan`, `apply` and `destroy` print a `warning:` and use local state as is.
 
+For host services (launchd or systemd), the same three commands ask the service manager whether each recorded service is running. A service is confirmed gone when launchd `print` exits with status 113 or shows `state = not running`, or when systemd reports the unit as not found, inactive or failed. Such a deployment is kept in state as pending and a `drift:` line is printed: `plan` shows a `create`, `apply` restarts the service, and `destroy` stops it and confirms the stop. If the check fails (for example `launchctl` or `systemctl` returns an error, or the service was started by another user), amicu prints a `warning:` and uses local state as is. A service that is starting or stopping, or a launchd record with no domain, is left alone without a warning.
+
 `plan` also warns, instead of failing, when the active Modal workspace cannot be determined. `apply` and `destroy` refuse in that case, because they must not act on instances they cannot place.
+
+### Change detection
+
+`plan` also compares three inputs with the values recorded when each deployment was last confirmed started:
+
+- the pinned `version` of each `api_key = secret("...")` reference;
+- the container image for a Modal deployment, set by `AMICU_MODAL_VLLM_IMAGE` or `AMICU_MODAL_LLAMACPP_IMAGE`, or the amicu default image when neither is set;
+- the path of the `llama-server` or `vllm` binary that `PATH` resolves to.
+
+A change to one of these shows the deployment as an `update` with a line such as `reason:   container image changed since it was last started`. The JSON plan output does not include the reason.
+
+Two cases are not detected:
+
+- Rotating an unpinned secret. amicu records no version for it. To make a rotation restart the deployment, pin `version` in the reference and bump it.
+- A binary that is not on `PATH`, and state written before this check existed. An unknown value never counts as a change. The first `apply` records a baseline silently, even when it prints `No changes to apply.`
+
+The recorded values are SHA-256 digests in the `fingerprints` map of state. amicu does not store the raw values. Deleting that map resets the baseline.
 
 ## Apply
 
@@ -46,7 +65,7 @@ For remote provider deployments (Modal today), `plan`, `apply` and `destroy` fir
 
 1. Runs preflight checks before anything starts: the provider must be supported by `apply`, every off-machine deployment must have an `api_key`, and the provider's own credentials must be present (on Modal, the proxy tokens).
 2. Starts each deployment through its provider.
-3. Verifies that each endpoint is protected. See [Endpoint auth](/docs/security/endpoint-auth).
+3. Verifies that each endpoint is protected. See [Endpoint auth](/docs/security/endpoint-auth). If a Modal update fails this check, and the new deployment went into the same Modal app that was serving, amicu rolls the app back to the previous version and checks that version again before it reports it as serving. Otherwise the app is stopped. If the rollback or the re-check fails, if there is no previous version, or if amicu cannot read the app's version history, the whole app is stopped. Either way apply fails. See [Security: State](/docs/security/state#when-apply-fails-partway).
 4. Stops deployments that were removed from the configuration.
 5. Writes state, including any deployments already started if a later action failed.
 6. Prints each endpoint and a ready-to-copy `curl` and OpenAI SDK snippet.
@@ -58,6 +77,8 @@ If the plan is empty, apply prints `No changes to apply.`
 ## Destroy
 
 `destroy` works like `terraform destroy`. It plans against an empty desired configuration, so every deployment in state is a `destroy` action (or only the `--target`s you name), shows the same plan preview as `apply`, and asks `Destroy these deployments? [y/N]`. `--auto-approve` (alias `--yes`) skips the prompt. `--lock-timeout <secs>` waits for the state lock, as in `apply`. Unknown `--target` names fail before anything is changed.
+
+For each host service that is stopped, destroy also deletes the service file (the launchd plist or systemd environment file), which holds the endpoint API key. With `--purge`, it also deletes the host log files recorded for the destroyed deployments. Modal cache volumes are never deleted. When a destroyed deployment mounts one, destroy lists it with the `modal volume delete <name>` command, for you to run yourself if no other project or app uses it.
 
 Each deployment follows the same no-orphans rule as apply:
 
@@ -72,6 +93,9 @@ So a deployment never leaves state before its stop is confirmed. If a stop fails
 - The host user differs from the one that started the instance (launchd and systemd records keep the uid). Re-run as that user.
 - The active Modal workspace differs from the one the app was deployed in. Switch `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` to that workspace and retry.
 - A Modal app cannot be found by name and has no recorded app id. Check the Modal dashboard. If it is confirmed gone, run `amicu destroy --target <name> --forget-unconfirmed`. This requires a `--target`, applies only to this case, and removes the record without stopping anything. It works only when the record's recorded workspace is known and matches the active Modal workspace. Otherwise it is refused; for a record with no workspace, the error points to `amicu modal stop <app>`.
+- A recorded service file, or a recorded log file when `--purge` is given, is not the file amicu writes for that deployment (wrong directory or wrong name). Nothing is stopped and the record is kept. Fix the state file and re-run.
+
+If the service file still exists after its stop is confirmed, destroy errors and keeps the record, so a re-run retries the removal.
 
 If `destroy` is interrupted or fails partway, the error lists what was stopped and what remains in state. Fix the cause and re-run the same command (`amicu destroy`, or `amicu apply` if apply was the command that stopped). Deployments already stopped are not touched again. See [State and backends](/docs/operate/state-and-backends#partial-apply-and-destroy).
 
