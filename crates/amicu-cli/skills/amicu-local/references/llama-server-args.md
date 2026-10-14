@@ -269,8 +269,7 @@ re-asserted:
   and the plan's cost/performance estimate is marked "unverified: raw
   runtime flags present" - the estimator cannot interpret flags it has no
   typed model for.
-- Setting both `chat_template` and `chat_template_file` is `AMICU-CAP-005`
-  - see above.
+- Setting both `chat_template` and `chat_template_file` is `AMICU-CAP-005` - see above.
 - A `speculative {}` block whose draft `model` is the deployment's own model is
   `AMICU-CAP-007` - see above.
 - A `multimodal { ... }` block on the `vllm {}` settings block is a

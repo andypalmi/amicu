@@ -113,8 +113,8 @@ fn model(name: &str, f: &Fields) -> Result<Model> {
                 })
             })
             .collect::<Result<_>>()?,
-        // Declared shape metadata feeding the KV-cache estimator
-        // - there is no GGUF header parser in-tree, so
+        // Declared shape metadata feeding the KV-cache estimator -
+        // there is no GGUF header parser in-tree, so
         // these are never derived.
         n_layers,
         n_kv_heads: f.opt_positive_u32("n_kv_heads")?,

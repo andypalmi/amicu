@@ -1,5 +1,5 @@
-//! HTTP surface for additional-workspace provisioning and workspace invitations
-//! - the final vertical of the authenticated
+//! HTTP surface for additional-workspace provisioning and workspace invitations -
+//! the final vertical of the authenticated
 //! multi-tenant workspaces epic.
 //!
 //! Three server-authoritative, audited-or-atomic operations, all wired against

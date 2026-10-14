@@ -146,8 +146,8 @@ pub fn build_plan_with(
     inputs: &PlanInputs<'_>,
 ) -> Result<PlanResult, PlanError> {
     let project_root = inputs.project_root;
-    // Dispatch to the adapter matching each deployment's own runtime family
-    // - previously any non-llama.cpp deployment was
+    // Dispatch to the adapter matching each deployment's own runtime family -
+    // previously any non-llama.cpp deployment was
     // skipped entirely (an info diagnostic, no launch, never applied).
     let catalog = build_catalog(graph);
     let mut llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), host_supervisor());

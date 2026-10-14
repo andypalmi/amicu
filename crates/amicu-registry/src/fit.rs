@@ -246,8 +246,8 @@ pub fn check_variant_fit(
 /// The weights figure one GGUF variant contributes: its declared `size` when
 /// present, otherwise a size computed from `total_parameters` at the variant's
 /// quantization. Exposed so a caller that has to fold a second model's weights
-/// into one fit check - a speculative deployment's draft model
-/// - derives that figure exactly the way
+/// into one fit check - a speculative deployment's draft model -
+/// derives that figure exactly the way
 /// [`check_variant_fit`] derives the primary model's.
 #[must_use]
 pub fn variant_weights(total_parameters: u64, variant: &GgufVariant) -> ByteSize {

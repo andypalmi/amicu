@@ -40,8 +40,8 @@ fn unique_key(test_name: &str) -> String {
 }
 
 /// Two `PostgresRateLimiter` instances - each over its OWN pool, exactly as
-/// two separate Cloud Run replicas each holding their own shared pool would
-/// - sharing ONE database. N+1 `check` calls
+/// two separate Cloud Run replicas each holding their own shared pool would -
+/// sharing ONE database. N+1 `check` calls
 /// interleaved across the two instances for the SAME key admit exactly N: the
 /// atomic upsert (`crates/amicu-store/migrations/0014_rate_limit_buckets.sql`)
 /// is what makes the budget genuinely shared rather than each replica

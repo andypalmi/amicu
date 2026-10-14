@@ -547,8 +547,8 @@ Rules and caveats:
   twice for no speedup.
 - `extra_args`/`env` fields on the `vllm {}` block parse the same way, ahead
   of the vLLM command renderer that will consume them.
-- A `multimodal { ... }` block is only valid inside `llama_cpp {}`
- : putting one inside `vllm {}` is a structural
+- A `multimodal { ... }` block is only valid inside `llama_cpp {}`:
+  putting one inside `vllm {}` is a structural
   schema error at parse time (`VllmSettings` has no field for it), not a
   capability diagnostic - fix by moving it to the `llama_cpp {}` block or
   removing it.

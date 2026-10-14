@@ -873,8 +873,8 @@ impl From<AuditEntry> for AuditEntryView {
 /// `required` (the base capability - [`Permission::InviteMember`] /
 /// [`Permission::ChangeRole`] / [`Permission::RemoveMember`]).
 ///
-/// Delegates to the SHARED [`amicu_auth::authorize_membership_mutation`]
-/// - the SAME function
+/// Delegates to the SHARED [`amicu_auth::authorize_membership_mutation`] -
+/// the SAME function
 /// `amicu_store::PostgresMembershipStore` calls for the Postgres backend - so
 /// the two backends can never drift.
 ///

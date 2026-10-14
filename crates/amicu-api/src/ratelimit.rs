@@ -7,7 +7,7 @@
 //!   every cold start. Kept for dev/tests and any DB-less deployment.
 //! * [`PostgresRateLimiter`] - a fixed-window counter shared by every replica
 //!   over the one Postgres pool each replica already holds,
-//! backed by
+//!   backed by
 //!   [`amicu_store::PostgresRateLimitStore`]'s single-round-trip atomic
 //!   upsert. This is the one `AMICU_ENV=production` requires (consistent with
 //!   the fail-fast posture established for a

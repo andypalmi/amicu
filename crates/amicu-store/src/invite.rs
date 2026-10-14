@@ -69,8 +69,8 @@ pub struct AcceptedInvite {
 /// Authorize creating an invite that GRANTS `granted` by an actor whose CURRENT
 /// role is `actor` (re-read under the mutation's own transaction and row lock).
 ///
-/// Delegates to the SHARED [`amicu_auth::authorize_invite_create`]
-/// - the same function `amicu-api`'s handlers
+/// Delegates to the SHARED [`amicu_auth::authorize_invite_create`] -
+/// the same function `amicu-api`'s handlers
 /// consult for their cheap pre-check - so there is exactly one definition of
 /// the rule: only an actor holding `InviteMember` may invite at all, and only
 /// one holding `AssignPrivilegedRole` (Owner) may invite a privileged

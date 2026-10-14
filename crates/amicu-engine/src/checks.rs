@@ -31,8 +31,8 @@ pub fn report_for(graph: &Graph) -> DiagnosticReport {
         diagnostics.push(d);
     }
 
-    // Dispatch to the adapter matching each deployment's own runtime family
-    // - previously this only ever ran llama.cpp's
+    // Dispatch to the adapter matching each deployment's own runtime family -
+    // previously this only ever ran llama.cpp's
     // adapter, so a vllm deployment got no fit/capability validation at all.
     let catalog = build_catalog(graph);
     let llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), host_supervisor());

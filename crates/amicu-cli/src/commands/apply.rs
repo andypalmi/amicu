@@ -832,8 +832,8 @@ async fn apply_all(
     progress: &mut Progress,
     env: &Env<'_>,
 ) -> Result<(), CliError> {
-    // Dispatch to the adapter matching each deployment's own runtime family
-    // - previously `apply` only ever started/stopped
+    // Dispatch to the adapter matching each deployment's own runtime family -
+    // previously `apply` only ever started/stopped
     // llama.cpp instances. The Modal work adds a second axis: a
     // vLLM deployment whose hardware profile has `provider = "modal"` is
     // routed through `ModalSupervisor` instead of the local launchd/systemd
