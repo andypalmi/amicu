@@ -38,13 +38,20 @@ pub struct Usage {
     pub hours: f64,
     /// Number of identical instances running for that duration.
     pub quantity: u32,
+    /// Region the deployment is pinned to, if any; selects the
+    /// [`Pricing::region_multipliers`] entry applied to the rates.
+    pub region: Option<String>,
 }
 
 impl Usage {
     /// `hours` on a single instance.
     #[must_use]
     pub fn for_hours(hours: f64) -> Self {
-        Self { hours, quantity: 1 }
+        Self {
+            hours,
+            quantity: 1,
+            region: None,
+        }
     }
 
     /// A single instance for one month ([`HOURS_PER_MONTH`] hours).
@@ -57,6 +64,13 @@ impl Usage {
     #[must_use]
     pub fn with_quantity(mut self, quantity: u32) -> Self {
         self.quantity = quantity;
+        self
+    }
+
+    /// Pin the usage to `region`, applying that region's price multiplier.
+    #[must_use]
+    pub fn in_region(mut self, region: impl Into<String>) -> Self {
+        self.region = Some(region.into());
         self
     }
 }
@@ -82,13 +96,17 @@ fn per_hour_amount(rate: &Rate) -> f64 {
     }
 }
 
-/// Total cost of `usage` at `rate`, in the rate's currency.
-fn rate_cost(rate: &Rate, usage: &Usage) -> Money {
-    let amount = per_hour_amount(rate) * usage.hours * f64::from(usage.quantity);
+/// Total cost of `usage` at `rate`, scaled by the region `multiplier`, in the
+/// rate's currency.
+fn rate_cost(rate: &Rate, usage: &Usage, multiplier: f64) -> Money {
+    let amount = per_hour_amount(rate) * usage.hours * f64::from(usage.quantity) * multiplier;
     Money::new(amount, rate.price.currency.clone())
 }
 
 /// Estimate the cost of running `usage` against `pricing`.
+///
+/// When `usage` pins a region, both rates are scaled by that region's
+/// [`Pricing::region_multipliers`] entry (1.0x if it has none).
 ///
 /// The upper bound is the guaranteed on-demand cost. The lower bound is the
 /// spot cost when the offering is interruptible, otherwise it equals the
@@ -102,7 +120,8 @@ fn rate_cost(rate: &Rate, usage: &Usage) -> Money {
 /// different currency than the on-demand rate.
 pub fn estimate_cost(pricing: &Pricing, usage: &Usage) -> Result<EstimateRange<Money>, CostError> {
     let on_demand = pricing.on_demand_rate();
-    let high = rate_cost(on_demand, usage);
+    let multiplier = pricing.region_multiplier(usage.region.as_deref());
+    let high = rate_cost(on_demand, usage, multiplier);
 
     let mut assumptions = vec![
         Assumption::new(format!(
@@ -116,6 +135,14 @@ pub fn estimate_cost(pricing: &Pricing, usage: &Usage) -> Result<EstimateRange<M
             unit_label(on_demand.unit),
         )),
     ];
+
+    if let Some(region) = usage.region.as_deref()
+        && (multiplier - 1.0).abs() > f64::EPSILON
+    {
+        assumptions.push(Assumption::new(format!(
+            "region {region}: rates scaled by {multiplier}x"
+        )));
+    }
 
     let mut uses_monthly = on_demand.unit == RateUnit::PerMonth;
 
@@ -134,7 +161,7 @@ pub fn estimate_cost(pricing: &Pricing, usage: &Usage) -> Result<EstimateRange<M
             unit_label(spot.unit),
         )));
         assumptions.push(Assumption::new("spot availability assumed for lower bound"));
-        rate_cost(spot, usage)
+        rate_cost(spot, usage, multiplier)
     } else {
         assumptions.push(Assumption::new(
             "no spot rate offered; lower bound equals on-demand",
@@ -238,6 +265,35 @@ mod tests {
                 spot: "EUR".into(),
             }
         );
+    }
+
+    #[test]
+    fn region_multiplier_scales_both_rates_and_is_recorded() {
+        let pricing = Pricing::on_demand(Rate::new(usd(2.0), RateUnit::PerHour))
+            .with_spot(Rate::new(usd(1.0), RateUnit::PerHour))
+            .with_region_multiplier("eu-west", 1.5);
+        let estimate =
+            estimate_cost(&pricing, &Usage::for_hours(10.0).in_region("eu-west")).unwrap();
+        assert_eq!(estimate.low(), &usd(15.0));
+        assert_eq!(estimate.high(), &usd(30.0));
+        assert!(
+            estimate
+                .assumptions()
+                .iter()
+                .any(|a| a.statement.contains("region eu-west"))
+        );
+    }
+
+    #[test]
+    fn unpinned_or_unlisted_region_uses_the_base_rate() {
+        let pricing = Pricing::on_demand(Rate::new(usd(2.0), RateUnit::PerHour))
+            .with_region_multiplier("eu-west", 1.5);
+        for usage in [
+            Usage::for_hours(10.0),
+            Usage::for_hours(10.0).in_region("us-east"),
+        ] {
+            assert_eq!(estimate_cost(&pricing, &usage).unwrap().high(), &usd(20.0));
+        }
     }
 
     #[test]

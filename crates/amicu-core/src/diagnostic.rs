@@ -382,6 +382,13 @@ pub mod catalog {
     /// error: the deployment may well fit, but at long `context_length` the KV
     /// cache can dominate, so a pass here is not evidence of fit.
     pub const CAP_KV_CACHE_NOT_ESTIMATED: DiagnosticCode = DiagnosticCode::new(Category::Cap, 10);
+    // --- plan-time range checks on typed llama.cpp fields ---
+    /// `AMICU-CAP-011` - a `llama_cpp` deployment sets a typed runtime field
+    /// to an out-of-range or inconsistent value (e.g. `top_p` outside
+    /// `[0, 1]`, `ubatch_size` above `batch_size`, `parallel_slots = 0`).
+    /// Error: `llama-server` would reject or misbehave on it at spawn time, so
+    /// it is caught at plan time instead.
+    pub const CAP_RUNTIME_FIELD_INVALID: DiagnosticCode = DiagnosticCode::new(Category::Cap, 11);
     /// `AMICU-MEM-001` - model does not fit in available VRAM.
     pub const MEM_VRAM_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Mem, 1);
     /// `AMICU-MEM-002` - a single artifact/weight file exceeds the available
@@ -474,7 +481,7 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 36] {
+    pub const fn all() -> [DiagnosticCode; 37] {
         [
             PARSE_UNCLOSED_BLOCK,
             PARSE_INVALID_SYNTAX,
@@ -492,6 +499,7 @@ pub mod catalog {
             CAP_SCALING_INVALID,
             CAP_SCALING_UNSUPPORTED_PROVIDER,
             CAP_KV_CACHE_NOT_ESTIMATED,
+            CAP_RUNTIME_FIELD_INVALID,
             MEM_VRAM_EXCEEDED,
             MEM_ARTIFACT_OVERSIZE,
             POLICY_BUDGET_EXCEEDED,
@@ -595,6 +603,10 @@ mod tests {
         assert_eq!(
             catalog::CAP_KV_CACHE_NOT_ESTIMATED.to_string(),
             "AMICU-CAP-010"
+        );
+        assert_eq!(
+            catalog::CAP_RUNTIME_FIELD_INVALID.to_string(),
+            "AMICU-CAP-011"
         );
         assert_eq!(
             catalog::POLICY_RUNTIME_ENV_SECRET_SUSPECTED.to_string(),
