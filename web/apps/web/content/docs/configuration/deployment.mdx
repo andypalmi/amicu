@@ -93,7 +93,7 @@ resource "deployment" "chat" {
 }
 ```
 
-The warning gives the estimate and the available memory, and says the check was bypassed by config. `plan` shows `memory_check` as `warn` for that deployment, in text and in `--output json`. Other deployments still enforce. Any value other than `"enforce"` or `"warn"` is a config error. There is no CLI flag, so the bypass is reviewed with the config.
+The warning gives the estimate and the available memory, and says the check was bypassed by config. The warning is printed as `warn: deployment.<id>: ...`. In the text plan, that deployment's block shows `memory_check: warn (bypassed)`; in `--output json`, its action has a runtime setting `memory_check` = `warn`. Other deployments still enforce. Any value other than `"enforce"` or `"warn"` is a config error. There is no CLI flag, so the bypass is reviewed with the config.
 
 ### scaling
 

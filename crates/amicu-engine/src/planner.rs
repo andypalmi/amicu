@@ -165,7 +165,12 @@ pub fn build_plan_with(
             Runtime::Vllm(_) => &vllm_adapter,
         };
 
-        diagnostics.extend(crate::checks::apply_memory_check(d, adapter.validate(d)));
+        for mut diag in crate::checks::apply_memory_check(d, adapter.validate(d)) {
+            if diag.resource.is_none() {
+                diag.resource = Some(format!("deployment.{}", d.id));
+            }
+            diagnostics.push(diag);
+        }
 
         let hardware = graph
             .hardware_profiles
