@@ -46,7 +46,8 @@ impl RenderedLaunch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceEstimate {
     /// Estimated peak device memory (weights plus the flat overhead band, or
-    /// weights plus [`Self::kv_cache`] when the latter is known).
+    /// weights + [`Self::kv_cache`] + the runtime overhead when the KV cache is
+    /// known).
     pub estimated_memory: ByteSize,
     /// Number of accelerators the launch will occupy.
     pub gpu_count: u32,

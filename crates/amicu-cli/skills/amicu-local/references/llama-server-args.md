@@ -115,8 +115,9 @@ slots, not sized per slot, so the KV pool stays `context_length`-sized
 regardless of how many slots split it.
 
 The result appears as `FitReport.kv_cache`, feeds the plan's
-`estimated_memory` (in place of the flat overhead band, which is otherwise
-the only memory-beyond-weights figure), and shows up in the plan's
+`estimated_memory`: weights + KV cache + runtime overhead (the low end of
+the flat overhead band, 10% of weights) rather than weights + the band high
+end, which is the figure when the KV cache is unknown, and shows up in the plan's
 `cost_performance.assumptions` as a line like
 `"KV cache: 4GiB at q8_0 for 32768 ctx"`. Leave the model's shape fields
 unset (there is no GGUF header parser in-tree to derive them) to keep the

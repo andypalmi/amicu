@@ -202,7 +202,10 @@ pub fn build_plan_with(
                         )),
                     )
                 }
-                Some(_) => (ActionKind::Update, None),
+                Some((pg, prev)) => (
+                    ActionKind::Update,
+                    describe_config_changes(resolve(pg, prev), resolve(graph, d)),
+                ),
             };
 
         let launch = match adapter.plan_launch(d) {
@@ -281,6 +284,77 @@ fn resolve<'a>(graph: &'a Graph, d: &'a Deployment) -> Resolved<'a> {
             .iter()
             .find(|h| h.id == d.hardware_profile),
     )
+}
+
+/// Why a deployment whose configuration changed is an update: what changed
+/// (`field: old -> new`, secrets are references so only the reference name is
+/// ever shown) and why that needs a restart. `None` when no field differs
+/// (nothing to say beyond the update itself).
+fn describe_config_changes(prev: Resolved<'_>, next: Resolved<'_>) -> Option<String> {
+    use std::collections::BTreeMap;
+
+    const SHOWN: usize = 6;
+
+    fn flatten(prefix: &str, v: &serde_json::Value, out: &mut BTreeMap<String, String>) {
+        match v {
+            serde_json::Value::Object(map) => {
+                for (k, v) in map {
+                    let key = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{prefix}.{k}")
+                    };
+                    flatten(&key, v, out);
+                }
+            }
+            serde_json::Value::String(s) => {
+                out.insert(prefix.to_owned(), s.clone());
+            }
+            other => {
+                out.insert(prefix.to_owned(), other.to_string());
+            }
+        }
+    }
+
+    fn fields<T: serde::Serialize>(label: &str, v: Option<&T>) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
+        if let Some(v) = v.and_then(|v| serde_json::to_value(v).ok()) {
+            flatten(label, &v, &mut out);
+        }
+        out
+    }
+
+    let collect = |r: Resolved<'_>| {
+        let mut all = fields("", Some(r.0));
+        all.extend(fields("model", r.1));
+        all.extend(fields("hardware", r.2));
+        all
+    };
+    let (old, new) = (collect(prev), collect(next));
+    let mut keys: Vec<&String> = old.keys().chain(new.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    let mut changes: Vec<String> = keys
+        .into_iter()
+        .filter_map(|k| match (old.get(k), new.get(k)) {
+            (Some(a), Some(b)) if a != b => Some(format!("{k}: {a} -> {b}")),
+            (None, Some(b)) => Some(format!("{k}: added ({b})")),
+            (Some(a), None) => Some(format!("{k}: removed (was {a})")),
+            _ => None,
+        })
+        .collect();
+    if changes.is_empty() {
+        return None;
+    }
+    if changes.len() > SHOWN {
+        let more = changes.len() - SHOWN;
+        changes.truncate(SHOWN);
+        changes.push(format!("and {more} more"));
+    }
+    Some(format!(
+        "{}. Launch settings are fixed when the service starts, so it is restarted to apply them",
+        changes.join(", ")
+    ))
 }
 
 /// A destroy plan item for `id` that needs no deployment in any graph (for
@@ -1349,6 +1423,31 @@ mod tests {
         assert_eq!(result.items.len(), 1);
         assert_eq!(result.items[0].action.kind, ActionKind::Update);
         assert!(build_plan(&next, Some(&next)).unwrap().items.is_empty());
+    }
+
+    #[test]
+    fn an_update_from_a_config_change_says_what_changed_and_why_it_restarts() {
+        let prior = graph(Vec::new());
+        let mut next = graph(Vec::new());
+        let Runtime::LlamaCpp(s) = &mut next.deployments[0].runtime else {
+            unreachable!("graph() builds a llama_cpp deployment")
+        };
+        let old = s.context_length;
+        s.context_length = old + 4096;
+        let item = &build_plan(&next, Some(&prior)).unwrap().items[0];
+        assert_eq!(item.action.kind, ActionKind::Update);
+        let reason = item.reason.as_deref().expect("reason line");
+        assert!(
+            reason.contains(&format!("context_length: {old} -> {}", old + 4096)),
+            "{reason}"
+        );
+        assert!(reason.contains("restarted"), "{reason}");
+
+        // Adding an api_key names the field and shows only the reference.
+        let keyed = with_key(graph(Vec::new()), "CHAT_API_KEY");
+        let item = &build_plan(&keyed, Some(&prior)).unwrap().items[0];
+        let reason = item.reason.as_deref().expect("reason line");
+        assert!(reason.contains("api_key"), "{reason}");
     }
 
     // --- change detection beyond the graph -------------

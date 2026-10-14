@@ -83,6 +83,13 @@ pub(crate) fn run(
             Status::Pass,
             format!("{} at {}", info.version, info.path.display()),
         )),
+        Err(amicu_llamacpp::LlamaCppError::UnparseableVersion(_)) => checks.push(check(
+            "llama-server",
+            Status::Warn,
+            "llama-server found, but its build number is unknown (a Homebrew or \
+             source build without version metadata); cannot check it against the \
+             minimum build",
+        )),
         Err(e) => checks.push(check("llama-server", Status::Warn, e.to_string())),
     }
 

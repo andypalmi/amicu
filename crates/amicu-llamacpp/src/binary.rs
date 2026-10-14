@@ -27,23 +27,36 @@ impl LlamaVersion {
     /// Parse the build number from `llama-server --version` output.
     ///
     /// Accepts the `version: 3901 (a1b2c3d)` line llama.cpp emits, tolerating a
-    /// leading `b` (e.g. `b3901`) and extra surrounding text.
+    /// leading `b` (e.g. `b3901`) and extra surrounding text. Homebrew's
+    /// package prints `version: 0.6.0 (build 11429, commit d812350)`: an
+    /// explicit `build <n>` wins over the leading number. A build of `0`
+    /// (`version: 0 (unknown)`, what a build without git metadata prints) or a
+    /// dotted release number with no build is not a build number.
     ///
     /// # Errors
     /// [`LlamaCppError::UnparseableVersion`] when no build number is present.
     pub fn parse(output: &str) -> Result<Self, LlamaCppError> {
-        output
-            .lines()
-            .find_map(|line| {
-                let lower = line.to_ascii_lowercase();
-                let rest = lower.split("version").nth(1)?;
-                let digits: String = rest
-                    .chars()
-                    .skip_while(|c| !c.is_ascii_digit())
-                    .take_while(char::is_ascii_digit)
-                    .collect();
-                digits.parse().ok().map(LlamaVersion::new)
+        let lower = output.to_ascii_lowercase();
+        let leading_build = |s: &str| -> Option<u32> {
+            let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
+            // `0.6.0` is a release number, not a build.
+            if s[digits.len()..].starts_with('.') {
+                return None;
+            }
+            digits.parse().ok().filter(|b| *b > 0)
+        };
+        // An explicit `build <n>` (Homebrew's format).
+        let explicit = lower
+            .match_indices("build ")
+            .find_map(|(i, m)| leading_build(lower[i + m.len()..].trim_start()));
+        let build = explicit.or_else(|| {
+            lower.lines().find_map(|line| {
+                let rest = line.split("version").nth(1)?;
+                leading_build(rest.trim_start_matches(|c: char| !c.is_ascii_digit()))
             })
+        });
+        build
+            .map(LlamaVersion::new)
             .ok_or_else(|| LlamaCppError::UnparseableVersion(output.to_string()))
     }
 }

@@ -25,7 +25,7 @@ resource "hardware_profile" "hw" {
   provider = "local_apple"
   accelerator {
     kind   = "apple_silicon"
-    model  = "m4_pro_48gb"
+    model  = "m4_pro"
     count  = 1
     memory = "48GiB"
   }

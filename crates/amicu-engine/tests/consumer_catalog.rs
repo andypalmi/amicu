@@ -59,7 +59,9 @@ fn seventy_b_q4km_does_not_fit_on_twenty_four_gb_consumer_gpu() {
 /// profile.
 #[test]
 fn seventy_b_q4km_fits_on_m3_ultra_256gb() {
-    let hw = consumer::m3_ultra_256gb();
+    let hw = consumer::apple_silicon_chip("m3_ultra")
+        .and_then(|c| c.profile(256))
+        .expect("m3_ultra has a 256 GiB configuration");
     let report = check_fit(
         70_000_000_000,
         Quantization::Q4KM,

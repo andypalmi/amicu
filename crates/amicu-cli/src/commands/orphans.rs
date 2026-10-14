@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use amicu_core::graph::Graph;
 use amicu_llamacpp::{CommandExec, HostExec};
 use amicu_modal::{Credentials, ModalClient, ModalError};
 use serde::Serialize;
@@ -215,6 +216,10 @@ pub(crate) struct Tracked {
     modal_names: BTreeSet<String>,
     modal_ids: BTreeSet<String>,
     labels: BTreeSet<String>,
+    /// Whether state or config references Modal at all (a Modal stop record or
+    /// a `modal` hardware profile). Modal is only queried when it does, so a
+    /// local-only project is never told about missing Modal credentials.
+    modal_referenced: bool,
 }
 
 impl Tracked {
@@ -227,18 +232,26 @@ impl Tracked {
         t.project_id.clone_from(&state.project_id);
         for rec in &state.stops {
             if rec.backend.is_modal() {
+                t.modal_referenced = true;
                 t.modal_names.insert(rec.identity.clone());
                 t.modal_ids.extend(rec.app_id.clone());
             } else {
                 t.insert_label(&rec.identity);
             }
         }
+        t.modal_referenced |= uses_modal(&state.graph);
         for ep in &state.endpoints {
             t.modal_names.insert(ep.id.clone());
             t.modal_ids.insert(ep.id.clone());
             t.insert_label(&ep.id);
         }
         t
+    }
+
+    /// Also count a Modal hardware profile in the current config as a reference.
+    pub(crate) fn with_config(mut self, config: Option<&Graph>) -> Self {
+        self.modal_referenced |= config.is_some_and(uses_modal);
+        self
     }
 
     fn insert_label(&mut self, label: &str) {
@@ -252,32 +265,48 @@ impl Tracked {
     }
 }
 
+/// Whether any hardware profile in `graph` runs on Modal.
+fn uses_modal(graph: &Graph) -> bool {
+    graph
+        .hardware_profiles
+        .iter()
+        .any(|h| h.provider.eq_ignore_ascii_case("modal"))
+}
+
 /// Discover untracked (and tracked) amicu resources. Never mutates anything.
 pub(crate) fn discover(env: &Env<'_>, tracked: &Tracked) -> OrphansReport {
     let mut sources = Vec::new();
     let mut resources = Vec::new();
 
-    match env.modal.list() {
-        Ok(apps) => {
-            sources.push(source("modal", "ok", None));
-            for app in apps {
-                // Stopped apps no longer run or bill; empty names are
-                // ephemeral/anonymous apps that are not amicu's.
-                if !app.name.starts_with(MODAL_PREFIX) || app.state == "stopped" {
-                    continue;
+    if tracked.modal_referenced {
+        match env.modal.list() {
+            Ok(apps) => {
+                sources.push(source("modal", "ok", None));
+                for app in apps {
+                    // Stopped apps no longer run or bill; empty names are
+                    // ephemeral/anonymous apps that are not amicu's.
+                    if !app.name.starts_with(MODAL_PREFIX) || app.state == "stopped" {
+                        continue;
+                    }
+                    resources.push(Found {
+                        kind: Kind::ModalApp,
+                        tracked: tracked.modal_names.contains(&app.name)
+                            || tracked.modal_ids.contains(&app.id),
+                        ownership: Ownership::Unknown,
+                        stop_command: format!("amicu modal stop -- {}", shell_quote(&app.name)),
+                        identity: app.name,
+                        state: app.state,
+                    });
                 }
-                resources.push(Found {
-                    kind: Kind::ModalApp,
-                    tracked: tracked.modal_names.contains(&app.name)
-                        || tracked.modal_ids.contains(&app.id),
-                    ownership: Ownership::Unknown,
-                    stop_command: format!("amicu modal stop -- {}", shell_quote(&app.name)),
-                    identity: app.name,
-                    state: app.state,
-                });
             }
+            Err(e) => sources.push(source("modal", "error", Some(e))),
         }
-        Err(e) => sources.push(source("modal", "error", Some(e))),
+    } else {
+        sources.push(source(
+            "modal",
+            "skipped",
+            Some("not used by this project".to_owned()),
+        ));
     }
 
     match env.platform {
@@ -521,7 +550,8 @@ pub(crate) fn run(
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
     let state = project.load_state()?;
-    let tracked = Tracked::from_state(state.as_ref());
+    let tracked =
+        Tracked::from_state(state.as_ref()).with_config(project.load_graph().ok().as_ref());
     let agents_dir = std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(|h| PathBuf::from(h).join("Library/LaunchAgents"));
@@ -729,6 +759,14 @@ mod tests {
         }
     }
 
+    /// A project whose state references Modal, so discovery queries it.
+    fn uses_modal_tracked() -> Tracked {
+        Tracked {
+            modal_referenced: true,
+            ..Tracked::default()
+        }
+    }
+
     fn tracked_chat() -> Tracked {
         tracked_of(vec![
             modal_stop("amicu-chat", None),
@@ -762,12 +800,60 @@ mod tests {
     }
 
     #[test]
+    fn modal_is_skipped_silently_when_nothing_references_it() {
+        // A local-only project: no Modal stop record, no `modal` hardware.
+        // The lookup (which would fail on missing credentials) must not run.
+        let modal = FakeModal(Err("MODAL_TOKEN_ID is not set".to_owned()));
+        let exec = FakeExec::new("", "");
+        let report = discover(
+            &env(Platform::Other, &exec, &modal, None),
+            &tracked_of(vec![host_stop("io.amicu.llama.a1b2c3d4.chat")]),
+        );
+        assert_eq!(report.sources[0].name, "modal");
+        assert_eq!(report.sources[0].status, "skipped");
+        let mut buf = Vec::new();
+        render(&report, OutputFormat::Human, &mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        assert!(!text.contains("warning"), "{text}");
+        assert!(!text.contains("MODAL_TOKEN_ID"), "{text}");
+    }
+
+    #[test]
+    fn modal_is_queried_when_state_or_config_references_it() {
+        let modal = FakeModal(Err("MODAL_TOKEN_ID is not set".to_owned()));
+        let exec = FakeExec::new("", "");
+        // State: a Modal stop record.
+        let from_state = Tracked::from_state(Some(&state_with(
+            vec![modal_stop("amicu-x", None)],
+            Vec::new(),
+        )));
+        let report = discover(&env(Platform::Other, &exec, &modal, None), &from_state);
+        assert_eq!(report.sources[0].status, "error");
+        // Config: a hardware profile on Modal.
+        let mut graph = Graph::new();
+        graph
+            .hardware_profiles
+            .push(amicu_core::resource::HardwareProfile {
+                id: "hw".into(),
+                provider: "modal".to_owned(),
+                region: None,
+                accelerator: None,
+                cpu: None,
+                memory: amicu_core::ByteSize::from_bytes(1 << 30),
+                interconnect: None,
+                price: None,
+            });
+        let from_config = Tracked::default().with_config(Some(&graph));
+        let report = discover(&env(Platform::Other, &exec, &modal, None), &from_config);
+        assert_eq!(report.sources[0].status, "error");
+    }
+    #[test]
     fn modal_error_is_reported_not_fatal() {
         let modal = FakeModal(Err("no credentials".to_owned()));
         let exec = FakeExec::new("", "");
         let report = discover(
             &env(Platform::Other, &exec, &modal, None),
-            &Tracked::default(),
+            &uses_modal_tracked(),
         );
         assert_eq!(report.resources.len(), 0);
         assert_eq!(report.sources[0].status, "error");
@@ -790,7 +876,7 @@ mod tests {
         let modal = FakeModal(Ok(vec![]));
         let report = discover(
             &env(Platform::MacOs, &exec, &modal, Some(dir.clone())),
-            &tracked_chat(),
+            &tracked_of(vec![host_stop("io.amicu.llama.a1b2c3d4.chat")]),
         );
         std::fs::remove_dir_all(&dir).unwrap();
         let got: Vec<_> = report
@@ -836,7 +922,7 @@ mod tests {
         let modal = FakeModal(Ok(vec![app("amicu-it's", "deployed")]));
         let report = discover(
             &env(Platform::Linux, &exec, &modal, None),
-            &tracked_of(vec![]),
+            &uses_modal_tracked(),
         );
         let cmds: Vec<_> = report
             .resources
@@ -946,7 +1032,7 @@ unrelated.service enabled enabled\n"
         let modal = FakeModal(Ok(vec![app("amicu-x", "deployed")]));
         let report = discover(
             &env(Platform::Linux, &exec, &modal, None),
-            &Tracked::default(),
+            &uses_modal_tracked(),
         );
         assert!(
             exec.calls().iter().all(|c| c.contains("list")),
