@@ -30,6 +30,19 @@
 //! `push` mints its own version id (`v{seq}`) and discards the caller-supplied
 //! [`StateSnapshot::version`], exactly like the fake reference backend.
 //!
+//! # Runtime records
+//!
+//! Per-deployment runtime records (`state_snapshots.runtime`) are never lost
+//! by a graph operation: `push` carries the current version's records forward
+//! (ignoring the pushed snapshot's own), and `rollback` appends a new version
+//! of the old graph plus the *current* records instead of repointing at the
+//! old row. Records change only through
+//! [`replace_runtime`](PostgresStateBackend::replace_runtime) and the
+//! per-deployment helpers built on it. Migration 0018 adds triggers so a
+//! binary that predates the column (and so would write the bare `'{}'`
+//! default) is refused once a stack holds records: all writers must still be
+//! upgraded, but a lagging one fails closed instead of wiping records.
+//!
 //! # Locking
 //!
 //! [`state_locks`] holds at most one lease per (workspace, stack). Acquiring
@@ -92,7 +105,8 @@
 use amicu_core::Graph;
 use amicu_core::adapter::{Adapter, AdapterError, AdapterId, DescribeCapabilities, HealthStatus};
 use amicu_state::{
-    LockHandle, StateBackendAdapter, StateCipher, StateError, StateSnapshot, StateVersion,
+    LockHandle, RuntimeState, StateBackendAdapter, StateCipher, StateError, StateSnapshot,
+    StateVersion,
 };
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -141,8 +155,8 @@ struct EncryptedContent {
 /// `serde_json::to_value(graph)` - byte-for-byte what every version of this
 /// backend before the encryption seam wrote, so existing rows and tests are
 /// unaffected.
-async fn encode_content(
-    graph: &Graph,
+async fn encode_content<T: Serialize + Sync>(
+    graph: &T,
     cipher: Option<&Arc<dyn StateCipher>>,
 ) -> Result<serde_json::Value, AdapterError> {
     let Some(cipher) = cipher else {
@@ -182,10 +196,10 @@ async fn encode_content(
 /// a cipher is turned on. A row that *is* wrapped but no cipher is
 /// configured to decrypt it is reported as [`StateError::Corrupted`] -
 /// explicit, non-retryable failure, never a silent misread.
-async fn decode_content(
+async fn decode_content<T: serde::de::DeserializeOwned>(
     content: serde_json::Value,
     cipher: Option<&Arc<dyn StateCipher>>,
-) -> Result<Graph, AdapterError> {
+) -> Result<T, AdapterError> {
     if !content
         .as_object()
         .is_some_and(|obj| obj.contains_key(CIPHER_MARKER_KEY))
@@ -382,8 +396,6 @@ impl PostgresStateBackend {
         delay: Duration,
     ) -> Result<(), AdapterError> {
         let mut tx = self.begin_tx().await?;
-        let wsid = self.workspace.as_uuid();
-        let stack = self.stack_id();
 
         // Never overwrite without the exact, still-live lock guarding the state.
         self.authorize(&mut tx, lock).await?;
@@ -392,13 +404,100 @@ impl PostgresStateBackend {
             tokio::time::sleep(delay).await;
         }
 
+        // Graph-only: carry the current version's runtime records forward, so
+        // a plain graph push can never drop a deployment's stop identity.
+        let runtime = match self.load_current(&mut tx).await? {
+            Some(current) => current.runtime,
+            None => RuntimeState::default(),
+        };
+        self.append_snapshot(
+            &mut tx,
+            &snapshot.graph,
+            &runtime,
+            &snapshot.recorded_at,
+            "push",
+        )
+        .await?;
+
+        tx.commit()
+            .await
+            .map_err(|_| backend_err("failed to commit push"))?;
+        Ok(())
+    }
+
+    /// Reads and decodes the snapshot recorded under `version`, verifying its
+    /// checksum.
+    async fn load_version(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        version: &str,
+    ) -> Result<Option<StateSnapshot>, AdapterError> {
+        let row = sqlx::query!(
+            "SELECT version, recorded_at, checksum, content, runtime FROM state_snapshots \
+             WHERE workspace_id = $1 AND stack_id = $2 AND version = $3",
+            self.workspace.as_uuid(),
+            self.stack_id(),
+            version,
+        )
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| backend_err("failed to read snapshot"))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let graph: Graph = decode_content(row.content, self.cipher.as_ref()).await?;
+        let runtime: RuntimeState = decode_content(row.runtime, self.cipher.as_ref()).await?;
+        let snapshot = StateSnapshot {
+            version: row.version,
+            recorded_at: row.recorded_at,
+            checksum: row.checksum,
+            graph,
+            runtime,
+        };
+        snapshot.verify()?;
+        Ok(Some(snapshot))
+    }
+
+    /// The current version's snapshot, if any push has ever run.
+    async fn load_current(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<Option<StateSnapshot>, AdapterError> {
+        let current = sqlx::query!(
+            "SELECT version FROM state_current WHERE workspace_id = $1 AND stack_id = $2",
+            self.workspace.as_uuid(),
+            self.stack_id(),
+        )
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| backend_err("failed to read current version"))?;
+        match current {
+            Some(c) => self.load_version(tx, &c.version).await,
+            None => Ok(None),
+        }
+    }
+
+    /// Appends a new version holding `graph` + `runtime` and advances the
+    /// current pointer to it. The caller must already have authorized its
+    /// lock in `tx`.
+    async fn append_snapshot(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        graph: &Graph,
+        runtime: &RuntimeState,
+        recorded_at: &str,
+        label: &str,
+    ) -> Result<(), AdapterError> {
+        let wsid = self.workspace.as_uuid();
+        let stack = self.stack_id();
+
         let next = sqlx::query!(
             r#"SELECT (COALESCE(MAX(seq), -1) + 1) AS "next_seq!"
                FROM state_snapshots WHERE workspace_id = $1 AND stack_id = $2"#,
             wsid,
             stack,
         )
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(|_| backend_err("failed to compute next version"))?;
         let seq = next.next_seq;
@@ -408,38 +507,45 @@ impl PostgresStateBackend {
             wsid,
             stack,
         )
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await
         .map_err(|_| backend_err("failed to read current version"))?;
         let parent_version = current.map(|r| r.version);
 
         // Mint our own version id and recompute the checksum fresh, exactly
-        // like the fake reference backend: the caller-supplied
-        // `snapshot.version` is a placeholder and is discarded.
-        let recorded = StateSnapshot::new(
+        // like the fake reference backend: any caller-supplied version is a
+        // placeholder and is discarded.
+        let recorded = StateSnapshot::with_runtime(
             format!("v{seq}"),
-            &snapshot.recorded_at,
-            snapshot.graph.clone(),
+            recorded_at,
+            graph.clone(),
+            runtime.clone(),
         )?;
         let content = encode_content(&recorded.graph, self.cipher.as_ref()).await?;
+        // Always a non-empty JSON object (`{"deployments":{}}` at minimum),
+        // never the bare `{}` column default: that is how the migration's
+        // guard triggers tell an upgraded writer from one that predates
+        // runtime records.
+        let runtime_json = encode_content(&recorded.runtime, self.cipher.as_ref()).await?;
         let created_at = now_unix_seconds();
 
         sqlx::query!(
             "INSERT INTO state_snapshots \
-             (workspace_id, stack_id, seq, version, parent_version, label, recorded_at, checksum, content, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+             (workspace_id, stack_id, seq, version, parent_version, label, recorded_at, checksum, content, created_at, runtime) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
             wsid,
             stack,
             seq,
             recorded.version,
             parent_version,
-            "push",
+            label,
             recorded.recorded_at,
             recorded.checksum,
             content,
             created_at,
+            runtime_json,
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|_| backend_err("failed to append snapshot"))?;
 
@@ -450,13 +556,9 @@ impl PostgresStateBackend {
             stack,
             recorded.version,
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|_| backend_err("failed to advance current version"))?;
-
-        tx.commit()
-            .await
-            .map_err(|_| backend_err("failed to commit push"))?;
         Ok(())
     }
 
@@ -524,7 +626,7 @@ impl StateBackendAdapter for PostgresStateBackend {
 
         let row = sqlx::query!(
             r#"
-            SELECT s.version, s.recorded_at, s.checksum, s.content
+            SELECT s.version, s.recorded_at, s.checksum, s.content, s.runtime
             FROM state_current c
             JOIN state_snapshots s
               ON s.workspace_id = c.workspace_id
@@ -552,12 +654,14 @@ impl StateBackendAdapter for PostgresStateBackend {
             )?);
         };
 
-        let graph = decode_content(row.content, self.cipher.as_ref()).await?;
+        let graph: Graph = decode_content(row.content, self.cipher.as_ref()).await?;
+        let runtime: RuntimeState = decode_content(row.runtime, self.cipher.as_ref()).await?;
         let snapshot = StateSnapshot {
             version: row.version,
             recorded_at: row.recorded_at,
             checksum: row.checksum,
             graph,
+            runtime,
         };
         snapshot.verify()?;
         Ok(snapshot)
@@ -639,6 +743,35 @@ impl StateBackendAdapter for PostgresStateBackend {
         Ok(LockHandle::new(self.id.clone(), token))
     }
 
+    async fn renew(&self, lock: &LockHandle) -> Result<(), AdapterError> {
+        let mut tx = self.begin_tx().await?;
+        let wsid = self.workspace.as_uuid();
+        let stack = self.stack_id();
+        let ttl = self.lease_ttl_seconds;
+
+        // Same authorization as push/rollback (`FOR UPDATE`, holder + token +
+        // not yet expired by Postgres's clock), so an already-expired lease
+        // cannot be renewed back to life: another holder may have taken it.
+        self.authorize(&mut tx, lock).await?;
+
+        sqlx::query!(
+            "UPDATE state_locks \
+             SET expires_at = extract(epoch FROM clock_timestamp())::bigint + $3 \
+             WHERE workspace_id = $1 AND stack_id = $2",
+            wsid,
+            stack,
+            ttl,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| backend_err("failed to renew lock"))?;
+
+        tx.commit()
+            .await
+            .map_err(|_| backend_err("failed to commit lock renewal"))?;
+        Ok(())
+    }
+
     async fn unlock(&self, handle: LockHandle) -> Result<(), AdapterError> {
         let mut tx = self.begin_tx().await?;
         let wsid = self.workspace.as_uuid();
@@ -699,47 +832,59 @@ impl StateBackendAdapter for PostgresStateBackend {
         lock: &LockHandle,
     ) -> Result<(), AdapterError> {
         let mut tx = self.begin_tx().await?;
-        let wsid = self.workspace.as_uuid();
-        let stack = self.stack_id();
 
         // Never roll back without the exact, still-live lock guarding the
         // state - a rollback can never race a concurrent push.
         self.authorize(&mut tx, lock).await?;
 
-        let target = sqlx::query!(
-            "SELECT version FROM state_snapshots \
-             WHERE workspace_id = $1 AND stack_id = $2 AND version = $3",
-            wsid,
-            stack,
-            version.id,
-        )
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|_| backend_err("failed to look up version"))?;
-
-        if target.is_none() {
+        let Some(target) = self.load_version(&mut tx, &version.id).await? else {
             return Err(StateError::VersionNotFound {
                 version: version.id.clone(),
             }
             .into());
-        }
+        };
 
-        // Append-only: this never touches `state_snapshots`, only repoints the
-        // mutable `state_current` pointer at the already-recorded version.
-        sqlx::query!(
-            "INSERT INTO state_current (workspace_id, stack_id, version) VALUES ($1, $2, $3) \
-             ON CONFLICT (workspace_id, stack_id) DO UPDATE SET version = EXCLUDED.version",
-            wsid,
-            stack,
-            version.id,
+        // Roll back the graph only. The target version's runtime records
+        // describe resources that may since have been started or stopped, so
+        // restoring them could orphan live resources: append a new version
+        // made of the old graph and the CURRENT records. History stays
+        // append-only.
+        let runtime = match self.load_current(&mut tx).await? {
+            Some(current) => current.runtime,
+            None => RuntimeState::default(),
+        };
+        self.append_snapshot(
+            &mut tx,
+            &target.graph,
+            &runtime,
+            &target.recorded_at,
+            "rollback",
         )
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| backend_err("failed to move current version"))?;
+        .await?;
 
         tx.commit()
             .await
             .map_err(|_| backend_err("failed to commit rollback"))?;
+        Ok(())
+    }
+
+    async fn replace_runtime(
+        &self,
+        runtime: &RuntimeState,
+        recorded_at: &str,
+        lock: &LockHandle,
+    ) -> Result<(), AdapterError> {
+        let mut tx = self.begin_tx().await?;
+        self.authorize(&mut tx, lock).await?;
+        let graph = match self.load_current(&mut tx).await? {
+            Some(current) => current.graph,
+            None => Graph::new(),
+        };
+        self.append_snapshot(&mut tx, &graph, runtime, recorded_at, "runtime")
+            .await?;
+        tx.commit()
+            .await
+            .map_err(|_| backend_err("failed to commit runtime write"))?;
         Ok(())
     }
 }
@@ -838,7 +983,7 @@ mod content_cipher_tests {
         );
         // And it round-trips straight back with no cipher, exactly as `pull`
         // always has.
-        let decoded = decode_content(via_seam, None).await.unwrap();
+        let decoded = decode_content::<Graph>(via_seam, None).await.unwrap();
         assert_eq!(decoded, graph);
     }
 
@@ -862,7 +1007,9 @@ mod content_cipher_tests {
             "encrypted content must carry the cipher marker key"
         );
 
-        let recovered = decode_content(stored, Some(&cipher)).await.unwrap();
+        let recovered = decode_content::<Graph>(stored, Some(&cipher))
+            .await
+            .unwrap();
         assert_eq!(
             recovered, graph,
             "encrypt -> store -> decrypt must recover the exact original graph"
@@ -885,7 +1032,9 @@ mod content_cipher_tests {
         let stored = encode_content(&graph, Some(&dyn_cipher)).await.unwrap();
         assert_eq!(cipher.encrypt_calls.load(Ordering::SeqCst), 1);
 
-        let _ = decode_content(stored, Some(&dyn_cipher)).await.unwrap();
+        let _ = decode_content::<Graph>(stored, Some(&dyn_cipher))
+            .await
+            .unwrap();
         assert_eq!(cipher.decrypt_calls.load(Ordering::SeqCst), 1);
     }
 
@@ -900,7 +1049,7 @@ mod content_cipher_tests {
         // backend's cipher was removed/misconfigured after these rows were
         // written. This must fail loudly, never silently return garbage or
         // the wrapper's raw fields mistaken for a graph.
-        let err = decode_content(stored, None).await.unwrap_err();
+        let err = decode_content::<Graph>(stored, None).await.unwrap_err();
         assert!(
             err.to_string().contains("no StateCipher is configured")
                 || format!("{err:?}").contains("no StateCipher is configured"),
@@ -918,7 +1067,7 @@ mod content_cipher_tests {
         let legacy_content = serde_json::to_value(&graph).unwrap();
 
         let cipher: Arc<dyn StateCipher> = Arc::new(XorTestCipher::new(0x99));
-        let decoded = decode_content(legacy_content, Some(&cipher))
+        let decoded = decode_content::<Graph>(legacy_content, Some(&cipher))
             .await
             .expect("unwrapped legacy content must decode as a plain graph");
         assert_eq!(decoded, graph);
@@ -935,7 +1084,9 @@ mod content_cipher_tests {
         let mut stored = encode_content(&graph, Some(&cipher)).await.unwrap();
         stored["__amicu_state_cipher_v__"] = serde_json::json!(u8::MAX);
 
-        let err = decode_content(stored, Some(&cipher)).await.unwrap_err();
+        let err = decode_content::<Graph>(stored, Some(&cipher))
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("not supported")
                 || format!("{err:?}").contains("not supported"),

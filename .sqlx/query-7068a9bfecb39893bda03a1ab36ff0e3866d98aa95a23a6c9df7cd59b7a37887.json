@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE state_locks SET expires_at = extract(epoch FROM clock_timestamp())::bigint + $3 WHERE workspace_id = $1 AND stack_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7068a9bfecb39893bda03a1ab36ff0e3866d98aa95a23a6c9df7cd59b7a37887"
+}
