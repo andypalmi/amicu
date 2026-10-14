@@ -71,7 +71,9 @@ pub(crate) fn run(
             Status::Pass,
             format!(
                 "{} · {} memory · {} disk free",
-                report.os, report.profile.memory, report.disk_free
+                report.os,
+                report.profile.memory.human(),
+                report.disk_free.human()
             ),
         )),
         Err(e) => checks.push(check("host", Status::Fail, e.to_string())),

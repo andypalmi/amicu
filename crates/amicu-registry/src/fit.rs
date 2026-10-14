@@ -301,12 +301,16 @@ fn evaluate(weights: ByteSize, hw: &HardwareProfile, cfg: &FitConfig) -> FitRepo
         } else {
             String::new()
         };
+        let (weights_s, available_s) = weights.human_pair(available);
+        let weights_s = format!("~{weights_s}");
         Diagnostic::new(
             pool.diagnostic_code(),
             Severity::Error,
             format!(
                 "model weights need {weights} but only {available} of {device_memory} {pool}{across} \
                  is available after a {reserve} reserve",
+                weights = weights_s,
+                available = available_s,
                 pool = pool.label(),
             ),
         )
@@ -432,6 +436,8 @@ fn apply_peak(report: &mut FitReport, kv_bytes: ByteSize, cfg: &FitConfig) {
     }
     report.fits = false;
     if report.diagnostic.is_none() {
+        let (peak_s, usable_s) = peak.human_pair(usable);
+        let peak_s = format!("~{peak_s}");
         let beyond = ByteSize::from_bytes(peak.bytes().saturating_sub(report.weights.bytes()));
         report.diagnostic = Some(Diagnostic::new(
             report.pool.diagnostic_code(),
@@ -440,7 +446,10 @@ fn apply_peak(report: &mut FitReport, kv_bytes: ByteSize, cfg: &FitConfig) {
                 "estimated peak memory {peak} (weights {weights} + kv cache/overhead {beyond}) \
                  exceeds the {usable} of {pool} usable; lower `context_length`, use a smaller \
                  quantization or a quantized KV cache",
-                weights = report.weights,
+                peak = peak_s,
+                beyond = beyond.approx(),
+                usable = usable_s,
+                weights = report.weights.approx(),
                 pool = report.pool.label(),
             ),
         ));
@@ -497,13 +506,19 @@ pub fn check_vllm_fit(
         } else {
             String::new()
         };
+        let (demand_s, available_s) = demand.human_pair(available);
+        let demand_s = format!("~{demand_s}");
+        let kv_s = kv_cache.map_or_else(String::new, |k| format!(" + kv cache {}", k.approx()));
         Diagnostic::new(
             pool.diagnostic_code(),
             Severity::Error,
             format!(
                 "model weights {weights}{kv} need {demand} but only {available} of {device_memory} \
                  {pool}{across} is usable at {pct:.0}% gpu_memory_utilization",
-                kv = kv_cache.map_or_else(String::new, |k| format!(" + kv cache {k}")),
+                kv = kv_s,
+                weights = weights.approx(),
+                demand = demand_s,
+                available = available_s,
                 pool = pool.label(),
                 pct = util * 100.0,
             ),
@@ -1230,5 +1245,49 @@ mod tests {
             None,
         );
         assert_eq!(report.pool, MemoryPool::Unified);
+    }
+
+    #[test]
+    fn comparison_messages_never_render_both_sides_equal() {
+        let mib3 = 3 * 1024 * 1024;
+        // Weights path: 16 GiB Mac, 2 GiB reserve -> 14 GiB available.
+        let variant = sized_variant(14 * GIB + mib3);
+        let report = check_variant_fit(
+            7_000_000_000,
+            &variant,
+            &apple_silicon(16),
+            &FitConfig::default(),
+        );
+        let msg = report.diagnostic.expect("diagnostic").message;
+        assert!(
+            msg.contains("~14.003 GiB") && msg.contains("14.000 GiB"),
+            "{msg}"
+        );
+
+        // Peak path: peak a few MiB over the usable pool.
+        let cfg = FitConfig::default();
+        let mut report =
+            check_variant_fit(7_000_000_000, &sized_variant(4 * GIB), &gpu_8_gib(), &cfg);
+        let usable = report.device_memory.bytes();
+        let kv = usable + mib3 - report.weights.bytes() - report.overhead.low.bytes();
+        apply_peak(&mut report, ByteSize::from_bytes(kv), &cfg);
+        let msg = report.diagnostic.expect("diagnostic").message;
+        assert!(
+            msg.contains("~8.003 GiB (") && msg.contains("exceeds the 8.000 GiB"),
+            "{msg}"
+        );
+
+        // vLLM path: 16 GiB GPU at 100% utilization.
+        let weights = ByteSize::from_bytes(16 * GIB + mib3);
+        let msg = check_vllm_fit(weights, &gpu(16), 1.0, 1, None)
+            .diagnostic
+            .expect("diagnostic")
+            .message;
+        assert!(
+            msg.contains("need ~16.003 GiB but only 16.000 GiB"),
+            "{msg}"
+        );
+        // Estimates carry a tilde.
+        assert!(msg.contains('~'));
     }
 }

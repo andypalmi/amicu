@@ -61,6 +61,62 @@ impl ByteSize {
     pub const fn bytes(self) -> u64 {
         self.0
     }
+
+    /// Rounded binary rendering for user-facing text, e.g. `11.5 GiB`
+    /// (one decimal; `MiB`/`KiB`/`B` below a GiB). Not lossless - use
+    /// [`Display`](fmt::Display) for anything that must round-trip.
+    #[must_use]
+    pub fn human(self) -> String {
+        self.human_with(1)
+    }
+
+    /// Render with `decimals` fractional digits, rolling over to the next unit
+    /// when rounding reaches 1024 (so never `1024.0 MiB`). Integer math only.
+    fn human_with(self, decimals: u32) -> String {
+        let scale = 10u128.pow(decimals);
+        let scaled = |factor: u64| {
+            (u128::from(self.0) * scale + u128::from(factor) / 2) / u128::from(factor)
+        };
+        let fmt = |t: u128, unit: &str| {
+            format!(
+                "{}.{:0>w$} {unit}",
+                t / scale,
+                t % scale,
+                w = decimals as usize
+            )
+        };
+        let limit = 1024 * scale;
+        if self.0 >= GIB || scaled(MIB) >= limit {
+            fmt(scaled(GIB), "GiB")
+        } else if self.0 >= MIB || scaled(KIB) >= limit {
+            fmt(scaled(MIB), "MiB")
+        } else if self.0 >= KIB {
+            fmt(scaled(KIB), "KiB")
+        } else {
+            format!("{} B", self.0)
+        }
+    }
+
+    /// Render two sizes for an "X exceeds Y" comparison so the strings never
+    /// read as equal: precision grows (1, 2, then 3 decimals) until they
+    /// differ, falling back to exact bytes.
+    #[must_use]
+    pub fn human_pair(self, other: Self) -> (String, String) {
+        for d in 1..=3 {
+            let (a, b) = (self.human_with(d), other.human_with(d));
+            if a != b {
+                return (a, b);
+            }
+        }
+        (format!("{} B", self.0), format!("{} B", other.0))
+    }
+
+    /// [`human`](Self::human) prefixed with `~`, for estimates. The `~` marks
+    /// estimates only; measured or configured values are rendered without it.
+    #[must_use]
+    pub fn approx(self) -> String {
+        format!("~{}", self.human())
+    }
 }
 
 impl From<u64> for ByteSize {
@@ -190,6 +246,42 @@ mod tests {
         assert_eq!(ByteSize::from_bytes(0).to_string(), "0B");
         // A non-round value has no coarse divisor and falls back to bytes.
         assert_eq!(ByteSize::from_bytes(7 * MIB + 3).to_string(), "7340035B");
+    }
+
+    #[test]
+    fn human_rounds_for_display() {
+        assert_eq!(ByteSize::from_bytes(12_385_752_662).human(), "11.5 GiB");
+        assert_eq!(ByteSize::from_bytes(12_385_752_662).approx(), "~11.5 GiB");
+        assert_eq!(ByteSize::from_bytes(48 * GIB).human(), "48.0 GiB");
+        assert_eq!(ByteSize::from_bytes(512 * MIB).human(), "512.0 MiB");
+        assert_eq!(ByteSize::from_bytes(1536).human(), "1.5 KiB");
+        assert_eq!(ByteSize::from_bytes(0).human(), "0 B");
+        assert!(ByteSize::from_bytes(u64::MAX).human().ends_with("GiB"));
+    }
+
+    #[test]
+    fn human_rolls_over_unit_boundaries() {
+        assert_eq!(ByteSize::from_bytes(GIB - 1).human(), "1.0 GiB");
+        assert_eq!(ByteSize::from_bytes(MIB - 1).human(), "1.0 MiB");
+        assert_eq!(
+            ByteSize::from_bytes(10 * GIB - 40_000_000).human(),
+            "10.0 GiB"
+        );
+        assert_eq!(
+            ByteSize::from_bytes(1023 * MIB + MIB / 2 - 1).human(),
+            "1023.5 MiB"
+        );
+    }
+
+    #[test]
+    fn human_pair_differs_when_close() {
+        let limit = ByteSize::from_bytes(8 * GIB);
+        let over = ByteSize::from_bytes(8 * GIB + 3 * MIB);
+        assert_eq!(over.human(), limit.human());
+        let (a, b) = over.human_pair(limit);
+        assert_eq!((a.as_str(), b.as_str()), ("8.003 GiB", "8.000 GiB"));
+        let (a, b) = limit.human_pair(limit);
+        assert_eq!(a, b);
     }
 
     #[test]
