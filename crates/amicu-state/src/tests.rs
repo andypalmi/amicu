@@ -434,7 +434,10 @@ async fn registry_holds_state_backends_and_discovers_capabilities() {
 
 // --- runtime records, renew, lease keeper -----------------------------------
 
-use super::{DeploymentPhase, DeploymentRecord, LeaseKeeper, RuntimeState, StopIdentity};
+use super::{
+    ConfirmedStop, DeploymentPhase, DeploymentRecord, LeaseKeeper, RuntimeState,
+    STATE_STOP_NOT_CONFIRMED, StopIdentity,
+};
 use amicu_runtime::{EndpointExposure, GatewayAuth, RuntimeHandle};
 use std::time::Duration;
 
@@ -529,19 +532,100 @@ async fn put_and_remove_deployment_record_touch_only_that_record() {
         DeploymentPhase::Running
     );
 
+    // A Running record cannot leave state, even with a ConfirmedStop in hand.
+    let d1 = ConfirmedStop::new(DeploymentId::new("d1"));
+    let err = b
+        .remove_deployment_record(&d1, &lock)
+        .await
+        .expect_err("running record must not be removable");
+    assert_eq!(err.code(), STATE_STOP_NOT_CONFIRMED);
+
+    // Stopping -> confirmed -> removable.
+    let mut stopping = DeploymentRecord::pending(stop_identity("d1"));
+    stopping.phase = DeploymentPhase::Stopping;
+    b.put_deployment_record(stopping, &lock)
+        .await
+        .expect("mark stopping");
     assert!(
-        b.remove_deployment_record(&DeploymentId::new("d1"), &lock)
+        b.remove_deployment_record(&d1, &lock)
             .await
             .expect("remove d1")
     );
     assert!(
-        !b.remove_deployment_record(&DeploymentId::new("d1"), &lock)
+        !b.remove_deployment_record(&d1, &lock)
             .await
             .expect("remove again")
     );
     let pulled = b.pull().await.expect("pull");
     assert!(pulled.runtime.get(&DeploymentId::new("d1")).is_none());
     assert!(pulled.runtime.get(&DeploymentId::new("d2")).is_some());
+}
+
+fn running_record(id: &str) -> DeploymentRecord {
+    let mut r = DeploymentRecord::pending(stop_identity(id));
+    r.phase = DeploymentPhase::Running;
+    r
+}
+
+#[tokio::test]
+async fn graph_only_push_keeps_the_runtime_records() {
+    let b = InMemoryStateBackend::new("primary");
+    let lock = b.lock().await.expect("lock");
+    b.put_deployment_record(running_record("d1"), &lock)
+        .await
+        .expect("put");
+
+    // `new(graph)` carries an empty runtime; the push must not wipe records.
+    b.push(&snapshot("_", sample_graph()), &lock)
+        .await
+        .expect("graph-only push");
+    let pulled = b.pull().await.expect("pull");
+    assert_eq!(pulled.graph, sample_graph());
+    assert!(pulled.runtime.get(&DeploymentId::new("d1")).is_some());
+}
+
+#[tokio::test]
+async fn rollback_restores_the_graph_but_keeps_the_current_records() {
+    let b = InMemoryStateBackend::new("primary");
+    let lock = b.lock().await.expect("lock");
+    let g1 = sample_graph();
+    b.push(&snapshot("_", g1.clone()), &lock).await.expect("v0");
+    let v_graph = b.history().await.expect("history")[0].clone();
+    b.put_deployment_record(running_record("d1"), &lock)
+        .await
+        .expect("v1 has a record");
+    let mut g2 = sample_graph();
+    g2.deployments.clear();
+    b.push(&snapshot("_", g2), &lock).await.expect("v2");
+
+    b.rollback(&v_graph, &lock).await.expect("rollback");
+    let pulled = b.pull().await.expect("pull");
+    assert_eq!(pulled.graph, g1, "graph rolled back");
+    assert!(
+        pulled.runtime.get(&DeploymentId::new("d1")).is_some(),
+        "the running record survives a rollback to a version that predates it"
+    );
+    pulled.verify().expect("checksum valid");
+}
+
+#[test]
+fn runtime_state_rejects_a_record_filed_under_another_deployment() {
+    let mut runtime = RuntimeState::default();
+    runtime.upsert(running_record("d1"));
+    let mut json = serde_json::to_value(&runtime).expect("serialize");
+    let record = json["deployments"]["d1"].clone();
+    json["deployments"] = serde_json::json!({ "other": record });
+    assert!(serde_json::from_value::<RuntimeState>(json).is_err());
+}
+
+#[tokio::test]
+async fn lease_keeper_rejects_bad_intervals() {
+    let b: Arc<dyn StateBackendAdapter> = Arc::new(InMemoryStateBackend::new("primary"));
+    let lock = b.lock().await.expect("lock");
+    let ttl = Duration::from_secs(10);
+    assert!(LeaseKeeper::spawn(Arc::clone(&b), lock.clone(), Duration::ZERO, ttl).is_err());
+    assert!(LeaseKeeper::spawn(Arc::clone(&b), lock.clone(), ttl, ttl).is_err());
+    assert!(LeaseKeeper::spawn(Arc::clone(&b), lock, Duration::from_secs(3), ttl).is_ok());
 }
 
 #[tokio::test]
@@ -569,7 +653,13 @@ async fn renew_requires_the_held_lock() {
 async fn lease_keeper_flags_a_lost_lock_and_stops_on_drop() {
     let b: Arc<dyn StateBackendAdapter> = Arc::new(InMemoryStateBackend::new("primary"));
     let lock = b.lock().await.expect("lock");
-    let keeper = LeaseKeeper::spawn(Arc::clone(&b), lock.clone(), Duration::from_millis(10));
+    let keeper = LeaseKeeper::spawn(
+        Arc::clone(&b),
+        lock.clone(),
+        Duration::from_millis(10),
+        Duration::from_secs(5),
+    )
+    .expect("valid interval");
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!keeper.is_lost());
 

@@ -25,6 +25,7 @@
 
 mod adapter;
 mod cipher;
+mod clock;
 mod drift;
 mod error;
 mod lock;
@@ -37,13 +38,13 @@ pub use adapter::StateBackendAdapter;
 pub use cipher::{IdentityCipher, StateCipher};
 pub use drift::{DriftReport, detect_drift};
 pub use error::{
-    STATE_BACKEND, STATE_CORRUPTED, STATE_LOCK_NOT_HELD, STATE_LOCKED, STATE_VERSION_NOT_FOUND,
-    StateError,
+    STATE_BACKEND, STATE_CORRUPTED, STATE_LOCK_NOT_HELD, STATE_LOCKED, STATE_STOP_NOT_CONFIRMED,
+    STATE_VERSION_NOT_FOUND, StateError,
 };
 pub use lock::LockHandle;
 pub use memory::InMemoryStateBackend;
 pub use renew::LeaseKeeper;
-pub use runtime::{DeploymentPhase, DeploymentRecord, RuntimeState, StopIdentity};
+pub use runtime::{ConfirmedStop, DeploymentPhase, DeploymentRecord, RuntimeState, StopIdentity};
 pub use snapshot::{StateSnapshot, StateVersion};
 
 #[cfg(test)]

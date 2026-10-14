@@ -87,11 +87,65 @@ impl DeploymentRecord {
 ///
 /// Ordered (`BTreeMap`) so the canonical JSON, and hence the checksum, is
 /// deterministic.
+///
+/// Deserialization rejects a map whose key differs from the record's own
+/// `stop.deployment`, so a record can never be filed under another
+/// deployment's id.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RuntimeStateWire")]
 pub struct RuntimeState {
     /// Records by deployment id.
-    #[serde(default)]
     pub deployments: BTreeMap<String, DeploymentRecord>,
+}
+
+#[derive(Deserialize)]
+struct RuntimeStateWire {
+    #[serde(default)]
+    deployments: BTreeMap<String, DeploymentRecord>,
+}
+
+impl TryFrom<RuntimeStateWire> for RuntimeState {
+    type Error = String;
+
+    fn try_from(wire: RuntimeStateWire) -> Result<Self, String> {
+        for (key, record) in &wire.deployments {
+            if key != record.deployment().as_str() {
+                return Err(format!(
+                    "runtime record filed under `{key}` belongs to deployment `{}`",
+                    record.deployment()
+                ));
+            }
+        }
+        Ok(Self {
+            deployments: wire.deployments,
+        })
+    }
+}
+
+/// Proof that a deployment's resource is confirmed gone, required to drop its
+/// record from state.
+///
+/// Construct it only after the provider/backend has *confirmed* the stop (an
+/// idempotent stop that reports the resource absent counts). It is
+/// deliberately not `Deserialize`/`Default`: it cannot be conjured from
+/// stored data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmedStop {
+    deployment: DeploymentId,
+}
+
+impl ConfirmedStop {
+    /// Attest that `deployment`'s stop was confirmed.
+    #[must_use]
+    pub fn new(deployment: DeploymentId) -> Self {
+        Self { deployment }
+    }
+
+    /// The deployment whose stop was confirmed.
+    #[must_use]
+    pub fn deployment(&self) -> &DeploymentId {
+        &self.deployment
+    }
 }
 
 impl RuntimeState {

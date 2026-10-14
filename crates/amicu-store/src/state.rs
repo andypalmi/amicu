@@ -30,6 +30,19 @@
 //! `push` mints its own version id (`v{seq}`) and discards the caller-supplied
 //! [`StateSnapshot::version`], exactly like the fake reference backend.
 //!
+//! # Runtime records
+//!
+//! Per-deployment runtime records (`state_snapshots.runtime`) are never lost
+//! by a graph operation: `push` carries the current version's records forward
+//! (ignoring the pushed snapshot's own), and `rollback` appends a new version
+//! of the old graph plus the *current* records instead of repointing at the
+//! old row. Records change only through
+//! [`replace_runtime`](PostgresStateBackend::replace_runtime) and the
+//! per-deployment helpers built on it. Migration 0018 adds triggers so a
+//! binary that predates the column (and so would write the bare `'{}'`
+//! default) is refused once a stack holds records: all writers must still be
+//! upgraded, but a lagging one fails closed instead of wiping records.
+//!
 //! # Locking
 //!
 //! [`state_locks`] holds at most one lease per (workspace, stack). Acquiring
@@ -383,8 +396,6 @@ impl PostgresStateBackend {
         delay: Duration,
     ) -> Result<(), AdapterError> {
         let mut tx = self.begin_tx().await?;
-        let wsid = self.workspace.as_uuid();
-        let stack = self.stack_id();
 
         // Never overwrite without the exact, still-live lock guarding the state.
         self.authorize(&mut tx, lock).await?;
@@ -393,13 +404,100 @@ impl PostgresStateBackend {
             tokio::time::sleep(delay).await;
         }
 
+        // Graph-only: carry the current version's runtime records forward, so
+        // a plain graph push can never drop a deployment's stop identity.
+        let runtime = match self.load_current(&mut tx).await? {
+            Some(current) => current.runtime,
+            None => RuntimeState::default(),
+        };
+        self.append_snapshot(
+            &mut tx,
+            &snapshot.graph,
+            &runtime,
+            &snapshot.recorded_at,
+            "push",
+        )
+        .await?;
+
+        tx.commit()
+            .await
+            .map_err(|_| backend_err("failed to commit push"))?;
+        Ok(())
+    }
+
+    /// Reads and decodes the snapshot recorded under `version`, verifying its
+    /// checksum.
+    async fn load_version(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        version: &str,
+    ) -> Result<Option<StateSnapshot>, AdapterError> {
+        let row = sqlx::query!(
+            "SELECT version, recorded_at, checksum, content, runtime FROM state_snapshots \
+             WHERE workspace_id = $1 AND stack_id = $2 AND version = $3",
+            self.workspace.as_uuid(),
+            self.stack_id(),
+            version,
+        )
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| backend_err("failed to read snapshot"))?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let graph: Graph = decode_content(row.content, self.cipher.as_ref()).await?;
+        let runtime: RuntimeState = decode_content(row.runtime, self.cipher.as_ref()).await?;
+        let snapshot = StateSnapshot {
+            version: row.version,
+            recorded_at: row.recorded_at,
+            checksum: row.checksum,
+            graph,
+            runtime,
+        };
+        snapshot.verify()?;
+        Ok(Some(snapshot))
+    }
+
+    /// The current version's snapshot, if any push has ever run.
+    async fn load_current(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<Option<StateSnapshot>, AdapterError> {
+        let current = sqlx::query!(
+            "SELECT version FROM state_current WHERE workspace_id = $1 AND stack_id = $2",
+            self.workspace.as_uuid(),
+            self.stack_id(),
+        )
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|_| backend_err("failed to read current version"))?;
+        match current {
+            Some(c) => self.load_version(tx, &c.version).await,
+            None => Ok(None),
+        }
+    }
+
+    /// Appends a new version holding `graph` + `runtime` and advances the
+    /// current pointer to it. The caller must already have authorized its
+    /// lock in `tx`.
+    async fn append_snapshot(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        graph: &Graph,
+        runtime: &RuntimeState,
+        recorded_at: &str,
+        label: &str,
+    ) -> Result<(), AdapterError> {
+        let wsid = self.workspace.as_uuid();
+        let stack = self.stack_id();
+
         let next = sqlx::query!(
             r#"SELECT (COALESCE(MAX(seq), -1) + 1) AS "next_seq!"
                FROM state_snapshots WHERE workspace_id = $1 AND stack_id = $2"#,
             wsid,
             stack,
         )
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await
         .map_err(|_| backend_err("failed to compute next version"))?;
         let seq = next.next_seq;
@@ -409,22 +507,26 @@ impl PostgresStateBackend {
             wsid,
             stack,
         )
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await
         .map_err(|_| backend_err("failed to read current version"))?;
         let parent_version = current.map(|r| r.version);
 
         // Mint our own version id and recompute the checksum fresh, exactly
-        // like the fake reference backend: the caller-supplied
-        // `snapshot.version` is a placeholder and is discarded.
+        // like the fake reference backend: any caller-supplied version is a
+        // placeholder and is discarded.
         let recorded = StateSnapshot::with_runtime(
             format!("v{seq}"),
-            &snapshot.recorded_at,
-            snapshot.graph.clone(),
-            snapshot.runtime.clone(),
+            recorded_at,
+            graph.clone(),
+            runtime.clone(),
         )?;
         let content = encode_content(&recorded.graph, self.cipher.as_ref()).await?;
-        let runtime = encode_content(&recorded.runtime, self.cipher.as_ref()).await?;
+        // Always a non-empty JSON object (`{"deployments":{}}` at minimum),
+        // never the bare `{}` column default: that is how the migration's
+        // guard triggers tell an upgraded writer from one that predates
+        // runtime records.
+        let runtime_json = encode_content(&recorded.runtime, self.cipher.as_ref()).await?;
         let created_at = now_unix_seconds();
 
         sqlx::query!(
@@ -436,14 +538,14 @@ impl PostgresStateBackend {
             seq,
             recorded.version,
             parent_version,
-            "push",
+            label,
             recorded.recorded_at,
             recorded.checksum,
             content,
             created_at,
-            runtime,
+            runtime_json,
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|_| backend_err("failed to append snapshot"))?;
 
@@ -454,13 +556,9 @@ impl PostgresStateBackend {
             stack,
             recorded.version,
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .map_err(|_| backend_err("failed to advance current version"))?;
-
-        tx.commit()
-            .await
-            .map_err(|_| backend_err("failed to commit push"))?;
         Ok(())
     }
 
@@ -734,47 +832,59 @@ impl StateBackendAdapter for PostgresStateBackend {
         lock: &LockHandle,
     ) -> Result<(), AdapterError> {
         let mut tx = self.begin_tx().await?;
-        let wsid = self.workspace.as_uuid();
-        let stack = self.stack_id();
 
         // Never roll back without the exact, still-live lock guarding the
         // state - a rollback can never race a concurrent push.
         self.authorize(&mut tx, lock).await?;
 
-        let target = sqlx::query!(
-            "SELECT version FROM state_snapshots \
-             WHERE workspace_id = $1 AND stack_id = $2 AND version = $3",
-            wsid,
-            stack,
-            version.id,
-        )
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|_| backend_err("failed to look up version"))?;
-
-        if target.is_none() {
+        let Some(target) = self.load_version(&mut tx, &version.id).await? else {
             return Err(StateError::VersionNotFound {
                 version: version.id.clone(),
             }
             .into());
-        }
+        };
 
-        // Append-only: this never touches `state_snapshots`, only repoints the
-        // mutable `state_current` pointer at the already-recorded version.
-        sqlx::query!(
-            "INSERT INTO state_current (workspace_id, stack_id, version) VALUES ($1, $2, $3) \
-             ON CONFLICT (workspace_id, stack_id) DO UPDATE SET version = EXCLUDED.version",
-            wsid,
-            stack,
-            version.id,
+        // Roll back the graph only. The target version's runtime records
+        // describe resources that may since have been started or stopped, so
+        // restoring them could orphan live resources: append a new version
+        // made of the old graph and the CURRENT records. History stays
+        // append-only.
+        let runtime = match self.load_current(&mut tx).await? {
+            Some(current) => current.runtime,
+            None => RuntimeState::default(),
+        };
+        self.append_snapshot(
+            &mut tx,
+            &target.graph,
+            &runtime,
+            &target.recorded_at,
+            "rollback",
         )
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| backend_err("failed to move current version"))?;
+        .await?;
 
         tx.commit()
             .await
             .map_err(|_| backend_err("failed to commit rollback"))?;
+        Ok(())
+    }
+
+    async fn replace_runtime(
+        &self,
+        runtime: &RuntimeState,
+        recorded_at: &str,
+        lock: &LockHandle,
+    ) -> Result<(), AdapterError> {
+        let mut tx = self.begin_tx().await?;
+        self.authorize(&mut tx, lock).await?;
+        let graph = match self.load_current(&mut tx).await? {
+            Some(current) => current.graph,
+            None => Graph::new(),
+        };
+        self.append_snapshot(&mut tx, &graph, runtime, recorded_at, "runtime")
+            .await?;
+        tx.commit()
+            .await
+            .map_err(|_| backend_err("failed to commit runtime write"))?;
         Ok(())
     }
 }
