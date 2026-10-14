@@ -29,11 +29,12 @@ Quick check: `amicu modal auth-check`.
 
 Fixed names and constants (not configurable in HCL today):
 
-- **App name**: `amicu-<project>-<deployment>-<digest>` (project id, the deployment
-  id lower-cased with other characters as `-`, and a digest of the exact ids); it
-  is recorded in state. Apps made by older versions are `amicu-` + the deployment
-  id; `apply` replaces them once (new URL, brief downtime, no rollback). Use the name with
-  `amicu modal status|logs|metrics|stop`.
+- **App name**: `amicu-<project>-<deployment>-<digest>` (project id, the
+  deployment id lower-cased with other characters as `-`, and a digest of the
+  exact ids). It is recorded in state; use it with
+  `amicu modal status|logs|metrics|stop`. Apps made by older versions are
+  `amicu-` + the deployment id; `apply` replaces them once (new URL, brief
+  downtime, no rollback).
 - **Cache volumes** (shared by every amicu deployment in the Modal workspace):
   `amicu-hf-cache` at `/root/.cache/huggingface` and `amicu-vllm-cache` at
   `/root/.cache/vllm` (vLLM); `amicu-llamacpp-cache` at `/root/.cache/llama.cpp`
