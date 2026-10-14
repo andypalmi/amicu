@@ -16,7 +16,7 @@ The CLI keeps state in the project directory, in `.amicu/state/state.json`. Writ
 - Fingerprints: SHA-256 digests of the secret pins (the `version` of each `api_key` reference), the container image, and the binary path, used to detect changes between plans. The raw values are not stored.
 - The project id, which scopes the host service labels.
 
-The service file of a host deployment (the launchd plist or systemd environment file) is outside state. It holds the endpoint API key, and `amicu destroy` deletes it when it stops the service. See [Secrets](/docs/security/secrets).
+The service files of a host deployment are outside state: the launchd plist, or on Linux the systemd unit file and its 0600 environment file. The environment file holds the endpoint API key. `amicu destroy` deletes these files after it confirms the service is stopped. See [Secrets](/docs/security/secrets).
 
 ## What it never contains
 
