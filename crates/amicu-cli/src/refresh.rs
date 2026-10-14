@@ -614,6 +614,7 @@ resource "deployment" "support_modal" {
             version: LocalState::VERSION.to_owned(),
             pending: Vec::new(),
             stops: Vec::new(),
+            fingerprints: std::collections::BTreeMap::default(),
             graph,
             endpoints,
         }

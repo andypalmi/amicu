@@ -25,7 +25,7 @@ Start with `amicu doctor`. Then read the diagnostic code: the category tells you
 
 **`AMICU-POLICY-008`.** The key is empty or contains a comma, whitespace, or non-ASCII characters. Regenerate it with `openssl rand -hex 32`.
 
-**`state is locked by another amicu process`.** Another `amicu apply` or a provider stop command is running. Wait, or use `--lock-timeout <secs>`. The lock is released automatically when the process exits.
+**`state is locked by another amicu process`.** Another `amicu apply`, `amicu destroy`, or provider stop command is running. Wait, or use `--lock-timeout <secs>`. The lock is released automatically when the process exits.
 
 **`llama-server not found on PATH; install with ...`.** Install llama.cpp (macOS: `brew install llama.cpp`) so `llama-server` is on the `PATH` of the shell that runs `amicu apply`. `amicu doctor` reports the same.
 
@@ -45,7 +45,7 @@ Start with `amicu doctor`. Then read the diagnostic code: the category tells you
 
 **If the stop after a failed check also failed,** the error prints the command to stop it by hand: `systemctl --user stop <label>` on Linux, `launchctl unload ~/Library/LaunchAgents/<label>.plist` on macOS, or the provider's stop command (for Modal, `amicu modal stop <app>`).
 
-**Apply failed partway.** Deployments started before the failure are recorded in state and listed in the error. Fix the cause and apply again; apply finishes the rest. See [State](/docs/security/state).
+**Apply failed partway.** Deployments started before the failure are recorded in state and listed in the error. Fix the cause and apply again; apply finishes the rest. A deployment whose start was not confirmed stays `pending` in state, with a stop record. `amicu destroy` (or a re-run of apply) cleans it up. See [State](/docs/security/state).
 
 ## Provider-specific
 

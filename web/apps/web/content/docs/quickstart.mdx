@@ -229,7 +229,15 @@ Today, `apply` supports Modal as a remote GPU provider. Hetzner, OVHcloud, Scale
 
 ## 4. Tear down
 
-There is no `destroy` command. Amicu removes what is no longer declared: delete the `deployment` resource from your HCL and run `amicu apply`. The plan shows a `destroy` action and apply stops the service.
+```bash
+amicu destroy
+```
+
+`destroy` lists every deployment recorded in state, asks `Destroy these deployments? [y/N]`, and then stops each one and removes it from state. To tear down only some of them, pass `--target <name>` (repeatable). Use `--auto-approve` (alias `--yes`) to skip the prompt.
+
+A deployment leaves state only after its stop is confirmed. If a stop fails, the command exits with an error, the deployment stays in state, and you can re-run `amicu destroy`. See [Plan, apply and state](/docs/concepts/plan-apply-state#destroy).
+
+You can also delete a `deployment` from your HCL and run `amicu apply`; the plan then shows a `destroy` action for it.
 
 Some providers also have a direct stop command; see the provider page (for example [Modal](/docs/providers/modal#monitoring)).
 
