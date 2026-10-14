@@ -969,6 +969,11 @@ impl amicu_llamacpp::ProcessSupervisor for FakeHost {
         h: &amicu_runtime::RuntimeHandle,
     ) -> Result<(), amicu_llamacpp::LlamaCppError> {
         if self.fail {
+            self.log
+                .events
+                .lock()
+                .unwrap()
+                .push(format!("stop host failed {}", h.id));
             return Err(amicu_llamacpp::LlamaCppError::Supervisor(
                 "stop could not be confirmed".to_owned(),
             ));
@@ -1202,6 +1207,7 @@ impl Rig {
             modal: &self.modal,
             forget_unconfirmed: self.forget,
             purge: self.purge,
+            proxy_tokens: amicu_modal::proxy_auth::TokenConfig::from_env,
         }
     }
     fn stopped(&self) -> Vec<String> {
@@ -2562,7 +2568,7 @@ fn running_modal_state() -> LocalState {
     state
 }
 
-fn plan_text_for(config: &str, state: &LocalState) -> String {
+fn plan_text_for(config: &str, state: &LocalState) -> (String, amicu_plan::Plan) {
     let td = TempDir::new();
     let project = Project::new(&td.path);
     write(&td.path, "amicu.hcl", config);
@@ -2575,34 +2581,70 @@ fn plan_text_for(config: &str, state: &LocalState) -> String {
         &P,
     )
     .unwrap();
-    let switches = commands::plan::provider_switches(&result, &state.stops);
+    let switches =
+        commands::plan::provider_switches(&result, &state.stops, state.project_id.as_deref());
     let mut out = Vec::new();
     commands::plan::print_human_with(&result, &graph, &switches, &mut out).unwrap();
-    utf8(out)
+    // The JSON plan carries the same steps, so the counts agree.
+    let mut plan = result.plan.clone();
+    commands::plan::add_switch_actions(&mut plan, &switches);
+    let text = utf8(out);
+    let n = plan.actions.len();
+    assert!(
+        text.contains(&format!("Plan: {n} action(s).")) || n == 0,
+        "{text}"
+    );
+    (text, plan)
 }
 
 #[test]
 fn plan_shows_a_destroy_old_step_before_the_create_on_a_provider_switch() {
-    let host_label = label("support_local");
-    let text = plan_text_for(&modal_config(), &running_host_state());
+    let (text, plan) = plan_text_for(&modal_config(), &running_host_state());
     let destroy = text
         .find("destroy old (")
         .unwrap_or_else(|| panic!("{text}"));
-    assert!(text.contains(&host_label), "{text}");
-    assert!(
-        destroy < text.find("action:   update").unwrap(),
-        "destroy-old comes first: {text}"
+    assert!(text.contains(&label("support_local")), "{text}");
+    assert!(destroy < text.find("action:   update").unwrap(), "{text}");
+    assert_eq!(plan.actions.len(), 2);
+    assert_eq!(
+        plan.actions[0].kind,
+        amicu_plan::contract::ActionKind::Destroy
+    );
+    assert_eq!(
+        plan.actions[1].kind,
+        amicu_plan::contract::ActionKind::Update
     );
 
-    let text = plan_text_for(VALID_CONFIG, &running_modal_state());
+    let (text, _) = plan_text_for(VALID_CONFIG, &running_modal_state());
     assert!(
         text.contains("destroy old (modal amicu-support-local)"),
         "{text}"
     );
+}
 
-    // No switch, no extra step.
-    let text = plan_text_for(VALID_CONFIG, &running_host_state());
+#[test]
+fn plan_shows_a_legacy_label_replaced_by_a_project_scoped_one_but_not_a_plain_update() {
+    // Same provider, but the recorded label is the legacy unscoped one and the
+    // new start uses the project-scoped label: apply stops the old first.
+    let changed = VALID_CONFIG.replace("8000", "8001");
+    let mut state = running_host_state();
+    state.project_id = Some("a1b2c3d4".to_owned());
+    let (text, plan) = plan_text_for(&changed, &state);
+    assert!(
+        text.contains("destroy old (") && text.contains(&label("support_local")),
+        "{text}"
+    );
+    assert_eq!(plan.actions.len(), 2);
+
+    state.stops = vec![StopRecord::host_in(
+        "a1b2c3d4",
+        &"support_local".into(),
+        Some(&platform_ctx()),
+        None,
+    )];
+    let (text, plan) = plan_text_for(&changed, &state);
     assert!(!text.contains("destroy old"), "{text}");
+    assert_eq!(plan.actions.len(), 1);
 }
 
 #[test]
@@ -2662,9 +2704,28 @@ fn host_to_modal_with_an_unconfirmed_old_stop_fails_and_keeps_the_old_record() {
     let project = saved(&td, &running_host_state());
     write(&td.path, "amicu.hcl", &modal_config());
     let rig = Rig::failing();
-    // apply_with is Err whichever check refuses first; what matters is that
-    // nothing was started and the old host record is still in state.
-    apply_with(&project, &rig).expect_err("must not succeed");
+    // Proxy tokens are injected so the Modal pre-check passes and apply
+    // reaches the stale-stop loop (no real process environment involved).
+    let mut env = rig.env();
+    env.proxy_tokens = || {
+        amicu_modal::proxy_auth::TokenConfig::from_values(Some("wk-1".into()), Some("ws-1".into()))
+    };
+    let err = commands::apply::run_with(
+        &project,
+        true,
+        None,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &mut std::io::Cursor::new(Vec::new()),
+        &env,
+    )
+    .expect_err("old stop not confirmed");
+    assert!(err.to_string().contains("could not be confirmed"), "{err}");
+    assert_eq!(
+        rig.log.events.lock().unwrap().clone(),
+        [format!("stop host failed {}", label("support_local"))],
+        "the host stop was attempted, and nothing else happened"
+    );
     assert!(rig.log.started.lock().unwrap().is_empty());
     assert!(rig.modal.stopped.lock().unwrap().is_empty());
     let stops = stops_for(&project, "support_local");

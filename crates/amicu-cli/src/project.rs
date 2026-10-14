@@ -52,6 +52,11 @@ pub(crate) struct LocalState {
     >,
     /// Top-level fields this amicu does not know (written by a newer build of
     /// the same version). Kept verbatim so a load-save cycle never drops them.
+    ///
+    /// Unknown-field rule for the rest of the document: stop records keep
+    /// theirs the same way; endpoint handles with an unknown field are
+    /// refused on load; and `graph` has no catch-all, so adding a field
+    /// inside `graph` requires a `VERSION` bump and a migration.
     #[serde(flatten)]
     pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
@@ -348,11 +353,30 @@ fn parse_state(text: &str) -> Result<LocalState, StateParseError> {
             )));
         }
         if let Some(map) = value.as_object_mut() {
-            migrate(version, map).map_err(StateParseError::Corrupt)?;
+            migrate(version, map).map_err(StateParseError::Unsupported)?;
+        }
+    }
+    // Endpoint handles are a shared API type that cannot carry a catch-all, so
+    // an unknown field there is refused rather than silently dropped on save.
+    if let Some(endpoints) = value.get("endpoints").and_then(|e| e.as_array()) {
+        for key in endpoints
+            .iter()
+            .filter_map(|e| e.as_object())
+            .flat_map(serde_json::Map::keys)
+        {
+            if !ENDPOINT_FIELDS.contains(&key.as_str()) {
+                return Err(StateParseError::Unsupported(format!(
+                    "has an endpoint field '{key}' this amicu does not understand; \
+                     upgrade amicu rather than overwrite it"
+                )));
+            }
         }
     }
     serde_json::from_value(value).map_err(corrupt)
 }
+
+/// The fields of a persisted endpoint handle ([`RuntimeHandle`]).
+const ENDPOINT_FIELDS: &[&str] = &["id", "deployment", "endpoint", "exposure"];
 
 /// Single-quote a path for safe pasting into a POSIX shell.
 fn shell_quote(path: &Path) -> String {
@@ -680,6 +704,37 @@ mod durability_tests {
         let saved: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(p.state_file()).unwrap()).unwrap();
         assert_eq!(saved["from_the_future"], serde_json::json!({"k": [1, 2]}));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unknown_stop_record_fields_survive_and_unknown_endpoint_fields_are_refused() {
+        let root = scratch("nested");
+        let p = Project::new(&root);
+        let mut s = state("g");
+        s.stops = vec![crate::stops::StopRecord::host(&"d".into(), None)];
+        s.endpoints = vec![RuntimeHandle {
+            id: "e".into(),
+            deployment: "d".into(),
+            endpoint: "http://127.0.0.1:1".into(),
+            exposure: amicu_runtime::EndpointExposure::Loopback,
+        }];
+        p.save_state(&s).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(p.state_file()).unwrap()).unwrap();
+        v["stops"][0]["from_the_future"] = serde_json::json!(7);
+        fs::write(p.state_file(), v.to_string()).unwrap();
+        let loaded = p.load_state().unwrap().unwrap();
+        p.save_state(&loaded).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(p.state_file()).unwrap()).unwrap();
+        assert_eq!(saved["stops"][0]["from_the_future"], 7);
+
+        v["endpoints"][0]["from_the_future"] = serde_json::json!(true);
+        fs::write(p.state_file(), v.to_string()).unwrap();
+        let err = p.load_state().expect_err("unknown endpoint field");
+        assert!(err.to_string().contains("from_the_future"), "{err}");
+        assert!(err.to_string().contains("upgrade amicu"), "{err}");
         let _ = fs::remove_dir_all(&root);
     }
 }
