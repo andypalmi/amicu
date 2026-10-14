@@ -10,6 +10,7 @@ Amicu works in four steps. Each reads the same configuration; only `apply` chang
 | Validate | `amicu validate` | Parses every `*.hcl` file and reports diagnostics. Changes nothing. |
 | Plan | `amicu plan` | Computes the actions needed to move from recorded state to the configuration. Changes nothing. |
 | Apply | `amicu apply` | Recomputes the plan, shows it, asks for approval, then executes it and records the result. |
+| Destroy | `amicu destroy` | Stops and removes the deployments recorded in state (or only the `--target`s). Asks for approval. |
 | Doctor | `amicu doctor` | Checks the host (runtime binary, state directory) and the project. |
 
 ## Validate
@@ -35,7 +36,9 @@ Only diagnostics with severity `error` fail the command (exit code 1). Warnings 
 
 For each deployment the plan shows the hardware, the provider, the model artifact, the exact launch command, and notes such as the estimated peak memory. Secret-designated fields show as `******`. A plan never reads secret values.
 
-For remote provider deployments (Modal today), `plan` and `apply` first ask the provider whether the apps recorded in state still exist. An app that was stopped outside amicu is dropped from state so the plan shows a `create`, and a `drift:` line is printed. If the lookup fails, a `warning:` is printed and local state is used as is.
+For remote provider deployments (Modal today), `plan`, `apply` and `destroy` first ask the provider whether the apps recorded in state still exist. An app that is not found by name is kept in state as pending (its stop identity is never dropped on a name lookup alone), and a `drift:` line is printed. `apply` recreates it; `destroy` tries to confirm its stop. If the lookup fails, `plan` prints a `warning:` and uses local state as is.
+
+`plan` also warns, instead of failing, when the active Modal workspace cannot be determined. `apply` and `destroy` refuse in that case, because they must not act on instances they cannot place.
 
 ## Apply
 
@@ -52,13 +55,33 @@ Apply holds a lock on the state directory for its whole run. Use `--lock-timeout
 
 If the plan is empty, apply prints `No changes to apply.`
 
+## Destroy
+
+`destroy` works like `terraform destroy`. It plans against an empty desired configuration, so every deployment in state is a `destroy` action (or only the `--target`s you name), shows the same plan preview as `apply`, and asks `Destroy these deployments? [y/N]`. `--auto-approve` (alias `--yes`) skips the prompt. `--lock-timeout <secs>` waits for the state lock, as in `apply`. Unknown `--target` names fail before anything is changed.
+
+Each deployment follows the same no-orphans rule as apply:
+
+1. Before a provider starts anything, amicu writes state with the deployment marked `pending` and a stop record that says how to stop it: the backend and identity, plus the host uid and launchd domain, or the Modal app id and workspace.
+2. The instance is stopped, and the stop is confirmed.
+3. Only then is the stop record removed, and the deployment is removed from state once it has no records left.
+
+So a deployment never leaves state before its stop is confirmed. If a stop fails, the deployment and its record stay in state, and the error says which instance may still be running.
+
+`destroy` refuses, and changes nothing, when the instance cannot be safely acted on:
+
+- The host user differs from the one that started the instance (launchd and systemd records keep the uid). Re-run as that user.
+- The active Modal workspace differs from the one the app was deployed in. Switch `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` to that workspace and retry.
+- A Modal app cannot be found by name and has no recorded app id. Check the Modal dashboard. If it is confirmed gone, run `amicu destroy --target <name> --forget-unconfirmed`. This requires a `--target`, applies only to this case, and removes the record without stopping anything.
+
+If `destroy` is interrupted or fails partway, the error lists what was stopped and what remains in state. Fix the cause and re-run the same command (`amicu destroy`, or `amicu apply` if apply was the command that stopped). Deployments already stopped are not touched again. See [State and backends](/docs/operate/state-and-backends#partial-apply-and-destroy).
+
 ## State
 
-State is the record of the last successful apply: the resource graph and the endpoints that were started. It lets `plan` show a diff and lets `apply` stop what you removed.
+State is the record of the last successful apply: the resource graph and the endpoints that were started. It lets `plan` show a diff and lets `apply` and `destroy` stop what you removed.
 
 - The CLI keeps state locally in `.amicu/state/state.json`.
 - State holds secret references (names), never secret values.
-- Deployments that were started are recorded even if a later action in the same apply fails.
+- Deployments are recorded before they start, and stay recorded if a later action in the same apply or destroy fails.
 
 Details, including what happens when an apply fails partway, are in [Security: State](/docs/security/state). Locking and backends are in [Operate: State and backends](/docs/operate/state-and-backends).
 
