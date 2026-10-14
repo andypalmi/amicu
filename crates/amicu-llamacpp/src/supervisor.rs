@@ -122,6 +122,16 @@ pub trait ProcessSupervisor: Send + Sync {
     fn instance_owner(&self, _label: &str) -> Option<u32> {
         None
     }
+
+    /// Read-only: is the instance `label` (started in launchd `domain`, if
+    /// recorded) running? `Down` only when confirmed gone.
+    fn presence(
+        &self,
+        _label: &str,
+        _domain: Option<&str>,
+    ) -> Result<crate::service::Presence, LlamaCppError> {
+        Ok(crate::service::Presence::Unknown)
+    }
 }
 
 /// The real supervisor: a [`ServiceManager`] runs the process, a [`HealthProbe`]
@@ -458,5 +468,13 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
 
     fn instance_owner(&self, label: &str) -> Option<u32> {
         self.manager.instance_owner(label)
+    }
+
+    fn presence(
+        &self,
+        label: &str,
+        domain: Option<&str>,
+    ) -> Result<crate::service::Presence, LlamaCppError> {
+        self.manager.presence(label, domain)
     }
 }

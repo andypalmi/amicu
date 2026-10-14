@@ -50,6 +50,19 @@ pub enum ServiceState {
     Failed,
 }
 
+/// What a read-only probe of a recorded host instance found. `Down` is only
+/// ever returned when the service manager CONFIRMS the instance is not
+/// running; anything uncertain is `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// Loaded and running.
+    Running,
+    /// Confirmed not loaded, or loaded and not running.
+    Down,
+    /// Could not be told (unknown state, no recorded domain, ...).
+    Unknown,
+}
+
 /// Which host service manager runs amicu's instances.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostBackend {
@@ -87,6 +100,12 @@ pub trait ServiceManager: Send + Sync {
     /// unit exists; a loaded launchd job would keep the old definition). Errors
     /// are ignored: normally there is nothing to release.
     fn release(&self, _label: &str) {}
+    /// Read-only probe of an instance recorded as `label` (and, for launchd,
+    /// started in `domain`). Never acts as a different domain than recorded.
+    /// `Err` means the manager could not answer.
+    fn presence(&self, _label: &str, _domain: Option<&str>) -> Result<Presence, LlamaCppError> {
+        Ok(Presence::Unknown)
+    }
     /// Write the service definition and start it.
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError>;
     /// The service's current lifecycle state.
@@ -279,6 +298,32 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
             uid,
             domain: Some(domain),
         })
+    }
+
+    fn presence(&self, label: &str, domain: Option<&str>) -> Result<Presence, LlamaCppError> {
+        // Without the domain the job was started in, `launchctl` could answer
+        // for a different one: do not guess.
+        let Some(domain) = domain else {
+            return Ok(Presence::Unknown);
+        };
+        let target = format!("{domain}/{label}");
+        let out = self.exec.exec("launchctl", &["print", &target])?;
+        if out.success {
+            return Ok(if out.stdout.contains("state = not running") {
+                Presence::Down
+            } else {
+                Presence::Running
+            });
+        }
+        if out.code == Some(113) {
+            // 113: "Could not find service".
+            return Ok(Presence::Down);
+        }
+        Err(LlamaCppError::Supervisor(format!(
+            "launchctl print {target} failed unexpectedly (exit {:?}): {}",
+            out.code,
+            out.stderr.trim()
+        )))
     }
 
     fn release(&self, label: &str) {
@@ -521,6 +566,31 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
             backend: HostBackend::Systemd,
             uid: effective_uid(&self.exec).ok()?,
             domain: None,
+        })
+    }
+
+    fn presence(&self, label: &str, _domain: Option<&str>) -> Result<Presence, LlamaCppError> {
+        let out = self.exec.exec(
+            "systemctl",
+            &["--user", "show", "-p", "LoadState,ActiveState", label],
+        )?;
+        if !out.success {
+            return Err(LlamaCppError::Supervisor(format!(
+                "systemctl show {label} failed: {}",
+                out.stderr.trim()
+            )));
+        }
+        let prop = |name: &str| {
+            out.stdout
+                .lines()
+                .find_map(|l| l.trim().strip_prefix(name)?.strip_prefix('='))
+                .map(str::trim)
+        };
+        Ok(match (prop("LoadState"), prop("ActiveState")) {
+            (Some("not-found"), _) | (Some(_), Some("inactive" | "failed")) => Presence::Down,
+            (Some(_), Some("active" | "reloading")) => Presence::Running,
+            // activating, deactivating, anything else or unparsed.
+            _ => Presence::Unknown,
         })
     }
 
