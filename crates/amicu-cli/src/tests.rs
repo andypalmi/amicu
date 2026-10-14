@@ -985,6 +985,8 @@ struct FakeModal {
     visible_ids: Vec<String>,
     /// Deployments whose host service the fake service manager reports down.
     host_down: Vec<String>,
+    /// The fake service manager cannot answer (bus error, unknown state).
+    host_unanswered: bool,
 }
 
 impl Default for FakeModal {
@@ -997,6 +999,7 @@ impl Default for FakeModal {
             live: None,
             visible_ids: Vec::new(),
             host_down: Vec::new(),
+            host_unanswered: false,
         }
     }
 }
@@ -1024,6 +1027,12 @@ impl ModalOps for FakeModal {
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, id)| id.clone()))
+    }
+    async fn latest_app_version(&self, _: &str) -> Result<Option<u32>, crate::error::CliError> {
+        Ok(None)
+    }
+    async fn rollback_app(&self, _: &str, _: u32) -> Result<(), crate::error::CliError> {
+        Ok(())
     }
     async fn stop_app(&self, app_id: &str) -> Result<bool, crate::error::CliError> {
         if self.unknown_ids.iter().any(|i| i == app_id) {
@@ -1065,6 +1074,9 @@ impl AppLookup for FakeModal {
     }
     fn host_unit(&self, record: &StopRecord) -> Result<crate::refresh::HostUnit, String> {
         use crate::refresh::HostUnit;
+        if self.host_unanswered {
+            return Err("Failed to connect to bus".to_owned());
+        }
         Ok(
             if self
                 .host_down
@@ -2097,4 +2109,23 @@ fn plan_shows_why_an_unchanged_config_is_an_update() {
         text.contains("reason:   binary path changed since it was last started"),
         "{text}"
     );
+}
+
+#[test]
+fn a_host_service_that_cannot_be_probed_is_a_warning_never_drift() {
+    let td = TempDir::new();
+    let project = saved(&td, &running_host_state());
+    let mut rig = Rig::new();
+    rig.modal.host_down = vec!["support_local".to_owned()];
+    rig.modal.host_unanswered = true;
+    let mut state = project.load_state().unwrap().unwrap();
+    let refresh = crate::refresh::refresh_state(&mut state, &rig.modal);
+    assert_eq!(refresh.notes.len(), 0);
+    assert_eq!(state.pending.len(), 0, "unknown is never down");
+    let warning = refresh.warning.unwrap();
+    assert!(
+        warning.contains("could not check host services"),
+        "{warning}"
+    );
+    assert!(warning.contains("Failed to connect to bus"), "{warning}");
 }

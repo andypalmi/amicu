@@ -77,7 +77,7 @@ impl AppLookup for ModalLookup {
     }
 
     fn host_unit(&self, record: &StopRecord) -> Result<HostUnit, String> {
-        use amicu_runtime::RuntimeStatus;
+        use amicu_llamacpp::Presence;
         let supervisor = amicu_llamacpp::host_supervisor();
         // Only ask about an instance this user and service manager own: a
         // different uid or backend would be answering about someone else's job.
@@ -92,16 +92,10 @@ impl AppLookup for ModalLookup {
                 record.describe()
             ));
         }
-        let handle = amicu_runtime::RuntimeHandle {
-            id: record.identity.clone(),
-            deployment: record.deployment.clone(),
-            endpoint: String::new(),
-            exposure: amicu_runtime::EndpointExposure::Loopback,
-        };
-        let rt = build_runtime().map_err(|e| e.to_string())?;
-        match rt.block_on(supervisor.status(&handle)) {
-            Ok(RuntimeStatus::Running { .. }) => Ok(HostUnit::Running),
-            Ok(_) => Ok(HostUnit::Down),
+        match supervisor.presence(&record.identity, record.domain.as_deref()) {
+            Ok(Presence::Running) => Ok(HostUnit::Running),
+            Ok(Presence::Down) => Ok(HostUnit::Down),
+            Ok(Presence::Unknown) => Ok(HostUnit::Unknown),
             Err(e) => Err(e.to_string()),
         }
     }

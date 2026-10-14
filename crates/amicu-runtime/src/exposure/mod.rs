@@ -415,7 +415,8 @@ where
             Ok(()) => {
                 return (
                     format!(
-                        "{detail}; the new version was rolled back to {previous} and verified;                          the previous deployment ({instance}) is still serving"
+                        "{detail}; the new version was rolled back to {previous} and verified; \
+                         the previous deployment ({instance}) is still serving"
                     ),
                     true,
                 );
