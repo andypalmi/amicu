@@ -460,20 +460,25 @@ pub(crate) fn stop(app_name: &str, out: &mut dyn Write) -> Result<u8, CliError> 
     let credentials = Credentials::from_env().map_err(ModalError::from)?;
     let rt = build_runtime()?;
 
-    let stopped = rt.block_on(async {
+    let (stopped, workspace) = rt.block_on(async {
         let mut client = ModalClient::connect(credentials).await?;
+        let workspace = client.workspace_name().await.ok();
         match client.find_app(app_name).await? {
             Some(app_id) => {
                 client.stop_app(&app_id).await?;
-                Ok::<Option<String>, ModalError>(Some(app_id))
+                Ok::<_, ModalError>((Some(app_id), workspace))
             }
-            None => Ok(None),
+            None => Ok((None, workspace)),
         }
     })?;
 
     let code = write_stop_result(out, app_name, stopped.as_deref())?;
-    if stopped.is_some() {
-        forget_stopped_app(app_name, out)?;
+    if let Some(app_id) = &stopped {
+        let active = workspace.map(|name| crate::modal_ops::Workspace {
+            name,
+            environment: crate::modal_ops::DEFAULT_ENVIRONMENT.to_owned(),
+        });
+        forget_stopped_app(app_name, app_id, active.as_ref(), out)?;
     }
     Ok(code)
 }
@@ -483,8 +488,15 @@ pub(crate) fn stop(app_name: &str, out: &mut dyn Write) -> Result<u8, CliError> 
 /// endpoint so the next `plan`/`apply` recreates it. Outside a project (no
 /// state file) this does nothing; a state problem warns but never fails the
 /// stop, which already happened.
-fn forget_stopped_app(app_name: &str, out: &mut dyn Write) -> Result<(), CliError> {
-    match Project::discover().and_then(|project| crate::refresh::forget_app(&project, app_name)) {
+fn forget_stopped_app(
+    app_name: &str,
+    app_id: &str,
+    active: Option<&crate::modal_ops::Workspace>,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    match Project::discover()
+        .and_then(|project| crate::refresh::forget_app(&project, app_name, app_id, active))
+    {
         Ok(Some(id)) => {
             writeln!(out, "removed deployment {id} from local state").map_err(io_err)?;
         }

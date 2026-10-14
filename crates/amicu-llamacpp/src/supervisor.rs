@@ -110,6 +110,12 @@ pub trait ProcessSupervisor: Send + Sync {
 
     /// Stop the instance.
     async fn stop(&self, handle: &RuntimeHandle) -> Result<(), LlamaCppError>;
+
+    /// Who the host service manager acts as (backend, uid, launchd domain),
+    /// when this supervisor is host-based. Recorded with started instances.
+    fn host_context(&self) -> Option<crate::service::HostContext> {
+        None
+    }
 }
 
 /// The real supervisor: a [`ServiceManager`] runs the process, a [`HealthProbe`]
@@ -438,5 +444,9 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
 
     async fn stop(&self, handle: &RuntimeHandle) -> Result<(), LlamaCppError> {
         self.manager.stop(&handle.id)
+    }
+
+    fn host_context(&self) -> Option<crate::service::HostContext> {
+        self.manager.context()
     }
 }

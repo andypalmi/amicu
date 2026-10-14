@@ -8,13 +8,14 @@
 use std::io::Write;
 
 use amicu_core::graph::Graph;
+use amicu_core::id::DeploymentId;
 
 use crate::OutputFormat;
-use crate::commands::apply::{HostSupervisorFactory, execute, prompt_approval_from};
+use crate::commands::apply::{Env, Op, execute, prompt_approval_from};
 use crate::error::CliError;
 use crate::lock::StateLock;
 use crate::planner::{PlanError, PlanResult};
-use crate::project::Project;
+use crate::project::{LocalState, Project};
 use crate::write_json;
 
 /// Plan, confirm, destroy, and persist state.
@@ -23,6 +24,7 @@ pub(crate) fn run(
     targets: &[String],
     auto_approve: bool,
     lock_timeout: Option<std::time::Duration>,
+    forget_unconfirmed: bool,
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
@@ -34,12 +36,12 @@ pub(crate) fn run(
         output,
         out,
         &mut std::io::stdin().lock(),
-        &amicu_llamacpp::host_supervisor,
+        &Env::real(forget_unconfirmed),
     )
 }
 
 /// [`run`] with the approval answer read from `input`.
-#[allow(clippy::too_many_arguments)] // run() plus the injected input and host
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // run() plus the injected input and env
 pub(crate) fn run_with(
     project: &Project,
     targets: &[String],
@@ -48,7 +50,7 @@ pub(crate) fn run_with(
     output: OutputFormat,
     out: &mut dyn Write,
     input: &mut dyn std::io::BufRead,
-    host: &HostSupervisorFactory,
+    env: &Env,
 ) -> Result<u8, CliError> {
     // Same locking discipline as `apply`: read -> refresh -> plan -> destroy ->
     // save under one state lock.
@@ -58,21 +60,27 @@ pub(crate) fn run_with(
     // before the Modal drift refresh makes any network call or prints drift.
     let raw = project.load_state()?;
     let raw_graph = raw.as_ref().map_or_else(Graph::new, |s| s.graph.clone());
-    if let Err(DestroyPlanError::UnknownTarget(msg)) = plan_destroy(&raw_graph, targets) {
+    let raw_orphans = orphan_ids(raw.as_ref());
+    if let Err(DestroyPlanError::UnknownTarget(msg)) =
+        plan_destroy(&raw_graph, &raw_orphans, targets)
+    {
         return Err(CliError::Message(msg));
     }
 
-    let (prior_state, pruned) =
-        crate::refresh::load_refreshed(project, &crate::refresh::ModalLookup, output, out)?;
+    let (prior_state, pruned) = crate::refresh::load_refreshed(project, env.modal, output, out)?;
     let empty = Graph::new();
     let prior_graph = prior_state.as_ref().map_or(&empty, |s| &s.graph);
+    let orphans = orphan_ids(prior_state.as_ref());
 
     // Targets the refresh pruned (their Modal app is gone) are not "unknown":
     // they were in state, and no longer exist remotely.
     let gone: Vec<&str> = targets
         .iter()
         .map(String::as_str)
-        .filter(|t| !prior_graph.deployments.iter().any(|d| d.id.as_str() == *t))
+        .filter(|t| {
+            !prior_graph.deployments.iter().any(|d| d.id.as_str() == *t)
+                && !orphans.iter().any(|o| o.as_str() == *t)
+        })
         .collect();
     if !gone.is_empty() {
         return Err(CliError::Message(format!(
@@ -82,7 +90,7 @@ pub(crate) fn run_with(
         )));
     }
 
-    let result = match plan_destroy(prior_graph, targets) {
+    let result = match plan_destroy(prior_graph, &orphans, targets) {
         Ok(result) => result,
         Err(DestroyPlanError::UnknownTarget(msg)) => return Err(CliError::Message(msg)),
         Err(DestroyPlanError::Plan(PlanError(report))) => {
@@ -134,7 +142,14 @@ pub(crate) fn run_with(
     }
 
     let remaining = remaining_graph(prior_graph, &result);
-    let (_, state) = execute(project, remaining, &result, prior_state.as_ref(), host)?;
+    let (_, state) = execute(
+        project,
+        remaining,
+        &result,
+        prior_state.as_ref(),
+        env,
+        Op::Destroy,
+    )?;
 
     let destroyed: Vec<&str> = result.items.iter().map(|i| i.deployment.as_str()).collect();
     if output.is_json() {
@@ -175,20 +190,44 @@ impl From<PlanError> for DestroyPlanError {
     }
 }
 
-/// Plan the destruction of everything in `prior`, or only `targets` when
-/// non-empty. Planned against an empty desired graph (the planner emits a
-/// destroy for each prior deployment), then narrowed to `targets`.
+/// Deployments that have stop records but are no longer in the graph: their
+/// instances may still be running, so destroy must act on them too.
+fn orphan_ids(state: Option<&LocalState>) -> Vec<DeploymentId> {
+    let Some(state) = state else {
+        return Vec::new();
+    };
+    let mut out: Vec<DeploymentId> = Vec::new();
+    for r in &state.stops {
+        if !state.graph.deployments.iter().any(|d| d.id == r.deployment)
+            && !out.contains(&r.deployment)
+        {
+            out.push(r.deployment.clone());
+        }
+    }
+    out
+}
+
+/// Plan the destruction of everything in `prior` and of the `orphans` known
+/// only from their stop records, or only `targets` when non-empty. Planned
+/// against an empty desired graph (the planner emits a destroy for each prior
+/// deployment), then narrowed to `targets`.
 pub(crate) fn plan_destroy(
     prior: &Graph,
+    orphans: &[DeploymentId],
     targets: &[String],
 ) -> Result<PlanResult, DestroyPlanError> {
+    let known: Vec<&str> = prior
+        .deployments
+        .iter()
+        .map(|d| d.id.as_str())
+        .chain(orphans.iter().map(DeploymentId::as_str))
+        .collect();
     let unknown: Vec<&str> = targets
         .iter()
         .map(String::as_str)
-        .filter(|t| !prior.deployments.iter().any(|d| d.id.as_str() == *t))
+        .filter(|t| !known.contains(t))
         .collect();
     if !unknown.is_empty() {
-        let known: Vec<&str> = prior.deployments.iter().map(|d| d.id.as_str()).collect();
         let known = if known.is_empty() {
             "(none)".to_owned()
         } else {
@@ -201,6 +240,11 @@ pub(crate) fn plan_destroy(
         )));
     }
     let mut result = amicu_engine::planner::build_plan_in(&Graph::new(), Some(prior), None)?;
+    for id in orphans {
+        let item = amicu_engine::planner::destroy_item(id);
+        result.plan.actions.push(item.action.clone());
+        result.items.push(item);
+    }
     if !targets.is_empty() {
         result
             .items

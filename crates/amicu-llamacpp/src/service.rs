@@ -50,8 +50,33 @@ pub enum ServiceState {
     Failed,
 }
 
+/// Which host service manager runs amicu's instances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostBackend {
+    /// launchd (macOS).
+    Launchd,
+    /// systemd user units (Linux).
+    Systemd,
+}
+
+/// Who the host service manager acts as. Recorded with every started
+/// instance so a later stop can refuse when it would act as someone else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostContext {
+    pub backend: HostBackend,
+    /// The effective uid the manager acts for.
+    pub uid: u32,
+    /// launchd only: the domain jobs are bootstrapped into (`gui/<uid>` or
+    /// `user/<uid>`).
+    pub domain: Option<String>,
+}
+
 /// Load/start, query, stop, and read logs for a supervised service.
 pub trait ServiceManager: Send + Sync {
+    /// The backend, uid and domain this manager acts as, if it can tell.
+    fn context(&self) -> Option<HostContext> {
+        None
+    }
     /// Best-effort removal of any previous instance with this label, so an
     /// update can start the new one (`systemd-run --unit=<same>` fails while the
     /// unit exists; a loaded launchd job would keep the old definition). Errors
@@ -88,12 +113,31 @@ pub trait CommandExec: Send + Sync {
     fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError>;
 }
 
+static FORBID_SERVICE_COMMANDS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Test guard: after this is called, [`HostExec`] panics instead of spawning
+/// `launchctl`, `systemctl`, `systemd-run` or `journalctl`, so a test that
+/// forgot to inject a fake can never touch the developer's real services.
+pub fn forbid_service_commands() {
+    FORBID_SERVICE_COMMANDS.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// The real executor: spawns the process and captures its output.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HostExec;
 
 impl CommandExec for HostExec {
     fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        assert!(
+            !(FORBID_SERVICE_COMMANDS.load(std::sync::atomic::Ordering::SeqCst)
+                && matches!(
+                    program,
+                    "launchctl" | "systemctl" | "systemd-run" | "journalctl"
+                )),
+            "test tried to run the real `{program} {}`; inject a fake service manager",
+            args.join(" ")
+        );
         let output = Command::new(program)
             .args(args)
             .output()
@@ -104,6 +148,17 @@ impl CommandExec for HostExec {
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
     }
+}
+
+/// The effective uid, from `id -u`.
+fn effective_uid(exec: &dyn CommandExec) -> Result<u32, LlamaCppError> {
+    let out = exec.exec("id", &["-u"])?;
+    out.stdout.trim().parse().map_err(|_| {
+        LlamaCppError::Supervisor(format!(
+            "cannot determine the effective uid from `id -u`: {:?}",
+            out.stdout.trim()
+        ))
+    })
 }
 
 fn tail<T>(mut lines: Vec<T>, options: LogOptions) -> Vec<T> {
@@ -139,9 +194,22 @@ impl<E: CommandExec> LaunchdManager<E> {
         self.agents_dir.join(format!("{label}.plist"))
     }
 
-    /// Whether launchd currently has a job loaded under `label`.
-    fn is_loaded(&self, label: &str) -> Result<bool, LlamaCppError> {
-        Ok(self.exec.exec("launchctl", &["list", label])?.success)
+    /// The launchd domain jobs live in: `gui/<uid>` when the user has a GUI
+    /// session, else `user/<uid>`.
+    fn domain(&self) -> Result<(u32, String), LlamaCppError> {
+        let uid = effective_uid(&self.exec)?;
+        let gui = format!("gui/{uid}");
+        if self.exec.exec("launchctl", &["print", &gui])?.success {
+            Ok((uid, gui))
+        } else {
+            Ok((uid, format!("user/{uid}")))
+        }
+    }
+
+    /// Whether launchd currently has the job loaded in `domain`.
+    fn is_loaded(&self, domain: &str, label: &str) -> Result<bool, LlamaCppError> {
+        let target = format!("{domain}/{label}");
+        Ok(self.exec.exec("launchctl", &["print", &target])?.success)
     }
 
     fn stdout_path(&self, label: &str) -> PathBuf {
@@ -169,14 +237,22 @@ impl LaunchdManager<HostExec> {
 }
 
 impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
+    fn context(&self) -> Option<HostContext> {
+        let (uid, domain) = self.domain().ok()?;
+        Some(HostContext {
+            backend: HostBackend::Launchd,
+            uid,
+            domain: Some(domain),
+        })
+    }
+
     fn release(&self, label: &str) {
-        let plist = self.plist_path(label);
-        if plist.exists() {
+        if let Ok((_, domain)) = self.domain() {
             let _ = self
                 .exec
-                .exec("launchctl", &["unload", "-w", &plist.to_string_lossy()]);
+                .exec("launchctl", &["bootout", &format!("{domain}/{label}")]);
         }
-        // By label too, even when the plist file is gone but the job is loaded.
+        // By label too, even when the job is loaded under another name.
         let _ = self.exec.exec("launchctl", &["remove", label]);
     }
 
@@ -194,10 +270,11 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         )?;
         ensure_dir(&self.log_dir)?;
         let plist = self.plist_path(&spec.label);
-        let out = match self
-            .exec
-            .exec("launchctl", &["load", "-w", &plist.to_string_lossy()])
-        {
+        let (_, domain) = self.domain().inspect_err(|_| remove_env_file(&plist))?;
+        let out = match self.exec.exec(
+            "launchctl",
+            &["bootstrap", &domain, &plist.to_string_lossy()],
+        ) {
             Ok(out) => out,
             Err(e) => {
                 remove_env_file(&plist);
@@ -209,7 +286,7 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
             // for a service that did not start.
             remove_env_file(&plist);
             return Err(LlamaCppError::Supervisor(format!(
-                "launchctl load failed: {}",
+                "launchctl bootstrap failed: {}",
                 out.stderr.trim()
             )));
         }
@@ -240,25 +317,22 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
 
     fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
         let plist = self.plist_path(label);
-        // `launchctl unload` can exit 0 while the job stays loaded ("Unload
-        // failed: 5: Input/output error"), so never trust its status: confirm
-        // by asking launchd whether the label is still loaded.
-        let mut detail = String::new();
-        if plist.exists() {
-            let out = self
-                .exec
-                .exec("launchctl", &["unload", "-w", &plist.to_string_lossy()])?;
-            out.stderr.trim().clone_into(&mut detail);
-        }
-        if self.is_loaded(label)? {
+        let (_, domain) = self.domain()?;
+        let target = format!("{domain}/{label}");
+        // `bootout` can exit 0 while the job stays loaded ("Boot-out failed:
+        // 5: Input/output error"), so never trust its status: confirm with
+        // `launchctl print` that the job is gone.
+        let out = self.exec.exec("launchctl", &["bootout", &target])?;
+        let mut detail = out.stderr.trim().to_owned();
+        if self.is_loaded(&domain, label)? {
             // Fall back to removing by label, as `release` does.
             let out = self.exec.exec("launchctl", &["remove", label])?;
             if !out.stderr.trim().is_empty() {
                 out.stderr.trim().clone_into(&mut detail);
             }
-            if self.is_loaded(label)? {
+            if self.is_loaded(&domain, label)? {
                 return Err(LlamaCppError::Supervisor(format!(
-                    "launchd job {label} is still loaded after unload and remove: {detail}"
+                    "launchd job {target} is still loaded after bootout and remove: {detail}"
                 )));
             }
         }
@@ -407,6 +481,14 @@ fn environment_file(env: &[(String, String)]) -> Result<String, LlamaCppError> {
 }
 
 impl<E: CommandExec> ServiceManager for SystemdManager<E> {
+    fn context(&self) -> Option<HostContext> {
+        Some(HostContext {
+            backend: HostBackend::Systemd,
+            uid: effective_uid(&self.exec).ok()?,
+            domain: None,
+        })
+    }
+
     fn release(&self, label: &str) {
         let _ = self.exec.exec("systemctl", &["--user", "stop", label]);
     }

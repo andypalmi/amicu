@@ -224,6 +224,8 @@ struct TempDir {
 impl TempDir {
     fn new() -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
+        // No test may ever spawn the real launchctl/systemctl.
+        amicu_llamacpp::forbid_service_commands();
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -376,7 +378,7 @@ fn region_residency_violation_blocks_validate_plan_and_apply() {
 
     // apply never reaches a side effect
     let mut out = Vec::new();
-    let code = commands::apply::run(&project, true, None, OutputFormat::Json, &mut out).unwrap();
+    let code = run_apply(&project, OutputFormat::Json, &mut out).unwrap();
     assert_eq!(code, 1);
     let report: amicu_core::diagnostic::DiagnosticReport = serde_json::from_slice(&out).unwrap();
     assert!(has_code(&report, "AMICU-POLICY-002"));
@@ -579,7 +581,7 @@ fn apply_json_stdout_is_a_single_json_value() {
     write(&td.path, "amicu.hcl", SECOND_MODEL);
 
     let mut out = Vec::new();
-    let code = commands::apply::run(&project, true, None, OutputFormat::Json, &mut out).unwrap();
+    let code = run_apply(&project, OutputFormat::Json, &mut out).unwrap();
     assert_eq!(code, 0);
     // The whole stdout buffer must parse as one JSON value.
     let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
@@ -664,7 +666,7 @@ fn apply_fails_fast_when_state_is_locked() {
 
     let _held = crate::lock::StateLock::acquire(&project.state_dir(), "apply", None).unwrap();
     let mut out = Vec::new();
-    let err = commands::apply::run(&project, true, None, OutputFormat::Human, &mut out)
+    let err = run_apply(&project, OutputFormat::Human, &mut out)
         .expect_err("a locked state must fail apply");
     assert!(
         matches!(err, crate::error::CliError::StateLocked(_)),
@@ -815,7 +817,7 @@ fn destroyed_ids(result: &crate::planner::PlanResult) -> Vec<String> {
 #[test]
 fn destroy_plans_every_deployment_in_state() {
     let prior = two_deployment_graph();
-    let result = commands::destroy::plan_destroy(&prior, &[]).unwrap();
+    let result = commands::destroy::plan_destroy(&prior, &[], &[]).unwrap();
     assert_eq!(result.plan.actions.len(), 2);
     assert!(
         result
@@ -831,7 +833,7 @@ fn destroy_plans_every_deployment_in_state() {
 #[test]
 fn destroy_target_limits_the_plan_to_the_named_deployments() {
     let prior = two_deployment_graph();
-    let result = commands::destroy::plan_destroy(&prior, &["support_two".to_owned()]).unwrap();
+    let result = commands::destroy::plan_destroy(&prior, &[], &["support_two".to_owned()]).unwrap();
     assert_eq!(destroyed_ids(&result), ["support_two"]);
     assert_eq!(result.plan.actions.len(), 1);
     assert_eq!(result.plan.actions[0].address, "deployment.support_two");
@@ -840,10 +842,13 @@ fn destroy_target_limits_the_plan_to_the_named_deployments() {
 #[test]
 fn destroy_unknown_target_is_an_error_and_plans_nothing() {
     let prior = two_deployment_graph();
-    let err =
-        commands::destroy::plan_destroy(&prior, &["support_two".to_owned(), "ghost".to_owned()])
-            .err()
-            .expect("unknown target must fail");
+    let err = commands::destroy::plan_destroy(
+        &prior,
+        &[],
+        &["support_two".to_owned(), "ghost".to_owned()],
+    )
+    .err()
+    .expect("unknown target must fail");
     let commands::destroy::DestroyPlanError::UnknownTarget(msg) = err else {
         panic!("expected UnknownTarget");
     };
@@ -855,12 +860,18 @@ fn destroy_unknown_target_is_an_error_and_plans_nothing() {
     assert!(msg.contains("support_local"), "lists known names: {msg}");
 }
 
-// ---- destroy end to end, over a fake host supervisor ------------------------
+// ---- apply / destroy end to end, over fake host and Modal -------------------
 //
-// None of these touches the real launchctl/systemctl: the host supervisor is
-// injected, so they run (and are safe) on any platform.
+// None of these touches the real launchctl/systemctl or the network: the host
+// supervisor and Modal are injected, and `TempDir::new` arms a guard that
+// panics if a real service command is ever spawned.
 
 use std::sync::{Arc, Mutex};
+
+use crate::commands::apply::Env;
+use crate::modal_ops::{ModalOps, Workspace};
+use crate::refresh::AppLookup;
+use crate::stops::{Backend, StopRecord};
 
 #[derive(Default)]
 struct StopLog {
@@ -870,6 +881,7 @@ struct StopLog {
 struct FakeHost {
     log: Arc<StopLog>,
     fail: bool,
+    ctx: Option<amicu_llamacpp::HostContext>,
 }
 
 #[async_trait::async_trait]
@@ -879,7 +891,7 @@ impl amicu_llamacpp::ProcessSupervisor for FakeHost {
         _: &amicu_runtime::LaunchPlan,
         _: &[amicu_llamacpp::ResolvedSecret],
     ) -> Result<amicu_runtime::RuntimeHandle, amicu_llamacpp::LlamaCppError> {
-        unreachable!("destroy never starts anything")
+        unreachable!("these tests never start anything")
     }
     async fn status(
         &self,
@@ -912,19 +924,139 @@ impl amicu_llamacpp::ProcessSupervisor for FakeHost {
         self.log.stopped.lock().unwrap().push(h.id.clone());
         Ok(())
     }
+    fn host_context(&self) -> Option<amicu_llamacpp::HostContext> {
+        self.ctx.clone()
+    }
 }
 
-fn fake_host(
-    log: &Arc<StopLog>,
-    fail: bool,
-) -> Box<dyn Fn() -> Box<dyn amicu_llamacpp::ProcessSupervisor>> {
-    let log = log.clone();
-    Box::new(move || {
-        Box::new(FakeHost {
-            log: log.clone(),
-            fail,
-        })
-    })
+/// A scripted Modal: which workspace the token is for, which apps exist by
+/// name, and which app ids Modal reports as unknown.
+struct FakeModal {
+    workspace: Workspace,
+    apps: Mutex<Vec<(String, String)>>,
+    unknown_ids: Vec<String>,
+    stopped: Mutex<Vec<String>>,
+    live: Option<Vec<String>>,
+}
+
+impl Default for FakeModal {
+    fn default() -> Self {
+        Self {
+            workspace: ws("acme"),
+            apps: Mutex::new(Vec::new()),
+            unknown_ids: Vec::new(),
+            stopped: Mutex::new(Vec::new()),
+            live: None,
+        }
+    }
+}
+
+fn ws(name: &str) -> Workspace {
+    Workspace {
+        name: name.to_owned(),
+        environment: "default".to_owned(),
+    }
+}
+
+#[async_trait::async_trait]
+impl ModalOps for FakeModal {
+    async fn workspace(&self) -> Result<Workspace, crate::error::CliError> {
+        Ok(self.workspace.clone())
+    }
+    async fn find_app(&self, name: &str) -> Result<Option<String>, crate::error::CliError> {
+        Ok(self
+            .apps
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, id)| id.clone()))
+    }
+    async fn stop_app(&self, app_id: &str) -> Result<bool, crate::error::CliError> {
+        if self.unknown_ids.iter().any(|i| i == app_id) {
+            return Ok(false);
+        }
+        self.stopped.lock().unwrap().push(app_id.to_owned());
+        Ok(true)
+    }
+}
+
+impl AppLookup for FakeModal {
+    fn live_apps(&self, app_names: &[String]) -> Result<std::collections::HashSet<String>, String> {
+        Ok(self
+            .live
+            .clone()
+            .unwrap_or_else(|| app_names.to_vec())
+            .into_iter()
+            .collect())
+    }
+    fn active_workspace(&self) -> Result<Option<Workspace>, String> {
+        Ok(Some(self.workspace.clone()))
+    }
+}
+
+struct Rig {
+    log: Arc<StopLog>,
+    host: Box<dyn Fn() -> Box<dyn amicu_llamacpp::ProcessSupervisor>>,
+    modal: FakeModal,
+    forget: bool,
+}
+
+impl Rig {
+    fn new() -> Self {
+        Self::build(false, None)
+    }
+    fn failing() -> Self {
+        Self::build(true, None)
+    }
+    fn with_ctx(ctx: amicu_llamacpp::HostContext) -> Self {
+        Self::build(false, Some(ctx))
+    }
+    fn build(fail: bool, ctx: Option<amicu_llamacpp::HostContext>) -> Self {
+        let log = Arc::new(StopLog::default());
+        let l = log.clone();
+        Self {
+            log,
+            host: Box::new(move || {
+                Box::new(FakeHost {
+                    log: l.clone(),
+                    fail,
+                    ctx: ctx.clone(),
+                })
+            }),
+            modal: FakeModal::default(),
+            forget: false,
+        }
+    }
+    fn env(&self) -> Env<'_> {
+        Env {
+            host: &*self.host,
+            modal: &self.modal,
+            forget_unconfirmed: self.forget,
+        }
+    }
+    fn stopped(&self) -> Vec<String> {
+        let mut v = self.log.stopped.lock().unwrap().clone();
+        v.sort();
+        v
+    }
+}
+
+fn run_apply(
+    project: &Project,
+    output: OutputFormat,
+    out: &mut Vec<u8>,
+) -> Result<u8, crate::error::CliError> {
+    let rig = Rig::new();
+    commands::apply::run_with(
+        project,
+        true,
+        None,
+        output,
+        out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &rig.env(),
+    )
 }
 
 fn state_with(graph: amicu_core::graph::Graph) -> LocalState {
@@ -943,7 +1075,7 @@ fn run_destroy(
     auto_approve: bool,
     output: OutputFormat,
     answer: &str,
-    host: &crate::commands::apply::HostSupervisorFactory,
+    rig: &Rig,
 ) -> (Result<u8, crate::error::CliError>, String) {
     let mut out = Vec::new();
     let mut input = std::io::Cursor::new(answer.as_bytes().to_vec());
@@ -955,7 +1087,7 @@ fn run_destroy(
         output,
         &mut out,
         &mut input,
-        host,
+        &rig.env(),
     );
     (result, utf8(out))
 }
@@ -964,41 +1096,95 @@ fn label(name: &str) -> String {
     amicu_llamacpp::host_label(name)
 }
 
+fn host_rec(name: &str) -> StopRecord {
+    StopRecord::host(&name.into(), None)
+}
+
+fn modal_rec(name: &str, app_id: Option<&str>, workspace: Option<&str>) -> StopRecord {
+    StopRecord::modal(
+        &name.into(),
+        app_id.map(str::to_owned),
+        workspace.map(ws).as_ref(),
+    )
+}
+
+fn stops_for(project: &Project, name: &str) -> Vec<StopRecord> {
+    project
+        .load_state()
+        .unwrap()
+        .unwrap()
+        .stops
+        .into_iter()
+        .filter(|r| r.deployment.as_str() == name)
+        .collect()
+}
+
+fn saved(td: &TempDir, state: &LocalState) -> Project {
+    let project = Project::new(&td.path);
+    project.save_state(state).unwrap();
+    project
+}
+
+#[test]
+fn applying_a_removal_stops_via_the_fake_host_not_the_real_one() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let prior = project.load_graph().unwrap();
+    project.save_state(&state_with(prior)).unwrap();
+    write(&td.path, "amicu.hcl", SECOND_MODEL);
+
+    let rig = Rig::new();
+    let mut out = Vec::new();
+    let code = commands::apply::run_with(
+        &project,
+        true,
+        None,
+        OutputFormat::Json,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &rig.env(),
+    )
+    .unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(rig.stopped(), [label("support_local")]);
+    let value: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(value.is_array());
+}
+
+#[test]
+#[should_panic(expected = "inject a fake service manager")]
+fn the_real_host_exec_refuses_service_commands_under_test() {
+    amicu_llamacpp::forbid_service_commands();
+    let _ = amicu_llamacpp::CommandExec::exec(&amicu_llamacpp::HostExec, "launchctl", &["list"]);
+}
+
 #[test]
 fn destroy_unknown_target_leaves_state_untouched() {
     let td = TempDir::new();
-    let project = Project::new(&td.path);
     let state = state_with(two_deployment_graph());
-    project.save_state(&state).unwrap();
-    let log = Arc::new(StopLog::default());
+    let project = saved(&td, &state);
+    let rig = Rig::new();
     let (result, out) = run_destroy(
         &project,
         &["ghost".to_owned()],
         true,
         OutputFormat::Human,
         "",
-        &fake_host(&log, false),
+        &rig,
     );
     let err = result.expect_err("unknown target");
     assert!(err.to_string().contains("ghost"), "{err}");
     assert_eq!(project.load_state().unwrap().unwrap().graph, state.graph);
     assert_eq!(out, "");
-    assert_eq!(log.stopped.lock().unwrap().len(), 0);
+    assert_eq!(rig.stopped().len(), 0);
 }
 
 #[test]
 fn destroy_with_empty_state_prints_nothing_to_destroy() {
     let td = TempDir::new();
     let project = Project::new(&td.path);
-    let log = Arc::new(StopLog::default());
-    let (result, out) = run_destroy(
-        &project,
-        &[],
-        true,
-        OutputFormat::Human,
-        "",
-        &fake_host(&log, false),
-    );
+    let (result, out) = run_destroy(&project, &[], true, OutputFormat::Human, "", &Rig::new());
     assert_eq!(result.unwrap(), 0);
     assert_eq!(out, "Nothing to destroy.\n");
     assert!(project.load_state().unwrap().is_none());
@@ -1008,15 +1194,7 @@ fn destroy_with_empty_state_prints_nothing_to_destroy() {
 fn destroy_nothing_in_json_mode_is_an_empty_array() {
     let td = TempDir::new();
     let project = Project::new(&td.path);
-    let log = Arc::new(StopLog::default());
-    let (result, out) = run_destroy(
-        &project,
-        &[],
-        true,
-        OutputFormat::Json,
-        "",
-        &fake_host(&log, false),
-    );
+    let (result, out) = run_destroy(&project, &[], true, OutputFormat::Json, "", &Rig::new());
     result.unwrap();
     assert_eq!(out.trim(), "[]");
 }
@@ -1026,18 +1204,10 @@ fn destroy_cancel_or_eof_destroys_nothing_and_json_prints_an_empty_array() {
     for answer in ["", "n\n", "no\n", "\n"] {
         for output in [OutputFormat::Human, OutputFormat::Json] {
             let td = TempDir::new();
-            let project = Project::new(&td.path);
             let state = state_with(two_deployment_graph());
-            project.save_state(&state).unwrap();
-            let log = Arc::new(StopLog::default());
-            let (result, out) = run_destroy(
-                &project,
-                &[],
-                false,
-                output,
-                answer,
-                &fake_host(&log, false),
-            );
+            let project = saved(&td, &state);
+            let rig = Rig::new();
+            let (result, out) = run_destroy(&project, &[], false, output, answer, &rig);
             assert_eq!(result.unwrap(), 0);
             if output.is_json() {
                 assert_eq!(out.trim(), "[]", "{out}");
@@ -1046,7 +1216,7 @@ fn destroy_cancel_or_eof_destroys_nothing_and_json_prints_an_empty_array() {
                 assert!(out.contains("Destroy cancelled."), "{out}");
             }
             assert_eq!(project.load_state().unwrap().unwrap().graph, state.graph);
-            assert_eq!(log.stopped.lock().unwrap().len(), 0);
+            assert_eq!(rig.stopped().len(), 0);
         }
     }
 }
@@ -1054,25 +1224,16 @@ fn destroy_cancel_or_eof_destroys_nothing_and_json_prints_an_empty_array() {
 #[test]
 fn destroy_confirmed_stops_via_derived_labels_and_empties_state() {
     let td = TempDir::new();
-    let project = Project::new(&td.path);
     // v1-style state: no endpoints, no stop records. Identity is derived.
-    project
-        .save_state(&state_with(two_deployment_graph()))
-        .unwrap();
-    let log = Arc::new(StopLog::default());
-    let (result, out) = run_destroy(
-        &project,
-        &[],
-        false,
-        OutputFormat::Human,
-        "y\n",
-        &fake_host(&log, false),
-    );
+    let project = saved(&td, &state_with(two_deployment_graph()));
+    let rig = Rig::new();
+    let (result, out) = run_destroy(&project, &[], false, OutputFormat::Human, "y\n", &rig);
     assert_eq!(result.unwrap(), 0);
     assert!(out.contains("Destroyed 2 deployment(s):"), "{out}");
-    let mut stopped = log.stopped.lock().unwrap().clone();
-    stopped.sort();
-    assert_eq!(stopped, [label("support_local"), label("support_two")]);
+    assert_eq!(
+        rig.stopped(),
+        [label("support_local"), label("support_two")]
+    );
     let after = project.load_state().unwrap().unwrap();
     assert_eq!(after.graph.deployments.len(), 0);
     assert_eq!(after.stops.len(), 0);
@@ -1081,22 +1242,21 @@ fn destroy_confirmed_stops_via_derived_labels_and_empties_state() {
 #[test]
 fn targeted_destroy_preserves_other_deployments_endpoints_and_stop_records() {
     let td = TempDir::new();
-    let project = Project::new(&td.path);
     let kept = handle("support_local", 8000);
     let mut state = state_with(two_deployment_graph());
     state.endpoints = vec![kept.clone()];
-    project.save_state(&state).unwrap();
-    let log = Arc::new(StopLog::default());
+    let project = saved(&td, &state);
+    let rig = Rig::new();
     let (result, _) = run_destroy(
         &project,
         &["support_two".to_owned()],
         true,
         OutputFormat::Human,
         "",
-        &fake_host(&log, false),
+        &rig,
     );
     result.unwrap();
-    assert_eq!(*log.stopped.lock().unwrap(), [label("support_two")]);
+    assert_eq!(rig.stopped(), [label("support_two")]);
     let after = project.load_state().unwrap().unwrap();
     assert_eq!(after.endpoints, vec![kept]);
     let ids: Vec<&str> = after
@@ -1106,7 +1266,6 @@ fn targeted_destroy_preserves_other_deployments_endpoints_and_stop_records() {
         .map(|d| d.id.as_str())
         .collect();
     assert_eq!(ids, ["support_local"]);
-    // The kept deployment can still be stopped from state afterwards.
     assert!(
         after
             .stops
@@ -1116,26 +1275,18 @@ fn targeted_destroy_preserves_other_deployments_endpoints_and_stop_records() {
 }
 
 #[test]
-fn a_failed_stop_keeps_the_deployment_and_its_record_and_errors() {
+fn a_failed_stop_keeps_the_deployment_and_its_record_and_errors_with_a_hint() {
     let td = TempDir::new();
-    let project = Project::new(&td.path);
     let mut state = state_with(two_deployment_graph());
-    state.stops = vec![
-        crate::stops::StopRecord::host(&"support_local".into()),
-        crate::stops::StopRecord::host(&"support_two".into()),
-    ];
-    project.save_state(&state).unwrap();
-    let log = Arc::new(StopLog::default());
-    let (result, out) = run_destroy(
-        &project,
-        &[],
-        true,
-        OutputFormat::Human,
-        "",
-        &fake_host(&log, true),
-    );
+    state.stops = vec![host_rec("support_local"), host_rec("support_two")];
+    let project = saved(&td, &state);
+    let rig = Rig::failing();
+    let (result, out) = run_destroy(&project, &[], true, OutputFormat::Human, "", &rig);
     let err = result.expect_err("an unconfirmed stop must fail the command");
-    assert!(err.to_string().contains("could not be confirmed"), "{err}");
+    let msg = err.to_string();
+    assert!(msg.contains("could not be confirmed"), "{msg}");
+    // First-stop failure: nothing changed, and the hint names the command.
+    assert!(msg.contains("amicu destroy"), "{msg}");
     assert!(!out.contains("Destroyed"), "never claim success: {out}");
     let after = project.load_state().unwrap().unwrap();
     assert_eq!(after.graph.deployments.len(), 2);
@@ -1144,26 +1295,25 @@ fn a_failed_stop_keeps_the_deployment_and_its_record_and_errors() {
 
 /// A crash between the provider start and the final save leaves only the
 /// write-ahead record: a pending deployment with its stop record and no
-/// endpoint. Destroy must stop it from that record alone.
+/// endpoint. Destroy stops it from that record alone.
 #[test]
 fn destroy_stops_a_pending_deployment_from_its_record_alone() {
     let td = TempDir::new();
-    let project = Project::new(&td.path);
     let mut state = state_with(two_deployment_graph());
     state.pending = vec!["support_two".into()];
-    state.stops = vec![crate::stops::StopRecord::host(&"support_two".into())];
-    project.save_state(&state).unwrap();
-    let log = Arc::new(StopLog::default());
+    state.stops = vec![host_rec("support_two")];
+    let project = saved(&td, &state);
+    let rig = Rig::new();
     let (result, _) = run_destroy(
         &project,
         &["support_two".to_owned()],
         true,
         OutputFormat::Human,
         "",
-        &fake_host(&log, false),
+        &rig,
     );
     result.unwrap();
-    assert_eq!(*log.stopped.lock().unwrap(), [label("support_two")]);
+    assert_eq!(rig.stopped(), [label("support_two")]);
     let after = project.load_state().unwrap().unwrap();
     assert_eq!(after.pending.len(), 0);
     assert!(
@@ -1176,33 +1326,247 @@ fn destroy_stops_a_pending_deployment_from_its_record_alone() {
     );
 }
 
-/// Every record of a deployment is stopped (an old identity left by a
-/// provider change as well as the current one), and only then forgotten.
 #[test]
 fn destroy_stops_every_recorded_identity_of_a_deployment() {
     let td = TempDir::new();
-    let project = Project::new(&td.path);
     let mut state = state_with(two_deployment_graph());
-    let mut old = crate::stops::StopRecord::host(&"support_two".into());
+    let mut old = host_rec("support_two");
     old.identity = "io.amicu.llama.old_name".to_owned();
-    state.stops = vec![old, crate::stops::StopRecord::host(&"support_two".into())];
-    project.save_state(&state).unwrap();
-    let log = Arc::new(StopLog::default());
+    state.stops = vec![old, host_rec("support_two")];
+    let project = saved(&td, &state);
+    let rig = Rig::new();
     let (result, _) = run_destroy(
         &project,
         &["support_two".to_owned()],
         true,
         OutputFormat::Human,
         "",
-        &fake_host(&log, false),
+        &rig,
     );
     result.unwrap();
-    let mut stopped = log.stopped.lock().unwrap().clone();
-    stopped.sort();
     assert_eq!(
-        stopped,
+        rig.stopped(),
         ["io.amicu.llama.old_name".to_owned(), label("support_two")]
     );
+}
+
+/// Stop records whose deployment is no longer in the graph are still
+/// instances that may be running: destroy plans and stops them too, and they
+/// are valid `--target`s.
+#[test]
+fn destroy_acts_on_orphan_stop_records() {
+    let td = TempDir::new();
+    let mut state = state_with(two_deployment_graph());
+    state.stops = vec![host_rec("ghost")];
+    let project = saved(&td, &state);
+
+    let rig = Rig::new();
+    let (result, _) = run_destroy(
+        &project,
+        &["ghost".to_owned()],
+        true,
+        OutputFormat::Human,
+        "",
+        &rig,
+    );
+    result.unwrap();
+    assert_eq!(rig.stopped(), [label("ghost")]);
+    let after = project.load_state().unwrap().unwrap();
+    assert_eq!(after.graph.deployments.len(), 2, "others untouched");
+    assert!(after.stops.iter().all(|r| r.deployment.as_str() != "ghost"));
+}
+
+// ---- host identity: backend, uid, launchd domain ----------------------------
+
+fn ctx(
+    backend: amicu_llamacpp::HostBackend,
+    uid: u32,
+    domain: Option<&str>,
+) -> amicu_llamacpp::HostContext {
+    amicu_llamacpp::HostContext {
+        backend,
+        uid,
+        domain: domain.map(str::to_owned),
+    }
+}
+
+fn destroy_one_host_record(
+    rec: StopRecord,
+    rig: &Rig,
+) -> (Result<u8, crate::error::CliError>, Project, TempDir) {
+    let td = TempDir::new();
+    let mut state = state_with(two_deployment_graph());
+    state.stops = vec![rec];
+    let project = saved(&td, &state);
+    let (result, _) = run_destroy(
+        &project,
+        &["support_two".to_owned()],
+        true,
+        OutputFormat::Human,
+        "",
+        rig,
+    );
+    (result, project, td)
+}
+
+#[test]
+fn host_records_remember_uid_and_launchd_domain() {
+    let c = ctx(amicu_llamacpp::HostBackend::Launchd, 501, Some("gui/501"));
+    let rec = StopRecord::host(&"support_two".into(), Some(&c));
+    assert_eq!(rec.backend, Backend::HostLaunchd);
+    assert_eq!(rec.uid, Some(501));
+    assert_eq!(rec.domain.as_deref(), Some("gui/501"));
+    let back: StopRecord = serde_json::from_str(&serde_json::to_string(&rec).unwrap()).unwrap();
+    assert_eq!(back, rec);
+}
+
+#[test]
+fn a_matching_uid_and_domain_stops_and_an_old_record_without_them_is_accepted() {
+    let c = ctx(amicu_llamacpp::HostBackend::Launchd, 501, Some("gui/501"));
+    let rec = StopRecord::host(&"support_two".into(), Some(&c));
+    let (result, _, _td) = destroy_one_host_record(rec, &Rig::with_ctx(c.clone()));
+    result.unwrap();
+
+    // Old record: backend only, no uid/domain.
+    let mut old = host_rec("support_two");
+    old.backend = Backend::HostLaunchd;
+    let (result, _, _td) = destroy_one_host_record(old, &Rig::with_ctx(c));
+    result.unwrap();
+}
+
+#[test]
+fn a_different_uid_domain_or_backend_is_refused_and_nothing_is_stopped() {
+    let started = ctx(amicu_llamacpp::HostBackend::Launchd, 501, Some("gui/501"));
+    let cases = [
+        (
+            "uid",
+            ctx(amicu_llamacpp::HostBackend::Launchd, 502, Some("gui/501")),
+        ),
+        (
+            "domain",
+            ctx(amicu_llamacpp::HostBackend::Launchd, 501, Some("user/501")),
+        ),
+        (
+            "backend",
+            ctx(amicu_llamacpp::HostBackend::Systemd, 501, None),
+        ),
+    ];
+    for (what, now) in cases {
+        let rec = StopRecord::host(&"support_two".into(), Some(&started));
+        let rig = Rig::with_ctx(now);
+        let (result, project, _td) = destroy_one_host_record(rec.clone(), &rig);
+        let err = result.expect_err(what);
+        assert!(
+            err.to_string().contains("Nothing was changed"),
+            "{what}: {err}"
+        );
+        assert_eq!(rig.stopped().len(), 0, "{what}");
+        let after = project.load_state().unwrap().unwrap();
+        assert_eq!(after.stops, vec![rec], "{what}: record kept");
+    }
+}
+
+#[test]
+fn launchd_and_systemd_records_are_not_the_same_target() {
+    let mut launchd = host_rec("support_two");
+    launchd.backend = Backend::HostLaunchd;
+    let mut systemd = host_rec("support_two");
+    systemd.backend = Backend::HostSystemd;
+    assert!(!launchd.same_target(&systemd));
+    assert!(launchd.same_target(&launchd.clone()));
+}
+
+// ---- Modal: workspace, app ids, unconfirmed names ---------------------------
+
+fn modal_graph() -> amicu_core::graph::Graph {
+    amicu_hcl::parse_graph(&two_deployments().replace("local_apple", "modal")).unwrap()
+}
+
+fn destroy_modal(
+    rec: StopRecord,
+    rig: &Rig,
+) -> (Result<u8, crate::error::CliError>, Project, TempDir) {
+    let td = TempDir::new();
+    let mut state = state_with(modal_graph());
+    state.stops = vec![rec];
+    let project = saved(&td, &state);
+    let (result, _) = run_destroy(
+        &project,
+        &["support_two".to_owned()],
+        true,
+        OutputFormat::Human,
+        "",
+        rig,
+    );
+    (result, project, td)
+}
+
+#[test]
+fn modal_destroy_stops_by_recorded_app_id_in_the_matching_workspace() {
+    let rig = Rig::new();
+    let (result, project, _td) =
+        destroy_modal(modal_rec("support_two", Some("ap-2"), Some("acme")), &rig);
+    result.unwrap();
+    assert_eq!(*rig.modal.stopped.lock().unwrap(), ["ap-2"]);
+    assert_eq!(stops_for(&project, "support_two").len(), 0);
+}
+
+#[test]
+fn modal_not_found_for_a_recorded_id_is_confirmed_only_in_the_matching_workspace() {
+    let mut rig = Rig::new();
+    rig.modal.unknown_ids = vec!["ap-2".to_owned()];
+    // Same workspace: Modal says it is gone, so it is confirmed.
+    let (result, project, _td) =
+        destroy_modal(modal_rec("support_two", Some("ap-2"), Some("acme")), &rig);
+    result.unwrap();
+    assert_eq!(stops_for(&project, "support_two").len(), 0);
+
+    // Another workspace: refused before asking Modal, and the record is kept.
+    let rec = modal_rec("support_two", Some("ap-2"), Some("other-co"));
+    let (result, project, _td) = destroy_modal(rec.clone(), &rig);
+    let msg = result.expect_err("workspace mismatch").to_string();
+    assert!(msg.contains("other-co") && msg.contains("acme"), "{msg}");
+    assert!(msg.contains("MODAL_TOKEN_ID"), "{msg}");
+    assert_eq!(stops_for(&project, "support_two"), vec![rec]);
+}
+
+#[test]
+fn modal_name_only_record_that_cannot_be_found_is_kept_unless_forgotten() {
+    let rig = Rig::new();
+    let rec = modal_rec("support_two", None, Some("acme"));
+    let (result, project, _td) = destroy_modal(rec.clone(), &rig);
+    let msg = result.expect_err("unconfirmed").to_string();
+    assert!(msg.contains("--forget-unconfirmed"), "{msg}");
+    assert!(!msg.contains("state.json"), "no hand-editing advice: {msg}");
+    assert_eq!(
+        project.load_state().unwrap().unwrap().stops,
+        vec![rec.clone()]
+    );
+
+    // Found by name: stopped by the id Modal reports.
+    rig.modal
+        .apps
+        .lock()
+        .unwrap()
+        .push(("amicu-support-two".to_owned(), "ap-found".to_owned()));
+    let (result, _, _td) = destroy_modal(rec.clone(), &rig);
+    result.unwrap();
+    assert_eq!(*rig.modal.stopped.lock().unwrap(), ["ap-found"]);
+
+    // The user checked the dashboard and opts in.
+    let mut rig = Rig::new();
+    rig.forget = true;
+    let (result, project, _td) = destroy_modal(rec, &rig);
+    result.unwrap();
+    assert_eq!(stops_for(&project, "support_two").len(), 0);
+}
+
+#[test]
+fn a_legacy_modal_record_without_a_workspace_is_still_usable() {
+    let rig = Rig::new();
+    let (result, _, _td) = destroy_modal(modal_rec("support_two", Some("ap-2"), None), &rig);
+    result.unwrap();
+    assert_eq!(*rig.modal.stopped.lock().unwrap(), ["ap-2"]);
 }
 
 #[test]
@@ -1211,7 +1575,7 @@ fn state_round_trips_and_refuses_newer_versions() {
     let project = Project::new(&td.path);
     let mut state = state_with(two_deployment_graph());
     state.pending = vec!["support_two".into()];
-    state.stops = vec![crate::stops::StopRecord::host(&"support_two".into())];
+    state.stops = vec![host_rec("support_two")];
     project.save_state(&state).unwrap();
     let loaded = project.load_state().unwrap().unwrap();
     assert_eq!(loaded.version, "v2");

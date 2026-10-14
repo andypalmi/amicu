@@ -8,6 +8,7 @@ mod checks;
 mod commands;
 mod error;
 mod lock;
+mod modal_ops;
 mod planner;
 mod project;
 mod refresh;
@@ -92,6 +93,11 @@ enum Command {
         /// immediately when another amicu process holds it.
         #[arg(long, value_name = "SECS")]
         lock_timeout: Option<u64>,
+        /// Forget a Modal deployment whose app cannot be found by name and has
+        /// no recorded app id, instead of refusing. Use only after checking in
+        /// the Modal dashboard that nothing is running.
+        #[arg(long)]
+        forget_unconfirmed: bool,
     },
     /// Run environment and project diagnostics.
     Doctor,
@@ -266,11 +272,13 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
             target,
             auto_approve,
             lock_timeout,
+            forget_unconfirmed,
         } => commands::destroy::run(
             &project,
             target,
             *auto_approve,
             lock_timeout.map(std::time::Duration::from_secs),
+            *forget_unconfirmed,
             cli.output,
             out,
         ),

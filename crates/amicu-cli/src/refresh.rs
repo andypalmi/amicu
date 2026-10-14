@@ -17,6 +17,7 @@ use crate::OutputFormat;
 use crate::commands::build_runtime;
 use crate::error::CliError;
 use crate::lock::StateLock;
+use crate::modal_ops::{Workspace, check_workspace};
 use crate::project::{LocalState, Project};
 
 /// Hardware profile `provider` value of a Modal-backed deployment.
@@ -28,12 +29,26 @@ pub(crate) trait AppLookup {
     /// Of `app_names`, the ones that exist on Modal. `Err` carries a message
     /// safe to print (no credentials).
     fn live_apps(&self, app_names: &[String]) -> Result<HashSet<String>, String>;
+
+    /// The workspace the active token belongs to, when it can be told. The
+    /// default (`None`) skips the workspace check.
+    fn active_workspace(&self) -> Result<Option<Workspace>, String> {
+        Ok(None)
+    }
 }
 
 /// The real lookup: the same `find_app` call `amicu modal status` is built on.
 pub(crate) struct ModalLookup;
 
 impl AppLookup for ModalLookup {
+    fn active_workspace(&self) -> Result<Option<Workspace>, String> {
+        let run = || -> Result<Workspace, CliError> {
+            let rt = build_runtime()?;
+            rt.block_on(crate::modal_ops::ModalOps::workspace(self))
+        };
+        run().map(Some).map_err(|e| e.to_string())
+    }
+
     fn live_apps(&self, app_names: &[String]) -> Result<HashSet<String>, String> {
         // `ModalError`'s `Display` never contains a token.
         let run = || -> Result<HashSet<String>, CliError> {
@@ -79,6 +94,9 @@ pub(crate) struct Refresh {
     pub notes: Vec<String>,
     /// Set when the lookup failed and the state was kept as-is.
     pub warning: Option<String>,
+    /// Set when the active Modal workspace differs from the one a recorded
+    /// instance lives in: the command must refuse to continue.
+    pub mismatch: Option<String>,
 }
 
 /// Drops from `state` every Modal deployment (and its endpoint) whose app is
@@ -103,6 +121,23 @@ pub(crate) fn refresh_state(state: &mut LocalState, lookup: &dyn AppLookup) -> R
         return Refresh::default();
     }
 
+    // Refuse to reason about apps recorded under a different workspace.
+    if let Ok(Some(active)) = lookup.active_workspace() {
+        for r in state.stops.iter().filter(|r| r.backend.is_modal()) {
+            if let Err(e) = check_workspace(
+                r.deployment.as_str(),
+                r.workspace.as_deref(),
+                r.environment.as_deref(),
+                &active,
+            ) {
+                return Refresh {
+                    mismatch: Some(e.to_string()),
+                    ..Refresh::default()
+                };
+            }
+        }
+    }
+
     let names: Vec<String> = recorded.iter().map(|(_, app)| app.clone()).collect();
     let live = match lookup.live_apps(&names) {
         Ok(live) => live,
@@ -112,6 +147,7 @@ pub(crate) fn refresh_state(state: &mut LocalState, lookup: &dyn AppLookup) -> R
                 warning: Some(format!(
                     "could not check Modal for live apps ({error}); using local state as-is"
                 )),
+                mismatch: None,
             };
         }
     };
@@ -123,25 +159,23 @@ pub(crate) fn refresh_state(state: &mut LocalState, lookup: &dyn AppLookup) -> R
         if state.pending.iter().any(|p| p.as_str() == id) {
             continue;
         }
-        if let Some(app_id) = recorded_app_id(state, id) {
-            state.pending.push(id.as_str().into());
-            notes.push(format!(
-                "deployment {id}: app {app} not found on Modal by name; kept in state as \
-                 pending (recorded app id {app_id}): apply will recreate it and destroy \
-                 confirms by id"
-            ));
-            continue;
-        }
-        state.graph.deployments.retain(|d| d.id.as_str() != id);
-        state.endpoints.retain(|h| h.deployment.as_str() != id);
-        state.stops.retain(|r| r.deployment.as_str() != id);
+        // Not found by name is not proof the instance is gone (wrong
+        // workspace, unpublished app): never drop its stop identity. Keep it
+        // pending, so apply recreates it and destroy confirms the stop.
+        state.pending.push(id.as_str().into());
+        let how = match recorded_app_id(state, id) {
+            Some(app_id) => format!("recorded app id {app_id}"),
+            None => "no app id recorded".to_owned(),
+        };
         notes.push(format!(
-            "deployment {id}: app {app} not found on Modal, will be recreated"
+            "deployment {id}: app {app} not found on Modal by name; kept in state as pending \
+             ({how}): apply will recreate it, destroy will try to confirm its stop"
         ));
     }
     Refresh {
         notes,
         warning: None,
+        mismatch: None,
     }
 }
 
@@ -169,6 +203,9 @@ pub(crate) fn load_refreshed(
         return Ok((None, false));
     };
     let refresh = refresh_state(&mut state, lookup);
+    if let Some(mismatch) = refresh.mismatch {
+        return Err(CliError::Message(mismatch));
+    }
     if let Some(warning) = &refresh.warning {
         eprintln!("warning: {warning}");
     }
@@ -180,17 +217,23 @@ pub(crate) fn load_refreshed(
     Ok((Some(state), !refresh.notes.is_empty()))
 }
 
-/// Removes the deployment whose Modal app is `app_name`, and its endpoint,
-/// from the project state. Returns the deployment id removed, or `None` when
-/// the state does not hold that app.
-pub(crate) fn forget_app(project: &Project, app_name: &str) -> Result<Option<String>, CliError> {
-    // Lock only when there is a state to update, so `stop` outside a project
-    // never creates `.amicu/`. Callers treat any error as a warning.
-    if project.load_state()?.is_none() {
+/// Removes what `amicu modal stop` just stopped from the project state: the
+/// stop records for Modal app `app_name` with app id `stopped_id` (or no app id
+/// yet), and, once the deployment has no record left, the deployment and its
+/// endpoint. Records for anything else (another app id, a host instance) are
+/// kept. Refuses when the active workspace differs from a record's. Returns the
+/// deployment id removed, or `None` when the state does not hold that app.
+pub(crate) fn forget_app(
+    project: &Project,
+    app_name: &str,
+    stopped_id: &str,
+    active: Option<&Workspace>,
+) -> Result<Option<String>, CliError> {
+    // No state file: nothing to update, and do not create `.amicu/`.
+    if !project.state_file().exists() {
         return Ok(None);
     }
     let _lock = StateLock::acquire(&project.state_dir(), "modal stop", None)?;
-    // Re-read under the lock: the pre-check above may be stale.
     let Some(mut state) = project.load_state()? else {
         return Ok(None);
     };
@@ -210,9 +253,36 @@ pub(crate) fn forget_app(project: &Project, app_name: &str) -> Result<Option<Str
     else {
         return Ok(None);
     };
+    let mut records = crate::commands::apply::effective_stops(Some(&state));
+    if let Some(active) = active {
+        for r in records
+            .iter()
+            .filter(|r| r.deployment.as_str() == id && r.backend.is_modal())
+        {
+            check_workspace(
+                &id,
+                r.workspace.as_deref(),
+                r.environment.as_deref(),
+                active,
+            )?;
+        }
+    }
+    // Only the records this stop actually stopped.
+    records.retain(|r| {
+        !(r.deployment.as_str() == id
+            && r.backend.is_modal()
+            && r.identity == app_name
+            && r.app_id.as_deref().is_none_or(|a| a == stopped_id))
+    });
+    let others_remain = records.iter().any(|r| r.deployment.as_str() == id);
+    state.stops = records;
+    if others_remain {
+        // Something else of this deployment may still run: keep it in state.
+        project.save_state(&state)?;
+        return Ok(Some(id));
+    }
     state.graph.deployments.retain(|d| d.id.as_str() != id);
     state.endpoints.retain(|h| h.deployment.as_str() != id);
-    state.stops.retain(|r| r.deployment.as_str() != id);
     state.pending.retain(|p| p.as_str() != id);
     project.save_state(&state)?;
     Ok(Some(id))
@@ -314,7 +384,7 @@ resource "deployment" "support_modal" {
     }
 
     #[test]
-    fn missing_app_is_dropped_and_plan_shows_create() {
+    fn missing_app_by_name_is_kept_pending_and_plan_shows_create() {
         let config = amicu_hcl::parse_graph(MODAL_CONFIG).unwrap();
         // Legacy state: no app id was ever recorded, so a name lookup is all
         // there is to go on.
@@ -327,10 +397,17 @@ resource "deployment" "support_modal" {
         let refresh = refresh_state(&mut state, &Fake(Ok(vec![])));
         assert_eq!(refresh.notes.len(), 1);
         assert!(refresh.notes[0].contains(APP), "{:?}", refresh.notes);
-        assert_eq!(state.graph.deployments.len(), 0);
-        assert_eq!(state.endpoints.len(), 0);
+        // Not found by name is not proof it is gone: kept, as pending, with
+        // nothing dropped.
+        assert_eq!(state.graph.deployments.len(), 1);
+        assert_eq!(state.pending.len(), 1);
 
-        let plan = build_plan(&config, Some(&state.graph)).unwrap();
+        // Pending is planned as absent, so apply recreates it.
+        let mut planning = state.graph.clone();
+        planning
+            .deployments
+            .retain(|d| !state.pending.contains(&d.id));
+        let plan = build_plan(&config, Some(&planning)).unwrap();
         assert_eq!(plan.items.len(), 1, "stopped app must be recreated");
     }
 
@@ -386,12 +463,17 @@ resource "deployment" "support_modal" {
         let project = Project::new(&dir);
 
         // No state file: outside a project / nothing recorded.
-        assert_eq!(forget_app(&project, APP).unwrap(), None);
+        assert_eq!(forget_app(&project, APP, "app-id", None).unwrap(), None);
 
         project.save_state(&state_for(MODAL_CONFIG)).unwrap();
-        assert_eq!(forget_app(&project, "amicu-other").unwrap(), None);
         assert_eq!(
-            forget_app(&project, APP).unwrap().as_deref(),
+            forget_app(&project, "amicu-other", "app-id", None).unwrap(),
+            None
+        );
+        assert_eq!(
+            forget_app(&project, APP, "app-id", None)
+                .unwrap()
+                .as_deref(),
             Some("support_modal")
         );
         let state = project.load_state().unwrap().unwrap();
@@ -408,7 +490,7 @@ resource "deployment" "support_modal" {
         project.save_state(&state_for(MODAL_CONFIG)).unwrap();
 
         let held = StateLock::acquire(&project.state_dir(), "apply", None).unwrap();
-        let err = forget_app(&project, APP).unwrap_err();
+        let err = forget_app(&project, APP, "app-id", None).unwrap_err();
         assert!(matches!(err, CliError::StateLocked(_)), "{err}");
         // State untouched while locked.
         let state = project.load_state().unwrap().unwrap();
@@ -417,7 +499,9 @@ resource "deployment" "support_modal" {
 
         drop(held);
         assert_eq!(
-            forget_app(&project, APP).unwrap().as_deref(),
+            forget_app(&project, APP, "app-id", None)
+                .unwrap()
+                .as_deref(),
             Some("support_modal")
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -428,7 +512,7 @@ resource "deployment" "support_modal" {
         let dir = std::env::temp_dir().join(format!("amicu-forget-none-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let project = Project::new(&dir);
-        assert_eq!(forget_app(&project, APP).unwrap(), None);
+        assert_eq!(forget_app(&project, APP, "app-id", None).unwrap(), None);
         assert!(!dir.join(".amicu").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -440,7 +524,7 @@ resource "deployment" "support_modal" {
         let project = Project::new(&dir);
         let local = MODAL_CONFIG.replace("\"modal\"", "\"local_apple\"");
         project.save_state(&state_for(&local)).unwrap();
-        assert_eq!(forget_app(&project, APP).unwrap(), None);
+        assert_eq!(forget_app(&project, APP, "app-id", None).unwrap(), None);
         let state = project.load_state().unwrap().unwrap();
         assert_eq!(state.graph.deployments.len(), 1);
         assert_eq!(state.endpoints.len(), 1);
@@ -460,12 +544,129 @@ resource "deployment" "support_modal" {
         let (state, pruned) =
             load_refreshed(&project, &Fake(Ok(vec![])), OutputFormat::Json, &mut out).unwrap();
         assert!(pruned);
-        assert_eq!(state.unwrap().graph.deployments.len(), 0);
+        assert_eq!(state.unwrap().pending.len(), 1);
         assert!(out.is_empty(), "JSON mode must keep stdout clean");
 
         let mut out = Vec::new();
         load_refreshed(&project, &Fake(Ok(vec![])), OutputFormat::Human, &mut out).unwrap();
         assert!(String::from_utf8(out).unwrap().contains("drift:"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    struct WsFake(Workspace);
+
+    impl AppLookup for WsFake {
+        fn live_apps(&self, names: &[String]) -> Result<HashSet<String>, String> {
+            Ok(names.iter().cloned().collect())
+        }
+        fn active_workspace(&self) -> Result<Option<Workspace>, String> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+
+    fn acme(name: &str) -> Workspace {
+        Workspace {
+            name: name.to_owned(),
+            environment: crate::modal_ops::DEFAULT_ENVIRONMENT.to_owned(),
+        }
+    }
+
+    fn modal_state_in(workspace: &str) -> LocalState {
+        let mut state = state_for(MODAL_CONFIG);
+        let id = state.graph.deployments[0].id.clone();
+        state.stops = vec![crate::stops::StopRecord::modal(
+            &id,
+            Some("app-id".to_owned()),
+            Some(&acme(workspace)),
+        )];
+        state
+    }
+
+    #[test]
+    fn refresh_refuses_when_the_active_workspace_differs() {
+        let mut state = modal_state_in("acme");
+        let refresh = refresh_state(&mut state, &WsFake(acme("other-co")));
+        let msg = refresh.mismatch.expect("mismatch");
+        assert!(msg.contains("acme") && msg.contains("other-co"), "{msg}");
+        assert!(msg.contains("MODAL_TOKEN_ID"), "{msg}");
+        assert_eq!(state.pending.len(), 0, "nothing touched");
+
+        let project_dir =
+            std::env::temp_dir().join(format!("amicu-ws-refresh-{}", std::process::id()));
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let project = Project::new(&project_dir);
+        project.save_state(&modal_state_in("acme")).unwrap();
+        let mut out = Vec::new();
+        let err = load_refreshed(
+            &project,
+            &WsFake(acme("other-co")),
+            OutputFormat::Human,
+            &mut out,
+        )
+        .expect_err("refresh must refuse");
+        assert!(err.to_string().contains("other-co"), "{err}");
+        let _ = std::fs::remove_dir_all(&project_dir);
+
+        // Same workspace: fine.
+        let mut state = modal_state_in("acme");
+        assert!(
+            refresh_state(&mut state, &WsFake(acme("acme")))
+                .mismatch
+                .is_none()
+        );
+    }
+
+    fn project_with(state: &LocalState, tag: &str) -> (Project, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("amicu-forget-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = Project::new(&dir);
+        project.save_state(state).unwrap();
+        (project, dir)
+    }
+
+    /// `amicu modal stop` removes only the record it stopped; a record for a
+    /// different app id (or a host instance) keeps the deployment in state.
+    #[test]
+    fn forget_app_removes_only_the_records_it_stopped() {
+        let mut state = modal_state_in("acme");
+        let id = state.graph.deployments[0].id.clone();
+        state.stops.push(crate::stops::StopRecord::modal(
+            &id,
+            Some("app-OTHER".to_owned()),
+            Some(&acme("acme")),
+        ));
+        let (project, dir) = project_with(&state, "partial");
+        let removed = forget_app(&project, APP, "app-id", Some(&acme("acme"))).unwrap();
+        assert_eq!(removed.as_deref(), Some(id.as_str()));
+        let after = project.load_state().unwrap().unwrap();
+        assert_eq!(after.graph.deployments.len(), 1, "other record keeps it");
+        let ids: Vec<_> = after.stops.iter().map(|r| r.app_id.as_deref()).collect();
+        assert_eq!(ids, [Some("app-OTHER")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forget_app_refuses_in_another_workspace_and_changes_nothing() {
+        let state = modal_state_in("acme");
+        let (project, dir) = project_with(&state, "ws");
+        let err = forget_app(&project, APP, "app-id", Some(&acme("other-co")))
+            .expect_err("workspace mismatch");
+        assert!(err.to_string().contains("other-co"), "{err}");
+        let after = project.load_state().unwrap().unwrap();
+        assert_eq!(after.stops, state.stops);
+        assert_eq!(after.graph.deployments.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forget_app_without_state_does_not_create_the_state_dir() {
+        let dir = std::env::temp_dir().join(format!("amicu-forget-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = Project::new(&dir);
+        assert_eq!(forget_app(&project, APP, "app-id", None).unwrap(), None);
+        assert!(!project.state_dir().exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

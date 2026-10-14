@@ -22,6 +22,7 @@ use crate::catalog::build_catalog;
 use crate::checks::report_for;
 use crate::error::CliError;
 use crate::lock::StateLock;
+use crate::modal_ops::{ModalBackend, check_workspace};
 use crate::planner::{PlanError, PlanResult, build_project_plan};
 use crate::project::{LocalState, Project};
 use crate::secret::EnvSecretResolver;
@@ -35,6 +36,28 @@ pub(crate) fn run(
     lock_timeout: Option<std::time::Duration>,
     output: OutputFormat,
     out: &mut dyn Write,
+) -> Result<u8, CliError> {
+    run_with(
+        project,
+        auto_approve,
+        lock_timeout,
+        output,
+        out,
+        &mut std::io::stdin().lock(),
+        &Env::real(false),
+    )
+}
+
+/// [`run`] with the approval answer read from `input` and every external
+/// system (host service manager, Modal) injected through `env`.
+pub(crate) fn run_with(
+    project: &Project,
+    auto_approve: bool,
+    lock_timeout: Option<std::time::Duration>,
+    output: OutputFormat,
+    out: &mut dyn Write,
+    input: &mut dyn std::io::BufRead,
+    env: &Env,
 ) -> Result<u8, CliError> {
     let graph = project.load_graph()?;
 
@@ -51,8 +74,7 @@ pub(crate) fn run(
     // (amicu-planning#178). Released when `_lock` drops on return.
     let _lock = StateLock::acquire(&project.state_dir(), "apply", lock_timeout)?;
 
-    let (prior_state, pruned) =
-        crate::refresh::load_refreshed(project, &crate::refresh::ModalLookup, output, out)?;
+    let (prior_state, pruned) = crate::refresh::load_refreshed(project, env.modal, output, out)?;
     // A pending deployment (start begun, never confirmed) is planned as absent
     // so apply (re)starts it; destroy still sees it in state.
     let prior_graph = prior_state.as_ref().map(|s| {
@@ -74,7 +96,7 @@ pub(crate) fn run(
     if let Some(state) = &prior_state {
         // A pending deployment that left the config still needs its recorded
         // instance stopped: plan it as a destroy.
-        for item in pending_destroys(state, &graph) {
+        for item in pending_destroys(state, &graph)? {
             result.plan.actions.push(item.action.clone());
             result.items.push(item);
         }
@@ -110,7 +132,7 @@ pub(crate) fn run(
             &mut *out
         };
         crate::commands::plan::print_human(&result, &graph, preview)?;
-        if !auto_approve && !prompt_approval(preview, "Apply these changes?")? {
+        if !auto_approve && !prompt_approval_from(preview, "Apply these changes?", input)? {
             writeln!(preview, "Apply cancelled.").map_err(|e| CliError::io("write failed", e))?;
             return Ok(0);
         }
@@ -121,7 +143,8 @@ pub(crate) fn run(
         graph,
         &result,
         prior_state.as_ref(),
-        &host_supervisor,
+        env,
+        Op::Apply,
     )?;
     report(&handles, &state.graph, output, out)
 }
@@ -144,19 +167,68 @@ fn stale_records(
 /// never touch the real service manager.
 pub(crate) type HostSupervisorFactory = dyn Fn() -> Box<dyn ProcessSupervisor>;
 
+/// The external systems a run acts on, injected so tests use fakes.
+pub(crate) struct Env<'a> {
+    pub host: &'a HostSupervisorFactory,
+    pub modal: &'a dyn ModalBackend,
+    /// Destroy only: treat a Modal app that cannot be found by name (and has
+    /// no recorded id) as gone, instead of refusing to forget it.
+    pub forget_unconfirmed: bool,
+}
+
+impl Env<'static> {
+    /// The real host service manager and Modal.
+    pub(crate) fn real(forget_unconfirmed: bool) -> Self {
+        Self {
+            host: &host_supervisor,
+            modal: &crate::refresh::ModalLookup,
+            forget_unconfirmed,
+        }
+    }
+}
+
+/// Which command is executing a plan, for recovery text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Op {
+    Apply,
+    Destroy,
+}
+
+impl Op {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Apply => "apply",
+            Self::Destroy => "destroy",
+        }
+    }
+}
+
 /// Destroy items for pending deployments that are no longer in the desired
 /// graph (so the normal diff, which plans pending as absent, cannot see them).
-fn pending_destroys(state: &LocalState, desired: &Graph) -> Vec<crate::planner::PlanItem> {
+/// Planner failures are errors, never swallowed.
+fn pending_destroys(
+    state: &LocalState,
+    desired: &Graph,
+) -> Result<Vec<crate::planner::PlanItem>, CliError> {
     let mut orphans = state.graph.clone();
     orphans
         .deployments
         .retain(|d| state.pending.contains(&d.id) && find_deployment(desired, &d.id).is_none());
     if orphans.deployments.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    amicu_engine::planner::build_plan_in(&Graph::new(), Some(&orphans), None)
-        .map(|r| r.items)
-        .unwrap_or_default()
+    match amicu_engine::planner::build_plan_in(&Graph::new(), Some(&orphans), None) {
+        Ok(result) => Ok(result.items),
+        Err(PlanError(report)) => Err(CliError::Message(format!(
+            "cannot plan the destroy of pending deployments: {}",
+            report
+                .diagnostics
+                .iter()
+                .map(|d| format!("{}: {}", d.code, d.message))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ))),
+    }
 }
 
 /// The stop record derived from the graph alone, for state written before
@@ -171,16 +243,16 @@ fn derive_stop(state: &LocalState, d: &Deployment) -> StopRecord {
     match dispatch_for(amicu_runtime::RuntimeKind::of(&d.runtime), provider)
         .unwrap_or(Dispatch::Host)
     {
-        Dispatch::Host => StopRecord::host(&d.id),
+        Dispatch::Host => StopRecord::host(&d.id, None),
         Dispatch::Modal => {
-            StopRecord::modal(&d.id, find_handle(state, &d.id).map(|h| h.id.clone()))
+            StopRecord::modal(&d.id, find_handle(state, &d.id).map(|h| h.id.clone()), None)
         }
     }
 }
 
 /// Every stop record in force: the recorded ones, plus a derived one for each
 /// deployment in the graph that has none (v1 state).
-fn effective_stops(prior: Option<&LocalState>) -> Vec<StopRecord> {
+pub(crate) fn effective_stops(prior: Option<&LocalState>) -> Vec<StopRecord> {
     let Some(state) = prior else {
         return Vec::new();
     };
@@ -201,7 +273,8 @@ pub(crate) fn execute(
     graph: Graph,
     result: &PlanResult,
     prior_state: Option<&LocalState>,
-    host: &HostSupervisorFactory,
+    env: &Env,
+    op: Op,
 ) -> Result<(Vec<RuntimeHandle>, LocalState), CliError> {
     let rt = crate::commands::build_runtime()?;
     let mut progress = Progress::new(prior_state);
@@ -211,9 +284,16 @@ pub(crate) fn execute(
         result,
         prior_state,
         &mut progress,
-        host,
+        env,
     )) {
-        return Err(record_partial(project, &graph, prior_state, &progress, err));
+        return Err(record_partial(
+            project,
+            &graph,
+            prior_state,
+            &progress,
+            err,
+            op,
+        ));
     }
     let handles = progress.started;
 
@@ -407,12 +487,21 @@ fn record_partial(
     prior: Option<&LocalState>,
     progress: &Progress,
     err: CliError,
+    op: Op,
 ) -> CliError {
+    let verb = op.name();
     if progress.started.is_empty()
         && progress.stopped.is_empty()
         && progress.in_flight.is_none()
         && progress.stops == effective_stops(prior)
     {
+        if op == Op::Destroy {
+            return CliError::Message(format!(
+                "{err}\n\ndestroy stopped before anything was removed; every deployment is \
+                 still in state. Fix the error and re-run `amicu destroy` (add `--target <name>` \
+                 to limit it)"
+            ));
+        }
         return err;
     }
     let partial = partial_graph(prior.map(|s| &s.graph), graph, progress);
@@ -461,15 +550,27 @@ fn record_partial(
         );
         done.push_str(&note);
     }
+    let retry = match op {
+        Op::Apply => "`amicu apply`",
+        Op::Destroy => "`amicu destroy` (add `--target <name>` to limit it)",
+    };
     match project.save_state(&state) {
         Ok(()) => CliError::Message(format!(
-            "{err}\n\napply stopped part-way; already done and recorded in state ({done}). \
-             Fix the error and re-run `amicu apply` to finish the rest"
+            "{err}\n\n{verb} stopped part-way; already done and recorded in state ({done}). \
+             Fix the error and re-run {retry} to finish the rest"
         )),
-        Err(save_err) => CliError::Message(format!(
-            "{err}\n\napply stopped part-way ({done}) and recording that in state FAILED: \
-             {save_err}. Those deployments may still be running; stop them by hand"
-        )),
+        Err(save_err) => {
+            let running: Vec<String> = progress.stops.iter().map(StopRecord::describe).collect();
+            CliError::Message(format!(
+                "{err}\n\n{verb} stopped part-way ({done}) and recording that in state FAILED: \
+                 {save_err}. These instances may still be running; stop each by hand: {}",
+                if running.is_empty() {
+                    "(none recorded)".to_owned()
+                } else {
+                    running.join("; ")
+                }
+            ))
+        }
     }
 }
 
@@ -616,7 +717,7 @@ async fn apply_all(
     result: &PlanResult,
     prior: Option<&LocalState>,
     progress: &mut Progress,
-    host: &HostSupervisorFactory,
+    env: &Env<'_>,
 ) -> Result<(), CliError> {
     // Dispatch to the adapter matching each deployment's own runtime family
     // (amicu-planning#152) - previously `apply` only ever started/stopped
@@ -628,8 +729,9 @@ async fn apply_all(
     // A llama.cpp deployment on Modal takes the same route through a
     // `LlamaCppAdapter` (amicu-planning#160).
     let catalog = build_catalog(graph);
-    let llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), host());
-    let vllm_adapter = VllmAdapter::new(Box::new(catalog.clone()), host());
+    let llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), (env.host)());
+    let vllm_adapter = VllmAdapter::new(Box::new(catalog.clone()), (env.host)());
+    let host_ctx = (env.host)().host_context();
     let resolver = EnvSecretResolver;
     let registry = EndpointRegistry::new();
     preflight(result)?;
@@ -661,10 +763,41 @@ async fn apply_all(
                 (amicu_runtime::RuntimeKind::LlamaCpp, Dispatch::Host) => &llama_adapter,
                 (amicu_runtime::RuntimeKind::Vllm, Dispatch::Host) => &vllm_adapter,
             };
-            let new_stop = match dispatch {
-                Dispatch::Host => StopRecord::host(&item.deployment),
-                Dispatch::Modal => StopRecord::modal(&item.deployment, None),
+            // The workspace a Modal app will be created in; a deployment whose
+            // recorded instances live in another workspace is refused.
+            let active_ws = if dispatch == Dispatch::Modal {
+                Some(env.modal.workspace().await?)
+            } else {
+                None
             };
+            let new_stop = match dispatch {
+                Dispatch::Host => StopRecord::host(&item.deployment, host_ctx.as_ref()),
+                Dispatch::Modal => StopRecord::modal(&item.deployment, None, active_ws.as_ref()),
+            };
+            if let Some(ws) = &active_ws {
+                for r in progress
+                    .stops
+                    .iter()
+                    .filter(|r| r.deployment == item.deployment && r.backend.is_modal())
+                {
+                    check_workspace(
+                        item.deployment.as_str(),
+                        r.workspace.as_deref(),
+                        r.environment.as_deref(),
+                        ws,
+                    )?;
+                }
+            } else {
+                // An in-place restart of a host unit started as someone else
+                // would leave the old one behind: refuse.
+                for r in progress
+                    .stops
+                    .iter()
+                    .filter(|r| r.deployment == item.deployment && r.same_target(&new_stop))
+                {
+                    check_host_context(r, host_ctx.as_ref())?;
+                }
+            }
             // A provider (or identity) change: stop what is running under the
             // OLD identity first, and confirm it, before starting the new one.
             // The old record stays in state until that stop is confirmed.
@@ -673,14 +806,27 @@ async fn apply_all(
                 .map(|d| &d.runtime);
             let stale = stale_records(&progress.stops, &item.deployment, &new_stop);
             for old in stale {
-                stop_record(&old, old_runtime, &llama_adapter, &vllm_adapter).await?;
+                stop_record(
+                    &old,
+                    old_runtime,
+                    &llama_adapter,
+                    &vllm_adapter,
+                    env,
+                    host_ctx.as_ref(),
+                )
+                .await?;
                 progress.stops.retain(|r| r != &old);
             }
             // Write-ahead: record the deployment as pending, with its stop
             // identity, BEFORE the provider starts anything, so a crash can
-            // never leave an instance that state cannot stop.
-            if !progress.stops.iter().any(|r| r.same_target(&new_stop)) {
-                progress.stops.push(new_stop);
+            // never leave an instance that state cannot stop. A previous
+            // instance's record (a different Modal app id) is kept alongside.
+            if !progress
+                .stops
+                .iter()
+                .any(|r| r.same_target(&new_stop) && (!dispatch_is_modal(r) || r.app_id.is_none()))
+            {
+                progress.stops.push(new_stop.clone());
             }
             project.save_state(&write_ahead_state(graph, prior, progress, &item.deployment))?;
             progress.in_flight = Some(item.deployment.clone());
@@ -689,18 +835,32 @@ async fn apply_all(
             // not protected as declared is torn down and apply fails.
             secure_endpoint(adapter, &handle, launch, dispatch, &resolver).await?;
             registry.register(&handle);
+            let mut superseded = Vec::new();
             if dispatch == Dispatch::Modal {
-                // Modal's handle id is the app id: stop by id from now on.
-                for r in progress
-                    .stops
-                    .iter_mut()
-                    .filter(|r| r.deployment == item.deployment && r.backend.is_modal())
-                {
-                    r.app_id = Some(handle.id.clone());
-                }
+                // Modal's handle id is the app id: stop by id from now on. An
+                // older record with a different app id is never overwritten;
+                // it stays until its stop is confirmed below.
+                superseded = record_modal_start(
+                    &mut progress.stops,
+                    &new_stop.identity,
+                    &item.deployment,
+                    &handle.id,
+                );
             }
             progress.started.push(handle);
             progress.in_flight = None;
+            for old in superseded {
+                stop_record(
+                    &old,
+                    old_runtime,
+                    &llama_adapter,
+                    &vllm_adapter,
+                    env,
+                    host_ctx.as_ref(),
+                )
+                .await?;
+                progress.stops.retain(|r| r != &old);
+            }
         } else {
             // Destroy: stop every recorded instance of this deployment. A
             // deployment leaves state only once each stop is confirmed (or the
@@ -718,7 +878,7 @@ async fn apply_all(
                 // No record at all (should not happen): derive one.
                 records.push(match (prior, prior_deployment) {
                     (Some(s), Some(d)) => derive_stop(s, d),
-                    _ => StopRecord::host(&item.deployment),
+                    _ => StopRecord::host(&item.deployment, host_ctx.as_ref()),
                 });
             }
             for record in records {
@@ -727,6 +887,8 @@ async fn apply_all(
                     prior_deployment.map(|d| &d.runtime),
                     &llama_adapter,
                     &vllm_adapter,
+                    env,
+                    host_ctx.as_ref(),
                 )
                 .await?;
                 progress.stops.retain(|r| r != &record);
@@ -767,8 +929,8 @@ async fn secure_endpoint(
     let hint = match dispatch {
         Dispatch::Modal => format!("`modal app stop {}`", handle.id),
         Dispatch::Host => format!(
-            "`systemctl --user stop {id}` on Linux, or `launchctl unload \
-             ~/Library/LaunchAgents/{id}.plist` on macOS",
+            "`systemctl --user stop {id}` on Linux, or `launchctl bootout \
+             gui/$(id -u)/{id}` on macOS",
             id = handle.id
         ),
     };
@@ -891,6 +1053,81 @@ fn host_handle(id: &DeploymentId, label: &str) -> RuntimeHandle {
     }
 }
 
+fn dispatch_is_modal(r: &StopRecord) -> bool {
+    r.backend.is_modal()
+}
+
+/// Apply the result of a successful Modal start to the stop records: the
+/// unconfirmed placeholder (no app id) takes the real id. Records that carry a
+/// different app id are kept untouched and returned, so the caller can stop
+/// (and confirm) them before forgetting them.
+fn record_modal_start(
+    stops: &mut Vec<StopRecord>,
+    identity: &str,
+    deployment: &DeploymentId,
+    app_id: &str,
+) -> Vec<StopRecord> {
+    let same = |r: &StopRecord| {
+        &r.deployment == deployment && r.backend.is_modal() && r.identity == identity
+    };
+    let known = stops
+        .iter()
+        .any(|r| same(r) && r.app_id.as_deref() == Some(app_id));
+    if let Some(i) = stops.iter().position(|r| same(r) && r.app_id.is_none()) {
+        if known {
+            stops.remove(i);
+        } else {
+            stops[i].app_id = Some(app_id.to_owned());
+        }
+    }
+    stops
+        .iter()
+        .filter(|r| same(r) && r.app_id.as_deref().is_some_and(|a| a != app_id))
+        .cloned()
+        .collect()
+}
+
+/// Refuse a host stop that would act as someone else: launchd and systemd are
+/// never interchangeable, and the uid / launchd domain must match the ones the
+/// instance was started with. Records without uid/domain (older state) are
+/// accepted for the current user.
+fn check_host_context(
+    record: &StopRecord,
+    current: Option<&amicu_llamacpp::HostContext>,
+) -> Result<(), CliError> {
+    let expected = current.map_or_else(Backend::host, |c| Backend::from_host(c.backend));
+    if record.backend != expected {
+        return Err(CliError::Message(format!(
+            "{} was started under {} but this machine uses {}; stop it on the machine and as \
+             the user that started it. Nothing was changed",
+            record.describe(),
+            record.backend.name(),
+            expected.name()
+        )));
+    }
+    if let (Some(rec), Some(cur)) = (record.uid, current.map(|c| c.uid))
+        && rec != cur
+    {
+        return Err(CliError::Message(format!(
+            "{} was started as uid {rec}, but you are uid {cur}; re-run as that user. Nothing \
+             was changed",
+            record.describe()
+        )));
+    }
+    if let (Some(rec), Some(cur)) = (
+        record.domain.as_deref(),
+        current.and_then(|c| c.domain.as_deref()),
+    ) && rec != cur
+    {
+        return Err(CliError::Message(format!(
+            "{} was started in launchd domain {rec}, but the current domain is {cur}; re-run \
+             from the same login session. Nothing was changed",
+            record.describe()
+        )));
+    }
+    Ok(())
+}
+
 /// Stop the instance `record` describes and confirm it. `Ok` means it is
 /// stopped or the provider confirms it does not exist; anything else is an
 /// error and the caller must keep the record in state.
@@ -899,9 +1136,12 @@ async fn stop_record(
     runtime: Option<&Runtime>,
     llama: &LlamaCppAdapter,
     vllm: &VllmAdapter,
+    env: &Env<'_>,
+    host_ctx: Option<&amicu_llamacpp::HostContext>,
 ) -> Result<(), CliError> {
     match record.backend {
         Backend::HostLaunchd | Backend::HostSystemd => {
+            check_host_context(record, host_ctx)?;
             let handle = host_handle(&record.deployment, &record.identity);
             // Both adapters share one supervisor that manages the unit purely
             // by the handle's id; dispatch on the declared runtime anyway.
@@ -911,35 +1151,52 @@ async fn stop_record(
             }
             Ok(())
         }
-        Backend::Modal => stop_modal(record).await,
+        Backend::Modal => stop_modal(record, env).await,
     }
 }
 
-/// Stop a Modal app by its recorded app id. A "not found" for a recorded id
-/// is a confirmed stop. With only a name, a lookup that finds nothing cannot
-/// confirm (the app may exist unpublished), so it is an error.
-async fn stop_modal(record: &StopRecord) -> Result<(), CliError> {
-    let credentials =
-        amicu_modal::Credentials::from_env().map_err(amicu_modal::ModalError::from)?;
-    let mut client = amicu_modal::ModalClient::connect(credentials).await?;
+/// Stop a Modal app. The active workspace must be the one the app was
+/// created in. By recorded app id, "not found" is a confirmed stop (the
+/// workspace was just checked). With only a name, a lookup that finds nothing
+/// cannot confirm (the app may exist unpublished): an error, unless the user
+/// passed `--forget-unconfirmed` after checking.
+async fn stop_modal(record: &StopRecord, env: &Env<'_>) -> Result<(), CliError> {
+    let active = env.modal.workspace().await?;
+    check_workspace(
+        record.deployment.as_str(),
+        record.workspace.as_deref(),
+        record.environment.as_deref(),
+        &active,
+    )?;
     let app_id = match &record.app_id {
         Some(id) => id.clone(),
-        None => client.find_app(&record.identity).await?.ok_or_else(|| {
-            CliError::Message(format!(
-                "cannot confirm Modal app '{name}' is stopped: no app id was recorded and Modal \
-                 has no published app by that name (it may exist unpublished). Check `modal app \
-                 list` or the Modal dashboard; once you have confirmed it is gone, remove \
-                 deployment '{dep}' from .amicu/state/state.json by hand. It was kept in state.",
-                name = record.identity,
-                dep = record.deployment
-            ))
-        })?,
+        None => match env.modal.find_app(&record.identity).await? {
+            Some(id) => id,
+            None if env.forget_unconfirmed => {
+                eprintln!(
+                    "warning: no Modal app '{}' found in {active}; forgetting '{}' as you asked \
+                     (--forget-unconfirmed)",
+                    record.identity, record.deployment
+                );
+                return Ok(());
+            }
+            None => {
+                return Err(CliError::Message(format!(
+                    "cannot confirm Modal app '{name}' is stopped: no app id was recorded and \
+                     {active} has no published app by that name (it may exist unpublished). \
+                     Check `modal app list` or the Modal dashboard; once you are sure it is \
+                     gone, run `amicu destroy --target {dep} --forget-unconfirmed`. It was kept \
+                     in state.",
+                    name = record.identity,
+                    dep = record.deployment
+                )));
+            }
+        },
     };
-    match client.stop_app(&app_id).await {
-        Ok(()) => Ok(()),
-        Err(e) if record.app_id.is_some() && e.is_not_found() => Ok(()),
-        Err(e) => Err(e.into()),
-    }
+    // `false`: Modal reports no such app. For a recorded id in the matching
+    // workspace, that is a confirmed stop.
+    env.modal.stop_app(&app_id).await?;
+    Ok(())
 }
 
 fn find_handle<'a>(
@@ -1097,11 +1354,7 @@ fn usage_snippets(
     out
 }
 
-pub(crate) fn prompt_approval(out: &mut dyn Write, question: &str) -> Result<bool, CliError> {
-    prompt_approval_from(out, question, &mut std::io::stdin().lock())
-}
-
-/// [`prompt_approval`] reading the answer from `input` (EOF means no).
+/// Ask `question` and read the answer from `input` (EOF means no).
 pub(crate) fn prompt_approval_from(
     out: &mut dyn Write,
     question: &str,
@@ -1345,6 +1598,7 @@ resource "deployment" "beta" {
             None,
             &progress,
             CliError::Message("beta failed to start".to_owned()),
+            super::Op::Apply,
         )
         .to_string();
         assert!(err.contains("beta failed to start"), "{err}");
@@ -1414,6 +1668,7 @@ resource "deployment" "beta" {
             Some(&prior),
             &progress,
             CliError::Message("boom".to_owned()),
+            super::Op::Apply,
         );
         let state = project.load_state().unwrap().unwrap();
         let next = build_plan(&graph, Some(&state.graph)).unwrap();
@@ -1439,6 +1694,7 @@ resource "deployment" "beta" {
             None,
             &Progress::default(),
             CliError::Message("boom".to_owned()),
+            super::Op::Apply,
         )
         .to_string();
         assert_eq!(err, "boom");
@@ -1797,14 +2053,14 @@ mod stop_invariant_tests {
     fn write_ahead_state_leaves_a_pending_stoppable_record() {
         let graph = amicu_hcl::parse_graph(CONFIG).unwrap();
         let mut progress = Progress::default();
-        progress.stops.push(StopRecord::host(&id("alpha")));
+        progress.stops.push(StopRecord::host(&id("alpha"), None));
         let ahead = write_ahead_state(&graph, None, &progress, &id("alpha"));
         assert_eq!(ahead.pending, vec![id("alpha")]);
         assert!(ahead.graph.deployments.iter().any(|d| d.id == id("alpha")));
-        assert_eq!(ahead.stops, vec![StopRecord::host(&id("alpha"))]);
+        assert_eq!(ahead.stops, vec![StopRecord::host(&id("alpha"), None)]);
         assert_eq!(ahead.endpoints.len(), 0, "no handle yet: the crash case");
 
-        let plan = crate::commands::destroy::plan_destroy(&ahead.graph, &[]).unwrap();
+        let plan = crate::commands::destroy::plan_destroy(&ahead.graph, &[], &[]).unwrap();
         assert_eq!(plan.items.len(), 1);
         assert!(plan.items[0].launch.is_none(), "a destroy action");
     }
@@ -1814,31 +2070,31 @@ mod stop_invariant_tests {
     #[test]
     fn write_ahead_keeps_the_old_identity_alongside_the_new_one() {
         let graph = amicu_hcl::parse_graph(CONFIG).unwrap();
-        let old = StopRecord::modal(&id("alpha"), Some("ap-123".to_owned()));
+        let old = StopRecord::modal(&id("alpha"), Some("ap-123".to_owned()), None);
         let mut progress = Progress::default();
         progress.stops.push(old.clone());
-        progress.stops.push(StopRecord::host(&id("alpha")));
+        progress.stops.push(StopRecord::host(&id("alpha"), None));
         let ahead = write_ahead_state(&graph, None, &progress, &id("alpha"));
         assert!(ahead.stops.contains(&old), "{:?}", ahead.stops);
-        assert!(ahead.stops.contains(&StopRecord::host(&id("alpha"))));
+        assert!(ahead.stops.contains(&StopRecord::host(&id("alpha"), None)));
     }
 
     #[test]
     fn a_provider_change_makes_the_old_identity_stale() {
-        let old_modal = StopRecord::modal(&id("alpha"), Some("ap-1".to_owned()));
-        let host = StopRecord::host(&id("alpha"));
-        let other = StopRecord::host(&id("beta"));
+        let old_modal = StopRecord::modal(&id("alpha"), Some("ap-1".to_owned()), None);
+        let host = StopRecord::host(&id("alpha"), None);
+        let other = StopRecord::host(&id("beta"), None);
         let stops = vec![old_modal.clone(), host.clone(), other];
         // Moving to the host: the Modal app is stale, the host unit is not,
         // and another deployment's record is never touched.
         assert_eq!(stale_records(&stops, &id("alpha"), &host), vec![old_modal]);
         // Moving to Modal: the host unit is stale.
-        let new_modal = StopRecord::modal(&id("alpha"), None);
+        let new_modal = StopRecord::modal(&id("alpha"), None, None);
         assert_eq!(stale_records(&stops, &id("alpha"), &new_modal), vec![host]);
         // Same target: nothing is stale (a restart replaces in place).
-        let only = vec![StopRecord::host(&id("alpha"))];
+        let only = vec![StopRecord::host(&id("alpha"), None)];
         assert_eq!(
-            stale_records(&only, &id("alpha"), &StopRecord::host(&id("alpha"))).len(),
+            stale_records(&only, &id("alpha"), &StopRecord::host(&id("alpha"), None)).len(),
             0
         );
     }
@@ -1879,23 +2135,119 @@ mod stop_invariant_tests {
         s.pending = vec![id("beta")];
         let mut desired = prior;
         desired.deployments.retain(|d| d.id != id("beta"));
-        let items = pending_destroys(&s, &desired);
+        let items = pending_destroys(&s, &desired).unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].deployment, id("beta"));
         assert!(items[0].launch.is_none());
         // Still wanted: planned as a normal (re)create instead.
         let kept = amicu_hcl::parse_graph(CONFIG).unwrap();
-        assert_eq!(pending_destroys(&s, &kept).len(), 0);
+        assert_eq!(pending_destroys(&s, &kept).unwrap().len(), 0);
     }
 
     #[test]
     fn pending_is_cleared_only_on_confirmed_start() {
         let graph = amicu_hcl::parse_graph(CONFIG).unwrap();
         let mut progress = Progress::default();
-        progress.stops.push(StopRecord::host(&id("alpha")));
+        progress.stops.push(StopRecord::host(&id("alpha"), None));
         let ahead = write_ahead_state(&graph, None, &progress, &id("alpha"));
         assert_eq!(pending_after(Some(&ahead), &graph, &[]), vec![id("alpha")]);
         let started = [super::host_handle(&id("alpha"), "io.amicu.llama.alpha")];
         assert_eq!(pending_after(Some(&ahead), &graph, &started).len(), 0);
+    }
+
+    /// A Modal restart that yields a different app id never overwrites the old
+    /// record: it stays, and is handed back to be stopped and confirmed.
+    #[test]
+    fn a_new_modal_app_id_never_overwrites_a_different_old_one() {
+        let dep = id("alpha");
+        let old = StopRecord::modal(&dep, Some("ap-OLD".to_owned()), None);
+        let placeholder = StopRecord::modal(&dep, None, None);
+        let mut stops = vec![old.clone(), placeholder];
+        let superseded = super::record_modal_start(&mut stops, "amicu-alpha", &dep, "ap-NEW");
+        assert_eq!(superseded, vec![old.clone()]);
+        assert!(stops.contains(&old), "old id kept: {stops:?}");
+        assert!(
+            stops.iter().any(|r| r.app_id.as_deref() == Some("ap-NEW")),
+            "{stops:?}"
+        );
+        assert_eq!(stops.len(), 2);
+
+        // Same id again: the placeholder just merges away.
+        let mut stops = vec![
+            StopRecord::modal(&dep, Some("ap-1".to_owned()), None),
+            StopRecord::modal(&dep, None, None),
+        ];
+        let superseded = super::record_modal_start(&mut stops, "amicu-alpha", &dep, "ap-1");
+        assert_eq!(superseded.len(), 0);
+        assert_eq!(stops.len(), 1);
+    }
+
+    #[test]
+    fn recovery_text_names_the_command_that_ran() {
+        use super::{Op, record_partial};
+        let dir = std::env::temp_dir().join(format!("amicu-recovery-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = crate::project::Project::new(&dir);
+        let graph = amicu_hcl::parse_graph(CONFIG).unwrap();
+        let mut progress = Progress::default();
+        progress.stopped.push(id("alpha"));
+        let boom = || crate::error::CliError::Message("boom".to_owned());
+        let destroy =
+            record_partial(&project, &graph, None, &progress, boom(), Op::Destroy).to_string();
+        assert!(destroy.contains("destroy stopped part-way"), "{destroy}");
+        assert!(destroy.contains("`amicu destroy`"), "{destroy}");
+        assert!(!destroy.contains("`amicu apply`"), "{destroy}");
+        let apply =
+            record_partial(&project, &graph, None, &progress, boom(), Op::Apply).to_string();
+        assert!(apply.contains("`amicu apply`"), "{apply}");
+
+        // Nothing done yet: the destroy error still carries a recovery hint.
+        let first = record_partial(
+            &project,
+            &graph,
+            None,
+            &Progress::default(),
+            boom(),
+            Op::Destroy,
+        )
+        .to_string();
+        assert!(first.contains("amicu destroy"), "{first}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// If recording the partial state fails, the message must list exactly
+    /// what may still be running (labels and app ids) so it can be stopped
+    /// by hand.
+    #[test]
+    fn a_failed_save_lists_the_exact_labels_and_app_ids() {
+        use super::{Op, record_partial};
+        let file = std::env::temp_dir().join(format!("amicu-not-a-dir-{}", std::process::id()));
+        std::fs::write(&file, "x").unwrap();
+        // The state dir cannot be created under a regular file.
+        let project = crate::project::Project::new(&file);
+        let graph = amicu_hcl::parse_graph(CONFIG).unwrap();
+        let mut progress = Progress::default();
+        progress.stopped.push(id("beta"));
+        progress.stops = vec![
+            StopRecord::host(&id("alpha"), None),
+            StopRecord::modal(&id("beta"), Some("ap-777".to_owned()), None),
+        ];
+        let msg = record_partial(
+            &project,
+            &graph,
+            None,
+            &progress,
+            crate::error::CliError::Message("boom".to_owned()),
+            Op::Apply,
+        )
+        .to_string();
+        assert!(msg.contains("FAILED"), "{msg}");
+        assert!(msg.contains("io.amicu.llama.alpha"), "{msg}");
+        assert!(
+            msg.contains("ap-777") && msg.contains("amicu-beta"),
+            "{msg}"
+        );
+        let _ = std::fs::remove_file(&file);
     }
 }

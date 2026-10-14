@@ -2055,9 +2055,18 @@ fn launchd_update_releases_the_old_job_by_plist_and_label_before_loading() {
     manager.release(&spec.label);
     manager.start(&spec).expect("update");
 
-    let calls = exec.calls.lock().unwrap().clone();
+    // `print` is the domain probe; the rest is the real sequence.
+    let calls: Vec<Vec<String>> = exec
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c[1] != "print")
+        .cloned()
+        .collect();
     let verbs: Vec<&str> = calls.iter().map(|c| c[1].as_str()).collect();
-    assert_eq!(verbs, ["load", "unload", "remove", "load"]);
+    assert_eq!(verbs, ["bootstrap", "bootout", "remove", "bootstrap"]);
+    assert_eq!(calls[1][2], format!("gui/501/{}", spec.label));
     assert_eq!(calls[2][2], spec.label);
 }
 
@@ -2067,8 +2076,21 @@ fn launchd_release_removes_by_label_even_without_a_plist() {
     let exec = std::sync::Arc::new(FakeExec::new(true, ""));
     let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"));
     manager.release("io.amicu.llama.x");
-    let calls = exec.calls.lock().unwrap().clone();
-    assert_eq!(calls, [["launchctl", "remove", "io.amicu.llama.x"]]);
+    let calls: Vec<Vec<String>> = exec
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c[1] != "print")
+        .cloned()
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            vec!["launchctl", "bootout", "gui/501/io.amicu.llama.x"],
+            vec!["launchctl", "remove", "io.amicu.llama.x"]
+        ]
+    );
 }
 
 #[test]
@@ -2194,6 +2216,13 @@ impl FakeExec {
 
 impl CommandExec for FakeExec {
     fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        if program == "id" {
+            return Ok(ExecOutput {
+                success: true,
+                stdout: "501\n".to_owned(),
+                stderr: String::new(),
+            });
+        }
         let mut call = vec![program.to_owned()];
         call.extend(args.iter().map(|a| (*a).to_owned()));
         self.calls.lock().unwrap().push(call);
@@ -2266,16 +2295,26 @@ impl LoadedExec {
 
 impl CommandExec for LoadedExec {
     fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        if program == "id" {
+            return Ok(ExecOutput {
+                success: true,
+                stdout: "501\n".to_owned(),
+                stderr: String::new(),
+            });
+        }
         assert_eq!(program, "launchctl");
         self.calls.lock().unwrap().push(args[0].to_owned());
         let mut loaded = self.loaded.lock().unwrap();
         let success = match args[0] {
-            "list" => *loaded,
-            "unload" => {
+            // `print gui/501` is the domain probe; `print gui/501/<label>`
+            // asks whether the job is loaded.
+            "print" if args[1] == "gui/501" => true,
+            "print" => *loaded,
+            "bootout" => {
                 if self.unload_clears {
                     *loaded = false;
                 }
-                // The real launchctl exits 0 even when the unload failed.
+                // The real launchctl can exit 0 even when the bootout failed.
                 true
             }
             "remove" => {
@@ -3206,4 +3245,61 @@ fn launchd_plist_carries_the_key_in_a_0600_file_removed_on_stop_and_on_failed_lo
     let failing = LaunchdManager::new(FakeExec::new(false, ""), &agents, tmp.file("logs"));
     assert!(failing.start(&spec).is_err());
     assert!(!plist.exists(), "plist with the key must be removed");
+}
+
+#[test]
+fn launchd_start_bootstraps_into_the_domain_and_reports_its_context() {
+    let tmp = TempDir::new("launchd-domain");
+    let exec = std::sync::Arc::new(FakeExec::new(true, ""));
+    let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"));
+    manager.start(&service_spec()).expect("start");
+    let calls = exec.calls.lock().unwrap().clone();
+    let bootstrap = calls
+        .iter()
+        .find(|c| c[1] == "bootstrap")
+        .expect("bootstrap");
+    assert_eq!(bootstrap[2], "gui/501");
+    assert!(bootstrap[3].ends_with("io.amicu.llama.support_chat_local.plist"));
+
+    let ctx = manager.context().expect("context");
+    assert_eq!(ctx.backend, crate::HostBackend::Launchd);
+    assert_eq!(ctx.uid, 501);
+    assert_eq!(ctx.domain.as_deref(), Some("gui/501"));
+}
+
+#[test]
+fn launchd_falls_back_to_the_user_domain_without_a_gui_session() {
+    let tmp = TempDir::new("launchd-user-domain");
+    // `launchctl print gui/501` fails: no GUI session.
+    let manager = LaunchdManager::new(NoGuiExec, tmp.file("agents"), tmp.file("logs"));
+    let ctx = manager.context().expect("context");
+    assert_eq!(ctx.domain.as_deref(), Some("user/501"));
+}
+
+struct NoGuiExec;
+
+impl CommandExec for NoGuiExec {
+    fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        let id = program == "id";
+        let gui = args.first() == Some(&"print") && args[1].starts_with("gui/");
+        Ok(ExecOutput {
+            success: !gui,
+            stdout: if id {
+                "501\n".to_owned()
+            } else {
+                String::new()
+            },
+            stderr: String::new(),
+        })
+    }
+}
+
+#[test]
+fn systemd_reports_its_uid() {
+    let tmp = TempDir::new("systemd-context");
+    let manager = SystemdManager::new(FakeExec::new(true, ""), &tmp.0);
+    let ctx = manager.context().expect("context");
+    assert_eq!(ctx.backend, crate::HostBackend::Systemd);
+    assert_eq!(ctx.uid, 501);
+    assert_eq!(ctx.domain, None);
 }
