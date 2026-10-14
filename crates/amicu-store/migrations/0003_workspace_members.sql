@@ -1,7 +1,7 @@
 -- Workspace membership: the join between a global user and a workspace, and the
 -- authority for WHO may act WHERE, as WHAT. `role` is one of
--- owner/admin/member/viewer. This is the table the claim-bound gate (issue
--- andypalmi/amicu-planning#129) consults to confirm a user's membership before
+-- owner/admin/member/viewer. This is the table the claim-bound gate
+-- consults to confirm a user's membership before
 -- minting a workspace-scoped token, and that privileged mutations re-check
 -- in-transaction.
 --
@@ -81,7 +81,7 @@ CREATE INDEX workspace_members_user_idx ON workspace_members (user_id);
 --
 -- As everywhere in this schema, the explicit WHERE predicate on every statement
 -- is the PRIMARY, always-on defense; RLS under the non-superuser amicu_app role
--- (see andypalmi/amicu-planning#114) is the backstop. FORCE applies the policy
+-- is the backstop. FORCE applies the policy
 -- to the table owner too.
 ALTER TABLE workspace_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workspace_members FORCE ROW LEVEL SECURITY;

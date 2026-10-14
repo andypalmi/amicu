@@ -41,7 +41,7 @@ pub const MAX_SIGNIN_PASSWORD_LEN: usize = 4096;
 /// [`AuthError::WeakPassword`] for a password below [`MIN_PASSWORD_LEN`] scalar
 /// values.
 ///
-// TODO(amicu-planning#96): strengthen beyond a length floor once a breach-corpus
+// TODO: strengthen beyond a length floor once a breach-corpus
 // (k-anonymity HIBP range API) or an entropy estimator (zxcvbn) dependency is
 // vetted for the MSRV-1.97, hermetic build. Kept a pure length check for now to
 // avoid a network dependency in the auth hot path and to stay offline-testable.

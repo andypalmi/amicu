@@ -6,7 +6,7 @@ import type { AnswerValue, MoneyAnswerValue } from '@/lib/recommend/answers';
 import type { QuestionDto } from '@/lib/recommend/candidates';
 
 // One engine-provided question's form control, used by the guided wizard's
-// questions step (andypalmi/amicu-planning#85). Values are kept as
+// questions step. Values are kept as
 // strings/booleans/money-pairs while editing; `lib/recommend/answers.ts`'s
 // `buildAnswers` casts them to the shape `/recommend/candidates` expects at
 // submit time.

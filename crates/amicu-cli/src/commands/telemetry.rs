@@ -1,5 +1,4 @@
 //! `amicu telemetry enable|disable|status` and the one-time consent prompt
-//! (amicu-planning#229, epic #226).
 //!
 //! Telemetry is opt-in and OFF by default. The choice lives in a user-level
 //! file (`$XDG_CONFIG_HOME/amicu/telemetry.json`, else

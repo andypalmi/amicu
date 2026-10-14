@@ -1,4 +1,4 @@
-//! Structured security events (andypalmi/amicu-planning#194).
+//! Structured security events.
 //!
 //! Every event is a `tracing` event on the stable target [`TARGET`]
 //! (`amicu::security`) with a fixed set of fields, so an operator can route

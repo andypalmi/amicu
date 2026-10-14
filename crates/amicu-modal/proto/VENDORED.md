@@ -20,12 +20,12 @@
 `task_command_router.proto` (the exec/stdin command-router service) is
 intentionally **not** vendored — this PR only needs `ClientHello` from the
 `ModalClient` service in `api.proto`, and the router service is out of
-scope per `andypalmi/amicu-planning#158`.
+scope per the Modal provider design.
 
 ## Drift check
 
 CI should diff this file against the pinned tag/commit above (same pattern
-as `andypalmi/amicu-planning#156`) so an upstream proto change is caught
+as the other vendored-file checks) so an upstream proto change is caught
 rather than silently drifting. Bumping the pin is a deliberate, reviewed
 change: update the tag/commit/date here, re-copy `api.proto`, and re-run
 `cargo build -p amicu-modal` to confirm the vendored file still compiles

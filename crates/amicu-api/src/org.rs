@@ -23,7 +23,7 @@
 //! when the caller's **org role** does not permit the action (e.g. a `Member`
 //! trying to remove someone). The messages differ so the two are never confused.
 //!
-//! # Claim-bound tenancy (andypalmi/amicu-planning#130)
+//! # Claim-bound tenancy
 //! The workspace a caller operates in is `claims.wsid` - resolved server-side
 //! from `workspace_members` when the token was minted, re-validated on every
 //! refresh rotation, and never asserted by the client. There is no
@@ -60,7 +60,7 @@
 //!
 //! # SSO is out of scope (deferred post-v1)
 //! Single sign-on (SAML/OIDC federation, SCIM provisioning) is intentionally not
-//! built here - see the `andypalmi/amicu-planning#92` SSO follow-up. Members are
+//! built here - a planned follow-up. Members are
 //! keyed by their first-party user id.
 
 use std::collections::BTreeMap;
@@ -90,8 +90,8 @@ use crate::engine::{AccessVerifier, WorkspaceContext};
 // permission type is `amicu_auth::Permission` - the SAME types the `wsrole`
 // claim, the store, and every enforcement call site use, so there is exactly
 // one definition of a role, a permission, and the role -> permission matrix
-// (`Role::grants`/`Role::permissions`) in the codebase
-// (andypalmi/amicu-planning#133). This module surfaces that shared matrix as
+// (`Role::grants`/`Role::permissions`) in the codebase.
+// This module surfaces that shared matrix as
 // the `GET /org/roles` catalog DTO; it holds no permission logic of its own.
 // ---------------------------------------------------------------------------
 
@@ -873,8 +873,8 @@ impl From<AuditEntry> for AuditEntryView {
 /// `required` (the base capability - [`Permission::InviteMember`] /
 /// [`Permission::ChangeRole`] / [`Permission::RemoveMember`]).
 ///
-/// Delegates to the SHARED [`amicu_auth::authorize_membership_mutation`]
-/// (andypalmi/amicu-planning#133) - the SAME function
+/// Delegates to the SHARED [`amicu_auth::authorize_membership_mutation`] -
+/// the SAME function
 /// `amicu_store::PostgresMembershipStore` calls for the Postgres backend - so
 /// the two backends can never drift.
 ///
@@ -898,8 +898,8 @@ fn authorize_membership_mutation(
 /// List the organization's members and their roles.
 ///
 /// Requires the `view_members` permission - Owner/Admin/Member hold it; a
-/// **Viewer does not** and is refused with `403` (andypalmi/amicu-planning#133:
-/// the enforced distinction that makes Viewer a real, more-restricted role).
+/// **Viewer does not** and is refused with `403`:
+/// the enforced distinction that makes Viewer a real, more-restricted role.
 #[utoipa::path(
     get,
     path = "/org/members",

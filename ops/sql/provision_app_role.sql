@@ -1,5 +1,4 @@
 -- Two-role production provisioning for amicu-store's Postgres schema
--- (andypalmi/amicu-planning#139, #143).
 --
 -- Shape: a MIGRATOR/OWNER role (`amicu_owner` below - name it however your
 -- infra prefers) creates and owns every table `amicu-server migrate` applies
@@ -131,7 +130,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE amicu_owner IN SCHEMA public
 ALTER DEFAULT PRIVILEGES FOR ROLE amicu_owner IN SCHEMA public
     GRANT USAGE, SELECT ON SEQUENCES TO amicu_app;
 
--- 4. Narrow the blanket DML above (andypalmi/amicu-planning#194).
+-- 4. Narrow the blanket DML above.
 --
 --    * AUDIT tables are append-only for the service: INSERT + SELECT only, so
 --      a compromised/buggy service cannot rewrite or erase the audit trail.

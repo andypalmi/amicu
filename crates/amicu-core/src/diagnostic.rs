@@ -289,7 +289,7 @@ pub mod catalog {
 
     /// `AMICU-PARSE-001` - HCL block is not closed.
     pub const PARSE_UNCLOSED_BLOCK: DiagnosticCode = DiagnosticCode::new(Category::Parse, 1);
-    // --- amicu-planning#35: generated HCL customize/plan display ---
+    // --- generated HCL customize/plan display ---
     /// `AMICU-PARSE-002` - HCL text is not syntactically valid; see the
     /// diagnostic message for detail. A generic parse-failure code, distinct
     /// from the more specific [`PARSE_UNCLOSED_BLOCK`], used whenever an
@@ -306,7 +306,7 @@ pub mod catalog {
     pub const SCHEMA_DUPLICATE_ID: DiagnosticCode = DiagnosticCode::new(Category::Schema, 2);
     /// `AMICU-SCHEMA-003` - an attribute or nested block that the schema does
     /// not define appears inside a resource (or its nested block), or at the
-    /// top level of the file (amicu-planning#157). Error, not a warning: a
+    /// top level of the file. Error, not a warning: a
     /// typo such as `contex_length` would otherwise be silently dropped and
     /// the field would quietly fall back to its default. Raised by the HCL
     /// front end (`amicu-hcl::HclError::UnknownField`).
@@ -315,7 +315,7 @@ pub mod catalog {
     pub const REF_UNKNOWN_RESOURCE: DiagnosticCode = DiagnosticCode::new(Category::Ref, 1);
     /// `AMICU-CAP-001` - runtime requires a GGUF model artifact.
     pub const CAP_RUNTIME_ARTIFACT_MISMATCH: DiagnosticCode = DiagnosticCode::new(Category::Cap, 1);
-    // --- amicu-planning#150: runtime escape hatch (extra_args / env) ---
+    // --- runtime escape hatch (extra_args / env) ---
     /// `AMICU-CAP-002` - an `extra_args` flag duplicates a flag already
     /// emitted by a typed field (e.g. `--ctx-size`, which `context_length`
     /// already renders). Error, not a warning: the raw flag would either
@@ -338,7 +338,7 @@ pub mod catalog {
     /// verdict for this deployment is unverified. Mirrored in the plan's
     /// `CostPerformance.assumptions` (`amicu_engine::planner`).
     pub const CAP_EXTRA_ARGS_PRESENT: DiagnosticCode = DiagnosticCode::new(Category::Cap, 4);
-    // --- amicu-planning#151: typed chat template fields ---
+    // --- typed chat template fields ---
     /// `AMICU-CAP-005` - a `llama_cpp` settings block sets both
     /// `chat_template` and `chat_template_file`. Error: they render mutually
     /// exclusive flags (`--chat-template` vs `--chat-template-file`), so
@@ -346,16 +346,16 @@ pub mod catalog {
     /// than guessing which one should win, and `plan_launch` refuses to
     /// build a launch at all.
     pub const CAP_CHAT_TEMPLATE_CONFLICT: DiagnosticCode = DiagnosticCode::new(Category::Cap, 5);
-    // --- amicu-planning#152: vLLM command renderer ---
+    // --- vLLM command renderer ---
     /// `AMICU-CAP-006` - a deployment's model artifact is GGUF but the
     /// runtime is vLLM. Warning, not an error: vLLM can load a single-file
     /// GGUF checkpoint, but the support is experimental (upstream vLLM docs),
     /// unlike llama.cpp where GGUF is the native, fully-supported format.
     /// Numbered 006, not 005: `AMICU-CAP-005` is
     /// `CAP_CHAT_TEMPLATE_CONFLICT`, registered by the concurrently-landing
-    /// amicu-planning#151 typed-fields PR (feat/typed-runtime-b, #146).
+    /// typed-fields PR.
     pub const CAP_VLLM_GGUF_EXPERIMENTAL: DiagnosticCode = DiagnosticCode::new(Category::Cap, 6);
-    // --- amicu-planning#151 PR C: typed speculative-decoding block ---
+    // --- typed speculative-decoding block ---
     /// `AMICU-CAP-007` - a `llama_cpp` deployment's `speculative { model = ... }`
     /// draft reference names the deployment's own primary model. Error:
     /// speculative decoding is only worth anything with a *smaller, cheaper*
@@ -364,18 +364,18 @@ pub mod catalog {
     /// memory for no speedup) and the fit check would count them twice.
     pub const CAP_SPECULATIVE_DRAFT_IS_PRIMARY: DiagnosticCode =
         DiagnosticCode::new(Category::Cap, 7);
-    // --- amicu-planning#180: provider-agnostic `scaling {}` block ---
+    // --- provider-agnostic `scaling {}` block ---
     /// `AMICU-CAP-008` - a deployment's `scaling {}` block has invalid
     /// values (`max_replicas`/`target_concurrency` below 1, a zero
     /// `scaledown_window`, or `min_replicas` above `max_replicas`). Error.
     pub const CAP_SCALING_INVALID: DiagnosticCode = DiagnosticCode::new(Category::Cap, 8);
     /// `AMICU-CAP-009` - a deployment sets `scaling {}` but its hardware
     /// profile's provider has no scaling mapping yet (only `modal` does;
-    /// amicu-planning#181 tracks the rest). Error rather than a silent no-op:
+    /// the rest are future work). Error rather than a silent no-op:
     /// the block's point is to cap spend, so ignoring it would be a lie.
     pub const CAP_SCALING_UNSUPPORTED_PROVIDER: DiagnosticCode =
         DiagnosticCode::new(Category::Cap, 9);
-    // --- amicu-planning#191: never silently drop the KV cache ---
+    // --- never silently drop the KV cache ---
     /// `AMICU-CAP-010` - a vLLM deployment's model does not declare
     /// `n_layers`/`n_kv_heads`/`head_dim`, so the KV cache is left out of the
     /// memory estimate and the fit check covers weights only. Warning, not an
@@ -389,7 +389,7 @@ pub mod catalog {
     pub const MEM_ARTIFACT_OVERSIZE: DiagnosticCode = DiagnosticCode::new(Category::Mem, 2);
     /// `AMICU-POLICY-001` - deployment exceeds the configured budget.
     pub const POLICY_BUDGET_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Policy, 1);
-    // --- amicu-planning#24: region / data-residency validation ---
+    // --- region / data-residency validation ---
     /// `AMICU-POLICY-002` - a deployment's region violates the configured
     /// residency / region allowlist (or matches a deny rule's region).
     pub const POLICY_REGION_RESIDENCY: DiagnosticCode = DiagnosticCode::new(Category::Policy, 2);
@@ -397,7 +397,7 @@ pub mod catalog {
     /// a deny rule's provider).
     pub const POLICY_PROVIDER_NOT_ALLOWED: DiagnosticCode =
         DiagnosticCode::new(Category::Policy, 3);
-    // --- amicu-planning#119: HCL secret safety ---
+    // --- HCL secret safety ---
     /// `AMICU-POLICY-004` - a secret-designated field (`api_key`, `token`,
     /// `password`, or an `env` map value) was given as a literal instead of a
     /// `secret(...)` reference. Structural, zero-false-positive: this is a
@@ -413,9 +413,9 @@ pub mod catalog {
     /// `# amicu:allow` comment on the same line.
     pub const POLICY_SECRET_PATTERN_SUSPECTED: DiagnosticCode =
         DiagnosticCode::new(Category::Policy, 5);
-    // --- amicu-planning#150: runtime escape hatch (extra_args / env) ---
+    // --- runtime escape hatch (extra_args / env) ---
     /// `AMICU-POLICY-006` - a runtime settings block's `env` map (the
-    /// llama.cpp / vLLM `extra_args`/`env` escape hatch, amicu-planning#150)
+    /// llama.cpp / vLLM `extra_args`/`env` escape hatch)
     /// has a value that matches a high-confidence secret shape (AWS access
     /// key, OpenAI-style key, PEM header, JWT, or a high-entropy token) -
     /// the same detectors [`POLICY_SECRET_PATTERN_SUSPECTED`] uses. Warning
@@ -425,7 +425,7 @@ pub mod catalog {
     /// `credential`, not a structural rejection.
     pub const POLICY_RUNTIME_ENV_SECRET_SUSPECTED: DiagnosticCode =
         DiagnosticCode::new(Category::Policy, 6);
-    // --- amicu-planning#191: per-deployment endpoint API keys ---
+    // --- per-deployment endpoint API keys ---
     /// `AMICU-POLICY-007` - a deployment whose endpoint is reachable
     /// off-machine (any provider other than the local ones, e.g. `modal`)
     /// declares no `api_key`. Error: an off-machine endpoint with no
@@ -480,37 +480,26 @@ pub mod catalog {
             PARSE_INVALID_SYNTAX,
             SCHEMA_MISSING_REQUIRED,
             SCHEMA_DUPLICATE_ID,
-            // amicu-planning#157 addition:
             SCHEMA_UNKNOWN_ATTRIBUTE,
             REF_UNKNOWN_RESOURCE,
             CAP_RUNTIME_ARTIFACT_MISMATCH,
-            // amicu-planning#150 additions:
             CAP_EXTRA_ARG_DUPLICATES_TYPED,
             CAP_EXTRA_ARG_DENYLISTED,
             CAP_EXTRA_ARGS_PRESENT,
-            // amicu-planning#151 additions:
             CAP_CHAT_TEMPLATE_CONFLICT,
-            // amicu-planning#152 addition:
             CAP_VLLM_GGUF_EXPERIMENTAL,
-            // amicu-planning#151 PR C addition:
             CAP_SPECULATIVE_DRAFT_IS_PRIMARY,
-            // amicu-planning#180 additions:
             CAP_SCALING_INVALID,
             CAP_SCALING_UNSUPPORTED_PROVIDER,
-            // amicu-planning#191 addition:
             CAP_KV_CACHE_NOT_ESTIMATED,
             MEM_VRAM_EXCEEDED,
             MEM_ARTIFACT_OVERSIZE,
             POLICY_BUDGET_EXCEEDED,
-            // amicu-planning#24 additions:
             POLICY_REGION_RESIDENCY,
             POLICY_PROVIDER_NOT_ALLOWED,
-            // amicu-planning#119 additions:
             POLICY_SECRET_LITERAL_REJECTED,
             POLICY_SECRET_PATTERN_SUSPECTED,
-            // amicu-planning#150 addition:
             POLICY_RUNTIME_ENV_SECRET_SUSPECTED,
-            // amicu-planning#191 addition:
             POLICY_ENDPOINT_API_KEY_REQUIRED,
             POLICY_ENDPOINT_API_KEY_INVALID,
             STATE_LOCKED,
@@ -522,7 +511,6 @@ pub mod catalog {
             PROVIDER_UNKNOWN_INSTANCE,
             PROVIDER_BACKEND,
             PROVIDER_CREDENTIALS_REJECTED,
-            // amicu-planning#158 addition:
             PROVIDER_UNSUPPORTED_OPERATION,
         ]
     }

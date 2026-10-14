@@ -52,7 +52,7 @@ pub struct ResourceEstimate {
     pub gpu_count: u32,
     /// A computed KV-cache memory estimate (`amicu_registry::fit::kv_cache_bytes`),
     /// present only when the model declares full shape metadata and the
-    /// deployment sets at least one KV-cache dtype (amicu-planning#151).
+    /// deployment sets at least one KV-cache dtype.
     /// `None` otherwise - the flat overhead band is the only estimate in that
     /// case, unchanged from before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -39,7 +39,7 @@ export async function readRecommendBody(
  * endpoint needs; `base_graph` is optional and, if present, only checked for
  * being an object (its shape is the API's job to validate as a `Graph`).
  * Returns the typed body or a 400 Response, mirroring `readRecommendBody`
- * above (andypalmi/amicu-planning#35).
+ * above.
  */
 export async function readCustomizeBody(
   request: Request,

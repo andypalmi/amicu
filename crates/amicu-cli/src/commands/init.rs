@@ -129,7 +129,7 @@ fn ensure_dir(out: &mut dyn Write, path: &Path, created: &mut u32) -> Result<(),
 }
 
 /// Make sure the ignore file covers `.amicu/`: local state is per-machine
-/// and must not be shared via version control (amicu-planning#218). Appends
+/// and must not be shared via version control. Appends
 /// when the file exists without the entry; creates it otherwise; idempotent.
 fn ensure_ignore_entry(out: &mut dyn Write, path: &Path) -> Result<u32, CliError> {
     let existing = match fs::read_to_string(path) {

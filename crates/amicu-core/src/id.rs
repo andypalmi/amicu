@@ -11,7 +11,7 @@ use std::fmt;
 /// Discriminates the ten canonical resource kinds. Useful for generic
 /// addressing and for reporting dangling references by kind.
 ///
-/// `Credential` (amicu-planning#119) is a named bundle of secret-designated
+/// `Credential` is a named bundle of secret-designated
 /// fields (`api_key`, `token`, `password`, an `env` map); it holds only
 /// [`crate::secret::SecretRef`] pointers, never secret bytes, so it carries no
 /// outgoing references and is exempt from [`crate::graph::Graph::missing_references`].

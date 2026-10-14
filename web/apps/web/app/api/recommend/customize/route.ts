@@ -2,8 +2,7 @@ import { engineClient } from '@/lib/engine/client';
 import { guardEngine, upstreamUnreachable } from '@/lib/engine/bff';
 import { readCustomizeBody } from '@/lib/recommend/bff';
 
-// BFF: POST /api/recommend/customize -> Management API POST /recommend/customize
-// (andypalmi/amicu-planning#35).
+// BFF: POST /api/recommend/customize -> Management API POST /recommend/customize.
 // Session-guarded; forwards `hcl` + optional `base_graph` and mirrors the
 // upstream status + JSON (200 CustomizeResponseDto, 400 malformed base_graph /
 // body, 401/403 auth, 422 CustomizeResponseDto carrying the blocking

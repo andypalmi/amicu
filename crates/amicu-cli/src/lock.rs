@@ -1,4 +1,4 @@
-//! Advisory lock on the project's local state (amicu-planning#178).
+//! Advisory lock on the project's local state.
 //!
 //! Two `amicu apply` runs (or an apply and `amicu modal stop` pruning state)
 //! would otherwise interleave their read-modify-write of

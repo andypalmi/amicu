@@ -373,8 +373,8 @@ export interface paths {
         /**
          * List the organization's members and their roles.
          * @description Requires the `view_members` permission - Owner/Admin/Member hold it; a
-         *     **Viewer does not** and is refused with `403` (andypalmi/amicu-planning#133:
-         *     the enforced distinction that makes Viewer a real, more-restricted role).
+         *     **Viewer does not** and is refused with `403`:
+         *     the enforced distinction that makes Viewer a real, more-restricted role.
          */
         get: operations["list_members_handler"];
         put?: never;

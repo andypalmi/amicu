@@ -1,7 +1,7 @@
 # Signing-key rotation runbook
 
-Operational procedure for the durable JWT signing key introduced by
-andypalmi/amicu-planning#140. Covers generating a key, first deploy, rotating
+Operational procedure for the durable JWT signing key.
+Covers generating a key, first deploy, rotating
 a key across replicas, and how long a retired key must stay published before
 it is safe to drop.
 
@@ -14,8 +14,8 @@ signing key" section).
 `amicu-server` mints access tokens as Ed25519-signed JWTs and publishes the
 public half of every active/retiring key at `GET /.well-known/jwks.json`. Each
 key's `kid` is deterministically derived — `SHA256(public_key)` truncated to
-22 base64url characters (132 bits, widened from an original 16/96 bits by
-andypalmi/amicu-planning#147) — so the SAME key always produces the SAME
+22 base64url characters (132 bits, widened from an original 16/96 bits)
+— so the SAME key always produces the SAME
 `kid` on every replica, with no coordination or handshake required between
 them.
 
@@ -164,8 +164,8 @@ decoding key to be evicted — see `KeyringJwksProvider`'s doc comment in
 ## Infra ownership
 
 The `AMICU_SIGNING_KEY_PEM` (and `AMICU_SIGNING_KEYS_RETIRING_PEM`) secret is
-expected to be managed by the infra Terraform repo,
-`github.com/andypalmi/amicu-infra` (a separate repo, out of scope for this
+expected to be managed by the infra Terraform repo
+(a separate, private repo, out of scope for this
 document) — that is where the secret-manager resource, its versions, and the
 per-replica env wiring should live. This runbook only covers the operational
 procedure once that plumbing exists.

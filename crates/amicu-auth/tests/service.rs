@@ -836,7 +836,7 @@ async fn private_key_never_appears_in_serialized_or_logged_output() {
 }
 
 // ---------------------------------------------------------------------------
-// andypalmi/amicu-planning#129: workspace claim in tokens.
+// workspace claim in tokens.
 //
 // A controllable membership authority so a test can seed / mutate / revoke a
 // user's membership in an arbitrary workspace and assert the issuer's

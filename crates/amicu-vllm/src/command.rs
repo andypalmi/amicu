@@ -1,7 +1,7 @@
 //! Rendering the `vllm serve` launch: a structured argv (the source of truth
 //! supervisors spawn from) plus a shell-quoted display string.
 //!
-//! Mirrors `amicu_llamacpp::command`'s shape (amicu-planning#152): typed
+//! Mirrors `amicu_llamacpp::command`'s shape: typed
 //! fields render first, `extra_args` verbatim after, argv is what actually
 //! spawns, `text` is display-only.
 

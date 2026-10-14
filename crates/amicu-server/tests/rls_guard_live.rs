@@ -1,5 +1,5 @@
 //! Live-database coverage for the Cloud Run bootstrap's Postgres-dependent
-//! pieces (andypalmi/amicu-planning#139): `GET /readyz` against a real pool,
+//! pieces: `GET /readyz` against a real pool,
 //! the production RLS-bypass startup guard
 //! ([`amicu_store::probe_rls_bypass_risk`]), and the two-role production
 //! topology (`amicu_server::migrate`/`migrate_database_url` as the
@@ -98,7 +98,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 /// A disposable, test-only Ed25519 PKCS#8 PEM fixture (same one
-/// `signing_key_replicas.rs` uses as its "old" key) - andypalmi/amicu-planning#140's
+/// `signing_key_replicas.rs` uses as its "old" key) - the
 /// durable-signing-key production gate ([`Error::MissingSigningKey`]) means
 /// `two_role_production_topology`'s `Environment::Production` boots need a
 /// real key now, not just a real database.
@@ -358,7 +358,7 @@ async fn two_role_production_topology() {
     let mut prod_config = test_config();
     prod_config.environment = Environment::Production;
     // `Environment::Production` refuses to boot without a real signing key
-    // (andypalmi/amicu-planning#140's `Error::MissingSigningKey` gate) - this
+    // (the `Error::MissingSigningKey` gate) - this
     // test is about the RLS-bypass guard, not signing keys, so give it a
     // disposable fixture key rather than exercise that gate here too.
     prod_config.signing_key_pem = Some(RedactedEnvString::new(TEST_SIGNING_KEY_PEM));

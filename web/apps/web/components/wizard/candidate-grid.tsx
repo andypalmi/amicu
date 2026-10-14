@@ -5,7 +5,7 @@ import { EmptyState } from '@/components/common/empty-state';
 import { selectableCardClassName } from '@/components/common/selectable-card';
 import { archetypeLabel, type CandidateDto } from '@/lib/recommend/candidates';
 
-// The guided wizard's candidates step (andypalmi/amicu-planning#85): renders
+// The guided wizard's candidates step: renders
 // the ranked `CandidateDto[]` from `POST /recommend/candidates` as a card
 // grid. Selection is tracked by the caller as `selectedIndex: number | null`
 // (fixing a review nit in the #31 exercise route's candidate-picker.tsx, which

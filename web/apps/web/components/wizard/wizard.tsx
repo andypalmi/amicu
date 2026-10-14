@@ -27,7 +27,7 @@ import {
 } from '@/lib/wizard/format';
 import { errorMessage, looksLikeConfigDetail } from '@/lib/configs/format';
 
-// Exported so the guided wizard's <QuestionForm> (andypalmi/amicu-planning#85)
+// Exported so the guided wizard's <QuestionForm>
 // can reuse the same currency list for its money-question control instead of
 // re-declaring it.
 export const CURRENCIES = ['USD', 'EUR', 'GBP'] as const;

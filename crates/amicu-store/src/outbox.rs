@@ -1,4 +1,4 @@
-//! Transactional email outbox (andypalmi/amicu-planning#141).
+//! Transactional email outbox.
 //!
 //! # Why an outbox at all
 //!

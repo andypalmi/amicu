@@ -419,7 +419,7 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
         };
         // A settings `env` key that is also a resolved secret's name is
         // ambiguous - refuse to guess which one the caller meant, rather than
-        // letting one silently shadow the other (amicu-planning#150).
+        // letting one silently shadow the other.
         if let Some(s) = secrets.iter().find(|s| settings_env.contains_key(&s.name)) {
             return Err(LlamaCppError::Supervisor(format!(
                 "env var '{}' is set both by the deployment's `env` block and a resolved secret",

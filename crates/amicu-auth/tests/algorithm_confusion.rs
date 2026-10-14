@@ -1,5 +1,5 @@
-//! Algorithm-confusion regression coverage for [`Verifier`] (security review
-//! finding N-4 on andypalmi/amicu-planning#140's PR): the verifier is built
+//! Algorithm-confusion regression coverage for [`Verifier`] (a security review
+//! finding): the verifier is built
 //! with `Validation::new(Algorithm::EdDSA)` (see `src/verifier.rs`), which
 //! pins the single algorithm `jsonwebtoken::decode` will accept. This proves
 //! two classic JWT algorithm-confusion attacks are rejected rather than

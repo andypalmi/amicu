@@ -183,7 +183,7 @@ fn validate_references(graph: &Graph) -> Result<(), HclError> {
         )?;
         // The llama.cpp `speculative {}` draft model is emitted as a
         // `model.<id>.id` traversal like any other edge, so it needs the same
-        // identifier check (amicu-planning#151 PR C).
+        // identifier check.
         if let Runtime::LlamaCpp(s) = &d.runtime
             && let Some(spec) = &s.speculative
         {
@@ -421,7 +421,7 @@ fn deployment_block(d: &Deployment) -> Block {
     resource("deployment", d.id.as_str(), body.build())
 }
 
-/// A deployment's `scaling {}` block (amicu-planning#180); the window is
+/// A deployment's `scaling {}` block; the window is
 /// written as a canonical duration string (`"15m"`).
 fn scaling_block(sc: &ScalingSettings) -> Block {
     let mut b = Block::builder("scaling");
@@ -440,7 +440,7 @@ fn scaling_block(sc: &ScalingSettings) -> Block {
     b.build()
 }
 
-/// A llama.cpp `speculative {}` block (amicu-planning#151 PR C). `model` is
+/// A llama.cpp `speculative {}` block. `model` is
 /// emitted as a `model.<id>.id` traversal - the same reference form the
 /// deployment's own `model` attribute uses - because it is a real graph edge,
 /// not a path string. Its identifier-safety is checked up front by
@@ -635,7 +635,7 @@ fn use_case_block(u: &amicu_core::resource::UseCase) -> Block {
     resource("use_case", u.id.as_str(), body.build())
 }
 
-/// A `credential` resource (amicu-planning#119): every secret-designated
+/// A `credential` resource: every secret-designated
 /// field always emits a `secret(...)` reference, matching what
 /// `amicu_hcl::de` accepts back on parse (see `secret_ref_from_expr`).
 fn credential_block(c: &Credential) -> Block {

@@ -76,8 +76,8 @@ impl EngineApiState {
 }
 
 /// The verified per-request tenancy context, derived ENTIRELY from the access
-/// token's claims - never from a request header
-/// (andypalmi/amicu-planning#130). Every auth gate stashes one of these in the
+/// token's claims - never from a request header.
+/// Every auth gate stashes one of these in the
 /// request extensions after verifying the token, so a handler always scopes its
 /// work to the workspace the token was minted for (`claims.wsid`), acting as the
 /// subject (`claims.sub`) with the role and tier the claim carries. The client
@@ -194,8 +194,8 @@ pub struct PlanRequest {
 
 /// Error surfaced by the engine handlers.
 ///
-/// A runtime adapter failure while planning is *not* a variant here
-/// (amicu-planning#150 review hardening): [`amicu_engine::build_plan`] folds
+/// A runtime adapter failure while planning is *not* a variant here:
+/// [`amicu_engine::build_plan`] folds
 /// any such failure into the [`amicu_engine::PlanError`] diagnostic report
 /// instead, which `plan_handler` handles directly as a `422` - there is no
 /// remaining path that needs to turn a bare `AdapterError` into a `500`.
@@ -292,7 +292,7 @@ pub(crate) async fn plan_handler(
         // conflict); `build_plan` hands back every diagnostic it collected
         // instead of a bare adapter error, so this stays a structured `422`
         // rather than falling through to `EngineHttpError::Plan`'s opaque
-        // `500` (amicu-planning#150 review hardening).
+        // `500`.
         Err(amicu_engine::PlanError(report)) => {
             return Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(report)).into_response());
         }

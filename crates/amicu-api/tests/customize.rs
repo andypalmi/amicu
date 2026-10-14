@@ -1,5 +1,5 @@
 //! Integration tests for the stateless, auth-gated deterministic customize
-//! endpoint: `POST /recommend/customize` (andypalmi/amicu-planning#35).
+//! endpoint: `POST /recommend/customize`.
 
 // `Duration::from_mins` is unstable on our MSRV 1.97; keep `from_secs`.
 #![allow(clippy::duration_suboptimal_units)]

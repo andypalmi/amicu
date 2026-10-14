@@ -1,9 +1,9 @@
 # Deploying amicu (Cloud Run + Cloudflare Workers)
 
-Short runbook for **this** repo's deploy artifacts (amicu-planning#143). The
+Short runbook for **this** repo's deploy artifacts. The
 durable infra (Cloud Run service/Job, Secret Manager, IAM, WIF, Cloudflare
 DNS) lives in the separate Terraform repo — **the master plan is
-`amicu-infra/docs/plans/cloud-run-deploy.md`**; read that first for the
+`docs/plans/cloud-run-deploy.md` in the infrastructure repo**; read that first for the
 target topology, numbered decisions, and the first-deploy checklist. This
 page covers only what runs from `amicu` itself: the image contract, the two
 GitHub Actions deploy workflows, and the repo vars/secrets they need.
@@ -11,12 +11,12 @@ GitHub Actions deploy workflows, and the repo vars/secrets they need.
 ## Image contract
 
 One image (`Dockerfile`, root of this repo) serves both Cloud Run resources
-amicu-infra provisions:
+the infrastructure repo provisions:
 
-| Resource | amicu-infra name | Invocation |
+| Resource | Infrastructure name | Invocation |
 | --- | --- | --- |
 | Service | `amicu-api` | `ENTRYPOINT` only, no args — binds `$PORT` (Cloud Run's injected env var; `AMICU_BIND`/`--bind` overrides it, see `crates/amicu-server/src/lib.rs`). |
-| Job | `amicu-migrate` | Terraform-managed `command` override: `["/usr/local/bin/amicu-server", "migrate"]` (amicu-planning#127's `Command::Migrate` in `crates/amicu-server/src/main.rs`) — applies pending schema migrations as the schema-owning role, prints how many it applied, and exits. No RLS-bypass guard runs (the migrator is expected to own the schema). |
+| Job | `amicu-migrate` | Terraform-managed `command` override: `["/usr/local/bin/amicu-server", "migrate"]` (the `Command::Migrate` in `crates/amicu-server/src/main.rs`) — applies pending schema migrations as the schema-owning role, prints how many it applied, and exits. No RLS-bypass guard runs (the migrator is expected to own the schema). |
 
 - **Health/readiness**: `GET /healthz` (startup probe) and `GET /readyz`
   (liveness probe, checks the Postgres pool with a `SELECT 1` under
@@ -33,10 +33,10 @@ amicu-infra provisions:
   no `libssl.so` anywhere, hence the distroless `cc-debian12:nonroot`
   runtime (glibc + libgcc + the CA trust store for validating outbound
   HTTPS/SMTP server certs, nothing else).
-- **Required env** — see amicu-infra's `docs/env-matrix.md` for the
+- **Required env** — see the infrastructure repo's `docs/env-matrix.md` for the
   authoritative, component-by-component table (secret-backed vs plain, every
   Cloud Run resource, every gating flag). Short version: `DATABASE_URL` +
-  `AMICU_SIGNING_KEY_PEM` (amicu-planning#140) are the only two secrets
+  `AMICU_SIGNING_KEY_PEM` are the only two secrets
   required before the Cloud Run resources can even start;
   `AMICU_ISSUER`/`AMICU_AUDIENCE`/`AMICU_WEB_URL`/`AMICU_TRUSTED_PROXIES` and
   the rest are plain env vars Terraform sets directly. The outbox-drain
@@ -46,7 +46,7 @@ amicu-infra provisions:
   optional `AMICU_INTERNAL_TOKEN` secret) are covered in "Cloud Scheduler →
   outbox drain" below.
 
-## Signing key (amicu-planning#140)
+## Signing key
 
 `amicu-server` no longer generates an ephemeral signing key at boot: the
 ACTIVE key comes from `AMICU_SIGNING_KEY_PEM` (Ed25519 PKCS#8 PEM), identical
@@ -66,25 +66,25 @@ amicu-server gen-signing-key | gcloud secrets versions add \
 Rotation (new active key, old key kept verify-only via
 `AMICU_SIGNING_KEYS_RETIRING_PEM` until every token it signed has expired,
 then dropped) is the full operational procedure in
-`amicu-infra/docs/runbook.md`'s "Rotate the signing key" section; the
+the infrastructure repo's `docs/runbook.md`'s "Rotate the signing key" section; the
 in-repo rationale (stable `kid` derivation, retention-window math, what
 breaks if a retiring key is dropped too early) lives in
 `docs/ops/signing-key-rotation.md`.
 
-## Shared rate limiter + Cloudflare edge trust (amicu-planning#142)
+## Shared rate limiter + Cloudflare edge trust
 
 Cloud Run autoscales `0..N` stateless replicas behind Google's own load
 balancer, which in turn sits behind the Cloudflare **api-proxy Worker**
-(`amicu-infra/fallback/api-proxy-worker`) fronting this service. Two
+(the infrastructure repo's `fallback/api-proxy-worker`) fronting this service. Two
 consequences for anything keyed on "the client":
 
 - The credential-route rate limiter (`crates/amicu-api/src/ratelimit.rs`) is
   **Postgres-backed and shared across every replica** whenever `DATABASE_URL`
   is set — the same single shared pool every replica already opens
-  (amicu-planning#139) backs `PostgresRateLimitStore`'s one-round-trip atomic
+  backs `PostgresRateLimitStore`'s one-round-trip atomic
   upsert (`crates/amicu-store/migrations/0014_rate_limit_buckets.sql`).
   `AMICU_ENV=production` requires this path: it already refuses to boot
-  without `DATABASE_URL` (amicu-planning#127's fail-fast gate), so the
+  without `DATABASE_URL` (the fail-fast gate), so the
   in-memory limiter — kept only for dev/tests/DB-less self-host, where a
   process-local counter resetting on every cold start is an accepted
   trade-off — is never reachable in production. **Fails open** on a database
@@ -105,21 +105,21 @@ consequences for anything keyed on "the client":
 
 | Env var | Secret? | Default | Purpose |
 | --- | --- | --- | --- |
-| `AMICU_EDGE_TOKEN` | **yes** | unset | Shared secret the api-proxy Worker attaches as `X-Amicu-Edge-Token` on every request it forwards. Store in Secret Manager for Cloud Run (`AMICU_EDGE_TOKEN`, see amicu-infra's `docs/env-matrix.md`) **and** as the Worker's `EDGE_TOKEN` secret (`wrangler secret put EDGE_TOKEN` in `amicu-infra/fallback/api-proxy-worker/`) — same value, provisioned independently on each side, never in Terraform state. Generate with `openssl rand -base64 32`. Compared constant-time; never logged. |
-| `AMICU_REQUIRE_EDGE_TOKEN` | no | `false` | When `true`, a request without a valid `X-Amicu-Edge-Token` is rejected `403` before any handler runs — closes the "raw `*.run.app` URL bypasses Cloudflare" gap outright. `GET /healthz`/`GET /readyz` are exempt (Cloud Run's own probes carry no such header). Requires `AMICU_EDGE_TOKEN` to also be set — booting with `true` and no token is a hard startup error (a deployment that would `403` every public request is refused rather than started). Defaults `false` in every environment, including production: turning it on is a deliberate operator step, gated behind amicu-infra's `optional_secrets_enabled.AMICU_EDGE_TOKEN`, taken once the Worker + token pair are actually provisioned — defaulting it on would break the very first production boot, before that provisioning step ever runs. |
+| `AMICU_EDGE_TOKEN` | **yes** | unset | Shared secret the api-proxy Worker attaches as `X-Amicu-Edge-Token` on every request it forwards. Store in Secret Manager for Cloud Run (`AMICU_EDGE_TOKEN`, see the infrastructure repo's `docs/env-matrix.md`) **and** as the Worker's `EDGE_TOKEN` secret (`wrangler secret put EDGE_TOKEN` in the infrastructure repo's api-proxy Worker directory) — same value, provisioned independently on each side, never in Terraform state. Generate with `openssl rand -base64 32`. Compared constant-time; never logged. |
+| `AMICU_REQUIRE_EDGE_TOKEN` | no | `false` | When `true`, a request without a valid `X-Amicu-Edge-Token` is rejected `403` before any handler runs — closes the "raw `*.run.app` URL bypasses Cloudflare" gap outright. `GET /healthz`/`GET /readyz` are exempt (Cloud Run's own probes carry no such header). Requires `AMICU_EDGE_TOKEN` to also be set — booting with `true` and no token is a hard startup error (a deployment that would `403` every public request is refused rather than started). Defaults `false` in every environment, including production: turning it on is a deliberate operator step, gated behind the infrastructure repo's `optional_secrets_enabled.AMICU_EDGE_TOKEN`, taken once the Worker + token pair are actually provisioned — defaulting it on would break the very first production boot, before that provisioning step ever runs. |
 | `AMICU_SIGNUPS_ENABLED` | no | `false` | Public sign-ups are CLOSED unless this is exactly `true` (`--signups-enabled`). Closed => `POST /signup` answers `403` `{"error":..., "code":"signups_disabled"}` before doing any work; invite acceptance, login, verify and verify/resend are unaffected. Self-host/dev must set `true` to allow registration. The web app's `SIGNUPS_ENABLED` mirrors this for the UI. |
 | `AMICU_RATE_LIMIT_TIMEOUT_MS` | no | `1000` | Upper bound the Postgres-backed rate limiter's `check` waits for the database hit before failing OPEN — its own dedicated budget, independent of `AMICU_DB_ACQUIRE_TIMEOUT_SECS`, mirroring `AMICU_READYZ_TIMEOUT_MS`'s relationship to that same acquire timeout. A timeout is treated exactly like a database error: it fails OPEN and counts toward the same sampled `WARNING`/`fail_open_count` reporting. Only consulted on the Postgres path — the in-memory limiter never awaits. |
 
 Independent of both: `AMICU_TRUSTED_PROXIES` keeps governing the
 non-Cloudflare `X-Forwarded-For` path unchanged — see
 `crates/amicu-server/src/lib.rs`'s existing table entry. The Cloud Run
-default recorded in amicu-infra's `docs/env-matrix.md` (`0.0.0.0/0`, flagged
+default recorded in the infrastructure repo's `docs/env-matrix.md` (`0.0.0.0/0`, flagged
 **UNVERIFIED** pending empirical confirmation of the actual ingress peer) is
 untouched by this change; once a valid edge token is presented,
 `CF-Connecting-IP` is used instead and `AMICU_TRUSTED_PROXIES` is not
 consulted for that request at all.
 
-## Auth hardening env (amicu-planning#194)
+## Auth hardening env
 
 | Env var | Secret? | Default | Purpose |
 | --- | --- | --- | --- |
@@ -150,8 +150,8 @@ transactional email cannot be sent "after" a response. Verification,
 password-reset and account-exists messages are therefore written to the
 `email_outbox` table inside the request that triggers them (in the same
 transaction as the token mint, on the Postgres path), and actually delivered by
-an authenticated endpoint that `amicu-infra`'s `modules/scheduler` calls on a
-fixed cadence — amicu-planning#141.
+an authenticated endpoint that the infrastructure repo's `modules/scheduler` calls on a
+fixed cadence.
 
 | | |
 | --- | --- |
@@ -210,14 +210,14 @@ fixed cadence — amicu-planning#141.
 
 ## `amicu_app` / `amicu_owner` DB roles
 
-`ops/sql/provision_app_role.sql` (landed with amicu-planning#127) is the
+`ops/sql/provision_app_role.sql` is the
 canonical provisioning script: a schema-**owning** `amicu_owner` role (runs
 `amicu-server migrate`) and a least-privilege, DML-only `amicu_app` role
 (runs the service), least-privilege enforced by `AMICU_ENV=production`'s
 startup guard refusing to boot as anything that would bypass RLS. Run it
 once per database as documented in its header comment.
 
-**Naming note for whoever fills in `DATABASE_URL_MIGRATE`**: amicu-infra's
+**Naming note for whoever fills in `DATABASE_URL_MIGRATE`**: the infrastructure repo's
 own README/docs describe the migrate connection as using Supabase's built-in
 `postgres` role. This repo's actual provisioning script does not reuse that
 role directly — it creates a dedicated `amicu_owner` role instead (never
@@ -259,11 +259,10 @@ Deploys use `github.sha` (the dispatched `main` commit).
    build & push the image to Artifact Registry, tagged with the deployed commit's SHA and `:latest` → update
    + execute the `amicu-migrate` Job with the new image, **waiting** for it
    to finish → only on success, `gcloud run deploy amicu-api --image …`.
-   Migrate-before-deploy, same order as `safecheck-backend`'s `backend.yml`
-   — fail loud before rolling the service onto a schema it doesn't match.
+   Migrate-before-deploy — fail loud before rolling the service onto a schema it doesn't match.
    Every `gcloud` call passes `--image` only; every other setting (env
    vars, secret refs, scaling, probes, ingress) stays Terraform-managed
-   (`amicu-infra/modules/cloud-run-api`'s `lifecycle.ignore_changes` on
+   (the infrastructure repo's `modules/cloud-run-api`'s `lifecycle.ignore_changes` on
    `template[0].containers[0].image`/`client`/`client_version` only), so
    this workflow can never fight a later `terraform apply`.
 2. **`deploy-web.yml`** (manual `workflow_dispatch` on `main`): pnpm install →
@@ -278,23 +277,23 @@ Deploys use `github.sha` (the dispatched `main` commit).
 
 | Name | Kind | Consumed by | Value / where it comes from |
 | --- | --- | --- | --- |
-| `WIF_PROVIDER` | repo variable | `deploy-api.yml` | `amicu-infra`'s `envs/prod` output `wif_provider_name` (`terraform output wif_provider_name`). |
-| `WIF_SERVICE_ACCOUNT` | repo variable | `deploy-api.yml` | `amicu-infra`'s output `deploy_service_account_email`. |
-| `GCP_PROJECT_ID` | repo variable | `deploy-api.yml` | `amicu-infra/envs/prod/variables.tf`'s `project_id` (default `amicu-prod`) — whatever's actually in `terraform.tfvars`. |
-| `GCP_REGION` | repo variable | `deploy-api.yml` | `amicu-infra/envs/prod/variables.tf`'s `region` (default `europe-west1`). |
-| `CLOUDFLARE_API_TOKEN` | repo **secret** | `deploy-web.yml` | Same token amicu-infra's README documents creating (Cloudflare dashboard → API Tokens), scopes listed there. Set on both repos. |
-| `CLOUDFLARE_ACCOUNT_ID` | repo variable | `deploy-web.yml` | Cloudflare dashboard (Workers & Pages → Overview, right sidebar) — not a Terraform output (amicu-infra's Cloudflare resources are zone-scoped, never needed the account id). |
+| `WIF_PROVIDER` | repo variable | `deploy-api.yml` | the infrastructure repo's `envs/prod` output `wif_provider_name` (`terraform output wif_provider_name`). |
+| `WIF_SERVICE_ACCOUNT` | repo variable | `deploy-api.yml` | the infrastructure repo's output `deploy_service_account_email`. |
+| `GCP_PROJECT_ID` | repo variable | `deploy-api.yml` | the infrastructure repo's `envs/prod/variables.tf`'s `project_id` (default `amicu-prod`) — whatever's actually in `terraform.tfvars`. |
+| `GCP_REGION` | repo variable | `deploy-api.yml` | the infrastructure repo's `envs/prod/variables.tf`'s `region` (default `europe-west1`). |
+| `CLOUDFLARE_API_TOKEN` | repo **secret** | `deploy-web.yml` | Same token the infrastructure repo's README documents creating (Cloudflare dashboard → API Tokens), scopes listed there. Set on both repos. |
+| `CLOUDFLARE_ACCOUNT_ID` | repo variable | `deploy-web.yml` | Cloudflare dashboard (Workers & Pages → Overview, right sidebar) — not a Terraform output (the infrastructure repo's Cloudflare resources are zone-scoped, never needed the account id). |
 | `NEXT_PUBLIC_SITE_URL` | repo variable | `deploy-web.yml` | The UI's public origin, `https://amicu.dev` (served by the Worker custom-domain route in `web/apps/web/wrangler.jsonc`; `www.amicu.dev` redirects to it; the API is `https://api.amicu.dev`). Build-time only: inlined into the client bundle by `next build`, must be set correctly before `cf:build` runs. |
 
 The Artifact Registry repo id (`amicu`), the Cloud Run service name
 (`amicu-api`), and the migrate Job name (`amicu-migrate`) are hardcoded in
 `deploy-api.yml` rather than repo variables — they're fixed
-`amicu-infra`/Terraform-module defaults (`modules/gcp-project`'s
+infrastructure/Terraform-module defaults (`modules/gcp-project`'s
 `artifact_registry_repo_id`, `envs/prod/variables.tf`'s `api_service_name` /
 `migrate_job_name`), not values meant to vary per deploy.
 
 Everything else the running containers need (`DATABASE_URL`,
 `AMICU_SIGNING_KEY_PEM`, `AMICU_SMTP_*`, …) is Cloud Run env/secret
-configuration owned entirely by `amicu-infra`'s Terraform — never passed
+configuration owned entirely by the infrastructure repo's Terraform — never passed
 via `--set-env-vars`/`--set-secrets` from either workflow here. See
-`amicu-infra/docs/env-matrix.md` for that full table.
+the infrastructure repo's `docs/env-matrix.md` for that full table.

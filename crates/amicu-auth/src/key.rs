@@ -108,7 +108,7 @@ impl SigningKey {
 /// risk of an accidental `Debug`/log leak between generation and the caller
 /// consuming it, but still ultimately a `String` the caller is expected to
 /// print. That is the entire point: this exists for operator tooling
-/// (`amicu-server gen-signing-key`, andypalmi/amicu-planning#140) that must
+/// (`amicu-server gen-signing-key`) that must
 /// emit a PEM an operator pipes straight into a secret manager (e.g.
 /// `gcloud secrets versions add AMICU_SIGNING_KEY_PEM --data-file=-`), which
 /// is fundamentally different from [`SigningKey`]'s job of using a key
@@ -137,7 +137,7 @@ impl std::fmt::Debug for SigningKey {
 }
 
 /// Stable kid: first 22 base64url chars (132 bits — comfortably over the
-/// 128-bit floor from andypalmi/amicu-planning#147) of SHA-256 over the
+/// 128-bit floor) of SHA-256 over the
 /// public key. Stable across restarts for the same key, so retiring keys
 /// keep their published kid.
 ///
@@ -157,7 +157,7 @@ fn derive_kid(public_key: &[u8; 32]) -> String {
 mod tests {
     use super::*;
 
-    /// andypalmi/amicu-planning#147: kid must be at least 128 bits of
+    /// kid must be at least 128 bits of
     /// entropy. 22 base64url chars encode 132 bits (each char is 6 bits),
     /// clearing the 128-bit floor (a base64url char count of 21.33 would be
     /// the exact floor, so 22 is the smallest whole number of chars that

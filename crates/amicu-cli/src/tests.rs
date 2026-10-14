@@ -2341,7 +2341,7 @@ fn modal_volumes_are_never_deleted_even_with_purge_and_are_listed_with_the_manua
     }
 }
 
-// ---- host refresh and failed updates (amicu-planning#211, #209) -------------
+// ---- host refresh and failed updates -------------
 
 fn single_graph() -> amicu_core::graph::Graph {
     amicu_hcl::parse_graph(VALID_CONFIG).unwrap()
@@ -2591,7 +2591,7 @@ fn a_host_service_that_cannot_be_probed_is_a_warning_never_drift() {
     assert!(warning.contains("Failed to connect to bus"), "{warning}");
 }
 
-// Provider switches (amicu-planning#208): the old instance is stopped and
+// Provider switches: the old instance is stopped and
 // confirmed before the new one starts, and is never dropped from state
 // otherwise.
 

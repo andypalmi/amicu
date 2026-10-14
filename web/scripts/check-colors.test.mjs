@@ -20,7 +20,7 @@ test('hex in all lengths and contexts', () => {
 });
 
 test('hex false positives', () => {
-  clean('Fixes #191 and see (#217) or Part of andypalmi/amicu-planning#201', 'a.md');
+  clean('Fixes #191 and see (#217) or Part of andypalmi/other-repo#201', 'a.md');
   clean('// TODO(#191): see #123456 and #217', 'a.ts');
   clean('/* Part of #191 */ .a { margin: 0 }', 'a.css');
   clean('{/* see #1234 */}');

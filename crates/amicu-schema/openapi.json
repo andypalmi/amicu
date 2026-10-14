@@ -882,7 +882,7 @@
           "org"
         ],
         "summary": "List the organization's members and their roles.",
-        "description": "Requires the `view_members` permission - Owner/Admin/Member hold it; a\n**Viewer does not** and is refused with `403` (andypalmi/amicu-planning#133:\nthe enforced distinction that makes Viewer a real, more-restricted role).",
+        "description": "Requires the `view_members` permission - Owner/Admin/Member hold it; a\n**Viewer does not** and is refused with `403`:\nthe enforced distinction that makes Viewer a real, more-restricted role.",
         "operationId": "list_members_handler",
         "responses": {
           "200": {

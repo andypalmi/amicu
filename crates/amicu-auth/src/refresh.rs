@@ -57,8 +57,8 @@ pub struct RefreshRecord {
     pub user_id: String,
     /// The workspace this session is scoped to. A refresh token REMEMBERS which
     /// workspace it was minted for so rotation can re-validate membership in
-    /// exactly that workspace and re-mint the access token scoped to it
-    /// (andypalmi/amicu-planning#129). Switching workspaces opens a NEW family
+    /// exactly that workspace and re-mint the access token scoped to it.
+    /// Switching workspaces opens a NEW family
     /// scoped to the target; it never mutates an existing row's workspace.
     pub workspace_id: WorkspaceId,
     /// Rotation-family id. Shared by a sign-in token and every token rotated
@@ -186,10 +186,10 @@ pub trait RefreshStore: Send + Sync {
     /// flag atomically (one transaction) so a concurrent rotation cannot mint a
     /// survivor.
     ///
-    // TODO(amicu-planning#96): when the persistent store lands, back the
+    // TODO: when the persistent store lands, back the
     // compromised flag with a durable, cross-node table (indexed by
     // `family_id`). The user-facing "suspicious sign-in" notice can now ride the
-    // notification seam added in amicu-planning#102
+    // notification seam added with the notifier
     // (`crate::notify::Notifier`); it is not wired here because
     // `compromise_family` sees only a `family_id`, not the owning user's email -
     // resolving that needs a family→user lookup this in-memory store does not

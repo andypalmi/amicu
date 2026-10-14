@@ -3,7 +3,7 @@
 //!
 //! The graph says what *should* exist; these records say what amicu has
 //! actually started (or is about to start), with everything needed to find and
-//! stop it. They back the "no orphans" invariant (amicu-planning#205):
+//! stop it. They back the "no orphans" invariant:
 //!
 //! - **Write-ahead.** Before a provider is asked to create anything, a record
 //!   in [`DeploymentPhase::Pending`] carrying the [`StopIdentity`] is

@@ -95,7 +95,7 @@ impl std::fmt::Display for FlashAttention {
 }
 
 /// `llama-server`'s `--reasoning-format` value: how reasoning/thinking
-/// blocks in the model's output are extracted and surfaced (amicu-planning#151).
+/// blocks in the model's output are extracted and surfaced.
 /// The four-value set `common/chat.cpp`'s `common_reasoning_format_name`/
 /// `common_reasoning_format_from_name` define: `none` (leave reasoning
 /// inline), `deepseek` (current DeepSeek-R1-style extraction, in
@@ -168,7 +168,6 @@ impl std::fmt::Display for VllmKvCacheDtype {
 }
 
 /// Speculative-decoding configuration for a llama.cpp deployment
-/// (amicu-planning#151 PR C).
 ///
 /// The draft model is a *reference to a second `model` resource*, not a path:
 /// it is a real graph edge (checked by
@@ -230,7 +229,7 @@ pub struct SpeculativeSettings {
 }
 
 /// Per-deployment autoscaling knobs for the Modal provider
-/// (amicu-planning#180), the deployment's optional `scaling { ... }` block.
+///, the deployment's optional `scaling { ... }` block.
 ///
 /// Every field is optional and independent: an omitted field keeps the
 /// provider default exactly as it was before this block existed
@@ -336,7 +335,7 @@ pub struct Deployment {
     pub id: DeploymentId,
     pub model: ModelId,
     pub hardware_profile: HardwareProfileId,
-    /// Optional Modal autoscaling overrides (amicu-planning#180); `None`
+    /// Optional Modal autoscaling overrides; `None`
     /// keeps today's defaults. See [`ScalingSettings`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scaling: Option<ScalingSettings>,
@@ -487,17 +486,17 @@ pub struct LlamaCppSettings {
     /// Flash-attention mode (`--flash-attn`); a three-way toggle, not a bool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flash_attention: Option<FlashAttention>,
-    /// Inline Jinja chat template text (`--chat-template`, amicu-planning#151).
+    /// Inline Jinja chat template text (`--chat-template`).
     /// Mutually exclusive with [`LlamaCppSettings::chat_template_file`] -
     /// setting both is `AMICU-CAP-005` and renders neither flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template: Option<String>,
-    /// Path to a Jinja chat template file (`--chat-template-file`,
-    /// amicu-planning#151). See [`LlamaCppSettings::chat_template`].
+    /// Path to a Jinja chat template file (`--chat-template-file`).
+    /// See [`LlamaCppSettings::chat_template`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_file: Option<String>,
-    /// Enable Jinja chat-template rendering (`--jinja`/`--no-jinja`,
-    /// amicu-planning#151): a paired bare-flag toggle (`common/arg.cpp`'s
+    /// Enable Jinja chat-template rendering (`--jinja`/`--no-jinja`):
+    /// a paired bare-flag toggle (`common/arg.cpp`'s
     /// `add_opt` for these registers both spellings under one option), not a
     /// value-having flag. `Some(true)` renders `--jinja`; `Some(false)`
     /// renders `--no-jinja` (so an explicit `false` here overrides an
@@ -506,34 +505,33 @@ pub struct LlamaCppSettings {
     /// default/environment in effect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jinja: Option<bool>,
-    /// Reasoning/thinking-block extraction format (`--reasoning-format`,
-    /// amicu-planning#151).
+    /// Reasoning/thinking-block extraction format (`--reasoning-format`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_format: Option<ReasoningFormat>,
-    /// Speculative decoding with a draft model (amicu-planning#151 PR C).
+    /// Speculative decoding with a draft model.
     /// `None` - the default - is today's behavior exactly: no draft model is
     /// resolved, no `--model-draft` is rendered, and the fit check counts only
     /// the primary model's weights. See [`SpeculativeSettings`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speculative: Option<SpeculativeSettings>,
-    /// Raw `llama-server` flags appended verbatim after the typed flags
-    /// (amicu-planning#150): the escape hatch for the ~98% of the flag
+    /// Raw `llama-server` flags appended verbatim after the typed flags:
+    /// the escape hatch for the ~98% of the flag
     /// surface with no typed field yet. Declaration order is preserved -
     /// it is argv order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_args: Vec<String>,
     /// Environment variables applied to the spawned process, merged with
-    /// (and never overriding) resolved secrets (amicu-planning#150).
+    /// (and never overriding) resolved secrets.
     /// `BTreeMap` for deterministic HCL round-trip, like `Tenant.labels`
     /// and `Credential.env`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
-    /// Runtime build pin (e.g. `"b4500"` or a git sha, amicu-planning#151).
+    /// Runtime build pin (e.g. `"b4500"` or a git sha).
     /// Stored/validated only; not yet rendered or enforced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<String>,
-    /// Vision/audio multimodal projector settings (`multimodal { ... }`,
-    /// amicu-planning#151 PR D): backs the `Modality::Vision` capability this
+    /// Vision/audio multimodal projector settings (`multimodal { ... }`):
+    /// backs the `Modality::Vision` capability this
     /// adapter already declares (`crate::adapter::LlamaCppAdapter::capabilities`,
     /// in `amicu-llamacpp`) with an actual mmproj file to load. llama.cpp-only:
     /// a `multimodal` block on a `vllm {}` settings block is a schema error
@@ -543,7 +541,7 @@ pub struct LlamaCppSettings {
 }
 
 /// `llama-server`'s multimodal projector settings (`--mmproj`/
-/// `--mmproj-offload`, amicu-planning#151 PR D): both fields optional and
+/// `--mmproj-offload`): both fields optional and
 /// independent.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MultimodalSettings {
@@ -586,7 +584,7 @@ pub struct VllmSettings {
     /// `batch_size`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_num_batched_tokens: Option<u32>,
-    /// Eager-mode toggle (`--enforce-eager`/`--no-enforce-eager`, amicu-planning#158):
+    /// Eager-mode toggle (`--enforce-eager`/`--no-enforce-eager`):
     /// a paired bare-flag toggle, not a value-having flag, following the
     /// same shape as [`LlamaCppSettings::jinja`] - confirmed against vLLM's
     /// `EngineArgs`/`FlexibleArgumentParser` (`get_kwargs`), which assigns
@@ -601,7 +599,7 @@ pub struct VllmSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enforce_eager: Option<bool>,
     /// Raw vLLM CLI flags appended verbatim by the vLLM renderer
-    /// (amicu-planning#150; the renderer itself ships separately). See
+    /// (the renderer itself ships separately). See
     /// [`LlamaCppSettings::extra_args`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_args: Vec<String>,

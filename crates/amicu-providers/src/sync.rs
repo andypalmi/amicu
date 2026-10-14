@@ -12,7 +12,7 @@
 //! (the pure [`Provider::capabilities`]), not a live provider fetch. Snapshots
 //! are therefore tagged honestly - [`Provenance::Formula`] +
 //! [`Confidence::Estimated`] - so catalog data is never presented as live
-//! truth. amicu-planning#68 (live fetch) will upgrade this provenance/confidence.
+//! truth. A live fetch will upgrade this provenance/confidence.
 
 use amicu_core::adapter::{AdapterId, HealthStatus, Registry};
 use amicu_core::diagnostic::{Diagnostic, Severity, catalog};
@@ -61,7 +61,7 @@ pub struct SyncedCapabilities {
     /// How much this snapshot can be trusted as current.
     pub freshness: Freshness,
     /// Where the snapshot's data comes from. Catalog-sourced today
-    /// ([`Provenance::Formula`]); amicu-planning#68 live fetch will upgrade this.
+    /// ([`Provenance::Formula`]); a live fetch will upgrade this.
     pub provenance: Provenance,
     /// Confidence in the snapshot. [`Confidence::Estimated`] while data is
     /// catalog-sourced rather than freshly fetched.

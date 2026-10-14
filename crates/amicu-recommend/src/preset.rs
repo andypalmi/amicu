@@ -10,7 +10,7 @@
 //!
 //! Local Dev Chat, Private EU Production, and Cost-Optimized Batch transcribe
 //! the shapes in the `amicu-presets` skill's `preset-catalog.md`. The other
-//! six (amicu-planning#149) transcribe the PRD's "Presets and Guided Stack
+//! six transcribe the PRD's "Presets and Guided Stack
 //! Design" outcome list: Internal Knowledge Chatbot, Customer Support
 //! Assistant, Document Extraction Pipeline, Code Assistant Endpoint, API
 //! Replacement / Migration, and Custom Stack. Treat every entry as a starting
@@ -239,7 +239,7 @@ static CATALOG: LazyLock<Vec<Preset>> = LazyLock::new(|| {
 
 /// The hardcoded preset catalog: the three starting points transcribed from the
 /// `amicu-presets` skill's `preset-catalog.md`, plus the remaining PRD-listed
-/// presets added by amicu-planning#149.
+/// presets.
 #[must_use]
 pub fn catalog() -> &'static [Preset] {
     &CATALOG
@@ -933,7 +933,7 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
         runtime: Runtime::Vllm(VllmSettings {
             context_length: answers.context_length,
             port: 8000,
-            // TODO(amicu-planning): mapping concurrency to tensor_parallel_size
+            // TODO: mapping concurrency to tensor_parallel_size
             // is a documented approximation. For throughput-first batch work the
             // correct scaling model is replica count, not tensor parallelism;
             // switch this to replicas once `Deployment` gains a replicas field.
@@ -1569,7 +1569,7 @@ mod tests {
     }
 
     /// Every preset id the catalog is expected to carry: the original three
-    /// plus the six added by amicu-planning#149 to cover the PRD's preset
+    /// plus the six added later to cover the PRD's preset
     /// list.
     const ALL_PRESET_IDS: [&str; 9] = [
         "local_dev_chat",

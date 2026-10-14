@@ -1,5 +1,5 @@
 // Live-runtime companion to `test/workerd/cookie-refresh.unit.test.ts`, for
-// amicu-planning#146(a): actually boots the built Worker under the REAL Cloudflare
+// actually boots the built Worker under the REAL Cloudflare
 // Workers runtime (workerd, via `wrangler dev --local`) - not a Node polyfill of
 // Request/Response, but the genuine `nodejs_compat` sandbox @opennextjs/cloudflare
 // targets - and drives the silent-refresh cookie-rotation path end-to-end over a

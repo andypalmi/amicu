@@ -1,7 +1,7 @@
 //! Conformance harness for the orphan-proof provider contract.
 //!
 //! Every adapter that can create billable resources must pass [`run`] before it
-//! is wired to `apply` (andypalmi/amicu-planning#215). The harness drives an
+//! is wired to `apply`. The harness drives an
 //! adapter through a stateful mock backend (a [`Fixture`]) and checks, with
 //! fault injection, that:
 //!

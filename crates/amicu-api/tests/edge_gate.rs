@@ -1,4 +1,4 @@
-//! Edge-gate composition tests (andypalmi/amicu-planning#142).
+//! Edge-gate composition tests.
 //!
 //! Mirrors the composition `amicu-server`'s `build_app_with_database_url`
 //! uses: [`edge_token_gate`] layered over the whole API surface (`auth_router`
@@ -222,7 +222,7 @@ async fn cf_connecting_ip_is_ignored_with_a_wrong_edge_token() {
 
 /// The pre-existing `X-Forwarded-For`/`AMICU_TRUSTED_PROXIES` path (no edge
 /// token involved at all) keeps working unchanged: a trusted-proxy peer's XFF
-/// chain is honored, right-to-left, same as before andypalmi/amicu-planning#142.
+/// chain is honored, right-to-left, same as before the edge-token gate.
 #[tokio::test]
 async fn x_forwarded_for_with_trusted_proxies_still_works_with_no_edge_trust_configured() {
     let trusted = TrustedProxies::from_strs(["10.0.0.0/8"]).unwrap();

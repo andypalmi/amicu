@@ -1055,7 +1055,7 @@ mod tests {
 
     #[test]
     fn every_preset_is_compliant_across_a_representative_answer_grid() {
-        // Table-driven compliance sweep (amicu-planning#149): every catalog
+        // Table-driven compliance sweep: every catalog
         // preset, crossed with a representative grid of context length,
         // concurrency, EU residency, and priority, must ask <= 6 questions,
         // rank into 1-4 hard-constraint-compliant candidates that each carry

@@ -1,5 +1,5 @@
--- "Known networks" for the per-email failed-sign-in budget
--- (andypalmi/amicu-planning#194). One row per pseudonym(email | client
+-- "Known networks" for the per-email failed-sign-in budget.
+-- One row per pseudonym(email | client
 -- network): written after a SUCCESSFUL sign-in from that network, so that when
 -- an account's failed-attempt budget is exhausted (a distributed guessing
 -- attack) the owner can still sign in from a network they have used recently

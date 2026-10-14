@@ -1,6 +1,5 @@
 //! Integration tests for the Enterprise organization console (`/org/*`):
 //! membership, RBAC, and the audit log, under CLAIM-BOUND tenancy
-//! (andypalmi/amicu-planning#130).
 //!
 //! The workspace a caller acts in, and the coarse role they hold there, come
 //! entirely from the verified access token (`claims.wsid` / `claims.wsrole`) -
@@ -249,7 +248,7 @@ async fn owner_lists_members_with_own_claim_role() {
 #[tokio::test]
 async fn member_lists_members() {
     // A Member holds `view_members`, so `GET /org/members` succeeds - the
-    // permission-gated distinction (andypalmi/amicu-planning#133) that a
+    // permission-gated distinction that a
     // Viewer specifically does NOT get (see `viewer_cannot_list_members_403`).
     let h = harness();
     seed(&h.store, *ORG, OWNER, Role::Owner);
@@ -739,7 +738,7 @@ async fn roles_catalog_lists_permissions() {
         .collect();
     assert!(perms.contains(&"assign_privileged_role"));
     // A Viewer must not carry management permissions, NOR `view_members` - the
-    // enforced distinction from Member (andypalmi/amicu-planning#133).
+    // enforced distinction from Member.
     let viewer = roles.iter().find(|r| r["role"] == "viewer").unwrap();
     let vperms: Vec<&str> = viewer["permissions"]
         .as_array()
@@ -787,7 +786,7 @@ async fn a_token_only_ever_sees_its_own_workspace() {
     assert_eq!(other_members[0]["user_id"], OTHER_OWNER);
 }
 
-/// andypalmi/amicu-planning#131 exit criterion: the workspace is claim-derived
+/// Exit criterion: the workspace is claim-derived
 /// EVERYWHERE and no request header can influence it. A caller attaches a bogus
 /// `X-Amicu-Workspace-Id` (and a stray `X-Workspace-Id`) naming OTHER while
 /// holding an ORG-scoped token; the request still acts on ORG (the claim), and

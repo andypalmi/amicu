@@ -49,8 +49,8 @@ pub fn weights_memory(total_parameters: u64, quantization: Quantization) -> Byte
     bytes_from_f64(params_as_f64(total_parameters) * bytes_per_parameter(quantization))
 }
 
-/// Model shape and KV-cache dtype needed to estimate KV-cache memory
-/// (amicu-planning#151). Folded into a fit check only when every field is
+/// Model shape and KV-cache dtype needed to estimate KV-cache memory.
+/// Folded into a fit check only when every field is
 /// known - see [`check_variant_fit_with_kv_cache`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KvCacheParams {
@@ -212,7 +212,7 @@ pub struct FitReport {
     pub fits: bool,
     /// Diagnostic when weights do not fit; `None` otherwise.
     pub diagnostic: Option<Diagnostic>,
-    /// A computed KV-cache memory estimate (amicu-planning#151), present only
+    /// A computed KV-cache memory estimate, present only
     /// when [`check_variant_fit_with_kv_cache`] was given full
     /// [`KvCacheParams`]. Distinct from [`Self::overhead`] (the flat band);
     /// [`Self::fits`] and [`Self::headroom`] are unaffected by this field
@@ -246,8 +246,8 @@ pub fn check_variant_fit(
 /// The weights figure one GGUF variant contributes: its declared `size` when
 /// present, otherwise a size computed from `total_parameters` at the variant's
 /// quantization. Exposed so a caller that has to fold a second model's weights
-/// into one fit check - a speculative deployment's draft model
-/// (amicu-planning#151 PR C) - derives that figure exactly the way
+/// into one fit check - a speculative deployment's draft model -
+/// derives that figure exactly the way
 /// [`check_variant_fit`] derives the primary model's.
 #[must_use]
 pub fn variant_weights(total_parameters: u64, variant: &GgufVariant) -> ByteSize {
@@ -320,7 +320,7 @@ fn evaluate(weights: ByteSize, hw: &HardwareProfile, cfg: &FitConfig) -> FitRepo
 }
 
 /// As [`check_variant_fit`], additionally computing [`FitReport::kv_cache`]
-/// when `kv` is given (amicu-planning#151). Does not otherwise change the
+/// when `kv` is given. Does not otherwise change the
 /// report: [`FitReport::fits`]/[`FitReport::headroom`]/[`FitReport::overhead`]
 /// are exactly what [`check_variant_fit`] would have produced, so a caller
 /// with no [`KvCacheParams`] gets byte-for-byte the same report as before
@@ -338,7 +338,6 @@ pub fn check_variant_fit_with_kv_cache(
 
 /// As [`check_variant_fit_with_kv_cache`], additionally counting a speculative
 /// deployment's draft-model weights toward the same device-memory pool
-/// (amicu-planning#151 PR C).
 ///
 /// `draft_weights` - typically [`variant_weights`] of the draft model's own
 /// GGUF variant - is simply added to [`FitReport::weights`], so the draft
@@ -382,7 +381,6 @@ pub fn check_variant_fit_with_draft(
 
 /// Check vLLM's memory model: `weights` (+ optional KV cache) against
 /// `gpu_memory_utilization × per-device memory × tensor_parallel_size`
-/// (amicu-planning#152).
 ///
 /// This deliberately does not reuse [`evaluate`]: vLLM's own
 /// `--gpu-memory-utilization` flag already *is* the usable fraction of each
@@ -791,7 +789,7 @@ mod tests {
         );
     }
 
-    // --- amicu-planning#151: KV-cache estimator ---------------------------
+    // --- KV-cache estimator ---------------------------
 
     #[test]
     fn kv_cache_bytes_matches_hand_computed_value_for_a_known_model() {
@@ -888,7 +886,7 @@ mod tests {
         assert_eq!(with_kv.weights, baseline.weights);
     }
 
-    // --- amicu-planning#151 PR C: speculative draft-model weights ----------
+    // --- speculative draft-model weights ----------
 
     fn sized_variant(bytes: u64) -> GgufVariant {
         GgufVariant {
@@ -971,7 +969,7 @@ mod tests {
         );
     }
 
-    // --- amicu-planning#152: vLLM fit estimate ------------------------------
+    // --- vLLM fit estimate ------------------------------
 
     #[test]
     fn vllm_fit_uses_gpu_memory_utilization_as_the_whole_pool() {

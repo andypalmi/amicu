@@ -78,7 +78,7 @@ impl PlanResult {
 /// [`AdapterError::to_diagnostic`](amicu_core::adapter::AdapterError::to_diagnostic).
 ///
 /// This exists so a caller that skips the prior [`crate::report_for`] gate
-/// (amicu-planning#150 review hardening: a `CAP-002`/`CAP-003`
+/// (review hardening: a `CAP-002`/`CAP-003`
 /// `extra_args`/`env` conflict makes
 /// [`RuntimeAdapter::plan_launch`](amicu_runtime::RuntimeAdapter::plan_launch)
 /// return `Err`, which used to propagate straight out of `build_plan` as a
@@ -146,8 +146,8 @@ pub fn build_plan_with(
     inputs: &PlanInputs<'_>,
 ) -> Result<PlanResult, PlanError> {
     let project_root = inputs.project_root;
-    // Dispatch to the adapter matching each deployment's own runtime family
-    // (amicu-planning#152) - previously any non-llama.cpp deployment was
+    // Dispatch to the adapter matching each deployment's own runtime family -
+    // previously any non-llama.cpp deployment was
     // skipped entirely (an info diagnostic, no launch, never applied).
     let catalog = build_catalog(graph);
     let mut llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), host_supervisor());
@@ -359,8 +359,8 @@ fn variant_artifact(variant: &GgufVariant) -> Artifact {
     }
 }
 
-/// Runtime settings plus the deployment's explicitly-set `scaling {}` fields
-/// (amicu-planning#180), so a non-default cap is visible in the plan.
+/// Runtime settings plus the deployment's explicitly-set `scaling {}` fields,
+/// so a non-default cap is visible in the plan.
 fn runtime_settings_with_scaling(d: &Deployment) -> Vec<Setting> {
     let mut settings = runtime_settings(d);
     // The endpoint API key is shown redacted, and is never resolved at plan
@@ -488,7 +488,6 @@ fn llama_cpp_runtime_settings(s: &LlamaCppSettings) -> Vec<Setting> {
 }
 
 /// Append the `speculative {}` block's fields as display settings
-/// (amicu-planning#151 PR C).
 fn push_speculative_settings(
     settings: &mut Vec<Setting>,
     speculative: Option<&amicu_core::resource::SpeculativeSettings>,
@@ -512,7 +511,6 @@ fn push_speculative_settings(
 }
 
 /// Append the `multimodal {}` block's fields as display settings
-/// (amicu-planning#151 PR D).
 fn push_multimodal_settings(
     settings: &mut Vec<Setting>,
     multimodal: Option<&amicu_core::resource::MultimodalSettings>,
@@ -569,7 +567,7 @@ fn vllm_runtime_settings(s: &VllmSettings) -> Vec<Setting> {
 }
 
 /// Append the shared `extra_args`/`env` settings both runtime families carry
-/// (amicu-planning#150's escape hatch): `extra_args` joined for display, and
+/// (the escape hatch): `extra_args` joined for display, and
 /// `env` key names only - never values, which may carry secrets or tuning
 /// data not meant for the plan display.
 fn extend_with_extra_args_and_env(
@@ -607,7 +605,7 @@ fn cost_performance(
     });
     // vLLM has no flat overhead band to stand in for an unknown KV cache, so
     // when the model shape is unknown the figure is weights only - say so
-    // rather than let it read as a full peak (amicu-planning#191).
+    // rather than let it read as a full peak.
     let kv_unknown = matches!(runtime, Runtime::Vllm(_)) && launch.estimate.kv_cache.is_none();
     let mut assumptions = vec![format!(
         "estimated peak memory {}{}",
@@ -617,7 +615,7 @@ fn cost_performance(
     // extra_args is an escape hatch the estimator cannot interpret (e.g. a
     // KV-cache-dtype or speculative-decoding flag) - flag the whole estimate
     // as unverified rather than silently ignoring what raw flags might do to
-    // memory/performance (amicu-planning#150). `confidence` is left alone:
+    // memory/performance. `confidence` is left alone:
     // it already reads Low for this heuristic path.
     if extra_args_present(runtime) {
         assumptions.push("unverified: raw runtime flags present".to_owned());
@@ -625,7 +623,7 @@ fn cost_performance(
     // vLLM's fit estimate is deliberately narrower than llama.cpp's (no flat
     // overhead band - see `amicu_registry::fit::check_vllm_fit`'s doc
     // comment): call that out on every vLLM plan, not just when a fit
-    // problem is found (amicu-planning#152).
+    // problem is found.
     if matches!(runtime, Runtime::Vllm(_)) {
         assumptions.push(if kv_unknown {
             "kv cache: not estimated (model shape unknown; set n_layers, n_kv_heads, head_dim on the model)"
@@ -636,7 +634,7 @@ fn cost_performance(
     }
     // A `multimodal` block's projector weights aren't sized anywhere - no
     // GGUF header parser in-tree, and the estimator only ever sees the main
-    // model's variant size (amicu-planning#151 PR D; see `fit.rs`'s doc
+    // model's variant size (see `fit.rs`'s doc
     // comment for the same "no parser" limitation on the main weights).
     if multimodal_present(runtime) {
         assumptions.push("multimodal: projector weights not estimated".to_owned());
@@ -657,7 +655,7 @@ fn cost_performance(
 }
 
 /// What a `speculative {}` block does and does not contribute to the memory
-/// estimate (amicu-planning#151 PR C): `amicu_registry::fit` adds the draft
+/// estimate: `amicu_registry::fit` adds the draft
 /// model's weights to the fit check's weights total, but does not estimate the
 /// draft model's own KV cache - that would need the draft model's layer/head
 /// shape, which the registry does not generally carry.
@@ -680,8 +678,8 @@ fn extra_args_present(runtime: &Runtime) -> bool {
     }
 }
 
-/// Whether the deployment carries a `multimodal { ... }` block
-/// (amicu-planning#151 PR D). `vllm` never does - `VllmSettings` has no such
+/// Whether the deployment carries a `multimodal { ... }` block.
+/// `vllm` never does - `VllmSettings` has no such
 /// field (a `multimodal` block on a `vllm {}` settings block is a schema
 /// error, `amicu_hcl::de`).
 fn multimodal_present(runtime: &Runtime) -> bool {
@@ -731,7 +729,7 @@ fn hardware_label(hardware: &HardwareProfile) -> String {
         }) => {
             let base = format!("{}.{}", accelerator_token(*kind), model);
             // Single-accelerator output stays unchanged; only show a count
-            // when it is above 1 (amicu-planning#177).
+            // when it is above 1.
             if *count > 1 {
                 format!("{base} x{count}")
             } else {
@@ -922,7 +920,7 @@ mod tests {
         assert!(!cp.assumptions.iter().any(|a| a == ASSUMPTION));
     }
 
-    // --- amicu-planning#191: vLLM never silently drops the KV cache --------
+    // --- vLLM never silently drops the KV cache --------
 
     fn vllm_graph(shaped: bool) -> Graph {
         let mut g = graph(Vec::new());
@@ -986,7 +984,7 @@ mod tests {
         assert!(kv(200_000).contains("200000 ctx"));
     }
 
-    // --- amicu-planning#151: KV-cache estimator assumption string ----------
+    // --- KV-cache estimator assumption string ----------
 
     #[test]
     fn kv_cache_assumption_present_when_shape_and_cache_type_are_set() {
@@ -1019,7 +1017,7 @@ mod tests {
         assert!(!cp.assumptions.iter().any(|a| a.starts_with("KV cache: ")));
     }
 
-    // --- amicu-planning#151 PR D: multimodal assumption string -------------
+    // --- multimodal assumption string -------------
 
     #[test]
     fn multimodal_assumption_present_when_block_is_set() {
@@ -1136,7 +1134,7 @@ mod tests {
         assert!(!env_setting.value.contains("secretvalue"));
     }
 
-    // L1 regression (amicu-planning#150 review hardening): a caller that
+    // L1 regression : a caller that
     // calls `build_plan` directly, skipping the prior `report_for` gate every
     // existing caller (CLI `plan`/`apply`, `/plan`, `/recommend/customize`)
     // applies, must still get a structured diagnostic report back - not a
@@ -1160,7 +1158,7 @@ mod tests {
         );
     }
 
-    // --- amicu-planning#151 PR C: speculative decoding ---------------------
+    // --- speculative decoding ---------------------
 
     /// [`graph`] plus a `draft` model, with the deployment drafting from it.
     fn speculative_graph() -> Graph {
@@ -1239,7 +1237,7 @@ mod tests {
         );
     }
 
-    // --- amicu-planning#180: scaling {} ------------------------------------
+    // --- scaling {} ------------------------------------
 
     fn with_scaling(mut g: Graph, s: amicu_core::resource::ScalingSettings) -> Graph {
         g.deployments[0].scaling = Some(s);
@@ -1298,7 +1296,7 @@ mod tests {
         assert!(build_plan(&next, Some(&next)).unwrap().items.is_empty());
     }
 
-    // --- amicu-planning#191: api_key ---------------------------------------
+    // --- api_key ---------------------------------------
 
     fn with_key(mut g: Graph, name: &str) -> Graph {
         g.deployments[0].api_key = Some(amicu_core::secret::SecretRef::new(name));
@@ -1353,7 +1351,7 @@ mod tests {
         assert!(build_plan(&next, Some(&next)).unwrap().items.is_empty());
     }
 
-    // --- amicu-planning#220: change detection beyond the graph -------------
+    // --- change detection beyond the graph -------------
 
     use crate::fingerprint::Fact;
     use amicu_core::secret::SecretRef;

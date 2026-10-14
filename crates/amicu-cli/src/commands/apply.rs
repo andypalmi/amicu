@@ -75,8 +75,8 @@ pub(crate) fn run_with(
     }
 
     // Hold the state lock for the whole read -> refresh -> plan -> apply ->
-    // save section, so a concurrent apply or `modal stop` cannot interleave
-    // (amicu-planning#178). Released when `_lock` drops on return.
+    // save section, so a concurrent apply or `modal stop` cannot interleave.
+    // Released when `_lock` drops on return.
     let _lock = StateLock::acquire(&project.state_dir(), "apply", lock_timeout)?;
 
     let (prior_state, pruned) = crate::refresh::load_refreshed(project, env.modal, output, out)?;
@@ -502,7 +502,7 @@ fn merged_fingerprints(
 /// The endpoints to record after an apply: the prior (refreshed) endpoints of
 /// deployments that are still in `graph` and were not destroyed, plus this
 /// run's `handles` (which replace any prior entry for the same deployment).
-/// Pure so it is unit tested without a network (amicu-planning#176).
+/// Pure so it is unit tested without a network.
 fn merge_endpoints(
     prior: &[RuntimeHandle],
     graph: &Graph,
@@ -525,7 +525,6 @@ fn merge_endpoints(
 
 /// What `apply_all` has already done to the real world when it returns, so a
 /// failure part-way through can still be recorded in state
-/// (amicu-planning#203).
 #[derive(Default, Clone)]
 struct Progress {
     /// Deployments started and verified, in plan order.
@@ -611,7 +610,7 @@ fn partial_graph(
 }
 
 /// Persist what a failed apply did get done, and return `err` annotated with
-/// which deployments were started and recorded (amicu-planning#203). Without
+/// which deployments were started and recorded. Without
 /// this they would keep running (and billing) with no state entry, invisible
 /// to `destroy` and re-created by the next `apply`.
 fn record_partial(
@@ -688,7 +687,6 @@ fn record_partial(
 
 /// Hardware profile `provider` value that routes a deployment through
 /// [`ModalSupervisor`] instead of the local host supervisor
-/// (amicu-planning#158 PR 5).
 const MODAL_PROVIDER: &str = "modal";
 
 /// The per-deployment supervisor `apply_all` routes to, decided purely from
@@ -834,15 +832,15 @@ async fn apply_all(
     progress: &mut Progress,
     env: &Env<'_>,
 ) -> Result<(), CliError> {
-    // Dispatch to the adapter matching each deployment's own runtime family
-    // (amicu-planning#152) - previously `apply` only ever started/stopped
-    // llama.cpp instances. amicu-planning#158 PR 5 adds a second axis: a
+    // Dispatch to the adapter matching each deployment's own runtime family -
+    // previously `apply` only ever started/stopped
+    // llama.cpp instances. The Modal work adds a second axis: a
     // vLLM deployment whose hardware profile has `provider = "modal"` is
     // routed through `ModalSupervisor` instead of the local launchd/systemd
     // `host_supervisor()` below - built fresh per such deployment (it needs
     // that deployment's own GPU/region), never reused across iterations.
     // A llama.cpp deployment on Modal takes the same route through a
-    // `LlamaCppAdapter` (amicu-planning#160).
+    // `LlamaCppAdapter`.
     let catalog = build_catalog(graph);
     let llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), (env.host)());
     let vllm_adapter = VllmAdapter::new(Box::new(catalog.clone()), (env.host)());
@@ -1108,7 +1106,7 @@ async fn previous_modal<'a>(
     })
 }
 
-/// The shared post-deploy exposure check (amicu-planning#191), run on the
+/// The shared post-deploy exposure check, run on the
 /// handle every adapter returns, whatever the provider.
 ///
 /// - Loopback endpoint, no `api_key`: nothing to protect, skipped.
@@ -1756,7 +1754,7 @@ mod dispatch_tests {
     use super::{Dispatch, dispatch_for};
     use amicu_runtime::RuntimeKind;
 
-    // amicu-planning#158 PR 5: `dispatch_for` is the whole of `apply_all`'s
+    // `dispatch_for` is the whole of `apply_all`'s
     // provider-routing decision, factored out precisely so this exhausts it
     // without executing any supervisor (no process spawn, no network call).
 
@@ -2835,7 +2833,7 @@ mod scoped_tests {
     }
 }
 
-/// Table tests for the pure partial-state functions (amicu-planning#222):
+/// Table tests for the pure partial-state functions:
 /// failure at every position, update vs create vs destroy, in-flight entries.
 #[cfg(test)]
 mod partial_state_tests {

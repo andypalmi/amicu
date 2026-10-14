@@ -1,4 +1,4 @@
-//! API-wide security response headers (andypalmi/amicu-planning#194).
+//! API-wide security response headers.
 //!
 //! [`security_headers`] is a middleware applied by [`crate::api_router`] to
 //! every route it serves (the health and outbox routers `amicu-server` merges

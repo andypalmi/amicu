@@ -1,5 +1,5 @@
 //! Suppressible, high-confidence warning heuristic for secrets pasted into
-//! genuinely free-text HCL content (amicu-planning#119).
+//! genuinely free-text HCL content.
 //!
 //! This is the residual case the structural `secret()` enforcement in
 //! [`crate::de`] cannot cover: a field that legitimately holds arbitrary
@@ -69,7 +69,7 @@ pub fn scan_secret_leaks(src: &str) -> Vec<Diagnostic> {
 }
 
 /// Scan a runtime settings block's `env` map values (the llama.cpp / vLLM
-/// `extra_args`/`env` escape hatch, amicu-planning#150) for the same
+/// `extra_args`/`env` escape hatch) for the same
 /// high-confidence secret shapes [`scan_secret_leaks`] looks for in free
 /// text, returning one `Warning`-severity [`Diagnostic`] (`AMICU-POLICY-006`)
 /// per match.
@@ -78,7 +78,7 @@ pub fn scan_secret_leaks(src: &str) -> Vec<Diagnostic> {
 /// than raw source text: a runtime `env` value is a structured map, not
 /// free-form prose, so there is no comment to anchor a suppression marker to
 /// and no line number to report. The same structural-vs-heuristic split
-/// `credential.env` secret-designation draws (amicu-planning#119) applies
+/// `credential.env` secret-designation draws applies
 /// here too, just one notch softer: unlike a `credential`, a runtime `env`
 /// map is not schema-directed to be secret-designated (it legitimately
 /// carries non-secret tuning knobs like `GGML_CUDA_DISABLE_GRAPHS=1`
@@ -288,8 +288,8 @@ fn scan_text(text: &str, line: u32, path: &str, out: &mut Vec<Diagnostic>) {
 /// Used by [`crate::de::secret_ref_from_expr`] to catch a literal secret
 /// smuggled inside a `secret(...)` call argument: the structural check alone
 /// only verifies the *syntax* is `secret("...")`, not that the string inside
-/// is actually a reference rather than the raw secret value itself
-/// (amicu-planning#119 review hardening). This still cannot be zero-false-
+/// is actually a reference rather than the raw secret value itself.
+/// This still cannot be zero-false-
 /// positive in the abstract - any bare reference name could coincidentally
 /// match - but reusing the same narrow, tuned detectors that gate the
 /// free-text *warning* keeps genuine references (`vault://kv/...`,

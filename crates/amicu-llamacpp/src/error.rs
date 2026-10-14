@@ -69,7 +69,7 @@ pub enum LlamaCppError {
     DownloadFailed(String),
 
     /// The resolved artifact's checksum does not match the GGUF variant's
-    /// declared `sha256` (amicu-planning#151). Raised before
+    /// declared `sha256`. Raised before
     /// [`crate::download::download_gguf`] downloads any bytes - fail fast
     /// rather than fetch a file already known to be wrong. Maps to
     /// `AMICU-CAP-001`: like [`LlamaCppError::IncompatibleArtifact`], this is
@@ -84,23 +84,23 @@ pub enum LlamaCppError {
     Supervisor(String),
 
     /// An `extra_args` flag duplicates a flag already rendered by a typed
-    /// field (amicu-planning#150). Maps to `AMICU-CAP-002`.
+    /// field. Maps to `AMICU-CAP-002`.
     #[error("extra_args flag `{0}` duplicates a typed field's flag")]
     ExtraArgDuplicatesTyped(String),
 
-    /// An `extra_args` flag is on the fixed denylist (amicu-planning#150).
+    /// An `extra_args` flag is on the fixed denylist.
     /// Maps to `AMICU-CAP-003`.
     #[error("extra_args flag `{0}` is not allowed (amicu owns this setting)")]
     ExtraArgDenylisted(String),
 
     /// A settings `env` key is one of the fixed dynamic-loader-hook names
-    /// (`LD_PRELOAD` and friends; amicu review hardening, amicu-planning#150).
+    /// (`LD_PRELOAD` and friends; amicu review hardening).
     /// Maps to `AMICU-CAP-003`.
     #[error("env var `{0}` is not allowed (can load arbitrary code into the process)")]
     EnvKeyDenylisted(String),
 
     /// A settings `env` key is a `LLAMA_ARG_<X>` mirror of a flag already
-    /// rendered by a typed field (amicu-planning#150 review hardening:
+    /// rendered by a typed field (review hardening:
     /// llama-server reads `LLAMA_ARG_*` env vars as CLI-flag equivalents, so
     /// this is the same conflict as [`LlamaCppError::ExtraArgDuplicatesTyped`]
     /// reached through `env` instead of `extra_args`). Maps to
@@ -111,7 +111,7 @@ pub enum LlamaCppError {
     EnvKeyMirrorsTypedFlag { key: String, flag: String },
 
     /// A settings `env` key is a `LLAMA_ARG_<X>` mirror of a denylisted flag
-    /// (amicu-planning#150 review hardening; see
+    /// (review hardening; see
     /// [`LlamaCppError::EnvKeyMirrorsTypedFlag`]). Maps to `AMICU-CAP-003`.
     #[error(
         "env var `{key}` mirrors denylisted flag `{flag}` (llama-server reads LLAMA_ARG_* as CLI flags)"
@@ -119,13 +119,13 @@ pub enum LlamaCppError {
     EnvKeyMirrorsDenylistedFlag { key: String, flag: String },
 
     /// Both `chat_template` and `chat_template_file` are set on the same
-    /// settings block (amicu-planning#151): they render mutually exclusive
+    /// settings block: they render mutually exclusive
     /// flags, so having both is ambiguous. Maps to `AMICU-CAP-005`.
     #[error("chat_template and chat_template_file are mutually exclusive; set only one")]
     ChatTemplateConflict,
 
     /// A `speculative {}` block's draft `model` reference names the
-    /// deployment's own primary model (amicu-planning#151 PR C). Maps to
+    /// deployment's own primary model. Maps to
     /// `AMICU-CAP-007`.
     #[error(
         "speculative draft model '{0}' is the deployment's own model; the draft model must be a \

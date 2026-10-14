@@ -10,8 +10,7 @@
 --
 -- id is a real UUID primary key (not the old opaque `usr_...` surrogate); it is
 -- the token subject (`sub`) and the target of the auth token tables' foreign
--- keys, so account deletion can cascade (resolves the soft-FK note in
--- andypalmi/amicu-planning#114).
+-- keys, so account deletion can cascade.
 --
 -- email_verified_at is nullable and holds the Unix-seconds instant the email was
 -- confirmed (NULL = unverified). It is a BIGINT rather than the issue's
@@ -21,8 +20,8 @@
 --
 -- personal_workspace_id points at the workspace provisioned for this user at
 -- sign-up (where they are Owner). It is the user's billing/tier home: because a
--- workspace-scoped claim (`wsid`) does not exist yet (that is
--- andypalmi/amicu-planning#129), tier and billing for a user are resolved
+-- workspace-scoped claim (`wsid`) does not exist yet,
+-- tier and billing for a user are resolved
 -- through this pointer to their one personal workspace. It is a FK into the
 -- no-RLS `workspaces` table, so the lookup needs no workspace context. Once the
 -- token carries `wsid`, billing/tier become claim-driven and this pointer's

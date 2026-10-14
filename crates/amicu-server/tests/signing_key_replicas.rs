@@ -1,5 +1,5 @@
-//! Real-socket, multi-replica coverage for the durable signing keyring
-//! (andypalmi/amicu-planning#140): proves that replicas sharing the same
+//! Real-socket, multi-replica coverage for the durable signing keyring:
+//! proves that replicas sharing the same
 //! `AMICU_SIGNING_KEY_PEM` env cross-verify each other's tokens and publish
 //! identical JWKS, that a retiring key still verifies while a new active key
 //! gets a new `kid`, and that dropping a key that signed a still-live token

@@ -1,5 +1,5 @@
-//! HTTP surface for the workspace claim in tokens
-//! (andypalmi/amicu-planning#129): list the authenticated user's workspaces and
+//! HTTP surface for the workspace claim in tokens:
+//! list the authenticated user's workspaces and
 //! switch the active one.
 //!
 //! Both routes are authenticated (any Community+ access token) and act ONLY on

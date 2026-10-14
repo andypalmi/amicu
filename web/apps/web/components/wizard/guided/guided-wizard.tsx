@@ -41,7 +41,7 @@ type CandidatesState =
   | { kind: 'error'; message: string }
   | { kind: 'ready'; candidates: CandidateDto[] };
 
-// The production guided wizard (andypalmi/amicu-planning#85): a deterministic,
+// The production guided wizard: a deterministic,
 // five-step stepper over the SAME BFF routes the #31/#35 exercise route used -
 // pick a preset, answer its engine-provided core questions, rank candidates,
 // review/edit one's HCL and its plan, then save it as a named config (the

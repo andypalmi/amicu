@@ -144,7 +144,7 @@ impl DeclaredHost {
 
     /// Declare the host's SSH host-key fingerprint (`SHA256:...`) so it is pinned
     /// in stop records from `prepare` on. Without it the key is pinned on first
-    /// use at `provision` (see amicu-planning#70).
+    /// use at `provision`.
     #[must_use]
     pub fn with_host_key(mut self, fingerprint: impl Into<String>) -> Self {
         self.host_key = Some(fingerprint.into());
@@ -761,8 +761,7 @@ impl Provider for SelfHostedProvider {
         match (&target.pinned_host_key, &check.host_key) {
             (Some(pinned), Some(seen)) if pinned == seen => Ok(TeardownOutcome::ConfirmedGone),
             (None, _) => Ok(TeardownOutcome::Unconfirmed {
-                reason: "host key was never pinned; the host's report of absence is unverified \
-                         (amicu-planning#70)"
+                reason: "host key was never pinned; the host's report of absence is unverified"
                     .into(),
             }),
             _ => Ok(TeardownOutcome::Unconfirmed {

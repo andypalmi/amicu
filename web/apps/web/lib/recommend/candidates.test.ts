@@ -1,5 +1,5 @@
 // Pure-logic tests for the guided-wizard candidate helpers
-// (andypalmi/amicu-planning#31/#35). Uses Node's built-in test runner
+// Uses Node's built-in test runner
 // (`node --test`, with type-stripping) so no test framework is added.
 // Run: `pnpm --filter @amicu/web test`.
 

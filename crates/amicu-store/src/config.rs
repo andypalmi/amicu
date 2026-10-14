@@ -202,7 +202,6 @@ fn content_sha256(content: &str) -> [u8; 32] {
 /// store instance being pinned to one workspace), so a single store handle
 /// serves every request and each call runs its queries under a `begin_scoped`
 /// transaction bound to the caller's *claim* workspace
-/// (andypalmi/amicu-planning#130).
 #[async_trait]
 pub trait ConfigStore: Send + Sync {
     /// Creates a new config together with its first version (`version_no =

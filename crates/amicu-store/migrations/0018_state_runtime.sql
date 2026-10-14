@@ -1,6 +1,6 @@
 -- Per-deployment runtime records (handles, endpoints, write-ahead pending
 -- records with their stop identity) carried in each state snapshot alongside
--- the graph. See `amicu_state::RuntimeState` (amicu-planning#223).
+-- the graph. See `amicu_state::RuntimeState`.
 --
 -- Same append-only discipline as `content`: written once by `push`, never
 -- updated. Existing rows (and snapshots with no runtime records) hold the

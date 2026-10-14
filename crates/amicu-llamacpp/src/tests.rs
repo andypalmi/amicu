@@ -117,7 +117,7 @@ fn deployment() -> Deployment {
     }
 }
 
-/// `deployment()` with `extra_args` set to `args` (amicu-planning#150).
+/// `deployment()` with `extra_args` set to `args`.
 fn deployment_with_extra_args(args: &[&str]) -> Deployment {
     let mut d = deployment();
     let Runtime::LlamaCpp(s) = &mut d.runtime else {
@@ -471,7 +471,7 @@ fn validate_reports_ref_for_unknown_model() {
     assert_eq!(diags[0].code, catalog::REF_UNKNOWN_RESOURCE);
 }
 
-// ---- extra_args diagnostics (amicu-planning#150) ----------------------------
+// ---- extra_args diagnostics ----------------------------
 
 #[test]
 fn validate_reports_cap004_when_extra_args_present() {
@@ -565,7 +565,7 @@ fn validate_reports_cap002_for_short_flag_aliases() {
     }
 }
 
-// ---- env key diagnostics (amicu-planning#150 review hardening: H2) ---------
+// ---- env key diagnostics (review hardening: H2) ---------
 //
 // llama-server reads `LLAMA_ARG_<X>` environment variables as equivalent to
 // `--<x>` on the CLI, so a settings `env` entry is a second channel to
@@ -595,7 +595,7 @@ fn validate_reports_cap002_for_llama_arg_ctx_size_env_key() {
     );
 }
 
-// ---- amicu-planning#151: sampling/KV-cache/batching/flash-attn typed-flag
+// ---- sampling/KV-cache/batching/flash-attn typed-flag
 // diagnostics -----------------------------------------------------------
 
 #[test]
@@ -654,7 +654,7 @@ fn validate_reports_cap002_for_new_typed_flags_and_short_aliases() {
     }
 }
 
-// ---- amicu-planning#151 PR B: chat template / jinja / reasoning-format
+// ---- chat template / jinja / reasoning-format
 // typed-flag diagnostics ---------------------------------------------------
 
 #[test]
@@ -759,7 +759,7 @@ fn validate_reports_cap003_for_denylisted_env_key() {
     }
 }
 
-// ---- amicu-planning#151 PR D: multimodal typed-flag diagnostics ----------
+// ---- multimodal typed-flag diagnostics ----------
 
 #[test]
 fn validate_reports_cap002_for_multimodal_flags() {
@@ -785,7 +785,7 @@ fn validate_reports_cap002_for_multimodal_flags() {
 fn validate_reports_cap002_for_llama_arg_mmproj_env_keys() {
     // No ENV_FLAG_OVERRIDES entry is needed for either key - `common/arg.cpp`
     // sets each env var after its own long flag spelling, so the mechanical
-    // LLAMA_ARG_<X> -> --<x> rule already matches (amicu-planning#151 PR D).
+    // LLAMA_ARG_<X> -> --<x> rule already matches.
     for key in ["LLAMA_ARG_MMPROJ", "LLAMA_ARG_MMPROJ_OFFLOAD"] {
         let diags = fitting_adapter().validate(&deployment_with_env(&[(key, "x")]));
         assert!(
@@ -908,7 +908,7 @@ fn render_command_formats_f32_as_plain_decimal_not_scientific() {
 #[test]
 fn render_command_appends_extra_args_after_typed_flags() {
     // `--mmproj` used to be the canonical "still untyped" example here
-    // (amicu-planning#151 PR D types it) - `--lora` remains untyped, so it
+    // (it is now typed) - `--lora` remains untyped, so it
     // still demonstrates plain argv-order pass-through.
     let settings = {
         let Runtime::LlamaCpp(s) = deployment_with_extra_args(&["--lora", "/m.gguf"]).runtime
@@ -944,7 +944,7 @@ fn render_command_always_enables_the_metrics_endpoint_once() {
     assert_eq!(count(&["--metrics"]), 1, "no duplicate when user passes it");
 }
 
-// ---- amicu-planning#151 PR B: chat template / jinja / reasoning-format
+// ---- chat template / jinja / reasoning-format
 // renderer ---------------------------------------------------------------
 
 #[test]
@@ -1085,7 +1085,7 @@ fn render_command_omits_unset_chat_template_jinja_reasoning_format_fields() {
     }
 }
 
-// ---- amicu-planning#151 PR D: multimodal projector renderer --------------
+// ---- multimodal projector renderer --------------
 
 #[test]
 fn render_command_emits_multimodal_projector_and_offload_when_set() {
@@ -1146,7 +1146,7 @@ fn render_command_omits_multimodal_flags_when_unset() {
     }
 }
 
-// ---- amicu-planning#151 PR B: AMICU-CAP-005 chat template conflict --------
+// ---- AMICU-CAP-005 chat template conflict --------
 
 #[test]
 fn validate_reports_cap005_when_both_chat_template_fields_are_set() {
@@ -1283,7 +1283,7 @@ fn plan_launch_command_is_secret_free_and_estimate_present() {
     assert_eq!(plan.estimate.gpu_count, 1);
 }
 
-// ---- amicu-planning#151: KV-cache estimator wiring --------------------------
+// ---- KV-cache estimator wiring --------------------------
 
 #[test]
 fn plan_launch_kv_cache_is_none_when_model_has_no_shape_metadata() {
@@ -1491,7 +1491,7 @@ async fn download_resumes_partial_after_transient_failure() {
     assert_eq!(fs::metadata(&dest).unwrap().len(), 64);
 }
 
-// ---- sha256 verification (amicu-planning#151) -------------------------------
+// ---- sha256 verification -------------------------------
 //
 // `FakeSource::resolve_artifact` always returns `checksum: "sha256:w".into()`
 // (see the fixture above).
@@ -1875,7 +1875,7 @@ async fn supervisor_injects_secrets_into_env_not_argv() {
     assert!(spec.argv.iter().all(|a| !a.contains("s3cr3t")));
 }
 
-// ---- env merge / collision (amicu-planning#150) ------------------------------
+// ---- env merge / collision ------------------------------
 
 fn deployment_with_env(pairs: &[(&str, &str)]) -> Deployment {
     let mut d = deployment();
@@ -2885,7 +2885,7 @@ fn systemd_logs_use_journalctl_with_tail() {
     assert!(call.contains(&"--lines=5".to_owned()));
 }
 
-// ---- NVIDIA / CUDA (amicu-planning#247) ----------------------------------------
+// ---- NVIDIA / CUDA ----------------------------------------
 
 #[test]
 fn an_8_gib_nvidia_card_accepts_an_8b_q4_gguf_with_full_gpu_offload() {
@@ -2925,7 +2925,7 @@ fn memory_fit_on_an_nvidia_card_is_checked_against_vram_not_system_ram() {
     assert!(err.message.contains("VRAM"), "{}", err.message);
 }
 
-// ---- amicu-planning#151 PR C: speculative decoding --------------------------
+// ---- speculative decoding --------------------------
 
 /// [`gguf_model`] under a caller-chosen id, so one catalog can hold both a
 /// primary and a draft model.
@@ -3385,7 +3385,7 @@ fn host_exec_runs_a_real_process() {
     assert!(out.stdout.contains("amicu"));
 }
 
-// ---- endpoint API key (amicu-planning#191) ----------------------------------
+// ---- endpoint API key ----------------------------------
 
 const ENDPOINT_KEY: &str = "value-of-CHAT_API_KEY";
 

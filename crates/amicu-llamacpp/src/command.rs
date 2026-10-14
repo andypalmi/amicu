@@ -11,16 +11,16 @@ use amicu_core::resource::LlamaCppSettings;
 /// `extra_args` can use to silently re-assert (or override, via
 /// llama-server's own last-flag-wins argv parsing) a value amicu already
 /// rendered. `--port` has no short alias. Spellings verified against
-/// `common/arg.cpp` (amicu-planning#151): `--temp`/`--temperature` share one
+/// `common/arg.cpp`: `--temp`/`--temperature` share one
 /// `add_opt`, `-ctk`/`-ctv` are the K/V cache-type short forms, `-b`/`-ub` are
 /// the batch/ubatch short forms, `-np` is `--parallel`, `-fa` is
 /// `--flash-attn`. `--top-k`/`--top-p`/`--min-p`/`--repeat-penalty` have no
-/// short alias. `--chat-template` and `--chat-template-file` (amicu-planning#151,
-/// PR B) likewise have no documented short alias anywhere in this repo, so
+/// short alias. `--chat-template` and `--chat-template-file`
+/// likewise have no documented short alias anywhere in this repo, so
 /// none is assumed. `--jinja`/`--no-jinja` are one `add_opt`'s paired
 /// spellings for the same boolean field (`common/arg.cpp`), grouped as one
 /// entry below; `--reasoning-format` has no short alias. `-mm`/`--mmproj`
-/// and `--mmproj-offload`/`--no-mmproj-offload` (amicu-planning#151 PR D)
+/// and `--mmproj-offload`/`--no-mmproj-offload`
 /// are likewise each one `add_opt`'s paired spellings - verified against
 /// `tools/server/README.md`/`common/arg.cpp` via context7, not guessed (PR
 /// B's reviewer caught a wrong spelling here before). Shared with
@@ -50,7 +50,7 @@ pub(crate) const TYPED_FLAGS: &[&[&str]] = &[
     &["--reasoning-format"],
     &["--mmproj", "-mm"],
     &["--mmproj-offload", "--no-mmproj-offload"],
-    // amicu-planning#151 PR C - the `speculative {}` block. llama.cpp renamed
+    // the `speculative {}` block. llama.cpp renamed
     // this whole family to a `--spec-draft-*` prefix and kept the older
     // spellings as aliases on the same `add_opt` (`common/arg.cpp`), except
     // `--draft`/`--draft-n`/`--draft-max` and `--draft-min`/`--draft-n-min`,
@@ -89,7 +89,7 @@ pub(crate) fn is_typed_flag(flag: &str) -> bool {
 /// - `--api-key`, `--api-key-file`, `--ssl-key-file`: each puts secret
 ///   material, or a path to it, directly into argv, which is visible to any
 ///   process that can read `/proc/<pid>/cmdline` or a process listing -
-///   exactly what secret-designated `env` (amicu-planning#119) exists to
+///   exactly what secret-designated `env` exists to
 ///   avoid.
 pub(crate) const DENYLISTED_FLAGS: &[&str] =
     &["--host", "--api-key", "--api-key-file", "--ssl-key-file"];
@@ -97,13 +97,13 @@ pub(crate) const DENYLISTED_FLAGS: &[&str] =
 /// Environment variable names that let a spawned process load arbitrary
 /// dynamic libraries into `llama-server`, regardless of any CLI-flag
 /// equivalence - checked directly against `settings.env` keys (amicu
-/// review hardening, amicu-planning#150), independent of the `LLAMA_ARG_*`
+/// review hardening), independent of the `LLAMA_ARG_*`
 /// mapping below. Raises `AMICU-CAP-003`.
 pub(crate) const DENYLISTED_ENV_KEYS: &[&str] = &[
     // llama-server's env mirror of `--api-key` (`set_env("LLAMA_API_KEY")`,
     // not `LLAMA_ARG_`-prefixed, so the mirror rule below would miss it). Only
-    // amicu may set it, from the deployment's resolved `api_key` secret
-    // (amicu-planning#191). `LLAMA_ARG_API_KEY` / `LLAMA_ARG_API_KEY_FILE`
+    // amicu may set it, from the deployment's resolved `api_key` secret.
+    // `LLAMA_ARG_API_KEY` / `LLAMA_ARG_API_KEY_FILE`
     // mirror the denylisted `--api-key` / `--api-key-file` and are caught by
     // the flag-mirror rule.
     "LLAMA_API_KEY",
@@ -121,20 +121,20 @@ pub(crate) const DENYLISTED_ENV_KEYS: &[&str] = &[
 /// (`n_batch`/`n_ubatch`/`n_parallel`), not the flag spelling, so the
 /// mechanical rule would derive `--batch`/`--ubatch`/`--n-parallel` - none a
 /// real flag - and silently miss the conflict. `LLAMA_ARG_THINK` is the same
-/// situation for `--reasoning-format` (amicu-planning#151 PR B, review
+/// situation for `--reasoning-format` (review
 /// hardening): `common/arg.cpp`'s `add_opt` for `--reasoning-format` calls
 /// `.set_env("LLAMA_ARG_THINK")` - named after the internal `params.think`
 /// field, not the flag - so the mechanical rule would derive
 /// `--reasoning-format` from the *wrong* env key (`LLAMA_ARG_REASONING_FORMAT`,
 /// which llama-server does not read at all) while missing the real one.
 ///
-/// `LLAMA_ARG_MMPROJ` and `LLAMA_ARG_MMPROJ_OFFLOAD` (amicu-planning#151 PR
-/// D) need no entry here: `common/arg.cpp`'s `add_opt` for `--mmproj`/`-mm`
+/// `LLAMA_ARG_MMPROJ` and `LLAMA_ARG_MMPROJ_OFFLOAD`
+/// need no entry here: `common/arg.cpp`'s `add_opt` for `--mmproj`/`-mm`
 /// and `--mmproj-offload`/`--no-mmproj-offload` calls `.set_env(...)` with
 /// the env var named after the long flag itself, so the mechanical rule
 /// already derives the right flag for both.
 ///
-/// The `speculative {}` block (amicu-planning#151 PR C) deliberately adds no
+/// The `speculative {}` block deliberately adds no
 /// entry here: each of its five env vars mechanically derives a flag spelling
 /// that is already listed as an alias in [`TYPED_FLAGS`], so the fallback rule
 /// alone catches them - `LLAMA_ARG_SPEC_DRAFT_MODEL` -> `--spec-draft-model`,
@@ -192,7 +192,7 @@ pub(crate) fn llama_arg_env_flag(key: &str) -> Option<String> {
 ///
 /// `draft_model_path` is the resolved GGUF path of the `speculative {}`
 /// block's draft model, resolved by the caller from the registry exactly like
-/// `model_path` is (amicu-planning#151 PR C). It is passed separately rather
+/// `model_path` is. It is passed separately rather
 /// than read off `settings` because `settings.speculative.model` is a *model
 /// resource reference*, not a path. `Some(_)` with no `settings.speculative`
 /// (or `None` with one) renders no draft flags at all: the two travel
@@ -311,7 +311,7 @@ pub fn render_command(
     (argv, text)
 }
 
-/// Append the `multimodal {}` block's flags (amicu-planning#151 PR D):
+/// Append the `multimodal {}` block's flags:
 /// `projector` and `offload` are independent. `--mmproj-offload`/
 /// `--no-mmproj-offload` is a paired bare-flag toggle exactly like
 /// `--jinja`/`--no-jinja` - `Some(false)` renders the negative flag
@@ -332,7 +332,7 @@ fn push_multimodal_flags(argv: &mut Vec<String>, settings: &LlamaCppSettings) {
     }
 }
 
-/// Append the `speculative {}` block's flags (amicu-planning#151 PR C). The
+/// Append the `speculative {}` block's flags. The
 /// draft path and the typed draft knobs render together: without a resolved
 /// draft model there is nothing for the draft parameters to apply to, and
 /// llama-server ignores them. See `SpeculativeSettings` for why each spelling

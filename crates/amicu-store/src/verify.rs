@@ -10,7 +10,7 @@
 //!
 //! [`insert_and_notify`](VerifyStore::insert_and_notify) additionally writes the
 //! delivery into the `email_outbox` queue inside the SAME transaction as the
-//! token row (andypalmi/amicu-planning#141) - see [`crate::reset`] for the full
+//! token row - see [`crate::reset`] for the full
 //! rationale.
 
 use amicu_auth::notify::{Notification, Notifier};

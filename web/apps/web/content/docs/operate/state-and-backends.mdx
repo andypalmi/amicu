@@ -18,7 +18,7 @@ The CLI stores state in the project directory:
 
 `local` is the only state backend the CLI implements. There is no remote state backend for the CLI yet.
 
-Treat `state.json` as sensitive operational data. Do not edit it by hand. `amicu init` adds `.amicu/` to `.gitignore`. Do not share state through version control: the lock is local to one machine, so two people applying from a committed `state.json` can overwrite each other and orphan running resources. A state serial with compare-and-swap saves is planned (amicu-planning#218).
+Treat `state.json` as sensitive operational data. Do not edit it by hand. `amicu init` adds `.amicu/` to `.gitignore`. Do not share state through version control: the lock is local to one machine, so two people applying from a committed `state.json` can overwrite each other and orphan running resources. A state serial with compare-and-swap saves is planned.
 
 ## Locking
 

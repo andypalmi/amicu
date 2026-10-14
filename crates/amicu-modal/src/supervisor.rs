@@ -288,7 +288,7 @@ impl ModalSupervisor {
         self
     }
 
-    /// Applies a deployment's `scaling {}` overrides (amicu-planning#180);
+    /// Applies a deployment's `scaling {}` overrides;
     /// `None` or omitted fields keep the module defaults
     /// ([`SCALEDOWN_WINDOW_SECS`], [`TARGET_CONCURRENCY`], [`MIN_CONTAINERS`],
     /// unlimited max). Values are not re-validated here: `amicu validate`/

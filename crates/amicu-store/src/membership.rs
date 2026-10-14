@@ -25,8 +25,8 @@ use crate::{
 
 /// A workspace role, in descending privilege. Stored as lowercase text.
 ///
-/// Defined in `amicu-auth` (`amicu_auth::tenant::Role`) since
-/// andypalmi/amicu-planning#129 so the access-token `wsrole` claim can carry it
+/// Defined in `amicu-auth` (`amicu_auth::tenant::Role`)
+/// so the access-token `wsrole` claim can carry it
 /// without a store dependency; re-exported here unchanged, so
 /// `amicu_store::membership::Role` keeps resolving.
 pub use amicu_auth::Role;
@@ -47,7 +47,7 @@ pub struct Member {
 }
 
 // ---------------------------------------------------------------------------
-// Org-console audited mutations (andypalmi/amicu-planning#130)
+// Org-console audited mutations
 //
 // The Enterprise organization console runs its privileged membership mutations
 // through this store so authorization is re-checked against the ACTOR's and
@@ -147,7 +147,7 @@ impl From<AuthError> for OrgMutationError {
 /// `required` (the base capability - `InviteMember`/`ChangeRole`/
 /// `RemoveMember`). Delegates to the SHARED
 /// [`amicu_auth::authorize_membership_mutation`] - the SAME function the
-/// in-memory `OrgStore` calls (andypalmi/amicu-planning#133) - so the two
+/// in-memory `OrgStore` calls - so the two
 /// backends can never drift. The caller has read `actor`/`target_current`
 /// under the mutation's own transaction and row locks, so both are fresh.
 fn check_membership_mutation(
@@ -348,7 +348,7 @@ impl PostgresMembershipStore {
     }
 
     // -----------------------------------------------------------------------
-    // Org-console audited mutations (andypalmi/amicu-planning#130).
+    // Org-console audited mutations.
     //
     // Each of the three mutations opens ONE `begin_scoped` transaction, locks the
     // actor's and target's membership rows `FOR UPDATE`, re-reads their *current*
@@ -418,7 +418,7 @@ impl PostgresMembershipStore {
     /// their read-modify-write one at a time - mirroring the in-memory store's
     /// single-mutex semantics.
     ///
-    /// Why it is needed (andypalmi/amicu-planning#130): the last-Owner guard
+    /// Why it is needed: the last-Owner guard
     /// reads an UNLOCKED `owner_count`. When actor == target (self-demotion or
     /// self-removal) only that one row is locked `FOR UPDATE`, so two Owners
     /// self-mutating concurrently hold DISJOINT row locks; under READ COMMITTED
@@ -447,7 +447,7 @@ impl PostgresMembershipStore {
     }
 
     /// Re-read `workspace`'s CURRENT tier inside `tx` and reject the mutation if
-    /// it no longer meets Enterprise (andypalmi/amicu-planning#132): the
+    /// it no longer meets Enterprise: the
     /// claim-based Enterprise gate keys on the access token's `claims.tier`, so
     /// a workspace DOWNGRADED from Enterprise still passes it until the token
     /// expires (<=5 min). Re-reading here, inside the SAME transaction as the
@@ -687,8 +687,8 @@ impl PostgresMembershipStore {
     }
 }
 
-/// The real, multi-workspace membership authority the token issuer consults
-/// (andypalmi/amicu-planning#129): [`context`](MembershipStore::context) resolves
+/// The real, multi-workspace membership authority the token issuer consults:
+/// [`context`](MembershipStore::context) resolves
 /// the `wsrole` + workspace `tier` for a mint/refresh, and
 /// [`list_for_user`](MembershipStore::list_for_user) backs `GET /workspaces`.
 /// Both resolve state SERVER-SIDE from `workspace_members` + `workspaces`;

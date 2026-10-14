@@ -1,5 +1,5 @@
 //! Proves the exact machinery `amicu-server` wires together for
-//! andypalmi/amicu-planning#140: a [`KeyringJwksProvider`] backed by
+//! a [`KeyringJwksProvider`] backed by
 //! [`AuthService::keyring_handle`] observes a runtime `rotate_keys` call
 //! immediately, with no restart and no JWKS round-trip, because it reads the
 //! same `Arc<RwLock<Keyring>>` the service mutates.

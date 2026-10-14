@@ -1,5 +1,5 @@
-//! End-to-end HTTP tests over the internal outbox-drain router
-//! (andypalmi/amicu-planning#141), in-process via `oneshot`.
+//! End-to-end HTTP tests over the internal outbox-drain router,
+//! in-process via `oneshot`.
 //!
 //! The Google-OIDC claim checking itself (issuer, signature, `aud`, allowlisted
 //! `email`) is unit-tested against a locally-signed RS256 token and an injected

@@ -113,8 +113,8 @@ fn model(name: &str, f: &Fields) -> Result<Model> {
                 })
             })
             .collect::<Result<_>>()?,
-        // Declared shape metadata feeding the KV-cache estimator
-        // (amicu-planning#151) - there is no GGUF header parser in-tree, so
+        // Declared shape metadata feeding the KV-cache estimator -
+        // there is no GGUF header parser in-tree, so
         // these are never derived.
         n_layers,
         n_kv_heads: f.opt_positive_u32("n_kv_heads")?,
@@ -188,8 +188,8 @@ fn deployment(name: &str, f: &Fields) -> Result<Deployment> {
                 reasoning_format: s.opt_enum::<ReasoningFormat>("reasoning_format")?,
                 // `speculative { model = model.<id>.id ... }` - the draft
                 // model is a reference expression, parsed with the same
-                // `reference` helper the deployment's primary `model` uses
-                // (amicu-planning#151 PR C), so it is a real graph edge.
+                // `reference` helper the deployment's primary `model` uses,
+                // so it is a real graph edge.
                 speculative: s
                     .opt_block("speculative")
                     .map(|spec| -> Result<SpeculativeSettings> {
@@ -221,8 +221,8 @@ fn deployment(name: &str, f: &Fields) -> Result<Deployment> {
         }
         "vllm" => {
             let s = f.block("vllm")?;
-            // `multimodal { ... }` is llama.cpp-only (amicu-planning#151 PR
-            // D: it backs `--mmproj`/`--mmproj-offload`, which have no vLLM
+            // `multimodal { ... }` is llama.cpp-only (
+            // it backs `--mmproj`/`--mmproj-offload`, which have no vLLM
             // equivalent, and `VllmSettings` carries no such field to parse
             // it into) - reject it structurally here rather than silently
             // dropping it, which would otherwise happen since nothing else
@@ -266,7 +266,7 @@ fn deployment(name: &str, f: &Fields) -> Result<Deployment> {
     })
 }
 
-/// The deployment-level `scaling { ... }` block (amicu-planning#180).
+/// The deployment-level `scaling { ... }` block.
 /// `scaledown_window` is a duration string (`"15m"`); value ranges are
 /// checked later by `AMICU-CAP-008`, only the syntax is checked here.
 fn scaling_settings(f: &Fields) -> Result<Option<ScalingSettings>> {
@@ -392,8 +392,8 @@ fn use_case(name: &str, f: &Fields) -> Result<UseCase> {
     })
 }
 
-/// A `credential` resource: a named bundle of secret-designated fields
-/// (amicu-planning#119). Every field here is structurally enforced to be a
+/// A `credential` resource: a named bundle of secret-designated fields.
+/// Every field here is structurally enforced to be a
 /// `secret(...)` reference by [`Fields::opt_secret_ref`] / [`Fields::secret_map`];
 /// a literal is a hard parse-time rejection.
 fn credential(name: &str, f: &Fields) -> Result<Credential> {
@@ -426,7 +426,6 @@ type Seen = Rc<RefCell<BTreeSet<String>>>;
 
 /// Every body visited while parsing one resource, with the keys read from
 /// it, so [`Registry::ensure_exhaustive`] can reject the leftovers
-/// (amicu-planning#157).
 #[derive(Clone, Default)]
 struct Registry<'a> {
     bodies: Rc<RefCell<Vec<Visited<'a>>>>,
@@ -698,7 +697,7 @@ impl<'a> Fields<'a> {
 
     /// A `sha256` attribute: exactly 64 hex characters (case-insensitive),
     /// normalized to lowercase. Hand-validated rather than a plain
-    /// pass-through (amicu-planning#151) - it must be a well-formed digest
+    /// pass-through - it must be a well-formed digest
     /// before it is ever compared against a downloaded artifact's checksum
     /// (see `amicu_llamacpp::download::download_gguf`).
     fn opt_sha256(&self, key: &str) -> Result<Option<String>> {
@@ -714,7 +713,7 @@ impl<'a> Fields<'a> {
     }
 
     /// A `build` attribute: non-empty and containing no whitespace (a build
-    /// tag like `"b4500"` or a git sha, amicu-planning#151). Stored/validated
+    /// tag like `"b4500"` or a git sha). Stored/validated
     /// only - not yet rendered or enforced.
     fn opt_build(&self, key: &str) -> Result<Option<String>> {
         self.opt_string(key)?
@@ -751,7 +750,7 @@ impl<'a> Fields<'a> {
     }
 
     /// A secret-designated attribute: only a `secret("<ref>")` function-call
-    /// expression is accepted (amicu-planning#119). A raw string literal, or
+    /// expression is accepted. A raw string literal, or
     /// anything else, is a hard parse-time rejection with
     /// `AMICU-POLICY-004` - not a heuristic, since the field is
     /// schema-directed. See [`secret_ref_from_expr`].
@@ -771,7 +770,7 @@ impl<'a> Fields<'a> {
 
     /// A nested block whose every attribute value must be a `secret(...)`
     /// reference, e.g. `env { HF_TOKEN = secret("vault://...") }`. Used for
-    /// credential-bearing `env` maps (amicu-planning#119): every *value* is
+    /// credential-bearing `env` maps: every *value* is
     /// secret-designated the same way a bare `api_key`/`token`/`password`
     /// attribute is.
     fn secret_map(&self, key: &str) -> Result<BTreeMap<String, SecretRef>> {
@@ -856,7 +855,7 @@ fn from_variant<T: DeserializeOwned>(s: &str) -> Option<T> {
     serde_json::from_value(serde_json::Value::String(s.to_string())).ok()
 }
 
-/// Extract a `secret("<ref>")` reference expression (amicu-planning#119).
+/// Extract a `secret("<ref>")` reference expression.
 ///
 /// Only a single-argument call to the bare, unnamespaced function `secret`
 /// with a string-literal argument counts; anything else - including a raw

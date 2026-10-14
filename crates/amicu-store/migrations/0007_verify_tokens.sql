@@ -8,7 +8,7 @@
 -- Control-plane, no workspace RLS - same rationale as refresh_tokens and users.
 --
 -- user_id is a REAL foreign key to users(id) with ON DELETE CASCADE (see
--- refresh_tokens; resolves andypalmi/amicu-planning#114).
+-- refresh_tokens).
 --
 -- expires_at is Unix seconds (BIGINT). No chrono.
 CREATE TABLE verify_tokens (

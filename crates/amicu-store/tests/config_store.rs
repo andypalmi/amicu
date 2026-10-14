@@ -42,7 +42,7 @@ async fn pool() -> PgPool {
 
 /// The single-tenant default workspace (seeded by migration 0010), used by the
 /// tests that do not exercise cross-workspace isolation. The store is no longer
-/// pinned to a workspace: it is passed per call (andypalmi/amicu-planning#130).
+/// pinned to a workspace: it is passed per call.
 const WS: WorkspaceId = WorkspaceId::DEFAULT;
 
 #[tokio::test]
@@ -326,7 +326,7 @@ async fn config_is_invisible_to_another_workspace() {
     assert_eq!(current.content, "hcl");
 }
 
-/// N2 fail-closed backport (andypalmi/amicu-planning#130, migration 0012): with
+/// N2 fail-closed backport (migration 0012): with
 /// NO `app.current_workspace` bound - or the empty string a reverted SET LOCAL
 /// leaves on a pooled connection - the config/state RLS policies must match
 /// NOTHING (fail-closed via NULLIF), never ERROR with `invalid input syntax for

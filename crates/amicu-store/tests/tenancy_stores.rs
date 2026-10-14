@@ -9,8 +9,8 @@
 //!     cargo test -p amicu-store -- --ignored
 //! ```
 //!
-//! Connect as the non-superuser, non-BYPASSRLS `amicu_app` role (see
-//! andypalmi/amicu-planning#114) to exercise the row-level-security backstop on
+//! Connect as the non-superuser, non-BYPASSRLS `amicu_app` role
+//! to exercise the row-level-security backstop on
 //! workspace_members / workspace_invites in addition to the always-on query
 //! predicates that make these tests pass under any role.
 
@@ -75,7 +75,7 @@ fn token_hash(seed: u8) -> [u8; 32] {
     h
 }
 
-/// andypalmi/amicu-planning#129: the token issuer's membership seam over
+/// the token issuer's membership seam over
 /// Postgres. `context` resolves the caller's role + the WORKSPACE's tier for a
 /// mint/refresh; `list_for_user` backs `GET /workspaces`. Both are the
 /// server-side authority - a removal/role-change is visible immediately, which
@@ -507,8 +507,8 @@ async fn delete_is_refused_when_personal_workspace_has_another_member() {
 }
 
 // ---------------------------------------------------------------------------
-// Additional-workspace provisioning + invitations
-// (andypalmi/amicu-planning#131). Server-authoritative ids, in-transaction actor
+// Additional-workspace provisioning + invitations.
+// Server-authoritative ids, in-transaction actor
 // RBAC re-checks, and invite acceptance that binds membership to the INVITE's
 // workspace/role only. The RLS backstop (workspace_invites / workspace_members
 // under the non-superuser amicu_app role) is exercised alongside the always-on
@@ -885,7 +885,7 @@ async fn invites_are_isolated_across_workspaces() {
     assert_eq!(found_b.workspace_id, ws_b);
 }
 
-/// Invite REVOCATION (andypalmi/amicu-planning#131): an Owner/Admin may revoke a
+/// Invite REVOCATION: an Owner/Admin may revoke a
 /// PENDING invite in their own workspace, re-checked against the actor's CURRENT
 /// role in the store's transaction; after revocation the token no longer
 /// redeems; a non-manager is refused; and a revoke targeting another workspace's
@@ -1125,7 +1125,7 @@ async fn invite_revoke_cannot_touch_another_workspaces_invite() {
     assert_eq!(accepted.workspace_id, ws_b);
 }
 
-/// CONCURRENCY (andypalmi/amicu-planning#131): two redemptions of the SAME token
+/// CONCURRENCY: two redemptions of the SAME token
 /// fired at once (each its own connection/transaction from the pool) must resolve
 /// to EXACTLY ONE `Ok` - the other losing the atomic
 /// `UPDATE ... WHERE accepted_at IS NULL ... RETURNING` claim (`Invalid`) or the
@@ -1204,8 +1204,8 @@ async fn concurrent_double_accept_enrolls_exactly_once() {
 
 // ---------------------------------------------------------------------------
 // Org console: audited mutations re-check RBAC in the mutation's own
-// transaction, write their audit record atomically, and stay workspace-scoped
-// (andypalmi/amicu-planning#130). Carries the #117 in-memory TOCTOU fix onto
+// transaction, write their audit record atomically, and stay workspace-scoped.
+// Carries the #117 in-memory TOCTOU fix onto
 // Postgres.
 // ---------------------------------------------------------------------------
 #[tokio::test]
@@ -1337,7 +1337,7 @@ async fn org_console_audited_mutations_recheck_roles_and_audit_atomically() {
 // ---------------------------------------------------------------------------
 // Org console: the Postgres membership store's authorized mutations delegate
 // to the SAME `amicu_auth::authorize_membership_mutation` the in-memory
-// `OrgStore` calls (andypalmi/amicu-planning#133), so a Viewer/Member actor is
+// `OrgStore` calls, so a Viewer/Member actor is
 // refused identically to the in-memory backend - table-driven over every
 // non-managing role.
 // ---------------------------------------------------------------------------
@@ -1419,8 +1419,8 @@ async fn viewer_and_member_cannot_manage_membership() {
 }
 
 // ---------------------------------------------------------------------------
-// Org console: the last-Owner invariant holds under CONCURRENT self-mutations
-// (andypalmi/amicu-planning#130). Two Owners self-removing at the same instant
+// Org console: the last-Owner invariant holds under CONCURRENT self-mutations.
+// Two Owners self-removing at the same instant
 // lock DISJOINT membership rows, so without the per-workspace serializing
 // advisory lock both `owner_count()` reads see 2, both pass the `== 1` guard,
 // and both commit -> 0 Owners, workspace orphaned. The advisory lock taken
@@ -1492,7 +1492,7 @@ async fn concurrent_self_removal_never_orphans_the_last_owner() {
 }
 
 // ---------------------------------------------------------------------------
-// N1: per-user workspace-creation cap (andypalmi/amicu-planning#132). There is
+// N1: per-user workspace-creation cap. There is
 // no `DELETE /workspaces`, so this cap is a hard ceiling, enforced INSIDE
 // `create_with_owner`'s own transaction under a per-owner advisory lock so it
 // is exact under concurrency.
@@ -1555,8 +1555,8 @@ async fn create_with_owner_enforces_the_per_user_cap() {
 }
 
 // ---------------------------------------------------------------------------
-// N3: close the tier-downgrade staleness window on org MUTATIONS
-// (andypalmi/amicu-planning#132). The claim-based Enterprise gate keys on the
+// N3: close the tier-downgrade staleness window on org MUTATIONS.
+// The claim-based Enterprise gate keys on the
 // access token's `claims.tier`, so a workspace DOWNGRADED from Enterprise
 // still passes it until the token expires (<=5 min). Every audited mutation
 // re-reads the workspace's CURRENT tier inside its own transaction and rejects

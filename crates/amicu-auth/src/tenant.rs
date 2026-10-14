@@ -32,7 +32,7 @@ impl WorkspaceId {
     /// A self-host deployment that has not provisioned distinct workspaces
     /// operates entirely within this one, so it is the sensible default.
     ///
-    /// NB (andypalmi/amicu-planning#129): this is NOT a valid active-workspace
+    /// NB: this is NOT a valid active-workspace
     /// claim. No token is ever minted with `wsid = DEFAULT`; it survives only
     /// for the not-yet-reworked self-host config/state stores (#116).
     pub const DEFAULT: Self = Self(Uuid::nil());

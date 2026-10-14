@@ -1,10 +1,10 @@
--- Shared, cross-replica fixed-window rate limiter backing store
--- (andypalmi/amicu-planning#142). Cloud Run autoscales N stateless replicas;
+-- Shared, cross-replica fixed-window rate limiter backing store.
+-- Cloud Run autoscales N stateless replicas;
 -- the process-local in-memory limiter (crates/amicu-api/src/ratelimit.rs)
 -- gives each replica its own full quota, so the effective limit is N times
 -- `AMICU_RATE_LIMIT_MAX` and resets on every cold start. This table lets every
 -- replica share ONE counter per (route, client) key over the one shared
--- Postgres pool every replica already holds (andypalmi/amicu-planning#139).
+-- Postgres pool every replica already holds.
 --
 -- Deliberately NOT workspace/tenant-scoped, unlike every RLS-protected table
 -- elsewhere in this schema: a rate-limit key is a route+client-IP (or

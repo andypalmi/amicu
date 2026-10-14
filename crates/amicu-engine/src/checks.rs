@@ -31,8 +31,8 @@ pub fn report_for(graph: &Graph) -> DiagnosticReport {
         diagnostics.push(d);
     }
 
-    // Dispatch to the adapter matching each deployment's own runtime family
-    // (amicu-planning#152) - previously this only ever ran llama.cpp's
+    // Dispatch to the adapter matching each deployment's own runtime family -
+    // previously this only ever ran llama.cpp's
     // adapter, so a vllm deployment got no fit/capability validation at all.
     let catalog = build_catalog(graph);
     let llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), host_supervisor());
@@ -93,7 +93,7 @@ pub(crate) fn apply_memory_check(
 /// Hardware-profile `provider` value whose deployments honor `scaling {}`.
 const SCALING_PROVIDER: &str = "modal";
 
-/// Validate each deployment's `scaling {}` block (amicu-planning#180):
+/// Validate each deployment's `scaling {}` block:
 /// `AMICU-CAP-008` for invalid values, `AMICU-CAP-009` when the deployment's
 /// provider has no scaling mapping yet.
 fn scaling_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
@@ -136,8 +136,8 @@ fn scaling_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
 }
 
 /// `AMICU-POLICY-007`: a deployment whose endpoint is reachable off-machine
-/// (any provider other than the local ones) must declare an `api_key`
-/// (amicu-planning#191). Local loopback deployments may omit it. The
+/// (any provider other than the local ones) must declare an `api_key`.
+/// Local loopback deployments may omit it. The
 /// diagnostic says how to declare the key and how to supply its value; it
 /// never needs, and never sees, the value.
 fn api_key_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
@@ -523,7 +523,7 @@ mod residency_tests {
     }
 }
 
-// --- amicu-planning#152: dispatch regression -------------------------------
+// --- dispatch regression -------------------------------
 //
 // Before this PR, `report_for` (and `build_plan`) hardcoded `LlamaCppAdapter`
 // and skipped any non-llama.cpp deployment outright (`if !matches!(runtime,
@@ -638,7 +638,7 @@ mod vllm_dispatch_tests {
         }
     }
 
-    /// amicu-planning#249: `Qwen/Qwen3-8B` in bf16 (~16 GB of weights) on an
+    /// `Qwen/Qwen3-8B` in bf16 (~16 GB of weights) on an
     /// 8 GiB card is rejected, and the message names the weights, the KV
     /// estimate (the model declares its shape) and the hardware memory.
     #[test]
@@ -784,8 +784,8 @@ mod vllm_dispatch_tests {
         assert!(report_for(&g).valid);
     }
 
-    /// GGUF-on-vLLM: a warning, not a block (amicu-planning#152's
-    /// `AMICU-CAP-006`), reached the same way through the dispatcher.
+    /// GGUF-on-vLLM: a warning, not a block,
+    /// `AMICU-CAP-006`, reached the same way through the dispatcher.
     #[test]
     fn vllm_deployment_with_gguf_artifact_warns_through_report_for() {
         let mut g = Graph::new();

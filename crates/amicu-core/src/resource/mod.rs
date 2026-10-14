@@ -1,5 +1,5 @@
 //! Faithful Rust representations of the canonical DSL resource kinds: the
-//! original nine plus `credential` (amicu-planning#119).
+//! original nine plus `credential`.
 //!
 //! Every type derives `Serialize`, `Deserialize`, `Debug`, `Clone` and
 //! `PartialEq`, uses `snake_case` field names to match the DSL/JSON, and

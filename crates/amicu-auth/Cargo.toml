@@ -56,7 +56,7 @@ sha2 = { version = "0.10", optional = true }
 zeroize = { version = "1", features = ["derive"], optional = true }
 # Anti-enumeration response-timing floor. `/recover` and `/verify/resend` do
 # their account-dependent work INLINE now (Cloud Run freezes detached tasks once
-# the response is written - amicu-planning#141) and pad to a fixed deadline with
+# the response is written) and pad to a fixed deadline with
 # `tokio::time::sleep_until`, so response timing never depends on account
 # existence. `time` only: no runtime, no `spawn`.
 tokio = { version = "1", default-features = false, features = ["time"], optional = true }

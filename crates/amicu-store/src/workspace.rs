@@ -3,7 +3,7 @@
 //! Global control-plane, like [`user`](crate::user): `workspaces` carries no
 //! RLS, so create/get/set operations need no workspace GUC. Workspace ids are
 //! ALWAYS server-generated here (never caller-chosen) - provisioning is
-//! server-authoritative (see andypalmi/amicu-planning#127).
+//! server-authoritative.
 
 use amicu_auth::{AuthError, Result, Tier};
 use sqlx::PgPool;
@@ -33,7 +33,7 @@ pub struct Workspace {
 /// Default cap on the TOTAL number of workspaces a user may OWN (`role =
 /// 'owner'` in `workspace_members`, across every workspace - including the
 /// personal workspace sign-up provisions), enforced by
-/// [`PostgresWorkspaceStore::create_with_owner`] (andypalmi/amicu-planning#132).
+/// [`PostgresWorkspaceStore::create_with_owner`].
 /// There is no `DELETE /workspaces`, so this is a hard ceiling per owner;
 /// `amicu-server` overrides it from `AMICU_MAX_WORKSPACES_PER_USER` via
 /// [`PostgresWorkspaceStore::with_max_workspaces_per_user`].
@@ -45,7 +45,7 @@ pub enum WorkspaceError {
     /// The owner already owns `max` workspaces (the configured
     /// `AMICU_MAX_WORKSPACES_PER_USER` cap), checked and enforced INSIDE the
     /// creating transaction under a per-owner advisory lock so it is exact
-    /// under concurrency - see andypalmi/amicu-planning#132.
+    /// under concurrency.
     LimitReached {
         /// The cap that was reached.
         max: u32,
@@ -123,7 +123,7 @@ impl PostgresWorkspaceStore {
     /// The new workspace starts at [`Tier::Community`]; billing upgrades are a
     /// separate, subscription-driven concern (the org console / Stripe surface).
     ///
-    /// # Per-user cap (andypalmi/amicu-planning#132)
+    /// # Per-user cap
     /// There is no `DELETE /workspaces`, so a per-user cap on how many
     /// workspaces one user may OWN is a hard ceiling. Enforced INSIDE this
     /// transaction, before either insert: a `pg_advisory_xact_lock` keyed on

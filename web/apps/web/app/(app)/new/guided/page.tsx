@@ -8,7 +8,7 @@ import { PageShell } from '@/components/common/page-shell';
 
 export const metadata: Metadata = { title: 'Guided wizard' };
 
-// The guided-wizard surface (andypalmi/amicu-planning#85): a deterministic,
+// The guided-wizard surface: a deterministic,
 // five-step stepper (preset -> questions -> candidates -> review -> confirm)
 // over the same preset/recommend/configs BFF routes the classic `/wizard`
 // already uses. No sessionStorage persistence - a hard refresh past step 1

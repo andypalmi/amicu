@@ -1,5 +1,4 @@
 //! Live-database integration tests for the transactional email outbox
-//! (andypalmi/amicu-planning#141).
 //!
 //! `#[ignore]`d like every other live-DB test in this workspace, so
 //! `cargo test --workspace` skips them when no Postgres is available (as in
@@ -369,7 +368,7 @@ async fn enqueue_joins_the_callers_transaction() {
     );
 }
 
-/// The atomicity andypalmi/amicu-planning#141 asks for, end to end: the Postgres
+/// The atomicity the durable outbox calls for, end to end: the Postgres
 /// [`ResetStore::insert_and_notify`] override writes the reset-token row and the
 /// queued email in ONE transaction, so the queue can never hold a link for a
 /// token that does not exist (nor the reverse).

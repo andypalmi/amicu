@@ -41,7 +41,6 @@ pub struct Claims {
     /// `workspace_members` at mint time and re-validated on every refresh
     /// rotation - never asserted by the client. There is no default: a token
     /// always names exactly one real workspace the subject is a member of
-    /// (andypalmi/amicu-planning#129).
     pub wsid: WorkspaceId,
     /// The subject's role in [`wsid`](Claims::wsid), resolved server-side from
     /// `workspace_members` at mint time (a fresh rotation carries the current

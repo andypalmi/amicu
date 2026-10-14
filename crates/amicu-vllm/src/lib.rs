@@ -1,7 +1,7 @@
 //! The vLLM runtime adapter.
 //!
 //! Implements [`RuntimeAdapter`](amicu_runtime::RuntimeAdapter) for local,
-//! single-process `vllm serve` launches (amicu-planning#152 - the renderer
+//! single-process `vllm serve` launches (the renderer
 //! half; the consumer/on-prem hardware catalog half landed in PR #145).
 //! Kubernetes/Helm delivery for vLLM stays out of scope (tracked separately:
 //! #27-#30).
@@ -9,7 +9,7 @@
 //! - **Command generation** ([`command`]) - render the visible, secret-free
 //!   `vllm serve` command line from a deployment's typed `vllm {}` settings,
 //!   plus the same `extra_args`/`env` escape hatch llama.cpp's renderer
-//!   offers (amicu-planning#150's conventions, applied here for the first
+//!   offers (same conventions, applied here for the first
 //!   time to vLLM).
 //! - **Adapter** ([`adapter`]) - planning (`capabilities`/`validate`/
 //!   `plan_launch`) is pure and resolves the deployment's model/hardware

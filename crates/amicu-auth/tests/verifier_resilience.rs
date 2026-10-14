@@ -1,4 +1,4 @@
-//! Verifier resilience (amicu-planning#95): bounded refetch on unknown `kid`s
+//! Verifier resilience: bounded refetch on unknown `kid`s
 //! and serve-stale-on-failure when a JWKS refetch blips.
 
 use std::sync::Arc;

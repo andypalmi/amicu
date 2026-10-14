@@ -17,7 +17,7 @@ resource "deployment" "support_local" {
 
 `n_gpu_layers = -1` offloads all layers to the accelerator; `0` is CPU-only.
 
-## llama.cpp: sampling, KV cache, batching, flash attention, parallel slots (amicu-planning#151)
+## llama.cpp: sampling, KV cache, batching, flash attention, parallel slots
 
 ```hcl
 resource "deployment" "support_local_tuned" {
@@ -92,7 +92,7 @@ layer counts:
   head_dim    = 256
 ```
 
-## llama.cpp: chat template, jinja, reasoning format, build pin, artifact checksum (amicu-planning#151 PR B)
+## llama.cpp: chat template, jinja, reasoning format, build pin, artifact checksum
 
 ```hcl
 resource "model" "support_chat" {
@@ -144,7 +144,7 @@ emits neither flag and `plan_launch` refuses to build the launch. All five
 fields above are optional and independent of each other and of the
 sampling/KV-cache/batching fields from PR A.
 
-## llama.cpp: multimodal projector (amicu-planning#151 PR D)
+## llama.cpp: multimodal projector
 
 ```hcl
 resource "deployment" "vision_chat_local" {
@@ -181,7 +181,7 @@ independent of each other. `multimodal {}` is llama.cpp-only: it backs the
 `multimodal` block on a `vllm {}` settings block is a schema error at parse
 time, not a capability diagnostic.
 
-## llama.cpp: speculative decoding with a draft model (amicu-planning#151 PR C)
+## llama.cpp: speculative decoding with a draft model
 
 The draft model is a **second `model` resource**, referenced by a real graph
 edge - not a path string. Its GGUF is resolved and staged exactly like the
@@ -272,14 +272,14 @@ resource "deployment" "chat_prod" {
     tensor_parallel_size   = 2
     gpu_memory_utilization = 0.90
 
-    # amicu-planning#151: vLLM's own KV-cache-dtype and batching knobs.
+    # vLLM's own KV-cache-dtype and batching knobs.
     # No vLLM renderer exists yet - these parse and round-trip but nothing
     # consumes them until the renderer lands.
     kv_cache_dtype           = "fp8"
     max_num_seqs             = 4
     max_num_batched_tokens   = 8192
 
-    # amicu-planning#158: unset here (default) so vLLM captures CUDA graphs
+    # unset here (default) so vLLM captures CUDA graphs
     # for this production deployment; see "Modal fast boot" below for the
     # opposite choice.
     # enforce_eager           = false
@@ -293,13 +293,13 @@ resource "deployment" "chat_prod" {
 llama.cpp's `cache_type_k`/`cache_type_v`. `max_num_seqs` is vLLM's rough
 equivalent of llama.cpp's `parallel_slots`; `max_num_batched_tokens` of
 `batch_size`. vLLM has no sampling-defaults deployment flags, so there is no
-`temperature`/`top_p`/... equivalent on `vllm {}`. `enforce_eager` (bool,
-amicu-planning#158) toggles CUDA-graph capture at startup: `true` skips it
+`temperature`/`top_p`/... equivalent on `vllm {}`. `enforce_eager` (bool)
+toggles CUDA-graph capture at startup: `true` skips it
 for a faster cold start at the cost of steady-state throughput (the trade-off
 a "fast boot" preset wants), `false` forces capture, and unset leaves vLLM's
 own default (captured) in effect.
 
-## Modal autoscaling: `scaling {}` (amicu-planning#180)
+## Modal autoscaling: `scaling {}`
 
 Deployment-level, optional, provider-agnostic block; only the `modal` provider
 maps it today (others get `AMICU-CAP-009`). Omitted fields keep today's
@@ -316,7 +316,7 @@ defaults (min 0, no max, target concurrency 32, scaledown 15m).
 
 See `modal-deployment.md` for details (`AMICU-CAP-008` validation, plan output).
 
-## vLLM on Modal (serverless GPU, amicu-planning#158)
+## vLLM on Modal (serverless GPU)
 
 Setup, multi-GPU, metrics and state behaviour: `modal-deployment.md`.
 
@@ -406,7 +406,7 @@ amicu sends them as `Modal-Key` / `Modal-Secret` on its health/status probes
 Add `-H "Authorization: Bearer $CHAT_MODAL_API_KEY"` for the deployment's own
 API key (the proxy token uses different headers, not `Authorization`).
 
-## llama.cpp on Modal (serverless GPU, amicu-planning#160)
+## llama.cpp on Modal (serverless GPU)
 
 ```hcl
 resource "model" "gemma_gguf" {
@@ -461,7 +461,7 @@ What actually happens on `amicu apply`:
 - Calling the endpoint needs the same Modal Proxy Auth Token headers as vLLM
   (see "Calling the endpoint" above); amicu's status probe sends them too.
 
-## llama.cpp escape hatch: `extra_args` + `env` (amicu-planning#150)
+## llama.cpp escape hatch: `extra_args` + `env`
 
 Typed fields cover a small slice of `llama-server`'s flag surface. `extra_args`
 passes raw flags straight through to the renderer, appended verbatim after the
@@ -483,7 +483,7 @@ resource "deployment" "vision_spec_local" {
     # speculative decoding are all typed fields (see above) - put them
     # there, not here. Passing any of their flags (including --mmproj or
     # --model-draft and friends) through extra_args is AMICU-CAP-002. What
-    # remains untyped after amicu-planning#151 (the speculative *type*/ngram
+    # remains untyped (the speculative *type*/ngram
     # knobs) still goes through extra_args, tracked as a separate PR against
     # the same issue.
     multimodal {
@@ -538,17 +538,17 @@ Rules and caveats:
   instead; this is a heuristic, not a hard rejection like `credential.env`'s
   `AMICU-POLICY-004`.
 - Setting both `chat_template` and `chat_template_file` on the same
-  `llama_cpp {}` block is `AMICU-CAP-005` (amicu-planning#151 PR B): they
+  `llama_cpp {}` block is `AMICU-CAP-005`: they
   render mutually exclusive flags, so `render_command` emits neither and
   `plan_launch` refuses the launch - fix by removing one.
 - A `speculative {}` block whose draft `model` is the deployment's own model
-  is `AMICU-CAP-007` (amicu-planning#151 PR C): a draft model must be a
+  is `AMICU-CAP-007`: a draft model must be a
   different, smaller model, or `llama-server` would load the same weights
   twice for no speedup.
 - `extra_args`/`env` fields on the `vllm {}` block parse the same way, ahead
   of the vLLM command renderer that will consume them.
-- A `multimodal { ... }` block is only valid inside `llama_cpp {}`
-  (amicu-planning#151 PR D): putting one inside `vllm {}` is a structural
+- A `multimodal { ... }` block is only valid inside `llama_cpp {}`:
+  putting one inside `vllm {}` is a structural
   schema error at parse time (`VllmSettings` has no field for it), not a
   capability diagnostic - fix by moving it to the `llama_cpp {}` block or
   removing it.

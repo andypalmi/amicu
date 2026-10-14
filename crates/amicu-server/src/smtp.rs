@@ -409,8 +409,8 @@ impl Notifier for SmtpNotifier {
 
 /// The domain half of an email address, for logging - never the whole address.
 ///
-/// A delivery failure is logged every time it is attempted, and since
-/// andypalmi/amicu-planning#141 the outbox drain RETRIES a failing message on a
+/// A delivery failure is logged every time it is attempted, and
+/// now the outbox drain RETRIES a failing message on a
 /// schedule (it used to be one best-effort, spawn-and-forget attempt). A full
 /// address would therefore be written to the logs repeatedly, turning a
 /// misconfigured mail server into a steady leak of who has an account here -

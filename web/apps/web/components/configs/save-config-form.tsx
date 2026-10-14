@@ -17,7 +17,7 @@ type SaveMode = 'existing' | 'new';
 // at the resulting config, so a second Save appends another version instead of
 // failing on a duplicate name.
 //
-// Extracted from `components/wizard/hcl-result.tsx` (andypalmi/amicu-planning#85)
+// Extracted from `components/wizard/hcl-result.tsx`
 // so the guided wizard's confirm/create step can reuse the exact same
 // save-a-config behavior as the classic `/wizard` flow - POSTing here as a
 // brand-new named config IS the guided wizard's confirm/create hand-off, there

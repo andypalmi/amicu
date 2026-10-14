@@ -2,7 +2,7 @@
 // generated `@amicu/api-client` (OpenAPI-derived, from `crates/amicu-schema/
 // openapi.json`).
 //
-// Resolved amicu-planning#83: the request/response *shapes* below are no longer
+// Resolved: the request/response *shapes* below are no longer
 // hand-written. `TokenResponse` and every request body are typed straight from the
 // generated schema, so this client cannot drift from the spec. What remains here is
 // only ergonomics: a compact method-per-flow surface returning a discriminated

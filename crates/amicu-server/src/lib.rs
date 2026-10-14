@@ -6,7 +6,7 @@
 //! state, reads its configuration from the environment (or flags), binds a
 //! `TcpListener`, and serves the router with graceful shutdown.
 //!
-//! # Cloud Run bootstrap (andypalmi/amicu-planning#139)
+//! # Cloud Run bootstrap
 //!
 //! [`build_app`] connects Postgres exactly ONCE per process and hands
 //! `pool.clone()` to every store that needs it (the auth quartet, the org
@@ -34,7 +34,7 @@
 //! instead of refusing to start when the connecting role happens to own the
 //! schema.
 //!
-//! ## Multi-replica signing key (andypalmi/amicu-planning#140)
+//! ## Multi-replica signing key
 //!
 //! [`build_app`] no longer generates a signing key at boot. The ACTIVE key
 //! (and any RETIRING keys, kept for verification only during rotation) are
@@ -144,14 +144,14 @@
 //! full operational rotation procedure.
 //!
 //! `bind`'s default changed from `127.0.0.1:8080` to `0.0.0.0:8080` in
-//! andypalmi/amicu-planning#139 - a deliberate, dev-facing change (not just a
+//! a deliberate, dev-facing change (not just a
 //! Cloud Run one): loopback-only refused every container/VM/Docker Desktop
 //! setup that reaches the process over a non-loopback interface, which is the
 //! common case outside "cargo run on your own machine". Restore the old
 //! loopback-only default explicitly with `AMICU_BIND=127.0.0.1:8080` (or
 //! `--bind`) if you want it back.
 //!
-//! # Email outbox + the scheduler contract (andypalmi/amicu-planning#141)
+//! # Email outbox + the scheduler contract
 //!
 //! Cloud Run throttles a container's CPU to near-zero the moment a response is
 //! written, so the old pattern of `tokio::spawn`-ing the SMTP send after the
@@ -160,7 +160,7 @@
 //! path the auth flows' notifier IS that queue - and actually delivered by
 //! `POST /internal/outbox/drain`, INSIDE a request, where CPU is allocated.
 //!
-//! The scheduler contract, matching `amicu-infra/modules/scheduler`:
+//! The scheduler contract, matching the infrastructure repo's `modules/scheduler`:
 //!
 //! | | |
 //! |---|---|
@@ -205,7 +205,7 @@
 //! A subscription change takes effect on the user's **next token issuance**
 //! (sign-in or refresh); live access JWTs are never revoked.
 //!
-//! # Cloudflare edge trust - env only (andypalmi/amicu-planning#142)
+//! # Cloudflare edge trust - env only
 //!
 //! Like the Stripe secrets above, `AMICU_EDGE_TOKEN` is read directly from the
 //! environment (never a flag, so it never appears in `--help` output or a
@@ -223,7 +223,7 @@
 //! just dev: unlike `DATABASE_URL`/RLS-bypass, turning this on requires an
 //! operator to have actually provisioned the Worker + token pair first (it is
 //! explicitly gated behind `optional_secrets_enabled.AMICU_EDGE_TOKEN` in
-//! amicu-infra), so defaulting it to `true` would break the very first
+//! the infrastructure repo), so defaulting it to `true` would break the very first
 //! production boot before that provisioning step ever runs. Booting with
 //! `AMICU_REQUIRE_EDGE_TOKEN=true` and no `AMICU_EDGE_TOKEN` configured is a
 //! hard startup error ([`Error::MissingEdgeToken`]) in every environment - such
@@ -346,7 +346,7 @@ pub struct Config {
     pub rate_limit_timeout_ms: u64,
 
     /// Per-EMAIL budget for `/recover` and `/verify/resend`, per
-    /// `email_rate_limit_window_secs` (andypalmi/amicu-planning#194). On top of
+    /// `email_rate_limit_window_secs`. On top of
     /// the per-IP limit; shared across replicas on the Postgres path.
     #[arg(long, env = "AMICU_EMAIL_RATE_LIMIT_MAX", default_value_t = 5)]
     pub email_rate_limit_max: u32,
@@ -367,8 +367,8 @@ pub struct Config {
     /// Cap on the TOTAL number of workspaces a user may OWN (across every
     /// workspace, including the personal workspace sign-up provisions), enforced
     /// on `POST /workspaces`. There is no `DELETE /workspaces`, so this is a hard
-    /// ceiling per owner, enforced inside the creating transaction
-    /// (andypalmi/amicu-planning#132). Only reachable on the Postgres path
+    /// ceiling per owner, enforced inside the creating transaction.
+    /// Only reachable on the Postgres path
     /// (`DATABASE_URL` set); the in-memory dev path is single-personal-workspace
     /// by construction.
     #[arg(
@@ -463,9 +463,9 @@ pub struct Config {
     pub signing_keys_retiring_pem_file: Option<String>,
 
     /// Required `aud` claim on the Google-issued OIDC ID token that
-    /// authenticates `POST /internal/outbox/drain`
-    /// (andypalmi/amicu-planning#141). Defaults to the effective `base_url`
-    /// when unset, which is what `amicu-infra`'s `modules/scheduler` mints by
+    /// authenticates `POST /internal/outbox/drain`.
+    /// Defaults to the effective `base_url`
+    /// when unset, which is what the infrastructure repo's `modules/scheduler` mints by
     /// default (the Cloud Run SERVICE URL - not the `/internal/outbox/drain`
     /// path - matching Google's own documented pattern).
     #[arg(long, env = "AMICU_INTERNAL_AUDIENCE")]
@@ -606,11 +606,11 @@ pub enum Error {
     /// deploy may never silently fall back to ephemeral in-memory stores.
     MissingDatabaseUrl,
     /// `AMICU_ENV=production` but `AMICU_SECURITY_HASH_KEY` is unset or shorter
-    /// than 32 bytes (andypalmi/amicu-planning#194). Without a secret key the
+    /// than 32 bytes. Without a secret key the
     /// pseudonyms in security events and rate-limit keys are guessable.
     MissingSecurityHashKey,
     /// `AMICU_ENV=production` without `AMICU_EDGE_TOKEN` set AND
-    /// `AMICU_REQUIRE_EDGE_TOKEN=true` (andypalmi/amicu-planning#194),
+    /// `AMICU_REQUIRE_EDGE_TOKEN=true`,
     /// whatever `AMICU_TRUSTED_PROXIES` says: an empty list collapses clients
     /// onto the proxy address and a catch-all trusts a spoofable
     /// `X-Forwarded-For`, so the per-IP/per-network sign-in controls need the
@@ -631,7 +631,7 @@ pub enum Error {
     /// a secret).
     MigratorLacksCreate(String),
     /// `AMICU_REQUIRE_EDGE_TOKEN=true` but `AMICU_EDGE_TOKEN` is unset (in ANY
-    /// environment, not just production - andypalmi/amicu-planning#142): a
+    /// environment, not just production): a
     /// deployment in this state would reject every public request
     /// unconditionally, so refusing to boot is strictly better than serving
     /// `403` to everything.
@@ -735,7 +735,7 @@ impl From<std::io::Error> for Error {
 /// (`None` on the in-memory dev path).
 ///
 /// A struct rather than a bare [`Router`] so [`run`] can close the pool after
-/// [`serve`] returns (andypalmi/amicu-planning#139); the `pool` field is
+/// [`serve`] returns; the `pool` field is
 /// crate-private because callers outside this crate only ever need `.router`
 /// (see the smoke test).
 #[derive(Debug)]
@@ -789,7 +789,7 @@ pub struct BuiltApp {
 /// JWKS round-trip — bounded by the verifier's own cache (worst case ~60s to
 /// pick up a new active key under an unknown-`kid` flood; up to 5 minutes,
 /// `VerifierConfig::cache_ttl`, for a retired key to stop verifying) rather
-/// than instant (andypalmi/amicu-planning#140).
+/// than instant.
 ///
 /// # Errors
 /// Returns [`Error::Proxy`] if the trusted-proxy allowlist fails to parse,
@@ -828,7 +828,6 @@ pub async fn build_app_in_memory(config: &Config) -> Result<BuiltApp, Error> {
 
 /// Applies the production gate, opens the single shared Postgres pool if
 /// `database_url` is set, and runs the RLS-bypass startup guard against it
-/// (andypalmi/amicu-planning#139).
 ///
 /// # Production gate
 /// In `production` (see [`Environment`]), a missing `database_url` is a hard
@@ -847,8 +846,7 @@ pub async fn build_app_in_memory(config: &Config) -> Result<BuiltApp, Error> {
 /// Whether migrations run here depends on `environment`:
 /// - `development`: single-role convenience (see
 ///   `docker/postgres-init/01-app-role.sql`) - the one connecting role also
-///   owns the schema, so migrations run right here, at boot, same as before
-///   andypalmi/amicu-planning#139.
+///   owns the schema, so migrations run right here, at boot, same as before.
 /// - `production`: two-role model (see [`migrate`] and
 ///   `ops/sql/provision_app_role.sql`) - a separate `amicu-server migrate`
 ///   run, connected as the schema-OWNING role, is expected to have already
@@ -862,7 +860,7 @@ pub async fn build_app_in_memory(config: &Config) -> Result<BuiltApp, Error> {
 /// # RLS-bypass guard
 /// The RLS design assumes the running service connects as a role with
 /// neither `SUPERUSER` nor `BYPASSRLS` (direct or inherited) and that owns no
-/// `FORCE ROW LEVEL SECURITY` table (andypalmi/amicu-planning#114); either
+/// `FORCE ROW LEVEL SECURITY` table; either
 /// condition silently bypasses every FORCE RLS policy
 /// ([`amicu_store::probe_rls_bypass_risk`]) - refuse to start on that in
 /// production ([`Error::RlsBypass`]); only warn in development.
@@ -952,8 +950,7 @@ async fn connect_shared_pool(
             let msg = format!(
                 "connected role '{}' {}: row-level security would be bypassed. In production, \
                  connect as a separate, non-owning role with neither SUPERUSER nor BYPASSRLS \
-                 (direct or inherited) - see ops/sql/provision_app_role.sql and \
-                 andypalmi/amicu-planning#114.",
+                 (direct or inherited) - see ops/sql/provision_app_role.sql.",
                 risk.current_user,
                 reasons.join(" and "),
             );
@@ -1135,13 +1132,13 @@ pub async fn build_app_with_database_url(
         Option<Arc<dyn MembershipStore>>,
     );
 
-    // Production gate + single shared pool + RLS-bypass startup guard
-    // (andypalmi/amicu-planning#139): see `connect_shared_pool`'s docs.
+    // Production gate + single shared pool + RLS-bypass startup guard:
+    // see `connect_shared_pool`'s docs.
     let pool = connect_shared_pool(config, database_url).await?;
 
     let trusted = TrustedProxies::from_strs(config.trusted_proxies.split(','))?;
 
-    // Cloudflare edge trust (andypalmi/amicu-planning#142): env-only, like the
+    // Cloudflare edge trust: env-only, like the
     // Stripe/SMTP secrets above - see the crate docs' "Cloudflare edge trust"
     // section for why these two never become `Config` flags. Checked early,
     // before any store/signing-key work, alongside the other pure config
@@ -1161,7 +1158,7 @@ pub async fn build_app_with_database_url(
         .clone()
         .unwrap_or_else(|| config.issuer.clone());
 
-    // Durable signing keyring (andypalmi/amicu-planning#140): the ACTIVE key
+    // Durable signing keyring: the ACTIVE key
     // (and any RETIRING keys) come from AMICU_SIGNING_KEY_PEM /
     // AMICU_SIGNING_KEYS_RETIRING_PEM (or their _FILE variants) - identical
     // across every replica that shares the same secret-injected env, so every
@@ -1242,11 +1239,11 @@ pub async fn build_app_with_database_url(
     // verifier observes rotate_keys()/retire() in-process, with no restart
     // and no JWKS round-trip (bounded by the verifier's own cache, not
     // instant - see KeyringJwksProvider's docs) - replacing the old
-    // boot-time StaticJwksProvider snapshot (andypalmi/amicu-planning#140).
+    // boot-time StaticJwksProvider snapshot.
     let keyring_handle = service.keyring_handle();
     let service = Arc::new(service);
 
-    // Rate limiter selection (andypalmi/amicu-planning#142): Postgres-backed
+    // Rate limiter selection: Postgres-backed
     // and shared across every replica when the shared pool is present,
     // in-memory (dev/tests/DB-less) otherwise. `AMICU_ENV=production` already
     // refused to reach this line without a pool (see `connect_shared_pool`'s
@@ -1304,7 +1301,7 @@ pub async fn build_app_with_database_url(
     // Postgres path it runs on the durable, multi-workspace `workspace_members` +
     // `org_audit` tables via `PostgresMembershipStore` (which implements
     // `OrgStore`), so a mutation re-checks RBAC and writes its audit record inside
-    // one workspace-scoped transaction (andypalmi/amicu-planning#130). In-memory
+    // one workspace-scoped transaction. In-memory
     // (no DATABASE_URL) it falls back to the single-node `InMemoryOrgStore`, state
     // lost on restart. Shares the one pool above, like every other store here.
     // SSO federation is deferred (post-v1) - see #92.
@@ -1313,7 +1310,7 @@ pub async fn build_app_with_database_url(
     } else {
         Arc::new(InMemoryOrgStore::new())
     };
-    // Multi-tenant provisioning + invites (andypalmi/amicu-planning#131):
+    // Multi-tenant provisioning + invites:
     // `POST /workspaces` (additional-workspace provisioning),
     // `POST /org/invites` + `GET /org/invites` (mint/list), and
     // `POST /org/invites/accept` (redeem). These are inherently multi-tenant
@@ -1349,13 +1346,13 @@ pub async fn build_app_with_database_url(
     };
     let config_state = ConfigApiState::new(config_store);
 
-    // State backend (amicu-planning#125, part of the #116 epic): the same
+    // State backend (part of the #116 epic): the same
     // Postgres-when-the-shared-pool-is-present-else-in-memory selection as the
     // config store above. `id` names the single state stream this
     // dev/single-node bootstrap manages; a multi-tenant deployment would scope
     // one instance per workspace/stack instead.
     //
-    // TODO(amicu-planning#116): `amicu-api` does not yet expose an HTTP
+    // TODO: `amicu-api` does not yet expose an HTTP
     // surface for state, so there is no `StateApiState`/`state_router`
     // equivalent of `ConfigApiState`/`config_router` for this to attach to
     // yet - inventing one here would be new consumer plumbing ahead of any
@@ -1382,7 +1379,7 @@ pub async fn build_app_with_database_url(
         config_state,
         session_state,
     )
-    // andypalmi/amicu-planning#142: the edge-token gate wraps the WHOLE API
+    // the edge-token gate wraps the WHOLE API
     // surface - applied here, before `health_router` is merged below, so
     // `GET /healthz`/`GET /readyz` stay outside it (Cloud Run's own
     // liveness/readiness probes carry no `X-Amicu-Edge-Token`). A no-op layer
@@ -1393,7 +1390,7 @@ pub async fn build_app_with_database_url(
     ));
     let mut router = api.merge(health_router(health_state));
 
-    // The internal outbox drain (andypalmi/amicu-planning#141), merged AFTER the
+    // The internal outbox drain, merged AFTER the
     // edge-token gate above so it sits outside it - see `mount_outbox_drain`.
     if let Some(pool) = pool.clone() {
         router = mount_outbox_drain(router, config, pool, &mailer, &effective_base_url);
@@ -1456,7 +1453,7 @@ fn select_mailer() -> Result<Arc<dyn Notifier>, Error> {
 
 /// The notifier the AUTH FLOWS use, which is not necessarily the mailer.
 ///
-/// On the Postgres path it is the durable outbox (andypalmi/amicu-planning#141):
+/// On the Postgres path it is the durable outbox:
 /// the request path writes one `email_outbox` row - joined to the token-mint
 /// transaction where the store supports it - and `mailer` is used later, by
 /// `POST /internal/outbox/drain`, inside a request where Cloud Run actually
@@ -1479,7 +1476,6 @@ fn select_auth_notifier(pool: Option<&PgPool>, mailer: &Arc<dyn Notifier>) -> Ar
 }
 
 /// Mount `POST /internal/outbox/drain` onto `router`
-/// (andypalmi/amicu-planning#141).
 ///
 /// Called only on the Postgres path - there is no queue without a database, so
 /// the dev in-memory path simply does not route it (404). Where it IS routed
@@ -1532,7 +1528,6 @@ fn mount_outbox_drain(
 }
 
 /// Assemble the caller-authentication policy for `POST /internal/outbox/drain`
-/// (andypalmi/amicu-planning#141).
 ///
 /// Two independent, optional mechanisms - configure either, or both:
 ///
@@ -1796,7 +1791,7 @@ pub async fn shutdown_signal() {
 /// Read once at boot (unlike `AMICU_REQUIRE_EMAIL_VERIFICATION`'s
 /// read-on-every-call convention - see [`env_flag_is_truthy`]) and held inside
 /// [`amicu_api::EdgeTrust`] for the life of the process; never echoed in any
-/// log line (andypalmi/amicu-planning#142).
+/// log line.
 fn edge_token_from_env() -> Option<SecretValue> {
     std::env::var("AMICU_EDGE_TOKEN")
         .ok()

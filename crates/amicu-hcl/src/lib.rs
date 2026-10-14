@@ -418,7 +418,7 @@ mod tests {
         assert!(matches!(parse_graph(src), Err(HclError::Schema(_))));
     }
 
-    // --- amicu-planning#119: HCL secret safety ---
+    // --- HCL secret safety ---
 
     #[test]
     fn literal_in_secret_designated_field_is_rejected() {
@@ -584,7 +584,7 @@ mod tests {
         assert_eq!(scan_secret_leaks(src), Vec::new());
     }
 
-    // --- amicu-planning#150: runtime escape hatch (extra_args / env) ---
+    // --- runtime escape hatch (extra_args / env) ---
 
     #[test]
     fn llama_cpp_extra_args_and_env_parse() {
@@ -731,7 +731,7 @@ mod tests {
         assert_eq!(g, reparsed);
     }
 
-    // --- amicu-planning#151: typed sampling/KV-cache/batching/flash-attn/
+    // --- typed sampling/KV-cache/batching/flash-attn/
     // parallel-slots fields, plus optional model shape metadata ------------
 
     #[test]
@@ -916,7 +916,7 @@ mod tests {
         assert!(parse_graph(src).is_err());
     }
 
-    // --- amicu-planning#151 PR B: chat template, jinja, reasoning_format,
+    // --- chat template, jinja, reasoning_format,
     // build, GgufVariant.sha256 ---------------------------------------------
 
     #[test]
@@ -1461,7 +1461,7 @@ mod tests {
         assert_eq!(paths, ["llama_cpp.extra_args[2]"]);
     }
 
-    // --- amicu-planning#151 PR D: multimodal projector block ---------------
+    // --- multimodal projector block ---------------
 
     #[test]
     fn llama_cpp_multimodal_block_round_trips() {
@@ -1569,7 +1569,7 @@ mod tests {
     // {}` settings block (`amicu_hcl::de::deployment`) - `VllmSettings` has
     // no field for it, so putting one inside `vllm {}` is rejected
     // structurally at parse time rather than silently dropped, per
-    // amicu-planning#151 PR D's scope decision (an `AMICU-CAP-*` diagnostic
+    // the scope decision (an `AMICU-CAP-*` diagnostic
     // was considered and skipped: the parser already refuses this shape, so
     // there is nothing left for a `validate`-time diagnostic to catch).
     #[test]
@@ -1606,7 +1606,7 @@ mod tests {
         );
     }
 
-    // --- amicu-planning#180: the provider-agnostic `scaling {}` block ------
+    // --- the provider-agnostic `scaling {}` block ------
 
     fn scaling_src(scaling_body: &str) -> String {
         format!(
@@ -1728,7 +1728,7 @@ mod tests {
         }
     }
 
-    // --- amicu-planning#191: per-deployment endpoint `api_key` -------------
+    // --- per-deployment endpoint `api_key` -------------
 
     #[test]
     fn deployment_api_key_is_a_secret_reference_and_round_trips() {
@@ -1770,7 +1770,7 @@ mod tests {
         }
     }
 
-    // --- amicu-planning#151 PR C: the typed `speculative {}` block ---------
+    // --- the typed `speculative {}` block ---------
 
     /// A one-deployment graph whose llama.cpp block carries `spec`.
     fn speculative_graph(spec: SpeculativeSettings) -> Graph {
@@ -2005,7 +2005,7 @@ mod tests {
         assert_eq!(g, parse_graph(&format_graph(&g).unwrap()).unwrap());
     }
 
-    // --- amicu-planning#157: unknown attributes / blocks are rejected ---
+    // --- unknown attributes / blocks are rejected ---
 
     /// Parse `src`, expecting `AMICU-SCHEMA-003`; returns
     /// `(context, kind, name, suggestion)`.
