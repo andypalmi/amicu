@@ -334,27 +334,73 @@ fn describe_config_changes(prev: Resolved<'_>, next: Resolved<'_>) -> Option<Str
     let mut keys: Vec<&String> = old.keys().chain(new.keys()).collect();
     keys.sort();
     keys.dedup();
-    let mut changes: Vec<String> = keys
+    // Launch-relevant fields first, so the cut at `SHOWN` never hides them.
+    let mut diffs: Vec<(bool, String)> = keys
         .into_iter()
-        .filter_map(|k| match (old.get(k), new.get(k)) {
-            (Some(a), Some(b)) if a != b => Some(format!("{k}: {a} -> {b}")),
-            (None, Some(b)) => Some(format!("{k}: added ({b})")),
-            (Some(a), None) => Some(format!("{k}: removed (was {a})")),
-            _ => None,
+        .filter_map(|k| {
+            let (a, b) = (old.get(k), new.get(k));
+            if a == b {
+                return None;
+            }
+            Some((is_launch_field(k), describe_change(k, a, b)))
         })
         .collect();
-    if changes.is_empty() {
+    if diffs.is_empty() {
         return None;
     }
+    let launch = diffs.iter().any(|(l, _)| *l);
+    // Stable: launch fields first, key order otherwise preserved.
+    diffs.sort_by_key(|(l, _)| !*l);
+    let mut changes: Vec<String> = diffs.into_iter().map(|(_, c)| c).collect();
     if changes.len() > SHOWN {
         let more = changes.len() - SHOWN;
         changes.truncate(SHOWN);
         changes.push(format!("and {more} more"));
     }
-    Some(format!(
-        "{}. Launch settings are fixed when the service starts, so it is restarted to apply them",
-        changes.join(", ")
-    ))
+    let joined = changes.join(", ");
+    Some(if launch {
+        format!(
+            "{joined}. Launch settings are fixed when the service starts, so it is restarted to apply them"
+        )
+    } else {
+        format!(
+            "{joined}. The recorded configuration differs from the last start, so it is updated"
+        )
+    })
+}
+
+/// Whether a flattened field is baked into the launch command (so a change
+/// needs a restart): everything except descriptive metadata.
+fn is_launch_field(key: &str) -> bool {
+    const NON_LAUNCH: [&str; 4] = ["name", "description", "labels", "tags"];
+    let head = key.split('.').next().unwrap_or(key);
+    !NON_LAUNCH.contains(&head)
+}
+
+/// One change line. Values under `env.*` and `extra_args` can hold literal
+/// secrets, so only the key is named; other values are truncated.
+fn describe_change(key: &str, old: Option<&String>, new: Option<&String>) -> String {
+    const MAX: usize = 40;
+    if key.starts_with("env.") {
+        return format!("{key} changed");
+    }
+    if key == "extra_args" || key.starts_with("extra_args.") {
+        return "extra_args changed".to_owned();
+    }
+    let short = |s: &str| -> String {
+        if s.chars().count() > MAX {
+            let cut: String = s.chars().take(MAX).collect();
+            format!("{cut}...")
+        } else {
+            s.to_owned()
+        }
+    };
+    match (old, new) {
+        (Some(a), Some(b)) => format!("{key}: {} -> {}", short(a), short(b)),
+        (None, Some(b)) => format!("{key}: added ({})", short(b)),
+        (Some(a), None) => format!("{key}: removed (was {})", short(a)),
+        (None, None) => key.to_owned(),
+    }
 }
 
 /// A destroy plan item for `id` that needs no deployment in any graph (for
@@ -1448,6 +1494,36 @@ mod tests {
         let item = &build_plan(&keyed, Some(&prior)).unwrap().items[0];
         let reason = item.reason.as_deref().expect("reason line");
         assert!(reason.contains("api_key"), "{reason}");
+    }
+
+    #[test]
+    fn the_reason_line_never_prints_env_values_or_extra_args() {
+        let prior = graph(Vec::new());
+        let mut next = graph(Vec::new());
+        let Runtime::LlamaCpp(s) = &mut next.deployments[0].runtime else {
+            unreachable!("graph() builds a llama_cpp deployment")
+        };
+        s.env
+            .insert("HF_TOKEN".to_owned(), "hf_literal_secret_value".to_owned());
+        s.extra_args = vec!["--seed".to_owned(), "sk-literal-token".to_owned()];
+        let item = &build_plan(&next, Some(&prior)).unwrap().items[0];
+        let reason = item.reason.as_deref().expect("reason line");
+        assert!(!reason.contains("hf_literal_secret_value"), "{reason}");
+        assert!(!reason.contains("sk-literal-token"), "{reason}");
+        assert!(!reason.contains("--seed"), "{reason}");
+        assert!(reason.contains("env.HF_TOKEN changed"), "{reason}");
+        assert!(reason.contains("extra_args changed"), "{reason}");
+    }
+
+    #[test]
+    fn launch_fields_sort_first_and_metadata_only_changes_do_not_claim_a_restart() {
+        assert!(is_launch_field("context_length"));
+        assert!(is_launch_field("env.X"));
+        assert!(!is_launch_field("description"));
+        assert!(!is_launch_field("labels.team"));
+        let long = "x".repeat(100);
+        let shown = describe_change("chat_template", Some(&long), None);
+        assert!(shown.len() < 80, "{shown}");
     }
 
     // --- change detection beyond the graph -------------

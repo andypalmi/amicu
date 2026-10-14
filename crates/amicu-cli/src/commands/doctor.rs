@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use amicu_llamacpp::{BinaryConfig, HostRunner, detect_binary};
+use amicu_llamacpp::{BinaryConfig, CommandRunner, HostRunner, detect_binary};
 use amicu_runtime::discovery::discover_report;
 use serde::Serialize;
 
@@ -77,21 +77,7 @@ pub(crate) fn run(
         Err(e) => checks.push(check("host", Status::Fail, e.to_string())),
     }
 
-    match detect_binary(&HostRunner, &BinaryConfig::default()) {
-        Ok(info) => checks.push(check(
-            "llama-server",
-            Status::Pass,
-            format!("{} at {}", info.version, info.path.display()),
-        )),
-        Err(amicu_llamacpp::LlamaCppError::UnparseableVersion(_)) => checks.push(check(
-            "llama-server",
-            Status::Warn,
-            "llama-server found, but its build number is unknown (a Homebrew or \
-             source build without version metadata); cannot check it against the \
-             minimum build",
-        )),
-        Err(e) => checks.push(check("llama-server", Status::Warn, e.to_string())),
-    }
+    checks.push(binary_check(&HostRunner));
 
     checks.push(project_config_check(project));
     checks.push(state_dir_check(project));
@@ -104,6 +90,25 @@ pub(crate) fn run(
         print_human(&report, out)?;
     }
     Ok(u8::from(!report.ok))
+}
+
+/// The `llama-server` check. An unknown build is a warning, never a failure.
+fn binary_check(runner: &dyn CommandRunner) -> Check {
+    match detect_binary(runner, &BinaryConfig::default()) {
+        Ok(info) => check(
+            "llama-server",
+            Status::Pass,
+            format!("{} at {}", info.version, info.path.display()),
+        ),
+        Err(amicu_llamacpp::LlamaCppError::UnparseableVersion(_)) => check(
+            "llama-server",
+            Status::Warn,
+            "llama-server found, but its build number is unknown (a Homebrew or \
+             source build without version metadata); cannot check it against the \
+             minimum build",
+        ),
+        Err(e) => check("llama-server", Status::Warn, e.to_string()),
+    }
 }
 
 fn project_config_check(project: &Project) -> Check {
@@ -157,4 +162,35 @@ fn print_human(report: &DoctorReport, out: &mut dyn Write) -> Result<(), CliErro
         }
     ))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    struct Fake(String);
+
+    impl CommandRunner for Fake {
+        fn which(&self, _name: &str) -> Option<PathBuf> {
+            Some(PathBuf::from("/opt/homebrew/bin/llama-server"))
+        }
+        fn version_output(&self, _path: &Path) -> Result<String, amicu_llamacpp::LlamaCppError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn unknown_build_is_a_warning_with_explanation() {
+        let c = binary_check(&Fake("version: 0 (unknown)".to_owned()));
+        assert_eq!(c.status, Status::Warn);
+        assert!(c.detail.contains("build number is unknown"), "{}", c.detail);
+    }
+
+    #[test]
+    fn known_build_passes() {
+        let c = binary_check(&Fake("version: 3901 (abc)".to_owned()));
+        assert_eq!(c.status, Status::Pass);
+    }
 }

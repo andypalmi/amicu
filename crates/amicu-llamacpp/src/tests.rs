@@ -1607,6 +1607,11 @@ fn version_parses_build_number() {
             "{unknown}"
         );
     }
+    // A seen `version:` line ends the scrape: the compiler version is not a build.
+    assert!(matches!(
+        LlamaVersion::parse("version: 0 (unknown)\nbuilt with clang version 18 (x)").unwrap_err(),
+        LlamaCppError::UnparseableVersion(_)
+    ));
     assert!(matches!(
         LlamaVersion::parse("no build here").unwrap_err(),
         LlamaCppError::UnparseableVersion(_)
@@ -1648,6 +1653,14 @@ fn detect_binary_version_too_old() {
 async fn health_reports_binary_state() {
     let adapter = fitting_adapter().with_runner(Box::new(FakeRunner::found("version: 3901 (a)")));
     assert!(adapter.health().await.unwrap().is_healthy());
+
+    // An unknown build (Homebrew without metadata) is a warning, not an outage.
+    let unknown =
+        fitting_adapter().with_runner(Box::new(FakeRunner::found("version: 0 (unknown)")));
+    assert!(matches!(
+        unknown.health().await.unwrap(),
+        HealthStatus::Degraded { .. }
+    ));
 
     let missing = fitting_adapter().with_runner(Box::new(FakeRunner::missing()));
     assert!(matches!(

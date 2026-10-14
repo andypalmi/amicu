@@ -512,7 +512,9 @@ impl Adapter for LlamaCppAdapter {
     async fn health(&self) -> Result<HealthStatus, AdapterError> {
         Ok(match self.detect_binary() {
             Ok(_) => HealthStatus::Healthy,
-            Err(e @ LlamaCppError::VersionTooOld { .. }) => HealthStatus::Degraded {
+            Err(
+                e @ (LlamaCppError::VersionTooOld { .. } | LlamaCppError::UnparseableVersion(_)),
+            ) => HealthStatus::Degraded {
                 detail: e.to_string(),
             },
             Err(e) => HealthStatus::Unavailable {

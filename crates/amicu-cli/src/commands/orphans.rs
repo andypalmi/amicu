@@ -241,6 +241,11 @@ impl Tracked {
         }
         t.modal_referenced |= uses_modal(&state.graph);
         for ep in &state.endpoints {
+            // Modal app ids (`ap-...`) mean Modal is in play even with no stop
+            // record or Modal profile in the graph.
+            if ep.id.starts_with("ap-") {
+                t.modal_referenced = true;
+            }
             t.modal_names.insert(ep.id.clone());
             t.modal_ids.insert(ep.id.clone());
             t.insert_label(&ep.id);
@@ -1167,5 +1172,13 @@ io.amicu.llama.old.service loaded active running c\n";
         assert!(t.has_label("io.amicu.llama.a1b2c3d4.b"));
         assert!(!t.has_label("io.amicu.llama.a1b2c3d4.c"));
         assert!(!Tracked::from_state(None).has_label("x"));
+    }
+
+    #[test]
+    fn modal_endpoint_ids_mark_modal_referenced() {
+        let t = Tracked::from_state(Some(&state_with(Vec::new(), vec![endpoint("ap-123")])));
+        assert!(t.modal_referenced);
+        let t = Tracked::from_state(Some(&state_with(Vec::new(), vec![endpoint("io.amicu.x")])));
+        assert!(!t.modal_referenced);
     }
 }

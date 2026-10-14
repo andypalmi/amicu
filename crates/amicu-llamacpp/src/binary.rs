@@ -50,7 +50,15 @@ impl LlamaVersion {
             .match_indices("build ")
             .find_map(|(i, m)| leading_build(lower[i + m.len()..].trim_start()));
         let build = explicit.or_else(|| {
+            // Once a `version:` line has been seen (even an unparseable one),
+            // later lines such as `built with clang version 18 (...)` are
+            // not build numbers.
+            let mut seen_version_line = false;
             lower.lines().find_map(|line| {
+                if seen_version_line {
+                    return None;
+                }
+                seen_version_line = line.trim_start().starts_with("version:");
                 let rest = line.split("version").nth(1)?;
                 leading_build(rest.trim_start_matches(|c: char| !c.is_ascii_digit()))
             })
