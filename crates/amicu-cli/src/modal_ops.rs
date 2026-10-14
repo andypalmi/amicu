@@ -38,6 +38,10 @@ pub(crate) trait ModalOps: Send + Sync {
     async fn list_app_ids(&self) -> Result<Vec<String>, CliError>;
     /// The app id published under `name`, if any.
     async fn find_app(&self, name: &str) -> Result<Option<String>, CliError>;
+    /// The newest deployed version of an app, when it has a history.
+    async fn latest_app_version(&self, app_id: &str) -> Result<Option<u32>, CliError>;
+    /// Roll an app back to a deployed version, leaving it deployed.
+    async fn rollback_app(&self, app_id: &str, version: u32) -> Result<(), CliError>;
     /// Stop an app by id. `Ok(false)`: Modal says no such app exists.
     async fn stop_app(&self, app_id: &str) -> Result<bool, CliError>;
 }
@@ -74,6 +78,14 @@ impl ModalOps for ModalLookup {
 
     async fn find_app(&self, name: &str) -> Result<Option<String>, CliError> {
         Ok(connect().await?.find_app(name).await?)
+    }
+
+    async fn latest_app_version(&self, app_id: &str) -> Result<Option<u32>, CliError> {
+        Ok(connect().await?.latest_app_version(app_id).await?)
+    }
+
+    async fn rollback_app(&self, app_id: &str, version: u32) -> Result<(), CliError> {
+        Ok(connect().await?.rollback_app(app_id, version).await?)
     }
 
     async fn stop_app(&self, app_id: &str) -> Result<bool, CliError> {

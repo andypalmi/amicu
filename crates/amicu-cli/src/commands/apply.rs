@@ -25,7 +25,7 @@ use crate::checks::report_for;
 use crate::error::CliError;
 use crate::lock::StateLock;
 use crate::modal_ops::{
-    ModalBackend, Workspace, check_workspace, unlocatable_record, unproven_workspace,
+    ModalBackend, ModalOps, Workspace, check_workspace, unlocatable_record, unproven_workspace,
 };
 use crate::planner::{PlanError, PlanResult, build_project_plan};
 use crate::project::{LocalState, Project};
@@ -724,6 +724,7 @@ fn modal_supervisor(
     catalog: &dyn Catalog,
     id: &amicu_core::id::DeploymentId,
     runtime: amicu_runtime::RuntimeKind,
+    previous_endpoint: Option<String>,
 ) -> Result<ModalSupervisor, CliError> {
     let deployment = find_deployment(graph, id).ok_or_else(|| {
         CliError::Message(format!(
@@ -740,7 +741,9 @@ fn modal_supervisor(
         })?;
     let supervisor = ModalSupervisor::for_hardware(app_name_for(id.as_str()), &hardware)
         .map_err(|e| CliError::Adapter(AdapterError::from_kind(e)))?;
-    let supervisor = supervisor.with_scaling(deployment.scaling.as_ref());
+    let supervisor = supervisor
+        .with_scaling(deployment.scaling.as_ref())
+        .with_previous_endpoint(previous_endpoint);
     Ok(match (runtime, catalog.resolve_model(&deployment.model)) {
         (amicu_runtime::RuntimeKind::LlamaCpp, Some(resolved)) => {
             supervisor.with_gguf_model(&resolved.model)
@@ -839,7 +842,16 @@ async fn apply_all(
             let modal_adapter: Box<dyn RuntimeAdapter>;
             let adapter: &dyn RuntimeAdapter = match (launch.runtime, dispatch) {
                 (runtime, Dispatch::Modal) => {
-                    let supervisor = modal_supervisor(graph, &catalog, &item.deployment, runtime)?;
+                    let previous_endpoint = prior
+                        .and_then(|s| find_handle(s, &item.deployment))
+                        .map(|h| h.endpoint.clone());
+                    let supervisor = modal_supervisor(
+                        graph,
+                        &catalog,
+                        &item.deployment,
+                        runtime,
+                        previous_endpoint,
+                    )?;
                     modal_adapter = match runtime {
                         amicu_runtime::RuntimeKind::Vllm => Box::new(VllmAdapter::new(
                             Box::new(catalog.clone()),
@@ -941,10 +953,41 @@ async fn apply_all(
             }
             project.save_state(&write_ahead_state(graph, prior, progress, &item.deployment))?;
             progress.in_flight = Some(item.deployment.clone());
+            // An update of a Modal app that is serving: remember its version
+            // and endpoint, so a new version that fails the post-deploy check
+            // is rolled back instead of taking the good one down with it.
+            let previous = if dispatch == Dispatch::Modal {
+                previous_modal(&progress.stops, prior, &item.deployment, env.modal).await
+            } else {
+                None
+            };
             let handle = adapter.apply(launch, &resolver).await?;
             // Shared post-deploy check, for every adapter: an endpoint that is
-            // not protected as declared is torn down and apply fails.
-            secure_endpoint(adapter, &handle, launch, dispatch, &resolver).await?;
+            // not protected as declared is rolled back (Modal update) or torn
+            // down, and apply fails.
+            if let Err(e) = secure_endpoint(
+                adapter,
+                &handle,
+                launch,
+                dispatch,
+                previous.as_ref(),
+                &resolver,
+            )
+            .await
+            {
+                if dispatch == Dispatch::Modal {
+                    // The app id is known now: record it, so a later destroy
+                    // stops by id without `--forget-unconfirmed`. Any older
+                    // record with another id is kept as it is.
+                    record_modal_start(
+                        &mut progress.stops,
+                        &new_stop.identity,
+                        &item.deployment,
+                        &handle.id,
+                    );
+                }
+                return Err(e);
+            }
             registry.register(&handle);
             let mut superseded = Vec::new();
             if dispatch == Dispatch::Modal {
@@ -1005,6 +1048,45 @@ async fn apply_all(
     Ok(())
 }
 
+/// The Modal version that is serving before an update, with the endpoint
+/// state recorded for it.
+struct PreviousModal<'a> {
+    modal: &'a dyn ModalOps,
+    app_id: String,
+    version: u32,
+    endpoint: String,
+}
+
+/// The serving version of `deployment`'s recorded Modal app, when state holds
+/// both its app id and its endpoint and Modal can tell its version. Best
+/// effort: `None` makes a failed update stop the app instead of rolling back.
+async fn previous_modal<'a>(
+    stops: &[StopRecord],
+    prior: Option<&LocalState>,
+    deployment: &DeploymentId,
+    modal: &'a dyn ModalOps,
+) -> Option<PreviousModal<'a>> {
+    let app_id = stops
+        .iter()
+        .rev()
+        .find(|r| &r.deployment == deployment && r.backend.is_modal() && r.app_id.is_some())?
+        .app_id
+        .clone()?;
+    let endpoint = prior?
+        .endpoints
+        .iter()
+        .find(|h| &h.deployment == deployment && h.id == app_id)?
+        .endpoint
+        .clone();
+    let version = modal.latest_app_version(&app_id).await.ok()??;
+    Some(PreviousModal {
+        modal,
+        app_id,
+        version,
+        endpoint,
+    })
+}
+
 /// The shared post-deploy exposure check (amicu-planning#191), run on the
 /// handle every adapter returns, whatever the provider.
 ///
@@ -1020,6 +1102,7 @@ async fn secure_endpoint(
     handle: &RuntimeHandle,
     launch: &LaunchPlan,
     dispatch: Dispatch,
+    previous: Option<&PreviousModal<'_>>,
     resolver: &dyn SecretResolver,
 ) -> Result<(), CliError> {
     let verdict = verify_handle(handle, launch, resolver).await;
@@ -1034,9 +1117,31 @@ async fn secure_endpoint(
             id = handle.id
         ),
     };
-    let message = amicu_runtime::exposure::teardown_report(&detail, &handle.id, &hint, || async {
-        adapter.stop(handle).await.map_err(|e| e.to_string())
-    })
+    // A Modal update redeploys under the same app: roll the new version back
+    // and re-verify the previous endpoint recorded in state. Anything short of
+    // a verified rollback stops the whole app (fail closed).
+    let previous = previous.filter(|p| dispatch == Dispatch::Modal && p.app_id == handle.id);
+    let label = previous.map(|p| format!("version {}", p.version));
+    let (message, _kept) = amicu_runtime::exposure::rollback_or_teardown(
+        &detail,
+        &handle.id,
+        &hint,
+        label.as_deref(),
+        || async {
+            let p = previous.expect("only called with a previous version");
+            p.modal
+                .rollback_app(&p.app_id, p.version)
+                .await
+                .map_err(|e| e.to_string())
+        },
+        || async {
+            let p = previous.expect("only called with a previous version");
+            let mut old = handle.clone();
+            old.endpoint.clone_from(&p.endpoint);
+            verify_handle(&old, launch, resolver).await
+        },
+        || async { adapter.stop(handle).await.map_err(|e| e.to_string()) },
+    )
     .await;
     Err(CliError::Message(format!(
         "deployment '{}': {message}",
@@ -1954,7 +2059,7 @@ mod exposure_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use super::{Dispatch, secure_endpoint, usage_snippets, verify_handle};
+    use super::{Dispatch, PreviousModal, secure_endpoint, usage_snippets, verify_handle};
     use amicu_core::adapter::{
         Adapter, AdapterError, AdapterId, DescribeCapabilities, HealthStatus,
     };
@@ -2157,6 +2262,7 @@ mod exposure_tests {
             &h,
             &launch(Some("K")),
             Dispatch::Host,
+            None,
             &FixedResolver,
         )
         .await
@@ -2166,6 +2272,124 @@ mod exposure_tests {
         assert!(err.contains("unauthenticated request"), "{err}");
         assert!(err.contains("was stopped"), "{err}");
         assert!(!err.contains(KEY), "{err}");
+    }
+
+    /// A Modal that only records rollbacks (and can fail them).
+    struct RollbackModal {
+        rolled_back: std::sync::Mutex<Vec<(String, u32)>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl crate::modal_ops::ModalOps for RollbackModal {
+        async fn workspace(&self) -> Result<crate::modal_ops::Workspace, crate::error::CliError> {
+            unreachable!("not used")
+        }
+        async fn list_app_ids(&self) -> Result<Vec<String>, crate::error::CliError> {
+            unreachable!("not used")
+        }
+        async fn find_app(&self, _: &str) -> Result<Option<String>, crate::error::CliError> {
+            unreachable!("not used")
+        }
+        async fn latest_app_version(&self, _: &str) -> Result<Option<u32>, crate::error::CliError> {
+            unreachable!("not used")
+        }
+        async fn rollback_app(
+            &self,
+            app_id: &str,
+            version: u32,
+        ) -> Result<(), crate::error::CliError> {
+            self.rolled_back
+                .lock()
+                .unwrap()
+                .push((app_id.to_owned(), version));
+            if self.fail {
+                Err(crate::error::CliError::Message("rpc down".to_owned()))
+            } else {
+                Ok(())
+            }
+        }
+        async fn stop_app(&self, _: &str) -> Result<bool, crate::error::CliError> {
+            unreachable!("apply stops through the adapter")
+        }
+    }
+
+    const PUBLIC: EndpointExposure = EndpointExposure::Public {
+        gateway: GatewayAuth::None,
+    };
+
+    /// A failed update on Modal: the new version's endpoint is `new_url`; the
+    /// previous version (app `inst-1`, version 3) was serving at `old_url`.
+    async fn modal_update(
+        new_url: &str,
+        old_url: &str,
+        rollback_fails: bool,
+        previous_app: &str,
+    ) -> (String, bool, Vec<(String, u32)>) {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let adapter = StopRecorder {
+            stopped: Arc::clone(&stopped),
+            fail: false,
+        };
+        let modal = RollbackModal {
+            rolled_back: std::sync::Mutex::new(Vec::new()),
+            fail: rollback_fails,
+        };
+        let previous = PreviousModal {
+            modal: &modal,
+            app_id: previous_app.to_owned(),
+            version: 3,
+            endpoint: old_url.to_owned(),
+        };
+        let err = secure_endpoint(
+            &adapter,
+            &handle(new_url, PUBLIC),
+            &launch(Some("K")),
+            Dispatch::Modal,
+            Some(&previous),
+            &FixedResolver,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        let calls = modal.rolled_back.lock().unwrap().clone();
+        (err, stopped.load(Ordering::SeqCst), calls)
+    }
+
+    #[tokio::test]
+    async fn a_modal_update_failing_the_key_check_is_rolled_back_not_stopped() {
+        let bad = serve(true).await;
+        let good = serve(false).await;
+        let (err, stopped, calls) = modal_update(&bad, &good, false, "inst-1").await;
+        assert!(!stopped, "the previous version must keep serving: {err}");
+        assert_eq!(calls, [("inst-1".to_owned(), 3)]);
+        assert!(err.contains("rolled back to version 3"), "{err}");
+        assert!(err.contains("still serving"), "{err}");
+        assert!(!err.contains(KEY), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_modal_rollback_that_fails_or_leaves_the_previous_endpoint_open_stops_the_app() {
+        let bad = serve(true).await;
+        let good = serve(false).await;
+        // The rollback RPC fails.
+        let (err, stopped, _) = modal_update(&bad, &good, true, "inst-1").await;
+        assert!(stopped, "{err}");
+        assert!(err.contains("rolling back to version 3 failed"), "{err}");
+        // The rollback "works" but the previous endpoint answers anyone.
+        let (err, stopped, calls) = modal_update(&bad, &bad, false, "inst-1").await;
+        assert!(stopped, "an open endpoint is never left serving: {err}");
+        assert_eq!(calls.len(), 1);
+        assert!(err.contains("still failed its check"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_previous_version_of_another_app_is_never_rolled_back_to() {
+        let bad = serve(true).await;
+        let good = serve(false).await;
+        let (err, stopped, calls) = modal_update(&bad, &good, false, "inst-OTHER").await;
+        assert!(stopped, "{err}");
+        assert_eq!(calls.len(), 0);
     }
 
     #[tokio::test]
@@ -2186,6 +2410,7 @@ mod exposure_tests {
             &h,
             &launch(Some("K")),
             Dispatch::Modal,
+            None,
             &FixedResolver,
         )
         .await
@@ -2194,6 +2419,16 @@ mod exposure_tests {
         assert!(err.contains("teardown FAILED"), "{err}");
         assert!(err.contains("modal app stop inst-1"), "{err}");
         assert!(!err.contains(KEY), "{err}");
+    }
+
+    #[test]
+    fn a_failed_update_records_the_app_id_on_the_placeholder_stop_record() {
+        let dep: amicu_core::id::DeploymentId = "dep".into();
+        let mut stops = vec![crate::stops::StopRecord::modal(&dep, None, None)];
+        let identity = stops[0].identity.clone();
+        super::record_modal_start(&mut stops, &identity, &dep, "inst-1");
+        assert_eq!(stops.len(), 1);
+        assert_eq!(stops[0].app_id.as_deref(), Some("inst-1"));
     }
 
     #[test]

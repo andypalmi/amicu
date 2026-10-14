@@ -19,6 +19,7 @@ use crate::error::CliError;
 use crate::lock::StateLock;
 use crate::modal_ops::{Workspace, check_workspace};
 use crate::project::{LocalState, Project};
+use crate::stops::StopRecord;
 
 /// Hardware profile `provider` value of a Modal-backed deployment.
 const MODAL_PROVIDER: &str = "modal";
@@ -41,6 +42,24 @@ pub(crate) trait AppLookup {
     fn app_ids(&self) -> Result<Option<HashSet<String>>, String> {
         Ok(None)
     }
+
+    /// Whether the host service (launchd job / systemd unit) a host stop
+    /// record names is running. The default ([`HostUnit::Unknown`]) skips the
+    /// host check. `Err` carries a message safe to print.
+    fn host_unit(&self, _record: &StopRecord) -> Result<HostUnit, String> {
+        Ok(HostUnit::Unknown)
+    }
+}
+
+/// What the host service manager says about one recorded host instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostUnit {
+    /// Loaded and running.
+    Running,
+    /// Not loaded, stopped, or crashed: the instance is not serving.
+    Down,
+    /// Not asked.
+    Unknown,
 }
 
 /// The real lookup: the same `find_app` call `amicu modal status` is built on.
@@ -55,6 +74,30 @@ impl AppLookup for ModalLookup {
         run()
             .map(|v| Some(v.into_iter().collect()))
             .map_err(|e| e.to_string())
+    }
+
+    fn host_unit(&self, record: &StopRecord) -> Result<HostUnit, String> {
+        use amicu_llamacpp::Presence;
+        let supervisor = amicu_llamacpp::host_supervisor();
+        // Only ask about an instance this user and service manager own: a
+        // different uid or backend would be answering about someone else's job.
+        let ctx = supervisor
+            .host_context()
+            .ok_or_else(|| "cannot tell which user and service manager amicu acts as".to_owned())?;
+        if crate::stops::Backend::from_host(ctx.backend) != record.backend
+            || record.uid.is_some_and(|u| u != ctx.uid)
+        {
+            return Err(format!(
+                "{} was started under another user or service manager",
+                record.describe()
+            ));
+        }
+        match supervisor.presence(&record.identity, record.domain.as_deref()) {
+            Ok(Presence::Running) => Ok(HostUnit::Running),
+            Ok(Presence::Down) => Ok(HostUnit::Down),
+            Ok(Presence::Unknown) => Ok(HostUnit::Unknown),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     fn active_workspace(&self) -> Result<Option<Workspace>, String> {
@@ -191,6 +234,65 @@ pub(crate) fn refresh_state_mode(
     lookup: &dyn AppLookup,
     strict: bool,
 ) -> Refresh {
+    let host = refresh_host(state, lookup);
+    let mut modal = refresh_modal(state, lookup, strict);
+    if modal.mismatch.is_some() {
+        return modal;
+    }
+    let mut notes = host.notes;
+    notes.append(&mut modal.notes);
+    modal.notes = notes;
+    modal.warning = match (host.warning, modal.warning) {
+        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+        (a, b) => a.or(b),
+    };
+    modal
+}
+
+/// Checks every recorded host instance against the host service manager. A
+/// deployment whose service is down (reboot, crash, `launchctl remove`) is kept
+/// in state, marked pending: its stop record stays, the planner shows a create,
+/// and apply restarts it (releasing whatever is left under the label) or
+/// destroy confirms its stop. Nothing is ever dropped here, and a failed check
+/// only warns.
+fn refresh_host(state: &mut LocalState, lookup: &dyn AppLookup) -> Refresh {
+    let mut out = Refresh::default();
+    let mut unchecked = Vec::new();
+    for record in crate::commands::apply::effective_stops(Some(state)) {
+        if record.backend.is_modal()
+            || !state
+                .graph
+                .deployments
+                .iter()
+                .any(|d| d.id == record.deployment)
+            || state.pending.contains(&record.deployment)
+        {
+            continue;
+        }
+        match lookup.host_unit(&record) {
+            Ok(HostUnit::Down) => {
+                state.pending.push(record.deployment.clone());
+                out.notes.push(format!(
+                    "deployment {}: {} is not running (reboot, crash or manual removal); kept in \
+                     state as pending: apply will restart it, destroy will confirm its stop",
+                    record.deployment,
+                    record.describe()
+                ));
+            }
+            Ok(HostUnit::Running | HostUnit::Unknown) => {}
+            Err(e) => unchecked.push(format!("{}: {e}", record.deployment)),
+        }
+    }
+    if !unchecked.is_empty() {
+        out.warning = Some(format!(
+            "could not check host services ({}); using local state as-is",
+            unchecked.join("; ")
+        ));
+    }
+    out
+}
+
+fn refresh_modal(state: &mut LocalState, lookup: &dyn AppLookup, strict: bool) -> Refresh {
     // (deployment id, app name) for every Modal deployment recorded in state.
     let recorded: Vec<(String, String)> = state
         .graph

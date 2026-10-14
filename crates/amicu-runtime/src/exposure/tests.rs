@@ -241,6 +241,75 @@ async fn teardown_report_says_whether_the_stop_worked() {
     assert!(bad.contains("modal app stop ap-1"));
 }
 
+/// Runs `rollback_or_teardown` with scripted results, returning the report,
+/// whether the previous version survived, and which steps ran.
+async fn scripted_update(
+    previous: Option<&str>,
+    rollback: Result<(), &'static str>,
+    reverify: Result<(), &'static str>,
+    stop: Result<(), &'static str>,
+) -> (String, bool, Vec<&'static str>) {
+    let calls = std::sync::Mutex::new(Vec::new());
+    let (report, kept) = rollback_or_teardown(
+        "open",
+        "ap-1",
+        "modal app stop ap-1",
+        previous,
+        || async {
+            calls.lock().unwrap().push("rollback");
+            rollback.map_err(str::to_owned)
+        },
+        || async {
+            calls.lock().unwrap().push("reverify");
+            reverify.map_err(str::to_owned)
+        },
+        || async {
+            calls.lock().unwrap().push("stop");
+            stop.map_err(str::to_owned)
+        },
+    )
+    .await;
+    (report, kept, calls.into_inner().unwrap())
+}
+
+#[tokio::test]
+async fn a_failed_update_rolls_back_only_the_new_version() {
+    let (report, kept, calls) = scripted_update(Some("version 3"), Ok(()), Ok(()), Ok(())).await;
+    assert!(kept, "{report}");
+    assert_eq!(calls, ["rollback", "reverify"], "the app is never stopped");
+    assert!(report.contains("rolled back to version 3"));
+    assert!(report.contains("still serving"));
+}
+
+#[tokio::test]
+async fn a_rollback_that_fails_or_does_not_close_the_endpoint_stops_everything() {
+    let (report, kept, calls) =
+        scripted_update(Some("version 3"), Err("rpc down"), Ok(()), Ok(())).await;
+    assert!(!kept);
+    assert_eq!(calls, ["rollback", "stop"]);
+    assert!(report.contains("rolling back to version 3 failed (rpc down)"));
+    assert!(report.contains("was stopped"));
+
+    let (report, kept, calls) =
+        scripted_update(Some("version 3"), Ok(()), Err("still open"), Ok(())).await;
+    assert!(!kept);
+    assert_eq!(calls, ["rollback", "reverify", "stop"]);
+    assert!(report.contains("still failed its check (still open)"));
+
+    let (report, kept, _) =
+        scripted_update(Some("version 3"), Err("x"), Ok(()), Err("stop down")).await;
+    assert!(!kept);
+    assert!(report.contains("teardown FAILED (stop down)"));
+}
+
+#[tokio::test]
+async fn a_fresh_deployment_has_nothing_to_roll_back_to() {
+    let (report, kept, calls) = scripted_update(None, Ok(()), Ok(()), Ok(())).await;
+    assert!(!kept);
+    assert_eq!(calls, ["stop"]);
+    assert_eq!(report, "open; the deployment (ap-1) was stopped");
+}
+
 #[test]
 fn exposure_round_trips_through_json() {
     for e in [

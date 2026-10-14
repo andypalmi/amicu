@@ -451,6 +451,42 @@ impl ModalClient {
         Ok(())
     }
 
+    /// The newest deployed version number of an app (`AppDeploymentHistory`),
+    /// `None` when the app has no recorded deployment. Read before an update so
+    /// a bad new version can be rolled back to exactly this one.
+    pub async fn latest_app_version(&mut self, app_id: &str) -> Result<Option<u32>, ModalError> {
+        let history = self
+            .stub()
+            .app_deployment_history(pb::AppDeploymentHistoryRequest {
+                app_id: app_id.to_owned(),
+            })
+            .await
+            .map_err(|status| ModalError::from_status("AppDeploymentHistory", status))?
+            .into_inner();
+        Ok(history
+            .app_deployment_histories
+            .iter()
+            .map(|h| h.version)
+            .max())
+    }
+
+    /// Rolls an app back to deployed `version` (`AppRollback`), leaving the
+    /// app deployed (unlike [`ModalClient::stop_app`]).
+    pub async fn rollback_app(&mut self, app_id: &str, version: u32) -> Result<(), ModalError> {
+        let version = i32::try_from(version).map_err(|_| ModalError::InvalidSpec {
+            field: "version",
+            detail: format!("app version {version} is out of range"),
+        })?;
+        self.stub()
+            .app_rollback(pb::AppRollbackRequest {
+                app_id: app_id.to_owned(),
+                version,
+            })
+            .await
+            .map_err(|status| ModalError::from_status("AppRollback", status))?;
+        Ok(())
+    }
+
     /// Builds the image, creates the server Function, and publishes the app,
     /// returning its public URL.
     ///

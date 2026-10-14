@@ -34,8 +34,8 @@ use crate::download::download_gguf;
 use crate::error::LlamaCppError;
 use crate::health::HealthProbe;
 use crate::service::{
-    CommandExec, ExecOutput, HostExec, LaunchdManager, ServiceManager, ServiceSpec, ServiceState,
-    SystemdManager,
+    CommandExec, ExecOutput, HostExec, LaunchdManager, Presence, ServiceManager, ServiceSpec,
+    ServiceState, SystemdManager,
 };
 use crate::supervisor::{ProcessSupervisor, ReadyWait, ResolvedSecret, ServiceSupervisor};
 use crate::{LlamaCppAdapter, MapCatalog};
@@ -3347,4 +3347,135 @@ fn the_real_host_exec_refuses_service_commands_unless_enabled() {
         let _ = HostExec.exec("launchctl", &["list"]);
     });
     assert!(result.is_err(), "must panic instead of spawning launchctl");
+}
+
+// ---- presence probes (host drift refresh): Down only when confirmed ----------
+
+/// Answers every non-`id` command with one scripted result.
+struct OneAnswer(Result<ExecOutput, String>, Mutex<Vec<Vec<String>>>);
+
+impl OneAnswer {
+    fn new(success: bool, code: i32, stdout: &str, stderr: &str) -> Self {
+        Self(
+            Ok(ExecOutput {
+                success,
+                stdout: stdout.to_owned(),
+                stderr: stderr.to_owned(),
+                code: Some(code),
+            }),
+            Mutex::new(Vec::new()),
+        )
+    }
+}
+
+impl CommandExec for OneAnswer {
+    fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        let mut call = vec![program.to_owned()];
+        call.extend(args.iter().map(|a| (*a).to_owned()));
+        self.1.lock().unwrap().push(call);
+        self.0.clone().map_err(LlamaCppError::Supervisor)
+    }
+}
+
+const PRESENCE_LABEL: &str = "io.amicu.llama.support_chat_local";
+
+fn launchd_presence(exec: OneAnswer, domain: Option<&str>) -> Result<Presence, LlamaCppError> {
+    let tmp = TempDir::new("presence");
+    LaunchdManager::new(exec, tmp.file("agents"), tmp.file("logs")).presence(PRESENCE_LABEL, domain)
+}
+
+#[test]
+fn launchd_presence_is_down_only_for_exit_113() {
+    let domain = Some("gui/501");
+    assert_eq!(
+        launchd_presence(
+            OneAnswer::new(false, 113, "", "Could not find service"),
+            domain
+        )
+        .unwrap(),
+        Presence::Down
+    );
+    for code in [1, 2, 5, 36, 125] {
+        let err = launchd_presence(OneAnswer::new(false, code, "", "boom"), domain);
+        assert!(err.is_err(), "exit {code} must not mean down: {err:?}");
+    }
+    assert_eq!(
+        launchd_presence(OneAnswer::new(true, 0, "\tstate = running\n", ""), domain).unwrap(),
+        Presence::Running
+    );
+    assert_eq!(
+        launchd_presence(
+            OneAnswer::new(true, 0, "\tstate = not running\n", ""),
+            domain
+        )
+        .unwrap(),
+        Presence::Down
+    );
+}
+
+#[test]
+fn launchd_presence_uses_the_recorded_domain_and_never_guesses_without_one() {
+    let exec = std::sync::Arc::new(OneAnswer::new(false, 113, "", ""));
+    let tmp = TempDir::new("presence-domain");
+    let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"));
+    manager.presence(PRESENCE_LABEL, Some("user/501")).unwrap();
+    assert_eq!(
+        exec.1.lock().unwrap().clone(),
+        [["launchctl", "print", &format!("user/501/{PRESENCE_LABEL}")]]
+    );
+    let calls_before = exec.1.lock().unwrap().len();
+    assert_eq!(
+        manager.presence(PRESENCE_LABEL, None).unwrap(),
+        Presence::Unknown
+    );
+    assert_eq!(exec.1.lock().unwrap().len(), calls_before, "no command run");
+}
+
+fn systemd_presence(exec: OneAnswer) -> Result<Presence, LlamaCppError> {
+    let dir = TempDir::new("presence-sd");
+    SystemdManager::new(exec, &dir.0).presence(PRESENCE_LABEL, None)
+}
+
+#[test]
+fn systemd_presence_reads_load_and_active_state_and_only_confirmed_is_down() {
+    let show = |load: &str, active: &str| {
+        OneAnswer::new(
+            true,
+            0,
+            &format!("LoadState={load}\nActiveState={active}\n"),
+            "",
+        )
+    };
+    assert_eq!(
+        systemd_presence(show("not-found", "inactive")).unwrap(),
+        Presence::Down
+    );
+    assert_eq!(
+        systemd_presence(show("loaded", "failed")).unwrap(),
+        Presence::Down
+    );
+    assert_eq!(
+        systemd_presence(show("loaded", "inactive")).unwrap(),
+        Presence::Down
+    );
+    assert_eq!(
+        systemd_presence(show("loaded", "active")).unwrap(),
+        Presence::Running
+    );
+    // In transition or unrecognised: never reported down.
+    for active in ["deactivating", "activating", "weird"] {
+        assert_eq!(
+            systemd_presence(show("loaded", active)).unwrap(),
+            Presence::Unknown,
+            "{active}"
+        );
+    }
+    // A bus error / failed command is an error, never down.
+    let bus = OneAnswer::new(false, 1, "", "Failed to connect to bus: No medium found");
+    assert!(systemd_presence(bus).is_err());
+    // Success with empty output is not proof of anything.
+    assert_eq!(
+        systemd_presence(OneAnswer::new(true, 0, "", "")).unwrap(),
+        Presence::Unknown
+    );
 }
