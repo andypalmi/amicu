@@ -5,6 +5,11 @@ version.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+description.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "amicu"
@@ -45,3 +50,6 @@ tokio = { version = "1", features = ["macros", "rt", "net", "io-util", "time"] }
 
 [lints]
 workspace = true
+
+[package.metadata.dist]
+formula = "amicu"
