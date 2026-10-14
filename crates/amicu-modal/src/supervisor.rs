@@ -52,6 +52,7 @@
 //!   `HF_TOKEN` is forwarded through `secret_env` exactly as for vLLM.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use amicu_core::ByteSize;
@@ -231,6 +232,9 @@ pub struct ModalSupervisor {
     memory_mb: Option<u32>,
     milli_cpu: Option<u32>,
     previous_endpoint: Option<String>,
+    /// Filled with the app id as soon as a deploy lands, so a caller can still
+    /// find the app when `start` then fails (an exposure rollback or teardown).
+    deployed_app: Arc<Mutex<Option<String>>>,
 }
 
 /// A GGUF file on Hugging Face: what a Modal-deployed llama-server fetches
@@ -261,7 +265,17 @@ impl ModalSupervisor {
             memory_mb: None,
             milli_cpu: None,
             previous_endpoint: None,
+            deployed_app: Arc::default(),
         }
+    }
+
+    /// A handle that holds the id of the app this supervisor deployed, set as soon
+    /// as the deploy lands and kept even when `start` then fails its exposure
+    /// check. The caller uses it to record an app that `start` rolled back or
+    /// stopped, so state always names every app that was created.
+    #[must_use]
+    pub fn deployed_app(&self) -> Arc<Mutex<Option<String>>> {
+        Arc::clone(&self.deployed_app)
     }
 
     /// The endpoint state recorded for the version being replaced. After a
@@ -379,6 +393,9 @@ fn memory_mb(memory: ByteSize) -> Option<u32> {
 /// dashes - conservative enough to satisfy any reasonable "deployment name"
 /// constraint without needing Modal's exact validation regex (not published
 /// as of this writing).
+///
+/// Lossy (`a_b` and `a-b` collide) and not project-scoped: only for state that
+/// predates [`project_app_name`], whose recorded name must keep working.
 #[must_use]
 pub fn app_name_for(deployment_id: &str) -> String {
     let mut out = String::with_capacity(deployment_id.len() + 6);
@@ -404,6 +421,58 @@ pub fn app_name_for(deployment_id: &str) -> String {
         out.pop();
     }
     out
+}
+
+/// The longest app name amicu asks Modal for.
+const MAX_APP_NAME: usize = 63;
+
+/// App name for `deployment_id` in the project `project_id`:
+/// `amicu-<project>-<readable slug>-<12 hex digits>`.
+///
+/// Unlike [`app_name_for`], two deployments never share a name by sanitizing
+/// alike (`a_b` and `a-b`), and two projects never share one for the same
+/// deployment id: the readable part is only for humans, and the suffix is a
+/// stable FNV-1a digest of the exact project and deployment ids. Deterministic
+/// (never depends on the platform or the toolchain), so a stop handle can be
+/// derived from state alone. Always `[a-z0-9-]`, at most 63 bytes.
+#[must_use]
+pub fn project_app_name(project_id: &str, deployment_id: &str) -> String {
+    let project = slug(project_id);
+    let digest = fnv1a(&[project_id.as_bytes(), &[0], deployment_id.as_bytes()]);
+    let hex = format!("{:012x}", digest & 0xffff_ffff_ffff);
+    let head = if project.is_empty() {
+        "amicu".to_owned()
+    } else {
+        format!("amicu-{project}")
+    };
+    // `<head>-<slug>-<hex>`; the slug gives way first when the name is long.
+    let room = MAX_APP_NAME.saturating_sub(head.len() + hex.len() + 2);
+    let mut readable = slug(deployment_id);
+    readable.truncate(room);
+    while readable.ends_with('-') {
+        readable.pop();
+    }
+    if readable.is_empty() {
+        format!("{head}-{hex}")
+    } else {
+        format!("{head}-{readable}-{hex}")
+    }
+}
+
+/// Lower-cased, `[a-z0-9-]` only, repeats collapsed, no edge dashes.
+fn slug(s: &str) -> String {
+    let full = app_name_for(s);
+    full.strip_prefix("amicu-").unwrap_or_default().to_owned()
+}
+
+/// 64-bit FNV-1a over the concatenation of `parts`.
+fn fnv1a(parts: &[&[u8]]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in parts.iter().flat_map(|p| p.iter()) {
+        h ^= u64::from(*byte);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
 }
 
 /// Renders an [`Accelerator`] as Modal's `gpu=` string (`"H100"`, `"H100:2"`).
@@ -1200,6 +1269,9 @@ impl ProcessSupervisor for ModalSupervisor {
         let deployed = client.deploy_server(&spec, &mut on_log).await;
         sink.finish();
         let deployment = deployed.map_err(|e| modal_err(&e))?;
+        if let Ok(mut slot) = self.deployed_app.lock() {
+            *slot = Some(deployment.app_id.clone());
+        }
         // Fail closed: never hand back (and so register/print) an endpoint that
         // answers without proxy auth. Roll an update back to the version that
         // was serving (verified closed again), or tear the app down.
@@ -1407,6 +1479,42 @@ mod tests {
         assert_eq!(app_name_for("support-chat"), "amicu-support-chat");
         assert_eq!(app_name_for("Support_Chat.01"), "amicu-support-chat-01");
         assert_eq!(app_name_for("  weird//id--"), "amicu-weird-id");
+    }
+
+    #[test]
+    fn project_app_names_are_distinct_per_project_and_per_exact_id() {
+        let a = project_app_name("aaaa1111", "a_b");
+        let b = project_app_name("aaaa1111", "a-b");
+        assert_ne!(a, b, "ids that sanitize alike must not collide");
+        assert_ne!(a, project_app_name("bbbb2222", "a_b"));
+        assert_ne!(project_app_name("p", "Chat"), project_app_name("p", "chat"));
+        assert_eq!(a, project_app_name("aaaa1111", "a_b"), "deterministic");
+        assert!(a.starts_with("amicu-aaaa1111-a-b-"), "{a}");
+    }
+
+    #[test]
+    fn project_app_names_are_stable_and_modal_safe() {
+        // Pinned below: the name is recorded in state, so it must never drift.
+        assert_eq!(
+            project_app_name("aaaa1111", "support-chat"),
+            "amicu-aaaa1111-support-chat-e285b9df4c23"
+        );
+        for (p, d) in [
+            ("", ""),
+            ("--", "//"),
+            ("P.1", &"x".repeat(200)[..]),
+            ("aaaa1111", "Support_Chat.01"),
+        ] {
+            let n = project_app_name(p, d);
+            assert!(n.len() <= 63, "{n}");
+            assert!(n.starts_with("amicu-"), "{n}");
+            assert!(
+                n.bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-'),
+                "{n}"
+            );
+            assert!(!n.ends_with('-') && !n.contains("--"), "{n}");
+        }
     }
 
     // --- gpu_string -----------------------------------------------------

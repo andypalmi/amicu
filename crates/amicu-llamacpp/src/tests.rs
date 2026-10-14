@@ -3730,6 +3730,27 @@ fn launchd_presence_is_down_only_for_exit_113() {
 }
 
 #[test]
+fn launchd_presence_reads_only_the_jobs_own_top_level_state() {
+    let domain = Some("gui/501");
+    let nested_only = "gui/501/io.amicu.llama.x = {\n\tactive count = 1\n\tstate = running\n\n\tendpoints = {\n\t\t\"a\" = {\n\t\t\tstate = not running\n\t\t}\n\t}\n}\n";
+    assert_eq!(
+        launchd_presence(OneAnswer::new(true, 0, nested_only, ""), domain).unwrap(),
+        Presence::Running
+    );
+    let down = "gui/501/io.amicu.llama.x = {\n\tstate = not running\n\n\tendpoints = {\n\t\t\"a\" = {\n\t\t\tstate = active\n\t\t}\n\t}\n}\n";
+    assert_eq!(
+        launchd_presence(OneAnswer::new(true, 0, down, ""), domain).unwrap(),
+        Presence::Down
+    );
+    // Not the exact line: a longer value at the top level is not "not running".
+    let longer = "gui/501/x = {\n\tstate = not running (probably)\n}\n";
+    assert_eq!(
+        launchd_presence(OneAnswer::new(true, 0, longer, ""), domain).unwrap(),
+        Presence::Running
+    );
+}
+
+#[test]
 fn launchd_presence_uses_the_recorded_domain_and_never_guesses_without_one() {
     let exec = std::sync::Arc::new(OneAnswer::new(false, 113, "", ""));
     let tmp = TempDir::new("presence-domain");

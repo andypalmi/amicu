@@ -7,7 +7,7 @@ use amicu_core::diagnostic::{DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
 use amicu_core::id::DeploymentId;
 use amicu_modal::ModalSupervisor;
-use amicu_modal::supervisor::app_name_for;
+use amicu_modal::supervisor::{app_name_for, project_app_name};
 use amicu_plan::Plan;
 use amicu_plan::contract::{ActionKind, PlannedAction, Setting};
 
@@ -144,7 +144,7 @@ pub(crate) fn provider_switches(
     for item in result.items.iter().filter(|i| i.launch.is_some()) {
         let id = item.deployment.as_str();
         let (backend, identity) = if item.action.provider.as_deref() == Some("modal") {
-            (Backend::Modal, Some(app_name_for(id)))
+            (Backend::Modal, project_id.map(|p| project_app_name(p, id)))
         } else {
             // Without a project id apply mints one, so no recorded host label
             // can match the new one.
@@ -345,6 +345,7 @@ pub(crate) fn print_human_with(
 /// `apply` surfaces the underlying error).
 fn modal_launch_text(graph: &Graph, item: &PlanItem) -> Option<String> {
     let launch = item.launch.as_ref()?;
+    // The name never appears in the launch line, so the legacy one is enough.
     let mut supervisor = ModalSupervisor::new(app_name_for(item.deployment.as_str()));
     if let Some(model) = graph
         .deployments

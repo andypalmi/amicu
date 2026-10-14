@@ -292,21 +292,36 @@ fn refresh_host(state: &mut LocalState, lookup: &dyn AppLookup) -> Refresh {
     out
 }
 
+/// `(deployment id, app name)` for every Modal deployment recorded in state.
+/// The name is the one recorded in the stop record, so an app created under
+/// an older naming scheme is still looked up by the name it really has.
+fn recorded_modal_apps(state: &LocalState) -> Vec<(String, String)> {
+    let stops = crate::commands::apply::effective_stops(Some(state));
+    let mut recorded = Vec::new();
+    for d in state.graph.deployments.iter().filter(|d| {
+        state
+            .graph
+            .hardware_profiles
+            .iter()
+            .any(|h| h.id == d.hardware_profile && h.provider == MODAL_PROVIDER)
+    }) {
+        let mut names: Vec<String> = stops
+            .iter()
+            .filter(|r| r.deployment == d.id && r.backend.is_modal())
+            .map(|r| r.identity.clone())
+            .collect();
+        names.sort();
+        names.dedup();
+        if names.is_empty() {
+            names.push(app_name_for(d.id.as_str()));
+        }
+        recorded.extend(names.into_iter().map(|n| (d.id.to_string(), n)));
+    }
+    recorded
+}
+
 fn refresh_modal(state: &mut LocalState, lookup: &dyn AppLookup, strict: bool) -> Refresh {
-    // (deployment id, app name) for every Modal deployment recorded in state.
-    let recorded: Vec<(String, String)> = state
-        .graph
-        .deployments
-        .iter()
-        .filter(|d| {
-            state
-                .graph
-                .hardware_profiles
-                .iter()
-                .any(|h| h.id == d.hardware_profile && h.provider == MODAL_PROVIDER)
-        })
-        .map(|d| (d.id.to_string(), app_name_for(d.id.as_str())))
-        .collect();
+    let recorded = recorded_modal_apps(state);
     if recorded.is_empty() {
         return Refresh::default();
     }
@@ -471,23 +486,16 @@ pub(crate) fn forget_app(
     let Some(mut state) = project.load_state()? else {
         return Ok(None);
     };
-    let Some(id) = state
-        .graph
-        .deployments
+    let mut records = crate::commands::apply::effective_stops(Some(&state));
+    // The deployment whose recorded Modal app is named `app_name`: the name in
+    // the record, whatever scheme it was created under.
+    let Some(id) = records
         .iter()
-        .find(|d| {
-            app_name_for(d.id.as_str()) == app_name
-                && state
-                    .graph
-                    .hardware_profiles
-                    .iter()
-                    .any(|h| h.id == d.hardware_profile && h.provider == MODAL_PROVIDER)
-        })
-        .map(|d| d.id.to_string())
+        .find(|r| r.backend.is_modal() && r.identity == app_name)
+        .map(|r| r.deployment.to_string())
     else {
         return Ok(None);
     };
-    let mut records = crate::commands::apply::effective_stops(Some(&state));
     if let Some(active) = active {
         for r in records
             .iter()
@@ -756,6 +764,42 @@ resource "deployment" "support_modal" {
         let project = Project::new(&dir);
         assert_eq!(forget_app(&project, APP, "app-id", None).unwrap(), None);
         assert!(!dir.join(".amicu").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_project_scoped_app_is_looked_up_and_forgotten_by_its_recorded_name() {
+        let mut state = state_for(MODAL_CONFIG);
+        let id = state.graph.deployments[0].id.clone();
+        let scoped = amicu_modal::supervisor::project_app_name("aaaa1111", id.as_str());
+        assert_ne!(scoped, APP);
+        state.stops = vec![crate::stops::StopRecord::modal_in(
+            "aaaa1111",
+            &id,
+            Some("app-id".to_owned()),
+            None,
+        )];
+        // Live under its recorded name: no drift. The legacy name alone is not it.
+        let live: &'static str = Box::leak(scoped.clone().into_boxed_str());
+        assert_eq!(
+            refresh_state(&mut state.clone(), &Fake(Ok(vec![live]))),
+            Refresh::default()
+        );
+        let refresh = refresh_state(&mut state, &Fake(Ok(vec![APP])));
+        assert_eq!(state.pending.len(), 1, "{refresh:?}");
+        assert!(refresh.notes[0].contains(&scoped), "{refresh:?}");
+
+        let dir = std::env::temp_dir().join(format!("amicu-forget-scoped-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = Project::new(&dir);
+        project.save_state(&state).unwrap();
+        assert_eq!(forget_app(&project, APP, "app-id", None).unwrap(), None);
+        assert_eq!(
+            forget_app(&project, &scoped, "app-id", None)
+                .unwrap()
+                .as_deref(),
+            Some(id.as_str())
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

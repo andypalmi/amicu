@@ -8,7 +8,7 @@
 
 use amicu_core::id::DeploymentId;
 use amicu_llamacpp::{HostBackend, HostContext};
-use amicu_modal::supervisor::app_name_for;
+use amicu_modal::supervisor::{app_name_for, project_app_name};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -152,6 +152,21 @@ impl StopRecord {
         self
     }
 
+    /// A Modal app of the project `project_id`: its name is scoped to the
+    /// project and exact per deployment, see [`project_app_name`].
+    pub(crate) fn modal_in(
+        project_id: &str,
+        deployment: &DeploymentId,
+        app_id: Option<String>,
+        workspace: Option<&Workspace>,
+    ) -> Self {
+        let mut rec = Self::modal(deployment, app_id, workspace);
+        rec.identity = project_app_name(project_id, deployment.as_str());
+        rec
+    }
+
+    /// A Modal app under the unscoped legacy name. Only for state written
+    /// before names were project-scoped: such a record keeps its recorded name.
     pub(crate) fn modal(
         deployment: &DeploymentId,
         app_id: Option<String>,
