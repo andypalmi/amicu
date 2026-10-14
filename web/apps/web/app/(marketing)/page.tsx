@@ -82,15 +82,15 @@ export default function LandingPage() {
         }}
       />
 
-      {/* Hero */}
-      <HomeSection>
+      {/* Hero: tighter on desktop so headline, subline and the whole terminal sit above the fold. */}
+      <HomeSection className="lg:py-10">
         <Headline as="h1">
           Deploy and manage LLMs as code.
         </Headline>
-        <p className={cn('mt-6 font-mono text-sm text-muted-foreground sm:text-base', MEASURE)}>
+        <p className={cn('mt-6 font-mono text-sm text-muted-foreground sm:text-base lg:mt-4', MEASURE)}>
           On your laptop, your servers or a cloud GPU.
         </p>
-        <div className="mt-8 flex flex-wrap items-center gap-3">
+        <div className="mt-8 flex flex-wrap items-center gap-3 lg:mt-6">
           <Button asChild size="lg">
             <Link href={quickstartUrl}>Get started</Link>
           </Button>
@@ -98,7 +98,7 @@ export default function LandingPage() {
             <a href={githubUrl}>GitHub</a>
           </Button>
         </div>
-        <ApplyDemo className={GAP_HEAD} />
+        <ApplyDemo className={cn(GAP_HEAD, 'lg:mt-8')} />
       </HomeSection>
 
       {/* Describe, apply */}
