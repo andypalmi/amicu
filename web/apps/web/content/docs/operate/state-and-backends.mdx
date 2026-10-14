@@ -14,6 +14,7 @@ The CLI stores state in the project directory:
 | `.amicu/state/state.json` | The applied resource graph, the started endpoints, the `pending` deployments and the stop records (below) |
 | `.amicu/state/state.json.bak` | The previous version of `state.json`, copied on save only when the current file is valid |
 | `.amicu/state/state.lock` | The lock file |
+| `.amicu/state/state.cas` | Short lock held only while a save checks the serial and swaps the file |
 | `.amicu/config.yaml` | Project config. `init` writes `state.backend: local`. |
 
 `local` is the only state backend the CLI implements. There is no remote state backend for the CLI yet.

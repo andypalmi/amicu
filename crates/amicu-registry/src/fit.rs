@@ -208,15 +208,17 @@ pub struct FitReport {
     pub overhead: OverheadRange,
     /// Available minus weights, saturating at zero.
     pub headroom: ByteSize,
-    /// Whether weights fit within `available`.
+    /// Whether weights fit within `available` (and, when a KV cache estimate is
+    /// present, whether the estimated peak fits the device memory).
     pub fits: bool,
     /// Diagnostic when weights do not fit; `None` otherwise.
     pub diagnostic: Option<Diagnostic>,
     /// A computed KV-cache memory estimate, present only
     /// when [`check_variant_fit_with_kv_cache`] was given full
     /// [`KvCacheParams`]. Distinct from [`Self::overhead`] (the flat band);
-    /// [`Self::fits`] and [`Self::headroom`] are unaffected by this field
-    /// regardless of whether it is set.
+    /// When set, [`Self::fits`] also requires the estimated peak (weights plus
+    /// the larger of this and the overhead band high) to fit the usable device
+    /// memory.
     pub kv_cache: Option<ByteSize>,
 }
 
@@ -256,6 +258,17 @@ pub fn variant_weights(total_parameters: u64, variant: &GgufVariant) -> ByteSize
         .unwrap_or_else(|| weights_memory(total_parameters, variant.quantization))
 }
 
+/// Device memory usable before the per-device reserve: the whole pool for a
+/// single device, or the tensor-parallel-efficiency share of the aggregate.
+fn usable_bytes(device_memory: ByteSize, count: u32, cfg: &FitConfig) -> u64 {
+    if count > 1 {
+        let eff = cfg.tensor_parallel_efficiency.clamp(0.0, 1.0);
+        bytes_from_f64(params_as_f64(device_memory.bytes()) * eff).bytes()
+    } else {
+        device_memory.bytes()
+    }
+}
+
 fn evaluate(weights: ByteSize, hw: &HardwareProfile, cfg: &FitConfig) -> FitReport {
     let (pool, per_device, count) = device_pool(hw);
 
@@ -264,12 +277,7 @@ fn evaluate(weights: ByteSize, hw: &HardwareProfile, cfg: &FitConfig) -> FitRepo
     // tensor-parallel efficiency haircut because sharding replicates buffers and
     // reserves per-card working memory, so aggregate VRAM is never fully usable.
     let device_memory = ByteSize::from_bytes(per_device.bytes().saturating_mul(u64::from(count)));
-    let usable = if count > 1 {
-        let eff = cfg.tensor_parallel_efficiency.clamp(0.0, 1.0);
-        bytes_from_f64(params_as_f64(device_memory.bytes()) * eff).bytes()
-    } else {
-        device_memory.bytes()
-    };
+    let usable = usable_bytes(device_memory, count, cfg);
     // Reserve is per device: every card holds back OS/driver/context memory.
     let reserve = ByteSize::from_bytes(cfg.reserve.bytes().saturating_mul(u64::from(count)));
     let available = ByteSize::from_bytes(usable.saturating_sub(reserve.bytes()));
@@ -376,7 +384,58 @@ pub fn check_variant_fit_with_draft(
             p.cache_type_v,
         )
     });
+    if let Some(kv_bytes) = report.kv_cache {
+        apply_peak(&mut report, kv_bytes, cfg);
+    }
     report
+}
+
+/// The estimated peak memory for a llama.cpp deployment whose KV cache is
+/// known: weights plus the larger of the KV estimate and the flat overhead
+/// band's high end (the KV figure omits compute buffers, so a small context
+/// must not drop the estimate below the band). This is the figure the launch
+/// plan prints as its estimated memory.
+#[must_use]
+pub fn estimated_peak(report: &FitReport, kv_cache: Option<ByteSize>) -> ByteSize {
+    let beyond = kv_cache.map_or(report.overhead.high, |kv| kv.max(report.overhead.high));
+    ByteSize::from_bytes(report.weights.bytes().saturating_add(beyond.bytes()))
+}
+
+/// Fold the KV-cache-aware peak into the fit decision: the deployment also has
+/// to fit when its estimated peak is compared with the usable device memory
+/// (before the OS reserve, which the weights check already applies). Only
+/// engaged when the KV cache is known; weights-only checks are unchanged.
+fn apply_peak(report: &mut FitReport, kv_bytes: ByteSize, cfg: &FitConfig) {
+    let usable = ByteSize::from_bytes(usable_bytes(
+        report.device_memory,
+        report.accelerator_count,
+        cfg,
+    ));
+    let peak = estimated_peak(report, Some(kv_bytes));
+    report.headroom = ByteSize::from_bytes(
+        report
+            .headroom
+            .bytes()
+            .min(usable.bytes().saturating_sub(peak.bytes())),
+    );
+    if peak.bytes() <= usable.bytes() {
+        return;
+    }
+    report.fits = false;
+    if report.diagnostic.is_none() {
+        let beyond = ByteSize::from_bytes(peak.bytes().saturating_sub(report.weights.bytes()));
+        report.diagnostic = Some(Diagnostic::new(
+            report.pool.diagnostic_code(),
+            Severity::Error,
+            format!(
+                "estimated peak memory {peak} (weights {weights} + kv cache/overhead {beyond}) \
+                 exceeds the {usable} of {pool} usable; lower `context_length`, use a smaller \
+                 quantization or a quantized KV cache",
+                weights = report.weights,
+                pool = report.pool.label(),
+            ),
+        ));
+    }
 }
 
 /// Check vLLM's memory model: `weights` (+ optional KV cache) against
@@ -858,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn check_variant_fit_with_kv_cache_sets_kv_cache_without_changing_fits_or_headroom() {
+    fn check_variant_fit_with_kv_cache_sets_kv_cache_and_keeps_a_fitting_decision() {
         let variant = GgufVariant {
             quantization: Quantization::Q4KM,
             file: "m.Q4_K_M.gguf".into(),
@@ -879,11 +938,60 @@ mod tests {
         let with_kv = check_variant_fit_with_kv_cache(7_000_000_000, &variant, &hw, &cfg, Some(kv));
 
         assert_eq!(with_kv.kv_cache, Some(ByteSize::from_bytes(2_281_701_376)));
-        // Distinct from the flat overhead band, and doesn't move it.
+        // Distinct from the flat overhead band, and doesn't move it. A peak
+        // well inside the pool leaves the decision alone; headroom now also
+        // reflects the peak.
         assert_eq!(with_kv.fits, baseline.fits);
-        assert_eq!(with_kv.headroom, baseline.headroom);
+        assert!(with_kv.headroom <= baseline.headroom);
         assert_eq!(with_kv.overhead, baseline.overhead);
         assert_eq!(with_kv.weights, baseline.weights);
+    }
+
+    fn gpu_8_gib() -> HardwareProfile {
+        let mut hw = apple_silicon(8);
+        if let Some(a) = hw.accelerator.as_mut() {
+            a.kind = AcceleratorKind::Gpu;
+        }
+        hw
+    }
+
+    fn qwen35_9b_kv(context_length: u32) -> KvCacheParams {
+        KvCacheParams {
+            context_length,
+            n_layers: 8,
+            n_kv_heads: 4,
+            head_dim: 256,
+            cache_type_k: KvCacheType::F16,
+            cache_type_v: KvCacheType::F16,
+        }
+    }
+
+    #[test]
+    fn kv_cache_peak_decides_the_fit_on_an_8_gib_gpu() {
+        let variant = sized_variant(5_680_000_000);
+        let cfg = FitConfig::default();
+        let small = check_variant_fit_with_kv_cache(
+            9_000_000_000,
+            &variant,
+            &gpu_8_gib(),
+            &cfg,
+            Some(qwen35_9b_kv(8192)),
+        );
+        assert!(small.fits, "{small:?}");
+        let big = check_variant_fit_with_kv_cache(
+            9_000_000_000,
+            &variant,
+            &gpu_8_gib(),
+            &cfg,
+            Some(qwen35_9b_kv(100_000)),
+        );
+        assert!(!big.fits);
+        let diag = big.diagnostic.expect("peak diagnostic");
+        assert_eq!(diag.code, catalog::MEM_VRAM_EXCEEDED);
+        assert!(diag.message.contains("estimated peak"), "{}", diag.message);
+        // Weights alone still fit, so the weights-only check is unchanged.
+        let weights_only = check_variant_fit(9_000_000_000, &variant, &gpu_8_gib(), &cfg);
+        assert!(weights_only.fits);
     }
 
     // --- speculative draft-model weights ----------

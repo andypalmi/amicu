@@ -115,6 +115,13 @@ pub fn rtx_4070_ti_super() -> HardwareProfile {
     discrete_gpu("rtx_4070_ti_super", "16GiB", 672)
 }
 
+/// NVIDIA GeForce RTX 3060 Ti: 8 GB GDDR6 (Ampere, CUDA compute capability
+/// 8.6 / sm_86), 448 GB/s memory bandwidth (NVIDIA spec sheet).
+#[must_use]
+pub fn rtx_3060_ti() -> HardwareProfile {
+    discrete_gpu("rtx_3060_ti", "8GiB", 448)
+}
+
 /// AMD Radeon RX 7900 XTX: 24 GB GDDR6, 960 GB/s memory bandwidth (AMD spec
 /// sheet). Catalogued as [`AcceleratorKind::Gpu`] - see the module doc for why.
 #[must_use]
@@ -134,6 +141,27 @@ pub fn m4_pro_24gb() -> HardwareProfile {
 #[must_use]
 pub fn m4_pro_48gb() -> HardwareProfile {
     apple_silicon("m4_pro_48gb", "48GiB", 273)
+}
+
+/// Apple M5 Pro, 24 GB configuration: 307 GB/s unified memory bandwidth
+/// (Apple spec sheet).
+#[must_use]
+pub fn m5_pro_24gb() -> HardwareProfile {
+    apple_silicon("m5_pro_24gb", "24GiB", 307)
+}
+
+/// Apple M5 Pro, 48 GB configuration: 307 GB/s unified memory bandwidth
+/// (Apple spec sheet).
+#[must_use]
+pub fn m5_pro_48gb() -> HardwareProfile {
+    apple_silicon("m5_pro_48gb", "48GiB", 307)
+}
+
+/// Apple M5 Pro, 64 GB configuration: 307 GB/s unified memory bandwidth
+/// (Apple spec sheet).
+#[must_use]
+pub fn m5_pro_64gb() -> HardwareProfile {
+    apple_silicon("m5_pro_64gb", "64GiB", 307)
 }
 
 /// Apple M4 Max, 36 GB configuration: ~410 GB/s unified memory bandwidth
@@ -185,8 +213,8 @@ pub fn m2_ultra_192gb() -> HardwareProfile {
     apple_silicon("m2_ultra_192gb", "192GiB", 800)
 }
 
-/// Every consumer/on-prem hardware profile this module catalogs: five NVIDIA
-/// desktop GPUs, one AMD desktop GPU, and nine Apple Silicon unified-memory
+/// Every consumer/on-prem hardware profile this module catalogs: six NVIDIA
+/// desktop GPUs, one AMD desktop GPU, and twelve Apple Silicon unified-memory
 /// configurations.
 #[must_use]
 pub fn catalog() -> Vec<HardwareProfile> {
@@ -196,9 +224,13 @@ pub fn catalog() -> Vec<HardwareProfile> {
         rtx_3090(),
         rtx_4080(),
         rtx_4070_ti_super(),
+        rtx_3060_ti(),
         rx_7900_xtx(),
         m4_pro_24gb(),
         m4_pro_48gb(),
+        m5_pro_24gb(),
+        m5_pro_48gb(),
+        m5_pro_64gb(),
         m4_max_36gb(),
         m4_max_128gb(),
         m3_ultra_96gb(),
@@ -214,8 +246,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_fifteen_entries() {
-        assert_eq!(catalog().len(), 15);
+    fn catalog_has_nineteen_entries() {
+        assert_eq!(catalog().len(), 19);
     }
 
     #[test]

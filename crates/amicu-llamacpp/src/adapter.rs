@@ -15,7 +15,8 @@ use amicu_core::resource::{
 };
 use amicu_core::secret::SecretResolver;
 use amicu_registry::{
-    FitConfig, GgufResolver, KvCacheParams, check_variant_fit_with_draft, variant_weights,
+    FitConfig, GgufResolver, KvCacheParams, check_variant_fit_with_draft, estimated_peak,
+    variant_weights,
 };
 use amicu_runtime::{
     LaunchPlan, LogOptions, LogStream, Parallelism, Platform, RenderedLaunch, ResourceEstimate,
@@ -302,12 +303,14 @@ fn kv_cache_params(model: &Model, settings: &LlamaCppSettings) -> Option<KvCache
 /// Range- and consistency-check the typed numeric fields, one `AMICU-CAP-011`
 /// error per problem so a caller sees every one at once. These are the values
 /// `llama-server` would otherwise reject (or silently misread) only at spawn
-/// time. Every message is prefixed `deployment.<id>:` and names the field.
+/// time. The exception is `ubatch_size` above `batch_size`, which llama-server
+/// just clamps, so that one is a warning. Every message is prefixed `deployment.<id>:` and names the field.
 ///
 /// Deliberately unchecked: `top_k` (any `u32`; `0` disables it) and
 /// `context_length` (`0` means "the model's trained context" to llama-server).
 fn runtime_field_diagnostics(d: &Deployment, s: &LlamaCppSettings) -> Vec<Diagnostic> {
     let mut problems: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
     if s.port == 0 {
         problems.push("`port` must be between 1 and 65535".to_owned());
     }
@@ -348,16 +351,19 @@ fn runtime_field_diagnostics(d: &Deployment, s: &LlamaCppSettings) -> Vec<Diagno
     if let (Some(batch), Some(ubatch)) = (s.batch_size, s.ubatch_size)
         && ubatch > batch
     {
-        problems.push(format!(
-            "`ubatch_size` ({ubatch}) must not exceed `batch_size` ({batch})"
+        // llama-server clamps n_ubatch to n_batch rather than failing.
+        warnings.push(format!(
+            "`ubatch_size` ({ubatch}) exceeds `batch_size` ({batch}); llama-server clamps it to {batch}"
         ));
     }
-    problems
-        .into_iter()
-        .map(|problem| {
+    let errors = problems.into_iter().map(|p| (Severity::Error, p));
+    let warns = warnings.into_iter().map(|p| (Severity::Warning, p));
+    errors
+        .chain(warns)
+        .map(|(severity, problem)| {
             let mut diag = Diagnostic::new(
                 catalog::CAP_RUNTIME_FIELD_INVALID,
-                Severity::Error,
+                severity,
                 format!("deployment.{}: {problem}", d.id),
             );
             diag.resource = Some(format!("deployment.{}", d.id));
@@ -642,11 +648,8 @@ impl RuntimeAdapter for LlamaCppAdapter {
         // weights standing in for it - but never report less than the band:
         // the KV figure leaves out compute buffers and runtime overhead, so a
         // small context must not make the estimate drop below the flat high.
-        let beyond_weights = report
-            .kv_cache
-            .map_or(report.overhead.high, |kv| kv.max(report.overhead.high));
-        let estimated_memory =
-            ByteSize::from_bytes(report.weights.bytes() + beyond_weights.bytes());
+        // The fit check in `validate` compares this same figure to the device.
+        let estimated_memory = estimated_peak(&report, report.kv_cache);
 
         Ok(LaunchPlan {
             deployment: d.id.clone(),

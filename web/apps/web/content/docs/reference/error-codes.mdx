@@ -51,6 +51,7 @@ Diagnostics have the form `AMICU-<CATEGORY>-<NNN>`. The category is the fastest 
 | `AMICU-CAP-008` | error | Invalid `scaling {}` values | See [deployment](/docs/configuration/deployment) for the allowed ranges |
 | `AMICU-CAP-009` | error | `scaling {}` on a provider with no scaling support | Remove the block or use a provider with scaling support (Modal today) |
 | `AMICU-CAP-010` | warning | vLLM KV cache not estimated; the model has no `n_layers`, `n_kv_heads`, `head_dim` | Declare the shape on the model |
+| `AMICU-CAP-011` | error | A typed `llama_cpp` field is out of range or inconsistent (for example `top_p` outside 0 to 1, or `parallel_slots = 0`). The message names the field. `ubatch_size` above `batch_size` is only a warning, because llama-server clamps it | Fix the named field |
 
 ## MEM
 

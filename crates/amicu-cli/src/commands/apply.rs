@@ -673,17 +673,20 @@ fn record_partial(
         );
         done.push_str(&note);
     }
+    if !done.is_empty() {
+        done = format!(" ({done})");
+    }
     let retry = match op {
         Op::Apply => "`amicu apply`",
         Op::Destroy => "`amicu destroy` (add `--target <name>` to limit it)",
     };
     match project.save_state(&state) {
         Ok(()) => CliError::Message(format!(
-            "{err}\n\n{verb} stopped part-way; already done and recorded in state ({done}). \
+            "{err}\n\n{verb} stopped part-way; already done and recorded in state{done}. \
              Fix the error and re-run {retry} to finish the rest"
         )),
         Err(save_err) => CliError::Message(format!(
-            "{err}\n\n{verb} stopped part-way ({done}) and recording that in state FAILED: {}",
+            "{err}\n\n{verb} stopped part-way{done} and recording that in state FAILED: {}",
             save_failed_message(op, progress, &save_err)
         )),
     }
@@ -719,7 +722,7 @@ fn save_failed_message(op: Op, progress: &Progress, save_err: &CliError) -> Stri
     format!(
         "{save_err}. Started by this run and recorded in state as pending before each start: {}. \
          Re-running `amicu apply` (or `amicu destroy --target <name>`) handles them; only if \
-         the state file was replaced meanwhile, stop each by hand",
+         those entries are no longer in state, stop each by hand",
         running.join("; ")
     )
 }

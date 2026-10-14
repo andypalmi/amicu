@@ -288,12 +288,14 @@ impl Project {
     ///
     /// Compare-and-swap: the write only goes through when the file on disk
     /// still carries the serial this handle last read or wrote, and stores
-    /// that serial plus one. A concurrent writer (a bypassed or foreign lock,
-    /// state shared by git or a synced folder) therefore fails this save
-    /// instead of being overwritten; nothing is merged or discarded, and the
-    /// caller surfaces the error. The final check and the swap are atomic with
-    /// respect to other savers (a short lock on `state.cas`); the state lock
-    /// still covers the whole read-plan-apply-save sequence.
+    /// that serial plus one. A second amicu run on the same machine that got
+    /// past the state lock therefore fails this save instead of overwriting
+    /// the other run; nothing is merged or discarded, and the caller surfaces
+    /// the error. This is same-machine protection only, not a distributed
+    /// lock: state shared through git or a synced folder is unsupported. The
+    /// final check and the swap are atomic with respect to other savers (a
+    /// short lock on `state.cas`); the state lock still covers the whole
+    /// read-plan-apply-save sequence.
     /// TODO: a remote backend needs a server-side compare-and-swap.
     pub fn save_state(&self, state: &LocalState) -> Result<(), CliError> {
         use std::io::Write as _;

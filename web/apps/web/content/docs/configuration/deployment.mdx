@@ -138,7 +138,7 @@ Every field is optional. Omitted fields keep the provider's defaults (see [Modal
 | `speculative` | block | | Speculative decoding |
 | `multimodal` | block | | Vision or audio projector |
 
-Out-of-range or inconsistent values in the typed fields above (for example `top_p` outside 0 to 1, `ubatch_size` above `batch_size`, or `parallel_slots = 0`) are rejected at plan time with `AMICU-CAP-011`, so they do not wait for llama-server to fail at start.
+Out-of-range or inconsistent values in the typed fields above (for example `top_p` outside 0 to 1 or `parallel_slots = 0`) are rejected at plan time with `AMICU-CAP-011`, so they do not wait for llama-server to fail at start. `ubatch_size` above `batch_size` is only a warning with the same code, because llama-server clamps it to `batch_size`.
 
 When the model declares `n_layers`, `n_kv_heads`, and `head_dim`, `amicu plan` estimates the KV cache from `context_length`. An unset `cache_type_k` or `cache_type_v` is counted at `f16`, llama-server's own default, so the estimate never assumes a smaller cache than the one that runs. Set a quantized cache type (for example `q8_0`) to shrink it.
 
