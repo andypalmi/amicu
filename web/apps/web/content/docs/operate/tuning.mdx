@@ -15,7 +15,7 @@ Amicu has no command that tunes a deployment automatically, and it never changes
 | `AMICU-MEM-002`: one artifact exceeds available memory | A smaller variant or different hardware |
 | `AMICU-CAP-010`: vLLM KV cache not estimated | Declare `n_layers`, `n_kv_heads`, and `head_dim` on the [model](/docs/configuration/model) |
 | `AMICU-CAP-004`: `extra_args` set | The fit verdict is unverified; check the real memory use |
-| `AMICU-CAP-011`: a typed llama.cpp field is out of range | Fix the named field (for example `ubatch_size` must not exceed `batch_size`) |
+| `AMICU-CAP-011`: a typed llama.cpp field is out of range | Fix the named field (for example `parallel_slots` must be at least 1). `ubatch_size` above `batch_size` only warns |
 
 Rough sizes: a GGUF file is about parameters times bits per weight divided by 8 (a 7B model at `q4_k_m` is about 4 GiB). vLLM FP16 or BF16 weights are about 2 bytes per parameter, plus KV cache. KV cache grows with `context_length` and concurrency.
 

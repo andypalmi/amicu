@@ -736,6 +736,70 @@ mod vllm_dispatch_tests {
         g
     }
 
+    /// Qwen3.5-9B Q4_K_M (~5.7 GB, hybrid: 8 of 32 layers are full attention,
+    /// 4 KV heads, head_dim 256) on an 8 GiB card.
+    fn qwen35_9b_llama_graph(context_length: u32, check: MemoryCheck) -> Graph {
+        let mut g = Graph::new();
+        let mut m = model("Qwen/Qwen3.5-9B");
+        m.artifact.format = ArtifactFormat::Gguf;
+        m.variants = vec![GgufVariant {
+            quantization: Quantization::Q4KM,
+            file: "Qwen3.5-9B-Q4_K_M.gguf".into(),
+            size: Some(ByteSize::from_bytes(5_680_000_000)),
+            sha256: None,
+        }];
+        m.n_layers = Some(32);
+        m.n_kv_layers = Some(8);
+        m.n_kv_heads = Some(4);
+        m.head_dim = Some(256);
+        g.models.push(m);
+        g.hardware_profiles.push(hw(8));
+        let mut d = vllm_deployment(VllmSettings::default());
+        d.memory_check = check;
+        d.runtime = Runtime::LlamaCpp(LlamaCppSettings {
+            context_length,
+            port: 8000,
+            n_gpu_layers: -1,
+            ..Default::default()
+        });
+        g.deployments.push(d);
+        g
+    }
+
+    #[test]
+    fn llama_cpp_fit_counts_the_kv_cache_at_a_small_context() {
+        let report = report_for(&qwen35_9b_llama_graph(8192, MemoryCheck::Enforce));
+        assert!(report.valid, "{:?}", report.diagnostics);
+        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    }
+
+    #[test]
+    fn llama_cpp_fit_rejects_a_peak_with_kv_cache_over_the_card_under_enforce() {
+        let report = report_for(&qwen35_9b_llama_graph(100_000, MemoryCheck::Enforce));
+        assert!(!report.valid);
+        let err = report
+            .diagnostics
+            .iter()
+            .find(|d| d.severity == Severity::Error && d.code == catalog::MEM_VRAM_EXCEEDED)
+            .unwrap_or_else(|| panic!("expected MEM_VRAM_EXCEEDED: {:?}", report.diagnostics));
+        assert!(err.message.contains("estimated peak"), "{}", err.message);
+        assert!(err.message.contains("memory_check"), "{}", err.message);
+    }
+
+    #[test]
+    fn llama_cpp_fit_warns_for_the_same_peak_under_warn() {
+        let report = report_for(&qwen35_9b_llama_graph(100_000, MemoryCheck::Warn));
+        assert!(report.valid, "{:?}", report.diagnostics);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Warning && d.code == catalog::MEM_VRAM_EXCEEDED),
+            "{:?}",
+            report.diagnostics
+        );
+    }
+
     #[test]
     fn memory_check_default_enforces_and_names_the_attribute() {
         let report = report_for(&two_oversized(MemoryCheck::Enforce));

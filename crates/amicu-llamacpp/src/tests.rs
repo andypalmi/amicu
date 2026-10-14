@@ -1406,7 +1406,9 @@ fn plan_launch_estimate_never_drops_below_the_flat_overhead_band() {
 // ---- typed-field range checks --------------------------
 
 /// Run `validate` on `deployment()` after `edit`, keeping only AMICU-CAP-011.
-fn field_diagnostics(edit: impl FnOnce(&mut LlamaCppSettings)) -> Vec<String> {
+fn field_diags(
+    edit: impl FnOnce(&mut LlamaCppSettings),
+) -> Vec<amicu_core::diagnostic::Diagnostic> {
     let mut d = deployment();
     let Runtime::LlamaCpp(s) = &mut d.runtime else {
         unreachable!("deployment() always builds a llama_cpp runtime");
@@ -1416,15 +1418,60 @@ fn field_diagnostics(edit: impl FnOnce(&mut LlamaCppSettings)) -> Vec<String> {
         .validate(&d)
         .into_iter()
         .filter(|diag| diag.code == amicu_core::diagnostic::catalog::CAP_RUNTIME_FIELD_INVALID)
-        .map(|diag| {
-            assert_eq!(diag.severity, amicu_core::diagnostic::Severity::Error);
+        .inspect(|diag| {
             assert_eq!(
                 diag.resource.as_deref(),
                 Some("deployment.support_chat_local")
             );
+        })
+        .collect()
+}
+
+/// The messages of [`field_diags`], asserting each one is an error.
+fn field_diagnostics(edit: impl FnOnce(&mut LlamaCppSettings)) -> Vec<String> {
+    field_diags(edit)
+        .into_iter()
+        .map(|diag| {
+            assert_eq!(diag.severity, amicu_core::diagnostic::Severity::Error);
             diag.message
         })
         .collect()
+}
+
+#[test]
+fn llama_cpp_fit_counts_the_kv_cache_on_an_8_gib_gpu() {
+    // Qwen3.5-9B Q4_K_M: ~5.7 GB weights, hybrid (8 of 32 layers hold KV),
+    // 4 KV heads, head_dim 256, on an 8 GiB card.
+    let mut model = gguf_model(&[(Quantization::Q4KM, "m.Q4_K_M.gguf", 5_680_000_000)]);
+    model.n_layers = Some(32);
+    model.n_kv_layers = Some(8);
+    model.n_kv_heads = Some(4);
+    model.head_dim = Some(256);
+    let catalog = MapCatalog::new()
+        .with_model(model, 9_000_000_000)
+        .with_hardware(nvidia_gpu(8, 48));
+    let adapter = LlamaCppAdapter::new(Box::new(catalog), Box::new(FakeSupervisor::default()));
+    let with_ctx = |ctx: u32| {
+        let mut d = nvidia_deployment();
+        let Runtime::LlamaCpp(s) = &mut d.runtime else {
+            unreachable!("nvidia_deployment() builds a llama_cpp runtime");
+        };
+        s.context_length = ctx;
+        d
+    };
+
+    assert_eq!(adapter.validate(&with_ctx(8192)), Vec::new());
+
+    let diags = adapter.validate(&with_ctx(100_000));
+    let err = diags
+        .iter()
+        .find(|x| x.severity == amicu_core::diagnostic::Severity::Error)
+        .expect("a 100k context must not fit 8 GiB");
+    assert_eq!(err.code, catalog::MEM_VRAM_EXCEEDED);
+    assert!(err.message.contains("estimated peak"), "{}", err.message);
+    // The plan prints the same peak the check used.
+    let plan = adapter.plan_launch(&with_ctx(100_000)).expect("plan");
+    assert!(plan.estimate.estimated_memory.bytes() > 8 * GIB);
 }
 
 #[test]
@@ -1483,13 +1530,21 @@ fn validate_rejects_zero_batch_and_slot_fields() {
 }
 
 #[test]
-fn validate_rejects_ubatch_above_batch() {
-    let msgs = field_diagnostics(|s| {
+fn validate_warns_but_does_not_reject_ubatch_above_batch() {
+    // llama-server clamps n_ubatch to n_batch, so this is only a warning.
+    let diags = field_diags(|s| {
         s.batch_size = Some(512);
         s.ubatch_size = Some(1024);
     });
-    assert_eq!(msgs.len(), 1, "{msgs:?}");
-    assert!(msgs[0].contains("`ubatch_size` (1024) must not exceed `batch_size` (512)"));
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(diags[0].severity, amicu_core::diagnostic::Severity::Warning);
+    assert!(
+        diags[0]
+            .message
+            .contains("`ubatch_size` (1024) exceeds `batch_size` (512)"),
+        "{}",
+        diags[0].message
+    );
 }
 
 #[test]

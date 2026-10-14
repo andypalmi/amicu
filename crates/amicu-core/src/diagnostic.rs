@@ -385,9 +385,10 @@ pub mod catalog {
     // --- plan-time range checks on typed llama.cpp fields ---
     /// `AMICU-CAP-011` - a `llama_cpp` deployment sets a typed runtime field
     /// to an out-of-range or inconsistent value (e.g. `top_p` outside
-    /// `[0, 1]`, `ubatch_size` above `batch_size`, `parallel_slots = 0`).
-    /// Error: `llama-server` would reject or misbehave on it at spawn time, so
-    /// it is caught at plan time instead.
+    /// `[0, 1]`, `parallel_slots = 0`). Error: `llama-server` would reject or
+    /// misbehave on it at spawn time, so it is caught at plan time instead.
+    /// `ubatch_size` above `batch_size` is the one warning, since
+    /// `llama-server` clamps it to `batch_size`.
     pub const CAP_RUNTIME_FIELD_INVALID: DiagnosticCode = DiagnosticCode::new(Category::Cap, 11);
     /// `AMICU-MEM-001` - model does not fit in available VRAM.
     pub const MEM_VRAM_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Mem, 1);
