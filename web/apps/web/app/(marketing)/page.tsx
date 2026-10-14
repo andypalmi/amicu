@@ -85,7 +85,7 @@ export default function LandingPage() {
       {/* Hero */}
       <HomeSection>
         <Headline as="h1">
-          Open-weight LLMs, deployed as code.
+          Deploy and manage LLMs as code.
         </Headline>
         <p className={cn('mt-6 font-mono text-sm text-muted-foreground sm:text-base', MEASURE)}>
           On your laptop, your servers or a cloud GPU.
