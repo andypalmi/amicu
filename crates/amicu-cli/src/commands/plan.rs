@@ -30,15 +30,19 @@ pub(crate) fn run(
         return Ok(1);
     }
 
-    let prior =
-        crate::refresh::load_refreshed_state(project, &crate::refresh::ModalLookup, output, out)?
-            .map(|s| {
-                // A pending deployment (start unconfirmed) is planned as absent.
-                let mut g = s.graph;
-                g.deployments.retain(|d| !s.pending.contains(&d.id));
-                g
-            });
-    let result = match build_project_plan(project, &graph, prior.as_ref()) {
+    let state =
+        crate::refresh::load_refreshed_state(project, &crate::refresh::ModalLookup, output, out)?;
+    let recorded = state
+        .as_ref()
+        .map(|s| s.fingerprints.clone())
+        .unwrap_or_default();
+    let prior = state.map(|s| {
+        // A pending deployment (start unconfirmed) is planned as absent.
+        let mut g = s.graph;
+        g.deployments.retain(|d| !s.pending.contains(&d.id));
+        g
+    });
+    let result = match build_project_plan(project, &graph, prior.as_ref(), &recorded) {
         Ok(result) => result,
         // A deployment failed to plan (e.g. a CAP-002/CAP-003 extra_args/env
         // conflict); `build_plan` hands back everything it collected instead
@@ -114,6 +118,9 @@ pub(crate) fn print_human(
             let kind = format!("{:?}", item.action.kind).to_lowercase();
             io(writeln!(out, "  {} {}", symbol(&kind), item.action.address))?;
             io(writeln!(out, "      action:   {kind}"))?;
+            if let Some(reason) = &item.reason {
+                io(writeln!(out, "      reason:   {reason}"))?;
+            }
             if let Some(hw) = &item.action.hardware {
                 io(writeln!(out, "      hardware: {hw}"))?;
             }
@@ -319,7 +326,13 @@ mod tests {
     fn project_plan_shows_an_absolute_model_path() {
         let g = graph("local", llama());
         let project = Project::new("/proj");
-        let result = crate::planner::build_project_plan(&project, &g, None).expect("plan");
+        let result = crate::planner::build_project_plan(
+            &project,
+            &g,
+            None,
+            &std::collections::BTreeMap::default(),
+        )
+        .expect("plan");
         let launch = result.items[0].rendered.clone().expect("rendered");
         assert!(launch.contains("/proj/models/m/"), "{launch}");
     }

@@ -5,6 +5,11 @@
 //! `crate::planner` call sites (`plan`, `apply`).
 
 use amicu_core::graph::Graph;
+use amicu_core::id::DeploymentId;
+use amicu_core::resource::{Deployment, HardwareProfile};
+use amicu_engine::fingerprint::{EnvProbe, Fact, Fingerprint};
+use amicu_llamacpp::CommandRunner;
+use std::collections::BTreeMap;
 
 use crate::project::Project;
 
@@ -19,7 +24,69 @@ pub(crate) fn build_project_plan(
     project: &Project,
     graph: &Graph,
     prior: Option<&Graph>,
+    recorded: &BTreeMap<DeploymentId, Fingerprint>,
+) -> Result<PlanResult, PlanError> {
+    build_project_plan_with(project, graph, prior, recorded, &HostEnvProbe)
+}
+
+/// [`build_project_plan`] with the environment probe injected (tests).
+pub(crate) fn build_project_plan_with(
+    project: &Project,
+    graph: &Graph,
+    prior: Option<&Graph>,
+    recorded: &BTreeMap<DeploymentId, Fingerprint>,
+    probe: &dyn EnvProbe,
 ) -> Result<PlanResult, PlanError> {
     let root = std::path::absolute(project.root()).ok();
-    amicu_engine::planner::build_plan_in(graph, prior, root.as_deref())
+    amicu_engine::planner::build_plan_with(
+        graph,
+        prior,
+        &amicu_engine::planner::PlanInputs {
+            project_root: root.as_deref(),
+            recorded,
+            probe,
+        },
+    )
+}
+
+/// Reads the image and binary a deployment would run with from the real
+/// environment (`AMICU_MODAL_*_IMAGE`, `PATH`).
+pub(crate) struct HostEnvProbe;
+
+impl HostEnvProbe {
+    fn is_modal(hardware: Option<&HardwareProfile>) -> bool {
+        hardware.is_some_and(|h| h.provider == "modal")
+    }
+}
+
+impl EnvProbe for HostEnvProbe {
+    fn image(&self, d: &Deployment, hardware: Option<&HardwareProfile>) -> Fact {
+        if !Self::is_modal(hardware) {
+            return Fact::NotApplicable;
+        }
+        let kind = amicu_runtime::RuntimeKind::of(&d.runtime);
+        Fact::Known(
+            std::env::var(amicu_modal::supervisor::image_env_var(kind))
+                .unwrap_or_else(|_| amicu_modal::supervisor::default_image(kind).to_owned()),
+        )
+    }
+
+    fn binary(&self, d: &Deployment, hardware: Option<&HardwareProfile>) -> Fact {
+        if Self::is_modal(hardware) {
+            return Fact::NotApplicable;
+        }
+        let name = match amicu_runtime::RuntimeKind::of(&d.runtime) {
+            amicu_runtime::RuntimeKind::LlamaCpp => "llama-server",
+            amicu_runtime::RuntimeKind::Vllm => "vllm",
+        };
+        match amicu_llamacpp::HostRunner.which(name) {
+            Some(p) => Fact::Known(
+                std::path::absolute(p)
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            None => Fact::Unknown,
+        }
+    }
 }

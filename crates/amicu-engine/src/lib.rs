@@ -18,6 +18,7 @@
 
 pub mod catalog;
 pub mod checks;
+pub mod fingerprint;
 pub mod planner;
 
 use amicu_core::graph::Graph;
@@ -25,7 +26,10 @@ use amicu_hcl::{HclError, parse_graph};
 
 pub use catalog::build_catalog;
 pub use checks::report_for;
-pub use planner::{PlanError, PlanItem, PlanResult, build_plan, build_plan_in};
+pub use fingerprint::{EnvProbe, Fact, Fingerprint, NoProbe};
+pub use planner::{
+    PlanError, PlanInputs, PlanItem, PlanResult, build_plan, build_plan_in, build_plan_with,
+};
 
 /// Parse a single HCL configuration document into the canonical graph.
 ///
