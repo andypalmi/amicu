@@ -112,6 +112,16 @@ pub trait ProcessSupervisor: Send + Sync {
     /// Stop the instance.
     async fn stop(&self, handle: &RuntimeHandle) -> Result<(), LlamaCppError>;
 
+    /// Stop the instance, deleting its service definition at the recorded
+    /// path (`None`: recompute it, for records that predate the field).
+    async fn stop_recorded(
+        &self,
+        handle: &RuntimeHandle,
+        _definition: Option<&Path>,
+    ) -> Result<(), LlamaCppError> {
+        self.stop(handle).await
+    }
+
     /// Who the host service manager acts as (backend, uid, launchd domain),
     /// when this supervisor is host-based. Recorded with started instances.
     fn host_context(&self) -> Option<crate::service::HostContext> {
@@ -471,6 +481,14 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
 
     async fn stop(&self, handle: &RuntimeHandle) -> Result<(), LlamaCppError> {
         self.manager.stop(&handle.id)
+    }
+
+    async fn stop_recorded(
+        &self,
+        handle: &RuntimeHandle,
+        definition: Option<&Path>,
+    ) -> Result<(), LlamaCppError> {
+        self.manager.stop_recorded(&handle.id, definition)
     }
 
     fn host_context(&self) -> Option<crate::service::HostContext> {

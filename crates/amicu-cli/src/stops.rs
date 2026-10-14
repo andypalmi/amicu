@@ -10,6 +10,7 @@ use amicu_core::id::DeploymentId;
 use amicu_llamacpp::{HostBackend, HostContext};
 use amicu_modal::supervisor::app_name_for;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 use crate::modal_ops::Workspace;
 
@@ -174,6 +175,76 @@ impl StopRecord {
             && self.backend == other.backend
             && self.identity == other.identity
             && self.app_id == other.app_id
+    }
+
+    /// The recorded service definition, validated: absolute, no `..`, named
+    /// exactly `<identity>.plist` (launchd) / `<identity>.env` (systemd), in
+    /// the directory amicu writes it to (`.../Library/LaunchAgents`, or the
+    /// systemd env dir `.../amicu` / `.../amicu/env`). `Ok(None)`: none
+    /// recorded (a legacy record). Anything else is refused, so a tampered
+    /// state file can never make amicu delete an unrelated file.
+    pub(crate) fn definition_path(&self) -> Result<Option<PathBuf>, String> {
+        let Some(def) = &self.definition else {
+            return Ok(None);
+        };
+        let path = PathBuf::from(def);
+        let (ext, dirs): (&str, &[&str]) = match self.backend {
+            Backend::HostLaunchd => ("plist", &["Library/LaunchAgents"]),
+            Backend::HostSystemd => ("env", &["amicu", "amicu/env"]),
+            Backend::Modal => return Err(format!("a Modal record has a service file '{def}'")),
+        };
+        Self::check_file(&path, &format!("{}.{ext}", self.identity), dirs)?;
+        Ok(Some(path))
+    }
+
+    /// The recorded log files, validated like [`Self::definition_path`]:
+    /// `<identity>.out.log` / `<identity>.err.log` in `.../Library/Logs/amicu`.
+    pub(crate) fn log_paths(&self) -> Result<Vec<PathBuf>, String> {
+        let mut out = Vec::new();
+        for l in &self.logs {
+            let path = PathBuf::from(l);
+            let ok = ["out", "err"].iter().any(|k| {
+                path.file_name().and_then(|n| n.to_str())
+                    == Some(&format!("{}.{k}.log", self.identity))
+            });
+            if self.backend != Backend::HostLaunchd || !ok {
+                return Err(format!("'{l}' is not a log file of {}", self.identity));
+            }
+            Self::check_file(
+                &path,
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default(),
+                &["Library/Logs/amicu"],
+            )?;
+            out.push(path);
+        }
+        Ok(out)
+    }
+
+    fn check_file(path: &Path, name: &str, dirs: &[&str]) -> Result<(), String> {
+        use std::path::Component;
+        let shown = path.display();
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+        {
+            return Err(format!("'{shown}' is not a clean absolute path"));
+        }
+        if path.file_name().and_then(|n| n.to_str()) != Some(name) {
+            return Err(format!("'{shown}' is not named '{name}'"));
+        }
+        let in_dir = path
+            .parent()
+            .is_some_and(|parent| dirs.iter().any(|d| parent.ends_with(d)));
+        if !in_dir {
+            return Err(format!(
+                "'{shown}' is not in the directory amicu writes it to ({})",
+                dirs.join(" or ")
+            ));
+        }
+        Ok(())
     }
 
     /// A human description naming the exact label / app id, for recovery text.

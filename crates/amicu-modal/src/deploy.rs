@@ -693,41 +693,6 @@ impl ModalClient {
         Ok(response.mount_id)
     }
 
-    /// Deletes the Volume named `name` (`VolumeGetOrCreate` as a pure lookup,
-    /// then `VolumeDelete`). `Ok(false)`: no such volume exists.
-    pub async fn delete_volume(&mut self, name: &str) -> Result<bool, ModalError> {
-        let found = self
-            .stub()
-            .volume_get_or_create(pb::VolumeGetOrCreateRequest {
-                deployment_name: name.to_owned(),
-                environment_name: String::new(),
-                object_creation_type: pb::ObjectCreationType::Unspecified as i32,
-                ..pb::VolumeGetOrCreateRequest::default()
-            })
-            .await;
-        let volume_id = match found {
-            Ok(r) => r.into_inner().volume_id,
-            Err(status) => {
-                let e = ModalError::from_status("VolumeGetOrCreate", status);
-                return if e.is_not_found() { Ok(false) } else { Err(e) };
-            }
-        };
-        match self
-            .stub()
-            .volume_delete(pb::VolumeDeleteRequest {
-                volume_id,
-                ..pb::VolumeDeleteRequest::default()
-            })
-            .await
-        {
-            Ok(_) => Ok(true),
-            Err(status) => {
-                let e = ModalError::from_status("VolumeDelete", status);
-                if e.is_not_found() { Ok(false) } else { Err(e) }
-            }
-        }
-    }
-
     async fn get_or_create_volume(&mut self, name: &str) -> Result<String, ModalError> {
         let response = self
             .stub()

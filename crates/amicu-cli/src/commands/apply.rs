@@ -6,7 +6,9 @@ use amicu_core::adapter::AdapterError;
 use amicu_core::diagnostic::{DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
 use amicu_core::id::DeploymentId;
-use amicu_core::resource::{Deployment, Runtime, is_local_provider};
+#[cfg(test)]
+use amicu_core::resource::Runtime;
+use amicu_core::resource::{Deployment, is_local_provider};
 use amicu_core::secret::{SecretResolver, SecretValue};
 use amicu_llamacpp::{Catalog, LlamaCppAdapter, ProcessSupervisor, host_supervisor};
 use amicu_modal::ModalSupervisor;
@@ -528,9 +530,7 @@ impl Progress {
         Self {
             stops: effective_stops(prior),
             // Empty until `execute` mints one for a project that has none.
-            project_id: prior
-                .and_then(|s| s.project_id.clone())
-                .unwrap_or_default(),
+            project_id: prior.and_then(|s| s.project_id.clone()).unwrap_or_default(),
             ..Self::default()
         }
     }
@@ -923,21 +923,9 @@ async fn apply_all(
             // A provider (or identity) change: stop what is running under the
             // OLD identity first, and confirm it, before starting the new one.
             // The old record stays in state until that stop is confirmed.
-            let old_runtime = prior
-                .and_then(|s| find_deployment(&s.graph, &item.deployment))
-                .map(|d| &d.runtime);
             let stale = stale_records(&progress.stops, &item.deployment, &new_stop);
             for old in stale {
-                stop_record(
-                    &old,
-                    old_runtime,
-                    &llama_adapter,
-                    &vllm_adapter,
-                    env,
-                    &*host_probe,
-                    &mut progress.stops,
-                )
-                .await?;
+                stop_record(&old, env, &*host_probe, &mut progress.stops).await?;
                 progress.stops.retain(|r| !r.same_instance(&old));
             }
             // Write-ahead: record the deployment as pending, with its stop
@@ -978,16 +966,7 @@ async fn apply_all(
             }
             progress.in_flight = None;
             for old in superseded {
-                stop_record(
-                    &old,
-                    old_runtime,
-                    &llama_adapter,
-                    &vllm_adapter,
-                    env,
-                    &*host_probe,
-                    &mut progress.stops,
-                )
-                .await?;
+                stop_record(&old, env, &*host_probe, &mut progress.stops).await?;
                 progress.stops.retain(|r| !r.same_instance(&old));
             }
         } else {
@@ -1011,16 +990,7 @@ async fn apply_all(
                 });
             }
             for record in records {
-                stop_record(
-                    &record,
-                    prior_deployment.map(|d| &d.runtime),
-                    &llama_adapter,
-                    &vllm_adapter,
-                    env,
-                    &*host_probe,
-                    &mut progress.stops,
-                )
-                .await?;
+                stop_record(&record, env, &*host_probe, &mut progress.stops).await?;
                 progress.stops.retain(|r| !r.same_instance(&record));
             }
             registry.deregister(&item.deployment);
@@ -1298,9 +1268,6 @@ fn check_host_context(
 /// error and the caller must keep the record in state.
 async fn stop_record(
     record: &StopRecord,
-    runtime: Option<&Runtime>,
-    llama: &LlamaCppAdapter,
-    vllm: &VllmAdapter,
     env: &Env<'_>,
     probe: &dyn ProcessSupervisor,
     stops: &mut [StopRecord],
@@ -1309,15 +1276,37 @@ async fn stop_record(
         Backend::HostLaunchd | Backend::HostSystemd => {
             check_host_context(record, probe.host_context().as_ref(), probe)?;
             let handle = host_handle(&record.deployment, &record.identity);
-            // Both adapters share one supervisor that manages the unit purely
-            // by the handle's id; dispatch on the declared runtime anyway.
-            match runtime {
-                Some(Runtime::Vllm(_)) => vllm.stop(&handle).await?,
-                _ => llama.stop(&handle).await?,
+            // Validated BEFORE anything is stopped: a recorded path that is
+            // not exactly this record's own service file is refused, so state
+            // can never point the delete at an unrelated file.
+            let definition = record.definition_path().map_err(|why| {
+                CliError::Message(format!(
+                    "{} has a recorded service file that amicu will not delete: {why}. Check \
+                     the state file; the record was kept and nothing was changed",
+                    record.describe()
+                ))
+            })?;
+            // Stop, then delete the service definition (it holds the endpoint
+            // API key) at the recorded path; a failure to delete is an error
+            // and the record stays in state.
+            probe
+                .stop_recorded(&handle, definition.as_deref())
+                .await
+                .map_err(|e| {
+                    CliError::Adapter(amicu_core::adapter::AdapterErrorKind::into_adapter_error(e))
+                })?;
+            if let Some(path) = &definition
+                && path.exists()
+            {
+                return Err(CliError::Message(format!(
+                    "{} is stopped but its service file {} (it holds the endpoint API key) \
+                     could not be removed. Delete it by hand; the record was kept so a re-run \
+                     retries",
+                    record.describe(),
+                    path.display()
+                )));
             }
-            // Confirmed stopped: delete the service definition that holds the
-            // injected environment, at the path recorded when it was written.
-            remove_definition(record)
+            Ok(())
         }
         Backend::Modal => stop_modal(record, env, stops).await,
     }
@@ -1337,57 +1326,40 @@ fn modal_volume_names(runtime: amicu_runtime::RuntimeKind) -> Vec<&'static str> 
     }
 }
 
-/// Make the model paths in a host launch absolute under `root` (`-m` and
-/// `--model-draft` values that are relative). Done when the instance starts,
-/// so plans and state never hold an absolute project path.
+/// Flags whose value is a file path relative to the project root.
+const PATH_FLAGS: [&str; 5] = [
+    "-m",
+    "--model",
+    "--model-draft",
+    "--mmproj",
+    "--chat-template-file",
+];
+
+/// Make the file paths in a host launch absolute under `root`: the model
+/// (`-m`), draft model, `--mmproj`/`-mm` and `--chat-template-file` values
+/// (also in `--flag=value` form) that are relative. Done when the instance
+/// starts, so plans and state never hold an absolute project path.
 fn resolve_model_paths(launch: &mut LaunchPlan, root: &std::path::Path) {
     let amicu_runtime::RenderedLaunch::Command { argv, .. } = &mut launch.rendered else {
         return;
     };
     let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let absolute = |v: &str| root.join(v).to_string_lossy().into_owned();
+    let is_path_flag = |f: &str| PATH_FLAGS.contains(&f) || f == "-mm";
     let mut i = 0;
-    while i + 1 < argv.len() {
-        if matches!(argv[i].as_str(), "-m" | "--model" | "--model-draft")
+    while i < argv.len() {
+        if let Some((flag, value)) = argv[i].split_once('=')
+            && is_path_flag(flag)
+            && !std::path::Path::new(value).is_absolute()
+        {
+            argv[i] = format!("{flag}={}", absolute(value));
+        } else if is_path_flag(&argv[i])
+            && i + 1 < argv.len()
             && !std::path::Path::new(&argv[i + 1]).is_absolute()
         {
-            argv[i + 1] = root.join(&argv[i + 1]).to_string_lossy().into_owned();
+            argv[i + 1] = absolute(&argv[i + 1]);
         }
         i += 1;
-    }
-}
-
-/// Whether `path` looks like a file amicu itself writes for a host service.
-fn is_service_file(path: &std::path::Path) -> bool {
-    path.is_absolute()
-        && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-            n.starts_with("io.amicu.llama.")
-                && std::path::Path::new(n).extension().is_some_and(|e| {
-                    e.eq_ignore_ascii_case("plist") || e.eq_ignore_ascii_case("env")
-                })
-        })
-}
-
-/// Delete the secret-bearing service definition recorded for a stopped host
-/// instance. A missing file is fine; any other failure is an error and the
-/// record stays in state.
-fn remove_definition(record: &StopRecord) -> Result<(), CliError> {
-    let Some(def) = &record.definition else {
-        return Ok(());
-    };
-    let path = std::path::Path::new(def);
-    if !is_service_file(path) {
-        return Err(CliError::Message(format!(
-            "{} has a recorded service file '{def}' that is not an amicu service file; refusing              to delete it. Check the state file; the record was kept",
-            record.describe()
-        )));
-    }
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(CliError::Message(format!(
-            "{} is stopped but its service file {def} (it holds the endpoint API key) could not              be removed: {e}. Delete it by hand; the record was kept so a re-run retries",
-            record.describe()
-        ))),
     }
 }
 
@@ -2556,6 +2528,11 @@ mod scoped_tests {
             "models/d/b.gguf",
             "--port",
             "8080",
+            "--mmproj",
+            "vision/mm.gguf",
+            "--chat-template-file=tpl/chat.jinja",
+            "-mm",
+            "/abs/already.gguf",
         ];
         let mut launch = LaunchPlan {
             deployment: "chat".into(),
@@ -2581,16 +2558,12 @@ mod scoped_tests {
         assert_eq!(argv[2], "/work/proj/models/m/a.gguf");
         assert_eq!(argv[4], "/work/proj/models/d/b.gguf");
         assert_eq!(argv[6], "8080");
-    }
-
-    #[test]
-    fn only_amicu_service_files_are_deletable() {
-        let ok = std::path::Path::new("/h/Library/LaunchAgents/io.amicu.llama.ab12.chat.plist");
-        assert!(is_service_file(ok));
-        assert!(!is_service_file(std::path::Path::new("/etc/passwd")));
-        assert!(!is_service_file(std::path::Path::new(
-            "io.amicu.llama.x.plist"
-        )));
+        assert_eq!(argv[8], "/work/proj/vision/mm.gguf");
+        assert_eq!(argv[9], "--chat-template-file=/work/proj/tpl/chat.jinja");
+        assert_eq!(
+            argv[11], "/abs/already.gguf",
+            "absolute paths are untouched"
+        );
     }
 }
 

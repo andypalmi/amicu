@@ -237,9 +237,27 @@ impl LlamaCppAdapter {
 
     /// The staged GGUF path for a resolved model/variant pair, the single
     /// place `models_dir/<model id>/<variant file>` is spelled.
-    fn model_path(&self, id: &ModelId, variant: &GgufVariant) -> PathBuf {
-        self.models_dir.join(id.as_str()).join(&variant.file)
+    fn model_path(&self, id: &ModelId, variant: &GgufVariant) -> Result<PathBuf, LlamaCppError> {
+        // An absolute variant file is the user's own GGUF and is used as-is (if it
+        // has no `..`); a relative one must be a plain name under the models dir.
+        let own = std::path::Path::new(&variant.file);
+        let own_ok = own.is_absolute()
+            && !own
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir));
+        if !(own_ok || is_plain_file_name(&variant.file)) || !is_plain_file_name(id.as_str()) {
+            return Err(LlamaCppError::Supervisor(format!(
+                "model '{id}': file name '{}' must be a plain name (no path separators or `..`)",
+                variant.file
+            )));
+        }
+        Ok(self.models_dir.join(id.as_str()).join(&variant.file))
     }
+}
+
+/// A single path component: not empty, not `.`/`..`, no separators.
+fn is_plain_file_name(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\', '\0'])
 }
 
 /// The draft-model weights a speculative deployment adds to the fit check
@@ -538,11 +556,17 @@ impl RuntimeAdapter for LlamaCppAdapter {
             kv,
             draft_weights(draft.as_ref()),
         );
-        let model_path = self.model_path(&model.id, &variant);
+        let model_path = self
+            .model_path(&model.id, &variant)
+            .map_err(LlamaCppError::into_adapter_error)?;
         // The draft GGUF is staged under its own model id, exactly like the
         // primary one - `--model-draft` gets a resolved path, never the HCL
         // reference (amicu-planning#151 PR C).
-        let draft_path = draft.as_ref().map(|(m, v)| self.model_path(&m.model.id, v));
+        let draft_path = draft
+            .as_ref()
+            .map(|(m, v)| self.model_path(&m.model.id, v))
+            .transpose()
+            .map_err(LlamaCppError::into_adapter_error)?;
         let (argv, text) = render_command(&model_path, draft_path.as_deref(), settings);
 
         let gpu_count = u32::from(hardware.accelerator.is_some() && settings.n_gpu_layers != 0);
@@ -609,5 +633,26 @@ impl RuntimeAdapter for LlamaCppAdapter {
             .stop(h)
             .await
             .map_err(LlamaCppError::into_adapter_error)
+    }
+}
+
+#[cfg(test)]
+mod file_name_tests {
+    use super::is_plain_file_name;
+
+    #[test]
+    fn only_plain_names_may_be_joined_under_the_models_dir() {
+        assert!(is_plain_file_name("model-q4_k_m.gguf"));
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../x.gguf",
+            "a/b.gguf",
+            "a\\b.gguf",
+            "/etc/passwd",
+        ] {
+            assert!(!is_plain_file_name(bad), "{bad}");
+        }
     }
 }

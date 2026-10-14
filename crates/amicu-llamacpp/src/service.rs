@@ -109,6 +109,12 @@ pub trait ServiceManager: Send + Sync {
     fn state(&self, label: &str) -> Result<ServiceState, LlamaCppError>;
     /// Stop and unload the service.
     fn stop(&self, label: &str) -> Result<(), LlamaCppError>;
+    /// [`stop`](Self::stop), deleting the service definition at `definition`
+    /// (the path recorded in state when it was written) instead of the one
+    /// recomputed from `$HOME`. `None`: recompute (legacy records).
+    fn stop_recorded(&self, label: &str, _definition: Option<&Path>) -> Result<(), LlamaCppError> {
+        self.stop(label)
+    }
     /// Read the service's captured log lines.
     fn logs(&self, label: &str, options: LogOptions) -> Result<Vec<String>, LlamaCppError>;
     /// Where a human finds the service's logs (file paths or a command), for
@@ -376,7 +382,11 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
     }
 
     fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
-        let plist = self.plist_path(label);
+        self.stop_recorded(label, None)
+    }
+
+    fn stop_recorded(&self, label: &str, definition: Option<&Path>) -> Result<(), LlamaCppError> {
+        let plist = definition.map_or_else(|| self.plist_path(label), Path::to_path_buf);
         let (_, domain) = self.domain()?;
         let target = format!("{domain}/{label}");
         // `bootout` can exit 0 while the job stays loaded ("Boot-out failed:
@@ -612,10 +622,17 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
     }
 
     fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
+        self.stop_recorded(label, None)
+    }
+
+    fn stop_recorded(&self, label: &str, definition: Option<&Path>) -> Result<(), LlamaCppError> {
         let out = self.exec.exec("systemctl", &["--user", "stop", label]);
         // Always drop the secrets file, even when stop fails (a crashed
         // `--collect` unit is "not loaded" and its stop errors).
-        remove_env_file(&self.env_path(label));
+        match definition {
+            Some(path) => remove_env_file(path),
+            None => remove_env_file(&self.env_path(label)),
+        }
         let out = out?;
         if out.success {
             return Ok(());

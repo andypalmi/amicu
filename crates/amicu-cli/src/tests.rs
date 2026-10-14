@@ -952,6 +952,18 @@ impl amicu_llamacpp::ProcessSupervisor for FakeHost {
         self.log.stopped.lock().unwrap().push(h.id.clone());
         Ok(())
     }
+    async fn stop_recorded(
+        &self,
+        h: &amicu_runtime::RuntimeHandle,
+        definition: Option<&std::path::Path>,
+    ) -> Result<(), amicu_llamacpp::LlamaCppError> {
+        self.stop(h).await?;
+        // Like the real managers: delete the definition at the recorded path.
+        if let Some(path) = definition {
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(())
+    }
     fn host_context(&self) -> Option<amicu_llamacpp::HostContext> {
         self.ctx.clone()
     }
@@ -970,7 +982,6 @@ struct FakeModal {
     live: Option<Vec<String>>,
     /// App ids the token's workspace can see (besides `apps`).
     visible_ids: Vec<String>,
-    deleted_volumes: Mutex<Vec<String>>,
 }
 
 impl Default for FakeModal {
@@ -982,7 +993,6 @@ impl Default for FakeModal {
             stopped: Mutex::new(Vec::new()),
             live: None,
             visible_ids: Vec::new(),
-            deleted_volumes: Mutex::new(Vec::new()),
         }
     }
 }
@@ -1010,10 +1020,6 @@ impl ModalOps for FakeModal {
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, id)| id.clone()))
-    }
-    async fn delete_volume(&self, name: &str) -> Result<bool, crate::error::CliError> {
-        self.deleted_volumes.lock().unwrap().push(name.to_owned());
-        Ok(true)
     }
     async fn stop_app(&self, app_id: &str) -> Result<bool, crate::error::CliError> {
         if self.unknown_ids.iter().any(|i| i == app_id) {
@@ -1873,17 +1879,136 @@ fn handle(id: &str, port: u16) -> amicu_runtime::RuntimeHandle {
 
 // ---- project-scoped labels, recorded files, purge (#212, #214) ---------------
 
-fn scoped_rec(project_id: &str, name: &str, dir: &std::path::Path) -> StopRecord {
+/// The directories amicu writes service files to, under `home`.
+fn service_dirs(home: &std::path::Path) -> (PathBuf, PathBuf) {
+    if cfg!(target_os = "macos") {
+        (
+            home.join("Library/LaunchAgents"),
+            home.join("Library/Logs/amicu"),
+        )
+    } else {
+        (home.join("amicu"), home.join("unused"))
+    }
+}
+
+fn scoped_rec(project_id: &str, name: &str, home: &std::path::Path) -> StopRecord {
     let label = amicu_llamacpp::project_host_label(project_id, name);
+    let (defs, logs) = service_dirs(home);
+    let ext = if cfg!(target_os = "macos") {
+        "plist"
+    } else {
+        "env"
+    };
     StopRecord::host_in(
         project_id,
         &name.into(),
         Some(&platform_ctx()),
         Some(amicu_llamacpp::ServicePaths {
-            definition: dir.join(format!("{label}.plist")),
-            logs: vec![dir.join(format!("{label}.out.log"))],
+            definition: defs.join(format!("{label}.{ext}")),
+            logs: if cfg!(target_os = "macos") {
+                vec![logs.join(format!("{label}.out.log"))]
+            } else {
+                Vec::new()
+            },
         }),
     )
+}
+
+fn launchd_rec(project_id: &str, name: &str) -> StopRecord {
+    let mut rec = StopRecord::host_in(
+        project_id,
+        &name.into(),
+        Some(&amicu_llamacpp::HostContext {
+            backend: amicu_llamacpp::HostBackend::Launchd,
+            uid: 501,
+            domain: Some("gui/501".to_owned()),
+        }),
+        None,
+    );
+    let label = rec.identity.clone();
+    rec.definition = Some(format!("/Users/me/Library/LaunchAgents/{label}.plist"));
+    rec.logs = vec![format!("/Users/me/Library/Logs/amicu/{label}.out.log")];
+    rec
+}
+
+#[test]
+fn recorded_definition_and_log_paths_are_validated_against_the_record() {
+    let rec = launchd_rec("aaaa1111", "chat");
+    assert!(rec.definition_path().unwrap().is_some());
+    assert_eq!(rec.log_paths().unwrap().len(), 1);
+
+    let label = rec.identity.clone();
+    let with_def = |d: String| {
+        let mut r = rec.clone();
+        r.definition = Some(d);
+        r.definition_path()
+    };
+    // `..` components.
+    assert!(with_def(format!("/Users/me/Library/LaunchAgents/../x/{label}.plist")).is_err());
+    assert!(
+        with_def(format!(
+            "/Users/me/Library/LaunchAgents/../LaunchAgents/{label}.plist"
+        ))
+        .is_err()
+    );
+    // Another project's label, or another deployment's.
+    assert!(
+        with_def("/Users/me/Library/LaunchAgents/io.amicu.llama.bbbb2222.chat.plist".into())
+            .is_err()
+    );
+    // The wrong directory.
+    assert!(with_def(format!("/etc/{label}.plist")).is_err());
+    assert!(with_def(format!("/Users/me/Documents/{label}.plist")).is_err());
+    // An arbitrary file with the right extension, a relative path, a wrong extension.
+    assert!(with_def("/Users/me/Library/LaunchAgents/other.plist".into()).is_err());
+    assert!(
+        with_def(format!("Library/LaunchAgents/{label}.plist").replace("Library", "./Library"))
+            .is_err()
+    );
+    assert!(with_def(format!("/Users/me/Library/LaunchAgents/{label}.env")).is_err());
+
+    let with_log = |l: String| {
+        let mut r = rec.clone();
+        r.logs = vec![l];
+        r.log_paths()
+    };
+    assert!(
+        with_log(format!(
+            "/Users/me/Library/Logs/amicu/../../x/{label}.out.log"
+        ))
+        .is_err()
+    );
+    assert!(
+        with_log("/Users/me/Library/Logs/amicu/io.amicu.llama.bbbb2222.chat.out.log".into())
+            .is_err()
+    );
+    assert!(with_log(format!("/var/log/{label}.out.log")).is_err());
+    assert!(with_log("/Users/me/Library/Logs/amicu/notes.txt".into()).is_err());
+    assert!(with_log(format!("/Users/me/Library/Logs/amicu/{label}.err.log")).is_ok());
+}
+
+#[test]
+fn systemd_env_files_are_validated_in_the_env_dir_only() {
+    let mut rec = StopRecord::host_in(
+        "aaaa1111",
+        &"chat".into(),
+        Some(&amicu_llamacpp::HostContext {
+            backend: amicu_llamacpp::HostBackend::Systemd,
+            uid: 501,
+            domain: None,
+        }),
+        None,
+    );
+    let label = rec.identity.clone();
+    let mut check = |d: String| {
+        rec.definition = Some(d);
+        rec.definition_path()
+    };
+    assert!(check(format!("/run/user/501/amicu/{label}.env")).is_ok());
+    assert!(check(format!("/home/me/.local/state/amicu/env/{label}.env")).is_ok());
+    assert!(check(format!("/home/me/{label}.env")).is_err());
+    assert!(check("/run/user/501/amicu/secrets.env".into()).is_err());
+    assert!(check(format!("/run/user/501/amicu/../{label}.env")).is_err());
 }
 
 #[test]
@@ -1946,65 +2071,96 @@ fn destroy_scoped(
     (result, project, td, utf8(out))
 }
 
+fn write_files(rec: &StopRecord) {
+    let def = std::path::PathBuf::from(rec.definition.clone().unwrap());
+    std::fs::create_dir_all(def.parent().unwrap()).unwrap();
+    std::fs::write(&def, "secret").unwrap();
+    for l in &rec.logs {
+        let l = std::path::PathBuf::from(l);
+        std::fs::create_dir_all(l.parent().unwrap()).unwrap();
+        std::fs::write(l, "log").unwrap();
+    }
+}
+
 #[test]
-fn destroy_removes_the_recorded_plist_and_leaves_logs_unless_purged() {
-    let dir = TempDir::new();
-    let rec = scoped_rec("aaaa1111", "support_two", &dir.path);
-    let plist = std::path::PathBuf::from(rec.definition.clone().unwrap());
-    let log = std::path::PathBuf::from(rec.logs[0].clone());
-    std::fs::write(&plist, "secret").unwrap();
-    std::fs::write(&log, "log").unwrap();
+fn destroy_removes_the_recorded_definition_and_leaves_logs_unless_purged() {
+    let home = TempDir::new();
+    let rec = scoped_rec("aaaa1111", "support_two", &home.path);
+    write_files(&rec);
+    let def = std::path::PathBuf::from(rec.definition.clone().unwrap());
     let rig = Rig::new();
-    let (result, project, _td, out) = destroy_scoped(rec, &rig, false);
+    let (result, project, _td, out) = destroy_scoped(rec.clone(), &rig, false);
     result.unwrap();
-    assert!(
-        !plist.exists(),
-        "secret-bearing plist deleted with the stop"
-    );
-    assert!(log.exists(), "logs stay without --purge");
-    assert!(
-        out.contains("amicu destroy --purge") && out.contains("out.log"),
-        "{out}"
-    );
+    assert!(!def.exists(), "secret-bearing file deleted with the stop");
+    for l in &rec.logs {
+        assert!(
+            std::path::Path::new(l).exists(),
+            "logs stay without --purge"
+        );
+        assert!(
+            out.contains("amicu destroy --purge") && out.contains(l),
+            "{out}"
+        );
+    }
     assert_eq!(stops_for(&project, "support_two").len(), 0);
     assert_eq!(rig.stopped(), ["io.amicu.llama.aaaa1111.support_two"]);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn destroy_purge_deletes_logs() {
-    let dir = TempDir::new();
-    let rec = scoped_rec("aaaa1111", "support_two", &dir.path);
+    let home = TempDir::new();
+    let rec = scoped_rec("aaaa1111", "support_two", &home.path);
+    write_files(&rec);
     let log = std::path::PathBuf::from(rec.logs[0].clone());
-    std::fs::write(&log, "log").unwrap();
     let (result, _p, _td, _out) = destroy_scoped(rec, &Rig::new(), true);
     result.unwrap();
     assert!(!log.exists());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn purge_refuses_a_log_path_that_is_not_the_records_own_before_changing_anything() {
+    let home = TempDir::new();
+    let victim = home.path.join("precious.log");
+    std::fs::write(&victim, "keep").unwrap();
+    let mut rec = scoped_rec("aaaa1111", "support_two", &home.path);
+    rec.logs = vec![victim.to_string_lossy().into_owned()];
+    let rig = Rig::new();
+    let (result, project, _td, _) = destroy_scoped(rec.clone(), &rig, true);
+    result.unwrap_err();
+    assert!(victim.exists());
+    assert_eq!(rig.stopped().len(), 0, "nothing was stopped");
+    assert_eq!(stops_for(&project, "support_two"), vec![rec]);
+}
+
 #[test]
 fn a_failed_stop_keeps_the_record_with_its_recorded_files() {
-    let dir = TempDir::new();
-    let rec = scoped_rec("aaaa1111", "support_two", &dir.path);
+    let home = TempDir::new();
+    let rec = scoped_rec("aaaa1111", "support_two", &home.path);
+    write_files(&rec);
     let (result, project, _td, _) = destroy_scoped(rec.clone(), &Rig::failing(), true);
     result.unwrap_err();
     assert_eq!(stops_for(&project, "support_two"), vec![rec]);
 }
 
 #[test]
-fn a_recorded_definition_that_is_not_an_amicu_file_is_never_deleted() {
-    let dir = TempDir::new();
-    let victim = dir.path.join("precious.txt");
+fn a_recorded_definition_that_is_not_the_records_own_file_is_never_deleted_or_stopped() {
+    let home = TempDir::new();
+    let victim = home.path.join("precious.plist");
     std::fs::write(&victim, "keep").unwrap();
-    let mut rec = scoped_rec("aaaa1111", "support_two", &dir.path);
+    let mut rec = scoped_rec("aaaa1111", "support_two", &home.path);
     rec.definition = Some(victim.to_string_lossy().into_owned());
-    let (result, project, _td, _) = destroy_scoped(rec, &Rig::new(), false);
+    let rig = Rig::new();
+    let (result, project, _td, _) = destroy_scoped(rec, &rig, false);
     result.unwrap_err();
     assert!(victim.exists());
+    assert_eq!(rig.stopped().len(), 0);
     assert_eq!(stops_for(&project, "support_two").len(), 1, "record kept");
 }
 
 #[test]
-fn modal_destroy_purge_deletes_the_recorded_volumes_once_no_modal_deployment_remains() {
+fn modal_volumes_are_never_deleted_even_with_purge_and_are_listed_with_the_manual_command() {
     let rig = Rig::new();
     let td = TempDir::new();
     let mut state = state_with(modal_graph());
@@ -2015,62 +2171,26 @@ fn modal_destroy_purge_deletes_the_recorded_volumes_once_no_modal_deployment_rem
             .with_volumes(&["amicu-hf-cache", "amicu-vllm-cache"]),
     ];
     let project = saved(&td, &state);
-    let mut env = rig.env();
-    env.purge = true;
-    let mut out = Vec::new();
-    commands::destroy::run_with(
-        &project,
-        &[],
-        true,
-        None,
-        OutputFormat::Human,
-        &mut out,
-        &mut std::io::Cursor::new(Vec::new()),
-        &env,
-    )
-    .unwrap();
-    assert_eq!(
-        *rig.modal.deleted_volumes.lock().unwrap(),
-        ["amicu-hf-cache", "amicu-vllm-cache"]
-    );
-}
-
-#[test]
-fn modal_destroy_purge_keeps_shared_volumes_while_another_modal_deployment_remains() {
-    let rig = Rig::new();
-    let td = TempDir::new();
-    let mut state = state_with(modal_graph());
-    state.stops = vec![
-        modal_rec("support_two", Some("ap-2"), Some("acme")).with_volumes(&["amicu-hf-cache"]),
-        modal_rec("support_local", Some("ap-1"), Some("acme")).with_volumes(&["amicu-hf-cache"]),
-    ];
-    let project = saved(&td, &state);
-    let mut env = rig.env();
-    env.purge = true;
-    let mut out = Vec::new();
-    commands::destroy::run_with(
-        &project,
-        &["support_two".to_owned()],
-        true,
-        None,
-        OutputFormat::Human,
-        &mut out,
-        &mut std::io::Cursor::new(Vec::new()),
-        &env,
-    )
-    .unwrap();
-    assert!(rig.modal.deleted_volumes.lock().unwrap().is_empty());
-    assert!(utf8(out).contains("Kept the Modal volumes"));
-}
-
-#[test]
-fn modal_destroy_without_purge_keeps_volumes_and_says_so() {
-    let rig = Rig::new();
-    let rec =
-        modal_rec("support_two", Some("ap-2"), Some("acme")).with_volumes(&["amicu-hf-cache"]);
-    let (result, _p, _td) = destroy_modal(rec, &rig);
-    result.unwrap();
-    assert!(rig.modal.deleted_volumes.lock().unwrap().is_empty());
+    for purge in [false, true] {
+        project.save_state(&state).unwrap();
+        let mut env = rig.env();
+        env.purge = purge;
+        let mut out = Vec::new();
+        commands::destroy::run_with(
+            &project,
+            &[],
+            true,
+            None,
+            OutputFormat::Human,
+            &mut out,
+            &mut std::io::Cursor::new(Vec::new()),
+            &env,
+        )
+        .unwrap();
+        let out = utf8(out);
+        assert!(out.contains("modal volume delete amicu-hf-cache"), "{out}");
+        assert!(out.contains("other projects or apps"), "{out}");
+    }
 }
 
 #[test]
