@@ -146,7 +146,13 @@ pub(crate) fn run_with(
         } else {
             &mut *out
         };
-        crate::commands::plan::print_human(&result, &graph, preview)?;
+        let switches = prior_state
+            .as_ref()
+            .map(|s| {
+                crate::commands::plan::provider_switches(&result, &s.stops, s.project_id.as_deref())
+            })
+            .unwrap_or_default();
+        crate::commands::plan::print_human_with(&result, &graph, &switches, preview)?;
         if !auto_approve && !prompt_approval_from(preview, "Apply these changes?", input)? {
             writeln!(preview, "Apply cancelled.").map_err(|e| CliError::io("write failed", e))?;
             return Ok(0);
@@ -201,6 +207,9 @@ pub(crate) struct Env<'a> {
     /// Destroy only: also delete the recorded host log files (Modal volumes
     /// are never deleted).
     pub purge: bool,
+    /// The Modal proxy token config `apply` requires for Modal deployments;
+    /// a parameter so tests need not touch the process environment.
+    pub proxy_tokens: fn() -> amicu_modal::proxy_auth::TokenConfig,
 }
 
 impl Env<'static> {
@@ -211,6 +220,7 @@ impl Env<'static> {
             modal: &crate::refresh::ModalLookup,
             forget_unconfirmed,
             purge,
+            proxy_tokens: amicu_modal::proxy_auth::TokenConfig::from_env,
         }
     }
 }
@@ -347,6 +357,7 @@ pub(crate) fn execute(
         fingerprints: final_fingerprints(prior_state, &graph, &progress, result),
         graph,
         endpoints,
+        extra: prior_state.map(|s| s.extra.clone()).unwrap_or_default(),
     };
     project.save_state(&state)?;
 
@@ -460,6 +471,7 @@ fn recorded_state(prior: Option<&LocalState>, graph: &Graph, progress: &Progress
         stops: progress.stops.clone(),
         fingerprints: merged_fingerprints(prior, &partial, progress),
         graph: partial,
+        extra: prior.map(|s| s.extra.clone()).unwrap_or_default(),
     }
 }
 
@@ -765,7 +777,7 @@ fn modal_supervisor(
 /// before anything is started or stopped. `amicu validate`/`plan` already
 /// report the latter (`AMICU-POLICY-007`); this is the backstop for callers
 /// that reach `apply` without them.
-fn preflight(result: &PlanResult) -> Result<(), CliError> {
+fn preflight(result: &PlanResult, env: &Env<'_>) -> Result<(), CliError> {
     for item in &result.items {
         if let Some(launch) = &item.launch {
             require_dispatch(
@@ -791,7 +803,7 @@ fn preflight(result: &PlanResult) -> Result<(), CliError> {
         })
     });
     if any_modal {
-        require_modal_proxy_token(&amicu_modal::proxy_auth::TokenConfig::from_env())?;
+        require_modal_proxy_token(&(env.proxy_tokens)())?;
     }
     Ok(())
 }
@@ -838,7 +850,7 @@ async fn apply_all(
     let host_ctx = host_probe.host_context();
     let resolver = EnvSecretResolver;
     let registry = EndpointRegistry::new();
-    preflight(result)?;
+    preflight(result, env)?;
 
     for item in &result.items {
         if let Some(launch) = &item.launch {
@@ -2017,6 +2029,7 @@ resource "deployment" "beta" {
             pending: Vec::new(),
             stops: Vec::new(),
             fingerprints: std::collections::BTreeMap::default(),
+            extra: std::collections::BTreeMap::default(),
             graph: prior_graph.clone(),
             endpoints: vec![
                 handle(&prior_graph, "alpha", "http://old-alpha"),
@@ -2547,6 +2560,7 @@ mod stop_invariant_tests {
             pending: Vec::new(),
             stops: Vec::new(),
             fingerprints: std::collections::BTreeMap::default(),
+            extra: std::collections::BTreeMap::default(),
         }
     }
 
@@ -2893,6 +2907,7 @@ mod partial_state_tests {
                 .collect(),
             pending: ids(pending),
             stops: Vec::new(),
+            extra: std::collections::BTreeMap::default(),
             graph: g,
         }
     }

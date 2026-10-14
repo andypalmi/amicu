@@ -96,6 +96,10 @@ pub(crate) struct StopRecord {
     /// destroy can list them; never deleted by amicu (other projects share them).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<String>,
+    /// Fields this amicu does not know (from a newer build of the same
+    /// version), kept verbatim so a load-save cycle never drops them.
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 impl StopRecord {
@@ -115,6 +119,7 @@ impl StopRecord {
             env_file: None,
             logs: Vec::new(),
             volumes: Vec::new(),
+            extra: std::collections::BTreeMap::new(),
         }
     }
 
@@ -165,6 +170,7 @@ impl StopRecord {
             env_file: None,
             logs: Vec::new(),
             volumes: Vec::new(),
+            extra: std::collections::BTreeMap::new(),
         }
     }
 

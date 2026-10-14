@@ -642,8 +642,15 @@ impl<E: CommandExec> SystemdManager<E> {
             && !path
                 .components()
                 .any(|c| matches!(c, std::path::Component::ParentDir));
-        (clean && path.file_name().and_then(|n| n.to_str()) == Some(&format!("{label}.env")))
-            .then_some(path)
+        // Also in the directory amicu writes env files to, so a tampered unit
+        // can never point the delete at an unrelated `<label>.env`.
+        let in_dir = path
+            .parent()
+            .is_some_and(|p| p.ends_with(".local/state/amicu/env"));
+        (clean
+            && in_dir
+            && path.file_name().and_then(|n| n.to_str()) == Some(&format!("{label}.env")))
+        .then_some(path)
     }
 
     /// Whether systemd confirms it has no unit called `label` loaded
@@ -1061,4 +1068,33 @@ fn write_private(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), LlamaCppEr
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod env_file_tests {
+    use super::*;
+    use crate::HostExec;
+
+    fn unit_naming(tag: &str, env: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("amicu-envnamed-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let unit = dir.join("x.service");
+        std::fs::write(&unit, format!("[Service]\nEnvironmentFile={env}\n")).unwrap();
+        unit
+    }
+
+    #[test]
+    fn env_file_named_by_only_accepts_the_amicu_env_dir() {
+        let named = SystemdManager::<HostExec>::env_file_named_by;
+        let ok = "/home/u/.local/state/amicu/env/io.amicu.x.env";
+        let unit = unit_naming("ok", ok);
+        assert_eq!(named(&unit, "io.amicu.x"), Some(PathBuf::from(ok)));
+
+        // Right file name, wrong directory: never an accepted delete target.
+        let unit = unit_naming("elsewhere", "/home/u/important/io.amicu.x.env");
+        assert_eq!(named(&unit, "io.amicu.x"), None);
+        // Right directory, another unit's file name.
+        let unit = unit_naming("other", "/home/u/.local/state/amicu/env/io.amicu.y.env");
+        assert_eq!(named(&unit, "io.amicu.x"), None);
+    }
 }

@@ -1,17 +1,22 @@
 //! `amicu plan [--output json]`.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 
 use amicu_core::diagnostic::{DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
+use amicu_core::id::DeploymentId;
 use amicu_modal::ModalSupervisor;
 use amicu_modal::supervisor::app_name_for;
+use amicu_plan::Plan;
+use amicu_plan::contract::{ActionKind, PlannedAction, Setting};
 
 use crate::OutputFormat;
 use crate::checks::report_for;
 use crate::error::CliError;
 use crate::planner::{PlanError, PlanItem, PlanResult, build_project_plan};
 use crate::project::Project;
+use crate::stops::{Backend, StopRecord};
 use crate::write_json;
 
 /// Build and render the plan; exits non-zero when validation errors block it.
@@ -36,6 +41,8 @@ pub(crate) fn run(
         .as_ref()
         .map(|s| s.fingerprints.clone())
         .unwrap_or_default();
+    let stops = state.as_ref().map(|s| s.stops.clone()).unwrap_or_default();
+    let project_id = state.as_ref().and_then(|s| s.project_id.clone());
     let prior = state.map(|s| {
         // A pending deployment (start unconfirmed) is planned as absent.
         let mut g = s.graph;
@@ -61,9 +68,13 @@ pub(crate) fn run(
     }
 
     if output.is_json() {
-        write_json(out, &result.plan)?;
+        let switches = provider_switches(&result, &stops, project_id.as_deref());
+        let mut plan = result.plan.clone();
+        add_switch_actions(&mut plan, &switches);
+        write_json(out, &plan)?;
     } else {
-        print_human(&result, &graph, out)?;
+        let switches = provider_switches(&result, &stops, project_id.as_deref());
+        print_human_with(&result, &graph, &switches, out)?;
     }
     Ok(0)
 }
@@ -100,9 +111,116 @@ fn emit_report(
     Ok(())
 }
 
+/// Per deployment, the recorded instances (`<backend> <identity>`) that a
+/// provider change leaves behind: they are stopped and confirmed before the
+/// new instance is started, so the plan shows that as its own step.
+pub(crate) type ProviderSwitches = BTreeMap<DeploymentId, Vec<OldInstance>>;
+
+/// One recorded instance a provider switch replaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OldInstance {
+    pub backend: &'static str,
+    pub identity: String,
+}
+
+impl OldInstance {
+    fn describe(&self) -> String {
+        format!("{} {}", self.backend, self.identity)
+    }
+}
+
+/// The provider-switch destroy steps for `result` given the recorded `stops`.
+/// A recorded instance of a deployment that is being launched is replaced
+/// when it is not the target the new start will use: the same test `apply`
+/// uses (backend and identity differ, see `StopRecord::same_target`), so a
+/// legacy unscoped host label replaced by a project-scoped one shows too.
+/// Destroys are not switches.
+pub(crate) fn provider_switches(
+    result: &PlanResult,
+    stops: &[StopRecord],
+    project_id: Option<&str>,
+) -> ProviderSwitches {
+    let mut switches = ProviderSwitches::new();
+    for item in result.items.iter().filter(|i| i.launch.is_some()) {
+        let id = item.deployment.as_str();
+        let (backend, identity) = if item.action.provider.as_deref() == Some("modal") {
+            (Backend::Modal, Some(app_name_for(id)))
+        } else {
+            // Without a project id apply mints one, so no recorded host label
+            // can match the new one.
+            (
+                Backend::host(),
+                project_id.map(|p| amicu_llamacpp::project_host_label(p, id)),
+            )
+        };
+        let old: Vec<OldInstance> = stops
+            .iter()
+            .filter(|r| {
+                r.deployment == item.deployment
+                    && !(r.backend == backend && Some(&r.identity) == identity.as_ref())
+            })
+            .map(|r| OldInstance {
+                backend: r.backend.name(),
+                identity: r.identity.clone(),
+            })
+            .collect();
+        if !old.is_empty() {
+            switches.insert(item.deployment.clone(), old);
+        }
+    }
+    switches
+}
+
+/// Insert each `destroy old` step into the JSON plan as a Destroy action
+/// directly before the deployment's create/update action (`provider` names
+/// the old backend), so the JSON has the same action count as the human plan.
+pub(crate) fn add_switch_actions(plan: &mut Plan, switches: &ProviderSwitches) {
+    let mut actions = Vec::with_capacity(plan.actions.len());
+    for action in std::mem::take(&mut plan.actions) {
+        let id = action
+            .address
+            .strip_prefix("deployment.")
+            .unwrap_or_default();
+        for (dep, olds) in switches {
+            if dep.as_str() == id {
+                for old in olds {
+                    actions.push(PlannedAction {
+                        kind: ActionKind::Destroy,
+                        address: action.address.clone(),
+                        artifact: None,
+                        runtime: vec![Setting {
+                            key: "old_identity".to_owned(),
+                            value: old.identity.clone(),
+                        }],
+                        hardware: None,
+                        provider: Some(old.backend.to_owned()),
+                        region: None,
+                        cost_performance: None,
+                        required_secrets: Vec::new(),
+                        required_action: None,
+                    });
+                }
+            }
+        }
+        actions.push(action);
+    }
+    plan.actions = actions;
+}
+
 pub(crate) fn print_human(
     result: &PlanResult,
     graph: &Graph,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    print_human_with(result, graph, &ProviderSwitches::new(), out)
+}
+
+/// [`print_human`], plus a `destroy old` step before each provider-switch
+/// create.
+pub(crate) fn print_human_with(
+    result: &PlanResult,
+    graph: &Graph,
+    switches: &ProviderSwitches,
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
     let io = |r: std::io::Result<()>| r.map_err(|e| CliError::io("write failed", e));
@@ -113,8 +231,25 @@ pub(crate) fn print_human(
             "No changes. Infrastructure matches the configuration."
         ))?;
     } else {
-        io(writeln!(out, "Plan: {} action(s).\n", result.items.len()))?;
+        let steps: usize = switches.values().map(Vec::len).sum();
+        io(writeln!(
+            out,
+            "Plan: {} action(s).\n",
+            result.items.len() + steps
+        ))?;
         for item in &result.items {
+            for old in switches.get(&item.deployment).into_iter().flatten() {
+                io(writeln!(
+                    out,
+                    "  - destroy old ({}) for {}",
+                    old.describe(),
+                    item.action.address
+                ))?;
+                io(writeln!(
+                    out,
+                    "      stopped and confirmed before the new instance starts\n"
+                ))?;
+            }
             let kind = format!("{:?}", item.action.kind).to_lowercase();
             io(writeln!(out, "  {} {}", symbol(&kind), item.action.address))?;
             io(writeln!(out, "      action:   {kind}"))?;

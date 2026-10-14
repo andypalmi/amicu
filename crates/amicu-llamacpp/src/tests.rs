@@ -2607,11 +2607,21 @@ fn systemd_stop_deletes_the_recorded_env_path_and_the_one_the_unit_names() {
     let dir = TempDir::new("systemd-recorded-env");
     let mut spec = service_spec();
     spec.env = vec![("k".into(), "v".into())];
-    let manager = systemd_manager(FakeExec::new(true, ""), &dir);
+    // The env dir has the shape amicu really writes to; the unit-named path is
+    // only trusted inside it.
+    let manager = SystemdManager::new(
+        FakeExec::new(true, ""),
+        dir.file("units"),
+        dir.file(".local/state/amicu/env"),
+    );
     manager.start(&spec).expect("start");
     let paths = manager.paths(&spec.label).unwrap();
     let env = paths.env.clone().expect("env path recorded");
-    assert_eq!(env, dir.file("env").join(format!("{}.env", spec.label)));
+    assert_eq!(
+        env,
+        dir.file(".local/state/amicu/env")
+            .join(format!("{}.env", spec.label))
+    );
     // A manager rooted elsewhere (HOME changed since the start) still deletes
     // the recorded file, and the unit's own `EnvironmentFile=`.
     let elsewhere = TempDir::new("systemd-elsewhere");
