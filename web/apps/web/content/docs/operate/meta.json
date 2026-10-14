@@ -1,4 +1,4 @@
 {
   "title": "Operate",
-  "pages": ["monitoring", "tuning", "state-and-backends"]
+  "pages": ["monitoring", "tuning", "state-and-backends", "orphans"]
 }

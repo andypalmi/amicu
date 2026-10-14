@@ -26,6 +26,33 @@ Amicu starts runtimes that make their own connections:
 - **llama-server and vLLM on your machine** are third-party programs. Whatever they fetch (for example a model when given a Hugging Face reference by `extra_args`) is their behavior, not amicu's. Amicu itself does not download model files for local deployments.
 - **Clients** you point at the endpoint talk to it directly. Amicu is not in the request path and never sees prompts or completions.
 
+## Telemetry setting
+
+Telemetry is off by default. You can record an opt-in with `amicu telemetry enable`, and undo it with `amicu telemetry disable`. The choice is stored per user, not per project, in `$XDG_CONFIG_HOME/amicu/telemetry.json` (or `~/.config/amicu/telemetry.json`). It is never written to project state.
+
+The effective setting is resolved in this order, strongest first:
+
+1. `DO_NOT_TRACK` set to a true value (for example `1`) forces telemetry off.
+2. `AMICU_TELEMETRY=0|1` (also `false`, `true`, `off`, `on`, `no`, `yes`) overrides the stored choice.
+3. The stored choice.
+4. The default: off.
+
+`amicu telemetry status` shows the effective setting and its source.
+
+**Nothing is collected or sent yet.** Recording a choice only saves the setting. The telemetry commands make no network calls.
+
+The first interactive `amicu init` or `amicu apply` asks once whether to share anonymous performance metrics. The default answer is No, and a No is stored, so the question is not asked again. The question is not asked when:
+
+- stdin, stdout or stderr is not a terminal,
+- `--output json` is set,
+- a CI environment variable is set (for example `CI` or `GITHUB_ACTIONS`),
+- `AMICU_TELEMETRY` or `DO_NOT_TRACK` is set, or
+- a choice is already stored.
+
+If the stored file exists but cannot be read, the question is skipped and the file is left as it is.
+
+If you opted in, the planned metrics are aggregate performance metrics from your deployments: latency, throughput, and hardware and model identifiers. The prompt states that amicu never sends prompts, completions, secrets or IP addresses.
+
 ## Local files
 
 Amicu writes `.amicu/` in your project, the service definitions described in [This machine](/docs/providers/local), and log files under `~/Library/Logs/amicu/` on macOS. Nothing is uploaded.

@@ -1,0 +1,94 @@
+---
+title: Orphaned resources
+description: Find amicu resources on this machine or in Modal that the project state does not track, and stop them by hand.
+---
+
+`amicu orphans` lists amicu-owned resources that this project's state does not record. It is read-only. It never stops, imports, or edits anything.
+
+```bash
+amicu orphans
+amicu orphans --output json
+```
+
+Run it in the project directory. It reads `.amicu/state/state.json`. If the project has no state, every resource it finds is untracked.
+
+## What it checks
+
+| Source | Where it looks | Notes |
+|---|---|---|
+| `modal` | Apps in the Modal workspace for `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` | Only apps whose name starts with `amicu-`. Apps in state `stopped` are skipped. |
+| `launchd` | macOS: `launchctl list` and plists in `~/Library/LaunchAgents/` | Labels that start with `io.amicu.`. A plist that is not loaded is reported as `plist only (not loaded)`. |
+| `systemd` | Linux: `systemctl --user list-units` | Units that start with `io.amicu.` or `amicu`. |
+
+On other platforms, the host sources are skipped. Without Modal credentials, the `modal` source reports an error. The local sources still print.
+
+A resource is **tracked** when state references it: a stop record or an endpoint. Modal apps are matched by app name or app id. Host services are matched by label.
+
+## Ownership
+
+Ownership is judged from the name alone. Host labels from amicu have one of these forms:
+
+- `io.amicu.llama.<project_id>.<deployment>`: scoped to one project.
+- `io.amicu.llama.<deployment>`: legacy, unscoped. Deployments created before state v3 use this form until their next `apply`.
+
+| Ownership | Human output | JSON value |
+|---|---|---|
+| Scoped to this project, untracked | scoped to this project, likely an orphan | `this_project` |
+| Scoped to another project | scoped to another project, may belong to it | `other_project` |
+| Legacy unscoped label | legacy unscoped label, may belong to another project | `legacy` |
+| Modal app, or a unit without the `io.amicu.` label form | may belong to another project | `unknown` |
+
+Only `this_project` means the resource is likely an orphan of this project. The other values mean another project, or another user of the machine or workspace, may own it.
+
+**Not tracked does not mean orphaned.** Other projects on the same machine, and other people in the same Modal workspace, show up here too. Check before you stop anything. For Modal, check the dashboard. For host services, check which project directory and config they came from.
+
+## Stop commands
+
+Each resource comes with the command that stops it by hand. The command is only printed. Run it yourself after you have checked the resource.
+
+| Kind | Stop command |
+|---|---|
+| `modal_app` | `amicu modal stop <app>` |
+| `launchd_job` | `launchctl unload -w <plist> && rm <plist>` |
+| `systemd_unit` | `systemctl --user stop <unit>` |
+
+## Human output
+
+The human output lists only untracked resources. For each one it prints the kind, the identity, the state, the ownership, and the stop command. It then prints how many tracked resources it skipped. A source that failed prints a `warning: could not query <source>` line first.
+
+The command exits `0` when it can print the report. This includes runs where a source failed.
+
+## JSON output
+
+`--output json` prints one object. It includes tracked resources too, with `tracked: true`.
+
+```json
+{
+  "version": "v1",
+  "sources": [
+    { "name": "modal", "status": "ok" },
+    { "name": "launchd", "status": "skipped", "detail": "not macOS" }
+  ],
+  "resources": [
+    {
+      "kind": "launchd_job",
+      "identity": "io.amicu.llama.1a2b3c4d.chat",
+      "state": "loaded, not running",
+      "tracked": false,
+      "ownership": "this_project",
+      "stop_command": "launchctl unload -w /Users/you/Library/LaunchAgents/io.amicu.llama.1a2b3c4d.chat.plist && rm /Users/you/Library/LaunchAgents/io.amicu.llama.1a2b3c4d.chat.plist"
+    }
+  ],
+  "note": "..."
+}
+```
+
+- `sources[].status` is `ok`, `skipped`, or `error`. `detail` appears for `skipped` and `error`.
+- `resources[].kind` is `modal_app`, `launchd_job`, or `systemd_unit`.
+- `resources[].ownership` is one of `this_project`, `other_project`, `legacy`, or `unknown`.
+- `note` repeats the scope warning: not tracked does not mean orphaned.
+
+## Related
+
+- [State and backends](/docs/operate/state-and-backends#host-service-labels): how host labels are built and how to stop a service by hand.
+- [CLI commands](/docs/reference/cli): all commands and flags.
