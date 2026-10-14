@@ -7,11 +7,11 @@ resource "hardware_profile" "dev_mac" {
   provider = "local_apple"
   accelerator {
     kind   = "apple_silicon"
-    model  = "m3_pro"
+    model  = "m4_pro_48gb"
     count  = 1
-    memory = "36GiB"
+    memory = "48GiB"
   }
-  memory = "36GiB"
+  memory = "48GiB"
 }
 ```
 

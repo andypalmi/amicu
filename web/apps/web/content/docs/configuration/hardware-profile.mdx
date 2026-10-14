@@ -14,11 +14,11 @@ resource "hardware_profile" "dev_mac" {
   provider = "local_apple"
   accelerator {
     kind   = "apple_silicon"
-    model  = "m3_pro"
+    model  = "m4_pro_48gb"
     count  = 1
-    memory = "36GiB"
+    memory = "48GiB"
   }
-  memory = "36GiB"
+  memory = "48GiB"
 }
 ```
 
@@ -59,7 +59,7 @@ resource "hardware_profile" "gpu_l4" {
 | `region` | string | no | Provider region code. Used for residency checks. |
 | `accelerator` | block | no | GPU, TPU, or Apple Silicon |
 | `accelerator.kind` | string | yes | `gpu`, `tpu`, `apple_silicon`, or `cpu` |
-| `accelerator.model` | string | yes | Model name, for example `l4`, `h100`, `m4_pro` |
+| `accelerator.model` | string | yes | Model name, for example `l4`, `h100`, `m4_pro_48gb` |
 | `accelerator.count` | number | yes | Number of accelerators |
 | `accelerator.memory` | size | yes | Memory of the accelerator (VRAM or unified memory) |
 | `accelerator.bandwidth_gbps` | number | no | Memory bandwidth in GB/s. Recorded for planning; not read by the fit check yet. |
