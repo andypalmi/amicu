@@ -1726,7 +1726,12 @@ fn forget_unconfirmed_is_refused_for_a_record_without_a_known_workspace() {
     let rec = modal_rec("support_two", None, None);
     let (result, project, _td) = destroy_modal(rec.clone(), &rig);
     let msg = result.expect_err("unknown workspace").to_string();
-    assert!(msg.contains("no known workspace"), "{msg}");
+    // Dead end: it points at the targeted recovery, not at the flag that is
+    // refused here.
+    assert!(msg.contains("recorded with no workspace"), "{msg}");
+    assert!(msg.contains("modal app list"), "{msg}");
+    assert!(msg.contains("amicu modal stop amicu-support-two"), "{msg}");
+    assert!(!msg.contains("--forget-unconfirmed"), "{msg}");
     assert_eq!(stops_for(&project, "support_two"), vec![rec]);
 }
 

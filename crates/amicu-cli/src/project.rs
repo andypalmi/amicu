@@ -161,6 +161,16 @@ impl Project {
         fs::create_dir_all(&dir)
             .map_err(|e| CliError::io(format!("cannot create {}", dir.display()), e))?;
         let path = self.state_file();
+        // Never overwrite a state this amicu does not understand (written by a
+        // newer version): that would silently downgrade or destroy it.
+        if let Ok(existing) = fs::read_to_string(&path)
+            && let Err(StateParseError::Unsupported(msg)) = parse_state(&existing)
+        {
+            return Err(CliError::Message(format!(
+                "refusing to overwrite {}: it {msg}",
+                path.display()
+            )));
+        }
         let text = serde_json::to_string_pretty(state)?;
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -470,8 +480,16 @@ mod durability_tests {
             !err.to_string().contains("cp "),
             "never advise restoring over it: {err}"
         );
-        // Saving must not rotate the unsupported file in as the backup.
-        p.save_state(&state("next")).unwrap();
+        // Saving must refuse to overwrite it (and so cannot rotate it into
+        // the backup either).
+        let err = p
+            .save_state(&state("next"))
+            .expect_err("must not overwrite");
+        assert!(err.to_string().contains("refusing to overwrite"), "{err}");
+        assert_eq!(
+            fs::read_to_string(p.state_file()).unwrap(),
+            newer.to_string()
+        );
         let bak: LocalState =
             serde_json::from_str(&fs::read_to_string(p.state_backup_file()).unwrap()).unwrap();
         assert_eq!(

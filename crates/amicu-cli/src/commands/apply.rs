@@ -22,7 +22,9 @@ use crate::catalog::build_catalog;
 use crate::checks::report_for;
 use crate::error::CliError;
 use crate::lock::StateLock;
-use crate::modal_ops::{ModalBackend, Workspace, check_workspace, unproven_workspace};
+use crate::modal_ops::{
+    ModalBackend, Workspace, check_workspace, unlocatable_record, unproven_workspace,
+};
 use crate::planner::{PlanError, PlanResult, build_project_plan};
 use crate::project::{LocalState, Project};
 use crate::secret::EnvSecretResolver;
@@ -1104,7 +1106,9 @@ fn record_modal_start(
 /// never interchangeable, and the uid / launchd domain must match the ones the
 /// instance was started with. An unknown current identity is a refusal. A
 /// record without a uid (older state) is accepted only for a non-root user who
-/// owns the instance's service definition.
+/// owns the instance's service definition. When the service definition (the
+/// launchd plist) is missing there is nothing to check, so that owner check is
+/// skipped.
 fn check_host_context(
     record: &StopRecord,
     current: Option<&amicu_llamacpp::HostContext>,
@@ -1244,21 +1248,21 @@ async fn stop_modal(
                 stamp_workspace(stops, record, &active);
                 id
             }
-            None if env.forget_unconfirmed && record.workspace.is_some() => {
+            // No workspace and nothing found: nothing proves where (or whether)
+            // the app lives, so neither stopping nor forgetting can act on it.
+            None if record.workspace.is_none() => {
+                return Err(unlocatable_record(
+                    record.deployment.as_str(),
+                    &record.identity,
+                ));
+            }
+            None if env.forget_unconfirmed => {
                 eprintln!(
                     "warning: no Modal app '{}' found in {active}; forgetting '{}' as you asked \
                      (--forget-unconfirmed)",
                     record.identity, record.deployment
                 );
                 return Ok(());
-            }
-            None if env.forget_unconfirmed => {
-                return Err(CliError::Message(format!(
-                    "refusing --forget-unconfirmed for '{}': its record has no known workspace, \
-                     so amicu cannot tell the app is not in another workspace. Nothing was \
-                     changed",
-                    record.deployment
-                )));
             }
             None => {
                 return Err(CliError::Message(format!(

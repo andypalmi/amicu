@@ -103,6 +103,66 @@ fn recorded_app_id(state: &LocalState, id: &str) -> Option<String> {
         })
 }
 
+/// Why [`prove_workspaces`] failed.
+enum ProofError {
+    /// A record is in another workspace, or its ownership is unproven.
+    Mismatch(String),
+    /// The workspace's apps could not be listed.
+    Unlisted(String),
+}
+
+/// Check every Modal stop record against the `active` workspace. Records
+/// with a workspace must match it. Records without one (v1-derived) that carry
+/// an app id must be proven to belong to it - the id has to appear in the
+/// workspace's app list, fetched at most once - and are then stamped with it.
+/// Materialises the derived records into `state.stops`.
+fn prove_workspaces(
+    state: &mut LocalState,
+    lookup: &dyn AppLookup,
+    active: &Workspace,
+) -> Result<(), ProofError> {
+    let mut records = crate::commands::apply::effective_stops(Some(state));
+    let mut listed: Option<Result<Option<HashSet<String>>, String>> = None;
+    for r in records.iter_mut().filter(|r| r.backend.is_modal()) {
+        if r.workspace.is_some() {
+            check_workspace(
+                r.deployment.as_str(),
+                r.workspace.as_deref(),
+                r.environment.as_deref(),
+                active,
+            )
+            .map_err(|e| ProofError::Mismatch(e.to_string()))?;
+        } else if let Some(app_id) = r.app_id.clone() {
+            let ids = listed.get_or_insert_with(|| lookup.app_ids());
+            match ids {
+                Ok(Some(ids)) if ids.contains(&app_id) => {
+                    r.workspace = Some(active.name.clone());
+                    r.environment = Some(active.environment.clone());
+                }
+                Ok(Some(_)) => {
+                    return Err(ProofError::Mismatch(
+                        crate::modal_ops::unproven_workspace(
+                            r.deployment.as_str(),
+                            &app_id,
+                            active,
+                        )
+                        .to_string(),
+                    ));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(ProofError::Unlisted(format!(
+                        "cannot list the apps of {active} to prove ownership of {app_id} \
+                         ({e}); nothing was changed"
+                    )));
+                }
+            }
+        }
+    }
+    state.stops = records;
+    Ok(())
+}
+
 /// What a refresh found.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Refresh {
@@ -118,7 +178,19 @@ pub(crate) struct Refresh {
 /// Drops from `state` every Modal deployment (and its endpoint) whose app is
 /// no longer live. Never fails: if the lookup errors, `state` is left as-is
 /// and [`Refresh::warning`] says so.
+#[cfg(test)]
 pub(crate) fn refresh_state(state: &mut LocalState, lookup: &dyn AppLookup) -> Refresh {
+    refresh_state_mode(state, lookup, true)
+}
+
+/// Like [`refresh_state`]. With `strict` false (read-only `plan`), an unknown
+/// active workspace only warns and the recorded state is used as-is, with
+/// nothing marked pending; strict (apply, destroy) refuses.
+pub(crate) fn refresh_state_mode(
+    state: &mut LocalState,
+    lookup: &dyn AppLookup,
+    strict: bool,
+) -> Refresh {
     // (deployment id, app name) for every Modal deployment recorded in state.
     let recorded: Vec<(String, String)> = state
         .graph
@@ -138,70 +210,54 @@ pub(crate) fn refresh_state(state: &mut LocalState, lookup: &dyn AppLookup) -> R
     }
 
     // Refuse to reason about apps recorded under a different workspace. With
-    // Modal instances recorded, an unknown workspace is a refusal too.
+    // Modal instances recorded, an unknown workspace is a refusal too (a
+    // warning for read-only `plan`).
     let active = match lookup.active_workspace() {
         Ok(active) => active,
         Err(error) => {
-            return Refresh {
-                mismatch: Some(format!(
-                    "cannot determine the active Modal workspace ({error}); refusing to touch \
-                     recorded Modal instances without knowing which workspace they are in. \
-                     Check MODAL_TOKEN_ID and MODAL_TOKEN_SECRET and retry; nothing was changed"
-                )),
-                ..Refresh::default()
+            let msg = format!(
+                "cannot determine the active Modal workspace ({error}); \
+                 recorded Modal instances cannot be placed in a workspace"
+            );
+            return if strict {
+                Refresh {
+                    mismatch: Some(format!(
+                        "{msg}. Refusing to touch them. Check MODAL_TOKEN_ID and \
+                         MODAL_TOKEN_SECRET and retry; nothing was changed"
+                    )),
+                    ..Refresh::default()
+                }
+            } else {
+                Refresh {
+                    warning: Some(format!("{msg}; planning against the recorded state as-is")),
+                    ..Refresh::default()
+                }
             };
         }
     };
     if let Some(active) = active {
-        // Include v1-derived records (no workspace yet): each must be proven
-        // to belong to the active workspace before anything acts on it.
-        let mut records = crate::commands::apply::effective_stops(Some(state));
-        for r in records.iter_mut().filter(|r| r.backend.is_modal()) {
-            if r.workspace.is_some() {
-                if let Err(e) = check_workspace(
-                    r.deployment.as_str(),
-                    r.workspace.as_deref(),
-                    r.environment.as_deref(),
-                    &active,
-                ) {
-                    return Refresh {
-                        mismatch: Some(e.to_string()),
-                        ..Refresh::default()
-                    };
-                }
-            } else if let Some(app_id) = r.app_id.clone() {
-                match lookup.app_ids() {
-                    Ok(Some(ids)) if ids.contains(&app_id) => {
-                        r.workspace = Some(active.name.clone());
-                        r.environment = Some(active.environment.clone());
-                    }
-                    Ok(Some(_)) => {
-                        return Refresh {
-                            mismatch: Some(
-                                crate::modal_ops::unproven_workspace(
-                                    r.deployment.as_str(),
-                                    &app_id,
-                                    &active,
-                                )
-                                .to_string(),
-                            ),
-                            ..Refresh::default()
-                        };
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        return Refresh {
-                            mismatch: Some(format!(
-                                "cannot list the apps of {active} to prove ownership of \
-                                 {app_id} ({e}); nothing was changed"
-                            )),
-                            ..Refresh::default()
-                        };
-                    }
-                }
+        match prove_workspaces(state, lookup, &active) {
+            Ok(()) => {}
+            Err(ProofError::Mismatch(msg)) => {
+                return Refresh {
+                    mismatch: Some(msg),
+                    ..Refresh::default()
+                };
+            }
+            Err(ProofError::Unlisted(msg)) if strict => {
+                return Refresh {
+                    mismatch: Some(msg),
+                    ..Refresh::default()
+                };
+            }
+            // Read-only `plan` only warns when it cannot list the apps.
+            Err(ProofError::Unlisted(msg)) => {
+                return Refresh {
+                    warning: Some(format!("{msg}; planning against the recorded state as-is")),
+                    ..Refresh::default()
+                };
             }
         }
-        state.stops = records;
     }
 
     let names: Vec<String> = recorded.iter().map(|(_, app)| app.clone()).collect();
@@ -254,7 +310,7 @@ pub(crate) fn load_refreshed_state(
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<Option<LocalState>, CliError> {
-    Ok(load_refreshed(project, lookup, output, out)?.0)
+    Ok(load_refreshed_mode(project, lookup, output, out, false)?.0)
 }
 
 /// Like [`load_refreshed_state`], also reporting whether the refresh dropped
@@ -265,10 +321,20 @@ pub(crate) fn load_refreshed(
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<(Option<LocalState>, bool), CliError> {
+    load_refreshed_mode(project, lookup, output, out, true)
+}
+
+fn load_refreshed_mode(
+    project: &Project,
+    lookup: &dyn AppLookup,
+    output: OutputFormat,
+    out: &mut dyn Write,
+    strict: bool,
+) -> Result<(Option<LocalState>, bool), CliError> {
     let Some(mut state) = project.load_state()? else {
         return Ok((None, false));
     };
-    let refresh = refresh_state(&mut state, lookup);
+    let refresh = refresh_state_mode(&mut state, lookup, strict);
     if let Some(mismatch) = refresh.mismatch {
         return Err(CliError::Message(mismatch));
     }
@@ -717,7 +783,7 @@ resource "deployment" "support_modal" {
     #[test]
     fn v1_derived_records_are_proven_then_stamped_or_refused() {
         let mut state = state_for(MODAL_CONFIG);
-        assert!(state.stops.is_empty());
+        assert_eq!(state.stops.len(), 0);
         let ids: HashSet<String> = ["app-id".to_owned()].into_iter().collect();
         let refresh = refresh_state(&mut state, &WsFake(acme("acme"), Some(ids)));
         assert!(refresh.mismatch.is_none());
@@ -728,7 +794,7 @@ resource "deployment" "support_modal" {
         let refresh = refresh_state(&mut state, &WsFake(acme("other-co"), Some(HashSet::new())));
         let msg = refresh.mismatch.expect("unproven");
         assert!(msg.contains("cannot see that app"), "{msg}");
-        assert!(state.stops.is_empty(), "nothing stamped");
+        assert_eq!(state.stops.len(), 0, "nothing stamped");
     }
 
     /// Without a known active workspace, only the exact stopped app id is
@@ -798,5 +864,68 @@ resource "deployment" "support_modal" {
         assert_eq!(forget_app(&project, APP, "app-id", None).unwrap(), None);
         assert!(!project.state_dir().exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_only_warns_when_the_workspace_is_unknown_and_marks_nothing_pending() {
+        let mut state = modal_state_in("acme");
+        let refresh = refresh_state_mode(&mut state, &BrokenWorkspace, false);
+        assert!(refresh.mismatch.is_none());
+        let warning = refresh.warning.expect("warns");
+        assert!(warning.contains("as-is"), "{warning}");
+        assert_eq!(state.pending.len(), 0);
+        assert_eq!(refresh.notes.len(), 0);
+
+        // And through the plan entry point.
+        let dir = std::env::temp_dir().join(format!("amicu-plan-ws-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = Project::new(&dir);
+        project.save_state(&modal_state_in("acme")).unwrap();
+        let mut out = Vec::new();
+        let loaded =
+            load_refreshed_state(&project, &BrokenWorkspace, OutputFormat::Human, &mut out)
+                .unwrap()
+                .unwrap();
+        assert_eq!(loaded.pending.len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    struct CountingList(std::cell::Cell<u32>);
+
+    impl AppLookup for CountingList {
+        fn live_apps(&self, names: &[String]) -> Result<HashSet<String>, String> {
+            Ok(names.iter().cloned().collect())
+        }
+        fn active_workspace(&self) -> Result<Option<Workspace>, String> {
+            Ok(Some(acme("acme")))
+        }
+        fn app_ids(&self) -> Result<Option<HashSet<String>>, String> {
+            self.0.set(self.0.get() + 1);
+            Ok(Some(
+                ["app-id".to_owned(), "app-id-2".to_owned()]
+                    .into_iter()
+                    .collect(),
+            ))
+        }
+    }
+
+    #[test]
+    fn the_app_list_is_fetched_once_per_refresh() {
+        let mut state = state_for(MODAL_CONFIG);
+        let id = state.graph.deployments[0].id.clone();
+        state.stops = vec![
+            crate::stops::StopRecord::modal(&id, Some("app-id".to_owned()), None),
+            crate::stops::StopRecord::modal(&id, Some("app-id-2".to_owned()), None),
+        ];
+        let lookup = CountingList(std::cell::Cell::new(0));
+        let refresh = refresh_state(&mut state, &lookup);
+        assert!(refresh.mismatch.is_none(), "{:?}", refresh.mismatch);
+        assert_eq!(lookup.0.get(), 1);
+        assert!(
+            state
+                .stops
+                .iter()
+                .all(|r| r.workspace.as_deref() == Some("acme"))
+        );
     }
 }

@@ -127,7 +127,21 @@ pub(crate) fn unproven_workspace(deployment: &str, app_id: &str, active: &Worksp
     CliError::Message(format!(
         "deployment '{deployment}' has Modal app id {app_id} recorded without a workspace, and \
          the active token ({active}) cannot see that app, so amicu cannot tell it belongs here. \
-         If it was created in another workspace, switch MODAL_TOKEN_ID and MODAL_TOKEN_SECRET \
-         to that workspace and retry; nothing was changed"
+         Run `modal app list` in each workspace you use to find the one that lists {app_id}, \
+         switch MODAL_TOKEN_ID and MODAL_TOKEN_SECRET to it and retry; nothing was changed"
+    ))
+}
+
+/// A Modal record with no workspace and no app id: nothing proves where (or
+/// whether) the app lives, so neither stopping nor `--forget-unconfirmed` can
+/// act on it. Point at the targeted recovery instead.
+pub(crate) fn unlocatable_record(deployment: &str, app_name: &str) -> CliError {
+    CliError::Message(format!(
+        "deployment '{deployment}' has a Modal app '{app_name}' recorded with no workspace and \
+         no app id, and the active workspace has no app by that name, so amicu cannot tell \
+         where it lives. Run `modal app list` in each workspace you use. If '{app_name}' is \
+         listed, switch MODAL_TOKEN_ID and MODAL_TOKEN_SECRET to that workspace and run \
+         `amicu modal stop {app_name}` (it stops the app and clears the record). It was kept in \
+         state"
     ))
 }
