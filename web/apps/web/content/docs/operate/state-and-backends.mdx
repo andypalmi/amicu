@@ -47,7 +47,7 @@ If an apply or destroy fails after starting or stopping some deployments, those 
 
 ## Known limitations
 
-- **Modal app name collisions.** Amicu names a Modal app `amicu-` plus the deployment id, lowercased, with separators such as `_` and `.` replaced by `-`. Two deployment ids that differ only in case or separator (for example `support_chat` and `Support-Chat`) map to the same app name. Amicu does not reject this yet, so do not give two deployments such ids. Name-based lookups can then find the wrong app.
+- **Modal app name collisions.** Amicu names a Modal app `amicu-` plus the deployment id, lowercased, with any non-alphanumeric character turned into `-` and runs of `-` collapsed into one. Two deployment ids that differ only in case or separator (for example `support_chat` and `Support-Chat`) map to the same app name. Amicu does not reject this yet, so do not give two deployments such ids. Name-based lookups can then find the wrong app.
 
 ## Drift
 

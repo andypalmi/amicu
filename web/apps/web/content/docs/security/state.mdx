@@ -11,6 +11,8 @@ The CLI keeps state in the project directory, in `.amicu/state/state.json`. Writ
 
 - The resource graph from the last successful apply: models, hardware profiles, deployments, and policy resources as parsed from your HCL.
 - The endpoints that were started: deployment id, runtime handle id (the service label or Modal app id), the endpoint URL, and whether it is loopback or public.
+- Deployments marked `pending`: starts not yet confirmed, or Modal apps that a drift check could not find by name. Apply and destroy write them before a provider starts or stops anything.
+- Stop records: for each deployment, what is needed to stop it later (the backend and identity, plus the host uid and launchd domain, or the Modal app id and workspace). A record is removed only after its stop is confirmed.
 
 ## What it never contains
 
