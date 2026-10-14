@@ -280,6 +280,7 @@ impl RuntimeAdapter for FakeRuntime {
 fn llama_deployment(context_length: u32) -> Deployment {
     Deployment {
         scaling: None,
+        memory_check: amicu_core::resource::MemoryCheck::default(),
         api_key: None,
         id: DeploymentId::new("support_chat_local"),
         model: ModelId::new("support_chat"),
@@ -296,6 +297,7 @@ fn llama_deployment(context_length: u32) -> Deployment {
 fn vllm_deployment() -> Deployment {
     Deployment {
         scaling: None,
+        memory_check: amicu_core::resource::MemoryCheck::default(),
         api_key: None,
         id: DeploymentId::new("support_chat_gpu"),
         model: ModelId::new("support_chat"),

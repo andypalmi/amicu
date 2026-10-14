@@ -415,6 +415,7 @@ mod tests {
         });
         g.deployments.push(Deployment {
             scaling: None,
+            memory_check: amicu_core::resource::MemoryCheck::default(),
             api_key: None,
             id: "dep".into(),
             model: "m".into(),

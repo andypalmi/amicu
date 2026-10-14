@@ -103,6 +103,7 @@ fn apple_silicon(mem_gib: u64) -> HardwareProfile {
 fn deployment() -> Deployment {
     Deployment {
         scaling: None,
+        memory_check: amicu_core::resource::MemoryCheck::default(),
         api_key: None,
         id: DeploymentId::new("support_chat_local"),
         model: ModelId::new("tiny_llama"),

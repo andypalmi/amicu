@@ -56,8 +56,8 @@ Diagnostics have the form `AMICU-<CATEGORY>-<NNN>`. The category is the fastest 
 
 | Code | Severity | Meaning | Fix |
 |---|---|---|---|
-| `AMICU-MEM-001` | error | The model does not fit in available VRAM or memory | Smaller quantization, shorter context, or bigger hardware |
-| `AMICU-MEM-002` | error | A single artifact file exceeds available memory | A smaller variant or different hardware |
+| `AMICU-MEM-001` | error | The model does not fit in available VRAM or memory | Smaller quantization, shorter context, or bigger hardware. `memory_check = "warn"` on the deployment turns it into a warning |
+| `AMICU-MEM-002` | error | A single artifact file exceeds available memory | A smaller variant or different hardware. `memory_check = "warn"` on the deployment turns it into a warning |
 
 ## POLICY
 

@@ -80,6 +80,20 @@ resource "deployment" "chat_prod" {
 | `vllm` | block | with `runtime = "vllm"` | vLLM settings |
 | `api_key` | `secret("NAME")` | off-machine providers | The endpoint's API key, by reference. A literal is rejected (`AMICU-POLICY-004`). Required unless the provider is local (`AMICU-POLICY-007`). |
 | `scaling` | block | no | Autoscaling limits. Providers with autoscaling only (Modal today). |
+| `memory_check` | string | no | `"enforce"` (default) or `"warn"`. See [memory_check](#memory_check). |
+
+### memory_check
+
+`amicu plan` rejects a deployment whose estimated memory (weights, KV cache, overhead) exceeds the available memory (`AMICU-MEM-001`, `AMICU-MEM-002`). If you know the estimate is conservative, set `memory_check = "warn"` on that deployment to turn the rejection into a warning:
+
+```hcl
+resource "deployment" "chat" {
+  memory_check = "warn"
+  # ...
+}
+```
+
+The warning gives the estimate and the available memory, and says the check was bypassed by config. `plan` shows `memory_check` as `warn` for that deployment, in text and in `--output json`. Other deployments still enforce. Any value other than `"enforce"` or `"warn"` is a config error. There is no CLI flag, so the bypass is reviewed with the config.
 
 ### scaling
 
