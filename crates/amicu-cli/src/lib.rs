@@ -299,7 +299,7 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
     // One-time, interactive-only consent question (amicu-planning#229). Lives
     // here, not in the command bodies, so command tests never reach a TTY.
     if matches!(cli.command, Command::Init | Command::Apply { .. }) {
-        commands::telemetry::consent_prompt();
+        commands::telemetry::consent_prompt(cli.output);
     }
     match &cli.command {
         Command::Init => commands::init::run(&project, out),

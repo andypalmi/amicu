@@ -291,10 +291,16 @@ fn is_ci(env: EnvGet<'_>) -> bool {
         .any(|k| env(k).is_some_and(|v| !v.is_empty() && v != "0" && v != "false"))
 }
 
+/// A prompt needs a person: stdin, stdout and stderr (where the question is
+/// written) all TTYs, and not JSON output mode.
+pub(crate) fn is_interactive(ttys: [bool; 3], json: bool) -> bool {
+    ttys.iter().all(|t| *t) && !json
+}
+
 /// Ask once, on the first interactive run, then persist the answer.
 ///
-/// Returns whether the prompt was shown. Never asks when: not both a stdin and
-/// stderr TTY, in CI, an env override is set, or a choice is already stored.
+/// Returns whether the prompt was shown. Never asks when: stdin, stdout or
+/// stderr is not a TTY, JSON output mode, in CI, an env override is set, or a choice is already stored.
 /// The default (empty answer, EOF, anything but yes) is No, and No is stored so
 /// the question is never repeated. Prompt goes to `out` (stderr in the host
 /// wrapper) so `--output json` on stdout stays clean.
@@ -339,11 +345,18 @@ pub(crate) fn maybe_prompt(
 }
 
 /// Host wrapper used by `init` and `apply`. Best effort; never fails a command.
-pub(crate) fn consent_prompt() {
+pub(crate) fn consent_prompt(output: OutputFormat) {
     let Some(store) = ConfigStore::host() else {
         return;
     };
-    let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
+    let interactive = is_interactive(
+        [
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+            std::io::stderr().is_terminal(),
+        ],
+        output.is_json(),
+    );
     maybe_prompt(
         &store,
         &real_env,
@@ -374,6 +387,15 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         (ConfigStore::new(dir.join("amicu/telemetry.json")), dir)
+    }
+
+    #[test]
+    fn interactive_needs_all_ttys_and_no_json() {
+        assert!(is_interactive([true; 3], false));
+        assert!(!is_interactive([false, true, true], false));
+        assert!(!is_interactive([true, false, true], false));
+        assert!(!is_interactive([true, true, false], false));
+        assert!(!is_interactive([true; 3], true));
     }
 
     #[test]
