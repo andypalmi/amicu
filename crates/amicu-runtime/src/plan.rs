@@ -84,6 +84,11 @@ pub struct LaunchPlan {
     /// redacted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<SecretRef>,
+    /// The host service-manager identity (launchd label / systemd unit) the
+    /// caller chose for this instance, so it can be recorded in state before
+    /// the start. `None`: the supervisor derives its default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_label: Option<String>,
     /// The estimated resource footprint.
     pub estimate: ResourceEstimate,
 }

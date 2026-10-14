@@ -6,7 +6,9 @@ use amicu_core::adapter::AdapterError;
 use amicu_core::diagnostic::{DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
 use amicu_core::id::DeploymentId;
-use amicu_core::resource::{Deployment, Runtime, is_local_provider};
+#[cfg(test)]
+use amicu_core::resource::Runtime;
+use amicu_core::resource::{Deployment, is_local_provider};
 use amicu_core::secret::{SecretResolver, SecretValue};
 use amicu_llamacpp::{Catalog, LlamaCppAdapter, ProcessSupervisor, host_supervisor};
 use amicu_modal::ModalSupervisor;
@@ -47,7 +49,7 @@ pub(crate) fn run(
         output,
         out,
         &mut std::io::stdin().lock(),
-        &Env::real(false),
+        &Env::real(false, false),
     )
 }
 
@@ -187,15 +189,19 @@ pub(crate) struct Env<'a> {
     /// Destroy only: treat a Modal app that cannot be found by name (and has
     /// no recorded id) as gone, instead of refusing to forget it.
     pub forget_unconfirmed: bool,
+    /// Destroy only: also delete the recorded host log files (Modal volumes
+    /// are never deleted).
+    pub purge: bool,
 }
 
 impl Env<'static> {
     /// The real host service manager and Modal.
-    pub(crate) fn real(forget_unconfirmed: bool) -> Self {
+    pub(crate) fn real(forget_unconfirmed: bool, purge: bool) -> Self {
         Self {
             host: &host_supervisor,
             modal: &crate::refresh::ModalLookup,
             forget_unconfirmed,
+            purge,
         }
     }
 }
@@ -291,6 +297,9 @@ pub(crate) fn execute(
 ) -> Result<(Vec<RuntimeHandle>, LocalState), CliError> {
     let rt = crate::commands::build_runtime()?;
     let mut progress = Progress::new(prior_state);
+    if progress.project_id.is_empty() {
+        progress.project_id = project.mint_id();
+    }
     if let Err(err) = rt.block_on(apply_all(
         project,
         &graph,
@@ -323,6 +332,7 @@ pub(crate) fn execute(
     let pending = pending_after(prior_state, &graph, &handles);
     let state = LocalState {
         version: LocalState::VERSION.to_owned(),
+        project_id: Some(progress.project_id.clone()),
         pending,
         stops: progress.stops.clone(),
         fingerprints: final_fingerprints(prior_state, &graph, &progress, result),
@@ -430,6 +440,7 @@ fn recorded_state(prior: Option<&LocalState>, graph: &Graph, progress: &Progress
     }
     LocalState {
         version: LocalState::VERSION.to_owned(),
+        project_id: Some(progress.project_id.clone()),
         endpoints: merge_endpoints(
             prior_endpoints,
             &partial,
@@ -507,6 +518,9 @@ struct Progress {
     /// goes: a record is added before its start and removed only when its
     /// stop is confirmed.
     stops: Vec<StopRecord>,
+    /// The project's stable id (minted on the first run), used to scope host
+    /// service labels.
+    project_id: String,
     /// The fingerprint each started deployment was started with.
     fingerprints: std::collections::BTreeMap<DeploymentId, Fingerprint>,
 }
@@ -515,6 +529,8 @@ impl Progress {
     fn new(prior: Option<&LocalState>) -> Self {
         Self {
             stops: effective_stops(prior),
+            // Empty until `execute` mints one for a project that has none.
+            project_id: prior.and_then(|s| s.project_id.clone()).unwrap_or_default(),
             ..Self::default()
         }
     }
@@ -859,9 +875,30 @@ async fn apply_all(
                 None
             };
             let new_stop = match dispatch {
-                Dispatch::Host => StopRecord::host(&item.deployment, host_ctx.as_ref()),
-                Dispatch::Modal => StopRecord::modal(&item.deployment, None, active_ws.as_ref()),
+                Dispatch::Host => {
+                    let label = amicu_llamacpp::project_host_label(
+                        &progress.project_id,
+                        item.deployment.as_str(),
+                    );
+                    StopRecord::host_in(
+                        &progress.project_id,
+                        &item.deployment,
+                        host_ctx.as_ref(),
+                        host_probe.service_paths(&label),
+                    )
+                }
+                Dispatch::Modal => StopRecord::modal(&item.deployment, None, active_ws.as_ref())
+                    .with_volumes(&modal_volume_names(launch.runtime)),
             };
+            // The instance is started under the label recorded in state, and
+            // a relative model path is resolved against the project root now,
+            // not baked into the plan.
+            let mut launch_owned = launch.clone();
+            if dispatch == Dispatch::Host {
+                launch_owned.service_label = Some(new_stop.identity.clone());
+                resolve_model_paths(&mut launch_owned, project.root());
+            }
+            let launch = &launch_owned;
             if let Some(ws) = &active_ws {
                 for r in progress
                     .stops
@@ -898,21 +935,9 @@ async fn apply_all(
             // A provider (or identity) change: stop what is running under the
             // OLD identity first, and confirm it, before starting the new one.
             // The old record stays in state until that stop is confirmed.
-            let old_runtime = prior
-                .and_then(|s| find_deployment(&s.graph, &item.deployment))
-                .map(|d| &d.runtime);
             let stale = stale_records(&progress.stops, &item.deployment, &new_stop);
             for old in stale {
-                stop_record(
-                    &old,
-                    old_runtime,
-                    &llama_adapter,
-                    &vllm_adapter,
-                    env,
-                    &*host_probe,
-                    &mut progress.stops,
-                )
-                .await?;
+                stop_record(&old, env, &*host_probe, &mut progress.stops).await?;
                 progress.stops.retain(|r| !r.same_instance(&old));
             }
             // Write-ahead: record the deployment as pending, with its stop
@@ -984,16 +1009,7 @@ async fn apply_all(
             }
             progress.in_flight = None;
             for old in superseded {
-                stop_record(
-                    &old,
-                    old_runtime,
-                    &llama_adapter,
-                    &vllm_adapter,
-                    env,
-                    &*host_probe,
-                    &mut progress.stops,
-                )
-                .await?;
+                stop_record(&old, env, &*host_probe, &mut progress.stops).await?;
                 progress.stops.retain(|r| !r.same_instance(&old));
             }
         } else {
@@ -1017,16 +1033,7 @@ async fn apply_all(
                 });
             }
             for record in records {
-                stop_record(
-                    &record,
-                    prior_deployment.map(|d| &d.runtime),
-                    &llama_adapter,
-                    &vllm_adapter,
-                    env,
-                    &*host_probe,
-                    &mut progress.stops,
-                )
-                .await?;
+                stop_record(&record, env, &*host_probe, &mut progress.stops).await?;
                 progress.stops.retain(|r| !r.same_instance(&record));
             }
             registry.deregister(&item.deployment);
@@ -1366,9 +1373,6 @@ fn check_host_context(
 /// error and the caller must keep the record in state.
 async fn stop_record(
     record: &StopRecord,
-    runtime: Option<&Runtime>,
-    llama: &LlamaCppAdapter,
-    vllm: &VllmAdapter,
     env: &Env<'_>,
     probe: &dyn ProcessSupervisor,
     stops: &mut [StopRecord],
@@ -1377,15 +1381,90 @@ async fn stop_record(
         Backend::HostLaunchd | Backend::HostSystemd => {
             check_host_context(record, probe.host_context().as_ref(), probe)?;
             let handle = host_handle(&record.deployment, &record.identity);
-            // Both adapters share one supervisor that manages the unit purely
-            // by the handle's id; dispatch on the declared runtime anyway.
-            match runtime {
-                Some(Runtime::Vllm(_)) => vllm.stop(&handle).await?,
-                _ => llama.stop(&handle).await?,
+            // Validated BEFORE anything is stopped: a recorded path that is
+            // not exactly this record's own service file is refused, so state
+            // can never point the delete at an unrelated file.
+            let definition = record.definition_path().map_err(|why| {
+                CliError::Message(format!(
+                    "{} has a recorded service file that amicu will not delete: {why}. Check \
+                     the state file; the record was kept and nothing was changed",
+                    record.describe()
+                ))
+            })?;
+            // Stop, then delete the service definition (it holds the endpoint
+            // API key) at the recorded path; a failure to delete is an error
+            // and the record stays in state.
+            probe
+                .stop_recorded(&handle, definition.as_deref())
+                .await
+                .map_err(|e| {
+                    CliError::Adapter(amicu_core::adapter::AdapterErrorKind::into_adapter_error(e))
+                })?;
+            if let Some(path) = &definition
+                && path.exists()
+            {
+                return Err(CliError::Message(format!(
+                    "{} is stopped but its service file {} (it holds the endpoint API key) \
+                     could not be removed. Delete it by hand; the record was kept so a re-run \
+                     retries",
+                    record.describe(),
+                    path.display()
+                )));
             }
             Ok(())
         }
         Backend::Modal => stop_modal(record, env, stops).await,
+    }
+}
+
+/// The Volumes a Modal deployment of `runtime` mounts.
+fn modal_volume_names(runtime: amicu_runtime::RuntimeKind) -> Vec<&'static str> {
+    match runtime {
+        amicu_runtime::RuntimeKind::Vllm => amicu_modal::supervisor::VOLUMES
+            .iter()
+            .map(|v| v.0)
+            .collect(),
+        amicu_runtime::RuntimeKind::LlamaCpp => amicu_modal::supervisor::LLAMACPP_VOLUMES
+            .iter()
+            .map(|v| v.0)
+            .collect(),
+    }
+}
+
+/// Flags whose value is a file path relative to the project root.
+const PATH_FLAGS: [&str; 5] = [
+    "-m",
+    "--model",
+    "--model-draft",
+    "--mmproj",
+    "--chat-template-file",
+];
+
+/// Make the file paths in a host launch absolute under `root`: the model
+/// (`-m`), draft model, `--mmproj`/`-mm` and `--chat-template-file` values
+/// (also in `--flag=value` form) that are relative. Done when the instance
+/// starts, so plans and state never hold an absolute project path.
+fn resolve_model_paths(launch: &mut LaunchPlan, root: &std::path::Path) {
+    let amicu_runtime::RenderedLaunch::Command { argv, .. } = &mut launch.rendered else {
+        return;
+    };
+    let root = std::path::absolute(root).unwrap_or_else(|_| root.to_path_buf());
+    let absolute = |v: &str| root.join(v).to_string_lossy().into_owned();
+    let is_path_flag = |f: &str| PATH_FLAGS.contains(&f) || f == "-mm";
+    let mut i = 0;
+    while i < argv.len() {
+        if let Some((flag, value)) = argv[i].split_once('=')
+            && is_path_flag(flag)
+            && !std::path::Path::new(value).is_absolute()
+        {
+            argv[i] = format!("{flag}={}", absolute(value));
+        } else if is_path_flag(&argv[i])
+            && i + 1 < argv.len()
+            && !std::path::Path::new(&argv[i + 1]).is_absolute()
+        {
+            argv[i + 1] = absolute(&argv[i + 1]);
+        }
+        i += 1;
     }
 }
 
@@ -1854,6 +1933,7 @@ resource "deployment" "beta" {
         // Fresh project: alpha started, then beta failed.
         let graph = amicu_hcl::parse_graph(CONFIG).unwrap();
         let progress = Progress {
+            project_id: String::new(),
             started: vec![handle(&graph, "alpha", "http://alpha")],
             stopped: Vec::new(),
             in_flight: Some(handle(&graph, "beta", "x").deployment),
@@ -1914,6 +1994,7 @@ resource "deployment" "beta" {
         let prior_graph = amicu_hcl::parse_graph(CONFIG).unwrap();
         let prior = crate::project::LocalState {
             version: crate::project::LocalState::VERSION.to_owned(),
+            project_id: None,
             pending: Vec::new(),
             stops: Vec::new(),
             fingerprints: std::collections::BTreeMap::default(),
@@ -1926,6 +2007,7 @@ resource "deployment" "beta" {
         let graph = amicu_hcl::parse_graph(&CONFIG.replace("model.gguf", "model-q5.gguf")).unwrap();
         // alpha was restarted; beta was never reached.
         let progress = Progress {
+            project_id: String::new(),
             started: vec![handle(&graph, "alpha", "http://new-alpha")],
             stopped: Vec::new(),
             in_flight: None,
@@ -2089,6 +2171,7 @@ mod exposure_tests {
             ),
             secret_refs: Vec::new(),
             api_key: api_key.map(SecretRef::new),
+            service_label: None,
             estimate: ResourceEstimate {
                 estimated_memory: amicu_core::ByteSize::from_bytes(0),
                 gpu_count: 0,
@@ -2439,6 +2522,7 @@ mod stop_invariant_tests {
     fn state(graph: amicu_core::graph::Graph) -> LocalState {
         LocalState {
             version: LocalState::VERSION.to_owned(),
+            project_id: None,
             graph,
             endpoints: Vec::new(),
             pending: Vec::new(),
@@ -2653,6 +2737,71 @@ mod stop_invariant_tests {
     }
 }
 
+#[cfg(test)]
+mod scoped_tests {
+    use super::*;
+
+    #[test]
+    fn a_legacy_unscoped_record_is_stale_against_the_project_scoped_one() {
+        let legacy = StopRecord::host(&"chat".into(), None);
+        let scoped = StopRecord::host_in("aaaa1111", &"chat".into(), None, None);
+        let stale = stale_records(std::slice::from_ref(&legacy), &"chat".into(), &scoped);
+        assert_eq!(
+            stale,
+            vec![legacy],
+            "stopped and confirmed before the new start"
+        );
+    }
+
+    #[test]
+    fn relative_model_paths_are_resolved_at_start_and_only_for_model_flags() {
+        let argv = [
+            "llama-server",
+            "-m",
+            "models/m/a.gguf",
+            "--model-draft",
+            "models/d/b.gguf",
+            "--port",
+            "8080",
+            "--mmproj",
+            "vision/mm.gguf",
+            "--chat-template-file=tpl/chat.jinja",
+            "-mm",
+            "/abs/already.gguf",
+        ];
+        let mut launch = LaunchPlan {
+            deployment: "chat".into(),
+            runtime: amicu_runtime::RuntimeKind::LlamaCpp,
+            rendered: amicu_runtime::RenderedLaunch::Command {
+                argv: argv.iter().map(|s| (*s).to_owned()).collect(),
+                text: String::new(),
+            },
+            settings: amicu_core::resource::Runtime::LlamaCpp(
+                amicu_core::resource::LlamaCppSettings::default(),
+            ),
+            secret_refs: Vec::new(),
+            api_key: None,
+            service_label: None,
+            estimate: amicu_runtime::ResourceEstimate {
+                estimated_memory: amicu_core::ByteSize::from_bytes(0),
+                gpu_count: 0,
+                kv_cache: None,
+            },
+        };
+        resolve_model_paths(&mut launch, std::path::Path::new("/work/proj"));
+        let argv = launch.rendered.argv().unwrap();
+        assert_eq!(argv[2], "/work/proj/models/m/a.gguf");
+        assert_eq!(argv[4], "/work/proj/models/d/b.gguf");
+        assert_eq!(argv[6], "8080");
+        assert_eq!(argv[8], "/work/proj/vision/mm.gguf");
+        assert_eq!(argv[9], "--chat-template-file=/work/proj/tpl/chat.jinja");
+        assert_eq!(
+            argv[11], "/abs/already.gguf",
+            "absolute paths are untouched"
+        );
+    }
+}
+
 /// Table tests for the pure partial-state functions (amicu-planning#222):
 /// failure at every position, update vs create vs destroy, in-flight entries.
 #[cfg(test)]
@@ -2712,6 +2861,7 @@ mod partial_state_tests {
     fn prior_state(g: Graph, pending: &[&str]) -> LocalState {
         LocalState {
             version: LocalState::VERSION.to_owned(),
+            project_id: None,
             endpoints: g
                 .deployments
                 .iter()

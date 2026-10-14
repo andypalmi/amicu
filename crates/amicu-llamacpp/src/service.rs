@@ -84,8 +84,24 @@ pub struct HostContext {
     pub domain: Option<String>,
 }
 
+/// The files a service leaves on the host: its definition (which holds the
+/// injected environment, so it is a secret-bearing file) and its log files.
+/// Recorded in state before the service starts so a later stop or purge does
+/// not depend on recomputing them from `$HOME` / the environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServicePaths {
+    /// The launchd plist / systemd environment file.
+    pub definition: PathBuf,
+    /// Log files the manager writes (empty for systemd: the journal).
+    pub logs: Vec<PathBuf>,
+}
+
 /// Load/start, query, stop, and read logs for a supervised service.
 pub trait ServiceManager: Send + Sync {
+    /// Where this manager keeps `label`'s definition and logs, if it can tell.
+    fn paths(&self, _label: &str) -> Option<ServicePaths> {
+        None
+    }
     /// The backend, uid and domain this manager acts as, if it can tell.
     fn context(&self) -> Option<HostContext> {
         None
@@ -112,6 +128,12 @@ pub trait ServiceManager: Send + Sync {
     fn state(&self, label: &str) -> Result<ServiceState, LlamaCppError>;
     /// Stop and unload the service.
     fn stop(&self, label: &str) -> Result<(), LlamaCppError>;
+    /// [`stop`](Self::stop), deleting the service definition at `definition`
+    /// (the path recorded in state when it was written) instead of the one
+    /// recomputed from `$HOME`. `None`: recompute (legacy records).
+    fn stop_recorded(&self, label: &str, _definition: Option<&Path>) -> Result<(), LlamaCppError> {
+        self.stop(label)
+    }
     /// Read the service's captured log lines.
     fn logs(&self, label: &str, options: LogOptions) -> Result<Vec<String>, LlamaCppError>;
     /// Where a human finds the service's logs (file paths or a command), for
@@ -278,6 +300,13 @@ impl LaunchdManager<HostExec> {
 }
 
 impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
+    fn paths(&self, label: &str) -> Option<ServicePaths> {
+        Some(ServicePaths {
+            definition: self.plist_path(label),
+            logs: vec![self.stdout_path(label), self.stderr_path(label)],
+        })
+    }
+
     fn instance_owner(&self, label: &str) -> Option<u32> {
         #[cfg(unix)]
         {
@@ -338,6 +367,9 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
 
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
         require_absolute(&self.agents_dir)?;
+        // Everything that can fail before the secret is on disk happens first,
+        // so a failure here never leaves the plist behind.
+        ensure_dir(&self.log_dir)?;
         write_private(
             &self.plist_path(&spec.label),
             &self.agents_dir,
@@ -348,7 +380,6 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
             )
             .as_bytes(),
         )?;
-        ensure_dir(&self.log_dir)?;
         let plist = self.plist_path(&spec.label);
         let (_, domain) = self.domain().inspect_err(|_| remove_env_file(&plist))?;
         let out = match self.exec.exec(
@@ -396,7 +427,11 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
     }
 
     fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
-        let plist = self.plist_path(label);
+        self.stop_recorded(label, None)
+    }
+
+    fn stop_recorded(&self, label: &str, definition: Option<&Path>) -> Result<(), LlamaCppError> {
+        let plist = definition.map_or_else(|| self.plist_path(label), Path::to_path_buf);
         let (_, domain) = self.domain()?;
         let target = format!("{domain}/{label}");
         // `bootout` can exit 0 while the job stays loaded ("Boot-out failed:
@@ -561,6 +596,13 @@ fn environment_file(env: &[(String, String)]) -> Result<String, LlamaCppError> {
 }
 
 impl<E: CommandExec> ServiceManager for SystemdManager<E> {
+    fn paths(&self, label: &str) -> Option<ServicePaths> {
+        Some(ServicePaths {
+            definition: self.env_path(label),
+            logs: Vec::new(),
+        })
+    }
+
     fn context(&self) -> Option<HostContext> {
         Some(HostContext {
             backend: HostBackend::Systemd,
@@ -599,6 +641,9 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
     }
 
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
+        if spec.argv.is_empty() {
+            return Err(LlamaCppError::Supervisor("empty argv".to_owned()));
+        }
         let unit = format!("--unit={}", spec.label);
         let mut args = vec!["--user", "--collect", &unit];
         // Env goes through a 0600 EnvironmentFile, not `--setenv`, whose values
@@ -647,10 +692,17 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
     }
 
     fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
+        self.stop_recorded(label, None)
+    }
+
+    fn stop_recorded(&self, label: &str, definition: Option<&Path>) -> Result<(), LlamaCppError> {
         let out = self.exec.exec("systemctl", &["--user", "stop", label]);
         // Always drop the secrets file, even when stop fails (a crashed
         // `--collect` unit is "not loaded" and its stop errors).
-        remove_env_file(&self.env_path(label));
+        match definition {
+            Some(path) => remove_env_file(path),
+            None => remove_env_file(&self.env_path(label)),
+        }
         let out = out?;
         if out.success {
             return Ok(());

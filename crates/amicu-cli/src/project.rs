@@ -23,6 +23,11 @@ pub(crate) struct Project {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct LocalState {
     pub version: String,
+    /// A stable id for this project, minted when state is first written. It
+    /// scopes host service labels so two projects never share a launchd job
+    /// or systemd unit. Absent in state written before v3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     pub graph: Graph,
     #[serde(default)]
     pub endpoints: Vec<RuntimeHandle>,
@@ -48,11 +53,12 @@ pub(crate) struct LocalState {
 }
 
 impl LocalState {
-    /// Written by this version. v2 adds `pending` and `stops`, which a v1-only
+    /// Written by this version. v2 adds `pending` and `stops`; v3 adds
+    /// `project_id` and the per-record files and volumes, which an older
     /// binary would silently drop on its next save.
-    pub const VERSION: &'static str = "v2";
+    pub const VERSION: &'static str = "v3";
     /// Versions this binary can read.
-    pub const SUPPORTED: &'static [&'static str] = &["v1", "v2"];
+    pub const SUPPORTED: &'static [&'static str] = &["v1", "v2", "v3"];
 }
 
 impl Project {
@@ -65,6 +71,22 @@ impl Project {
         let cwd = std::env::current_dir()
             .map_err(|e| CliError::io("cannot determine current directory", e))?;
         Ok(Self::new(cwd))
+    }
+
+    /// A fresh project id: 8 hex digits mixing the absolute root, the clock
+    /// and the pid. Stored in state, so it only has to be unlikely to collide.
+    pub(crate) fn mint_id(&self) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::path::absolute(&self.root)
+            .unwrap_or_else(|_| self.root.clone())
+            .hash(&mut h);
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos())
+            .hash(&mut h);
+        std::process::id().hash(&mut h);
+        format!("{:08x}", h.finish() & 0xffff_ffff)
     }
 
     pub fn root(&self) -> &Path {
@@ -362,6 +384,7 @@ mod durability_tests {
         // supported one or the state would (rightly) not load.
         LocalState {
             version: LocalState::VERSION.to_owned(),
+            project_id: None,
             graph: Graph::new(),
             endpoints: Vec::new(),
             pending: vec![tag.into()],

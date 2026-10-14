@@ -1685,6 +1685,7 @@ fn manifest_plan() -> LaunchPlan {
         }),
         secret_refs: vec![],
         api_key: None,
+        service_label: None,
         estimate: ResourceEstimate {
             estimated_memory: ByteSize::from_bytes(0),
             gpu_count: 0,

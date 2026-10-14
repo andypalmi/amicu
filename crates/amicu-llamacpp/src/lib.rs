@@ -36,11 +36,12 @@ pub use error::LlamaCppError;
 pub use health::{Health, HealthProbe, HttpHealthProbe};
 pub use service::{
     CommandExec, ExecOutput, HostBackend, HostContext, HostExec, LaunchdManager, Presence,
-    ServiceManager, ServiceSpec, ServiceState, SystemdManager, allow_service_commands,
+    ServiceManager, ServicePaths, ServiceSpec, ServiceState, SystemdManager,
+    allow_service_commands,
 };
 pub use supervisor::{
     LaunchdSupervisor, ProcessSupervisor, ReadyWait, ResolvedSecret, ServiceSupervisor,
-    SystemdSupervisor, host_label, host_supervisor, resolve_launch_secrets,
+    SystemdSupervisor, host_label, host_supervisor, project_host_label, resolve_launch_secrets,
 };
 
 #[cfg(test)]
