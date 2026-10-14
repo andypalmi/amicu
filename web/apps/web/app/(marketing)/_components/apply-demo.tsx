@@ -126,10 +126,10 @@ export function ApplyDemo({ className }: { className?: string }) {
     <MockWindow title="terminal" action={replay} className={className}>
       <div
         ref={rootRef}
-        className="grid font-mono text-xs leading-5 sm:text-[0.8125rem] sm:leading-6 lg:grid-cols-2"
+        className="grid font-mono text-xs leading-5 sm:text-[0.8125rem] sm:leading-6 lg:grid-cols-2 lg:text-xs lg:leading-[1.125rem]"
       >
         <pre className="sr-only">{TRANSCRIPT}</pre>
-        <div aria-hidden className={cn('min-w-0 px-3 py-3 sm:px-4', SCROLLER)}>
+        <div aria-hidden className={cn('min-w-0 px-3 py-3 sm:px-4 lg:py-2.5', SCROLLER)}>
           {term.map((row, i) => (
             <RowLine key={i} row={row} />
           ))}
@@ -137,7 +137,7 @@ export function ApplyDemo({ className }: { className?: string }) {
         <div aria-hidden className="min-w-0 border-border lg:border-l">
           <div
             className={cn(
-              'mx-3 border-t border-border pb-3 pt-3 sm:mx-4 lg:mx-0 lg:border-t-0 lg:px-4',
+              'mx-3 border-t border-border pb-3 pt-3 sm:mx-4 lg:mx-0 lg:border-t-0 lg:px-4 lg:py-2.5',
               SCROLLER,
               state.screen !== 'call' && 'invisible',
             )}
