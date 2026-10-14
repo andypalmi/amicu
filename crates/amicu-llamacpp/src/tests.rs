@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -2301,7 +2302,8 @@ async fn start_fails_fast_when_the_service_crashes() {
 fn launchd_update_releases_the_old_job_by_plist_and_label_before_loading() {
     let tmp = TempDir::new("launchd-update");
     let exec = std::sync::Arc::new(FakeExec::new(true, ""));
-    let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"));
+    let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"))
+        .with_settle_timeout(Duration::from_millis(100));
     let spec = service_spec();
     manager.start(&spec).expect("first start");
     manager.release(&spec.label);
@@ -2326,7 +2328,8 @@ fn launchd_update_releases_the_old_job_by_plist_and_label_before_loading() {
 fn launchd_release_removes_by_label_even_without_a_plist() {
     let tmp = TempDir::new("launchd-release");
     let exec = std::sync::Arc::new(FakeExec::new(true, ""));
-    let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"));
+    let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"))
+        .with_settle_timeout(Duration::from_millis(100));
     manager.release("io.amicu.llama.x");
     let calls: Vec<Vec<String>> = exec
         .calls
@@ -2622,7 +2625,8 @@ fn launchd_stop_falls_back_to_remove_when_unload_leaves_the_job_loaded() {
         .start(&spec)
         .unwrap();
     let exec = std::sync::Arc::new(LoadedExec::new(false, true));
-    let manager = LaunchdManager::new(exec.clone(), &agents, tmp.file("logs"));
+    let manager = LaunchdManager::new(exec.clone(), &agents, tmp.file("logs"))
+        .with_settle_timeout(Duration::from_millis(100));
     manager.stop(&spec.label).expect("remove confirms the stop");
     let calls = exec.calls.lock().unwrap().clone();
     assert!(calls.contains(&"remove".to_owned()), "{calls:?}");
@@ -2636,7 +2640,8 @@ fn launchd_stop_errors_and_keeps_the_plist_when_the_job_stays_loaded() {
     LaunchdManager::new(FakeExec::new(true, ""), &agents, tmp.file("logs"))
         .start(&spec)
         .unwrap();
-    let manager = LaunchdManager::new(LoadedExec::new(false, false), &agents, tmp.file("logs"));
+    let manager = LaunchdManager::new(LoadedExec::new(false, false), &agents, tmp.file("logs"))
+        .with_settle_timeout(Duration::from_millis(100));
     let err = manager.stop(&spec.label).expect_err("unconfirmed stop");
     assert!(err.to_string().contains("still loaded"), "{err}");
     assert!(
@@ -2649,12 +2654,182 @@ fn launchd_stop_errors_and_keeps_the_plist_when_the_job_stays_loaded() {
 #[test]
 fn launchd_stop_with_no_plist_still_checks_the_label_is_gone() {
     let tmp = TempDir::new("launchd-stop-noplist");
-    let manager = LaunchdManager::new(LoadedExec::new(false, false), tmp.file("a"), "/l");
+    let manager = LaunchdManager::new(LoadedExec::new(false, false), tmp.file("a"), "/l")
+        .with_settle_timeout(Duration::from_millis(100));
     assert!(manager.stop("io.amicu.llama.x").is_err());
-    let manager = LaunchdManager::new(LoadedExec::new(false, true), tmp.file("a"), "/l");
+    let manager = LaunchdManager::new(LoadedExec::new(false, true), tmp.file("a"), "/l")
+        .with_settle_timeout(Duration::from_millis(100));
     manager.stop("io.amicu.llama.x").expect("removed by label");
 }
 
+/// A launchd stand-in with an asynchronous `bootout`: after it, the job stays
+/// listed (state `SIGTERMed`) for `lingering_prints` more `print` calls and
+/// only then disappears, like the real launchd. `bootstrap` fails with error
+/// 5 while the label is still registered.
+struct AsyncBootoutExec {
+    /// `print` answers left while the job is still tearing down; `None`
+    /// means it has not been booted out.
+    lingering: Mutex<Option<u32>>,
+    lingering_prints: u32,
+    loaded: Mutex<bool>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl AsyncBootoutExec {
+    fn new(lingering_prints: u32) -> Self {
+        Self {
+            lingering: Mutex::new(None),
+            lingering_prints,
+            loaded: Mutex::new(true),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl CommandExec for AsyncBootoutExec {
+    fn exec(&self, program: &str, args: &[&str]) -> Result<ExecOutput, LlamaCppError> {
+        let ok = |stdout: &str| ExecOutput {
+            success: true,
+            stdout: stdout.to_owned(),
+            stderr: String::new(),
+            code: Some(0),
+        };
+        if program.ends_with("/id") {
+            return Ok(ok("501\n"));
+        }
+        self.calls.lock().unwrap().push(args[0].to_owned());
+        let mut loaded = self.loaded.lock().unwrap();
+        let mut lingering = self.lingering.lock().unwrap();
+        Ok(match args[0] {
+            "print" if args[1] == "gui/501" => ok(""),
+            "print" => {
+                if let Some(left) = lingering.as_mut() {
+                    if *left == 0 {
+                        *loaded = false;
+                        *lingering = None;
+                    } else {
+                        *left -= 1;
+                        return Ok(ok("\tactive count = 1\n\tstate = SIGTERMed\n"));
+                    }
+                }
+                if *loaded {
+                    ok("\tactive count = 1\n\tstate = running\n")
+                } else {
+                    ExecOutput {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "Could not find service".to_owned(),
+                        code: Some(113),
+                    }
+                }
+            }
+            "bootout" => {
+                *lingering = Some(self.lingering_prints);
+                ok("")
+            }
+            "bootstrap" => {
+                if *loaded {
+                    ExecOutput {
+                        success: false,
+                        stdout: String::new(),
+                        stderr: "Bootstrap failed: 5: Input/output error".to_owned(),
+                        code: Some(5),
+                    }
+                } else {
+                    *loaded = true;
+                    ok("")
+                }
+            }
+            "remove" => ok(""),
+            other => panic!("unexpected launchctl {other}"),
+        })
+    }
+}
+
+#[test]
+fn launchd_update_waits_for_the_asynchronous_bootout_before_bootstrapping() {
+    let tmp = TempDir::new("launchd-async-update");
+    let exec = std::sync::Arc::new(AsyncBootoutExec::new(3));
+    let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"))
+        .with_settle_timeout(Duration::from_secs(5));
+    let spec = service_spec();
+    manager.release(&spec.label);
+    manager
+        .start(&spec)
+        .expect("bootstrap must not race the bootout");
+    assert!(*exec.loaded.lock().unwrap(), "the new job is loaded");
+}
+
+#[test]
+fn launchd_update_without_waiting_would_hit_error_5() {
+    // Documents the race the wait closes: a zero settle timeout skips it.
+    let tmp = TempDir::new("launchd-async-nowait");
+    let exec = std::sync::Arc::new(AsyncBootoutExec::new(3));
+    let manager = LaunchdManager::new(exec, tmp.file("agents"), tmp.file("logs"))
+        .with_settle_timeout(Duration::ZERO);
+    let spec = service_spec();
+    manager.release(&spec.label);
+    let err = manager.start(&spec).expect_err("raced");
+    assert!(err.to_string().contains("Bootstrap failed: 5"), "{err}");
+}
+
+#[test]
+fn launchd_stop_waits_for_the_asynchronous_bootout() {
+    let tmp = TempDir::new("launchd-async-stop");
+    let agents = tmp.file("agents");
+    let spec = service_spec();
+    LaunchdManager::new(FakeExec::new(true, ""), &agents, tmp.file("logs"))
+        .start(&spec)
+        .unwrap();
+    let exec = std::sync::Arc::new(AsyncBootoutExec::new(4));
+    let manager = LaunchdManager::new(exec.clone(), &agents, tmp.file("logs"))
+        .with_settle_timeout(Duration::from_secs(5));
+    manager.stop(&spec.label).expect("confirmed after waiting");
+    let calls = exec.calls.lock().unwrap().clone();
+    assert!(
+        !calls.contains(&"remove".to_owned()),
+        "no remove fallback needed once bootout settles: {calls:?}"
+    );
+    assert!(
+        !agents
+            .join("io.amicu.llama.support_chat_local.plist")
+            .exists(),
+        "plist removed only after the job is confirmed gone"
+    );
+}
+
+#[test]
+fn launchd_stop_that_never_settles_keeps_the_plist_and_errors() {
+    let tmp = TempDir::new("launchd-async-stuck");
+    let agents = tmp.file("agents");
+    let spec = service_spec();
+    LaunchdManager::new(FakeExec::new(true, ""), &agents, tmp.file("logs"))
+        .start(&spec)
+        .unwrap();
+    let manager = LaunchdManager::new(AsyncBootoutExec::new(u32::MAX), &agents, tmp.file("logs"))
+        .with_settle_timeout(Duration::from_millis(150));
+    let err = manager.stop(&spec.label).expect_err("still tearing down");
+    assert!(err.to_string().contains("still loaded"), "{err}");
+    assert!(
+        agents
+            .join("io.amicu.llama.support_chat_local.plist")
+            .exists(),
+        "never drop the record of a job that may still be loaded"
+    );
+}
+
+#[test]
+fn launchd_presence_treats_a_job_being_torn_down_as_down() {
+    let domain = Some("gui/501");
+    for state in ["SIGTERMed", "SIGKILLed", "not running"] {
+        let out = format!("gui/501/x = {{\n\tactive count = 1\n\tstate = {state}\n\tpid = 7\n}}\n");
+        assert_eq!(
+            launchd_presence(OneAnswer::new(true, 0, &out, ""), domain).unwrap(),
+            Presence::Down,
+            "{state}"
+        );
+    }
+}
 #[test]
 fn launchd_state_maps_pid_exit_and_missing() {
     let active = LaunchdManager::new(FakeExec::new(true, "{\n\t\"PID\" = 1234;\n};"), "/a", "/l");
