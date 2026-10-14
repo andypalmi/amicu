@@ -1,0 +1,50 @@
+name: release-plz
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-pr:
+    # Opens/updates the release PR (version bump, Cargo.lock, CHANGELOG.md).
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-plz-pr
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+      - uses: release-plz/action@8921286633dfa0c4020f7f30bd1c14fe19cbb10e # v0.5.142
+        with:
+          command: release-pr
+        env:
+          # PAT or App token, not GITHUB_TOKEN, so the release PR triggers CI.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+
+  release:
+    # Pushes the tag v<version> once a release PR is merged; release.yml
+    # (cargo-dist) reacts to the tag and creates the GitHub Release.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+      - uses: release-plz/action@8921286633dfa0c4020f7f30bd1c14fe19cbb10e # v0.5.142
+        with:
+          command: release
+        env:
+          # PAT or App token: tags pushed with GITHUB_TOKEN do not trigger release.yml.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
