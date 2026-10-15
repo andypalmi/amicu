@@ -59,10 +59,22 @@ Create an empty directory and run `init` in it.
 
 ```bash
 mkdir my-stack && cd my-stack
-amicu init
+amicu init --example
 ```
 
-`init` creates `amicu.hcl` (a starter config), `variables.amicu.hcl` (a placeholder), and `.amicu/` (project config and state). It never overwrites existing files.
+`init` creates `amicu.hcl` (only a comment header, no resources), `variables.amicu.hcl` (a placeholder), and `.amicu/` (project config and state). It never overwrites existing files.
+
+For a working starter, add `--example`. A bare `--example` picks the one for this machine: macOS gets `mac`, Linux with `nvidia-smi` gets `linux-cuda`, and any other Linux gets `linux-cpu`. Its hardware profile is the detected machine, and it picks a Qwen3 GGUF model and context length that fit its memory. It replaces the header-only `amicu.hcl` while that is unchanged, and never overwrites a file you edited. To choose yourself:
+
+```bash
+amicu init --example             # detect this machine
+amicu init --example mac         # Apple Silicon, llama.cpp with Metal
+amicu init --example linux-cuda  # NVIDIA GPU, llama.cpp with all layers on the GPU
+amicu init --example linux-cpu   # no GPU, llama.cpp on the CPU
+amicu init --example modal       # Modal serverless GPU (Path B)
+```
+
+A local example must match the machine it runs on. See [Init examples](/docs/reference/cli#init-examples). The same files are in the repository under [`examples/`](https://github.com/andypalmi/amicu/tree/main/examples). To see what fits before you pick, run `amicu catalog fits`.
 
 ## Path A: on this machine
 
@@ -73,7 +85,7 @@ Requirements:
 
 ### The starter config
 
-`amicu init` writes this `amicu.hcl`. It serves `Qwen/Qwen3-8B-GGUF` (`Qwen3-8B-Q4_K_M.gguf`, about 5 GB) with llama.cpp:
+`amicu init --example` writes an `amicu.hcl` like this one. On a Mac with 48 GiB of memory it serves `Qwen/Qwen3-8B-GGUF` (`Qwen3-8B-Q4_K_M.gguf`, about 5 GB) with llama.cpp. Smaller machines get a smaller model, so the model id, file name and context length below depend on your machine:
 
 ```hcl
 resource "model" "qwen3_8b" {
@@ -87,11 +99,11 @@ resource "model" "qwen3_8b" {
     format       = "gguf"
     quantization = "q4_k_m"
   }
-  context_length = 100000
+  context_length = 32768
   variant {
     quantization = "q4_k_m"
     file         = "Qwen3-8B-Q4_K_M.gguf"
-    size         = "5027783488"
+    size         = "5027783488B"
   }
 }
 
@@ -111,18 +123,18 @@ resource "deployment" "qwen3_8b_local" {
   hardware = hardware_profile.local_dev.id
   runtime  = "llama_cpp"
   llama_cpp {
-    context_length = 100000
+    context_length = 32768
     port           = 8000
     n_gpu_layers   = -1
   }
 }
 ```
 
-Edit `hardware_profile` to match your machine. On Linux without a GPU use `provider = "local_cpu"` with a `cpu {}` block instead; see [Hardware profile](/docs/configuration/hardware-profile). Lower `context_length` if memory is tight.
+`variant.size` is an integer number of bytes; `"5027783488B"` and `"5027783488"` mean the same. The `hardware_profile` is what `init` detected, and the fit check uses it. Change it only if you plan for another machine; see [Hardware profile](/docs/configuration/hardware-profile). Lower `context_length` if memory is tight.
 
 ### Get the GGUF
 
-The model resource id decides where the file goes: `models/<model id>/<variant.file>` relative to the project directory. Here that is `models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf`. You can instead set `variant.file` to an absolute path.
+If `init` picked a smaller model for your machine, use the model id and file name from your `amicu.hcl` in place of `qwen3_8b` and `Qwen3-8B-Q4_K_M.gguf` below. The model resource id decides where the file goes: `models/<model id>/<variant.file>` relative to the project directory. Here that is `models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf`. You can instead set `variant.file` to an absolute path.
 
 ```bash
 mkdir -p models/qwen3_8b
@@ -140,6 +152,8 @@ amicu validate
 amicu plan
 amicu apply
 ```
+
+`doctor` and `plan` compare a local hardware profile with this machine. If the profile declares more memory than the machine has, they print the warning `AMICU-MEM-003`. It is only a warning, because `plan` may run on another machine than the one you deploy to, such as CI. Fix the profile, or ignore it when that is the case.
 
 `plan` prints the exact `llama-server` command, with the model path relative to the project, `models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf`. The service runs with the absolute path. `apply` shows the plan, asks for approval, installs a user service (launchd on macOS, systemd on Linux), starts it, and waits up to 15 minutes for `/health` to answer. If the service exits during startup, apply fails within seconds. On any failure it stops the service and the error gives the log location. See [This machine](/docs/providers/local).
 

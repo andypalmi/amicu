@@ -19,6 +19,7 @@
 pub mod catalog;
 pub mod checks;
 pub mod fingerprint;
+pub mod host;
 pub mod planner;
 
 use amicu_core::graph::Graph;
@@ -27,6 +28,7 @@ use amicu_hcl::{HclError, parse_graph};
 pub use catalog::build_catalog;
 pub use checks::report_for;
 pub use fingerprint::{EnvProbe, Fact, Fingerprint, NoProbe};
+pub use host::{HostFacts, host_diagnostics};
 pub use planner::{
     PlanError, PlanInputs, PlanItem, PlanResult, build_plan, build_plan_in, build_plan_with,
 };

@@ -50,6 +50,10 @@ On Linux, the unit comes back after a reboot, at your next login. To start it at
 
 When you change a deployment, `apply` replaces the running service; it may wait up to 10 seconds for the old one to stop. If something else still answers `/health` on the port, apply fails with `port N is already serving /health`. When you remove a deployment from the configuration, `apply` stops and unloads its service.
 
+## Host check
+
+A local profile that declares more memory than this machine has gets the warning `AMICU-MEM-003` from `amicu plan` and `amicu doctor`. It is a warning, not an error, because `plan` may run on another machine than the target, such as CI. A declared figure is accepted up to the largest of 5% over the detected one, the detected one plus 256 MiB, and the detected one rounded to the nearest GiB, since Linux reports slightly less than the installed RAM. Accelerator memory is compared only when it was detected: unified memory on Apple Silicon, or VRAM from `nvidia-smi` on Linux. Remote providers are never compared.
+
 ## Requirements
 
 - **llama.cpp runtime:** `llama-server` on `PATH`. `apply` resolves it from `PATH` to an absolute path and fails with `llama-server not found on PATH; install with ...` if it is missing. Run `amicu doctor` to confirm it is found. amicu does not check which build you have; use a CUDA build of `llama-server` for GPU offload.

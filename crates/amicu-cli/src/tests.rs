@@ -256,7 +256,16 @@ fn init_creates_expected_files_and_is_idempotent() {
     let project = Project::new(&td.path);
 
     let mut out = Vec::new();
-    assert_eq!(commands::init::run(&project, &mut out).unwrap(), 0);
+    assert_eq!(
+        commands::init::run(
+            &project,
+            Some(Some(commands::init::InitTarget::Mac)),
+            Some(&crate::host::fake::mac("m4_pro", 48)),
+            &mut out
+        )
+        .unwrap(),
+        0
+    );
 
     assert!(td.path.join("amicu.hcl").is_file());
     assert!(td.path.join("variables.amicu.hcl").is_file());
@@ -269,7 +278,13 @@ fn init_creates_expected_files_and_is_idempotent() {
 
     // Second run creates nothing and reports so.
     let mut out2 = Vec::new();
-    commands::init::run(&project, &mut out2).unwrap();
+    commands::init::run(
+        &project,
+        Some(Some(commands::init::InitTarget::Mac)),
+        Some(&crate::host::fake::mac("m4_pro", 48)),
+        &mut out2,
+    )
+    .unwrap();
     assert!(utf8(out2).contains("already initialized"));
 }
 
@@ -279,22 +294,52 @@ fn init_ignores_dot_amicu_idempotently() {
     // No ignore file: created.
     let td = TempDir::new();
     let project = Project::new(&td.path);
-    commands::init::run(&project, &mut Vec::new()).unwrap();
-    commands::init::run(&project, &mut Vec::new()).unwrap();
+    commands::init::run(
+        &project,
+        Some(Some(commands::init::InitTarget::Mac)),
+        Some(&crate::host::fake::mac("m4_pro", 48)),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    commands::init::run(
+        &project,
+        Some(Some(commands::init::InitTarget::Mac)),
+        Some(&crate::host::fake::mac("m4_pro", 48)),
+        &mut Vec::new(),
+    )
+    .unwrap();
     assert_eq!(read(&td), ".amicu/\n");
 
     // Existing file without trailing newline: appended, other entries kept.
     let td = TempDir::new();
     write(&td.path, ".gitignore", "target");
     let project = Project::new(&td.path);
-    commands::init::run(&project, &mut Vec::new()).unwrap();
-    commands::init::run(&project, &mut Vec::new()).unwrap();
+    commands::init::run(
+        &project,
+        Some(Some(commands::init::InitTarget::Mac)),
+        Some(&crate::host::fake::mac("m4_pro", 48)),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    commands::init::run(
+        &project,
+        Some(Some(commands::init::InitTarget::Mac)),
+        Some(&crate::host::fake::mac("m4_pro", 48)),
+        &mut Vec::new(),
+    )
+    .unwrap();
     assert_eq!(read(&td), "target\n.amicu/\n");
 
     // Already covered (alternate spelling): untouched.
     let td = TempDir::new();
     write(&td.path, ".gitignore", "/.amicu\n");
-    commands::init::run(&Project::new(&td.path), &mut Vec::new()).unwrap();
+    commands::init::run(
+        &Project::new(&td.path),
+        Some(Some(commands::init::InitTarget::Mac)),
+        Some(&crate::host::fake::mac("m4_pro", 48)),
+        &mut Vec::new(),
+    )
+    .unwrap();
     assert_eq!(read(&td), "/.amicu\n");
 }
 
@@ -643,7 +688,16 @@ fn init_output_passes_fmt_check() {
     let project = Project::new(&td.path);
 
     let mut out = Vec::new();
-    assert_eq!(commands::init::run(&project, &mut out).unwrap(), 0);
+    assert_eq!(
+        commands::init::run(
+            &project,
+            Some(Some(commands::init::InitTarget::Mac)),
+            Some(&crate::host::fake::mac("m4_pro", 48)),
+            &mut out
+        )
+        .unwrap(),
+        0
+    );
 
     // The scaffolded files must already be canonical under the formatter.
     let mut out = Vec::new();
@@ -3552,4 +3606,626 @@ fn missing_secret_message_lists_every_name_once() {
     assert_eq!(one, "secret 'A' is not set in the environment");
     let two = crate::secret::missing_secrets_message(&["A".to_owned(), "B".to_owned()]);
     assert_eq!(two, "secrets 'A', 'B' are not set in the environment");
+}
+
+// --- host-aware init, plan and doctor; catalog --------------------------------
+
+mod host_catalog {
+    use amicu_engine::host::HostFacts;
+
+    use super::*;
+    use crate::commands::init::{InitTarget, pick_tier, starter_hcl};
+    use crate::host::{HostInfo, fake};
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    fn hosts() -> Vec<(InitTarget, HostInfo)> {
+        let mut v = Vec::new();
+        for gib in [4, 8, 16, 24, 48, 128] {
+            v.push((InitTarget::Mac, fake::mac("m4_pro", gib)));
+            v.push((InitTarget::LinuxCpu, fake::linux(gib, None)));
+            v.push((
+                InitTarget::LinuxCuda,
+                fake::linux(64, Some(("rtx_4090", gib))),
+            ));
+        }
+        v.push((InitTarget::Modal, fake::linux(8, None)));
+        v
+    }
+
+    #[test]
+    fn every_starter_validates_plans_and_fits() {
+        for (target, host) in hosts() {
+            let hcl = starter_hcl(target, Some(&host)).unwrap();
+            let graph = amicu_hcl::parse_graph(&hcl)
+                .unwrap_or_else(|e| panic!("{target:?} on {}: {e}\n{hcl}", host.describe()));
+            let report = report_for(&graph);
+            let errors: Vec<_> = report
+                .diagnostics
+                .iter()
+                .filter(|d| d.severity == amicu_core::diagnostic::Severity::Error)
+                .map(|d| format!("{} {}", d.code, d.message))
+                .collect();
+            assert!(
+                errors.is_empty(),
+                "{target:?} on {}: {errors:?}\n{hcl}",
+                host.describe()
+            );
+            let plan = build_plan(&graph, None).unwrap_or_else(|_| panic!("plan failed: {hcl}"));
+            assert!(!plan.has_errors(), "{target:?} on {}", host.describe());
+            assert_eq!(plan.items.len(), 1);
+        }
+    }
+
+    #[test]
+    fn starters_are_validated_end_to_end_through_the_commands() {
+        for (target, host) in [
+            (InitTarget::Mac, fake::mac("m4_pro", 24)),
+            (
+                InitTarget::LinuxCuda,
+                fake::linux(32, Some(("rtx_4090", 24))),
+            ),
+            (InitTarget::LinuxCpu, fake::linux(16, None)),
+            (InitTarget::Modal, fake::mac("m1", 8)),
+        ] {
+            let td = TempDir::new();
+            let project = Project::new(&td.path);
+            commands::init::run(&project, Some(Some(target)), Some(&host), &mut Vec::new())
+                .unwrap();
+            let mut out = Vec::new();
+            let code =
+                commands::validate::run(&project, false, OutputFormat::Human, &mut out).unwrap();
+            assert_eq!(code, 0, "{target:?}: {}", utf8(out));
+            let mut out = Vec::new();
+            // The secret lookup is injected: the Modal starter needs CHAT_API_KEY.
+            let code = commands::plan::run_with(&project, OutputFormat::Human, &mut out, |_| true)
+                .unwrap();
+            assert_eq!(code, 0, "{target:?}: {}", utf8(out));
+            let mut out = Vec::new();
+            assert_eq!(commands::fmt::run(&project, true, &mut out).unwrap(), 0);
+        }
+    }
+
+    #[test]
+    fn starter_declares_the_detected_host_and_a_model_that_fits() {
+        let hcl = starter_hcl(InitTarget::Mac, Some(&fake::mac("m4_pro", 24))).unwrap();
+        assert!(hcl.contains("m4_pro"), "{hcl}");
+        assert!(hcl.contains("24GiB"), "{hcl}");
+        assert!(hcl.contains("Qwen3-8B-Q4_K_M.gguf"), "{hcl}");
+
+        let small = starter_hcl(InitTarget::Mac, Some(&fake::mac("m1", 8))).unwrap();
+        assert!(small.contains("Qwen3-4B"), "{small}");
+
+        let cuda = starter_hcl(
+            InitTarget::LinuxCuda,
+            Some(&fake::linux(64, Some(("rtx_3060", 12)))),
+        )
+        .unwrap();
+        assert!(cuda.contains("rtx_3060"), "{cuda}");
+        assert!(cuda.contains("n_gpu_layers   = -1"), "{cuda}");
+        assert!(cuda.contains("12GiB"), "{cuda}");
+
+        let cpu = starter_hcl(InitTarget::LinuxCpu, Some(&fake::linux(64, None))).unwrap();
+        assert!(cpu.contains("local_cpu"), "{cpu}");
+        assert!(cpu.contains("n_gpu_layers   = 0"), "{cpu}");
+        // CPU skips the 8B tier even with plenty of memory.
+        assert!(cpu.contains("Qwen3-4B"), "{cpu}");
+    }
+
+    #[test]
+    fn target_defaults_follow_the_host() {
+        assert_eq!(InitTarget::detect(&fake::mac("m4", 16)), InitTarget::Mac);
+        assert_eq!(
+            InitTarget::detect(&fake::linux(32, Some(("rtx_4090", 24)))),
+            InitTarget::LinuxCuda
+        );
+        assert_eq!(
+            InitTarget::detect(&fake::linux(32, None)),
+            InitTarget::LinuxCpu
+        );
+    }
+
+    #[test]
+    fn init_without_target_uses_the_detected_host() {
+        let td = TempDir::new();
+        let project = Project::new(&td.path);
+        let mut out = Vec::new();
+        commands::init::run(&project, Some(None), Some(&fake::linux(16, None)), &mut out).unwrap();
+        let text = utf8(out);
+        assert!(text.contains("Example: linux-cpu."), "{text}");
+        let hcl = std::fs::read_to_string(td.path.join("amicu.hcl")).unwrap();
+        assert!(hcl.contains("local_cpu"));
+    }
+
+    #[test]
+    fn mismatched_or_undetected_host_is_an_error() {
+        let td = TempDir::new();
+        let project = Project::new(&td.path);
+        let err = commands::init::run(
+            &project,
+            Some(Some(InitTarget::Mac)),
+            Some(&fake::linux(16, None)),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("needs a Mac"), "{err}");
+        let err = commands::init::run(
+            &project,
+            Some(Some(InitTarget::LinuxCuda)),
+            Some(&fake::linux(16, None)),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no NVIDIA GPU"), "{err}");
+        let err = commands::init::run(&project, Some(None), None, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("--example"), "{err}");
+        // Nothing was written by the failed attempts.
+        assert!(!td.path.join("amicu.hcl").exists());
+        // Modal needs no host at all.
+        commands::init::run(
+            &project,
+            Some(Some(InitTarget::Modal)),
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn starter_size_is_canonical_and_parses_with_or_without_the_suffix() {
+        let td = TempDir::new();
+        let project = Project::new(&td.path);
+        commands::init::run(
+            &project,
+            Some(Some(InitTarget::Mac)),
+            Some(&fake::mac("m4_pro", 48)),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let hcl = std::fs::read_to_string(td.path.join("amicu.hcl")).unwrap();
+        assert!(hcl.contains("size = \"5027783488B\""), "{hcl}");
+        // The bare form the docs used to show means the same.
+        let bare = hcl.replace("5027783488B", "5027783488");
+        let a = amicu_hcl::parse_graph(&hcl).unwrap();
+        let b = amicu_hcl::parse_graph(&bare).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn tier_picking_follows_memory() {
+        let pick = |gib: u64, cpu| pick_tier(gib * GIB, cpu).id;
+        assert_eq!(pick(48, false), "qwen3_8b");
+        assert_eq!(pick(16, false), "qwen3_8b");
+        assert_eq!(pick(12, false), "qwen3_4b");
+        assert_eq!(pick(6, false), "qwen3_1_7b");
+        assert_eq!(pick(2, false), "qwen3_0_6b");
+        assert_eq!(pick(48, true), "qwen3_4b");
+    }
+
+    const BIG_PROFILE: &str = r#"resource "model" "m" {
+  source {
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen3-4B-GGUF"
+  }
+  architecture   = "qwen3"
+  modalities     = ["text"]
+  artifact {
+    format       = "gguf"
+    quantization = "q4_k_m"
+  }
+  context_length = 8192
+  variant {
+    quantization = "q4_k_m"
+    file         = "m.gguf"
+    size         = "2GiB"
+  }
+}
+
+resource "hardware_profile" "big" {
+  provider = "local_apple"
+  accelerator {
+    kind   = "apple_silicon"
+    model  = "m4_max"
+    count  = 1
+    memory = "128GiB"
+  }
+  memory = "128GiB"
+}
+
+resource "deployment" "d" {
+  model    = model.m.id
+  hardware = hardware_profile.big.id
+  runtime  = "llama_cpp"
+  llama_cpp {
+    context_length = 4096
+    port           = 8000
+    n_gpu_layers   = -1
+  }
+}
+"#;
+
+    fn facts(gib: u64) -> HostFacts {
+        HostFacts {
+            memory: amicu_core::ByteSize::from_bytes(gib * GIB),
+            accelerator_memory: Some(amicu_core::ByteSize::from_bytes(gib * GIB)),
+        }
+    }
+
+    #[test]
+    fn plan_warns_but_succeeds_when_the_profile_exceeds_the_host() {
+        let td = TempDir::new();
+        write(&td.path, "amicu.hcl", BIG_PROFILE);
+        let project = Project::new(&td.path);
+        let mut out = Vec::new();
+        let code = commands::plan::run_with_host(
+            &project,
+            OutputFormat::Human,
+            &mut out,
+            |_| true,
+            &|| Some(facts(16)),
+        )
+        .unwrap();
+        let text = utf8(out);
+        assert_eq!(code, 0, "a host mismatch must not fail plan: {text}");
+        assert!(text.contains("warn: deployment.d"), "{text}");
+        assert!(
+            text.contains("hardware profile `big` declares memory 128.0 GiB"),
+            "{text}"
+        );
+        assert!(text.contains("Plan: 1 action"), "{text}");
+    }
+
+    #[test]
+    fn plan_is_silent_when_the_host_is_big_enough_or_unknown() {
+        let td = TempDir::new();
+        write(&td.path, "amicu.hcl", BIG_PROFILE);
+        let project = Project::new(&td.path);
+        for host in [Some(facts(128)), None] {
+            let mut out = Vec::new();
+            let code = commands::plan::run_with_host(
+                &project,
+                OutputFormat::Human,
+                &mut out,
+                |_| true,
+                &|| host,
+            )
+            .unwrap();
+            assert_eq!(code, 0);
+            assert!(!utf8(out).contains("warn:"));
+        }
+    }
+
+    #[test]
+    fn plan_does_not_probe_the_host_for_remote_profiles() {
+        let td = TempDir::new();
+        write(
+            &td.path,
+            "amicu.hcl",
+            &BIG_PROFILE.replace("local_apple", "modal"),
+        );
+        let project = Project::new(&td.path);
+        let mut out = Vec::new();
+        let probe = || -> Option<HostFacts> { panic!("host must not be probed") };
+        // The config has no api_key, so plan fails on that; the point is the probe.
+        let _ = commands::plan::run_with_host(
+            &project,
+            OutputFormat::Human,
+            &mut out,
+            |_| true,
+            &probe,
+        );
+    }
+
+    #[test]
+    fn doctor_reports_the_profile_against_the_host() {
+        let td = TempDir::new();
+        write(&td.path, "amicu.hcl", BIG_PROFILE);
+        let project = Project::new(&td.path);
+        let run = |host: &HostInfo| {
+            let mut out = Vec::new();
+            commands::doctor::run_with(&project, OutputFormat::Json, &mut out, Ok(host), None)
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+            v["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == "profile")
+                .cloned()
+        };
+        let small = run(&fake::mac("m1", 8)).expect("profile check");
+        assert_eq!(small["status"], "warn");
+        assert!(small["detail"].as_str().unwrap().contains("AMICU-MEM-003"));
+        let big = run(&fake::mac("m4_max", 128)).expect("profile check");
+        assert_eq!(big["status"], "pass");
+    }
+
+    #[test]
+    fn doctor_has_no_profile_check_without_a_config() {
+        let td = TempDir::new();
+        let project = Project::new(&td.path);
+        let mut out = Vec::new();
+        commands::doctor::run_with(
+            &project,
+            OutputFormat::Json,
+            &mut out,
+            Ok(&fake::mac("m1", 8)),
+            None,
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert!(
+            v["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c["name"] != "profile")
+        );
+    }
+
+    #[test]
+    fn catalog_hardware_lists_gpus_and_chips_as_json() {
+        let mut out = Vec::new();
+        commands::catalog::hardware(OutputFormat::Json, &mut out).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let rows = v.as_array().unwrap();
+        let find = |id: &str| {
+            rows.iter()
+                .find(|r| r["id"] == id)
+                .unwrap_or_else(|| panic!("{id}"))
+        };
+        assert_eq!(find("m4_pro")["kind"], "apple_silicon");
+        assert_eq!(
+            find("m4_pro")["memory_gib"],
+            serde_json::json!([24, 48, 64])
+        );
+        assert_eq!(find("rtx_4090")["kind"], "gpu");
+        assert_eq!(find("rtx_4090")["memory_gib"], serde_json::json!([24]));
+    }
+
+    #[test]
+    fn catalog_hardware_human_table_has_a_header_and_rows() {
+        let mut out = Vec::new();
+        commands::catalog::hardware(OutputFormat::Human, &mut out).unwrap();
+        let text = utf8(out);
+        assert!(text.starts_with("ID"), "{text}");
+        assert!(text.contains("m4_pro"));
+        assert!(text.contains("24, 48, 64"));
+    }
+
+    #[test]
+    fn catalog_presets_lists_every_preset() {
+        let mut out = Vec::new();
+        commands::catalog::presets(OutputFormat::Json, &mut out).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let ids: Vec<&str> = v
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids.len(), amicu_recommend::catalog().len());
+        assert!(ids.contains(&"local_dev_chat"));
+        let mut out = Vec::new();
+        commands::catalog::presets(OutputFormat::Human, &mut out).unwrap();
+        assert!(utf8(out).contains("local_dev_chat"));
+    }
+
+    #[test]
+    fn catalog_fits_depends_on_the_host() {
+        let report = |host: &HostInfo| {
+            let mut out = Vec::new();
+            commands::catalog::fits(Ok(host), OutputFormat::Json, &mut out).unwrap();
+            serde_json::from_slice::<serde_json::Value>(&out).unwrap()
+        };
+        let verdict = |v: &serde_json::Value, id: &str| {
+            v["starter_models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["id"] == id)
+                .unwrap()["verdict"]
+                .clone()
+        };
+        let big = report(&fake::mac("m4_pro", 48));
+        assert_eq!(big["version"], "v1");
+        assert_eq!(big["host"]["accelerator"], "m4_pro");
+        assert_eq!(verdict(&big, "qwen3_8b"), "fits");
+
+        let tiny = report(&fake::linux(4, None));
+        assert_eq!(verdict(&tiny, "qwen3_8b"), "too_big");
+        assert_eq!(verdict(&tiny, "qwen3_0_6b"), "fits");
+
+        // A GPU host is judged by its VRAM, not its system memory.
+        let gpu = report(&fake::linux(128, Some(("rtx_3060", 4))));
+        assert_eq!(verdict(&gpu, "qwen3_8b"), "too_big");
+
+        // Presets are evaluated too; the 48 GiB host fits the local dev preset.
+        let preset = big["presets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "local_dev_chat")
+            .unwrap();
+        assert_eq!(preset["verdict"], "fits", "{preset}");
+        let small = report(&fake::linux(4, None));
+        let preset = small["presets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "local_dev_chat")
+            .unwrap();
+        assert_eq!(preset["verdict"], "too_big", "{preset}");
+    }
+
+    #[test]
+    fn catalog_fits_human_output_and_undetected_host() {
+        let mut out = Vec::new();
+        commands::catalog::fits(Ok(&fake::mac("m4_pro", 24)), OutputFormat::Human, &mut out)
+            .unwrap();
+        let text = utf8(out);
+        assert!(text.contains("Host: macos"), "{text}");
+        assert!(text.contains("qwen3_8b"));
+        assert!(text.contains("local_dev_chat"));
+        let err = commands::catalog::fits(
+            Err("unsupported OS: windows"),
+            OutputFormat::Human,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unsupported OS"));
+    }
+
+    // --- empty init, examples/ -------------------------------------------------
+
+    #[test]
+    fn plain_init_writes_only_a_header_that_validates_and_plans_to_nothing() {
+        let td = TempDir::new();
+        let project = Project::new(&td.path);
+        commands::init::run(&project, None, None, &mut Vec::new()).unwrap();
+        let hcl = std::fs::read_to_string(td.path.join("amicu.hcl")).unwrap();
+        assert!(
+            hcl.lines().all(|l| l.starts_with('#') || l.is_empty()),
+            "{hcl}"
+        );
+        assert!(hcl.contains("amicu init --example"));
+        assert!(hcl.contains("amicu catalog"));
+        assert!(hcl.contains("https://amicu.dev/docs"));
+
+        let mut out = Vec::new();
+        assert_eq!(
+            commands::validate::run(&project, false, OutputFormat::Human, &mut out).unwrap(),
+            0,
+            "{}",
+            utf8(out)
+        );
+        let mut out = Vec::new();
+        let code =
+            commands::plan::run_with(&project, OutputFormat::Human, &mut out, |_| true).unwrap();
+        let text = utf8(out);
+        assert_eq!(code, 0, "{text}");
+        assert!(text.contains("No changes"), "{text}");
+        let mut out = Vec::new();
+        assert_eq!(commands::fmt::run(&project, true, &mut out).unwrap(), 0);
+    }
+
+    #[test]
+    fn example_upgrades_an_untouched_header_but_never_a_users_file() {
+        let td = TempDir::new();
+        let project = Project::new(&td.path);
+        let host = fake::mac("m4_pro", 48);
+        commands::init::run(&project, None, None, &mut Vec::new()).unwrap();
+        commands::init::run(&project, Some(None), Some(&host), &mut Vec::new()).unwrap();
+        let hcl = std::fs::read_to_string(td.path.join("amicu.hcl")).unwrap();
+        assert!(hcl.contains("resource \"model\""), "{hcl}");
+
+        // Now the user's own file: a second --example leaves it alone.
+        std::fs::write(td.path.join("amicu.hcl"), "# mine\n").unwrap();
+        commands::init::run(&project, Some(None), Some(&host), &mut Vec::new()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(td.path.join("amicu.hcl")).unwrap(),
+            "# mine\n"
+        );
+    }
+
+    #[test]
+    fn sixteen_gb_cards_get_the_8b_tier() {
+        // A "16 GB" GPU reports 16376 MiB.
+        assert_eq!(pick_tier(16376 * 1024 * 1024, false).id, "qwen3_8b");
+        // A "8 GB" card reports about 8188 MiB.
+        assert_eq!(pick_tier(8188 * 1024 * 1024, false).id, "qwen3_4b");
+        // Well under the threshold still steps down.
+        assert_eq!(pick_tier(14 * GIB, false).id, "qwen3_4b");
+        let hcl = starter_hcl(
+            InitTarget::LinuxCuda,
+            Some(&HostInfo {
+                nvidia: Some(crate::host::NvidiaGpu {
+                    model: "rtx_4080".into(),
+                    count: 1,
+                    memory: amicu_core::ByteSize::from_bytes(16376 * 1024 * 1024),
+                }),
+                ..fake::linux(64, None)
+            }),
+        )
+        .unwrap();
+        assert!(hcl.contains("Qwen3-8B"), "{hcl}");
+    }
+
+    /// The machines the files under `examples/` are generated for.
+    fn reference(target: InitTarget) -> (HostInfo, &'static str) {
+        match target {
+            InitTarget::Mac => (
+                fake::mac("m4_pro", 48),
+                "Apple M4 Pro, 48 GiB unified memory",
+            ),
+            InitTarget::LinuxCuda => (
+                fake::linux(64, Some(("rtx_4090", 24))),
+                "Linux, 64 GiB RAM, one NVIDIA RTX 4090 (24 GiB VRAM)",
+            ),
+            InitTarget::LinuxCpu => (fake::linux(16, None), "Linux, 16 GiB RAM, no GPU"),
+            InitTarget::Modal => (fake::linux(16, None), "no local hardware needed"),
+        }
+    }
+
+    fn example_path(dir: &str, file: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples")
+            .join(dir)
+            .join(file)
+    }
+
+    fn example_dirs() -> [(&'static str, InitTarget); 4] {
+        [
+            ("mac", InitTarget::Mac),
+            ("linux-cuda", InitTarget::LinuxCuda),
+            ("linux-cpu", InitTarget::LinuxCpu),
+            ("modal", InitTarget::Modal),
+        ]
+    }
+
+    /// The expected file: a comment naming the reference machine, then exactly
+    /// what `init --example` writes for it.
+    fn expected_example(target: InitTarget) -> String {
+        let (host, label) = reference(target);
+        let body = crate::commands::init::canonical_starter(target, Some(&host)).unwrap();
+        format!(
+            "# Reference machine: {label}.\n# `amicu init --example` sizes the starter to your own machine instead.\n\n{body}"
+        )
+    }
+
+    #[test]
+    fn example_files_match_init_output_and_validate_and_plan() {
+        // `AMICU_UPDATE_EXAMPLES=1 cargo test -p amicu-cli example_files` rewrites them.
+        let update = std::env::var_os("AMICU_UPDATE_EXAMPLES").is_some();
+        for (dir, target) in example_dirs() {
+            let path = example_path(dir, "amicu.hcl");
+            let want = expected_example(target);
+            if update {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, &want).unwrap();
+            }
+            let have = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            assert_eq!(
+                have, want,
+                "examples/{dir}/amicu.hcl is stale; rerun with AMICU_UPDATE_EXAMPLES=1"
+            );
+            assert!(
+                example_path(dir, "README.md").is_file(),
+                "examples/{dir}/README.md"
+            );
+
+            let td = TempDir::new();
+            write(&td.path, "amicu.hcl", &have);
+            let project = Project::new(&td.path);
+            let mut out = Vec::new();
+            let code =
+                commands::validate::run(&project, false, OutputFormat::Human, &mut out).unwrap();
+            assert_eq!(code, 0, "{dir}: {}", utf8(out));
+            let mut out = Vec::new();
+            let code = commands::plan::run_with(&project, OutputFormat::Human, &mut out, |_| true)
+                .unwrap();
+            assert_eq!(code, 0, "{dir}: {}", utf8(out));
+        }
+    }
 }

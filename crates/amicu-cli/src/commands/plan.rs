@@ -25,15 +25,32 @@ pub(crate) fn run(
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
-    run_with(project, output, out, crate::secret::env_has_secret)
+    run_with_host(project, output, out, crate::secret::env_has_secret, &|| {
+        crate::host::HostInfo::detect().ok().map(|h| h.facts())
+    })
 }
 
-/// [`run`] with the secret lookup injected.
+/// [`run`] with the secret lookup injected and no host check.
+#[cfg(test)]
 pub(crate) fn run_with(
     project: &Project,
     output: OutputFormat,
     out: &mut dyn Write,
     secret_is_set: fn(&str) -> bool,
+) -> Result<u8, CliError> {
+    run_with_host(project, output, out, secret_is_set, &|| None)
+}
+
+/// [`run_with`] plus the host facts, injected. `host` is called at most once,
+/// and only when a deployment targets a local profile, so a project that
+/// plans for Modal never probes the machine. `None` (detection failed)
+/// skips the host check.
+pub(crate) fn run_with_host(
+    project: &Project,
+    output: OutputFormat,
+    out: &mut dyn Write,
+    secret_is_set: fn(&str) -> bool,
+    host: &dyn Fn() -> Option<amicu_engine::host::HostFacts>,
 ) -> Result<u8, CliError> {
     let graph = project.load_graph()?;
 
@@ -76,6 +93,18 @@ pub(crate) fn run_with(
     // apply would fail on these after starting work, so fail here instead.
     let unset = crate::secret::missing_secrets_diagnostics(&result, secret_is_set);
     result.diagnostics.extend(unset);
+
+    // A local profile that declares more memory than this machine has: a
+    // warning (AMICU-MEM-003), since plan may run elsewhere than the target.
+    let has_local = graph.hardware_profiles.iter().any(|h| {
+        amicu_core::resource::is_local_provider(&h.provider)
+            && graph.deployments.iter().any(|d| d.hardware_profile == h.id)
+    });
+    if has_local && let Some(facts) = host() {
+        result
+            .diagnostics
+            .extend(amicu_engine::host::host_diagnostics(&graph, &facts));
+    }
 
     if result.has_errors() {
         // Cannot produce a reviewable plan for an invalid config.

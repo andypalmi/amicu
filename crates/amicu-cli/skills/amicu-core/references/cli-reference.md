@@ -4,12 +4,13 @@
 
 | Command | Effect |
 |---|---|
-| `amicu init` | Scaffold `amicu.hcl`, `variables.amicu.hcl`, `.amicu/`. Idempotent; never overwrites. |
+| `amicu init [--example [mac\|linux-cuda\|linux-cpu\|modal]]` | Scaffold `variables.amicu.hcl`, `.amicu/` and an `amicu.hcl` holding only a comment header. `--example` writes a working starter instead; a bare `--example` detects macOS (`mac`), Linux with `nvidia-smi` (`linux-cuda`) or other Linux (`linux-cpu`). Local starters declare this machine's memory and pick a Qwen3 GGUF that fits; on an Intel Mac `mac` writes a `local_cpu` profile with `n_gpu_layers = 0`. Never overwrites a file you edited. Same starters in `examples/`. |
 | `amicu fmt [--check]` | Canonically format `*.hcl`. `--check` reports drift (exit 1) without writing. |
 | `amicu validate [--fix] [--output json]` | Structural, reference, and capacity checks. `--fix` applies safe deterministic repairs (re-formatting only). |
 | `amicu plan [--output json]` | Compute the actions the next apply would take, diffed against state. |
 | `amicu apply [--auto-approve]` | Execute the reviewed plan. Prompts for approval unless `--auto-approve`. |
 | `amicu doctor [--output json]` | Environment + project diagnostics. |
+| `amicu catalog hardware\|presets\|fits [--output json]` | Read-only, offline. `hardware`: known GPUs and Apple Silicon chips with memory sizes. `presets`: the wizard presets. `fits`: which starter models and presets fit this machine's memory. Works without a project. |
 | `amicu skill export --target <t> [--path <dir>]` | Render agent skills for a coding agent. Works without a project. |
 | `amicu modal <subcommand>` | Operate a Modal deployment; see "Modal commands" below. Works without a project. |
 

@@ -6,7 +6,7 @@ description: What Amicu is, what it is not, and which providers it can deploy to
 Amicu is a command-line tool for deploying open-weight LLM inference. You describe models, hardware, and deployments in HCL (`amicu.hcl`). Amicu checks the configuration, shows a plan against recorded state, and applies it by running llama.cpp or vLLM for you.
 
 ```bash
-amicu init       # scaffold amicu.hcl and .amicu/
+amicu init       # scaffold .amicu/ and an empty amicu.hcl (add --example for a starter)
 amicu validate   # structural, reference, capacity, and policy checks
 amicu plan       # what apply would do, diffed against state
 amicu apply      # start, update, or stop deployments after approval

@@ -45,6 +45,9 @@ signal; the number identifies the specific check.
   (`top_p` outside `[0, 1]`, `parallel_slots = 0`, ...). The message names the
   field. `ubatch_size` above `batch_size` is only a warning (llama-server clamps it).
 - `AMICU-MEM-001` / `AMICU-MEM-002` - capacity/memory fit failures.
+- `AMICU-MEM-003` - warning: a local hardware profile declares more memory than
+  this machine has (`plan` and `doctor` report it). Fix the profile, or ignore
+  it when planning for another machine.
 - `AMICU-POLICY-001` - a governance/residency rule was violated.
 - `AMICU-POLICY-004` - a secret-designated field (`api_key`, `token`, ...) was
   given as a literal. Use `secret("NAME")`.

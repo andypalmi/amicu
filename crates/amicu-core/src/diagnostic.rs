@@ -395,6 +395,11 @@ pub mod catalog {
     /// `AMICU-MEM-002` - a single artifact/weight file exceeds the available
     /// size budget, independent of aggregate VRAM.
     pub const MEM_ARTIFACT_OVERSIZE: DiagnosticCode = DiagnosticCode::new(Category::Mem, 2);
+    /// `AMICU-MEM-003` - a local hardware profile declares more memory (or
+    /// accelerator memory) than the machine running `plan` has. Warning only:
+    /// `plan` may run on a different machine than the deployment target (CI),
+    /// so the declared profile is not proof of a mistake.
+    pub const MEM_PROFILE_EXCEEDS_HOST: DiagnosticCode = DiagnosticCode::new(Category::Mem, 3);
     /// `AMICU-POLICY-001` - deployment exceeds the configured budget.
     pub const POLICY_BUDGET_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Policy, 1);
     // --- region / data-residency validation ---
@@ -482,7 +487,7 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 37] {
+    pub const fn all() -> [DiagnosticCode; 38] {
         [
             PARSE_UNCLOSED_BLOCK,
             PARSE_INVALID_SYNTAX,
@@ -503,6 +508,7 @@ pub mod catalog {
             CAP_RUNTIME_FIELD_INVALID,
             MEM_VRAM_EXCEEDED,
             MEM_ARTIFACT_OVERSIZE,
+            MEM_PROFILE_EXCEEDS_HOST,
             POLICY_BUDGET_EXCEEDED,
             POLICY_REGION_RESIDENCY,
             POLICY_PROVIDER_NOT_ALLOWED,
