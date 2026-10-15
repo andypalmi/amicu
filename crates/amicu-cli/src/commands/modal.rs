@@ -502,9 +502,17 @@ fn forget_stopped_app(
         }
         Ok(None) => {}
         Err(error @ CliError::StateLocked(_)) => {
-            eprintln!("warning: skipped updating local state: {error}");
+            let _ = writeln!(
+                io::stderr(),
+                "warning: skipped updating local state: {error}"
+            );
         }
-        Err(error) => eprintln!("warning: could not update local state: {error}"),
+        Err(error) => {
+            let _ = writeln!(
+                io::stderr(),
+                "warning: could not update local state: {error}"
+            );
+        }
     }
     Ok(())
 }

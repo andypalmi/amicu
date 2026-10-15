@@ -372,7 +372,8 @@ impl Project {
         // The new state is already in place; a failed directory sync only
         // weakens crash durability, so warn rather than fail the save.
         if let Err(e) = sync_dir(&dir) {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr(),
                 "warning: state saved but could not sync {}: {e}",
                 dir.display()
             );

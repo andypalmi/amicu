@@ -126,6 +126,8 @@ consulted for that request at all.
 | `AMICU_SECURITY_HASH_KEY` | **yes** | unset | Secret key (**>= 32 bytes**, e.g. `openssl rand -base64 48`) used to pseudonymize emails and client IPs in `amicu::security` log events and in the sign-in backoff / per-email limiter keys. **Required when `AMICU_ENV=production`** (startup error otherwise); the SAME value on every replica. Store in Secret Manager. Rotating it resets backoff counters and changes the hashes in logs. |
 | `AMICU_EMAIL_RATE_LIMIT_MAX` / `AMICU_EMAIL_RATE_LIMIT_WINDOW_SECS` | no | `5` / `900` | Per-email budget for `/recover` and `/verify/resend`. |
 | `AMICU_SIGNIN_EMAIL_RATE_LIMIT_MAX` | no | `100` | Per-email budget of FAILED sign-ins per window. Once exhausted, only networks that signed in successfully to that account in the last 30 days may still attempt; others get `429` until the window passes (so during an active distributed attack the owner on a brand-new network is refused). |
+| `SENTRY_DSN` | **yes** | unset | Opt-in error reporting. Unset = disabled, no behaviour change. When set, panics and 5xx responses (method + route template only) are sent to Sentry, errors only (no tracing or profiling). Events are scrubbed server-side of user, request data, headers, cookies, emails, bearer tokens and `token=`/`code=`/`key=`/`secret=`/`password=` values. In the Sentry project enable "Prevent Storing of IP Addresses". Store in Secret Manager. |
+| `SENTRY_ENVIRONMENT` | no | `AMICU_ENV` value | Environment name tagged on events. |
 
 **Production client identity.** The per-network sign-in backoff and the
 per-IP limits trust the client IP, which behind Cloud Run/Cloudflare is only

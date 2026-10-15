@@ -22,6 +22,13 @@
 //! `development` (the default) only warns, so local runs and pre-database
 //! self-host stay zero-config.
 //!
+//! ## Error reporting (opt-in)
+//!
+//! Setting `SENTRY_DSN` enables Sentry error reporting (panics and 5xx
+//! responses, scrubbed; see [`error_reporting`]). `SENTRY_ENVIRONMENT`
+//! overrides the environment name (default: the `AMICU_ENV` value). Unset, nothing
+//! is initialised.
+//!
 //! ## Two-role production model
 //!
 //! In `production`, this bootstrap deliberately does NOT migrate at boot (see
@@ -238,6 +245,7 @@
 //! Cloudflare edge itself, never the client) carry the real client IP instead
 //! - see [`amicu_api::edge`]'s docs for the full request-chain rationale.
 
+pub mod error_reporting;
 pub mod signing_key;
 pub mod smtp;
 
@@ -1740,7 +1748,15 @@ pub async fn run(config: Config) -> Result<(), Error> {
     let addr = listener.local_addr()?;
     eprintln!("{}", startup_banner(config.environment));
     eprintln!("amicu-server listening on http://{addr}");
-    serve(listener, built.router, shutdown_signal()).await?;
+    // 5xx reporting is mounted only when Sentry was initialised (SENTRY_DSN set).
+    let router = if sentry::Hub::current().client().is_some() {
+        built.router.layer(axum::middleware::from_fn(
+            error_reporting::report_server_errors,
+        ))
+    } else {
+        built.router
+    };
+    serve(listener, router, shutdown_signal()).await?;
     if let Some(pool) = built.pool {
         /// Upper bound on how long shutdown waits for in-flight connections
         /// to drain before giving up on a clean pool close. Bounded so a
