@@ -788,11 +788,84 @@ fn skill_export_works_without_a_project() {
     // A temp dir with no amicu config: export must still succeed.
     let td = TempDir::new();
     let mut out = Vec::new();
-    let code =
-        commands::skill::export(crate::SkillTarget::ClaudeCode, Some(&td.path), &mut out).unwrap();
+    let code = commands::skill::export(
+        Some(crate::SkillTarget::ClaudeCode),
+        Some(&td.path),
+        &mut out,
+    )
+    .unwrap();
     assert_eq!(code, 0);
     assert!(td.path.join("amicu-core/SKILL.md").is_file());
     assert!(td.path.join("amicu-presets/SKILL.md").is_file());
+    let out = utf8(out);
+    assert!(out.starts_with("Exporting 8 skills for claude-code to "));
+    assert!(
+        !out.contains("for cursor"),
+        "single target must not export others"
+    );
+}
+
+#[test]
+fn skill_export_without_target_writes_every_target() {
+    use crate::SkillTarget;
+
+    let td = TempDir::new();
+    let plan: Vec<(SkillTarget, std::path::PathBuf)> = SkillTarget::ALL
+        .iter()
+        .map(|&t| (t, td.path.join(t.label())))
+        .collect();
+    let mut out = Vec::new();
+    commands::skill::export_plan(&plan, &mut out).unwrap();
+
+    let out = utf8(out);
+    let mut last = 0;
+    for label in ["claude-code", "cursor", "windsurf", "generic"] {
+        let header = format!("Exporting 8 skills for {label} to ");
+        let at = out
+            .find(&header)
+            .unwrap_or_else(|| panic!("no header for {label}"));
+        assert!(at >= last, "targets must be listed in fixed order");
+        last = at;
+        for name in ["amicu-core", "amicu-presets"] {
+            let written = td.path.join(label).join(name).join("SKILL.md");
+            assert!(written.is_file(), "{label}: {} missing", written.display());
+            assert!(out.contains(&written.display().to_string()));
+        }
+    }
+    assert_eq!(out.matches("Exporting ").count(), 4);
+}
+
+#[test]
+fn skill_export_without_target_rejects_path() {
+    let td = TempDir::new();
+    let mut out = Vec::new();
+    let err = commands::skill::export(None, Some(&td.path), &mut out).unwrap_err();
+    assert!(err.to_string().contains("--path needs --target"));
+    assert!(out.is_empty(), "nothing may be written before the refusal");
+    assert!(std::fs::read_dir(&td.path).unwrap().next().is_none());
+}
+
+#[test]
+fn skill_export_default_roots_are_disjoint() {
+    use crate::SkillTarget;
+
+    let plan: Vec<(SkillTarget, std::path::PathBuf)> = SkillTarget::ALL
+        .iter()
+        .map(|&t| {
+            (
+                t,
+                std::path::PathBuf::from("/project").join(t.default_root()),
+            )
+        })
+        .collect();
+    commands::skill::check_disjoint(&plan).expect("default layouts must not collide");
+
+    let shared = vec![
+        (SkillTarget::Cursor, std::path::PathBuf::from("/out")),
+        (SkillTarget::Generic, std::path::PathBuf::from("/out")),
+    ];
+    let err = commands::skill::check_disjoint(&shared).unwrap_err();
+    assert!(err.to_string().contains("overlapping directories"));
 }
 
 #[test]

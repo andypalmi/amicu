@@ -203,10 +203,10 @@ enum ModalCommand {
 enum SkillCommand {
     /// Render the canonical agent skills into a target-specific layout.
     Export {
-        /// Coding agent to render skills for.
+        /// Coding agent to render skills for. Omit to export every target.
         #[arg(long, value_enum)]
-        target: SkillTarget,
-        /// Output directory (overrides the target default; required for generic).
+        target: Option<SkillTarget>,
+        /// Output directory (overrides the target default). Needs `--target`.
         #[arg(long)]
         path: Option<PathBuf>,
     },
@@ -226,6 +226,14 @@ enum SkillTarget {
 }
 
 impl SkillTarget {
+    /// Every target, in the order `skill export` without `--target` writes them.
+    const ALL: [SkillTarget; 4] = [
+        SkillTarget::ClaudeCode,
+        SkillTarget::Cursor,
+        SkillTarget::Windsurf,
+        SkillTarget::Generic,
+    ];
+
     fn default_root(self) -> &'static str {
         match self {
             SkillTarget::ClaudeCode => ".claude/skills",
