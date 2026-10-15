@@ -58,14 +58,17 @@ enum Command {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     init_logging();
-    // Held for the process lifetime so queued events flush on exit; `None`
-    // (and no behaviour change) unless SENTRY_DSN is set.
-    let _sentry = amicu_server::error_reporting::init(cli.config.environment);
     let result = match cli.command {
         Some(Command::Migrate) => amicu_server::migrate().await,
         Some(Command::GenSigningKey) => amicu_server::gen_signing_key(),
         Some(Command::OutboxDrain) => amicu_server::outbox_drain(&cli.config).await,
-        None => amicu_server::run(cli.config).await,
+        None => {
+            // Serve path only (not migrate / gen-signing-key / outbox-drain).
+            // The guard flushes queued events on drop; `None` (no behaviour
+            // change) unless SENTRY_DSN is set.
+            let _sentry = amicu_server::error_reporting::init(cli.config.environment);
+            amicu_server::run(cli.config).await
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
