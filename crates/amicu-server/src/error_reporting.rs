@@ -206,13 +206,42 @@ pub fn scrub_text(input: &str) -> String {
     let s = redact_userinfo(input);
     let s = redact_jwts(&s);
     let s = redact_api_keys(&s);
-    let s = redact_keyed(&s);
     let s = redact_bearer(&s);
+    let s = redact_keyed(&s);
     redact_emails(&s)
 }
 
 fn is_value_end(c: char) -> bool {
     c.is_whitespace() || matches!(c, '&' | '"' | '\'' | ',' | ';' | ')' | '>' | '<' | '\\')
+}
+
+/// End of an unquoted value. Quotes inside it are part of the value.
+fn is_unquoted_end(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '&' | ',' | ';' | ')' | '>' | '<' | '\\' | '}')
+}
+
+/// `Ident(...)` at the start of `s` (a Debug-wrapped value such as
+/// `Some(Secret("x"))`): the length through the matching `)`, or all of `s`
+/// if unbalanced.
+fn wrapper_len(s: &str) -> Option<usize> {
+    let ident = s.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))?;
+    if ident == 0 || !s[ident..].starts_with('(') {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (i, c) in s[ident..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(ident + i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(s.len())
 }
 
 fn is_token_char(c: char) -> bool {
@@ -230,7 +259,21 @@ fn redact_userinfo(input: &str) -> String {
         let auth_len = rest
             .find(|c: char| c.is_whitespace() || matches!(c, '/' | '?' | '#' | '"' | '\''))
             .unwrap_or(rest.len());
-        if let Some(at) = rest[..auth_len].rfind('@') {
+        let mut at = rest[..auth_len].rfind('@');
+        if at.is_none() {
+            // A password containing `/`, `?` or `#` ends the authority early. Look
+            // on to the next whitespace, but only when the authority already
+            // looks like `user:password` (a non-numeric part after `:`), so
+            // `https://host:8080/a@b` and `https://host/a@b` stay intact.
+            let userish = rest[..auth_len]
+                .split_once(':')
+                .is_some_and(|(_, p)| !p.bytes().all(|c| c.is_ascii_digit()));
+            if userish {
+                let ws = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                at = rest[..ws].rfind('@');
+            }
+        }
+        if let Some(at) = at {
             out.push_str(REDACTED);
             rest = &rest[at..];
         }
@@ -366,7 +409,7 @@ fn redact_key(input: &str, name: &str, allow_joined: bool) -> String {
         let rest = &input[j..];
         let len = match quote {
             Some(q) => rest.find([q as char, '\\']),
-            None => rest.find(is_value_end),
+            None => wrapper_len(rest).or_else(|| rest.find(is_unquoted_end)),
         }
         .unwrap_or(rest.len());
         if len > 0 {
@@ -559,6 +602,32 @@ mod tests {
             r#"{\"secret\":\"[redacted]\"}"#
         );
         assert_eq!(scrub_text("token=&code=&x"), "token=&code=&x");
+    }
+
+    #[test]
+    fn redacts_debug_wrapped_and_nested_secrets() {
+        assert_eq!(
+            scrub_text(r#"password: Some("hunter2") ok"#),
+            "password: [redacted] ok"
+        );
+        assert_eq!(
+            scrub_text(r#"secret: Secret("x") ok"#),
+            "secret: [redacted] ok"
+        );
+        assert_eq!(
+            scrub_text(r#"token: Some(Secret("x")) ok"#),
+            "token: [redacted] ok"
+        );
+        assert_eq!(scrub_text(r#"key=ab"cd ok"#), "key=[redacted] ok");
+        assert_eq!(
+            scrub_text("token=Bearer abc ok"),
+            "token=[redacted] [redacted] ok"
+        );
+        assert_eq!(
+            scrub_text("postgres://u:pa/ss@h/db failed"),
+            "postgres://[redacted]@h/db failed"
+        );
+        assert_eq!(scrub_text("http://host:8080/a@b"), "http://host:8080/a@b");
     }
 
     #[test]
