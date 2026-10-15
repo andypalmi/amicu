@@ -41,7 +41,7 @@ impl OutputFormat {
     }
 }
 
-/// Amicu: declarative local LLM serving.
+/// Manage open LLMs and deploy them as code: locally or on cloud GPUs.
 #[derive(Debug, Parser)]
 #[command(name = "amicu", version, about)]
 struct Cli {
