@@ -1233,6 +1233,7 @@ impl Rig {
             purge: self.purge,
             proxy_tokens: amicu_modal::proxy_auth::TokenConfig::from_env,
             interactive: true,
+            secret_is_set: |_| true,
         }
     }
     fn stopped(&self) -> Vec<String> {
@@ -3379,4 +3380,80 @@ fn destroy_outside_a_project_creates_no_state_dir() {
     assert_eq!(code, 0);
     assert_eq!(utf8(out), "Nothing to destroy.\n");
     assert!(!td.path.join(".amicu").exists());
+}
+
+// ---- unset secrets are caught before anything starts -------------------------
+
+fn nothing_set(_: &str) -> bool {
+    false
+}
+
+#[test]
+fn plan_errors_on_an_unset_secret_naming_it_and_never_a_value() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let mut out = Vec::new();
+    let code =
+        commands::plan::run_with(&project, OutputFormat::Human, &mut out, nothing_set).unwrap();
+    let text = utf8(out);
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("AMICU-POLICY-002"), "{text}");
+    assert!(text.contains("'SUPPORT_LOCAL_API_KEY'"), "{text}");
+
+    // Set: the plan works and still shows the key redacted.
+    let mut out = Vec::new();
+    let code = commands::plan::run_with(&project, OutputFormat::Human, &mut out, |_| true).unwrap();
+    let text = utf8(out);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("******"), "{text}");
+}
+
+#[test]
+fn apply_with_an_unset_secret_fails_before_any_state_or_start() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let rig = Rig::new();
+    let mut env = rig.env();
+    env.secret_is_set = nothing_set;
+    let mut out = Vec::new();
+    let code = commands::apply::run_with(
+        &project,
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &env,
+    )
+    .unwrap();
+    let text = utf8(out);
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("'SUPPORT_LOCAL_API_KEY'"), "{text}");
+    assert!(project.load_state().unwrap().is_none(), "no state written");
+    assert_eq!(rig.stopped().len(), 0);
+
+    // Set: apply goes ahead.
+    assert_eq!(apply_with(&project, &rig).unwrap(), 0);
+    assert!(project.load_state().unwrap().is_some());
+}
+
+#[test]
+fn an_unset_secret_of_an_unchanged_deployment_blocks_nothing() {
+    let td = TempDir::new();
+    let project = saved(&td, &running_host_state());
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let mut out = Vec::new();
+    let code =
+        commands::plan::run_with(&project, OutputFormat::Human, &mut out, nothing_set).unwrap();
+    assert_eq!(code, 0, "{}", utf8(out));
+}
+
+#[test]
+fn missing_secret_message_lists_every_name_once() {
+    let one = crate::secret::missing_secrets_message(&["A".to_owned()]);
+    assert_eq!(one, "secret 'A' is not set in the environment");
+    let two = crate::secret::missing_secrets_message(&["A".to_owned(), "B".to_owned()]);
+    assert_eq!(two, "secrets 'A', 'B' are not set in the environment");
 }

@@ -21,7 +21,7 @@ Start with `amicu doctor`. Then read the diagnostic code: the category tells you
 
 ## Apply
 
-**`secret 'NAME' is not set in the environment`.** Export the variable named in `secret("NAME")` in the shell that runs `amicu apply`.
+**`secret 'NAME' is not set in the environment`.** Export the variable named in `secret("NAME")` in the shell that runs `amicu plan` and `amicu apply`. Both report every unset secret at once, before anything is started.
 
 **`AMICU-POLICY-008`.** The key is empty or contains a comma, whitespace, or non-ASCII characters. Regenerate it with `openssl rand -hex 32`.
 
