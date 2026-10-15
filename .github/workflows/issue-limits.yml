@@ -9,6 +9,7 @@ permissions: {}
 jobs:
   limits:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       issues: write
     steps:
@@ -40,8 +41,45 @@ jobs:
               return;
             }
 
-            if ((issue.body || '').length > MAX_BODY) {
-              await github.rest.issues.addLabels({
-                owner, repo, issue_number: issue.number, labels: ['needs-trim'],
-              });
+            // Issue-form bodies render each field as "### <label>" then the value.
+            // Label -> max characters. Logs/output/command fields are exempt (not listed).
+            const FIELD_LIMITS = {
+              'Description': 1000,
+              'Problem': 1000,
+              'Proposed behaviour': 1000,
+              'Expected': 500,
+              'Actual': 500,
+              'Alternatives': 500,
+            };
+
+            const body = issue.body || '';
+            const reasons = [];
+
+            if (body.length > MAX_BODY) {
+              reasons.push(`the whole issue is ${body.length} characters (limit ${MAX_BODY})`);
             }
+
+            for (const section of body.split(/^### /m).slice(1)) {
+              const nl = section.indexOf('\n');
+              const label = (nl === -1 ? section : section.slice(0, nl)).trim();
+              const value = (nl === -1 ? '' : section.slice(nl + 1)).trim();
+              const limit = FIELD_LIMITS[label];
+              if (limit === undefined || value === '_No response_') continue;
+              if (value.length > limit) {
+                reasons.push(`"${label}" is ${value.length} characters (limit ${limit})`);
+              }
+            }
+
+            if (reasons.length === 0) return;
+
+            const labels = issue.labels.map(l => (typeof l === 'string' ? l : l.name));
+            if (labels.includes('needs-trim')) return;
+
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number: issue.number, labels: ['needs-trim'],
+            });
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: issue.number,
+              body: `Please shorten this issue: ${reasons.join('; ')}. Logs and command output are exempt. Edit the issue to trim it; it stays open.`,
+            });
+

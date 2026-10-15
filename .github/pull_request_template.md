@@ -10,3 +10,4 @@ Closes #
 
 - [ ] PR title is a conventional commit, e.g. `feat(cli): add doctor check for llama-server`
 - [ ] Linked issue above (required; PRs without one are closed)
+- [ ] No secrets or private infrastructure details in the diff
