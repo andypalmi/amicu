@@ -16,9 +16,9 @@ const VALID_CONFIG: &str = r#"# a comment that canonical formatting drops
 resource "model" "support_chat" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "unsloth/Qwen3.5-9B-GGUF"
   }
-  architecture   = "qwen2"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
@@ -28,7 +28,7 @@ resource "model" "support_chat" {
   variant {
     quantization = "q4_k_m"
     file         = "model.gguf"
-    size         = "4GiB"
+    size         = "5680522464B"
   }
 }
 
@@ -83,9 +83,9 @@ resource "deployment" "orphan" {
 const DUP_MODEL: &str = r#"resource "model" "support_chat" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "unsloth/Qwen3.5-9B-GGUF"
   }
-  architecture   = "qwen2"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
@@ -95,7 +95,7 @@ const DUP_MODEL: &str = r#"resource "model" "support_chat" {
   variant {
     quantization = "q4_k_m"
     file         = "model.gguf"
-    size         = "4GiB"
+    size         = "5680522464B"
   }
 }
 "#;
@@ -104,9 +104,9 @@ const DUP_MODEL: &str = r#"resource "model" "support_chat" {
 const SECOND_MODEL: &str = r#"resource "model" "summarizer" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "unsloth/Qwen3.5-9B-GGUF"
   }
-  architecture   = "qwen2"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
@@ -116,7 +116,7 @@ const SECOND_MODEL: &str = r#"resource "model" "summarizer" {
   variant {
     quantization = "q4_k_m"
     file         = "model.gguf"
-    size         = "4GiB"
+    size         = "5680522464B"
   }
 }
 "#;
@@ -125,9 +125,9 @@ const SECOND_MODEL: &str = r#"resource "model" "summarizer" {
 const RESIDENCY_MODEL_AND_DEPLOYMENT: &str = r#"resource "model" "support_chat" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "unsloth/Qwen3.5-9B-GGUF"
   }
-  architecture   = "qwen2"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
@@ -137,7 +137,7 @@ const RESIDENCY_MODEL_AND_DEPLOYMENT: &str = r#"resource "model" "support_chat" 
   variant {
     quantization = "q4_k_m"
     file         = "model.gguf"
-    size         = "4GiB"
+    size         = "5680522464B"
   }
 }
 
@@ -3691,10 +3691,10 @@ mod host_catalog {
         let hcl = starter_hcl(InitTarget::Mac, Some(&fake::mac("m4_pro", 24))).unwrap();
         assert!(hcl.contains("m4_pro"), "{hcl}");
         assert!(hcl.contains("24GiB"), "{hcl}");
-        assert!(hcl.contains("Qwen3-8B-Q4_K_M.gguf"), "{hcl}");
+        assert!(hcl.contains("Qwen3.5-9B-Q4_K_M.gguf"), "{hcl}");
 
         let small = starter_hcl(InitTarget::Mac, Some(&fake::mac("m1", 8))).unwrap();
-        assert!(small.contains("Qwen3-4B"), "{small}");
+        assert!(small.contains("Qwen3.5-4B"), "{small}");
 
         let cuda = starter_hcl(
             InitTarget::LinuxCuda,
@@ -3709,7 +3709,7 @@ mod host_catalog {
         assert!(cpu.contains("local_cpu"), "{cpu}");
         assert!(cpu.contains("n_gpu_layers   = 0"), "{cpu}");
         // CPU skips the 8B tier even with plenty of memory.
-        assert!(cpu.contains("Qwen3-4B"), "{cpu}");
+        assert!(cpu.contains("Qwen3.5-4B"), "{cpu}");
     }
 
     #[test]
@@ -3778,14 +3778,14 @@ mod host_catalog {
         commands::init::run(
             &project,
             Some(Some(InitTarget::Mac)),
-            Some(&fake::mac("m4_pro", 48)),
+            Some(&fake::mac("m4_pro", 24)),
             &mut Vec::new(),
         )
         .unwrap();
         let hcl = std::fs::read_to_string(td.path.join("amicu.hcl")).unwrap();
-        assert!(hcl.contains("size = \"5027783488B\""), "{hcl}");
+        assert!(hcl.contains("size = \"5680522464B\""), "{hcl}");
         // The bare form the docs used to show means the same.
-        let bare = hcl.replace("5027783488B", "5027783488");
+        let bare = hcl.replace("5680522464B", "5680522464");
         let a = amicu_hcl::parse_graph(&hcl).unwrap();
         let b = amicu_hcl::parse_graph(&bare).unwrap();
         assert_eq!(a, b);
@@ -3794,20 +3794,25 @@ mod host_catalog {
     #[test]
     fn tier_picking_follows_memory() {
         let pick = |gib: u64, cpu| pick_tier(gib * GIB, cpu).id;
-        assert_eq!(pick(48, false), "qwen3_8b");
-        assert_eq!(pick(16, false), "qwen3_8b");
-        assert_eq!(pick(12, false), "qwen3_4b");
-        assert_eq!(pick(6, false), "qwen3_1_7b");
-        assert_eq!(pick(2, false), "qwen3_0_6b");
-        assert_eq!(pick(48, true), "qwen3_4b");
+        assert_eq!(pick(48, false), "qwen35_27b");
+        assert_eq!(pick(32, false), "qwen35_27b");
+        assert_eq!(pick(24, false), "qwen35_9b");
+        assert_eq!(pick(16, false), "qwen35_9b");
+        assert_eq!(pick(12, false), "qwen35_4b");
+        assert_eq!(pick(6, false), "qwen35_2b");
+        assert_eq!(pick(2, false), "qwen35_0_8b");
+        assert_eq!(pick(48, true), "qwen35_4b");
+        // A "32 GB" machine reports a little under 32 GiB.
+        assert_eq!(pick_tier(31 * GIB, false).id, "qwen35_27b");
+        assert_eq!(pick_tier(30 * GIB, false).id, "qwen35_9b");
     }
 
     const BIG_PROFILE: &str = r#"resource "model" "m" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen3-4B-GGUF"
+    reference = "unsloth/Qwen3.5-4B-GGUF"
   }
-  architecture   = "qwen3"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
@@ -4030,15 +4035,15 @@ resource "deployment" "d" {
         let big = report(&fake::mac("m4_pro", 48));
         assert_eq!(big["version"], "v1");
         assert_eq!(big["host"]["accelerator"], "m4_pro");
-        assert_eq!(verdict(&big, "qwen3_8b"), "fits");
+        assert_eq!(verdict(&big, "qwen35_9b"), "fits");
 
         let tiny = report(&fake::linux(4, None));
-        assert_eq!(verdict(&tiny, "qwen3_8b"), "too_big");
-        assert_eq!(verdict(&tiny, "qwen3_0_6b"), "fits");
+        assert_eq!(verdict(&tiny, "qwen35_9b"), "too_big");
+        assert_eq!(verdict(&tiny, "qwen35_0_8b"), "fits");
 
         // A GPU host is judged by its VRAM, not its system memory.
         let gpu = report(&fake::linux(128, Some(("rtx_3060", 4))));
-        assert_eq!(verdict(&gpu, "qwen3_8b"), "too_big");
+        assert_eq!(verdict(&gpu, "qwen35_9b"), "too_big");
 
         // Presets are evaluated too; the 48 GiB host fits the local dev preset.
         let preset = big["presets"]
@@ -4065,7 +4070,7 @@ resource "deployment" "d" {
             .unwrap();
         let text = utf8(out);
         assert!(text.contains("Host: macos"), "{text}");
-        assert!(text.contains("qwen3_8b"));
+        assert!(text.contains("qwen35_9b"));
         assert!(text.contains("local_dev_chat"));
         let err = commands::catalog::fits(
             Err("unsupported OS: windows"),
@@ -4128,14 +4133,49 @@ resource "deployment" "d" {
         );
     }
 
+    /// Every tier, on the smallest memory it is picked at, gets a context
+    /// that passes the engine's own fit check (weights + KV + overhead).
     #[test]
-    fn sixteen_gb_cards_get_the_8b_tier() {
+    fn starter_context_fits_the_engine_check_at_every_tier_threshold() {
+        for t in &crate::commands::init::TIERS {
+            // The smallest memory the picker still hands this tier (5% slack).
+            let mem = (t.min_gib.max(4) * GIB * 95).div_ceil(100);
+            let host = fake::mac("m4_pro", 0);
+            let mut hw = host.fit_profile();
+            hw.memory = amicu_core::ByteSize::from_bytes(mem);
+            if let Some(a) = hw.accelerator.as_mut() {
+                a.memory = amicu_core::ByteSize::from_bytes(mem);
+            }
+            let ctx = crate::commands::init::context_for(t, &hw);
+            let want = match t.id {
+                "qwen35_27b" | "qwen35_4b" | "qwen35_0_8b" => 131_072,
+                _ => 262_144,
+            };
+            assert_eq!(ctx, want, "{} at {mem} bytes", t.id);
+            assert!(ctx.is_power_of_two() && ctx >= 2048, "{}: {ctx}", t.id);
+        }
+    }
+
+    #[test]
+    fn starters_use_the_native_window_where_it_fits_and_cap_the_output() {
+        let big = starter_hcl(InitTarget::Mac, Some(&fake::mac("m4_pro", 48))).unwrap();
+        assert!(big.contains("Qwen3.5-27B-Q4_K_M.gguf"), "{big}");
+        assert!(big.contains("context_length = 262144"), "{big}");
+        assert!(big.contains("[\"--n-predict\", \"65536\"]"), "{big}");
+        // 27B at 262144 needs ~36 GB; a 32 GiB Mac halves the window once.
+        let mid = starter_hcl(InitTarget::Mac, Some(&fake::mac("m4_pro", 32))).unwrap();
+        assert!(mid.contains("Qwen3.5-27B-Q4_K_M.gguf"), "{mid}");
+        assert!(mid.contains("    context_length = 131072"), "{mid}");
+    }
+
+    #[test]
+    fn sixteen_gb_cards_get_the_9b_tier() {
         // A "16 GB" GPU reports 16376 MiB.
-        assert_eq!(pick_tier(16376 * 1024 * 1024, false).id, "qwen3_8b");
+        assert_eq!(pick_tier(16376 * 1024 * 1024, false).id, "qwen35_9b");
         // A "8 GB" card reports about 8188 MiB.
-        assert_eq!(pick_tier(8188 * 1024 * 1024, false).id, "qwen3_4b");
+        assert_eq!(pick_tier(8188 * 1024 * 1024, false).id, "qwen35_4b");
         // Well under the threshold still steps down.
-        assert_eq!(pick_tier(14 * GIB, false).id, "qwen3_4b");
+        assert_eq!(pick_tier(14 * GIB, false).id, "qwen35_4b");
         let hcl = starter_hcl(
             InitTarget::LinuxCuda,
             Some(&HostInfo {
@@ -4148,7 +4188,7 @@ resource "deployment" "d" {
             }),
         )
         .unwrap();
-        assert!(hcl.contains("Qwen3-8B"), "{hcl}");
+        assert!(hcl.contains("Qwen3.5-9B"), "{hcl}");
     }
 
     /// The machines the files under `examples/` are generated for.

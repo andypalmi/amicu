@@ -10,7 +10,7 @@ use crate::units::ByteSize;
 pub struct Model {
     pub id: ModelId,
     pub source: ModelSource,
-    /// Architecture family, e.g. `"llama"`, `"qwen2"`, `"mixtral"`.
+    /// Architecture family, e.g. `"llama"`, `"qwen35"`, `"mixtral"`.
     pub architecture: String,
     pub modalities: Vec<Modality>,
     pub artifact: Artifact,

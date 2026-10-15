@@ -4,9 +4,9 @@
 resource "model" "support_chat" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "unsloth/Qwen3.5-9B-GGUF"
   }
-  architecture   = "qwen2"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
@@ -15,8 +15,8 @@ resource "model" "support_chat" {
   context_length = 8192
   variant {
     quantization = "q4_k_m"
-    file         = "qwen2.5-7b-instruct-q4_k_m.gguf"
-    size         = "4GiB"
+    file         = "Qwen3.5-9B-Q4_K_M.gguf"
+    size         = "5680522464B"
   }
 }
 

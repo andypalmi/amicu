@@ -4,43 +4,53 @@
 resource "model" "qwen" {
   source {
     registry = "hugging_face"
-    reference = "Qwen/Qwen3-8B"
+    reference = "RedHatAI/Qwen3.5-9B-FP8-dynamic"
   }
 
-  architecture = "qwen3"
+  architecture = "qwen3_5"
   modalities = [
     "text"
   ]
 
   artifact {
     format = "safetensors"
+    quantization = "fp8"
   }
 
-  context_length = 32768
+  context_length = 262144
+  n_layers = 32
+  n_kv_heads = 4
+  head_dim = 256
+  n_kv_layers = 8
 }
 
-resource "hardware_profile" "gpu_l4" {
+resource "hardware_profile" "gpu_2xl4" {
   provider = "modal"
   region = "eu-west"
 
   accelerator {
     kind = "gpu"
     model = "l4"
-    count = 1
+    count = 2
     memory = "24GiB"
   }
 
-  memory = "32GiB"
+  memory = "64GiB"
 }
 
 resource "deployment" "chat" {
   model = model.qwen.id
-  hardware = hardware_profile.gpu_l4.id
+  hardware = hardware_profile.gpu_2xl4.id
   runtime = "vllm"
 
   vllm {
-    context_length = 8192
+    context_length = 262144
     port = 8000
+    tensor_parallel_size = 2
+
+    env {
+      NCCL_P2P_DISABLE = "1"
+    }
   }
 
   api_key = secret("CHAT_API_KEY")

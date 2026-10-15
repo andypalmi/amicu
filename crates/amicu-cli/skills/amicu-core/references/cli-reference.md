@@ -4,7 +4,7 @@
 
 | Command | Effect |
 |---|---|
-| `amicu init [--example [mac\|linux-cuda\|linux-cpu\|modal]]` | Scaffold `variables.amicu.hcl`, `.amicu/` and an `amicu.hcl` holding only a comment header. `--example` writes a working starter instead; a bare `--example` detects macOS (`mac`), Linux with `nvidia-smi` (`linux-cuda`) or other Linux (`linux-cpu`). Local starters declare this machine's memory and pick a Qwen3 GGUF that fits; on an Intel Mac `mac` writes a `local_cpu` profile with `n_gpu_layers = 0`. Never overwrites a file you edited. Same starters in `examples/`. |
+| `amicu init [--example [mac\|linux-cuda\|linux-cpu\|modal]]` | Scaffold `variables.amicu.hcl`, `.amicu/` and an `amicu.hcl` holding only a comment header. `--example` writes a working starter instead; a bare `--example` detects macOS (`mac`), Linux with `nvidia-smi` (`linux-cuda`) or other Linux (`linux-cpu`). Local starters declare this machine's memory and pick the largest Qwen3.5 GGUF that fits (27B at 32 GiB or more, then 9B at 16, 4B at 8, 2B at 6, 0.8B below; `linux-cpu` starts at 4B), with a context up to the native 262144 that passes the fit check and output capped at 65536 via `extra_args = ["--n-predict", "65536"]`; on an Intel Mac `mac` writes a `local_cpu` profile with `n_gpu_layers = 0`. Never overwrites a file you edited. Same starters in `examples/`. |
 | `amicu fmt [--check]` | Canonically format `*.hcl`. `--check` reports drift (exit 1) without writing. |
 | `amicu validate [--fix] [--output json]` | Structural, reference, and capacity checks. `--fix` applies safe deterministic repairs (re-formatting only). |
 | `amicu plan [--output json]` | Compute the actions the next apply would take, diffed against state. |

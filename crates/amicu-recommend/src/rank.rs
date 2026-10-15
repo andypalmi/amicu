@@ -284,17 +284,13 @@ fn variant_specs(preset: &Preset, base: &Graph) -> Vec<VariantSpec> {
 
 fn local_dev_chat_variants(base: &Graph) -> Vec<VariantSpec> {
     let mut simplest = base.clone();
-    set_gguf_quantization(
-        &mut simplest,
-        Quantization::Q4KM,
-        "qwen2.5-7b-instruct-q4_k_m.gguf",
-    );
+    set_gguf_quantization(&mut simplest, Quantization::Q4KM, "Qwen3.5-9B-Q4_K_M.gguf");
 
     let mut higher_quality = base.clone();
     set_gguf_quantization(
         &mut higher_quality,
         Quantization::Q6K,
-        "qwen2.5-7b-instruct-q6_k.gguf",
+        "Qwen3.5-9B-Q6_K.gguf",
     );
     if let Some(hw) = higher_quality.hardware_profiles.first_mut() {
         hw.memory = ByteSize::from_bytes(64 * GIB);
@@ -774,8 +770,8 @@ fn custom_stack_variants(base: &Graph) -> Vec<VariantSpec> {
             archetype: CandidateArchetype::Balanced,
             graph: base.clone(),
             rationale: vec![
-                "A10G accelerators, unquantized weights: a reasonable general-purpose starting \
-                 point with no preset opinion baked in."
+                "L40S accelerators (48 GiB), unquantized weights: a reasonable general-purpose \
+                 starting point with room for the KV cache and, on Qwen3.5, the vision tower."
                     .to_string(),
             ],
             rejected: Vec::new(),
