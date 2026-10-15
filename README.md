@@ -1,27 +1,10 @@
 # Amicu
 
-Terraform for AI inference infrastructure: a declarative HCL DSL plus a Rust planner/apply engine that turns model, hardware, routing, and governance definitions into running llama.cpp (local) and vLLM (production) deployments.
+Manage open LLMs and deploy them as code: locally or on cloud GPUs.
 
-## The problem
+Write HCL that describes a model and where it runs. `amicu plan` checks that it fits in memory, `amicu apply` starts it and hands you an OpenAI-compatible URL, an API key and a ready-to-copy `curl` command, and `amicu destroy` removes it. State tracks everything amicu started, so nothing is left running. If you know Terraform, the workflow is the same.
 
-Standing up an inference stack today means hand-wiring model downloads, runtime flags, GPU provisioning, traffic routing, and data-residency rules - differently on a laptop than in production, and differently again per provider. Amicu makes that stack declarative, diffable, and reviewable: define it, `plan` the changes, `apply` them. Residency and governance are first-class resources you can pin - EU-only is one policy among many (air-gapped, cost-optimized, multi-cloud).
-
-## What you get
-
-- **One file, laptop to production** - the same HCL describes a local llama.cpp run and a multi-GPU vLLM cluster; `plan` and `apply` reconcile the difference.
-- **Diffable, reviewable infrastructure** - every change is a plan against tracked state you can read before it runs, not a pile of imperative scripts.
-- **Residency and governance as code** - data-class, residency, and routing policies are first-class resources, checked at plan time rather than bolted on later; pin a fully EU-only stack, or air-gapped, cost-optimized, or multi-cloud.
-- **Provider-portable model** - one provider abstraction and catalog covering AWS, Azure, GCP, Hetzner, OVHcloud, Scaleway, RunPod, Nebius, and SSH hosts. `apply` deploys to the local machine and Modal today; the rest are preview or catalog-only (see below).
-
-## Quickstart
-
-Install first (see [Install](#install-and-platforms)), then:
-
-```bash
-amicu init      # scaffolds amicu.hcl in the current directory
-```
-
-`init` writes a minimal, complete config - model, hardware, and the deployment that binds them:
+## Example
 
 ```hcl
 resource "model" "qwen3_8b" {
@@ -67,13 +50,50 @@ resource "deployment" "qwen3_8b_local" {
 ```
 
 ```bash
-amicu validate  # structural, reference, and capacity checks
-amicu plan      # shows what apply would do, diffed against state
-amicu apply     # executes the plan (prompts for approval)
-amicu destroy   # stops and removes the recorded deployments (prompts for approval)
+amicu init      # scaffolds the config above as amicu.hcl
+amicu plan      # checks it fits in memory and shows what apply would do, diffed against state
+amicu apply     # shows the plan, asks for approval, starts the model, checks the endpoint
+amicu destroy   # stops and removes the recorded deployments (asks for approval)
 ```
 
-Six other resource kinds - `routing_policy`, `data_class`, `governance_rule`, `budget`, `tenant`, `use_case` - extend the same graph with traffic splitting, residency/sensitivity constraints, and spend limits. Full reference: https://amicu.dev/docs.
+Point the `hardware_profile` at `provider = "modal"` instead and the same deployment runs on a cloud GPU (see [Deploy to Modal](#deploy-to-modal)). Step by step: [quickstart](https://amicu.dev/docs/quickstart).
+
+## Where it runs
+
+| Target | Runtimes | Status |
+|---|---|---|
+| Your Mac (launchd) | llama.cpp, vLLM | Supported |
+| Linux (systemd) | llama.cpp, vLLM | Supported |
+| Modal (serverless GPU) | llama.cpp, vLLM | Supported |
+| Hetzner, OVHcloud, Scaleway, RunPod, SSH hosts | n/a | Preview: adapters built, not wired into `apply` |
+| AWS, Azure, GCP, Nebius | n/a | Catalog and pricing data only; `apply` fails with an error |
+
+Windows is not supported. A provider `apply` cannot deploy to fails with a clear error; it never falls back to running locally.
+
+## Why
+
+- **Your models, on infrastructure you chose.** No prompts go to a model API provider. Data residency is a policy you write: a `data_class` plus a region (for example Modal `eu-west`), checked at plan time. A Modal deployment runs on Modal; the point is that you choose where.
+- **Config in git, with a reviewable plan.** Every change is a plan against recorded state that you read before it runs, not a pile of imperative scripts.
+- **No orphaned GPUs.** `apply` records a stop intent before it starts anything, and a deployment leaves state only after its stop is confirmed, so `destroy` can always find what may be running.
+
+## Install
+
+There are no published binaries yet. Both options need Rust 1.97 or newer:
+
+```bash
+# Install the `amicu` binary into ~/.cargo/bin
+cargo install --locked --git https://github.com/andypalmi/amicu amicu-cli
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/andypalmi/amicu.git
+cd amicu
+cargo build --release -p amicu-cli   # binary: ./target/release/amicu
+```
+
+Prebuilt binaries, a shell installer and Homebrew are coming with the first release.
 
 ## Deploy to Modal
 
@@ -123,30 +143,12 @@ Every deployment can declare an `api_key = secret("NAME")`. It is a reference, n
 - **Checked after deploy.** For every endpoint `apply` starts, it sends an unauthenticated `GET /v1/models` (no key, no provider headers). A `401`/`403` passes; a `2xx` means the endpoint is open, so it is stopped and apply fails (a failed stop is reported with the command to run by hand). It then sends the key (plus the Modal proxy headers) and requires a `2xx`. Loopback endpoints without a key skip the check.
 - **Calling it.** After a successful apply the output includes a ready-to-copy `curl` and OpenAI SDK snippet that refer to the key and, on Modal, the `Modal-Key`/`Modal-Secret` proxy token by environment variable name.
 
-## Install and platforms
+## Platform notes
 
-There are no published binaries yet. Two options, both need Rust 1.97 or newer:
+- **llama.cpp, local:** macOS (Apple Silicon), Linux/CPU and Linux with an NVIDIA GPU (CUDA), run as a native process (launchd on macOS, a persistent systemd user unit on Linux). On Linux a deployment comes back after a reboot at boot only if user lingering is on (`sudo loginctl enable-linger $USER`), otherwise at your next login; `apply` prints a hint when lingering is off. For GPU offload the `llama-server` on `PATH` must be a CUDA build (`n_gpu_layers = -1` offloads all layers; a CPU-only build silently runs on the CPU), and the memory-fit check is made against the card's VRAM.
+- **vLLM:** NVIDIA CUDA, AMD ROCm and Intel XPU GPUs, locally as a native single process (launchd/systemd).
 
-```bash
-# Install the `amicu` binary into ~/.cargo/bin
-cargo install --locked --git https://github.com/andypalmi/amicu amicu-cli
-```
-
-Or build from source:
-
-```bash
-git clone https://github.com/andypalmi/amicu.git
-cd amicu
-cargo build --release -p amicu-cli   # binary: ./target/release/amicu
-```
-
-Prebuilt binaries, a shell installer and Homebrew are coming with the first release.
-
-- **Local runtime (llama.cpp):** macOS (Apple Silicon), Linux/CPU and Linux with an NVIDIA GPU (CUDA), run as a native process (launchd on macOS, a persistent systemd user unit on Linux). A deployment `apply` created comes back after a reboot (`RunAtLoad` / enabled unit with `Restart=on-failure`); on Linux this happens at boot only if user lingering is on (`sudo loginctl enable-linger $USER`), otherwise at your next login, and `apply` prints a hint when lingering is off. For GPU offload the `llama-server` on `PATH` must be a CUDA build (amicu offloads per `n_gpu_layers`, `-1` = all layers; a CPU-only build silently runs on the CPU), and the memory-fit check is made against the card's VRAM.
-- **Production runtime (vLLM):** NVIDIA CUDA, AMD ROCm, and Intel XPU GPUs. Locally as a native single process (launchd/systemd, same as llama.cpp) or deployed via Kubernetes/Helm or k3s.
-- **Providers:** `apply` supports the local machine (`local`, `local_apple`, `local_cpu`, `on_prem`) and Modal. Any other provider fails at apply with a clear error rather than running locally.
-  - Preview, provisioning adapters not yet wired into `apply`: Hetzner, RunPod, Scaleway, OVHcloud, and SSH.
-  - Catalog and pricing data only: AWS, Azure, GCP, and Nebius.
+## Development
 
 ### Development database
 
@@ -226,16 +228,13 @@ that module and `amicu-store`'s `state` module docs for details.
 
 ## Status
 
-Early stage. Working today: the HCL DSL and parser, the CLI (`init`, `fmt`, `validate`, `plan`, `apply`, `destroy`, `doctor`, `skill export`), the planner and local state (with write-ahead stop records, so `destroy` can stop what may be running), and the local and Modal providers listed above. Not yet built: the browser UI, hosted service, and performance-intelligence dataset. Expect breaking changes to the DSL and CLI.
+Early stage. Working today: the HCL DSL and parser, the CLI (`init`, `fmt`, `validate`, `plan`, `apply`, `destroy`, `doctor`, `skill export`), the planner and local state (with write-ahead stop records), and the local and Modal providers above. State is local only. Not yet built: the browser UI and hosted service. Expect breaking changes to the DSL and CLI.
 
 ## Learn more
 
-- Website: https://amicu.dev
 - Documentation: https://amicu.dev/docs
-
-## Contributing and security
-
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for setup and the checks CI runs. Report vulnerabilities privately as described in [SECURITY.md](./SECURITY.md).
+- Website: https://amicu.dev
+- Contributing: see [CONTRIBUTING.md](./CONTRIBUTING.md) for setup and the checks CI runs. Report vulnerabilities privately as described in [SECURITY.md](./SECURITY.md).
 
 ## License
 
