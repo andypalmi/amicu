@@ -48,12 +48,13 @@ pub struct Model {
 impl Model {
     /// The model id a local llama.cpp server reports in `/v1/models` (passed as
     /// `--alias`), and the `model` the printed usage example sends. The source
-    /// reference (`org/model`, a URL), except for a local file, whose reference
-    /// is an absolute path that must not leak: the HCL model id is used then.
+    /// reference (`org/model`, a URL), except for a local file or a URL, whose
+    /// reference is an absolute path or may carry a token and must not leak into
+    /// argv or `/v1/models`: the HCL model id is used then.
     #[must_use]
     pub fn served_name(&self) -> &str {
         match self.source.registry {
-            SourceRegistry::Local => self.id.as_str(),
+            SourceRegistry::Local | SourceRegistry::Url => self.id.as_str(),
             _ => &self.source.reference,
         }
     }

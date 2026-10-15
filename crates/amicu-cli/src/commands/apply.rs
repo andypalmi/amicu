@@ -364,7 +364,7 @@ pub(crate) fn execute(
         project_id: Some(progress.project_id.clone()),
         pending,
         stops: progress.stops.clone(),
-        purge_pending: purge_pending_after(prior_state, &progress.stops, &progress.stopped),
+        purge_pending: purge_pending_after(prior_state, &progress.stops),
         fingerprints: final_fingerprints(prior_state, &graph, &progress, result),
         graph,
         endpoints,
@@ -381,22 +381,25 @@ pub(crate) fn execute(
     Ok((handles, state))
 }
 
-/// The purge-pending records after a run: the prior ones, plus the log files of
-/// each deployment in `stopped` (destroyed), minus any deployment that has a
-/// live stop record again (it is running, its logs are in use).
+/// The purge-pending records after a run: the prior ones, plus every log file
+/// of a prior stop record that the run no longer records (stopped, destroyed or
+/// superseded by an instance with different paths), minus any file a live stop
+/// record uses again. No recorded file ever leaves state without either
+/// staying in a stop record or entering `purge_pending`.
 fn purge_pending_after(
     prior: Option<&LocalState>,
     stops: &[StopRecord],
-    stopped: &[DeploymentId],
 ) -> Vec<crate::stops::PurgePending> {
+    let live = |l: &String| stops.iter().any(|s| s.logs.contains(l));
     let mut out = prior.map(|s| s.purge_pending.clone()).unwrap_or_default();
     for rec in prior.map_or(&[][..], |s| &s.stops[..]) {
-        if !stopped.contains(&rec.deployment) {
-            continue;
-        }
-        let Some(entry) = rec.purge_entry() else {
+        let Some(mut entry) = rec.purge_entry() else {
             continue;
         };
+        entry.logs.retain(|l| !live(l));
+        if entry.logs.is_empty() {
+            continue;
+        }
         match out
             .iter_mut()
             .find(|p| p.deployment == entry.deployment && p.identity == entry.identity)
@@ -411,7 +414,10 @@ fn purge_pending_after(
             None => out.push(entry),
         }
     }
-    out.retain(|p| !stops.iter().any(|s| s.deployment == p.deployment));
+    for p in &mut out {
+        p.logs.retain(|l| !live(l));
+    }
+    out.retain(|p| !p.logs.is_empty());
     out
 }
 
@@ -520,7 +526,7 @@ fn recorded_state(prior: Option<&LocalState>, graph: &Graph, progress: &Progress
         ),
         pending,
         stops: progress.stops.clone(),
-        purge_pending: purge_pending_after(prior, &progress.stops, &progress.stopped),
+        purge_pending: purge_pending_after(prior, &progress.stops),
         fingerprints: merged_fingerprints(prior, &partial, progress),
         graph: partial,
         // Placeholder: `save_state` overwrites it with the serial it read plus one.
@@ -3258,5 +3264,48 @@ mod partial_state_tests {
             "never overwrite a recorded one"
         );
         assert_eq!(out[&id("beta")], fp("now"));
+    }
+}
+
+#[cfg(test)]
+mod purge_pending_tests {
+    use super::*;
+
+    fn rec(identity: &str, logs: &[&str]) -> StopRecord {
+        let mut r = StopRecord::host(&"d".into(), None);
+        r.identity = identity.to_owned();
+        r.logs = logs.iter().map(|l| (*l).to_owned()).collect();
+        r
+    }
+
+    fn prior(stops: Vec<StopRecord>) -> LocalState {
+        LocalState {
+            version: LocalState::VERSION.to_owned(),
+            project_id: None,
+            serial: 0,
+            graph: Graph::new(),
+            endpoints: Vec::new(),
+            pending: Vec::new(),
+            stops,
+            purge_pending: Vec::new(),
+            fingerprints: std::collections::BTreeMap::default(),
+            extra: std::collections::BTreeMap::default(),
+        }
+    }
+
+    #[test]
+    fn a_superseded_record_with_different_logs_keeps_its_files_tracked() {
+        let p = prior(vec![rec("old", &["/l/old.out.log"])]);
+        let out = purge_pending_after(Some(&p), &[rec("new", &["/l/new.out.log"])]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].logs, ["/l/old.out.log"]);
+    }
+
+    #[test]
+    fn logs_still_in_a_live_record_are_not_pending_and_stale_pending_clears() {
+        let mut p = prior(vec![rec("a", &["/l/a.out.log"])]);
+        p.purge_pending = vec![rec("a", &["/l/a.out.log"]).purge_entry().unwrap()];
+        let out = purge_pending_after(Some(&p), &[rec("a", &["/l/a.out.log"])]);
+        assert_eq!(out.len(), 0);
     }
 }

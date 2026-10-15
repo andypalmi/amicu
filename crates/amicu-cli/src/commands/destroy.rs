@@ -239,10 +239,14 @@ impl Leftovers {
     ) -> Result<Self, CliError> {
         let mut me = Self::default();
         // Files an earlier plain destroy left behind and state still tracks.
-        for p in prior.map_or(&[][..], |s| &s.purge_pending[..]) {
-            if !targets.is_empty() && !targets.iter().any(|t| t == p.deployment.as_str()) {
-                continue;
-            }
+        // A targeted destroy never touches leftovers of earlier destroys: those
+        // are purged by an untargeted `amicu destroy --purge`.
+        let pending = if targets.is_empty() {
+            prior.map_or(&[][..], |s| &s.purge_pending[..])
+        } else {
+            &[][..]
+        };
+        for p in pending {
             if purge && let Err(why) = p.log_paths() {
                 return Err(CliError::Message(format!(
                     "the recorded leftover logs of destroyed deployment '{}' include a file \

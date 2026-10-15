@@ -150,6 +150,7 @@ impl Fingerprint {
         self.secrets = self.secrets.take().or_else(|| current.secrets.clone());
         self.image = self.image.take().or_else(|| current.image.clone());
         self.binary = self.binary.take().or_else(|| current.binary.clone());
-        self.launch = self.launch.take().or_else(|| current.launch.clone());
+        // `launch` is deliberately not adopted: a process started before it was
+        // recorded may not match the current command, so a baseline would lie.
     }
 }

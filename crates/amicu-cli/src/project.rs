@@ -205,7 +205,15 @@ impl Project {
             return Err(CliError::NoConfig(self.root.clone()));
         }
         let mut files = Vec::new();
-        collect_hcl(&self.root, &mut files)?;
+        let mut skipped = Vec::new();
+        collect_hcl(&self.root, &mut files, &mut skipped)?;
+        skipped.sort();
+        for dir in &skipped {
+            eprintln!(
+                "note: skipping nested amicu project {} (it has its own .amicu/); run amicu there",
+                dir.display()
+            );
+        }
         files.sort();
         Ok(files)
     }
@@ -550,15 +558,29 @@ fn sync_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 /// Recursively collect `*.hcl` files under `dir`, skipping excluded subtrees.
-fn collect_hcl(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), CliError> {
+fn collect_hcl(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    skipped: &mut Vec<PathBuf>,
+) -> Result<(), CliError> {
     let entries =
         fs::read_dir(dir).map_err(|e| CliError::io(format!("cannot read {}", dir.display()), e))?;
     for entry in entries {
         let entry = entry.map_err(|e| CliError::io("cannot read directory entry", e))?;
         let path = entry.path();
-        if path.is_dir() {
-            if !is_excluded_dir(&path) && !is_foreign_project(&path) {
-                collect_hcl(&path, files)?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| CliError::io("cannot read directory entry", e))?;
+        // Symlinked directories are never followed: a link back up the tree
+        // would recurse forever, and a link out is not part of this project.
+        if file_type.is_dir() {
+            if is_excluded_dir(&path) {
+                continue;
+            }
+            if is_nested_amicu_project(&path) {
+                skipped.push(path);
+            } else if !is_foreign_project(&path) {
+                collect_hcl(&path, files, skipped)?;
             }
         } else if path.is_file() && is_config_file(&path) {
             files.push(path);
@@ -577,11 +599,17 @@ fn is_config_file(path: &Path) -> bool {
     Path::new(&lower).extension().is_some_and(|e| e == "hcl") && !lower.ends_with(".lock.hcl")
 }
 
-/// Whether a nested directory is the root of a different project, whose files
-/// are not ours: it has its own `.amicu/` (a nested amicu project) or
-/// Terraform markers (`.terraform/` or `.terraform.lock.hcl`).
+/// Whether a nested directory is a different amicu project: `.amicu/` holding
+/// what `amicu init` or a real apply wrote. A bare `.amicu/` is not enough: the
+/// state lock creates `.amicu/state/` in any directory amicu is run from.
+fn is_nested_amicu_project(dir: &Path) -> bool {
+    dir.join(".amicu/config.yaml").is_file() || dir.join(".amicu/state/state.json").is_file()
+}
+
+/// Whether a nested directory is the root of a Terraform project, whose files
+/// are not ours (`.terraform/` or `.terraform.lock.hcl`).
 fn is_foreign_project(dir: &Path) -> bool {
-    [".amicu", ".terraform", ".terraform.lock.hcl"]
+    [".terraform", ".terraform.lock.hcl"]
         .iter()
         .any(|m| dir.join(m).exists())
 }

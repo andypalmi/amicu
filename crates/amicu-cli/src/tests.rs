@@ -2998,6 +2998,7 @@ fn a_nested_amicu_project_is_not_part_of_the_outer_one() {
     write(&td.path, "amicu.hcl", VALID_CONFIG);
     let inner = td.path.join("other");
     std::fs::create_dir_all(inner.join(".amicu")).unwrap();
+    std::fs::write(inner.join(".amicu/config.yaml"), "").unwrap();
     std::fs::write(inner.join("amicu.hcl"), SECOND_MODEL).unwrap();
     assert_eq!(project.load_graph().unwrap().models.len(), 1);
 }
@@ -3296,4 +3297,27 @@ fn purge_pending_survives_a_state_round_trip_and_older_state_loads() {
     let p2 = saved(&plain, &state_with(amicu_core::graph::Graph::new()));
     let text = std::fs::read_to_string(p2.state_file()).unwrap();
     assert!(!text.contains("purge_pending"));
+}
+
+#[test]
+fn a_lock_only_dot_amicu_does_not_hide_a_subdirectory() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    // What running `amicu apply` inside `models/` leaves behind: the state lock.
+    let models = td.path.join("models");
+    std::fs::create_dir_all(models.join(".amicu/state")).unwrap();
+    std::fs::write(models.join(".amicu/state/state.lock"), "").unwrap();
+    std::fs::write(models.join("extra.hcl"), SECOND_MODEL).unwrap();
+    assert_eq!(project.load_graph().unwrap().models.len(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_symlink_loop_is_not_followed() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    std::os::unix::fs::symlink(&td.path, td.path.join("loop")).unwrap();
+    assert_eq!(project.load_graph().unwrap().models.len(), 1);
 }
