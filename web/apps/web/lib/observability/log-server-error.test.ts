@@ -92,3 +92,22 @@ test('buildServerErrorReport omits tags when no context is given', () => {
   assert.equal(report.route, undefined);
   assert.equal(report.op, undefined);
 });
+
+test('registered sink receives errors and cannot break logging', async () => {
+  const { registerServerErrorSink, logServerError } = await import('./log-server-error.ts');
+  const seen: unknown[] = [];
+  const original = console.error;
+  console.error = () => {};
+  try {
+    registerServerErrorSink((e) => seen.push(e));
+    logServerError(new Error('x'), { route: 'r' });
+    registerServerErrorSink(() => {
+      throw new Error('sink down');
+    });
+    logServerError(new Error('y'));
+  } finally {
+    registerServerErrorSink(null);
+    console.error = original;
+  }
+  assert.equal(seen.length, 1);
+});

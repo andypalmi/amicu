@@ -3,6 +3,8 @@ import './global.css';
 import 'sonner/dist/styles.css';
 import { Martian_Mono, Schibsted_Grotesk } from 'next/font/google';
 import type { Metadata, Viewport } from 'next';
+import { Analytics } from '@/components/analytics/analytics';
+import { CloudflareBeacon } from '@/components/analytics/cf-beacon';
 import { Toaster } from '@/components/common/toaster';
 import { tokens } from '@/lib/generated/tokens';
 import { appName, appTagline, siteUrl } from '@/lib/shared';
@@ -59,6 +61,8 @@ export default function Layout({ children }: LayoutProps<'/'>) {
         <RootProvider>
           {children}
           <Toaster />
+          <Analytics />
+          <CloudflareBeacon />
         </RootProvider>
       </body>
     </html>

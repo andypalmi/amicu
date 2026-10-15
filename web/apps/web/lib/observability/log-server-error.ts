@@ -73,6 +73,14 @@ export function buildServerErrorReport(
   };
 }
 
+type ServerErrorSink = (error: unknown, context: ServerErrorContext) => void;
+let sink: ServerErrorSink | null = null;
+
+/** Register an extra sink (e.g. Sentry) that receives every logged error. */
+export function registerServerErrorSink(fn: ServerErrorSink | null): void {
+  sink = fn;
+}
+
 /**
  * Log a server-side error to stderr as a structured record. Call from a BFF
  * catch BEFORE returning the client-facing 502 - this is purely for operators.
@@ -85,4 +93,9 @@ export function logServerError(error: unknown, context: ServerErrorContext = {})
   // Sanctioned server transport: stderr via console.error, never stdout-as-data
   // and never the client Response. Swap for a real sink (OTEL, Sentry) here.
   console.error('[amicu:server-error]', report);
+  try {
+    sink?.(error, context);
+  } catch {
+    // A failing sink must never break the request path.
+  }
 }

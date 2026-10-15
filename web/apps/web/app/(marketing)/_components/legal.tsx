@@ -15,19 +15,6 @@ export function LegalPage({ title, effective, children }: { title: string; effec
   );
 }
 
-/** Owner-supplied text, paragraphs split on blank lines. */
-export function Body({ text }: { text: string }) {
-  return (
-    <>
-      {text.split(/\n\s*\n/).map((para, i) => (
-        <p key={i} className="whitespace-pre-line">
-          {para}
-        </p>
-      ))}
-    </>
-  );
-}
-
 export function requireEnabled(enabled: boolean): void {
   if (!enabled) notFound();
 }
