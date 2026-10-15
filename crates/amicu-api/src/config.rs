@@ -26,6 +26,7 @@
 //! [`created_by_for`] for how a token's `sub` claim becomes the store's
 //! `created_by` column.
 
+use std::io::Write as _;
 use std::sync::Arc;
 
 use amicu_auth::Claims;
@@ -286,7 +287,7 @@ impl From<ConfigError> for ConfigHttpError {
             ConfigError::NotFound => Self::NotFound("config not found".to_owned()),
             ConfigError::VersionNotFound(v) => Self::NotFound(format!("version {v} not found")),
             ConfigError::Database(_) | ConfigError::Backend => {
-                eprintln!("amicu-api: config store error: {e}");
+                let _ = writeln!(std::io::stderr(), "amicu-api: config store error: {e}");
                 Self::Backend
             }
         }

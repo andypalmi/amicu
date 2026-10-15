@@ -27,6 +27,7 @@
 //!   per-boot key that would differ across replicas.
 
 use std::collections::HashSet;
+use std::io::Write as _;
 
 use amicu_auth::error::AuthError;
 use amicu_auth::key::SigningKey;
@@ -346,7 +347,8 @@ pub(crate) fn load_keyring(config: &Config) -> Result<Keyring, SigningKeyConfigE
             return Err(SigningKeyConfigError::MissingActiveKey);
         }
         None => {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr(),
                 "amicu-server: WARNING - AMICU_SIGNING_KEY_PEM/_FILE not set; generating an \
                  ephemeral signing key for THIS BOOT ONLY (development). Tokens will not verify \
                  across replicas or survive a restart. Set AMICU_SIGNING_KEY_PEM in production \
@@ -413,7 +415,8 @@ pub(crate) fn load_keyring(config: &Config) -> Result<Keyring, SigningKeyConfigE
         }
     }
 
-    eprintln!(
+    let _ = writeln!(
+        std::io::stderr(),
         "amicu-server: signing keyring loaded (active kid={}, {} retiring key(s): [{}]).",
         active.kid(),
         retiring.len(),

@@ -26,6 +26,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::io::Write as _;
 use utoipa::ToSchema;
 
 use crate::dto::{MoneyDto, TierDto, WorkloadEstimateDto};
@@ -348,7 +349,7 @@ impl IntoResponse for PresetHttpError {
             // A render failure is internal detail. Log the real cause and return
             // a fixed, generic body so nothing about the internals leaks.
             PresetHttpError::Emit(e) => {
-                eprintln!("amicu-api: preset HCL emit failed: {e}");
+                let _ = writeln!(std::io::stderr(), "amicu-api: preset HCL emit failed: {e}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal error".to_owned(),

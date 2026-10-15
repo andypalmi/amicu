@@ -7,6 +7,7 @@
 //! subcommands, over an explicit `DATABASE_URL` (see
 //! `tests/rls_guard_live.rs`).
 
+use std::io::Write as _;
 use std::process::ExitCode;
 
 use amicu_server::Config;
@@ -73,7 +74,7 @@ async fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("amicu-server: {e}");
+            let _ = writeln!(std::io::stderr(), "amicu-server: {e}");
             ExitCode::FAILURE
         }
     }

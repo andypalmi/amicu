@@ -250,6 +250,7 @@ pub mod signing_key;
 pub mod smtp;
 
 use std::future::Future;
+use std::io::Write as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -899,7 +900,8 @@ async fn connect_shared_pool(
                     amicu_store::run_migrations(&pool)
                         .await
                         .map_err(Error::Store)?;
-                    eprintln!(
+                    let _ = writeln!(
+                        std::io::stderr(),
                         "amicu-server: connected + migrated the shared Postgres pool \
                          (development; max_connections={}, min_connections={}, \
                          acquire_timeout={}s).",
@@ -920,7 +922,8 @@ async fn connect_shared_pool(
                     if !pending.is_empty() {
                         return Err(Error::PendingMigrations(pending.len()));
                     }
-                    eprintln!(
+                    let _ = writeln!(
+                        std::io::stderr(),
                         "amicu-server: connected the shared Postgres pool (production; \
                          schema up to date, NOT migrating at boot - see `amicu-server \
                          migrate`; max_connections={}, min_connections={}, \
@@ -965,7 +968,8 @@ async fn connect_shared_pool(
             match config.environment {
                 Environment::Production => return Err(Error::RlsBypass(msg)),
                 Environment::Development => {
-                    eprintln!(
+                    let _ = writeln!(
+                        std::io::stderr(),
                         "amicu-server: WARNING - {msg} Allowed in development; this fails \
                          startup in production (AMICU_ENV=production)."
                     );
@@ -1055,7 +1059,8 @@ pub async fn migrate_database_url(database_url: Option<&str>) -> Result<(), Erro
     amicu_store::run_migrations(&pool)
         .await
         .map_err(Error::Store)?;
-    eprintln!(
+    let _ = writeln!(
+        std::io::stderr(),
         "amicu-server migrate: applied {pending_count} pending migration(s); schema now up to \
          date."
     );
@@ -1297,7 +1302,8 @@ pub async fn build_app_with_database_url(
     let billing_state = if let Some(stripe) = stripe_config_from_env(&env) {
         BillingApiState::with_stripe(verifier.clone(), users.clone(), stripe)
     } else {
-        eprintln!(
+        let _ = writeln!(
+            std::io::stderr(),
             "amicu-server: billing DISABLED (set STRIPE_SECRET_KEY, \
              STRIPE_WEBHOOK_SECRET, and STRIPE_PRICE_* to activate); \
              /billing/* endpoints will return 503."
@@ -1445,12 +1451,16 @@ fn with_inline_send(
 /// request.
 fn select_mailer() -> Result<Arc<dyn Notifier>, Error> {
     if smtp::any_smtp_var_set() {
-        eprintln!("amicu-server: SMTP notifier configured; sending real verification/reset email.");
+        let _ = writeln!(
+            std::io::stderr(),
+            "amicu-server: SMTP notifier configured; sending real verification/reset email."
+        );
         Ok(Arc::new(
             smtp::SmtpNotifier::from_env().map_err(Error::Smtp)?,
         ))
     } else {
-        eprintln!(
+        let _ = writeln!(
+            std::io::stderr(),
             "amicu-server: SMTP NOT configured (set AMICU_SMTP_HOST + AMICU_SMTP_FROM to \
              activate); using the dev LoggingNotifier, which prints reset/verify tokens to \
              stderr. NOT for production use."
@@ -1470,7 +1480,8 @@ fn select_mailer() -> Result<Arc<dyn Notifier>, Error> {
 fn select_auth_notifier(pool: Option<&PgPool>, mailer: &Arc<dyn Notifier>) -> Arc<dyn Notifier> {
     let Some(pool) = pool else {
         if smtp::any_smtp_var_set() {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr(),
                 "amicu-server: WARNING - SMTP is configured but DATABASE_URL is not, so \
                  there is no email outbox to queue into: verification/reset mail is sent \
                  inline on the request path and is lost on restart. This combination is \
@@ -1514,15 +1525,21 @@ fn mount_outbox_drain(
              POST /internal/outbox/drain will return 503 and NO queued email will \
              ever be delivered.";
         match config.environment {
-            Environment::Production => eprintln!(
-                "{complaint} WARNING: this is a production deploy - verification and \
+            Environment::Production => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "{complaint} WARNING: this is a production deploy - verification and \
                  password-reset email will silently pile up undelivered until one of \
                  those is set."
-            ),
-            Environment::Development => eprintln!(
-                "{complaint} Meanwhile `amicu-server outbox-drain` runs one pass by \
+                );
+            }
+            Environment::Development => {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "{complaint} Meanwhile `amicu-server outbox-drain` runs one pass by \
                  hand, which is usually what you want locally."
-            ),
+                );
+            }
         }
     }
     let outbox_state = OutboxApiState::new(
@@ -1617,7 +1634,8 @@ pub async fn outbox_drain(config: &Config) -> Result<(), Error> {
     let mailer: Arc<dyn Notifier> = if smtp::any_smtp_var_set() {
         Arc::new(smtp::SmtpNotifier::from_env().map_err(Error::Smtp)?)
     } else {
-        eprintln!(
+        let _ = writeln!(
+            std::io::stderr(),
             "amicu-server outbox-drain: SMTP NOT configured; queued messages will be \
              'delivered' by the dev LoggingNotifier (stderr). NOT for production use."
         );
@@ -1635,10 +1653,15 @@ pub async fn outbox_drain(config: &Config) -> Result<(), Error> {
     .map_err(Error::Store)?;
     pool.close().await;
 
-    eprintln!(
+    let _ = writeln!(
+        std::io::stderr(),
         "amicu-server outbox-drain: claimed={} sent={} failed={} dead_lettered={} \
          budget_exhausted={}",
-        report.claimed, report.sent, report.failed, report.dead_lettered, report.budget_exhausted,
+        report.claimed,
+        report.sent,
+        report.failed,
+        report.dead_lettered,
+        report.budget_exhausted,
     );
     Ok(())
 }
@@ -1746,8 +1769,8 @@ pub async fn run(config: Config) -> Result<(), Error> {
     let bind = resolve_bind(config.bind)?;
     let listener = TcpListener::bind(bind).await?;
     let addr = listener.local_addr()?;
-    eprintln!("{}", startup_banner(config.environment));
-    eprintln!("amicu-server listening on http://{addr}");
+    let _ = writeln!(std::io::stderr(), "{}", startup_banner(config.environment));
+    let _ = writeln!(std::io::stderr(), "amicu-server listening on http://{addr}");
     // 5xx reporting is mounted only when Sentry was initialised (SENTRY_DSN set).
     let router = if sentry::Hub::current().client().is_some() {
         built.router.layer(axum::middleware::from_fn(
@@ -1767,13 +1790,14 @@ pub async fn run(config: Config) -> Result<(), Error> {
             .await
             .is_err()
         {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr(),
                 "amicu-server: WARNING - closing the shared Postgres pool did not finish \
                  within {POOL_CLOSE_TIMEOUT:?}; exiting anyway."
             );
         }
     }
-    eprintln!("amicu-server shut down");
+    let _ = writeln!(std::io::stderr(), "amicu-server shut down");
     Ok(())
 }
 
@@ -1839,11 +1863,14 @@ fn init_security_hash_key(config: &Config) -> Result<(), Error> {
         _ if config.environment == Environment::Production => {
             return Err(Error::MissingSecurityHashKey);
         }
-        _ => eprintln!(
-            "amicu-server: WARNING - AMICU_SECURITY_HASH_KEY is not set (or < 32 bytes); \
+        _ => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "amicu-server: WARNING - AMICU_SECURITY_HASH_KEY is not set (or < 32 bytes); \
              emails/IPs in security events are hashed with a PUBLIC default key (guessable for \
              low-entropy inputs). Set one secret value, identical on every replica."
-        ),
+            );
+        }
     }
     Ok(())
 }
