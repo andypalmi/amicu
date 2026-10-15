@@ -82,13 +82,16 @@ export default function PrivacyPage() {
         <li>
           <strong>PostHog (EU cloud)</strong> provides cookieless product
           analytics. It runs in memory only: nothing is written to cookies or local storage,
-          there is no session recording, no autocapture of what you type, and it stays off if
+          our PostHog project is configured to discard client IP addresses (the IP may be used
+          momentarily to derive coarse location before being discarded), there is no session
+          recording, no autocapture of what you type, and it stays off if
           your browser sends Do Not Track or Global Privacy Control.
         </li>
         <li>
           <strong>Sentry</strong> receives error reports. We turn off sending personal data to
-          it: no IP address collection, no user identifiers, no session replay, and request
-          bodies, cookies and headers are removed before an event is sent.
+          it: the SDK is set not to send personal data, our Sentry project is configured not to
+          store IP addresses, there are no user identifiers and no session replay, and request
+          bodies, cookies, headers and query strings are removed before an event is sent.
         </li>
         <li>
           Our own API and database that store your account and configuration data, run on
@@ -117,7 +120,8 @@ export default function PrivacyPage() {
         </li>
         <li>
           Cloudflare Turnstile, where enabled, loads from challenges.cloudflare.com on sign-up,
-          password-reset and verification forms to tell humans from bots.
+          password-reset and verification forms to tell humans from bots. It may set a
+          short-lived Cloudflare cookie inside its own iframe, strictly for bot protection.
         </li>
       </ul>
 

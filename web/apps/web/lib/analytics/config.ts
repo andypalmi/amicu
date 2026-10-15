@@ -30,6 +30,24 @@ export function privacyOptOut(s: PrivacySignals): boolean {
   return s.globalPrivacyControl === true || dnt === '1' || dnt === 'yes';
 }
 
+/** Drop the query string and fragment from a URL-ish string. */
+export function stripQuery(url: string): string {
+  const cut = url.search(/[?#]/);
+  return cut === -1 ? url : url.slice(0, cut);
+}
+
+/**
+ * before_send hook: strip query strings and fragments from every URL-valued
+ * property ($current_url, $referrer, $initial_*, ...) since tokens can live there.
+ */
+export function sanitizeCapture<T extends { properties?: Record<string, unknown> } | null>(cr: T): T {
+  if (!cr?.properties) return cr;
+  for (const [k, v] of Object.entries(cr.properties)) {
+    if (typeof v === 'string' && /^https?:\/\//i.test(v)) cr.properties[k] = stripQuery(v);
+  }
+  return cr;
+}
+
 /**
  * posthog-js options: no cookies/localStorage (memory persistence), no session
  * recording, no autocapture, no surveys or feature flags, DNT respected,
@@ -49,6 +67,10 @@ export function posthogOptions() {
     capture_heatmaps: false,
     disable_surveys: true,
     advanced_disable_flags: true,
+    capture_performance: false,
+    capture_exceptions: false,
+    disable_web_experiments: true,
+    before_send: sanitizeCapture,
   };
 }
 
