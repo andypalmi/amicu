@@ -109,6 +109,18 @@ const config = {
     serverActions: { allowedOrigins: [siteHost, appHost].filter(Boolean) },
   },
   transpilePackages: ['@amicu/ui', '@amicu/auth'],
+  async redirects() {
+    // One-line installer. Config redirects run before proxy.ts. `releases/latest`
+    // skips prereleases, so this serves the newest stable release.
+    return [
+      {
+        source: '/install.sh',
+        destination:
+          'https://github.com/andypalmi/amicu/releases/latest/download/amicu-cli-installer.sh',
+        statusCode: 302,
+      },
+    ];
+  },
   async headers() {
     return [
       {

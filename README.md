@@ -80,22 +80,33 @@ Local runs target macOS and Linux. A provider `apply` cannot deploy to fails wit
 
 ## Install
 
-There are no published binaries yet. Both options need Rust 1.97 or newer:
+macOS and Linux only (arm64 and x86_64); Windows is not supported.
 
 ```bash
-# Install the `amicu` binary into ~/.cargo/bin
-cargo install --locked --git https://github.com/andypalmi/amicu amicu-cli
+curl -LsSf https://amicu.dev/install.sh | sh
 ```
 
-Or build from source:
+The installer downloads a prebuilt binary and puts `amicu` in `~/.local/bin`. It edits your shell profile, so open a new shell before running `amicu`.
+
+With Homebrew:
+
+```bash
+brew install andypalmi/tap/amicu
+```
+
+From source (needs Rust 1.97 or newer):
+
+```bash
+cargo install --locked --git https://github.com/andypalmi/amicu amicu-cli   # installs into ~/.cargo/bin
+```
+
+Or clone and build:
 
 ```bash
 git clone https://github.com/andypalmi/amicu.git
 cd amicu
 cargo build --release -p amicu-cli   # binary: ./target/release/amicu
 ```
-
-Prebuilt binaries, a shell installer and Homebrew are coming with the first release.
 
 ## Deploy to Modal
 
