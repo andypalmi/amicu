@@ -148,7 +148,7 @@ Every deployment can declare an `api_key = secret("NAME")`. It is a reference, n
 ## Platform notes
 
 - **llama.cpp, local:** macOS (Apple Silicon), Linux/CPU and Linux with an NVIDIA GPU (CUDA), run as a native process (launchd on macOS, a persistent systemd user unit on Linux). On Linux a deployment comes back after a reboot at boot only if user lingering is on (`sudo loginctl enable-linger $USER`), otherwise at your next login; `apply` prints a hint when lingering is off. For GPU offload the `llama-server` on `PATH` must be a CUDA build (`n_gpu_layers = -1` offloads all layers; a CPU-only build silently runs on the CPU), and the memory-fit check is made against the card's VRAM.
-- **vLLM:** NVIDIA CUDA, AMD ROCm and Intel XPU GPUs, locally as a native single process (launchd/systemd).
+- **vLLM:** NVIDIA CUDA, AMD ROCm and Intel XPU GPUs, locally as a native single process (systemd on Linux).
 
 ## Development
 
