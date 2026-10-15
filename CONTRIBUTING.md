@@ -13,7 +13,7 @@ These rules apply to people and coding agents alike (see also [`AGENTS.md`](./AG
 - Pull requests from outside contributors are by invitation: open an issue first and wait for a maintainer to ask for a PR. PRs are limited to collaborators.
 - Questions go to [Discussions](https://github.com/andypalmi/amicu/discussions).
 - Non-maintainers with 3 or more open issues have further new issues closed automatically until the earlier ones are triaged.
-- Issue-form fields have length limits: Problem/Description 1000 characters, Proposed behaviour 1000, Expected 500, Actual 500, Alternatives 500. Logs and command output are exempt. Longer issues are labelled `needs-trim` with a comment; they are never closed for length.
+- Issues not created from an issue form (including via the API or CLI), or over the length limits, are closed automatically with a comment explaining why; refile using a form. Limits: Problem/Proposed behaviour 1000 characters, Expected/Actual/Alternatives 500, total 3000, excluding logs and command output.
 
 ## Prerequisites
 

@@ -58,8 +58,13 @@ jobs:
               ...FIELD_LIMITS.keys(), ...EXEMPT,
               'amicu version', 'Area', 'OS', 'Accelerator', 'Checks',
             ]);
+            // Required headings per form (labels from .github/ISSUE_TEMPLATE/*.yml).
+            const FORMS = [
+              ['Bug report', ['Area', 'amicu version', 'Expected', 'Actual']],
+              ['Feature request', ['Problem', 'Proposed behaviour']],
+            ];
 
-            const body = (issue.body || '').replace(/\r\n/g, '\n');
+            const body =(issue.body || '').replace(/\r\n/g, '\n');
             const reasons = [];
 
             // Split into sections; ignore heading-like lines inside ``` fences.
@@ -75,6 +80,11 @@ jobs:
               }
             }
 
+            const present = new Set(sections.map(s => s.label));
+            if (!FORMS.some(([, req]) => req.every(l => present.has(l)))) {
+              reasons.push('the issue was not created from an issue form (or its required headings are missing)');
+            }
+
             let counted = 0;
             for (const { label, lines } of sections) {
               const value = lines.join('\n').trim();
@@ -88,18 +98,31 @@ jobs:
             }
 
             if (counted > MAX_BODY) {
-              reasons.unshift(`the issue is ${counted} characters excluding logs and command output (limit ${MAX_BODY})`);
+              reasons.push(`the issue is ${counted} characters excluding logs and command output (limit ${MAX_BODY})`);
             }
 
             if (reasons.length === 0) return;
 
-            const labels = issue.labels.map(l => (typeof l === 'string' ? l : l.name));
-            if (labels.includes('needs-trim')) return;
+            const limitsOf = (...labels) => labels.map(l => `${l} ${FIELD_LIMITS.get(l)}`).join(', ');
+            const comment = [
+              'This issue was closed automatically because:',
+              '',
+              ...reasons.map(r => `- ${r}`),
+              '',
+              `Issues must be created from a form at https://github.com/${owner}/${repo}/issues/new/choose (issues filed via the API or CLI that skip the form are closed).`,
+              '',
+              'Required fields:',
+              ...FORMS.map(([name, req]) => `- ${name}: ${req.join(', ')}`),
+              '',
+              `Limits (characters): ${limitsOf('Problem', 'Proposed behaviour')}; ${limitsOf('Expected', 'Actual', 'Alternatives')}; total ${MAX_BODY}, excluding logs and command output.`,
+              '',
+              'Please refile using a form and stay within these limits.',
+            ].join('\n');
 
-            await github.rest.issues.addLabels({
-              owner, repo, issue_number: issue.number, labels: ['needs-trim'],
-            });
             await github.rest.issues.createComment({
+              owner, repo, issue_number: issue.number, body: comment,
+            });
+            await github.rest.issues.update({
               owner, repo, issue_number: issue.number,
-              body: `Please shorten this issue: ${reasons.join('; ')}. Logs and command output are exempt. Edit the issue to trim it; it stays open.`,
+              state: 'closed', state_reason: 'not_planned',
             });
