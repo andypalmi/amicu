@@ -50,7 +50,7 @@ jobs:
         run: cargo test --workspace --locked
 
   commit-messages:
-    name: no Claude attribution in commits
+    name: commit trailers
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:

@@ -14,10 +14,22 @@ body:
       placeholder: "output of amicu --version"
     validations:
       required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - CLI
+        - API
+        - Web
+        - Docs
+    validations:
+      required: true
   - type: input
     id: os
     attributes:
       label: OS
+      description: "n/a for web or docs issues."
       placeholder: "e.g. macOS 15 arm64, Ubuntu 24.04 x86_64"
     validations:
       required: true
@@ -25,6 +37,7 @@ body:
     id: accelerator
     attributes:
       label: Accelerator
+      description: "n/a for web or docs issues."
       placeholder: "e.g. Apple M2 Metal, NVIDIA RTX 4090 CUDA 12, CPU only"
     validations:
       required: true
@@ -32,6 +45,7 @@ body:
     id: command
     attributes:
       label: Command run
+      description: "n/a for web or docs issues."
       placeholder: "the exact command"
     validations:
       required: true
@@ -44,10 +58,17 @@ body:
     validations:
       required: true
   - type: textarea
-    id: expected-actual
+    id: expected
     attributes:
-      label: Expected vs actual
-      description: One line each.
+      label: Expected
+      description: "One or two lines (max 500 characters)."
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: "One or two lines (max 500 characters)."
     validations:
       required: true
   - type: checkboxes

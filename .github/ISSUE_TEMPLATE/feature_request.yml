@@ -10,23 +10,21 @@ body:
     id: problem
     attributes:
       label: Problem
-      description: What do you need to do that you cannot do today?
+      description: What do you need to do that you cannot do today? Max 1000 characters.
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
       label: Proposed behaviour
-      description: What should amicu do? A short example or HCL snippet helps.
+      description: What should amicu do? Max 1000 characters. A short example or HCL snippet helps.
     validations:
       required: true
   - type: textarea
     id: alternatives
     attributes:
       label: Alternatives
-      description: What you tried or considered instead.
-    validations:
-      required: true
+      description: What you tried or considered instead. Max 500 characters.
   - type: checkboxes
     id: checks
     attributes:
