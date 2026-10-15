@@ -10,6 +10,7 @@ amicu init       # scaffold amicu.hcl and .amicu/
 amicu validate   # structural, reference, capacity, and policy checks
 amicu plan       # what apply would do, diffed against state
 amicu apply      # start, update, or stop deployments after approval
+amicu destroy    # stop deployments and remove them from state (--purge also deletes their logs)
 ```
 
 The workflow is the one Terraform users know: configuration is declarative, every change is a plan you can read first, and state records what was applied.

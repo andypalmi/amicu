@@ -26,7 +26,8 @@ use async_trait::async_trait;
 
 use crate::binary::{BinaryConfig, BinaryInfo, CommandRunner, HostRunner, detect_binary};
 use crate::command::{
-    DENYLISTED_ENV_KEYS, DENYLISTED_FLAGS, is_typed_flag, llama_arg_env_flag, render_command,
+    DENYLISTED_ENV_KEYS, DENYLISTED_FLAGS, is_typed_flag, llama_arg_env_flag,
+    render_command_with_alias,
 };
 use crate::error::LlamaCppError;
 use crate::supervisor::{ProcessSupervisor, resolve_launch_secrets};
@@ -642,7 +643,12 @@ impl RuntimeAdapter for LlamaCppAdapter {
             .map(|(m, v)| self.model_path(&m.model.id, v))
             .transpose()
             .map_err(LlamaCppError::into_adapter_error)?;
-        let (argv, text) = render_command(&model_path, draft_path.as_deref(), settings);
+        let (argv, text) = render_command_with_alias(
+            &model_path,
+            draft_path.as_deref(),
+            settings,
+            Some(model.served_name()),
+        );
 
         let gpu_count = u32::from(hardware.accelerator.is_some() && settings.n_gpu_layers != 0);
         // With a KV-cache estimate the peak is weights + KV cache + runtime

@@ -176,7 +176,19 @@ pub fn build_plan_with(
             .hardware_profiles
             .iter()
             .find(|h| h.id == d.hardware_profile);
-        let fingerprint = Fingerprint::compute(d, hardware, inputs.probe);
+        let launch = match adapter.plan_launch(d) {
+            Ok(launch) => launch,
+            Err(err) => {
+                // Fold the triggering error into the diagnostics already
+                // collected (this deployment's `validate` output included)
+                // and hand the caller the full report, rather than losing
+                // that context behind a bare `AdapterError`.
+                diagnostics.push(err.to_diagnostic());
+                return Err(PlanError(DiagnosticReport::new(diagnostics)));
+            }
+        };
+        let rendered = launch.rendered.as_text().to_owned();
+        let fingerprint = Fingerprint::compute(d, hardware, inputs.probe).with_launch(&rendered);
         fingerprints.insert(d.id.clone(), fingerprint.clone());
 
         let (kind, reason) =
@@ -208,18 +220,6 @@ pub fn build_plan_with(
                 ),
             };
 
-        let launch = match adapter.plan_launch(d) {
-            Ok(launch) => launch,
-            Err(err) => {
-                // Fold the triggering error into the diagnostics already
-                // collected (this deployment's `validate` output included)
-                // and hand the caller the full report, rather than losing
-                // that context behind a bare `AdapterError`.
-                diagnostics.push(err.to_diagnostic());
-                return Err(PlanError(DiagnosticReport::new(diagnostics)));
-            }
-        };
-        let rendered = launch.rendered.as_text().to_owned();
         let action = action_for(kind, d, &launch, graph);
         items.push(PlanItem {
             action,

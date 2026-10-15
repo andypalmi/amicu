@@ -157,6 +157,9 @@ pub(crate) fn run_with(
             })
             .unwrap_or_default();
         crate::commands::plan::print_human_with(&result, &graph, &switches, preview)?;
+        if !auto_approve {
+            require_interactive(env, "apply")?;
+        }
         if !auto_approve && !prompt_approval_from(preview, "Apply these changes?", input)? {
             writeln!(preview, "Apply cancelled.").map_err(|e| CliError::io("write failed", e))?;
             return Ok(0);
@@ -214,6 +217,8 @@ pub(crate) struct Env<'a> {
     /// The Modal proxy token config `apply` requires for Modal deployments;
     /// a parameter so tests need not touch the process environment.
     pub proxy_tokens: fn() -> amicu_modal::proxy_auth::TokenConfig,
+    /// Whether stdin is a terminal a person can answer a prompt on.
+    pub interactive: bool,
 }
 
 impl Env<'static> {
@@ -225,6 +230,7 @@ impl Env<'static> {
             forget_unconfirmed,
             purge,
             proxy_tokens: amicu_modal::proxy_auth::TokenConfig::from_env,
+            interactive: std::io::IsTerminal::is_terminal(&std::io::stdin()),
         }
     }
 }
@@ -358,6 +364,7 @@ pub(crate) fn execute(
         project_id: Some(progress.project_id.clone()),
         pending,
         stops: progress.stops.clone(),
+        purge_pending: purge_pending_after(prior_state, &progress.stops),
         fingerprints: final_fingerprints(prior_state, &graph, &progress, result),
         graph,
         endpoints,
@@ -372,6 +379,46 @@ pub(crate) fn execute(
     }
 
     Ok((handles, state))
+}
+
+/// The purge-pending records after a run: the prior ones, plus every log file
+/// of a prior stop record that the run no longer records (stopped, destroyed or
+/// superseded by an instance with different paths), minus any file a live stop
+/// record uses again. No recorded file ever leaves state without either
+/// staying in a stop record or entering `purge_pending`.
+fn purge_pending_after(
+    prior: Option<&LocalState>,
+    stops: &[StopRecord],
+) -> Vec<crate::stops::PurgePending> {
+    let live = |l: &String| stops.iter().any(|s| s.logs.contains(l));
+    let mut out = prior.map(|s| s.purge_pending.clone()).unwrap_or_default();
+    for rec in prior.map_or(&[][..], |s| &s.stops[..]) {
+        let Some(mut entry) = rec.purge_entry() else {
+            continue;
+        };
+        entry.logs.retain(|l| !live(l));
+        if entry.logs.is_empty() {
+            continue;
+        }
+        match out
+            .iter_mut()
+            .find(|p| p.deployment == entry.deployment && p.identity == entry.identity)
+        {
+            Some(existing) => {
+                for l in entry.logs {
+                    if !existing.logs.contains(&l) {
+                        existing.logs.push(l);
+                    }
+                }
+            }
+            None => out.push(entry),
+        }
+    }
+    for p in &mut out {
+        p.logs.retain(|l| !live(l));
+    }
+    out.retain(|p| !p.logs.is_empty());
+    out
 }
 
 /// Fingerprints for a fully successful run: as [`merged_fingerprints`], plus
@@ -479,6 +526,7 @@ fn recorded_state(prior: Option<&LocalState>, graph: &Graph, progress: &Progress
         ),
         pending,
         stops: progress.stops.clone(),
+        purge_pending: purge_pending_after(prior, &progress.stops),
         fingerprints: merged_fingerprints(prior, &partial, progress),
         graph: partial,
         // Placeholder: `save_state` overwrites it with the serial it read plus one.
@@ -1684,7 +1732,18 @@ fn report(
             let deployment = find_deployment(graph, &h.deployment);
             let model = deployment
                 .and_then(|d| graph.models.iter().find(|m| m.id == d.model))
-                .map(|m| m.source.reference.as_str());
+                .map(|m| {
+                    // Must agree with the `--alias` llama-server was started with.
+                    let llama = deployment.is_some_and(|d| {
+                        amicu_runtime::RuntimeKind::of(&d.runtime)
+                            == amicu_runtime::RuntimeKind::LlamaCpp
+                    });
+                    if llama {
+                        m.served_name()
+                    } else {
+                        m.source.reference.as_str()
+                    }
+                });
             let key = deployment.and_then(|d| d.api_key.as_ref());
             io(write!(out, "{}", usage_snippets(h, key, model)))?;
         }
@@ -1807,6 +1866,18 @@ fn usage_snippets(
     );
     out.push('\n');
     out
+}
+
+/// Refuse to prompt when stdin is not a terminal: a script or CI job would
+/// hang or silently cancel. Fails with an error naming `--auto-approve`.
+pub(crate) fn require_interactive(env: &Env<'_>, command: &str) -> Result<(), CliError> {
+    if env.interactive {
+        return Ok(());
+    }
+    Err(CliError::Message(format!(
+        "amicu {command} needs confirmation but stdin is not a terminal; \
+         re-run with --auto-approve to proceed without a prompt"
+    )))
 }
 
 /// Ask `question` and read the answer from `input` (EOF means no).
@@ -2108,6 +2179,7 @@ resource "deployment" "beta" {
             stops: Vec::new(),
             fingerprints: std::collections::BTreeMap::default(),
             serial: 0,
+            purge_pending: Vec::new(),
             extra: std::collections::BTreeMap::default(),
             graph: prior_graph.clone(),
             endpoints: vec![
@@ -2640,6 +2712,7 @@ mod stop_invariant_tests {
             stops: Vec::new(),
             fingerprints: std::collections::BTreeMap::default(),
             serial: 0,
+            purge_pending: Vec::new(),
             extra: std::collections::BTreeMap::default(),
         }
     }
@@ -3038,6 +3111,7 @@ mod partial_state_tests {
             pending: ids(pending),
             stops: Vec::new(),
             serial: 0,
+            purge_pending: Vec::new(),
             extra: std::collections::BTreeMap::default(),
             graph: g,
         }
@@ -3190,5 +3264,48 @@ mod partial_state_tests {
             "never overwrite a recorded one"
         );
         assert_eq!(out[&id("beta")], fp("now"));
+    }
+}
+
+#[cfg(test)]
+mod purge_pending_tests {
+    use super::*;
+
+    fn rec(identity: &str, logs: &[&str]) -> StopRecord {
+        let mut r = StopRecord::host(&"d".into(), None);
+        r.identity = identity.to_owned();
+        r.logs = logs.iter().map(|l| (*l).to_owned()).collect();
+        r
+    }
+
+    fn prior(stops: Vec<StopRecord>) -> LocalState {
+        LocalState {
+            version: LocalState::VERSION.to_owned(),
+            project_id: None,
+            serial: 0,
+            graph: Graph::new(),
+            endpoints: Vec::new(),
+            pending: Vec::new(),
+            stops,
+            purge_pending: Vec::new(),
+            fingerprints: std::collections::BTreeMap::default(),
+            extra: std::collections::BTreeMap::default(),
+        }
+    }
+
+    #[test]
+    fn a_superseded_record_with_different_logs_keeps_its_files_tracked() {
+        let p = prior(vec![rec("old", &["/l/old.out.log"])]);
+        let out = purge_pending_after(Some(&p), &[rec("new", &["/l/new.out.log"])]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].logs, ["/l/old.out.log"]);
+    }
+
+    #[test]
+    fn logs_still_in_a_live_record_are_not_pending_and_stale_pending_clears() {
+        let mut p = prior(vec![rec("a", &["/l/a.out.log"])]);
+        p.purge_pending = vec![rec("a", &["/l/a.out.log"]).purge_entry().unwrap()];
+        let out = purge_pending_after(Some(&p), &[rec("a", &["/l/a.out.log"])]);
+        assert_eq!(out.len(), 0);
     }
 }

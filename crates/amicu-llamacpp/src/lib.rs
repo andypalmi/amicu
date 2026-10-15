@@ -30,7 +30,7 @@ pub use adapter::{Catalog, LlamaCppAdapter, MapCatalog, ResolvedModel};
 pub use binary::{
     BinaryConfig, BinaryInfo, CommandRunner, HostRunner, LlamaVersion, detect_binary,
 };
-pub use command::render_command;
+pub use command::{render_command, render_command_with_alias};
 pub use download::{DEFAULT_MAX_ATTEMPTS, download_gguf};
 pub use error::LlamaCppError;
 pub use health::{Health, HealthProbe, HttpHealthProbe};

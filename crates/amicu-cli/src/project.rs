@@ -61,6 +61,11 @@ pub(crate) struct LocalState {
         amicu_core::id::DeploymentId,
         amicu_engine::fingerprint::Fingerprint,
     >,
+    /// Files left behind by destroyed deployments (their log files), kept until
+    /// `amicu destroy --purge` removes them. Not drift: the deployments are
+    /// gone, only these files remain. Absent in older state.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub purge_pending: Vec<crate::stops::PurgePending>,
     /// Top-level fields this amicu does not know (written by a newer build of
     /// the same version). Kept verbatim so a load-save cycle never drops them.
     ///
@@ -187,14 +192,49 @@ impl Project {
         self.state_dir().join("state.json")
     }
 
-    /// Every `*.hcl` file under the project root, sorted by path.
+    /// Every config `*.hcl` file of this project, sorted by path.
     ///
-    /// Walks recursively, skipping `.amicu/`, hidden dirs, and `target/`.
+    /// The root must be an amicu project: it holds a config `.hcl` file
+    /// directly, or a `.amicu/` directory. Otherwise (e.g. a parent directory of
+    /// several unrelated projects) nothing is loaded and `NoConfig` is returned.
+    /// The walk is recursive but skips hidden dirs (`.amicu/`, `.terraform/`,
+    /// `.git/`), `target/`, `node_modules/`, `*.lock.hcl` files, and nested
+    /// directories that are another project's root (see [`is_foreign_project`]).
     pub fn config_files(&self) -> Result<Vec<PathBuf>, CliError> {
+        if !self.is_project_root()? {
+            return Err(CliError::NoConfig(self.root.clone()));
+        }
         let mut files = Vec::new();
-        collect_hcl(&self.root, &mut files)?;
+        let mut skipped = Vec::new();
+        collect_hcl(&self.root, &mut files, &mut skipped)?;
+        skipped.sort();
+        for dir in &skipped {
+            eprintln!(
+                "note: skipping nested amicu project {} (it has its own .amicu/); run amicu there",
+                dir.display()
+            );
+        }
         files.sort();
         Ok(files)
+    }
+
+    /// Whether the root is an amicu project: a `.amicu/` directory, or a
+    /// config `.hcl` file directly in the root.
+    fn is_project_root(&self) -> Result<bool, CliError> {
+        if self.dot_dir().is_dir() {
+            return Ok(true);
+        }
+        let entries = fs::read_dir(&self.root)
+            .map_err(|e| CliError::io(format!("cannot read {}", self.root.display()), e))?;
+        for entry in entries {
+            let path = entry
+                .map_err(|e| CliError::io("cannot read directory entry", e))?
+                .path();
+            if path.is_file() && is_config_file(&path) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Parse and merge every config file into a single graph.
@@ -518,27 +558,66 @@ fn sync_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 /// Recursively collect `*.hcl` files under `dir`, skipping excluded subtrees.
-fn collect_hcl(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), CliError> {
+fn collect_hcl(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    skipped: &mut Vec<PathBuf>,
+) -> Result<(), CliError> {
     let entries =
         fs::read_dir(dir).map_err(|e| CliError::io(format!("cannot read {}", dir.display()), e))?;
     for entry in entries {
         let entry = entry.map_err(|e| CliError::io("cannot read directory entry", e))?;
         let path = entry.path();
-        if path.is_dir() {
-            if !is_excluded_dir(&path) {
-                collect_hcl(&path, files)?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| CliError::io("cannot read directory entry", e))?;
+        // Symlinked directories are never followed: a link back up the tree
+        // would recurse forever, and a link out is not part of this project.
+        if file_type.is_dir() {
+            if is_excluded_dir(&path) {
+                continue;
             }
-        } else if path.is_file() && path.extension().is_some_and(|e| e == "hcl") {
+            if is_nested_amicu_project(&path) {
+                skipped.push(path);
+            } else if !is_foreign_project(&path) {
+                collect_hcl(&path, files, skipped)?;
+            }
+        } else if path.is_file() && is_config_file(&path) {
             files.push(path);
         }
     }
     Ok(())
 }
 
+/// A config file: `*.hcl`, but not a tool lock file such as
+/// `.terraform.lock.hcl` (`*.lock.hcl`).
+fn is_config_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    Path::new(&lower).extension().is_some_and(|e| e == "hcl") && !lower.ends_with(".lock.hcl")
+}
+
+/// Whether a nested directory is a different amicu project: `.amicu/` holding
+/// what `amicu init` or a real apply wrote. A bare `.amicu/` is not enough: the
+/// state lock creates `.amicu/state/` in any directory amicu is run from.
+fn is_nested_amicu_project(dir: &Path) -> bool {
+    dir.join(".amicu/config.yaml").is_file() || dir.join(".amicu/state/state.json").is_file()
+}
+
+/// Whether a nested directory is the root of a Terraform project, whose files
+/// are not ours (`.terraform/` or `.terraform.lock.hcl`).
+fn is_foreign_project(dir: &Path) -> bool {
+    [".terraform", ".terraform.lock.hcl"]
+        .iter()
+        .any(|m| dir.join(m).exists())
+}
+
 /// Directories skipped during discovery: state, hidden dirs, and build output.
 fn is_excluded_dir(path: &Path) -> bool {
     match path.file_name().and_then(|n| n.to_str()) {
-        Some(name) => name.starts_with('.') || name == "target",
+        Some(name) => name.starts_with('.') || name == "target" || name == "node_modules",
         None => true,
     }
 }
@@ -598,6 +677,7 @@ mod durability_tests {
             stops: Vec::new(),
             fingerprints: std::collections::BTreeMap::default(),
             serial: 0,
+            purge_pending: Vec::new(),
             extra: std::collections::BTreeMap::default(),
         }
     }

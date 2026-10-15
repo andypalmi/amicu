@@ -16,7 +16,7 @@ Amicu configuration is HCL. This page covers the rules shared by every resource.
 | `.amicu/config.yaml` | Project config (`version: 1`, `state.backend: local`) |
 | `.amicu/state/` | Local state and the state lock |
 
-Amicu reads every `*.hcl` file under the project root, recursively, skipping `.amicu/`, hidden directories, and `target/`. You can split resources across files in any layout. Ids must be unique per kind across all files (`AMICU-SCHEMA-002`).
+A directory is an amicu project when it holds a `.hcl` file or a `.amicu/` directory directly. Run from anywhere else (for example a parent of several unrelated projects), amicu stops with `no amicu project found here (run `amicu init`)`. In a project, amicu reads every `*.hcl` file under the project root, recursively, and skips: hidden directories (`.amicu/`, `.terraform/`, `.git/`), `target/` and `node_modules/`, tool lock files (`*.lock.hcl`, such as `.terraform.lock.hcl`), and nested directories that are another project's root (they contain `.amicu/config.yaml` or `.amicu/state/state.json`, or Terraform's `.terraform/` or `.terraform.lock.hcl`). A skipped nested amicu project is named in a note on stderr. Symlinked directories are not followed. You can split resources across files in any other layout. Ids must be unique per kind across all files (`AMICU-SCHEMA-002`).
 
 ## Language
 

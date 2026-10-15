@@ -721,6 +721,7 @@ mod tests {
             stops,
             fingerprints: BTreeMap::default(),
             serial: 0,
+            purge_pending: Vec::new(),
             extra: std::collections::BTreeMap::default(),
         }
     }

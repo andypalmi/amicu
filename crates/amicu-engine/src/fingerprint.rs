@@ -64,6 +64,11 @@ pub struct Fingerprint {
     /// The resolved binary path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
+    /// The rendered launch command (arguments), so a change to how amicu starts
+    /// the runtime shows as an update even when the HCL is unchanged. Absent in
+    /// state written before it was recorded: that is not a difference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<String>,
 }
 
 fn digest(label: &str, value: &str) -> String {
@@ -106,7 +111,15 @@ impl Fingerprint {
             secrets: Some(digest("secrets", &secrets)),
             image: fact_digest("image", probe.image(d, hardware)),
             binary: fact_digest("binary", probe.binary(d, hardware)),
+            launch: None,
         }
+    }
+
+    /// This fingerprint with the digest of the rendered launch command `text`.
+    #[must_use]
+    pub fn with_launch(mut self, text: &str) -> Self {
+        self.launch = Some(digest("launch", text));
+        self
     }
 
     /// The inputs that provably differ from what was `recorded` when the
@@ -125,6 +138,9 @@ impl Fingerprint {
         if differs(&self.binary, &recorded.binary) {
             out.push("binary path");
         }
+        if differs(&self.launch, &recorded.launch) {
+            out.push("launch arguments");
+        }
         out
     }
 
@@ -134,5 +150,7 @@ impl Fingerprint {
         self.secrets = self.secrets.take().or_else(|| current.secrets.clone());
         self.image = self.image.take().or_else(|| current.image.clone());
         self.binary = self.binary.take().or_else(|| current.binary.clone());
+        // `launch` is deliberately not adopted: a process started before it was
+        // recorded may not match the current command, so a baseline would lie.
     }
 }

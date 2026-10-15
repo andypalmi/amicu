@@ -8,8 +8,8 @@ use amicu_hcl::HclError;
 /// Failures surfaced by CLI commands.
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
-    /// No `*.hcl` config was found in the project directory.
-    #[error("no Amicu config found in {}; run `amicu init` first", .0.display())]
+    /// No amicu project was found in the directory.
+    #[error("no amicu project found here (run `amicu init`)")]
     NoConfig(PathBuf),
 
     /// A filesystem operation failed.
