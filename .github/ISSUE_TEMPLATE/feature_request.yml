@@ -2,6 +2,10 @@ name: Feature request
 description: Suggest a change or a new capability.
 labels: ["enhancement"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep it short: one request per issue, about 150 words. No summaries or filler.
   - type: textarea
     id: problem
     attributes:
@@ -12,11 +16,21 @@ body:
   - type: textarea
     id: proposal
     attributes:
-      label: Proposed change
-      description: What would you like amicu to do? Examples or HCL snippets help.
+      label: Proposed behaviour
+      description: What should amicu do? A short example or HCL snippet helps.
     validations:
       required: true
   - type: textarea
     id: alternatives
     attributes:
-      label: Alternatives considered
+      label: Alternatives
+      description: What you tried or considered instead.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I checked the latest release and searched existing issues.
+          required: true

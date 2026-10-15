@@ -4,6 +4,16 @@ Thanks for helping. This repo is a Rust workspace (`crates/`) plus a pnpm/Turbor
 
 Report security issues privately, not as public issues: see [`SECURITY.md`](./SECURITY.md).
 
+## Lean issues and pull requests
+
+These rules apply to people and coding agents alike (see also [`AGENTS.md`](./AGENTS.md)).
+
+- Search existing issues first, and use the issue forms. One problem per issue.
+- At most about 150 words plus the repro. No AI-generated summaries or filler, and no speculative fixes.
+- Pull requests from outside contributors are by invitation: open an issue first and wait for a maintainer to ask for a PR. PRs are limited to collaborators.
+- Questions go to [Discussions](https://github.com/andypalmi/amicu/discussions).
+- Non-maintainers with 3 or more open issues have further new issues closed automatically until the earlier ones are triaged.
+
 ## Prerequisites
 
 - Rust 1.97 or newer (`rust-version` in `Cargo.toml`; CI also builds on the latest stable). Components: `rustfmt`, `clippy`.
