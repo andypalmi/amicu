@@ -9,6 +9,7 @@ Applies to people and coding agents alike.
 - At most about 150 words plus the repro. No AI-generated summaries, no filler.
 - No speculative fixes: report what you observed, not what you guess the cause is.
 - Use the issue forms; include version, OS, accelerator, command and full output.
+- Issues not created from a form (including via the API or CLI) or over the length limits are closed automatically. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the limits.
 
 ## Pull requests
 
