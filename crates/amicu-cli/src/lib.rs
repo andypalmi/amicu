@@ -58,14 +58,21 @@ struct Cli {
 enum Command {
     /// Scaffold a new project in the current directory.
     ///
-    /// Without `--target` the starter is chosen for this machine: macOS gets
-    /// `mac`, Linux with an NVIDIA GPU gets `linux-cuda`, any other Linux
-    /// gets `linux-cpu`. Local starters declare this machine's memory and
-    /// pick a small model that fits it.
+    /// Plain `init` writes an `amicu.hcl` with only a comment header. Use
+    /// `--example` for a working starter.
     Init {
-        /// Starter to write instead of auto-detecting.
-        #[arg(long, value_enum)]
-        target: Option<commands::init::InitTarget>,
+        /// Write a starter example instead of an empty file. Bare `--example`
+        /// detects this machine: macOS gets `mac`, Linux with an NVIDIA GPU gets
+        /// `linux-cuda`, any other Linux gets `linux-cpu`. Local examples
+        /// declare this machine's memory and pick a small model that fits it.
+        /// On an Intel Mac, `mac` writes a `local_cpu` profile with
+        /// `n_gpu_layers = 0`.
+        #[allow(
+            clippy::option_option,
+            reason = "clap: absent, bare flag, flag with value"
+        )]
+        #[arg(long, value_enum, num_args = 0..=1, value_name = "TARGET")]
+        example: Option<Option<commands::init::InitTarget>>,
     },
     /// Canonically format the project's HCL files.
     Fmt {
@@ -361,12 +368,11 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
         commands::telemetry::consent_prompt(cli.output);
     }
     match &cli.command {
-        Command::Init { target } => {
-            // `modal` needs no local hardware, so do not probe for it.
-            let host = (*target != Some(commands::init::InitTarget::Modal))
-                .then(|| host::HostInfo::detect().ok())
-                .flatten();
-            commands::init::run(&project, *target, host.as_ref(), out)
+        Command::Init { example } => {
+            // Plain init and `modal` need no local hardware, so do not probe.
+            let probe = example.is_some_and(|t| t != Some(commands::init::InitTarget::Modal));
+            let host = probe.then(|| host::HostInfo::detect().ok()).flatten();
+            commands::init::run(&project, *example, host.as_ref(), out)
         }
         Command::Fmt { check } => commands::fmt::run(&project, *check, out),
         Command::Validate { fix } => commands::validate::run(&project, *fix, cli.output, out),

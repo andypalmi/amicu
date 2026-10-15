@@ -11,7 +11,7 @@ Amicu configuration is HCL. This page covers the rules shared by every resource.
 
 | Path | Purpose |
 |---|---|
-| `amicu.hcl` | Your resources |
+| `amicu.hcl` | Your resources. `init` writes only a comment header; `init --example` writes a starter. | 
 | `variables.amicu.hcl` | A placeholder. Reusable values are not supported yet. |
 | `.amicu/config.yaml` | Project config (`version: 1`, `state.backend: local`) |
 | `.amicu/state/` | Local state and the state lock |

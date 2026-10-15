@@ -50,13 +50,15 @@ resource "deployment" "qwen3_8b_local" {
 ```
 
 ```bash
-amicu init      # scaffolds a config like the above, sized to this machine (--target mac|linux-cuda|linux-cpu|modal)
+amicu init --example   # scaffolds a config like the above, sized to this machine (plain `amicu init` writes an empty file)
 amicu plan      # checks it fits in memory and shows what apply would do, diffed against state
 amicu apply     # shows the plan, asks for approval, starts the model, checks the endpoint
 amicu destroy   # stops and removes the recorded deployments (asks for approval)
 ```
 
 Point the `hardware_profile` at `provider = "modal"` instead and the same deployment runs on a cloud GPU (see [Deploy to Modal](#deploy-to-modal)). Step by step: [quickstart](https://amicu.dev/docs/quickstart).
+
+More starters are in [`examples/`](examples): `mac`, `linux-cuda`, `linux-cpu` and `modal`.
 
 Local runs need the GGUF weights on disk first; see [Get the GGUF](https://amicu.dev/docs/quickstart#get-the-gguf) in the quickstart.
 

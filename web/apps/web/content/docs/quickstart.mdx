@@ -59,21 +59,22 @@ Create an empty directory and run `init` in it.
 
 ```bash
 mkdir my-stack && cd my-stack
-amicu init
+amicu init --example
 ```
 
-`init` creates `amicu.hcl` (a starter config), `variables.amicu.hcl` (a placeholder), and `.amicu/` (project config and state). It never overwrites existing files.
+`init` creates `amicu.hcl` (only a comment header, no resources), `variables.amicu.hcl` (a placeholder), and `.amicu/` (project config and state). It never overwrites existing files.
 
-The starter is chosen for this machine. macOS gets the `mac` target, Linux with `nvidia-smi` gets `linux-cuda`, and any other Linux gets `linux-cpu`. Its hardware profile is the detected machine, and it picks a Qwen3 GGUF model and context length that fit its memory. To choose yourself:
+For a working starter, add `--example`. A bare `--example` picks the one for this machine: macOS gets `mac`, Linux with `nvidia-smi` gets `linux-cuda`, and any other Linux gets `linux-cpu`. Its hardware profile is the detected machine, and it picks a Qwen3 GGUF model and context length that fit its memory. It replaces the header-only `amicu.hcl` while that is unchanged, and never overwrites a file you edited. To choose yourself:
 
 ```bash
-amicu init --target mac          # Apple Silicon, llama.cpp with Metal
-amicu init --target linux-cuda   # NVIDIA GPU, llama.cpp with all layers on the GPU
-amicu init --target linux-cpu    # no GPU, llama.cpp on the CPU
-amicu init --target modal        # Modal serverless GPU (Path B)
+amicu init --example             # detect this machine
+amicu init --example mac         # Apple Silicon, llama.cpp with Metal
+amicu init --example linux-cuda  # NVIDIA GPU, llama.cpp with all layers on the GPU
+amicu init --example linux-cpu   # no GPU, llama.cpp on the CPU
+amicu init --example modal       # Modal serverless GPU (Path B)
 ```
 
-A local target must match the machine it runs on. See [Init targets](/docs/reference/cli#init-targets). To see what fits before you pick, run `amicu catalog fits`.
+A local example must match the machine it runs on. See [Init examples](/docs/reference/cli#init-examples). The same files are in the repository under [`examples/`](https://github.com/andypalmi/amicu/tree/main/examples). To see what fits before you pick, run `amicu catalog fits`.
 
 ## Path A: on this machine
 
@@ -84,7 +85,7 @@ Requirements:
 
 ### The starter config
 
-`amicu init` writes an `amicu.hcl` like this one. On a Mac with 48 GiB of memory it serves `Qwen/Qwen3-8B-GGUF` (`Qwen3-8B-Q4_K_M.gguf`, about 5 GB) with llama.cpp. Smaller machines get a smaller model, so the model id, file name and context length below depend on your machine:
+`amicu init --example` writes an `amicu.hcl` like this one. On a Mac with 48 GiB of memory it serves `Qwen/Qwen3-8B-GGUF` (`Qwen3-8B-Q4_K_M.gguf`, about 5 GB) with llama.cpp. Smaller machines get a smaller model, so the model id, file name and context length below depend on your machine:
 
 ```hcl
 resource "model" "qwen3_8b" {

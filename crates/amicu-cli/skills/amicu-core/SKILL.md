@@ -21,8 +21,9 @@ through the CLI rather than guessing configuration.
 ## Core workflow
 
 ```bash
-amicu init                 # scaffold amicu.hcl + .amicu/ (starter matched to this machine)
-amicu init --target mac|linux-cuda|linux-cpu|modal   # pick the starter
+amicu init                 # scaffold .amicu/ and an empty amicu.hcl (comment header only)
+amicu init --example       # quick path: a starter sized to this machine
+amicu init --example mac|linux-cuda|linux-cpu|modal   # pick the starter
 amicu catalog fits         # what fits this machine (also: catalog hardware, catalog presets)
 amicu fmt                  # canonical formatting (--check to detect drift only)
 amicu validate --output json   # structural + reference + capacity checks

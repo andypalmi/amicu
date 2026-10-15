@@ -168,8 +168,13 @@ pub(crate) struct HostSummary {
     pub memory_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub accelerator: Option<String>,
-    /// The pool the fit is evaluated against.
+    /// Total memory of the pool the fit engine evaluates: GPU VRAM summed over
+    /// all cards when a GPU was detected, otherwise system or unified memory.
     pub pool_bytes: u64,
+    /// What weights may use in that pool: after the per-device reserve and,
+    /// for several GPUs, the tensor-parallel haircut. Same figure as the
+    /// engine's `available`.
+    pub available_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -189,7 +194,11 @@ pub(crate) fn fits_report(host: &HostInfo) -> FitsReport {
         .iter()
         .map(|t| {
             let variant = GgufVariant {
-                quantization: Quantization::Q4KM,
+                quantization: if t.quantization == "q8_0" {
+                    Quantization::Q8_0
+                } else {
+                    Quantization::Q4KM
+                },
                 file: t.file.to_owned(),
                 size: Some(ByteSize::from_bytes(t.size_bytes)),
                 sha256: None,
@@ -216,10 +225,18 @@ pub(crate) fn fits_report(host: &HostInfo) -> FitsReport {
         .map(|p| preset_fit(p, host))
         .collect();
 
-    let pool = match (&host.nvidia, &host.profile.accelerator) {
-        (Some(g), _) => g.memory.bytes() * u64::from(g.count),
-        _ => host.profile.memory.bytes(),
-    };
+    // The pool and what is usable in it, from the same engine the verdicts use.
+    let probe = check_variant_fit(
+        0,
+        &GgufVariant {
+            quantization: Quantization::Q4KM,
+            file: String::new(),
+            size: Some(ByteSize::from_bytes(0)),
+            sha256: None,
+        },
+        &hw,
+        &cfg,
+    );
     FitsReport {
         version: "v1",
         host: HostSummary {
@@ -230,7 +247,8 @@ pub(crate) fn fits_report(host: &HostInfo) -> FitsReport {
                 .as_ref()
                 .map(|g| g.model.clone())
                 .or_else(|| host.profile.accelerator.as_ref().map(|a| a.model.clone())),
-            pool_bytes: pool,
+            pool_bytes: probe.device_memory.bytes(),
+            available_bytes: probe.available.bytes(),
         },
         starter_models,
         presets,

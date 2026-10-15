@@ -1,10 +1,12 @@
-//! `amicu init [--target mac|linux-cuda|linux-cpu|modal]` - scaffold a new
+//! `amicu init [--example [mac|linux-cuda|linux-cpu|modal]]` - scaffold a new
 //! project. Idempotent; never overwrites.
 //!
-//! The starter is chosen per target. For the local targets its hardware
+//! Plain `init` writes an `amicu.hcl` with only a comment header. `--example`
+//! writes a working starter instead. For the local examples its hardware
 //! profile is the detected host and the model is the largest of a small Qwen3
-//! ladder that fits that memory; `modal` mirrors the Modal docs example.
-
+//! ladder that fits that memory; `modal` mirrors the Modal docs example. The
+//! same starters live under `examples/` in the repo, generated from
+//! [`starter_hcl`] on a stated reference machine (see the tests).
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Write;
@@ -17,10 +19,12 @@ use crate::error::CliError;
 use crate::host::HostInfo;
 use crate::project::Project;
 
-/// Which starter `init` writes.
+/// Which example `init --example` writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum InitTarget {
-    /// Apple Silicon Mac: llama.cpp with Metal offload.
+    /// Apple Silicon Mac: llama.cpp with Metal offload. On an Intel Mac there
+    /// is no GPU to offload to, so it writes a `local_cpu` profile with
+    /// `n_gpu_layers = 0` instead.
     Mac,
     /// Linux with an NVIDIA GPU: llama.cpp with all layers on the GPU.
     LinuxCuda,
@@ -103,15 +107,20 @@ pub(crate) const TIERS: [Tier; 4] = [
     },
 ];
 
-/// The largest tier whose `min_gib` is within `memory_bytes`. On CPU the 8B
+/// Whether `memory_bytes` reaches `gib` GiB, allowing 5% slack: a "16 GB" GPU
+/// reports 16376 MiB, and Linux `MemTotal` is below installed RAM.
+pub(crate) fn reaches_gib(memory_bytes: u64, gib: u64) -> bool {
+    u128::from(memory_bytes) * 100 >= u128::from(gib) * u128::from(GIB) * 95
+}
+
+/// The largest tier whose `min_gib` is within `memory_bytes` (with 5% slack). On CPU the 8B
 /// tier is skipped: generation is slow enough there that a small model is the
 /// better first experience.
 pub(crate) fn pick_tier(memory_bytes: u64, cpu_only: bool) -> &'static Tier {
-    let gib = memory_bytes / GIB;
     TIERS
         .iter()
         .skip(usize::from(cpu_only))
-        .find(|t| gib >= t.min_gib)
+        .find(|t| reaches_gib(memory_bytes, t.min_gib))
         .unwrap_or(&TIERS[TIERS.len() - 1])
 }
 
@@ -119,7 +128,7 @@ pub(crate) fn pick_tier(memory_bytes: u64, cpu_only: bool) -> &'static Tier {
 /// cache grows with it), more on big machines.
 pub(crate) fn context_for(tier: &Tier, memory_bytes: u64) -> u32 {
     match tier.id {
-        "qwen3_8b" | "qwen3_4b" if memory_bytes / GIB >= 32 => 32768,
+        "qwen3_8b" | "qwen3_4b" if reaches_gib(memory_bytes, 32) => 32768,
         "qwen3_8b" | "qwen3_4b" => 8192,
         "qwen3_1_7b" => 4096,
         _ => 2048,
@@ -172,7 +181,7 @@ pub(crate) fn starter_hcl(target: InitTarget, host: Option<&HostInfo>) -> Result
     let host = host.ok_or_else(|| {
         CliError::Message(format!(
             "could not detect this machine, so the `{}` starter cannot match it; \
-             use `--target modal`, or write the hardware profile by hand",
+             use `--example modal`, or write the hardware profile by hand",
             target.label()
         ))
     })?;
@@ -206,7 +215,7 @@ pub(crate) fn starter_hcl(target: InitTarget, host: Option<&HostInfo>) -> Result
             let gpu = host.nvidia.as_ref().ok_or_else(|| {
                 CliError::Message(
                     "no NVIDIA GPU found (`nvidia-smi` is missing or lists no card); \
-                     use `--target linux-cpu`"
+                     use `--example linux-cpu`"
                         .into(),
                 )
             })?;
@@ -314,6 +323,19 @@ resource "deployment" "chat" {
 }
 "#;
 
+/// What plain `init` writes: no resources, just where to go next.
+const EMPTY_HCL: &str = "# Amicu configuration.
+#
+# Declare models, hardware profiles and deployments here.
+# To start from a working example sized for this machine, run
+#   amicu init --example
+# (or pick one: amicu init --example mac|linux-cuda|linux-cpu|modal).
+# That replaces this file while it is still unchanged.
+#
+# See what fits this machine: amicu catalog fits
+# Docs: https://amicu.dev/docs
+";
+
 const VARIABLES_HCL: &str = "# Amicu variables.
 # Reusable values will be declarable here in a future release.
 ";
@@ -326,32 +348,49 @@ state:
 
 /// Scaffold the project files, warning on (and skipping) any that exist.
 ///
-/// `target` is `None` for auto-detection from `host`. `host` is `None` when
-/// detection failed or was not needed (`modal`).
+/// `example` is `None` for plain `init` (header-only config), `Some(None)` for
+/// a bare `--example` (auto-detect from `host`), or `Some(Some(target))`.
+/// `host` is `None` when detection failed or was not needed.
+#[allow(
+    clippy::option_option,
+    reason = "absent, bare --example, --example <target>"
+)]
 pub(crate) fn run(
     project: &Project,
-    target: Option<InitTarget>,
+    example: Option<Option<InitTarget>>,
     host: Option<&HostInfo>,
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
     let io = |r: std::io::Result<()>| r.map_err(|e| CliError::io("write failed", e));
-    let target = match (target, host) {
-        (Some(t), _) => t,
-        (None, Some(h)) => InitTarget::detect(h),
-        (None, None) => {
+    let target = match (example, host) {
+        (None, _) => None,
+        (Some(Some(t)), _) => Some(t),
+        (Some(None), Some(h)) => Some(InitTarget::detect(h)),
+        (Some(None), None) => {
             return Err(CliError::Message(
-                "could not detect this machine; pass `--target mac|linux-cuda|linux-cpu|modal`"
+                "could not detect this machine; pass `--example mac|linux-cuda|linux-cpu|modal`"
                     .into(),
             ));
         }
     };
-    check_host_matches(target, host)?;
+    if let Some(t) = target {
+        check_host_matches(t, host)?;
+    }
     let root = project.root();
     let mut created = 0u32;
 
     // Emit the starter already in canonical form so `fmt --check` is clean.
-    let amicu_hcl = canonical(&starter_hcl(target, host)?)?;
+    let amicu_hcl = match target {
+        Some(t) => canonical(&starter_hcl(t, host)?)?,
+        None => EMPTY_HCL.to_owned(),
+    };
     let hcl_path = root.join("amicu.hcl");
+    // A file `init` left untouched is safe to upgrade to an example; anything
+    // the user wrote is never overwritten.
+    if target.is_some() && fs::read_to_string(&hcl_path).is_ok_and(|t| t == EMPTY_HCL) {
+        fs::remove_file(&hcl_path)
+            .map_err(|e| CliError::io(format!("cannot replace {}", hcl_path.display()), e))?;
+    }
     let hcl_existed = hcl_path.exists();
     created += write_if_absent(out, &hcl_path, &amicu_hcl)?;
     created += write_if_absent(out, &root.join("variables.amicu.hcl"), VARIABLES_HCL)?;
@@ -371,8 +410,15 @@ pub(crate) fn run(
             "Initialized Amicu project ({created} item(s) created)."
         ))?;
     }
-    if !hcl_existed {
-        io(writeln!(out, "Starter: {}.", target.label()))?;
+    if !hcl_existed && let Some(target) = target {
+        io(writeln!(out, "Example: {}.", target.label()))?;
+        if target == InitTarget::Modal {
+            io(writeln!(
+                out,
+                "Export MODAL_TOKEN_ID, MODAL_TOKEN_SECRET, MODAL_PROXY_TOKEN_ID, \
+                 MODAL_PROXY_TOKEN_SECRET and CHAT_API_KEY before `amicu plan`."
+            ))?;
+        }
         if let Some(h) = host.filter(|_| target != InitTarget::Modal) {
             io(writeln!(out, "Detected: {}.", h.describe()))?;
         }
@@ -381,13 +427,13 @@ pub(crate) fn run(
 }
 
 /// A local target must match the machine it is written on: its profile is the
-/// detected host. `--target mac` on Linux (or the reverse) would write a
+/// detected host. `--example mac` on Linux (or the reverse) would write a
 /// profile of hardware that is not there.
 fn check_host_matches(target: InitTarget, host: Option<&HostInfo>) -> Result<(), CliError> {
     let Some(host) = host else { return Ok(()) };
     let mismatch = |wanted: &str| {
         Err(CliError::Message(format!(
-            "`--target {}` needs {wanted}, but this machine is {}; \
+            "`--example {}` needs {wanted}, but this machine is {}; \
              pick another target (the default detects one)",
             target.label(),
             host.os
@@ -400,6 +446,16 @@ fn check_host_matches(target: InitTarget, host: Option<&HostInfo>) -> Result<(),
         }
         _ => Ok(()),
     }
+}
+
+/// The starter for `target` on `host`, in canonical form: exactly what
+/// `init --example` writes. Also used to generate `examples/`.
+#[cfg(test)]
+pub(crate) fn canonical_starter(
+    target: InitTarget,
+    host: Option<&HostInfo>,
+) -> Result<String, CliError> {
+    canonical(&starter_hcl(target, host)?)
 }
 
 /// The starter config, rendered through the same formatter as `fmt`.

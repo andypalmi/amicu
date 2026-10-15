@@ -137,13 +137,31 @@ fn discover_macos(probe: &impl SystemProbe, os: &str) -> Result<HostReport, Disc
 fn discover_linux(probe: &impl SystemProbe, os: &str) -> Result<HostReport, DiscoveryError> {
     let cpuinfo = probe.read_file("/proc/cpuinfo")?;
     let meminfo = probe.read_file("/proc/meminfo")?;
-    let profile = parse_linux_cpu(&cpuinfo, &meminfo)?;
+    let mut profile = parse_linux_cpu(&cpuinfo, &meminfo)?;
+    // Inside a container the cgroup limit, not the host RAM, is what the
+    // process can use.
+    if let Some(limit) = cgroup_memory_limit(probe) {
+        profile.memory = ByteSize::from_bytes(profile.memory.bytes().min(limit));
+    }
     let disk_free = disk_free(probe)?;
     Ok(HostReport {
         profile,
         os: os.to_string(),
         disk_free,
     })
+}
+
+/// The cgroup memory limit in bytes (v2 `memory.max`, then v1
+/// `memory.limit_in_bytes`), or `None` when there is no readable, numeric
+/// limit (`max` means unlimited).
+fn cgroup_memory_limit(probe: &impl SystemProbe) -> Option<u64> {
+    [
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ]
+    .iter()
+    .find_map(|path| probe.read_file(path).ok()?.trim().parse::<u64>().ok())
+    .filter(|b| *b > 0)
 }
 
 fn disk_free(probe: &impl SystemProbe) -> Result<ByteSize, DiscoveryError> {
@@ -542,6 +560,40 @@ MemAvailable:    8000000 kB
         assert_eq!(report.os, "linux");
         assert_eq!(report.disk_free.bytes(), 72_836_000 * 1024);
         assert_eq!(report.profile.memory.bytes(), 16_384_000 * 1024);
+    }
+
+    fn linux_probe() -> FakeProbe {
+        FakeProbe::default()
+            .file("/proc/cpuinfo", CPUINFO)
+            .file("/proc/meminfo", MEMINFO)
+            .command("df -Pk /", DF_LINUX)
+    }
+
+    #[test]
+    fn linux_memory_is_capped_by_a_cgroup_v2_limit() {
+        let probe = linux_probe().file("/sys/fs/cgroup/memory.max", "4294967296\n");
+        let report = discover_with(&probe, "linux").unwrap();
+        assert_eq!(report.profile.memory.bytes(), 4 << 30);
+    }
+
+    #[test]
+    fn linux_memory_is_capped_by_a_cgroup_v1_limit() {
+        let probe = linux_probe().file(
+            "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+            "2147483648\n",
+        );
+        let report = discover_with(&probe, "linux").unwrap();
+        assert_eq!(report.profile.memory.bytes(), 2 << 30);
+    }
+
+    #[test]
+    fn unlimited_or_larger_cgroup_limits_do_not_change_host_memory() {
+        let host = 16_384_000 * 1024;
+        for limit in ["max\n", "9223372036854771712\n", "garbage"] {
+            let probe = linux_probe().file("/sys/fs/cgroup/memory.max", limit);
+            let report = discover_with(&probe, "linux").unwrap();
+            assert_eq!(report.profile.memory.bytes(), host, "{limit}");
+        }
     }
 
     #[test]

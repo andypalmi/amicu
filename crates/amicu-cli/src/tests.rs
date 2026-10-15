@@ -259,7 +259,7 @@ fn init_creates_expected_files_and_is_idempotent() {
     assert_eq!(
         commands::init::run(
             &project,
-            Some(commands::init::InitTarget::Mac),
+            Some(Some(commands::init::InitTarget::Mac)),
             Some(&crate::host::fake::mac("m4_pro", 48)),
             &mut out
         )
@@ -280,7 +280,7 @@ fn init_creates_expected_files_and_is_idempotent() {
     let mut out2 = Vec::new();
     commands::init::run(
         &project,
-        Some(commands::init::InitTarget::Mac),
+        Some(Some(commands::init::InitTarget::Mac)),
         Some(&crate::host::fake::mac("m4_pro", 48)),
         &mut out2,
     )
@@ -296,14 +296,14 @@ fn init_ignores_dot_amicu_idempotently() {
     let project = Project::new(&td.path);
     commands::init::run(
         &project,
-        Some(commands::init::InitTarget::Mac),
+        Some(Some(commands::init::InitTarget::Mac)),
         Some(&crate::host::fake::mac("m4_pro", 48)),
         &mut Vec::new(),
     )
     .unwrap();
     commands::init::run(
         &project,
-        Some(commands::init::InitTarget::Mac),
+        Some(Some(commands::init::InitTarget::Mac)),
         Some(&crate::host::fake::mac("m4_pro", 48)),
         &mut Vec::new(),
     )
@@ -316,14 +316,14 @@ fn init_ignores_dot_amicu_idempotently() {
     let project = Project::new(&td.path);
     commands::init::run(
         &project,
-        Some(commands::init::InitTarget::Mac),
+        Some(Some(commands::init::InitTarget::Mac)),
         Some(&crate::host::fake::mac("m4_pro", 48)),
         &mut Vec::new(),
     )
     .unwrap();
     commands::init::run(
         &project,
-        Some(commands::init::InitTarget::Mac),
+        Some(Some(commands::init::InitTarget::Mac)),
         Some(&crate::host::fake::mac("m4_pro", 48)),
         &mut Vec::new(),
     )
@@ -335,7 +335,7 @@ fn init_ignores_dot_amicu_idempotently() {
     write(&td.path, ".gitignore", "/.amicu\n");
     commands::init::run(
         &Project::new(&td.path),
-        Some(commands::init::InitTarget::Mac),
+        Some(Some(commands::init::InitTarget::Mac)),
         Some(&crate::host::fake::mac("m4_pro", 48)),
         &mut Vec::new(),
     )
@@ -691,7 +691,7 @@ fn init_output_passes_fmt_check() {
     assert_eq!(
         commands::init::run(
             &project,
-            Some(commands::init::InitTarget::Mac),
+            Some(Some(commands::init::InitTarget::Mac)),
             Some(&crate::host::fake::mac("m4_pro", 48)),
             &mut out
         )
@@ -3670,7 +3670,8 @@ mod host_catalog {
         ] {
             let td = TempDir::new();
             let project = Project::new(&td.path);
-            commands::init::run(&project, Some(target), Some(&host), &mut Vec::new()).unwrap();
+            commands::init::run(&project, Some(Some(target)), Some(&host), &mut Vec::new())
+                .unwrap();
             let mut out = Vec::new();
             let code =
                 commands::validate::run(&project, false, OutputFormat::Human, &mut out).unwrap();
@@ -3729,9 +3730,9 @@ mod host_catalog {
         let td = TempDir::new();
         let project = Project::new(&td.path);
         let mut out = Vec::new();
-        commands::init::run(&project, None, Some(&fake::linux(16, None)), &mut out).unwrap();
+        commands::init::run(&project, Some(None), Some(&fake::linux(16, None)), &mut out).unwrap();
         let text = utf8(out);
-        assert!(text.contains("Starter: linux-cpu."), "{text}");
+        assert!(text.contains("Example: linux-cpu."), "{text}");
         let hcl = std::fs::read_to_string(td.path.join("amicu.hcl")).unwrap();
         assert!(hcl.contains("local_cpu"));
     }
@@ -3742,7 +3743,7 @@ mod host_catalog {
         let project = Project::new(&td.path);
         let err = commands::init::run(
             &project,
-            Some(InitTarget::Mac),
+            Some(Some(InitTarget::Mac)),
             Some(&fake::linux(16, None)),
             &mut Vec::new(),
         )
@@ -3750,18 +3751,24 @@ mod host_catalog {
         assert!(err.to_string().contains("needs a Mac"), "{err}");
         let err = commands::init::run(
             &project,
-            Some(InitTarget::LinuxCuda),
+            Some(Some(InitTarget::LinuxCuda)),
             Some(&fake::linux(16, None)),
             &mut Vec::new(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("no NVIDIA GPU"), "{err}");
-        let err = commands::init::run(&project, None, None, &mut Vec::new()).unwrap_err();
-        assert!(err.to_string().contains("--target"), "{err}");
+        let err = commands::init::run(&project, Some(None), None, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("--example"), "{err}");
         // Nothing was written by the failed attempts.
         assert!(!td.path.join("amicu.hcl").exists());
         // Modal needs no host at all.
-        commands::init::run(&project, Some(InitTarget::Modal), None, &mut Vec::new()).unwrap();
+        commands::init::run(
+            &project,
+            Some(Some(InitTarget::Modal)),
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -3770,7 +3777,7 @@ mod host_catalog {
         let project = Project::new(&td.path);
         commands::init::run(
             &project,
-            Some(InitTarget::Mac),
+            Some(Some(InitTarget::Mac)),
             Some(&fake::mac("m4_pro", 48)),
             &mut Vec::new(),
         )
@@ -4067,5 +4074,158 @@ resource "deployment" "d" {
         )
         .unwrap_err();
         assert!(err.to_string().contains("unsupported OS"));
+    }
+
+    // --- empty init, examples/ -------------------------------------------------
+
+    #[test]
+    fn plain_init_writes_only_a_header_that_validates_and_plans_to_nothing() {
+        let td = TempDir::new();
+        let project = Project::new(&td.path);
+        commands::init::run(&project, None, None, &mut Vec::new()).unwrap();
+        let hcl = std::fs::read_to_string(td.path.join("amicu.hcl")).unwrap();
+        assert!(
+            hcl.lines().all(|l| l.starts_with('#') || l.is_empty()),
+            "{hcl}"
+        );
+        assert!(hcl.contains("amicu init --example"));
+        assert!(hcl.contains("amicu catalog"));
+        assert!(hcl.contains("https://amicu.dev/docs"));
+
+        let mut out = Vec::new();
+        assert_eq!(
+            commands::validate::run(&project, false, OutputFormat::Human, &mut out).unwrap(),
+            0,
+            "{}",
+            utf8(out)
+        );
+        let mut out = Vec::new();
+        let code =
+            commands::plan::run_with(&project, OutputFormat::Human, &mut out, |_| true).unwrap();
+        let text = utf8(out);
+        assert_eq!(code, 0, "{text}");
+        assert!(text.contains("No changes"), "{text}");
+        let mut out = Vec::new();
+        assert_eq!(commands::fmt::run(&project, true, &mut out).unwrap(), 0);
+    }
+
+    #[test]
+    fn example_upgrades_an_untouched_header_but_never_a_users_file() {
+        let td = TempDir::new();
+        let project = Project::new(&td.path);
+        let host = fake::mac("m4_pro", 48);
+        commands::init::run(&project, None, None, &mut Vec::new()).unwrap();
+        commands::init::run(&project, Some(None), Some(&host), &mut Vec::new()).unwrap();
+        let hcl = std::fs::read_to_string(td.path.join("amicu.hcl")).unwrap();
+        assert!(hcl.contains("resource \"model\""), "{hcl}");
+
+        // Now the user's own file: a second --example leaves it alone.
+        std::fs::write(td.path.join("amicu.hcl"), "# mine\n").unwrap();
+        commands::init::run(&project, Some(None), Some(&host), &mut Vec::new()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(td.path.join("amicu.hcl")).unwrap(),
+            "# mine\n"
+        );
+    }
+
+    #[test]
+    fn sixteen_gb_cards_get_the_8b_tier() {
+        // A "16 GB" GPU reports 16376 MiB.
+        assert_eq!(pick_tier(16376 * 1024 * 1024, false).id, "qwen3_8b");
+        // A "8 GB" card reports about 8188 MiB.
+        assert_eq!(pick_tier(8188 * 1024 * 1024, false).id, "qwen3_4b");
+        // Well under the threshold still steps down.
+        assert_eq!(pick_tier(14 * GIB, false).id, "qwen3_4b");
+        let hcl = starter_hcl(
+            InitTarget::LinuxCuda,
+            Some(&HostInfo {
+                nvidia: Some(crate::host::NvidiaGpu {
+                    model: "rtx_4080".into(),
+                    count: 1,
+                    memory: amicu_core::ByteSize::from_bytes(16376 * 1024 * 1024),
+                }),
+                ..fake::linux(64, None)
+            }),
+        )
+        .unwrap();
+        assert!(hcl.contains("Qwen3-8B"), "{hcl}");
+    }
+
+    /// The machines the files under `examples/` are generated for.
+    fn reference(target: InitTarget) -> (HostInfo, &'static str) {
+        match target {
+            InitTarget::Mac => (
+                fake::mac("m4_pro", 48),
+                "Apple M4 Pro, 48 GiB unified memory",
+            ),
+            InitTarget::LinuxCuda => (
+                fake::linux(64, Some(("rtx_4090", 24))),
+                "Linux, 64 GiB RAM, one NVIDIA RTX 4090 (24 GiB VRAM)",
+            ),
+            InitTarget::LinuxCpu => (fake::linux(16, None), "Linux, 16 GiB RAM, no GPU"),
+            InitTarget::Modal => (fake::linux(16, None), "no local hardware needed"),
+        }
+    }
+
+    fn example_path(dir: &str, file: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples")
+            .join(dir)
+            .join(file)
+    }
+
+    fn example_dirs() -> [(&'static str, InitTarget); 4] {
+        [
+            ("mac", InitTarget::Mac),
+            ("linux-cuda", InitTarget::LinuxCuda),
+            ("linux-cpu", InitTarget::LinuxCpu),
+            ("modal", InitTarget::Modal),
+        ]
+    }
+
+    /// The expected file: a comment naming the reference machine, then exactly
+    /// what `init --example` writes for it.
+    fn expected_example(target: InitTarget) -> String {
+        let (host, label) = reference(target);
+        let body = crate::commands::init::canonical_starter(target, Some(&host)).unwrap();
+        format!(
+            "# Reference machine: {label}.\n# `amicu init --example` sizes the starter to your own machine instead.\n\n{body}"
+        )
+    }
+
+    #[test]
+    fn example_files_match_init_output_and_validate_and_plan() {
+        // `AMICU_UPDATE_EXAMPLES=1 cargo test -p amicu-cli example_files` rewrites them.
+        let update = std::env::var_os("AMICU_UPDATE_EXAMPLES").is_some();
+        for (dir, target) in example_dirs() {
+            let path = example_path(dir, "amicu.hcl");
+            let want = expected_example(target);
+            if update {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, &want).unwrap();
+            }
+            let have = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            assert_eq!(
+                have, want,
+                "examples/{dir}/amicu.hcl is stale; rerun with AMICU_UPDATE_EXAMPLES=1"
+            );
+            assert!(
+                example_path(dir, "README.md").is_file(),
+                "examples/{dir}/README.md"
+            );
+
+            let td = TempDir::new();
+            write(&td.path, "amicu.hcl", &have);
+            let project = Project::new(&td.path);
+            let mut out = Vec::new();
+            let code =
+                commands::validate::run(&project, false, OutputFormat::Human, &mut out).unwrap();
+            assert_eq!(code, 0, "{dir}: {}", utf8(out));
+            let mut out = Vec::new();
+            let code = commands::plan::run_with(&project, OutputFormat::Human, &mut out, |_| true)
+                .unwrap();
+            assert_eq!(code, 0, "{dir}: {}", utf8(out));
+        }
     }
 }

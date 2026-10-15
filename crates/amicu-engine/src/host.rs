@@ -20,14 +20,24 @@ pub struct HostFacts {
     pub accelerator_memory: Option<ByteSize>,
 }
 
-/// A declared figure may exceed the detected one by this much before it is
-/// flagged: Linux `MemTotal` is a few percent below the installed RAM, and a
-/// "16GiB" machine reports about 15.6 GiB.
+/// A declared figure is accepted up to the largest of: 5% over the detected
+/// one, the detected one plus 256 MiB, and the detected one rounded to the
+/// nearest GiB. Linux `MemTotal` is a few percent below installed RAM (a
+/// "16GiB" machine reports about 15.6 GiB, an "8GiB" one about 7.6 GiB), and
+/// a percentage alone is too tight on small machines.
 const TOLERANCE_PERCENT: u64 = 5;
+const TOLERANCE_FLOOR: u64 = 256 * 1024 * 1024;
+const GIB: u64 = 1024 * 1024 * 1024;
 
 fn exceeds(declared: ByteSize, detected: ByteSize) -> bool {
-    u128::from(declared.bytes()) * 100
-        > u128::from(detected.bytes()) * (100 + u128::from(TOLERANCE_PERCENT))
+    let d = detected.bytes();
+    let percent = u64::try_from(u128::from(d) * u128::from(100 + TOLERANCE_PERCENT) / 100)
+        .unwrap_or(u64::MAX);
+    let nearest_gib = d.saturating_add(GIB / 2) / GIB * GIB;
+    let allowed = percent
+        .max(d.saturating_add(TOLERANCE_FLOOR))
+        .max(nearest_gib);
+    declared.bytes() > allowed
 }
 
 /// `AMICU-MEM-003` warnings, one per local deployment whose hardware profile
@@ -174,6 +184,20 @@ mod tests {
         );
         assert_eq!(
             host_diagnostics(&graph("local_cpu", gib(32), None), &h).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn small_machines_round_to_the_nearest_gib() {
+        // "8GiB" declared on a host reporting 7.6 GiB (5% alone would warn).
+        let h = HostFacts {
+            memory: ByteSize::from_bytes(8_150_000_000),
+            accelerator_memory: None,
+        };
+        assert_eq!(host_diagnostics(&graph("local", gib(8), None), &h).len(), 0);
+        assert_eq!(
+            host_diagnostics(&graph("local", gib(16), None), &h).len(),
             1
         );
     }

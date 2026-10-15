@@ -15,7 +15,7 @@ Commands operate on the project in the current directory. `catalog`, `skill` and
 
 | Command | Description |
 |---|---|
-| `amicu init [--target mac\|linux-cuda\|linux-cpu\|modal]` | Scaffold `amicu.hcl`, `variables.amicu.hcl`, and `.amicu/`. Idempotent; never overwrites. Without `--target`, the starter is chosen for this machine, see [Init targets](#init-targets). |
+| `amicu init [--example [mac\|linux-cuda\|linux-cpu\|modal]]` | Scaffold `amicu.hcl`, `variables.amicu.hcl`, and `.amicu/`. Idempotent; never overwrites. Plain `init` writes `amicu.hcl` with only a comment header. `--example` writes a working starter instead, see [Init examples](#init-examples). |
 | `amicu fmt [--check]` | Rewrite `*.hcl` in canonical form. With `--check`, write nothing and exit 1 if any file would change. |
 | `amicu validate [--fix]` | Structural, reference, capacity, and policy checks. `--fix` applies safe repairs (re-formatting only). |
 | `amicu plan` | Compute the actions the next apply would take, diffed against state. |
@@ -26,18 +26,18 @@ Commands operate on the project in the current directory. `catalog`, `skill` and
 
 `destroy` works like `terraform destroy`. To remove a deployment without tearing it down first, delete its resource from the configuration and run `amicu apply`. See [Plan, apply and state](/docs/concepts/plan-apply-state#destroy).
 
-## Init targets
+## Init examples
 
-`amicu init --target <target>` writes a starter `amicu.hcl`. Without `--target`, macOS gets `mac`, Linux with `nvidia-smi` gets `linux-cuda`, and any other Linux gets `linux-cpu`. Windows is not supported for local runs.
+Plain `amicu init` writes an `amicu.hcl` with only a comment header (no resources); it validates and plans to nothing. `amicu init --example <target>` writes a starter instead. A bare `--example` detects the target: macOS gets `mac`, Linux with `nvidia-smi` gets `linux-cuda`, and any other Linux gets `linux-cpu`. Windows is not supported for local runs.
 
 | Target | Runtime | Hardware profile |
 |---|---|---|
-| `mac` | llama.cpp, all layers on the GPU (Metal) | `local_apple` with the detected chip and unified memory |
+| `mac` | llama.cpp, all layers on the GPU (Metal) | `local_apple` with the detected chip and unified memory. On an Intel Mac there is no GPU to offload to, so it writes a `local_cpu` profile with `n_gpu_layers = 0` |
 | `linux-cuda` | llama.cpp, `n_gpu_layers = -1` | `on_prem` with the detected GPU model and VRAM |
 | `linux-cpu` | llama.cpp, `n_gpu_layers = 0` | `local_cpu` with the detected CPU and memory |
 | `modal` | vLLM on one Modal L4 | The [Modal](/docs/providers/modal) example; needs the Modal tokens and `CHAT_API_KEY` |
 
-The local targets pick the largest of Qwen3 8B, 4B, 1.7B and 0.6B (GGUF) that fits the detected memory, and a context length to match. `linux-cpu` starts at 4B. A local target must match the machine it runs on. The starter is a starting point: change the model, then run `amicu validate` and `amicu plan`.
+The starter is written only if `amicu.hcl` is absent or still the untouched header from plain `init`. The same starters are in the repository under `examples/`, generated for a stated reference machine; a test keeps them equal to the `init` output. The local examples pick the largest of Qwen3 8B, 4B, 1.7B and 0.6B (GGUF) that fits the detected memory, and a context length to match. `linux-cpu` starts at 4B. A local example must match the machine it runs on. The starter is a starting point: change the model, then run `amicu validate` and `amicu plan`.
 
 ## Catalog commands
 
@@ -49,7 +49,7 @@ Read-only and offline. They read data built into amicu and need no project, netw
 | `amicu catalog presets` | The wizard presets: id, name and summary. |
 | `amicu catalog fits` | Which starter models and presets fit this machine's memory, from the same weight-fit estimate as `validate`. Weights only, after a 2 GiB reserve. A preset is judged with this machine as its hardware. |
 
-All three accept `--output json`. `fits` emits `{ "version": "v1", "host": {...}, "starter_models": [...], "presets": [...] }`; each entry has a `verdict` of `fits`, `too_big` or `unknown`.
+All three accept `--output json`. `fits` emits `{ "version": "v1", "host": {...}, "starter_models": [...], "presets": [...] }`; `host` has `pool_bytes` (the memory pool the fit engine evaluates, GPU VRAM summed over cards when a GPU was detected) and `available_bytes` (what weights may use after the reserve and any multi-GPU haircut); each entry has a `verdict` of `fits`, `too_big` or `unknown`.
 
 ## Output lines
 
@@ -117,7 +117,6 @@ The stored choice is in `$XDG_CONFIG_HOME/amicu/telemetry.json`, or `~/.config/a
 - `validate` emits a diagnostic report: `{ "version": "v1", "valid": true, "diagnostics": [] }`. A `plan` that fails on errors emits the same shape.
 - A successful `plan` emits the plan: `{ "version": "v1", "actions": [...] }`.
 - `doctor` emits `{ "version": "v1", "ok": true, "checks": [...] }`.
-- `catalog hardware`, `catalog presets` and `catalog fits` emit JSON documents as described above.
 - With `apply --output json`, stdout carries only the resulting endpoint handles; the plan preview and approval prompt go to stderr.
 - With `destroy --output json`, stdout is a JSON array of the destroyed deployment ids. It is `[]` when there was nothing to destroy or the prompt was declined. The preview, the prompt, and the notes about log files and volumes go to stderr.
 
