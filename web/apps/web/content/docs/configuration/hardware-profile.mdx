@@ -59,7 +59,7 @@ resource "hardware_profile" "gpu_l4" {
 | `region` | string | no | Provider region code. Used for residency checks. |
 | `accelerator` | block | no | GPU, TPU, or Apple Silicon |
 | `accelerator.kind` | string | yes | `gpu`, `tpu`, `apple_silicon`, or `cpu` |
-| `accelerator.model` | string | yes | Model name, for example `l4`, `h100`, `m4_pro` (chip only; the memory size goes in `memory`) |
+| `accelerator.model` | string | yes | Model name, for example `l4`, `h100`, `m4_pro`, `m5_max`, `m3_ultra` (any shipped Apple Silicon chip, `m1` to `m5` base/Pro/Max/Ultra; chip only, the memory size goes in `memory`) |
 | `accelerator.count` | number | yes | Number of accelerators |
 | `accelerator.memory` | size | yes | Memory of the accelerator (VRAM or unified memory) |
 | `accelerator.bandwidth_gbps` | number | no | Memory bandwidth in GB/s. Recorded for planning; not read by the fit check yet. |
