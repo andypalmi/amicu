@@ -37,9 +37,9 @@ const VALID_NO_DEPLOY: &str = r#"
 resource "model" "m" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "unsloth/Qwen3.5-9B-GGUF"
   }
-  architecture   = "qwen2"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
@@ -49,7 +49,7 @@ resource "model" "m" {
   variant {
     quantization = "q4_k_m"
     file         = "m-q4_k_m.gguf"
-    size         = "4GiB"
+    size         = "5680522464B"
   }
 }
 
@@ -70,9 +70,9 @@ const PLANNABLE: &str = r#"
 resource "model" "m" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "unsloth/Qwen3.5-9B-GGUF"
   }
-  architecture   = "qwen2"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
@@ -82,7 +82,7 @@ resource "model" "m" {
   variant {
     quantization = "q4_k_m"
     file         = "m-q4_k_m.gguf"
-    size         = "4GiB"
+    size         = "5680522464B"
   }
 }
 

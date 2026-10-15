@@ -700,9 +700,9 @@ fn build_local_dev_chat(preset: &Preset, answers: &WizardAnswers) -> Graph {
         id: model_id.as_str().into(),
         source: ModelSource {
             registry: SourceRegistry::HuggingFace,
-            reference: "Qwen/Qwen2.5-7B-Instruct-GGUF".to_string(),
+            reference: "unsloth/Qwen3.5-9B-GGUF".to_string(),
         },
-        architecture: "qwen2".to_string(),
+        architecture: "qwen35".to_string(),
         modalities: vec![Modality::Text],
         artifact: Artifact {
             format: ArtifactFormat::Gguf,
@@ -714,7 +714,7 @@ fn build_local_dev_chat(preset: &Preset, answers: &WizardAnswers) -> Graph {
         // variant to resolve rather than erroring with "no GGUF variant".
         variants: vec![GgufVariant {
             quantization: Quantization::Q4KM,
-            file: "qwen2.5-7b-instruct-q4_k_m.gguf".to_string(),
+            file: "Qwen3.5-9B-Q4_K_M.gguf".to_string(),
             size: None,
             sha256: None,
         }],
@@ -971,9 +971,9 @@ fn build_internal_knowledge_chatbot(preset: &Preset, answers: &WizardAnswers) ->
         id: model_id.as_str().into(),
         source: ModelSource {
             registry: SourceRegistry::HuggingFace,
-            reference: "Qwen/Qwen2.5-14B-Instruct".to_string(),
+            reference: "Qwen/Qwen3.5-27B".to_string(),
         },
-        architecture: "qwen2".to_string(),
+        architecture: "qwen3_5".to_string(),
         modalities: vec![Modality::Text],
         artifact: Artifact {
             format: ArtifactFormat::Safetensors,
@@ -1140,9 +1140,9 @@ fn build_document_extraction_pipeline(preset: &Preset, answers: &WizardAnswers) 
         id: model_id.as_str().into(),
         source: ModelSource {
             registry: SourceRegistry::HuggingFace,
-            reference: "Qwen/Qwen2-VL-7B-Instruct".to_string(),
+            reference: "Qwen/Qwen3.5-9B".to_string(),
         },
-        architecture: "qwen2_vl".to_string(),
+        architecture: "qwen3_5".to_string(),
         modalities: vec![Modality::Text, Modality::Vision],
         artifact: Artifact {
             format: ArtifactFormat::Safetensors,
@@ -1225,9 +1225,9 @@ fn build_code_assistant_endpoint(preset: &Preset, answers: &WizardAnswers) -> Gr
         id: model_id.as_str().into(),
         source: ModelSource {
             registry: SourceRegistry::HuggingFace,
-            reference: "Qwen/Qwen2.5-Coder-14B-Instruct".to_string(),
+            reference: "Qwen/Qwen3.5-9B".to_string(),
         },
-        architecture: "qwen2".to_string(),
+        architecture: "qwen3_5".to_string(),
         modalities: vec![Modality::Text],
         artifact: Artifact {
             format: ArtifactFormat::Safetensors,
@@ -1389,9 +1389,9 @@ fn build_custom_stack(preset: &Preset, answers: &WizardAnswers) -> Graph {
         id: model_id.as_str().into(),
         source: ModelSource {
             registry: SourceRegistry::HuggingFace,
-            reference: "Qwen/Qwen2.5-7B-Instruct".to_string(),
+            reference: "Qwen/Qwen3.5-9B".to_string(),
         },
-        architecture: "qwen2".to_string(),
+        architecture: "qwen3_5".to_string(),
         modalities: vec![Modality::Text],
         artifact: Artifact {
             format: ArtifactFormat::Safetensors,

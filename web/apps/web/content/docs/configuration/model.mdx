@@ -11,9 +11,9 @@ A `model` names what to serve and which artifact to use. It does not start anyth
 resource "model" "support_chat" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "unsloth/Qwen3.5-9B-GGUF"
   }
-  architecture   = "qwen2"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
@@ -22,8 +22,8 @@ resource "model" "support_chat" {
   context_length = 8192
   variant {
     quantization = "q4_k_m"
-    file         = "qwen2.5-7b-instruct-q4_k_m.gguf"
-    size         = "4GiB"
+    file         = "Qwen3.5-9B-Q4_K_M.gguf"
+    size         = "5680522464B"
   }
 }
 ```
@@ -52,7 +52,7 @@ resource "model" "chat_prod" {
 | `source` | block | yes | Where the model comes from |
 | `source.registry` | string | yes | `hugging_face`, `ollama`, `url`, or `local` |
 | `source.reference` | string | yes | Registry reference, for example `org/name` on Hugging Face |
-| `architecture` | string | yes | Model architecture label, for example `llama`, `qwen3` |
+| `architecture` | string | yes | Model architecture label, for example `llama`, `qwen35` |
 | `modalities` | list | yes | Any of `text`, `vision`, `audio`, `embedding` |
 | `artifact` | block | yes | The weight format to serve |
 | `artifact.format` | string | yes | `gguf`, `safetensors`, `pytorch`, or `onnx` |

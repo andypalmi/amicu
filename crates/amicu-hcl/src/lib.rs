@@ -40,7 +40,7 @@ mod tests {
         let model = &graph.models[0];
         assert_eq!(model.id.as_str(), "support_chat");
         assert_eq!(model.source.registry, SourceRegistry::HuggingFace);
-        assert_eq!(model.source.reference, "Qwen/Qwen2.5-7B-Instruct");
+        assert_eq!(model.source.reference, "unsloth/Qwen3.5-9B-GGUF");
         assert_eq!(model.artifact.quantization, Some(Quantization::Q4KM));
         assert_eq!(model.context_length, Some(8192));
 
@@ -2042,7 +2042,7 @@ mod tests {
           registry = "hugging_face"
           reference = "a/b"
         }
-        architecture = "qwen2"
+        architecture = "qwen35"
         modalities = ["text"]
         artifact {
           format = "gguf"

@@ -16,9 +16,9 @@ const VALID_CONFIG: &str = r#"# a comment that canonical formatting drops
 resource "model" "support_chat" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "unsloth/Qwen3.5-9B-GGUF"
   }
-  architecture   = "qwen2"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
@@ -28,7 +28,7 @@ resource "model" "support_chat" {
   variant {
     quantization = "q4_k_m"
     file         = "model.gguf"
-    size         = "4GiB"
+    size         = "5680522464B"
   }
 }
 
@@ -83,9 +83,9 @@ resource "deployment" "orphan" {
 const DUP_MODEL: &str = r#"resource "model" "support_chat" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "unsloth/Qwen3.5-9B-GGUF"
   }
-  architecture   = "qwen2"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
@@ -95,7 +95,7 @@ const DUP_MODEL: &str = r#"resource "model" "support_chat" {
   variant {
     quantization = "q4_k_m"
     file         = "model.gguf"
-    size         = "4GiB"
+    size         = "5680522464B"
   }
 }
 "#;
@@ -104,9 +104,9 @@ const DUP_MODEL: &str = r#"resource "model" "support_chat" {
 const SECOND_MODEL: &str = r#"resource "model" "summarizer" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "unsloth/Qwen3.5-9B-GGUF"
   }
-  architecture   = "qwen2"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
@@ -116,7 +116,7 @@ const SECOND_MODEL: &str = r#"resource "model" "summarizer" {
   variant {
     quantization = "q4_k_m"
     file         = "model.gguf"
-    size         = "4GiB"
+    size         = "5680522464B"
   }
 }
 "#;
@@ -125,9 +125,9 @@ const SECOND_MODEL: &str = r#"resource "model" "summarizer" {
 const RESIDENCY_MODEL_AND_DEPLOYMENT: &str = r#"resource "model" "support_chat" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "unsloth/Qwen3.5-9B-GGUF"
   }
-  architecture   = "qwen2"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
@@ -137,7 +137,7 @@ const RESIDENCY_MODEL_AND_DEPLOYMENT: &str = r#"resource "model" "support_chat" 
   variant {
     quantization = "q4_k_m"
     file         = "model.gguf"
-    size         = "4GiB"
+    size         = "5680522464B"
   }
 }
 

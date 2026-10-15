@@ -545,9 +545,9 @@ mod tests {
     const MODAL_CONFIG: &str = r#"resource "model" "support_chat" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen2.5-7B-Instruct"
+    reference = "unsloth/Qwen3.5-9B-GGUF"
   }
-  architecture   = "qwen2"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
@@ -557,7 +557,7 @@ mod tests {
   variant {
     quantization = "q4_k_m"
     file         = "model.gguf"
-    size         = "4GiB"
+    size         = "5680522464B"
   }
 }
 
