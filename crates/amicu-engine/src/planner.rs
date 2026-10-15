@@ -449,14 +449,11 @@ fn is_redacted(key: &str) -> bool {
     NEEDLES.iter().any(|n| lower.contains(n))
 }
 
-/// A value that embeds credentials (`https://user:pw@host/...`) or a query
-/// string (`?token=...`): never shown, whatever the key.
+/// A URL value (`scheme://...`): its userinfo, path or fragment can carry a
+/// token, so it is never shown, whatever the key. Hugging Face `org/name`,
+/// Ollama tags and local paths have no `://` and stay visible.
 fn value_looks_sensitive(v: &str) -> bool {
-    let Some((_, rest)) = v.split_once("://") else {
-        return false;
-    };
-    let authority = rest.split('/').next().unwrap_or("");
-    authority.contains('@') || v.contains('?')
+    v.contains("://")
 }
 
 fn planned_change(key: &str, old: Option<&String>, new: Option<&String>) -> PlannedChange {
@@ -1641,6 +1638,40 @@ mod tests {
         ] {
             let c = change(&item.changes, key);
             assert!(c.redacted && c.old.is_none() && c.new.is_none(), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn url_values_are_redacted_but_plain_references_are_shown() {
+        for (i, url) in [
+            "https://host/dl/tok_path_secret/m.gguf",
+            "https://host/m.gguf#sig=tok_frag_secret",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let prior = graph(Vec::new());
+            let mut next = graph(Vec::new());
+            next.models[0].source.reference = url.to_owned();
+            let item = &build_plan(&next, Some(&prior)).unwrap().items[0];
+            let c = change(&item.changes, "model.source.reference");
+            assert!(
+                c.redacted && c.old.is_none() && c.new.is_none(),
+                "{i}: {c:?}"
+            );
+            let dump = format!("{:?} {:?}", item.reason, item.changes);
+            let json = serde_json::to_string(&item.action.changes).unwrap();
+            for leaked in ["tok_path_secret", "tok_frag_secret"] {
+                assert!(!dump.contains(leaked) && !json.contains(leaked), "{dump}");
+            }
+        }
+        for plain in ["Qwen/Qwen3.8-27B", "qwen3:8b", "/Users/x/models/m.gguf"] {
+            let prior = graph(Vec::new());
+            let mut next = graph(Vec::new());
+            next.models[0].source.reference = plain.to_owned();
+            let item = &build_plan(&next, Some(&prior)).unwrap().items[0];
+            let c = change(&item.changes, "model.source.reference");
+            assert!(!c.redacted && c.new.as_deref() == Some(plain), "{c:?}");
         }
     }
 

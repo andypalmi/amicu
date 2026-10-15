@@ -63,7 +63,7 @@ All three accept `--output json`. `fits` emits `{ "version": "v1", "host": {...}
 
 ## Output lines
 
-`plan`, `apply` and `destroy` can print these lines in human output. In JSON output, `reason` and `changes` appear on each action.
+`plan`, `apply` and `destroy` can print these lines in human output. In JSON output, `reason` and `changes` appear on update actions and are omitted when empty.
 
 | Line | Meaning |
 |---|---|

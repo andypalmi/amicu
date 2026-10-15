@@ -716,6 +716,30 @@ mod tests {
     }
 
     #[test]
+    fn url_references_never_print_in_human_output() {
+        let prior = graph("local", llama());
+        for url in [
+            "https://h/dl/tok_path_secret/m.gguf",
+            "https://h/m.gguf#sig=tok_path_secret",
+        ] {
+            let mut next = prior.clone();
+            next.models[0].source.reference = url.into();
+            let full = update_text(&prior, &next);
+            // Only the change lines: the `launch:` line is a separate, existing surface.
+            let text: String = full
+                .lines()
+                .filter(|l| !l.contains("launch:"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!text.contains("tok_path_secret"), "{text}");
+            assert!(
+                text.contains("~ model.source.reference: (changed)"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
     fn a_non_launch_change_says_configuration_changed() {
         let prior = graph("local", llama());
         let mut next = prior.clone();
