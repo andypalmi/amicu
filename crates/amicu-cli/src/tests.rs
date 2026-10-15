@@ -600,6 +600,7 @@ fn apply_json_stdout_is_a_single_json_value() {
             stops: Vec::new(),
             fingerprints: std::collections::BTreeMap::default(),
             serial: 0,
+            purge_pending: Vec::new(),
             extra: std::collections::BTreeMap::default(),
             graph: prior,
             endpoints: Vec::new(),
@@ -679,6 +680,7 @@ fn state_round_trips() {
         stops: Vec::new(),
         fingerprints: std::collections::BTreeMap::default(),
         serial: 0,
+        purge_pending: Vec::new(),
         extra: std::collections::BTreeMap::default(),
         graph: graph.clone(),
         endpoints: Vec::new(),
@@ -1230,6 +1232,7 @@ impl Rig {
             forget_unconfirmed: self.forget,
             purge: self.purge,
             proxy_tokens: amicu_modal::proxy_auth::TokenConfig::from_env,
+            interactive: true,
         }
     }
     fn stopped(&self) -> Vec<String> {
@@ -1283,6 +1286,7 @@ fn state_with(graph: amicu_core::graph::Graph) -> LocalState {
         stops: Vec::new(),
         fingerprints: std::collections::BTreeMap::default(),
         serial: 0,
+        purge_pending: Vec::new(),
         extra: std::collections::BTreeMap::default(),
     }
 }
@@ -2963,4 +2967,333 @@ fn broken_pipe_exits_quietly() {
     assert_eq!(crate::exit_status(&other, &mut err), 1);
     assert!(String::from_utf8(err).unwrap().starts_with("error: "));
     assert_eq!(crate::exit_status(&Ok(3), &mut Vec::new()), 3);
+}
+
+// ---- project discovery: only this project's config --------------------------
+
+#[test]
+fn lock_files_and_foreign_project_dirs_are_not_loaded() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    // A Terraform lock file anywhere, and a whole nested Terraform project.
+    let tf = td.path.join("infra/bootstrap");
+    std::fs::create_dir_all(tf.join(".terraform")).unwrap();
+    let lock = "provider \"registry.terraform.io/hashicorp/aws\" {\n  version = \"5.0.0\"\n}\n";
+    std::fs::write(tf.join(".terraform.lock.hcl"), lock).unwrap();
+    std::fs::write(tf.join(".terraform/stuff.hcl"), lock).unwrap();
+    std::fs::write(tf.join("terragrunt.hcl"), lock).unwrap();
+    std::fs::write(td.path.join("deps.lock.hcl"), lock).unwrap();
+
+    let graph = project.load_graph().unwrap();
+    assert_eq!(graph.models.len(), 1);
+    let files = project.config_files().unwrap();
+    assert_eq!(files, vec![td.path.join("amicu.hcl")]);
+}
+
+#[test]
+fn a_nested_amicu_project_is_not_part_of_the_outer_one() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let inner = td.path.join("other");
+    std::fs::create_dir_all(inner.join(".amicu")).unwrap();
+    std::fs::write(inner.join("amicu.hcl"), SECOND_MODEL).unwrap();
+    assert_eq!(project.load_graph().unwrap().models.len(), 1);
+}
+
+#[test]
+fn a_parent_of_unrelated_projects_is_not_an_amicu_project() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    let other = td.path.join("other-project/bootstrap");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join(".terraform.lock.hcl"), "provider \"x\" {}\n").unwrap();
+    std::fs::write(other.join("stack.hcl"), "provider \"x\" {}\n").unwrap();
+
+    let err = project.load_graph().unwrap_err();
+    assert!(matches!(err, crate::error::CliError::NoConfig(_)));
+    assert_eq!(
+        err.to_string(),
+        "no amicu project found here (run `amicu init`)"
+    );
+    let mut out = Vec::new();
+    let err = commands::plan::run(&project, OutputFormat::Human, &mut out).unwrap_err();
+    assert!(err.to_string().contains("no amicu project found here"));
+}
+
+// ---- non-interactive confirmation (#260) -------------------------------------
+
+#[test]
+fn destroy_without_a_terminal_fails_naming_auto_approve_and_stops_nothing() {
+    let td = TempDir::new();
+    let project = saved(&td, &state_with(two_deployment_graph()));
+    let rig = Rig::new();
+    let mut env = rig.env();
+    env.interactive = false;
+    let mut out = Vec::new();
+    let err = commands::destroy::run_with(
+        &project,
+        &[],
+        false,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(b"y\n".to_vec()),
+        &env,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("--auto-approve"), "{err}");
+    assert!(!utf8(out).contains("Destroy cancelled"));
+    assert_eq!(rig.stopped().len(), 0);
+    assert_eq!(
+        project
+            .load_state()
+            .unwrap()
+            .unwrap()
+            .graph
+            .deployments
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn apply_without_a_terminal_fails_naming_auto_approve_and_writes_no_state() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let rig = Rig::new();
+    let mut env = rig.env();
+    env.interactive = false;
+    let mut out = Vec::new();
+    let err = commands::apply::run_with(
+        &project,
+        false,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(b"y\n".to_vec()),
+        &env,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("--auto-approve"), "{err}");
+    assert!(project.load_state().unwrap().is_none());
+}
+
+#[test]
+fn an_interactive_destroy_still_prompts_and_auto_approve_needs_no_terminal() {
+    let td = TempDir::new();
+    let project = saved(&td, &state_with(two_deployment_graph()));
+    let rig = Rig::new();
+    // Interactive: a "n" answer cancels, as before.
+    let (res, out) = run_destroy(&project, &[], false, OutputFormat::Human, "n\n", &rig);
+    assert_eq!(res.unwrap(), 0);
+    assert!(out.contains("Destroy cancelled."), "{out}");
+    // No terminal but --auto-approve: proceeds.
+    let mut env = rig.env();
+    env.interactive = false;
+    let mut out = Vec::new();
+    let code = commands::destroy::run_with(
+        &project,
+        &[],
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &env,
+    )
+    .unwrap();
+    assert_eq!(code, 0);
+}
+
+// ---- launch arguments are tracked (#261) -------------------------------------
+
+#[test]
+fn plan_shows_a_launch_argument_change_as_an_update_with_a_reason() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let graph = project.load_graph().unwrap();
+    let d = &graph.deployments[0];
+    let mut recorded = std::collections::BTreeMap::new();
+    recorded.insert(
+        d.id.clone(),
+        amicu_engine::fingerprint::Fingerprint {
+            launch: Some("0".repeat(64)),
+            ..Default::default()
+        },
+    );
+    let result =
+        crate::planner::build_project_plan_with(&project, &graph, Some(&graph), &recorded, &P)
+            .unwrap();
+    let mut out = Vec::new();
+    commands::plan::print_human(&result, &graph, &mut out).unwrap();
+    let text = utf8(out);
+    assert!(text.contains("action:   update"), "{text}");
+    assert!(
+        text.contains("reason:   launch arguments changed since it was last started"),
+        "{text}"
+    );
+}
+
+#[test]
+fn state_without_a_recorded_launch_digest_is_not_drift() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let graph = project.load_graph().unwrap();
+    let mut recorded = std::collections::BTreeMap::new();
+    recorded.insert(
+        graph.deployments[0].id.clone(),
+        amicu_engine::fingerprint::Fingerprint::default(),
+    );
+    let result =
+        crate::planner::build_project_plan_with(&project, &graph, Some(&graph), &recorded, &P)
+            .unwrap();
+    assert!(result.items.is_empty());
+}
+
+// ---- purge-pending leftovers (#262) ------------------------------------------
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_plain_destroy_records_the_leftover_logs_and_a_later_purge_removes_them() {
+    let home = TempDir::new();
+    let rec = scoped_rec("aaaa1111", "support_two", &home.path);
+    write_files(&rec);
+    let rig = Rig::new();
+    let (result, project, _td, _) = destroy_scoped(rec.clone(), &rig, false);
+    result.unwrap();
+
+    // Tracked in state, not as a stop record or deployment.
+    let state = project.load_state().unwrap().unwrap();
+    assert!(
+        state
+            .stops
+            .iter()
+            .all(|s| s.deployment.as_str() != "support_two")
+    );
+    assert_eq!(state.purge_pending.len(), 1);
+    assert_eq!(state.purge_pending[0].logs, rec.logs);
+    // Not drift: the plan against the unchanged config touches only what the
+    // config says, never the leftover record.
+    assert!(
+        state
+            .graph
+            .deployments
+            .iter()
+            .all(|d| d.id.as_str() != "support_two")
+    );
+
+    // `destroy --purge` with nothing else to destroy removes them and clears the record.
+    let mut empty = state.clone();
+    empty.graph = amicu_core::graph::Graph::new();
+    empty.stops.clear();
+    empty.endpoints.clear();
+    project.save_state(&empty).unwrap();
+    let mut env = rig.env();
+    env.purge = true;
+    let mut out = Vec::new();
+    let code = commands::destroy::run_with(
+        &project,
+        &[],
+        false,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &env,
+    )
+    .unwrap();
+    assert_eq!(code, 0);
+    let out = utf8(out);
+    assert!(out.contains("Purged the log files"), "{out}");
+    for l in &rec.logs {
+        assert!(!std::path::Path::new(l).exists(), "{l} removed");
+    }
+    assert_eq!(
+        project.load_state().unwrap().unwrap().purge_pending.len(),
+        0
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn destroy_without_purge_lists_tracked_leftovers_and_keeps_the_record() {
+    let home = TempDir::new();
+    let rec = scoped_rec("aaaa1111", "support_two", &home.path);
+    write_files(&rec);
+    let td = TempDir::new();
+    let mut state = state_with(amicu_core::graph::Graph::new());
+    state.purge_pending = vec![rec.purge_entry().unwrap()];
+    let project = saved(&td, &state);
+    let (res, out) = run_destroy(&project, &[], true, OutputFormat::Human, "", &Rig::new());
+    assert_eq!(res.unwrap(), 0);
+    assert!(
+        out.contains("amicu destroy --purge") && out.contains(&rec.logs[0]),
+        "{out}"
+    );
+    assert_eq!(
+        project.load_state().unwrap().unwrap().purge_pending.len(),
+        1
+    );
+    assert!(std::path::Path::new(&rec.logs[0]).exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_purge_pending_log_that_is_not_the_records_own_is_refused_and_kept() {
+    let home = TempDir::new();
+    let victim = home.path.join("precious.log");
+    std::fs::write(&victim, "keep").unwrap();
+    let mut rec = scoped_rec("aaaa1111", "support_two", &home.path);
+    rec.logs = vec![victim.to_string_lossy().into_owned()];
+    let td = TempDir::new();
+    let mut state = state_with(amicu_core::graph::Graph::new());
+    state.purge_pending = vec![rec.purge_entry().unwrap()];
+    let project = saved(&td, &state);
+    let rig = Rig::new();
+    let mut env = rig.env();
+    env.purge = true;
+    let mut out = Vec::new();
+    let err = commands::destroy::run_with(
+        &project,
+        &[],
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &env,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("will not delete"), "{err}");
+    assert!(victim.exists());
+    assert_eq!(
+        project.load_state().unwrap().unwrap().purge_pending.len(),
+        1
+    );
+}
+
+#[test]
+fn purge_pending_survives_a_state_round_trip_and_older_state_loads() {
+    let td = TempDir::new();
+    let mut state = state_with(amicu_core::graph::Graph::new());
+    state.purge_pending = vec![crate::stops::PurgePending {
+        deployment: "support_two".into(),
+        backend: crate::stops::Backend::HostLaunchd,
+        identity: "x".to_owned(),
+        logs: vec!["/a/x.out.log".to_owned()],
+    }];
+    let project = saved(&td, &state);
+    assert_eq!(
+        project.load_state().unwrap().unwrap().purge_pending.len(),
+        1
+    );
+    let plain = TempDir::new();
+    let p2 = saved(&plain, &state_with(amicu_core::graph::Graph::new()));
+    let text = std::fs::read_to_string(p2.state_file()).unwrap();
+    assert!(!text.contains("purge_pending"));
 }

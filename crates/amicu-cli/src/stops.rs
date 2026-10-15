@@ -256,26 +256,17 @@ impl StopRecord {
     /// The recorded log files, validated like [`Self::definition_path`]:
     /// `<identity>.out.log` / `<identity>.err.log` in `.../Library/Logs/amicu`.
     pub(crate) fn log_paths(&self) -> Result<Vec<PathBuf>, String> {
-        let mut out = Vec::new();
-        for l in &self.logs {
-            let path = PathBuf::from(l);
-            let ok = ["out", "err"].iter().any(|k| {
-                path.file_name().and_then(|n| n.to_str())
-                    == Some(&format!("{}.{k}.log", self.identity))
-            });
-            if self.backend != Backend::HostLaunchd || !ok {
-                return Err(format!("'{l}' is not a log file of {}", self.identity));
-            }
-            Self::check_file(
-                &path,
-                path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default(),
-                &["Library/Logs/amicu"],
-            )?;
-            out.push(path);
-        }
-        Ok(out)
+        checked_log_paths(self.backend, &self.identity, &self.logs)
+    }
+
+    /// The log files this record left behind, for a purge-pending entry.
+    pub(crate) fn purge_entry(&self) -> Option<PurgePending> {
+        (!self.logs.is_empty()).then(|| PurgePending {
+            deployment: self.deployment.clone(),
+            backend: self.backend,
+            identity: self.identity.clone(),
+            logs: self.logs.clone(),
+        })
     }
 
     fn check_file(path: &Path, name: &str, dirs: &[&str]) -> Result<(), String> {
@@ -319,5 +310,52 @@ impl StopRecord {
                 self.identity
             ),
         }
+    }
+}
+
+/// Each of `logs` validated as exactly `identity`'s own log file in amicu's
+/// log directory (`<identity>.out.log` / `<identity>.err.log`).
+fn checked_log_paths(
+    backend: Backend,
+    identity: &str,
+    logs: &[String],
+) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    for l in logs {
+        let path = PathBuf::from(l);
+        let ok = ["out", "err"].iter().any(|k| {
+            path.file_name().and_then(|n| n.to_str()) == Some(&format!("{identity}.{k}.log"))
+        });
+        if backend != Backend::HostLaunchd || !ok {
+            return Err(format!("'{l}' is not a log file of {identity}"));
+        }
+        StopRecord::check_file(
+            &path,
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default(),
+            &["Library/Logs/amicu"],
+        )?;
+        out.push(path);
+    }
+    Ok(out)
+}
+
+/// Files a destroyed deployment left behind that a plain `destroy` does not
+/// remove (its log files). Kept in state until `amicu destroy --purge`
+/// removes them, so amicu never loses track of a file it created.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PurgePending {
+    pub deployment: DeploymentId,
+    pub backend: Backend,
+    /// The identity (launchd label) the logs are named after.
+    pub identity: String,
+    pub logs: Vec<String>,
+}
+
+impl PurgePending {
+    /// The log files, validated like [`StopRecord::log_paths`].
+    pub(crate) fn log_paths(&self) -> Result<Vec<PathBuf>, String> {
+        checked_log_paths(self.backend, &self.identity, &self.logs)
     }
 }

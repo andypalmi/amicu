@@ -30,6 +30,7 @@ use amicu_core::resource::LlamaCppSettings;
 /// list.
 pub(crate) const TYPED_FLAGS: &[&[&str]] = &[
     &["--model", "-m"],
+    &["--alias", "-a"],
     &["--port"],
     &["--ctx-size", "-c"],
     &["--n-gpu-layers", "-ngl", "--gpu-layers"],
@@ -209,6 +210,19 @@ pub fn render_command(
     draft_model_path: Option<&Path>,
     settings: &LlamaCppSettings,
 ) -> (Vec<String>, String) {
+    render_command_with_alias(model_path, draft_model_path, settings, None)
+}
+
+/// [`render_command`] plus `--alias <alias>`: the model id `/v1/models` and
+/// chat requests use, instead of the absolute GGUF path llama-server would
+/// otherwise report.
+#[must_use]
+pub fn render_command_with_alias(
+    model_path: &Path,
+    draft_model_path: Option<&Path>,
+    settings: &LlamaCppSettings,
+    alias: Option<&str>,
+) -> (Vec<String>, String) {
     let mut argv = vec![
         "llama-server".to_owned(),
         "-m".to_owned(),
@@ -224,6 +238,10 @@ pub fn render_command(
         "--n-gpu-layers".to_owned(),
         settings.n_gpu_layers.to_string(),
     ];
+    if let Some(alias) = alias {
+        argv.push("--alias".to_owned());
+        argv.push(alias.to_owned());
+    }
     if let Some(v) = settings.temperature {
         argv.push("--temp".to_owned());
         argv.push(v.to_string());

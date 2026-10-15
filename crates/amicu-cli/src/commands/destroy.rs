@@ -127,7 +127,10 @@ pub(crate) fn run_with(
         } else {
             writeln!(out, "Nothing to destroy.").map_err(|e| CliError::io("write failed", e))?;
         }
-        return Ok(0);
+        // Files left by an earlier plain destroy are still tracked: list them,
+        // or with `--purge` remove them.
+        return Leftovers::of(prior_state.as_ref(), &result, env.purge, targets)?
+            .finish(project, env, output, out);
     }
 
     // Same safety rule as `apply`: show the plan and get approval first; in
@@ -163,6 +166,9 @@ pub(crate) fn run_with(
                 .map_err(|e| CliError::io("write failed", e))?;
             }
         }
+        if !auto_approve {
+            crate::commands::apply::require_interactive(env, "destroy")?;
+        }
         if !auto_approve && !prompt_approval_from(preview, "Destroy these deployments?", input)? {
             writeln!(preview, "Destroy cancelled.").map_err(|e| CliError::io("write failed", e))?;
             true
@@ -180,7 +186,7 @@ pub(crate) fn run_with(
     let remaining = remaining_graph(prior_graph, &result);
     // What the destroyed deployments leave behind, read from their records
     // BEFORE the stop removes those records.
-    let leftovers = Leftovers::of(prior_state.as_ref(), &result, env.purge)?;
+    let leftovers = Leftovers::of(prior_state.as_ref(), &result, env.purge, targets)?;
     let (_, state) = execute(
         project,
         remaining,
@@ -211,7 +217,7 @@ pub(crate) fn run_with(
             ))?;
         }
     }
-    leftovers.finish(env, output, out)
+    leftovers.finish(project, env, output, out)
 }
 
 /// Secondary resources of destroyed deployments that a stop does not remove.
@@ -225,8 +231,32 @@ impl Leftovers {
     /// With `--purge`, every recorded log path is validated here, BEFORE
     /// anything is stopped: one that is not exactly the record's own log file
     /// in amicu's log directory refuses the whole command (nothing changed).
-    fn of(prior: Option<&LocalState>, result: &PlanResult, purge: bool) -> Result<Self, CliError> {
+    fn of(
+        prior: Option<&LocalState>,
+        result: &PlanResult,
+        purge: bool,
+        targets: &[String],
+    ) -> Result<Self, CliError> {
         let mut me = Self::default();
+        // Files an earlier plain destroy left behind and state still tracks.
+        for p in prior.map_or(&[][..], |s| &s.purge_pending[..]) {
+            if !targets.is_empty() && !targets.iter().any(|t| t == p.deployment.as_str()) {
+                continue;
+            }
+            if purge && let Err(why) = p.log_paths() {
+                return Err(CliError::Message(format!(
+                    "the recorded leftover logs of destroyed deployment '{}' include a file \
+                     that --purge will not delete: {why}. Check the state file; nothing was \
+                     changed",
+                    p.deployment
+                )));
+            }
+            for l in &p.logs {
+                if !me.logs.contains(l) {
+                    me.logs.push(l.clone());
+                }
+            }
+        }
         for r in crate::commands::apply::effective_stops(prior)
             .iter()
             .filter(|r| result.items.iter().any(|i| i.deployment == r.deployment))
@@ -258,7 +288,13 @@ impl Leftovers {
     /// mode stdout stays the list of destroyed deployments and this note goes
     /// to stderr. The deployments are already stopped and out of state, so a
     /// failure is reported (exit 1) without touching that.
-    fn finish(self, env: &Env, output: OutputFormat, out: &mut dyn Write) -> Result<u8, CliError> {
+    fn finish(
+        self,
+        project: &Project,
+        env: &Env,
+        output: OutputFormat,
+        out: &mut dyn Write,
+    ) -> Result<u8, CliError> {
         let mut failures = Vec::new();
         let mut kept_logs = self.logs.clone();
         if env.purge {
@@ -273,6 +309,17 @@ impl Leftovers {
                     }
                 }
             }
+        }
+        if env.purge && kept_logs.len() < self.logs.len() {
+            // Stop tracking exactly the files that are gone; one that could not
+            // be removed stays recorded for the next `--purge`.
+            let removed: Vec<String> = self
+                .logs
+                .iter()
+                .filter(|l| !kept_logs.contains(l))
+                .cloned()
+                .collect();
+            forget_purged(project, &removed)?;
         }
         let mut note = String::new();
         if !kept_logs.is_empty() {
@@ -311,6 +358,18 @@ impl Leftovers {
             failures.join("; ")
         )))
     }
+}
+
+/// Drop `removed` log files from state's purge-pending records.
+fn forget_purged(project: &Project, removed: &[String]) -> Result<(), CliError> {
+    let Some(mut state) = project.load_state()? else {
+        return Ok(());
+    };
+    for p in &mut state.purge_pending {
+        p.logs.retain(|l| !removed.contains(l));
+    }
+    state.purge_pending.retain(|p| !p.logs.is_empty());
+    project.save_state(&state)
 }
 
 /// Why [`plan_destroy`] produced no plan.

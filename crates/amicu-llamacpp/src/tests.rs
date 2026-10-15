@@ -4218,3 +4218,29 @@ fn systemd_presence_reads_load_and_active_state_and_only_confirmed_is_down() {
         Presence::Unknown
     );
 }
+
+#[test]
+fn render_command_with_alias_passes_alias_and_without_one_omits_it() {
+    let settings = LlamaCppSettings::default();
+    let (argv, _) = crate::command::render_command_with_alias(
+        Path::new("/models/tiny.gguf"),
+        None,
+        &settings,
+        Some("org/tiny"),
+    );
+    let i = argv.iter().position(|a| a == "--alias").expect("--alias");
+    assert_eq!(argv[i + 1], "org/tiny");
+    assert!(
+        !argv
+            .iter()
+            .any(|a| a.contains("/models/tiny.gguf") && a == &argv[i + 1])
+    );
+    let (argv, _) = render_command(Path::new("/models/tiny.gguf"), None, &settings);
+    assert!(!argv.iter().any(|a| a == "--alias"));
+}
+
+#[test]
+fn alias_is_an_amicu_owned_flag_in_extra_args() {
+    assert!(crate::command::is_typed_flag("--alias"));
+    assert!(crate::command::is_typed_flag("-a"));
+}
