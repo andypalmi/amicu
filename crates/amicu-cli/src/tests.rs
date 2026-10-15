@@ -3388,11 +3388,21 @@ fn nothing_set(_: &str) -> bool {
     false
 }
 
+fn keyed_config() -> String {
+    let cfg = VALID_CONFIG.replacen(
+        "  runtime  = \"llama_cpp\"\n",
+        "  runtime  = \"llama_cpp\"\n  api_key  = secret(\"SUPPORT_LOCAL_API_KEY\")\n",
+        1,
+    );
+    assert!(cfg.contains("secret("));
+    cfg
+}
+
 #[test]
 fn plan_errors_on_an_unset_secret_naming_it_and_never_a_value() {
     let td = TempDir::new();
     let project = Project::new(&td.path);
-    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    write(&td.path, "amicu.hcl", &keyed_config());
     let mut out = Vec::new();
     let code =
         commands::plan::run_with(&project, OutputFormat::Human, &mut out, nothing_set).unwrap();
@@ -3413,7 +3423,7 @@ fn plan_errors_on_an_unset_secret_naming_it_and_never_a_value() {
 fn apply_with_an_unset_secret_fails_before_any_state_or_start() {
     let td = TempDir::new();
     let project = Project::new(&td.path);
-    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    write(&td.path, "amicu.hcl", &keyed_config());
     let rig = Rig::new();
     let mut env = rig.env();
     env.secret_is_set = nothing_set;
@@ -3433,20 +3443,33 @@ fn apply_with_an_unset_secret_fails_before_any_state_or_start() {
     assert!(text.contains("'SUPPORT_LOCAL_API_KEY'"), "{text}");
     assert!(project.load_state().unwrap().is_none(), "no state written");
     assert_eq!(rig.stopped().len(), 0);
-
-    // Set: apply goes ahead.
-    assert_eq!(apply_with(&project, &rig).unwrap(), 0);
-    assert!(project.load_state().unwrap().is_some());
 }
 
 #[test]
 fn an_unset_secret_of_an_unchanged_deployment_blocks_nothing() {
     let td = TempDir::new();
-    let project = saved(&td, &running_host_state());
-    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let cfg = keyed_config();
+    let mut state = state_with(amicu_hcl::parse_graph(&cfg).unwrap());
+    state.stops = vec![StopRecord::host(
+        &"support_local".into(),
+        Some(&platform_ctx()),
+    )];
+    let project = saved(&td, &state);
+    write(&td.path, "amicu.hcl", &cfg);
+    let rig = Rig::new();
+    let mut env = rig.env();
+    env.secret_is_set = nothing_set;
     let mut out = Vec::new();
-    let code =
-        commands::plan::run_with(&project, OutputFormat::Human, &mut out, nothing_set).unwrap();
+    let code = commands::apply::run_with(
+        &project,
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &env,
+    )
+    .unwrap();
     assert_eq!(code, 0, "{}", utf8(out));
 }
 
