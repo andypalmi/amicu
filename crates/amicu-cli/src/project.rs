@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use amicu_core::graph::Graph;
@@ -20,6 +21,9 @@ pub(crate) struct Project {
     /// expects, so a concurrent writer is detected instead of overwritten.
     /// Shared by clones: they are the same logical reader.
     seen_serial: Arc<Mutex<Option<u64>>>,
+    /// Whether the "skipping nested amicu project" note was already printed, so
+    /// it shows once per command however often the config is listed.
+    nested_note_shown: Arc<AtomicBool>,
 }
 
 /// The minimal local state persisted by `apply`.
@@ -150,6 +154,7 @@ impl Project {
         Self {
             root: root.into(),
             seen_serial: Arc::new(Mutex::new(None)),
+            nested_note_shown: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -195,11 +200,15 @@ impl Project {
     /// Every config `*.hcl` file of this project, sorted by path.
     ///
     /// The root must be an amicu project: it holds a config `.hcl` file
-    /// directly, or a `.amicu/` directory. Otherwise (e.g. a parent directory of
+    /// directly, or a real `.amicu/` marker (`config.yaml` or
+    /// `state/state.json`; a bare `.amicu/` does not count). Otherwise (e.g. a parent directory of
     /// several unrelated projects) nothing is loaded and `NoConfig` is returned.
     /// The walk is recursive but skips hidden dirs (`.amicu/`, `.terraform/`,
     /// `.git/`), `target/`, `node_modules/`, `*.lock.hcl` files, and nested
-    /// directories that are another project's root (see [`is_foreign_project`]).
+    /// directories that are another amicu project (see
+    /// [`is_nested_amicu_project`]) or a Terraform project (`.terraform/` or
+    /// `.terraform.lock.hcl`). The note about a skipped amicu project prints
+    /// once per `Project`.
     pub fn config_files(&self) -> Result<Vec<PathBuf>, CliError> {
         if !self.is_project_root()? {
             return Err(CliError::NoConfig(self.root.clone()));
@@ -208,7 +217,8 @@ impl Project {
         let mut skipped = Vec::new();
         collect_hcl(&self.root, &mut files, &mut skipped)?;
         skipped.sort();
-        for dir in &skipped {
+        let first = !skipped.is_empty() && !self.nested_note_shown.swap(true, Ordering::Relaxed);
+        for dir in skipped.iter().filter(|_| first) {
             eprintln!(
                 "note: skipping nested amicu project {} (it has its own .amicu/); run amicu there",
                 dir.display()
@@ -218,10 +228,12 @@ impl Project {
         Ok(files)
     }
 
-    /// Whether the root is an amicu project: a `.amicu/` directory, or a
-    /// config `.hcl` file directly in the root.
-    fn is_project_root(&self) -> Result<bool, CliError> {
-        if self.dot_dir().is_dir() {
+    /// Whether the root is an amicu project: it carries the same real marker as
+    /// a nested project (see [`is_nested_amicu_project`]), or has a config
+    /// `.hcl` file directly in the root. A bare `.amicu/` is not enough: the
+    /// state lock creates `.amicu/state/` in whatever directory it runs from.
+    pub(crate) fn is_project_root(&self) -> Result<bool, CliError> {
+        if is_nested_amicu_project(&self.root) {
             return Ok(true);
         }
         let entries = fs::read_dir(&self.root)

@@ -1867,6 +1867,7 @@ impl FakeManager {
     }
 }
 
+#[async_trait]
 impl ServiceManager for FakeManager {
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
         if !self.start_ok {
@@ -1883,7 +1884,7 @@ impl ServiceManager for FakeManager {
             .pop_front()
             .unwrap_or(self.state))
     }
-    fn stop(&self, _label: &str) -> Result<(), LlamaCppError> {
+    async fn stop(&self, _label: &str) -> Result<(), LlamaCppError> {
         *self.stopped.lock().unwrap() = true;
         if self.stop_ok {
             Ok(())
@@ -1891,7 +1892,7 @@ impl ServiceManager for FakeManager {
             Err(LlamaCppError::Supervisor("Unit not loaded.".into()))
         }
     }
-    fn release(&self, _label: &str) {
+    async fn release(&self, _label: &str) {
         *self.released.lock().unwrap() += 1;
     }
     fn log_location(&self, _label: &str) -> String {
@@ -2042,6 +2043,7 @@ async fn supervisor_logs_and_stop_and_metrics() {
 /// supervisor.
 struct SharedManager(std::sync::Arc<FakeManager>);
 
+#[async_trait]
 impl ServiceManager for SharedManager {
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
         self.0.start(spec)
@@ -2049,8 +2051,8 @@ impl ServiceManager for SharedManager {
     fn state(&self, label: &str) -> Result<ServiceState, LlamaCppError> {
         self.0.state(label)
     }
-    fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
-        self.0.stop(label)
+    async fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
+        self.0.stop(label).await
     }
     fn logs(&self, label: &str, options: LogOptions) -> Result<Vec<String>, LlamaCppError> {
         self.0.logs(label, options)
@@ -2058,8 +2060,8 @@ impl ServiceManager for SharedManager {
     fn log_location(&self, label: &str) -> String {
         self.0.log_location(label)
     }
-    fn release(&self, label: &str) {
-        self.0.release(label);
+    async fn release(&self, label: &str) {
+        self.0.release(label).await;
     }
 }
 
@@ -2323,7 +2325,7 @@ fn launchd_update_releases_the_old_job_by_plist_and_label_before_loading() {
         .with_settle_timeout(Duration::from_millis(100));
     let spec = service_spec();
     manager.start(&spec).expect("first start");
-    manager.release(&spec.label);
+    block_on(manager.release(&spec.label));
     manager.start(&spec).expect("update");
 
     // `print` is the domain probe; the rest is the real sequence.
@@ -2347,7 +2349,7 @@ fn launchd_release_removes_by_label_even_without_a_plist() {
     let exec = std::sync::Arc::new(FakeExec::new(true, ""));
     let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"))
         .with_settle_timeout(Duration::from_millis(100));
-    manager.release("io.amicu.llama.x");
+    block_on(manager.release("io.amicu.llama.x"));
     let calls: Vec<Vec<String>> = exec
         .calls
         .lock()
@@ -2370,7 +2372,7 @@ fn systemd_release_stops_a_previous_unit_with_the_same_name_before_rewriting_it(
     let dir = TempDir::new("systemd-update");
     let exec = std::sync::Arc::new(FakeExec::new(true, ""));
     let manager = SystemdManager::new(exec.clone(), &dir.0, &dir.0);
-    manager.release("io.amicu.llama.support_chat_local");
+    block_on(manager.release("io.amicu.llama.support_chat_local"));
     manager.start(&service_spec()).expect("start");
 
     let calls = exec.calls.lock().unwrap().clone();
@@ -2623,14 +2625,14 @@ fn launchd_stop_removes_plist() {
     assert!(plist.exists(), "plist should exist after start");
 
     let manager = LaunchdManager::new(LoadedExec::new(true, true), &agents, &logs);
-    manager.stop(&spec.label).expect("stop");
+    block_on(manager.stop(&spec.label)).expect("stop");
     assert!(!plist.exists(), "plist must be removed after stop");
 
     // A second stop (plist gone, job gone) must not fail.
     let exec = LoadedExec::new(true, true);
     *exec.loaded.lock().unwrap() = false;
     let gone = LaunchdManager::new(exec, &agents, &logs);
-    gone.stop(&spec.label).expect("stop is idempotent");
+    block_on(gone.stop(&spec.label)).expect("stop is idempotent");
 }
 
 #[test]
@@ -2644,7 +2646,7 @@ fn launchd_stop_falls_back_to_remove_when_unload_leaves_the_job_loaded() {
     let exec = std::sync::Arc::new(LoadedExec::new(false, true));
     let manager = LaunchdManager::new(exec.clone(), &agents, tmp.file("logs"))
         .with_settle_timeout(Duration::from_millis(100));
-    manager.stop(&spec.label).expect("remove confirms the stop");
+    block_on(manager.stop(&spec.label)).expect("remove confirms the stop");
     let calls = exec.calls.lock().unwrap().clone();
     assert!(calls.contains(&"remove".to_owned()), "{calls:?}");
 }
@@ -2659,7 +2661,7 @@ fn launchd_stop_errors_and_keeps_the_plist_when_the_job_stays_loaded() {
         .unwrap();
     let manager = LaunchdManager::new(LoadedExec::new(false, false), &agents, tmp.file("logs"))
         .with_settle_timeout(Duration::from_millis(100));
-    let err = manager.stop(&spec.label).expect_err("unconfirmed stop");
+    let err = block_on(manager.stop(&spec.label)).expect_err("unconfirmed stop");
     assert!(err.to_string().contains("still loaded"), "{err}");
     assert!(
         agents
@@ -2673,10 +2675,10 @@ fn launchd_stop_with_no_plist_still_checks_the_label_is_gone() {
     let tmp = TempDir::new("launchd-stop-noplist");
     let manager = LaunchdManager::new(LoadedExec::new(false, false), tmp.file("a"), "/l")
         .with_settle_timeout(Duration::from_millis(100));
-    assert!(manager.stop("io.amicu.llama.x").is_err());
+    assert!(block_on(manager.stop("io.amicu.llama.x")).is_err());
     let manager = LaunchdManager::new(LoadedExec::new(false, true), tmp.file("a"), "/l")
         .with_settle_timeout(Duration::from_millis(100));
-    manager.stop("io.amicu.llama.x").expect("removed by label");
+    block_on(manager.stop("io.amicu.llama.x")).expect("removed by label");
 }
 
 /// A launchd stand-in with an asynchronous `bootout`: after it, the job stays
@@ -2770,7 +2772,7 @@ fn launchd_update_waits_for_the_asynchronous_bootout_before_bootstrapping() {
     let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"))
         .with_settle_timeout(Duration::from_secs(5));
     let spec = service_spec();
-    manager.release(&spec.label);
+    block_on(manager.release(&spec.label));
     manager
         .start(&spec)
         .expect("bootstrap must not race the bootout");
@@ -2785,7 +2787,7 @@ fn launchd_update_without_waiting_would_hit_error_5() {
     let manager = LaunchdManager::new(exec, tmp.file("agents"), tmp.file("logs"))
         .with_settle_timeout(Duration::ZERO);
     let spec = service_spec();
-    manager.release(&spec.label);
+    block_on(manager.release(&spec.label));
     let err = manager.start(&spec).expect_err("raced");
     assert!(err.to_string().contains("Bootstrap failed: 5"), "{err}");
 }
@@ -2801,7 +2803,7 @@ fn launchd_stop_waits_for_the_asynchronous_bootout() {
     let exec = std::sync::Arc::new(AsyncBootoutExec::new(4));
     let manager = LaunchdManager::new(exec.clone(), &agents, tmp.file("logs"))
         .with_settle_timeout(Duration::from_secs(5));
-    manager.stop(&spec.label).expect("confirmed after waiting");
+    block_on(manager.stop(&spec.label)).expect("confirmed after waiting");
     let calls = exec.calls.lock().unwrap().clone();
     assert!(
         !calls.contains(&"remove".to_owned()),
@@ -2825,7 +2827,7 @@ fn launchd_stop_that_never_settles_keeps_the_plist_and_errors() {
         .unwrap();
     let manager = LaunchdManager::new(AsyncBootoutExec::new(u32::MAX), &agents, tmp.file("logs"))
         .with_settle_timeout(Duration::from_millis(150));
-    let err = manager.stop(&spec.label).expect_err("still tearing down");
+    let err = block_on(manager.stop(&spec.label)).expect_err("still tearing down");
     assert!(err.to_string().contains("still loaded"), "{err}");
     assert!(
         agents
@@ -2927,7 +2929,7 @@ fn systemd_start_writes_a_persistent_enabled_unit_with_a_0600_env_file() {
     assert_eq!(manager.paths(&spec.label).unwrap().definition, unit);
 
     // Stop disables + stops it, then removes both files.
-    manager.stop(&spec.label).expect("stop");
+    block_on(manager.stop(&spec.label)).expect("stop");
     assert!(!unit.exists() && !env.exists());
     let calls = exec.calls.lock().unwrap().clone();
     assert!(
@@ -3000,7 +3002,7 @@ fn systemd_env_delete_failure_keeps_the_unit_file_and_errors() {
     manager.start(&spec).expect("start");
     let env = dir.file("env").join(format!("{}.env", spec.label));
     fs::create_dir_all(env.join("blocker")).unwrap();
-    let err = manager.stop(&spec.label).expect_err("env not deletable");
+    let err = block_on(manager.stop(&spec.label)).expect_err("env not deletable");
     assert!(err.to_string().contains("remove"), "{err}");
     assert!(manager.paths(&spec.label).unwrap().definition.exists());
 }
@@ -3029,15 +3031,13 @@ fn systemd_stop_deletes_the_recorded_env_path_and_the_one_the_unit_names() {
     // the recorded file, and the unit's own `EnvironmentFile=`.
     let elsewhere = TempDir::new("systemd-elsewhere");
     let other = systemd_manager(FakeExec::new(true, ""), &elsewhere);
-    other
-        .stop_recorded_with_env(&spec.label, Some(&paths.definition), Some(&env))
+    block_on(other.stop_recorded_with_env(&spec.label, Some(&paths.definition), Some(&env)))
         .expect("stop");
     assert!(!env.exists() && !paths.definition.exists());
 
     // Without a recorded env path, the unit file names it.
     manager.start(&spec).expect("restart");
-    other
-        .stop_recorded_with_env(&spec.label, Some(&paths.definition), None)
+    block_on(other.stop_recorded_with_env(&spec.label, Some(&paths.definition), None))
         .expect("stop");
     assert!(!env.exists() && !paths.definition.exists());
 }
@@ -3049,10 +3049,12 @@ fn systemd_stop_of_a_legacy_record_removes_the_tmpfs_env_file_too() {
     let leftover = run.file("amicu/io.amicu.llama.x.env");
     fs::create_dir_all(run.file("amicu")).unwrap();
     fs::write(&leftover, "k=\"v\"\n").unwrap();
-    systemd_manager(TransientExec(Mutex::new(Vec::new())), &dir)
-        .with_legacy_env_dir(run.file("amicu"))
-        .stop_recorded("io.amicu.llama.x", None)
-        .expect("stopped");
+    block_on(
+        systemd_manager(TransientExec(Mutex::new(Vec::new())), &dir)
+            .with_legacy_env_dir(run.file("amicu"))
+            .stop_recorded("io.amicu.llama.x", None),
+    )
+    .expect("stopped");
     assert!(!leftover.exists());
 }
 
@@ -3088,14 +3090,14 @@ fn systemd_stop_failure_is_confirmed_only_by_load_state_not_stderr() {
         },
         &dir,
     );
-    gone.stop("io.amicu.llama.x").expect("unit does not exist");
+    block_on(gone.stop("io.amicu.llama.x")).expect("unit does not exist");
     let loaded = systemd_manager(
         StopFailsExec {
             load_state: "loaded\n",
         },
         &dir,
     );
-    assert!(loaded.stop("io.amicu.llama.x").is_err());
+    assert!(block_on(loaded.stop("io.amicu.llama.x")).is_err());
 }
 
 #[test]
@@ -3109,7 +3111,7 @@ fn systemd_unconfirmed_stop_keeps_the_unit_and_env_files() {
         .start(&spec)
         .expect("start");
     let manager = systemd_manager(FakeExec::new(false, ""), &dir);
-    assert!(manager.stop(&spec.label).is_err());
+    assert!(block_on(manager.stop(&spec.label)).is_err());
     assert_eq!(dir_entries(&dir.file("units")), 1);
     assert_eq!(dir_entries(&dir.file("env")), 1);
 }
@@ -3140,9 +3142,7 @@ fn systemd_stop_falls_back_to_a_plain_stop_for_a_legacy_transient_unit() {
     let legacy_env = dir.file("env/io.amicu.llama.x.env");
     fs::create_dir_all(dir.file("env")).unwrap();
     fs::write(&legacy_env, "k=\"v\"\n").unwrap();
-    manager
-        .stop_recorded("io.amicu.llama.x", Some(&legacy_env))
-        .expect("stopped");
+    block_on(manager.stop_recorded("io.amicu.llama.x", Some(&legacy_env))).expect("stopped");
     let calls = exec.0.lock().unwrap().clone();
     assert!(calls.iter().any(|c| c == "--user stop io.amicu.llama.x"));
     assert!(!legacy_env.exists());
@@ -3156,9 +3156,7 @@ fn systemd_stop_removes_the_recorded_unit_file_after_a_confirmed_stop() {
     manager.start(&spec).expect("start");
     let unit = manager.paths(&spec.label).unwrap().definition;
     assert!(unit.exists());
-    manager
-        .stop_recorded(&spec.label, Some(&unit))
-        .expect("stop");
+    block_on(manager.stop_recorded(&spec.label, Some(&unit))).expect("stop");
     assert!(!unit.exists());
 }
 
@@ -3167,7 +3165,7 @@ fn systemd_refuses_a_label_that_is_not_one_plain_name() {
     let dir = TempDir::new("systemd-label");
     let manager = systemd_manager(FakeExec::new(true, ""), &dir);
     for bad in ["../evil", "a/b", "", ".hidden", "a b"] {
-        assert!(manager.stop(bad).is_err(), "{bad:?}");
+        assert!(block_on(manager.stop(bad)).is_err(), "{bad:?}");
         let mut spec = service_spec();
         spec.label = bad.to_owned();
         assert!(manager.start(&spec).is_err(), "{bad:?}");
@@ -3960,9 +3958,11 @@ fn launchd_plist_carries_the_key_in_a_0600_file_removed_on_stop_and_on_failed_lo
         fs::metadata(&plist).unwrap().permissions().mode() & 0o777,
         0o600
     );
-    LaunchdManager::new(LoadedExec::new(true, true), &agents, tmp.file("logs"))
-        .stop(&spec.label)
-        .unwrap();
+    block_on(
+        LaunchdManager::new(LoadedExec::new(true, true), &agents, tmp.file("logs"))
+            .stop(&spec.label),
+    )
+    .unwrap();
     assert!(!plist.exists());
 
     // A failed `launchctl load` must not leave the secret behind.
@@ -4053,9 +4053,7 @@ impl CommandExec for OddExitExec {
 fn launchd_only_exit_113_means_gone_other_failures_are_errors() {
     let tmp = TempDir::new("launchd-odd-exit");
     let manager = LaunchdManager::new(OddExitExec, tmp.file("agents"), tmp.file("logs"));
-    let err = manager
-        .stop("io.amicu.llama.x")
-        .expect_err("exit 5 is not 'gone'");
+    let err = block_on(manager.stop("io.amicu.llama.x")).expect_err("exit 5 is not 'gone'");
     assert!(err.to_string().contains("failed unexpectedly"), "{err}");
 }
 
@@ -4243,4 +4241,28 @@ fn render_command_with_alias_passes_alias_and_without_one_omits_it() {
 fn alias_is_an_amicu_owned_flag_in_extra_args() {
     assert!(crate::command::is_typed_flag("--alias"));
     assert!(crate::command::is_typed_flag("-a"));
+}
+
+/// Drive a manager future from a synchronous test.
+fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime")
+        .block_on(f)
+}
+
+#[test]
+fn launchd_presence_does_not_call_transient_states_down() {
+    let domain = Some("gui/501");
+    let presence = |state: &str| {
+        let out = format!("gui/501/x = {{\n\tactive count = 0\n\tstate = {state}\n}}\n");
+        launchd_presence(OneAnswer::new(true, 0, &out, ""), domain).unwrap()
+    };
+    // About to be (re)started by launchd: not confirmed down, not running.
+    assert_eq!(presence("spawn scheduled"), Presence::Unknown);
+    assert_eq!(presence("waiting"), Presence::Unknown);
+    // Its process is gone and launchd will not restart it right now.
+    assert_eq!(presence("exited"), Presence::Down);
+    assert_eq!(presence("running"), Presence::Running);
 }

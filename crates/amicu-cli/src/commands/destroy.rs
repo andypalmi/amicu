@@ -67,7 +67,18 @@ pub(crate) fn run_with(
 
     // Same locking discipline as `apply`: read -> refresh -> plan -> destroy ->
     // save under one state lock.
-    let _lock = StateLock::acquire(&project.state_dir(), "destroy", lock_timeout)?;
+    // Only a real project takes the lock: it creates `.amicu/state`, which would
+    // otherwise turn any folder amicu is run from into a "project". Outside one
+    // there is no state, so nothing needs protecting (and nothing is created).
+    let _lock = if project.is_project_root()? {
+        Some(StateLock::acquire(
+            &project.state_dir(),
+            "destroy",
+            lock_timeout,
+        )?)
+    } else {
+        None
+    };
 
     // Validate --target against the raw recorded state first, so a typo fails
     // before the Modal drift refresh makes any network call or prints drift.

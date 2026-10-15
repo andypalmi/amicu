@@ -456,7 +456,13 @@ fn adopt_baselines(
         }
         out.entry(id.clone())
             .and_modify(|f| f.fill_missing(current))
-            .or_insert_with(|| current.clone());
+            .or_insert_with(|| {
+                // As `fill_missing`: a running process may not match the current
+                // launch command, so its digest is never adopted.
+                let mut baseline = current.clone();
+                baseline.launch = None;
+                baseline
+            });
     }
 }
 
@@ -3264,6 +3270,28 @@ mod partial_state_tests {
             "never overwrite a recorded one"
         );
         assert_eq!(out[&id("beta")], fp("now"));
+    }
+
+    #[test]
+    fn an_adopted_baseline_never_records_the_launch_digest() {
+        let g = graph(&["beta"], 8000);
+        let mut prior = prior_state(g.clone(), &[]);
+        prior.fingerprints.remove(&id("beta"));
+        let now = fp("now").with_launch("llama-server --ctx-size 8192");
+        let result = PlanResult {
+            plan: amicu_plan::Plan {
+                version: amicu_plan::Plan::VERSION.to_owned(),
+                actions: Vec::new(),
+                policy: None,
+            },
+            items: Vec::new(),
+            diagnostics: Vec::new(),
+            fingerprints: [(id("beta"), now)].into(),
+        };
+        let mut out = prior.fingerprints.clone();
+        adopt_baselines(&mut out, &g, Some(&prior), &result);
+        assert_eq!(out[&id("beta")].secrets, Some("now".to_owned()));
+        assert_eq!(out[&id("beta")].launch, None);
     }
 }
 
