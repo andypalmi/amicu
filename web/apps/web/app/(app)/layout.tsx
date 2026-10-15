@@ -1,4 +1,6 @@
 import type { Metadata } from 'next';
+import { notFound } from 'next/navigation';
+import { SIGNIN_ENABLED } from '@/lib/features';
 import { HomeLayout } from 'fumadocs-ui/layouts/home';
 import { Badge } from '@amicu/ui';
 import { TIER_LABELS } from '@amicu/auth';
@@ -18,6 +20,8 @@ export const metadata: Metadata = {
 // /login. The verified claims are handed to client components via SessionProvider
 // as plain data - the raw access/refresh tokens never cross into the browser.
 export default async function Layout({ children }: LayoutProps<'/'>) {
+  // Sign-in disabled: the console does not exist (proxy.ts 404s first; this is the backstop).
+  if (!SIGNIN_ENABLED) notFound();
   const user = await requireSession();
 
   return (

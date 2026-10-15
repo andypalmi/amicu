@@ -1,4 +1,6 @@
 import type { Metadata } from 'next';
+import { notFound } from 'next/navigation';
+import { SIGNIN_ENABLED } from '@/lib/features';
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { getSession } from '@/lib/auth/session';
@@ -14,6 +16,8 @@ export const metadata: Metadata = {
 // Public auth surface (/login, /signup, /forgot). Already-authenticated visitors
 // are bounced to the app.
 export default async function AuthLayout({ children }: LayoutProps<'/'>) {
+  // Sign-in disabled: no auth pages (proxy.ts 404s first; this is the backstop).
+  if (!SIGNIN_ENABLED) notFound();
   const session = await getSession();
   if (session) redirect(appHomeHref());
 

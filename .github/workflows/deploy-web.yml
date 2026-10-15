@@ -88,3 +88,5 @@ jobs:
           # variable, not a secret.
           NEXT_PUBLIC_SITE_URL: ${{ vars.NEXT_PUBLIC_SITE_URL }}
           NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL || 'https://app.amicu.dev' }}
+          # Build-time, default OFF (unset/empty => sign-in hidden). Set the repo variable to "true" to expose it.
+          NEXT_PUBLIC_SIGNIN_ENABLED: ${{ vars.NEXT_PUBLIC_SIGNIN_ENABLED }}
