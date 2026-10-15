@@ -1267,7 +1267,8 @@ async fn verify_handle(
     // Fail closed: without the gateway credentials the runtime key cannot be
     // verified (the preflight normally stops this before anything is deployed).
     let gateway = gateway_headers(&handle.exposure)?;
-    eprintln!(
+    let _ = writeln!(
+        std::io::stderr(),
         "verifying endpoint authentication at {} ...",
         handle.endpoint
     );
@@ -1625,10 +1626,12 @@ async fn stop_modal(
                 ));
             }
             None if env.forget_unconfirmed => {
-                eprintln!(
+                let _ = writeln!(
+                    std::io::stderr(),
                     "warning: no Modal app '{}' found in {active}; forgetting '{}' as you asked \
                      (--forget-unconfirmed)",
-                    record.identity, record.deployment
+                    record.identity,
+                    record.deployment
                 );
                 return Ok(());
             }

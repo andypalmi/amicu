@@ -49,6 +49,10 @@ lettre = { version = "0.11", default-features = false, features = [
     "webpki-roots",
 ] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+# Opt-in error reporting (active only when SENTRY_DSN is set). Errors only: no
+# tracing/profiling features. reqwest transport on rustls; default features are
+# off so native-tls/OpenSSL are never built.
+sentry = { version = "0.49", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "std"] }
 # Zeroize-on-drop intermediates while normalizing/splitting the raw
 # signing-key PEM (src/signing_key.rs), so no un-zeroized copy of key

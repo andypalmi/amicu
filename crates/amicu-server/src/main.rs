@@ -58,6 +58,9 @@ enum Command {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     init_logging();
+    // Held for the process lifetime so queued events flush on exit; `None`
+    // (and no behaviour change) unless SENTRY_DSN is set.
+    let _sentry = amicu_server::error_reporting::init(cli.config.environment);
     let result = match cli.command {
         Some(Command::Migrate) => amicu_server::migrate().await,
         Some(Command::GenSigningKey) => amicu_server::gen_signing_key(),

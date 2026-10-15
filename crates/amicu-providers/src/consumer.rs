@@ -166,7 +166,9 @@ const fn cfg(memory_gib: u32, bandwidth_gbps: u32) -> MemoryConfig {
 // binned into parts with different bandwidth for the same memory size (M3 Max
 // 14-core CPU / 30-core GPU 300 GB/s vs 400 GB/s, M4 Max 32-core GPU 410 vs
 // 546 GB/s, M5 Max 32-core GPU 460 vs 614 GB/s), the lower figure is used when
-// the size is sold with the slower bin, so estimates stay conservative. There
+// the size is sold with the slower bin, so estimates stay conservative (M4 Max
+// 36 GB is the only slower-bin size; 48 GB and up ship with the 16-core CPU /
+// 40-core GPU bin at 546 GB/s). There
 // is no M4 Ultra or M5 Ultra.
 const APPLE_SILICON_CHIPS: &[AppleSiliconChip] = &[
     AppleSiliconChip {
@@ -233,7 +235,7 @@ const APPLE_SILICON_CHIPS: &[AppleSiliconChip] = &[
     },
     AppleSiliconChip {
         id: "m4_max",
-        configs: &[cfg(36, 410), cfg(48, 410), cfg(64, 546), cfg(128, 546)],
+        configs: &[cfg(36, 410), cfg(48, 546), cfg(64, 546), cfg(128, 546)],
     },
     AppleSiliconChip {
         id: "m5",

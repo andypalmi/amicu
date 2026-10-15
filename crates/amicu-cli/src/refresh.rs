@@ -456,7 +456,7 @@ fn load_refreshed_mode(
         return Err(CliError::Message(mismatch));
     }
     if let Some(warning) = &refresh.warning {
-        eprintln!("warning: {warning}");
+        let _ = writeln!(std::io::stderr(), "warning: {warning}");
     }
     let mut stderr = std::io::stderr();
     let sink: &mut dyn Write = if output.is_json() { &mut stderr } else { out };

@@ -57,6 +57,10 @@ impl CliError {
     /// Whether the failure is a write to a closed pipe (`amicu ... | head -1`).
     /// That is the reader's choice, not an error worth reporting.
     pub(crate) fn is_broken_pipe(&self) -> bool {
-        matches!(self, Self::Io { source, .. } if source.kind() == std::io::ErrorKind::BrokenPipe)
+        match self {
+            Self::Io { source, .. } => source.kind() == std::io::ErrorKind::BrokenPipe,
+            Self::Serde(e) => e.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe),
+            _ => false,
+        }
     }
 }
