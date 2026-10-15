@@ -37,7 +37,17 @@ Plain `amicu init` writes an `amicu.hcl` with only a comment header (no resource
 | `linux-cpu` | llama.cpp, `n_gpu_layers = 0` | `local_cpu` with the detected CPU and memory |
 | `modal` | vLLM on one Modal L4 | The [Modal](/docs/providers/modal) example; needs the Modal tokens and `CHAT_API_KEY` |
 
-The starter is written only if `amicu.hcl` is absent or still the untouched header from plain `init`. The same starters are in the repository under `examples/`, generated for a stated reference machine; a test keeps them equal to the `init` output. The local examples pick the largest of Qwen3 8B, 4B, 1.7B and 0.6B (GGUF) that fits the detected memory, and a context length to match. `linux-cpu` starts at 4B. A local example must match the machine it runs on. The starter is a starting point: change the model, then run `amicu validate` and `amicu plan`.
+The starter is written only if `amicu.hcl` is absent or still the untouched header from plain `init`. The same starters are in the repository under `examples/`, generated for a stated reference machine; a test keeps them equal to the `init` output. The local examples pick the largest Qwen3.5 GGUF (from `unsloth`; Qwen publishes none) that fits the detected memory. For a GPU host that is the VRAM, otherwise the machine's memory, and a tier is chosen when memory reaches its threshold within 5%. `linux-cpu` starts at 4B.
+
+| Memory | Model | Quantization | File size |
+|---|---|---|---|
+| 32 GiB or more | Qwen3.5 27B | Q4_K_M | 16.74 GB |
+| 16 GiB | Qwen3.5 9B | Q4_K_M | 5.68 GB |
+| 8 GiB | Qwen3.5 4B | Q4_K_M | 2.74 GB |
+| 6 GiB | Qwen3.5 2B | Q8_0 | 2.01 GB |
+| less | Qwen3.5 0.8B | Q8_0 | 0.81 GB |
+
+The starter asks for Qwen3.5's native 262144-token context and halves it until the fit check (weights, KV cache at f16 and runtime overhead) passes on the detected memory; a 32 GiB host gets 131072 on 27B. The model declares its attention shape (`n_layers`, `n_kv_layers`, `n_kv_heads`, `head_dim`), so the estimate counts only Qwen3.5's full-attention layers. Output is capped at 65536 tokens with `extra_args = ["--n-predict", "65536"]`. A local example must match the machine it runs on. The starter is a starting point: change the model, then run `amicu validate` and `amicu plan`.
 
 ## Catalog commands
 

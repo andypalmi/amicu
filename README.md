@@ -7,22 +7,26 @@ Write HCL that describes a model and where it runs. `amicu plan` checks that it 
 ## Example
 
 ```hcl
-resource "model" "qwen3_8b" {
+resource "model" "qwen35_27b" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen3-8B-GGUF"
+    reference = "unsloth/Qwen3.5-27B-GGUF"
   }
-  architecture   = "qwen3"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
     quantization = "q4_k_m"
   }
-  context_length = 32768
+  context_length = 262144
+  n_layers       = 64
+  n_kv_layers    = 16
+  n_kv_heads     = 4
+  head_dim       = 256
   variant {
     quantization = "q4_k_m"
-    file         = "Qwen3-8B-Q4_K_M.gguf"
-    size         = "5027783488B"
+    file         = "Qwen3.5-27B-Q4_K_M.gguf"
+    size         = "16740812704B"
   }
 }
 
@@ -37,14 +41,15 @@ resource "hardware_profile" "local_dev" {
   memory = "48GiB"
 }
 
-resource "deployment" "qwen3_8b_local" {
-  model    = model.qwen3_8b.id
+resource "deployment" "qwen35_27b_local" {
+  model    = model.qwen35_27b.id
   hardware = hardware_profile.local_dev.id
   runtime  = "llama_cpp"
   llama_cpp {
-    context_length = 32768
+    context_length = 262144
     port           = 8000
     n_gpu_layers   = -1
+    extra_args     = ["--n-predict", "65536"]
   }
 }
 ```
@@ -137,7 +142,7 @@ Bind a model to it with a `deployment` as in the quickstart, plus an `api_key` s
 
 ```hcl
 resource "deployment" "chat" {
-  model    = model.qwen3_8b.id
+  model    = model.qwen35_27b.id
   hardware = hardware_profile.modal_l4.id
   runtime  = "vllm"
   api_key  = secret("CHAT_API_KEY")   # read from the environment variable of that name at apply time

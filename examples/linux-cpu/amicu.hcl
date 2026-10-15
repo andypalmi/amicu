@@ -1,13 +1,13 @@
 # Reference machine: Linux, 16 GiB RAM, no GPU.
 # `amicu init --example` sizes the starter to your own machine instead.
 
-resource "model" "qwen3_4b" {
+resource "model" "qwen35_4b" {
   source {
     registry = "hugging_face"
-    reference = "Qwen/Qwen3-4B-GGUF"
+    reference = "unsloth/Qwen3.5-4B-GGUF"
   }
 
-  architecture = "qwen3"
+  architecture = "qwen35"
   modalities = [
     "text"
   ]
@@ -17,13 +17,18 @@ resource "model" "qwen3_4b" {
     quantization = "q4_k_m"
   }
 
-  context_length = 32768
+  context_length = 262144
 
   variant {
     quantization = "q4_k_m"
-    file = "Qwen3-4B-Q4_K_M.gguf"
-    size = "2497280256B"
+    file = "Qwen3.5-4B-Q4_K_M.gguf"
+    size = "2740937888B"
   }
+
+  n_layers = 32
+  n_kv_heads = 4
+  head_dim = 256
+  n_kv_layers = 8
 }
 
 resource "hardware_profile" "local_dev" {
@@ -37,14 +42,18 @@ resource "hardware_profile" "local_dev" {
   memory = "16GiB"
 }
 
-resource "deployment" "qwen3_4b_local" {
-  model = model.qwen3_4b.id
+resource "deployment" "qwen35_4b_local" {
+  model = model.qwen35_4b.id
   hardware = hardware_profile.local_dev.id
   runtime = "llama_cpp"
 
   llama_cpp {
-    context_length = 8192
+    context_length = 262144
     port = 8000
     n_gpu_layers = 0
+    extra_args = [
+      "--n-predict",
+      "65536"
+    ]
   }
 }

@@ -1417,13 +1417,13 @@ fn build_custom_stack(preset: &Preset, answers: &WizardAnswers) -> Graph {
         region: None,
         accelerator: Some(Accelerator {
             kind: AcceleratorKind::Gpu,
-            model: "a10g".to_string(),
+            model: "l40s".to_string(),
             count: gpu_count,
-            memory: ByteSize::from_bytes(24 * GIB),
+            memory: ByteSize::from_bytes(48 * GIB),
             memory_bandwidth_gbps: None,
         }),
         cpu: None,
-        memory: ByteSize::from_bytes(64 * GIB),
+        memory: ByteSize::from_bytes(96 * GIB),
         interconnect: None,
         price: None,
     });

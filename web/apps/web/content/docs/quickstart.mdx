@@ -64,7 +64,7 @@ amicu init --example
 
 `init` creates `amicu.hcl` (only a comment header, no resources), `variables.amicu.hcl` (a placeholder), and `.amicu/` (project config and state). It never overwrites existing files.
 
-For a working starter, add `--example`. A bare `--example` picks the one for this machine: macOS gets `mac`, Linux with `nvidia-smi` gets `linux-cuda`, and any other Linux gets `linux-cpu`. Its hardware profile is the detected machine, and it picks a Qwen3 GGUF model and context length that fit its memory. It replaces the header-only `amicu.hcl` while that is unchanged, and never overwrites a file you edited. To choose yourself:
+For a working starter, add `--example`. A bare `--example` picks the one for this machine: macOS gets `mac`, Linux with `nvidia-smi` gets `linux-cuda`, and any other Linux gets `linux-cpu`. Its hardware profile is the detected machine, and it picks a Qwen3.5 GGUF model and a context length (up to the native 262144) that fit its memory, with output capped at 65536 tokens. It replaces the header-only `amicu.hcl` while that is unchanged, and never overwrites a file you edited. To choose yourself:
 
 ```bash
 amicu init --example             # detect this machine
@@ -85,25 +85,29 @@ Requirements:
 
 ### The starter config
 
-`amicu init --example` writes an `amicu.hcl` like this one. On a Mac with 48 GiB of memory it serves `Qwen/Qwen3-8B-GGUF` (`Qwen3-8B-Q4_K_M.gguf`, about 5 GB) with llama.cpp. Smaller machines get a smaller model, so the model id, file name and context length below depend on your machine:
+`amicu init --example` writes an `amicu.hcl` like this one. On a Mac with 48 GiB of memory it serves `unsloth/Qwen3.5-27B-GGUF` (`Qwen3.5-27B-Q4_K_M.gguf`, about 17 GB) with llama.cpp. Smaller machines get a smaller model, so the model id, file name and context length below depend on your machine:
 
 ```hcl
-resource "model" "qwen3_8b" {
+resource "model" "qwen35_27b" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen3-8B-GGUF"
+    reference = "unsloth/Qwen3.5-27B-GGUF"
   }
-  architecture   = "qwen3"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {
     format       = "gguf"
     quantization = "q4_k_m"
   }
-  context_length = 32768
+  context_length = 262144
+  n_layers       = 64
+  n_kv_layers    = 16
+  n_kv_heads     = 4
+  head_dim       = 256
   variant {
     quantization = "q4_k_m"
-    file         = "Qwen3-8B-Q4_K_M.gguf"
-    size         = "5027783488B"
+    file         = "Qwen3.5-27B-Q4_K_M.gguf"
+    size         = "16740812704B"
   }
 }
 
@@ -118,28 +122,29 @@ resource "hardware_profile" "local_dev" {
   memory = "48GiB"
 }
 
-resource "deployment" "qwen3_8b_local" {
-  model    = model.qwen3_8b.id
+resource "deployment" "qwen35_27b_local" {
+  model    = model.qwen35_27b.id
   hardware = hardware_profile.local_dev.id
   runtime  = "llama_cpp"
   llama_cpp {
-    context_length = 32768
+    context_length = 262144
     port           = 8000
     n_gpu_layers   = -1
+    extra_args     = ["--n-predict", "65536"]
   }
 }
 ```
 
-`variant.size` is an integer number of bytes; `"5027783488B"` and `"5027783488"` mean the same. The `hardware_profile` is what `init` detected, and the fit check uses it. Change it only if you plan for another machine; see [Hardware profile](/docs/configuration/hardware-profile). Lower `context_length` if memory is tight.
+`variant.size` is an integer number of bytes; `"16740812704B"` and `"16740812704"` mean the same. The `hardware_profile` is what `init` detected, and the fit check uses it. Change it only if you plan for another machine; see [Hardware profile](/docs/configuration/hardware-profile). Lower `context_length` if memory is tight.
 
 ### Get the GGUF
 
-If `init` picked a smaller model for your machine, use the model id and file name from your `amicu.hcl` in place of `qwen3_8b` and `Qwen3-8B-Q4_K_M.gguf` below. The model resource id decides where the file goes: `models/<model id>/<variant.file>` relative to the project directory. Here that is `models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf`. You can instead set `variant.file` to an absolute path.
+If `init` picked a smaller model for your machine, use the model id and file name from your `amicu.hcl` in place of `qwen35_27b` and `Qwen3.5-27B-Q4_K_M.gguf` below. The model resource id decides where the file goes: `models/<model id>/<variant.file>` relative to the project directory. Here that is `models/qwen35_27b/Qwen3.5-27B-Q4_K_M.gguf`. You can instead set `variant.file` to an absolute path.
 
 ```bash
-mkdir -p models/qwen3_8b
-curl -L -o models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf \
-  https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf
+mkdir -p models/qwen35_27b
+curl -L -o models/qwen35_27b/Qwen3.5-27B-Q4_K_M.gguf \
+  https://huggingface.co/unsloth/Qwen3.5-27B-GGUF/resolve/main/Qwen3.5-27B-Q4_K_M.gguf
 ```
 
 For gated or private repos, add `-H "Authorization: Bearer $HF_TOKEN"`.
@@ -155,7 +160,7 @@ amicu apply
 
 `doctor` and `plan` compare a local hardware profile with this machine. If the profile declares more memory than the machine has, they print the warning `AMICU-MEM-003`. It is only a warning, because `plan` may run on another machine than the one you deploy to, such as CI. Fix the profile, or ignore it when that is the case.
 
-`plan` prints the exact `llama-server` command, with the model path relative to the project, `models/qwen3_8b/Qwen3-8B-Q4_K_M.gguf`. The service runs with the absolute path. `apply` shows the plan, asks for approval, installs a user service (launchd on macOS, systemd on Linux), starts it, and waits up to 15 minutes for `/health` to answer. If the service exits during startup, apply fails within seconds. On any failure it stops the service and the error gives the log location. See [This machine](/docs/providers/local).
+`plan` prints the exact `llama-server` command, with the model path relative to the project, `models/qwen35_27b/Qwen3.5-27B-Q4_K_M.gguf`. The service runs with the absolute path. `apply` shows the plan, asks for approval, installs a user service (launchd on macOS, systemd on Linux), starts it, and waits up to 15 minutes for `/health` to answer. If the service exits during startup, apply fails within seconds. On any failure it stops the service and the error gives the log location. See [This machine](/docs/providers/local).
 
 ### Send a request
 
@@ -164,10 +169,10 @@ The deployment has no `api_key`, so no header is needed; the endpoint is bound t
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model": "Qwen/Qwen3-8B-GGUF", "messages": [{"role": "user", "content": "Hello"}]}'
+  -d '{"model": "unsloth/Qwen3.5-27B-GGUF", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-If the request fails, check that the service is running and read its log: on macOS `~/Library/Logs/amicu/<label>.out.log` and `<label>.err.log`, on Linux `journalctl --user --unit=<label>`. The label is `io.amicu.llama.<project_id>.qwen3_8b_local`, where `project_id` is in `.amicu/state/state.json`. A missing or wrong GGUF path is the usual cause; confirm the file exists at `models/qwen3_8b/` in the project directory.
+If the request fails, check that the service is running and read its log: on macOS `~/Library/Logs/amicu/<label>.out.log` and `<label>.err.log`, on Linux `journalctl --user --unit=<label>`. The label is `io.amicu.llama.<project_id>.qwen35_27b_local`, where `project_id` is in `.amicu/state/state.json`. A missing or wrong GGUF path is the usual cause; confirm the file exists at `models/qwen35_27b/` in the project directory.
 
 To require a key even locally, add `api_key = secret("LOCAL_API_KEY")` to the deployment and export `LOCAL_API_KEY` before `apply`, then send `Authorization: Bearer $LOCAL_API_KEY`.
 
@@ -204,36 +209,45 @@ Today, `apply` supports Modal as a remote GPU provider. Hetzner, OVHcloud, Scale
     resource "model" "qwen" {
       source {
         registry  = "hugging_face"
-        reference = "Qwen/Qwen3-8B"
+        reference = "RedHatAI/Qwen3.5-9B-FP8-dynamic"
       }
-      architecture   = "qwen3"
+      architecture   = "qwen3_5"
       modalities     = ["text"]
       artifact {
-        format = "safetensors"
+        format       = "safetensors"
+        quantization = "fp8"
       }
-      context_length = 32768
+      context_length = 262144
+      n_layers       = 32
+      n_kv_layers    = 8
+      n_kv_heads     = 4
+      head_dim       = 256
     }
 
-    resource "hardware_profile" "gpu_l4" {
+    resource "hardware_profile" "gpu_2xl4" {
       provider = "modal"
       region   = "eu-west"
       accelerator {
         kind   = "gpu"
         model  = "l4"
-        count  = 1
+        count  = 2
         memory = "24GiB"
       }
-      memory = "32GiB"
+      memory = "64GiB"
     }
 
     resource "deployment" "chat" {
       model    = model.qwen.id
-      hardware = hardware_profile.gpu_l4.id
+      hardware = hardware_profile.gpu_2xl4.id
       runtime  = "vllm"
       api_key  = secret("CHAT_API_KEY")
       vllm {
-        context_length = 8192
-        port           = 8000
+        context_length       = 262144
+        port                 = 8000
+        tensor_parallel_size = 2
+        env {
+          NCCL_P2P_DISABLE = "1"
+        }
       }
     }
     ```
@@ -246,7 +260,7 @@ Today, `apply` supports Modal as a remote GPU provider. Hetzner, OVHcloud, Scale
       -H "Modal-Key: $MODAL_PROXY_TOKEN_ID" \
       -H "Modal-Secret: $MODAL_PROXY_TOKEN_SECRET" \
       -H "Content-Type: application/json" \
-      -d '{"model": "Qwen/Qwen3-8B", "messages": [{"role": "user", "content": "Hello"}]}'
+      -d '{"model": "RedHatAI/Qwen3.5-9B-FP8-dynamic", "messages": [{"role": "user", "content": "Hello"}]}'
     ```
 
     A `503` while the container cold-starts is normal.

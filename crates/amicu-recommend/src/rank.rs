@@ -770,8 +770,8 @@ fn custom_stack_variants(base: &Graph) -> Vec<VariantSpec> {
             archetype: CandidateArchetype::Balanced,
             graph: base.clone(),
             rationale: vec![
-                "A10G accelerators, unquantized weights: a reasonable general-purpose starting \
-                 point with no preset opinion baked in."
+                "L40S accelerators (48 GiB), unquantized weights: a reasonable general-purpose \
+                 starting point with room for the KV cache and, on Qwen3.5, the vision tower."
                     .to_string(),
             ],
             rejected: Vec::new(),

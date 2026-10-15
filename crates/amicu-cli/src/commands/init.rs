@@ -3,7 +3,7 @@
 //!
 //! Plain `init` writes an `amicu.hcl` with only a comment header. `--example`
 //! writes a working starter instead. For the local examples its hardware
-//! profile is the detected host and the model is the largest of a small Qwen3
+//! profile is the detected host and the model is the largest of a small Qwen3.5
 //! ladder that fits that memory; `modal` mirrors the Modal docs example. The
 //! same starters live under `examples/` in the repo, generated from
 //! [`starter_hcl`] on a stated reference machine (see the tests).
@@ -12,7 +12,10 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use amicu_core::ByteSize;
+use amicu_core::resource::{GgufVariant, HardwareProfile, KvCacheType, Quantization};
 use amicu_hcl::{format_graph, parse_graph};
+use amicu_registry::{FitConfig, KvCacheParams, check_variant_fit_with_kv_cache};
 use clap::ValueEnum;
 
 use crate::error::CliError;
@@ -59,7 +62,8 @@ impl InitTarget {
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
-/// One rung of the starter model ladder (all Qwen3 GGUF from Hugging Face).
+/// One rung of the starter model ladder (all Qwen3.5 GGUF from Hugging Face).
+/// Qwen publishes no Qwen3.5 GGUF, so these come from `unsloth`.
 pub(crate) struct Tier {
     pub id: &'static str,
     pub repo: &'static str,
@@ -69,41 +73,85 @@ pub(crate) struct Tier {
     pub size_bytes: u64,
     /// Smallest memory (GiB, of the pool the model loads into) it is picked at.
     pub min_gib: u64,
+    /// Transformer layer count (`num_hidden_layers` in config.json).
+    pub n_layers: u32,
+    /// Layers that hold a KV cache. Qwen3.5 is hybrid: every 4th layer is full
+    /// attention, the rest are linear attention with no per-token KV.
+    pub n_kv_layers: u32,
+    /// Key/value heads (`num_key_value_heads`).
+    pub n_kv_heads: u32,
+    /// Per-head dimension (`head_dim`).
+    pub head_dim: u32,
 }
 
+/// Qwen3.5's native context window.
+pub(crate) const NATIVE_CONTEXT: u32 = 262_144;
+/// Default cap on generated tokens per request, passed as `--n-predict`.
+pub(crate) const MAX_OUTPUT_TOKENS: u32 = 65_536;
+/// The smallest context the starters fall back to.
+const MIN_CONTEXT: u32 = 2048;
+
 /// Largest first.
-pub(crate) const TIERS: [Tier; 4] = [
+pub(crate) const TIERS: [Tier; 5] = [
     Tier {
-        id: "qwen3_8b",
-        repo: "Qwen/Qwen3-8B-GGUF",
-        file: "Qwen3-8B-Q4_K_M.gguf",
+        id: "qwen35_27b",
+        repo: "unsloth/Qwen3.5-27B-GGUF",
+        file: "Qwen3.5-27B-Q4_K_M.gguf",
         quantization: "q4_k_m",
-        size_bytes: 5_027_783_488,
+        size_bytes: 16_740_812_704,
+        min_gib: 32,
+        n_layers: 64,
+        n_kv_layers: 16,
+        n_kv_heads: 4,
+        head_dim: 256,
+    },
+    Tier {
+        id: "qwen35_9b",
+        repo: "unsloth/Qwen3.5-9B-GGUF",
+        file: "Qwen3.5-9B-Q4_K_M.gguf",
+        quantization: "q4_k_m",
+        size_bytes: 5_680_522_464,
         min_gib: 16,
+        n_layers: 32,
+        n_kv_layers: 8,
+        n_kv_heads: 4,
+        head_dim: 256,
     },
     Tier {
-        id: "qwen3_4b",
-        repo: "Qwen/Qwen3-4B-GGUF",
-        file: "Qwen3-4B-Q4_K_M.gguf",
+        id: "qwen35_4b",
+        repo: "unsloth/Qwen3.5-4B-GGUF",
+        file: "Qwen3.5-4B-Q4_K_M.gguf",
         quantization: "q4_k_m",
-        size_bytes: 2_497_280_256,
+        size_bytes: 2_740_937_888,
         min_gib: 8,
+        n_layers: 32,
+        n_kv_layers: 8,
+        n_kv_heads: 4,
+        head_dim: 256,
     },
     Tier {
-        id: "qwen3_1_7b",
-        repo: "Qwen/Qwen3-1.7B-GGUF",
-        file: "Qwen3-1.7B-Q8_0.gguf",
+        id: "qwen35_2b",
+        repo: "unsloth/Qwen3.5-2B-GGUF",
+        file: "Qwen3.5-2B-Q8_0.gguf",
         quantization: "q8_0",
-        size_bytes: 1_834_426_016,
+        size_bytes: 2_012_012_800,
         min_gib: 6,
+        n_layers: 24,
+        n_kv_layers: 6,
+        n_kv_heads: 2,
+        head_dim: 256,
     },
     Tier {
-        id: "qwen3_0_6b",
-        repo: "Qwen/Qwen3-0.6B-GGUF",
-        file: "Qwen3-0.6B-Q8_0.gguf",
+        id: "qwen35_0_8b",
+        repo: "unsloth/Qwen3.5-0.8B-GGUF",
+        file: "Qwen3.5-0.8B-Q8_0.gguf",
         quantization: "q8_0",
-        size_bytes: 639_446_688,
+        size_bytes: 811_843_840,
         min_gib: 0,
+        n_layers: 24,
+        n_kv_layers: 6,
+        n_kv_heads: 2,
+        head_dim: 256,
     },
 ];
 
@@ -113,26 +161,53 @@ pub(crate) fn reaches_gib(memory_bytes: u64, gib: u64) -> bool {
     u128::from(memory_bytes) * 100 >= u128::from(gib) * u128::from(GIB) * 95
 }
 
-/// The largest tier whose `min_gib` is within `memory_bytes` (with 5% slack). On CPU the 8B
-/// tier is skipped: generation is slow enough there that a small model is the
-/// better first experience.
+/// The largest tier whose `min_gib` is within `memory_bytes` (with 5% slack). On CPU the 27B
+/// and 9B tiers are skipped: generation is slow enough there that a small model
+/// is the better first experience, so CPU starts at 4B.
 pub(crate) fn pick_tier(memory_bytes: u64, cpu_only: bool) -> &'static Tier {
     TIERS
         .iter()
-        .skip(usize::from(cpu_only))
+        .skip(if cpu_only { 2 } else { 0 })
         .find(|t| reaches_gib(memory_bytes, t.min_gib))
         .unwrap_or(&TIERS[TIERS.len() - 1])
 }
 
-/// Runtime context for a tier on `memory_bytes`: modest by default (the KV
-/// cache grows with it), more on big machines.
-pub(crate) fn context_for(tier: &Tier, memory_bytes: u64) -> u32 {
-    match tier.id {
-        "qwen3_8b" | "qwen3_4b" if reaches_gib(memory_bytes, 32) => 32768,
-        "qwen3_8b" | "qwen3_4b" => 8192,
-        "qwen3_1_7b" => 4096,
-        _ => 2048,
+/// The tier's GGUF variant, as the model block declares it.
+fn tier_variant(tier: &Tier) -> GgufVariant {
+    GgufVariant {
+        quantization: if tier.quantization == "q8_0" {
+            Quantization::Q8_0
+        } else {
+            Quantization::Q4KM
+        },
+        file: tier.file.to_owned(),
+        size: Some(ByteSize::from_bytes(tier.size_bytes)),
+        sha256: None,
     }
+}
+
+/// Runtime context for a tier on `hw`: Qwen3.5's native 262144 window, halved
+/// until the engine's own fit check (weights + KV cache at the default f16 cache
+/// type + runtime overhead, against the pool the model loads into) passes.
+pub(crate) fn context_for(tier: &Tier, hw: &HardwareProfile) -> u32 {
+    let variant = tier_variant(tier);
+    let cfg = FitConfig::default();
+    let mut ctx = NATIVE_CONTEXT;
+    while ctx > MIN_CONTEXT {
+        let kv = KvCacheParams {
+            context_length: ctx,
+            n_layers: tier.n_kv_layers,
+            n_kv_heads: tier.n_kv_heads,
+            head_dim: tier.head_dim,
+            cache_type_k: KvCacheType::F16,
+            cache_type_v: KvCacheType::F16,
+        };
+        if check_variant_fit_with_kv_cache(0, &variant, hw, &cfg, Some(kv)).fits {
+            return ctx;
+        }
+        ctx /= 2;
+    }
+    MIN_CONTEXT
 }
 
 fn model_block(tier: &Tier) -> String {
@@ -142,13 +217,17 @@ fn model_block(tier: &Tier) -> String {
     registry  = "hugging_face"
     reference = "{repo}"
   }}
-  architecture   = "qwen3"
+  architecture   = "qwen35"
   modalities     = ["text"]
   artifact {{
     format       = "gguf"
     quantization = "{q}"
   }}
-  context_length = 32768
+  context_length = {native}
+  n_layers       = {n_layers}
+  n_kv_layers    = {n_kv_layers}
+  n_kv_heads     = {n_kv_heads}
+  head_dim       = {head_dim}
   variant {{
     quantization = "{q}"
     file         = "{file}"
@@ -161,6 +240,11 @@ fn model_block(tier: &Tier) -> String {
         q = tier.quantization,
         file = tier.file,
         size = tier.size_bytes,
+        native = NATIVE_CONTEXT,
+        n_layers = tier.n_layers,
+        n_kv_layers = tier.n_kv_layers,
+        n_kv_heads = tier.n_kv_heads,
+        head_dim = tier.head_dim,
     )
 }
 
@@ -207,7 +291,7 @@ pub(crate) fn starter_hcl(target: InitTarget, host: Option<&HostInfo>) -> Result
             hcl.push_str(&deployment_block(
                 tier,
                 "local_dev",
-                context_for(tier, mem.bytes()),
+                context_for(tier, &host.fit_profile()),
                 host.profile.accelerator.is_some(),
             ));
         }
@@ -229,7 +313,7 @@ pub(crate) fn starter_hcl(target: InitTarget, host: Option<&HostInfo>) -> Result
             hcl.push_str(&deployment_block(
                 tier,
                 "local_gpu",
-                context_for(tier, gpu.memory.bytes()),
+                context_for(tier, &host.fit_profile()),
                 true,
             ));
         }
@@ -240,7 +324,7 @@ pub(crate) fn starter_hcl(target: InitTarget, host: Option<&HostInfo>) -> Result
             hcl.push_str(&deployment_block(
                 tier,
                 "local_dev",
-                context_for(tier, mem.bytes()),
+                context_for(tier, &host.fit_profile()),
                 false,
             ));
         }
@@ -271,15 +355,17 @@ resource "deployment" "{id}_local" {{
     context_length = {context}
     port           = 8000
     n_gpu_layers   = {layers}
+    extra_args     = ["--n-predict", "{max_out}"]
   }}
 }}
 "#,
         id = tier.id,
         layers = if gpu { -1 } else { 0 },
+        max_out = MAX_OUTPUT_TOKENS,
     )
 }
 
-/// The `modal` starter: the Modal docs example (vLLM on one L4). Needs the
+/// The `modal` starter: the Modal docs example (vLLM, FP8, tensor-parallel over two L4s). Needs the
 /// four Modal tokens and the deployment's own `CHAT_API_KEY`.
 const MODAL_HCL: &str = r#"# Amicu starter configuration for Modal.
 # Export MODAL_TOKEN_ID, MODAL_TOKEN_SECRET, MODAL_PROXY_TOKEN_ID,
@@ -289,36 +375,45 @@ const MODAL_HCL: &str = r#"# Amicu starter configuration for Modal.
 resource "model" "qwen" {
   source {
     registry  = "hugging_face"
-    reference = "Qwen/Qwen3-8B"
+    reference = "RedHatAI/Qwen3.5-9B-FP8-dynamic"
   }
-  architecture   = "qwen3"
+  architecture   = "qwen3_5"
   modalities     = ["text"]
   artifact {
-    format = "safetensors"
+    format       = "safetensors"
+    quantization = "fp8"
   }
-  context_length = 32768
+  context_length = 262144
+  n_layers       = 32
+  n_kv_layers    = 8
+  n_kv_heads     = 4
+  head_dim       = 256
 }
 
-resource "hardware_profile" "gpu_l4" {
+resource "hardware_profile" "gpu_2xl4" {
   provider = "modal"
   region   = "eu-west"
   accelerator {
     kind   = "gpu"
     model  = "l4"
-    count  = 1
+    count  = 2
     memory = "24GiB"
   }
-  memory = "32GiB"
+  memory = "64GiB"
 }
 
 resource "deployment" "chat" {
   model    = model.qwen.id
-  hardware = hardware_profile.gpu_l4.id
+  hardware = hardware_profile.gpu_2xl4.id
   runtime  = "vllm"
   api_key  = secret("CHAT_API_KEY")
   vllm {
-    context_length = 8192
-    port           = 8000
+    context_length       = 262144
+    port                 = 8000
+    tensor_parallel_size = 2
+    env {
+      NCCL_P2P_DISABLE = "1"
+    }
   }
 }
 "#;
