@@ -2,6 +2,9 @@
 //!
 //! Runs without a project: it only reads the embedded manifest and writes files.
 //! Idempotent - re-running overwrites the generated files.
+//!
+//! Without `--target`, every target is exported, each into its own default
+//! directory. Those directories are distinct, so the exports never overlap.
 
 use std::fs;
 use std::io::Write;
@@ -12,21 +15,71 @@ use crate::error::CliError;
 use crate::skills::SKILLS;
 
 pub(crate) fn export(
-    target: SkillTarget,
+    target: Option<SkillTarget>,
     path: Option<&Path>,
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
-    let base = resolve_base(target, path)?;
-    writeln!(
-        out,
-        "Exporting {} skills for {} to {}",
-        SKILLS.len(),
-        target.label(),
-        base.display()
-    )
-    .map_err(|e| CliError::io("write failed", e))?;
-    write_skills(&base, out)?;
+    let plan = match target {
+        Some(target) => vec![(target, resolve_base(target, path)?)],
+        None => all_targets_plan(path)?,
+    };
+    export_plan(&plan, out)?;
     Ok(0)
+}
+
+/// The export plan for every target, each at its default directory.
+fn all_targets_plan(path: Option<&Path>) -> Result<Vec<(SkillTarget, PathBuf)>, CliError> {
+    // Every target shares one `<skill>/SKILL.md` layout, so a single
+    // `--path` would make them overwrite each other.
+    if path.is_some() {
+        return Err(CliError::Message(
+            "--path needs --target when exporting all targets: every target would write the same <skill>/SKILL.md files into it".to_string(),
+        ));
+    }
+    let plan = SkillTarget::ALL
+        .iter()
+        .map(|&target| Ok((target, resolve_base(target, None)?)))
+        .collect::<Result<Vec<_>, CliError>>()?;
+    check_disjoint(&plan)?;
+    Ok(plan)
+}
+
+/// Write each target's skills into its base directory, reporting what was written.
+pub(crate) fn export_plan(
+    plan: &[(SkillTarget, PathBuf)],
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    for (target, base) in plan {
+        writeln!(
+            out,
+            "Exporting {} skills for {} to {}",
+            SKILLS.len(),
+            target.label(),
+            base.display()
+        )
+        .map_err(|e| CliError::io("write failed", e))?;
+        write_skills(base, out)?;
+    }
+    Ok(())
+}
+
+/// Refuse a plan in which two targets would write into the same or nested
+/// directories, rather than silently overwriting files.
+pub(crate) fn check_disjoint(plan: &[(SkillTarget, PathBuf)]) -> Result<(), CliError> {
+    for (i, (a, base_a)) in plan.iter().enumerate() {
+        for (b, base_b) in &plan[i + 1..] {
+            if base_a.starts_with(base_b) || base_b.starts_with(base_a) {
+                return Err(CliError::Message(format!(
+                    "skill export: {} and {} would write to overlapping directories ({} and {})",
+                    a.label(),
+                    b.label(),
+                    base_a.display(),
+                    base_b.display()
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Resolve the output root: an explicit `--path`, else the target default,

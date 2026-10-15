@@ -43,7 +43,7 @@ A binary that is not on `PATH`, and state written before change detection, are n
 
 | Command | Description |
 |---|---|
-| `amicu skill export --target <target> [--path <dir>]` | Write agent skills. Targets: `claude-code`, `cursor`, `windsurf`, `generic`. `--path` overrides the default directory. The `generic` target defaults to `./agent-guidance/`. |
+| `amicu skill export [--target <target>] [--path <dir>]` | Write agent skills. Targets: `claude-code`, `cursor`, `windsurf`, `generic`. `--target` is optional: without it, every target is exported to its default directory and each path written is printed. `--path` overrides the default directory and needs `--target`. The `generic` target defaults to `./agent-guidance/`. |
 
 See [Agent skills](/docs/reference/agent-skills).
 

@@ -12,6 +12,8 @@ amicu skill export --target windsurf
 amicu skill export --target generic --path ./agent-guidance
 ```
 
+`--target` is optional. Without it, `amicu skill export` exports for every target, each into its default directory, and prints what it wrote where.
+
 | Target | Default directory |
 |---|---|
 | `claude-code` | `.claude/skills/<skill>/SKILL.md` with `references/` |
@@ -19,6 +21,6 @@ amicu skill export --target generic --path ./agent-guidance
 | `windsurf` | `.windsurf/rules/<skill>/` |
 | `generic` | Plain markdown under `./agent-guidance/` |
 
-`--path` overrides the default directory. The command works without a project.
+`--path` overrides the default directory and needs `--target`: without a target, every export would write the same files into that one directory, so the command refuses it. The command works without a project.
 
 Eight skills are exported: core workflow, writing HCL (`amicu-dsl`), local llama.cpp, production vLLM, model selection, routing and policy, presets, and troubleshooting. Some of them mention commands that are planned but not implemented (`schema`, `capabilities`, `models`, `presets`, `recommend`); those do not exist in the CLI yet.
