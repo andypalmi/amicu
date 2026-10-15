@@ -48,6 +48,8 @@ fn sample_plan() -> Plan {
             }),
             required_secrets: vec!["RUNPOD_API_KEY".to_owned(), "HF_TOKEN".to_owned()],
             required_action: Some("Accept the model license on Hugging Face.".to_owned()),
+            reason: None,
+            changes: Vec::new(),
         }],
         policy: Some(PolicyOutcome {
             allowed: true,

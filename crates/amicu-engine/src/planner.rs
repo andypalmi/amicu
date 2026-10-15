@@ -13,7 +13,9 @@ use amicu_core::resource::{
 };
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
 use amicu_plan::Plan;
-use amicu_plan::contract::{ActionKind, Artifact, CostPerformance, PlannedAction, Range, Setting};
+use amicu_plan::contract::{
+    ActionKind, Artifact, ChangeOp, CostPerformance, PlannedAction, PlannedChange, Range, Setting,
+};
 use amicu_registry::GgufResolver;
 use amicu_runtime::{LaunchPlan, RuntimeAdapter};
 use amicu_vllm::VllmAdapter;
@@ -36,6 +38,8 @@ pub struct PlanItem {
     /// Why an Update was planned although the config is unchanged (a secret
     /// pin, image or binary path changed since the last start).
     pub reason: Option<String>,
+    /// The per-field differences behind an update (also on `action`).
+    pub changes: Vec<PlannedChange>,
 }
 
 /// The full result of planning a graph.
@@ -140,6 +144,7 @@ pub fn build_plan_in(
 ///
 /// # Errors
 /// As [`build_plan`].
+#[allow(clippy::too_many_lines)] // one linear per-deployment planning loop
 pub fn build_plan_with(
     graph: &Graph,
     prior: Option<&Graph>,
@@ -191,9 +196,9 @@ pub fn build_plan_with(
         let fingerprint = Fingerprint::compute(d, hardware, inputs.probe).with_launch(&rendered);
         fingerprints.insert(d.id.clone(), fingerprint.clone());
 
-        let (kind, reason) =
+        let (kind, reason, changes) =
             match prior.and_then(|p| find_deployment(p, &d.id).map(|prev| (p, prev))) {
-                None => (ActionKind::Create, None),
+                None => (ActionKind::Create, None, Vec::new()),
                 // Unchanged only if the deployment and everything it references
                 // match, and nothing it was started with has changed outside
                 // the config.
@@ -212,15 +217,19 @@ pub fn build_plan_with(
                             "{} changed since it was last started",
                             changes.join(", ")
                         )),
+                        Vec::new(),
                     )
                 }
-                Some((pg, prev)) => (
-                    ActionKind::Update,
-                    describe_config_changes(resolve(pg, prev), resolve(graph, d)),
-                ),
+                Some((pg, prev)) => {
+                    let (reason, changes) =
+                        describe_config_changes(resolve(pg, prev), resolve(graph, d));
+                    (ActionKind::Update, reason, changes)
+                }
             };
 
-        let action = action_for(kind, d, &launch, graph);
+        let mut action = action_for(kind, d, &launch, graph);
+        action.reason.clone_from(&reason);
+        action.changes.clone_from(&changes);
         items.push(PlanItem {
             action,
             launch: Some(launch),
@@ -228,6 +237,7 @@ pub fn build_plan_with(
             rendered: Some(rendered),
             fingerprint: Some(fingerprint),
             reason,
+            changes,
         });
     }
 
@@ -242,6 +252,7 @@ pub fn build_plan_with(
                     rendered: None,
                     fingerprint: None,
                     reason: None,
+                    changes: Vec::new(),
                 });
             }
         }
@@ -286,14 +297,15 @@ fn resolve<'a>(graph: &'a Graph, d: &'a Deployment) -> Resolved<'a> {
     )
 }
 
-/// Why a deployment whose configuration changed is an update: what changed
-/// (`field: old -> new`, secrets are references so only the reference name is
-/// ever shown) and why that needs a restart. `None` when no field differs
-/// (nothing to say beyond the update itself).
-fn describe_config_changes(prev: Resolved<'_>, next: Resolved<'_>) -> Option<String> {
+/// Why a deployment whose configuration changed is an update, and what
+/// changed field by field (see [`PlannedChange`]). Values that may hold
+/// secrets or arbitrary user text are redacted ([`is_redacted`]). The reason
+/// is `None` (with no changes) when no field differs.
+fn describe_config_changes(
+    prev: Resolved<'_>,
+    next: Resolved<'_>,
+) -> (Option<String>, Vec<PlannedChange>) {
     use std::collections::BTreeMap;
-
-    const SHOWN: usize = 6;
 
     fn flatten(prefix: &str, v: &serde_json::Value, out: &mut BTreeMap<String, String>) {
         match v {
@@ -334,39 +346,27 @@ fn describe_config_changes(prev: Resolved<'_>, next: Resolved<'_>) -> Option<Str
     let mut keys: Vec<&String> = old.keys().chain(new.keys()).collect();
     keys.sort();
     keys.dedup();
-    // Launch-relevant fields first, so the cut at `SHOWN` never hides them.
-    let mut diffs: Vec<(bool, String)> = keys
+    let mut changes: Vec<PlannedChange> = keys
         .into_iter()
         .filter_map(|k| {
             let (a, b) = (old.get(k), new.get(k));
             if a == b {
                 return None;
             }
-            Some((is_launch_field(k), describe_change(k, a, b)))
+            Some(planned_change(k, a, b))
         })
         .collect();
-    if diffs.is_empty() {
-        return None;
+    if changes.is_empty() {
+        return (None, changes);
     }
-    let launch = diffs.iter().any(|(l, _)| *l);
-    // Stable: launch fields first, key order otherwise preserved.
-    diffs.sort_by_key(|(l, _)| !*l);
-    let mut changes: Vec<String> = diffs.into_iter().map(|(_, c)| c).collect();
-    if changes.len() > SHOWN {
-        let more = changes.len() - SHOWN;
-        changes.truncate(SHOWN);
-        changes.push(format!("and {more} more"));
-    }
-    let joined = changes.join(", ");
-    Some(if launch {
-        format!(
-            "{joined}. Launch settings are fixed when the service starts, so it is restarted to apply them"
-        )
+    // Launch-relevant fields first (stable: key order otherwise preserved).
+    changes.sort_by_key(|c| !c.restart);
+    let reason = if changes.iter().any(|c| c.restart) {
+        "launch settings changed, so the service restarts"
     } else {
-        format!(
-            "{joined}. The recorded configuration differs from the last start, so it is updated"
-        )
-    })
+        "configuration changed"
+    };
+    (Some(reason.to_owned()), changes)
 }
 
 /// Whether a flattened field is baked into the llama-server / vLLM launch (so
@@ -422,58 +422,56 @@ fn is_launch_field(key: &str) -> bool {
     EXACT.contains(&key) || PREFIXES.iter().any(|p| key.starts_with(p))
 }
 
-/// Keys whose old/new values are printed: fixed known-safe numeric, boolean
-/// or enum launch settings. Every other key (URLs, templates, paths, env,
-/// extra args, ...) is named only, since free-form strings can hold secrets.
-fn is_value_safe(key: &str) -> bool {
-    const SAFE: [&str; 25] = [
-        "context_length",
-        "port",
-        "n_gpu_layers",
-        "temperature",
-        "top_p",
-        "top_k",
-        "min_p",
-        "repeat_penalty",
-        "cache_type_k",
-        "cache_type_v",
-        "batch_size",
-        "ubatch_size",
-        "parallel_slots",
-        "flash_attention",
-        "jinja",
-        "reasoning_format",
-        "tensor_parallel_size",
-        "gpu_memory_utilization",
-        "kv_cache_dtype",
-        "max_num_seqs",
-        "max_num_batched_tokens",
-        "enforce_eager",
-        "speculative.n_max",
-        "speculative.n_min",
-        "speculative.p_min",
+/// Keys whose values are never shown: they can carry secrets or arbitrary
+/// user text. Everything else is shown. Denied: `env` values, `api_key*`
+/// secret references, `extra_args` (raw CLI flags), `chat_template` and
+/// `build` (free-form text), plus any key containing a credential-like word
+/// (`key`, `token`, `secret`, `password`, `credential`, `auth`, `header`,
+/// `cookie`, `private`).
+fn is_redacted(key: &str) -> bool {
+    const EXACT: [&str; 4] = ["extra_args", "chat_template", "build", "env"];
+    const PREFIXES: [&str; 2] = ["env.", "api_key"];
+    const NEEDLES: [&str; 9] = [
+        "key",
+        "token",
+        "secret",
+        "password",
+        "credential",
+        "auth",
+        "header",
+        "cookie",
+        "private",
     ];
-    SAFE.contains(&key)
-        || matches!(
-            key,
-            "speculative.n_gpu_layers"
-                | "multimodal.offload"
-                | "model.artifact.quantization"
-                | "model.artifact.format"
-                | "memory_check"
-        )
+    if EXACT.contains(&key) || PREFIXES.iter().any(|p| key.starts_with(p)) {
+        return true;
+    }
+    let lower = key.to_ascii_lowercase();
+    NEEDLES.iter().any(|n| lower.contains(n))
 }
 
-/// One change line: `key: old -> new` for allowlisted scalar settings, else
-/// just `key changed`.
-fn describe_change(key: &str, old: Option<&String>, new: Option<&String>) -> String {
-    if !is_value_safe(key) {
-        return format!("{key} changed");
-    }
-    match (old, new) {
-        (Some(a), Some(b)) => format!("{key}: {a} -> {b}"),
-        (None, Some(b)) => format!("{key}: added ({b})"),
-        (a, None) => format!("{key}: removed (was {})", a.map_or("", |s| s.as_str())),
+/// A URL value (`scheme://...`): its userinfo, path or fragment can carry a
+/// token, so it is never shown, whatever the key. Hugging Face `org/name`,
+/// Ollama tags and local paths have no `://` and stay visible.
+fn value_looks_sensitive(v: &str) -> bool {
+    v.contains("://")
+}
+
+fn planned_change(key: &str, old: Option<&String>, new: Option<&String>) -> PlannedChange {
+    let redacted = is_redacted(key)
+        || old.is_some_and(|v| value_looks_sensitive(v))
+        || new.is_some_and(|v| value_looks_sensitive(v));
+    let op = match (old, new) {
+        (Some(_), Some(_)) => ChangeOp::Changed,
+        (None, _) => ChangeOp::Added,
+        (_, None) => ChangeOp::Removed,
+    };
+    PlannedChange {
+        key: key.to_owned(),
+        op,
+        old: if redacted { None } else { old.cloned() },
+        new: if redacted { None } else { new.cloned() },
+        restart: is_launch_field(key),
+        redacted,
     }
 }
 
@@ -488,6 +486,7 @@ pub fn destroy_item(id: &DeploymentId) -> PlanItem {
         rendered: None,
         fingerprint: None,
         reason: None,
+        changes: Vec::new(),
     }
 }
 
@@ -503,6 +502,8 @@ fn destroy_action(id: &DeploymentId) -> PlannedAction {
         cost_performance: None,
         required_secrets: Vec::new(),
         required_action: None,
+        reason: None,
+        changes: Vec::new(),
     }
 }
 
@@ -535,6 +536,8 @@ fn action_for(
             .map(|r| r.name.clone())
             .collect(),
         required_action: None,
+        reason: None,
+        changes: Vec::new(),
     }
 }
 
@@ -1546,6 +1549,12 @@ mod tests {
         assert_eq!(result.items[0].action.kind, ActionKind::Update);
         assert!(build_plan(&next, Some(&next)).unwrap().items.is_empty());
     }
+    fn change<'a>(changes: &'a [PlannedChange], key: &str) -> &'a PlannedChange {
+        changes
+            .iter()
+            .find(|c| c.key == key)
+            .unwrap_or_else(|| panic!("no change for {key} in {changes:?}"))
+    }
 
     #[test]
     fn an_update_from_a_config_change_says_what_changed_and_why_it_restarts() {
@@ -1558,22 +1567,43 @@ mod tests {
         s.context_length = old + 4096;
         let item = &build_plan(&next, Some(&prior)).unwrap().items[0];
         assert_eq!(item.action.kind, ActionKind::Update);
-        let reason = item.reason.as_deref().expect("reason line");
-        assert!(
-            reason.contains(&format!("context_length: {old} -> {}", old + 4096)),
-            "{reason}"
+        assert_eq!(
+            item.reason.as_deref(),
+            Some("launch settings changed, so the service restarts")
         );
-        assert!(reason.contains("restarted"), "{reason}");
+        assert_eq!(item.action.reason, item.reason);
+        let c = change(&item.changes, "context_length");
+        assert_eq!(c.old.as_deref(), Some(old.to_string().as_str()));
+        assert_eq!(c.new.as_deref(), Some((old + 4096).to_string().as_str()));
+        assert_eq!(
+            (c.op, c.restart, c.redacted),
+            (ChangeOp::Changed, true, false)
+        );
+        assert_eq!(item.action.changes, item.changes);
 
-        // Adding an api_key names the field and shows only the reference.
+        // Adding an api_key names the field but withholds the reference.
         let keyed = with_key(graph(Vec::new()), "CHAT_API_KEY");
         let item = &build_plan(&keyed, Some(&prior)).unwrap().items[0];
-        let reason = item.reason.as_deref().expect("reason line");
-        assert!(reason.contains("api_key"), "{reason}");
+        let c = change(&item.changes, "api_key.name");
+        assert!(c.redacted && c.old.is_none() && c.new.is_none(), "{c:?}");
+        assert_eq!(c.op, ChangeOp::Added);
     }
 
     #[test]
-    fn the_reason_line_never_prints_free_form_values() {
+    fn a_model_swap_changes_the_source_reference_and_restarts() {
+        let prior = graph(Vec::new());
+        let mut next = graph(Vec::new());
+        let old = next.models[0].source.reference.clone();
+        next.models[0].source.reference = "Qwen/Qwen3.8-27B".to_owned();
+        let item = &build_plan(&next, Some(&prior)).unwrap().items[0];
+        let c = change(&item.changes, "model.source.reference");
+        assert_eq!(c.old.as_deref(), Some(old.as_str()));
+        assert_eq!(c.new.as_deref(), Some("Qwen/Qwen3.8-27B"));
+        assert!(c.restart && !c.redacted);
+    }
+
+    #[test]
+    fn denylisted_fields_never_carry_their_values() {
         let prior = graph(Vec::new());
         let mut next = graph(Vec::new());
         let Runtime::LlamaCpp(s) = &mut next.deployments[0].runtime else {
@@ -1585,7 +1615,9 @@ mod tests {
         s.chat_template = Some("{{ tmpl_secret_marker }}".to_owned());
         next.models[0].source.reference = "https://user:tok@host/m.gguf?token=SECRET".to_owned();
         let item = &build_plan(&next, Some(&prior)).unwrap().items[0];
-        let reason = item.reason.as_deref().expect("reason line");
+        let dump = format!("{:?} {:?}", item.reason, item.changes);
+        // The new fields only; `runtime` settings are a separate, pre-existing surface.
+        let json = serde_json::to_string(&(&item.action.reason, &item.action.changes)).unwrap();
         for leaked in [
             "hf_literal_secret_value",
             "sk-literal-token",
@@ -1595,19 +1627,108 @@ mod tests {
             "SECRET",
             "user:",
         ] {
-            assert!(!reason.contains(leaked), "{leaked} in {reason}");
+            assert!(!dump.contains(leaked), "{leaked} in {dump}");
+            assert!(!json.contains(leaked), "{leaked} in {json}");
         }
-        assert!(reason.contains("env.HF_TOKEN changed"), "{reason}");
-        assert!(reason.contains("extra_args changed"), "{reason}");
-        assert!(reason.contains("chat_template changed"), "{reason}");
-        assert!(
-            reason.contains("model.source.reference changed"),
-            "{reason}"
+        for key in [
+            "env.HF_TOKEN",
+            "extra_args",
+            "chat_template",
+            "model.source.reference",
+        ] {
+            let c = change(&item.changes, key);
+            assert!(c.redacted && c.old.is_none() && c.new.is_none(), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn url_values_are_redacted_but_plain_references_are_shown() {
+        for (i, url) in [
+            "https://host/dl/tok_path_secret/m.gguf",
+            "https://host/m.gguf#sig=tok_frag_secret",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let prior = graph(Vec::new());
+            let mut next = graph(Vec::new());
+            next.models[0].source.reference = url.to_owned();
+            let item = &build_plan(&next, Some(&prior)).unwrap().items[0];
+            let c = change(&item.changes, "model.source.reference");
+            assert!(
+                c.redacted && c.old.is_none() && c.new.is_none(),
+                "{i}: {c:?}"
+            );
+            let dump = format!("{:?} {:?}", item.reason, item.changes);
+            let json = serde_json::to_string(&item.action.changes).unwrap();
+            for leaked in ["tok_path_secret", "tok_frag_secret"] {
+                assert!(!dump.contains(leaked) && !json.contains(leaked), "{dump}");
+            }
+        }
+        for plain in ["Qwen/Qwen3.8-27B", "qwen3:8b", "/Users/x/models/m.gguf"] {
+            let prior = graph(Vec::new());
+            let mut next = graph(Vec::new());
+            next.models[0].source.reference = plain.to_owned();
+            let item = &build_plan(&next, Some(&prior)).unwrap().items[0];
+            let c = change(&item.changes, "model.source.reference");
+            assert!(!c.redacted && c.new.as_deref() == Some(plain), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn added_and_removed_fields_carry_their_op() {
+        let (m, hw) = (model(), hardware());
+        let dep = deployment(Vec::new());
+        let mut dep2 = dep.clone();
+        let Runtime::LlamaCpp(s) = &mut dep2.runtime else {
+            unreachable!()
+        };
+        s.temperature = Some(0.5);
+        let (_, added) =
+            describe_config_changes((&dep, Some(&m), Some(&hw)), (&dep2, Some(&m), Some(&hw)));
+        let c = change(&added, "temperature");
+        assert_eq!(
+            (c.op, c.old.as_deref(), c.new.as_deref()),
+            (ChangeOp::Added, None, Some("0.5"))
+        );
+        let (_, removed) =
+            describe_config_changes((&dep2, Some(&m), Some(&hw)), (&dep, Some(&m), Some(&hw)));
+        let c = change(&removed, "temperature");
+        assert_eq!(
+            (c.op, c.old.as_deref(), c.new.as_deref()),
+            (ChangeOp::Removed, Some("0.5"), None)
         );
     }
 
     #[test]
-    fn allowlisted_scalars_show_values_and_price_only_changes_claim_no_restart() {
+    fn denylist_matches_credential_like_keys() {
+        for k in [
+            "env.X",
+            "extra_args",
+            "api_key.name",
+            "chat_template",
+            "build",
+            "headers.authorization",
+            "hardware.auth_token",
+            "x.client_secret",
+            "db_password",
+        ] {
+            assert!(is_redacted(k), "{k}");
+        }
+        for k in [
+            "context_length",
+            "top_k",
+            "model.source.reference",
+            "hardware.region.code",
+            "cache_type_k",
+            "chat_template_file",
+        ] {
+            assert!(!is_redacted(k), "{k}");
+        }
+    }
+
+    #[test]
+    fn price_only_changes_claim_no_restart_and_launch_fields_sort_first() {
         assert!(is_launch_field("context_length"));
         assert!(is_launch_field("env.X"));
         assert!(is_launch_field("model.source.reference"));
@@ -1624,11 +1745,11 @@ mod tests {
         hw2.price = Some(amicu_core::resource::Price {
             per_hour: amicu_core::resource::Money::new(1.5, "USD"),
         });
-        let text =
-            describe_config_changes((&dep, Some(&m), Some(&hw)), (&dep, Some(&m), Some(&hw2)))
-                .expect("a difference");
-        assert!(text.contains("hardware.price"), "{text}");
-        assert!(!text.contains("restarted"), "{text}");
+        let (reason, changes) =
+            describe_config_changes((&dep, Some(&m), Some(&hw)), (&dep, Some(&m), Some(&hw2)));
+        assert_eq!(reason.as_deref(), Some("configuration changed"));
+        assert!(changes.iter().all(|c| !c.restart));
+        assert!(changes.iter().any(|c| c.key.starts_with("hardware.price")));
 
         // Mixed change: the launch key sorts ahead of the hardware keys.
         let mut dep2 = dep.clone();
@@ -1638,11 +1759,14 @@ mod tests {
         s.context_length = 16384;
         let mut hw3 = hw2.clone();
         hw3.region = Some(amicu_core::resource::Region::from_code("eu-west-1"));
-        let text =
-            describe_config_changes((&dep, Some(&m), Some(&hw)), (&dep2, Some(&m), Some(&hw3)))
-                .expect("a difference");
-        assert!(text.starts_with("context_length: 8192 -> 16384"), "{text}");
-        assert!(text.contains("restarted"), "{text}");
+        let (reason, changes) =
+            describe_config_changes((&dep, Some(&m), Some(&hw)), (&dep2, Some(&m), Some(&hw3)));
+        assert_eq!(changes[0].key, "context_length");
+        assert_eq!(changes[0].new.as_deref(), Some("16384"));
+        assert_eq!(
+            reason.as_deref(),
+            Some("launch settings changed, so the service restarts")
+        );
     }
 
     // --- change detection beyond the graph -------------

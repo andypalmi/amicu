@@ -80,6 +80,46 @@ pub struct PlannedAction {
     /// Manual action the user must take before this can be applied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required_action: Option<String>,
+    /// Why an update is planned (e.g. `launch settings changed, so the
+    /// service restarts`). Absent for creates and destroys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The per-field differences behind an update, launch fields first.
+    /// Values that may hold secrets are redacted (see [`PlannedChange`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<PlannedChange>,
+}
+
+/// How a field differs between the last applied config and the desired one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeOp {
+    /// The field is new.
+    Added,
+    /// The field was removed.
+    Removed,
+    /// The field has a different value.
+    Changed,
+}
+
+/// One changed field of an update.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+pub struct PlannedChange {
+    /// Dotted field name (e.g. `model.source.reference`).
+    pub key: String,
+    /// Whether the field was added, removed or changed.
+    pub op: ChangeOp,
+    /// The previous value; `null` when the field was absent or is redacted.
+    pub old: Option<String>,
+    /// The new value; `null` when the field is now absent or is redacted.
+    pub new: Option<String>,
+    /// Whether this change needs the service restarted to take effect.
+    pub restart: bool,
+    /// True when the field may hold a secret or arbitrary user text, so its
+    /// values are withheld (`old` and `new` are `null`).
+    pub redacted: bool,
 }
 
 /// A selected model artifact and its download characteristics.

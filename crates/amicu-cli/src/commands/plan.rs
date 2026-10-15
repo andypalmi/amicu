@@ -9,7 +9,7 @@ use amicu_core::id::DeploymentId;
 use amicu_modal::ModalSupervisor;
 use amicu_modal::supervisor::project_app_name;
 use amicu_plan::Plan;
-use amicu_plan::contract::{ActionKind, PlannedAction, Setting};
+use amicu_plan::contract::{ActionKind, ChangeOp, PlannedAction, PlannedChange, Setting};
 
 use crate::OutputFormat;
 use crate::checks::report_for;
@@ -246,6 +246,8 @@ pub(crate) fn add_switch_actions(plan: &mut Plan, switches: &ProviderSwitches) {
                         cost_performance: None,
                         required_secrets: Vec::new(),
                         required_action: None,
+                        reason: None,
+                        changes: Vec::new(),
                     });
                 }
             }
@@ -312,6 +314,7 @@ pub(crate) fn print_human_with(
             if let Some(reason) = &item.reason {
                 io(writeln!(out, "      reason:   {reason}"))?;
             }
+            io(write_changes(out, &item.changes, home_dir().as_deref()))?;
             if let Some(hw) = &item.action.hardware {
                 io(writeln!(out, "      hardware: {hw}"))?;
             }
@@ -412,6 +415,71 @@ fn modal_launch_text(graph: &Graph, item: &PlanItem) -> Option<String> {
         supervisor = supervisor.with_gguf_model(model);
     }
     supervisor.launch_text(launch).ok()
+}
+
+/// How many changed fields an update lists before "and N more".
+const SHOWN_CHANGES: usize = 6;
+/// Longest value printed before it is cut with an ellipsis.
+const MAX_VALUE_CHARS: usize = 80;
+
+fn home_dir() -> Option<String> {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .filter(|h| h.len() > 1)
+}
+
+/// A value as shown: the user's home prefix becomes `~`, long values are cut,
+/// and string values are quoted (numbers, booleans and JSON are not).
+fn display_value(v: &str, home: Option<&str>) -> String {
+    let mut text = v.to_owned();
+    if let Some(home) = home
+        && let Some(rest) = v.strip_prefix(home)
+        && (rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\'))
+    {
+        text = format!("~{rest}");
+    }
+    let bare = text.parse::<f64>().is_ok()
+        || matches!(text.as_str(), "true" | "false")
+        || text.starts_with('[')
+        || text.starts_with('{');
+    if text.chars().count() > MAX_VALUE_CHARS {
+        text = text.chars().take(MAX_VALUE_CHARS - 1).collect::<String>() + "\u{2026}";
+    }
+    if bare { text } else { format!("\"{text}\"") }
+}
+
+/// One change line: `~ key: "old" -> "new"`, `+ key: "new"` or `- key: "old"`;
+/// a redacted field never shows a value.
+fn change_line(c: &PlannedChange, home: Option<&str>) -> String {
+    let val = |v: &Option<String>| v.as_deref().map(|v| display_value(v, home));
+    match (c.op, c.redacted) {
+        (ChangeOp::Added, true) => format!("+ {}: (set)", c.key),
+        (ChangeOp::Removed, true) => format!("- {}: (unset)", c.key),
+        (ChangeOp::Changed, true) => format!("~ {}: (changed)", c.key),
+        (ChangeOp::Added, false) => format!("+ {}: {}", c.key, val(&c.new).unwrap_or_default()),
+        (ChangeOp::Removed, false) => format!("- {}: {}", c.key, val(&c.old).unwrap_or_default()),
+        (ChangeOp::Changed, false) => format!(
+            "~ {}: {} -> {}",
+            c.key,
+            val(&c.old).unwrap_or_default(),
+            val(&c.new).unwrap_or_default()
+        ),
+    }
+}
+
+fn write_changes(
+    out: &mut dyn Write,
+    changes: &[PlannedChange],
+    home: Option<&str>,
+) -> std::io::Result<()> {
+    for c in changes.iter().take(SHOWN_CHANGES) {
+        writeln!(out, "      {}", change_line(c, home))?;
+    }
+    if changes.len() > SHOWN_CHANGES {
+        writeln!(out, "      and {} more", changes.len() - SHOWN_CHANGES)?;
+    }
+    Ok(())
 }
 
 fn symbol(kind: &str) -> &'static str {
@@ -615,6 +683,216 @@ mod tests {
         assert!(!line.contains(" -m "), "{line}");
         assert!(line.contains("--host 0.0.0.0"), "{line}");
         assert!(line.contains("--no-mmproj"), "{line}");
+    }
+
+    fn update_text(prior: &Graph, next: &Graph) -> String {
+        let result = build_plan(next, Some(prior)).expect("plan");
+        let mut out = Vec::new();
+        print_human(&result, next, &mut out).expect("print");
+        String::from_utf8(out).expect("utf8")
+    }
+
+    #[test]
+    fn a_model_swap_prints_the_old_and_new_reference() {
+        let mut prior = graph("local", llama());
+        prior.models[0].source.reference = "Qwen/Qwen3.6-27B".into();
+        let mut next = prior.clone();
+        next.models[0].source.reference = "Qwen/Qwen3.8-27B".into();
+        let text = update_text(&prior, &next);
+        let head: Vec<&str> = text.lines().take(7).collect();
+        assert_eq!(
+            head,
+            [
+                "Plan: 1 action(s).",
+                "",
+                "  ~ deployment.dep",
+                "      action:   update",
+                "      reason:   launch settings changed, so the service restarts",
+                "      ~ model.source.reference: \"Qwen/Qwen3.6-27B\" -> \"Qwen/Qwen3.8-27B\"",
+                "      hardware: gpu.l4",
+            ],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn url_references_never_print_in_human_output() {
+        let prior = graph("local", llama());
+        for url in [
+            "https://h/dl/tok_path_secret/m.gguf",
+            "https://h/m.gguf#sig=tok_path_secret",
+        ] {
+            let mut next = prior.clone();
+            next.models[0].source.reference = url.into();
+            let full = update_text(&prior, &next);
+            // Only the change lines: the `launch:` line is a separate, existing surface.
+            let text: String = full
+                .lines()
+                .filter(|l| !l.contains("launch:"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(!text.contains("tok_path_secret"), "{text}");
+            assert!(
+                text.contains("~ model.source.reference: (changed)"),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_launch_change_says_configuration_changed() {
+        let prior = graph("local", llama());
+        let mut next = prior.clone();
+        next.hardware_profiles[0].region =
+            Some(amicu_core::resource::Region::from_code("eu-west-1"));
+        let text = update_text(&prior, &next);
+        assert!(text.contains("reason:   configuration changed"), "{text}");
+        assert!(!text.contains("restarts"), "{text}");
+    }
+
+    #[test]
+    fn a_denylisted_field_never_prints_its_value() {
+        let prior = graph("local", llama());
+        let mut next = prior.clone();
+        let Runtime::LlamaCpp(s) = &mut next.deployments[0].runtime else {
+            unreachable!()
+        };
+        s.env
+            .insert("HF_TOKEN".into(), "hf_literal_secret_value".into());
+        s.extra_args = vec!["--seed".into(), "sk-literal-token".into()];
+        s.chat_template = Some("{{ tmpl_secret_marker }}".into());
+        next.deployments[0].api_key = Some(amicu_core::secret::SecretRef::new("MY_SECRET_NAME"));
+        let text = update_text(&prior, &next);
+        let changes: String = text
+            .lines()
+            .filter(|l| l.trim_start().starts_with(['~', '+', '-']))
+            .filter(|l| !l.contains("deployment.dep"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for leaked in [
+            "hf_literal_secret_value",
+            "sk-literal-token",
+            "--seed",
+            "tmpl_secret_marker",
+            "MY_SECRET_NAME",
+        ] {
+            assert!(!changes.contains(leaked), "{leaked} in {changes}");
+        }
+        assert!(changes.contains("+ env.HF_TOKEN: (set)"), "{changes}");
+        assert!(changes.contains("+ extra_args: (set)"), "{changes}");
+        assert!(changes.contains("+ chat_template: (set)"), "{changes}");
+    }
+
+    fn change(op: ChangeOp, redacted: bool, old: Option<&str>, new: Option<&str>) -> PlannedChange {
+        PlannedChange {
+            key: "k".into(),
+            op,
+            old: old.map(str::to_owned),
+            new: new.map(str::to_owned),
+            restart: true,
+            redacted,
+        }
+    }
+
+    #[test]
+    fn change_lines_cover_added_removed_changed_and_redacted() {
+        let line = |c: &PlannedChange| change_line(c, None);
+        assert_eq!(
+            line(&change(ChangeOp::Changed, false, Some("a"), Some("b"))),
+            "~ k: \"a\" -> \"b\""
+        );
+        assert_eq!(
+            line(&change(
+                ChangeOp::Changed,
+                false,
+                Some("8192"),
+                Some("16384")
+            )),
+            "~ k: 8192 -> 16384"
+        );
+        assert_eq!(
+            line(&change(ChangeOp::Added, false, None, Some("true"))),
+            "+ k: true"
+        );
+        assert_eq!(
+            line(&change(ChangeOp::Removed, false, Some("x"), None)),
+            "- k: \"x\""
+        );
+        assert_eq!(
+            line(&change(ChangeOp::Changed, true, None, None)),
+            "~ k: (changed)"
+        );
+        assert_eq!(
+            line(&change(ChangeOp::Added, true, None, None)),
+            "+ k: (set)"
+        );
+        assert_eq!(
+            line(&change(ChangeOp::Removed, true, None, None)),
+            "- k: (unset)"
+        );
+    }
+
+    #[test]
+    fn home_prefix_becomes_a_tilde() {
+        let home = Some("/Users/ann");
+        assert_eq!(
+            display_value("/Users/ann/models/a.gguf", home),
+            "\"~/models/a.gguf\""
+        );
+        assert_eq!(display_value("/Users/anna/x", home), "\"/Users/anna/x\"");
+        assert_eq!(display_value("/opt/x", home), "\"/opt/x\"");
+    }
+
+    #[test]
+    fn long_values_are_truncated_with_an_ellipsis() {
+        let long = "a".repeat(200);
+        let shown = display_value(&long, None);
+        assert_eq!(shown.chars().count(), MAX_VALUE_CHARS + 2, "{shown}");
+        assert!(shown.ends_with("\u{2026}\""), "{shown}");
+        assert_eq!(display_value(&"b".repeat(80), None).chars().count(), 82);
+    }
+
+    #[test]
+    fn only_six_changes_are_listed_then_and_n_more() {
+        let many: Vec<PlannedChange> = (0..9)
+            .map(|i| PlannedChange {
+                key: format!("k{i}"),
+                ..change(ChangeOp::Changed, false, Some("1"), Some("2"))
+            })
+            .collect();
+        let mut out = Vec::new();
+        write_changes(&mut out, &many, None).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.lines().count(), 7, "{text}");
+        assert!(text.ends_with("      and 3 more\n"), "{text}");
+    }
+
+    #[test]
+    fn plan_json_carries_reason_and_structured_changes() {
+        let mut prior = graph("local", llama());
+        prior.models[0].source.reference = "Qwen/Qwen3.6-27B".into();
+        let mut next = prior.clone();
+        next.models[0].source.reference = "Qwen/Qwen3.8-27B".into();
+        let result = build_plan(&next, Some(&prior)).expect("plan");
+        let mut out = Vec::new();
+        crate::write_json(&mut out, &result.plan).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        let a = &v["actions"][0];
+        assert_eq!(
+            a["reason"],
+            "launch settings changed, so the service restarts"
+        );
+        assert_eq!(
+            a["changes"][0],
+            serde_json::json!({
+                "key": "model.source.reference",
+                "op": "changed",
+                "old": "Qwen/Qwen3.6-27B",
+                "new": "Qwen/Qwen3.8-27B",
+                "restart": true,
+                "redacted": false,
+            })
+        );
     }
 
     #[test]

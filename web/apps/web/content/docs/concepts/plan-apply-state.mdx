@@ -50,7 +50,7 @@ For host services (launchd or systemd), the same three commands ask the service 
 - the container image for a Modal deployment, set by `AMICU_MODAL_VLLM_IMAGE` or `AMICU_MODAL_LLAMACPP_IMAGE`, or the amicu default image when neither is set;
 - the path of the `llama-server` or `vllm` binary that `PATH` resolves to.
 
-A change to one of these shows the deployment as an `update` with a line such as `reason:   container image changed since it was last started`. The JSON plan output does not include the reason.
+A change to one of these shows the deployment as an `update` with a line such as `reason:   container image changed since it was last started`. The JSON plan output carries the same text in `reason`.
 
 Two cases are not detected:
 

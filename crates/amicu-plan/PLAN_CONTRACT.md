@@ -44,6 +44,15 @@ The contract is defined in [`src/contract.rs`](src/contract.rs) as the
 | `cost_performance` | `CostPerformance`? | Estimate ranges + provenance. |
 | `required_secrets` | array of string | Secret **names** only. |
 | `required_action` | string? | Manual step the user must take. |
+| `reason` | string? | Why an update is planned. |
+| `changes` | array of `PlannedChange` | Per-field differences behind an update, launch fields first. |
+
+### `PlannedChange`
+
+`key`, `op` (`added` \| `removed` \| `changed`), `old` and `new` (string or
+null), `restart` (bool) and `redacted` (bool). A field that may hold a secret
+or arbitrary user text (env values, `extra_args`, `api_key`, templates,
+credential-like keys) is `redacted`: its `old` and `new` are always null.
 
 ### `Artifact`
 
