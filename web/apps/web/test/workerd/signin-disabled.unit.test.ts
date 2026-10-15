@@ -45,3 +45,10 @@ test('disabled: marketing, docs and /api paths are untouched', async () => {
     assert.equal(res.status, 200, path);
   }
 });
+
+for (const path of ['/%6Cogin', '/%61pp', '/Login', '//login', '/app%2Fx', '/%E0%A4%A']) {
+  test(`disabled: encoded/odd path ${path} is a 404 path`, async () => {
+    const res = await proxy(new NextRequest(`http://localhost:3000${path}`));
+    assert.match(rewriteOf(res) ?? '', /\/__signin-disabled$/);
+  });
+}

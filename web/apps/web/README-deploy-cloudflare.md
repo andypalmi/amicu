@@ -26,7 +26,12 @@ pnpm --filter web cf:preview
 
 # Build and deploy (passes --keep-vars to `wrangler deploy`; the committed
 # `vars` are the production values - see the note below).
+# Sign-in is OFF in this build: NEXT_PUBLIC_SIGNIN_ENABLED is build-time and
+# unset means disabled (all auth/console pages 404, no sign-in links).
 pnpm --filter web cf:deploy
+
+# Same deploy WITH sign-in (the flag must be set for the build, not just the Worker):
+NEXT_PUBLIC_SIGNIN_ENABLED=true pnpm --filter web cf:deploy
 
 # Regenerate `cloudflare-env.d.ts` (typed `CloudflareEnv`) after changing
 # bindings in wrangler.jsonc. Gitignored - regenerate, don't hand-edit.
@@ -43,7 +48,11 @@ available without an account.
 `wrangler.jsonc` commits the **production, non-secret** values under `vars`
 (`API_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_JWKS_URL`,
 `NEXT_PUBLIC_SITE_URL`, `NODE_ENV`), so a bare `wrangler deploy` or CI deploy
-keeps production intact. Change them by editing the file in a PR. Do **not**
+keeps these production values. It does **not** enable sign-in: that is the
+build-time `NEXT_PUBLIC_SIGNIN_ENABLED`, off unless the build ran with it set to
+`true` (`NEXT_PUBLIC_SIGNIN_ENABLED=true pnpm cf:build && wrangler deploy`). The
+`deploy-web.yml` workflow reads the repo variable `NEXT_PUBLIC_SIGNIN_ENABLED` the
+same way; unset or empty deploys with sign-in hidden. Change them by editing the file in a PR. Do **not**
 also set a Worker secret with one of these names (`wrangler secret put
 API_URL` etc.): a secret and a var with the same name conflict. Only real
 secrets (e.g. `TURNSTILE_SECRET_KEY`) belong in the secret store.

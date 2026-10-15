@@ -1,7 +1,8 @@
 'use server';
 
 import { headers } from 'next/headers';
-import { redirect } from 'next/navigation';
+import { notFound, redirect } from 'next/navigation';
+import { SIGNIN_ENABLED } from '@/lib/features';
 import {
   loginSchema,
   signupSchema,
@@ -68,6 +69,12 @@ async function challengeFailure(
   return result.ok ? null : { error: GENERIC_CHALLENGE };
 }
 
+// Server actions are public POST endpoints addressable by action id even when no
+// page renders their form, so each refuses (404) when sign-in is disabled.
+function assertSigninEnabled(): void {
+  if (!SIGNIN_ENABLED) notFound();
+}
+
 function safeNext(raw: FormDataEntryValue | null): string {
   return safeNextPath(raw, appHomeHref());
 }
@@ -76,6 +83,7 @@ export async function loginAction(
   _prev: AuthFormState,
   formData: FormData,
 ): Promise<AuthFormState> {
+  assertSigninEnabled();
   const parsed = loginSchema.safeParse({
     email: formData.get('email'),
     password: formData.get('password'),
@@ -98,6 +106,7 @@ export async function signupAction(
   _prev: AuthFormState,
   formData: FormData,
 ): Promise<AuthFormState> {
+  assertSigninEnabled();
   // Closed sign-ups: refuse before touching the API (or the challenge).
   if (!SIGNUPS_ENABLED) {
     return { error: 'Sign-ups are currently closed.' };
@@ -134,6 +143,7 @@ export async function forgotAction(
   _prev: AuthFormState,
   formData: FormData,
 ): Promise<AuthFormState> {
+  assertSigninEnabled();
   const parsed = forgotSchema.safeParse({ email: formData.get('email') });
   if (!parsed.success) {
     return { fieldErrors: fieldErrors(parsed.error) };
@@ -155,6 +165,7 @@ export async function resendVerificationAction(
   _prev: AuthFormState,
   formData: FormData,
 ): Promise<AuthFormState> {
+  assertSigninEnabled();
   // The verification link carries only an email; reuse the forgot-flow schema
   // (email-only, same shape).
   const parsed = forgotSchema.safeParse({ email: formData.get('email') });
@@ -187,6 +198,7 @@ export type VerifyStatus = 'success' | 'invalid' | 'error';
 // the /verify page (a GET landing), not from a form. The token is opaque and may
 // be absent or garbage; callers guard the empty case before invoking this.
 export async function verifyAction(token: string): Promise<VerifyStatus> {
+  assertSigninEnabled();
   if (!token) return 'invalid';
 
   const result = await authClient.verify({ token });
@@ -198,6 +210,7 @@ export async function verifyAction(token: string): Promise<VerifyStatus> {
 }
 
 export async function logoutAction(): Promise<void> {
+  assertSigninEnabled();
   // Revoke the refresh token server-side, then clear both cookies. Revocation is
   // best-effort - the cookies are cleared regardless so the browser session ends.
   const refresh = await readRefreshToken();

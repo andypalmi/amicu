@@ -100,6 +100,20 @@ async function handleAuth(request: NextRequest, rewriteTo: string | null): Promi
   return proceed(request, rewriteTo);
 }
 
+// Match on the raw AND the decoded/normalised path so `/%6Cogin`, `//login`,
+// `/Login/` style variants cannot slip past the gate. Malformed encodings are
+// treated as gated (fail closed).
+function isGatedPath(pathname: string): boolean {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    return true;
+  }
+  const norm = decoded.replace(/\/{2,}/g, '/').toLowerCase();
+  return isAppPath(pathname) || isAppPath(norm);
+}
+
 function notFoundResponse(request: NextRequest): NextResponse {
   const url = request.nextUrl.clone();
   url.pathname = '/__signin-disabled';
@@ -123,7 +137,7 @@ export default async function proxy(request: NextRequest) {
   // (rewrite to a path that does not exist, rendering app/not-found.tsx). Checked
   // before the host split so amicu.dev/login is not 301'd to a 404 on the app host.
   // /api/* is not an app path and is untouched (its handlers still require auth).
-  if (!SIGNIN_ENABLED && isAppPath(pathname)) return notFoundResponse(request);
+  if (!SIGNIN_ENABLED && isGatedPath(pathname)) return notFoundResponse(request);
 
   // Host split (amicu.dev marketing/docs vs app.amicu.dev console + auth). Inert
   // unless the request host is one of the two configured hosts (so localhost and
