@@ -13,6 +13,7 @@ import { appHomeHref } from '@/lib/shared';
 import { safeNextPath } from '@/lib/auth/safe-next';
 import { authClient } from '@/lib/auth/client';
 import { SIGNUPS_ENABLED } from '@/lib/auth/config';
+import { ACCEPT_TERMS_ERROR, ACCEPT_TERMS_FIELD, termsAccepted } from '@/lib/auth/consent';
 import {
   setSessionCookies,
   clearSessionCookies,
@@ -105,8 +106,11 @@ export async function signupAction(
     email: formData.get('email'),
     password: formData.get('password'),
   });
-  if (!parsed.success) {
-    return { fieldErrors: fieldErrors(parsed.error) };
+  const errors: FieldErrors = parsed.success ? {} : fieldErrors(parsed.error);
+  // Age + terms consent is enforced server-side too (the client check is only UX).
+  if (!termsAccepted(formData.get(ACCEPT_TERMS_FIELD))) errors[ACCEPT_TERMS_FIELD] = ACCEPT_TERMS_ERROR;
+  if (!parsed.success || Object.keys(errors).length > 0) {
+    return { fieldErrors: errors };
   }
 
   const blocked = await challengeFailure(formData, 'signup');

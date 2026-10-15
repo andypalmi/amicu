@@ -7,7 +7,6 @@ import {
   CardContent,
 } from '@amicu/ui';
 import { turnstileSiteKey } from '@/lib/security/turnstile-config';
-import { legalPages } from '@/lib/legal/company';
 import Link from 'next/link';
 import { SIGNUPS_ENABLED } from '@/lib/auth/config';
 import { SignupForm } from '@/components/auth/signup-form';
@@ -44,10 +43,7 @@ export default function SignupPage() {
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <SignupForm
-          siteKey={turnstileSiteKey()}
-          legal={{ terms: legalPages.terms, privacy: legalPages.privacy }}
-        />
+        <SignupForm siteKey={turnstileSiteKey()} />
       </CardContent>
     </Card>
   );

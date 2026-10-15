@@ -45,16 +45,33 @@ const isProd = process.env.NODE_ENV === 'production';
 // challenge iframe and its XHR all come from this single origin.
 const turnstileOrigin = 'https://challenges.cloudflare.com';
 
+// Observability origins, all conditional on build-time env so a build without
+// them keeps the original strict policy. Cloudflare Web Analytics beacon, PostHog
+// (EU) and the Sentry ingest host (derived from the public DSN).
+const cfBeaconOrigins = process.env.NEXT_PUBLIC_CF_BEACON_TOKEN
+  ? ['https://static.cloudflareinsights.com', 'https://cloudflareinsights.com']
+  : [];
+const posthogOrigins = process.env.NEXT_PUBLIC_POSTHOG_KEY
+  ? ['https://eu.i.posthog.com', 'https://eu-assets.i.posthog.com']
+  : [];
+const sentryOrigins = (() => {
+  try {
+    return process.env.NEXT_PUBLIC_SENTRY_DSN ? [new URL(process.env.NEXT_PUBLIC_SENTRY_DSN).origin] : [];
+  } catch {
+    return [];
+  }
+})();
+
 const cspDirectives = [
   "default-src 'self'",
   // 'unsafe-eval' is added in dev only: React 19's Fast Refresh runtime and the
   // Next.js error overlay use eval() in the browser. Production stays strict and
   // must NOT include 'unsafe-eval'. Matches Next.js's official CSP guidance.
-  `script-src 'self' 'unsafe-inline' ${turnstileOrigin}${isProd ? '' : " 'unsafe-eval'"}`,
+  `script-src 'self' 'unsafe-inline' ${[turnstileOrigin, ...cfBeaconOrigins, ...posthogOrigins].join(' ')}${isProd ? '' : " 'unsafe-eval'"}`,
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self'",
   "img-src 'self' blob: data:",
-  `connect-src 'self' ${turnstileOrigin}`,
+  `connect-src 'self' ${[turnstileOrigin, ...cfBeaconOrigins, ...posthogOrigins, ...sentryOrigins].join(' ')}`,
   // Turnstile renders its challenge in an iframe.
   `frame-src ${turnstileOrigin}`,
   "object-src 'none'",

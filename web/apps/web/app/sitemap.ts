@@ -13,7 +13,7 @@ const marketingRoutes = [
   '/pricing',
   '/providers',
   '/security',
-  // Legal pages are listed only once the owner fills lib/legal/company.ts.
+  // Legal pages are listed only per lib/legal/company.ts (imprint stays hidden until identity is filled).
   ...(legalPages.privacy ? ['/privacy'] : []),
   ...(legalPages.terms ? ['/terms'] : []),
   ...(legalPages.imprint ? ['/imprint'] : []),

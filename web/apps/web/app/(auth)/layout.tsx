@@ -3,6 +3,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { getSession } from '@/lib/auth/session';
 import { appHomeHref, siteHref } from '@/lib/shared';
+import { LegalLinks } from '@/components/common/legal-links';
 import { Brand } from '@/components/common/brand';
 
 // Auth screens carry no indexable content: keep them out of search indexes.
@@ -17,17 +18,20 @@ export default async function AuthLayout({ children }: LayoutProps<'/'>) {
   if (session) redirect(appHomeHref());
 
   return (
-    <main className="flex flex-1 flex-col items-center justify-center px-6 py-16">
-      <div className="w-full max-w-sm">
-        <Link
-          href={siteHref('/')}
-          aria-label="amicu home"
-          className="mb-8 flex justify-center rounded-md outline-none transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
-        >
-          <Brand />
-        </Link>
-        {children}
-      </div>
-    </main>
+    <>
+      <main className="flex flex-1 flex-col items-center justify-center px-6 py-16">
+        <div className="w-full max-w-sm">
+          <Link
+            href={siteHref('/')}
+            aria-label="amicu home"
+            className="mb-8 flex justify-center rounded-md outline-none transition-opacity hover:opacity-80 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          >
+            <Brand />
+          </Link>
+          {children}
+        </div>
+      </main>
+      <LegalLinks />
+    </>
   );
 }

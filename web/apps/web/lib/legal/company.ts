@@ -1,14 +1,24 @@
-// Single source of truth for legal/company identity. ALL FIELDS ARE NULL BY
-// DEFAULT, and while they are null no legal page, footer legal link, signup
-// consent line or sitemap entry is emitted (the routes call notFound()).
+// Single source of truth for legal/company identity.
 //
-// OWNER TODO: fill these in (and supply the policy bodies) before launch. Do not
-// invent text: have counsel review privacy/terms wording.
+// The privacy and terms pages are written in code (see app/(marketing)/privacy
+// and /terms) and render from this config. They go live once their effective
+// date and contact address are set. The imprint stays hidden (404, unlinked, not
+// in the sitemap) until the identity fields (legalName, address, country) are
+// filled, so no personal details are published while there is no company.
+//
+// OWNER TODO: when a company or VAT number exists, fill the identity fields (the
+// imprint then appears) and set controllerName. Have counsel review the wording.
 
 export interface CompanyConfig {
-  /** Registered legal entity name. */
+  /**
+   * Name shown for the data controller in the privacy policy. Unset: the policy
+   * says "the amicu maintainer". Do not set it to a personal name unless the
+   * owner has chosen to publish it.
+   */
+  controllerName: string | null;
+  /** Registered legal entity name (imprint only). */
   legalName: string | null;
-  /** Postal address, lines separated by "\n". */
+  /** Postal address, lines separated by "\n" (imprint only). */
   address: string | null;
   country: string | null;
   /** Commercial register / company number. */
@@ -18,15 +28,13 @@ export interface CompanyConfig {
   contactEmail: string | null;
   /** Address for privacy and data requests. */
   privacyEmail: string | null;
-  /** ISO dates (YYYY-MM-DD). */
+  /** ISO dates (YYYY-MM-DD). A page is live only when its date is set. */
   privacyEffectiveDate: string | null;
   termsEffectiveDate: string | null;
-  /** Policy text supplied by the owner/counsel; paragraphs separated by a blank line. */
-  privacyBody: string | null;
-  termsBody: string | null;
 }
 
 export const company: CompanyConfig = {
+  controllerName: null,
   legalName: null,
   address: null,
   country: null,
@@ -34,21 +42,18 @@ export const company: CompanyConfig = {
   vatId: null,
   contactEmail: 'hello@amicu.dev',
   privacyEmail: 'privacy@amicu.dev',
-  privacyEffectiveDate: null,
-  termsEffectiveDate: null,
-  privacyBody: null,
-  termsBody: null,
+  privacyEffectiveDate: '2026-10-15',
+  termsEffectiveDate: '2026-10-15',
 };
 
 const identityReady = (c: CompanyConfig) =>
   Boolean(c.legalName && c.address && c.country && c.contactEmail);
 
 export function resolveLegalPages(c: CompanyConfig) {
-  const id = identityReady(c);
   return {
-    privacy: id && Boolean(c.privacyEffectiveDate && c.privacyBody),
-    terms: id && Boolean(c.termsEffectiveDate && c.termsBody),
-    imprint: id,
+    privacy: Boolean(c.privacyEmail && c.privacyEffectiveDate),
+    terms: Boolean(c.contactEmail && c.termsEffectiveDate),
+    imprint: identityReady(c),
     contact: Boolean(c.contactEmail),
   };
 }

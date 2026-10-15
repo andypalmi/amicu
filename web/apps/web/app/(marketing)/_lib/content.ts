@@ -13,8 +13,8 @@ export const githubUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}
 /** The docs quickstart (install the CLI, `amicu init`, plan, apply). */
 export const quickstartUrl = '/docs/quickstart';
 /**
- * Contact channel until a company contact address exists (see
- * `lib/legal/company.ts`, all fields still null): the repository's issues.
+ * Issue tracker, used as a public support channel (general contact is
+ * `company.contactEmail` in `lib/legal/company.ts`).
  */
 export const contactUrl = `${githubUrl}/issues`;
 

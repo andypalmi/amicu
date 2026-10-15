@@ -5,6 +5,7 @@ import { TIER_LABELS } from '@amicu/auth';
 import { appUrl, siteHref } from '@/lib/shared';
 import { baseOptions } from '@/lib/layout.shared';
 import { requireSession } from '@/lib/auth/session';
+import { LegalLinks } from '@/components/common/legal-links';
 import { SessionProvider } from '@/components/session-provider';
 
 // The authed product surface is private: keep it out of search indexes.
@@ -56,6 +57,7 @@ export default async function Layout({ children }: LayoutProps<'/'>) {
         ]}
       >
         {children}
+        <LegalLinks />
       </HomeLayout>
     </SessionProvider>
   );
