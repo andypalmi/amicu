@@ -162,26 +162,90 @@ const fn cfg(memory_gib: u32, bandwidth_gbps: u32) -> MemoryConfig {
     }
 }
 
+// Sizes and bandwidths are from Apple's tech-specs pages. Where a chip is
+// binned into parts with different bandwidth for the same memory size (M3 Max
+// 14-core CPU / 30-core GPU 300 GB/s vs 400 GB/s, M4 Max 32-core GPU 410 vs
+// 546 GB/s, M5 Max 32-core GPU 460 vs 614 GB/s), the lower figure is used when
+// the size is sold with the slower bin, so estimates stay conservative. There
+// is no M4 Ultra or M5 Ultra.
 const APPLE_SILICON_CHIPS: &[AppleSiliconChip] = &[
     AppleSiliconChip {
-        id: "m4_pro",
-        configs: &[cfg(24, 273), cfg(48, 273)],
+        id: "m1",
+        configs: &[cfg(8, 68), cfg(16, 68)],
     },
     AppleSiliconChip {
-        id: "m5_pro",
-        configs: &[cfg(24, 307), cfg(48, 307), cfg(64, 307)],
+        id: "m1_pro",
+        configs: &[cfg(16, 200), cfg(32, 200)],
     },
     AppleSiliconChip {
-        id: "m4_max",
-        configs: &[cfg(36, 410), cfg(128, 546)],
+        id: "m1_max",
+        configs: &[cfg(32, 400), cfg(64, 400)],
+    },
+    AppleSiliconChip {
+        id: "m1_ultra",
+        configs: &[cfg(64, 800), cfg(128, 800)],
+    },
+    AppleSiliconChip {
+        id: "m2",
+        configs: &[cfg(8, 100), cfg(16, 100), cfg(24, 100)],
+    },
+    AppleSiliconChip {
+        id: "m2_pro",
+        configs: &[cfg(16, 200), cfg(32, 200)],
+    },
+    AppleSiliconChip {
+        id: "m2_max",
+        configs: &[cfg(32, 400), cfg(64, 400), cfg(96, 400)],
+    },
+    AppleSiliconChip {
+        id: "m2_ultra",
+        configs: &[cfg(64, 800), cfg(128, 800), cfg(192, 800)],
+    },
+    AppleSiliconChip {
+        id: "m3",
+        configs: &[cfg(8, 100), cfg(16, 100), cfg(24, 100)],
+    },
+    AppleSiliconChip {
+        id: "m3_pro",
+        configs: &[cfg(18, 150), cfg(36, 150)],
+    },
+    AppleSiliconChip {
+        id: "m3_max",
+        configs: &[
+            cfg(36, 300),
+            cfg(48, 400),
+            cfg(64, 400),
+            cfg(96, 300),
+            cfg(128, 400),
+        ],
     },
     AppleSiliconChip {
         id: "m3_ultra",
         configs: &[cfg(96, 819), cfg(256, 819), cfg(512, 819)],
     },
     AppleSiliconChip {
-        id: "m2_ultra",
-        configs: &[cfg(64, 800), cfg(192, 800)],
+        id: "m4",
+        configs: &[cfg(16, 120), cfg(24, 120), cfg(32, 120)],
+    },
+    AppleSiliconChip {
+        id: "m4_pro",
+        configs: &[cfg(24, 273), cfg(48, 273), cfg(64, 273)],
+    },
+    AppleSiliconChip {
+        id: "m4_max",
+        configs: &[cfg(36, 410), cfg(48, 410), cfg(64, 546), cfg(128, 546)],
+    },
+    AppleSiliconChip {
+        id: "m5",
+        configs: &[cfg(16, 153), cfg(24, 153), cfg(32, 153)],
+    },
+    AppleSiliconChip {
+        id: "m5_pro",
+        configs: &[cfg(24, 307), cfg(48, 307), cfg(64, 307)],
+    },
+    AppleSiliconChip {
+        id: "m5_max",
+        configs: &[cfg(36, 460), cfg(48, 614), cfg(64, 614), cfg(128, 614)],
     },
 ];
 
@@ -223,7 +287,7 @@ impl AppleSiliconChip {
     }
 }
 
-/// Apple M4 Pro (24 or 48 GB), ~273 GB/s unified memory bandwidth (Apple spec
+/// Apple M4 Pro (24, 48 or 64 GB), ~273 GB/s unified memory bandwidth (Apple spec
 /// sheet). The profile is the 24 GB configuration; see
 /// [`AppleSiliconChip::profile`] for the others.
 #[must_use]
@@ -238,7 +302,7 @@ pub fn m5_pro() -> HardwareProfile {
     chip_base("m5_pro")
 }
 
-/// Apple M4 Max (36 or 128 GB), 410 / 546 GB/s unified memory bandwidth
+/// Apple M4 Max (36, 48, 64 or 128 GB), 410 / 546 GB/s unified memory bandwidth
 /// (Apple spec sheet). The profile is the 36 GB configuration.
 #[must_use]
 pub fn m4_max() -> HardwareProfile {
@@ -252,7 +316,7 @@ pub fn m3_ultra() -> HardwareProfile {
     chip_base("m3_ultra")
 }
 
-/// Apple M2 Ultra (64 or 192 GB), 800 GB/s unified memory bandwidth (Apple
+/// Apple M2 Ultra (64, 128 or 192 GB), 800 GB/s unified memory bandwidth (Apple
 /// spec sheet). The profile is the 64 GB configuration.
 #[must_use]
 pub fn m2_ultra() -> HardwareProfile {
@@ -294,9 +358,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_twelve_entries() {
-        // Seven discrete GPUs and five Apple Silicon chips.
-        assert_eq!(catalog().len(), 12);
+    fn catalog_has_twenty_five_entries() {
+        // Seven discrete GPUs and eighteen Apple Silicon chips.
+        assert_eq!(catalog().len(), 25);
     }
 
     #[test]
@@ -310,7 +374,13 @@ mod tests {
             assert_ne!(chip.configs, []);
         }
         let ids: Vec<_> = apple_silicon_chips().iter().map(|c| c.id).collect();
-        assert_eq!(ids, ["m4_pro", "m5_pro", "m4_max", "m3_ultra", "m2_ultra"]);
+        assert_eq!(
+            ids,
+            [
+                "m1", "m1_pro", "m1_max", "m1_ultra", "m2", "m2_pro", "m2_max", "m2_ultra", "m3",
+                "m3_pro", "m3_max", "m3_ultra", "m4", "m4_pro", "m4_max", "m5", "m5_pro", "m5_max",
+            ]
+        );
     }
 
     #[test]

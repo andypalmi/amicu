@@ -253,11 +253,25 @@ pub fn run() -> ExitCode {
     amicu_llamacpp::allow_service_commands();
     let cli = Cli::parse();
     let mut stdout = std::io::stdout();
-    match dispatch(&cli, &mut stdout) {
-        Ok(code) => ExitCode::from(code),
+    ExitCode::from(exit_status(
+        &dispatch(&cli, &mut stdout),
+        &mut std::io::stderr(),
+    ))
+}
+
+/// Map a command result to a process exit status, reporting errors on `err`.
+///
+/// A broken pipe on stdout (`amicu ... | head -1`) exits quietly with 0, as
+/// `head`-style consumers closing early is not a failure. The report is written
+/// with `writeln!` and its result ignored: `eprintln!` panics (exit 101) when
+/// stderr is closed too, e.g. `2>&1 | head -1`.
+fn exit_status(result: &Result<u8, CliError>, err: &mut dyn Write) -> u8 {
+    match result {
+        Ok(code) => *code,
+        Err(e) if e.is_broken_pipe() => 0,
         Err(e) => {
-            eprintln!("error: {e}");
-            ExitCode::FAILURE
+            let _ = writeln!(err, "error: {e}");
+            1
         }
     }
 }

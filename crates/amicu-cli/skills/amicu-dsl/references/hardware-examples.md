@@ -161,7 +161,8 @@ Notes:
   planning purposes; it is optional and not yet read by the fit check.
 - These three examples match `amicu_providers::consumer`'s `rtx_4090()`,
   `m4_max()`, and `rx_7900_xtx()` catalog entries. Apple Silicon ids are the
-  chip only (`m4_pro`, `m5_pro`, `m4_max`, `m3_ultra`, `m2_ultra`): set the
+  chip only (`m1` through `m5`, each as base, `_pro`, `_max` and
+  `_ultra` where Apple shipped it, e.g. `m4_pro`, `m5_max`, `m3_ultra`): set the
   memory size with the `memory` fields, not in `model`. Discrete GPU ids keep
   their fixed memory (`rtx_4090` is 24 GiB). `provider =
   "on_prem"` is the convention for hardware the user already owns - distinct

@@ -2943,3 +2943,24 @@ fn destroy_conflict_says_rerun_and_never_lists_kept_deployments() {
         "a kept deployment must not be listed: {msg}"
     );
 }
+
+#[test]
+fn broken_pipe_exits_quietly() {
+    use crate::error::CliError;
+
+    let broken = Err(CliError::io(
+        "write failed",
+        std::io::Error::from(std::io::ErrorKind::BrokenPipe),
+    ));
+    let mut err = Vec::new();
+    assert_eq!(crate::exit_status(&broken, &mut err), 0);
+    assert!(err.is_empty(), "broken pipe must not print an error");
+
+    let other = Err(CliError::io(
+        "write failed",
+        std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+    ));
+    assert_eq!(crate::exit_status(&other, &mut err), 1);
+    assert!(String::from_utf8(err).unwrap().starts_with("error: "));
+    assert_eq!(crate::exit_status(&Ok(3), &mut Vec::new()), 3);
+}
