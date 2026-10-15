@@ -2,7 +2,7 @@
 
 Manage open LLMs and deploy them as code: locally or on cloud GPUs.
 
-Write HCL that describes a model and where it runs. `amicu plan` checks that it fits in memory, `amicu apply` starts it and hands you an OpenAI-compatible URL, an API key and a ready-to-copy `curl` command, and `amicu destroy` removes it. State tracks everything amicu started, so nothing is left running. If you know Terraform, the workflow is the same.
+Write HCL that describes a model and where it runs. `amicu plan` checks that it fits in memory, `amicu apply` starts it and hands you an OpenAI-compatible endpoint URL and a ready-to-copy `curl` command, and `amicu destroy` removes it. The endpoint key is one you set with `api_key = secret(...)` (required off-machine). amicu records a deployment in state before starting it and only removes it after the stop is confirmed, so `destroy` can find what may still be running. If you know Terraform, the workflow is the same.
 
 ## Example
 
@@ -58,23 +58,25 @@ amicu destroy   # stops and removes the recorded deployments (asks for approval)
 
 Point the `hardware_profile` at `provider = "modal"` instead and the same deployment runs on a cloud GPU (see [Deploy to Modal](#deploy-to-modal)). Step by step: [quickstart](https://amicu.dev/docs/quickstart).
 
+Local runs need the GGUF weights on disk first; see [Get the GGUF](https://amicu.dev/docs/quickstart#get-the-gguf) in the quickstart.
+
 ## Where it runs
 
 | Target | Runtimes | Status |
 |---|---|---|
-| Your Mac (launchd) | llama.cpp, vLLM | Supported |
-| Linux (systemd) | llama.cpp, vLLM | Supported |
+| Your Mac (launchd) | llama.cpp | Supported |
+| Linux (systemd) | llama.cpp, vLLM (GPU) | Supported |
 | Modal (serverless GPU) | llama.cpp, vLLM | Supported |
 | Hetzner, OVHcloud, Scaleway, RunPod, SSH hosts | n/a | Preview: adapters built, not wired into `apply` |
 | AWS, Azure, GCP, Nebius | n/a | Catalog and pricing data only; `apply` fails with an error |
 
-Windows is not supported. A provider `apply` cannot deploy to fails with a clear error; it never falls back to running locally.
+Local runs target macOS and Linux. A provider `apply` cannot deploy to fails with a clear error; it never falls back to running locally.
 
-## Why
+## Why amicu
 
-- **Your models, on infrastructure you chose.** No prompts go to a model API provider. Data residency is a policy you write: a `data_class` plus a region (for example Modal `eu-west`), checked at plan time. A Modal deployment runs on Modal; the point is that you choose where.
+- **Your models, on infrastructure you chose.** Your prompts go to your own endpoint, not a model API provider. Data residency is a policy you write: a `data_class` plus a region (for example Modal `eu-west`), checked at plan time. A Modal deployment runs on Modal; the point is that you choose where.
 - **Config in git, with a reviewable plan.** Every change is a plan against recorded state that you read before it runs, not a pile of imperative scripts.
-- **No orphaned GPUs.** `apply` records a stop intent before it starts anything, and a deployment leaves state only after its stop is confirmed, so `destroy` can always find what may be running.
+- **Built to avoid orphaned GPUs.** `apply` records a deployment in state before it starts anything, and it leaves state only after its stop is confirmed, so `destroy` is designed to find what may still be running.
 
 ## Install
 
