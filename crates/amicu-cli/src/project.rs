@@ -1,6 +1,7 @@
 //! Project layout: config discovery, graph loading, and local state.
 
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -219,7 +220,8 @@ impl Project {
         skipped.sort();
         let first = !skipped.is_empty() && !self.nested_note_shown.swap(true, Ordering::Relaxed);
         for dir in skipped.iter().filter(|_| first) {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr(),
                 "note: skipping nested amicu project {} (it has its own .amicu/); run amicu there",
                 dir.display()
             );

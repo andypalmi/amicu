@@ -24,6 +24,7 @@
 
 use amicu_core::secret::SecretValue;
 use async_trait::async_trait;
+use std::io::Write as _;
 
 use crate::error::Result;
 
@@ -96,7 +97,8 @@ impl Notifier for LoggingNotifier {
                 let token = reset_token
                     .expose_secret_str()
                     .unwrap_or("<non-utf8-token>");
-                eprintln!(
+                let _ = writeln!(
+                    std::io::stderr(),
                     "[notify] password-reset to {}: reset_token={token}",
                     message.recipient
                 );
@@ -111,13 +113,15 @@ impl Notifier for LoggingNotifier {
                 let token = verify_token
                     .expose_secret_str()
                     .unwrap_or("<non-utf8-token>");
-                eprintln!(
+                let _ = writeln!(
+                    std::io::stderr(),
                     "[notify] email-verification to {}: verify_token={token}",
                     message.recipient
                 );
             }
             NotificationKind::AccountExists => {
-                eprintln!(
+                let _ = writeln!(
+                    std::io::stderr(),
                     "[notify] account-exists notice to {} (sign in or reset instead)",
                     message.recipient
                 );

@@ -38,6 +38,7 @@
 //! error - never the address, the message body, the opaque token, or the SMTP
 //! password.
 
+use std::io::Write as _;
 use std::sync::Arc;
 
 use amicu_auth::error::AuthError;
@@ -400,7 +401,10 @@ impl Notifier for SmtpNotifier {
         // the opaque token, which lives in the body and must never reach a log,
         // and the SMTP password, which lettre's error never contains.
         self.transport.send(email).await.map_err(|err| {
-            eprintln!("[notify] SMTP send failed for a recipient at {domain}: {err}");
+            let _ = writeln!(
+                std::io::stderr(),
+                "[notify] SMTP send failed for a recipient at {domain}: {err}"
+            );
             AuthError::Backend
         })?;
         Ok(())

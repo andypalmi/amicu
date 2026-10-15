@@ -47,6 +47,7 @@
 //!   [`amicu_store::ratelimit`]'s docs).
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -315,7 +316,8 @@ impl PostgresRateLimiter {
     fn note_fail_open(&self, detail: impl std::fmt::Display) {
         let n = self.fail_open_hits.fetch_add(1, Ordering::Relaxed) + 1;
         if n == 1 || n.is_multiple_of(WARN_SAMPLE_EVERY) {
-            eprintln!(
+            let _ = writeln!(
+                std::io::stderr(),
                 "amicu-api: WARNING - Postgres rate limiter check failed for key \
                  (key content withheld from this log line; keys embed the request path and \
                  may embed a client IP or email), failing OPEN (request allowed): {detail}. \

@@ -5,6 +5,7 @@
 //! service definitions to disk, so unit tests stay hermetic. Secrets are passed
 //! through the process environment only - never into argv or a log.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -268,6 +269,10 @@ pub struct LaunchdManager<E> {
 /// its model on SIGTERM, which can take several seconds for a large one.
 const LAUNCHD_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a stop wait must last before the one-time "waiting" note prints;
+/// `bootout` is async, so most stops finish well inside this.
+const WAIT_NOTE_AFTER: Duration = Duration::from_secs(1);
+
 impl<E: CommandExec> LaunchdManager<E> {
     /// Build over an executor and the LaunchAgents / log directories.
     pub fn new(exec: E, agents_dir: impl Into<PathBuf>, log_dir: impl Into<PathBuf>) -> Self {
@@ -291,7 +296,7 @@ impl<E: CommandExec> LaunchdManager<E> {
     /// / throttled one) until its process has exited. Poll `launchctl print`
     /// with a short backoff, asynchronously, until the job is unloaded. Any
     /// state in which launchd still lists the job counts as loaded, never as
-    /// stopped. Prints a one-line progress note the first time it has to wait.
+    /// stopped. Prints a one-line progress note (once) when the wait has lasted over a second.
     /// `Ok(true)` once gone, `Ok(false)` if still loaded after the timeout.
     async fn wait_unloaded(&self, domain: &str, label: &str) -> Result<bool, LlamaCppError> {
         let started = Instant::now();
@@ -301,9 +306,10 @@ impl<E: CommandExec> LaunchdManager<E> {
             if !self.is_loaded(domain, label)? {
                 return Ok(true);
             }
-            if !announced {
+            if !announced && started.elapsed() >= WAIT_NOTE_AFTER {
                 announced = true;
-                eprintln!(
+                let _ = writeln!(
+                    std::io::stderr(),
                     "waiting for {label} to stop (up to {}s)...",
                     self.settle_timeout.as_secs()
                 );

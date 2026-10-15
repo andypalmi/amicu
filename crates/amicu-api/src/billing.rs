@@ -30,6 +30,7 @@
 //! issued (sign-in or refresh). This is deliberate - see the crate docs.
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -721,7 +722,10 @@ async fn stripe_post(
     // the params explicitly (reqwest's `.form()` helper is compiled out under our
     // minimal, default-features-off reqwest build).
     let form_body = serde_urlencoded::to_string(params).map_err(|e| {
-        eprintln!("amicu-api: encoding stripe form for {path} failed: {e}");
+        let _ = writeln!(
+            std::io::stderr(),
+            "amicu-api: encoding stripe form for {path} failed: {e}"
+        );
         BillingError::Upstream
     })?;
     let response = stripe
@@ -736,19 +740,26 @@ async fn stripe_post(
         .send()
         .await
         .map_err(|e| {
-            eprintln!("amicu-api: stripe request to {path} failed: {e}");
+            let _ = writeln!(
+                std::io::stderr(),
+                "amicu-api: stripe request to {path} failed: {e}"
+            );
             BillingError::Upstream
         })?;
 
     let status = response.status();
     let body = response.bytes().await.map_err(|e| {
-        eprintln!("amicu-api: reading stripe response from {path} failed: {e}");
+        let _ = writeln!(
+            std::io::stderr(),
+            "amicu-api: reading stripe response from {path} failed: {e}"
+        );
         BillingError::Upstream
     })?;
 
     if !status.is_success() {
         // Do not echo Stripe's error body to the client; log it for operators.
-        eprintln!(
+        let _ = writeln!(
+            std::io::stderr(),
             "amicu-api: stripe {path} returned {status}: {}",
             String::from_utf8_lossy(&body)
         );
@@ -756,7 +767,10 @@ async fn stripe_post(
     }
 
     serde_json::from_slice(&body).map_err(|e| {
-        eprintln!("amicu-api: stripe {path} response was not JSON: {e}");
+        let _ = writeln!(
+            std::io::stderr(),
+            "amicu-api: stripe {path} response was not JSON: {e}"
+        );
         BillingError::Upstream
     })
 }
