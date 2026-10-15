@@ -31,6 +31,14 @@ pnpm test
 cd apps/web && NEXT_PUBLIC_SITE_URL=https://amicu.dev pnpm cf:build
 ```
 
+Sign-in is hidden unless the build runs with `NEXT_PUBLIC_SIGNIN_ENABLED=true` (build-time, default off; auth and console pages 404). To build or deploy with sign-in:
+
+```bash
+cd apps/web && NEXT_PUBLIC_SIGNIN_ENABLED=true NEXT_PUBLIC_SITE_URL=https://amicu.dev pnpm cf:build
+```
+
+The `deploy-web.yml` workflow reads the repo variable `NEXT_PUBLIC_SIGNIN_ENABLED` the same way.
+
 ## Link check
 
 `pnpm lint:links` validates every internal link (docs MDX, `#heading` anchors, and `href`s in `app/`, `components/`) against the real route set (`next-validate-link` + Fumadocs source); external links are skipped. It runs in CI and as a git pre-commit hook (`.githooks/pre-commit`, enabled by `pnpm install` through the `prepare` script, or manually with `git config core.hooksPath .githooks`). The hook only runs when `web/` files are staged and is skipped if pnpm is not installed; bypass with `git commit --no-verify`. Hooks live in `.githooks` and chain to any local `.git/hooks` hook of the same name. The checker validates physical routes only and ignores the `amicu.dev` / `app.amicu.dev` host split.

@@ -26,7 +26,12 @@ pnpm --filter web cf:preview
 
 # Build and deploy (passes --keep-vars to `wrangler deploy`; the committed
 # `vars` are the production values - see the note below).
+# Sign-in is OFF in this build: NEXT_PUBLIC_SIGNIN_ENABLED is build-time and
+# unset means disabled (all auth/console pages 404, no sign-in links).
 pnpm --filter web cf:deploy
+
+# Same deploy WITH sign-in (the flag must be set for the build, not just the Worker):
+NEXT_PUBLIC_SIGNIN_ENABLED=true pnpm --filter web cf:deploy
 
 # Regenerate `cloudflare-env.d.ts` (typed `CloudflareEnv`) after changing
 # bindings in wrangler.jsonc. Gitignored - regenerate, don't hand-edit.
@@ -43,7 +48,11 @@ available without an account.
 `wrangler.jsonc` commits the **production, non-secret** values under `vars`
 (`API_URL`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_JWKS_URL`,
 `NEXT_PUBLIC_SITE_URL`, `NODE_ENV`), so a bare `wrangler deploy` or CI deploy
-keeps production intact. Change them by editing the file in a PR. Do **not**
+keeps these production values. It does **not** enable sign-in: that is the
+build-time `NEXT_PUBLIC_SIGNIN_ENABLED`, off unless the build ran with it set to
+`true` (`NEXT_PUBLIC_SIGNIN_ENABLED=true pnpm cf:build && wrangler deploy`). The
+`deploy-web.yml` workflow reads the repo variable `NEXT_PUBLIC_SIGNIN_ENABLED` the
+same way; unset or empty deploys with sign-in hidden. Change them by editing the file in a PR. Do **not**
 also set a Worker secret with one of these names (`wrangler secret put
 API_URL` etc.): a secret and a var with the same name conflict. Only real
 secrets (e.g. `TURNSTILE_SECRET_KEY`) belong in the secret store.
@@ -57,6 +66,7 @@ secrets (e.g. `TURNSTILE_SECRET_KEY`) belong in the secret store.
 | `NEXT_PUBLIC_APP_URL` | Origin of the product app (console + auth), `https://app.amicu.dev`. The same Worker serves both hosts; `proxy.ts` 301s app/auth paths on `amicu.dev` to this host and marketing/docs paths on this host back to `amicu.dev`. Unset locally => no host split. Also an accepted CSRF/server-action origin and the expected Turnstile hostname. | Build-time (inlined) and runtime var. |
 | `NEXT_PUBLIC_SITE_URL` | Public site origin, embedded in client bundles. Production: `https://amicu.dev` (also the source of the expected Turnstile hostname) | **Build-time**, not just runtime: `NEXT_PUBLIC_*` vars are inlined into the JS bundle during `next build`/`cf:build`, so this must be set correctly *before* building, not only in the deployed Worker's runtime vars. |
 | `NODE_ENV` | Standard Node env flag | Keep `production` for any real deploy. Also gates `COOKIE_SECURE`'s default (see below) and the CSP's dev-only `'unsafe-eval'` allowance in `next.config.mjs`. |
+| `NEXT_PUBLIC_SIGNIN_ENABLED` | Exposes sign-in. Exactly `true` => links shown, `/login` etc. and the console work as before. Unset, empty or anything else => **every sign-in/sign-up link is hidden, `/login` `/signup` `/forgot` `/verify` and all session-gated pages (`/app`, `/account`, `/configs`, `/billing`, `/org`, `/monitor`, `/new`, `/recommend`, `/wizard`) return a real 404** (also on `app.amicu.dev`). `/api/*` is unchanged (still auth-guarded). | **Build-time** (inlined), default OFF, so no deploy config is needed to keep it off. To turn it on: `NEXT_PUBLIC_SIGNIN_ENABLED=true NEXT_PUBLIC_SITE_URL=https://amicu.dev pnpm cf:build && wrangler deploy`. Setting it only as a runtime Worker var has no effect. |
 | `SIGNUPS_ENABLED` | Whether public sign-ups are open. When not exactly `true`, `/signup` shows "Sign-ups are currently closed", the signup action refuses without calling the API, and the login page hides "Create an account" | **Fail-closed**: unset => closed. Committed as `"false"` in `wrangler.jsonc` for production. The API enforces it independently via `AMICU_SIGNUPS_ENABLED` (also default closed) - set both. Local dev: put `SIGNUPS_ENABLED=true` in `.env.local`. |
 | `COOKIE_SECURE` (optional) | Explicit override for the session cookies' `Secure` flag | Not in `wrangler.jsonc` by default - it defaults to `true` whenever `NODE_ENV !== 'development'`, which is correct for every real deployment (Workers always serves over TLS). Only set this if you need to force a non-default value; see `lib/auth/server-env.ts`. |
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY` (optional) | Cloudflare Turnstile public site key | **Build-time** (inlined). Unset => widget not rendered. Create the widget in the Cloudflare dashboard (hostname = the public site host). |

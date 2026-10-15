@@ -4,7 +4,8 @@ import { Container } from './marketing';
 import { ThemeToggle } from './theme-toggle';
 import { MobileMenu, type MobileNavCta, type MobileNavItem } from './mobile-menu';
 import { appHref } from '@/lib/shared';
-import { githubUrl } from '../_lib/content';
+import { SIGNIN_ENABLED } from '@/lib/features';
+import { githubUrl, quickstartUrl } from '../_lib/content';
 
 const siteLinks = [
   { href: '/docs', label: 'Docs' },
@@ -32,8 +33,12 @@ const mobileItems: MobileNavItem[] = [
 // Outline variants first, the filled primary last.
 const mobileCtas: MobileNavCta[] = [
   { href: githubUrl, label: 'GitHub', variant: 'outline' },
-  { href: appHref('/login'), label: 'Sign in', variant: 'outline' },
-  { href: appHref('/signup'), label: 'Get started', variant: 'default' },
+  ...(SIGNIN_ENABLED
+    ? ([
+        { href: appHref('/login'), label: 'Sign in', variant: 'outline' },
+        { href: appHref('/signup'), label: 'Get started', variant: 'default' },
+      ] as MobileNavCta[])
+    : ([{ href: quickstartUrl, label: 'Quickstart', variant: 'default' }] as MobileNavCta[])),
 ];
 
 const linkCls =
@@ -68,12 +73,14 @@ export function SiteHeader() {
         </nav>
 
         <div className="ml-auto flex items-center gap-2 text-sm">
-          <Link
-            href={appHref('/login')}
-            className={`${linkCls} hidden px-2 md:inline`}
-          >
-            Sign in
-          </Link>
+          {SIGNIN_ENABLED ? (
+            <Link
+              href={appHref('/login')}
+              className={`${linkCls} hidden px-2 md:inline`}
+            >
+              Sign in
+            </Link>
+          ) : null}
           <ThemeToggle />
           <MobileMenu items={mobileItems} ctas={mobileCtas} />
         </div>

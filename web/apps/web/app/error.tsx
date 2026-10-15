@@ -3,6 +3,7 @@
 import { useEffect } from 'react';
 import * as Sentry from '@sentry/nextjs';
 import Link from 'next/link';
+import { SIGNIN_ENABLED } from '@/lib/features';
 import { appHomeHref } from '@/lib/shared';
 import { AlertTriangle, RotateCcw } from 'lucide-react';
 import {
@@ -62,7 +63,11 @@ export default function Error({
             <RotateCcw /> Try again
           </Button>
           <Button asChild variant="outline">
-            <Link href={appHomeHref()}>Back to console</Link>
+            {SIGNIN_ENABLED ? (
+              <Link href={appHomeHref()}>Back to console</Link>
+            ) : (
+              <Link href="/">Back to home</Link>
+            )}
           </Button>
         </CardFooter>
       </Card>

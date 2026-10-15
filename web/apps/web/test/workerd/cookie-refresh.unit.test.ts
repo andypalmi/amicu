@@ -74,6 +74,7 @@ before(async () => {
   process.env.API_URL = `http://127.0.0.1:${stubApi.port}`;
   process.env.NODE_ENV = 'production';
   process.env.COOKIE_SECURE = 'true';
+  process.env.NEXT_PUBLIC_SIGNIN_ENABLED = 'true'; // refresh only runs on the (app) surface
 
   ({ default: proxy } = await import('../../proxy.ts'));
   ({ NextRequest } = await import('next/server'));
