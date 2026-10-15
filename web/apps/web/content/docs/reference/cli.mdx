@@ -63,11 +63,12 @@ All three accept `--output json`. `fits` emits `{ "version": "v1", "host": {...}
 
 ## Output lines
 
-`plan`, `apply` and `destroy` can print these lines in human output. They are not part of the JSON output.
+`plan`, `apply` and `destroy` can print these lines in human output. In JSON output, `reason` and `changes` appear on each action.
 
 | Line | Meaning |
 |---|---|
 | `reason:   <list> changed since it was last started` | Shown under an `update`. The list names what changed: `secret references` (a pinned `version` in an `api_key` reference), `container image` (the Modal image variable or the amicu default image), or `binary path` (`llama-server` or `vllm` resolves to another path on `PATH`). |
+| `reason:   launch settings changed, so the service restarts` or `reason:   configuration changed` | Shown under an `update` when the config changed. Followed by one line per changed field, launch fields first: `~ key: "old" -> "new"`, `+ key: "new"` (added) or `- key: "old"` (removed), with at most six shown and `and N more` after. Values that may hold secrets or free-form text (env values, `extra_args`, `api_key`, `chat_template`, credential-like keys) print as `(changed)`, `(set)` or `(unset)` with no value. A leading home directory prints as `~`, and values over 80 characters are cut with an ellipsis. In JSON each entry of `changes` is `{key, op, old, new, restart, redacted}`; `old` and `new` are null when redacted. |
 | `  - destroy old (<backend> <identity>) for <address>` | A provider or identity change. The old instance is stopped and confirmed before the new one starts. If that stop fails, apply stops there and starts nothing new. See [Plan, apply and state](/docs/concepts/plan-apply-state#provider-switch). |
 | `drift: deployment <id>: ...` | A recorded host service or Modal app is gone. The deployment is kept in state as pending. See [State and backends](/docs/operate/state-and-backends#drift). |
 | `warning: could not check host services (...)` or `warning: could not check Modal for live apps (...)` | The check failed. The command uses local state as it is. The failed check does not change state. |

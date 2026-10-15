@@ -2289,6 +2289,15 @@
           "replace"
         ]
       },
+      "ChangeOp": {
+        "type": "string",
+        "description": "How a field differs between the last applied config and the desired one.",
+        "enum": [
+          "added",
+          "removed",
+          "changed"
+        ]
+      },
       "ChangeRoleRequest": {
         "type": "object",
         "description": "Request body for `PATCH /org/members/{id}`.",
@@ -3254,6 +3263,13 @@
               }
             ]
           },
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlannedChange"
+            },
+            "description": "The per-field differences behind an update, launch fields first.\nValues that may hold secrets are redacted (see [`PlannedChange`])."
+          },
           "cost_performance": {
             "oneOf": [
               {
@@ -3283,6 +3299,13 @@
             ],
             "description": "Target provider (e.g. `runpod`)."
           },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why an update is planned (e.g. `launch settings changed, so the\nservice restarts`). Absent for creates and destroys."
+          },
           "region": {
             "type": [
               "string",
@@ -3310,6 +3333,48 @@
               "$ref": "#/components/schemas/Setting"
             },
             "description": "Runtime and material launch settings, as opaque key/value pairs."
+          }
+        }
+      },
+      "PlannedChange": {
+        "type": "object",
+        "description": "One changed field of an update.",
+        "required": [
+          "key",
+          "op",
+          "restart",
+          "redacted"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Dotted field name (e.g. `model.source.reference`)."
+          },
+          "new": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The new value; `null` when the field is now absent or is redacted."
+          },
+          "old": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The previous value; `null` when the field was absent or is redacted."
+          },
+          "op": {
+            "$ref": "#/components/schemas/ChangeOp",
+            "description": "Whether the field was added, removed or changed."
+          },
+          "redacted": {
+            "type": "boolean",
+            "description": "True when the field may hold a secret or arbitrary user text, so its\nvalues are withheld (`old` and `new` are `null`)."
+          },
+          "restart": {
+            "type": "boolean",
+            "description": "Whether this change needs the service restarted to take effect."
           }
         }
       },

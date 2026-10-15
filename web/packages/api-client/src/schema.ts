@@ -1051,6 +1051,11 @@ export interface components {
          * @enum {string}
          */
         ChangeDirectionDto: "increase" | "decrease" | "enable" | "replace";
+        /**
+         * @description How a field differs between the last applied config and the desired one.
+         * @enum {string}
+         */
+        ChangeOp: "added" | "removed" | "changed";
         /** @description Request body for `PATCH /org/members/{id}`. */
         ChangeRoleRequest: {
             /**
@@ -1518,6 +1523,11 @@ export interface components {
             /** @description The target resource address (e.g. `deployment.support_chat_local`). */
             address: string;
             artifact?: null | components["schemas"]["Artifact"];
+            /**
+             * @description The per-field differences behind an update, launch fields first.
+             *     Values that may hold secrets are redacted (see [`PlannedChange`]).
+             */
+            changes?: components["schemas"]["PlannedChange"][];
             cost_performance?: null | components["schemas"]["CostPerformance"];
             /** @description Target hardware descriptor (e.g. `gpu.a100_80gb`). */
             hardware?: string | null;
@@ -1525,6 +1535,11 @@ export interface components {
             kind: components["schemas"]["ActionKind"];
             /** @description Target provider (e.g. `runpod`). */
             provider?: string | null;
+            /**
+             * @description Why an update is planned (e.g. `launch settings changed, so the
+             *     service restarts`). Absent for creates and destroys.
+             */
+            reason?: string | null;
             /** @description Target region (e.g. `eu-central`). */
             region?: string | null;
             /** @description Manual action the user must take before this can be applied. */
@@ -1537,6 +1552,24 @@ export interface components {
             required_secrets?: string[];
             /** @description Runtime and material launch settings, as opaque key/value pairs. */
             runtime?: components["schemas"]["Setting"][];
+        };
+        /** @description One changed field of an update. */
+        PlannedChange: {
+            /** @description Dotted field name (e.g. `model.source.reference`). */
+            key: string;
+            /** @description The new value; `null` when the field is now absent or is redacted. */
+            new?: string | null;
+            /** @description The previous value; `null` when the field was absent or is redacted. */
+            old?: string | null;
+            /** @description Whether the field was added, removed or changed. */
+            op: components["schemas"]["ChangeOp"];
+            /**
+             * @description True when the field may hold a secret or arbitrary user text, so its
+             *     values are withheld (`old` and `new` are `null`).
+             */
+            redacted: boolean;
+            /** @description Whether this change needs the service restarted to take effect. */
+            restart: boolean;
         };
         /** @description Governance / policy outcome for a plan. */
         PolicyOutcome: {
@@ -2060,6 +2093,7 @@ export type CandidateScoreDto = components['schemas']['CandidateScoreDto'];
 export type CandidatesRequestDto = components['schemas']['CandidatesRequestDto'];
 export type CandidatesResponseDto = components['schemas']['CandidatesResponseDto'];
 export type ChangeDirectionDto = components['schemas']['ChangeDirectionDto'];
+export type ChangeOp = components['schemas']['ChangeOp'];
 export type ChangeRoleRequest = components['schemas']['ChangeRoleRequest'];
 export type CheckoutRequest = components['schemas']['CheckoutRequest'];
 export type ComparisonDto = components['schemas']['ComparisonDto'];
@@ -2100,6 +2134,7 @@ export type Patch = components['schemas']['Patch'];
 export type Plan = components['schemas']['Plan'];
 export type PlanRequest = components['schemas']['PlanRequest'];
 export type PlannedAction = components['schemas']['PlannedAction'];
+export type PlannedChange = components['schemas']['PlannedChange'];
 export type PolicyOutcome = components['schemas']['PolicyOutcome'];
 export type PresetConstraintDto = components['schemas']['PresetConstraintDto'];
 export type PresetDetailDto = components['schemas']['PresetDetailDto'];
