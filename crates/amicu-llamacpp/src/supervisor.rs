@@ -315,7 +315,7 @@ impl<M: ServiceManager, P: HealthProbe> ServiceSupervisor<M, P> {
             tokio::time::sleep(self.ready.interval).await;
         };
         let logs = self.manager.log_location(label);
-        let stopped = self.manager.stop(label);
+        let stopped = self.manager.stop(label).await;
         Err(LlamaCppError::Supervisor(match stopped {
             Ok(()) => format!("{reason}; the service was stopped; see logs at {logs}"),
             // An exited (collected) unit is "not loaded": its stop error is expected.
@@ -451,7 +451,7 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
         };
         let endpoint = endpoint_for(plan);
         // Update: remove the previous instance and let its port go quiet first.
-        self.manager.release(&label);
+        self.manager.release(&label).await;
         if !self.drain.is_zero() {
             self.wait_released(&label, &endpoint).await?;
         }
@@ -507,7 +507,7 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
     }
 
     async fn stop(&self, handle: &RuntimeHandle) -> Result<(), LlamaCppError> {
-        self.manager.stop(&handle.id)
+        self.manager.stop(&handle.id).await
     }
 
     async fn stop_recorded(
@@ -515,7 +515,7 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
         handle: &RuntimeHandle,
         definition: Option<&Path>,
     ) -> Result<(), LlamaCppError> {
-        self.manager.stop_recorded(&handle.id, definition)
+        self.manager.stop_recorded(&handle.id, definition).await
     }
 
     async fn stop_recorded_with_env(
@@ -526,6 +526,7 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
     ) -> Result<(), LlamaCppError> {
         self.manager
             .stop_recorded_with_env(&handle.id, definition, env)
+            .await
     }
 
     fn host_context(&self) -> Option<crate::service::HostContext> {

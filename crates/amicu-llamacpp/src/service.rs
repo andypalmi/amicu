@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
+
 use amicu_runtime::LogOptions;
 
 use crate::error::LlamaCppError;
@@ -101,6 +103,7 @@ pub struct ServicePaths {
 }
 
 /// Load/start, query, stop, and read logs for a supervised service.
+#[async_trait]
 pub trait ServiceManager: Send + Sync {
     /// Where this manager keeps `label`'s definition and logs, if it can tell.
     fn paths(&self, _label: &str) -> Option<ServicePaths> {
@@ -115,11 +118,13 @@ pub trait ServiceManager: Send + Sync {
     fn instance_owner(&self, _label: &str) -> Option<u32> {
         None
     }
-    /// Best-effort removal of any previous instance with this label, so an
-    /// update can start the new one (a loaded launchd job would keep the old
-    /// definition; a running systemd unit would not pick up the new one). Errors
-    /// are ignored: normally there is nothing to release.
-    fn release(&self, _label: &str) {}
+    /// Best-effort stop of any previous instance with this label, so an update
+    /// can start the new one (a loaded launchd job would keep the old
+    /// definition; a running systemd unit would not pick up the new one).
+    /// launchd waits for the job to unload (bootout is asynchronous). Errors
+    /// are ignored: normally there is nothing to release, and `start` reports
+    /// a job that lingers.
+    async fn release(&self, _label: &str) {}
     /// Read-only probe of an instance recorded as `label` (and, for launchd,
     /// started in `domain`). Never acts as a different domain than recorded.
     /// `Err` means the manager could not answer.
@@ -131,23 +136,27 @@ pub trait ServiceManager: Send + Sync {
     /// The service's current lifecycle state.
     fn state(&self, label: &str) -> Result<ServiceState, LlamaCppError>;
     /// Stop and unload the service.
-    fn stop(&self, label: &str) -> Result<(), LlamaCppError>;
+    async fn stop(&self, label: &str) -> Result<(), LlamaCppError>;
     /// [`stop`](Self::stop), deleting the service definition at `definition`
     /// (the path recorded in state when it was written) instead of the one
     /// recomputed from `$HOME`. `None`: recompute (legacy records).
-    fn stop_recorded(&self, label: &str, _definition: Option<&Path>) -> Result<(), LlamaCppError> {
-        self.stop(label)
+    async fn stop_recorded(
+        &self,
+        label: &str,
+        _definition: Option<&Path>,
+    ) -> Result<(), LlamaCppError> {
+        self.stop(label).await
     }
     /// [`stop_recorded`](Self::stop_recorded), also deleting the secrets
     /// environment file recorded in state at `env` (systemd). `None`: derive it
     /// (records that predate the field).
-    fn stop_recorded_with_env(
+    async fn stop_recorded_with_env(
         &self,
         label: &str,
         definition: Option<&Path>,
         _env: Option<&Path>,
     ) -> Result<(), LlamaCppError> {
-        self.stop_recorded(label, definition)
+        self.stop_recorded(label, definition).await
     }
     /// A one-line advisory to show after a successful start, when this host
     /// would not bring the service back after a reboot as is (systemd user
@@ -278,21 +287,32 @@ impl<E: CommandExec> LaunchdManager<E> {
     }
 
     /// `launchctl bootout` returns before the job is gone: the job stays
-    /// listed (state `SIGTERMed`) until its process has exited. Poll
-    /// `launchctl print` with a short backoff until the job is unloaded.
+    /// listed (state `SIGTERMed`, or a transient `spawn scheduled` / `exited`
+    /// / throttled one) until its process has exited. Poll `launchctl print`
+    /// with a short backoff, asynchronously, until the job is unloaded. Any
+    /// state in which launchd still lists the job counts as loaded, never as
+    /// stopped. Prints a one-line progress note the first time it has to wait.
     /// `Ok(true)` once gone, `Ok(false)` if still loaded after the timeout.
-    fn wait_unloaded(&self, domain: &str, label: &str) -> Result<bool, LlamaCppError> {
+    async fn wait_unloaded(&self, domain: &str, label: &str) -> Result<bool, LlamaCppError> {
         let started = Instant::now();
         let mut delay = Duration::from_millis(50);
+        let mut announced = false;
         loop {
             if !self.is_loaded(domain, label)? {
                 return Ok(true);
+            }
+            if !announced {
+                announced = true;
+                eprintln!(
+                    "waiting for {label} to stop (up to {}s)...",
+                    self.settle_timeout.as_secs()
+                );
             }
             let left = self.settle_timeout.saturating_sub(started.elapsed());
             if left.is_zero() {
                 return Ok(false);
             }
-            std::thread::sleep(delay.min(left));
+            tokio::time::sleep(delay.min(left)).await;
             delay = (delay * 2).min(Duration::from_millis(500));
         }
     }
@@ -355,14 +375,10 @@ impl LaunchdManager<HostExec> {
     }
 }
 
-/// Whether `launchctl print` output says the job's own state is not
-/// `running`: `not running`, or `SIGTERMed`/`SIGKILLed` (right after a
-/// `bootout` the job stays listed while its process is torn down, and must
-/// count as down, not as a healthy service). A line that is exactly one of
-/// those at the job's
-/// top level, not the same text nested in a sub-block (an endpoint, a
-/// dispatch-state entry) that says nothing about the job.
-fn job_not_running(print_output: &str) -> bool {
+/// The job's own `state = ...` value from `launchctl print` output: the line
+/// at the job's top level, not the same key nested in a sub-block (an
+/// endpoint, a dispatch-state entry) that says nothing about the job.
+fn job_state(print_output: &str) -> Option<&str> {
     let indent = |l: &str| l.len() - l.trim_start().len();
     let mut body: Vec<&str> = print_output
         .lines()
@@ -374,18 +390,29 @@ fn job_not_running(print_output: &str) -> bool {
         body.remove(0);
     }
     body.retain(|l| l.trim() != "}");
-    let Some(top) = body.iter().map(|l| indent(l)).min() else {
-        return false;
-    };
-    body.iter().any(|l| {
-        indent(l) == top
-            && matches!(
-                l.trim(),
-                "state = not running" | "state = SIGTERMed" | "state = SIGKILLed"
-            )
-    })
+    let top = body.iter().map(|l| indent(l)).min()?;
+    body.iter()
+        .filter(|l| indent(l) == top)
+        .find_map(|l| l.trim().strip_prefix("state = "))
 }
 
+/// What a listed job's top-level state says about whether it is running.
+/// `not running`, `exited`, and `SIGTERMed`/`SIGKILLed` (right after a
+/// `bootout` the job stays listed while its process is torn down) are down.
+/// `spawn scheduled` / `waiting` / throttled mean launchd is about to (re)start
+/// the job: not running now, but not confirmed down either, so `Unknown`
+/// (never reported stopped, so nothing is dropped and no orphan can appear).
+fn job_presence(print_output: &str) -> Presence {
+    match job_state(print_output) {
+        Some("not running" | "exited" | "SIGTERMed" | "SIGKILLed") => Presence::Down,
+        Some(s) if s == "spawn scheduled" || s == "waiting" || s.contains("throttl") => {
+            Presence::Unknown
+        }
+        _ => Presence::Running,
+    }
+}
+
+#[async_trait]
 impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
     fn paths(&self, label: &str) -> Option<ServicePaths> {
         Some(ServicePaths {
@@ -426,11 +453,7 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         let target = format!("{domain}/{label}");
         let out = self.exec.exec("launchctl", &["print", &target])?;
         if out.success {
-            return Ok(if job_not_running(&out.stdout) {
-                Presence::Down
-            } else {
-                Presence::Running
-            });
+            return Ok(job_presence(&out.stdout));
         }
         if out.code == Some(113) {
             // 113: "Could not find service".
@@ -443,7 +466,7 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         )))
     }
 
-    fn release(&self, label: &str) {
+    async fn release(&self, label: &str) {
         let domain = self.domain().ok().map(|(_, d)| d);
         if let Some(domain) = &domain {
             let _ = self
@@ -452,14 +475,14 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
             // Bootout is asynchronous: wait for the label to be released so the
             // next bootstrap does not race it (error 5). Best effort: if the
             // job lingers, fall through to remove and let `start` report it.
-            if matches!(self.wait_unloaded(domain, label), Ok(true)) {
+            if matches!(self.wait_unloaded(domain, label).await, Ok(true)) {
                 return;
             }
         }
         // By label too, even when the job is loaded under another name.
         let _ = self.exec.exec("launchctl", &["remove", label]);
         if let Some(domain) = &domain {
-            let _ = self.wait_unloaded(domain, label);
+            let _ = self.wait_unloaded(domain, label).await;
         }
     }
 
@@ -524,11 +547,15 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         })
     }
 
-    fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
-        self.stop_recorded(label, None)
+    async fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
+        self.stop_recorded(label, None).await
     }
 
-    fn stop_recorded(&self, label: &str, definition: Option<&Path>) -> Result<(), LlamaCppError> {
+    async fn stop_recorded(
+        &self,
+        label: &str,
+        definition: Option<&Path>,
+    ) -> Result<(), LlamaCppError> {
         let plist = definition.map_or_else(|| self.plist_path(label), Path::to_path_buf);
         let (_, domain) = self.domain()?;
         let target = format!("{domain}/{label}");
@@ -539,13 +566,13 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         let mut detail = out.stderr.trim().to_owned();
         // Bootout is asynchronous: the job stays listed until its process has
         // exited, so wait for it rather than checking once.
-        if !self.wait_unloaded(&domain, label)? {
+        if !self.wait_unloaded(&domain, label).await? {
             // Fall back to removing by label, as `release` does.
             let out = self.exec.exec("launchctl", &["remove", label])?;
             if !out.stderr.trim().is_empty() {
                 out.stderr.trim().clone_into(&mut detail);
             }
-            if !self.wait_unloaded(&domain, label)? {
+            if !self.wait_unloaded(&domain, label).await? {
                 return Err(LlamaCppError::Supervisor(format!(
                     "launchd job {target} is still loaded after bootout and remove: {detail}"
                 )));
@@ -844,6 +871,7 @@ fn check_label(label: &str) -> Result<(), LlamaCppError> {
     Ok(())
 }
 
+#[async_trait]
 impl<E: CommandExec> ServiceManager for SystemdManager<E> {
     fn paths(&self, label: &str) -> Option<ServicePaths> {
         Some(ServicePaths {
@@ -900,7 +928,7 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
         })
     }
 
-    fn release(&self, label: &str) {
+    async fn release(&self, label: &str) {
         // Stop only: `start` rewrites the unit file and reloads, so an update
         // never has to remove the definition first.
         let _ = self.exec.exec("systemctl", &["--user", "stop", label]);
@@ -966,15 +994,19 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
         })
     }
 
-    fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
-        self.stop_recorded(label, None)
+    async fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
+        self.stop_recorded(label, None).await
     }
 
-    fn stop_recorded(&self, label: &str, definition: Option<&Path>) -> Result<(), LlamaCppError> {
-        self.stop_recorded_with_env(label, definition, None)
+    async fn stop_recorded(
+        &self,
+        label: &str,
+        definition: Option<&Path>,
+    ) -> Result<(), LlamaCppError> {
+        self.stop_recorded_with_env(label, definition, None).await
     }
 
-    fn stop_recorded_with_env(
+    async fn stop_recorded_with_env(
         &self,
         label: &str,
         definition: Option<&Path>,

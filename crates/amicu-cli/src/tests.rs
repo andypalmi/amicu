@@ -3321,3 +3321,62 @@ fn a_directory_symlink_loop_is_not_followed() {
     std::os::unix::fs::symlink(&td.path, td.path.join("loop")).unwrap();
     assert_eq!(project.load_graph().unwrap().models.len(), 1);
 }
+
+// ---- project root marker -----------------------------------------------------
+
+#[test]
+fn a_bare_dot_amicu_dir_does_not_make_a_project_root() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    // What the state lock leaves behind in any directory amicu ran from.
+    std::fs::create_dir_all(td.path.join(".amicu/state")).unwrap();
+    std::fs::write(td.path.join(".amicu/state/state.lock"), "").unwrap();
+    let sub = td.path.join("unrelated");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(sub.join("main.hcl"), VALID_CONFIG).unwrap();
+
+    assert!(!project.is_project_root().unwrap());
+    assert!(matches!(
+        project.config_files().unwrap_err(),
+        crate::error::CliError::NoConfig(_)
+    ));
+}
+
+#[test]
+fn a_real_marker_or_a_direct_hcl_file_makes_a_project_root() {
+    let config = TempDir::new();
+    std::fs::create_dir_all(config.path.join(".amicu")).unwrap();
+    std::fs::write(config.path.join(".amicu/config.yaml"), "").unwrap();
+    assert!(Project::new(&config.path).is_project_root().unwrap());
+
+    let state = TempDir::new();
+    std::fs::create_dir_all(state.path.join(".amicu/state")).unwrap();
+    std::fs::write(state.path.join(".amicu/state/state.json"), "{}").unwrap();
+    assert!(Project::new(&state.path).is_project_root().unwrap());
+
+    let hcl = TempDir::new();
+    write(&hcl.path, "amicu.hcl", VALID_CONFIG);
+    assert!(Project::new(&hcl.path).is_project_root().unwrap());
+}
+
+#[test]
+fn destroy_outside_a_project_creates_no_state_dir() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    let rig = Rig::new();
+    let mut out = Vec::new();
+    let code = commands::destroy::run_with(
+        &project,
+        &[],
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &rig.env(),
+    )
+    .unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(utf8(out), "Nothing to destroy.\n");
+    assert!(!td.path.join(".amicu").exists());
+}
