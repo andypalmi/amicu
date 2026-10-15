@@ -153,7 +153,7 @@ The steps are the same for any provider:
 4. Give the deployment an endpoint key: `api_key = secret("CHAT_API_KEY")`, with `CHAT_API_KEY` exported. Every off-machine endpoint needs one.
 5. Run `amicu validate`, `amicu plan`, `amicu apply`.
 
-`plan` shows `api_key: ******` and never reads the key. `apply` starts the deployment and then checks that the endpoint rejects anonymous requests and accepts your key. The first deploy downloads the weights and can take several minutes.
+`plan` shows `api_key: ******` and never reads the key value (it only checks that the variable is set). `apply` starts the deployment and then checks that the endpoint rejects anonymous requests and accepts your key. The first deploy downloads the weights and can take several minutes.
 
 Today, `apply` supports Modal as a remote GPU provider. Hetzner, OVHcloud, Scaleway, RunPod and SSH are in preview (adapter built, not wired into `apply`), and AWS, Azure, GCP and Nebius are planned. Selecting one of those fails at `apply` with a clear error before anything starts. Each provider page has its own setup and troubleshooting.
 

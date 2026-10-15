@@ -64,7 +64,7 @@ Diagnostics have the form `AMICU-<CATEGORY>-<NNN>`. The category is the fastest 
 
 | Code | Severity | Meaning | Fix |
 |---|---|---|---|
-| `AMICU-POLICY-002` | error | A region violates the residency or allowed-regions policy, or a deny rule. Also reported when a `secret("NAME")` variable is not set at apply time. | Change the region, or set the environment variable named in the message |
+| `AMICU-POLICY-002` | error | A region violates the residency or allowed-regions policy, or a deny rule. Also reported by `plan` and `apply` when a `secret("NAME")` variable needed by a deployment to be created or updated is not set. | Change the region, or set the environment variable named in the message |
 | `AMICU-POLICY-003` | error | A provider is not allowed, or is denied | Change the provider or the rule |
 | `AMICU-POLICY-004` | error | A secret-designated field was given as a literal | Use `secret("NAME")` |
 | `AMICU-POLICY-005` | warning | A free-text field or comment looks like a secret | Remove it, or add `# amicu:allow` on the line |

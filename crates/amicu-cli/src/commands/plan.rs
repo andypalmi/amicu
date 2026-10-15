@@ -25,6 +25,16 @@ pub(crate) fn run(
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
+    run_with(project, output, out, crate::secret::env_has_secret)
+}
+
+/// [`run`] with the secret lookup injected.
+pub(crate) fn run_with(
+    project: &Project,
+    output: OutputFormat,
+    out: &mut dyn Write,
+    secret_is_set: fn(&str) -> bool,
+) -> Result<u8, CliError> {
     let graph = project.load_graph()?;
 
     // Surface structural errors (dangling refs, duplicate ids) through the same
@@ -51,7 +61,7 @@ pub(crate) fn run(
         g.deployments.retain(|d| !s.pending.contains(&d.id));
         g
     });
-    let result = match build_project_plan(project, &graph, prior.as_ref(), &recorded) {
+    let mut result = match build_project_plan(project, &graph, prior.as_ref(), &recorded) {
         Ok(result) => result,
         // A deployment failed to plan (e.g. a CAP-002/CAP-003 extra_args/env
         // conflict); `build_plan` hands back everything it collected instead
@@ -62,6 +72,10 @@ pub(crate) fn run(
             return Ok(1);
         }
     };
+
+    // apply would fail on these after starting work, so fail here instead.
+    let unset = crate::secret::missing_secrets_diagnostics(&result, secret_is_set);
+    result.diagnostics.extend(unset);
 
     if result.has_errors() {
         // Cannot produce a reviewable plan for an invalid config.

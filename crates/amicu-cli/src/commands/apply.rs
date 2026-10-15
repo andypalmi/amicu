@@ -111,6 +111,11 @@ pub(crate) fn run_with(
         }
     }
 
+    // Resolve-check every secret before any side effect: no approval prompt, no
+    // write-ahead state, no start.
+    let unset = crate::secret::missing_secrets_diagnostics(&result, env.secret_is_set);
+    result.diagnostics.extend(unset);
+
     if result.has_errors() {
         emit_report(
             &DiagnosticReport::new(result.diagnostics.clone()),
@@ -219,6 +224,9 @@ pub(crate) struct Env<'a> {
     pub proxy_tokens: fn() -> amicu_modal::proxy_auth::TokenConfig,
     /// Whether stdin is a terminal a person can answer a prompt on.
     pub interactive: bool,
+    /// Whether a secret name is set; a parameter so tests need not touch the
+    /// process environment.
+    pub secret_is_set: fn(&str) -> bool,
 }
 
 impl Env<'static> {
@@ -231,6 +239,7 @@ impl Env<'static> {
             purge,
             proxy_tokens: amicu_modal::proxy_auth::TokenConfig::from_env,
             interactive: std::io::IsTerminal::is_terminal(&std::io::stdin()),
+            secret_is_set: crate::secret::env_has_secret,
         }
     }
 }
@@ -719,24 +728,30 @@ fn record_partial(
     if !stopped.is_empty() {
         done.push(format!("stopped: {stopped}"));
     }
-    let mut done = done.join("; ");
+    let finished = done.join("; ");
     if let Some(id) = &progress.in_flight {
-        let note = format!(
-            "; '{id}' failed mid-start and is recorded as pending: it may be running, and \
+        done.push(format!(
+            "'{id}' failed mid-start and is recorded as pending: it may be running, and \
              `amicu destroy --target {id}` will stop it (or re-run `amicu apply` to retry)"
-        );
-        done.push_str(&note);
+        ));
     }
-    if !done.is_empty() {
-        done = format!(" ({done})");
-    }
+    let done = if done.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", done.join("; "))
+    };
+    let recorded = if finished.is_empty() {
+        "recorded in state"
+    } else {
+        "already done and recorded in state"
+    };
     let retry = match op {
         Op::Apply => "`amicu apply`",
         Op::Destroy => "`amicu destroy` (add `--target <name>` to limit it)",
     };
     match project.save_state(&state) {
         Ok(()) => CliError::Message(format!(
-            "{err}\n\n{verb} stopped part-way; already done and recorded in state{done}. \
+            "{err}\n\n{verb} stopped part-way; {recorded}{done}. \
              Fix the error and re-run {retry} to finish the rest"
         )),
         Err(save_err) => CliError::Message(format!(
@@ -873,6 +888,13 @@ fn modal_supervisor(
 /// report the latter (`AMICU-POLICY-007`); this is the backstop for callers
 /// that reach `apply` without them.
 fn preflight(result: &PlanResult, env: &Env<'_>) -> Result<(), CliError> {
+    let missing = crate::secret::missing_secrets(result, env.secret_is_set);
+    if !missing.is_empty() {
+        return Err(CliError::Message(format!(
+            "[AMICU-POLICY-002] {}; nothing was started",
+            crate::secret::missing_secrets_message(&missing)
+        )));
+    }
     for item in &result.items {
         if let Some(launch) = &item.launch {
             require_dispatch(
@@ -2139,6 +2161,7 @@ resource "deployment" "beta" {
         assert!(err.contains("started: alpha"), "{err}");
         assert!(err.contains("recorded in state"), "{err}");
         assert!(err.contains("'beta' failed mid-start"), "{err}");
+        assert!(!err.contains("(;"), "{err}");
 
         let state = project.load_state().unwrap().expect("state was saved");
         let ids: Vec<_> = state
@@ -2219,6 +2242,35 @@ resource "deployment" "beta" {
             pending,
             vec!["alpha", "beta"],
             "beta must not look unchanged"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_an_in_flight_start_has_no_empty_done_list() {
+        let dir = std::env::temp_dir().join(format!("amicu-partial-fl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = Project::new(&dir);
+        let graph = amicu_hcl::parse_graph(CONFIG).unwrap();
+        let progress = Progress {
+            in_flight: Some(handle(&graph, "beta", "x").deployment),
+            ..Progress::default()
+        };
+        let err = record_partial(
+            &project,
+            &graph,
+            None,
+            &progress,
+            CliError::Message("boom".to_owned()),
+            super::Op::Apply,
+        )
+        .to_string();
+        assert!(!err.contains("(;"), "{err}");
+        assert!(!err.contains("already done"), "{err}");
+        assert!(
+            err.contains("recorded in state ('beta' failed mid-start"),
+            "{err}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
