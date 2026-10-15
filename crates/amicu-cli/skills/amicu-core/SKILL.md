@@ -21,7 +21,9 @@ through the CLI rather than guessing configuration.
 ## Core workflow
 
 ```bash
-amicu init                 # scaffold amicu.hcl + .amicu/ in the current dir
+amicu init                 # scaffold amicu.hcl + .amicu/ (starter matched to this machine)
+amicu init --target mac|linux-cuda|linux-cpu|modal   # pick the starter
+amicu catalog fits         # what fits this machine (also: catalog hardware, catalog presets)
 amicu fmt                  # canonical formatting (--check to detect drift only)
 amicu validate --output json   # structural + reference + capacity checks
 amicu plan --output json       # actions the next apply would take
@@ -34,7 +36,7 @@ emits a stable contract. A non-zero exit means diagnostics with severity error.
 
 ## Command discovery
 
-Only `init`, `fmt`, `validate`, `plan`, `apply`, `doctor`, and
+Only `init`, `fmt`, `validate`, `plan`, `apply`, `doctor`, `catalog`, and
 `skill export` are implemented today. Commands the workflow references but that
 are not yet available (`schema`, `capabilities`, `models`, `presets`,
 `recommend`) are planned; do not invent flags for them or assume they run.

@@ -18,11 +18,11 @@ resource "model" "qwen3_8b" {
     format       = "gguf"
     quantization = "q4_k_m"
   }
-  context_length = 100000
+  context_length = 32768
   variant {
     quantization = "q4_k_m"
     file         = "Qwen3-8B-Q4_K_M.gguf"
-    size         = "5027783488"
+    size         = "5027783488B"
   }
 }
 
@@ -42,7 +42,7 @@ resource "deployment" "qwen3_8b_local" {
   hardware = hardware_profile.local_dev.id
   runtime  = "llama_cpp"
   llama_cpp {
-    context_length = 100000
+    context_length = 32768
     port           = 8000
     n_gpu_layers   = -1
   }
@@ -50,7 +50,7 @@ resource "deployment" "qwen3_8b_local" {
 ```
 
 ```bash
-amicu init      # scaffolds the config above as amicu.hcl
+amicu init      # scaffolds a config like the above, sized to this machine (--target mac|linux-cuda|linux-cpu|modal)
 amicu plan      # checks it fits in memory and shows what apply would do, diffed against state
 amicu apply     # shows the plan, asks for approval, starts the model, checks the endpoint
 amicu destroy   # stops and removes the recorded deployments (asks for approval)

@@ -7,6 +7,7 @@ mod catalog;
 mod checks;
 mod commands;
 mod error;
+mod host;
 mod lock;
 mod modal_ops;
 mod planner;
@@ -56,7 +57,16 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Scaffold a new project in the current directory.
-    Init,
+    ///
+    /// Without `--target` the starter is chosen for this machine: macOS gets
+    /// `mac`, Linux with an NVIDIA GPU gets `linux-cuda`, any other Linux
+    /// gets `linux-cpu`. Local starters declare this machine's memory and
+    /// pick a small model that fits it.
+    Init {
+        /// Starter to write instead of auto-detecting.
+        #[arg(long, value_enum)]
+        target: Option<commands::init::InitTarget>,
+    },
     /// Canonically format the project's HCL files.
     Fmt {
         /// Report whether formatting would change files without writing.
@@ -114,6 +124,12 @@ enum Command {
     /// `MODAL_TOKEN_SECRET` to inspect Modal; without them that backend is
     /// reported as unavailable and the local ones still print.
     Orphans,
+    /// Read-only, offline views of the built-in hardware and preset data.
+    /// Does not require a project.
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogCommand,
+    },
     /// Export coding-agent skills. Does not require a project.
     Skill {
         #[command(subcommand)]
@@ -133,6 +149,16 @@ enum Command {
         #[command(subcommand)]
         command: TelemetryCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum CatalogCommand {
+    /// List the known GPUs and Apple Silicon chips with their memory sizes.
+    Hardware,
+    /// List the wizard presets.
+    Presets,
+    /// Show which starter models and presets fit this machine's memory.
+    Fits,
 }
 
 #[derive(Debug, Subcommand)]
@@ -309,6 +335,17 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
         };
     }
 
+    if let Command::Catalog { command } = &cli.command {
+        return match command {
+            CatalogCommand::Hardware => commands::catalog::hardware(cli.output, out),
+            CatalogCommand::Presets => commands::catalog::presets(cli.output, out),
+            CatalogCommand::Fits => {
+                let host = host::HostInfo::detect();
+                commands::catalog::fits(host.as_ref().map_err(String::as_str), cli.output, out)
+            }
+        };
+    }
+
     if let Command::Telemetry { command } = &cli.command {
         return match command {
             TelemetryCommand::Enable => commands::telemetry::enable(out),
@@ -320,11 +357,17 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
     let project = Project::discover()?;
     // One-time, interactive-only consent question. Lives
     // here, not in the command bodies, so command tests never reach a TTY.
-    if matches!(cli.command, Command::Init | Command::Apply { .. }) {
+    if matches!(cli.command, Command::Init { .. } | Command::Apply { .. }) {
         commands::telemetry::consent_prompt(cli.output);
     }
     match &cli.command {
-        Command::Init => commands::init::run(&project, out),
+        Command::Init { target } => {
+            // `modal` needs no local hardware, so do not probe for it.
+            let host = (*target != Some(commands::init::InitTarget::Modal))
+                .then(|| host::HostInfo::detect().ok())
+                .flatten();
+            commands::init::run(&project, *target, host.as_ref(), out)
+        }
         Command::Fmt { check } => commands::fmt::run(&project, *check, out),
         Command::Validate { fix } => commands::validate::run(&project, *fix, cli.output, out),
         Command::Plan => commands::plan::run(&project, cli.output, out),
@@ -356,7 +399,10 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
         ),
         Command::Doctor => commands::doctor::run(&project, cli.output, out),
         Command::Orphans => commands::orphans::run(&project, cli.output, out),
-        Command::Skill { .. } | Command::Modal { .. } | Command::Telemetry { .. } => {
+        Command::Skill { .. }
+        | Command::Modal { .. }
+        | Command::Telemetry { .. }
+        | Command::Catalog { .. } => {
             unreachable!("handled before project discovery")
         }
     }

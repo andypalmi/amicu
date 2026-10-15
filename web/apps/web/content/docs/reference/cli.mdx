@@ -9,22 +9,47 @@ amicu [--output human|json] <command>
 
 `--output` is global. The default is `human`. Run `amicu <command> --help` for the authoritative flag list of your build.
 
-Commands operate on the project in the current directory. `skill` and the provider commands (`modal` today) do not need a project.
+Commands operate on the project in the current directory. `catalog`, `skill` and the provider commands (`modal` today) do not need a project.
 
 ## Project commands
 
 | Command | Description |
 |---|---|
-| `amicu init` | Scaffold `amicu.hcl`, `variables.amicu.hcl`, and `.amicu/`. Idempotent; never overwrites. |
+| `amicu init [--target mac\|linux-cuda\|linux-cpu\|modal]` | Scaffold `amicu.hcl`, `variables.amicu.hcl`, and `.amicu/`. Idempotent; never overwrites. Without `--target`, the starter is chosen for this machine, see [Init targets](#init-targets). |
 | `amicu fmt [--check]` | Rewrite `*.hcl` in canonical form. With `--check`, write nothing and exit 1 if any file would change. |
 | `amicu validate [--fix]` | Structural, reference, capacity, and policy checks. `--fix` applies safe repairs (re-formatting only). |
 | `amicu plan` | Compute the actions the next apply would take, diffed against state. |
 | `amicu apply [--auto-approve] [--lock-timeout <secs>]` | Execute the plan. Prompts for approval unless `--auto-approve` (alias `--yes`); with no terminal on stdin it fails with an error naming `--auto-approve` instead of waiting. `--lock-timeout` waits for the state lock instead of failing at once. |
 | `amicu destroy [--target <name>]... [--auto-approve] [--lock-timeout <secs>] [--forget-unconfirmed] [--purge]` | Stop and remove the deployments recorded in state: all of them, or only the named `--target`s (unknown names are an error). Prompts `Destroy these deployments? [y/N]` unless `--auto-approve` (alias `--yes`). `--purge` also deletes the host log files recorded for the destroyed deployments. A plain destroy leaves the logs in place but keeps them recorded in state, so a later `amicu destroy --purge` (even with nothing left to destroy) removes them and clears the record. Like apply, destroy fails without a terminal unless `--auto-approve` is passed. Modal cache volumes are never deleted. `--forget-unconfirmed` requires `--target` and applies only to a Modal deployment whose app cannot be found by name and has no recorded app id; it removes the record from state without stopping anything, like `terraform state rm`. It works only when the record's recorded workspace is known and matches the active Modal workspace. Otherwise it is refused: for a record with no workspace, the error points to `amicu modal stop <app>`; for a workspace mismatch, the error asks you to switch Modal tokens. Use it only after checking the Modal dashboard. |
-| `amicu doctor` | Environment and project diagnostics. |
+| `amicu doctor` | Environment and project diagnostics. With a local hardware profile it also compares the profile with this machine (`AMICU-MEM-003`). |
 | `amicu orphans` | List amicu Modal apps, launchd jobs, and systemd units that this project's state does not track, with the manual stop command for each. Read-only. Never stops anything. See [Orphaned resources](/docs/operate/orphans). |
 
 `destroy` works like `terraform destroy`. To remove a deployment without tearing it down first, delete its resource from the configuration and run `amicu apply`. See [Plan, apply and state](/docs/concepts/plan-apply-state#destroy).
+
+## Init targets
+
+`amicu init --target <target>` writes a starter `amicu.hcl`. Without `--target`, macOS gets `mac`, Linux with `nvidia-smi` gets `linux-cuda`, and any other Linux gets `linux-cpu`. Windows is not supported for local runs.
+
+| Target | Runtime | Hardware profile |
+|---|---|---|
+| `mac` | llama.cpp, all layers on the GPU (Metal) | `local_apple` with the detected chip and unified memory |
+| `linux-cuda` | llama.cpp, `n_gpu_layers = -1` | `on_prem` with the detected GPU model and VRAM |
+| `linux-cpu` | llama.cpp, `n_gpu_layers = 0` | `local_cpu` with the detected CPU and memory |
+| `modal` | vLLM on one Modal L4 | The [Modal](/docs/providers/modal) example; needs the Modal tokens and `CHAT_API_KEY` |
+
+The local targets pick the largest of Qwen3 8B, 4B, 1.7B and 0.6B (GGUF) that fits the detected memory, and a context length to match. `linux-cpu` starts at 4B. A local target must match the machine it runs on. The starter is a starting point: change the model, then run `amicu validate` and `amicu plan`.
+
+## Catalog commands
+
+Read-only and offline. They read data built into amicu and need no project, network or credentials.
+
+| Command | Description |
+|---|---|
+| `amicu catalog hardware` | Known consumer GPUs and Apple Silicon chips, with the memory sizes they ship in. |
+| `amicu catalog presets` | The wizard presets: id, name and summary. |
+| `amicu catalog fits` | Which starter models and presets fit this machine's memory, from the same weight-fit estimate as `validate`. Weights only, after a 2 GiB reserve. A preset is judged with this machine as its hardware. |
+
+All three accept `--output json`. `fits` emits `{ "version": "v1", "host": {...}, "starter_models": [...], "presets": [...] }`; each entry has a `verdict` of `fits`, `too_big` or `unknown`.
 
 ## Output lines
 
@@ -92,6 +117,7 @@ The stored choice is in `$XDG_CONFIG_HOME/amicu/telemetry.json`, or `~/.config/a
 - `validate` emits a diagnostic report: `{ "version": "v1", "valid": true, "diagnostics": [] }`. A `plan` that fails on errors emits the same shape.
 - A successful `plan` emits the plan: `{ "version": "v1", "actions": [...] }`.
 - `doctor` emits `{ "version": "v1", "ok": true, "checks": [...] }`.
+- `catalog hardware`, `catalog presets` and `catalog fits` emit JSON documents as described above.
 - With `apply --output json`, stdout carries only the resulting endpoint handles; the plan preview and approval prompt go to stderr.
 - With `destroy --output json`, stdout is a JSON array of the destroyed deployment ids. It is `[]` when there was nothing to destroy or the prompt was declined. The preview, the prompt, and the notes about log files and volumes go to stderr.
 

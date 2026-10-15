@@ -1,13 +1,15 @@
 //! `amicu doctor [--output json]` - environment and project diagnostics.
 
+use std::fmt::Write as _;
 use std::io::Write;
 
+use amicu_engine::host::host_diagnostics;
 use amicu_llamacpp::{BinaryConfig, CommandRunner, HostRunner, detect_binary};
-use amicu_runtime::discovery::discover_report;
 use serde::Serialize;
 
 use crate::OutputFormat;
 use crate::error::CliError;
+use crate::host::HostInfo;
 use crate::project::Project;
 use crate::write_json;
 
@@ -63,25 +65,46 @@ pub(crate) fn run(
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
+    let host = HostInfo::detect();
+    let disk_free = amicu_runtime::discovery::discover_report()
+        .ok()
+        .map(|r| r.disk_free.human());
+    run_with(
+        project,
+        output,
+        out,
+        host.as_ref().map_err(String::as_str),
+        disk_free,
+    )
+}
+
+/// [`run`] with the detected host injected.
+pub(crate) fn run_with(
+    project: &Project,
+    output: OutputFormat,
+    out: &mut dyn Write,
+    host: Result<&HostInfo, &str>,
+    disk_free: Option<String>,
+) -> Result<u8, CliError> {
     let mut checks = Vec::new();
 
-    match discover_report() {
-        Ok(report) => checks.push(check(
-            "host",
-            Status::Pass,
-            format!(
-                "{} · {} memory · {} disk free",
-                report.os,
-                report.profile.memory.human(),
-                report.disk_free.human()
-            ),
-        )),
-        Err(e) => checks.push(check("host", Status::Fail, e.to_string())),
+    match host {
+        Ok(host) => {
+            let mut detail = host.describe();
+            if let Some(free) = disk_free {
+                let _ = write!(detail, " · {free} disk free");
+            }
+            checks.push(check("host", Status::Pass, detail));
+        }
+        Err(e) => checks.push(check("host", Status::Fail, e)),
     }
 
     checks.push(binary_check(&HostRunner));
 
     checks.push(project_config_check(project));
+    if let Ok(host) = host {
+        checks.extend(profile_check(project, host));
+    }
     checks.push(state_dir_check(project));
 
     let report = DoctorReport::from_checks(checks);
@@ -129,6 +152,38 @@ fn project_config_check(project: &Project) -> Check {
         }
         Err(e) => check("config", Status::Fail, e.to_string()),
     }
+}
+
+/// Compare the project's local hardware profile with this machine
+/// (`AMICU-MEM-003`). `None` when there is no config or no local deployment,
+/// since then there is nothing to compare. A mismatch is a warning: the
+/// project may be planned for another machine.
+fn profile_check(project: &Project, host: &HostInfo) -> Option<Check> {
+    let graph = project.load_graph().ok()?;
+    let has_local = graph.deployments.iter().any(|d| {
+        graph
+            .hardware_profiles
+            .iter()
+            .find(|h| h.id == d.hardware_profile)
+            .is_some_and(|h| amicu_core::resource::is_local_provider(&h.provider))
+    });
+    if !has_local {
+        return None;
+    }
+    let diags = host_diagnostics(&graph, &host.facts());
+    if diags.is_empty() {
+        return Some(check(
+            "profile",
+            Status::Pass,
+            "declared hardware does not exceed this machine",
+        ));
+    }
+    let detail = diags
+        .iter()
+        .map(|d| format!("[{}] {}", d.code, d.message))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(check("profile", Status::Warn, detail))
 }
 
 fn state_dir_check(project: &Project) -> Check {

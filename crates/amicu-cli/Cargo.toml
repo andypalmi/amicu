@@ -27,6 +27,9 @@ amicu-engine = { path = "../amicu-engine" }
 amicu-llamacpp = { path = "../amicu-llamacpp" }
 amicu-vllm = { path = "../amicu-vllm" }
 amicu-runtime = { path = "../amicu-runtime" }
+amicu-providers = { path = "../amicu-providers" }
+amicu-recommend = { path = "../amicu-recommend" }
+amicu-registry = { path = "../amicu-registry" }
 # CLI-only: `amicu modal auth-check`. Deliberately not a dependency of
 # amicu-api/amicu-server, so the shipped `amicu-server` binary (built with
 # `cargo build -p amicu-server`) never links it. Note this doesn't fully

@@ -1,6 +1,7 @@
 //! The command implementations.
 
 pub(crate) mod apply;
+pub(crate) mod catalog;
 pub(crate) mod destroy;
 pub(crate) mod doctor;
 pub(crate) mod fmt;

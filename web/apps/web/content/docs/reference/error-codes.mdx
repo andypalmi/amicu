@@ -59,6 +59,7 @@ Diagnostics have the form `AMICU-<CATEGORY>-<NNN>`. The category is the fastest 
 |---|---|---|---|
 | `AMICU-MEM-001` | error | The model does not fit in available GPU VRAM. The message names the model weights and the usable and total memory. For vLLM the message includes the KV cache when the model shape is known. Unified or system memory is `AMICU-MEM-002`. | Smaller quantization, shorter context, or bigger hardware. `memory_check = "warn"` on the deployment turns it into a warning |
 | `AMICU-MEM-002` | error | A single artifact file exceeds available memory | A smaller variant or different hardware. `memory_check = "warn"` on the deployment turns it into a warning |
+| `AMICU-MEM-003` | warning | A local hardware profile declares more memory (or accelerator memory) than the machine running `plan` has. A model sized for the profile may fail to load. It is a warning because `plan` can run on another machine than the target, such as CI. `amicu doctor` reports the same comparison. Not checked for remote providers, and a declared figure up to 5% above the detected one is accepted | Correct the `hardware_profile` to this machine, or ignore it when you are planning for another one |
 
 ## POLICY
 
