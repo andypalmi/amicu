@@ -43,31 +43,52 @@ jobs:
 
             // Issue-form bodies render each field as "### <label>" then the value.
             // Label -> max characters. Logs/output/command fields are exempt (not listed).
-            const FIELD_LIMITS = {
-              'Description': 1000,
-              'Problem': 1000,
-              'Proposed behaviour': 1000,
-              'Expected': 500,
-              'Actual': 500,
-              'Alternatives': 500,
-            };
+            const FIELD_LIMITS = new Map([
+              ['Description', 1000],
+              ['Problem', 1000],
+              ['Proposed behaviour', 1000],
+              ['Expected', 500],
+              ['Actual', 500],
+              ['Alternatives', 500],
+            ]);
+            // Exempt from every length check, including the whole-body total.
+            const EXEMPT = new Set(['Command run', 'Full output']);
+            // Every label from .github/ISSUE_TEMPLATE/*.yml; only these start a section.
+            const KNOWN = new Set([
+              ...FIELD_LIMITS.keys(), ...EXEMPT,
+              'amicu version', 'Area', 'OS', 'Accelerator', 'Checks',
+            ]);
 
-            const body = issue.body || '';
+            const body = (issue.body || '').replace(/\r\n/g, '\n');
             const reasons = [];
 
-            if (body.length > MAX_BODY) {
-              reasons.push(`the whole issue is ${body.length} characters (limit ${MAX_BODY})`);
+            // Split into sections; ignore heading-like lines inside ``` fences.
+            const sections = [{ label: null, lines: [] }];
+            let fenced = false;
+            for (const line of body.split('\n')) {
+              if (/^\s*```/.test(line)) fenced = !fenced;
+              const m = fenced ? null : /^### (.+?)\s*$/.exec(line);
+              if (m && KNOWN.has(m[1])) {
+                sections.push({ label: m[1], lines: [] });
+              } else {
+                sections[sections.length - 1].lines.push(line);
+              }
             }
 
-            for (const section of body.split(/^### /m).slice(1)) {
-              const nl = section.indexOf('\n');
-              const label = (nl === -1 ? section : section.slice(0, nl)).trim();
-              const value = (nl === -1 ? '' : section.slice(nl + 1)).trim();
-              const limit = FIELD_LIMITS[label];
+            let counted = 0;
+            for (const { label, lines } of sections) {
+              const value = lines.join('\n').trim();
+              if (EXEMPT.has(label)) continue;
+              if (value !== '_No response_') counted += value.length;
+              const limit = FIELD_LIMITS.get(label);
               if (limit === undefined || value === '_No response_') continue;
               if (value.length > limit) {
                 reasons.push(`"${label}" is ${value.length} characters (limit ${limit})`);
               }
+            }
+
+            if (counted > MAX_BODY) {
+              reasons.unshift(`the issue is ${counted} characters excluding logs and command output (limit ${MAX_BODY})`);
             }
 
             if (reasons.length === 0) return;
@@ -82,4 +103,3 @@ jobs:
               owner, repo, issue_number: issue.number,
               body: `Please shorten this issue: ${reasons.join('; ')}. Logs and command output are exempt. Edit the issue to trim it; it stays open.`,
             });
-
