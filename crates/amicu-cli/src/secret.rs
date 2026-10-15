@@ -25,16 +25,18 @@ impl SecretResolver for EnvSecretResolver {
     }
 }
 
+/// Whether the secret `name` is set in the process environment to a valid
+/// (UTF-8) value, as the resolver requires. Presence only: the value is
+/// dropped and never logged.
+pub(crate) fn env_has_secret(name: &str) -> bool {
+    std::env::var(name).is_ok()
+}
+
 /// The secrets the launches in `result` need that are not set in the
 /// environment, sorted and de-duplicated. Only deployments that will be
 /// created, updated or replaced carry a launch, so secrets of deployments that
 /// are only destroyed or left unchanged never appear here. Names only: values
 /// are never read into the result.
-/// Whether the secret `name` is set in the process environment.
-pub(crate) fn env_has_secret(name: &str) -> bool {
-    std::env::var_os(name).is_some()
-}
-
 pub(crate) fn missing_secrets(
     result: &amicu_engine::planner::PlanResult,
     is_set: fn(&str) -> bool,
