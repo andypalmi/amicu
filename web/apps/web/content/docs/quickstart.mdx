@@ -18,16 +18,32 @@ See [Providers](/docs/providers) for every provider and its status.
 
 ## 2. Install
 
-There are no published binaries yet. Both options need Rust 1.97 or newer.
-
-Install the `amicu` binary into `~/.cargo/bin`:
+amicu runs on macOS and Linux (arm64 and x86_64). Windows is not supported.
 
 ```bash
-cargo install --locked --git https://github.com/andypalmi/amicu amicu-cli
+curl -LsSf https://amicu.dev/install.sh | sh
+```
+
+The installer downloads a prebuilt binary and puts `amicu` in `~/.local/bin`. It edits your shell profile, so open a new shell, then check it:
+
+```bash
+amicu --version
 amicu --help
 ```
 
-Or build from source:
+With Homebrew:
+
+```bash
+brew install andypalmi/tap/amicu
+```
+
+To build from source instead, you need Rust 1.97 or newer:
+
+```bash
+cargo install --locked --git https://github.com/andypalmi/amicu amicu-cli   # installs into ~/.cargo/bin
+```
+
+Or clone and build:
 
 ```bash
 git clone https://github.com/andypalmi/amicu.git
@@ -36,8 +52,6 @@ cargo build --release -p amicu-cli
 export PATH="$PWD/target/release:$PATH"
 amicu --help
 ```
-
-Prebuilt binaries, a shell installer and Homebrew are coming with the first release.
 
 ## 3. Initialize a project
 
