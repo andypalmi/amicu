@@ -85,7 +85,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "amicu-api"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-auth",
  "amicu-core",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-auth"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-core",
  "argon2 0.5.3",
@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-cli"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-core",
  "amicu-engine",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-core"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "async-trait",
  "rustversion",
@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-engine"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-core",
  "amicu-hcl",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-hcl"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-core",
  "hcl-rs",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-llamacpp"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-core",
  "amicu-registry",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-modal"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-core",
  "amicu-llamacpp",
@@ -240,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-plan"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "jsonschema",
  "schemars",
@@ -251,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-providers"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-core",
  "async-trait",
@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-recommend"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-core",
  "amicu-engine",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-registry"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-core",
  "async-trait",
@@ -292,7 +292,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-runtime"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-core",
  "async-trait",
@@ -305,11 +305,11 @@ dependencies = [
 
 [[package]]
 name = "amicu-schema"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 
 [[package]]
 name = "amicu-server"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-api",
  "amicu-auth",
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-state"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-core",
  "amicu-runtime",
@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-store"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-auth",
  "amicu-core",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-telemetry"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-core",
  "amicu-runtime",
@@ -379,11 +379,11 @@ dependencies = [
 
 [[package]]
 name = "amicu-validation"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 
 [[package]]
 name = "amicu-vllm"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-core",
  "amicu-llamacpp",
@@ -397,7 +397,7 @@ dependencies = [
 
 [[package]]
 name = "amicu-worker"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "amicu-core",
  "amicu-providers",
