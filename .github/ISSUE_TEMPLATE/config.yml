@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Question or discussion
+    url: https://github.com/andypalmi/amicu/discussions
+    about: Ask questions and share ideas here, not in issues.
   - name: Security vulnerability
-    url: https://github.com/andypalmi/amicu/security/advisories/new
+    url: https://github.com/andypalmi/amicu/security/policy
     about: Report security problems privately. Do not open a public issue.
-  - name: Documentation
-    url: https://amicu.dev/docs
-    about: Check the docs before opening an issue.

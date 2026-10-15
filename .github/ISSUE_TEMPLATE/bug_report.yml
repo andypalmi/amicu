@@ -5,48 +5,55 @@ body:
   - type: markdown
     attributes:
       value: |
+        Keep it short: one problem per issue, about 150 words plus the repro. No summaries or speculative fixes.
         Security problems do not go here. Report them privately, see https://github.com/andypalmi/amicu/security/policy.
   - type: input
     id: version
     attributes:
-      label: amicu version or commit
-      placeholder: "amicu --version, or the commit SHA"
+      label: amicu version
+      placeholder: "output of amicu --version"
     validations:
       required: true
-  - type: dropdown
-    id: area
+  - type: input
+    id: os
     attributes:
-      label: Area
-      options:
-        - CLI
-        - Server / API
-        - Web
-        - Docs
-        - Other
+      label: OS
+      placeholder: "e.g. macOS 15 arm64, Ubuntu 24.04 x86_64"
     validations:
       required: true
-  - type: textarea
-    id: what-happened
+  - type: input
+    id: accelerator
     attributes:
-      label: What happened
-      description: What you did, what you expected, and what happened instead.
+      label: Accelerator
+      placeholder: "e.g. Apple M2 Metal, NVIDIA RTX 4090 CUDA 12, CPU only"
     validations:
       required: true
-  - type: textarea
-    id: steps
+  - type: input
+    id: command
     attributes:
-      label: Steps to reproduce
-      placeholder: "1. ...\n2. ..."
+      label: Command run
+      placeholder: "the exact command"
     validations:
       required: true
   - type: textarea
-    id: environment
+    id: output
     attributes:
-      label: Environment
-      description: OS, architecture, Rust or Node version, and the provider involved if any.
-  - type: textarea
-    id: logs
-    attributes:
-      label: Logs or output
-      description: Remove secrets, API keys and endpoint credentials before pasting.
+      label: Full output
+      description: Complete output, not an excerpt. Remove secrets and API keys first.
       render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: Expected vs actual
+      description: One line each.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I reproduced this on the latest release and searched existing issues.
+          required: true
