@@ -1200,6 +1200,7 @@ mod env_file_tests {
         unit
     }
 
+    #[cfg(unix)]
     #[test]
     fn env_file_named_by_only_accepts_the_amicu_env_dir() {
         let named = SystemdManager::<HostExec>::env_file_named_by;

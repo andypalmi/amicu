@@ -2173,6 +2173,7 @@ async fn supervisor_hard_errors_on_settings_env_secret_collision() {
 
 // ---- absolute model path, binary resolution, readiness, replace (#204) -------
 
+#[cfg(unix)]
 #[test]
 fn plan_launch_uses_an_absolute_model_path_under_the_models_dir() {
     let adapter = fitting_adapter().with_models_dir("/proj/models");
@@ -2186,6 +2187,7 @@ fn plan_launch_uses_an_absolute_model_path_under_the_models_dir() {
     assert!(plan.rendered.as_text().contains("/proj/models/tiny_llama/"));
 }
 
+#[cfg(unix)]
 #[test]
 fn an_absolute_variant_file_is_left_as_is() {
     let catalog = MapCatalog::new()
@@ -2205,6 +2207,7 @@ fn an_absolute_variant_file_is_left_as_is() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bare_program_is_resolved_to_an_absolute_path_on_start() {
     let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
@@ -2215,6 +2218,7 @@ async fn bare_program_is_resolved_to_an_absolute_path_on_start() {
     assert_eq!(spec.argv[0], "/usr/local/bin/llama-server");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_absolute_program_is_not_searched_for() {
     let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
@@ -3693,6 +3697,7 @@ fn validate_is_clean_for_a_resolvable_draft_model() {
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
 
+#[cfg(unix)]
 #[test]
 fn plan_launch_renders_the_resolved_draft_gguf_path() {
     let d = speculative_deployment(SpeculativeSettings {

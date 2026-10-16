@@ -906,6 +906,7 @@ mod tests {
         assert_eq!(exec.calls(), ["launchctl list"]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn plist_fallback_keeps_tilde_unquoted() {
         assert_eq!(

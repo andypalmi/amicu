@@ -2187,6 +2187,7 @@ fn launchd_rec(project_id: &str, name: &str) -> StopRecord {
     rec
 }
 
+#[cfg(unix)]
 #[test]
 fn recorded_definition_and_log_paths_are_validated_against_the_record() {
     let rec = launchd_rec("aaaa1111", "chat");
@@ -2243,6 +2244,7 @@ fn recorded_definition_and_log_paths_are_validated_against_the_record() {
     assert!(with_log(format!("/Users/me/Library/Logs/amicu/{label}.err.log")).is_ok());
 }
 
+#[cfg(unix)]
 #[test]
 fn systemd_env_files_are_validated_in_the_env_dir_only() {
     let mut rec = StopRecord::host_in(
@@ -2276,6 +2278,7 @@ fn systemd_env_files_are_validated_in_the_env_dir_only() {
     assert!(check(format!("/tmp/systemd/user/{label}.service")).is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn the_recorded_systemd_secrets_file_is_validated_before_anything_is_deleted() {
     let mut rec = StopRecord::host_in(
