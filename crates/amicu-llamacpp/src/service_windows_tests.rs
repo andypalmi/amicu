@@ -677,6 +677,14 @@ fn a_task_that_ran_without_any_pid_record_is_never_confirmed_stopped() {
     // `/End` leaves the task Disabled; the server may live on unrecorded.
     let err = block_on(m.stop(LABEL)).unwrap_err().to_string();
     assert!(err.contains("cannot confirm"), "{err}");
+    let hint = format!(
+        "If no llama-server.exe is running (check Task Manager), run \
+         `schtasks /Delete /TN 'amicu\\{LABEL}' /F` and retry"
+    );
+    assert!(err.contains(&hint), "{err}");
+    // A new start points at the same way out, not at `/End`.
+    let err = m.start(&spec()).unwrap_err().to_string();
+    assert!(err.contains(&hint) && !err.contains("/End"), "{err}");
     assert!(!win.actions().iter().any(|a| a.contains("/Delete")));
     assert!(m.env_path(LABEL).exists());
     assert_eq!(m.presence(LABEL, None).unwrap(), Presence::Unknown);
@@ -826,4 +834,28 @@ fn an_incomplete_listing_is_an_error_not_an_empty_folder() {
         }
     }
     assert!(list_tasks(&Truncated).is_err());
+}
+
+#[test]
+fn the_server_image_gets_exe_when_argv0_has_no_extension() {
+    assert_eq!(server_image(r"C:\llama\llama-server"), "llama-server.exe");
+    assert_eq!(server_image("llama-server"), "llama-server.exe");
+    assert_eq!(
+        server_image(r"C:\llama\llama-server.exe"),
+        "llama-server.exe"
+    );
+    assert_eq!(server_image("/opt/x/LLAMA-SERVER.EXE"), "LLAMA-SERVER.EXE");
+    let mut s = spec();
+    s.argv[0] = r"C:\llama\llama-server".to_owned();
+    let script = launcher_script(
+        &s,
+        Path::new("e"),
+        Path::new("p"),
+        Path::new("o"),
+        Path::new("r"),
+    );
+    assert!(
+        script.contains("`t\" + 'llama-server.exe' + \"`n"),
+        "{script}"
+    );
 }

@@ -424,8 +424,8 @@ impl<E: CommandExec> TaskSchedulerManager<E> {
             }
             Liveness::Unclear => Err(LlamaCppError::Supervisor(format!(
                 "cannot confirm that {label} has stopped: its task has run but there is no \
-                 usable pid record (or its state is unknown). Check for llama-server.exe in \
-                 Task Manager; nothing was removed"
+                 usable pid record (or its state is unknown). Nothing was removed. {}",
+                recovery_hint(label)
             ))),
         }
     }
@@ -535,6 +535,29 @@ impl TaskSchedulerManager<HostExec> {
     }
 }
 
+/// The way out of an instance amicu cannot confirm stopped (a launcher that
+/// died before recording itself, a task whose state is stale): only the user
+/// can check that no server runs, then unregister the task by hand.
+fn recovery_hint(label: &str) -> String {
+    format!(
+        "If no llama-server.exe is running (check Task Manager), run `schtasks /Delete /TN {} /F` \
+         and retry",
+        ps_quote(&task_name(label))
+    )
+}
+
+/// The process name Windows reports for `program` (`Win32_Process.Name`):
+/// its file name, with `.exe` added when it has no extension (Windows runs
+/// `llama-server` as `llama-server.exe`).
+fn server_image(program: &str) -> String {
+    let name = program.rsplit(['\\', '/']).next().unwrap_or(program);
+    if Path::new(name).extension().is_some() {
+        name.to_owned()
+    } else {
+        format!("{name}.exe")
+    }
+}
+
 /// Task names may not contain these, beyond what [`check_label`] refuses.
 fn check_task_label(label: &str) -> Result<(), LlamaCppError> {
     check_label(label)?;
@@ -605,9 +628,9 @@ impl<E: CommandExec> ServiceManager for TaskSchedulerManager<E> {
         // it while anything of an earlier instance may still run.
         if self.liveness(label)? != Liveness::Gone {
             return Err(LlamaCppError::Supervisor(format!(
-                "an earlier instance of {label} may still be running; stop it first \
-                 (`amicu destroy`, or `schtasks /End /TN {}`)",
-                task_name(label)
+                "an earlier instance of {label} may still be running; stop it first with \
+                 `amicu destroy`. {}",
+                recovery_hint(label)
             )));
         }
         let env_body = env_file(&spec.env)?;
@@ -827,7 +850,7 @@ fn launcher_script(
     stderr: &Path,
 ) -> String {
     let program = &spec.argv[0];
-    let image = program.rsplit(['\\', '/']).next().unwrap_or(program);
+    let image = server_image(program);
     let arguments = if spec.argv.len() > 1 {
         let line = spec.argv[1..]
             .iter()
@@ -860,7 +883,7 @@ exit $p.ExitCode
         out = ps_quote(&stdout.to_string_lossy()),
         err = ps_quote(&stderr.to_string_lossy()),
         pid = ps_quote(&pid.to_string_lossy()),
-        image = ps_quote(image),
+        image = ps_quote(&image),
     )
 }
 
