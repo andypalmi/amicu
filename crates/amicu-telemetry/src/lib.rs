@@ -23,6 +23,7 @@ pub mod hardware;
 mod identity;
 mod log;
 mod metrics;
+pub mod prometheus;
 mod report;
 mod schema;
 
