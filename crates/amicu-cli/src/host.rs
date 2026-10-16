@@ -40,7 +40,8 @@ impl HostInfo {
     /// Probe the real machine. Fails on an OS discovery does not support.
     pub(crate) fn detect() -> Result<Self, String> {
         let report = discover_report().map_err(|e| e.to_string())?;
-        let nvidia = if report.os == "linux" {
+        let nvidia = if matches!(report.os.as_str(), "linux" | "windows") {
+            // `nvidia-smi` is found on PATH on both (the Windows driver installs it).
             nvidia_smi_output().and_then(|out| parse_nvidia_smi(&out))
         } else {
             None

@@ -4157,7 +4157,7 @@ resource "deployment" "d" {
         assert!(text.contains("qwen35_9b"));
         assert!(text.contains("local_dev_chat"));
         let err = commands::catalog::fits(
-            Err("unsupported OS: windows"),
+            Err("unsupported OS: freebsd"),
             OutputFormat::Human,
             &mut Vec::new(),
         )
