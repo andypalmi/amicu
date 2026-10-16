@@ -95,9 +95,17 @@ pub struct HostRunner;
 impl CommandRunner for HostRunner {
     fn which(&self, name: &str) -> Option<PathBuf> {
         let path = std::env::var_os("PATH")?;
+        // Windows executables carry an extension the caller does not spell out.
+        let names: &[String] = &[
+            name.to_owned(),
+            #[cfg(windows)]
+            format!("{name}.exe"),
+        ];
         std::env::split_paths(&path).find_map(|dir| {
-            let candidate = dir.join(name);
-            is_executable(&candidate).then_some(candidate)
+            names.iter().find_map(|n| {
+                let candidate = dir.join(n);
+                is_executable(&candidate).then_some(candidate)
+            })
         })
     }
 

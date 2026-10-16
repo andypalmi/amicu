@@ -366,9 +366,55 @@ pub fn host_supervisor() -> Box<dyn ProcessSupervisor> {
     {
         Box::new(LaunchdSupervisor::host())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), not(windows)))]
     {
         Box::new(SystemdSupervisor::host())
+    }
+    #[cfg(windows)]
+    {
+        Box::new(UnsupportedSupervisor)
+    }
+}
+
+/// Stand-in host supervisor where no service manager backend exists yet:
+/// every operation fails with a clear message.
+#[cfg(windows)]
+struct UnsupportedSupervisor;
+
+#[cfg(windows)]
+fn unsupported() -> LlamaCppError {
+    LlamaCppError::Supervisor("local deployments are not supported on Windows yet".to_owned())
+}
+
+#[cfg(windows)]
+#[async_trait]
+impl ProcessSupervisor for UnsupportedSupervisor {
+    async fn start(
+        &self,
+        _plan: &LaunchPlan,
+        _secrets: &[ResolvedSecret],
+    ) -> Result<RuntimeHandle, LlamaCppError> {
+        Err(unsupported())
+    }
+
+    async fn status(&self, _handle: &RuntimeHandle) -> Result<RuntimeStatus, LlamaCppError> {
+        Err(unsupported())
+    }
+
+    async fn metrics(&self, _handle: &RuntimeHandle) -> Result<RuntimeMetrics, LlamaCppError> {
+        Err(unsupported())
+    }
+
+    async fn logs(
+        &self,
+        _handle: &RuntimeHandle,
+        _options: LogOptions,
+    ) -> Result<LogStream, LlamaCppError> {
+        Err(unsupported())
+    }
+
+    async fn stop(&self, _handle: &RuntimeHandle) -> Result<(), LlamaCppError> {
+        Err(unsupported())
     }
 }
 

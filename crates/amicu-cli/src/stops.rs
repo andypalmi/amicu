@@ -28,6 +28,8 @@ pub(crate) enum Backend {
 
 impl Backend {
     /// The host backend of the machine amicu is running on.
+    // TODO: Windows has no host backend yet; `host_supervisor()` refuses to
+    // start anything there, so this fallback is never acted on.
     pub(crate) fn host() -> Self {
         if cfg!(target_os = "macos") {
             Self::HostLaunchd

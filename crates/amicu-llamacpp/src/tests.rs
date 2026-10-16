@@ -2873,6 +2873,7 @@ fn dir_entries(dir: &Path) -> usize {
     fs::read_dir(dir).map_or(0, Iterator::count)
 }
 
+#[cfg(unix)]
 #[test]
 fn systemd_start_writes_a_persistent_enabled_unit_with_a_0600_env_file() {
     use std::os::unix::fs::PermissionsExt;
@@ -3172,6 +3173,7 @@ fn systemd_refuses_a_label_that_is_not_one_plain_name() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn systemd_env_file_replaces_preexisting_files_and_symlinks() {
     use std::os::unix::fs::PermissionsExt;
@@ -3940,6 +3942,7 @@ fn service_spec_debug_shows_env_names_but_never_values() {
     assert!(!text.contains("hunter2-secret"), "{text}");
 }
 
+#[cfg(unix)]
 #[test]
 fn launchd_plist_carries_the_key_in_a_0600_file_removed_on_stop_and_on_failed_load() {
     use std::os::unix::fs::PermissionsExt;

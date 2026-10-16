@@ -1116,6 +1116,7 @@ fn remove_file_strict(path: &Path) -> Result<(), LlamaCppError> {
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
 }
