@@ -77,7 +77,7 @@ Local runs need the GGUF weights on disk first; see [Get the GGUF](https://amicu
 | Hetzner, OVHcloud, Scaleway, RunPod, SSH hosts | n/a | Preview: adapters built, not wired into `apply` |
 | AWS, Azure, GCP, Nebius | n/a | Catalog and pricing data only; `apply` fails with an error |
 
-Local runs target macOS and Linux. A provider `apply` cannot deploy to fails with a clear error; it never falls back to running locally.
+Local runs target macOS, Linux and Windows. A provider `apply` cannot deploy to fails with a clear error; it never falls back to running locally.
 
 ## Why amicu
 
@@ -87,13 +87,19 @@ Local runs target macOS and Linux. A provider `apply` cannot deploy to fails wit
 
 ## Install
 
-macOS and Linux only (arm64 and x86_64); Windows is not supported.
+macOS and Linux (arm64 and x86_64), and Windows (x86_64).
 
 ```bash
 curl -LsSf https://amicu.dev/install.sh | sh
 ```
 
 The installer downloads a prebuilt binary and puts `amicu` in `~/.local/bin`. It edits your shell profile, so open a new shell before running `amicu`.
+
+On Windows, use the PowerShell installer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://amicu.dev/install.ps1 | iex"
+```
 
 With Homebrew:
 
@@ -165,7 +171,7 @@ Every deployment can declare an `api_key = secret("NAME")`. It is a reference, n
 
 ## Platform notes
 
-- **llama.cpp, local:** macOS (Apple Silicon), Linux/CPU and Linux with an NVIDIA GPU (CUDA), run as a native process (launchd on macOS, a persistent systemd user unit on Linux). On Linux a deployment comes back after a reboot at boot only if user lingering is on (`sudo loginctl enable-linger $USER`), otherwise at your next login; `apply` prints a hint when lingering is off. For GPU offload the `llama-server` on `PATH` must be a CUDA build (`n_gpu_layers = -1` offloads all layers; a CPU-only build silently runs on the CPU), and the memory-fit check is made against the card's VRAM.
+- **llama.cpp, local:** macOS (Apple Silicon), Linux/CPU and Linux with an NVIDIA GPU (CUDA), and Windows x86_64 (CPU, CUDA or Vulkan), run as a native process (launchd on macOS, a persistent systemd user unit on Linux, a per-user Task Scheduler task that starts at logon on Windows, no admin rights needed). On Windows, install `llama-server.exe` with `winget install llama.cpp` or from the llama.cpp releases (CUDA or Vulkan zip) and put it on `PATH`; vLLM is Linux-only. On Linux a deployment comes back after a reboot at boot only if user lingering is on (`sudo loginctl enable-linger $USER`), otherwise at your next login; `apply` prints a hint when lingering is off. For GPU offload the `llama-server` on `PATH` must be a CUDA build (`n_gpu_layers = -1` offloads all layers; a CPU-only build silently runs on the CPU), and the memory-fit check is made against the card's VRAM.
 - **vLLM:** NVIDIA CUDA, AMD ROCm and Intel XPU GPUs, locally as a native single process (systemd on Linux).
 
 ## Development

@@ -9,7 +9,7 @@ Two equal paths. Pick one; steps 2 and 3 are shared.
 
 | | [Path A: on this machine](#path-a-on-this-machine) | [Path B: on a GPU provider](#path-b-on-a-gpu-provider) |
 |---|---|---|
-| Where | macOS or Linux, launchd or systemd user service | A remote GPU provider you have an account with |
+| Where | macOS, Linux or Windows; launchd, systemd or Task Scheduler user service | A remote GPU provider you have an account with |
 | Runtime | llama.cpp or vLLM | llama.cpp or vLLM |
 | Endpoint | Loopback, `api_key` optional | Public, `api_key` required |
 | Status | Supported | Today `apply` supports Modal; Hetzner, OVHcloud, Scaleway, RunPod and SSH are in preview, and AWS, Azure, GCP and Nebius are planned |
@@ -18,13 +18,19 @@ See [Providers](/docs/providers) for every provider and its status.
 
 ## 2. Install
 
-amicu runs on macOS and Linux (arm64 and x86_64). Windows is not supported.
+amicu runs on macOS and Linux (arm64 and x86_64) and on Windows (x86_64).
 
 ```bash
 curl -LsSf https://amicu.dev/install.sh | sh
 ```
 
-The installer downloads a prebuilt binary and puts `amicu` in `~/.local/bin`. It edits your shell profile, so open a new shell, then check it:
+The installer downloads a prebuilt binary and puts `amicu` in `~/.local/bin`. It edits your shell profile, so open a new shell, then check it. On Windows, use the PowerShell installer instead:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://amicu.dev/install.ps1 | iex"
+```
+
+Then open a new terminal and check it:
 
 ```bash
 amicu --version
@@ -64,7 +70,7 @@ amicu init --example
 
 `init` creates `amicu.hcl` (only a comment header, no resources), `variables.amicu.hcl` (a placeholder), and `.amicu/` (project config and state). It never overwrites existing files.
 
-For a working starter, add `--example`. A bare `--example` picks the one for this machine: macOS gets `mac`, Linux with `nvidia-smi` gets `linux-cuda`, and any other Linux gets `linux-cpu`. Its hardware profile is the detected machine, and it picks a Qwen3.5 GGUF model and a context length (up to the native 262144) that fit its memory, with output capped at 65536 tokens. It replaces the header-only `amicu.hcl` while that is unchanged, and never overwrites a file you edited. To choose yourself:
+For a working starter, add `--example`. A bare `--example` picks the one for this machine: macOS gets `mac`, Linux with `nvidia-smi` gets `linux-cuda`, and any other Linux gets `linux-cpu`. On Windows, pass the target explicitly (`--example linux-cuda`, `linux-cpu` or `modal`). Its hardware profile is the detected machine, and it picks a Qwen3.5 GGUF model and a context length (up to the native 262144) that fit its memory, with output capped at 65536 tokens. It replaces the header-only `amicu.hcl` while that is unchanged, and never overwrites a file you edited. To choose yourself:
 
 ```bash
 amicu init --example             # detect this machine
@@ -160,7 +166,7 @@ amicu apply
 
 `doctor` and `plan` compare a local hardware profile with this machine. If the profile declares more memory than the machine has, they print the warning `AMICU-MEM-003`. It is only a warning, because `plan` may run on another machine than the one you deploy to, such as CI. Fix the profile, or ignore it when that is the case.
 
-`plan` prints the exact `llama-server` command, with the model path relative to the project, `models/qwen35_27b/Qwen3.5-27B-Q4_K_M.gguf`. The service runs with the absolute path. `apply` shows the plan, asks for approval, installs a user service (launchd on macOS, systemd on Linux), starts it, and waits up to 15 minutes for `/health` to answer. If the service exits during startup, apply fails within seconds. On any failure it stops the service and the error gives the log location. See [This machine](/docs/providers/local).
+`plan` prints the exact `llama-server` command, with the model path relative to the project, `models/qwen35_27b/Qwen3.5-27B-Q4_K_M.gguf`. The service runs with the absolute path. `apply` shows the plan, asks for approval, installs a user service (launchd on macOS, systemd on Linux, a per-user Task Scheduler task that starts at logon on Windows), starts it, and waits up to 15 minutes for `/health` to answer. If the service exits during startup, apply fails within seconds. On any failure it stops the service and the error gives the log location. See [This machine](/docs/providers/local).
 
 ### Send a request
 

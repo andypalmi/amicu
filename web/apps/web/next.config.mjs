@@ -110,13 +110,19 @@ const config = {
   },
   transpilePackages: ['@amicu/ui', '@amicu/auth'],
   async redirects() {
-    // One-line installer. Config redirects run before proxy.ts. `releases/latest`
+    // One-line installers (shell and PowerShell). Config redirects run before proxy.ts. `releases/latest`
     // skips prereleases, so this serves the newest stable release.
     return [
       {
         source: '/install.sh',
         destination:
           'https://github.com/andypalmi/amicu/releases/latest/download/amicu-cli-installer.sh',
+        statusCode: 302,
+      },
+      {
+        source: '/install.ps1',
+        destination:
+          'https://github.com/andypalmi/amicu/releases/latest/download/amicu-cli-installer.ps1',
         statusCode: 302,
       },
     ];

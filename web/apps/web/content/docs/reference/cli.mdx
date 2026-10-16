@@ -28,7 +28,7 @@ Commands operate on the project in the current directory. `catalog`, `skill` and
 
 ## Init examples
 
-Plain `amicu init` writes an `amicu.hcl` with only a comment header (no resources); it validates and plans to nothing. `amicu init --example <target>` writes a starter instead. A bare `--example` detects the target: macOS gets `mac`, Linux with `nvidia-smi` gets `linux-cuda`, and any other Linux gets `linux-cpu`. Windows is not supported for local runs.
+Plain `amicu init` writes an `amicu.hcl` with only a comment header (no resources); it validates and plans to nothing. `amicu init --example <target>` writes a starter instead. A bare `--example` detects the target: macOS gets `mac`, Linux with `nvidia-smi` gets `linux-cuda`, and any other Linux gets `linux-cpu`. On Windows, pass the target explicitly: local runs use `linux-cuda` or `linux-cpu` (with `llama-server.exe` on `PATH`; vLLM is Linux-only), or use `modal`.
 
 | Target | Runtime | Hardware profile |
 |---|---|---|
