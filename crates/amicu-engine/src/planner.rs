@@ -193,6 +193,7 @@ pub fn build_plan_with(
             }
         };
         let rendered = launch.rendered.as_text().to_owned();
+        let shown = redacted_launch_text(&launch.rendered);
         let fingerprint = Fingerprint::compute(d, hardware, inputs.probe).with_launch(&rendered);
         fingerprints.insert(d.id.clone(), fingerprint.clone());
 
@@ -234,7 +235,7 @@ pub fn build_plan_with(
             action,
             launch: Some(launch),
             deployment: d.id.clone(),
-            rendered: Some(rendered),
+            rendered: Some(shown),
             fingerprint: Some(fingerprint),
             reason,
             changes,
@@ -456,6 +457,138 @@ fn value_looks_sensitive(v: &str) -> bool {
     v.contains("://")
 }
 
+/// Shown in place of any redacted value in plan output.
+pub const REDACTED: &str = "(redacted)";
+
+/// Whether a flag name (`--api-key`, `-hf-token`, ...) names a secret-bearing
+/// option or free-form template, judged word by word so `--tokenizer` does not
+/// match `token`.
+fn flag_is_secret(flag: &str) -> bool {
+    const NEEDLES: [&str; 9] = [
+        "key",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "auth",
+        "header",
+        "cookie",
+        "credential",
+    ];
+    // Free-form template text (the same value `is_redacted` hides as a setting).
+    if matches!(flag, "--chat-template" | "--chat-template-kwargs") {
+        return true;
+    }
+    flag.trim_start_matches('-')
+        .to_ascii_lowercase()
+        .split(['-', '_'])
+        .any(|part| !part.starts_with("tokeniz") && NEEDLES.iter().any(|n| part.contains(n)))
+}
+
+/// Whether `arg` is itself an option name rather than a value.
+fn looks_like_flag(arg: &str) -> bool {
+    arg.starts_with("--")
+        || (arg.len() == 2
+            && arg.starts_with('-')
+            && arg.chars().nth(1).is_some_and(char::is_alphabetic))
+}
+
+/// A command-line argument vector with secrets removed for display: the value
+/// after a secret-bearing flag (`--api-key v` and `--api-key=v`) and any
+/// argument that is or embeds a URL (`scheme://...`, whose path or userinfo
+/// can carry a token) become [`REDACTED`]. Everything else is unchanged.
+#[must_use]
+pub fn redact_argv(argv: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(argv.len());
+    let mut redact_next = false;
+    for arg in argv {
+        if std::mem::take(&mut redact_next) && !looks_like_flag(arg) {
+            out.push(REDACTED.to_owned());
+            continue;
+        }
+        if arg.starts_with('-') {
+            if let Some((flag, value)) = arg.split_once('=') {
+                if flag_is_secret(flag) || value_looks_sensitive(value) {
+                    out.push(format!("{flag}={REDACTED}"));
+                } else {
+                    out.push(arg.clone());
+                }
+                continue;
+            }
+            redact_next = flag_is_secret(arg);
+        }
+        out.push(if value_looks_sensitive(arg) {
+            REDACTED.to_owned()
+        } else {
+            arg.clone()
+        });
+    }
+    out
+}
+
+/// Quote one token for display: bare words pass through, the rest is
+/// single-quoted.
+fn display_quote(token: &str) -> String {
+    let safe = !token.is_empty()
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./=:,@%+()".contains(c));
+    if safe {
+        token.to_owned()
+    } else {
+        format!("'{}'", token.replace('\'', r"'\''"))
+    }
+}
+
+/// Display text for an argv with secrets removed ([`redact_argv`]).
+#[must_use]
+pub fn redacted_argv_text(argv: &[String]) -> String {
+    redact_argv(argv)
+        .iter()
+        .map(|a| display_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The launch line shown in a plan, with secrets removed. A command is
+/// rebuilt from its structured argv; a manifest (no argv) is redacted word by
+/// word.
+#[must_use]
+pub fn redacted_launch_text(rendered: &amicu_runtime::RenderedLaunch) -> String {
+    match rendered.argv() {
+        Some(argv) => redacted_argv_text(argv),
+        None => rendered
+            .as_text()
+            .lines()
+            .map(|line| {
+                let words: Vec<String> = line.split(' ').map(str::to_owned).collect();
+                redact_argv(&words).join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+/// A runtime setting as shown in a plan: values under a denied key
+/// ([`is_redacted`]) or holding a URL become [`REDACTED`]. `extra_args` is
+/// kept but redacted argument by argument ([`redact_argv`]); `env` lists names
+/// only; the endpoint
+/// `api_key` placeholder is already masked.
+fn redact_setting(mut s: Setting) -> Setting {
+    if s.key == "api_key" {
+        return s;
+    }
+    if s.key == "extra_args" || s.key == "env" {
+        // `extra_args` is redacted argument by argument where it is built;
+        // `env` carries variable names only, never values.
+        return s;
+    }
+    if is_redacted(&s.key) || value_looks_sensitive(&s.value) {
+        REDACTED.clone_into(&mut s.value);
+    }
+    s
+}
+
 fn planned_change(key: &str, old: Option<&String>, new: Option<&String>) -> PlannedChange {
     let redacted = is_redacted(key)
         || old.is_some_and(|v| value_looks_sensitive(v))
@@ -524,7 +657,10 @@ fn action_for(
         kind,
         address: format!("deployment.{}", d.id),
         artifact: variant.as_ref().map(variant_artifact),
-        runtime: runtime_settings_with_scaling(d),
+        runtime: runtime_settings_with_scaling(d)
+            .into_iter()
+            .map(redact_setting)
+            .collect(),
         hardware: hardware.map(hardware_label),
         provider: hardware.map(|h| h.provider.clone()),
         region: hardware.and_then(|h| h.region.as_ref().map(|r| r.code.clone())),
@@ -773,7 +909,7 @@ fn extend_with_extra_args_and_env(
     env: &std::collections::BTreeMap<String, String>,
 ) {
     if !extra_args.is_empty() {
-        settings.push(setting("extra_args", extra_args.join(" ")));
+        settings.push(setting("extra_args", redact_argv(extra_args).join(" ")));
     }
     if !env.is_empty() {
         settings.push(setting(
@@ -1921,5 +2057,58 @@ mod tests {
         let r = build_plan(&g, None).unwrap();
         assert_eq!(r.items[0].action.kind, ActionKind::Create);
         assert!(r.items[0].fingerprint.is_some());
+    }
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| (*a).to_owned()).collect()
+    }
+
+    #[test]
+    fn redact_argv_hides_secret_flag_values_and_urls() {
+        let out = redact_argv(&argv(&[
+            "llama-server",
+            "--api-key",
+            "v1",
+            "--hf-token=v2",
+            "--auth-token",
+            "v3",
+            "--alias",
+            "https://host/dl/tok/m.gguf",
+            "--mmproj=http://h/p",
+            "--tokenizer",
+            "tok",
+            "--no-auth",
+            "--threads",
+            "4",
+            "-hf",
+            "org/name",
+        ]));
+        assert_eq!(
+            out,
+            argv(&[
+                "llama-server",
+                "--api-key",
+                "(redacted)",
+                "--hf-token=(redacted)",
+                "--auth-token",
+                "(redacted)",
+                "--alias",
+                "(redacted)",
+                "--mmproj=(redacted)",
+                "--tokenizer",
+                "tok",
+                "--no-auth",
+                "--threads",
+                "4",
+                "-hf",
+                "org/name",
+            ])
+        );
+    }
+
+    #[test]
+    fn redacted_argv_text_quotes_like_a_shell() {
+        let text = redacted_argv_text(&argv(&["srv", "--header", "A: b c", "--x", "a b"]));
+        assert_eq!(text, "srv --header (redacted) --x 'a b'");
     }
 }

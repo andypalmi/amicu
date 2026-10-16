@@ -414,7 +414,10 @@ fn modal_launch_text(graph: &Graph, item: &PlanItem) -> Option<String> {
     {
         supervisor = supervisor.with_gguf_model(model);
     }
-    supervisor.launch_text(launch).ok()
+    supervisor
+        .launch_argv(launch)
+        .ok()
+        .map(|argv| amicu_engine::planner::redacted_argv_text(&argv))
 }
 
 /// How many changed fields an update lists before "and N more".
@@ -902,6 +905,77 @@ mod tests {
             assert!(!line.contains("0.0.0.0"), "{line}");
             assert!(!line.contains("--no-mmproj"), "{line}");
             assert!(!line.contains("-hf "), "{line}");
+        }
+    }
+
+    const SECRETS: [&str; 6] = [
+        "s3cr3t-extra",
+        "s3cr3t-equals",
+        "s3cr3t-token-path",
+        "s3cr3t-template",
+        "s3cr3t-header",
+        "s3cr3t-arg-url",
+    ];
+
+    fn leaky_graph(provider: &str) -> Graph {
+        let mut g = graph(provider, llama());
+        g.models[0].source.reference = "https://host.example/dl/s3cr3t-token-path/m.gguf".into();
+        let Runtime::LlamaCpp(s) = &mut g.deployments[0].runtime else {
+            unreachable!()
+        };
+        s.extra_args = [
+            "--proxy-token",
+            "s3cr3t-extra",
+            "--hf-token=s3cr3t-equals",
+            "--header",
+            "Authorization: Bearer s3cr3t-header",
+            "--mmproj-url",
+            "https://u:s3cr3t-arg-url@cdn.example/p.gguf",
+            "--threads",
+            "4",
+        ]
+        .map(String::from)
+        .to_vec();
+        s.chat_template = Some("{{ s3cr3t-template }}".into());
+        g
+    }
+
+    fn assert_no_secrets(text: &str) {
+        for secret in SECRETS {
+            assert!(!text.contains(secret), "{secret} leaked in:\n{text}");
+        }
+    }
+
+    #[test]
+    fn plan_output_never_shows_secrets_in_extra_args_urls_or_templates() {
+        for provider in ["local", "modal"] {
+            let g = leaky_graph(provider);
+            let result = build_plan(&g, None).expect("plan");
+
+            let mut human = Vec::new();
+            print_human(&result, &g, &mut human).expect("print");
+            let human = String::from_utf8(human).expect("utf8");
+            assert_no_secrets(&human);
+            assert!(human.contains("(redacted)"), "{human}");
+            assert!(human.contains("--threads 4"), "benign args stay: {human}");
+
+            let mut json = Vec::new();
+            crate::write_json(&mut json, &result.plan).unwrap();
+            let json = String::from_utf8(json).expect("utf8");
+            assert_no_secrets(&json);
+            let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let runtime = v["actions"][0]["runtime"].as_array().unwrap();
+            let value = |k: &str| {
+                runtime
+                    .iter()
+                    .find(|s| s["key"] == k)
+                    .map(|s| s["value"].as_str().unwrap().to_owned())
+            };
+            assert_eq!(value("chat_template").as_deref(), Some("(redacted)"));
+            let extra = value("extra_args").unwrap();
+            assert!(extra.contains("--proxy-token (redacted)"), "{extra}");
+            assert!(extra.contains("--hf-token=(redacted)"), "{extra}");
+            assert!(extra.contains("--threads 4"), "{extra}");
         }
     }
 }

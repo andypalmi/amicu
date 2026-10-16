@@ -74,3 +74,14 @@ Optional `cost` and `performance` ranges (`{min, max, unit?}`), a list of
 `required_secrets` carries secret **names only** (`Vec<String>`). Secret
 **values never appear** anywhere in a plan. A test asserts the field is a list
 of names.
+
+## Redaction in runtime settings and the launch line
+
+The `runtime` settings and the human `launch:` line apply the same rules as
+`redacted` changes. A setting under a denied key (`chat_template`, `build`,
+credential-like keys) or whose value contains `://` is shown as
+`(redacted)`. Inside `extra_args` and the launch command, the value after a
+secret-bearing flag (`--api-key v`, `--hf-token=v`, `--header`, `--cookie`, ...)
+and any argument containing `://` (for example a model URL with a token in its
+path) print as `(redacted)`; other arguments are unchanged. `env` lists
+variable names only.
