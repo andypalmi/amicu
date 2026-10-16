@@ -318,10 +318,9 @@ impl Project {
         if self.backup_parses() {
             Err(CliError::Message(format!(
                 "{problem}. {} holds the previous valid state; inspect it and, if correct, \
-                 restore it with `cp {} {}`",
+                 restore it with `{}`",
                 bak.display(),
-                shell_quote(&bak),
-                shell_quote(&path)
+                restore_command(&bak, &path)
             )))
         } else {
             Err(CliError::Message(problem))
@@ -557,6 +556,17 @@ fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
 
+/// The command that copies `from` over `to`, quoted for the shell the user
+/// most likely pastes it into: PowerShell on Windows, a POSIX shell elsewhere.
+fn restore_command(from: &Path, to: &Path) -> String {
+    if cfg!(windows) {
+        let q = |p: &Path| amicu_llamacpp::service_windows::ps_quote(&p.to_string_lossy());
+        format!("Copy-Item -LiteralPath {} -Destination {}", q(from), q(to))
+    } else {
+        format!("cp {} {}", shell_quote(from), shell_quote(to))
+    }
+}
+
 /// fsync a directory so a rename inside it survives power loss (unix only;
 /// Windows cannot open directories as files).
 fn sync_dir(dir: &Path) -> std::io::Result<()> {
@@ -726,7 +736,11 @@ mod durability_tests {
         p.save_state(&state("b")).unwrap();
         fs::write(p.state_file(), "x").unwrap();
         let err = p.load_state().unwrap_err().to_string();
-        assert!(err.contains("cp '") && err.contains("quote it"), "{err}");
+        if cfg!(windows) {
+            assert!(err.contains("Copy-Item -LiteralPath '"), "{err}");
+        } else {
+            assert!(err.contains("cp '") && err.contains("quote it"), "{err}");
+        }
         let _ = fs::remove_dir_all(root);
     }
 

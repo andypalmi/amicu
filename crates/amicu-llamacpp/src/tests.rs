@@ -1892,8 +1892,9 @@ impl ServiceManager for FakeManager {
             Err(LlamaCppError::Supervisor("Unit not loaded.".into()))
         }
     }
-    async fn release(&self, _label: &str) {
+    async fn release(&self, _label: &str) -> Result<(), LlamaCppError> {
         *self.released.lock().unwrap() += 1;
+        Ok(())
     }
     fn log_location(&self, _label: &str) -> String {
         "/logs/fake.log".into()
@@ -2060,8 +2061,8 @@ impl ServiceManager for SharedManager {
     fn log_location(&self, label: &str) -> String {
         self.0.log_location(label)
     }
-    async fn release(&self, label: &str) {
-        self.0.release(label).await;
+    async fn release(&self, label: &str) -> Result<(), LlamaCppError> {
+        self.0.release(label).await
     }
 }
 
@@ -2325,7 +2326,7 @@ fn launchd_update_releases_the_old_job_by_plist_and_label_before_loading() {
         .with_settle_timeout(Duration::from_millis(100));
     let spec = service_spec();
     manager.start(&spec).expect("first start");
-    block_on(manager.release(&spec.label));
+    block_on(manager.release(&spec.label)).unwrap();
     manager.start(&spec).expect("update");
 
     // `print` is the domain probe; the rest is the real sequence.
@@ -2349,7 +2350,7 @@ fn launchd_release_removes_by_label_even_without_a_plist() {
     let exec = std::sync::Arc::new(FakeExec::new(true, ""));
     let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"))
         .with_settle_timeout(Duration::from_millis(100));
-    block_on(manager.release("io.amicu.llama.x"));
+    block_on(manager.release("io.amicu.llama.x")).unwrap();
     let calls: Vec<Vec<String>> = exec
         .calls
         .lock()
@@ -2372,7 +2373,7 @@ fn systemd_release_stops_a_previous_unit_with_the_same_name_before_rewriting_it(
     let dir = TempDir::new("systemd-update");
     let exec = std::sync::Arc::new(FakeExec::new(true, ""));
     let manager = SystemdManager::new(exec.clone(), &dir.0, &dir.0);
-    block_on(manager.release("io.amicu.llama.support_chat_local"));
+    block_on(manager.release("io.amicu.llama.support_chat_local")).unwrap();
     manager.start(&service_spec()).expect("start");
 
     let calls = exec.calls.lock().unwrap().clone();
@@ -2772,7 +2773,7 @@ fn launchd_update_waits_for_the_asynchronous_bootout_before_bootstrapping() {
     let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"))
         .with_settle_timeout(Duration::from_secs(5));
     let spec = service_spec();
-    block_on(manager.release(&spec.label));
+    block_on(manager.release(&spec.label)).unwrap();
     manager
         .start(&spec)
         .expect("bootstrap must not race the bootout");
@@ -2787,7 +2788,7 @@ fn launchd_update_without_waiting_would_hit_error_5() {
     let manager = LaunchdManager::new(exec, tmp.file("agents"), tmp.file("logs"))
         .with_settle_timeout(Duration::ZERO);
     let spec = service_spec();
-    block_on(manager.release(&spec.label));
+    block_on(manager.release(&spec.label)).unwrap();
     let err = manager.start(&spec).expect_err("raced");
     assert!(err.to_string().contains("Bootstrap failed: 5"), "{err}");
 }
@@ -3987,7 +3988,7 @@ fn launchd_start_bootstraps_into_the_domain_and_reports_its_context() {
 
     let ctx = manager.context().expect("context");
     assert_eq!(ctx.backend, crate::HostBackend::Launchd);
-    assert_eq!(ctx.uid, 501);
+    assert_eq!(ctx.uid, Some(501));
     assert_eq!(ctx.domain.as_deref(), Some("gui/501"));
 }
 
@@ -4025,7 +4026,7 @@ fn systemd_reports_its_uid() {
     let manager = SystemdManager::new(FakeExec::new(true, ""), &tmp.0, &tmp.0);
     let ctx = manager.context().expect("context");
     assert_eq!(ctx.backend, crate::HostBackend::Systemd);
-    assert_eq!(ctx.uid, 501);
+    assert_eq!(ctx.uid, Some(501));
     assert_eq!(ctx.domain, None);
 }
 

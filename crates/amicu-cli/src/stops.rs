@@ -22,6 +22,8 @@ pub(crate) enum Backend {
     HostLaunchd,
     /// A systemd user unit (Linux host).
     HostSystemd,
+    /// A per-user Task Scheduler task (Windows host).
+    HostTaskScheduler,
     /// A Modal app.
     Modal,
 }
@@ -31,6 +33,8 @@ impl Backend {
     pub(crate) fn host() -> Self {
         if cfg!(target_os = "macos") {
             Self::HostLaunchd
+        } else if cfg!(windows) {
+            Self::HostTaskScheduler
         } else {
             Self::HostSystemd
         }
@@ -40,6 +44,7 @@ impl Backend {
         match backend {
             HostBackend::Launchd => Self::HostLaunchd,
             HostBackend::Systemd => Self::HostSystemd,
+            HostBackend::TaskScheduler => Self::HostTaskScheduler,
         }
     }
 
@@ -51,6 +56,7 @@ impl Backend {
         match self {
             Self::HostLaunchd => "launchd",
             Self::HostSystemd => "systemd",
+            Self::HostTaskScheduler => "task-scheduler",
             Self::Modal => "modal",
         }
     }
@@ -71,6 +77,9 @@ pub(crate) struct StopRecord {
     /// Host only: the effective uid the instance was started as.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uid: Option<u32>,
+    /// Task Scheduler only: the SID of the user the task runs as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<String>,
     /// launchd only: the domain (`gui/<uid>` or `user/<uid>`) it was started in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
@@ -111,7 +120,8 @@ impl StopRecord {
             backend: context.map_or_else(Backend::host, |c| Backend::from_host(c.backend)),
             identity: amicu_llamacpp::host_label(deployment.as_str()),
             app_id: None,
-            uid: context.map(|c| c.uid),
+            uid: context.and_then(|c| c.uid),
+            sid: context.and_then(|c| c.sid.clone()),
             domain: context.and_then(|c| c.domain.clone()),
             workspace: None,
             environment: None,
@@ -178,6 +188,7 @@ impl StopRecord {
             identity: app_name_for(deployment.as_str()),
             app_id,
             uid: None,
+            sid: None,
             domain: None,
             workspace: workspace.map(|w| w.name.clone()),
             environment: workspace.map(|w| w.environment.clone()),
@@ -206,10 +217,11 @@ impl StopRecord {
 
     /// The recorded service definition, validated: absolute, no `..`, named
     /// exactly `<identity>.plist` (launchd) / `<identity>.service` (systemd; or
-    /// `<identity>.env` in records written when units were transient), in the
-    /// directory amicu writes it to (`.../Library/LaunchAgents`, the systemd
-    /// user unit dir `.../systemd/user`, or the legacy env dir `.../amicu` /
-    /// `.../amicu/env`). `Ok(None)`: none
+    /// `<identity>.env` in records written when units were transient) /
+    /// `<identity>.xml` (Task Scheduler), in the directory amicu writes it to
+    /// (`.../Library/LaunchAgents`, the systemd user unit dir
+    /// `.../systemd/user`, the legacy env dir `.../amicu` / `.../amicu/env`, or
+    /// `...\amicu\tasks`). `Ok(None)`: none
     /// recorded (a legacy record). Anything else is refused, so a tampered
     /// state file can never make amicu delete an unrelated file.
     pub(crate) fn definition_path(&self) -> Result<Option<PathBuf>, String> {
@@ -225,36 +237,45 @@ impl StopRecord {
                 ("env", &["amicu", "amicu/env"])
             }
             Backend::HostSystemd => ("service", &[".config/systemd/user"]),
+            Backend::HostTaskScheduler => ("xml", &["amicu/tasks"]),
             Backend::Modal => return Err(format!("a Modal record has a service file '{def}'")),
         };
         Self::check_file(&path, &format!("{}.{ext}", self.identity), dirs)?;
+        if self.backend == Backend::HostTaskScheduler {
+            check_anchored(&path, task_scheduler_base().as_deref(), "tasks")?;
+        }
         Ok(Some(path))
     }
 
-    /// The recorded systemd secrets file, validated: absolute, no `..`, named
-    /// exactly `<identity>.env`, in `.../.local/state/amicu/env`. `Ok(None)`:
-    /// none recorded (the manager then derives it).
+    /// The recorded secrets file, validated: absolute, no `..`, named exactly
+    /// `<identity>.env`, in `.../.local/state/amicu/env` (systemd) or
+    /// `...\amicu\env` (Task Scheduler). `Ok(None)`: none recorded (the
+    /// manager then derives it).
     pub(crate) fn env_path(&self) -> Result<Option<PathBuf>, String> {
         let Some(env) = &self.env_file else {
             return Ok(None);
         };
-        if self.backend != Backend::HostSystemd {
-            return Err(format!(
-                "a {} record has an env file '{env}'",
-                self.backend.name()
-            ));
-        }
+        let dirs: &[&str] = match self.backend {
+            Backend::HostSystemd => &[".local/state/amicu/env"],
+            Backend::HostTaskScheduler => &["amicu/env"],
+            _ => {
+                return Err(format!(
+                    "a {} record has an env file '{env}'",
+                    self.backend.name()
+                ));
+            }
+        };
         let path = PathBuf::from(env);
-        Self::check_file(
-            &path,
-            &format!("{}.env", self.identity),
-            &[".local/state/amicu/env"],
-        )?;
+        Self::check_file(&path, &format!("{}.env", self.identity), dirs)?;
+        if self.backend == Backend::HostTaskScheduler {
+            check_anchored(&path, task_scheduler_base().as_deref(), "env")?;
+        }
         Ok(Some(path))
     }
 
     /// The recorded log files, validated like [`Self::definition_path`]:
-    /// `<identity>.out.log` / `<identity>.err.log` in `.../Library/Logs/amicu`.
+    /// `<identity>.out.log` / `<identity>.err.log` in `.../Library/Logs/amicu`
+    /// (launchd) or `...\amicu\logs` (Task Scheduler).
     pub(crate) fn log_paths(&self) -> Result<Vec<PathBuf>, String> {
         checked_log_paths(self.backend, &self.identity, &self.logs)
     }
@@ -326,7 +347,12 @@ fn checked_log_paths(
         let ok = ["out", "err"].iter().any(|k| {
             path.file_name().and_then(|n| n.to_str()) == Some(&format!("{identity}.{k}.log"))
         });
-        if backend != Backend::HostLaunchd || !ok {
+        let dir = match backend {
+            Backend::HostLaunchd => "Library/Logs/amicu",
+            Backend::HostTaskScheduler => "amicu/logs",
+            _ => return Err(format!("'{l}' is not a log file of {identity}")),
+        };
+        if !ok {
             return Err(format!("'{l}' is not a log file of {identity}"));
         }
         StopRecord::check_file(
@@ -334,11 +360,53 @@ fn checked_log_paths(
             path.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or_default(),
-            &["Library/Logs/amicu"],
+            &[dir],
         )?;
+        if backend == Backend::HostTaskScheduler {
+            check_anchored(&path, task_scheduler_base().as_deref(), "logs")?;
+        }
         out.push(path);
     }
     Ok(out)
+}
+
+/// Where the Task Scheduler manager keeps its files: `%LOCALAPPDATA%\amicu`.
+fn task_scheduler_base() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .filter(|d| !d.is_empty())
+        .map(|d| PathBuf::from(d).join("amicu"))
+}
+
+/// A recorded Task Scheduler file must lie directly in `base\sub`, the
+/// directory the manager writes it to, compared case-insensitively and with
+/// either separator (as Windows resolves paths): a suffix match alone would
+/// accept the same names under another profile, drive or UNC share.
+pub(crate) fn check_anchored(path: &Path, base: Option<&Path>, sub: &str) -> Result<(), String> {
+    let Some(base) = base else {
+        return Err(format!(
+            "'{}': LOCALAPPDATA is not set, so amicu cannot tell where its Task Scheduler \
+             files belong",
+            path.display()
+        ));
+    };
+    let norm = |p: &Path| {
+        p.to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    };
+    let expected = base.join(sub);
+    let full = norm(path);
+    let parent = full.rsplit_once('\\').map(|(dir, _)| dir);
+    if parent == Some(norm(&expected).as_str()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "'{}' is not in the directory amicu writes it to ({})",
+            path.display(),
+            expected.display()
+        ))
+    }
 }
 
 /// Files a destroyed deployment left behind that a plain `destroy` does not
