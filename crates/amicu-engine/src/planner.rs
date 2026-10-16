@@ -432,22 +432,10 @@ fn is_launch_field(key: &str) -> bool {
 fn is_redacted(key: &str) -> bool {
     const EXACT: [&str; 4] = ["extra_args", "chat_template", "build", "env"];
     const PREFIXES: [&str; 2] = ["env.", "api_key"];
-    const NEEDLES: [&str; 9] = [
-        "key",
-        "token",
-        "secret",
-        "password",
-        "credential",
-        "auth",
-        "header",
-        "cookie",
-        "private",
-    ];
     if EXACT.contains(&key) || PREFIXES.iter().any(|p| key.starts_with(p)) {
         return true;
     }
-    let lower = key.to_ascii_lowercase();
-    NEEDLES.iter().any(|n| lower.contains(n))
+    name_is_secret(key)
 }
 
 /// A URL value (`scheme://...`): its userinfo, path or fragment can carry a
@@ -460,13 +448,29 @@ fn value_looks_sensitive(v: &str) -> bool {
 /// Shown in place of any redacted value in plan output.
 pub const REDACTED: &str = "(redacted)";
 
-/// Whether a flag name (`--api-key`, `-hf-token`, ...) names a secret-bearing
-/// option or free-form template, judged word by word so `--tokenizer` does not
-/// match `token`.
-fn flag_is_secret(flag: &str) -> bool {
-    const NEEDLES: [&str; 9] = [
+/// Words that make a `token` a count or limit (`max_num_batched_tokens`,
+/// `--long-prefill-token-threshold`) rather than a credential.
+const COUNT_WORDS: [&str; 12] = [
+    "threshold",
+    "limit",
+    "budget",
+    "max",
+    "min",
+    "num",
+    "n",
+    "count",
+    "size",
+    "len",
+    "length",
+    "batched",
+];
+
+/// Whether a flag or setting name (split into words on `-`, `_` and `.`) names
+/// a credential. `token` counts only as the singular word and not as a count
+/// (`tokens`, `token-threshold`, `max-token-...`); `tokenizer` never matches.
+fn name_is_secret(name: &str) -> bool {
+    const NEEDLES: [&str; 8] = [
         "key",
-        "token",
         "secret",
         "password",
         "passwd",
@@ -475,49 +479,76 @@ fn flag_is_secret(flag: &str) -> bool {
         "cookie",
         "credential",
     ];
-    // Free-form template text (the same value `is_redacted` hides as a setting).
-    if matches!(flag, "--chat-template" | "--chat-template-kwargs") {
-        return true;
-    }
-    flag.trim_start_matches('-')
-        .to_ascii_lowercase()
-        .split(['-', '_'])
-        .any(|part| !part.starts_with("tokeniz") && NEEDLES.iter().any(|n| part.contains(n)))
+    let lower = name.trim_start_matches('-').to_ascii_lowercase();
+    let parts: Vec<&str> = lower.split(['-', '_', '.']).collect();
+    parts.iter().enumerate().any(|(i, part)| {
+        if NEEDLES.iter().any(|n| part.contains(n)) || part.contains("private") {
+            return true;
+        }
+        if !part.contains("token") || part.starts_with("tokeniz") || part.ends_with("tokens") {
+            return false;
+        }
+        let count_ctx = parts.get(i + 1).is_some_and(|w| COUNT_WORDS.contains(w))
+            || (i > 0 && COUNT_WORDS.contains(&parts[i - 1]));
+        !count_ctx
+    })
 }
 
-/// Whether `arg` is itself an option name rather than a value.
-fn looks_like_flag(arg: &str) -> bool {
-    arg.starts_with("--")
-        || (arg.len() == 2
-            && arg.starts_with('-')
-            && arg.chars().nth(1).is_some_and(char::is_alphabetic))
+/// Whether a flag names a secret-bearing option or free-form template text.
+fn flag_is_secret(flag: &str) -> bool {
+    // `-H` is the curl-style header short flag (`-h` is help).
+    if matches!(flag, "-H" | "--chat-template" | "--chat-template-kwargs") {
+        return true;
+    }
+    name_is_secret(flag)
+}
+
+/// `user:password@host` without a scheme.
+fn has_userinfo(arg: &str) -> bool {
+    let Some((info, host)) = arg.split_once('@') else {
+        return false;
+    };
+    let Some((user, pass)) = info.split_once(':') else {
+        return false;
+    };
+    !host.is_empty()
+        && !user.is_empty()
+        && !pass.is_empty()
+        && !info.contains(char::is_whitespace)
+        && !info.contains('/')
+}
+
+fn arg_is_sensitive(arg: &str) -> bool {
+    value_looks_sensitive(arg) || has_userinfo(arg)
 }
 
 /// A command-line argument vector with secrets removed for display: the value
-/// after a secret-bearing flag (`--api-key v` and `--api-key=v`) and any
-/// argument that is or embeds a URL (`scheme://...`, whose path or userinfo
-/// can carry a token) become [`REDACTED`]. Everything else is unchanged.
+/// after a secret-bearing flag (`--api-key v` and `--api-key=v`; the next
+/// argument is always taken as the value, even if it starts with `-`), and
+/// any argument that embeds a URL (`scheme://...`) or `user:pass@host`
+/// userinfo, become [`REDACTED`]. Everything else is unchanged.
 #[must_use]
 pub fn redact_argv(argv: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(argv.len());
     let mut redact_next = false;
     for arg in argv {
-        if std::mem::take(&mut redact_next) && !looks_like_flag(arg) {
+        if std::mem::take(&mut redact_next) {
             out.push(REDACTED.to_owned());
             continue;
         }
         if arg.starts_with('-') {
             if let Some((flag, value)) = arg.split_once('=') {
-                if flag_is_secret(flag) || value_looks_sensitive(value) {
+                if flag_is_secret(flag) || arg_is_sensitive(value) {
                     out.push(format!("{flag}={REDACTED}"));
                 } else {
                     out.push(arg.clone());
                 }
                 continue;
             }
-            redact_next = flag_is_secret(arg);
+            // A boolean `--no-...` switch takes no value.
+            redact_next = flag_is_secret(arg) && !arg.starts_with("--no-");
         }
-        out.push(if value_looks_sensitive(arg) {
+        out.push(if arg_is_sensitive(arg) {
             REDACTED.to_owned()
         } else {
             arg.clone()
@@ -526,20 +557,20 @@ pub fn redact_argv(argv: &[String]) -> Vec<String> {
     out
 }
 
-/// Quote one token for display: bare words pass through, the rest is
-/// single-quoted.
+/// Quote one token for display: bare words pass through, everything else is
+/// single-quoted. The redaction marker itself (alone or as `--flag=(redacted)`)
+/// prints bare.
 fn display_quote(token: &str) -> String {
     let safe = !token.is_empty()
-        && token
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "-_./=:,@%+()".contains(c));
-    if safe {
+        && token.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/' | b'=' | b':')
+        });
+    if safe || token == REDACTED || token.ends_with(&format!("={REDACTED}")) {
         token.to_owned()
     } else {
         format!("'{}'", token.replace('\'', r"'\''"))
     }
 }
-
 /// Display text for an argv with secrets removed ([`redact_argv`]).
 #[must_use]
 pub fn redacted_argv_text(argv: &[String]) -> String {
@@ -581,6 +612,10 @@ fn redact_setting(mut s: Setting) -> Setting {
     if s.key == "extra_args" || s.key == "env" {
         // `extra_args` is redacted argument by argument where it is built;
         // `env` carries variable names only, never values.
+        return s;
+    }
+    // A plain number is a typed tuning field, never a credential.
+    if s.value.parse::<f64>().is_ok() {
         return s;
     }
     if is_redacted(&s.key) || value_looks_sensitive(&s.value) {
@@ -2110,5 +2145,91 @@ mod tests {
     fn redacted_argv_text_quotes_like_a_shell() {
         let text = redacted_argv_text(&argv(&["srv", "--header", "A: b c", "--x", "a b"]));
         assert_eq!(text, "srv --header (redacted) --x 'a b'");
+    }
+
+    #[test]
+    fn count_flags_and_typed_vllm_fields_are_not_redacted() {
+        let out = redact_argv(&argv(&[
+            "--max-num-batched-tokens",
+            "8192",
+            "--long-prefill-token-threshold",
+            "512",
+            "--max-tokens",
+            "64",
+            "--tokenizer",
+            "x",
+        ]));
+        assert_eq!(out[1], "8192");
+        assert_eq!(out[3], "512");
+        assert_eq!(out[5], "64");
+        assert_eq!(out[7], "x");
+        for key in ["max_num_batched_tokens", "max_tokens", "tokenizer"] {
+            assert!(!is_redacted(key), "{key}");
+        }
+        assert!(is_redacted("hf_token") && is_redacted("access-token"));
+
+        let mut g = vllm_graph(false);
+        let Runtime::Vllm(s) = &mut g.deployments[0].runtime else {
+            unreachable!()
+        };
+        s.max_num_batched_tokens = Some(8192);
+        let result = build_plan(&g, None).unwrap();
+        let shown = result.items[0]
+            .action
+            .runtime
+            .iter()
+            .find(|s| s.key == "max_num_batched_tokens")
+            .map(|s| s.value.clone());
+        assert_eq!(shown.as_deref(), Some("8192"));
+    }
+
+    #[test]
+    fn vllm_extra_args_secrets_never_reach_the_plan() {
+        let mut g = vllm_graph(false);
+        let Runtime::Vllm(s) = &mut g.deployments[0].runtime else {
+            unreachable!()
+        };
+        s.extra_args = argv(&["--hf-token", "s3cr3t-vllm", "--swap-space", "4"]);
+        let result = build_plan(&g, None).unwrap();
+        let text = format!(
+            "{:?}{}",
+            result.plan,
+            result.items[0].rendered.as_deref().unwrap_or_default()
+        );
+        assert!(!text.contains("s3cr3t-vllm"), "{text}");
+        assert!(text.contains("(redacted)"), "{text}");
+    }
+
+    #[test]
+    fn redact_argv_handles_edge_forms() {
+        let out = redact_argv(&argv(&[
+            "--API-KEY",
+            "-dash-secret",
+            "-H",
+            "Authorization: Bearer x",
+            "--proxy",
+            "user:pw@host.example",
+            "--x=u:pw@h",
+            "--keep",
+            "a@b",
+        ]));
+        assert_eq!(
+            out,
+            argv(&[
+                "--API-KEY",
+                "(redacted)",
+                "-H",
+                "(redacted)",
+                "--proxy",
+                "(redacted)",
+                "--x=(redacted)",
+                "--keep",
+                "a@b",
+            ])
+        );
+        assert_eq!(
+            redacted_argv_text(&argv(&["s", "--hf-token=v", "--k", "(paren)"])),
+            "s --hf-token=(redacted) --k '(paren)'"
+        );
     }
 }
