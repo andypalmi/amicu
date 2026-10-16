@@ -4,6 +4,8 @@
 //! logic stays pure and is unit-tested against captured fixtures. [`discover`]
 //! runs the real [`HostProbe`]; tests inject a fake probe.
 //!
+//! Windows is probed through PowerShell CIM queries emitting JSON.
+//!
 //! macOS unified memory is reported by `system_profiler` in binary "GB"
 //! (`hw.memsize` confirms an "8 GB" M1 is exactly `8 * 1024^3` bytes), so those
 //! values are interpreted as GiB.
@@ -98,7 +100,7 @@ pub fn discover() -> Result<HardwareProfile, DiscoveryError> {
 
 /// Discover a full [`HostReport`] (profile + OS + free disk) using the host
 /// probe. On macOS, Apple-Silicon detection is tried first with a CPU-only
-/// fallback; Linux uses the CPU-only path.
+/// fallback; Linux and Windows use the CPU-only path.
 pub fn discover_report() -> Result<HostReport, DiscoveryError> {
     discover_with(&HostProbe, std::env::consts::OS)
 }
@@ -107,6 +109,7 @@ fn discover_with(probe: &impl SystemProbe, os: &str) -> Result<HostReport, Disco
     match os {
         "macos" => discover_macos(probe, os),
         "linux" => discover_linux(probe, os),
+        "windows" => discover_windows(probe, os),
         other => Err(DiscoveryError::UnsupportedOs(other.to_string())),
     }
 }
@@ -149,6 +152,136 @@ fn discover_linux(probe: &impl SystemProbe, os: &str) -> Result<HostReport, Disc
         os: os.to_string(),
         disk_free,
     })
+}
+
+fn discover_windows(probe: &impl SystemProbe, os: &str) -> Result<HostReport, DiscoveryError> {
+    let system = powershell_json(
+        probe,
+        "Get-CimInstance Win32_ComputerSystem | Select-Object TotalPhysicalMemory",
+        "Win32_ComputerSystem",
+    )?;
+    let processors = powershell_json(
+        probe,
+        "Get-CimInstance Win32_Processor | Select-Object Name,NumberOfLogicalProcessors",
+        "Win32_Processor",
+    )?;
+    let disk = powershell_json(
+        probe,
+        "Get-CimInstance Win32_LogicalDisk -Filter \"DeviceID='$env:SystemDrive'\" | Select-Object FreeSpace",
+        "Win32_LogicalDisk",
+    )?;
+    let profile = parse_windows_cpu(&system, &processors)?;
+    let disk_free = parse_windows_disk_free(&disk)?;
+    Ok(HostReport {
+        profile,
+        os: os.to_string(),
+        disk_free,
+    })
+}
+
+/// Run a PowerShell CIM query whose output is piped through `ConvertTo-Json`
+/// and parse it. `source_name` names the CIM class in errors.
+fn powershell_json(
+    probe: &impl SystemProbe,
+    query: &str,
+    source_name: &str,
+) -> Result<serde_json::Value, DiscoveryError> {
+    let command = format!("{query} | ConvertTo-Json");
+    let out = probe.run(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", &command],
+    )?;
+    // Windows PowerShell may prefix redirected output with a byte-order mark.
+    let text = out.trim().trim_start_matches('\u{feff}');
+    serde_json::from_str(text).map_err(|_| DiscoveryError::ParseValue {
+        field: "json".to_string(),
+        value: text.chars().take(80).collect(),
+        source_name: source_name.to_string(),
+    })
+}
+
+/// `ConvertTo-Json` yields a bare object for one CIM instance and an array for
+/// several (e.g. a multi-socket machine).
+fn json_objects(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    match value {
+        serde_json::Value::Array(items) => items.iter().collect(),
+        other => vec![other],
+    }
+}
+
+/// A JSON field that is a number, or a numeric string, as an unsigned integer.
+fn json_u64(obj: &serde_json::Value, key: &str, source_name: &str) -> Result<u64, DiscoveryError> {
+    match obj.get(key) {
+        None | Some(serde_json::Value::Null) => Err(DiscoveryError::FieldNotFound {
+            field: key.to_string(),
+            source_name: source_name.to_string(),
+        }),
+        Some(serde_json::Value::Number(n)) => {
+            n.as_u64().ok_or_else(|| DiscoveryError::ParseValue {
+                field: key.to_string(),
+                value: n.to_string(),
+                source_name: source_name.to_string(),
+            })
+        }
+        Some(serde_json::Value::String(s)) => parse_u64(s, key, source_name),
+        Some(other) => Err(DiscoveryError::ParseValue {
+            field: key.to_string(),
+            value: other.to_string(),
+            source_name: source_name.to_string(),
+        }),
+    }
+}
+
+fn parse_windows_cpu(
+    system: &serde_json::Value,
+    processors: &serde_json::Value,
+) -> Result<HardwareProfile, DiscoveryError> {
+    const SYSTEM: &str = "Win32_ComputerSystem";
+    const CPU: &str = "Win32_Processor";
+    let memory = json_u64(
+        json_objects(system).first().unwrap_or(&system),
+        "TotalPhysicalMemory",
+        SYSTEM,
+    )?;
+    let sockets = json_objects(processors);
+    let model = sockets
+        .iter()
+        .find_map(|p| p.get("Name")?.as_str())
+        .map(|n| n.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| DiscoveryError::FieldNotFound {
+            field: "Name".to_string(),
+            source_name: CPU.to_string(),
+        })?;
+    let mut cores = 0u32;
+    for socket in &sockets {
+        let n = json_u64(socket, "NumberOfLogicalProcessors", CPU)?;
+        cores = cores.saturating_add(u32::try_from(n).unwrap_or(u32::MAX));
+    }
+    if cores == 0 {
+        return Err(DiscoveryError::FieldNotFound {
+            field: "NumberOfLogicalProcessors".to_string(),
+            source_name: CPU.to_string(),
+        });
+    }
+    Ok(HardwareProfile {
+        id: HardwareProfileId::new("local-cpu"),
+        provider: "local".to_string(),
+        region: None,
+        accelerator: None,
+        cpu: Some(Cpu { model, cores }),
+        memory: ByteSize::from_bytes(memory),
+        interconnect: None,
+        price: None,
+    })
+}
+
+fn parse_windows_disk_free(disk: &serde_json::Value) -> Result<ByteSize, DiscoveryError> {
+    let first = json_objects(disk)
+        .into_iter()
+        .next()
+        .unwrap_or(&serde_json::Value::Null);
+    json_u64(first, "FreeSpace", "Win32_LogicalDisk").map(ByteSize::from_bytes)
 }
 
 /// The cgroup memory limit in bytes (v2 `memory.max`, then v1
@@ -596,11 +729,99 @@ MemAvailable:    8000000 kB
         }
     }
 
+    const PS_PREFIX: &str = "powershell -NoProfile -NonInteractive -Command ";
+    const PS_SYSTEM: &str =
+        "Get-CimInstance Win32_ComputerSystem | Select-Object TotalPhysicalMemory | ConvertTo-Json";
+    const PS_CPU: &str = "Get-CimInstance Win32_Processor | Select-Object Name,NumberOfLogicalProcessors | ConvertTo-Json";
+    const PS_DISK: &str = "Get-CimInstance Win32_LogicalDisk -Filter \"DeviceID='$env:SystemDrive'\" | Select-Object FreeSpace | ConvertTo-Json";
+
+    fn windows_probe(system: &str, cpu: &str, disk: &str) -> FakeProbe {
+        FakeProbe::default()
+            .command(&format!("{PS_PREFIX}{PS_SYSTEM}"), system)
+            .command(&format!("{PS_PREFIX}{PS_CPU}"), cpu)
+            .command(&format!("{PS_PREFIX}{PS_DISK}"), disk)
+    }
+
+    const WIN_SYSTEM: &str = "{\r\n  \"TotalPhysicalMemory\": 34290544640\r\n}\r\n";
+    const WIN_CPU: &str = "{\r\n  \"Name\": \"AMD Ryzen 7 5800X 8-Core Processor      \",\r\n  \"NumberOfLogicalProcessors\": 16\r\n}\r\n";
+    const WIN_DISK: &str = "{\r\n  \"FreeSpace\": 250000000000\r\n}\r\n";
+
+    #[test]
+    fn discovers_windows() {
+        let probe = windows_probe(WIN_SYSTEM, WIN_CPU, WIN_DISK);
+        let report = discover_with(&probe, "windows").unwrap();
+        assert_eq!(report.os, "windows");
+        assert_eq!(report.disk_free.bytes(), 250_000_000_000);
+        assert_eq!(report.profile.memory.bytes(), 34_290_544_640);
+        assert!(report.profile.accelerator.is_none());
+        let cpu = report.profile.cpu.unwrap();
+        assert_eq!(cpu.model, "AMD Ryzen 7 5800X 8-Core Processor");
+        assert_eq!(cpu.cores, 16);
+    }
+
+    #[test]
+    fn windows_sums_sockets_and_tolerates_bom_and_string_numbers() {
+        let cpu = "\u{feff}[{\"Name\":\"Xeon\",\"NumberOfLogicalProcessors\":24},{\"Name\":\"Xeon\",\"NumberOfLogicalProcessors\":24}]";
+        let system = "{\"TotalPhysicalMemory\": \"68719476736\"}";
+        let probe = windows_probe(system, cpu, WIN_DISK);
+        let report = discover_with(&probe, "windows").unwrap();
+        assert_eq!(report.profile.cpu.unwrap().cores, 48);
+        assert_eq!(report.profile.memory.bytes(), 68_719_476_736);
+    }
+
+    #[test]
+    fn windows_missing_fields_err() {
+        let probe = windows_probe("{}", WIN_CPU, WIN_DISK);
+        assert!(matches!(
+            discover_with(&probe, "windows").unwrap_err(),
+            DiscoveryError::FieldNotFound { .. }
+        ));
+        let probe = windows_probe(WIN_SYSTEM, "{\"Name\": \"X\"}", WIN_DISK);
+        assert!(matches!(
+            discover_with(&probe, "windows").unwrap_err(),
+            DiscoveryError::FieldNotFound { .. }
+        ));
+        let probe = windows_probe(WIN_SYSTEM, WIN_CPU, "{\"FreeSpace\": null}");
+        assert!(matches!(
+            discover_with(&probe, "windows").unwrap_err(),
+            DiscoveryError::FieldNotFound { .. }
+        ));
+        // CIM returned nothing at all (no such drive).
+        let probe = windows_probe(WIN_SYSTEM, WIN_CPU, "");
+        assert!(matches!(
+            discover_with(&probe, "windows").unwrap_err(),
+            DiscoveryError::ParseValue { .. }
+        ));
+    }
+
+    #[test]
+    fn windows_malformed_output_errs() {
+        let probe = windows_probe("not json at all", WIN_CPU, WIN_DISK);
+        assert!(matches!(
+            discover_with(&probe, "windows").unwrap_err(),
+            DiscoveryError::ParseValue { .. }
+        ));
+        let probe = windows_probe(WIN_SYSTEM, WIN_CPU, "{\"FreeSpace\": \"lots\"}");
+        assert!(matches!(
+            discover_with(&probe, "windows").unwrap_err(),
+            DiscoveryError::ParseValue { .. }
+        ));
+    }
+
+    #[test]
+    fn windows_probe_failure_propagates() {
+        let probe = FakeProbe::default();
+        assert!(matches!(
+            discover_with(&probe, "windows").unwrap_err(),
+            DiscoveryError::Probe { .. }
+        ));
+    }
+
     #[test]
     fn rejects_unsupported_os() {
         let probe = FakeProbe::default();
         assert!(matches!(
-            discover_with(&probe, "windows").unwrap_err(),
+            discover_with(&probe, "freebsd").unwrap_err(),
             DiscoveryError::UnsupportedOs(_)
         ));
     }
