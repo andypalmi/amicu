@@ -1,4 +1,5 @@
-//! Service-manager operations behind launchd (macOS) and systemd (Linux).
+//! Service-manager operations behind launchd (macOS) and systemd (Linux); the
+//! Windows Task Scheduler manager lives in [`crate::service_windows`].
 //!
 //! The [`ServiceManager`] trait is the injectable seam the supervisor drives;
 //! real impls shell out through a [`CommandExec`] (itself injectable) and write
@@ -74,6 +75,8 @@ pub enum HostBackend {
     Launchd,
     /// systemd user units (Linux).
     Systemd,
+    /// Per-user Task Scheduler tasks (Windows).
+    TaskScheduler,
 }
 
 /// Who the host service manager acts as. Recorded with every started
@@ -81,8 +84,11 @@ pub enum HostBackend {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostContext {
     pub backend: HostBackend,
-    /// The effective uid the manager acts for.
-    pub uid: u32,
+    /// The effective uid the manager acts for (launchd, systemd; `None` on
+    /// Windows, which has no uid).
+    pub uid: Option<u32>,
+    /// Task Scheduler only: the SID of the user the tasks run as.
+    pub sid: Option<String>,
     /// launchd only: the domain jobs are bootstrapped into (`gui/<uid>` or
     /// `user/<uid>`).
     pub domain: Option<String>,
@@ -122,10 +128,13 @@ pub trait ServiceManager: Send + Sync {
     /// Best-effort stop of any previous instance with this label, so an update
     /// can start the new one (a loaded launchd job would keep the old
     /// definition; a running systemd unit would not pick up the new one).
-    /// launchd waits for the job to unload (bootout is asynchronous). Errors
-    /// are ignored: normally there is nothing to release, and `start` reports
-    /// a job that lingers.
-    async fn release(&self, _label: &str) {}
+    /// launchd waits for the job to unload (bootout is asynchronous); launchd
+    /// and systemd ignore errors (normally there is nothing to release, and
+    /// `start` reports a job that lingers). An `Err` (Task Scheduler: the old
+    /// instance is not confirmed gone) aborts the start.
+    async fn release(&self, _label: &str) -> Result<(), LlamaCppError> {
+        Ok(())
+    }
     /// Read-only probe of an instance recorded as `label` (and, for launchd,
     /// started in `domain`). Never acts as a different domain than recorded.
     /// `Err` means the manager could not answer.
@@ -197,7 +206,8 @@ static ALLOW_SERVICE_COMMANDS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Opt in to running real service commands (`launchctl`, `systemctl`,
-/// `loginctl`, `journalctl`). Off by default, so any test in any crate that
+/// `loginctl`, `journalctl`, and on Windows `schtasks`, `powershell`,
+/// `taskkill`, `whoami`, `icacls`). Off by default, so any test in any crate that
 /// reaches a real [`HostExec`] panics instead of touching the developer's
 /// services, regardless of test order. Only the `amicu` binary calls this.
 pub fn allow_service_commands() {
@@ -214,7 +224,15 @@ impl CommandExec for HostExec {
             ALLOW_SERVICE_COMMANDS.load(std::sync::atomic::Ordering::SeqCst)
                 || !matches!(
                     program,
-                    "launchctl" | "systemctl" | "loginctl" | "journalctl"
+                    "launchctl"
+                        | "systemctl"
+                        | "loginctl"
+                        | "journalctl"
+                        | "schtasks"
+                        | "powershell"
+                        | "taskkill"
+                        | "whoami"
+                        | "icacls"
                 ),
             "refusing to run the real `{program} {}`: service commands are only enabled in the \
              amicu binary; inject a fake service manager",
@@ -244,7 +262,7 @@ fn effective_uid(exec: &dyn CommandExec) -> Result<u32, LlamaCppError> {
     })
 }
 
-fn tail<T>(mut lines: Vec<T>, options: LogOptions) -> Vec<T> {
+pub(crate) fn tail<T>(mut lines: Vec<T>, options: LogOptions) -> Vec<T> {
     if let Some(n) = options.tail {
         let keep = (n as usize).min(lines.len());
         lines = lines.split_off(lines.len() - keep);
@@ -271,7 +289,7 @@ const LAUNCHD_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a stop wait must last before the one-time "waiting" note prints;
 /// `bootout` is async, so most stops finish well inside this.
-const WAIT_NOTE_AFTER: Duration = Duration::from_secs(1);
+pub(crate) const WAIT_NOTE_AFTER: Duration = Duration::from_secs(1);
 
 impl<E: CommandExec> LaunchdManager<E> {
     /// Build over an executor and the LaunchAgents / log directories.
@@ -445,7 +463,8 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         let (uid, domain) = self.domain().ok()?;
         Some(HostContext {
             backend: HostBackend::Launchd,
-            uid,
+            uid: Some(uid),
+            sid: None,
             domain: Some(domain),
         })
     }
@@ -472,7 +491,7 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         )))
     }
 
-    async fn release(&self, label: &str) {
+    async fn release(&self, label: &str) -> Result<(), LlamaCppError> {
         let domain = self.domain().ok().map(|(_, d)| d);
         if let Some(domain) = &domain {
             let _ = self
@@ -482,7 +501,7 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
             // next bootstrap does not race it (error 5). Best effort: if the
             // job lingers, fall through to remove and let `start` report it.
             if matches!(self.wait_unloaded(domain, label).await, Ok(true)) {
-                return;
+                return Ok(());
             }
         }
         // By label too, even when the job is loaded under another name.
@@ -490,6 +509,7 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         if let Some(domain) = &domain {
             let _ = self.wait_unloaded(domain, label).await;
         }
+        Ok(())
     }
 
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
@@ -651,7 +671,7 @@ fn plist_xml(spec: &ServiceSpec, stdout: &Path, stderr: &Path) -> String {
     )
 }
 
-fn xml_escape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -863,7 +883,7 @@ fn unit_file(spec: &ServiceSpec, env_file: Option<&Path>) -> String {
 
 /// A label becomes a file name and a unit name: refuse anything that is not
 /// one plain component, so a tampered record cannot reach another file.
-fn check_label(label: &str) -> Result<(), LlamaCppError> {
+pub(crate) fn check_label(label: &str) -> Result<(), LlamaCppError> {
     let bad = label.is_empty()
         || label.starts_with('.')
         || label
@@ -890,7 +910,8 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
     fn context(&self) -> Option<HostContext> {
         Some(HostContext {
             backend: HostBackend::Systemd,
-            uid: effective_uid(&self.exec).ok()?,
+            uid: Some(effective_uid(&self.exec).ok()?),
+            sid: None,
             domain: None,
         })
     }
@@ -934,10 +955,11 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
         })
     }
 
-    async fn release(&self, label: &str) {
+    async fn release(&self, label: &str) -> Result<(), LlamaCppError> {
         // Stop only: `start` rewrites the unit file and reloads, so an update
         // never has to remove the definition first.
         let _ = self.exec.exec("systemctl", &["--user", "stop", label]);
+        Ok(())
     }
 
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
@@ -1098,12 +1120,12 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
 // ---- fs helpers -----------------------------------------------------------
 
 /// Best-effort removal of a unit's env file; a missing file is fine.
-fn remove_env_file(path: &Path) {
+pub(crate) fn remove_env_file(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
 /// Remove `path`; a missing file is fine, any other error is surfaced.
-fn remove_file_strict(path: &Path) -> Result<(), LlamaCppError> {
+pub(crate) fn remove_file_strict(path: &Path) -> Result<(), LlamaCppError> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1123,7 +1145,7 @@ fn home_dir() -> Option<PathBuf> {
 
 /// Refuse a relative or empty directory: it means `HOME` was unset, and secrets
 /// must never be written relative to the cwd.
-fn require_absolute(dir: &Path) -> Result<(), LlamaCppError> {
+pub(crate) fn require_absolute(dir: &Path) -> Result<(), LlamaCppError> {
     if dir.is_absolute() {
         Ok(())
     } else {
@@ -1134,7 +1156,7 @@ fn require_absolute(dir: &Path) -> Result<(), LlamaCppError> {
 }
 
 /// Create `dir` (and parents), the leaf owner-only (0700) on unix.
-fn ensure_dir(dir: &Path) -> Result<(), LlamaCppError> {
+pub(crate) fn ensure_dir(dir: &Path) -> Result<(), LlamaCppError> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -1149,7 +1171,7 @@ fn ensure_dir(dir: &Path) -> Result<(), LlamaCppError> {
 
 /// Write `bytes` to `path` (creating `dir`), owner-readable only - the plist and
 /// env files hold secrets, so they must not be world-readable.
-fn write_private(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), LlamaCppError> {
+pub(crate) fn write_private(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(), LlamaCppError> {
     use std::io::Write as _;
     ensure_dir(dir)?;
     // Never reuse an existing file or symlink (its mode/owner/target are not

@@ -29,6 +29,7 @@ use crate::service::{
     HostExec, LaunchdManager, ServiceManager, ServicePaths, ServiceSpec, ServiceState,
     SystemdManager,
 };
+use crate::service_windows::TaskSchedulerManager;
 
 /// A resolved secret handed to a supervisor at start time: its name and value.
 ///
@@ -330,6 +331,9 @@ impl<M: ServiceManager, P: HealthProbe> ServiceSupervisor<M, P> {
 /// How to install a runtime binary, for the not-found error.
 fn install_hint(program: &str) -> &'static str {
     match program {
+        "llama-server" if cfg!(windows) => {
+            "`winget install llama.cpp`, or download a release zip from github.com/ggml-org/llama.cpp"
+        }
         "llama-server" => "`brew install llama.cpp` (macOS) or see github.com/ggml-org/llama.cpp",
         "vllm" => "`pip install vllm`",
         _ => "your package manager",
@@ -341,6 +345,10 @@ pub type LaunchdSupervisor = ServiceSupervisor<LaunchdManager<HostExec>, HttpHea
 
 /// The systemd (Linux) supervisor: a persistent `--user` unit driven by `systemctl`.
 pub type SystemdSupervisor = ServiceSupervisor<SystemdManager<HostExec>, HttpHealthProbe>;
+
+/// The Task Scheduler (Windows) supervisor: a per-user logon task driven by `schtasks`.
+pub type TaskSchedulerSupervisor =
+    ServiceSupervisor<TaskSchedulerManager<HostExec>, HttpHealthProbe>;
 
 impl LaunchdSupervisor {
     /// Host-wired launchd supervisor.
@@ -358,63 +366,29 @@ impl SystemdSupervisor {
     }
 }
 
-/// The supervisor for the host's service manager: launchd on macOS, systemd
-/// elsewhere.
+impl TaskSchedulerSupervisor {
+    /// Host-wired Task Scheduler supervisor.
+    #[must_use]
+    pub fn host() -> Self {
+        Self::new(TaskSchedulerManager::host(), HttpHealthProbe::new())
+    }
+}
+
+/// The supervisor for the host's service manager: launchd on macOS, Task
+/// Scheduler on Windows, systemd elsewhere.
 #[must_use]
 pub fn host_supervisor() -> Box<dyn ProcessSupervisor> {
     #[cfg(target_os = "macos")]
     {
         Box::new(LaunchdSupervisor::host())
     }
-    #[cfg(all(not(target_os = "macos"), not(windows)))]
-    {
-        Box::new(SystemdSupervisor::host())
-    }
     #[cfg(windows)]
     {
-        Box::new(UnsupportedSupervisor)
+        Box::new(TaskSchedulerSupervisor::host())
     }
-}
-
-/// Stand-in host supervisor where no service manager backend exists yet:
-/// every operation fails with a clear message.
-#[cfg(windows)]
-struct UnsupportedSupervisor;
-
-#[cfg(windows)]
-fn unsupported() -> LlamaCppError {
-    LlamaCppError::Supervisor("local deployments are not supported on Windows yet".to_owned())
-}
-
-#[cfg(windows)]
-#[async_trait]
-impl ProcessSupervisor for UnsupportedSupervisor {
-    async fn start(
-        &self,
-        _plan: &LaunchPlan,
-        _secrets: &[ResolvedSecret],
-    ) -> Result<RuntimeHandle, LlamaCppError> {
-        Err(unsupported())
-    }
-
-    async fn status(&self, _handle: &RuntimeHandle) -> Result<RuntimeStatus, LlamaCppError> {
-        Err(unsupported())
-    }
-
-    async fn metrics(&self, _handle: &RuntimeHandle) -> Result<RuntimeMetrics, LlamaCppError> {
-        Err(unsupported())
-    }
-
-    async fn logs(
-        &self,
-        _handle: &RuntimeHandle,
-        _options: LogOptions,
-    ) -> Result<LogStream, LlamaCppError> {
-        Err(unsupported())
-    }
-
-    async fn stop(&self, _handle: &RuntimeHandle) -> Result<(), LlamaCppError> {
-        Err(unsupported())
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        Box::new(SystemdSupervisor::host())
     }
 }
 
@@ -497,7 +471,7 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
         };
         let endpoint = endpoint_for(plan);
         // Update: remove the previous instance and let its port go quiet first.
-        self.manager.release(&label).await;
+        self.manager.release(&label).await?;
         if !self.drain.is_zero() {
             self.wait_released(&label, &endpoint).await?;
         }

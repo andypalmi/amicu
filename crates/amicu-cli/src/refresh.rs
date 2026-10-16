@@ -85,7 +85,11 @@ impl AppLookup for ModalLookup {
             .host_context()
             .ok_or_else(|| "cannot tell which user and service manager amicu acts as".to_owned())?;
         if crate::stops::Backend::from_host(ctx.backend) != record.backend
-            || record.uid.is_some_and(|u| u != ctx.uid)
+            || record.uid.is_some_and(|u| Some(u) != ctx.uid)
+            || record
+                .sid
+                .as_deref()
+                .is_some_and(|s| Some(s) != ctx.sid.as_deref())
         {
             return Err(format!(
                 "{} was started under another user or service manager",
