@@ -3987,7 +3987,7 @@ fn launchd_start_bootstraps_into_the_domain_and_reports_its_context() {
 
     let ctx = manager.context().expect("context");
     assert_eq!(ctx.backend, crate::HostBackend::Launchd);
-    assert_eq!(ctx.uid, 501);
+    assert_eq!(ctx.uid, Some(501));
     assert_eq!(ctx.domain.as_deref(), Some("gui/501"));
 }
 
@@ -4025,7 +4025,7 @@ fn systemd_reports_its_uid() {
     let manager = SystemdManager::new(FakeExec::new(true, ""), &tmp.0, &tmp.0);
     let ctx = manager.context().expect("context");
     assert_eq!(ctx.backend, crate::HostBackend::Systemd);
-    assert_eq!(ctx.uid, 501);
+    assert_eq!(ctx.uid, Some(501));
     assert_eq!(ctx.domain, None);
 }
 
