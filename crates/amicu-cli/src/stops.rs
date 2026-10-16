@@ -241,6 +241,9 @@ impl StopRecord {
             Backend::Modal => return Err(format!("a Modal record has a service file '{def}'")),
         };
         Self::check_file(&path, &format!("{}.{ext}", self.identity), dirs)?;
+        if self.backend == Backend::HostTaskScheduler {
+            check_anchored(&path, task_scheduler_base().as_deref(), "tasks")?;
+        }
         Ok(Some(path))
     }
 
@@ -264,6 +267,9 @@ impl StopRecord {
         };
         let path = PathBuf::from(env);
         Self::check_file(&path, &format!("{}.env", self.identity), dirs)?;
+        if self.backend == Backend::HostTaskScheduler {
+            check_anchored(&path, task_scheduler_base().as_deref(), "env")?;
+        }
         Ok(Some(path))
     }
 
@@ -356,9 +362,51 @@ fn checked_log_paths(
                 .unwrap_or_default(),
             &[dir],
         )?;
+        if backend == Backend::HostTaskScheduler {
+            check_anchored(&path, task_scheduler_base().as_deref(), "logs")?;
+        }
         out.push(path);
     }
     Ok(out)
+}
+
+/// Where the Task Scheduler manager keeps its files: `%LOCALAPPDATA%\amicu`.
+fn task_scheduler_base() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .filter(|d| !d.is_empty())
+        .map(|d| PathBuf::from(d).join("amicu"))
+}
+
+/// A recorded Task Scheduler file must lie directly in `base\sub`, the
+/// directory the manager writes it to, compared case-insensitively and with
+/// either separator (as Windows resolves paths): a suffix match alone would
+/// accept the same names under another profile, drive or UNC share.
+pub(crate) fn check_anchored(path: &Path, base: Option<&Path>, sub: &str) -> Result<(), String> {
+    let Some(base) = base else {
+        return Err(format!(
+            "'{}': LOCALAPPDATA is not set, so amicu cannot tell where its Task Scheduler \
+             files belong",
+            path.display()
+        ));
+    };
+    let norm = |p: &Path| {
+        p.to_string_lossy()
+            .replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_lowercase()
+    };
+    let expected = base.join(sub);
+    let full = norm(path);
+    let parent = full.rsplit_once('\\').map(|(dir, _)| dir);
+    if parent == Some(norm(&expected).as_str()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "'{}' is not in the directory amicu writes it to ({})",
+            path.display(),
+            expected.display()
+        ))
+    }
 }
 
 /// Files a destroyed deployment left behind that a plain `destroy` does not

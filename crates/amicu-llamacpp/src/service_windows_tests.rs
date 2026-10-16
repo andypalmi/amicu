@@ -32,18 +32,34 @@ impl Drop for Dir {
     }
 }
 
-/// A simulated per-user Task Scheduler plus the one server process a task's
-/// launcher starts.
+/// How much of its pid record the simulated launcher has written by the time
+/// a test looks.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum Record {
+    /// Its own line and the server's.
+    #[default]
+    Full,
+    /// Its own line only: the server is started but not yet recorded.
+    LauncherOnly,
+    /// Nothing yet.
+    Nothing,
+}
+
+/// A simulated per-user Task Scheduler plus the launcher (pid 100) and server
+/// (pid 4242, the launcher's child) a task runs.
 #[derive(Default)]
 struct Win {
     /// name -> (state, last result)
     tasks: Mutex<BTreeMap<String, (String, i64)>>,
-    /// Whether the server process is alive.
+    launcher: Mutex<bool>,
     server: Mutex<bool>,
-    /// Where `/Run` makes the "launcher" record the server's pid.
+    /// Where `/Run` makes the launcher write its pid record.
     pid_file: Mutex<Option<PathBuf>>,
-    /// `taskkill` does not kill the server.
+    record: Record,
+    /// `taskkill` kills nothing.
     stubborn: bool,
+    /// `/Change /DISABLE` shows the task Disabled even while it runs.
+    disabled_while_running: bool,
     /// `schtasks <verb>` fails.
     fail: Option<&'static str>,
     calls: Mutex<Vec<Vec<String>>>,
@@ -82,6 +98,40 @@ impl Win {
             .collect()
     }
 
+    /// Answer the task listing and the process identity probe.
+    fn powershell(&self, script: &str) -> ExecOutput {
+        if script.contains("Get-ScheduledTask") {
+            let mut out = String::new();
+            for (name, (state, result)) in self.tasks.lock().unwrap().iter() {
+                let _ = write!(out, "TASK\t{name}\t{state}\t{result}\r\n");
+            }
+            out.push_str("END\r\n");
+            ok(&out)
+        } else if script.contains("function Ours") {
+            // Identity checks of the recorded pids, and the server
+            // found as the launcher's child even when unrecorded.
+            assert!(script.contains("if (Ours 100 1111)"), "{script}");
+            assert!(script.contains("ParentProcessId = 100"), "{script}");
+            // An unreadable start time is "not ours", not an error.
+            assert!(script.contains("catch { return $false }"), "{script}");
+            assert!(
+                script.contains("$_.Name -eq 'llama-server.exe'"),
+                "{script}"
+            );
+            let mut out = String::new();
+            if *self.launcher.lock().unwrap() {
+                out.push_str("LIVE\t100\r\n");
+            }
+            if *self.server.lock().unwrap() {
+                out.push_str("LIVE\t4242\r\n");
+            }
+            out.push_str("END\r\n");
+            ok(&out)
+        } else {
+            failed("unexpected script")
+        }
+    }
+
     fn set_task(&self, name: &str, state: &str, result: i64) {
         self.tasks
             .lock()
@@ -101,31 +151,18 @@ impl CommandExec for Win {
         };
         Ok(match program {
             "whoami" => ok(&format!("\"desktop\\me\",\"{SID}\"\r\n")),
-            "icacls" | "taskkill" => {
-                if program == "taskkill" && !self.stubborn {
+            "icacls" => ok(""),
+            "taskkill" => {
+                if !self.stubborn {
+                    // `/T`: the launcher's tree includes the server.
+                    if args[1] == "100" {
+                        *self.launcher.lock().unwrap() = false;
+                    }
                     *self.server.lock().unwrap() = false;
                 }
                 ok("")
             }
-            "powershell" => {
-                let script = args[5];
-                if script.contains("Get-ScheduledTask") {
-                    let mut out = String::new();
-                    for (name, (state, result)) in self.tasks.lock().unwrap().iter() {
-                        let _ = write!(out, "TASK\t{name}\t{state}\t{result}\r\n");
-                    }
-                    out.push_str("END\r\n");
-                    ok(&out)
-                } else if script.contains("Get-Process -Id 4242") {
-                    if *self.server.lock().unwrap() {
-                        ok("PROC\t1337\r\n")
-                    } else {
-                        ok("NONE\r\n")
-                    }
-                } else {
-                    failed("unexpected script")
-                }
-            }
+            "powershell" => self.powershell(args[5]),
             "schtasks" => {
                 if self.fail == Some(args[0]) {
                     return Ok(failed("ERROR: Access is denied."));
@@ -141,21 +178,33 @@ impl CommandExec for Win {
                             return Ok(failed("ERROR: not found"));
                         };
                         t.0 = "Running".to_owned();
+                        *self.launcher.lock().unwrap() = true;
                         *self.server.lock().unwrap() = true;
-                        if let Some(p) = self.pid_file.lock().unwrap().as_ref() {
-                            std::fs::write(p, "4242\t1337").unwrap();
+                        let line = "L\t100\t1111\tllama-server.exe\n";
+                        let text = match self.record {
+                            Record::Full => format!("{line}S\t4242\t1337\n"),
+                            Record::LauncherOnly => line.to_owned(),
+                            Record::Nothing => String::new(),
+                        };
+                        if let Some(p) = self.pid_file.lock().unwrap().as_ref()
+                            && !text.is_empty()
+                        {
+                            std::fs::write(p, text).unwrap();
                         }
                     }
                     "/Change" => {
                         if let Some(t) = tasks.get_mut(&name)
-                            && t.0 != "Running"
+                            && (t.0 != "Running" || self.disabled_while_running)
                         {
                             t.0 = "Disabled".to_owned();
                         }
                     }
                     "/End" => {
                         // Ends the launcher; the server (its child) lives on.
-                        if let Some(t) = tasks.get_mut(&name) {
+                        *self.launcher.lock().unwrap() = false;
+                        if let Some(t) = tasks.get_mut(&name)
+                            && t.0 == "Running"
+                        {
                             t.0 = "Disabled".to_owned();
                             t.1 = 0x41306;
                         }
@@ -288,6 +337,7 @@ fn launcher_golden_quotes_every_literal() {
     let expected = [
         "# amicu launcher for io.amicu.llama.0a1b2c3d.chat. Generated; rewritten on every apply.",
         "$ErrorActionPreference = 'Stop'",
+        r#"[System.IO.File]::WriteAllText('C:\Users\Jo O''Neil\AppData\Local\amicu\tasks\x.pid', "L`t$PID`t$((Get-Process -Id $PID).StartTime.ToFileTimeUtc())`t" + 'llama-server.exe' + "`n")"#,
         r"foreach ($line in [System.IO.File]::ReadAllLines('C:\Users\Jo O''Neil\AppData\Local\amicu\env\x.env')) {",
         "  if ($line -eq '') { continue }",
         "  $i = $line.IndexOf('=')",
@@ -296,7 +346,7 @@ fn launcher_golden_quotes_every_literal() {
         "}",
         r#"$p = Start-Process -FilePath 'C:\Program Files\llama.cpp\llama-server.exe' -ArgumentList '-m "C:\Users\Jo O''Neil\models\tiny model.gguf" --port 8080' -NoNewWindow -PassThru -RedirectStandardOutput 'C:\Users\Jo O''Neil\AppData\Local\amicu\logs\x.out.log' -RedirectStandardError 'C:\Users\Jo O''Neil\AppData\Local\amicu\logs\x.err.log'"#,
         "$null = $p.Handle",
-        r#"try { [System.IO.File]::WriteAllText('C:\Users\Jo O''Neil\AppData\Local\amicu\tasks\x.pid', "$($p.Id)`t$($p.StartTime.ToFileTimeUtc())") } catch { $p.Kill(); exit 1 }"#,
+        r#"try { [System.IO.File]::AppendAllText('C:\Users\Jo O''Neil\AppData\Local\amicu\tasks\x.pid', "S`t$($p.Id)`t$($p.StartTime.ToFileTimeUtc())`n") } catch { $p.Kill(); exit 1 }"#,
         "$p.WaitForExit()",
         "exit $p.ExitCode",
         "",
@@ -443,8 +493,10 @@ fn stop_disables_ends_kills_waits_then_deletes_task_and_files() {
         win.actions(),
         vec![
             format!("schtasks /Change /TN {name} /DISABLE"),
-            format!("schtasks /End /TN {name}"),
+            // Both trees, while the launcher still lives, then the task.
+            "taskkill /PID 100 /T /F".to_owned(),
             "taskkill /PID 4242 /T /F".to_owned(),
+            format!("schtasks /End /TN {name}"),
             format!("schtasks /Delete /TN {name} /F"),
         ]
     );
@@ -523,6 +575,8 @@ fn an_unknown_task_state_is_unknown_presence_and_never_stopped() {
     win.set_task(LABEL, "SomethingNew", 0);
     assert_eq!(m.presence(LABEL, None).unwrap(), Presence::Unknown);
     assert_eq!(m.state(LABEL).unwrap(), ServiceState::Active);
+    assert!(block_on(m.stop(LABEL)).is_err());
+    assert!(win.tasks.lock().unwrap().contains_key(LABEL));
 }
 
 #[test]
@@ -532,30 +586,160 @@ fn presence_is_down_without_a_task_and_failed_after_a_bad_exit() {
     let m = manager(&win, &dir);
     assert_eq!(m.presence(LABEL, None).unwrap(), Presence::Down);
     assert_eq!(m.state(LABEL).unwrap(), ServiceState::Inactive);
-    win.set_task(LABEL, "Ready", 1);
+    // Registered, never run: nothing can be running.
+    win.set_task(LABEL, "Ready", 0x41303);
     assert_eq!(m.presence(LABEL, None).unwrap(), Presence::Down);
+    // It ran and failed, but there is no pid record: cannot be confirmed.
+    win.set_task(LABEL, "Ready", 1);
+    assert_eq!(m.presence(LABEL, None).unwrap(), Presence::Unknown);
     assert_eq!(m.state(LABEL).unwrap(), ServiceState::Failed);
+    // With a record whose processes are gone it is confirmed down.
+    std::fs::create_dir_all(&m.task_dir).unwrap();
+    std::fs::write(m.pid_path(LABEL), "L\t100\t1111\tllama-server.exe\n").unwrap();
+    assert_eq!(m.presence(LABEL, None).unwrap(), Presence::Down);
     win.set_task(LABEL, "Queued", 0);
     assert_eq!(m.presence(LABEL, None).unwrap(), Presence::Running);
 }
 
 #[test]
-fn a_reused_pid_is_not_taken_for_the_server() {
-    let dir = Dir::new("pid-reuse");
+fn pid_records_parse_and_garbage_is_refused() {
+    assert_eq!(
+        parse_pid_record("L\t100\t1111\tllama-server.exe\nS\t4242\t1337\n"),
+        Some(PidRecord {
+            launcher: (100, 1111),
+            image: "llama-server.exe".to_owned(),
+            server: Some((4242, 1337)),
+        })
+    );
+    assert_eq!(
+        parse_pid_record("L\t100\t1111\tllama-server.exe\r\n").map(|r| r.server),
+        Some(None)
+    );
+    for bad in [
+        "",
+        "garbage",
+        "S\t4242\t1337\n",
+        "L\tx\t1\tl.exe",
+        "L\t1\t1\t",
+    ] {
+        assert_eq!(parse_pid_record(bad), None, "{bad:?}");
+    }
+    let dir = Dir::new("pid-garbage");
     let win = Arc::new(Win::default());
     let m = manager(&win, &dir);
-    *win.server.lock().unwrap() = true;
     std::fs::create_dir_all(&m.task_dir).unwrap();
-    // Same pid, different start time: some other process.
-    std::fs::write(m.pid_path(LABEL), "4242\t9999").unwrap();
-    assert_eq!(m.live_pid(LABEL).unwrap(), None);
-    std::fs::write(m.pid_path(LABEL), "4242\t1337").unwrap();
-    assert_eq!(m.live_pid(LABEL).unwrap(), Some(4242));
     std::fs::write(m.pid_path(LABEL), "garbage").unwrap();
     assert!(
-        m.live_pid(LABEL).is_err(),
+        m.presence(LABEL, None).is_err(),
         "an unreadable record is not 'gone'"
     );
+}
+
+#[test]
+fn a_server_started_but_not_yet_recorded_is_found_as_the_launchers_child() {
+    let dir = Dir::new("unrecorded");
+    let win = Arc::new(Win {
+        record: Record::LauncherOnly,
+        ..Win::default()
+    });
+    let m = manager(&win, &dir);
+    m.start(&spec()).unwrap();
+    assert_eq!(m.presence(LABEL, None).unwrap(), Presence::Running);
+    block_on(m.stop(LABEL)).unwrap();
+    assert!(
+        !*win.server.lock().unwrap(),
+        "the unrecorded server was killed"
+    );
+
+    // Same, but it does not die: never confirmed, everything kept.
+    let dir = Dir::new("unrecorded-stubborn");
+    let win = Arc::new(Win {
+        record: Record::LauncherOnly,
+        stubborn: true,
+        ..Win::default()
+    });
+    let m = manager(&win, &dir);
+    m.start(&spec()).unwrap();
+    assert!(block_on(m.stop(LABEL)).is_err());
+    assert!(win.tasks.lock().unwrap().contains_key(LABEL));
+    assert!(m.env_path(LABEL).exists());
+}
+
+#[test]
+fn a_task_that_ran_without_any_pid_record_is_never_confirmed_stopped() {
+    let dir = Dir::new("no-record");
+    let win = Arc::new(Win {
+        record: Record::Nothing,
+        ..Win::default()
+    });
+    let m = manager(&win, &dir);
+    m.start(&spec()).unwrap();
+    // `/End` leaves the task Disabled; the server may live on unrecorded.
+    let err = block_on(m.stop(LABEL)).unwrap_err().to_string();
+    assert!(err.contains("cannot confirm"), "{err}");
+    assert!(!win.actions().iter().any(|a| a.contains("/Delete")));
+    assert!(m.env_path(LABEL).exists());
+    assert_eq!(m.presence(LABEL, None).unwrap(), Presence::Unknown);
+}
+
+#[test]
+fn a_task_shown_disabled_while_its_server_runs_is_not_stopped() {
+    let dir = Dir::new("disabled-running");
+    let win = Arc::new(Win {
+        disabled_while_running: true,
+        stubborn: true,
+        ..Win::default()
+    });
+    let m = manager(&win, &dir);
+    m.start(&spec()).unwrap();
+    assert!(block_on(m.stop(LABEL)).is_err());
+    assert_eq!(win.tasks.lock().unwrap()[LABEL].0, "Disabled");
+    assert!(m.pid_path(LABEL).exists() && m.env_path(LABEL).exists());
+}
+
+#[test]
+fn start_refuses_while_an_earlier_instance_runs_and_keeps_its_pid_record() {
+    let dir = Dir::new("start-twice");
+    let win = Arc::new(Win::default());
+    let m = manager(&win, &dir);
+    m.start(&spec()).unwrap();
+    let record = std::fs::read_to_string(m.pid_path(LABEL)).unwrap();
+    let err = m.start(&spec()).unwrap_err().to_string();
+    assert!(err.contains("may still be running"), "{err}");
+    assert_eq!(std::fs::read_to_string(m.pid_path(LABEL)).unwrap(), record);
+}
+
+#[test]
+fn release_fails_when_the_old_instance_does_not_stop() {
+    let dir = Dir::new("release-stubborn");
+    let win = Arc::new(Win {
+        stubborn: true,
+        ..Win::default()
+    });
+    let m = manager(&win, &dir);
+    m.start(&spec()).unwrap();
+    assert!(block_on(m.release(LABEL)).is_err());
+    assert!(m.pid_path(LABEL).exists());
+}
+
+#[test]
+fn a_failed_disable_stops_nothing() {
+    let dir = Dir::new("disable-fails");
+    let win = Arc::new(Win {
+        fail: Some("/Change"),
+        ..Win::default()
+    });
+    let m = manager(&win, &dir);
+    m.start(&spec()).unwrap();
+    let err = block_on(m.stop(LABEL)).unwrap_err().to_string();
+    assert!(err.contains("/DISABLE failed"), "{err}");
+    assert!(m.env_path(LABEL).exists());
+}
+
+#[test]
+fn the_listing_treats_a_missing_folder_as_no_tasks() {
+    assert!(LIST_TASKS_SCRIPT.contains("-TaskPath '\\amicu\\'"));
+    assert!(LIST_TASKS_SCRIPT.contains("'ObjectNotFound') { $tasks = @() } else { throw }"));
 }
 
 #[test]
@@ -599,7 +783,7 @@ fn release_waits_for_the_old_instance_and_keeps_the_files() {
     let win = Arc::new(Win::default());
     let m = manager(&win, &dir);
     m.start(&spec()).unwrap();
-    block_on(m.release(LABEL));
+    block_on(m.release(LABEL)).unwrap();
     assert!(!*win.server.lock().unwrap());
     assert!(m.xml_path(LABEL).exists());
     // A restart re-registers and runs again.

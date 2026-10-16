@@ -471,7 +471,7 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
         };
         let endpoint = endpoint_for(plan);
         // Update: remove the previous instance and let its port go quiet first.
-        self.manager.release(&label).await;
+        self.manager.release(&label).await?;
         if !self.drain.is_zero() {
             self.wait_released(&label, &endpoint).await?;
         }

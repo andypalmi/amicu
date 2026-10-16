@@ -128,10 +128,13 @@ pub trait ServiceManager: Send + Sync {
     /// Best-effort stop of any previous instance with this label, so an update
     /// can start the new one (a loaded launchd job would keep the old
     /// definition; a running systemd unit would not pick up the new one).
-    /// launchd waits for the job to unload (bootout is asynchronous). Errors
-    /// are ignored: normally there is nothing to release, and `start` reports
-    /// a job that lingers.
-    async fn release(&self, _label: &str) {}
+    /// launchd waits for the job to unload (bootout is asynchronous); launchd
+    /// and systemd ignore errors (normally there is nothing to release, and
+    /// `start` reports a job that lingers). An `Err` (Task Scheduler: the old
+    /// instance is not confirmed gone) aborts the start.
+    async fn release(&self, _label: &str) -> Result<(), LlamaCppError> {
+        Ok(())
+    }
     /// Read-only probe of an instance recorded as `label` (and, for launchd,
     /// started in `domain`). Never acts as a different domain than recorded.
     /// `Err` means the manager could not answer.
@@ -488,7 +491,7 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         )))
     }
 
-    async fn release(&self, label: &str) {
+    async fn release(&self, label: &str) -> Result<(), LlamaCppError> {
         let domain = self.domain().ok().map(|(_, d)| d);
         if let Some(domain) = &domain {
             let _ = self
@@ -498,7 +501,7 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
             // next bootstrap does not race it (error 5). Best effort: if the
             // job lingers, fall through to remove and let `start` report it.
             if matches!(self.wait_unloaded(domain, label).await, Ok(true)) {
-                return;
+                return Ok(());
             }
         }
         // By label too, even when the job is loaded under another name.
@@ -506,6 +509,7 @@ impl<E: CommandExec> ServiceManager for LaunchdManager<E> {
         if let Some(domain) = &domain {
             let _ = self.wait_unloaded(domain, label).await;
         }
+        Ok(())
     }
 
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
@@ -951,10 +955,11 @@ impl<E: CommandExec> ServiceManager for SystemdManager<E> {
         })
     }
 
-    async fn release(&self, label: &str) {
+    async fn release(&self, label: &str) -> Result<(), LlamaCppError> {
         // Stop only: `start` rewrites the unit file and reloads, so an update
         // never has to remove the definition first.
         let _ = self.exec.exec("systemctl", &["--user", "stop", label]);
+        Ok(())
     }
 
     fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {

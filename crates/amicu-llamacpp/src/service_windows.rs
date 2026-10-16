@@ -17,9 +17,12 @@
 //! server sees is exactly the one rendered here. Secrets live only in the
 //! owner-only env file, never in the task XML or the launcher.
 //!
-//! The launcher records the server's pid (and start time) next to the task, so
-//! a stop can confirm the process is gone: `schtasks /End` is asynchronous and
-//! does not reliably take the server (a child of the launcher) with it.
+//! The launcher records its own pid (first, before it starts anything) and
+//! then the server's, each with its start time, next to the task. A stop kills
+//! both process trees (`schtasks /End` is asynchronous and does not take the
+//! launcher's child with it) and is confirmed only once the task is not
+//! running and every recorded process, and any server child of the launcher,
+//! is gone. Without a usable record a task that has run is never "gone".
 //!
 //! Generic over [`CommandExec`] and not `cfg`-gated, so it is unit-tested on
 //! every platform with a fake executor.
@@ -53,15 +56,44 @@ const RESTART_INTERVAL: &str = "PT1M";
 
 /// Task Scheduler result codes that do not mean the last run failed: success,
 /// running, has not run yet, and terminated by the user (`/End`).
-const BENIGN_RESULTS: [i64; 4] = [0, 0x41301, 0x41303, 0x41306];
+const BENIGN_RESULTS: [i64; 4] = [0, 0x41301, HAS_NOT_RUN, 0x41306];
+
+/// `SCHED_S_TASK_HAS_NOT_RUN`: the task was registered but never started.
+const HAS_NOT_RUN: i64 = 0x41303;
+
+/// What the launcher records in the pid file: its own pid and start time and
+/// the server's image name (written first, before it starts anything), then
+/// the server's pid and start time once it has started it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PidRecord {
+    launcher: (u32, u64),
+    image: String,
+    server: Option<(u32, u64)>,
+}
+
+/// Whether anything of an instance may still run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Liveness {
+    /// Confirmed: the task is not running and no recorded process is alive.
+    Gone,
+    /// Running: these processes of ours are alive (empty when only the task
+    /// says it runs).
+    Running(Vec<u32>),
+    /// Cannot be confirmed either way (no pid record for a task that has run,
+    /// or a task state this build does not know). Never treated as gone.
+    Unclear,
+}
 
 /// Lists every task in `\amicu\` as `TASK<TAB>name<TAB>state<TAB>result`
 /// lines, then an end marker. `State` is the `ScheduledTasks` enum name
 /// (`Ready`, `Running`, `Queued`, `Disabled`), which unlike `schtasks /Query`
-/// output is not localized. Any failure exits non-zero, so a missing marker is
-/// never read as "no tasks".
+/// output is not localized. A folder that does not exist (`ObjectNotFound`)
+/// is no tasks; any other failure exits non-zero, so a missing marker is never
+/// read as "no tasks".
 const LIST_TASKS_SCRIPT: &str = "$ErrorActionPreference = 'Stop'; \
-Get-ScheduledTask | Where-Object { $_.TaskPath -eq '\\amicu\\' } | ForEach-Object { \
+try { $tasks = @(Get-ScheduledTask -TaskPath '\\amicu\\') } \
+catch { if ($_.CategoryInfo.Category -eq 'ObjectNotFound') { $tasks = @() } else { throw } }; \
+$tasks | ForEach-Object { \
 $i = Get-ScheduledTaskInfo -InputObject $_; \
 \"TASK`t$($_.TaskName)`t$($_.State)`t$($i.LastTaskResult)\" }; 'END'";
 
@@ -248,10 +280,8 @@ impl<E: CommandExec> TaskSchedulerManager<E> {
             .find(|t| t.name.eq_ignore_ascii_case(label)))
     }
 
-    /// The server process the launcher recorded, if it is still alive: its
-    /// pid, when that pid still runs a process with the recorded start time
-    /// (a reused pid is some other process, never ours to kill).
-    fn live_pid(&self, label: &str) -> Result<Option<u32>, LlamaCppError> {
+    /// The pid record the launcher wrote, `None` when there is none.
+    fn read_pids(&self, label: &str) -> Result<Option<PidRecord>, LlamaCppError> {
         let path = self.pid_path(label);
         let text = match std::fs::read_to_string(&path) {
             Ok(t) => t,
@@ -263,32 +293,76 @@ impl<E: CommandExec> TaskSchedulerManager<E> {
                 )));
             }
         };
-        let bad = || LlamaCppError::Supervisor(format!("{} is not a pid record", path.display()));
-        let (pid, started) = text.trim().split_once('\t').ok_or_else(bad)?;
-        let pid: u32 = pid.trim().parse().map_err(|_| bad())?;
-        let started = started.trim();
-        let script = format!(
-            "$ErrorActionPreference = 'Stop'; \
-             $p = Get-Process -Id {pid} -ErrorAction SilentlyContinue; \
-             if ($p) {{ \"PROC`t$($p.StartTime.ToFileTimeUtc())\" }} else {{ 'NONE' }}"
+        parse_pid_record(&text).map(Some).ok_or_else(|| {
+            LlamaCppError::Supervisor(format!("{} is not a pid record", path.display()))
+        })
+    }
+
+    /// Our processes that are still alive: the launcher and the server, each
+    /// only while its pid runs a process with the recorded start time (a
+    /// reused pid, or one whose start time cannot be read, is not ours), plus
+    /// any child of the launcher with the server's image name started after
+    /// it (a server started but not yet recorded, or left behind by a killed
+    /// launcher).
+    fn live_pids(&self, label: &str, rec: &PidRecord) -> Result<Vec<u32>, LlamaCppError> {
+        use std::fmt::Write as _;
+        let (lpid, lstart) = rec.launcher;
+        let mut script = String::from(
+            "$ErrorActionPreference = 'Stop'\n\
+             function Ours($id, $t) { $p = Get-Process -Id $id -ErrorAction SilentlyContinue; \
+             if (-not $p) { return $false }; \
+             try { return $p.StartTime.ToFileTimeUtc() -eq $t } catch { return $false } }\n",
         );
+        for (pid, start) in std::iter::once(rec.launcher).chain(rec.server) {
+            let _ = writeln!(script, "if (Ours {pid} {start}) {{ \"LIVE`t{pid}\" }}");
+        }
+        let _ = writeln!(
+            script,
+            "Get-CimInstance Win32_Process -Filter 'ParentProcessId = {lpid}' | \
+             Where-Object {{ $_.Name -eq {image} -and $_.CreationDate.ToFileTimeUtc() -ge {lstart} }} | \
+             ForEach-Object {{ \"LIVE`t$($_.ProcessId)\" }}",
+            image = ps_quote(&rec.image),
+        );
+        script.push_str("'END'");
         let out = self.powershell(&script)?;
-        let answer = out
-            .stdout
-            .lines()
-            .map(str::trim)
-            .find(|l| *l == "NONE" || l.starts_with("PROC\t"));
-        match answer {
-            Some("NONE") if out.success => Ok(None),
-            Some(line) if out.success => {
-                Ok((line.trim_start_matches("PROC\t") == started).then_some(pid))
-            }
-            _ => Err(LlamaCppError::Supervisor(format!(
-                "cannot tell whether process {pid} is running (exit {:?}): {}",
+        if !out.success || !out.stdout.lines().any(|l| l.trim() == "END") {
+            return Err(LlamaCppError::Supervisor(format!(
+                "cannot tell whether the processes of {label} are running (exit {:?}): {}",
                 out.code,
                 out.stderr.trim()
-            ))),
+            )));
         }
+        let mut pids: Vec<u32> = out
+            .stdout
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("LIVE\t")?.trim().parse().ok())
+            .collect();
+        pids.sort_unstable();
+        pids.dedup();
+        Ok(pids)
+    }
+
+    /// Whether anything of the instance may still run. With a pid record,
+    /// every recorded process must be gone and the task not running. Without
+    /// one, only a task that is not registered, or registered and never run,
+    /// counts as gone: a task that ran may have a server nobody recorded.
+    fn liveness(&self, label: &str) -> Result<Liveness, LlamaCppError> {
+        let task = self.task(label)?;
+        if let Some(rec) = self.read_pids(label)? {
+            let pids = self.live_pids(label, &rec)?;
+            return Ok(match &task {
+                _ if !pids.is_empty() => Liveness::Running(pids),
+                Some(t) if t.is_running() => Liveness::Running(pids),
+                Some(t) if !t.is_idle() => Liveness::Unclear,
+                _ => Liveness::Gone,
+            });
+        }
+        Ok(match task {
+            None => Liveness::Gone,
+            Some(t) if t.is_running() => Liveness::Running(Vec::new()),
+            Some(t) if t.is_idle() && t.last_result == Some(HAS_NOT_RUN) => Liveness::Gone,
+            Some(_) => Liveness::Unclear,
+        })
     }
 
     /// Run a PowerShell `script` (no profile, non-interactive).
@@ -296,36 +370,70 @@ impl<E: CommandExec> TaskSchedulerManager<E> {
         self.exec.exec("powershell", &powershell_args(script))
     }
 
-    /// Ask the task and its server to stop, without waiting: disable the task
-    /// first (so neither its restart-on-failure nor a logon brings it back
-    /// meanwhile), end it, and kill the recorded server process tree.
-    fn request_stop(&self, label: &str) {
-        let name = task_name(label);
-        let _ = self
-            .exec
-            .exec("schtasks", &["/Change", "/TN", &name, "/DISABLE"]);
-        let _ = self.exec.exec("schtasks", &["/End", "/TN", &name]);
+    fn kill_tree(&self, pid: u32) {
+        let pid = pid.to_string();
+        let _ = self.exec.exec("taskkill", &["/PID", &pid, "/T", "/F"]);
     }
 
-    /// One check: is the instance confirmed gone (the task not running AND
-    /// the server process gone)? A live server is killed again on the way.
-    /// An unrecognized task state is never "gone".
-    fn check_gone(&self, label: &str) -> Result<bool, LlamaCppError> {
-        if let Some(pid) = self.live_pid(label)? {
-            let pid = pid.to_string();
-            let _ = self.exec.exec("taskkill", &["/PID", &pid, "/T", "/F"]);
-            return Ok(false);
+    /// Ask the task and its processes to stop, without waiting: disable the
+    /// task (so neither its restart-on-failure nor a logon brings it back),
+    /// kill the recorded launcher and server trees while the launcher still
+    /// lives (`/End` alone would leave its child running), then end the task.
+    /// A failed disable, or an end that leaves the task running, is an error.
+    fn request_stop(&self, label: &str) -> Result<(), LlamaCppError> {
+        let name = task_name(label);
+        let registered = self.task(label)?.is_some();
+        if registered {
+            let out = self
+                .exec
+                .exec("schtasks", &["/Change", "/TN", &name, "/DISABLE"])?;
+            if !out.success && self.task(label)?.is_some() {
+                return Err(LlamaCppError::Supervisor(format!(
+                    "schtasks /Change /TN {name} /DISABLE failed: {}; nothing was removed",
+                    out.stderr.trim()
+                )));
+            }
         }
-        Ok(match self.task(label)? {
-            None => true,
-            Some(t) => t.is_idle(),
-        })
+        if let Some(rec) = self.read_pids(label)? {
+            for pid in self.live_pids(label, &rec)? {
+                self.kill_tree(pid);
+            }
+        }
+        if registered {
+            let out = self.exec.exec("schtasks", &["/End", "/TN", &name])?;
+            if !out.success && self.task(label)?.is_some_and(|t| t.is_running()) {
+                return Err(LlamaCppError::Supervisor(format!(
+                    "schtasks /End /TN {name} failed: {}; nothing was removed",
+                    out.stderr.trim()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// One check: is the instance confirmed gone? Live processes of ours are
+    /// killed again on the way. Anything unclear is an error, never "gone".
+    fn check_gone(&self, label: &str) -> Result<bool, LlamaCppError> {
+        match self.liveness(label)? {
+            Liveness::Gone => Ok(true),
+            Liveness::Running(pids) => {
+                for pid in pids {
+                    self.kill_tree(pid);
+                }
+                Ok(false)
+            }
+            Liveness::Unclear => Err(LlamaCppError::Supervisor(format!(
+                "cannot confirm that {label} has stopped: its task has run but there is no \
+                 usable pid record (or its state is unknown). Check for llama-server.exe in \
+                 Task Manager; nothing was removed"
+            ))),
+        }
     }
 
     /// Stop the instance and wait (bounded, with backoff) until it is
     /// confirmed gone. `Ok(false)` if it still runs after the timeout.
     async fn halt(&self, label: &str) -> Result<bool, LlamaCppError> {
-        self.request_stop(label);
+        self.request_stop(label)?;
         let started = Instant::now();
         let mut delay = Duration::from_millis(50);
         let mut announced = false;
@@ -352,7 +460,7 @@ impl<E: CommandExec> TaskSchedulerManager<E> {
 
     /// [`halt`](Self::halt) for the synchronous start path.
     fn halt_blocking(&self, label: &str) -> Result<bool, LlamaCppError> {
-        self.request_stop(label);
+        self.request_stop(label)?;
         let started = Instant::now();
         let mut delay = Duration::from_millis(50);
         loop {
@@ -457,24 +565,28 @@ impl<E: CommandExec> ServiceManager for TaskSchedulerManager<E> {
         })
     }
 
-    async fn release(&self, label: &str) {
+    async fn release(&self, label: &str) -> Result<(), LlamaCppError> {
         // Stop only: `start` re-registers the task (`/F`) and rewrites its
-        // files. Best effort; `start` refuses a port that is still served.
-        if check_task_label(label).is_ok() {
-            let _ = self.halt(label).await;
+        // files. The old instance must be confirmed gone first: `start`
+        // replaces its pid record, the only handle on its server.
+        check_task_label(label)?;
+        if self.halt(label).await? {
+            Ok(())
+        } else {
+            Err(LlamaCppError::Supervisor(format!(
+                "the previous instance of {label} is still running {}s after `schtasks /End` \
+                 and `taskkill`; nothing was started",
+                self.settle_timeout.as_secs()
+            )))
         }
     }
 
     fn presence(&self, label: &str, _domain: Option<&str>) -> Result<Presence, LlamaCppError> {
         check_task_label(label)?;
-        if self.live_pid(label)?.is_some() {
-            return Ok(Presence::Running);
-        }
-        Ok(match self.task(label)? {
-            None => Presence::Down,
-            Some(t) if t.is_running() => Presence::Running,
-            Some(t) if t.is_idle() => Presence::Down,
-            Some(_) => Presence::Unknown,
+        Ok(match self.liveness(label)? {
+            Liveness::Gone => Presence::Down,
+            Liveness::Running(_) => Presence::Running,
+            Liveness::Unclear => Presence::Unknown,
         })
     }
 
@@ -489,6 +601,15 @@ impl<E: CommandExec> ServiceManager for TaskSchedulerManager<E> {
         let label = &spec.label;
         // Everything that can fail before a secret is on disk happens first.
         let sid = self.user_sid()?;
+        // The pid record is the only handle on a running server: never replace
+        // it while anything of an earlier instance may still run.
+        if self.liveness(label)? != Liveness::Gone {
+            return Err(LlamaCppError::Supervisor(format!(
+                "an earlier instance of {label} may still be running; stop it first \
+                 (`amicu destroy`, or `schtasks /End /TN {}`)",
+                task_name(label)
+            )));
+        }
         let env_body = env_file(&spec.env)?;
         let env_path = self.env_path(label);
         let launcher = launcher_script(
@@ -551,21 +672,17 @@ impl<E: CommandExec> ServiceManager for TaskSchedulerManager<E> {
 
     fn state(&self, label: &str) -> Result<ServiceState, LlamaCppError> {
         check_task_label(label)?;
-        if self.live_pid(label)?.is_some() {
+        if let Liveness::Running(_) = self.liveness(label)? {
             return Ok(ServiceState::Active);
         }
+        // Not running (or unclear, which a stop then refuses to confirm).
         Ok(match self.task(label)? {
-            None => ServiceState::Inactive,
-            Some(t) if t.is_idle() => {
-                if t.last_result.is_some_and(|r| !BENIGN_RESULTS.contains(&r)) {
-                    ServiceState::Failed
-                } else {
-                    ServiceState::Inactive
-                }
+            // A task state this build does not know: not reported stopped.
+            Some(t) if !t.is_idle() => ServiceState::Active,
+            Some(t) if t.last_result.is_some_and(|r| !BENIGN_RESULTS.contains(&r)) => {
+                ServiceState::Failed
             }
-            // Running, queued, or a state this build does not know: not
-            // reported stopped.
-            Some(_) => ServiceState::Active,
+            _ => ServiceState::Inactive,
         })
     }
 
@@ -697,10 +814,11 @@ fn task_xml(label: &str, sid: &str, launcher: &Path) -> String {
     )
 }
 
-/// The launcher the task runs: load the env file (`NAME=<base64>` lines, read
-/// as data), start the server with its output redirected to the log files,
-/// record its pid and start time (together they identify the process even
-/// after the pid is reused), and exit with its exit code.
+/// The launcher the task runs: record its own pid and start time first
+/// (together they identify a process even after its pid is reused), load the
+/// env file (`NAME=<base64>` lines, read as data), start the server with its
+/// output redirected to the log files, record the server's pid and start
+/// time, and exit with its exit code.
 fn launcher_script(
     spec: &ServiceSpec,
     env: &Path,
@@ -709,6 +827,7 @@ fn launcher_script(
     stderr: &Path,
 ) -> String {
     let program = &spec.argv[0];
+    let image = program.rsplit(['\\', '/']).next().unwrap_or(program);
     let arguments = if spec.argv.len() > 1 {
         let line = spec.argv[1..]
             .iter()
@@ -722,6 +841,7 @@ fn launcher_script(
     format!(
         r#"# amicu launcher for {label}. Generated; rewritten on every apply.
 $ErrorActionPreference = 'Stop'
+[System.IO.File]::WriteAllText({pid}, "L`t$PID`t$((Get-Process -Id $PID).StartTime.ToFileTimeUtc())`t" + {image} + "`n")
 foreach ($line in [System.IO.File]::ReadAllLines({env})) {{
   if ($line -eq '') {{ continue }}
   $i = $line.IndexOf('=')
@@ -730,7 +850,7 @@ foreach ($line in [System.IO.File]::ReadAllLines({env})) {{
 }}
 $p = Start-Process -FilePath {program}{arguments} -NoNewWindow -PassThru -RedirectStandardOutput {out} -RedirectStandardError {err}
 $null = $p.Handle
-try {{ [System.IO.File]::WriteAllText({pid}, "$($p.Id)`t$($p.StartTime.ToFileTimeUtc())") }} catch {{ $p.Kill(); exit 1 }}
+try {{ [System.IO.File]::AppendAllText({pid}, "S`t$($p.Id)`t$($p.StartTime.ToFileTimeUtc())`n") }} catch {{ $p.Kill(); exit 1 }}
 $p.WaitForExit()
 exit $p.ExitCode
 "#,
@@ -740,6 +860,7 @@ exit $p.ExitCode
         out = ps_quote(&stdout.to_string_lossy()),
         err = ps_quote(&stderr.to_string_lossy()),
         pid = ps_quote(&pid.to_string_lossy()),
+        image = ps_quote(image),
     )
 }
 
@@ -805,6 +926,29 @@ pub fn windows_arg(arg: &str) -> String {
     out.extend(std::iter::repeat_n('\\', backslashes * 2));
     out.push('"');
     out
+}
+
+/// Parse the launcher's pid record: an `L<TAB>pid<TAB>start<TAB>image` line,
+/// then optionally `S<TAB>pid<TAB>start`.
+fn parse_pid_record(text: &str) -> Option<PidRecord> {
+    let mut launcher = None;
+    let mut server = None;
+    for line in text.lines().map(|l| l.trim_end_matches('\r')) {
+        let cols: Vec<&str> = line.split('\t').collect();
+        let pid_start = || Some((cols.get(1)?.parse().ok()?, cols.get(2)?.parse().ok()?));
+        match cols.first() {
+            Some(&"L") => launcher = Some((pid_start()?, (*cols.get(3)?).to_owned())),
+            Some(&"S") => server = Some(pid_start()?),
+            Some(&"") | None => {}
+            Some(_) => return None,
+        }
+    }
+    let (launcher, image) = launcher?;
+    (!image.is_empty()).then_some(PidRecord {
+        launcher,
+        image,
+        server,
+    })
 }
 
 /// The fields of one CSV line as `whoami` prints it (every field

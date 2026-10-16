@@ -1862,9 +1862,12 @@ fn task_scheduler_recorded_files_are_validated() {
     rec.definition = Some(format!("{base}/tasks/{id}.xml"));
     rec.env_file = Some(format!("{base}/env/{id}.env"));
     rec.logs = vec![format!("{base}/logs/{id}.out.log")];
-    assert!(rec.definition_path().unwrap().is_some());
-    assert!(rec.env_path().unwrap().is_some());
-    assert_eq!(rec.log_paths().unwrap().len(), 1);
+    if std::env::var_os("LOCALAPPDATA").is_none() {
+        // Without LOCALAPPDATA the anchor is unknown: everything is refused.
+        assert!(rec.definition_path().is_err());
+        assert!(rec.env_path().is_err());
+        assert!(rec.log_paths().is_err());
+    }
 
     let mut bad = rec.clone();
     bad.definition = Some(format!("/Users/me/Documents/{id}.xml"));
@@ -1875,6 +1878,29 @@ fn task_scheduler_recorded_files_are_validated() {
     let mut bad = rec;
     bad.logs = vec![format!("{base}/logs/other.out.log")];
     assert!(bad.log_paths().is_err());
+}
+
+#[test]
+fn task_scheduler_files_are_anchored_to_the_managers_directory() {
+    use crate::stops::check_anchored;
+    use std::path::Path;
+    let base = Path::new(r"C:\Users\me\AppData\Local\amicu");
+    let ok = |p: &str, sub: &str| check_anchored(Path::new(p), Some(base), sub).is_ok();
+    assert!(ok(r"C:\Users\me\AppData\Local\amicu\tasks\x.xml", "tasks"));
+    // Case and separators do not matter on Windows.
+    assert!(ok(r"c:/users/ME/appdata/local/AMICU/tasks/x.xml", "tasks"));
+    // The same suffix under another profile, drive or share is refused.
+    assert!(!ok(
+        r"C:\Users\other\AppData\Local\amicu\tasks\x.xml",
+        "tasks"
+    ));
+    assert!(!ok(r"D:\Users\me\AppData\Local\amicu\tasks\x.xml", "tasks"));
+    assert!(!ok(
+        r"\\server\share\AppData\Local\amicu\tasks\x.xml",
+        "tasks"
+    ));
+    assert!(!ok(r"C:\Users\me\AppData\Local\amicu\env\x.xml", "tasks"));
+    assert!(check_anchored(Path::new("/x/amicu/tasks/x.xml"), None, "tasks").is_err());
 }
 
 #[test]
