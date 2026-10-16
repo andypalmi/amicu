@@ -193,6 +193,7 @@ pub fn build_plan_with(
             }
         };
         let rendered = launch.rendered.as_text().to_owned();
+        let shown = redacted_launch_text(&launch.rendered);
         let fingerprint = Fingerprint::compute(d, hardware, inputs.probe).with_launch(&rendered);
         fingerprints.insert(d.id.clone(), fingerprint.clone());
 
@@ -234,7 +235,7 @@ pub fn build_plan_with(
             action,
             launch: Some(launch),
             deployment: d.id.clone(),
-            rendered: Some(rendered),
+            rendered: Some(shown),
             fingerprint: Some(fingerprint),
             reason,
             changes,
@@ -431,22 +432,10 @@ fn is_launch_field(key: &str) -> bool {
 fn is_redacted(key: &str) -> bool {
     const EXACT: [&str; 4] = ["extra_args", "chat_template", "build", "env"];
     const PREFIXES: [&str; 2] = ["env.", "api_key"];
-    const NEEDLES: [&str; 9] = [
-        "key",
-        "token",
-        "secret",
-        "password",
-        "credential",
-        "auth",
-        "header",
-        "cookie",
-        "private",
-    ];
     if EXACT.contains(&key) || PREFIXES.iter().any(|p| key.starts_with(p)) {
         return true;
     }
-    let lower = key.to_ascii_lowercase();
-    NEEDLES.iter().any(|n| lower.contains(n))
+    name_is_secret(key)
 }
 
 /// A URL value (`scheme://...`): its userinfo, path or fragment can carry a
@@ -454,6 +443,194 @@ fn is_redacted(key: &str) -> bool {
 /// Ollama tags and local paths have no `://` and stay visible.
 fn value_looks_sensitive(v: &str) -> bool {
     v.contains("://")
+}
+
+/// Shown in place of any redacted value in plan output.
+pub const REDACTED: &str = "(redacted)";
+
+/// Words that make a `token` a count or limit (`max_num_batched_tokens`,
+/// `--long-prefill-token-threshold`) rather than a credential.
+const COUNT_WORDS: [&str; 12] = [
+    "threshold",
+    "limit",
+    "budget",
+    "max",
+    "min",
+    "num",
+    "n",
+    "count",
+    "size",
+    "len",
+    "length",
+    "batched",
+];
+
+/// Whether a flag or setting name (split into words on `-`, `_` and `.`) names
+/// a credential. `token` counts only as the singular word and not as a count
+/// (`tokens`, `token-threshold`, `max-token-...`); `tokenizer` never matches.
+fn name_is_secret(name: &str) -> bool {
+    const NEEDLES: [&str; 8] = [
+        "key",
+        "secret",
+        "password",
+        "passwd",
+        "auth",
+        "header",
+        "cookie",
+        "credential",
+    ];
+    let lower = name.trim_start_matches('-').to_ascii_lowercase();
+    let parts: Vec<&str> = lower.split(['-', '_', '.']).collect();
+    parts.iter().enumerate().any(|(i, part)| {
+        if NEEDLES.iter().any(|n| part.contains(n)) || part.contains("private") {
+            return true;
+        }
+        if !part.contains("token") || part.starts_with("tokeniz") || part.ends_with("tokens") {
+            return false;
+        }
+        let count_ctx = parts.get(i + 1).is_some_and(|w| COUNT_WORDS.contains(w))
+            || (i > 0 && COUNT_WORDS.contains(&parts[i - 1]));
+        !count_ctx
+    })
+}
+
+/// Whether a flag names a secret-bearing option or free-form template text.
+fn flag_is_secret(flag: &str) -> bool {
+    // `-H` is the curl-style header short flag (`-h` is help).
+    if matches!(flag, "-H" | "--chat-template" | "--chat-template-kwargs") {
+        return true;
+    }
+    name_is_secret(flag)
+}
+
+/// Whether `arg` is an option name (`--x` or `-X`) rather than a value, so a
+/// secret flag that takes no value does not swallow the next flag.
+fn looks_like_flag(arg: &str) -> bool {
+    arg.starts_with("--")
+        || (arg.len() == 2
+            && arg.starts_with('-')
+            && arg.chars().nth(1).is_some_and(char::is_alphabetic))
+}
+
+/// `user:password@host` without a scheme.
+fn has_userinfo(arg: &str) -> bool {
+    let Some((info, host)) = arg.split_once('@') else {
+        return false;
+    };
+    let Some((user, pass)) = info.split_once(':') else {
+        return false;
+    };
+    !host.is_empty()
+        && !user.is_empty()
+        && !pass.is_empty()
+        && !info.contains(char::is_whitespace)
+        && !user.contains('/')
+}
+
+fn arg_is_sensitive(arg: &str) -> bool {
+    value_looks_sensitive(arg) || has_userinfo(arg)
+}
+
+/// A command-line argument vector with secrets removed for display: the value
+/// after a secret-bearing flag (`--api-key v` and `--api-key=v`; the next
+/// argument is taken as the value unless it is itself a flag (`--x`, `-X`)), and
+/// any argument that embeds a URL (`scheme://...`) or `user:pass@host`
+/// userinfo, become [`REDACTED`]. Everything else is unchanged.
+#[must_use]
+pub fn redact_argv(argv: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(argv.len());
+    let mut redact_next = false;
+    for arg in argv {
+        if std::mem::take(&mut redact_next) && !looks_like_flag(arg) {
+            out.push(REDACTED.to_owned());
+            continue;
+        }
+        if arg.starts_with('-') {
+            if let Some((flag, value)) = arg.split_once('=') {
+                if flag_is_secret(flag) || arg_is_sensitive(value) {
+                    out.push(format!("{flag}={REDACTED}"));
+                } else {
+                    out.push(arg.clone());
+                }
+                continue;
+            }
+            // A boolean `--no-...` switch takes no value.
+            redact_next = flag_is_secret(arg) && !arg.starts_with("--no-");
+        }
+        out.push(if arg_is_sensitive(arg) {
+            REDACTED.to_owned()
+        } else {
+            arg.clone()
+        });
+    }
+    out
+}
+
+/// Quote one token for display: bare words pass through, everything else is
+/// single-quoted. The redaction marker itself (alone or as `--flag=(redacted)`)
+/// prints bare.
+fn display_quote(token: &str) -> String {
+    let safe = !token.is_empty()
+        && token.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/' | b'=' | b':')
+        });
+    if safe || token == REDACTED || token.ends_with(&format!("={REDACTED}")) {
+        token.to_owned()
+    } else {
+        format!("'{}'", token.replace('\'', r"'\''"))
+    }
+}
+/// Display text for an argv with secrets removed ([`redact_argv`]).
+#[must_use]
+pub fn redacted_argv_text(argv: &[String]) -> String {
+    redact_argv(argv)
+        .iter()
+        .map(|a| display_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The launch line shown in a plan, with secrets removed. A command is
+/// rebuilt from its structured argv; a manifest (no argv) is redacted word by
+/// word.
+#[must_use]
+pub fn redacted_launch_text(rendered: &amicu_runtime::RenderedLaunch) -> String {
+    match rendered.argv() {
+        Some(argv) => redacted_argv_text(argv),
+        None => rendered
+            .as_text()
+            .lines()
+            .map(|line| {
+                let words: Vec<String> = line.split(' ').map(str::to_owned).collect();
+                redact_argv(&words).join(" ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+/// A runtime setting as shown in a plan: values under a denied key
+/// ([`is_redacted`]) or holding a URL become [`REDACTED`]. `extra_args` is
+/// kept but redacted argument by argument ([`redact_argv`]); `env` lists names
+/// only; the endpoint
+/// `api_key` placeholder is already masked.
+fn redact_setting(mut s: Setting) -> Setting {
+    if s.key == "api_key" {
+        return s;
+    }
+    if s.key == "extra_args" || s.key == "env" {
+        // `extra_args` is redacted argument by argument where it is built;
+        // `env` carries variable names only, never values.
+        return s;
+    }
+    // A plain number is a typed tuning field, never a credential.
+    if s.value.parse::<f64>().is_ok() {
+        return s;
+    }
+    if is_redacted(&s.key) || value_looks_sensitive(&s.value) {
+        REDACTED.clone_into(&mut s.value);
+    }
+    s
 }
 
 fn planned_change(key: &str, old: Option<&String>, new: Option<&String>) -> PlannedChange {
@@ -524,7 +701,10 @@ fn action_for(
         kind,
         address: format!("deployment.{}", d.id),
         artifact: variant.as_ref().map(variant_artifact),
-        runtime: runtime_settings_with_scaling(d),
+        runtime: runtime_settings_with_scaling(d)
+            .into_iter()
+            .map(redact_setting)
+            .collect(),
         hardware: hardware.map(hardware_label),
         provider: hardware.map(|h| h.provider.clone()),
         region: hardware.and_then(|h| h.region.as_ref().map(|r| r.code.clone())),
@@ -773,7 +953,7 @@ fn extend_with_extra_args_and_env(
     env: &std::collections::BTreeMap<String, String>,
 ) {
     if !extra_args.is_empty() {
-        settings.push(setting("extra_args", extra_args.join(" ")));
+        settings.push(setting("extra_args", redact_argv(extra_args).join(" ")));
     }
     if !env.is_empty() {
         settings.push(setting(
@@ -1921,5 +2101,164 @@ mod tests {
         let r = build_plan(&g, None).unwrap();
         assert_eq!(r.items[0].action.kind, ActionKind::Create);
         assert!(r.items[0].fingerprint.is_some());
+    }
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| (*a).to_owned()).collect()
+    }
+
+    #[test]
+    fn redact_argv_hides_secret_flag_values_and_urls() {
+        let out = redact_argv(&argv(&[
+            "llama-server",
+            "--api-key",
+            "v1",
+            "--hf-token=v2",
+            "--auth-token",
+            "v3",
+            "--alias",
+            "https://host/dl/tok/m.gguf",
+            "--mmproj=http://h/p",
+            "--tokenizer",
+            "tok",
+            "--no-auth",
+            "--threads",
+            "4",
+            "-hf",
+            "org/name",
+        ]));
+        assert_eq!(
+            out,
+            argv(&[
+                "llama-server",
+                "--api-key",
+                "(redacted)",
+                "--hf-token=(redacted)",
+                "--auth-token",
+                "(redacted)",
+                "--alias",
+                "(redacted)",
+                "--mmproj=(redacted)",
+                "--tokenizer",
+                "tok",
+                "--no-auth",
+                "--threads",
+                "4",
+                "-hf",
+                "org/name",
+            ])
+        );
+    }
+
+    #[test]
+    fn redacted_argv_text_quotes_like_a_shell() {
+        let text = redacted_argv_text(&argv(&["srv", "--header", "A: b c", "--x", "a b"]));
+        assert_eq!(text, "srv --header (redacted) --x 'a b'");
+    }
+
+    #[test]
+    fn count_flags_and_typed_vllm_fields_are_not_redacted() {
+        let out = redact_argv(&argv(&[
+            "--max-num-batched-tokens",
+            "8192",
+            "--long-prefill-token-threshold",
+            "512",
+            "--max-tokens",
+            "64",
+            "--tokenizer",
+            "x",
+        ]));
+        assert_eq!(out[1], "8192");
+        assert_eq!(out[3], "512");
+        assert_eq!(out[5], "64");
+        assert_eq!(out[7], "x");
+        for key in ["max_num_batched_tokens", "max_tokens", "tokenizer"] {
+            assert!(!is_redacted(key), "{key}");
+        }
+        assert!(is_redacted("hf_token") && is_redacted("access-token"));
+
+        let mut g = vllm_graph(false);
+        let Runtime::Vllm(s) = &mut g.deployments[0].runtime else {
+            unreachable!()
+        };
+        s.max_num_batched_tokens = Some(8192);
+        let result = build_plan(&g, None).unwrap();
+        let shown = result.items[0]
+            .action
+            .runtime
+            .iter()
+            .find(|s| s.key == "max_num_batched_tokens")
+            .map(|s| s.value.clone());
+        assert_eq!(shown.as_deref(), Some("8192"));
+    }
+
+    #[test]
+    fn vllm_extra_args_secrets_never_reach_the_plan() {
+        let mut g = vllm_graph(false);
+        let Runtime::Vllm(s) = &mut g.deployments[0].runtime else {
+            unreachable!()
+        };
+        s.extra_args = argv(&["--hf-token", "s3cr3t-vllm", "--swap-space", "4"]);
+        let result = build_plan(&g, None).unwrap();
+        let text = format!(
+            "{:?}{}",
+            result.plan,
+            result.items[0].rendered.as_deref().unwrap_or_default()
+        );
+        assert!(!text.contains("s3cr3t-vllm"), "{text}");
+        assert!(text.contains("(redacted)"), "{text}");
+    }
+
+    #[test]
+    fn redact_argv_handles_edge_forms() {
+        let out = redact_argv(&argv(&[
+            "--API-KEY",
+            "-dash-secret",
+            "-H",
+            "Authorization: Bearer x",
+            "--proxy",
+            "user:pw@host.example",
+            "--x=u:pw@h",
+            "--keep",
+            "a@b",
+        ]));
+        assert_eq!(
+            out,
+            argv(&[
+                "--API-KEY",
+                "(redacted)",
+                "-H",
+                "(redacted)",
+                "--proxy",
+                "(redacted)",
+                "--x=(redacted)",
+                "--keep",
+                "a@b",
+            ])
+        );
+        assert_eq!(
+            redacted_argv_text(&argv(&["s", "--hf-token=v", "--k", "(paren)"])),
+            "s --hf-token=(redacted) --k '(paren)'"
+        );
+    }
+
+    #[test]
+    fn chained_flags_after_a_valueless_secret_flag_are_still_processed() {
+        for flag in [
+            "--allow-credentials",
+            "--enable-request-id-headers",
+            "--return-tokens-as-token-ids",
+        ] {
+            let out = redact_argv(&argv(&[flag, "--hf-token", "s3cr3t"]));
+            assert_eq!(out, argv(&[flag, "--hf-token", "(redacted)"]), "{flag}");
+        }
+        let out = redact_argv(&argv(&["--allow-credentials", "--swap-space", "4"]));
+        assert_eq!(out, argv(&["--allow-credentials", "--swap-space", "4"]));
+        let out = redact_argv(&argv(&["--allow-credentials", "-H", "X: y"]));
+        assert_eq!(out, argv(&["--allow-credentials", "-H", "(redacted)"]));
+        assert_eq!(
+            redact_argv(&argv(&["--proxy", "user:pa/ss@host"])),
+            argv(&["--proxy", "(redacted)"])
+        );
     }
 }
