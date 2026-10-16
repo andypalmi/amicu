@@ -503,6 +503,15 @@ fn flag_is_secret(flag: &str) -> bool {
     name_is_secret(flag)
 }
 
+/// Whether `arg` is an option name (`--x` or `-X`) rather than a value, so a
+/// secret flag that takes no value does not swallow the next flag.
+fn looks_like_flag(arg: &str) -> bool {
+    arg.starts_with("--")
+        || (arg.len() == 2
+            && arg.starts_with('-')
+            && arg.chars().nth(1).is_some_and(char::is_alphabetic))
+}
+
 /// `user:password@host` without a scheme.
 fn has_userinfo(arg: &str) -> bool {
     let Some((info, host)) = arg.split_once('@') else {
@@ -515,7 +524,7 @@ fn has_userinfo(arg: &str) -> bool {
         && !user.is_empty()
         && !pass.is_empty()
         && !info.contains(char::is_whitespace)
-        && !info.contains('/')
+        && !user.contains('/')
 }
 
 fn arg_is_sensitive(arg: &str) -> bool {
@@ -524,7 +533,7 @@ fn arg_is_sensitive(arg: &str) -> bool {
 
 /// A command-line argument vector with secrets removed for display: the value
 /// after a secret-bearing flag (`--api-key v` and `--api-key=v`; the next
-/// argument is always taken as the value, even if it starts with `-`), and
+/// argument is taken as the value unless it is itself a flag (`--x`, `-X`)), and
 /// any argument that embeds a URL (`scheme://...`) or `user:pass@host`
 /// userinfo, become [`REDACTED`]. Everything else is unchanged.
 #[must_use]
@@ -532,7 +541,7 @@ pub fn redact_argv(argv: &[String]) -> Vec<String> {
     let mut out = Vec::with_capacity(argv.len());
     let mut redact_next = false;
     for arg in argv {
-        if std::mem::take(&mut redact_next) {
+        if std::mem::take(&mut redact_next) && !looks_like_flag(arg) {
             out.push(REDACTED.to_owned());
             continue;
         }
@@ -2230,6 +2239,26 @@ mod tests {
         assert_eq!(
             redacted_argv_text(&argv(&["s", "--hf-token=v", "--k", "(paren)"])),
             "s --hf-token=(redacted) --k '(paren)'"
+        );
+    }
+
+    #[test]
+    fn chained_flags_after_a_valueless_secret_flag_are_still_processed() {
+        for flag in [
+            "--allow-credentials",
+            "--enable-request-id-headers",
+            "--return-tokens-as-token-ids",
+        ] {
+            let out = redact_argv(&argv(&[flag, "--hf-token", "s3cr3t"]));
+            assert_eq!(out, argv(&[flag, "--hf-token", "(redacted)"]), "{flag}");
+        }
+        let out = redact_argv(&argv(&["--allow-credentials", "--swap-space", "4"]));
+        assert_eq!(out, argv(&["--allow-credentials", "--swap-space", "4"]));
+        let out = redact_argv(&argv(&["--allow-credentials", "-H", "X: y"]));
+        assert_eq!(out, argv(&["--allow-credentials", "-H", "(redacted)"]));
+        assert_eq!(
+            redact_argv(&argv(&["--proxy", "user:pa/ss@host"])),
+            argv(&["--proxy", "(redacted)"])
         );
     }
 }
