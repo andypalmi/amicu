@@ -18,4 +18,4 @@ These pages describe what amicu does with credentials and where data goes. They 
 - Values never appear in HCL, plan output, state, logs, or command-line arguments. They reach the runtime through its environment, in a file readable only by you.
 - Every deployment that is reachable off the machine must have an API key.
 - After every deploy that has an `api_key`, or that is reachable off the machine, amicu checks that an anonymous request is refused. If it is not, amicu stops the endpoint and fails the apply. Loopback endpoints without an `api_key` skip the check.
-- The CLI sends no telemetry.
+- Telemetry is off by default, and nothing is sent unless you opt in. If you opt in, deployments that `amicu apply` starts on your machine make outbound HTTPS calls to `api.amicu.dev`. Each call carries 5-minute performance rollups, which are aggregates only. See [Telemetry and network](/docs/security/telemetry) for the exact field list.
