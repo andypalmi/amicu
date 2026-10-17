@@ -70,7 +70,7 @@ amicu init --example
 
 `init` creates `amicu.hcl` (only a comment header, no resources), `variables.amicu.hcl` (a placeholder), and `.amicu/` (project config and state). It never overwrites existing files.
 
-For a working starter, add `--example`. A bare `--example` picks the one for this machine: macOS gets `mac`, Linux with `nvidia-smi` gets `linux-cuda`, and any other Linux gets `linux-cpu`. On Windows, pass the target explicitly (`--example linux-cuda`, `linux-cpu` or `modal`). Its hardware profile is the detected machine, and it picks a Qwen3.5 GGUF model and a context length (up to the native 262144) that fit its memory, with output capped at 65536 tokens. It replaces the header-only `amicu.hcl` while that is unchanged, and never overwrites a file you edited. To choose yourself:
+For a working starter, add `--example`. A bare `--example` picks the one for this machine: macOS gets `mac`, Linux with `nvidia-smi` gets `linux-cuda`, and any other Linux gets `linux-cpu`. Windows is detected the same way as Linux: `nvidia-smi` on `PATH` gets `linux-cuda`, otherwise `linux-cpu` (plain llama.cpp starters despite the names). Its hardware profile is the detected machine, and it picks a Qwen3.5 GGUF model and a context length (up to the native 262144) that fit its memory, with output capped at 65536 tokens. It replaces the header-only `amicu.hcl` while that is unchanged, and never overwrites a file you edited. To choose yourself:
 
 ```bash
 amicu init --example             # detect this machine

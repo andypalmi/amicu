@@ -1550,7 +1550,10 @@ fn host_stop_hint(os: &str, id: &str) -> String {
     match os {
         "macos" => format!("`launchctl bootout gui/$(id -u)/{id}`"),
         "windows" => format!(
-            "`schtasks /End /TN {id}` then `schtasks /Delete /TN {id} /F` (or Task Scheduler)"
+            "`schtasks /End /TN {task}` then `schtasks /Delete /TN {task} /F` (or Task Scheduler)",
+            task = amicu_llamacpp::service_windows::ps_quote(
+                &amicu_llamacpp::service_windows::task_name(id)
+            )
         ),
         _ => format!("`systemctl --user disable --now {id}`"),
     }
