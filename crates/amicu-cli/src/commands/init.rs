@@ -48,7 +48,7 @@ impl InitTarget {
     }
 
     /// The target for the detected host: macOS is `mac`; Linux with an NVIDIA
-    /// GPU is `linux-cuda`; any other Linux is `linux-cpu`.
+    /// GPU is `linux-cuda`; any other host (Linux or Windows) is `linux-cpu`.
     pub(crate) fn detect(host: &HostInfo) -> Self {
         if host.os == "macos" {
             InitTarget::Mac

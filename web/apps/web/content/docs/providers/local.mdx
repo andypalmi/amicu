@@ -1,6 +1,6 @@
 ---
 title: This machine
-description: Run llama.cpp or vLLM as a launchd or systemd user service, on macOS, Linux, Apple Silicon, or CPU.
+description: Run llama.cpp or vLLM as a launchd, systemd or Task Scheduler user service, on macOS, Linux, Windows, Apple Silicon, or CPU.
 ---
 
 <ProviderFacts slug="local" ids="local, local_apple, local_cpu, on_prem" />
@@ -33,7 +33,7 @@ Hardware profiles with `provider` set to `local`, `local_apple`, `local_cpu`, or
 
 A profile with no `provider` also means the local host.
 
-These ids are supported by `apply`, which runs the runtime on the host you invoke it from. Modal is the only provider tested end to end on real GPUs; the local path is implemented for macOS (launchd) and Linux (systemd), as described below.
+These ids are supported by `apply`, which runs the runtime on the host you invoke it from. Modal is the only provider tested end to end on real GPUs; the local path is implemented for macOS (launchd), Linux (systemd) and Windows x86_64 (Task Scheduler), as described below. vLLM is Linux-only.
 
 ## How it runs
 
@@ -42,6 +42,7 @@ These ids are supported by `apply`, which runs the runtime on the host you invok
 | OS | Service manager | Details |
 |---|---|---|
 | macOS | launchd | A LaunchAgent plist in `~/Library/LaunchAgents/`, loaded with `launchctl`. It has `RunAtLoad`, so the service starts again when you log in. Logs go to `~/Library/Logs/amicu/`. |
+| Windows | Task Scheduler | A per-user scheduled task with a logon trigger, so the service starts when you log in. It needs no administrator rights and is not a Windows Service. |
 | Linux | systemd | A persistent `--user` unit at `~/.config/systemd/user/<label>.service`, enabled and started with `systemctl --user enable --now`. It restarts on failure (`Restart=on-failure`). The secrets are in a 0600 environment file under `~/.local/state/amicu/env`, not in the unit file. |
 
 The service label is `io.amicu.llama.<project_id>.<deployment id>`, for both llama.cpp and vLLM deployments. `project_id` is stored in `.amicu/state/state.json`, so two projects never share a label. The server binds to `127.0.0.1` on the `port` you set. The host is not configurable.
@@ -159,7 +160,7 @@ For a `gpu` accelerator, the fit check counts the model weights against VRAM (`a
 
 <Accordions>
   <Accordion title="llama-server not found on PATH">
-    Install llama.cpp (macOS: `brew install llama.cpp`) so `llama-server` is on the `PATH` of the shell that runs `amicu apply`. `amicu doctor` reports the same.
+    Install llama.cpp (macOS: `brew install llama.cpp`; Windows: `winget install llama.cpp`, or download the CUDA or Vulkan zip from the llama.cpp releases and add its folder to `PATH`) so `llama-server` is on the `PATH` of the shell that runs `amicu apply`. `amicu doctor` reports the same.
   </Accordion>
   <Accordion title="vllm not found on PATH">
     Install vLLM into the environment whose `PATH` runs `amicu apply`: `pip install vllm`.
