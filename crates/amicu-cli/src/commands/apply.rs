@@ -25,6 +25,7 @@ use amicu_vllm::VllmAdapter;
 use crate::OutputFormat;
 use crate::catalog::build_catalog;
 use crate::checks::report_for;
+use crate::commands::telemetry_agent::TelemetryHooks;
 use crate::error::CliError;
 use crate::lock::StateLock;
 use crate::modal_ops::{
@@ -81,6 +82,8 @@ pub(crate) fn run_with(
     // save section, so a concurrent apply or `modal stop` cannot interleave.
     // Released when `_lock` drops on return.
     let _lock = StateLock::acquire(&project.state_dir(), "apply", lock_timeout)?;
+    // Every apply, a no-op one included, enforces an opt-out on this host.
+    stop_agents_if_opted_out(env)?;
 
     let (prior_state, pruned) = crate::refresh::load_refreshed(project, env.modal, output, out)?;
     // A pending deployment (start begun, never confirmed) is planned as absent
@@ -194,6 +197,32 @@ pub(crate) fn run_with(
     Ok(code)
 }
 
+/// When consent resolves to off from any source (the file, `DO_NOT_TRACK`,
+/// `AMICU_TELEMETRY=0`), stop every telemetry agent on this host and delete
+/// every queue. The agents run under the service manager and never see this
+/// shell's environment, so the CLI enforces the opt-out for them. A stop
+/// that fails is an error: an agent that may still send must not be ignored.
+pub(crate) fn stop_agents_if_opted_out(env: &Env<'_>) -> Result<(), CliError> {
+    if env.telemetry.consent_on() {
+        return Ok(());
+    }
+    let host = (env.host)(None);
+    let stopped = crate::commands::build_runtime()?
+        .block_on(host.stop_all_sidecars())
+        .map_err(|e| {
+            CliError::Adapter(amicu_core::adapter::AdapterErrorKind::into_adapter_error(e))
+        })?;
+    env.telemetry.clear_queues();
+    if !stopped.is_empty() {
+        let _ = writeln!(
+            std::io::stderr(),
+            "Telemetry is off: stopped {} telemetry agent(s) and deleted their buffered data.",
+            stopped.len()
+        );
+    }
+    Ok(())
+}
+
 /// The recorded instances of `deployment` that are not the one about to be
 /// started: they must be stopped (and confirmed) first.
 fn stale_records(
@@ -232,14 +261,10 @@ pub(crate) struct Env<'a> {
     /// Whether a secret name is set; a parameter so tests need not touch the
     /// process environment.
     pub secret_is_set: fn(&str) -> bool,
-    /// The telemetry sidecar planner for this run, `None` unless the user
-    /// opted in; a parameter so tests never read the real consent file.
-    pub telemetry: TelemetryPlannerFactory,
+    /// Consent, the sidecar planner and the telemetry data dir; a parameter
+    /// so tests never read the real consent file.
+    pub telemetry: &'a dyn TelemetryHooks,
 }
-
-/// See [`Env::telemetry`].
-pub(crate) type TelemetryPlannerFactory =
-    fn(&Graph, &dyn Catalog, &PlanResult) -> Option<Arc<dyn SidecarPlanner>>;
 
 impl Env<'static> {
     /// The real host service manager and Modal.
@@ -252,7 +277,7 @@ impl Env<'static> {
             proxy_tokens: amicu_modal::proxy_auth::TokenConfig::from_env,
             interactive: std::io::IsTerminal::is_terminal(&std::io::stdin()),
             secret_is_set: crate::secret::env_has_secret,
-            telemetry: crate::commands::telemetry_agent::planner_for_apply,
+            telemetry: &crate::commands::telemetry_agent::HostTelemetry,
         }
     }
 }
@@ -976,7 +1001,7 @@ async fn apply_all(
     let catalog = build_catalog(graph);
     // The opt-in telemetry agent rides along with host instances only when
     // consent resolves to on right now; otherwise a previous agent is stopped.
-    let sidecar = (env.telemetry)(graph, &catalog, result);
+    let sidecar = env.telemetry.planner(graph, &catalog, result);
     let llama_adapter =
         LlamaCppAdapter::new(Box::new(catalog.clone()), (env.host)(sidecar.clone()));
     let vllm_adapter = VllmAdapter::new(Box::new(catalog.clone()), (env.host)(sidecar));
@@ -1629,6 +1654,8 @@ async fn stop_record(
                     path.display()
                 )));
             }
+            // Its agent was stopped with it: drop the agent's id and queue.
+            env.telemetry.forget(&record.identity);
             Ok(())
         }
         Backend::Modal => stop_modal(record, env, stops).await,

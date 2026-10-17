@@ -176,6 +176,18 @@ pub trait ProcessSupervisor: Send + Sync {
     ) -> Result<crate::service::Presence, LlamaCppError> {
         Ok(crate::service::Presence::Unknown)
     }
+
+    /// Every telemetry sidecar job this host has a definition for, from any
+    /// project, with whether it is running.
+    fn sidecars(&self) -> Vec<(String, crate::service::Presence)> {
+        Vec::new()
+    }
+
+    /// Stop every telemetry sidecar job this host has a definition for, from
+    /// any project (consent is per user). Returns the labels stopped.
+    async fn stop_all_sidecars(&self) -> Result<Vec<String>, LlamaCppError> {
+        Ok(Vec::new())
+    }
 }
 
 /// Decides whether a host instance gets a sidecar job (the telemetry agent)
@@ -277,6 +289,35 @@ impl<M: ServiceManager, P: HealthProbe> ServiceSupervisor<M, P> {
             },
             None => self.manager.paths(&label).map(|p| p.definition),
         }
+    }
+
+    /// Every sidecar definition on disk: `(label, path)`. Sidecars live next
+    /// to their instances, in the manager's definition directory.
+    fn sidecar_definitions(&self) -> Vec<(String, PathBuf)> {
+        let Some(probe) = self.manager.paths(&sidecar_label("io.amicu.llama.x")) else {
+            return Vec::new();
+        };
+        let (Some(dir), Some(ext)) = (
+            probe.definition.parent(),
+            probe.definition.extension().and_then(|e| e.to_str()),
+        ) else {
+            return Vec::new();
+        };
+        let suffix = format!(".{ext}");
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut found: Vec<(String, PathBuf)> = entries
+            .filter_map(Result::ok)
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                let label = name.strip_suffix(&suffix)?;
+                sidecar_main_label(label)?;
+                Some((label.to_owned(), e.path()))
+            })
+            .collect();
+        found.sort();
+        found
     }
 
     /// Stop the sidecar of `main_label`, if one was ever started: its
@@ -590,7 +631,8 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
         // Update: a previous sidecar is stopped for good (this start decides
         // afresh whether to run one), then the previous instance is released
         // and its port allowed to go quiet.
-        self.stop_sidecar(&label, None).await?;
+        let definition = self.manager.paths(&label).map(|p| p.definition);
+        self.stop_sidecar(&label, definition.as_deref()).await?;
         self.manager.release(&label).await?;
         if !self.drain.is_zero() {
             self.wait_released(&label, &endpoint).await?;
@@ -706,5 +748,35 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
         domain: Option<&str>,
     ) -> Result<crate::service::Presence, LlamaCppError> {
         self.manager.presence(label, domain)
+    }
+
+    fn sidecars(&self) -> Vec<(String, crate::service::Presence)> {
+        let domain = self.manager.context().and_then(|c| c.domain);
+        self.sidecar_definitions()
+            .into_iter()
+            .map(|(label, _)| {
+                let presence = self
+                    .manager
+                    .presence(&label, domain.as_deref())
+                    .unwrap_or(crate::service::Presence::Unknown);
+                (label, presence)
+            })
+            .collect()
+    }
+
+    async fn stop_all_sidecars(&self) -> Result<Vec<String>, LlamaCppError> {
+        let mut stopped = Vec::new();
+        for (label, definition) in self.sidecar_definitions() {
+            self.manager
+                .stop_recorded(&label, Some(&definition))
+                .await
+                .map_err(|e| {
+                    LlamaCppError::Supervisor(format!(
+                        "stopping the telemetry agent {label} failed: {e}"
+                    ))
+                })?;
+            stopped.push(label);
+        }
+        Ok(stopped)
     }
 }

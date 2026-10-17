@@ -4517,3 +4517,32 @@ async fn a_sidecar_that_fails_to_start_never_fails_the_deployment() {
     assert_eq!(handle.id, "io.amicu.llama.a1b2c3d4.chat");
     assert!(!m.def("io.amicu.telemetry.a1b2c3d4.chat").exists());
 }
+
+#[tokio::test]
+async fn opting_out_stops_every_sidecar_on_the_host() {
+    let m = std::sync::Arc::new(DirManager::new("stopall"));
+    let sup = sidecar_supervisor(&m, true);
+    for dep in ["chat", "code"] {
+        let mut plan = command_plan();
+        plan.service_label = Some(format!("io.amicu.llama.a1b2c3d4.{dep}"));
+        sup.start(&plan, &[]).await.expect("start");
+    }
+    // Another project's agent, and an unrelated file, in the same folder.
+    std::fs::write(m.def("io.amicu.telemetry.ffffffff.x"), "x").unwrap();
+    std::fs::write(m.dir.join("notes.txt"), "x").unwrap();
+    let plain = sidecar_supervisor(&m, false);
+    assert_eq!(plain.sidecars().len(), 3);
+    let stopped = plain.stop_all_sidecars().await.expect("stop all");
+    assert_eq!(
+        stopped,
+        [
+            "io.amicu.telemetry.a1b2c3d4.chat",
+            "io.amicu.telemetry.a1b2c3d4.code",
+            "io.amicu.telemetry.ffffffff.x",
+        ]
+    );
+    assert_eq!(plain.sidecars(), vec![]);
+    // The instances themselves keep running.
+    assert!(m.def("io.amicu.llama.a1b2c3d4.chat").exists());
+    assert!(m.dir.join("notes.txt").exists());
+}

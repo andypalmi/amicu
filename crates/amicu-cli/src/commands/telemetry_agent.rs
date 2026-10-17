@@ -15,9 +15,11 @@
 //!
 //! Consent is re-read from the user's telemetry file before every scrape and
 //! every upload: once it resolves to off, the agent stops collecting, deletes
-//! its queue, and sends nothing, without a redeploy. `DO_NOT_TRACK` and
-//! `AMICU_TELEMETRY` win as everywhere else (at apply time they keep the agent
-//! from being started at all; the agent sees only its service environment).
+//! its queue, and sends nothing, without a redeploy. The agent never sees the
+//! user's shell, so `DO_NOT_TRACK` / `AMICU_TELEMETRY` are enforced by the CLI:
+//! every `apply` (a no-op one too) and `amicu telemetry disable` stop every
+//! agent on the host when consent resolves to off
+//! (`apply::stop_agents_if_opted_out`).
 //!
 //! Modal deployments get no agent: the container image does not carry the
 //! amicu binary, and the CLI does not run continuously beside them.
@@ -159,9 +161,28 @@ impl FileIdentity {
         }
     }
 
-    fn write(&self, file: &IdentityFile) -> Result<(), StoreError> {
-        let text = serde_json::to_string_pretty(file).map_err(|e| StoreError(e.to_string()))?;
+    /// Read-modify-write under `identity.lock`, so two CLI runs cannot lose
+    /// each other's ids. Only the CLI writes this file; agents only read it.
+    fn update(&self, change: impl FnOnce(&mut IdentityFile)) -> Result<(), StoreError> {
+        let _lock = FileLock::acquire(&self.path.with_extension("lock"))
+            .map_err(|e| StoreError(e.to_string()))?;
+        let mut file = self.read()?;
+        change(&mut file);
+        let text = serde_json::to_string_pretty(&file).map_err(|e| StoreError(e.to_string()))?;
         write_private(&self.path, text.as_bytes()).map_err(|e| StoreError(e.to_string()))
+    }
+
+    /// Forget `main_label`'s anonymous id and delete its queue file. Returns
+    /// the id that was forgotten.
+    pub(crate) fn forget(&self, main_label: &str) -> Option<AnonDeploymentId> {
+        let id = self.read().ok()?.deployments.get(main_label).copied()?;
+        let data = self.path.parent()?;
+        let _ = std::fs::remove_file(queue_dir(data).join(format!("{id}.jsonl")));
+        self.update(|f| {
+            f.deployments.remove(main_label);
+        })
+        .ok()?;
+        Some(id)
     }
 }
 
@@ -170,9 +191,10 @@ impl IdentityStore for FileIdentity {
         Ok(self.read()?.install_id)
     }
     fn save_install_id(&self, id: &InstallId) -> Result<(), StoreError> {
-        let mut f = self.read()?;
-        f.install_id = Some(*id);
-        self.write(&f)
+        // Under the lock, an id another run wrote first wins.
+        self.update(|f| {
+            f.install_id.get_or_insert(*id);
+        })
     }
     fn load_deployment_id(
         &self,
@@ -185,25 +207,71 @@ impl IdentityStore for FileIdentity {
         deployment: &DeploymentId,
         id: &AnonDeploymentId,
     ) -> Result<(), StoreError> {
-        let mut f = self.read()?;
-        f.deployments.insert(deployment.as_str().to_owned(), *id);
-        self.write(&f)
+        self.update(|f| {
+            f.deployments
+                .entry(deployment.as_str().to_owned())
+                .or_insert(*id);
+        })
     }
     fn clear_deployment_ids(&self) -> Result<(), StoreError> {
-        let mut f = self.read()?;
-        f.deployments.clear();
-        self.write(&f)
+        self.update(|f| f.deployments.clear())
     }
 }
 
-/// Write `bytes` to `path` via a 0600 temp file renamed into place, in a 0700
-/// directory.
+/// An exclusive lock file, removed on drop. A lock older than a minute is
+/// left over from a crash and is taken over.
+struct FileLock(PathBuf);
+
+impl FileLock {
+    fn acquire(path: &Path) -> std::io::Result<Self> {
+        ensure_private_dir(path.parent().unwrap_or(Path::new(".")))?;
+        for _ in 0..100 {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(_) => return Ok(Self(path.to_path_buf())),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = std::fs::metadata(path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|age| age > Duration::from_secs(60));
+                    if stale {
+                        let _ = std::fs::remove_file(path);
+                    } else {
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("{} is held by another amicu", path.display()),
+        ))
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Write `bytes` to `path` via a uniquely named 0600 temp file renamed into
+/// place, in a 0700 directory.
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     let dir = path.parent().unwrap_or(Path::new("."));
     ensure_private_dir(dir)?;
-    let tmp = path.with_extension("tmp");
-    let _ = std::fs::remove_file(&tmp);
+    let tmp = dir.join(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
@@ -365,29 +433,70 @@ fn stable_exe() -> Option<PathBuf> {
     Some(on_path.unwrap_or(real))
 }
 
-/// [`Env::telemetry`](crate::commands::apply::Env) for real runs: a planner
-/// only when consent resolves to on now (env overrides included), and the
-/// user's config and data dirs and this binary can be located.
-pub(crate) fn planner_for_apply(
-    graph: &Graph,
-    catalog: &dyn Catalog,
-    result: &PlanResult,
-) -> Option<Arc<dyn SidecarPlanner>> {
-    let store = ConfigStore::host()?;
-    let env = |k: &str| std::env::var(k).ok();
-    if !effective(&env, store.load().ok().flatten()).enabled {
-        return None;
+/// What `apply` and `destroy` need from telemetry. A trait so tests never
+/// read the real consent file or touch the real data dir.
+pub(crate) trait TelemetryHooks: Sync {
+    /// Whether consent resolves to on in this process (file and env).
+    fn consent_on(&self) -> bool;
+    /// The sidecar planner for this run; `None` unless consent is on.
+    fn planner(
+        &self,
+        graph: &Graph,
+        catalog: &dyn Catalog,
+        result: &PlanResult,
+    ) -> Option<Arc<dyn SidecarPlanner>>;
+    /// Delete every agent's queue.
+    fn clear_queues(&self);
+    /// An instance (and so its agent) is confirmed stopped for good: drop its
+    /// anonymous id and its queue.
+    fn forget(&self, main_label: &str);
+}
+
+/// The real [`TelemetryHooks`]: the user's consent file and data dir.
+pub(crate) struct HostTelemetry;
+
+impl TelemetryHooks for HostTelemetry {
+    fn consent_on(&self) -> bool {
+        ConfigStore::host().is_some_and(|store| consent_on(store.path()))
     }
-    let endpoint = endpoint_from(&env)?;
-    Some(Arc::new(TelemetrySidecar::new(
-        stable_exe()?,
-        endpoint,
-        store.path().to_path_buf(),
-        data_dir()?,
-        graph,
-        catalog,
-        result,
-    )))
+
+    fn planner(
+        &self,
+        graph: &Graph,
+        catalog: &dyn Catalog,
+        result: &PlanResult,
+    ) -> Option<Arc<dyn SidecarPlanner>> {
+        let store = ConfigStore::host()?;
+        if !consent_on(store.path()) {
+            return None;
+        }
+        let endpoint = endpoint_from(&|k: &str| std::env::var(k).ok())?;
+        let data = data_dir()?;
+        // The install id is created here, by the CLI, under the identity
+        // lock; agents only ever read it.
+        Identity::new(FileIdentity::new(&data)).install_id().ok()?;
+        Some(Arc::new(TelemetrySidecar::new(
+            stable_exe()?,
+            endpoint,
+            store.path().to_path_buf(),
+            data,
+            graph,
+            catalog,
+            result,
+        )))
+    }
+
+    fn clear_queues(&self) {
+        if let Some(data) = data_dir() {
+            let _ = std::fs::remove_dir_all(queue_dir(&data));
+        }
+    }
+
+    fn forget(&self, main_label: &str) {
+        if let Some(data) = data_dir() {
+            FileIdentity::new(&data).forget(main_label);
+        }
+    }
 }
 
 // ---- the agent --------------------------------------------------------------
@@ -442,7 +551,7 @@ impl Static {
         let deployment_id: AnonDeploymentId =
             serde_json::from_value(serde_json::Value::String(a.deployment_id.clone()))
                 .map_err(|_| bad("--deployment-id"))?;
-        if !a.metrics_url.starts_with("http://127.0.0.1:") {
+        if !is_loopback_metrics_url(&a.metrics_url) {
             return Err(bad("--metrics-url (must be loopback)"));
         }
         if !a.endpoint.starts_with("https://") {
@@ -459,7 +568,11 @@ impl Static {
             deployment_id,
             model,
             runtime: RuntimeInfo::new(runtime),
-            provider: a.provider.as_deref().and_then(Label::sanitized),
+            // One of the fixed provider values, anything else `other`.
+            provider: a
+                .provider
+                .as_deref()
+                .and_then(TelemetryReport::provider_label),
             context_length: a.context_length,
             batch_size: a.batch_size,
         })
@@ -488,6 +601,23 @@ impl Static {
             metrics: closed.metrics,
         }
     }
+}
+
+/// `http://127.0.0.1:<port>/metrics` or `http://[::1]:<port>/metrics`,
+/// parsed, with no userinfo, query or fragment.
+fn is_loopback_metrics_url(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    let loopback = matches!(url.host_str(), Some("127.0.0.1" | "[::1]"));
+    url.scheme() == "http"
+        && loopback
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_some()
+        && url.path() == "/metrics"
+        && url.query().is_none()
+        && url.fragment().is_none()
 }
 
 /// A short accelerator model label: `NVIDIA GeForce RTX 4090` becomes
@@ -633,7 +763,8 @@ async fn agent_loop(
         queue_dir(&args.data_dir).join(format!("{}.jsonl", fixed.deployment_id)),
         QueueLimits::DEFAULT,
     );
-    let identity = Identity::new(FileIdentity::new(&args.data_dir));
+    // Read-only: apply created the install id.
+    let identity = FileIdentity::new(&args.data_dir);
     let mut aggregator = WindowAggregator::new();
     let mut uploader = Uploader::new();
     let mut backoff = Backoff::new(BACKOFF_BASE, BACKOFF_MAX);
@@ -659,7 +790,7 @@ async fn agent_loop(
                 hardware = hardware_info(s);
             }
             if let Some(closed) = aggregator.observe(now, metrics, sample.as_ref())
-                && let Ok(install_id) = identity.install_id()
+                && let Ok(Some(install_id)) = identity.load_install_id()
             {
                 let report = fixed.report(install_id, &hardware, closed);
                 if report.validate().is_ok() {
@@ -800,15 +931,32 @@ mod tests {
     #[test]
     fn agent_arguments_are_validated() {
         assert!(Static::from_args(&args()).is_ok());
-        let mut a = args();
-        a.metrics_url = "http://10.0.0.5:8080/metrics".into();
-        assert!(Static::from_args(&a).is_err(), "never scrapes off-host");
+        for bad in [
+            "http://10.0.0.5:8080/metrics",
+            "http://127.0.0.1:8080@evil.example/metrics",
+            "http://user:pw@127.0.0.1:8080/metrics",
+            "http://127.0.0.1.evil.example:8080/metrics",
+            "https://127.0.0.1:8080/metrics",
+            "http://127.0.0.1:8080/other",
+            "http://localhost:8080/metrics",
+        ] {
+            let mut a = args();
+            a.metrics_url = bad.into();
+            assert!(Static::from_args(&a).is_err(), "{bad}");
+        }
+        assert!(is_loopback_metrics_url("http://[::1]:8080/metrics"));
         let mut a = args();
         a.endpoint = "http://api.amicu.dev".into();
         assert!(Static::from_args(&a).is_err());
         let mut a = args();
         a.deployment_id = "chat_prod".into();
         assert!(Static::from_args(&a).is_err(), "only a random uuid");
+        let mut a = args();
+        a.provider = Some("hetzner".into());
+        assert_eq!(
+            Static::from_args(&a).unwrap().provider.unwrap().as_str(),
+            "other"
+        );
         let mut a = args();
         a.model = "has spaces".into();
         assert_eq!(Static::from_args(&a).unwrap().model.name.as_str(), "custom");
@@ -871,6 +1019,36 @@ mod tests {
         assert_eq!(d, ident.deployment_id(&label).unwrap());
         let text = std::fs::read_to_string(dir.join("identity.json")).unwrap();
         assert!(text.contains(&d.to_uuid_string()));
+        // Forgetting drops the entry and the queue file.
+        let q = queue_dir(&dir).join(format!("{d}.jsonl"));
+        std::fs::create_dir_all(q.parent().unwrap()).unwrap();
+        std::fs::write(&q, "{}\n").unwrap();
+        assert_eq!(FileIdentity::new(&dir).forget(label.as_str()), Some(d));
+        assert!(!q.exists());
+        assert_eq!(
+            FileIdentity::new(&dir).load_deployment_id(&label).unwrap(),
+            None
+        );
+        assert_eq!(FileIdentity::new(&dir).load_install_id().unwrap(), Some(a));
+        // Concurrent writers under the lock never lose an id.
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    Identity::new(FileIdentity::new(&dir))
+                        .deployment_id(&DeploymentId::new(format!("io.amicu.llama.x.d{i}")))
+                        .unwrap()
+                })
+            })
+            .collect();
+        let ids: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        for (i, id) in ids.iter().enumerate() {
+            let got = FileIdentity::new(&dir)
+                .load_deployment_id(&DeploymentId::new(format!("io.amicu.llama.x.d{i}")))
+                .unwrap();
+            assert_eq!(got, Some(*id));
+        }
+        assert!(!dir.join("identity.lock").exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

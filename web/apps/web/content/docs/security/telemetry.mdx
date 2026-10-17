@@ -41,7 +41,7 @@ The effective setting is resolved in this order, strongest first:
 3. The stored choice.
 4. The default: off.
 
-`amicu telemetry status` shows the effective setting and its source. When telemetry is on, it also says that data is being collected, buffered and sent. The telemetry commands themselves make no network calls.
+`amicu telemetry status` shows the effective setting and its source, the choice saved in the file, any `DO_NOT_TRACK` or `AMICU_TELEMETRY` override set in your shell, and how many telemetry agents are installed and running on this machine and how many deployments have buffered data. It warns when telemetry is off but agents are still installed. The telemetry commands make no network calls.
 
 The first interactive `amicu init` or `amicu apply` asks once whether to share anonymous performance metrics. The default answer is No, and a No is stored, so the question is not asked again. The question is not asked when:
 
@@ -55,7 +55,7 @@ If the stored file exists but cannot be read, the question is skipped and the fi
 
 ## Opt-in telemetry
 
-When the effective setting is on at `amicu apply` time, apply starts a second job next to each launchd (macOS) or systemd (Linux) deployment. The job is `io.amicu.telemetry.<project>.<deployment>`, and it runs `amicu telemetry-agent`. The job holds no secrets. It is stopped before its deployment whenever amicu stops, updates or destroys that deployment. When the setting is off at apply time, no agent is started, and an agent from an earlier apply is stopped.
+When the effective setting is on at `amicu apply` time, apply starts a second job next to each launchd (macOS) or systemd (Linux) deployment. The job is `io.amicu.telemetry.<project>.<deployment>`, and it runs `amicu telemetry-agent`. The job holds no secrets. It is stopped before its deployment whenever amicu stops, updates or destroys that deployment. When the setting is off at apply time, no agent is started.
 
 The agent:
 
@@ -63,7 +63,13 @@ The agent:
 - runs the same read-only hardware probe as `amicu modal metrics` (`nvidia-smi`, `amd-smi`, `xpu-smi` or `ioreg`) to read accelerator utilization and memory.
 - adds up each 5-minute window and keeps the result in a queue at `$XDG_DATA_HOME/amicu/telemetry/queue/` (or `~/.local/share/amicu/telemetry/queue/`). Only you can read the queue files (0600). Each deployment's queue holds at most 512 KiB and 7 days of data. When it is full, the oldest entries are dropped first.
 - uploads the queue about once an hour, at a random time within each hour. Each request is under 64 KB. A failed upload (the endpoint is down, unreachable, or answers 503) is retried later with exponential backoff. Until then the data waits in the bounded queue. A batch the server rejects as invalid is dropped, not retried.
-- reads your telemetry setting again before every scrape and every upload. Once you run `amicu telemetry disable`, collection stops within a minute and the queue is deleted, with no redeploy needed. `AMICU_TELEMETRY=0` and `DO_NOT_TRACK=1` in your shell take effect when you run `amicu apply`, because the agent does not see your shell's environment. `amicu telemetry disable` also deletes every queue right away.
+- reads the saved choice in `telemetry.json` again before every scrape and every upload. If the file says off, it collects nothing, sends nothing and deletes its queue within a minute. The agent runs under launchd or systemd, so it never sees your shell's environment.
+
+How opting out reaches running agents:
+
+- `amicu telemetry disable` saves the choice, then right away stops every telemetry agent on this machine (from every project) and deletes every queue.
+- Every `amicu apply`, including one with no changes to apply, checks consent first. If it resolves to off from any source (the file, `DO_NOT_TRACK=1` or `AMICU_TELEMETRY=0`), apply stops every telemetry agent on this machine and deletes every queue before doing anything else. If an agent cannot be stopped, apply fails and says so.
+- When amicu stops a deployment for good (`destroy`, or removing it from the config), it also deletes that deployment's queue and its anonymous id.
 
 If you opt in after deploying, a deployment gets its agent the next time `amicu apply` starts or updates it.
 
@@ -80,9 +86,9 @@ Each upload is a JSON batch (schema version 2) of reports. Each report covers on
 | Window | `start_unix_s`, `duration_s` (300) |
 | Software | `amicu_version`, `runtime.name` (`llama.cpp` or `vllm`), `runtime.version` |
 | Model | `model.name` and `model.quantization`. `model.name` is the Hugging Face repo id only for models from well-known public publishers (for example `meta-llama`, `Qwen`, `mistralai`, `unsloth`, `bartowski`). Any other model, including local files, URLs and other repos, is sent as `custom`. |
-| Configuration | `context_length`, `batch_size`, `provider` (for example `local`), `region`. `region` is only a cloud provider's region code. It is never sent for a deployment on your machine, and never derived from your location or locale. |
+| Configuration | `context_length`, `batch_size`, `provider` (one of `local`, `local_apple`, `local_cpu`, `on_prem`, `modal`, or `other` for anything else), `region`. `region` is only a cloud provider's region code. It is never sent for a deployment on your machine, and never derived from your location or locale. |
 | Hardware | `accelerator` (model, for example `nvidia-geforce-rtx-4090`), `accelerator_count`, `vram_bytes` (per accelerator, rounded to whole GiB), `cpu_cores` (capped at 256), `memory_bytes` (rounded up to a power-of-two number of GiB, for example 24 GiB is sent as 32 GiB). The rounding keeps exact hardware sizes from identifying a machine. |
-| Measurements | `requests` and `errors` (vLLM only), `prompt_tokens`, `output_tokens`, `output_tokens_per_s`, `decode_tokens_per_s`, the latency histograms `ttft_ms`, `e2e_ms` and `tpot_ms` (bucket counts and a sum, over fixed bucket bounds), `running_peak`, `waiting_peak`, `kv_cache_utilization_peak`, `preemptions`, `gpu_utilization`, `gpu_memory_peak_bytes`, `host_memory_peak_bytes` |
+| Measurements | `requests` and `errors` (vLLM only), `prompt_tokens`, `output_tokens`, `output_tokens_per_s`, `decode_tokens_per_s`, the latency histograms `ttft_ms`, `e2e_ms` and `tpot_ms` (bucket counts and a sum, over fixed bucket bounds), `running_peak`, `waiting_peak`, `kv_cache_utilization_peak`, `preemptions`, `gpu_utilization`, `gpu_memory_peak_bytes` and `host_memory_peak_bytes` (both rounded to whole GiB) |
 
 The payload has no field for prompts, completions or any request content, IP addresses, hostnames, file paths, endpoint URLs, usernames, or API keys and other secrets. Every text value must be a short token without spaces. A value that looks like an IP address or a credential is dropped before it is sent, and the server rejects it too.
 
