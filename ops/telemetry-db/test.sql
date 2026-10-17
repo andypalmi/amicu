@@ -65,6 +65,12 @@ begin
   perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,hardware,vram_bytes}', '85899345921'), 'vram not whole GiB');
   perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,hardware,cpu_cores}', '257'), 'cpu cores above 256');
   perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,provider}', '"hetzner"'), 'provider outside the enum');
+  perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,region}', '"eu-west"'), 'region with provider local');
+  perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()) #- '{reports,0,provider}', '{reports,0,region}', '"eu-west"'), 'region without provider');
+  r := public.ingest_rollup_batch(jsonb_set(jsonb_set(pg_temp.at(ex, h0 + 900, gen_random_uuid()),
+    '{reports,0,provider}', '"modal"'), '{reports,0,region}', '"eu-west"'));
+  perform pg_temp.check(r->>'inserted' = '1', 'region with provider modal accepted');
+  delete from telemetry.rollup_5m where window_start = to_timestamp(h0 + 900);
   perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,metrics,host_memory_peak_bytes}', '1073741825'), 'memory peak not whole GiB');
   perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,metrics,gpu_memory_peak_bytes}', '1'), 'gpu memory peak not whole GiB');
 

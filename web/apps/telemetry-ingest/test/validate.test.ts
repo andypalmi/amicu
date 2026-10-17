@@ -52,6 +52,28 @@ test('schemaProblems flags what the validator cannot enforce', () => {
   assert.equal(problems.length, 3);
 });
 
+test('region is allowed only with provider modal', () => {
+  const withRegion = (provider: string | undefined) => {
+    const b = clone();
+    if (provider === undefined) delete b.reports[0].provider;
+    else b.reports[0].provider = provider;
+    b.reports[0].region = 'eu-west';
+    return b;
+  };
+  rejects(withRegion('local'), 'local + region');
+  rejects(withRegion('other'), 'other + region');
+  rejects(withRegion(undefined), 'no provider + region');
+  assert.equal(validateBatch(withRegion('modal'), NOW).reports.length, 1);
+  const noRegion = clone();
+  delete noRegion.reports[0].provider;
+  validateBatch(noRegion, NOW);
+});
+
+test('if/then/else and not follow JSON Schema semantics', () => {
+  assert.deepEqual(schemaProblems({ if: { const: 1 }, then: { not: { type: 'string' } }, else: { minimum: 5 } }), []);
+  assert.equal(schemaProblems({ if: { oneOf: [] } }).length, 1, 'nested subschemas are walked');
+});
+
 test('every provider in the schema enum is accepted', () => {
   for (const provider of ['local', 'local_apple', 'local_cpu', 'on_prem', 'modal', 'other']) {
     const b = clone();

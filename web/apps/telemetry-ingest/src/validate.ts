@@ -29,7 +29,7 @@ const defs = (schema.$defs ?? {}) as Record<string, Schema>;
 const ENFORCED = new Set([
   'type', 'const', 'required', 'properties', 'additionalProperties', 'items', '$ref',
   'pattern', 'minLength', 'maxLength', 'minimum', 'maximum', 'minItems', 'maxItems',
-  'multipleOf', 'enum',
+  'multipleOf', 'enum', 'not', 'if', 'then', 'else',
 ]);
 const ANNOTATIONS = new Set([
   '$schema', '$id', '$defs', '$comment', 'title', 'description', 'examples', 'default', 'x-amicu',
@@ -60,6 +60,9 @@ export function schemaProblems(root: Schema): string[] {
       walk(child, `${path}.${name}`);
     }
     if (node.items) walk(node.items as Schema, `${path}[]`);
+    for (const key of ['not', 'if', 'then', 'else']) {
+      if (node[key] !== undefined) walk(node[key] as Schema, `${path}/${key}`);
+    }
   };
   walk(root, '#');
   for (const [name, def] of Object.entries(rootDefs)) walk(def, `#/$defs/${name}`);
@@ -105,7 +108,23 @@ function fail(path: string): never {
   throw new InvalidBatch(path);
 }
 
+/** Whether `v` satisfies `node` (for `not` and `if`). */
+function matches(node: Schema, v: Json, path: string): boolean {
+  try {
+    check(node, v, path);
+    return true;
+  } catch (e) {
+    if (e instanceof InvalidBatch) return false;
+    throw e;
+  }
+}
+
 function check(node: Schema, v: Json, path: string): void {
+  if (node.not !== undefined && matches(node.not as Schema, v, path)) fail(path);
+  if (node.if !== undefined) {
+    const branch = matches(node.if as Schema, v, path) ? node.then : node.else;
+    if (branch !== undefined) check(branch as Schema, v, path);
+  }
   if (typeof node.$ref === 'string') {
     const name = node.$ref.replace(/^#\/\$defs\//, '');
     const target = Object.hasOwn(defs, name) ? defs[name] : undefined;

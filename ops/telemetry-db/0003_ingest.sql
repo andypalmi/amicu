@@ -226,6 +226,10 @@ begin
        ('"local"', '"local_apple"', '"local_cpu"', '"on_prem"', '"modal"', '"other"') then
       perform telemetry.bad('provider');
     end if;
+    -- A region only for provider modal (a local host never sends one).
+    if (rep ? 'region') and (rep -> 'provider') is distinct from '"modal"'::jsonb then
+      perform telemetry.bad('region');
+    end if;
 
     perform telemetry.check_object(rep -> 'model', array['name', 'quantization'], 'model');
     perform telemetry.check_object(rep -> 'runtime', array['name', 'version'], 'runtime');

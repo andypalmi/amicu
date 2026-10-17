@@ -83,6 +83,21 @@ test('202 on success; one RPC call with the secret key in apikey only', async ()
   assert.deepEqual(JSON.parse(init.body as string), { batch: example });
 });
 
+test('region: 202 with provider modal, 400 with local or no provider', async () => {
+  const db = ok();
+  const send = async (provider: string | undefined) => {
+    const b = structuredClone(example);
+    if (provider === undefined) delete b.reports[0].provider;
+    else b.reports[0].provider = provider;
+    b.reports[0].region = 'eu-west';
+    return (await handle(post(JSON.stringify(b)), env(), db.fetchImpl, NOW)).status;
+  };
+  assert.equal(await send('local'), 400);
+  assert.equal(await send(undefined), 400);
+  assert.equal(await send('modal'), 202);
+  assert.equal(db.calls.length, 1);
+});
+
 test('a retried batch the database reports as duplicate is still 202', async () => {
   const db = supabase(() => Response.json({ duplicate: true, inserted: 0 }));
   const res = await handle(post(), env(), db.fetchImpl, NOW);
