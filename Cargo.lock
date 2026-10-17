@@ -152,13 +152,16 @@ dependencies = [
  "amicu-recommend",
  "amicu-registry",
  "amicu-runtime",
+ "amicu-telemetry",
  "amicu-vllm",
  "async-trait",
  "clap",
+ "reqwest 0.13.4",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -377,6 +380,7 @@ dependencies = [
  "amicu-runtime",
  "serde",
  "serde_json",
+ "tokio",
  "uuid",
 ]
 

@@ -71,6 +71,9 @@ impl Ownership {
 /// Classify a host label (a `.service` suffix is ignored).
 fn ownership_of_label(label: &str, project_id: Option<&str>) -> Ownership {
     let label = label.strip_suffix(".service").unwrap_or(label);
+    // A telemetry sidecar belongs to whoever its instance belongs to.
+    let main = amicu_llamacpp::sidecar_main_label(label);
+    let label = main.as_deref().unwrap_or(label);
     let Some(rest) = label.strip_prefix(LLAMA_PREFIX) else {
         return Ownership::Unknown;
     };
@@ -269,9 +272,11 @@ impl Tracked {
             .insert(label.strip_suffix(".service").unwrap_or(label).to_owned());
     }
 
+    /// A telemetry sidecar counts as tracked when its instance is.
     fn has_label(&self, label: &str) -> bool {
-        self.labels
-            .contains(label.strip_suffix(".service").unwrap_or(label))
+        let label = label.strip_suffix(".service").unwrap_or(label);
+        let main = amicu_llamacpp::sidecar_main_label(label);
+        self.labels.contains(main.as_deref().unwrap_or(label))
     }
 }
 
@@ -860,6 +865,18 @@ mod tests {
             "amicu modal stop -- amicu-old"
         );
         assert!(exec.calls().is_empty(), "no commands on Other");
+    }
+
+    #[test]
+    fn a_telemetry_sidecar_follows_its_instance() {
+        let tracked = tracked_of(vec![host_stop("io.amicu.llama.a1b2c3d4.chat")]);
+        assert!(tracked.has_label("io.amicu.telemetry.a1b2c3d4.chat"));
+        assert!(tracked.has_label("io.amicu.telemetry.a1b2c3d4.chat.service"));
+        assert!(!tracked.has_label("io.amicu.telemetry.a1b2c3d4.other"));
+        assert_eq!(
+            ownership_of_label("io.amicu.telemetry.a1b2c3d4.other", Some("a1b2c3d4")),
+            Ownership::ThisProject
+        );
     }
 
     #[test]

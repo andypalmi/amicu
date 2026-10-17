@@ -152,11 +152,17 @@ enum Command {
     /// not require a project.
     ///
     /// Overrides: `AMICU_TELEMETRY=0|1`, and `DO_NOT_TRACK=1` always forces
-    /// off. No telemetry data is collected or sent yet.
+    /// off. When on, deployments started by `apply` on this machine run a
+    /// small agent that sends 5-minute performance rollups to the amicu
+    /// telemetry endpoint.
     Telemetry {
         #[command(subcommand)]
         command: TelemetryCommand,
     },
+    /// The opt-in telemetry agent `apply` starts beside each local
+    /// deployment. Not meant to be run by hand.
+    #[command(hide = true)]
+    TelemetryAgent(commands::telemetry_agent::AgentArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -362,6 +368,10 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
         };
     }
 
+    if let Command::TelemetryAgent(args) = &cli.command {
+        return commands::telemetry_agent::run(args);
+    }
+
     let project = Project::discover()?;
     // One-time, interactive-only consent question. Lives
     // here, not in the command bodies, so command tests never reach a TTY.
@@ -409,6 +419,7 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
         Command::Skill { .. }
         | Command::Modal { .. }
         | Command::Telemetry { .. }
+        | Command::TelemetryAgent(_)
         | Command::Catalog { .. } => {
             unreachable!("handled before project discovery")
         }

@@ -1,0 +1,115 @@
+{
+  "batch_id": "03030303-0303-4303-8303-030303030303",
+  "reports": [
+    {
+      "amicu_version": "0.4.0",
+      "batch_size": 64,
+      "context_length": 8192,
+      "deployment_id": "02020202-0202-4202-8202-020202020202",
+      "hardware": {
+        "accelerator": "h100-80gb",
+        "accelerator_count": 1,
+        "cpu_cores": 24,
+        "memory_bytes": 274877906944,
+        "vram_bytes": 85899345920
+      },
+      "install_id": "01010101-0101-4101-8101-010101010101",
+      "metrics": {
+        "decode_tokens_per_s": 42.5,
+        "e2e_ms": {
+          "counts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            120,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "sum_ms": 480000.0
+        },
+        "errors": 2,
+        "gpu_memory_peak_bytes": 75161927680,
+        "gpu_utilization": 0.75,
+        "host_memory_peak_bytes": 12884901888,
+        "kv_cache_utilization_peak": 0.5,
+        "output_tokens": 30000,
+        "output_tokens_per_s": 100.0,
+        "preemptions": 0,
+        "prompt_tokens": 48000,
+        "requests": 120,
+        "running_peak": 8,
+        "tpot_ms": {
+          "counts": [
+            0,
+            120,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "sum_ms": 2820.0
+        },
+        "ttft_ms": {
+          "counts": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            120,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "sum_ms": 18000.0
+        },
+        "waiting_peak": 1
+      },
+      "model": {
+        "name": "meta-llama/Llama-3.1-8B-Instruct",
+        "quantization": "fp8"
+      },
+      "provider": "local",
+      "runtime": {
+        "name": "vllm",
+        "version": "0.11.0"
+      },
+      "schema_version": 2,
+      "window": {
+        "duration_s": 300,
+        "start_unix_s": 1750000200
+      }
+    }
+  ],
+  "schema_version": 2
+}

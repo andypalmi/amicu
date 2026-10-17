@@ -43,8 +43,9 @@ pub use service::{
 pub use service_windows::TaskSchedulerManager;
 pub use supervisor::{
     LaunchdSupervisor, ProcessSupervisor, ReadyWait, ResolvedSecret, ServiceSupervisor,
-    SystemdSupervisor, TaskSchedulerSupervisor, host_label, host_supervisor, project_host_label,
-    resolve_launch_secrets,
+    SidecarPlanner, SystemdSupervisor, TaskSchedulerSupervisor, host_label, host_supervisor,
+    host_supervisor_with_sidecar, project_host_label, resolve_launch_secrets, sidecar_label,
+    sidecar_main_label,
 };
 
 #[cfg(test)]

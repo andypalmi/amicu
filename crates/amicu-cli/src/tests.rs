@@ -1066,6 +1066,14 @@ struct FakeHost {
 
 #[async_trait::async_trait]
 impl amicu_llamacpp::ProcessSupervisor for FakeHost {
+    async fn stop_all_sidecars(&self) -> Result<Vec<String>, amicu_llamacpp::LlamaCppError> {
+        self.log
+            .events
+            .lock()
+            .unwrap()
+            .push("stop telemetry agents".to_owned());
+        Ok(vec!["io.amicu.telemetry.a1b2c3d4.support_local".to_owned()])
+    }
     async fn start(
         &self,
         plan: &amicu_runtime::LaunchPlan,
@@ -1291,9 +1299,47 @@ impl AppLookup for FakeModal {
     }
 }
 
+/// Telemetry hooks with consent decided by an injected environment, and a
+/// record of what was cleared and forgotten.
+#[derive(Default)]
+struct FakeTelemetry {
+    env: Vec<(&'static str, &'static str)>,
+    stored: Option<bool>,
+    cleared: std::sync::atomic::AtomicBool,
+    forgotten: Mutex<Vec<String>>,
+}
+
+impl crate::commands::telemetry_agent::TelemetryHooks for FakeTelemetry {
+    fn consent_on(&self) -> bool {
+        let env = |k: &str| {
+            self.env
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| (*v).to_owned())
+        };
+        crate::commands::telemetry::effective(&env, self.stored).enabled
+    }
+    fn planner(
+        &self,
+        _: &amicu_core::graph::Graph,
+        _: &dyn amicu_llamacpp::Catalog,
+        _: &crate::planner::PlanResult,
+    ) -> Option<Arc<dyn amicu_llamacpp::SidecarPlanner>> {
+        None
+    }
+    fn clear_queues(&self) {
+        self.cleared
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    fn forget(&self, main_label: &str) {
+        self.forgotten.lock().unwrap().push(main_label.to_owned());
+    }
+}
+
 struct Rig {
     log: Arc<StopLog>,
-    host: Box<dyn Fn() -> Box<dyn amicu_llamacpp::ProcessSupervisor>>,
+    telemetry: FakeTelemetry,
+    host: Box<crate::commands::apply::HostSupervisorFactory>,
     modal: FakeModal,
     forget: bool,
     purge: bool,
@@ -1318,7 +1364,7 @@ impl Rig {
     fn failing_start() -> Self {
         let mut rig = Self::new();
         let log = rig.log.clone();
-        rig.host = Box::new(move || {
+        rig.host = Box::new(move |_| {
             Box::new(FakeHost {
                 log: log.clone(),
                 fail: false,
@@ -1338,7 +1384,7 @@ impl Rig {
         };
         Self {
             log,
-            host: Box::new(move || {
+            host: Box::new(move |_| {
                 Box::new(FakeHost {
                     log: l.clone(),
                     fail,
@@ -1350,6 +1396,11 @@ impl Rig {
             modal,
             forget: false,
             purge: false,
+            // Opted in: the opt-out sweep stays out of unrelated tests.
+            telemetry: FakeTelemetry {
+                stored: Some(true),
+                ..FakeTelemetry::default()
+            },
         }
     }
     fn env(&self) -> Env<'_> {
@@ -1361,6 +1412,7 @@ impl Rig {
             proxy_tokens: amicu_modal::proxy_auth::TokenConfig::from_env,
             interactive: true,
             secret_is_set: |_| true,
+            telemetry: &self.telemetry,
         }
     }
     fn stopped(&self) -> Vec<String> {
@@ -1704,6 +1756,11 @@ fn destroy_stops_every_recorded_identity_of_a_deployment() {
     result.unwrap();
     assert_eq!(
         rig.stopped(),
+        ["io.amicu.llama.old_name".to_owned(), label("support_two")]
+    );
+    // Each confirmed stop also drops that instance's agent id and queue.
+    assert_eq!(
+        *rig.telemetry.forgotten.lock().unwrap(),
         ["io.amicu.llama.old_name".to_owned(), label("support_two")]
     );
 }
@@ -2778,6 +2835,51 @@ fn a_failed_host_update_leaves_the_deployment_pending_with_its_stop_record() {
     // And destroy still stops it from state alone.
     let (result, _) = run_destroy(&project, &[], true, OutputFormat::Human, "", &Rig::new());
     result.unwrap();
+}
+
+#[test]
+fn a_no_op_apply_with_do_not_track_stops_the_telemetry_agents() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let graph = project.load_graph().unwrap();
+    project.save_state(&state_with(graph)).unwrap();
+    let mut rig = Rig::new();
+    // Opted in in the file, DO_NOT_TRACK=1 in this shell.
+    rig.telemetry.env = vec![("DO_NOT_TRACK", "1")];
+    let mut out = Vec::new();
+    let code = commands::apply::run_with(
+        &project,
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &rig.env(),
+    )
+    .unwrap();
+    assert_eq!(code, 0);
+    assert!(utf8(out).contains("No changes to apply."));
+    assert_eq!(*rig.log.events.lock().unwrap(), ["stop telemetry agents"]);
+    assert!(
+        rig.telemetry
+            .cleared
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    // Opted in everywhere: nothing is stopped.
+    let rig = Rig::new();
+    let mut out = Vec::new();
+    commands::apply::run_with(
+        &project,
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &rig.env(),
+    )
+    .unwrap();
+    assert!(rig.log.events.lock().unwrap().is_empty());
 }
 
 #[test]

@@ -47,7 +47,10 @@ use std::time::Duration;
 use amicu_core::ByteSize;
 use amicu_core::id::DeploymentId;
 use amicu_runtime::RuntimeMetrics;
+use amicu_telemetry::prometheus::{cumulative_buckets, first_sum, sum};
 use amicu_telemetry::{Distribution, StackMetrics};
+
+pub use amicu_telemetry::prometheus::{Sample, parse_prometheus};
 
 /// Request timeout. Generous because a scaled-to-zero container cold-starts
 /// on the first request.
@@ -204,102 +207,6 @@ impl MetricsSnapshot {
     }
 }
 
-/// One exposition-format sample line.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Sample {
-    pub name: String,
-    pub labels: Vec<(String, String)>,
-    pub value: f64,
-}
-
-impl Sample {
-    fn label(&self, key: &str) -> Option<&str> {
-        self.labels
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
-    }
-}
-
-/// Parses Prometheus text exposition (v0.0.4). Comments, blank lines and
-/// malformed lines are skipped; a trailing timestamp is ignored.
-#[must_use]
-pub fn parse_prometheus(text: &str) -> Vec<Sample> {
-    text.lines().filter_map(parse_line).collect()
-}
-
-fn parse_line(line: &str) -> Option<Sample> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return None;
-    }
-    let name_end = line.find(['{', ' ', '\t']).unwrap_or(line.len());
-    let name = &line[..name_end];
-    if name.is_empty() {
-        return None;
-    }
-    let mut rest = &line[name_end..];
-    let mut labels = Vec::new();
-    if rest.starts_with('{') {
-        let (parsed, after) = parse_labels(&rest[1..])?;
-        labels = parsed;
-        rest = after;
-    }
-    let value = rest.split_whitespace().next()?.parse::<f64>().ok()?;
-    Some(Sample {
-        name: name.to_owned(),
-        labels,
-        value,
-    })
-}
-
-/// Parses `k="v",k2="v2"}` (input starts after the `{`); returns the labels
-/// and the text after the closing brace.
-fn parse_labels(mut s: &str) -> Option<(Vec<(String, String)>, &str)> {
-    let mut labels = Vec::new();
-    loop {
-        s = s.trim_start_matches([' ', ',']);
-        if let Some(after) = s.strip_prefix('}') {
-            return Some((labels, after));
-        }
-        let eq = s.find('=')?;
-        let key = s[..eq].trim().to_owned();
-        s = s[eq + 1..].strip_prefix('"')?;
-        let mut value = String::new();
-        let mut chars = s.char_indices();
-        let end = loop {
-            let (i, c) = chars.next()?;
-            match c {
-                '"' => break i,
-                '\\' => match chars.next()?.1 {
-                    'n' => value.push('\n'),
-                    other => value.push(other),
-                },
-                c => value.push(c),
-            }
-        };
-        labels.push((key, value));
-        s = &s[end + 1..];
-    }
-}
-
-/// Sum of every sample called `name` (across label sets); `None` if none.
-fn sum(samples: &[Sample], name: &str) -> Option<f64> {
-    let mut found = false;
-    let total: f64 = samples
-        .iter()
-        .filter(|s| s.name == name)
-        .inspect(|_| found = true)
-        .map(|s| s.value)
-        .sum();
-    // NaN/Inf from a hostile or buggy endpoint must not reach the display.
-    found.then_some(total).filter(|t| t.is_finite())
-}
-
-fn first_sum(samples: &[Sample], names: &[&str]) -> Option<f64> {
-    names.iter().find_map(|n| sum(samples, n))
-}
-
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn as_u64(v: f64) -> u64 {
     if v.is_finite() && v > 0.0 {
@@ -321,24 +228,7 @@ fn as_u32(v: f64) -> u32 {
 /// p50/p90/p99 (milliseconds) of the histogram `base` (seconds), merged
 /// across label sets, interpolating linearly inside the matching bucket.
 fn histogram_percentiles(samples: &[Sample], base: &str) -> Option<Percentiles> {
-    let bucket_name = format!("{base}_bucket");
-    let mut buckets: Vec<(f64, f64)> = Vec::new();
-    for s in samples.iter().filter(|s| s.name == bucket_name) {
-        let le = match s.label("le")? {
-            "+Inf" | "Inf" => f64::INFINITY,
-            other => other.parse::<f64>().ok()?,
-        };
-        buckets.push((le, s.value));
-    }
-    buckets.sort_by(|a, b| a.0.total_cmp(&b.0));
-    // Merge label sets (engines) sharing a bound.
-    buckets.dedup_by(|dup, kept| {
-        let same = dup.0.total_cmp(&kept.0).is_eq();
-        if same {
-            kept.1 += dup.1;
-        }
-        same
-    });
+    let buckets = cumulative_buckets(samples, base);
     let total = buckets.last().map(|b| b.1).filter(|t| *t > 0.0)?;
     let quantile = |q: f64| -> f64 {
         let target = q * total;
@@ -587,19 +477,6 @@ llamacpp:requests_processing 1
 # TYPE llamacpp:requests_deferred gauge
 llamacpp:requests_deferred 0
 ";
-
-    #[test]
-    fn parses_labels_escapes_values_and_skips_noise() {
-        let text = "# c\n\nfoo{a=\"x y\",b=\"q\\\"z\\\\\",} 1.5 1700000000\nbar 2\nbroken{\nbaz NaN\nnovalue\n";
-        let s = parse_prometheus(text);
-        assert_eq!(s[0].name, "foo");
-        assert_eq!(s[0].label("a"), Some("x y"));
-        assert_eq!(s[0].label("b"), Some("q\"z\\"));
-        assert!((s[0].value - 1.5).abs() < f64::EPSILON);
-        assert_eq!(s[1].name, "bar");
-        assert!(s[2].value.is_nan());
-        assert_eq!(s.len(), 3, "malformed lines are skipped: {s:?}");
-    }
 
     #[test]
     fn vllm_fixture_maps_every_field() {

@@ -1,9 +1,11 @@
 ---
 title: Telemetry and network
-description: The CLI sends no telemetry. This page lists every network connection it makes.
+description: Telemetry is off unless you opt in. This page lists every network connection amicu makes, and exactly what opted-in deployments send.
 ---
 
-The amicu CLI sends no telemetry, analytics, crash reports, or update checks. There is no account and no amicu-operated server involved in `init`, `fmt`, `validate`, `plan`, `apply`, `destroy`, `doctor`, or `skill export`. This was verified against the CLI's code and dependency tree: the only HTTP clients are the ones listed below.
+By default amicu sends no telemetry, analytics, crash reports or update checks. There is no account, and `init`, `fmt`, `validate`, `plan`, `apply`, `destroy`, `doctor` and `skill export` do not contact any amicu-operated server. The only HTTP clients in the code are the ones listed below.
+
+If you opt in to telemetry (see [Telemetry setting](#telemetry-setting)), each deployment that `amicu apply` starts on your machine runs a small agent next to it. **The agent makes outbound HTTPS calls to `api.amicu.dev`.** The [Opt-in telemetry](#opt-in-telemetry) section lists exactly what it sends.
 
 ## Connections the CLI makes
 
@@ -15,6 +17,8 @@ The amicu CLI sends no telemetry, analytics, crash reports, or update checks. Th
 | Provider rows: `apply`, `plan` and provider commands when a remote provider is involved. Today, Modal: | `api.modal.com:443` (gRPC over TLS) | Your Modal token pair for authentication, and the app, image, and function definitions needed to deploy: image build steps, the launch command, GPU and region request, and a Modal Secret holding the endpoint API key (and `HF_TOKEN` if set). `plan`, `apply` and `destroy` also look up whether recorded apps still exist whenever state contains a Modal deployment. |
 | `apply` on a remote provider (Modal today) | The deployment's Modal URL | The endpoint auth check, and the proxy token headers (`Modal-Key`, `Modal-Secret`). |
 | `amicu modal metrics` | The deployment's Modal URL | A `GET /metrics` with the proxy token headers. Hardware metrics use a read-only probe run inside the container through Modal's API. |
+| Only when telemetry is on: the telemetry agent next to each local deployment | `127.0.0.1:<port>/metrics` | A `GET /metrics` to the deployment's own server, about once a minute. Nothing leaves the machine. |
+| Only when telemetry is on: the telemetry agent | `api.amicu.dev:443` (HTTPS) | About one `POST /v1/telemetry/rollups` per deployment per hour, carrying the [fields listed below](#what-is-sent). |
 
 Credentials are sent only to the endpoint they protect. The exposure check does not use environment HTTP proxies and does not follow redirects, so a key is never forwarded elsewhere.
 
@@ -37,9 +41,7 @@ The effective setting is resolved in this order, strongest first:
 3. The stored choice.
 4. The default: off.
 
-`amicu telemetry status` shows the effective setting and its source.
-
-**Nothing is collected or sent yet.** Recording a choice only saves the setting. The telemetry commands make no network calls.
+`amicu telemetry status` shows the effective setting and its source, the choice saved in the file, any `DO_NOT_TRACK` or `AMICU_TELEMETRY` override set in your shell, and how many telemetry agents are installed and running on this machine and how many deployments have buffered data. It warns when telemetry is off but agents are still installed. The telemetry commands make no network calls.
 
 The first interactive `amicu init` or `amicu apply` asks once whether to share anonymous performance metrics. The default answer is No, and a No is stored, so the question is not asked again. The question is not asked when:
 
@@ -51,11 +53,50 @@ The first interactive `amicu init` or `amicu apply` asks once whether to share a
 
 If the stored file exists but cannot be read, the question is skipped and the file is left as it is.
 
-If you opted in, the planned metrics are aggregate performance metrics from your deployments: latency, throughput, and hardware and model identifiers. The prompt states that amicu never sends prompts, completions, secrets or IP addresses.
+## Opt-in telemetry
+
+When the effective setting is on at `amicu apply` time, apply starts a second job next to each launchd (macOS) or systemd (Linux) deployment. The job is `io.amicu.telemetry.<project>.<deployment>`, and it runs `amicu telemetry-agent`. The job holds no secrets. It is stopped before its deployment whenever amicu stops, updates or destroys that deployment. When the setting is off at apply time, no agent is started.
+
+The agent:
+
+- reads the server's own Prometheus `/metrics` on `127.0.0.1` about once a minute. It never proxies or sees a request, so it does not affect request latency. llama-server serves `/metrics` because amicu always starts it with `--metrics`. vLLM serves it by default.
+- runs the same read-only hardware probe as `amicu modal metrics` (`nvidia-smi`, `amd-smi`, `xpu-smi` or `ioreg`) to read accelerator utilization and memory.
+- adds up each 5-minute window and keeps the result in a queue at `$XDG_DATA_HOME/amicu/telemetry/queue/` (or `~/.local/share/amicu/telemetry/queue/`). Only you can read the queue files (0600). Each deployment's queue holds at most 512 KiB and 7 days of data. When it is full, the oldest entries are dropped first.
+- uploads the queue about once an hour, at a random time within each hour. Each request is under 64 KB. A failed upload (the endpoint is down, unreachable, or answers 503) is retried later with exponential backoff. Until then the data waits in the bounded queue. A batch the server rejects as invalid is dropped, not retried.
+- reads the saved choice in `telemetry.json` again before every scrape and every upload. If the file says off, it collects nothing, sends nothing and deletes its queue within a minute. The agent runs under launchd or systemd, so it never sees your shell's environment.
+
+How opting out reaches running agents:
+
+- `amicu telemetry disable` saves the choice, then right away stops every telemetry agent on this machine (from every project) and deletes every queue.
+- Every `amicu apply`, including one with no changes to apply, checks consent first. If it resolves to off from any source (the file, `DO_NOT_TRACK=1` or `AMICU_TELEMETRY=0`), apply stops every telemetry agent on this machine and deletes every queue before doing anything else. If an agent cannot be stopped, apply fails and says so.
+- When amicu stops a deployment for good (`destroy`, or removing it from the config), it also deletes that deployment's queue and its anonymous id.
+
+If you opt in after deploying, a deployment gets its agent the next time `amicu apply` starts or updates it.
+
+Not covered yet: Modal deployments get no agent, because the container does not carry the amicu binary. Windows deployments do not get one yet either.
+
+### What is sent
+
+Each upload is a JSON batch (schema version 2) of reports. Each report covers one deployment over one 5-minute window. The exact format is published as a JSON Schema in the repository, at `crates/amicu-telemetry/schema/telemetry-batch.v2.schema.json`. The ingestion service rejects any field not listed here.
+
+| Group | Fields |
+|---|---|
+| Batch | `schema_version`, `batch_id` (random, so a retried upload is stored once), `reports` |
+| Identity | `install_id`: a random id for this installation, generated once and stored in `~/.local/share/amicu/telemetry/identity.json`. `deployment_id`: a random id per deployment. Neither is derived from your machine, user or deployment name. |
+| Window | `start_unix_s`, `duration_s` (300) |
+| Software | `amicu_version`, `runtime.name` (`llama.cpp` or `vllm`), `runtime.version` |
+| Model | `model.name` and `model.quantization`. `model.name` is the Hugging Face repo id only for models from well-known public publishers (for example `meta-llama`, `Qwen`, `mistralai`, `unsloth`, `bartowski`). Any other model, including local files, URLs and other repos, is sent as `custom`. |
+| Configuration | `context_length`, `batch_size`, `provider` (one of `local`, `local_apple`, `local_cpu`, `on_prem`, `modal`, or `other` for anything else), `region`. `region` is only a cloud provider's region code. It is never sent for a deployment on your machine, and never derived from your location or locale. |
+| Hardware | `accelerator` (model, for example `nvidia-geforce-rtx-4090`), `accelerator_count`, `vram_bytes` (per accelerator, rounded to whole GiB), `cpu_cores` (capped at 256), `memory_bytes` (rounded up to a power-of-two number of GiB, for example 24 GiB is sent as 32 GiB). The rounding keeps exact hardware sizes from identifying a machine. |
+| Measurements | `requests` and `errors` (vLLM only), `prompt_tokens`, `output_tokens`, `output_tokens_per_s`, `decode_tokens_per_s`, the latency histograms `ttft_ms`, `e2e_ms` and `tpot_ms` (bucket counts and a sum, over fixed bucket bounds), `running_peak`, `waiting_peak`, `kv_cache_utilization_peak`, `preemptions`, `gpu_utilization`, `gpu_memory_peak_bytes` and `host_memory_peak_bytes` (both rounded to whole GiB) |
+
+The payload has no field for prompts, completions or any request content, IP addresses, hostnames, file paths, endpoint URLs, usernames, or API keys and other secrets. Every text value must be a short token without spaces. A value that looks like an IP address or a credential is dropped before it is sent, and the server rejects it too.
+
+Each upload is an HTTPS `POST` with `Content-Type: application/json`, `User-Agent: amicu/<version>` and an `Idempotency-Key` header set to the batch id. No credentials or tokens are sent. The ingestion service runs at `api.amicu.dev` and does not store the IP address a request comes from.
 
 ## Local files
 
-Amicu writes `.amicu/` in your project, the service definitions described in [This machine](/docs/providers/local), and log files under `~/Library/Logs/amicu/` on macOS. Nothing is uploaded.
+Amicu writes `.amicu/` in your project, the service definitions described in [This machine](/docs/providers/local), and log files under `~/Library/Logs/amicu/` on macOS. With telemetry on, it also writes the telemetry identity and queue files under `~/.local/share/amicu/telemetry/`. Only the queued rollups are ever uploaded, and only while telemetry is on.
 
 ## The server crates
 
