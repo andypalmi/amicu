@@ -41,7 +41,8 @@ pub use service::{
 };
 pub use supervisor::{
     LaunchdSupervisor, ProcessSupervisor, ReadyWait, ResolvedSecret, ServiceSupervisor,
-    SystemdSupervisor, host_label, host_supervisor, project_host_label, resolve_launch_secrets,
+    SidecarPlanner, SystemdSupervisor, host_label, host_supervisor, host_supervisor_with_sidecar,
+    project_host_label, resolve_launch_secrets, sidecar_label, sidecar_main_label,
 };
 
 #[cfg(test)]

@@ -6,8 +6,16 @@
 //! [`ServiceManager`] (launchd or systemd) and a [`HealthProbe`]; both ports are
 //! injectable so unit tests run without a real service manager or network.
 //! [`LaunchdSupervisor`] and [`SystemdSupervisor`] pin the host wiring.
+//!
+//! A [`SidecarPlanner`] can add a second, secret-free job next to each
+//! instance: the opt-in telemetry agent. Its label derives from the
+//! instance's ([`sidecar_label`]), and so does its definition file, so a stop
+//! handle recorded for the instance also covers the sidecar: every stop stops
+//! the sidecar first (when its definition is on disk), then the instance.
 
-use std::path::Path;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use amicu_core::ByteSize;
@@ -169,6 +177,36 @@ pub trait ProcessSupervisor: Send + Sync {
     }
 }
 
+/// Decides whether a host instance gets a sidecar job (the telemetry agent)
+/// and renders it. The sidecar carries no secrets.
+pub trait SidecarPlanner: Send + Sync {
+    /// The sidecar to run beside `plan`'s instance, labelled
+    /// [`sidecar_label`]`(main_label)`, or `None` for no sidecar.
+    fn sidecar(&self, plan: &LaunchPlan, main_label: &str) -> Option<ServiceSpec>;
+}
+
+const LLAMA_LABEL_PREFIX: &str = "io.amicu.llama.";
+const SIDECAR_LABEL_PREFIX: &str = "io.amicu.telemetry.";
+
+/// The sidecar label for the instance `main_label`:
+/// `io.amicu.llama.<rest>` becomes `io.amicu.telemetry.<rest>`.
+#[must_use]
+pub fn sidecar_label(main_label: &str) -> String {
+    match main_label.strip_prefix(LLAMA_LABEL_PREFIX) {
+        Some(rest) => format!("{SIDECAR_LABEL_PREFIX}{rest}"),
+        None => format!("{main_label}.telemetry"),
+    }
+}
+
+/// The instance label a sidecar label belongs to, if it is one.
+#[must_use]
+pub fn sidecar_main_label(label: &str) -> Option<String> {
+    label
+        .strip_prefix(SIDECAR_LABEL_PREFIX)
+        .filter(|rest| !rest.is_empty())
+        .map(|rest| format!("{LLAMA_LABEL_PREFIX}{rest}"))
+}
+
 /// The real supervisor: a [`ServiceManager`] runs the process, a [`HealthProbe`]
 /// checks endpoint readiness, and the two combine into the health tri-state
 /// surfaced through [`status`](ProcessSupervisor::status).
@@ -178,6 +216,7 @@ pub struct ServiceSupervisor<M, P> {
     runner: Box<dyn CommandRunner>,
     ready: ReadyWait,
     drain: Duration,
+    sidecar: Option<Arc<dyn SidecarPlanner>>,
 }
 
 /// How long [`ServiceSupervisor::start`] waits for the endpoint to answer its
@@ -208,7 +247,60 @@ impl<M: ServiceManager, P: HealthProbe> ServiceSupervisor<M, P> {
             runner: Box::new(HostRunner),
             ready: ReadyWait::LOCAL,
             drain: Duration::from_secs(10),
+            sidecar: None,
         }
+    }
+
+    /// Start a sidecar job (the telemetry agent) beside each instance when
+    /// `planner` asks for one.
+    #[must_use]
+    pub fn with_sidecar(mut self, planner: Option<Arc<dyn SidecarPlanner>>) -> Self {
+        self.sidecar = planner;
+        self
+    }
+
+    /// Where the sidecar of `main_label` keeps its definition: next to the
+    /// instance's recorded definition, else where the manager would put it.
+    fn sidecar_definition(
+        &self,
+        main_label: &str,
+        main_definition: Option<&Path>,
+    ) -> Option<PathBuf> {
+        let label = sidecar_label(main_label);
+        match main_definition {
+            Some(p) => match p.extension().and_then(|e| e.to_str()) {
+                Some(ext @ ("plist" | "service")) => {
+                    Some(p.with_file_name(format!("{label}.{ext}")))
+                }
+                _ => self.manager.paths(&label).map(|p| p.definition),
+            },
+            None => self.manager.paths(&label).map(|p| p.definition),
+        }
+    }
+
+    /// Stop the sidecar of `main_label`, if one was ever started: its
+    /// definition is written before it starts and removed only after a
+    /// confirmed stop, so a definition on disk is the record that it may run.
+    async fn stop_sidecar(
+        &self,
+        main_label: &str,
+        main_definition: Option<&Path>,
+    ) -> Result<(), LlamaCppError> {
+        let Some(definition) = self.sidecar_definition(main_label, main_definition) else {
+            return Ok(());
+        };
+        if std::fs::symlink_metadata(&definition).is_err() {
+            return Ok(());
+        }
+        let label = sidecar_label(main_label);
+        self.manager
+            .stop_recorded(&label, Some(&definition))
+            .await
+            .map_err(|e| {
+                LlamaCppError::Supervisor(format!(
+                    "stopping the telemetry agent {label} failed: {e}"
+                ))
+            })
     }
 
     /// Override how the runtime binary is searched for on `PATH` (tests).
@@ -372,6 +464,25 @@ pub fn host_supervisor() -> Box<dyn ProcessSupervisor> {
     }
 }
 
+/// [`host_supervisor`] that also starts `sidecar`'s job (the telemetry
+/// agent) beside each instance. Stops cover the sidecar either way.
+///
+/// TODO: the Windows Task Scheduler backend needs the same sidecar handling
+/// (a second per-user task, stopped before the instance's).
+#[must_use]
+pub fn host_supervisor_with_sidecar(
+    sidecar: Option<Arc<dyn SidecarPlanner>>,
+) -> Box<dyn ProcessSupervisor> {
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(LaunchdSupervisor::host().with_sidecar(sidecar))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Box::new(SystemdSupervisor::host().with_sidecar(sidecar))
+    }
+}
+
 fn endpoint_for(plan: &LaunchPlan) -> String {
     let port = match &plan.settings {
         Runtime::LlamaCpp(s) => s.port,
@@ -450,13 +561,28 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
             env,
         };
         let endpoint = endpoint_for(plan);
-        // Update: remove the previous instance and let its port go quiet first.
+        // Update: a previous sidecar is stopped for good (this start decides
+        // afresh whether to run one), then the previous instance is released
+        // and its port allowed to go quiet.
+        self.stop_sidecar(&label, None).await?;
         self.manager.release(&label).await;
         if !self.drain.is_zero() {
             self.wait_released(&label, &endpoint).await?;
         }
         self.manager.start(&spec)?;
         self.wait_ready(&label, &endpoint).await?;
+        // The sidecar starts only once the instance serves, and its failure
+        // never fails the deployment (`start` removes a definition it could
+        // not start, so nothing is left behind).
+        if let Some(sidecar) = self.sidecar.as_ref().and_then(|p| p.sidecar(plan, &label))
+            && let Err(e) = self.manager.start(&sidecar)
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "warning: the telemetry agent for {label} did not start ({e}); the deployment \
+                 itself is running"
+            );
+        }
         Ok(RuntimeHandle {
             id: label,
             deployment: plan.deployment.clone(),
@@ -507,6 +633,7 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
     }
 
     async fn stop(&self, handle: &RuntimeHandle) -> Result<(), LlamaCppError> {
+        self.stop_sidecar(&handle.id, None).await?;
         self.manager.stop(&handle.id).await
     }
 
@@ -515,6 +642,7 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
         handle: &RuntimeHandle,
         definition: Option<&Path>,
     ) -> Result<(), LlamaCppError> {
+        self.stop_sidecar(&handle.id, definition).await?;
         self.manager.stop_recorded(&handle.id, definition).await
     }
 
@@ -524,6 +652,7 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
         definition: Option<&Path>,
         env: Option<&Path>,
     ) -> Result<(), LlamaCppError> {
+        self.stop_sidecar(&handle.id, definition).await?;
         self.manager
             .stop_recorded_with_env(&handle.id, definition, env)
             .await

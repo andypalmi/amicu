@@ -4266,3 +4266,239 @@ fn launchd_presence_does_not_call_transient_states_down() {
     assert_eq!(presence("exited"), Presence::Down);
     assert_eq!(presence("running"), Presence::Running);
 }
+
+// ---- telemetry sidecar lifecycle --------------------------------------------
+
+/// A manager over a real temp dir: `start` writes the definition file, a
+/// confirmed `stop_recorded` removes it, and every call is logged in order.
+struct DirManager {
+    dir: std::path::PathBuf,
+    calls: Mutex<Vec<String>>,
+    fail_start_of: Option<String>,
+    fail_stop_of: Option<String>,
+}
+
+impl DirManager {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "amicu-sidecar-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self {
+            dir,
+            calls: Mutex::new(Vec::new()),
+            fail_start_of: None,
+            fail_stop_of: None,
+        }
+    }
+    fn def(&self, label: &str) -> std::path::PathBuf {
+        self.dir.join(format!("{label}.plist"))
+    }
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ServiceManager for std::sync::Arc<DirManager> {
+    fn paths(&self, label: &str) -> Option<crate::ServicePaths> {
+        Some(crate::ServicePaths {
+            definition: self.def(label),
+            logs: vec![],
+            env: None,
+        })
+    }
+    fn start(&self, spec: &ServiceSpec) -> Result<(), LlamaCppError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("start {}", spec.label));
+        if self.fail_start_of.as_deref() == Some(spec.label.as_str()) {
+            return Err(LlamaCppError::Supervisor("bootstrap failed".into()));
+        }
+        std::fs::write(self.def(&spec.label), spec.argv.join(" ")).unwrap();
+        Ok(())
+    }
+    fn state(&self, _label: &str) -> Result<ServiceState, LlamaCppError> {
+        Ok(ServiceState::Active)
+    }
+    async fn release(&self, label: &str) {
+        self.calls.lock().unwrap().push(format!("release {label}"));
+    }
+    async fn stop(&self, label: &str) -> Result<(), LlamaCppError> {
+        self.stop_recorded(label, None).await
+    }
+    async fn stop_recorded(
+        &self,
+        label: &str,
+        definition: Option<&std::path::Path>,
+    ) -> Result<(), LlamaCppError> {
+        self.calls.lock().unwrap().push(format!("stop {label}"));
+        if self.fail_stop_of.as_deref() == Some(label) {
+            return Err(LlamaCppError::Supervisor("still loaded".into()));
+        }
+        let def = definition.map_or_else(|| self.def(label), std::path::Path::to_path_buf);
+        let _ = std::fs::remove_file(def);
+        Ok(())
+    }
+    fn logs(&self, _label: &str, _options: LogOptions) -> Result<Vec<String>, LlamaCppError> {
+        Ok(vec![])
+    }
+    fn log_location(&self, _label: &str) -> String {
+        String::new()
+    }
+}
+
+struct AgentPlanner;
+
+impl crate::SidecarPlanner for AgentPlanner {
+    fn sidecar(&self, _plan: &LaunchPlan, main_label: &str) -> Option<ServiceSpec> {
+        Some(ServiceSpec {
+            label: crate::sidecar_label(main_label),
+            argv: vec!["/bin/amicu".into(), "telemetry-agent".into()],
+            env: vec![],
+        })
+    }
+}
+
+fn sidecar_supervisor(
+    manager: &std::sync::Arc<DirManager>,
+    planner: bool,
+) -> ServiceSupervisor<std::sync::Arc<DirManager>, FakeProbe> {
+    let planner: Option<std::sync::Arc<dyn crate::SidecarPlanner>> =
+        planner.then(|| std::sync::Arc::new(AgentPlanner) as _);
+    test_supervisor(manager.clone(), FakeProbe { ready: true }).with_sidecar(planner)
+}
+
+fn labelled_plan() -> LaunchPlan {
+    let mut plan = command_plan();
+    plan.service_label = Some("io.amicu.llama.a1b2c3d4.chat".into());
+    plan
+}
+
+#[test]
+fn sidecar_labels_derive_from_and_map_back_to_the_instance() {
+    let main = "io.amicu.llama.a1b2c3d4.chat";
+    assert_eq!(
+        crate::sidecar_label(main),
+        "io.amicu.telemetry.a1b2c3d4.chat"
+    );
+    assert_eq!(
+        crate::sidecar_main_label("io.amicu.telemetry.a1b2c3d4.chat").as_deref(),
+        Some(main)
+    );
+    assert_eq!(crate::sidecar_main_label(main), None);
+    assert_eq!(crate::sidecar_label("custom"), "custom.telemetry");
+}
+
+#[tokio::test]
+async fn the_sidecar_starts_after_the_instance_and_stops_before_it() {
+    let m = std::sync::Arc::new(DirManager::new("order"));
+    let sup = sidecar_supervisor(&m, true);
+    let handle = sup.start(&labelled_plan(), &[]).await.expect("start");
+    let side = "io.amicu.telemetry.a1b2c3d4.chat";
+    assert_eq!(
+        m.calls(),
+        [
+            "release io.amicu.llama.a1b2c3d4.chat",
+            "start io.amicu.llama.a1b2c3d4.chat",
+            &format!("start {side}"),
+        ]
+    );
+    assert!(m.def(side).exists());
+    m.calls.lock().unwrap().clear();
+    // Destroy passes the recorded definition: the sidecar's sits next to it.
+    let recorded = m.def(&handle.id);
+    sup.stop_recorded_with_env(&handle, Some(&recorded), None)
+        .await
+        .expect("stop");
+    assert_eq!(
+        m.calls(),
+        [format!("stop {side}"), format!("stop {}", handle.id)]
+    );
+    assert!(!m.def(side).exists() && !recorded.exists());
+}
+
+#[tokio::test]
+async fn a_supervisor_without_a_planner_still_stops_a_recorded_sidecar() {
+    let m = std::sync::Arc::new(DirManager::new("noplanner"));
+    sidecar_supervisor(&m, true)
+        .start(&labelled_plan(), &[])
+        .await
+        .expect("start");
+    // `destroy` builds a plain host supervisor: it must not orphan the agent.
+    let plain = sidecar_supervisor(&m, false);
+    let handle = RuntimeHandle {
+        id: "io.amicu.llama.a1b2c3d4.chat".into(),
+        deployment: DeploymentId::new("chat"),
+        endpoint: "http://127.0.0.1:8080".into(),
+        exposure: amicu_runtime::EndpointExposure::Loopback,
+    };
+    plain.stop(&handle).await.expect("stop");
+    assert!(!m.def("io.amicu.telemetry.a1b2c3d4.chat").exists());
+    // Without a sidecar definition on disk no sidecar stop is attempted.
+    m.calls.lock().unwrap().clear();
+    plain.stop(&handle).await.expect("stop");
+    assert_eq!(m.calls(), [format!("stop {}", handle.id)]);
+}
+
+#[tokio::test]
+async fn re_applying_without_consent_stops_the_old_sidecar_for_good() {
+    let m = std::sync::Arc::new(DirManager::new("optout"));
+    sidecar_supervisor(&m, true)
+        .start(&labelled_plan(), &[])
+        .await
+        .expect("start");
+    m.calls.lock().unwrap().clear();
+    sidecar_supervisor(&m, false)
+        .start(&labelled_plan(), &[])
+        .await
+        .expect("restart");
+    let calls = m.calls();
+    assert_eq!(calls[0], "stop io.amicu.telemetry.a1b2c3d4.chat");
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.starts_with("start io.amicu.telemetry"))
+    );
+    assert!(!m.def("io.amicu.telemetry.a1b2c3d4.chat").exists());
+}
+
+#[tokio::test]
+async fn a_sidecar_that_will_not_stop_keeps_the_instance_and_its_record() {
+    let mut dm = DirManager::new("stuck");
+    dm.fail_stop_of = Some("io.amicu.telemetry.a1b2c3d4.chat".into());
+    let m = std::sync::Arc::new(dm);
+    let handle = sidecar_supervisor(&m, true)
+        .start(&labelled_plan(), &[])
+        .await
+        .expect("start");
+    let err = sidecar_supervisor(&m, false)
+        .stop(&handle)
+        .await
+        .expect_err("sidecar stuck");
+    assert!(err.to_string().contains("telemetry agent"), "{err}");
+    // The instance was not stopped either, so the caller keeps its state.
+    assert!(
+        !m.calls()
+            .iter()
+            .any(|c| c == &format!("stop {}", handle.id))
+    );
+    assert!(m.def(&handle.id).exists());
+}
+
+#[tokio::test]
+async fn a_sidecar_that_fails_to_start_never_fails_the_deployment() {
+    let mut dm = DirManager::new("failstart");
+    dm.fail_start_of = Some("io.amicu.telemetry.a1b2c3d4.chat".into());
+    let m = std::sync::Arc::new(dm);
+    let handle = sidecar_supervisor(&m, true)
+        .start(&labelled_plan(), &[])
+        .await
+        .expect("the instance still starts");
+    assert_eq!(handle.id, "io.amicu.llama.a1b2c3d4.chat");
+    assert!(!m.def("io.amicu.telemetry.a1b2c3d4.chat").exists());
+}
