@@ -1209,7 +1209,7 @@ pub(crate) fn write_private(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(),
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod env_file_tests {
     use super::*;
     use crate::HostExec;

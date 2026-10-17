@@ -2250,7 +2250,12 @@ async fn a_missing_binary_fails_before_anything_is_started() {
         .expect_err("binary missing");
     let msg = err.to_string();
     assert!(msg.contains("llama-server not found on PATH"), "{msg}");
-    assert!(msg.contains("brew install llama.cpp"), "{msg}");
+    let install_hint = if cfg!(windows) {
+        "winget install llama.cpp"
+    } else {
+        "brew install llama.cpp"
+    };
+    assert!(msg.contains(install_hint), "{msg}");
     assert!(manager.started.lock().unwrap().is_none());
 }
 

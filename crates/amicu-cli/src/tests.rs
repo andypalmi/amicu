@@ -1379,6 +1379,13 @@ fn platform_ctx() -> amicu_llamacpp::HostContext {
             sid: None,
             domain: Some("gui/501".to_owned()),
         }
+    } else if cfg!(windows) {
+        amicu_llamacpp::HostContext {
+            backend: amicu_llamacpp::HostBackend::TaskScheduler,
+            uid: None,
+            sid: Some("S-1-5-21-1-1001".to_owned()),
+            domain: None,
+        }
     } else {
         amicu_llamacpp::HostContext {
             backend: amicu_llamacpp::HostBackend::Systemd,
@@ -2165,6 +2172,7 @@ fn an_unknown_host_identity_refuses_every_stop() {
     assert_eq!(stops_for(&project, "support_two").len(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_record_without_an_owner_is_refused_for_root_or_a_foreign_plist_owner() {
     let mut root = platform_ctx();
@@ -2277,6 +2285,7 @@ fn scoped_rec(project_id: &str, name: &str, home: &std::path::Path) -> StopRecor
     )
 }
 
+#[cfg(unix)]
 fn launchd_rec(project_id: &str, name: &str) -> StopRecord {
     let mut rec = StopRecord::host_in(
         project_id,
