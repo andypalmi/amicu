@@ -1293,7 +1293,7 @@ impl AppLookup for FakeModal {
 
 struct Rig {
     log: Arc<StopLog>,
-    host: Box<dyn Fn() -> Box<dyn amicu_llamacpp::ProcessSupervisor>>,
+    host: Box<crate::commands::apply::HostSupervisorFactory>,
     modal: FakeModal,
     forget: bool,
     purge: bool,
@@ -1318,7 +1318,7 @@ impl Rig {
     fn failing_start() -> Self {
         let mut rig = Self::new();
         let log = rig.log.clone();
-        rig.host = Box::new(move || {
+        rig.host = Box::new(move |_| {
             Box::new(FakeHost {
                 log: log.clone(),
                 fail: false,
@@ -1338,7 +1338,7 @@ impl Rig {
         };
         Self {
             log,
-            host: Box::new(move || {
+            host: Box::new(move |_| {
                 Box::new(FakeHost {
                     log: l.clone(),
                     fail,
@@ -1361,6 +1361,7 @@ impl Rig {
             proxy_tokens: amicu_modal::proxy_auth::TokenConfig::from_env,
             interactive: true,
             secret_is_set: |_| true,
+            telemetry: |_, _, _| None,
         }
     }
     fn stopped(&self) -> Vec<String> {

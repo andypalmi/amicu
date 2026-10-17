@@ -11,8 +11,10 @@
 //! 3. The persisted choice.
 //! 4. Default: off, not yet asked.
 //!
-//! NOTHING IS COLLECTED OR SENT YET. This module only records consent so the
-//! setting exists before any collection ships; it makes no network calls.
+//! This module only records consent and makes no network calls. When the
+//! effective setting is on, `apply` starts the telemetry agent
+//! (`commands::telemetry_agent`) beside each local deployment; the agent
+//! re-reads this setting before every scrape and upload.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -23,8 +25,18 @@ use crate::OutputFormat;
 use crate::error::CliError;
 use crate::write_json;
 
-const NOT_COLLECTING: &str =
-    "No telemetry data is collected or sent yet; this setting only records your choice.";
+const COLLECTING: &str = "Deployments started by `amicu apply` on this machine collect 5-minute \
+performance rollups, buffer them locally and send them to the amicu telemetry endpoint \
+(https://api.amicu.dev). Aggregates only: never prompts, completions, IPs, hostnames, paths, \
+usernames or keys. A deployment started before you opted in gets its agent the next time \
+`amicu apply` starts or updates it. Opting out takes effect within a minute: agents stop \
+collecting and delete what they buffered.";
+
+const NOT_COLLECTING: &str = "No telemetry data is collected or sent.";
+
+fn collection_note(enabled: bool) -> &'static str {
+    if enabled { COLLECTING } else { NOT_COLLECTING }
+}
 
 /// Env vars that mark a non-interactive CI environment.
 const CI_VARS: &[&str] = &[
@@ -196,6 +208,10 @@ fn set(
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
     store.save(enabled)?;
+    if !enabled {
+        // Buffered rollups that were never sent are deleted, not kept.
+        clear_queues(crate::commands::telemetry_agent::data_dir().as_deref());
+    }
     writeln!(
         out,
         "telemetry {} (saved to {})",
@@ -213,8 +229,15 @@ fn set(
         )
         .map_err(io_err)?;
     }
-    writeln!(out, "{NOT_COLLECTING}").map_err(io_err)?;
+    writeln!(out, "{}", collection_note(eff.enabled)).map_err(io_err)?;
     Ok(0)
+}
+
+/// Delete every agent's buffered, unsent rollups. Best effort.
+fn clear_queues(data: Option<&Path>) {
+    if let Some(data) = data {
+        let _ = std::fs::remove_dir_all(crate::commands::telemetry_agent::queue_dir(data));
+    }
 }
 
 #[derive(Serialize)]
@@ -264,8 +287,8 @@ fn status_with(
                 enabled: eff.enabled,
                 source: eff.source,
                 config_path: store.map(|s| s.path().display().to_string()),
-                collecting: false,
-                note: NOT_COLLECTING,
+                collecting: eff.enabled,
+                note: collection_note(eff.enabled),
                 warning,
             },
         )?;
@@ -284,7 +307,7 @@ fn status_with(
     if let Some(w) = &warning {
         writeln!(out, "warning:   {w}").map_err(io_err)?;
     }
-    writeln!(out, "\n{NOT_COLLECTING}").map_err(io_err)?;
+    writeln!(out, "\n{}", collection_note(eff.enabled)).map_err(io_err)?;
     Ok(0)
 }
 
@@ -293,13 +316,13 @@ fn status_with(
 const PROMPT: &str = "\
 Help improve amicu? (one-time question)
 
-If you opt in, amicu will send aggregate performance metrics from your
-deployments: latency, throughput, hardware and model identifiers.
-It never sends prompts, completions, secrets or IP addresses.
+If you opt in, your local deployments will send aggregate performance
+metrics to api.amicu.dev about once an hour: latency, throughput, hardware
+and model identifiers. It never sends prompts, completions, secrets or IP
+addresses.
 
 You can change this any time with `amicu telemetry enable|disable`
 (or set AMICU_TELEMETRY=0/1; DO_NOT_TRACK=1 always turns it off).
-Nothing is collected or sent yet; this only records your choice.
 
 Share anonymous performance metrics? [y/N] ";
 
@@ -480,10 +503,23 @@ mod tests {
         let s = String::from_utf8(s).unwrap();
         assert!(s.contains("telemetry: enabled"));
         assert!(s.contains("user config file"));
-        assert!(s.contains("No telemetry data is collected or sent yet"));
+        assert!(s.contains("collect 5-minute performance rollups"));
+        assert!(s.contains("api.amicu.dev"));
 
         set(&store, false, &env, &mut Vec::new()).unwrap();
         assert_eq!(store.load().unwrap(), Some(false));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn opting_out_deletes_buffered_rollups() {
+        let (_, dir) = temp_store("queues");
+        let q = crate::commands::telemetry_agent::queue_dir(&dir);
+        std::fs::create_dir_all(&q).unwrap();
+        std::fs::write(q.join("d.jsonl"), "{}\n").unwrap();
+        clear_queues(Some(&dir));
+        assert!(!q.exists());
+        clear_queues(Some(&dir));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -527,6 +563,13 @@ mod tests {
         assert_eq!(v["enabled"], false);
         assert_eq!(v["source"], "do_not_track");
         assert_eq!(v["collecting"], false);
+        assert_eq!(v["note"], NOT_COLLECTING);
+
+        let mut buf = Vec::new();
+        status_with(Some(&store), &env_of(&[]), OutputFormat::Json, &mut buf).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
+        assert_eq!(v["collecting"], true, "opted in: collected and buffered");
+        assert_eq!(v["note"], COLLECTING);
 
         let mut out = Vec::new();
         set(&store, true, &env, &mut out).unwrap();

@@ -1,6 +1,7 @@
 //! `amicu apply [--auto-approve]` - plan, approve, then start deployments.
 
 use std::io::Write;
+use std::sync::Arc;
 
 use amicu_core::adapter::AdapterError;
 use amicu_core::diagnostic::{DiagnosticReport, Severity};
@@ -10,7 +11,9 @@ use amicu_core::id::DeploymentId;
 use amicu_core::resource::Runtime;
 use amicu_core::resource::{Deployment, is_local_provider};
 use amicu_core::secret::{SecretResolver, SecretValue};
-use amicu_llamacpp::{Catalog, LlamaCppAdapter, ProcessSupervisor, host_supervisor};
+use amicu_llamacpp::{
+    Catalog, LlamaCppAdapter, ProcessSupervisor, SidecarPlanner, host_supervisor_with_sidecar,
+};
 use amicu_modal::ModalSupervisor;
 use amicu_modal::supervisor::project_app_name;
 use amicu_runtime::exposure::{CheckTiming, EndpointCheck, PROBE_PATH};
@@ -184,7 +187,7 @@ pub(crate) fn run_with(
     // machine would only do so at their next login (systemd lingering off).
     if !output.is_json()
         && handles.iter().any(|h| h.id.starts_with("io.amicu."))
-        && let Some(hint) = (env.host)().boot_hint()
+        && let Some(hint) = (env.host)(None).boot_hint()
     {
         writeln!(out, "\n{hint}").map_err(|e| CliError::io("write failed", e))?;
     }
@@ -205,9 +208,11 @@ fn stale_records(
         .collect()
 }
 
-/// Builds the host process supervisor (launchd/systemd). A parameter so tests
-/// never touch the real service manager.
-pub(crate) type HostSupervisorFactory = dyn Fn() -> Box<dyn ProcessSupervisor>;
+/// Builds the host process supervisor (launchd/systemd), optionally with the
+/// telemetry sidecar planner. A parameter so tests never touch the real
+/// service manager.
+pub(crate) type HostSupervisorFactory =
+    dyn Fn(Option<Arc<dyn SidecarPlanner>>) -> Box<dyn ProcessSupervisor>;
 
 /// The external systems a run acts on, injected so tests use fakes.
 pub(crate) struct Env<'a> {
@@ -227,19 +232,27 @@ pub(crate) struct Env<'a> {
     /// Whether a secret name is set; a parameter so tests need not touch the
     /// process environment.
     pub secret_is_set: fn(&str) -> bool,
+    /// The telemetry sidecar planner for this run, `None` unless the user
+    /// opted in; a parameter so tests never read the real consent file.
+    pub telemetry: TelemetryPlannerFactory,
 }
+
+/// See [`Env::telemetry`].
+pub(crate) type TelemetryPlannerFactory =
+    fn(&Graph, &dyn Catalog, &PlanResult) -> Option<Arc<dyn SidecarPlanner>>;
 
 impl Env<'static> {
     /// The real host service manager and Modal.
     pub(crate) fn real(forget_unconfirmed: bool, purge: bool) -> Self {
         Self {
-            host: &host_supervisor,
+            host: &host_supervisor_with_sidecar,
             modal: &crate::refresh::ModalLookup,
             forget_unconfirmed,
             purge,
             proxy_tokens: amicu_modal::proxy_auth::TokenConfig::from_env,
             interactive: std::io::IsTerminal::is_terminal(&std::io::stdin()),
             secret_is_set: crate::secret::env_has_secret,
+            telemetry: crate::commands::telemetry_agent::planner_for_apply,
         }
     }
 }
@@ -961,9 +974,13 @@ async fn apply_all(
     // A llama.cpp deployment on Modal takes the same route through a
     // `LlamaCppAdapter`.
     let catalog = build_catalog(graph);
-    let llama_adapter = LlamaCppAdapter::new(Box::new(catalog.clone()), (env.host)());
-    let vllm_adapter = VllmAdapter::new(Box::new(catalog.clone()), (env.host)());
-    let host_probe = (env.host)();
+    // The opt-in telemetry agent rides along with host instances only when
+    // consent resolves to on right now; otherwise a previous agent is stopped.
+    let sidecar = (env.telemetry)(graph, &catalog, result);
+    let llama_adapter =
+        LlamaCppAdapter::new(Box::new(catalog.clone()), (env.host)(sidecar.clone()));
+    let vllm_adapter = VllmAdapter::new(Box::new(catalog.clone()), (env.host)(sidecar));
+    let host_probe = (env.host)(None);
     let host_ctx = host_probe.host_context();
     let resolver = EnvSecretResolver;
     let registry = EndpointRegistry::new();

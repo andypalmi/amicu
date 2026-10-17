@@ -11,6 +11,7 @@ pub(crate) mod orphans;
 pub(crate) mod plan;
 pub(crate) mod skill;
 pub(crate) mod telemetry;
+pub(crate) mod telemetry_agent;
 pub(crate) mod validate;
 
 /// A fresh current-thread Tokio runtime with every driver (IO, time) enabled.
