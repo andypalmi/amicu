@@ -17,7 +17,7 @@ The workflow is the one Terraform users know: configuration is declarative, ever
 
 ## What it does
 
-- Runs a llama.cpp or vLLM server where you choose: on your machine as a launchd (macOS) or systemd (Linux) user service, or on a remote GPU provider with a pinned region (Modal is supported today; others are in preview). See [Providers](/docs/providers).
+- Runs a llama.cpp or vLLM server where you choose: on your machine as a launchd (macOS), systemd (Linux) or Task Scheduler (Windows) user service, or on a remote GPU provider with a pinned region (Modal is supported today; others are in preview). See [Providers](/docs/providers).
 - Checks that the model fits the hardware before anything starts.
 - Treats data residency and provider allowlists as resources that `validate` and `plan` enforce.
 - Keeps credentials out of configuration, plans, state, and command lines. See [Secrets](/docs/security/secrets).

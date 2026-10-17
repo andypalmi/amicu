@@ -63,8 +63,9 @@ enum Command {
     Init {
         /// Write a starter example instead of an empty file. Bare `--example`
         /// detects this machine: macOS gets `mac`, Linux with an NVIDIA GPU gets
-        /// `linux-cuda`, any other Linux gets `linux-cpu`. Local examples
-        /// declare this machine's memory and pick a small model that fits it.
+        /// `linux-cuda`, any other Linux gets `linux-cpu`; Windows is detected
+        /// the same way as Linux. Local examples declare this machine's memory
+        /// and pick a small model that fits it.
         /// On an Intel Mac, `mac` writes a `local_cpu` profile with
         /// `n_gpu_layers = 0`.
         #[allow(

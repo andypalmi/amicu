@@ -1276,11 +1276,7 @@ async fn secure_endpoint(
     };
     let hint = match dispatch {
         Dispatch::Modal => format!("`modal app stop {}`", handle.id),
-        Dispatch::Host => format!(
-            "`systemctl --user disable --now {id}` on Linux, or `launchctl bootout \
-             gui/$(id -u)/{id}` on macOS",
-            id = handle.id
-        ),
+        Dispatch::Host => host_stop_hint(std::env::consts::OS, &handle.id),
     };
     // A Modal update redeploys under the same app: roll the new version back
     // and re-verify the previous endpoint recorded in state. Anything short of
@@ -1547,6 +1543,20 @@ fn check_host_context(
         )));
     }
     Ok(())
+}
+
+/// How to stop a host service by hand, for the host OS (`std::env::consts::OS`).
+fn host_stop_hint(os: &str, id: &str) -> String {
+    match os {
+        "macos" => format!("`launchctl bootout gui/$(id -u)/{id}`"),
+        "windows" => format!(
+            "`schtasks /End /TN {task}` then `schtasks /Delete /TN {task} /F` (in PowerShell, or use Task Scheduler)",
+            task = amicu_llamacpp::service_windows::ps_quote(
+                &amicu_llamacpp::service_windows::task_name(id)
+            )
+        ),
+        _ => format!("`systemctl --user disable --now {id}`"),
+    }
 }
 
 /// Stop the instance `record` describes and confirm it. `Ok` means it is
@@ -3396,5 +3406,17 @@ mod purge_pending_tests {
         p.purge_pending = vec![rec("a", &["/l/a.out.log"]).purge_entry().unwrap()];
         let out = purge_pending_after(Some(&p), &[rec("a", &["/l/a.out.log"])]);
         assert_eq!(out.len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod host_stop_hint_tests {
+    use super::host_stop_hint;
+
+    #[test]
+    fn names_the_stop_command_of_each_host_os() {
+        assert!(host_stop_hint("macos", "io.amicu.x").contains("launchctl bootout"));
+        assert!(host_stop_hint("linux", "io.amicu.x").contains("systemctl --user"));
+        assert!(host_stop_hint("windows", "io.amicu.x").contains("schtasks"));
     }
 }
