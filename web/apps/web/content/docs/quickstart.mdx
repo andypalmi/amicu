@@ -283,7 +283,7 @@ amicu destroy
 
 `destroy` lists every deployment recorded in state, asks `Destroy these deployments? [y/N]`, and then stops each one and removes it from state. To tear down only some of them, pass `--target <name>` (repeatable). Use `--auto-approve` (alias `--yes`) to skip the prompt.
 
-A deployment leaves state only after its stop is confirmed. If a stop fails, the command exits with an error, the deployment stays in state, and you can re-run `amicu destroy`. On macOS and Linux, destroy also deletes the service file, which holds the endpoint API key. Add `--purge` to also delete the host log files of the destroyed deployments. Modal cache volumes are never deleted. See [Plan, apply and state](/docs/concepts/plan-apply-state#destroy).
+A deployment leaves state only after its stop is confirmed. If a stop fails, the command exits with an error, the deployment stays in state, and you can re-run `amicu destroy`. On macOS and Linux, destroy also deletes the service file, which holds the endpoint API key. On Windows it deletes the scheduled task and its definition, launcher, pid and environment files (the environment file holds the key). Add `--purge` to also delete the host log files of the destroyed deployments. Modal cache volumes are never deleted. See [Plan, apply and state](/docs/concepts/plan-apply-state#destroy).
 
 You can also delete a `deployment` from your HCL and run `amicu apply`; the plan then shows a `destroy` action for it.
 

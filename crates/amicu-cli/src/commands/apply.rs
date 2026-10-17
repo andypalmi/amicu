@@ -1550,7 +1550,7 @@ fn host_stop_hint(os: &str, id: &str) -> String {
     match os {
         "macos" => format!("`launchctl bootout gui/$(id -u)/{id}`"),
         "windows" => format!(
-            "`schtasks /End /TN {task}` then `schtasks /Delete /TN {task} /F` (or Task Scheduler)",
+            "`schtasks /End /TN {task}` then `schtasks /Delete /TN {task} /F` (in PowerShell, or use Task Scheduler)",
             task = amicu_llamacpp::service_windows::ps_quote(
                 &amicu_llamacpp::service_windows::task_name(id)
             )
