@@ -39,9 +39,11 @@ declare
   r jsonb;
   install uuid := '01010101-0101-4101-8101-010101010101';
 begin
-  -- The golden example as sent (window in 2025) is valid but past retention.
-  r := public.ingest_rollup_batch(ex);
-  perform pg_temp.check(r->>'skipped' = '1' and r->>'inserted' = '0', 'golden example accepted, stale window skipped');
+  -- The golden example as sent has a 2025 window: older than 8 days, rejected.
+  perform pg_temp.expect_400(ex, 'golden example with a window older than 8 days');
+  -- 7 to 8 days old: valid, past retention, skipped.
+  r := public.ingest_rollup_batch(pg_temp.at(ex, h0 - 7 * 86400 - 43200, gen_random_uuid()));
+  perform pg_temp.check(r->>'skipped' = '1' and r->>'inserted' = '0', 'window past retention accepted and skipped');
 
   r := public.ingest_rollup_batch(pg_temp.at(ex, h0, gen_random_uuid()));
   perform pg_temp.check(r->>'inserted' = '1', 'fresh report inserted');
@@ -53,8 +55,15 @@ begin
   r := public.ingest_rollup_batch(pg_temp.at(ex, h0 + 300, gen_random_uuid()));
   perform pg_temp.check(r->>'duplicates' = '1' and r->>'inserted' = '0', 're-packed report not double-counted');
 
-  r := public.ingest_rollup_batch(pg_temp.at(ex, (extract(epoch from now()) + 7200)::bigint, gen_random_uuid()));
-  perform pg_temp.check(r->>'skipped' = '1', 'future window skipped');
+  perform pg_temp.expect_400(pg_temp.at(ex, (extract(epoch from now())::bigint / 300 + 4) * 300, gen_random_uuid()), 'window more than 10 minutes ahead');
+  perform pg_temp.expect_400(pg_temp.at(ex, h0 + 1, gen_random_uuid()), 'unaligned window');
+  perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,window,duration_s}', '60'), 'window not 300 s');
+  perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,1}',
+    jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()) #> '{reports,0}', '{install_id}', '"0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b"')),
+    'two install ids in one batch');
+  perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,hardware,memory_bytes}', to_jsonb(24 * 1073741824::bigint)), 'memory not a power of two GiB');
+  perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,hardware,vram_bytes}', '85899345921'), 'vram not whole GiB');
+  perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,hardware,cpu_cores}', '257'), 'cpu cores above 256');
 
   perform pg_temp.expect_400(ex || '{"extra": 1}', 'unknown batch field');
   perform pg_temp.expect_400(jsonb_set(ex, '{reports,0,metrics,ip}', '"1.2.3.4"'), 'unknown metrics field');
@@ -69,6 +78,7 @@ begin
 
   -- Downsampling: two 5-minute rows of one hour -> one hourly row, exact sums.
   r := telemetry.run_maintenance();
+  perform pg_temp.check((public.telemetry_health() ->> 'ok')::boolean, 'telemetry_health ok after maintenance');
   perform pg_temp.check((select reports = 2 and requests = 240 and ttft_counts[7] = 240
       and ttft_sum_ms = 36000 and window_s = 600 and output_tps_x_s = 60000
     from telemetry.rollup_hourly), 'hourly row is the exact sum of its 5-minute rows');

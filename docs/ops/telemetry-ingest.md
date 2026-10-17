@@ -18,7 +18,7 @@ does not affect senders.
 | Response | When | Sender |
 |---|---|---|
 | `202` | stored, or a duplicate of a stored batch | drains the batch |
-| `400` | not JSON, fails the schema, implausible values, or `Idempotency-Key` differs from `batch_id` | drops the batch |
+| `400` | not JSON, fails the schema, implausible values, more than one install id, a window that is not an aligned 5 minutes or starts more than 8 days ago or more than 10 minutes ahead, or `Idempotency-Key` differs from `batch_id` | drops the batch |
 | `413` | body over 64 KB | drops the batch |
 | `405` / `415` | not `POST` / not `application/json` | retries |
 | `429` | over the per-install or global rate limit | retries with backoff |
@@ -32,10 +32,27 @@ does not affect senders.
   invocation logs, which would record request metadata, are off in
   `wrangler.jsonc`. No CORS headers are sent.
 - Rate limiting uses the Workers Rate Limiting binding: 10 requests per 60 s
-  per install id and 600 per 60 s overall, per Cloudflare location. If
-  `wrangler deploy` rejects the `ratelimits` block on this account's plan,
-  delete it. The code runs without the bindings. Then add a WAF rate-limiting
-  rule for `/v1/telemetry/rollups` in the dashboard instead.
+  per install id, 30 per 60 s per client IP (keyed by a truncated SHA-256 of
+  the IP, which is never logged or stored), and 600 per 60 s overall. Every
+  one of these is counted per Cloudflare location and is approximate, so the
+  "global" limit is not a zone-wide total. If `wrangler deploy` rejects the
+  `ratelimits` block on this account's plan, delete it; the code runs without
+  the bindings.
+- Recommended in addition (zone-wide, enforced before the Worker runs): a WAF
+  rate-limiting rule in the dashboard, Security > WAF > Rate limiting rules:
+  - If: `http.host eq "api.amicu.dev" and http.request.uri.path eq "/v1/telemetry/rollups"`
+  - Counting characteristic: IP. Rate: 30 requests per 1 minute (the Free
+    plan allows a 10-second period only: use 10 requests per 10 seconds).
+  - Action: Block for the shortest duration offered. Senders treat the 429 as
+    "retry later".
+- Abuse limits: each batch carries exactly one install id, and every window is
+  one aligned 5-minute slot per deployment, so one request can no longer mint
+  hundreds of installs or rows at arbitrary timestamps. Forging installs is
+  still possible, at the cost of one request per fake install, spread over
+  many IPs to get past the limits. The 5-install threshold of
+  `telemetry.benchmark_30d` can therefore still be gamed by a determined
+  sender until uploads carry a server-signed install token (planned for the
+  Cloud Run ingestion service). Treat published aggregates accordingly.
 - Route: `api.amicu.dev/v1/telemetry/rollups` on the `amicu.dev` zone. The
   api-proxy Worker holds `api.amicu.dev/*`. Cloudflare runs the more specific
   route, so only this exact path goes to this Worker.
@@ -53,8 +70,9 @@ does not affect senders.
 
    ```sh
    cd web/apps/telemetry-ingest
-   export CLOUDFLARE_API_TOKEN=...
-   <command that prints the key> | pnpm exec wrangler secret put SUPABASE_SECRET_KEY
+   pnpm exec wrangler login     # OAuth in the browser; no token in shell history
+   security find-generic-password -s supabase-amicu-telemetry-secret-key -a default -w \
+     | pnpm exec wrangler secret put SUPABASE_SECRET_KEY
    ```
 
    The Worker reads `SUPABASE_SECRET_KEY`, not `SUPABASE_SERVICE_ROLE_KEY`.
@@ -93,6 +111,12 @@ does not affect senders.
 
 ## Operations
 
+- **Health, weekly**: `select public.telemetry_health();` (or re-run
+  `verify.sql`). `ok` is false when maintenance has not finished in the last
+  3 hours or tomorrow's partitions are missing, i.e. the pg_cron job has
+  stalled; inserts start failing (503) once the 3 days of partitions made
+  ahead run out. Fix by running `select telemetry.run_maintenance();` and
+  checking `cron.job_run_details`.
 - **Size**: `select * from telemetry.db_size;`. Move to Pro when
   `over_alert_300mb` turns true.
 - **Maintenance**: pg_cron runs `telemetry.run_maintenance()` hourly. Inspect

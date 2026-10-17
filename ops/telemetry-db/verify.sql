@@ -1,5 +1,7 @@
 -- amicu telemetry database: post-migration checks. Read-only (the role probes
 -- run inside a transaction that is rolled back). Every row should say ok = true.
+-- Re-run weekly: the maintenance health row turns false when the pg_cron job
+-- has stalled (shown in its name: newest partitions and last runs).
 
 begin;
 
@@ -65,6 +67,17 @@ begin
     values ('pg_cron maintenance job scheduled (false is expected without pg_cron)', scheduled);
 end
 $$;
+
+insert into verify_result
+select 'maintenance healthy (newest partitions ahead, last run < 3 h): ' || (h - 'ok')::text,
+  (h ->> 'ok')::boolean
+from public.telemetry_health() h;
+
+insert into verify_result
+select format('%s cannot execute public.telemetry_health()', r),
+  not has_function_privilege(r, 'public.telemetry_health()', 'execute')
+from unnest(array['anon', 'authenticated']) r
+where exists (select 1 from pg_roles where rolname = r);
 
 -- Live probe: as anon, every path into the data must fail.
 do $$

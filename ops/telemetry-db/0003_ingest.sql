@@ -16,9 +16,12 @@
 -- NOTHING, so a retried batch, or a report re-sent in another batch, is never
 -- counted twice. Batch ids are recorded for 8 days and a repeat is reported
 -- as "duplicate": true.
--- Reports whose window started more than 7 days ago (past 5-minute retention)
--- or more than one hour in the future are skipped, not stored; the batch is
--- still accepted so the sender drains it.
+-- Flood resistance: every report in a batch must carry the same install id,
+-- and windows must be aligned 5-minute windows (start divisible by 300,
+-- duration 300) starting between 8 days ago and 10 minutes from now; anything
+-- else is rejected (PT400). A window 7 to 8 days old is valid but past
+-- 5-minute retention: it is skipped, not stored, and the batch is still
+-- accepted so the sender drains it.
 
 begin;
 
@@ -149,6 +152,7 @@ set search_path = ''
 as $$
 declare
   bid uuid;
+  first_install jsonb;
   row5 telemetry.rollup_5m%rowtype;
   rep jsonb;
   hw jsonb;
@@ -175,6 +179,7 @@ begin
     perform telemetry.bad('reports');
   end if;
 
+  first_install := batch #> '{reports,0,install_id}';
   for rep in select value from jsonb_array_elements(batch -> 'reports') loop
     perform telemetry.check_object(rep, array['schema_version', 'install_id', 'deployment_id',
       'window', 'amicu_version', 'hardware', 'model', 'runtime', 'provider', 'region',
@@ -182,8 +187,13 @@ begin
     if rep -> 'schema_version' is distinct from '2'::jsonb then perform telemetry.bad('report.schema_version'); end if;
 
     w := telemetry.check_object(rep -> 'window', array['start_unix_s', 'duration_s'], 'window');
+    if rep -> 'install_id' is distinct from first_install then perform telemetry.bad('reports.install_id'); end if;
     win_start := to_timestamp(telemetry.num(w, 'start_unix_s', 1704067200, 4102444800, true, true, 'window.start_unix_s')::double precision);
-    perform telemetry.num(w, 'duration_s', 1, 86400, true, true, 'window.duration_s');
+    if (w ->> 'start_unix_s')::numeric % 300 <> 0 then perform telemetry.bad('window.start_unix_s'); end if;
+    perform telemetry.num(w, 'duration_s', 300, 300, true, true, 'window.duration_s');
+    if win_start < now() - interval '8 days' or win_start > now() + interval '10 minutes' then
+      perform telemetry.bad('window.start_unix_s');
+    end if;
 
     hw := coalesce(rep -> 'hardware', '{}'::jsonb);
     perform telemetry.check_object(hw, array['accelerator', 'accelerator_count', 'vram_bytes',
@@ -191,6 +201,19 @@ begin
     accelerator := telemetry.label(hw, 'accelerator', false, 'hardware.accelerator');
     accelerator_count := coalesce(telemetry.num(hw, 'accelerator_count', 0, 1024, true, false, 'hardware.accelerator_count'), 0);
     if accelerator is not null and accelerator_count = 0 then perform telemetry.bad('hardware.accelerator_count'); end if;
+    -- Sizes arrive coarsened: VRAM in whole GiB, host memory a power-of-two
+    -- number of GiB.
+    if (hw ? 'vram_bytes') and jsonb_typeof(hw -> 'vram_bytes') = 'number'
+       and (hw ->> 'vram_bytes')::numeric % 1073741824 <> 0 then
+      perform telemetry.bad('hardware.vram_bytes');
+    end if;
+    if (hw ? 'memory_bytes') and jsonb_typeof(hw -> 'memory_bytes') = 'number'
+       and (hw ->> 'memory_bytes')::numeric > 0
+       and ((hw ->> 'memory_bytes')::numeric % 1073741824 <> 0
+            or ((hw ->> 'memory_bytes')::numeric / 1073741824) not in
+               (select (2::numeric) ^ e from generate_series(0, 20) e)) then
+      perform telemetry.bad('hardware.memory_bytes');
+    end if;
 
     perform telemetry.check_object(rep -> 'model', array['name', 'quantization'], 'model');
     perform telemetry.check_object(rep -> 'runtime', array['name', 'version'], 'runtime');
@@ -215,7 +238,7 @@ begin
     row5.accelerator := accelerator;
     row5.accelerator_count := accelerator_count;
     row5.vram_bytes := telemetry.num(hw, 'vram_bytes', 0, 1125899906842624, true, false, 'hardware.vram_bytes');
-    row5.cpu_cores := telemetry.num(hw, 'cpu_cores', 0, 65536, true, false, 'hardware.cpu_cores');
+    row5.cpu_cores := telemetry.num(hw, 'cpu_cores', 0, 256, true, false, 'hardware.cpu_cores');
     row5.memory_bytes := telemetry.num(hw, 'memory_bytes', 0, 1125899906842624, true, false, 'hardware.memory_bytes');
     row5.model_name := telemetry.label(rep -> 'model', 'name', true, 'model.name');
     row5.quantization := telemetry.label(rep -> 'model', 'quantization', false, 'model.quantization');
@@ -247,8 +270,8 @@ begin
     row5.ingested_at := now();
     row5.downsampled := false;
 
-    -- Past retention, or implausibly in the future: accept the batch, store nothing.
-    if win_start < now() - interval '7 days' or win_start > now() + interval '1 hour' then
+    -- Valid but past 5-minute retention: accept the batch, store nothing.
+    if win_start < now() - interval '7 days' then
       skipped := skipped + 1;
       continue;
     end if;

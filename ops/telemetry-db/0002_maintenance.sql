@@ -280,6 +280,14 @@ begin
 end
 $$;
 
+-- The last completed maintenance run, for telemetry_health(). One row.
+create table if not exists telemetry.maintenance_runs (
+  id          boolean primary key default true check (id),
+  finished_at timestamptz not null,
+  result      jsonb not null
+);
+alter table telemetry.maintenance_runs enable row level security;
+
 -- The scheduled job. Serialized with an advisory lock so overlapping runs
 -- (a slow run, or a manual call during a scheduled one) cannot double-fold.
 create or replace function telemetry.run_maintenance()
@@ -300,7 +308,66 @@ begin
   result := result || jsonb_build_object('partitions_dropped', telemetry.drop_expired_partitions());
   delete from telemetry.ingested_batches where received_at < now() - interval '8 days';
   get diagnostics purged = row_count;
-  return result || jsonb_build_object('batch_ids_purged', purged);
+  result := result || jsonb_build_object('batch_ids_purged', purged);
+  insert into telemetry.maintenance_runs (id, finished_at, result) values (true, now(), result)
+    on conflict (id) do update set finished_at = excluded.finished_at, result = excluded.result;
+  return result;
+end
+$$;
+
+-- Health of the scheduled maintenance: a stalled job means no new partitions,
+-- and inserts start failing (503 to senders) once the 3 days made ahead run
+-- out. Check weekly, or after any incident:
+--   select public.telemetry_health();
+-- `ok` is true when tomorrow's partition exists and maintenance finished in
+-- the last 3 hours. Callable by service_role (and postgres); no data rows.
+create or replace function public.telemetry_health()
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  newest_5m date;
+  newest_hourly date;
+  last_run timestamptz;
+  last_cron timestamptz;
+  last_report timestamptz;
+begin
+  select max(to_date(right(c.relname, 8), 'YYYYMMDD')) into newest_5m
+    from pg_inherits i join pg_class c on c.oid = i.inhrelid
+    where i.inhparent = 'telemetry.rollup_5m'::regclass;
+  select max(to_date(right(c.relname, 8), 'YYYYMMDD')) into newest_hourly
+    from pg_inherits i join pg_class c on c.oid = i.inhrelid
+    where i.inhparent = 'telemetry.rollup_hourly'::regclass;
+  select finished_at into last_run from telemetry.maintenance_runs;
+  if to_regclass('cron.job_run_details') is not null then
+    execute $q$
+      select max(d.end_time) from cron.job_run_details d join cron.job j on j.jobid = d.jobid
+      where j.jobname = 'amicu-telemetry-maintenance' and d.status = 'succeeded'
+    $q$ into last_cron;
+  end if;
+  select max(ingested_at) into last_report from telemetry.rollup_5m;
+  return jsonb_build_object(
+    'ok', coalesce(newest_5m > (now() at time zone 'utc')::date
+                   and newest_hourly > (now() at time zone 'utc')::date
+                   and last_run > now() - interval '3 hours', false),
+    'newest_5m_partition', newest_5m,
+    'newest_hourly_partition', newest_hourly,
+    'last_maintenance_at', last_run,
+    'last_cron_success_at', last_cron,
+    'newest_report_ingested_at', last_report);
+end
+$$;
+revoke all on function public.telemetry_health() from public;
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'anon') then
+    revoke all on function public.telemetry_health() from anon, authenticated;
+  end if;
+  if exists (select 1 from pg_roles where rolname = 'service_role') then
+    grant execute on function public.telemetry_health() to service_role;
+  end if;
 end
 $$;
 
@@ -363,6 +430,6 @@ begin
 end
 $$;
 
-select telemetry.ensure_partitions();
+select telemetry.run_maintenance();
 
 commit;

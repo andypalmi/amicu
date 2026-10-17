@@ -15,10 +15,10 @@ order. Each file is re-runnable.
 | File | What it does |
 |---|---|
 | `0001_schema.sql` | `telemetry` schema, tables, histogram layouts, RLS, revokes |
-| `0002_maintenance.sql` | partitions, downsampling, retention, `telemetry.db_size`, `telemetry.benchmark_30d` |
+| `0002_maintenance.sql` | partitions, downsampling, retention, `public.telemetry_health()`, `telemetry.db_size`, `telemetry.benchmark_30d` |
 | `0003_ingest.sql` | `public.ingest_rollup_batch(jsonb)` and `public.delete_install(uuid)`, executable by `service_role` only |
 | `0004_schedule.sql` | enables `pg_cron` and schedules `telemetry.run_maintenance()` hourly (minute 7) |
-| `verify.sql` | read-only checks; every row must say `ok = t` |
+| `verify.sql` | read-only checks, including maintenance health; every row must say `ok = t`. Re-run weekly |
 
 ```sh
 for f in 0001_schema.sql 0002_maintenance.sql 0003_ingest.sql 0004_schedule.sql verify.sql; do
@@ -54,8 +54,12 @@ and deletes rows. Never run it against the project.
   start) and inserts use `ON CONFLICT DO NOTHING`, so a retried or re-packed
   report never counts twice. Batch ids are recorded too, and a repeat is
   answered as `"duplicate": true`.
-- Reports with a window more than 7 days old, or more than an hour in the
-  future, are accepted and skipped, so the sender drains them.
+- Flood resistance: a batch must carry one install id, and every window must
+  be an aligned 5-minute slot (start divisible by 300, duration 300) starting
+  at most 8 days ago and at most 10 minutes ahead; otherwise the RPC raises
+  PT400. Hardware sizes must arrive coarsened (VRAM in whole GiB, host memory
+  a power-of-two number of GiB, at most 256 cores). A window 7 to 8 days old
+  is accepted and skipped (past retention), so the sender drains it.
 - `telemetry.run_maintenance()` creates partitions 3 days ahead, folds new
   5-minute rows into `rollup_hourly`, rebuilds the last 8 days of
   `rollup_daily`, drops expired partitions, and purges old batch ids. It runs
@@ -63,6 +67,10 @@ and deletes rows. Never run it against the project.
   in the statement that adds it to the hourly table, so late reports are
   counted exactly once. If the job stops for more than 3 days, inserts fail
   for want of a partition. The endpoint then answers 503 and senders retry.
+- `public.telemetry_health()` (service_role or postgres) reports the newest
+  partitions, the last maintenance run and the last successful pg_cron run;
+  `ok` is false when the job has stalled. `verify.sql` includes it: re-run it
+  weekly.
 - `public.delete_install(install_id)` deletes the install's 5-minute and
   hourly rows. Daily rows hold no install id and are kept. The next
   maintenance run still drops the install from the last 8 days, because those
@@ -70,7 +78,9 @@ and deletes rows. Never run it against the project.
 - `rollup_daily` also drops `cpu_cores`, `memory_bytes` and `region`. It keeps
   `installs` and `deployments` (distinct counts) for minimum-sample thresholds.
   `telemetry.benchmark_30d` lists only configurations seen from at least 5
-  installs.
+  installs. Install ids are self-asserted until uploads carry a server-signed
+  install token, so that threshold raises the cost of poisoning but does not
+  rule it out.
 
 ## Access
 

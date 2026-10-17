@@ -22,16 +22,29 @@
   // SUPABASE_SECRET_KEY is a SECRET (`sb_secret_...`, maps to service_role):
   // set it with `wrangler secret put SUPABASE_SECRET_KEY`, never in "vars".
   //
-  // Workers Rate Limiting binding. Limits are per Cloudflare location and
-  // approximate; the database (one row per deployment and window) is the
-  // exact backstop. A sender uploads about once an hour per deployment.
+  // Workers Rate Limiting binding. Every limit below is counted per Cloudflare
+  // location (not globally) and is approximate (eventually consistent), so a
+  // client spread across locations gets a multiple of it. The database (one
+  // row per deployment and window) is the exact backstop, and a WAF rule
+  // (docs/ops/telemetry-ingest.md) the zone-wide one. A sender uploads about
+  // once an hour per deployment.
   "ratelimits": [
     {
+      // Keyed by install id (one per batch).
       "name": "INSTALL_LIMITER",
       "namespace_id": "2311",
       "simple": { "limit": 10, "period": 60 },
     },
     {
+      // Keyed by a truncated SHA-256 of CF-Connecting-IP; the IP itself is
+      // never passed on, logged or stored.
+      "name": "IP_LIMITER",
+      "namespace_id": "2313",
+      "simple": { "limit": 30, "period": 60 },
+    },
+    {
+      // Coarse cap on all traffic: per Cloudflare location and approximate,
+      // NOT a global total.
       "name": "GLOBAL_LIMITER",
       "namespace_id": "2312",
       "simple": { "limit": 600, "period": 60 },

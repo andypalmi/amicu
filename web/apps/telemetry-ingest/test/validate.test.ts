@@ -6,17 +6,18 @@ import { HISTOGRAM_BOUNDS_MS, InvalidBatch, looksLikeCredential, looksLikeIpv4, 
 
 const here = new URL('.', import.meta.url);
 const example = JSON.parse(readFileSync(new URL('fixtures/telemetry-batch.v2.example.json', here), 'utf8'));
+const NOW = example.reports[0].window.start_unix_s + 600;
 
 function clone() {
   return structuredClone(example);
 }
 
 function rejects(batch: unknown, what: string) {
-  assert.throws(() => validateBatch(batch as never), InvalidBatch, what);
+  assert.throws(() => validateBatch(batch as never, NOW), InvalidBatch, what);
 }
 
 test('the golden example from the sender validates', () => {
-  const ok = validateBatch(clone());
+  const ok = validateBatch(clone(), NOW);
   assert.equal(ok.batch_id, example.batch_id);
   assert.equal(ok.reports.length, 1);
 });
@@ -59,6 +60,9 @@ test('structural violations are rejected', () => {
     ['fraction > 1', (b) => (b.reports[0].metrics.gpu_utilization = 1.01)],
     ['window too old', (b) => (b.reports[0].window.start_unix_s = 1)],
     ['window too long', (b) => (b.reports[0].window.duration_s = 86401)],
+    ['cpu cores above the cap', (b) => (b.reports[0].hardware.cpu_cores = 257)],
+    ['vram not whole GiB', (b) => (b.reports[0].hardware.vram_bytes = 85899345921)],
+    ['histogram length', (b) => b.reports[0].metrics.tpot_ms.counts.push(0)],
     ['string number', (b) => (b.reports[0].metrics.requests = '120')],
     ['null field', (b) => (b.reports[0].region = null)],
   ];
@@ -81,11 +85,44 @@ test('semantic checks mirror report.rs', () => {
     ['accelerator without count', (b) => (b.reports[0].hardware.accelerator_count = 0)],
     ['ip-shaped label', (b) => (b.reports[0].region = '10.1.2.3')],
     ['credential label', (b) => (b.reports[0].model.name = 'hf_abcdefghijklmnop')],
+    ['memory not a power of two GiB', (b) => (b.reports[0].hardware.memory_bytes = 24 * 2 ** 30)],
+    ['two install ids', (b) => b.reports.push({ ...b.reports[0], install_id: '0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b' })],
+    ['window not 300 s', (b) => (b.reports[0].window.duration_s = 60)],
+    ['window not aligned', (b) => (b.reports[0].window.start_unix_s += 1)],
+    ['window older than 8 days', (b) => (b.reports[0].window.start_unix_s -= 8 * 86400 + 600)],
+    ['window more than 10 minutes ahead', (b) => (b.reports[0].window.start_unix_s += 1500)],
   ];
   for (const [what, mutate] of cases) {
     const b = clone();
     mutate(b);
     rejects(b, what);
+  }
+});
+
+test('__proto__ and constructor are unknown fields, not inherited ones', () => {
+  for (const key of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+    // JSON.parse makes `__proto__` an own property, as a real request would.
+    const text = JSON.stringify(clone()).replace('"metrics":{', `"metrics":{"${key}":{},`);
+    rejects(JSON.parse(text), `metrics.${key}`);
+    const top = JSON.stringify(clone()).replace('{', `{"${key}":{},`);
+    rejects(JSON.parse(top), key);
+  }
+});
+
+test('a required field cannot be satisfied through the prototype chain', () => {
+  const b = clone();
+  const proto = { metrics: b.reports[0].metrics };
+  delete b.reports[0].metrics;
+  Object.setPrototypeOf(b.reports[0], proto);
+  rejects(b, 'inherited metrics');
+});
+
+test('the SQL histogram layouts match the schema x-amicu bounds', () => {
+  const sql = readFileSync(new URL('../../../../ops/telemetry-db/0001_schema.sql', here), 'utf8');
+  for (const [name, bounds] of Object.entries(HISTOGRAM_BOUNDS_MS)) {
+    const m = sql.match(new RegExp(`\\('${name}',\\s*2,\\s*'\\{([^}]*)\\}'\\)`));
+    assert.ok(m, `${name} layout literal in 0001_schema.sql`);
+    assert.deepEqual(m[1].split(',').map(Number), bounds, `${name} bounds drifted`);
   }
 });
 
@@ -111,7 +148,7 @@ test('errors carry a field path, never an input value', () => {
   const b = clone();
   b.reports[0].region = 'secret value here';
   try {
-    validateBatch(b);
+    validateBatch(b, NOW);
     assert.fail('should reject');
   } catch (e) {
     assert.ok(e instanceof InvalidBatch);

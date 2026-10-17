@@ -26,6 +26,7 @@ const defs = (schema.$defs ?? {}) as Record<string, Schema>;
 const ENFORCED = new Set([
   'type', 'const', 'required', 'properties', 'additionalProperties', 'items', '$ref',
   'pattern', 'minLength', 'maxLength', 'minimum', 'maximum', 'minItems', 'maxItems',
+  'multipleOf',
 ]);
 const ANNOTATIONS = new Set(['$schema', '$id', '$defs', 'title', 'description', 'x-amicu']);
 
@@ -96,6 +97,7 @@ function check(node: Schema, v: Json, path: string): void {
   if (typeof v === 'number') {
     if (typeof node.minimum === 'number' && v < node.minimum) fail(path);
     if (typeof node.maximum === 'number' && v > node.maximum) fail(path);
+    if (typeof node.multipleOf === 'number' && v % node.multipleOf !== 0) fail(path);
   }
   if (typeof v === 'string') {
     const len = [...v].length;
@@ -111,10 +113,12 @@ function check(node: Schema, v: Json, path: string): void {
   if (isObject(v)) {
     const props = (node.properties ?? {}) as Record<string, Schema>;
     for (const key of (node.required ?? []) as string[]) {
-      if (!(key in v)) fail(`${path}.${key}`);
+      if (!Object.hasOwn(v, key)) fail(`${path}.${key}`);
     }
     for (const [key, child] of Object.entries(v)) {
-      const sub = props[key];
+      // Own properties only: `__proto__` or `constructor` must not resolve
+      // through Object.prototype to something that looks like a sub-schema.
+      const sub = Object.hasOwn(props, key) ? props[key] : undefined;
       if (!sub) {
         if (node.additionalProperties === false) fail(`${path}: unknown field`);
         continue;
@@ -129,6 +133,13 @@ function check(node: Schema, v: Json, path: string): void {
 // ---------------------------------------------------------------------------
 
 const MAX_REQUESTS = 10_000_000_000;
+const GIB = 2 ** 30;
+/** The sender's rollup window: aligned 5-minute windows only. */
+export const WINDOW_S = 300;
+/** Oldest accepted window start, relative to now (the sender buffers 7 days). */
+export const MAX_WINDOW_AGE_S = 8 * 86_400;
+/** Newest accepted window start, relative to now (clock skew). */
+export const MAX_WINDOW_LEAD_S = 600;
 const MAX_BYTES = 2 ** 50;
 const MAX_TOKENS = 2 ** 50;
 const MAX_LATENCY_MS = 86_400_000;
@@ -197,9 +208,18 @@ function histogram(v: Json | undefined, layout: number[], path: string): void {
   if ((v.sum_ms as number) > MAX_LATENCY_MS * total) fail(`${path}.sum_ms`);
 }
 
-function semantic(batch: { [key: string]: Json }): void {
-  (batch.reports as { [key: string]: Json }[]).forEach((r, i) => {
+function semantic(batch: { [key: string]: Json }, nowS: number): void {
+  const reports = batch.reports as { [key: string]: Json }[];
+  // One install per batch (the sender keeps one queue per deployment). Stops
+  // a single request from minting hundreds of installs.
+  if (reports.some((r) => r.install_id !== reports[0].install_id)) fail('reports.install_id');
+  reports.forEach((r, i) => {
     const p = `reports[${i}]`;
+    const w = r.window as { start_unix_s: number; duration_s: number };
+    if (w.duration_s !== WINDOW_S || w.start_unix_s % WINDOW_S !== 0) fail(`${p}.window`);
+    if (w.start_unix_s < nowS - MAX_WINDOW_AGE_S || w.start_unix_s > nowS + MAX_WINDOW_LEAD_S) {
+      fail(`${p}.window.start_unix_s`);
+    }
     const hw = (r.hardware ?? {}) as { [key: string]: Json };
     const model = r.model as { [key: string]: Json };
     const runtime = r.runtime as { [key: string]: Json };
@@ -216,6 +236,11 @@ function semantic(batch: { [key: string]: Json }): void {
 
     max(hw.vram_bytes, MAX_BYTES, `${p}.hardware.vram_bytes`);
     max(hw.memory_bytes, MAX_BYTES, `${p}.hardware.memory_bytes`);
+    // Host memory is sent as a power-of-two number of GiB (anti-fingerprinting).
+    if (typeof hw.memory_bytes === 'number' && hw.memory_bytes > 0) {
+      const gib = hw.memory_bytes / GIB;
+      if (!Number.isInteger(gib) || (gib & (gib - 1)) !== 0 || gib > 2 ** 20) fail(`${p}.hardware.memory_bytes`);
+    }
     if (hw.accelerator !== undefined && !((hw.accelerator_count as number) > 0)) {
       fail(`${p}.hardware.accelerator_count`);
     }
@@ -242,9 +267,13 @@ export type ValidBatch = {
   reports: { install_id: string; [key: string]: unknown }[];
 };
 
-/** Validate a parsed batch. Throws InvalidBatch (field path only) on failure. */
-export function validateBatch(value: Json): ValidBatch {
+/**
+ * Validate a parsed batch against the schema and the plausibility rules,
+ * with window times checked against `nowS` (Unix seconds). Throws
+ * InvalidBatch (field path only) on failure.
+ */
+export function validateBatch(value: Json, nowS: number = Date.now() / 1000): ValidBatch {
   check(schema, value, '$');
-  semantic(value as { [key: string]: Json });
+  semantic(value as { [key: string]: Json }, nowS);
   return value as unknown as ValidBatch;
 }

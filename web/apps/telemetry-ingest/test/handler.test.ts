@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, test } from 'node:test';
 
-import { handle, MAX_BODY_BYTES, ROUTE, type Env, type RateLimit } from '../src/handler.ts';
+import { handle, ipKey, MAX_BODY_BYTES, ROUTE, type Env, type RateLimit } from '../src/handler.ts';
 
 const exampleText = readFileSync(new URL('fixtures/telemetry-batch.v2.example.json', import.meta.url), 'utf8');
 const example = JSON.parse(exampleText);
 const URL_ = `https://api.amicu.dev${ROUTE}`;
 const SECRET = 'sb_secret_test_value';
+// "Now" for window checks: just after the example's window.
+const NOW = example.reports[0].window.start_unix_s + 600;
 
 type Call = { url: string; init: RequestInit };
 
@@ -68,7 +70,7 @@ function assertNoLeak(res: Response, text: string) {
 
 test('202 on success; one RPC call with the secret key in apikey only', async () => {
   const db = ok();
-  const res = await handle(post(exampleText, { 'cf-connecting-ip': '203.0.113.7' }), env(), db.fetchImpl);
+  const res = await handle(post(exampleText, { 'cf-connecting-ip': '203.0.113.7' }), env(), db.fetchImpl, NOW);
   assert.equal(res.status, 202);
   assertNoLeak(res, await res.text());
   assert.equal(db.calls.length, 1);
@@ -83,34 +85,34 @@ test('202 on success; one RPC call with the secret key in apikey only', async ()
 
 test('a retried batch the database reports as duplicate is still 202', async () => {
   const db = supabase(() => Response.json({ duplicate: true, inserted: 0 }));
-  const res = await handle(post(), env(), db.fetchImpl);
+  const res = await handle(post(), env(), db.fetchImpl, NOW);
   assert.equal(res.status, 202);
 });
 
 test('405 for other methods, 404 for other paths', async () => {
   const db = ok();
   for (const method of ['GET', 'PUT', 'DELETE', 'OPTIONS']) {
-    const res = await handle(new Request(URL_, { method }), env(), db.fetchImpl);
+    const res = await handle(new Request(URL_, { method }), env(), db.fetchImpl, NOW);
     assert.equal(res.status, 405, method);
     assert.equal(res.headers.get('allow'), 'POST');
   }
-  const res = await handle(new Request('https://api.amicu.dev/v1/other', { method: 'POST' }), env(), db.fetchImpl);
+  const res = await handle(new Request('https://api.amicu.dev/v1/other', { method: 'POST' }), env(), db.fetchImpl, NOW);
   assert.equal(res.status, 404);
   assert.equal(db.calls.length, 0);
 });
 
 test('415 without application/json', async () => {
   const db = ok();
-  const res = await handle(post(exampleText, { 'content-type': 'text/plain' }), env(), db.fetchImpl);
+  const res = await handle(post(exampleText, { 'content-type': 'text/plain' }), env(), db.fetchImpl, NOW);
   assert.equal(res.status, 415);
-  const charset = await handle(post(exampleText, { 'content-type': 'application/json; charset=utf-8' }), env(), db.fetchImpl);
+  const charset = await handle(post(exampleText, { 'content-type': 'application/json; charset=utf-8' }), env(), db.fetchImpl, NOW);
   assert.equal(charset.status, 202);
 });
 
 test('413 above 64 KB, by header or by actual size', async () => {
   const db = ok();
   const big = 'x'.repeat(MAX_BODY_BYTES + 1);
-  const res = await handle(post(big), env(), db.fetchImpl);
+  const res = await handle(post(big), env(), db.fetchImpl, NOW);
   assert.equal(res.status, 413);
   // A body streamed without a usable content-length is cut off at the cap.
   const stream = new ReadableStream({
@@ -125,7 +127,7 @@ test('413 above 64 KB, by header or by actual size', async () => {
     body: stream,
     duplex: 'half',
   } as RequestInit);
-  assert.equal((await handle(streamed, env(), db.fetchImpl)).status, 413);
+  assert.equal((await handle(streamed, env(), db.fetchImpl, NOW)).status, 413);
   assert.equal(db.calls.length, 0);
 });
 
@@ -139,7 +141,7 @@ test('400 for malformed JSON, schema violations and a mismatched idempotency key
     [JSON.stringify(bad), {}],
     [exampleText, { 'idempotency-key': '0a0a0a0a-0a0a-4a0a-8a0a-0a0a0a0a0a0a' }],
   ] as [string | Uint8Array<ArrayBuffer>, Record<string, string>][]) {
-    const res = await handle(post(body, headers), env(), db.fetchImpl);
+    const res = await handle(post(body, headers), env(), db.fetchImpl, NOW);
     assert.equal(res.status, 400);
     const text = await res.text();
     assert.ok(!text.includes('secret'));
@@ -150,7 +152,7 @@ test('400 for malformed JSON, schema violations and a mismatched idempotency key
 
 test('400 when the database rejects the batch (PT400)', async () => {
   const db = supabase(() => Response.json({ code: 'PT400', message: 'invalid telemetry batch: x' }, { status: 400 }));
-  assert.equal((await handle(post(), env(), db.fetchImpl)).status, 400);
+  assert.equal((await handle(post(), env(), db.fetchImpl, NOW)).status, 400);
 });
 
 test('503 when Supabase is down, errors, or the Worker is misconfigured', async () => {
@@ -162,20 +164,58 @@ test('503 when Supabase is down, errors, or the Worker is misconfigured', async 
     () => Response.json({ code: 'PGRST100' }, { status: 400 }),
     () => Promise.reject(new TypeError('network down')),
   ]) {
-    const res = await handle(post(), env(), supabase(respond).fetchImpl);
+    const res = await handle(post(), env(), supabase(respond).fetchImpl, NOW);
     assert.equal(res.status, 503);
     assert.equal(res.headers.get('retry-after'), '300');
   }
   const db = ok();
-  const res = await handle(post(), env({ SUPABASE_SECRET_KEY: undefined }), db.fetchImpl);
+  const res = await handle(post(), env({ SUPABASE_SECRET_KEY: undefined }), db.fetchImpl, NOW);
   assert.equal(res.status, 503);
+  assert.equal(db.calls.length, 0);
+});
+
+test('429 from the per-IP limiter, keyed by a hash of the IP that is never logged', async () => {
+  const db = ok();
+  const ip = limiter(() => false);
+  const res = await handle(post(exampleText, { 'cf-connecting-ip': '203.0.113.7' }), env({ IP_LIMITER: ip }), db.fetchImpl, NOW);
+  assert.equal(res.status, 429);
+  assert.deepEqual(ip.keys, [await ipKey('203.0.113.7')]);
+  assert.ok(!ip.keys[0].includes('203.0.113'));
+  assertNoLeak(res, await res.text());
+  assert.equal(db.calls.length, 0);
+});
+
+test('400 for a batch mixing install ids, before any limiter or database call', async () => {
+  const db = ok();
+  const install = limiter(() => true);
+  const b = structuredClone(example);
+  const other = structuredClone(b.reports[0]);
+  other.install_id = '0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b';
+  b.reports.push(other);
+  const res = await handle(post(JSON.stringify(b)), env({ INSTALL_LIMITER: install }), db.fetchImpl, NOW);
+  assert.equal(res.status, 400);
+  assert.deepEqual(install.keys, []);
+  assert.equal(db.calls.length, 0);
+});
+
+test('400 for windows that are stale, in the future or unaligned', async () => {
+  const db = ok();
+  const start = example.reports[0].window.start_unix_s;
+  for (const now of [start + 8 * 86400 + 1, start - 601]) {
+    assert.equal((await handle(post(), env(), db.fetchImpl, now)).status, 400);
+  }
+  for (const window of [{ start_unix_s: start + 1, duration_s: 300 }, { start_unix_s: start, duration_s: 60 }]) {
+    const b = structuredClone(example);
+    b.reports[0].window = window;
+    assert.equal((await handle(post(JSON.stringify(b)), env(), db.fetchImpl, NOW)).status, 400);
+  }
   assert.equal(db.calls.length, 0);
 });
 
 test('429 from the per-install limiter, keyed by install id', async () => {
   const db = ok();
   const install = limiter(() => false);
-  const res = await handle(post(), env({ INSTALL_LIMITER: install }), db.fetchImpl);
+  const res = await handle(post(), env({ INSTALL_LIMITER: install }), db.fetchImpl, NOW);
   assert.equal(res.status, 429);
   assert.deepEqual(install.keys, [example.reports[0].install_id]);
   assert.equal(db.calls.length, 0);
@@ -184,7 +224,7 @@ test('429 from the per-install limiter, keyed by install id', async () => {
 test('429 from the global limiter, before the body is read', async () => {
   const db = ok();
   const global = limiter(() => false);
-  const res = await handle(post('x'.repeat(MAX_BODY_BYTES + 10)), env({ GLOBAL_LIMITER: global }), db.fetchImpl);
+  const res = await handle(post('x'.repeat(MAX_BODY_BYTES + 10)), env({ GLOBAL_LIMITER: global }), db.fetchImpl, NOW);
   assert.equal(res.status, 429);
   assert.deepEqual(global.keys, ['global']);
 });
@@ -198,6 +238,7 @@ test('limiters that allow, or that fail, do not block ingestion', async () => {
     post(),
     env({ INSTALL_LIMITER: limiter(() => true), GLOBAL_LIMITER: broken }),
     db.fetchImpl,
+    NOW,
   );
   assert.equal(res.status, 202);
 });
