@@ -2504,6 +2504,7 @@ fn write_files(rec: &StopRecord) {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn destroy_removes_the_recorded_definition_and_leaves_logs_unless_purged() {
     let home = TempDir::new();
