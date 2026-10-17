@@ -597,6 +597,7 @@ mod tests {
             .unwrap_or_else(|| panic!("no launch line in:\n{text}"))
     }
 
+    #[cfg(unix)]
     #[test]
     fn project_plan_keeps_the_model_path_relative() {
         let g = graph("local", llama());

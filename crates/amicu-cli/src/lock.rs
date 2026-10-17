@@ -198,6 +198,8 @@ mod tests {
         assert!(s.state_dir().join("state.lock").is_file());
     }
 
+    // Windows byte-range locks block other handles from reading the holder info.
+    #[cfg(unix)]
     #[test]
     fn error_names_the_holder() {
         let s = Scratch::new();
@@ -214,6 +216,8 @@ mod tests {
         assert!(message.contains("--lock-timeout"), "{message}");
     }
 
+    // Windows byte-range locks block other handles from reading the holder info.
+    #[cfg(unix)]
     #[test]
     fn failed_acquire_does_not_clobber_holder_info() {
         let s = Scratch::new();
@@ -237,6 +241,8 @@ mod tests {
         releaser.join().unwrap();
     }
 
+    // Windows byte-range locks block other handles from reading the holder info.
+    #[cfg(unix)]
     #[test]
     fn timeout_gives_up_when_still_held() {
         let s = Scratch::new();

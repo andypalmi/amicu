@@ -1379,6 +1379,13 @@ fn platform_ctx() -> amicu_llamacpp::HostContext {
             sid: None,
             domain: Some("gui/501".to_owned()),
         }
+    } else if cfg!(windows) {
+        amicu_llamacpp::HostContext {
+            backend: amicu_llamacpp::HostBackend::TaskScheduler,
+            uid: None,
+            sid: Some("S-1-5-21-1-1001".to_owned()),
+            domain: None,
+        }
     } else {
         amicu_llamacpp::HostContext {
             backend: amicu_llamacpp::HostBackend::Systemd,
@@ -2165,6 +2172,7 @@ fn an_unknown_host_identity_refuses_every_stop() {
     assert_eq!(stops_for(&project, "support_two").len(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_record_without_an_owner_is_refused_for_root_or_a_foreign_plist_owner() {
     let mut root = platform_ctx();
@@ -2277,6 +2285,7 @@ fn scoped_rec(project_id: &str, name: &str, home: &std::path::Path) -> StopRecor
     )
 }
 
+#[cfg(unix)]
 fn launchd_rec(project_id: &str, name: &str) -> StopRecord {
     let mut rec = StopRecord::host_in(
         project_id,
@@ -2295,6 +2304,7 @@ fn launchd_rec(project_id: &str, name: &str) -> StopRecord {
     rec
 }
 
+#[cfg(unix)]
 #[test]
 fn recorded_definition_and_log_paths_are_validated_against_the_record() {
     let rec = launchd_rec("aaaa1111", "chat");
@@ -2351,6 +2361,7 @@ fn recorded_definition_and_log_paths_are_validated_against_the_record() {
     assert!(with_log(format!("/Users/me/Library/Logs/amicu/{label}.err.log")).is_ok());
 }
 
+#[cfg(unix)]
 #[test]
 fn systemd_env_files_are_validated_in_the_env_dir_only() {
     let mut rec = StopRecord::host_in(
@@ -2385,6 +2396,7 @@ fn systemd_env_files_are_validated_in_the_env_dir_only() {
     assert!(check(format!("/tmp/systemd/user/{label}.service")).is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn the_recorded_systemd_secrets_file_is_validated_before_anything_is_deleted() {
     let mut rec = StopRecord::host_in(
@@ -2492,6 +2504,7 @@ fn write_files(rec: &StopRecord) {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn destroy_removes_the_recorded_definition_and_leaves_logs_unless_purged() {
     let home = TempDir::new();

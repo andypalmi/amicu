@@ -1138,6 +1138,7 @@ pub(crate) fn remove_file_strict(path: &Path) -> Result<(), LlamaCppError> {
 
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
 }
@@ -1208,7 +1209,7 @@ pub(crate) fn write_private(path: &Path, dir: &Path, bytes: &[u8]) -> Result<(),
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod env_file_tests {
     use super::*;
     use crate::HostExec;
@@ -1221,6 +1222,7 @@ mod env_file_tests {
         unit
     }
 
+    #[cfg(unix)]
     #[test]
     fn env_file_named_by_only_accepts_the_amicu_env_dir() {
         let named = SystemdManager::<HostExec>::env_file_named_by;

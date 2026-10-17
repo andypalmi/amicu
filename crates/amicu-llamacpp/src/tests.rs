@@ -2174,6 +2174,7 @@ async fn supervisor_hard_errors_on_settings_env_secret_collision() {
 
 // ---- absolute model path, binary resolution, readiness, replace (#204) -------
 
+#[cfg(unix)]
 #[test]
 fn plan_launch_uses_an_absolute_model_path_under_the_models_dir() {
     let adapter = fitting_adapter().with_models_dir("/proj/models");
@@ -2187,6 +2188,7 @@ fn plan_launch_uses_an_absolute_model_path_under_the_models_dir() {
     assert!(plan.rendered.as_text().contains("/proj/models/tiny_llama/"));
 }
 
+#[cfg(unix)]
 #[test]
 fn an_absolute_variant_file_is_left_as_is() {
     let catalog = MapCatalog::new()
@@ -2206,6 +2208,7 @@ fn an_absolute_variant_file_is_left_as_is() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bare_program_is_resolved_to_an_absolute_path_on_start() {
     let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
@@ -2216,6 +2219,7 @@ async fn bare_program_is_resolved_to_an_absolute_path_on_start() {
     assert_eq!(spec.argv[0], "/usr/local/bin/llama-server");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_absolute_program_is_not_searched_for() {
     let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
@@ -2246,7 +2250,12 @@ async fn a_missing_binary_fails_before_anything_is_started() {
         .expect_err("binary missing");
     let msg = err.to_string();
     assert!(msg.contains("llama-server not found on PATH"), "{msg}");
-    assert!(msg.contains("brew install llama.cpp"), "{msg}");
+    let install_hint = if cfg!(windows) {
+        "winget install llama.cpp"
+    } else {
+        "brew install llama.cpp"
+    };
+    assert!(msg.contains(install_hint), "{msg}");
     assert!(manager.started.lock().unwrap().is_none());
 }
 
@@ -2874,6 +2883,7 @@ fn dir_entries(dir: &Path) -> usize {
     fs::read_dir(dir).map_or(0, Iterator::count)
 }
 
+#[cfg(unix)]
 #[test]
 fn systemd_start_writes_a_persistent_enabled_unit_with_a_0600_env_file() {
     use std::os::unix::fs::PermissionsExt;
@@ -3173,6 +3183,7 @@ fn systemd_refuses_a_label_that_is_not_one_plain_name() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn systemd_env_file_replaces_preexisting_files_and_symlinks() {
     use std::os::unix::fs::PermissionsExt;
@@ -3692,6 +3703,7 @@ fn validate_is_clean_for_a_resolvable_draft_model() {
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
 
+#[cfg(unix)]
 #[test]
 fn plan_launch_renders_the_resolved_draft_gguf_path() {
     let d = speculative_deployment(SpeculativeSettings {
@@ -3941,6 +3953,7 @@ fn service_spec_debug_shows_env_names_but_never_values() {
     assert!(!text.contains("hunter2-secret"), "{text}");
 }
 
+#[cfg(unix)]
 #[test]
 fn launchd_plist_carries_the_key_in_a_0600_file_removed_on_stop_and_on_failed_load() {
     use std::os::unix::fs::PermissionsExt;

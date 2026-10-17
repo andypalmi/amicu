@@ -3055,6 +3055,7 @@ mod scoped_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn relative_model_paths_are_resolved_at_start_and_only_for_model_flags() {
         let argv = [
