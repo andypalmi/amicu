@@ -93,6 +93,10 @@ random_id!(
     /// Anonymous, random id of one deployment; never the deployment's name.
     AnonDeploymentId
 );
+random_id!(
+    /// Random id of one upload batch: the ingestion idempotency key.
+    BatchId
+);
 
 /// A rejected id value.
 #[derive(Debug, Clone, PartialEq, Eq)]

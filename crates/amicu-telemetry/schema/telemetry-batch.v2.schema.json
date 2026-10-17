@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://amicu.dev/schemas/telemetry-batch.v2.schema.json",
+  "title": "amicu telemetry batch, schema version 2",
+  "description": "The body an opted-in amicu deployment POSTs to the telemetry ingestion endpoint. Aggregates only: 5-minute rollups of one deployment. Every object rejects unknown fields. The Rust types in crates/amicu-telemetry/src/report.rs are the source of truth; a unit test keeps this file in step with them. The serialized body is at most 65536 bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "batch_id", "reports"],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "batch_id": { "$ref": "#/$defs/uuid_v4", "description": "Random per batch; the same value on every retry (idempotency key)." },
+    "reports": { "type": "array", "minItems": 1, "maxItems": 288, "items": { "$ref": "#/$defs/report" } }
+  },
+  "x-amicu": {
+    "ttft_bounds_ms": [10.0, 20.0, 40.0, 60.0, 80.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0, 5000.0, 7500.0, 10000.0, 20000.0, 40000.0, 80000.0],
+    "e2e_bounds_ms": [300.0, 500.0, 800.0, 1000.0, 1500.0, 2000.0, 2500.0, 5000.0, 10000.0, 15000.0, 20000.0, 30000.0, 40000.0, 50000.0, 60000.0, 120000.0, 240000.0, 480000.0],
+    "tpot_bounds_ms": [10.0, 25.0, 50.0, 75.0, 100.0, 150.0, 200.0, 300.0, 400.0, 500.0, 750.0, 1000.0, 2500.0],
+    "histogram_note": "counts[i] holds observations in (bounds[i-1], bounds[i]] ms; the extra last count is above the last bound. Not cumulative."
+  },
+  "$defs": {
+    "uuid_v4": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._+/-]+$",
+      "description": "A short identifier token. Server-side validation also rejects IPv4-shaped and credential-shaped values."
+    },
+    "count": { "type": "integer", "minimum": 0 },
+    "fraction": { "type": "number", "minimum": 0, "maximum": 1 },
+    "histogram": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["counts", "sum_ms"],
+      "properties": {
+        "counts": { "type": "array", "items": { "$ref": "#/$defs/count" }, "description": "Length is the layout's bound count plus one (see x-amicu)." },
+        "sum_ms": { "type": "number", "minimum": 0 }
+      }
+    },
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "install_id", "deployment_id", "window", "amicu_version", "model", "runtime", "metrics"],
+      "properties": {
+        "schema_version": { "const": 2 },
+        "install_id": { "$ref": "#/$defs/uuid_v4", "description": "Random, rotatable id of the installation." },
+        "deployment_id": { "$ref": "#/$defs/uuid_v4", "description": "Random id of the deployment; never its name." },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start_unix_s", "duration_s"],
+          "properties": {
+            "start_unix_s": { "type": "integer", "minimum": 1704067200, "maximum": 4102444800 },
+            "duration_s": { "type": "integer", "minimum": 1, "maximum": 86400 }
+          }
+        },
+        "amicu_version": { "$ref": "#/$defs/label" },
+        "hardware": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "accelerator": { "$ref": "#/$defs/label", "description": "Accelerator model, e.g. h100-80gb." },
+            "accelerator_count": { "type": "integer", "minimum": 0, "maximum": 1024 },
+            "vram_bytes": { "$ref": "#/$defs/count", "description": "Per accelerator." },
+            "cpu_cores": { "type": "integer", "minimum": 0, "maximum": 65536 },
+            "memory_bytes": { "$ref": "#/$defs/count" }
+          }
+        },
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name"],
+          "properties": {
+            "name": { "$ref": "#/$defs/label", "description": "A public Hugging Face repo id from a well-known publisher, otherwise the literal custom." },
+            "quantization": { "$ref": "#/$defs/label" }
+          }
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name"],
+          "properties": {
+            "name": { "$ref": "#/$defs/label", "description": "llama.cpp or vllm." },
+            "version": { "$ref": "#/$defs/label" }
+          }
+        },
+        "provider": { "$ref": "#/$defs/label" },
+        "region": { "$ref": "#/$defs/label" },
+        "context_length": { "type": "integer", "minimum": 0, "maximum": 16777216 },
+        "batch_size": { "type": "integer", "minimum": 0, "maximum": 1048576 },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "requests": { "$ref": "#/$defs/count", "description": "Requests finished in the window (vLLM only)." },
+            "errors": { "$ref": "#/$defs/count", "description": "Of those, not finished normally; at most requests." },
+            "prompt_tokens": { "$ref": "#/$defs/count" },
+            "output_tokens": { "$ref": "#/$defs/count" },
+            "output_tokens_per_s": { "type": "number", "minimum": 0, "maximum": 10000000 },
+            "decode_tokens_per_s": { "type": "number", "minimum": 0, "maximum": 10000000 },
+            "ttft_ms": { "$ref": "#/$defs/histogram", "description": "Layout x-amicu.ttft_bounds_ms." },
+            "e2e_ms": { "$ref": "#/$defs/histogram", "description": "Layout x-amicu.e2e_bounds_ms." },
+            "tpot_ms": { "$ref": "#/$defs/histogram", "description": "Layout x-amicu.tpot_bounds_ms." },
+            "running_peak": { "$ref": "#/$defs/count" },
+            "waiting_peak": { "$ref": "#/$defs/count" },
+            "kv_cache_utilization_peak": { "$ref": "#/$defs/fraction" },
+            "preemptions": { "$ref": "#/$defs/count" },
+            "gpu_utilization": { "$ref": "#/$defs/fraction" },
+            "gpu_memory_peak_bytes": { "$ref": "#/$defs/count" },
+            "host_memory_peak_bytes": { "$ref": "#/$defs/count" }
+          }
+        }
+      }
+    }
+  }
+}

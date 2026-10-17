@@ -167,7 +167,7 @@ mod tests {
                  h_bucket{engine=\"1\",le=\"0.5\"} 2\nh_bucket{engine=\"0\",le=\"+Inf\"} 3\n";
         let b = cumulative_buckets(&parse_prometheus(t), "h");
         assert_eq!(b, vec![(0.5, 3.0), (f64::INFINITY, 7.0)]);
-        assert!(cumulative_buckets(&parse_prometheus(t), "other").is_empty());
+        assert_eq!(cumulative_buckets(&parse_prometheus(t), "other"), vec![]);
     }
 
     #[test]

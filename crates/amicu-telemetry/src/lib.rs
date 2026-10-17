@@ -28,13 +28,15 @@ mod report;
 mod schema;
 
 pub use identity::{
-    AnonDeploymentId, Identity, IdentityStore, InstallId, MemoryIdentityStore, StoreError,
+    AnonDeploymentId, BatchId, Identity, IdentityStore, InstallId, MemoryIdentityStore, StoreError,
 };
 pub use log::{LogLevel, LoggingPolicy, Outcome, RequestLog, RequestRecord};
 pub use metrics::{MetricsCollector, MetricsSnapshot};
 pub use report::{
-    HardwareInfo, Label, MAX_LABEL_LEN, MAX_WINDOW_SECONDS, ModelInfo, Percentiles, Rollup,
-    RuntimeInfo, TELEMETRY_SCHEMA_VERSION, TelemetryReport, ValidationError, Window,
+    E2E_BOUNDS_MS, HardwareInfo, Histogram, HistogramKind, Label, MAX_BATCH_BYTES,
+    MAX_BATCH_REPORTS, MAX_LABEL_LEN, MAX_WINDOW_SECONDS, ModelInfo, Rollup, RuntimeInfo,
+    TELEMETRY_SCHEMA_VERSION, TPOT_BOUNDS_MS, TTFT_BOUNDS_MS, TelemetryBatch, TelemetryReport,
+    ValidationError, Window,
 };
 pub use schema::{
     ConcurrencyMetrics, CostMetrics, Distribution, GpuMetrics, LatencyMetrics, MemoryKvMetrics,
