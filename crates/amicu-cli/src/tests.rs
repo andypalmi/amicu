@@ -1375,13 +1375,22 @@ fn platform_ctx() -> amicu_llamacpp::HostContext {
     if cfg!(target_os = "macos") {
         amicu_llamacpp::HostContext {
             backend: amicu_llamacpp::HostBackend::Launchd,
-            uid: 501,
+            uid: Some(501),
+            sid: None,
             domain: Some("gui/501".to_owned()),
+        }
+    } else if cfg!(windows) {
+        amicu_llamacpp::HostContext {
+            backend: amicu_llamacpp::HostBackend::TaskScheduler,
+            uid: None,
+            sid: Some("S-1-5-21-1-1001".to_owned()),
+            domain: None,
         }
     } else {
         amicu_llamacpp::HostContext {
             backend: amicu_llamacpp::HostBackend::Systemd,
-            uid: 501,
+            uid: Some(501),
+            sid: None,
             domain: None,
         }
     }
@@ -1734,7 +1743,8 @@ fn ctx(
 ) -> amicu_llamacpp::HostContext {
     amicu_llamacpp::HostContext {
         backend,
-        uid,
+        uid: Some(uid),
+        sid: None,
         domain: domain.map(str::to_owned),
     }
 }
@@ -1813,6 +1823,110 @@ fn a_different_uid_domain_or_backend_is_refused_and_nothing_is_stopped() {
         let after = project.load_state().unwrap().unwrap();
         assert_eq!(after.stops, vec![rec], "{what}: record kept");
     }
+}
+
+fn task_ctx(sid: &str) -> amicu_llamacpp::HostContext {
+    amicu_llamacpp::HostContext {
+        backend: amicu_llamacpp::HostBackend::TaskScheduler,
+        uid: None,
+        sid: Some(sid.to_owned()),
+        domain: None,
+    }
+}
+
+#[test]
+fn task_scheduler_records_round_trip_and_older_records_still_load() {
+    assert_eq!(Backend::HostTaskScheduler.name(), "task-scheduler");
+    assert_eq!(
+        serde_json::to_string(&Backend::HostTaskScheduler).unwrap(),
+        "\"host_task_scheduler\""
+    );
+    let rec = StopRecord::host(&"support_two".into(), Some(&task_ctx("S-1-5-21-1-1001")));
+    assert_eq!(rec.backend, Backend::HostTaskScheduler);
+    assert_eq!(rec.uid, None);
+    assert_eq!(rec.sid.as_deref(), Some("S-1-5-21-1-1001"));
+    let json = serde_json::to_string(&rec).unwrap();
+    assert!(!json.contains("\"uid\""), "{json}");
+    let back: StopRecord = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, rec);
+    // Unix records never had a sid: they load unchanged and save without one.
+    let unix = StopRecord::host(
+        &"support_two".into(),
+        Some(&ctx(amicu_llamacpp::HostBackend::Systemd, 501, None)),
+    );
+    let json = serde_json::to_string(&unix).unwrap();
+    assert!(!json.contains("sid"), "{json}");
+    let back: StopRecord = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.uid, Some(501));
+    assert_eq!(back.sid, None);
+}
+
+#[test]
+fn task_scheduler_recorded_files_are_validated() {
+    let mut rec = StopRecord::host(&"support_two".into(), Some(&task_ctx("S-1-5-21-1-1001")));
+    let id = rec.identity.clone();
+    let base = "/Users/me/AppData/Local/amicu";
+    rec.definition = Some(format!("{base}/tasks/{id}.xml"));
+    rec.env_file = Some(format!("{base}/env/{id}.env"));
+    rec.logs = vec![format!("{base}/logs/{id}.out.log")];
+    if std::env::var_os("LOCALAPPDATA").is_none() {
+        // Without LOCALAPPDATA the anchor is unknown: everything is refused.
+        assert!(rec.definition_path().is_err());
+        assert!(rec.env_path().is_err());
+        assert!(rec.log_paths().is_err());
+    }
+
+    let mut bad = rec.clone();
+    bad.definition = Some(format!("/Users/me/Documents/{id}.xml"));
+    assert!(bad.definition_path().is_err());
+    let mut bad = rec.clone();
+    bad.env_file = Some(format!("{base}/tasks/{id}.env"));
+    assert!(bad.env_path().is_err());
+    let mut bad = rec;
+    bad.logs = vec![format!("{base}/logs/other.out.log")];
+    assert!(bad.log_paths().is_err());
+}
+
+#[test]
+fn task_scheduler_files_are_anchored_to_the_managers_directory() {
+    use crate::stops::check_anchored;
+    use std::path::Path;
+    let base = Path::new(r"C:\Users\me\AppData\Local\amicu");
+    let ok = |p: &str, sub: &str| check_anchored(Path::new(p), Some(base), sub).is_ok();
+    assert!(ok(r"C:\Users\me\AppData\Local\amicu\tasks\x.xml", "tasks"));
+    // Case and separators do not matter on Windows.
+    assert!(ok(r"c:/users/ME/appdata/local/AMICU/tasks/x.xml", "tasks"));
+    // The same suffix under another profile, drive or share is refused.
+    assert!(!ok(
+        r"C:\Users\other\AppData\Local\amicu\tasks\x.xml",
+        "tasks"
+    ));
+    assert!(!ok(r"D:\Users\me\AppData\Local\amicu\tasks\x.xml", "tasks"));
+    assert!(!ok(
+        r"\\server\share\AppData\Local\amicu\tasks\x.xml",
+        "tasks"
+    ));
+    assert!(!ok(r"C:\Users\me\AppData\Local\amicu\env\x.xml", "tasks"));
+    assert!(check_anchored(Path::new("/x/amicu/tasks/x.xml"), None, "tasks").is_err());
+}
+
+#[test]
+fn a_task_scheduler_record_of_another_windows_user_is_refused() {
+    let rec = StopRecord::host(&"support_two".into(), Some(&task_ctx("S-1-5-21-1-1001")));
+    let rig = Rig::with_ctx(task_ctx("S-1-5-21-1-1002"));
+    let (result, project, _td) = destroy_one_host_record(rec.clone(), &rig);
+    let err = result.expect_err("other user").to_string();
+    assert!(err.contains("Windows user S-1-5-21-1-1001"), "{err}");
+    assert_eq!(rig.stopped().len(), 0);
+    let after = project.load_state().unwrap().unwrap();
+    assert_eq!(after.stops, vec![rec]);
+
+    // The same user stops it.
+    let rec = StopRecord::host(&"support_two".into(), Some(&task_ctx("S-1-5-21-1-1001")));
+    let rig = Rig::with_ctx(task_ctx("S-1-5-21-1-1001"));
+    let (result, _, _td) = destroy_one_host_record(rec, &rig);
+    result.unwrap();
+    assert_eq!(rig.stopped().len(), 1);
 }
 
 #[test]
@@ -2058,10 +2172,11 @@ fn an_unknown_host_identity_refuses_every_stop() {
     assert_eq!(stops_for(&project, "support_two").len(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_record_without_an_owner_is_refused_for_root_or_a_foreign_plist_owner() {
     let mut root = platform_ctx();
-    root.uid = 0;
+    root.uid = Some(0);
     let (result, _, _td) = destroy_one_host_record(host_rec("support_two"), &Rig::with_ctx(root));
     assert!(result.expect_err("root").to_string().contains("root"));
 
@@ -2170,13 +2285,15 @@ fn scoped_rec(project_id: &str, name: &str, home: &std::path::Path) -> StopRecor
     )
 }
 
+#[cfg(unix)]
 fn launchd_rec(project_id: &str, name: &str) -> StopRecord {
     let mut rec = StopRecord::host_in(
         project_id,
         &name.into(),
         Some(&amicu_llamacpp::HostContext {
             backend: amicu_llamacpp::HostBackend::Launchd,
-            uid: 501,
+            uid: Some(501),
+            sid: None,
             domain: Some("gui/501".to_owned()),
         }),
         None,
@@ -2187,6 +2304,7 @@ fn launchd_rec(project_id: &str, name: &str) -> StopRecord {
     rec
 }
 
+#[cfg(unix)]
 #[test]
 fn recorded_definition_and_log_paths_are_validated_against_the_record() {
     let rec = launchd_rec("aaaa1111", "chat");
@@ -2243,6 +2361,7 @@ fn recorded_definition_and_log_paths_are_validated_against_the_record() {
     assert!(with_log(format!("/Users/me/Library/Logs/amicu/{label}.err.log")).is_ok());
 }
 
+#[cfg(unix)]
 #[test]
 fn systemd_env_files_are_validated_in_the_env_dir_only() {
     let mut rec = StopRecord::host_in(
@@ -2250,7 +2369,8 @@ fn systemd_env_files_are_validated_in_the_env_dir_only() {
         &"chat".into(),
         Some(&amicu_llamacpp::HostContext {
             backend: amicu_llamacpp::HostBackend::Systemd,
-            uid: 501,
+            uid: Some(501),
+            sid: None,
             domain: None,
         }),
         None,
@@ -2276,6 +2396,7 @@ fn systemd_env_files_are_validated_in_the_env_dir_only() {
     assert!(check(format!("/tmp/systemd/user/{label}.service")).is_err());
 }
 
+#[cfg(unix)]
 #[test]
 fn the_recorded_systemd_secrets_file_is_validated_before_anything_is_deleted() {
     let mut rec = StopRecord::host_in(
@@ -2283,7 +2404,8 @@ fn the_recorded_systemd_secrets_file_is_validated_before_anything_is_deleted() {
         &"chat".into(),
         Some(&amicu_llamacpp::HostContext {
             backend: amicu_llamacpp::HostBackend::Systemd,
-            uid: 501,
+            uid: Some(501),
+            sid: None,
             domain: None,
         }),
         Some(amicu_llamacpp::ServicePaths {
@@ -2382,6 +2504,7 @@ fn write_files(rec: &StopRecord) {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn destroy_removes_the_recorded_definition_and_leaves_logs_unless_purged() {
     let home = TempDir::new();
@@ -4073,7 +4196,7 @@ resource "deployment" "d" {
         assert!(text.contains("qwen35_9b"));
         assert!(text.contains("local_dev_chat"));
         let err = commands::catalog::fits(
-            Err("unsupported OS: windows"),
+            Err("unsupported OS: freebsd"),
             OutputFormat::Human,
             &mut Vec::new(),
         )

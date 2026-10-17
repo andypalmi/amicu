@@ -1892,8 +1892,9 @@ impl ServiceManager for FakeManager {
             Err(LlamaCppError::Supervisor("Unit not loaded.".into()))
         }
     }
-    async fn release(&self, _label: &str) {
+    async fn release(&self, _label: &str) -> Result<(), LlamaCppError> {
         *self.released.lock().unwrap() += 1;
+        Ok(())
     }
     fn log_location(&self, _label: &str) -> String {
         "/logs/fake.log".into()
@@ -2060,8 +2061,8 @@ impl ServiceManager for SharedManager {
     fn log_location(&self, label: &str) -> String {
         self.0.log_location(label)
     }
-    async fn release(&self, label: &str) {
-        self.0.release(label).await;
+    async fn release(&self, label: &str) -> Result<(), LlamaCppError> {
+        self.0.release(label).await
     }
 }
 
@@ -2173,6 +2174,7 @@ async fn supervisor_hard_errors_on_settings_env_secret_collision() {
 
 // ---- absolute model path, binary resolution, readiness, replace (#204) -------
 
+#[cfg(unix)]
 #[test]
 fn plan_launch_uses_an_absolute_model_path_under_the_models_dir() {
     let adapter = fitting_adapter().with_models_dir("/proj/models");
@@ -2186,6 +2188,7 @@ fn plan_launch_uses_an_absolute_model_path_under_the_models_dir() {
     assert!(plan.rendered.as_text().contains("/proj/models/tiny_llama/"));
 }
 
+#[cfg(unix)]
 #[test]
 fn an_absolute_variant_file_is_left_as_is() {
     let catalog = MapCatalog::new()
@@ -2205,6 +2208,7 @@ fn an_absolute_variant_file_is_left_as_is() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn bare_program_is_resolved_to_an_absolute_path_on_start() {
     let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
@@ -2215,6 +2219,7 @@ async fn bare_program_is_resolved_to_an_absolute_path_on_start() {
     assert_eq!(spec.argv[0], "/usr/local/bin/llama-server");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_absolute_program_is_not_searched_for() {
     let manager = std::sync::Arc::new(FakeManager::new(ServiceState::Active));
@@ -2245,7 +2250,12 @@ async fn a_missing_binary_fails_before_anything_is_started() {
         .expect_err("binary missing");
     let msg = err.to_string();
     assert!(msg.contains("llama-server not found on PATH"), "{msg}");
-    assert!(msg.contains("brew install llama.cpp"), "{msg}");
+    let install_hint = if cfg!(windows) {
+        "winget install llama.cpp"
+    } else {
+        "brew install llama.cpp"
+    };
+    assert!(msg.contains(install_hint), "{msg}");
     assert!(manager.started.lock().unwrap().is_none());
 }
 
@@ -2325,7 +2335,7 @@ fn launchd_update_releases_the_old_job_by_plist_and_label_before_loading() {
         .with_settle_timeout(Duration::from_millis(100));
     let spec = service_spec();
     manager.start(&spec).expect("first start");
-    block_on(manager.release(&spec.label));
+    block_on(manager.release(&spec.label)).unwrap();
     manager.start(&spec).expect("update");
 
     // `print` is the domain probe; the rest is the real sequence.
@@ -2349,7 +2359,7 @@ fn launchd_release_removes_by_label_even_without_a_plist() {
     let exec = std::sync::Arc::new(FakeExec::new(true, ""));
     let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"))
         .with_settle_timeout(Duration::from_millis(100));
-    block_on(manager.release("io.amicu.llama.x"));
+    block_on(manager.release("io.amicu.llama.x")).unwrap();
     let calls: Vec<Vec<String>> = exec
         .calls
         .lock()
@@ -2372,7 +2382,7 @@ fn systemd_release_stops_a_previous_unit_with_the_same_name_before_rewriting_it(
     let dir = TempDir::new("systemd-update");
     let exec = std::sync::Arc::new(FakeExec::new(true, ""));
     let manager = SystemdManager::new(exec.clone(), &dir.0, &dir.0);
-    block_on(manager.release("io.amicu.llama.support_chat_local"));
+    block_on(manager.release("io.amicu.llama.support_chat_local")).unwrap();
     manager.start(&service_spec()).expect("start");
 
     let calls = exec.calls.lock().unwrap().clone();
@@ -2772,7 +2782,7 @@ fn launchd_update_waits_for_the_asynchronous_bootout_before_bootstrapping() {
     let manager = LaunchdManager::new(exec.clone(), tmp.file("agents"), tmp.file("logs"))
         .with_settle_timeout(Duration::from_secs(5));
     let spec = service_spec();
-    block_on(manager.release(&spec.label));
+    block_on(manager.release(&spec.label)).unwrap();
     manager
         .start(&spec)
         .expect("bootstrap must not race the bootout");
@@ -2787,7 +2797,7 @@ fn launchd_update_without_waiting_would_hit_error_5() {
     let manager = LaunchdManager::new(exec, tmp.file("agents"), tmp.file("logs"))
         .with_settle_timeout(Duration::ZERO);
     let spec = service_spec();
-    block_on(manager.release(&spec.label));
+    block_on(manager.release(&spec.label)).unwrap();
     let err = manager.start(&spec).expect_err("raced");
     assert!(err.to_string().contains("Bootstrap failed: 5"), "{err}");
 }
@@ -2873,6 +2883,7 @@ fn dir_entries(dir: &Path) -> usize {
     fs::read_dir(dir).map_or(0, Iterator::count)
 }
 
+#[cfg(unix)]
 #[test]
 fn systemd_start_writes_a_persistent_enabled_unit_with_a_0600_env_file() {
     use std::os::unix::fs::PermissionsExt;
@@ -3172,6 +3183,7 @@ fn systemd_refuses_a_label_that_is_not_one_plain_name() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn systemd_env_file_replaces_preexisting_files_and_symlinks() {
     use std::os::unix::fs::PermissionsExt;
@@ -3691,6 +3703,7 @@ fn validate_is_clean_for_a_resolvable_draft_model() {
     assert!(diags.is_empty(), "expected no diagnostics, got {diags:?}");
 }
 
+#[cfg(unix)]
 #[test]
 fn plan_launch_renders_the_resolved_draft_gguf_path() {
     let d = speculative_deployment(SpeculativeSettings {
@@ -3940,6 +3953,7 @@ fn service_spec_debug_shows_env_names_but_never_values() {
     assert!(!text.contains("hunter2-secret"), "{text}");
 }
 
+#[cfg(unix)]
 #[test]
 fn launchd_plist_carries_the_key_in_a_0600_file_removed_on_stop_and_on_failed_load() {
     use std::os::unix::fs::PermissionsExt;
@@ -3987,7 +4001,7 @@ fn launchd_start_bootstraps_into_the_domain_and_reports_its_context() {
 
     let ctx = manager.context().expect("context");
     assert_eq!(ctx.backend, crate::HostBackend::Launchd);
-    assert_eq!(ctx.uid, 501);
+    assert_eq!(ctx.uid, Some(501));
     assert_eq!(ctx.domain.as_deref(), Some("gui/501"));
 }
 
@@ -4025,7 +4039,7 @@ fn systemd_reports_its_uid() {
     let manager = SystemdManager::new(FakeExec::new(true, ""), &tmp.0, &tmp.0);
     let ctx = manager.context().expect("context");
     assert_eq!(ctx.backend, crate::HostBackend::Systemd);
-    assert_eq!(ctx.uid, 501);
+    assert_eq!(ctx.uid, Some(501));
     assert_eq!(ctx.domain, None);
 }
 
