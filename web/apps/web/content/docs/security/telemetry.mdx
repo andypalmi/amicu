@@ -80,13 +80,13 @@ Each upload is a JSON batch (schema version 2) of reports. Each report covers on
 | Window | `start_unix_s`, `duration_s` (300) |
 | Software | `amicu_version`, `runtime.name` (`llama.cpp` or `vllm`), `runtime.version` |
 | Model | `model.name` and `model.quantization`. `model.name` is the Hugging Face repo id only for models from well-known public publishers (for example `meta-llama`, `Qwen`, `mistralai`, `unsloth`, `bartowski`). Any other model, including local files, URLs and other repos, is sent as `custom`. |
-| Configuration | `context_length`, `batch_size`, `provider` (for example `local`) |
-| Hardware | `accelerator` (model, for example `nvidia-geforce-rtx-4090`), `accelerator_count`, `vram_bytes`, `cpu_cores`, `memory_bytes` |
+| Configuration | `context_length`, `batch_size`, `provider` (for example `local`), `region`. `region` is only a cloud provider's region code. It is never sent for a deployment on your machine, and never derived from your location or locale. |
+| Hardware | `accelerator` (model, for example `nvidia-geforce-rtx-4090`), `accelerator_count`, `vram_bytes` (per accelerator, rounded to whole GiB), `cpu_cores` (capped at 256), `memory_bytes` (rounded up to a power-of-two number of GiB, for example 24 GiB is sent as 32 GiB). The rounding keeps exact hardware sizes from identifying a machine. |
 | Measurements | `requests` and `errors` (vLLM only), `prompt_tokens`, `output_tokens`, `output_tokens_per_s`, `decode_tokens_per_s`, the latency histograms `ttft_ms`, `e2e_ms` and `tpot_ms` (bucket counts and a sum, over fixed bucket bounds), `running_peak`, `waiting_peak`, `kv_cache_utilization_peak`, `preemptions`, `gpu_utilization`, `gpu_memory_peak_bytes`, `host_memory_peak_bytes` |
 
 The payload has no field for prompts, completions or any request content, IP addresses, hostnames, file paths, endpoint URLs, usernames, or API keys and other secrets. Every text value must be a short token without spaces. A value that looks like an IP address or a credential is dropped before it is sent, and the server rejects it too.
 
-The ingestion service runs at `api.amicu.dev` and does not store the IP address a request comes from.
+Each upload is an HTTPS `POST` with `Content-Type: application/json`, `User-Agent: amicu/<version>` and an `Idempotency-Key` header set to the batch id. No credentials or tokens are sent. The ingestion service runs at `api.amicu.dev` and does not store the IP address a request comes from.
 
 ## Local files
 

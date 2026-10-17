@@ -78,8 +78,11 @@ pub const MAX_CONCURRENCY: u64 = 1 << 20;
 pub const MAX_CONTEXT_LENGTH: u32 = 1 << 24;
 /// Most accelerators one deployment can plausibly use.
 pub const MAX_ACCELERATORS: u32 = 1_024;
-/// Most CPU cores one host can plausibly have.
-pub const MAX_CPU_CORES: u32 = 65_536;
+/// CPU cores are capped at this value, so that very large hosts do not stand out.
+pub const MAX_CPU_CORES: u32 = 256;
+/// One GiB. Accelerator memory is sent in whole GiB, and host memory in
+/// power-of-two GiB buckets, so exact sizes cannot fingerprint a machine.
+pub const GIB: u64 = 1 << 30;
 
 /// Why a report or label was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -477,7 +480,33 @@ impl HardwareInfo {
         self
     }
 
+    /// Coarsen the identifying values. `vram_bytes` is rounded to the nearest
+    /// GiB (at least 1). `memory_bytes` is rounded up to a power-of-two
+    /// number of GiB. `cpu_cores` is capped at [`MAX_CPU_CORES`].
+    #[must_use]
+    pub fn coarsened(mut self) -> Self {
+        self.vram_bytes = self
+            .vram_bytes
+            .filter(|b| *b > 0)
+            .map(|b| ((b + GIB / 2) / GIB).max(1) * GIB);
+        self.memory_bytes = self
+            .memory_bytes
+            .filter(|b| *b > 0)
+            .map(|b| b.div_ceil(GIB).next_power_of_two().saturating_mul(GIB));
+        self.cpu_cores = self.cpu_cores.map(|c| c.min(MAX_CPU_CORES));
+        self
+    }
+
     fn validate(&self) -> Result<(), ValidationError> {
+        if self.vram_bytes.is_some_and(|b| b % GIB != 0) {
+            return Err(ValidationError::BadNumber("hardware.vram_bytes"));
+        }
+        if self
+            .memory_bytes
+            .is_some_and(|b| b % GIB != 0 || !(b / GIB).is_power_of_two())
+        {
+            return Err(ValidationError::BadNumber("hardware.memory_bytes"));
+        }
         if self.accelerator_count > MAX_ACCELERATORS {
             return Err(ValidationError::BadNumber("hardware.accelerator_count"));
         }
@@ -707,7 +736,8 @@ pub struct TelemetryReport {
     /// Provider kind, e.g. `local`, `hetzner`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Label>,
-    /// Provider region code.
+    /// A cloud provider's region code (e.g. a Modal region). Never set for
+    /// a local host, and never derived from the user's location or locale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<Label>,
     /// Configured context length, tokens.
@@ -1004,6 +1034,75 @@ mod tests {
     }
 
     #[test]
+    fn json_schema_bounds_match_the_rust_limits() {
+        let schema: serde_json::Value = serde_json::from_str(SCHEMA).unwrap();
+        let defs = &schema["$defs"];
+        let report = &defs["report"]["properties"];
+        let hw = &report["hardware"]["properties"];
+        let max = |v: &serde_json::Value| v["maximum"].as_f64().unwrap();
+        #[allow(clippy::cast_precision_loss)]
+        let checks = [
+            (max(&defs["requests"]), MAX_REQUESTS as f64),
+            (max(&defs["tokens"]), MAX_TOKENS as f64),
+            (max(&defs["bytes"]), MAX_BYTES as f64),
+            (max(&defs["concurrency"]), MAX_CONCURRENCY as f64),
+            (max(&defs["rate"]), MAX_RATE),
+            (max(&hw["cpu_cores"]), f64::from(MAX_CPU_CORES)),
+            (max(&hw["accelerator_count"]), f64::from(MAX_ACCELERATORS)),
+            (max(&hw["vram_bytes"]), MAX_BYTES as f64),
+            (hw["vram_bytes"]["multipleOf"].as_f64().unwrap(), GIB as f64),
+            (
+                hw["memory_bytes"]["multipleOf"].as_f64().unwrap(),
+                GIB as f64,
+            ),
+            (
+                max(&report["context_length"]),
+                f64::from(MAX_CONTEXT_LENGTH),
+            ),
+            (
+                max(&report["window"]["properties"]["duration_s"]),
+                f64::from(MAX_WINDOW_SECONDS),
+            ),
+            (
+                max(&report["window"]["properties"]["start_unix_s"]),
+                MAX_START_UNIX_S as f64,
+            ),
+            (
+                report["window"]["properties"]["start_unix_s"]["minimum"]
+                    .as_f64()
+                    .unwrap(),
+                MIN_START_UNIX_S as f64,
+            ),
+            (
+                defs["label"]["maxLength"].as_f64().unwrap(),
+                MAX_LABEL_LEN as f64,
+            ),
+            (
+                schema["properties"]["reports"]["maxItems"]
+                    .as_f64()
+                    .unwrap(),
+                MAX_BATCH_REPORTS as f64,
+            ),
+        ];
+        for (i, (schema_value, rust_value)) in checks.iter().enumerate() {
+            assert!(
+                (schema_value - rust_value).abs() < 0.5,
+                "check {i}: {schema_value} != {rust_value}"
+            );
+        }
+        for (name, kind) in [
+            ("ttft_histogram", HistogramKind::Ttft),
+            ("e2e_histogram", HistogramKind::E2e),
+            ("tpot_histogram", HistogramKind::Tpot),
+        ] {
+            let counts = &defs[name]["properties"]["counts"];
+            let n = kind.bounds_ms().len() as u64 + 1;
+            assert_eq!(counts["minItems"].as_u64(), Some(n), "{name}");
+            assert_eq!(counts["maxItems"].as_u64(), Some(n), "{name}");
+        }
+    }
+
+    #[test]
     fn round_trips_and_is_compact() {
         let r = report();
         let json = r.to_json().unwrap();
@@ -1150,6 +1249,34 @@ mod tests {
         let mut r = report();
         r.schema_version = 1;
         assert_eq!(r.validate(), Err(ValidationError::UnsupportedSchema(1)));
+    }
+
+    #[test]
+    fn hardware_is_coarsened_against_fingerprinting() {
+        let hw = HardwareInfo {
+            accelerator: None,
+            accelerator_count: 1,
+            vram_bytes: Some(25_757_220_864), // 23.99 GiB as reported
+            cpu_cores: Some(384),
+            memory_bytes: Some(24 * GIB + 12_345),
+        }
+        .coarsened();
+        assert_eq!(hw.vram_bytes, Some(24 * GIB));
+        assert_eq!(hw.memory_bytes, Some(32 * GIB));
+        assert_eq!(hw.cpu_cores, Some(MAX_CPU_CORES));
+        let mut r = report();
+        r.hardware = hw;
+        r.validate().unwrap();
+        // Exact values are refused: the server never stores them.
+        let mut r = report();
+        r.hardware.memory_bytes = Some(24 * GIB);
+        assert!(r.validate().is_err(), "not a power of two");
+        let mut r = report();
+        r.hardware.vram_bytes = Some(80 * GIB + 1);
+        assert!(r.validate().is_err(), "not whole GiB");
+        let mut r = report();
+        r.hardware.cpu_cores = Some(MAX_CPU_CORES + 1);
+        assert!(r.validate().is_err());
     }
 
     #[test]

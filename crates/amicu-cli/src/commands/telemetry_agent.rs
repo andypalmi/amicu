@@ -522,7 +522,7 @@ fn hardware_info(sample: &amicu_telemetry::hardware::HardwareSample) -> Hardware
     } else {
         info.accelerator_count = count;
     }
-    info
+    info.coarsened()
 }
 
 /// The HTTPS uploader.
@@ -543,6 +543,7 @@ impl HttpTransport {
         }
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .user_agent(concat!("amicu/", env!("CARGO_PKG_VERSION")))
             .timeout(UPLOAD_TIMEOUT)
             .https_only(!loopback)
             .build()
@@ -950,10 +951,16 @@ mod tests {
     }
 
     /// One-shot HTTP server on loopback answering `status`, returning the URL.
-    async fn serve(statuses: Vec<&'static str>) -> String {
+    type Seen = Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// A loopback HTTP server answering `statuses` in order; returns its URL
+    /// and the raw requests it received.
+    async fn serve(statuses: Vec<&'static str>) -> (String, Seen) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let requests: Seen = Arc::default();
+        let log = requests.clone();
         tokio::spawn(async move {
             for status in statuses {
                 let (mut sock, _) = listener.accept().await.unwrap();
@@ -981,12 +988,15 @@ mod tests {
                         break;
                     }
                 }
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&seen).into_owned());
                 let reply =
                     format!("HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
                 sock.write_all(reply.as_bytes()).await.unwrap();
             }
         });
-        format!("http://{addr}/v1/telemetry/rollups")
+        (format!("http://{addr}/v1/telemetry/rollups"), requests)
     }
 
     #[tokio::test]
@@ -1009,7 +1019,7 @@ mod tests {
             let r = fixed.report(InstallId::generate(), &HardwareInfo::default(), closed);
             queue.push(r, 1_750_000_200).unwrap();
         }
-        let url = serve(vec!["503 Service Unavailable", "202 Accepted"]).await;
+        let (url, requests) = serve(vec!["503 Service Unavailable", "202 Accepted"]).await;
         let transport = HttpTransport::new(&url).unwrap();
         let mut up = Uploader::new();
         assert_eq!(
@@ -1026,6 +1036,32 @@ mod tests {
             Attempt::Sent(Delivery::Accepted, 3)
         );
         assert!(queue.load().unwrap().is_empty(), "202 drains it");
+        // The request shape the ingestion service expects.
+        let sent = requests.lock().unwrap().clone();
+        assert_eq!(sent.len(), 2);
+        for req in &sent {
+            let lower = req.to_ascii_lowercase();
+            assert!(
+                req.starts_with("POST /v1/telemetry/rollups HTTP/1.1"),
+                "{req}"
+            );
+            assert!(lower.contains("content-type: application/json"));
+            assert!(lower.contains(&format!("user-agent: amicu/{}", env!("CARGO_PKG_VERSION"))));
+            assert!(!lower.contains("authorization"), "no token header yet");
+        }
+        let key = |r: &str| {
+            r.lines()
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("idempotency-key: ")
+                        .map(str::to_owned)
+                })
+                .unwrap()
+        };
+        assert_eq!(key(&sent[0]), key(&sent[1]), "a retry reuses the key");
+        let body = &sent[1][sent[1].find("\r\n\r\n").unwrap() + 4..];
+        let batch = amicu_telemetry::TelemetryBatch::from_json(body).unwrap();
+        assert_eq!(batch.batch_id.to_uuid_string(), key(&sent[1]).trim());
         // Nothing listening: a network error keeps the data too.
         queue
             .push(
