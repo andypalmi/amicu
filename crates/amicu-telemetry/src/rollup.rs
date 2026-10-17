@@ -24,7 +24,7 @@
 
 use crate::hardware::HardwareSample;
 use crate::prometheus::{Sample, cumulative_buckets, first_sum, max, parse_prometheus, sum};
-use crate::report::{Histogram, HistogramKind, Rollup, Window};
+use crate::report::{GIB, Histogram, HistogramKind, Rollup, Window};
 
 /// Rollup window length, seconds.
 pub const WINDOW_SECONDS: u32 = 300;
@@ -294,6 +294,11 @@ impl WindowAggregator {
     }
 }
 
+/// `bytes` rounded to the nearest whole GiB, so exact sizes are not sent.
+fn round_gib(bytes: u64) -> u64 {
+    bytes.saturating_add(GIB / 2) / GIB * GIB
+}
+
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -337,8 +342,8 @@ fn finish(start: u64, acc: Accum) -> Option<ClosedWindow> {
             kv_cache_utilization_peak: acc.kv_peak.map(|v| v.clamp(0.0, 1.0)),
             preemptions: acc.preemptions,
             gpu_utilization: mean(&acc.gpu_util),
-            gpu_memory_peak_bytes: acc.gpu_mem_peak,
-            host_memory_peak_bytes: acc.resident_peak.map(|v| v as u64),
+            gpu_memory_peak_bytes: acc.gpu_mem_peak.map(round_gib),
+            host_memory_peak_bytes: acc.resident_peak.map(|v| round_gib(v as u64)),
         },
     })
 }
@@ -458,7 +463,8 @@ mod tests {
         assert_eq!(m.kv_cache_utilization_peak, Some(0.4));
         assert_eq!(m.gpu_utilization, Some(0.5));
         assert_eq!(m.gpu_memory_peak_bytes, Some(7 << 30));
-        assert_eq!(m.host_memory_peak_bytes, Some(2_500_000_000));
+        // 2.5e9 bytes is 2.33 GiB: sent as 2 GiB.
+        assert_eq!(m.host_memory_peak_bytes, Some(2 << 30));
         let ttft = m.ttft_ms.unwrap();
         assert_eq!(ttft.total(), 30);
         assert_eq!(ttft.counts[5], 8, "le=0.1 s is the 100 ms bucket");

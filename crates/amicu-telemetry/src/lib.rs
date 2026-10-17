@@ -43,10 +43,10 @@ pub use identity::{
 pub use log::{LogLevel, LoggingPolicy, Outcome, RequestLog, RequestRecord};
 pub use metrics::{MetricsCollector, MetricsSnapshot};
 pub use report::{
-    E2E_BOUNDS_MS, HardwareInfo, Histogram, HistogramKind, Label, MAX_BATCH_BYTES,
-    MAX_BATCH_REPORTS, MAX_LABEL_LEN, MAX_WINDOW_SECONDS, ModelInfo, Rollup, RuntimeInfo,
-    TELEMETRY_SCHEMA_VERSION, TPOT_BOUNDS_MS, TTFT_BOUNDS_MS, TelemetryBatch, TelemetryReport,
-    ValidationError, Window,
+    E2E_BOUNDS_MS, GIB, HardwareInfo, Histogram, HistogramKind, Label, MAX_BATCH_BYTES,
+    MAX_BATCH_REPORTS, MAX_LABEL_LEN, MAX_WINDOW_SECONDS, ModelInfo, PROVIDERS, Rollup,
+    RuntimeInfo, TELEMETRY_SCHEMA_VERSION, TPOT_BOUNDS_MS, TTFT_BOUNDS_MS, TelemetryBatch,
+    TelemetryReport, ValidationError, Window,
 };
 pub use schema::{
     ConcurrencyMetrics, CostMetrics, Distribution, GpuMetrics, LatencyMetrics, MemoryKvMetrics,

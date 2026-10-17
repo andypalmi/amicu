@@ -80,6 +80,17 @@ pub const MAX_CONTEXT_LENGTH: u32 = 1 << 24;
 pub const MAX_ACCELERATORS: u32 = 1_024;
 /// CPU cores are capped at this value, so that very large hosts do not stand out.
 pub const MAX_CPU_CORES: u32 = 256;
+/// The `provider` values a report may carry; anything else is sent as
+/// `other` (see [`TelemetryReport::with_provider`]).
+pub const PROVIDERS: &[&str] = &[
+    "local",
+    "local_apple",
+    "local_cpu",
+    "on_prem",
+    "modal",
+    "other",
+];
+
 /// One GiB. Accelerator memory is sent in whole GiB, and host memory in
 /// power-of-two GiB buckets, so exact sizes cannot fingerprint a machine.
 pub const GIB: u64 = 1 << 30;
@@ -634,10 +645,12 @@ pub struct Rollup {
     /// Mean accelerator utilization sampled, a fraction in `[0, 1]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_utilization: Option<f64>,
-    /// Highest accelerator memory in use sampled (all accelerators), bytes.
+    /// Highest accelerator memory in use sampled (all accelerators), bytes,
+    /// rounded to the nearest whole GiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_memory_peak_bytes: Option<u64>,
-    /// Highest resident memory of the server process sampled, bytes (vLLM).
+    /// Highest resident memory of the server process sampled, bytes (vLLM),
+    /// rounded to the nearest whole GiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_memory_peak_bytes: Option<u64>,
 }
@@ -694,7 +707,7 @@ impl Rollup {
             (self.gpu_memory_peak_bytes, "gpu_memory_peak_bytes"),
             (self.host_memory_peak_bytes, "host_memory_peak_bytes"),
         ] {
-            if v.is_some_and(|b| b > MAX_BYTES) {
+            if v.is_some_and(|b| b > MAX_BYTES || b % GIB != 0) {
                 return Err(ValidationError::BadNumber(field));
             }
         }
@@ -751,11 +764,18 @@ pub struct TelemetryReport {
 }
 
 impl TelemetryReport {
-    /// Set the provider label from raw text; dropped if unacceptable.
+    /// Set the provider from raw text: one of [`PROVIDERS`], else `other`.
     #[must_use]
     pub fn with_provider(mut self, provider: &str) -> Self {
-        self.provider = Label::sanitized(provider);
+        self.provider = Self::provider_label(provider);
         self
+    }
+
+    /// The provider label for raw text: one of [`PROVIDERS`], else `other`.
+    #[must_use]
+    pub fn provider_label(provider: &str) -> Option<Label> {
+        let known = PROVIDERS.iter().find(|p| p.eq_ignore_ascii_case(provider));
+        Label::new(*known.unwrap_or(&"other")).ok()
     }
 
     /// Set the region label from raw text; dropped if unacceptable.
@@ -778,6 +798,13 @@ impl TelemetryReport {
         }
         if !(MIN_START_UNIX_S..=MAX_START_UNIX_S).contains(&self.window.start_unix_s) {
             return Err(ValidationError::BadNumber("window.start_unix_s"));
+        }
+        if self
+            .provider
+            .as_ref()
+            .is_some_and(|p| !PROVIDERS.contains(&p.as_str()))
+        {
+            return Err(ValidationError::BadLabel("unknown provider".into()));
         }
         if self.context_length.is_some_and(|c| c > MAX_CONTEXT_LENGTH) {
             return Err(ValidationError::BadNumber("context_length"));
@@ -1090,6 +1117,11 @@ mod tests {
                 "check {i}: {schema_value} != {rust_value}"
             );
         }
+        let providers: Vec<String> =
+            serde_json::from_value(report["provider"]["enum"].clone()).unwrap();
+        assert_eq!(providers, PROVIDERS);
+        assert_eq!(defs["gib_bytes"]["multipleOf"].as_u64(), Some(GIB));
+        assert_eq!(defs["gib_bytes"]["maximum"].as_u64(), Some(MAX_BYTES));
         for (name, kind) in [
             ("ttft_histogram", HistogramKind::Ttft),
             ("e2e_histogram", HistogramKind::E2e),
@@ -1221,6 +1253,8 @@ mod tests {
             |r| r.metrics.decode_tokens_per_s = Some(1e12),
             |r| r.metrics.output_tokens = u64::MAX,
             |r| r.metrics.gpu_memory_peak_bytes = Some(u64::MAX),
+            |r| r.metrics.host_memory_peak_bytes = Some(GIB + 1),
+            |r| r.provider = Some(Label::new("hetzner").unwrap()),
             |r| r.metrics.running_peak = Some(u32::MAX),
             |r| {
                 r.metrics.ttft_ms.as_mut().unwrap().counts.pop();
@@ -1369,7 +1403,11 @@ mod tests {
         r.runtime = RuntimeInfo::new(Label::new("vllm").unwrap()).with_version("sk-secret-1");
         r.model.quantization = Label::sanitized("a b");
         let r = r.with_provider("10.1.2.3").with_region("nbg1");
-        assert!(r.provider.is_none());
+        assert_eq!(r.provider.as_ref().map(Label::as_str), Some("other"));
+        assert_eq!(
+            report().with_provider("Modal").provider.unwrap().as_str(),
+            "modal"
+        );
         assert!(Label::sanitized("192.168.0.1").is_none());
         assert_eq!(
             TelemetryReport::from_json(&r.to_json().unwrap()).unwrap(),
