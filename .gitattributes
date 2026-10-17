@@ -1,0 +1,2 @@
+# Keep checked-out text files LF on every platform (generated artifacts are byte-compared in tests).
+* text=auto eol=lf

@@ -2,7 +2,8 @@
 //! project's state does not record.
 //!
 //! Strictly read-only: it enumerates Modal apps (`amicu-` prefix), launchd
-//! jobs/plists (`io.amicu.` prefix) and systemd `--user` units, marks each as
+//! jobs/plists (`io.amicu.` prefix), systemd `--user` units and Task Scheduler
+//! tasks (the `\amicu\` folder, Windows), marks each as
 //! tracked or not by comparing against what `.amicu/state/state.json`
 //! references (every stop record and every endpoint), and prints the exact
 //! manual command that stops it. It never stops, imports or edits anything.
@@ -101,6 +102,7 @@ pub(crate) enum Kind {
     ModalApp,
     LaunchdJob,
     SystemdUnit,
+    ScheduledTask,
 }
 
 impl Kind {
@@ -109,6 +111,7 @@ impl Kind {
             Kind::ModalApp => "modal app",
             Kind::LaunchdJob => "launchd job",
             Kind::SystemdUnit => "systemd unit",
+            Kind::ScheduledTask => "scheduled task",
         }
     }
 }
@@ -190,6 +193,7 @@ impl ModalApps for RealModal {
 pub(crate) enum Platform {
     MacOs,
     Linux,
+    Windows,
     Other,
 }
 
@@ -198,6 +202,7 @@ impl Platform {
         match std::env::consts::OS {
             "macos" => Platform::MacOs,
             "linux" => Platform::Linux,
+            "windows" => Platform::Windows,
             _ => Platform::Other,
         }
     }
@@ -303,7 +308,10 @@ pub(crate) fn discover(env: &Env<'_>, tracked: &Tracked) -> OrphansReport {
                         tracked: tracked.modal_names.contains(&app.name)
                             || tracked.modal_ids.contains(&app.id),
                         ownership: Ownership::Unknown,
-                        stop_command: format!("amicu modal stop -- {}", shell_quote(&app.name)),
+                        stop_command: format!(
+                            "amicu modal stop -- {}",
+                            quote_for(env.platform, &app.name)
+                        ),
                         identity: app.name,
                         state: app.state,
                     });
@@ -329,6 +337,17 @@ pub(crate) fn discover(env: &Env<'_>, tracked: &Tracked) -> OrphansReport {
                 Err(e) => sources.push(source("launchd", "error", Some(e))),
             }
             sources.push(source("systemd", "skipped", Some("not Linux".to_owned())));
+        }
+        Platform::Windows => {
+            sources.push(source("launchd", "skipped", Some("not macOS".to_owned())));
+            sources.push(source("systemd", "skipped", Some("not Linux".to_owned())));
+            match task_scheduler(env, tracked) {
+                Ok(found) => {
+                    sources.push(source("task-scheduler", "ok", None));
+                    resources.extend(found);
+                }
+                Err(e) => sources.push(source("task-scheduler", "error", Some(e))),
+            }
         }
         Platform::Linux => {
             sources.push(source("launchd", "skipped", Some("not macOS".to_owned())));
@@ -383,6 +402,40 @@ fn shell_quote(s: &str) -> String {
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
     }
+}
+
+/// A value interpolated into a printed command, quoted for the shell the user
+/// most likely pastes it into: PowerShell on Windows, a POSIX shell elsewhere.
+fn quote_for(platform: Platform, s: &str) -> String {
+    match platform {
+        Platform::Windows => amicu_llamacpp::service_windows::ps_quote(s),
+        _ => shell_quote(s),
+    }
+}
+
+/// The PowerShell commands that stop a Task Scheduler task and unregister it:
+/// disable it first so its restart-on-failure cannot bring it back, end it,
+/// then delete it.
+fn task_stop_command(label: &str) -> String {
+    let q = amicu_llamacpp::service_windows::ps_quote(&amicu_llamacpp::service_windows::task_name(
+        label,
+    ));
+    format!("schtasks /Change /TN {q} /DISABLE; schtasks /End /TN {q}; schtasks /Delete /TN {q} /F")
+}
+
+fn task_scheduler(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
+    let tasks = amicu_llamacpp::service_windows::list_tasks(env.exec).map_err(|e| e.to_string())?;
+    Ok(tasks
+        .into_iter()
+        .map(|t| Found {
+            kind: Kind::ScheduledTask,
+            tracked: tracked.has_label(&t.name),
+            ownership: ownership_of_label(&t.name, tracked.project_id.as_deref()),
+            stop_command: task_stop_command(&t.name),
+            state: t.state.to_lowercase(),
+            identity: t.name,
+        })
+        .collect())
 }
 
 /// The plist path as a shell word. Without a known agents dir it falls back to
@@ -645,6 +698,8 @@ mod tests {
         systemctl: Result<String, String>,
         /// Answer for `list-unit-files`; `None` falls back to `systemctl`.
         unit_files: Option<String>,
+        /// Answer for the PowerShell Task Scheduler listing.
+        powershell: Result<String, String>,
     }
 
     impl FakeExec {
@@ -654,6 +709,7 @@ mod tests {
                 launchctl: Ok(launchctl.to_owned()),
                 systemctl: Ok(systemctl.to_owned()),
                 unit_files: None,
+                powershell: Ok(String::new()),
             }
         }
 
@@ -675,6 +731,7 @@ mod tests {
                     unit_files.as_ref().unwrap()
                 }
                 "systemctl" => &self.systemctl,
+                "powershell" => &self.powershell,
                 other => panic!("unexpected program {other}"),
             };
             Ok(match r {
@@ -923,6 +980,7 @@ mod tests {
         assert_eq!(exec.calls(), ["launchctl list"]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn plist_fallback_keeps_tilde_unquoted() {
         assert_eq!(
@@ -969,6 +1027,7 @@ mod tests {
             launchctl: Err("boom".to_owned()),
             systemctl: Ok(String::new()),
             unit_files: None,
+            powershell: Ok(String::new()),
         };
         let modal = FakeModal(Ok(vec![]));
         let report = discover(
@@ -1198,5 +1257,91 @@ io.amicu.llama.old.service loaded active running c\n";
         assert!(t.modal_referenced);
         let t = Tracked::from_state(Some(&state_with(Vec::new(), vec![endpoint("io.amicu.x")])));
         assert!(!t.modal_referenced);
+    }
+
+    #[test]
+    fn windows_lists_amicu_tasks_with_powershell_stop_commands() {
+        let mut exec = FakeExec::new("", "");
+        exec.powershell = Ok(format!(
+            "TASK\tio.amicu.llama.{PID}.chat\tRunning\t267009\r\n\
+             TASK\tio.amicu.llama.{PID}.old\tReady\t0\r\n\
+             TASK\tio.amicu.llama.it's\tDisabled\t0\r\nEND\r\n"
+        ));
+        let modal = FakeModal(Ok(vec![app("amicu-x y", "deployed")]));
+        let report = discover(
+            &env(Platform::Windows, &exec, &modal, None),
+            &Tracked {
+                modal_referenced: true,
+                ..tracked_chat()
+            },
+        );
+        let status: Vec<_> = report.sources.iter().map(|s| (s.name, s.status)).collect();
+        assert_eq!(
+            status,
+            [
+                ("modal", "ok"),
+                ("launchd", "skipped"),
+                ("systemd", "skipped"),
+                ("task-scheduler", "ok"),
+            ]
+        );
+        let tasks: Vec<_> = report
+            .resources
+            .iter()
+            .filter(|r| r.kind == Kind::ScheduledTask)
+            .map(|r| {
+                (
+                    r.identity.as_str(),
+                    r.state.as_str(),
+                    r.tracked,
+                    r.ownership,
+                )
+            })
+            .collect();
+        let chat = format!("io.amicu.llama.{PID}.chat");
+        let old = format!("io.amicu.llama.{PID}.old");
+        assert_eq!(
+            tasks,
+            [
+                (old.as_str(), "ready", false, Ownership::ThisProject),
+                ("io.amicu.llama.it's", "disabled", false, Ownership::Legacy),
+                (chat.as_str(), "running", true, Ownership::ThisProject),
+            ]
+        );
+        let odd = report
+            .resources
+            .iter()
+            .find(|r| r.identity == "io.amicu.llama.it's")
+            .unwrap();
+        assert_eq!(
+            odd.stop_command,
+            "schtasks /Change /TN 'amicu\\io.amicu.llama.it''s' /DISABLE; \
+             schtasks /End /TN 'amicu\\io.amicu.llama.it''s'; \
+             schtasks /Delete /TN 'amicu\\io.amicu.llama.it''s' /F"
+        );
+        let modal_app = report
+            .resources
+            .iter()
+            .find(|r| r.kind == Kind::ModalApp)
+            .unwrap();
+        assert_eq!(modal_app.stop_command, "amicu modal stop -- 'amicu-x y'");
+    }
+
+    #[test]
+    fn windows_reports_a_failed_task_listing_as_an_error() {
+        let mut exec = FakeExec::new("", "");
+        exec.powershell = Err("Get-ScheduledTask: access denied".to_owned());
+        let modal = FakeModal(Ok(vec![]));
+        let report = discover(
+            &env(Platform::Windows, &exec, &modal, None),
+            &tracked_chat(),
+        );
+        let ts = report
+            .sources
+            .iter()
+            .find(|s| s.name == "task-scheduler")
+            .unwrap();
+        assert_eq!(ts.status, "error");
+        assert_eq!(report.resources.len(), 0);
     }
 }

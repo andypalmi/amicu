@@ -1483,8 +1483,8 @@ fn record_modal_start(
 }
 
 /// Refuse a host stop that would act as someone else: launchd and systemd are
-/// never interchangeable, and the uid / launchd domain must match the ones the
-/// instance was started with. An unknown current identity is a refusal. A
+/// never interchangeable, and the uid (the SID on Windows) / launchd domain
+/// must match the ones the instance was started with. An unknown current identity is a refusal. A
 /// record without a uid (older state) is accepted only for a non-root user who
 /// owns the instance's service definition. When the service definition (the
 /// launchd plist) is missing there is nothing to check, so that owner check is
@@ -1511,18 +1511,26 @@ fn check_host_context(
             expected.name()
         )));
     }
-    match record.uid {
-        Some(rec) if rec != cur.uid => {
+    // Windows has no uid: the user is told by SID.
+    if let (Some(rec), Some(now)) = (record.sid.as_deref(), cur.sid.as_deref())
+        && rec != now
+    {
+        return Err(CliError::Message(format!(
+            "{} was started as the Windows user {rec}, but you are {now}; re-run as that user. \
+             Nothing was changed",
+            record.describe()
+        )));
+    }
+    match (record.uid, cur.uid) {
+        (Some(rec), Some(now)) if rec != now => {
             return Err(CliError::Message(format!(
-                "{} was started as uid {rec}, but you are uid {}; re-run as that user. Nothing \
+                "{} was started as uid {rec}, but you are uid {now}; re-run as that user. Nothing \
                  was changed",
                 record.describe(),
-                cur.uid
             )));
         }
-        Some(_) => {}
-        None => {
-            if cur.uid == 0 {
+        (None, Some(now)) => {
+            if now == 0 {
                 return Err(CliError::Message(format!(
                     "{} has no recorded owner and you are root, so amicu cannot tell whose job \
                      it is; re-run as the user that started it. Nothing was changed",
@@ -1530,16 +1538,16 @@ fn check_host_context(
                 )));
             }
             if let Some(owner) = probe.instance_owner(&record.identity)
-                && owner != cur.uid
+                && owner != now
             {
                 return Err(CliError::Message(format!(
-                    "{} belongs to uid {owner}, but you are uid {}; re-run as that user. \
+                    "{} belongs to uid {owner}, but you are uid {now}; re-run as that user. \
                      Nothing was changed",
                     record.describe(),
-                    cur.uid
                 )));
             }
         }
+        _ => {}
     }
     if let (Some(rec), Some(now)) = (record.domain.as_deref(), cur.domain.as_deref())
         && rec != now
@@ -1568,7 +1576,7 @@ async fn stop_record(
     stops: &mut [StopRecord],
 ) -> Result<(), CliError> {
     match record.backend {
-        Backend::HostLaunchd | Backend::HostSystemd => {
+        Backend::HostLaunchd | Backend::HostSystemd | Backend::HostTaskScheduler => {
             check_host_context(record, probe.host_context().as_ref(), probe)?;
             let handle = host_handle(&record.deployment, &record.identity);
             // Validated BEFORE anything is stopped: a recorded path that is
@@ -3064,6 +3072,7 @@ mod scoped_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn relative_model_paths_are_resolved_at_start_and_only_for_model_flags() {
         let argv = [

@@ -37,6 +37,7 @@ use crate::service::{
     HostExec, LaunchdManager, ServiceManager, ServicePaths, ServiceSpec, ServiceState,
     SystemdManager,
 };
+use crate::service_windows::TaskSchedulerManager;
 
 /// A resolved secret handed to a supervisor at start time: its name and value.
 ///
@@ -422,6 +423,9 @@ impl<M: ServiceManager, P: HealthProbe> ServiceSupervisor<M, P> {
 /// How to install a runtime binary, for the not-found error.
 fn install_hint(program: &str) -> &'static str {
     match program {
+        "llama-server" if cfg!(windows) => {
+            "`winget install llama.cpp`, or download a release zip from github.com/ggml-org/llama.cpp"
+        }
         "llama-server" => "`brew install llama.cpp` (macOS) or see github.com/ggml-org/llama.cpp",
         "vllm" => "`pip install vllm`",
         _ => "your package manager",
@@ -433,6 +437,10 @@ pub type LaunchdSupervisor = ServiceSupervisor<LaunchdManager<HostExec>, HttpHea
 
 /// The systemd (Linux) supervisor: a persistent `--user` unit driven by `systemctl`.
 pub type SystemdSupervisor = ServiceSupervisor<SystemdManager<HostExec>, HttpHealthProbe>;
+
+/// The Task Scheduler (Windows) supervisor: a per-user logon task driven by `schtasks`.
+pub type TaskSchedulerSupervisor =
+    ServiceSupervisor<TaskSchedulerManager<HostExec>, HttpHealthProbe>;
 
 impl LaunchdSupervisor {
     /// Host-wired launchd supervisor.
@@ -450,15 +458,27 @@ impl SystemdSupervisor {
     }
 }
 
-/// The supervisor for the host's service manager: launchd on macOS, systemd
-/// elsewhere.
+impl TaskSchedulerSupervisor {
+    /// Host-wired Task Scheduler supervisor.
+    #[must_use]
+    pub fn host() -> Self {
+        Self::new(TaskSchedulerManager::host(), HttpHealthProbe::new())
+    }
+}
+
+/// The supervisor for the host's service manager: launchd on macOS, Task
+/// Scheduler on Windows, systemd elsewhere.
 #[must_use]
 pub fn host_supervisor() -> Box<dyn ProcessSupervisor> {
     #[cfg(target_os = "macos")]
     {
         Box::new(LaunchdSupervisor::host())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        Box::new(TaskSchedulerSupervisor::host())
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         Box::new(SystemdSupervisor::host())
     }
@@ -467,8 +487,9 @@ pub fn host_supervisor() -> Box<dyn ProcessSupervisor> {
 /// [`host_supervisor`] that also starts `sidecar`'s job (the telemetry
 /// agent) beside each instance. Stops cover the sidecar either way.
 ///
-/// TODO: the Windows Task Scheduler backend needs the same sidecar handling
-/// (a second per-user task, stopped before the instance's).
+/// On Windows no sidecar is started yet. TODO: start the agent as a second
+/// per-user Task Scheduler task (the agent's consent, data-dir and hardware
+/// probe paths are Unix-only today); stops already cover a sidecar there.
 #[must_use]
 pub fn host_supervisor_with_sidecar(
     sidecar: Option<Arc<dyn SidecarPlanner>>,
@@ -477,7 +498,12 @@ pub fn host_supervisor_with_sidecar(
     {
         Box::new(LaunchdSupervisor::host().with_sidecar(sidecar))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        let _ = sidecar;
+        Box::new(TaskSchedulerSupervisor::host())
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         Box::new(SystemdSupervisor::host().with_sidecar(sidecar))
     }
@@ -565,7 +591,7 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
         // afresh whether to run one), then the previous instance is released
         // and its port allowed to go quiet.
         self.stop_sidecar(&label, None).await?;
-        self.manager.release(&label).await;
+        self.manager.release(&label).await?;
         if !self.drain.is_zero() {
             self.wait_released(&label, &endpoint).await?;
         }

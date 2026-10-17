@@ -106,6 +106,11 @@ impl ConfigStore {
 
     /// The per-user location, or `None` when no home/config dir is known.
     pub(crate) fn host() -> Option<Self> {
+        #[cfg(windows)]
+        let base = std::env::var_os("APPDATA")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)?;
+        #[cfg(not(windows))]
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
@@ -186,7 +191,12 @@ fn io_err(e: std::io::Error) -> CliError {
 fn store_or_err() -> Result<ConfigStore, CliError> {
     ConfigStore::host().ok_or_else(|| {
         CliError::Message(
-            "cannot locate a user config directory (set HOME or XDG_CONFIG_HOME)".to_owned(),
+            if cfg!(windows) {
+                "cannot locate a user config directory (set APPDATA)"
+            } else {
+                "cannot locate a user config directory (set HOME or XDG_CONFIG_HOME)"
+            }
+            .to_owned(),
         )
     })
 }
