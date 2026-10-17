@@ -19,6 +19,9 @@ type Schema = { [key: string]: unknown };
 
 export class InvalidBatch extends Error {}
 
+/** The bundled schema uses something this validator cannot enforce. */
+export class UnsupportedSchema extends Error {}
+
 const schema = schemaJson as unknown as Schema;
 const defs = (schema.$defs ?? {}) as Record<string, Schema>;
 
@@ -26,26 +29,43 @@ const defs = (schema.$defs ?? {}) as Record<string, Schema>;
 const ENFORCED = new Set([
   'type', 'const', 'required', 'properties', 'additionalProperties', 'items', '$ref',
   'pattern', 'minLength', 'maxLength', 'minimum', 'maximum', 'minItems', 'maxItems',
-  'multipleOf',
+  'multipleOf', 'enum',
 ]);
-const ANNOTATIONS = new Set(['$schema', '$id', '$defs', 'title', 'description', 'x-amicu']);
+const ANNOTATIONS = new Set([
+  '$schema', '$id', '$defs', '$comment', 'title', 'description', 'examples', 'default', 'x-amicu',
+]);
 
-function checkKeywords(node: Schema, path: string): void {
-  for (const [key, value] of Object.entries(node)) {
-    if (!ENFORCED.has(key) && !ANNOTATIONS.has(key)) {
-      throw new Error(`telemetry schema keyword not supported by the validator: ${key} at ${path}`);
+/**
+ * Everything in `root` this validator cannot enforce: unknown keywords,
+ * additionalProperties other than false, unresolvable `$ref`s. Empty for a
+ * supported schema. The test suite asserts it is empty for the bundled
+ * schema; at runtime a non-empty list makes validation fail closed (503, the
+ * sender retries) instead of crashing the Worker at load.
+ */
+export function schemaProblems(root: Schema): string[] {
+  const problems: string[] = [];
+  const rootDefs = (root.$defs ?? {}) as Record<string, Schema>;
+  const walk = (node: Schema, path: string) => {
+    for (const [key, value] of Object.entries(node)) {
+      if (!ENFORCED.has(key) && !ANNOTATIONS.has(key)) problems.push(`unsupported keyword ${key} at ${path}`);
+      if (key === 'additionalProperties' && value !== false) {
+        problems.push(`additionalProperties must be false at ${path}`);
+      }
+      if (key === '$ref' && !(typeof value === 'string' && /^#\/\$defs\/[^/]+$/.test(value) && Object.hasOwn(rootDefs, value.slice(8)))) {
+        problems.push(`unresolved $ref at ${path}`);
+      }
+      if (key === 'enum' && !Array.isArray(value)) problems.push(`enum must be an array at ${path}`);
     }
-    if (key === 'additionalProperties' && value !== false) {
-      throw new Error(`telemetry schema: additionalProperties must be false at ${path}`);
+    for (const [name, child] of Object.entries((node.properties ?? {}) as Record<string, Schema>)) {
+      walk(child, `${path}.${name}`);
     }
-  }
-  for (const [name, child] of Object.entries((node.properties ?? {}) as Record<string, Schema>)) {
-    checkKeywords(child, `${path}.${name}`);
-  }
-  if (node.items) checkKeywords(node.items as Schema, `${path}[]`);
+    if (node.items) walk(node.items as Schema, `${path}[]`);
+  };
+  walk(root, '#');
+  for (const [name, def] of Object.entries(rootDefs)) walk(def, `#/$defs/${name}`);
+  return problems;
 }
-checkKeywords(schema, '#');
-for (const [name, def] of Object.entries(defs)) checkKeywords(def, `#/$defs/${name}`);
+const problems = schemaProblems(schema);
 
 // Patterns compiled once.
 const patterns = new Map<string, RegExp>();
@@ -88,12 +108,13 @@ function fail(path: string): never {
 function check(node: Schema, v: Json, path: string): void {
   if (typeof node.$ref === 'string') {
     const name = node.$ref.replace(/^#\/\$defs\//, '');
-    const target = defs[name];
+    const target = Object.hasOwn(defs, name) ? defs[name] : undefined;
     if (!target) throw new Error(`telemetry schema: unresolved $ref ${node.$ref}`);
     check(target, v, path);
   }
   if (typeof node.type === 'string' && !typeOk(node.type, v)) fail(path);
   if ('const' in node && v !== node.const) fail(path);
+  if (Array.isArray(node.enum) && !node.enum.includes(v)) fail(path);
   if (typeof v === 'number') {
     if (typeof node.minimum === 'number' && v < node.minimum) fail(path);
     if (typeof node.maximum === 'number' && v > node.maximum) fail(path);
@@ -273,6 +294,7 @@ export type ValidBatch = {
  * InvalidBatch (field path only) on failure.
  */
 export function validateBatch(value: Json, nowS: number = Date.now() / 1000): ValidBatch {
+  if (problems.length > 0) throw new UnsupportedSchema(problems.join('; '));
   check(schema, value, '$');
   semantic(value as { [key: string]: Json }, nowS);
   return value as unknown as ValidBatch;

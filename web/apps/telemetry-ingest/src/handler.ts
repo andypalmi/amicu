@@ -8,7 +8,7 @@
 // Never logged or echoed: the payload, any field of it, and the client IP.
 // No CORS headers: the only client is the CLI sidecar, not a browser.
 
-import { InvalidBatch, validateBatch } from './validate.ts';
+import { InvalidBatch, UnsupportedSchema, validateBatch } from './validate.ts';
 
 export const ROUTE = '/v1/telemetry/rollups';
 export const MAX_BODY_BYTES = 64 * 1024;
@@ -135,6 +135,11 @@ export async function handle(
     if (e instanceof InvalidBatch || e instanceof SyntaxError || e instanceof TypeError) {
       log('rejected', { reason: e instanceof InvalidBatch ? 'schema' : 'json' });
       return reply(400, 'invalid telemetry batch');
+    }
+    if (e instanceof UnsupportedSchema) {
+      // A deploy bug, not the sender's fault: keep the batch for a retry.
+      log('schema_unsupported');
+      return reply(503, 'unavailable', { 'retry-after': '300' });
     }
     throw e;
   }

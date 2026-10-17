@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
-import { HISTOGRAM_BOUNDS_MS, InvalidBatch, looksLikeCredential, looksLikeIpv4, validateBatch } from '../src/validate.ts';
+import { HISTOGRAM_BOUNDS_MS, InvalidBatch, schemaProblems, looksLikeCredential, looksLikeIpv4, validateBatch } from '../src/validate.ts';
 
 const here = new URL('.', import.meta.url);
 const example = JSON.parse(readFileSync(new URL('fixtures/telemetry-batch.v2.example.json', here), 'utf8'));
@@ -31,6 +31,32 @@ test('the bundled schema is the sender schema, byte for byte, when both are pres
     const up = new URL(upstream, crate);
     if (!existsSync(up)) continue; // the sender crate is not on this branch yet
     assert.equal(readFileSync(new URL(bundled, here), 'utf8'), readFileSync(up, 'utf8'), `${upstream} drifted`);
+  }
+});
+
+test('the validator supports every keyword of the real schema files', () => {
+  const files = [new URL('../src/schema/telemetry-batch.v2.schema.json', here)];
+  const crate = new URL('../../../../crates/amicu-telemetry/schema/telemetry-batch.v2.schema.json', here);
+  if (existsSync(crate)) files.push(crate);
+  for (const file of files) {
+    assert.deepEqual(schemaProblems(JSON.parse(readFileSync(file, 'utf8'))), [], file.pathname);
+  }
+});
+
+test('schemaProblems flags what the validator cannot enforce', () => {
+  const problems = schemaProblems({
+    type: 'object',
+    additionalProperties: true,
+    properties: { a: { oneOf: [] }, b: { $ref: '#/$defs/missing' } },
+  });
+  assert.equal(problems.length, 3);
+});
+
+test('every provider in the schema enum is accepted', () => {
+  for (const provider of ['local', 'local_apple', 'local_cpu', 'on_prem', 'modal', 'other']) {
+    const b = clone();
+    b.reports[0].provider = provider;
+    validateBatch(b, NOW);
   }
 });
 
@@ -63,6 +89,10 @@ test('structural violations are rejected', () => {
     ['cpu cores above the cap', (b) => (b.reports[0].hardware.cpu_cores = 257)],
     ['vram not whole GiB', (b) => (b.reports[0].hardware.vram_bytes = 85899345921)],
     ['histogram length', (b) => b.reports[0].metrics.tpot_ms.counts.push(0)],
+    ['provider outside the enum', (b) => (b.reports[0].provider = 'hetzner')],
+    ['provider case', (b) => (b.reports[0].provider = 'Modal')],
+    ['memory peak not whole GiB', (b) => (b.reports[0].metrics.host_memory_peak_bytes = 2 ** 30 + 1)],
+    ['gpu memory peak not whole GiB', (b) => (b.reports[0].metrics.gpu_memory_peak_bytes = 1)],
     ['string number', (b) => (b.reports[0].metrics.requests = '120')],
     ['null field', (b) => (b.reports[0].region = null)],
   ];

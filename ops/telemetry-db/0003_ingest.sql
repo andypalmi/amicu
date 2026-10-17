@@ -99,6 +99,26 @@ begin
 end
 $$;
 
+-- A byte count that must be a whole number of GiB (memory peaks, VRAM), and
+-- optionally a power-of-two number of GiB (host memory).
+create or replace function telemetry.gib(obj jsonb, key text, power_of_two boolean, field text)
+returns bigint
+language plpgsql
+set search_path = ''
+as $$
+declare
+  n numeric := telemetry.num(obj, key, 0, 1125899906842624, true, false, field);
+begin
+  if n is null then return null; end if;
+  if n % 1073741824 <> 0 then perform telemetry.bad(field); end if;
+  if power_of_two and n > 0
+     and (n / 1073741824) not in (select (2::numeric) ^ e from generate_series(0, 20) e) then
+    perform telemetry.bad(field);
+  end if;
+  return n;
+end
+$$;
+
 create or replace function telemetry.uuid_v4(v jsonb, field text)
 returns uuid
 language plpgsql
@@ -201,18 +221,10 @@ begin
     accelerator := telemetry.label(hw, 'accelerator', false, 'hardware.accelerator');
     accelerator_count := coalesce(telemetry.num(hw, 'accelerator_count', 0, 1024, true, false, 'hardware.accelerator_count'), 0);
     if accelerator is not null and accelerator_count = 0 then perform telemetry.bad('hardware.accelerator_count'); end if;
-    -- Sizes arrive coarsened: VRAM in whole GiB, host memory a power-of-two
-    -- number of GiB.
-    if (hw ? 'vram_bytes') and jsonb_typeof(hw -> 'vram_bytes') = 'number'
-       and (hw ->> 'vram_bytes')::numeric % 1073741824 <> 0 then
-      perform telemetry.bad('hardware.vram_bytes');
-    end if;
-    if (hw ? 'memory_bytes') and jsonb_typeof(hw -> 'memory_bytes') = 'number'
-       and (hw ->> 'memory_bytes')::numeric > 0
-       and ((hw ->> 'memory_bytes')::numeric % 1073741824 <> 0
-            or ((hw ->> 'memory_bytes')::numeric / 1073741824) not in
-               (select (2::numeric) ^ e from generate_series(0, 20) e)) then
-      perform telemetry.bad('hardware.memory_bytes');
+    -- Fixed provider values (anything else is sent as "other").
+    if (rep ? 'provider') and (rep -> 'provider') not in
+       ('"local"', '"local_apple"', '"local_cpu"', '"on_prem"', '"modal"', '"other"') then
+      perform telemetry.bad('provider');
     end if;
 
     perform telemetry.check_object(rep -> 'model', array['name', 'quantization'], 'model');
@@ -237,9 +249,10 @@ begin
     row5.amicu_version := telemetry.label(rep, 'amicu_version', true, 'amicu_version');
     row5.accelerator := accelerator;
     row5.accelerator_count := accelerator_count;
-    row5.vram_bytes := telemetry.num(hw, 'vram_bytes', 0, 1125899906842624, true, false, 'hardware.vram_bytes');
+    -- Sizes arrive coarsened: whole GiB; host memory a power-of-two number of GiB.
+    row5.vram_bytes := telemetry.gib(hw, 'vram_bytes', false, 'hardware.vram_bytes');
     row5.cpu_cores := telemetry.num(hw, 'cpu_cores', 0, 256, true, false, 'hardware.cpu_cores');
-    row5.memory_bytes := telemetry.num(hw, 'memory_bytes', 0, 1125899906842624, true, false, 'hardware.memory_bytes');
+    row5.memory_bytes := telemetry.gib(hw, 'memory_bytes', true, 'hardware.memory_bytes');
     row5.model_name := telemetry.label(rep -> 'model', 'name', true, 'model.name');
     row5.quantization := telemetry.label(rep -> 'model', 'quantization', false, 'model.quantization');
     row5.runtime_name := telemetry.label(rep -> 'runtime', 'name', true, 'runtime.name');
@@ -265,8 +278,8 @@ begin
     row5.kv_cache_utilization_peak := telemetry.num(m, 'kv_cache_utilization_peak', 0, 1, false, false, 'metrics.kv_cache_utilization_peak');
     row5.preemptions := telemetry.num(m, 'preemptions', 0, 10000000000, true, false, 'metrics.preemptions');
     row5.gpu_utilization := telemetry.num(m, 'gpu_utilization', 0, 1, false, false, 'metrics.gpu_utilization');
-    row5.gpu_memory_peak_bytes := telemetry.num(m, 'gpu_memory_peak_bytes', 0, 1125899906842624, true, false, 'metrics.gpu_memory_peak_bytes');
-    row5.host_memory_peak_bytes := telemetry.num(m, 'host_memory_peak_bytes', 0, 1125899906842624, true, false, 'metrics.host_memory_peak_bytes');
+    row5.gpu_memory_peak_bytes := telemetry.gib(m, 'gpu_memory_peak_bytes', false, 'metrics.gpu_memory_peak_bytes');
+    row5.host_memory_peak_bytes := telemetry.gib(m, 'host_memory_peak_bytes', false, 'metrics.host_memory_peak_bytes');
     row5.ingested_at := now();
     row5.downsampled := false;
 

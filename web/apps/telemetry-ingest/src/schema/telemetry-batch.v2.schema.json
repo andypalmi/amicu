@@ -180,7 +180,7 @@
               "minimum": 0,
               "maximum": 1125899906842624,
               "multipleOf": 1073741824,
-              "description": "Host memory, rounded up to a power-of-two number of GiB (the server also checks the power of two)."
+              "description": "Host memory, rounded up to a power-of-two number of GiB. JSON Schema cannot express the power of two, so a validator must check it separately (TelemetryReport::validate does)."
             }
           }
         },
@@ -217,7 +217,15 @@
           }
         },
         "provider": {
-          "$ref": "#/$defs/label"
+          "enum": [
+            "local",
+            "local_apple",
+            "local_cpu",
+            "on_prem",
+            "modal",
+            "other"
+          ],
+          "description": "Where the deployment runs; any other provider is sent as other."
         },
         "region": {
           "$ref": "#/$defs/label",
@@ -280,10 +288,10 @@
               "$ref": "#/$defs/fraction"
             },
             "gpu_memory_peak_bytes": {
-              "$ref": "#/$defs/bytes"
+              "$ref": "#/$defs/gib_bytes"
             },
             "host_memory_peak_bytes": {
-              "$ref": "#/$defs/bytes"
+              "$ref": "#/$defs/gib_bytes"
             }
           }
         }
@@ -382,6 +390,13 @@
           "minimum": 0
         }
       }
+    },
+    "gib_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1125899906842624,
+      "multipleOf": 1073741824,
+      "description": "Rounded to the nearest whole GiB."
     }
   }
 }

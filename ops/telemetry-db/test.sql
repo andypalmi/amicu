@@ -64,6 +64,9 @@ begin
   perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,hardware,memory_bytes}', to_jsonb(24 * 1073741824::bigint)), 'memory not a power of two GiB');
   perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,hardware,vram_bytes}', '85899345921'), 'vram not whole GiB');
   perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,hardware,cpu_cores}', '257'), 'cpu cores above 256');
+  perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,provider}', '"hetzner"'), 'provider outside the enum');
+  perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,metrics,host_memory_peak_bytes}', '1073741825'), 'memory peak not whole GiB');
+  perform pg_temp.expect_400(jsonb_set(pg_temp.at(ex, h0, gen_random_uuid()), '{reports,0,metrics,gpu_memory_peak_bytes}', '1'), 'gpu memory peak not whole GiB');
 
   perform pg_temp.expect_400(ex || '{"extra": 1}', 'unknown batch field');
   perform pg_temp.expect_400(jsonb_set(ex, '{reports,0,metrics,ip}', '"1.2.3.4"'), 'unknown metrics field');
