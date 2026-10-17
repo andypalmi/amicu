@@ -3,7 +3,7 @@ name: Deploy Web (Cloudflare Workers)
 # Cloudflare Workers deploy job shape
 # (pnpm install --frozen-lockfile -> build -> cloudflare/wrangler-action),
 # adapted for amicu's OpenNext Worker (a real server Worker with a `main`
-# script, not a pure-static-assets SPA — see
+# script, not a pure-static-assets SPA - see
 # web/apps/web/wrangler.jsonc and README-deploy-cloudflare.md).
 #
 # Gated behind the same
@@ -39,6 +39,8 @@ jobs:
         working-directory: web
     steps:
       - name: Verify CI passed for this commit
+        # Runs before checkout, so web/ doesn't exist yet.
+        working-directory: .
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -58,7 +60,7 @@ jobs:
 
       # Activates the `packageManager` pin in web/package.json
       # ("pnpm@11.22.0") via Node 22's built-in corepack, same pin CI's
-      # `web` job gets from pnpm/action-setup's package_json_file input —
+      # `web` job gets from pnpm/action-setup's package_json_file input -
       # corepack is the more direct way to honor that pin from a plain
       # actions/setup-node step.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -72,11 +74,11 @@ jobs:
 
       # `cf:deploy` (web/apps/web/package.json) is
       # `opennextjs-cloudflare build && opennextjs-cloudflare deploy --
-      # --keep-vars` — `--keep-vars` preserves whatever non-secret `vars`
+      # --keep-vars` - `--keep-vars` preserves whatever non-secret `vars`
       # and `wrangler secret put` values already set on the Worker
       # (Cloudflare dashboard / CLI) that are not in wrangler.jsonc (which
       # now commits the production vars). Runtime
-      # secrets (a BFF session secret, etc.) are never set here — see
+      # secrets (a BFF session secret, etc.) are never set here - see
       # docs/deploy/cloud-run.md and web/apps/web/README-deploy-cloudflare.md.
       - name: Build & deploy
         run: pnpm --filter @amicu/web cf:deploy
@@ -84,7 +86,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           # Public/build-time only (baked into the client bundle either
-          # way, per web/apps/web/README-deploy-cloudflare.md) — a repo
+          # way, per web/apps/web/README-deploy-cloudflare.md) - a repo
           # variable, not a secret.
           NEXT_PUBLIC_SITE_URL: ${{ vars.NEXT_PUBLIC_SITE_URL }}
           NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL || 'https://app.amicu.dev' }}
