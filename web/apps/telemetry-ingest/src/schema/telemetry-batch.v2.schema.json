@@ -1,0 +1,421 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://amicu.dev/schemas/telemetry-batch.v2.schema.json",
+  "title": "amicu telemetry batch, schema version 2",
+  "description": "The body an opted-in amicu deployment POSTs to the telemetry ingestion endpoint. Aggregates only: 5-minute rollups of one deployment. Every object rejects unknown fields. The Rust types in crates/amicu-telemetry/src/report.rs are the source of truth; a unit test keeps this file in step with them. The serialized body is at most 65536 bytes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "batch_id",
+    "reports"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 2
+    },
+    "batch_id": {
+      "$ref": "#/$defs/uuid_v4",
+      "description": "Random per batch; the same value on every retry (idempotency key)."
+    },
+    "reports": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 288,
+      "items": {
+        "$ref": "#/$defs/report"
+      }
+    }
+  },
+  "x-amicu": {
+    "ttft_bounds_ms": [
+      10.0,
+      20.0,
+      40.0,
+      60.0,
+      80.0,
+      100.0,
+      250.0,
+      500.0,
+      750.0,
+      1000.0,
+      2500.0,
+      5000.0,
+      7500.0,
+      10000.0,
+      20000.0,
+      40000.0,
+      80000.0
+    ],
+    "e2e_bounds_ms": [
+      300.0,
+      500.0,
+      800.0,
+      1000.0,
+      1500.0,
+      2000.0,
+      2500.0,
+      5000.0,
+      10000.0,
+      15000.0,
+      20000.0,
+      30000.0,
+      40000.0,
+      50000.0,
+      60000.0,
+      120000.0,
+      240000.0,
+      480000.0
+    ],
+    "tpot_bounds_ms": [
+      10.0,
+      25.0,
+      50.0,
+      75.0,
+      100.0,
+      150.0,
+      200.0,
+      300.0,
+      400.0,
+      500.0,
+      750.0,
+      1000.0,
+      2500.0
+    ],
+    "histogram_note": "counts[i] holds observations in (bounds[i-1], bounds[i]] ms; the extra last count is above the last bound. Not cumulative."
+  },
+  "$defs": {
+    "uuid_v4": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._+/-]+$",
+      "description": "A short identifier token. Server-side validation also rejects IPv4-shaped and credential-shaped values."
+    },
+    "fraction": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "install_id",
+        "deployment_id",
+        "window",
+        "amicu_version",
+        "model",
+        "runtime",
+        "metrics"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 2
+        },
+        "install_id": {
+          "$ref": "#/$defs/uuid_v4",
+          "description": "Random, rotatable id of the installation."
+        },
+        "deployment_id": {
+          "$ref": "#/$defs/uuid_v4",
+          "description": "Random id of the deployment; never its name."
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "start_unix_s",
+            "duration_s"
+          ],
+          "properties": {
+            "start_unix_s": {
+              "type": "integer",
+              "minimum": 1704067200,
+              "maximum": 4102444800
+            },
+            "duration_s": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400
+            }
+          }
+        },
+        "amicu_version": {
+          "$ref": "#/$defs/label"
+        },
+        "hardware": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "accelerator": {
+              "$ref": "#/$defs/label",
+              "description": "Accelerator model, e.g. h100-80gb."
+            },
+            "accelerator_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1024
+            },
+            "vram_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1125899906842624,
+              "multipleOf": 1073741824,
+              "description": "Per accelerator, rounded to the nearest whole GiB."
+            },
+            "cpu_cores": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 256,
+              "description": "Capped at 256."
+            },
+            "memory_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1125899906842624,
+              "multipleOf": 1073741824,
+              "description": "Host memory, rounded up to a power-of-two number of GiB. JSON Schema cannot express the power of two, so a validator must check it separately (TelemetryReport::validate does)."
+            }
+          }
+        },
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name"
+          ],
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/label",
+              "description": "A public Hugging Face repo id from a well-known publisher, otherwise the literal custom."
+            },
+            "quantization": {
+              "$ref": "#/$defs/label"
+            }
+          }
+        },
+        "runtime": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name"
+          ],
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/label",
+              "description": "llama.cpp or vllm."
+            },
+            "version": {
+              "$ref": "#/$defs/label"
+            }
+          }
+        },
+        "provider": {
+          "enum": [
+            "local",
+            "local_apple",
+            "local_cpu",
+            "on_prem",
+            "modal",
+            "other"
+          ],
+          "description": "Where the deployment runs; any other provider is sent as other."
+        },
+        "region": {
+          "$ref": "#/$defs/label",
+          "description": "A cloud provider's region code. Allowed only when provider is modal; a local host never sends one."
+        },
+        "context_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16777216
+        },
+        "batch_size": {
+          "$ref": "#/$defs/concurrency"
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "requests": {
+              "$ref": "#/$defs/requests",
+              "description": "Requests finished in the window (vLLM only)."
+            },
+            "errors": {
+              "$ref": "#/$defs/requests",
+              "description": "Of those, not finished normally; at most requests."
+            },
+            "prompt_tokens": {
+              "$ref": "#/$defs/tokens"
+            },
+            "output_tokens": {
+              "$ref": "#/$defs/tokens"
+            },
+            "output_tokens_per_s": {
+              "$ref": "#/$defs/rate"
+            },
+            "decode_tokens_per_s": {
+              "$ref": "#/$defs/rate"
+            },
+            "ttft_ms": {
+              "$ref": "#/$defs/ttft_histogram"
+            },
+            "e2e_ms": {
+              "$ref": "#/$defs/e2e_histogram"
+            },
+            "tpot_ms": {
+              "$ref": "#/$defs/tpot_histogram"
+            },
+            "running_peak": {
+              "$ref": "#/$defs/concurrency"
+            },
+            "waiting_peak": {
+              "$ref": "#/$defs/concurrency"
+            },
+            "kv_cache_utilization_peak": {
+              "$ref": "#/$defs/fraction"
+            },
+            "preemptions": {
+              "$ref": "#/$defs/requests"
+            },
+            "gpu_utilization": {
+              "$ref": "#/$defs/fraction"
+            },
+            "gpu_memory_peak_bytes": {
+              "$ref": "#/$defs/gib_bytes"
+            },
+            "host_memory_peak_bytes": {
+              "$ref": "#/$defs/gib_bytes"
+            }
+          }
+        }
+      },
+      "if": {
+        "not": {
+          "required": [
+            "provider"
+          ],
+          "properties": {
+            "provider": {
+              "const": "modal"
+            }
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "region"
+          ]
+        }
+      }
+    },
+    "requests": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000000000
+    },
+    "tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1125899906842624
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1125899906842624
+    },
+    "concurrency": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1048576
+    },
+    "rate": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 10000000
+    },
+    "ttft_histogram": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "counts",
+        "sum_ms"
+      ],
+      "description": "Bucket counts over x-amicu.ttft_bounds_ms; exactly 18 counts (bounds plus one overflow). The total of counts is at most 10000000000; sum_ms is at most 86400000 times that total.",
+      "properties": {
+        "counts": {
+          "type": "array",
+          "minItems": 18,
+          "maxItems": 18,
+          "items": {
+            "$ref": "#/$defs/requests"
+          }
+        },
+        "sum_ms": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "e2e_histogram": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "counts",
+        "sum_ms"
+      ],
+      "description": "Bucket counts over x-amicu.e2e_bounds_ms; exactly 19 counts (bounds plus one overflow). The total of counts is at most 10000000000; sum_ms is at most 86400000 times that total.",
+      "properties": {
+        "counts": {
+          "type": "array",
+          "minItems": 19,
+          "maxItems": 19,
+          "items": {
+            "$ref": "#/$defs/requests"
+          }
+        },
+        "sum_ms": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "tpot_histogram": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "counts",
+        "sum_ms"
+      ],
+      "description": "Bucket counts over x-amicu.tpot_bounds_ms; exactly 14 counts (bounds plus one overflow). The total of counts is at most 10000000000; sum_ms is at most 86400000 times that total.",
+      "properties": {
+        "counts": {
+          "type": "array",
+          "minItems": 14,
+          "maxItems": 14,
+          "items": {
+            "$ref": "#/$defs/requests"
+          }
+        },
+        "sum_ms": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "gib_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1125899906842624,
+      "multipleOf": 1073741824,
+      "description": "Rounded to the nearest whole GiB."
+    }
+  }
+}

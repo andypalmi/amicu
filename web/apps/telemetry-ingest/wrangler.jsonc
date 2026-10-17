@@ -1,0 +1,59 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Interim telemetry ingestion endpoint, until the dedicated Cloud Run
+  // ingestion service exists. Deployed by hand (docs/ops/telemetry-ingest.md).
+  "name": "amicu-telemetry-ingest",
+  // Production Cloudflare account id (public, not a secret); same account as
+  // the amicu.dev zone and the api-proxy Worker.
+  "account_id": "efe23a599dc30bbc8aa71b985512b9f0",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-16",
+  // One exact path on api.amicu.dev. The api-proxy Worker holds
+  // `api.amicu.dev/*`; Cloudflare runs the most specific matching route, so
+  // this path goes here and everything else still reaches the API.
+  "routes": [
+    { "pattern": "api.amicu.dev/v1/telemetry/rollups", "zone_name": "amicu.dev" },
+  ],
+  "workers_dev": false,
+  "vars": {
+    // The amicu-telemetry Supabase project. Not secret.
+    "SUPABASE_URL": "https://ymfvzksjrszdtwmqfeuf.supabase.co",
+  },
+  // SUPABASE_SECRET_KEY is a SECRET (`sb_secret_...`, maps to service_role):
+  // set it with `wrangler secret put SUPABASE_SECRET_KEY`, never in "vars".
+  //
+  // Workers Rate Limiting binding. Every limit below is counted per Cloudflare
+  // location (not globally) and is approximate (eventually consistent), so a
+  // client spread across locations gets a multiple of it. The database (one
+  // row per deployment and window) is the exact backstop, and a WAF rule
+  // (docs/ops/telemetry-ingest.md) the zone-wide one. A sender uploads about
+  // once an hour per deployment.
+  "ratelimits": [
+    {
+      // Keyed by install id (one per batch).
+      "name": "INSTALL_LIMITER",
+      "namespace_id": "2311",
+      "simple": { "limit": 10, "period": 60 },
+    },
+    {
+      // Keyed by a truncated SHA-256 of CF-Connecting-IP; the IP itself is
+      // never passed on, logged or stored.
+      "name": "IP_LIMITER",
+      "namespace_id": "2313",
+      "simple": { "limit": 30, "period": 60 },
+    },
+    {
+      // Coarse cap on all traffic: per Cloudflare location and approximate,
+      // NOT a global total.
+      "name": "GLOBAL_LIMITER",
+      "namespace_id": "2312",
+      "simple": { "limit": 600, "period": 60 },
+    },
+  ],
+  "observability": {
+    "enabled": true,
+    // Invocation logs record request metadata, including the client IP. Keep
+    // only the Worker's own log lines, which never contain payload or IP.
+    "logs": { "invocation_logs": false },
+  },
+}
