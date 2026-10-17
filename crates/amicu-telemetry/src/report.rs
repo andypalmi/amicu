@@ -806,6 +806,12 @@ impl TelemetryReport {
         {
             return Err(ValidationError::BadLabel("unknown provider".into()));
         }
+        // A region is a cloud provider's; a local host never has one.
+        if self.region.is_some() && self.provider.as_ref().map(Label::as_str) != Some("modal") {
+            return Err(ValidationError::BadLabel(
+                "region without a cloud provider".into(),
+            ));
+        }
         if self.context_length.is_some_and(|c| c > MAX_CONTEXT_LENGTH) {
             return Err(ValidationError::BadNumber("context_length"));
         }
@@ -966,7 +972,7 @@ mod tests {
             },
             runtime: RuntimeInfo::new(Label::new("vllm").unwrap()).with_version("0.11.0"),
             provider: Some(Label::new("local").unwrap()),
-            region: Some(Label::new("nbg1").unwrap()),
+            region: None,
             context_length: Some(8192),
             batch_size: Some(64),
             metrics: Rollup {
@@ -1041,6 +1047,9 @@ mod tests {
         // the schema declares nothing the types do not have.
         let mut payload = BTreeSet::new();
         collect_keys(&serde_json::to_value(batch()).unwrap(), &mut payload);
+        // `region` appears only on a Modal report.
+        let modal = report().with_provider("modal").with_region("eu-west");
+        collect_keys(&serde_json::to_value(modal).unwrap(), &mut payload);
         let schema: serde_json::Value = serde_json::from_str(SCHEMA).unwrap();
         let mut declared = BTreeSet::new();
         schema_properties(&schema, &mut declared);
@@ -1255,6 +1264,11 @@ mod tests {
             |r| r.metrics.gpu_memory_peak_bytes = Some(u64::MAX),
             |r| r.metrics.host_memory_peak_bytes = Some(GIB + 1),
             |r| r.provider = Some(Label::new("hetzner").unwrap()),
+            |r| r.region = Some(Label::new("nbg1").unwrap()),
+            |r| {
+                r.provider = None;
+                r.region = Some(Label::new("eu-west").unwrap());
+            },
             |r| r.metrics.running_peak = Some(u32::MAX),
             |r| {
                 r.metrics.ttft_ms.as_mut().unwrap().counts.pop();
@@ -1277,7 +1291,12 @@ mod tests {
             assert!(r.validate().is_err(), "case {i}");
             assert!(r.to_json().is_err(), "invalid reports are never serialized");
         }
-        let mut r = report();
+        let mut r = report().with_provider("modal").with_region("eu-west");
+        r.validate()
+            .expect("a Modal report may carry a Modal region");
+        let mut v = serde_json::to_value(&r).unwrap();
+        v["provider"] = "local".into();
+        assert!(TelemetryReport::from_json(&v.to_string()).is_err());
         r.hardware.accelerator = None; // model label dropped client-side: fine
         assert!(r.validate().is_ok());
         let mut r = report();
@@ -1402,7 +1421,7 @@ mod tests {
         let mut r = report();
         r.runtime = RuntimeInfo::new(Label::new("vllm").unwrap()).with_version("sk-secret-1");
         r.model.quantization = Label::sanitized("a b");
-        let r = r.with_provider("10.1.2.3").with_region("nbg1");
+        let r = r.with_provider("10.1.2.3");
         assert_eq!(r.provider.as_ref().map(Label::as_str), Some("other"));
         assert_eq!(
             report().with_provider("Modal").provider.unwrap().as_str(),

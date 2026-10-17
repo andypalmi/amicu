@@ -100,7 +100,6 @@
         "quantization": "fp8"
       },
       "provider": "local",
-      "region": "nbg1",
       "runtime": {
         "name": "vllm",
         "version": "0.11.0"

@@ -229,7 +229,7 @@
         },
         "region": {
           "$ref": "#/$defs/label",
-          "description": "A cloud provider's region code only; never set for a local host."
+          "description": "A cloud provider's region code. Allowed only when provider is modal; a local host never sends one."
         },
         "context_length": {
           "type": "integer",
@@ -294,6 +294,25 @@
               "$ref": "#/$defs/gib_bytes"
             }
           }
+        }
+      },
+      "if": {
+        "not": {
+          "required": [
+            "provider"
+          ],
+          "properties": {
+            "provider": {
+              "const": "modal"
+            }
+          }
+        }
+      },
+      "then": {
+        "not": {
+          "required": [
+            "region"
+          ]
         }
       }
     },
