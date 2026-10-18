@@ -1007,8 +1007,7 @@ fn preflight(result: &PlanResult, env: &Env<'_>) -> Result<(), CliError> {
                 item.action.provider.as_deref(),
                 &item.deployment,
             )?;
-            if item.action.provider.as_deref() == Some(RUNPOD_PROVIDER)
-                && launch.api_key.is_none()
+            if item.action.provider.as_deref() == Some(RUNPOD_PROVIDER) && launch.api_key.is_none()
             {
                 return Err(CliError::Message(format!(
                     "deployment '{}': RunPod deployments need an `api_key`, and it must be a \
@@ -1097,40 +1096,89 @@ async fn apply_all(
                 item.action.provider.as_deref(),
                 &item.deployment,
             )?;
-            // Modal builds a per-deployment adapter; the host adapters are shared.
-            let modal_adapter: Box<dyn RuntimeAdapter>;
+            // Modal and RunPod build a per-deployment adapter; the host adapters
+            // are shared.
+            let remote_adapter: Box<dyn RuntimeAdapter>;
             // Set for Modal: the id of the app `start` deployed, readable even when
             // `start` fails after the deploy (see below).
             let mut deployed_app = None;
-            let adapter: &dyn RuntimeAdapter = match (launch.runtime, dispatch) {
-                (runtime, Dispatch::Modal) => {
-                    let previous_endpoint = prior
-                        .and_then(|s| find_handle(s, &item.deployment))
-                        .map(|h| h.endpoint.clone());
-                    let supervisor = modal_supervisor(
-                        graph,
-                        &catalog,
-                        &item.deployment,
-                        project_app_name(&progress.project_id, item.deployment.as_str()),
-                        runtime,
-                        previous_endpoint,
-                    )?;
-                    deployed_app = Some(supervisor.deployed_app());
-                    modal_adapter = match runtime {
-                        amicu_runtime::RuntimeKind::Vllm => Box::new(VllmAdapter::new(
-                            Box::new(catalog.clone()),
-                            Box::new(supervisor),
-                        )),
-                        amicu_runtime::RuntimeKind::LlamaCpp => Box::new(LlamaCppAdapter::new(
-                            Box::new(catalog.clone()),
-                            Box::new(supervisor),
-                        )),
-                    };
-                    modal_adapter.as_ref()
-                }
-                (amicu_runtime::RuntimeKind::LlamaCpp, Dispatch::Host) => &llama_adapter,
-                (amicu_runtime::RuntimeKind::Vllm, Dispatch::Host) => &vllm_adapter,
-            };
+            let mut runpod = None;
+            let adapter: &dyn RuntimeAdapter =
+                match (launch.runtime, dispatch) {
+                    (runtime, Dispatch::Modal) => {
+                        let previous_endpoint = prior
+                            .and_then(|s| find_handle(s, &item.deployment))
+                            .map(|h| h.endpoint.clone());
+                        let supervisor = modal_supervisor(
+                            graph,
+                            &catalog,
+                            &item.deployment,
+                            project_app_name(&progress.project_id, item.deployment.as_str()),
+                            runtime,
+                            previous_endpoint,
+                        )?;
+                        deployed_app = Some(supervisor.deployed_app());
+                        remote_adapter =
+                            boxed_adapter(Box::new(catalog.clone()), runtime, Box::new(supervisor));
+                        remote_adapter.as_ref()
+                    }
+                    (runtime, Dispatch::RunPod) => {
+                        let account = runpod_account.as_deref().ok_or_else(|| {
+                            CliError::Message("the RunPod preflight did not run".to_owned())
+                        })?;
+                        for r in progress.stops.iter().filter(|r| {
+                            r.deployment == item.deployment && r.backend == Backend::Runpod
+                        }) {
+                            crate::runpod_ops::check_account(
+                                item.deployment.as_str(),
+                                r.workspace.as_deref(),
+                                Some(account),
+                            )?;
+                        }
+                        let name = amicu_runpod::project_endpoint_name(
+                            &progress.project_id,
+                            item.deployment.as_str(),
+                        );
+                        let recorded = progress
+                            .stops
+                            .iter()
+                            .find(|r| {
+                                r.deployment == item.deployment
+                                    && r.backend == Backend::Runpod
+                                    && r.identity == name
+                            })
+                            .cloned();
+                        let supervisor = runpod_supervisor(
+                            graph,
+                            &catalog,
+                            &item.deployment,
+                            &progress.project_id,
+                            account,
+                            env.runpod,
+                            recorded.as_ref(),
+                        )?;
+                        let launch_secrets =
+                            amicu_llamacpp::resolve_launch_secrets(launch, resolver).await?;
+                        let planned = supervisor
+                            .planned_secret_names(launch, &launch_secrets)
+                            .map_err(supervisor_err)?;
+                        runpod = Some(RunPodStart {
+                            account: account.to_owned(),
+                            recorded_id: recorded.as_ref().and_then(|r| r.app_id.clone()),
+                            secrets: merged_names(
+                                recorded.as_ref().map_or(&[][..], |r| &r.secrets[..]),
+                                &planned,
+                            ),
+                            deployed: supervisor.deployed_endpoint(),
+                            created: supervisor.created_secrets(),
+                        });
+                        remote_adapter =
+                            boxed_adapter(Box::new(catalog.clone()), runtime, Box::new(supervisor));
+                        remote_adapter.as_ref()
+                    }
+                    (amicu_runtime::RuntimeKind::LlamaCpp, Dispatch::Host) => &llama_adapter,
+                    (amicu_runtime::RuntimeKind::Vllm, Dispatch::Host) => &vllm_adapter,
+                };
             // The workspace a Modal app will be created in; a deployment whose
             // recorded instances live in another workspace is refused.
             let active_ws = if dispatch == Dispatch::Modal {
@@ -1138,8 +1186,22 @@ async fn apply_all(
             } else {
                 None
             };
-            let new_stop = match dispatch {
-                Dispatch::Host => {
+            let new_stop = match (dispatch, &runpod) {
+                (Dispatch::RunPod, Some(rp)) => StopRecord::runpod_in(
+                    &progress.project_id,
+                    &item.deployment,
+                    rp.recorded_id.clone(),
+                    Some(&rp.account),
+                    rp.secrets.clone(),
+                ),
+                (Dispatch::Modal, _) => StopRecord::modal_in(
+                    &progress.project_id,
+                    &item.deployment,
+                    None,
+                    active_ws.as_ref(),
+                )
+                .with_volumes(&modal_volume_names(launch.runtime)),
+                _ => {
                     let label = amicu_llamacpp::project_host_label(
                         &progress.project_id,
                         item.deployment.as_str(),
@@ -1151,13 +1213,6 @@ async fn apply_all(
                         host_probe.service_paths(&label),
                     )
                 }
-                Dispatch::Modal => StopRecord::modal_in(
-                    &progress.project_id,
-                    &item.deployment,
-                    None,
-                    active_ws.as_ref(),
-                )
-                .with_volumes(&modal_volume_names(launch.runtime)),
             };
             // The instance is started under the label recorded in state, and
             // a relative model path is resolved against the project root now,
@@ -1181,7 +1236,7 @@ async fn apply_all(
                         ws,
                     )?;
                 }
-            } else {
+            } else if dispatch == Dispatch::Host {
                 // Never start something whose owner cannot be recorded.
                 if host_ctx.is_none() {
                     return Err(CliError::Message(format!(
@@ -1213,7 +1268,12 @@ async fn apply_all(
             // identity, BEFORE the provider starts anything, so a crash can
             // never leave an instance that state cannot stop. A previous
             // instance's record (a different Modal app id) is kept alongside.
-            if !progress
+            // A RunPod endpoint is updated in place: its record is replaced by
+            // one that also lists the secrets about to be written.
+            if dispatch == Dispatch::RunPod {
+                progress.stops.retain(|r| !r.same_target(&new_stop));
+                progress.stops.push(new_stop.clone());
+            } else if !progress
                 .stops
                 .iter()
                 .any(|r| r.same_target(&new_stop) && (!dispatch_is_modal(r) || r.app_id.is_none()))
@@ -1230,7 +1290,7 @@ async fn apply_all(
             } else {
                 None
             };
-            let handle = match adapter.apply(launch, &resolver).await {
+            let handle = match adapter.apply(launch, resolver).await {
                 Ok(handle) => handle,
                 Err(e) => {
                     // The supervisor may have rolled back or stopped an app it had
@@ -1245,6 +1305,11 @@ async fn apply_all(
                             &app_id,
                         );
                     }
+                    if let Some(rp) = &runpod {
+                        let note =
+                            runpod_failed_start(rp, adapter, &new_stop, &mut progress.stops).await;
+                        return Err(CliError::Message(format!("{e}{note}")));
+                    }
                     return Err(e.into());
                 }
             };
@@ -1257,7 +1322,8 @@ async fn apply_all(
                 launch,
                 dispatch,
                 previous.as_ref(),
-                &resolver,
+                resolver,
+                env.runpod,
             )
             .await
             {
@@ -1271,6 +1337,10 @@ async fn apply_all(
                         &item.deployment,
                         &handle.id,
                     );
+                }
+                if let Some(rp) = &runpod {
+                    // Torn down or not, the record stays until a stop is confirmed.
+                    sync_runpod_record(&mut progress.stops, &new_stop, Some(&handle.id), rp, false);
                 }
                 return Err(e);
             }
@@ -1286,6 +1356,9 @@ async fn apply_all(
                     &item.deployment,
                     &handle.id,
                 );
+            }
+            if let Some(rp) = &runpod {
+                sync_runpod_record(&mut progress.stops, &new_stop, Some(&handle.id), rp, true);
             }
             progress.started.push(handle);
             if let Some(fp) = &item.fingerprint {
@@ -1390,14 +1463,16 @@ async fn secure_endpoint(
     dispatch: Dispatch,
     previous: Option<&PreviousModal<'_>>,
     resolver: &dyn SecretResolver,
+    runpod: &dyn RunPodOps,
 ) -> Result<(), CliError> {
-    let verdict = verify_handle(handle, launch, resolver).await;
+    let verdict = verify_handle(handle, launch, resolver, runpod).await;
     let Err(detail) = verdict else {
         return Ok(());
     };
     let hint = match dispatch {
         Dispatch::Modal => format!("`modal app stop {}`", handle.id),
         Dispatch::Host => host_stop_hint(std::env::consts::OS, &handle.id),
+        Dispatch::RunPod => format!("delete endpoint {} in the RunPod console", handle.id),
     };
     // A Modal update redeploys under the same app: roll the new version back
     // and re-verify the previous endpoint recorded in state. Anything short of
@@ -1420,7 +1495,7 @@ async fn secure_endpoint(
             let p = previous.expect("only called with a previous version");
             let mut old = handle.clone();
             old.endpoint.clone_from(&p.endpoint);
-            verify_handle(&old, launch, resolver).await
+            verify_handle(&old, launch, resolver, runpod).await
         },
         || async { adapter.stop(handle).await.map_err(|e| e.to_string()) },
     )
@@ -1437,6 +1512,7 @@ async fn verify_handle(
     handle: &RuntimeHandle,
     launch: &LaunchPlan,
     resolver: &dyn SecretResolver,
+    runpod: &dyn RunPodOps,
 ) -> Result<(), String> {
     let Some(key_ref) = &launch.api_key else {
         return match handle.exposure {
@@ -1452,6 +1528,18 @@ async fn verify_handle(
         .resolve(key_ref)
         .await
         .map_err(|e| format!("could not resolve the endpoint API key to verify it ({e})"))?;
+    if handle.exposure
+        == (EndpointExposure::Public {
+            gateway: GatewayAuth::RunPodBearer,
+        })
+    {
+        let _ = writeln!(
+            std::io::stderr(),
+            "verifying endpoint authentication at {} ...",
+            handle.endpoint
+        );
+        return runpod.verify_exposure(&handle.endpoint, &key).await;
+    }
     let timing = if handle.exposure.is_public() {
         CheckTiming::PUBLIC
     } else {
@@ -1582,6 +1670,179 @@ fn record_modal_start(
         .filter(|r| same(r) && r.app_id.as_deref().is_some_and(|a| a != app_id))
         .cloned()
         .collect()
+}
+
+/// The adapter for `runtime` over a per-deployment remote supervisor.
+fn boxed_adapter(
+    catalog: Box<dyn Catalog>,
+    runtime: amicu_runtime::RuntimeKind,
+    supervisor: Box<dyn ProcessSupervisor>,
+) -> Box<dyn RuntimeAdapter> {
+    match runtime {
+        amicu_runtime::RuntimeKind::Vllm => Box::new(VllmAdapter::new(catalog, supervisor)),
+        amicu_runtime::RuntimeKind::LlamaCpp => Box::new(LlamaCppAdapter::new(catalog, supervisor)),
+    }
+}
+
+/// What a RunPod start began from, and the supervisor's view of what exists.
+struct RunPodStart {
+    account: String,
+    recorded_id: Option<String>,
+    /// Recorded plus planned secret names, as written ahead.
+    secrets: Vec<String>,
+    deployed: Arc<std::sync::Mutex<Option<String>>>,
+    created: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+fn merged_names(a: &[String], b: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = a.iter().chain(b).cloned().collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Checks the RunPod management key and reads the account, once per run,
+/// when any launch goes to RunPod. Nothing is started before this passes.
+async fn runpod_preflight(result: &PlanResult, env: &Env<'_>) -> Result<Option<String>, CliError> {
+    let deployments: Vec<&DeploymentId> = result
+        .items
+        .iter()
+        .filter(|i| {
+            i.launch.as_ref().is_some_and(|l| {
+                dispatch_for(l.runtime, i.action.provider.as_deref()) == Some(Dispatch::RunPod)
+            })
+        })
+        .map(|i| &i.deployment)
+        .collect();
+    if deployments.is_empty() {
+        return Ok(None);
+    }
+    let account = crate::runpod_ops::preflight(env.runpod).await?;
+    for d in deployments {
+        let _ = writeln!(
+            std::io::stderr(),
+            "note: '{d}' runs on RunPod: its api_key must be a RunPod API key with \
+             api.runpod.ai access; RunPod's gateway checks it and the runtime has no key of its own"
+        );
+    }
+    Ok(Some(account))
+}
+
+/// Updates the RunPod record matching `record` from the supervisor: the
+/// endpoint id once known, and the secrets. `exact` (a finished start or a
+/// confirmed teardown) records the supervisor's set as is; otherwise names
+/// are only ever added, so nothing that may exist is forgotten.
+fn sync_runpod_record(
+    stops: &mut [StopRecord],
+    record: &StopRecord,
+    endpoint_id: Option<&str>,
+    rp: &RunPodStart,
+    exact: bool,
+) {
+    let Some(r) = stops.iter_mut().find(|r| r.same_target(record)) else {
+        return;
+    };
+    if let Some(id) = endpoint_id {
+        r.app_id = Some(id.to_owned());
+    }
+    if let Ok(created) = rp.created.lock() {
+        r.secrets = if exact {
+            merged_names(&created, &[])
+        } else {
+            merged_names(&r.secrets, &created)
+        };
+    }
+}
+
+fn runpod_handle(deployment: &DeploymentId, id: &str) -> RuntimeHandle {
+    RuntimeHandle {
+        id: id.to_owned(),
+        deployment: deployment.clone(),
+        endpoint: amicu_runpod::endpoint_url(id),
+        exposure: EndpointExposure::Public {
+            gateway: GatewayAuth::RunPodBearer,
+        },
+    }
+}
+
+/// After a failed RunPod start: record what exists, and tear down an
+/// endpoint this run created (nothing was serving from it). An endpoint that
+/// was already recorded is left in place rather than taken down. Either way
+/// the record stays until a stop is confirmed. Returns a note for the error.
+async fn runpod_failed_start(
+    rp: &RunPodStart,
+    adapter: &dyn RuntimeAdapter,
+    record: &StopRecord,
+    stops: &mut [StopRecord],
+) -> String {
+    let deployed = rp.deployed.lock().ok().and_then(|d| d.clone());
+    sync_runpod_record(stops, record, deployed.as_deref(), rp, false);
+    let Some(id) = deployed else {
+        return String::new();
+    };
+    if rp.recorded_id.as_deref() == Some(id.as_str()) {
+        return format!("; RunPod endpoint {id} was left in place and stays recorded");
+    }
+    match adapter.stop(&runpod_handle(&record.deployment, &id)).await {
+        Ok(()) => {
+            sync_runpod_record(stops, record, None, rp, true);
+            format!(
+                "; the new RunPod endpoint {id} was torn down (it stays recorded until a later \
+                 apply or destroy confirms it is gone)"
+            )
+        }
+        Err(e) => format!(
+            "; tearing down the new RunPod endpoint {id} FAILED ({e}); it stays recorded and \
+             `amicu destroy --target {}` retries",
+            record.deployment
+        ),
+    }
+}
+
+/// Stops a RunPod endpoint and deletes its secrets. Only a confirmed stop in
+/// the recorded account is `Ok`; anything else keeps the record.
+async fn stop_runpod(record: &StopRecord, env: &Env<'_>) -> Result<(), CliError> {
+    let client = env.runpod.client()?;
+    let active = crate::runpod_ops::current_account(&client).await?;
+    crate::runpod_ops::check_account(
+        record.deployment.as_str(),
+        record.workspace.as_deref(),
+        active.as_deref(),
+    )?;
+    let Some(id) = record.app_id.as_deref() else {
+        return Err(CliError::Message(format!(
+            "{} has no endpoint id recorded, so amicu cannot confirm it is stopped. If an \
+             endpoint named '{}' exists in the RunPod console, delete it there. It was kept in \
+             state",
+            record.describe(),
+            record.identity
+        )));
+    };
+    // The project id only names new endpoints; a stop goes by id.
+    let supervisor = RunPodSupervisor::new(client, "", record.deployment.as_str())
+        .with_recorded_secrets(record.secrets.clone())
+        .with_confirmed_account(true);
+    let kept = match supervisor
+        .stop_endpoint(&runpod_handle(&record.deployment, id))
+        .await
+    {
+        Ok(StopOutcome::Deleted) => return Ok(()),
+        Ok(StopOutcome::AlreadyGone { kept_secrets }) => kept_secrets,
+        Err(e) => {
+            return Err(CliError::Message(format!(
+                "{}: {e}; it was kept in state",
+                record.describe()
+            )));
+        }
+    };
+    if kept.is_empty() {
+        return Ok(());
+    }
+    Err(CliError::Message(format!(
+        "{} is gone, but its secrets were kept ({}); it was kept in state",
+        record.describe(),
+        kept.join(", ")
+    )))
 }
 
 /// Refuse a host stop that would act as someone else: launchd and systemd are
@@ -1740,6 +2001,7 @@ async fn stop_record(
             Ok(())
         }
         Backend::Modal => stop_modal(record, env, stops).await,
+        Backend::Runpod => stop_runpod(record, env).await,
     }
 }
 
@@ -2107,7 +2369,7 @@ mod dispatch_tests {
 
     #[test]
     fn vllm_on_an_unsupported_provider_is_not_dispatched() {
-        for provider in ["runpod", "hetzner", "aws", "ssh"] {
+        for provider in ["hetzner", "aws", "ssh"] {
             assert_eq!(
                 dispatch_for(RuntimeKind::Vllm, Some(provider)),
                 None,
@@ -2119,11 +2381,21 @@ mod dispatch_tests {
     #[test]
     fn unsupported_provider_error_names_it_and_the_supported_set() {
         let id = amicu_core::id::DeploymentId::from("dep");
-        let err = super::require_dispatch(RuntimeKind::Vllm, Some("runpod"), &id)
-            .expect_err("runpod is not applyable")
+        let err = super::require_dispatch(RuntimeKind::Vllm, Some("hetzner"), &id)
+            .expect_err("hetzner is not applyable")
             .to_string();
-        assert!(err.contains("provider \"runpod\" is not supported by apply yet"));
-        assert!(err.contains("modal"));
+        assert!(err.contains("provider \"hetzner\" is not supported by apply yet"));
+        assert!(err.contains("modal, runpod"));
+    }
+
+    #[test]
+    fn both_runtimes_on_runpod_select_the_runpod_supervisor() {
+        for runtime in [RuntimeKind::Vllm, RuntimeKind::LlamaCpp] {
+            assert_eq!(
+                dispatch_for(runtime, Some("runpod")),
+                Some(Dispatch::RunPod)
+            );
+        }
     }
 
     #[test]
@@ -2153,7 +2425,7 @@ mod dispatch_tests {
 
     #[test]
     fn llama_cpp_on_an_unsupported_provider_is_not_dispatched() {
-        for provider in ["runpod", "hetzner", "aws", "ssh"] {
+        for provider in ["hetzner", "aws", "ssh"] {
             assert_eq!(
                 dispatch_for(RuntimeKind::LlamaCpp, Some(provider)),
                 None,
@@ -2604,9 +2876,14 @@ mod exposure_tests {
     async fn loopback_without_a_key_skips_the_check() {
         // No server at all: a skipped check must not touch the network.
         let h = handle("http://127.0.0.1:1", EndpointExposure::Loopback);
-        verify_handle(&h, &launch(None), &FixedResolver)
-            .await
-            .unwrap();
+        verify_handle(
+            &h,
+            &launch(None),
+            &FixedResolver,
+            &crate::runpod_ops::RealRunPod,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -2617,9 +2894,14 @@ mod exposure_tests {
                 gateway: GatewayAuth::None,
             },
         );
-        let err = verify_handle(&h, &launch(None), &FixedResolver)
-            .await
-            .unwrap_err();
+        let err = verify_handle(
+            &h,
+            &launch(None),
+            &FixedResolver,
+            &crate::runpod_ops::RealRunPod,
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("no `api_key`"), "{err}");
     }
 
@@ -2627,9 +2909,14 @@ mod exposure_tests {
     async fn a_protected_loopback_endpoint_with_a_key_passes() {
         let url = serve(false).await;
         let h = handle(&url, EndpointExposure::Loopback);
-        verify_handle(&h, &launch(Some("K")), &FixedResolver)
-            .await
-            .unwrap();
+        verify_handle(
+            &h,
+            &launch(Some("K")),
+            &FixedResolver,
+            &crate::runpod_ops::RealRunPod,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -2648,6 +2935,7 @@ mod exposure_tests {
             Dispatch::Host,
             None,
             &FixedResolver,
+            &crate::runpod_ops::RealRunPod,
         )
         .await
         .unwrap_err()
@@ -2732,6 +3020,7 @@ mod exposure_tests {
             Dispatch::Modal,
             Some(&previous),
             &FixedResolver,
+            &crate::runpod_ops::RealRunPod,
         )
         .await
         .unwrap_err()
@@ -2796,6 +3085,7 @@ mod exposure_tests {
             Dispatch::Modal,
             None,
             &FixedResolver,
+            &crate::runpod_ops::RealRunPod,
         )
         .await
         .unwrap_err()

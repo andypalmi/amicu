@@ -1,14 +1,6 @@
-//! Typed client over the RunPod v2 REST API.
-//!
-//! The API is described by <https://api.runpod.io/v2/openapi.json>: server
-//! `https://api.runpod.io`, every path under `/v2`, bearer-token auth,
-//! `application/problem+json` errors. This client covers the serverless
-//! (`/serverless`), account secret (`/account/secrets`) and organization
-//! (`/organization`) resources amicu needs to deploy a load-balancing endpoint.
-//!
-//! It is built on [`HttpTransport`], so tests inject a mock and nothing here
-//! touches a concrete HTTP client. The API key and secret values are held in
-//! types whose `Debug` redacts them and are never put in an error.
+//! Typed client over the RunPod v2 REST API
+//! (<https://api.runpod.io/v2/openapi.json>), on the [`HttpTransport`] seam.
+//! The API key and secret values are never `Debug`-printed or put in an error.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -21,8 +13,6 @@ use serde_json::{Map, Value, json};
 
 use crate::error::RunPodError;
 
-/// The RunPod v2 REST base URL (`servers[0].url` + the `/v2` path prefix of
-/// the OpenAPI document).
 pub const BASE_URL: &str = "https://api.runpod.io/v2";
 
 /// Upper bound on list pages followed, so a misbehaving cursor cannot loop
@@ -37,7 +27,6 @@ const MAX_DETAIL: usize = 300;
 pub struct ApiKey(String);
 
 impl ApiKey {
-    /// Wrap a key.
     #[must_use]
     pub fn new(key: impl Into<String>) -> Self {
         Self(key.into())
@@ -50,13 +39,11 @@ impl fmt::Debug for ApiKey {
     }
 }
 
-/// FlashBoot cold-start acceleration mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FlashBoot {
     /// Disabled (the API default).
     #[default]
     Off,
-    /// Enabled.
     Flashboot,
     /// Enabled with priority capacity.
     PriorityFlashboot,
@@ -81,9 +68,7 @@ impl FlashBoot {
 /// `excluded_types`** unless restated (RunPod's documented behavior).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuRequest {
-    /// Serverless GPU pool ids.
     pub pools: Vec<String>,
-    /// GPUs per worker.
     pub count: u32,
     /// GPU type ids subtracted from the pools.
     pub excluded_types: Vec<String>,
@@ -111,12 +96,10 @@ impl From<crate::hardware::GpuPlacement> for GpuRequest {
     }
 }
 
-/// Worker bounds and scale-down delay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkersConfig {
     /// Minimum workers (`0` scales to zero).
     pub min: u32,
-    /// Maximum workers.
     pub max: u32,
     /// Seconds before an idle worker scales down (1..=3600).
     pub idle_timeout: Option<u32>,
@@ -142,7 +125,6 @@ impl WorkersConfig {
 pub struct CreateEndpoint {
     /// Endpoint name (the identity amicu looks it up by).
     pub name: String,
-    /// Container image.
     pub image: String,
     /// Container ENTRYPOINT in exec form; omitted when empty.
     pub entrypoint: Vec<String>,
@@ -153,23 +135,17 @@ pub struct CreateEndpoint {
     pub env: BTreeMap<String, String>,
     /// Exposed ports as `port/protocol`, e.g. `8000/http`.
     pub ports: Vec<String>,
-    /// Container disk in GB.
     pub disk_gb: Option<u32>,
-    /// GPU pools and count.
     pub gpu: GpuRequest,
-    /// Worker bounds.
     pub workers: WorkersConfig,
     /// In-flight requests per worker that triggers scale-up (`>= 1`).
     pub request_count: u32,
     /// Placement data centers; empty lets RunPod choose.
     pub data_center_ids: Vec<String>,
-    /// FlashBoot mode.
     pub flashboot: FlashBoot,
     /// Network volumes to mount (at `/runpod-volume`).
     pub network_volume_ids: Vec<String>,
-    /// Per-request execution timeout in milliseconds.
     pub timeout_ms: Option<u32>,
-    /// Container registry credential id for a private image.
     pub registry_id: Option<String>,
 }
 
@@ -201,7 +177,6 @@ impl CreateEndpoint {
         }
     }
 
-    /// The exact JSON body sent to RunPod.
     #[must_use]
     pub fn to_body(&self) -> Value {
         let mut m = Map::new();
@@ -254,40 +229,28 @@ impl fmt::Debug for CreateEndpoint {
 /// `Debug` prints environment variable names only.
 #[derive(Clone, Default)]
 pub struct UpdateEndpoint {
-    /// New name.
     pub name: Option<String>,
-    /// New image.
     pub image: Option<String>,
     /// Replacement ENTRYPOINT (`Some(vec![])` clears it).
     pub entrypoint: Option<Vec<String>>,
     /// Replacement CMD (`Some(vec![])` clears it).
     pub cmd: Option<Vec<String>>,
-    /// Replacement environment (replaces the whole map).
     pub env: Option<BTreeMap<String, String>>,
-    /// Replacement ports.
     pub ports: Option<Vec<String>>,
-    /// New container disk in GB.
     pub disk_gb: Option<u32>,
-    /// New GPU selection.
     pub gpu: Option<GpuRequest>,
-    /// New worker bounds.
     pub workers: Option<WorkersConfig>,
-    /// New in-flight-requests-per-worker scaler value.
     pub request_count: Option<u32>,
     /// Replacement data centers (`Some(vec![])` lets RunPod choose).
     pub data_center_ids: Option<Vec<String>>,
-    /// New FlashBoot mode.
     pub flashboot: Option<FlashBoot>,
     /// Replacement network volumes (`Some(vec![])` detaches).
     pub network_volume_ids: Option<Vec<String>>,
-    /// New execution timeout in milliseconds.
     pub timeout_ms: Option<u32>,
-    /// New registry credential id.
     pub registry_id: Option<String>,
 }
 
 impl UpdateEndpoint {
-    /// The exact JSON body sent to RunPod.
     #[must_use]
     pub fn to_body(&self) -> Value {
         let mut m = Map::new();
@@ -394,7 +357,6 @@ pub struct CreateSecret {
     pub name: String,
     /// The secret value (write-only on RunPod's side).
     pub value: String,
-    /// Optional description.
     pub description: Option<String>,
 }
 
@@ -429,26 +391,20 @@ pub enum DeleteOutcome {
     AlreadyGone,
 }
 
-/// GPU settings of a returned endpoint.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointGpu {
-    /// Pool ids.
     #[serde(default)]
     pub pools: Vec<String>,
-    /// GPUs per worker.
     #[serde(default)]
     pub count: Option<u32>,
 }
 
-/// Worker bounds of a returned endpoint.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointWorkers {
-    /// Minimum workers.
     #[serde(default)]
     pub min: u32,
-    /// Maximum workers.
     #[serde(default)]
     pub max: u32,
     /// Idle scale-down delay in seconds.
@@ -461,10 +417,8 @@ pub struct EndpointWorkers {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestUrls {
-    /// Base URL requests are routed through.
     #[serde(default)]
     pub base: Option<String>,
-    /// Health-check URL.
     #[serde(default)]
     pub health: Option<String>,
 }
@@ -480,32 +434,25 @@ pub const OWNER_ENV_VAR: &str = "AMICU_OWNER";
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Endpoint {
-    /// Endpoint id.
     pub id: String,
-    /// Endpoint name.
     pub name: String,
     /// `QUEUE` or `LOAD_BALANCER`.
     #[serde(rename = "type", default)]
     pub kind: Option<String>,
-    /// Container image.
     #[serde(default)]
     pub image: Option<String>,
     /// GPU settings (absent for CPU endpoints).
     #[serde(default)]
     pub gpu: Option<EndpointGpu>,
-    /// Worker bounds.
     #[serde(default)]
     pub workers: Option<EndpointWorkers>,
-    /// Placement data centers.
     #[serde(default)]
     pub data_center_ids: Vec<String>,
-    /// Request URLs.
     #[serde(default)]
     pub request_urls: Option<RequestUrls>,
     /// FlashBoot mode as RunPod spells it.
     #[serde(default)]
     pub flashboot: Option<String>,
-    /// Creation time (RFC 3339).
     #[serde(default)]
     pub created_at: Option<String>,
     /// The [`OWNER_ENV_VAR`] value in the endpoint env, when RunPod returns
@@ -526,38 +473,30 @@ where
         .and_then(|v| v.as_str().map(str::to_owned)))
 }
 
-/// One active worker of an endpoint.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Worker {
-    /// Worker id.
     pub id: String,
     /// `RUNNING`, `IDLE`, `INITIALIZING`, `THROTTLED` or `UNHEALTHY`.
     pub status: String,
     /// Whether it runs an older endpoint configuration.
     #[serde(default)]
     pub is_stale: bool,
-    /// GPUs allocated.
     #[serde(default)]
     pub gpu_count: u32,
-    /// GPU type the worker is placed on.
     #[serde(default)]
     pub gpu_type_id: Option<String>,
-    /// Data center the worker is placed in.
     #[serde(default)]
     pub data_center_id: Option<String>,
 }
 
-/// Worker counts by status.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 pub struct WorkerSummary {
-    /// Processing a job.
     #[serde(default)]
     pub running: u32,
     /// Ready, polling for jobs.
     #[serde(default)]
     pub idle: u32,
-    /// Starting up.
     #[serde(default)]
     pub initializing: u32,
     /// Waiting on capacity.
@@ -566,7 +505,6 @@ pub struct WorkerSummary {
     /// Failing health checks.
     #[serde(default)]
     pub unhealthy: u32,
-    /// All workers.
     #[serde(default)]
     pub total: u32,
 }
@@ -575,9 +513,7 @@ pub struct WorkerSummary {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkersList {
-    /// Active workers.
     pub workers: Vec<Worker>,
-    /// Counts by status.
     pub summary: WorkerSummary,
     /// The endpoint's current configuration version.
     #[serde(default)]
@@ -587,24 +523,17 @@ pub struct WorkersList {
 /// The account's organization: its identity.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct Organization {
-    /// Organization id.
     pub id: String,
-    /// Organization name.
     pub name: String,
 }
 
-/// Secret metadata (the value is write-only and never returned).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Secret {
-    /// Secret id.
     pub id: String,
-    /// Secret name.
     pub name: String,
-    /// Description.
     #[serde(default)]
     pub description: Option<String>,
-    /// Creation time (RFC 3339).
     #[serde(default)]
     pub created_at: Option<String>,
 }
@@ -638,13 +567,11 @@ struct GpuCatalog {
 pub struct GpuType {
     /// GPU type id, as used in `excludedTypes` (`"NVIDIA L40S"`).
     pub id: String,
-    /// Display name.
     #[serde(default)]
     pub name: String,
     /// Serverless pool id (`"ADA_48_PRO"`); absent for types with no pool.
     #[serde(default)]
     pub pool: Option<String>,
-    /// Memory in GB.
     #[serde(default)]
     pub memory: Option<u32>,
 }
@@ -657,16 +584,10 @@ pub const ACCOUNT_MARKER_SECRET: &str = "amicu-account-marker";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountIdentity {
     /// An organization account, by organization id.
-    Organization {
-        /// Organization id.
-        id: String,
-    },
+    Organization { id: String },
     /// A personal account (organizations not enabled), by the id of its
     /// [`ACCOUNT_MARKER_SECRET`].
-    Personal {
-        /// The marker secret's id.
-        marker_secret_id: String,
-    },
+    Personal { marker_secret_id: String },
 }
 
 impl AccountIdentity {
@@ -681,7 +602,6 @@ impl AccountIdentity {
     }
 }
 
-/// The RunPod v2 REST client.
 pub struct RunPodClient {
     transport: Arc<dyn HttpTransport>,
     base_url: String,
@@ -742,7 +662,6 @@ impl RunPodClient {
         decode(&resp)
     }
 
-    /// `GET /serverless/{id}`.
     pub async fn get_endpoint(&self, id: &str) -> Result<Endpoint, RunPodError> {
         let path = format!("/serverless/{}", segment(id)?);
         let resp = self
@@ -840,7 +759,6 @@ impl RunPodClient {
         self.delete(&path, &format!("endpoint `{id}`")).await
     }
 
-    /// `GET /serverless/{id}/workers`.
     pub async fn list_workers(&self, id: &str) -> Result<WorkersList, RunPodError> {
         let path = format!("/serverless/{}/workers", segment(id)?);
         let resp = self
@@ -1766,6 +1684,18 @@ mod tests {
     }
 
     const NO_ORGS: &str = r#"{"detail":"organizations are not enabled for this user"}"#;
+
+    #[tokio::test]
+    async fn verify_key_lists_one_endpoint_and_maps_a_refusal() {
+        let body = r#"{"endpoints":[],"pagination":{"hasNextPage":false}}"#;
+        let (c, _) = client(Mock::default().on(HttpMethod::Get, "/serverless?limit=1", 200, body));
+        c.verify_key().await.unwrap();
+        let (c, _) = client(Mock::default().on(HttpMethod::Get, "/serverless?limit=1", 401, "{}"));
+        assert_eq!(
+            c.verify_key().await.unwrap_err(),
+            RunPodError::CredentialsRejected { status: 401 }
+        );
+    }
 
     #[tokio::test]
     async fn a_personal_account_is_not_a_rejected_key() {

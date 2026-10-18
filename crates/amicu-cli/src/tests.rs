@@ -1341,6 +1341,8 @@ struct Rig {
     telemetry: FakeTelemetry,
     host: Box<crate::commands::apply::HostSupervisorFactory>,
     modal: FakeModal,
+    runpod: runpod::FakeRunPod,
+    resolver: Box<dyn amicu_core::secret::SecretResolver>,
     forget: bool,
     purge: bool,
 }
@@ -1394,6 +1396,8 @@ impl Rig {
                 })
             }),
             modal,
+            runpod: runpod::FakeRunPod::default(),
+            resolver: Box::new(crate::secret::EnvSecretResolver),
             forget: false,
             purge: false,
             // Opted in: the opt-out sweep stays out of unrelated tests.
@@ -1407,6 +1411,8 @@ impl Rig {
         Env {
             host: &*self.host,
             modal: &self.modal,
+            runpod: &self.runpod,
+            resolver: &*self.resolver,
             forget_unconfirmed: self.forget,
             purge: self.purge,
             proxy_tokens: amicu_modal::proxy_auth::TokenConfig::from_env,
@@ -4496,3 +4502,5 @@ resource "deployment" "d" {
         }
     }
 }
+
+mod runpod;

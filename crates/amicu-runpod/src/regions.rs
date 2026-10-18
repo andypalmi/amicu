@@ -1,8 +1,5 @@
-//! Residency-aware data-center selection.
-//!
-//! Reuses the data-center table in `amicu-providers` (the same one the RunPod
-//! pod provider filters on), so EU placement here is exactly as strict as
-//! there: region `"eu"` yields only EU/EEA data centers.
+//! Residency-aware data-center selection, from the same table the RunPod pod
+//! provider in `amicu-providers` filters on.
 
 use amicu_core::resource::Residency;
 use amicu_providers::RunPodProvider;

@@ -1,93 +1,29 @@
 //! [`RunPodSupervisor`]: runs a rendered vLLM / llama.cpp launch as a RunPod
-//! Serverless load-balancing endpoint, behind the same
-//! [`amicu_llamacpp::ProcessSupervisor`] contract the local and Modal
-//! supervisors implement.
+//! Serverless load-balancing endpoint (`https://<id>.api.runpod.ai`), using
+//! the stock image and the shared container rewrite
+//! ([`amicu_llamacpp::remote::launch_argv`]). The load balancer routes to and
+//! health-checks the deployment's own port.
 //!
-//! # What runs
+//! Auth is the gateway only ([`GatewayAuth::RunPodBearer`]): RunPod checks
+//! `Authorization: Bearer <RunPod API key>` and strips the header before the
+//! worker, so the deployment's `api_key` must be a RunPod key with
+//! api.runpod.ai access, is used only to probe readiness, and the runtime gets
+//! no `--api-key` (it would reject every request).
 //!
-//! The stock image ([`DEFAULT_VLLM_IMAGE`](amicu_llamacpp::remote::DEFAULT_VLLM_IMAGE)
-//! or the llama.cpp `server-cuda` build) with amicu's own rendered argv, made
-//! container-ready by the same shared rewrite Modal uses
-//! ([`amicu_llamacpp::remote::launch_argv`]: `--host 0.0.0.0`, `-hf`/`-hff`
-//! for a GGUF, no local paths or secret flags). `argv[0]` becomes the
-//! container `ENTRYPOINT` (`llama-server` is mapped to the image's
-//! `/app/llama-server`), the rest the `CMD`. No image is built.
+//! Every other secret becomes a RunPod account secret referenced as
+//! `{{ RUNPOD_SECRET_<name> }}`, so the stored endpoint config holds no value.
+//! Names are content-addressed ([`secret_name`]): a changed value is a new
+//! name, and the previous generation is deleted only after the endpoint
+//! update succeeds. [`RunPodSupervisor::planned_secret_names`] gives the names
+//! before `start` for write-ahead recording; `start` and `stop` only delete
+//! names they recorded or wrote. A pre-existing secret with a computed name is
+//! trusted to hold its value.
 //!
-//! The load balancer routes to the worker's `PORT` and polls
-//! `HEALTH_CHECK_PATH` on `PORT_HEALTH` (`200` ready, `204` initializing);
-//! both runtimes serve `/health` on their own port, so all three are set to
-//! the deployment's port and [`HEALTH_PATH`]. The endpoint is reachable at
-//! `https://<id>.api.runpod.ai` ([`endpoint_url`]).
-//!
-//! # Authentication: the gateway only
-//!
-//! RunPod's gateway authenticates every request to `*.api.runpod.ai` with
-//! `Authorization: Bearer <RunPod API key>` and **strips that header** before
-//! the request reaches the worker (custom headers are forwarded). The gateway
-//! is therefore the only auth layer ([`GatewayAuth::RunPodBearer`]): the
-//! deployment's `api_key` must be a RunPod API key with `api.runpod.ai` access
-//! (ideally restricted to this endpoint), and it is a RunPod credential, so it
-//! never reaches the worker. `start` takes the runtime's key variable
-//! (`VLLM_API_KEY` / `LLAMA_API_KEY`) out of the resolved secrets, uses it only
-//! to probe readiness through the gateway, and sets no runtime `--api-key`
-//! (the runtime would reject every request, since the header never arrives).
-//! Neither key variable may appear in the deployment's `env` block.
-//!
-//! # Secrets
-//!
-//! Every other resolved secret (`HF_TOKEN`, any `secret_refs`) is stored as a
-//! RunPod account secret and referenced from the endpoint env as
-//! `{{ RUNPOD_SECRET_<name> }}` ([`secret_reference`]), so the endpoint
-//! configuration RunPod stores holds only the template, never a value.
-//!
-//! Names are content-addressed ([`secret_name`]): the deployment's readable
-//! prefix plus a truncated SHA-256 of the value, salted with the endpoint's
-//! [`owner_marker`] and the variable name. The same value always maps to the
-//! same name, so `start` skips a name that already exists and creates only
-//! new ones; a changed value is a new name, so the live endpoint keeps
-//! resolving its old secret until the PATCH that switches it over succeeds.
-//! Only then are the previous generation's secrets (recorded in state via
-//! [`RunPodSupervisor::with_recorded_secrets`], or written by this instance)
-//! deleted. The digest is 48 bits of a salted hash: it does not reveal a
-//! high-entropy token, but a guessable low-entropy value could be confirmed
-//! by someone able to list the account's secret names.
-//!
-//! [`RunPodSupervisor::planned_secret_names`] gives the exact names before
-//! `start` so a caller can record them write-ahead;
-//! [`RunPodSupervisor::created_secrets`] tracks every name that may exist
-//! for this deployment as far as this instance knows (recorded, written, or
-//! left behind by a failed delete).
-//!
-//! Residual risk: a secret whose name already exists is trusted to hold the
-//! value its name encodes. Names include the owner marker (workspace,
-//! project, deployment), so another amicu deployment never computes the same
-//! name, but someone with access to the account could pre-create one.
-//! `start` and `stop` only ever delete names they recorded or wrote.
-//!
-//! # Create, never blind-retry; adopt only what is ours
-//!
-//! `start` prefers the endpoint id recorded in state
-//! ([`RunPodSupervisor::with_recorded_endpoint`]). Without one (or when it is
-//! gone) it looks the name up: RunPod does not enforce unique names, so
-//! several matches are refused, and a single match is adopted only when its
-//! env carries this deployment's [`OWNER_ENV_VAR`] marker, which `start`
-//! sets on every endpoint it writes. A create whose outcome is unknown
-//! ([`RunPodError::AmbiguousCreate`]) is resolved by looking the name up
-//! again (with the same owner check), never by sending the create twice. The
-//! endpoint id lands in [`RunPodSupervisor::deployed_endpoint`] as soon as it
-//! is known, so a caller can record it even when `start` then fails.
-//!
-//! # GPU placement
-//!
-//! The static table in [`crate::hardware`] resolves the requested card to a
-//! pool and type id; before writing anything, `start` reads
-//! `GET /v2/catalog/gpus` and excludes every other type RunPod lists in that
-//! pool ([`crate::hardware::exclusions_from_catalog`]), so a card RunPod adds
-//! later can never be picked instead. A catalog that cannot be read, or that
-//! does not list the card in that pool, stops the deploy.
-//!
-//! `metrics`/`logs` are not implemented for RunPod yet and return a clear
-//! error.
+//! `start` never blind-retries a create: it prefers the recorded endpoint id,
+//! otherwise adopts a single same-named endpoint only when it carries this
+//! deployment's [`OWNER_ENV_VAR`] marker, and resolves an ambiguous create by
+//! that same lookup. The live GPU catalog narrows `excludedTypes` to the
+//! requested card before anything is written.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
@@ -1001,7 +937,7 @@ impl RunPodSupervisor {
             if now >= deadline {
                 return Err(LlamaCppError::Supervisor(format!(
                     "RunPod endpoint {id} did not become ready within {}s (last health answer: \
-                     {last}); it is left in place",
+                     {last})",
                     timing.timeout.as_secs()
                 )));
             }

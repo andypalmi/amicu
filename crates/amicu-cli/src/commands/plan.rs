@@ -197,12 +197,12 @@ pub(crate) fn provider_switches(
                 project_id.map(|p| amicu_runpod::project_endpoint_name(p, id)),
             ),
             _ => {
-            // Without a project id apply mints one, so no recorded host label
-            // can match the new one.
-            (
-                Backend::host(),
-                project_id.map(|p| amicu_llamacpp::project_host_label(p, id)),
-            )
+                // Without a project id apply mints one, so no recorded host label
+                // can match the new one.
+                (
+                    Backend::host(),
+                    project_id.map(|p| amicu_llamacpp::project_host_label(p, id)),
+                )
             }
         };
         let old: Vec<OldInstance> = stops
