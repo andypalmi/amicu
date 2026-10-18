@@ -27,6 +27,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -287,6 +288,7 @@ pub struct RunPodSupervisor {
     recorded_endpoint: Option<String>,
     recorded_secrets: Vec<String>,
     deployed_endpoint: Arc<Mutex<Option<String>>>,
+    created_endpoint: Arc<AtomicBool>,
     created_secrets: Arc<Mutex<Vec<String>>>,
 }
 
@@ -327,6 +329,7 @@ impl RunPodSupervisor {
             recorded_endpoint: None,
             recorded_secrets: Vec::new(),
             deployed_endpoint: Arc::default(),
+            created_endpoint: Arc::default(),
             created_secrets: Arc::default(),
         }
     }
@@ -517,6 +520,15 @@ impl RunPodSupervisor {
     #[must_use]
     pub fn deployed_endpoint(&self) -> Arc<Mutex<Option<String>>> {
         Arc::clone(&self.deployed_endpoint)
+    }
+
+    /// Set once this instance's create (`POST`) produced the endpoint in
+    /// [`deployed_endpoint`](Self::deployed_endpoint), including one found by
+    /// name after an ambiguous create. Unset for an endpoint adopted by name
+    /// or by recorded id.
+    #[must_use]
+    pub fn created_endpoint(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.created_endpoint)
     }
 
     /// Names of the RunPod secrets that may exist for this deployment as far
@@ -856,6 +868,7 @@ impl RunPodSupervisor {
         match self.client.create_endpoint(&prepared.endpoint).await {
             Ok(created) => {
                 self.set_deployed(&created.id);
+                self.created_endpoint.store(true, Ordering::SeqCst);
                 Ok(created.id)
             }
             Err(RunPodError::AmbiguousCreate(detail)) => {
@@ -893,6 +906,7 @@ impl RunPodSupervisor {
                     .map_err(|e| lookup_err(&e))?;
                 self.check_owner(&ep)?;
                 self.set_deployed(&ep.id);
+                self.created_endpoint.store(true, Ordering::SeqCst);
                 Ok(ep.id)
             }
             [] => Err(LlamaCppError::Supervisor(format!(

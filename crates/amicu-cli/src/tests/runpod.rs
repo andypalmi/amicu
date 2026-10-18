@@ -17,6 +17,7 @@ const PROJECT: &str = "aaaa1111";
 const DEP: &str = "support_local";
 const MARKER_ID: &str = "s0";
 const ACCOUNT: &str = "personal:s0";
+const MANAGEMENT_KEY: &str = "rpa_MANAGEMENT";
 
 #[derive(Clone)]
 struct Ep {
@@ -26,6 +27,7 @@ struct Ep {
 }
 
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)]
 struct WorldState {
     /// `Some`: an organization account with this id.
     org: Option<String>,
@@ -36,6 +38,9 @@ struct WorldState {
     /// Health answer of every endpoint (0: 200).
     health: u16,
     delete_fails: bool,
+    secret_delete_fails: bool,
+    /// The endpoint create goes through but its response is lost.
+    lose_create_response: bool,
     /// `METHOD path` of every request, in order.
     log: Vec<String>,
 }
@@ -128,6 +133,9 @@ impl HttpTransport for World {
                     owner: owner_in(req.body.as_ref()),
                 };
                 w.endpoints.push(ep.clone());
+                if w.lose_create_response {
+                    return Err(TransportError::Timeout);
+                }
                 reply(201, &ep_json(&ep))
             }
             (method, ["serverless", id]) => {
@@ -175,6 +183,9 @@ impl HttpTransport for World {
                     .to_owned();
                 w.secrets.push((id.clone(), name.clone()));
                 reply(201, &json!({"id": id, "name": name}))
+            }
+            (HttpMethod::Delete, ["account", "secrets", _]) if w.secret_delete_fails => {
+                reply(500, &json!({"detail": "internal error"}))
             }
             (HttpMethod::Delete, ["account", "secrets", id]) => {
                 let before = w.secrets.len();
@@ -235,13 +246,16 @@ impl Default for FakeRunPod {
 impl RunPodOps for FakeRunPod {
     fn client(&self) -> Result<RunPodClient, crate::error::CliError> {
         if self.no_key {
-            return crate::runpod_ops::RealRunPod.client();
+            return Err(crate::runpod_ops::missing_key());
         }
         Ok(RunPodClient::with_transport(
-            ApiKey::new("rpa_MANAGEMENT"),
+            ApiKey::new(MANAGEMENT_KEY),
             self.world.clone(),
             BASE,
         ))
+    }
+    fn is_management_key(&self, key: &SecretValue) -> bool {
+        key.expose_secret() == MANAGEMENT_KEY.as_bytes()
     }
     fn probe(&self) -> Arc<dyn HttpTransport> {
         self.world.clone()
@@ -476,10 +490,6 @@ fn a_missing_management_key_stops_apply_before_any_call() {
     let project = project_with(&td, None);
     let mut rig = rig();
     rig.runpod.no_key = true;
-    // Only meaningful when the test environment has no real key.
-    if std::env::var(crate::runpod_ops::API_KEY_ENV_VAR).is_ok() {
-        return;
-    }
     let err = apply_with(&project, &rig).unwrap_err().to_string();
     assert!(err.contains("RUNPOD_API_KEY"), "{err}");
     assert_eq!(rig.runpod.world.log().len(), 0);
@@ -637,11 +647,238 @@ fn an_unconfirmed_delete_keeps_the_record() {
     assert_eq!(stops_for(&project, DEP)[0].app_id.as_deref(), Some("ep7"));
 }
 
+fn add_secret(rig: &Rig, id: &str, name: &str) {
+    rig.runpod
+        .world
+        .state
+        .lock()
+        .unwrap()
+        .secrets
+        .push((id.to_owned(), name.to_owned()));
+}
+
 #[test]
-fn a_record_without_an_endpoint_id_is_kept_by_destroy() {
+fn an_ambiguous_create_adopts_the_endpoint_by_name_without_a_second_create() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let rig = rig();
+    rig.runpod.world.state.lock().unwrap().lose_create_response = true;
+    apply_with(&project, &rig).unwrap();
+    let posts = rig
+        .runpod
+        .world
+        .writes()
+        .into_iter()
+        .filter(|w| w == "Post /serverless")
+        .count();
+    assert_eq!(posts, 1);
+    assert_eq!(rig.runpod.world.endpoint_ids(), ["ep1"]);
+    assert_eq!(stops_for(&project, DEP)[0].app_id.as_deref(), Some("ep1"));
+}
+
+#[test]
+fn an_ambiguous_create_that_then_fails_readiness_is_torn_down_as_created() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let rig = rig();
+    {
+        let mut w = rig.runpod.world.state.lock().unwrap();
+        w.lose_create_response = true;
+        w.health = 401;
+    }
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("created by this run, was torn down"), "{err}");
+    assert_eq!(rig.runpod.world.endpoint_ids().len(), 0);
+    assert_eq!(stops_for(&project, DEP)[0].app_id.as_deref(), Some("ep1"));
+}
+
+#[test]
+fn a_failed_exposure_check_leaves_an_adopted_endpoint_in_place() {
     let td = TempDir::new();
     let project = project_with(&td, Some(record(None, ACCOUNT, &[])));
-    let err = destroy(&project, &rig()).unwrap_err().to_string();
-    assert!(err.contains("no endpoint id recorded"), "{err}");
+    let mut rig = rig();
+    add_endpoint(&rig, "ep9", Some(owner()));
+    rig.runpod.exposure_fails = true;
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("existed before this run"), "{err}");
+    assert!(err.contains("unauthenticated request"), "{err}");
+    assert_eq!(rig.runpod.world.endpoint_ids(), ["ep9"]);
+    assert_eq!(stops_for(&project, DEP)[0].app_id.as_deref(), Some("ep9"));
+}
+
+#[test]
+fn the_management_key_is_refused_as_the_endpoint_api_key() {
+    struct ManagementKey;
+    #[async_trait::async_trait]
+    impl SecretResolver for ManagementKey {
+        async fn resolve(&self, _: &SecretRef) -> Result<SecretValue, AdapterError> {
+            Ok(SecretValue::new(MANAGEMENT_KEY.to_owned()))
+        }
+    }
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let mut rig = rig();
+    rig.resolver = Box::new(ManagementKey);
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("management key"), "{err}");
+    assert!(err.contains("restricted to invoking"), "{err}");
+    assert!(!err.contains(MANAGEMENT_KEY), "{err}");
+    assert_eq!(rig.runpod.world.log().len(), 0);
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn a_failed_secret_delete_on_destroy_keeps_the_record_with_what_remains() {
+    let td = TempDir::new();
+    let project = project_with(
+        &td,
+        Some(record(Some("ep7"), ACCOUNT, &["amicu-x", "amicu-y"])),
+    );
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    add_secret(&rig, "s5", "amicu-x");
+    add_secret(&rig, "s6", "amicu-y");
+    rig.runpod.world.state.lock().unwrap().secret_delete_fails = true;
+    let err = destroy(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("amicu-x") && err.contains("amicu-y"), "{err}");
+    assert!(err.contains("kept in state"), "{err}");
+    assert_eq!(rig.runpod.world.endpoint_ids().len(), 0);
+    let stops = stops_for(&project, DEP);
+    assert_eq!(stops[0].app_id.as_deref(), Some("ep7"));
+    assert_eq!(stops[0].secrets, ["amicu-x", "amicu-y"]);
+    // A retry once RunPod accepts the deletes confirms it and drops it.
+    rig.runpod.world.state.lock().unwrap().secret_delete_fails = false;
+    destroy(&project, &rig).unwrap();
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+    assert_eq!(
+        rig.runpod.world.secret_names(),
+        [amicu_runpod::ACCOUNT_MARKER_SECRET]
+    );
+}
+
+#[test]
+fn a_gone_endpoint_with_leftover_secrets_deletes_them_then_drops_the_record() {
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(Some("ep7"), ACCOUNT, &["amicu-x"])));
+    let rig = rig();
+    add_secret(&rig, "s5", "amicu-x");
+    destroy(&project, &rig).unwrap();
+    assert_eq!(
+        rig.runpod.world.secret_names(),
+        [amicu_runpod::ACCOUNT_MARKER_SECRET]
+    );
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn a_gone_endpoint_whose_secrets_cannot_be_deleted_keeps_the_record() {
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(Some("ep7"), ACCOUNT, &["amicu-x"])));
+    let rig = rig();
+    add_secret(&rig, "s5", "amicu-x");
+    rig.runpod.world.state.lock().unwrap().secret_delete_fails = true;
+    let err = destroy(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("amicu-x"), "{err}");
+    assert_eq!(stops_for(&project, DEP)[0].secrets, ["amicu-x"]);
+}
+
+#[test]
+fn destroy_without_an_endpoint_id_deletes_the_owned_endpoint_found_by_name() {
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(None, ACCOUNT, &["amicu-x"])));
+    let rig = rig();
+    add_endpoint(&rig, "ep9", Some(owner()));
+    add_secret(&rig, "s5", "amicu-x");
+    destroy(&project, &rig).unwrap();
+    assert_eq!(rig.runpod.world.endpoint_ids().len(), 0);
+    assert_eq!(
+        rig.runpod.world.secret_names(),
+        [amicu_runpod::ACCOUNT_MARKER_SECRET]
+    );
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn destroy_without_an_endpoint_id_and_no_endpoint_deletes_the_secrets() {
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(None, ACCOUNT, &["amicu-x"])));
+    let rig = rig();
+    add_secret(&rig, "s5", "amicu-x");
+    destroy(&project, &rig).unwrap();
+    assert_eq!(
+        rig.runpod.world.secret_names(),
+        [amicu_runpod::ACCOUNT_MARKER_SECRET]
+    );
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn destroy_without_an_endpoint_id_and_a_secret_delete_failure_keeps_the_record() {
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(None, ACCOUNT, &["amicu-x"])));
+    let rig = rig();
+    add_secret(&rig, "s5", "amicu-x");
+    rig.runpod.world.state.lock().unwrap().secret_delete_fails = true;
+    let err = destroy(&project, &rig).unwrap_err().to_string();
+    assert!(
+        err.contains("no endpoint exists") && err.contains("amicu-x"),
+        "{err}"
+    );
+    assert_eq!(stops_for(&project, DEP)[0].secrets, ["amicu-x"]);
+}
+
+#[test]
+fn destroy_without_an_endpoint_id_refuses_an_endpoint_of_another_owner() {
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(None, ACCOUNT, &["amicu-x"])));
+    let mut rig = rig();
+    add_endpoint(&rig, "ep9", Some("someone-else".to_owned()));
+    add_secret(&rig, "s5", "amicu-x");
+    let err = destroy(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("AMICU_OWNER"), "{err}");
+    assert!(err.contains("--forget-unconfirmed"), "{err}");
+    assert_eq!(rig.runpod.world.endpoint_ids(), ["ep9"]);
     assert_eq!(stops_for(&project, DEP).len(), 1);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+
+    // Forgetting leaves the foreign endpoint alone but deletes the secrets.
+    rig.forget = true;
+    destroy(&project, &rig).unwrap();
+    assert_eq!(rig.runpod.world.endpoint_ids(), ["ep9"]);
+    assert_eq!(
+        rig.runpod.world.secret_names(),
+        [amicu_runpod::ACCOUNT_MARKER_SECRET]
+    );
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn a_deleted_account_marker_is_an_actionable_error_and_forget_drops_the_record() {
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(Some("ep7"), ACCOUNT, &["amicu-x"])));
+    let mut rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    rig.runpod.world.state.lock().unwrap().secrets.clear();
+    let err = destroy(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains(amicu_runpod::ACCOUNT_MARKER_SECRET), "{err}");
+    assert!(err.contains("ep7") && err.contains("amicu-x"), "{err}");
+    assert!(err.contains("--forget-unconfirmed"), "{err}");
+    assert_eq!(stops_for(&project, DEP).len(), 1);
+
+    rig.forget = true;
+    destroy(&project, &rig).unwrap();
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn the_write_ahead_keeps_unknown_fields_of_the_existing_record() {
+    let td = TempDir::new();
+    let mut rec = record(Some("ep7"), ACCOUNT, &[]);
+    rec.extra.insert("future".to_owned(), json!(1));
+    let project = project_with(&td, Some(rec));
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(stops_for(&project, DEP)[0].extra["future"], json!(1));
 }

@@ -18,6 +18,8 @@ pub(crate) const API_KEY_ENV_VAR: &str = "RUNPOD_API_KEY";
 pub(crate) trait RunPodOps: Send + Sync {
     /// A management client for the configured key.
     fn client(&self) -> Result<RunPodClient, CliError>;
+    /// Whether `key` is the management key itself.
+    fn is_management_key(&self, key: &SecretValue) -> bool;
     /// The transport the readiness probe goes through.
     fn probe(&self) -> Arc<dyn HttpTransport>;
     /// The post-deploy check: an anonymous request is refused and `key` is
@@ -32,11 +34,13 @@ impl RunPodOps for RealRunPod {
     fn client(&self) -> Result<RunPodClient, CliError> {
         match std::env::var(API_KEY_ENV_VAR) {
             Ok(key) if !key.trim().is_empty() => Ok(RunPodClient::new(ApiKey::new(key))),
-            _ => Err(CliError::Message(format!(
-                "RunPod needs {API_KEY_ENV_VAR} set to a RunPod API key that can manage \
-                 serverless endpoints and secrets; nothing was changed"
-            ))),
+            _ => Err(missing_key()),
         }
+    }
+
+    fn is_management_key(&self, key: &SecretValue) -> bool {
+        std::env::var(API_KEY_ENV_VAR)
+            .is_ok_and(|k| !k.trim().is_empty() && k.as_bytes() == key.expose_secret())
     }
 
     fn probe(&self) -> Arc<dyn HttpTransport> {
@@ -57,7 +61,14 @@ impl RunPodOps for RealRunPod {
     }
 }
 
-fn runpod_error(context: &str, e: &RunPodError) -> CliError {
+pub(crate) fn missing_key() -> CliError {
+    CliError::Message(format!(
+        "RunPod needs {API_KEY_ENV_VAR} set to a RunPod API key that can manage serverless \
+         endpoints and secrets; nothing was changed"
+    ))
+}
+
+pub(crate) fn runpod_error(context: &str, e: &RunPodError) -> CliError {
     let hint = match e {
         RunPodError::CredentialsRejected { .. } => format!(
             "; check that {API_KEY_ENV_VAR} is a valid RunPod API key with read/write access"

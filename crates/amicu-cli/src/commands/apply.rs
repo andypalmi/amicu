@@ -852,7 +852,6 @@ fn save_failed_message(op: Op, progress: &Progress, save_err: &CliError) -> Stri
 /// [`ModalSupervisor`] instead of the local host supervisor
 const MODAL_PROVIDER: &str = "modal";
 
-/// Hardware profile `provider` value that routes through [`RunPodSupervisor`].
 const RUNPOD_PROVIDER: &str = "runpod";
 
 /// The per-deployment supervisor `apply_all` routes to, decided purely from
@@ -867,7 +866,6 @@ enum Dispatch {
     /// `provider = "modal"`, vLLM or llama.cpp: route through
     /// [`ModalSupervisor`] (the runtime picks the adapter and the image).
     Modal,
-    /// `provider = "runpod"`: a [`RunPodSupervisor`] load-balancing endpoint.
     RunPod,
 }
 
@@ -1170,7 +1168,8 @@ async fn apply_all(
                                 &planned,
                             ),
                             deployed: supervisor.deployed_endpoint(),
-                            created: supervisor.created_secrets(),
+                            created_endpoint: supervisor.created_endpoint(),
+                            created_secrets: supervisor.created_secrets(),
                         });
                         remote_adapter =
                             boxed_adapter(Box::new(catalog.clone()), runtime, Box::new(supervisor));
@@ -1261,18 +1260,29 @@ async fn apply_all(
             // The old record stays in state until that stop is confirmed.
             let stale = stale_records(&progress.stops, &item.deployment, &new_stop);
             for old in stale {
-                stop_record(&old, env, &*host_probe, &mut progress.stops).await?;
+                stop_record(
+                    &old,
+                    env,
+                    &*host_probe,
+                    &progress.project_id,
+                    &mut progress.stops,
+                )
+                .await?;
                 progress.stops.retain(|r| !r.same_instance(&old));
             }
             // Write-ahead: record the deployment as pending, with its stop
             // identity, BEFORE the provider starts anything, so a crash can
             // never leave an instance that state cannot stop. A previous
             // instance's record (a different Modal app id) is kept alongside.
-            // A RunPod endpoint is updated in place: its record is replaced by
-            // one that also lists the secrets about to be written.
+            // A RunPod record is updated in place to also list the secrets
+            // about to be written.
             if dispatch == Dispatch::RunPod {
-                progress.stops.retain(|r| !r.same_target(&new_stop));
-                progress.stops.push(new_stop.clone());
+                if let Some(r) = progress.stops.iter_mut().find(|r| r.same_target(&new_stop)) {
+                    r.workspace.clone_from(&new_stop.workspace);
+                    r.secrets = merged_names(&r.secrets, &new_stop.secrets);
+                } else {
+                    progress.stops.push(new_stop.clone());
+                }
             } else if !progress
                 .stops
                 .iter()
@@ -1315,18 +1325,34 @@ async fn apply_all(
             };
             // Shared post-deploy check, for every adapter: an endpoint that is
             // not protected as declared is rolled back (Modal update) or torn
-            // down, and apply fails.
-            if let Err(e) = secure_endpoint(
-                adapter,
-                &handle,
-                launch,
-                dispatch,
-                previous.as_ref(),
-                resolver,
-                env.runpod,
-            )
-            .await
-            {
+            // down, and apply fails. RunPod tears down only an endpoint this
+            // run created, as after a failed start.
+            let secured = if let Some(rp) = &runpod {
+                match verify_handle(&handle, launch, resolver, env.runpod).await {
+                    Ok(()) => Ok(()),
+                    Err(detail) => {
+                        let note =
+                            runpod_failed_start(rp, adapter, &new_stop, &mut progress.stops).await;
+                        Err(CliError::Message(format!(
+                            "deployment '{}': endpoint {} failed its exposure check: \
+                             {detail}{note}",
+                            item.deployment, handle.id
+                        )))
+                    }
+                }
+            } else {
+                secure_endpoint(
+                    adapter,
+                    &handle,
+                    launch,
+                    dispatch,
+                    previous.as_ref(),
+                    resolver,
+                    env.runpod,
+                )
+                .await
+            };
+            if let Err(e) = secured {
                 if dispatch == Dispatch::Modal {
                     // The app id is known now: record it, so a later destroy
                     // stops by id without `--forget-unconfirmed`. Any older
@@ -1337,10 +1363,6 @@ async fn apply_all(
                         &item.deployment,
                         &handle.id,
                     );
-                }
-                if let Some(rp) = &runpod {
-                    // Torn down or not, the record stays until a stop is confirmed.
-                    sync_runpod_record(&mut progress.stops, &new_stop, Some(&handle.id), rp, false);
                 }
                 return Err(e);
             }
@@ -1368,7 +1390,14 @@ async fn apply_all(
             }
             progress.in_flight = None;
             for old in superseded {
-                stop_record(&old, env, &*host_probe, &mut progress.stops).await?;
+                stop_record(
+                    &old,
+                    env,
+                    &*host_probe,
+                    &progress.project_id,
+                    &mut progress.stops,
+                )
+                .await?;
                 progress.stops.retain(|r| !r.same_instance(&old));
             }
         } else {
@@ -1392,7 +1421,14 @@ async fn apply_all(
                 });
             }
             for record in records {
-                stop_record(&record, env, &*host_probe, &mut progress.stops).await?;
+                stop_record(
+                    &record,
+                    env,
+                    &*host_probe,
+                    &progress.project_id,
+                    &mut progress.stops,
+                )
+                .await?;
                 progress.stops.retain(|r| !r.same_instance(&record));
             }
             registry.deregister(&item.deployment);
@@ -1688,10 +1724,10 @@ fn boxed_adapter(
 struct RunPodStart {
     account: String,
     recorded_id: Option<String>,
-    /// Recorded plus planned secret names, as written ahead.
     secrets: Vec<String>,
     deployed: Arc<std::sync::Mutex<Option<String>>>,
-    created: Arc<std::sync::Mutex<Vec<String>>>,
+    created_endpoint: Arc<std::sync::atomic::AtomicBool>,
+    created_secrets: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 fn merged_names(a: &[String], b: &[String]) -> Vec<String> {
@@ -1704,21 +1740,35 @@ fn merged_names(a: &[String], b: &[String]) -> Vec<String> {
 /// Checks the RunPod management key and reads the account, once per run,
 /// when any launch goes to RunPod. Nothing is started before this passes.
 async fn runpod_preflight(result: &PlanResult, env: &Env<'_>) -> Result<Option<String>, CliError> {
-    let deployments: Vec<&DeploymentId> = result
+    let launches: Vec<(&DeploymentId, &LaunchPlan)> = result
         .items
         .iter()
-        .filter(|i| {
-            i.launch.as_ref().is_some_and(|l| {
-                dispatch_for(l.runtime, i.action.provider.as_deref()) == Some(Dispatch::RunPod)
-            })
+        .filter_map(|i| {
+            let l = i.launch.as_ref()?;
+            (dispatch_for(l.runtime, i.action.provider.as_deref()) == Some(Dispatch::RunPod))
+                .then_some((&i.deployment, l))
         })
-        .map(|i| &i.deployment)
         .collect();
-    if deployments.is_empty() {
+    if launches.is_empty() {
         return Ok(None);
     }
+    for (d, launch) in &launches {
+        let Some(key_ref) = &launch.api_key else {
+            continue;
+        };
+        let key = env.resolver.resolve(key_ref).await?;
+        if env.runpod.is_management_key(&key) {
+            return Err(CliError::Message(format!(
+                "deployment '{d}': its api_key is the same key as {var}, the management key \
+                 amicu deploys with. Clients would hold full control of the RunPod account; \
+                 create a separate RunPod API key restricted to invoking this endpoint \
+                 (api.runpod.ai access) and use it as the api_key. Nothing was started",
+                var = crate::runpod_ops::API_KEY_ENV_VAR
+            )));
+        }
+    }
     let account = crate::runpod_ops::preflight(env.runpod).await?;
-    for d in deployments {
+    for (d, _) in launches {
         let _ = writeln!(
             std::io::stderr(),
             "note: '{d}' runs on RunPod: its api_key must be a RunPod API key with \
@@ -1745,7 +1795,7 @@ fn sync_runpod_record(
     if let Some(id) = endpoint_id {
         r.app_id = Some(id.to_owned());
     }
-    if let Ok(created) = rp.created.lock() {
+    if let Ok(created) = rp.created_secrets.lock() {
         r.secrets = if exact {
             merged_names(&created, &[])
         } else {
@@ -1765,10 +1815,10 @@ fn runpod_handle(deployment: &DeploymentId, id: &str) -> RuntimeHandle {
     }
 }
 
-/// After a failed RunPod start: record what exists, and tear down an
-/// endpoint this run created (nothing was serving from it). An endpoint that
-/// was already recorded is left in place rather than taken down. Either way
-/// the record stays until a stop is confirmed. Returns a note for the error.
+/// After a failed RunPod start or exposure check: record what exists, and
+/// tear down an endpoint this run created (nothing was serving from it). An
+/// endpoint adopted by name or recorded id is left in place. Either way the
+/// record stays until a stop is confirmed. Returns a note for the error.
 async fn runpod_failed_start(
     rp: &RunPodStart,
     adapter: &dyn RuntimeAdapter,
@@ -1780,68 +1830,241 @@ async fn runpod_failed_start(
     let Some(id) = deployed else {
         return String::new();
     };
-    if rp.recorded_id.as_deref() == Some(id.as_str()) {
-        return format!("; RunPod endpoint {id} was left in place and stays recorded");
+    if !rp
+        .created_endpoint
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return format!(
+            "; RunPod endpoint {id} existed before this run, so it was left in place and stays \
+             recorded (`amicu destroy --target {}` removes it)",
+            record.deployment
+        );
     }
     match adapter.stop(&runpod_handle(&record.deployment, &id)).await {
         Ok(()) => {
             sync_runpod_record(stops, record, None, rp, true);
             format!(
-                "; the new RunPod endpoint {id} was torn down (it stays recorded until a later \
-                 apply or destroy confirms it is gone)"
+                "; RunPod endpoint {id}, created by this run, was torn down (it stays recorded \
+                 until a later apply or destroy confirms it is gone)"
             )
         }
         Err(e) => format!(
-            "; tearing down the new RunPod endpoint {id} FAILED ({e}); it stays recorded and \
-             `amicu destroy --target {}` retries",
+            "; tearing down RunPod endpoint {id}, created by this run, FAILED ({e}); it stays \
+             recorded and `amicu destroy --target {}` retries",
             record.deployment
         ),
     }
 }
 
 /// Stops a RunPod endpoint and deletes its secrets. Only a confirmed stop in
-/// the recorded account is `Ok`; anything else keeps the record.
-async fn stop_runpod(record: &StopRecord, env: &Env<'_>) -> Result<(), CliError> {
+/// the recorded account is `Ok`; anything else keeps the record. A record
+/// without an endpoint id is resolved by exact name and owner marker.
+async fn stop_runpod(
+    record: &StopRecord,
+    env: &Env<'_>,
+    project_id: &str,
+    stops: &mut [StopRecord],
+) -> Result<(), CliError> {
     let client = env.runpod.client()?;
-    let active = crate::runpod_ops::current_account(&client).await?;
+    let Some(active) = crate::runpod_ops::current_account(&client).await? else {
+        return unknown_runpod_account(record, env);
+    };
     crate::runpod_ops::check_account(
         record.deployment.as_str(),
         record.workspace.as_deref(),
-        active.as_deref(),
+        Some(&active),
     )?;
-    let Some(id) = record.app_id.as_deref() else {
-        return Err(CliError::Message(format!(
-            "{} has no endpoint id recorded, so amicu cannot confirm it is stopped. If an \
-             endpoint named '{}' exists in the RunPod console, delete it there. It was kept in \
-             state",
-            record.describe(),
-            record.identity
-        )));
+    let id = match &record.app_id {
+        Some(id) => id.clone(),
+        None => match owned_endpoint_by_name(&client, record, &active, project_id, env).await? {
+            Some(id) => id,
+            None => return delete_runpod_secrets(&client, record, env, stops).await,
+        },
     };
-    // The project id only names new endpoints; a stop goes by id.
     let supervisor = RunPodSupervisor::new(client, "", record.deployment.as_str())
         .with_recorded_secrets(record.secrets.clone())
         .with_confirmed_account(true);
-    let kept = match supervisor
-        .stop_endpoint(&runpod_handle(&record.deployment, id))
-        .await
-    {
+    let result = supervisor
+        .stop_endpoint(&runpod_handle(&record.deployment, &id))
+        .await;
+    let kept = match result {
         Ok(StopOutcome::Deleted) => return Ok(()),
-        Ok(StopOutcome::AlreadyGone { kept_secrets }) => kept_secrets,
-        Err(e) => {
-            return Err(CliError::Message(format!(
-                "{}: {e}; it was kept in state",
+        Ok(StopOutcome::AlreadyGone { kept_secrets }) if kept_secrets.is_empty() => {
+            return Ok(());
+        }
+        Ok(StopOutcome::AlreadyGone { kept_secrets }) => format!(
+            "{} is gone, but its secrets were kept ({})",
+            record.describe(),
+            kept_secrets.join(", ")
+        ),
+        Err(e) => format!("{}: {e}", record.describe()),
+    };
+    let remaining = supervisor
+        .created_secrets()
+        .lock()
+        .map_or_else(|_| record.secrets.clone(), |c| merged_names(&c, &[]));
+    if let Some(r) = stops.iter_mut().find(|r| r.same_instance(record)) {
+        r.app_id = Some(id);
+        r.secrets = remaining;
+    }
+    Err(CliError::Message(format!("{kept}; it was kept in state")))
+}
+
+/// The id of the one endpoint named `record.identity` that carries this
+/// deployment's owner marker in `account`, or `None` when no endpoint has the
+/// name. A foreign or duplicate name is refused, unless
+/// `--forget-unconfirmed` (the foreign endpoint is then left untouched).
+async fn owned_endpoint_by_name(
+    client: &amicu_runpod::RunPodClient,
+    record: &StopRecord,
+    account: &str,
+    project_id: &str,
+    env: &Env<'_>,
+) -> Result<Option<String>, CliError> {
+    let lookup = |e: &amicu_runpod::RunPodError| {
+        crate::runpod_ops::runpod_error(
+            &format!(
+                "{} has no endpoint id recorded and looking it up by name failed; it was kept \
+                 in state",
                 record.describe()
+            ),
+            e,
+        )
+    };
+    let found = client
+        .find_endpoints_by_name(&record.identity)
+        .await
+        .map_err(|e| lookup(&e))?;
+    let one = match found.as_slice() {
+        [] => return Ok(None),
+        [one] => one,
+        many => {
+            return Err(CliError::Message(format!(
+                "{} has no endpoint id recorded and several RunPod endpoints are named '{}' \
+                 ({}); delete the extra ones in the RunPod console. It was kept in state",
+                record.describe(),
+                record.identity,
+                many.iter()
+                    .map(|e| e.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )));
         }
     };
-    if kept.is_empty() {
+    let ep = client.get_endpoint(&one.id).await.map_err(|e| lookup(&e))?;
+    let owner = amicu_runpod::owner_marker(Some(account), project_id, record.deployment.as_str());
+    if ep.owner.as_deref() == Some(owner.as_str()) {
+        return Ok(Some(ep.id));
+    }
+    if env.forget_unconfirmed {
+        let _ = writeln!(
+            std::io::stderr(),
+            "warning: RunPod endpoint {} is named '{}' but does not carry this deployment's {} \
+             marker; it was NOT deleted, and '{}' is forgotten as you asked \
+             (--forget-unconfirmed)",
+            ep.id,
+            ep.name,
+            amicu_runpod::OWNER_ENV_VAR,
+            record.deployment
+        );
+        return Ok(None);
+    }
+    Err(CliError::Message(format!(
+        "{} has no endpoint id recorded, and RunPod endpoint {} named '{}' does not carry this \
+         deployment's {} marker, so amicu will not delete it. Check it in the RunPod console; \
+         if this deployment never created an endpoint, run `amicu destroy --target {} \
+         --forget-unconfirmed`. It was kept in state",
+        record.describe(),
+        ep.id,
+        ep.name,
+        amicu_runpod::OWNER_ENV_VAR,
+        record.deployment
+    )))
+}
+
+/// No endpoint exists for `record`: deletes its recorded secrets. `Ok` only
+/// when every delete succeeded (or `--forget-unconfirmed`); the record then
+/// keeps listing the secrets that could not be deleted.
+async fn delete_runpod_secrets(
+    client: &amicu_runpod::RunPodClient,
+    record: &StopRecord,
+    env: &Env<'_>,
+    stops: &mut [StopRecord],
+) -> Result<(), CliError> {
+    let mut remaining = Vec::new();
+    let mut failed = Vec::new();
+    for name in &record.secrets {
+        let deleted = match client.find_secret(name).await {
+            Ok(Some(s)) => client.delete_secret(&s.id).await.map(|_| ()),
+            Ok(None) => Ok(()),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = deleted {
+            failed.push(format!("`{name}` ({e})"));
+            remaining.push(name.clone());
+        }
+    }
+    if failed.is_empty() {
+        return Ok(());
+    }
+    if env.forget_unconfirmed {
+        let _ = writeln!(
+            std::io::stderr(),
+            "warning: forgetting '{}' as you asked (--forget-unconfirmed), but these RunPod \
+             secrets could not be deleted and may remain: {}",
+            record.deployment,
+            failed.join(", ")
+        );
+        return Ok(());
+    }
+    if let Some(r) = stops.iter_mut().find(|r| r.same_instance(record)) {
+        r.secrets = remaining;
+    }
+    Err(CliError::Message(format!(
+        "{}: no endpoint exists, but these secrets could not be deleted: {}; it was kept in \
+         state",
+        record.describe(),
+        failed.join(", ")
+    )))
+}
+
+/// `RUNPOD_API_KEY` acts in an account amicu cannot identify (the personal
+/// account marker secret is missing): nothing can be confirmed.
+fn unknown_runpod_account(record: &StopRecord, env: &Env<'_>) -> Result<(), CliError> {
+    let leftovers = format!(
+        "endpoint '{}'{}{}",
+        record.identity,
+        record
+            .app_id
+            .as_deref()
+            .map(|id| format!(" (id {id})"))
+            .unwrap_or_default(),
+        if record.secrets.is_empty() {
+            String::new()
+        } else {
+            format!(" and secrets {}", record.secrets.join(", "))
+        }
+    );
+    if env.forget_unconfirmed {
+        let _ = writeln!(
+            std::io::stderr(),
+            "warning: forgetting '{}' WITHOUT confirming anything (--forget-unconfirmed): amicu \
+             cannot identify the RunPod account, so these may still exist in {}: {leftovers}",
+            record.deployment,
+            record.workspace.as_deref().unwrap_or("an unknown account")
+        );
         return Ok(());
     }
     Err(CliError::Message(format!(
-        "{} is gone, but its secrets were kept ({}); it was kept in state",
-        record.describe(),
-        kept.join(", ")
+        "cannot confirm which RunPod account {key} acts in: the `{marker}` secret amicu uses to \
+         identify a personal account is missing (deleted, or {key} belongs to another account), \
+         so '{dep}' (recorded in {recorded}) cannot be stopped safely. If {key} is the right \
+         account, delete {leftovers} in the RunPod console, then run `amicu destroy --target \
+         {dep} --forget-unconfirmed`. It was kept in state",
+        key = crate::runpod_ops::API_KEY_ENV_VAR,
+        marker = amicu_runpod::ACCOUNT_MARKER_SECRET,
+        dep = record.deployment,
+        recorded = record.workspace.as_deref().unwrap_or("an unknown account"),
     )))
 }
 
@@ -1950,6 +2173,7 @@ async fn stop_record(
     record: &StopRecord,
     env: &Env<'_>,
     probe: &dyn ProcessSupervisor,
+    project_id: &str,
     stops: &mut [StopRecord],
 ) -> Result<(), CliError> {
     match record.backend {
@@ -2001,7 +2225,7 @@ async fn stop_record(
             Ok(())
         }
         Backend::Modal => stop_modal(record, env, stops).await,
-        Backend::Runpod => stop_runpod(record, env).await,
+        Backend::Runpod => stop_runpod(record, env, project_id, stops).await,
     }
 }
 

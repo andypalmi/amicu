@@ -84,13 +84,15 @@ pub(crate) struct LocalState {
 
 impl LocalState {
     /// Written by this version. v2 adds `pending` and `stops`; v3 adds
-    /// `project_id` and the per-record files and volumes; v4 adds `serial`.
-    /// An older binary would silently drop these on its next save (and a v3
-    /// writer would not bump the serial, defeating the compare-and-swap).
-    pub const VERSION: &'static str = "v4";
+    /// `project_id` and the per-record files and volumes; v4 adds `serial`;
+    /// v5 adds RunPod stop records (backend `runpod`, `secrets`). An older
+    /// binary would silently drop these on its next save (and a v3 writer
+    /// would not bump the serial, defeating the compare-and-swap), or report
+    /// a v5 file with a RunPod record as corrupt instead of unsupported.
+    pub const VERSION: &'static str = "v5";
     /// Versions this binary can read: every `from` in [`MIGRATIONS`] plus
     /// [`Self::VERSION`].
-    pub const SUPPORTED: &'static [&'static str] = &["v1", "v2", "v3", "v4"];
+    pub const SUPPORTED: &'static [&'static str] = &["v1", "v2", "v3", "v4", "v5"];
 }
 
 /// One step `from` -> `to` applied to the raw state JSON on load, so
@@ -129,6 +131,12 @@ const MIGRATIONS: &[Migration] = &[
         from: "v3",
         to: "v4",
         // v4 added `serial`; absent reads as 0 and the next save writes 1.
+        apply: |_| {},
+    },
+    Migration {
+        from: "v4",
+        to: "v5",
+        // v5 added RunPod stop records; a v4 file has none.
         apply: |_| {},
     },
 ];
@@ -890,6 +898,27 @@ mod durability_tests {
     }
 
     #[test]
+    fn v4_to_v5_leaves_the_document_unchanged() {
+        let v4 = serde_json::json!({"version": "v4", "serial": 3, "stops": []});
+        assert_eq!(migrated("v4", v4.clone()), v4);
+    }
+
+    #[test]
+    fn v4_state_loads_and_is_stamped_v5() {
+        let root = scratch("v4");
+        let p = Project::new(&root);
+        p.save_state(&state("x")).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(p.state_file()).unwrap()).unwrap();
+        v["version"] = "v4".into();
+        fs::write(p.state_file(), v.to_string()).unwrap();
+        let loaded = Project::new(&root).load_state().unwrap().unwrap();
+        assert_eq!(loaded.version, "v5");
+        assert_eq!(loaded.pending, state("x").pending);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn old_versions_load_and_are_stamped_current() {
         let root = scratch("migrate");
         let p = Project::new(&root);
@@ -912,10 +941,10 @@ mod durability_tests {
 
     #[test]
     fn newer_version_is_refused_even_when_its_shape_differs() {
-        let text = r#"{"version": "v5", "graph": "not a graph any more"}"#;
+        let text = r#"{"version": "v6", "graph": "not a graph any more"}"#;
         assert!(matches!(
             parse_state(text),
-            Err(StateParseError::Unsupported(m)) if m.contains("v5") && m.contains("upgrade amicu")
+            Err(StateParseError::Unsupported(m)) if m.contains("v6") && m.contains("upgrade amicu")
         ));
     }
 
@@ -1102,7 +1131,7 @@ mod durability_tests {
         fs::write(p.state_file(), v.to_string()).unwrap();
         let q = Project::new(&root);
         let loaded = q.load_state().unwrap().unwrap();
-        assert_eq!((loaded.version.as_str(), loaded.serial), ("v4", 0));
+        assert_eq!((loaded.version.as_str(), loaded.serial), ("v5", 0));
         q.save_state(&loaded).unwrap();
         assert_eq!(q.load_state().unwrap().unwrap().serial, 1);
         let _ = fs::remove_dir_all(&root);
