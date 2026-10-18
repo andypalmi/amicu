@@ -21,7 +21,7 @@ export default function PrivacyPage() {
         This policy explains what personal data amicu (the open-source CLI, the website at
         amicu.dev and the hosted web app at app.amicu.dev) handles, why, and what your rights
         are. We aim to collect as little as possible. The amicu CLI runs on your own machine and
-        sends nothing to us.
+        sends nothing to us unless you opt in to telemetry (see below).
       </p>
 
       <h2>Who is responsible</h2>
@@ -59,6 +59,28 @@ export default function PrivacyPage() {
           (see below), so we can fix bugs. Legal basis: legitimate interests.
         </li>
         <li>
+          <strong>CLI telemetry (opt-in)</strong>: off unless you turn it on. If you do, amicu
+          deployments started on your machine send aggregate performance rollups, one per
+          deployment per 5-minute window: coarse hardware (accelerator model and count, VRAM,
+          CPU cores and memory, rounded), the runtime and its version, the model name (only for
+          well-known public publishers, otherwise &quot;custom&quot;) and quantization, the
+          provider type (and a cloud region code for cloud providers only), context length and
+          batch size, request, error and token counts, throughput, latency histograms, peak load
+          and GPU and memory utilization, the amicu version, and two random identifiers (an
+          install id and a deployment id, not derived from your machine, user or deployment
+          name). Prompts, completions and other request content, IP addresses, hostnames, file
+          paths, endpoint URLs, usernames and API keys are not part of the payload, and we do not
+          store the IP address a request comes from. Turn it off with{' '}
+          <code>amicu telemetry disable</code>, or set <code>DO_NOT_TRACK=1</code> or{' '}
+          <code>AMICU_TELEMETRY=0</code>; running agents stop and delete their local queue. Legal
+          basis: your consent (Art. 6(1)(a)), which you can withdraw at any time. The exact
+          fields and how the setting works are documented in{' '}
+          <a className={link} href="/docs/security/telemetry">
+            Telemetry and network
+          </a>
+          .
+        </li>
+        <li>
           <strong>Messages you send us</strong> by email, kept as long as needed to answer you.
         </li>
         <li>
@@ -75,7 +97,7 @@ export default function PrivacyPage() {
       <ul>
         <li>
           <strong>Cloudflare</strong> hosts and delivers the website and web app (Workers/CDN).
-          It also provides Cloudflare Web Analytics, a cookieless service that reports page
+          Cloudflare also runs the CLI telemetry ingestion endpoint (api.amicu.dev). It also provides Cloudflare Web Analytics, a cookieless service that reports page
           views and performance without cookies or cross-site tracking, and Turnstile, a bot
           check used on sign-up, password-reset and verification forms.
         </li>
@@ -94,8 +116,13 @@ export default function PrivacyPage() {
           bodies, cookies, headers and query strings are removed before an event is sent.
         </li>
         <li>
-          Our own API and database that store your account and configuration data, run on
-          cloud infrastructure we operate.
+          <strong>Google Cloud</strong> (Google Cloud Run, EU region) runs our API, which
+          stores your account and configuration data.
+        </li>
+        <li>
+          <strong>Supabase</strong> (Supabase Inc.) hosts our databases, in its EU region
+          (eu-west-1, Ireland): the account and configuration database and the telemetry
+          database.
         </li>
       </ul>
 
@@ -136,13 +163,16 @@ export default function PrivacyPage() {
       <ul>
         <li>Account and configuration data: while your account exists, then deleted on request or when you close it, except where the law requires us to keep something.</li>
         <li>Analytics and error reports: kept by the providers for a limited period, in aggregate or without personal identifiers, and no longer than needed for these purposes.</li>
+        <li>CLI telemetry: 5-minute rollups are kept for 7 days, hourly rollups (still tied to the random install id) for 90 days, and batch ids for 8 days. After that only daily aggregates remain, which carry no install or deployment id. On request, we delete the rollups tied to your install id.</li>
         <li>Server logs: kept briefly by the hosting provider.</li>
         <li>Emails you send us: as long as needed to deal with your request.</li>
       </ul>
 
       <h2>International transfers</h2>
       <p>
-        Cloudflare and Sentry are US companies and process data globally. Where personal data
+        Cloudflare, Sentry, Google and Supabase are US companies. Cloudflare and Sentry process
+        data globally; our account, configuration and telemetry data is stored in the EU (see
+        above). Where personal data
         leaves the European Economic Area, we rely on the EU-US Data Privacy Framework where the
         provider is certified, and otherwise on the European Commission&apos;s Standard
         Contractual Clauses. PostHog data is hosted in the EU.
@@ -162,6 +192,16 @@ export default function PrivacyPage() {
           garanteprivacy.it
         </a>
         ), or to the authority in your own country.
+      </p>
+      <p>
+        To have your CLI telemetry deleted, write to{' '}
+        <a className={link} href={`mailto:${email}`}>
+          {email}
+        </a>{' '}
+        with your install id. The CLI has no command that prints it: it is the{' '}
+        <code>install_id</code> value in <code>identity.json</code> in amicu&apos;s telemetry data
+        directory (<code>~/.local/share/amicu/telemetry/</code>, or under{' '}
+        <code>$XDG_DATA_HOME</code> if set). Telemetry is not linked to your account or email.
       </p>
 
       <h2>California and other US states</h2>

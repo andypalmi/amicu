@@ -42,7 +42,7 @@ export const company: CompanyConfig = {
   vatId: null,
   contactEmail: 'hello@amicu.dev',
   privacyEmail: 'privacy@amicu.dev',
-  privacyEffectiveDate: '2026-10-15',
+  privacyEffectiveDate: '2026-10-18',
   termsEffectiveDate: '2026-10-15',
 };
 
