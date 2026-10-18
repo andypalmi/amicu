@@ -1403,9 +1403,11 @@ async fn verify_handle(
 fn gateway_headers(exposure: &EndpointExposure) -> Result<Vec<(String, SecretValue)>, String> {
     use amicu_modal::proxy_auth::{TOKEN_ID_ENV_VAR, TOKEN_SECRET_ENV_VAR, TokenConfig};
     match exposure {
+        // RunPod's gateway checks the same `Authorization: Bearer` key the
+        // runtime does: the shared check needs nothing beyond the key.
         EndpointExposure::Loopback
         | EndpointExposure::Public {
-            gateway: GatewayAuth::None,
+            gateway: GatewayAuth::None | GatewayAuth::RunPodBearer,
         } => Ok(Vec::new()),
         EndpointExposure::Public {
             gateway: GatewayAuth::ModalProxyToken,
@@ -2722,6 +2724,15 @@ mod exposure_tests {
         assert!(err.contains("teardown FAILED"), "{err}");
         assert!(err.contains("modal app stop inst-1"), "{err}");
         assert!(!err.contains(KEY), "{err}");
+    }
+
+    #[test]
+    fn a_runpod_endpoint_is_checked_with_the_bearer_key_alone() {
+        let headers = super::gateway_headers(&EndpointExposure::Public {
+            gateway: GatewayAuth::RunPodBearer,
+        })
+        .unwrap();
+        assert!(headers.is_empty());
     }
 
     #[test]

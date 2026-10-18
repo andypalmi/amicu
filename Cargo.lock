@@ -227,7 +227,6 @@ dependencies = [
  "amicu-core",
  "amicu-llamacpp",
  "amicu-providers",
- "amicu-registry",
  "amicu-runtime",
  "amicu-telemetry",
  "async-trait",
@@ -301,7 +300,9 @@ name = "amicu-runpod"
 version = "0.1.3"
 dependencies = [
  "amicu-core",
+ "amicu-llamacpp",
  "amicu-providers",
+ "amicu-runtime",
  "async-trait",
  "serde",
  "serde_json",

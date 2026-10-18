@@ -65,6 +65,25 @@ pub enum GatewayAuth {
     /// Modal proxy auth: requests need the workspace `Modal-Key` /
     /// `Modal-Secret` Proxy Auth Token headers.
     ModalProxyToken,
+    /// RunPod serverless gateway (`https://<id>.api.runpod.ai`): every request
+    /// needs `Authorization: Bearer <key>`, and the gateway forwards that same
+    /// header to the worker, whose runtime enforces the deployment's API key.
+    /// One header satisfies both, so there are no extra gateway headers:
+    /// callers send `Authorization: Bearer <api_key>` and nothing else.
+    #[serde(rename = "runpod_bearer")]
+    RunPodBearer,
+}
+
+impl GatewayAuth {
+    /// Whether the gateway needs credentials besides the runtime's own
+    /// `Authorization: Bearer` key (e.g. Modal's proxy-token headers).
+    #[must_use]
+    pub fn needs_extra_headers(self) -> bool {
+        match self {
+            Self::None | Self::RunPodBearer => false,
+            Self::ModalProxyToken => true,
+        }
+    }
 }
 
 /// A failed [`verify_endpoint`]. The text never contains a secret value.

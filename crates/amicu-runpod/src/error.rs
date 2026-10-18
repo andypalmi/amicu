@@ -21,6 +21,10 @@ pub enum RunPodError {
     /// The exchange never completed (timeout, DNS, TLS). Transient.
     #[error("RunPod transport failure: {0}")]
     Transport(String),
+    /// `GET /organization` answered `403` "organizations are not enabled for
+    /// this user": a personal account, not a rejected key.
+    #[error("RunPod organizations are not enabled for this account (a personal account)")]
+    OrganizationsDisabled,
     /// `401`/`403`: the API key is missing, invalid, or lacks the scope.
     #[error("RunPod rejected the API key (HTTP {status})")]
     CredentialsRejected { status: u16 },

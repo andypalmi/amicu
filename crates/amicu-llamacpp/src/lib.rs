@@ -23,6 +23,7 @@ pub mod command;
 pub mod download;
 mod error;
 pub mod health;
+pub mod remote;
 pub mod service;
 pub mod service_windows;
 pub mod supervisor;

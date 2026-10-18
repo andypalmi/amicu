@@ -606,6 +606,59 @@ struct SecretsList {
     secrets: Vec<Secret>,
 }
 
+#[derive(Deserialize)]
+struct GpuCatalog {
+    gpus: Vec<GpuType>,
+}
+
+/// One entry of `GET /catalog/gpus`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct GpuType {
+    /// GPU type id, as used in `excludedTypes` (`"NVIDIA L40S"`).
+    pub id: String,
+    /// Display name.
+    #[serde(default)]
+    pub name: String,
+    /// Serverless pool id (`"ADA_48_PRO"`); absent for types with no pool.
+    #[serde(default)]
+    pub pool: Option<String>,
+    /// Memory in GB.
+    #[serde(default)]
+    pub memory: Option<u32>,
+}
+
+/// Name of the amicu-owned secret whose id identifies a personal account
+/// (see [`RunPodClient::account_identity`]).
+pub const ACCOUNT_MARKER_SECRET: &str = "amicu-account-marker";
+
+/// Which RunPod account a set of credentials acts in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountIdentity {
+    /// An organization account, by organization id.
+    Organization {
+        /// Organization id.
+        id: String,
+    },
+    /// A personal account (organizations not enabled), by the id of its
+    /// [`ACCOUNT_MARKER_SECRET`].
+    Personal {
+        /// The marker secret's id.
+        marker_secret_id: String,
+    },
+}
+
+impl AccountIdentity {
+    /// A stable string to record in state and compare later:
+    /// `org:<id>` or `personal:<marker secret id>`.
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        match self {
+            Self::Organization { id } => format!("org:{id}"),
+            Self::Personal { marker_secret_id } => format!("personal:{marker_secret_id}"),
+        }
+    }
+}
+
 /// The RunPod v2 REST client.
 pub struct RunPodClient {
     transport: Arc<dyn HttpTransport>,
@@ -762,11 +815,85 @@ impl RunPodClient {
     }
 
     /// `GET /organization`: the account identity.
+    ///
+    /// A personal account answers `403` "organizations are not enabled for
+    /// this user"; that is [`RunPodError::OrganizationsDisabled`], not a
+    /// rejected key (see [`account_identity`](Self::account_identity)).
     pub async fn get_organization(&self) -> Result<Organization, RunPodError> {
-        let resp = self
-            .send(HttpMethod::Get, "/organization", None, "organization")
-            .await?;
+        let resp = self.execute(HttpMethod::Get, "/organization", None).await?;
+        if resp.status == 403
+            && problem_detail(&resp.body)
+                .to_ascii_lowercase()
+                .contains("organizations are not enabled")
+        {
+            return Err(RunPodError::OrganizationsDisabled);
+        }
+        check(&resp, "organization", false)?;
         decode(&resp)
+    }
+
+    /// The account these credentials act in, for "confirmed gone only in the
+    /// same workspace" checks.
+    ///
+    /// An organization account is identified by its organization id. The v2
+    /// API has no user or account endpoint for a personal account (organization
+    /// `403`), so its identity is the id of an amicu-owned marker secret,
+    /// [`ACCOUNT_MARKER_SECRET`]: secrets are account-scoped and ids are
+    /// stable, so the same account always re-derives the same id, and another
+    /// account never sees it. With `create_marker` the marker is created when
+    /// missing (deploy time); without it a missing marker is `Ok(None)`
+    /// (identity unknown: never treat that as "same account").
+    pub async fn account_identity(
+        &self,
+        create_marker: bool,
+    ) -> Result<Option<AccountIdentity>, RunPodError> {
+        match self.get_organization().await {
+            Ok(org) => return Ok(Some(AccountIdentity::Organization { id: org.id })),
+            Err(RunPodError::OrganizationsDisabled) => {}
+            Err(e) => return Err(e),
+        }
+        if let Some(marker) = self.find_secret(ACCOUNT_MARKER_SECRET).await? {
+            return Ok(Some(AccountIdentity::Personal {
+                marker_secret_id: marker.id,
+            }));
+        }
+        if !create_marker {
+            return Ok(None);
+        }
+        let marker = CreateSecret {
+            name: ACCOUNT_MARKER_SECRET.to_owned(),
+            value: "amicu account marker (not a credential)".to_owned(),
+            description: Some(
+                "amicu: identifies this RunPod account; do not delete while amicu manages \
+                 deployments here"
+                    .to_owned(),
+            ),
+        };
+        let id = match self.create_secret(&marker).await {
+            Ok(s) => s.id,
+            // Created concurrently, or the response was lost: read it back.
+            Err(RunPodError::Conflict { .. } | RunPodError::Transport(_)) => {
+                self.find_secret(ACCOUNT_MARKER_SECRET)
+                    .await?
+                    .ok_or_else(|| RunPodError::NotFound {
+                        what: format!("secret `{ACCOUNT_MARKER_SECRET}`"),
+                    })?
+                    .id
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(Some(AccountIdentity::Personal {
+            marker_secret_id: id,
+        }))
+    }
+
+    /// `GET /catalog/gpus`: every GPU type with its serverless pool.
+    pub async fn get_gpu_catalog(&self) -> Result<Vec<GpuType>, RunPodError> {
+        let resp = self
+            .send(HttpMethod::Get, "/catalog/gpus", None, "GPU catalog")
+            .await?;
+        let list: GpuCatalog = decode(&resp)?;
+        Ok(list.gpus)
     }
 
     /// `POST /account/secrets`. Error details are withheld for this call.
@@ -1272,7 +1399,11 @@ mod tests {
             json!({
                 "pools": ["ADA_48_PRO"],
                 "count": 1,
-                "excludedTypes": ["NVIDIA L40", "NVIDIA RTX 6000 Ada Generation"]
+                "excludedTypes": [
+                    "NVIDIA L40",
+                    "NVIDIA RTX 6000 Ada Generation",
+                    "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb"
+                ]
             })
         );
     }
@@ -1590,5 +1721,118 @@ mod tests {
             "https://example.test/v2/",
         );
         assert_eq!(c.base_url, "https://example.test/v2");
+    }
+
+    const NO_ORGS: &str = r#"{"detail":"organizations are not enabled for this user"}"#;
+
+    #[tokio::test]
+    async fn a_personal_account_is_not_a_rejected_key() {
+        let (c, _) = client(Mock::default().on(HttpMethod::Get, "/organization", 403, NO_ORGS));
+        assert_eq!(
+            c.get_organization().await.unwrap_err(),
+            RunPodError::OrganizationsDisabled
+        );
+        // Any other 403 still means the key is refused.
+        let (c, _) = client(Mock::default().on(
+            HttpMethod::Get,
+            "/organization",
+            403,
+            r#"{"detail":"forbidden"}"#,
+        ));
+        assert_eq!(
+            c.get_organization().await.unwrap_err(),
+            RunPodError::CredentialsRejected { status: 403 }
+        );
+    }
+
+    #[tokio::test]
+    async fn account_identity_prefers_the_organization() {
+        let (c, mock) = client(Mock::default().on(
+            HttpMethod::Get,
+            "/organization",
+            200,
+            r#"{"id":"org1","name":"o"}"#,
+        ));
+        let id = c.account_identity(true).await.unwrap().unwrap();
+        assert_eq!(id.fingerprint(), "org:org1");
+        assert_eq!(mock.requests().len(), 1, "no marker needed");
+    }
+
+    #[tokio::test]
+    async fn a_personal_account_is_identified_by_its_marker_secret() {
+        let found = r#"{"secrets":[{"id":"m1","name":"amicu-account-marker"}]}"#;
+        let (c, _) = client(
+            Mock::default()
+                .on(HttpMethod::Get, "/organization", 403, NO_ORGS)
+                .on(
+                    HttpMethod::Get,
+                    "/account/secrets?name=amicu-account-marker",
+                    200,
+                    found,
+                ),
+        );
+        assert_eq!(
+            c.account_identity(false).await.unwrap(),
+            Some(AccountIdentity::Personal {
+                marker_secret_id: "m1".into()
+            })
+        );
+
+        // Missing marker: unknown without create, created with it.
+        let none = r#"{"secrets":[]}"#;
+        let mock = || {
+            Mock::default()
+                .on(HttpMethod::Get, "/organization", 403, NO_ORGS)
+                .on(
+                    HttpMethod::Get,
+                    "/account/secrets?name=amicu-account-marker",
+                    200,
+                    none,
+                )
+                .on(
+                    HttpMethod::Post,
+                    "/account/secrets",
+                    201,
+                    r#"{"id":"m2","name":"amicu-account-marker"}"#,
+                )
+        };
+        let (c, m) = client(mock());
+        assert_eq!(c.account_identity(false).await.unwrap(), None);
+        assert!(m.requests().iter().all(|s| s.method == HttpMethod::Get));
+        let (c, m) = client(mock());
+        assert_eq!(
+            c.account_identity(true)
+                .await
+                .unwrap()
+                .unwrap()
+                .fingerprint(),
+            "personal:m2"
+        );
+        let body = m
+            .requests()
+            .into_iter()
+            .find(|s| s.method == HttpMethod::Post)
+            .unwrap()
+            .body
+            .unwrap();
+        assert_eq!(body["name"], json!(ACCOUNT_MARKER_SECRET));
+    }
+
+    #[tokio::test]
+    async fn gpu_catalog_is_listed_with_pools() {
+        let body = r#"{"gpus":[
+            {"id":"NVIDIA L40S","name":"L40S","pool":"ADA_48_PRO","memory":48,"secure":true},
+            {"id":"NVIDIA A40","name":"A40","pool":"AMPERE_48","memory":48},
+            {"id":"Odd GPU","name":"Odd"}]}"#;
+        let (c, mock) = client(Mock::default().on(HttpMethod::Get, "/catalog/gpus", 200, body));
+        let gpus = c.get_gpu_catalog().await.unwrap();
+        assert_eq!(
+            mock.requests()[0].url,
+            "https://api.runpod.io/v2/catalog/gpus"
+        );
+        assert_eq!(gpus.len(), 3);
+        assert_eq!(gpus[0].pool.as_deref(), Some("ADA_48_PRO"));
+        assert_eq!(gpus[0].memory, Some(48));
+        assert_eq!(gpus[2].pool, None);
     }
 }
