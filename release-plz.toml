@@ -6,6 +6,11 @@ changelog_path = "./CHANGELOG.md"
 changelog_update = false        # only amicu-cli writes the changelog (below)
 git_release_enable = false      # cargo-dist creates the GitHub Release
 git_tag_enable = false          # only the CLI package tags (below)
+# Every package shares the CLI's tag name. With git_only, release-plz finds a
+# package's previous release by matching its git_tag_name against existing
+# tags; without this, the untagged crates look unreleased on every run, so
+# each release PR re-bumps them and re-lists their whole history.
+git_tag_name = "v{{ version }}"
 git_only = true                 # versions come from git tags (not on crates.io); skips cargo publish
 release_always = false          # tag only when a release PR is merged
 semver_check = false            # no published baseline yet
@@ -15,7 +20,6 @@ release_commits = "^(feat|fix|perf|refactor)"
 [[package]]
 name = "amicu-cli"
 git_tag_enable = true
-git_tag_name = "v{{ version }}"
 changelog_path = "./CHANGELOG.md"
 changelog_update = true
 changelog_include = [
