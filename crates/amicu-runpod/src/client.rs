@@ -469,8 +469,14 @@ pub struct RequestUrls {
     pub health: Option<String>,
 }
 
+/// The plain endpoint env variable amicu sets on every endpoint it creates:
+/// an owner marker (a digest of the workspace / project / deployment), checked
+/// before an endpoint found only by name is adopted.
+pub const OWNER_ENV_VAR: &str = "AMICU_OWNER";
+
 /// A serverless endpoint as RunPod returns it. Environment values are
-/// deliberately not modelled, so they cannot be logged from here.
+/// deliberately not modelled, so they cannot be logged from here; only
+/// amicu's own [`OWNER_ENV_VAR`] marker (not a secret) is read.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Endpoint {
@@ -502,6 +508,22 @@ pub struct Endpoint {
     /// Creation time (RFC 3339).
     #[serde(default)]
     pub created_at: Option<String>,
+    /// The [`OWNER_ENV_VAR`] value in the endpoint env, when RunPod returns
+    /// the env and amicu set the marker.
+    #[serde(default, rename = "env", deserialize_with = "owner_from_env")]
+    pub owner: Option<String>,
+}
+
+/// Reads only [`OWNER_ENV_VAR`] out of an endpoint's `env` map; every other
+/// value is dropped unseen.
+fn owner_from_env<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let env: Option<BTreeMap<String, Value>> = Option::deserialize(d)?;
+    Ok(env
+        .and_then(|mut m| m.remove(OWNER_ENV_VAR))
+        .and_then(|v| v.as_str().map(str::to_owned)))
 }
 
 /// One active worker of an endpoint.
@@ -1711,6 +1733,13 @@ mod tests {
     fn endpoint_response_does_not_model_env_values() {
         let ep: Endpoint = serde_json::from_str(ENDPOINT).unwrap();
         assert!(!format!("{ep:?}").contains("leaky"));
+        assert_eq!(ep.owner, None);
+        let marked: Endpoint = serde_json::from_str(
+            r#"{"id":"e","name":"n","env":{"AMICU_OWNER":"abc","T":"leaky"}}"#,
+        )
+        .unwrap();
+        assert_eq!(marked.owner.as_deref(), Some("abc"));
+        assert!(!format!("{marked:?}").contains("leaky"));
     }
 
     #[test]

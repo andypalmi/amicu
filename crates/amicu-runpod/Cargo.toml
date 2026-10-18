@@ -20,6 +20,8 @@ amicu-runtime = { path = "../amicu-runtime" }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Content-addressed secret names and the endpoint owner marker.
+sha2 = "0.10"
 thiserror = "2"
 # The readiness wait's backoff sleeps and deadline.
 tokio = { version = "1", features = ["time"] }

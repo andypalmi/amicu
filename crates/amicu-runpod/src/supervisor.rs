@@ -19,35 +19,63 @@
 //! the deployment's port and [`HEALTH_PATH`]. The endpoint is reachable at
 //! `https://<id>.api.runpod.ai` ([`endpoint_url`]).
 //!
-//! # Secrets and the API key
-//!
-//! Every resolved secret - the deployment's `api_key` (under the runtime's
-//! own key variable, `VLLM_API_KEY` / `LLAMA_API_KEY`, which both runtimes
-//! read as their `--api-key`), `HF_TOKEN`, any other `secret_refs` - is stored
-//! as a RunPod account secret named deterministically by [`secret_name`] and
-//! referenced from the endpoint env as `{{ RUNPOD_SECRET_<name> }}`
-//! ([`secret_reference`]). The endpoint configuration RunPod stores (and
-//! returns from its API) therefore holds only the template, never a value.
-//! [`RunPodSupervisor::planned_secret_names`] gives the names before `start`
-//! so a caller can record them write-ahead; [`RunPodSupervisor::created_secrets`]
-//! tracks what `start` actually wrote.
+//! # Authentication: the gateway only
 //!
 //! RunPod's gateway authenticates every request to `*.api.runpod.ai` with
-//! `Authorization: Bearer <RunPod API key>` and forwards that header to the
-//! worker, where the runtime checks it against its own `--api-key`. One
-//! header must pass both, so the deployment's `api_key` has to be a RunPod API
-//! key allowed to call this endpoint (ideally a restricted key scoped to it).
-//! That is [`GatewayAuth::RunPodBearer`]: no extra gateway headers, end users
-//! send `Authorization: Bearer <api_key>` and nothing else.
+//! `Authorization: Bearer <RunPod API key>` and **strips that header** before
+//! the request reaches the worker (custom headers are forwarded). The gateway
+//! is therefore the only auth layer ([`GatewayAuth::RunPodBearer`]): the
+//! deployment's `api_key` must be a RunPod API key with `api.runpod.ai` access
+//! (ideally restricted to this endpoint), and it is a RunPod credential, so it
+//! never reaches the worker. `start` takes the runtime's key variable
+//! (`VLLM_API_KEY` / `LLAMA_API_KEY`) out of the resolved secrets, uses it only
+//! to probe readiness through the gateway, and sets no runtime `--api-key`
+//! (the runtime would reject every request, since the header never arrives).
+//! Neither key variable may appear in the deployment's `env` block.
 //!
-//! # Create, never blind-retry
+//! # Secrets
 //!
-//! RunPod does not enforce unique endpoint names, so `start` looks the name up
-//! first (one match: update it in place; several: refuse), and a create whose
-//! outcome is unknown ([`RunPodError::AmbiguousCreate`]) is resolved by
-//! looking the name up again, never by sending the create twice. The endpoint
-//! id lands in [`RunPodSupervisor::deployed_endpoint`] as soon as it is known,
-//! so a caller can record it even when `start` then fails.
+//! Every other resolved secret (`HF_TOKEN`, any `secret_refs`) is stored as a
+//! RunPod account secret and referenced from the endpoint env as
+//! `{{ RUNPOD_SECRET_<name> }}` ([`secret_reference`]), so the endpoint
+//! configuration RunPod stores holds only the template, never a value.
+//!
+//! Names are content-addressed ([`secret_name`]): the deployment's readable
+//! prefix plus a truncated SHA-256 of the value, salted with the endpoint's
+//! [`owner_marker`] and the variable name. The same value always maps to the
+//! same name, so `start` skips a name that already exists and creates only
+//! new ones; a changed value is a new name, so the live endpoint keeps
+//! resolving its old secret until the PATCH that switches it over succeeds.
+//! Only then are the previous generation's secrets (recorded in state via
+//! [`RunPodSupervisor::with_recorded_secrets`], or written by this instance)
+//! deleted. The digest is 48 bits of a salted hash: it does not reveal a
+//! high-entropy token, but a guessable low-entropy value could be confirmed
+//! by someone able to list the account's secret names.
+//!
+//! [`RunPodSupervisor::planned_secret_names`] gives the exact names before
+//! `start` so a caller can record them write-ahead;
+//! [`RunPodSupervisor::created_secrets`] tracks every name that may exist
+//! for this deployment as far as this instance knows (recorded, written, or
+//! left behind by a failed delete).
+//!
+//! Residual risk: a secret whose name already exists is trusted to hold the
+//! value its name encodes. Names include the owner marker (workspace,
+//! project, deployment), so another amicu deployment never computes the same
+//! name, but someone with access to the account could pre-create one.
+//! `start` and `stop` only ever delete names they recorded or wrote.
+//!
+//! # Create, never blind-retry; adopt only what is ours
+//!
+//! `start` prefers the endpoint id recorded in state
+//! ([`RunPodSupervisor::with_recorded_endpoint`]). Without one (or when it is
+//! gone) it looks the name up: RunPod does not enforce unique names, so
+//! several matches are refused, and a single match is adopted only when its
+//! env carries this deployment's [`OWNER_ENV_VAR`] marker, which `start`
+//! sets on every endpoint it writes. A create whose outcome is unknown
+//! ([`RunPodError::AmbiguousCreate`]) is resolved by looking the name up
+//! again (with the same owner check), never by sending the create twice. The
+//! endpoint id lands in [`RunPodSupervisor::deployed_endpoint`] as soon as it
+//! is known, so a caller can record it even when `start` then fails.
 //!
 //! # GPU placement
 //!
@@ -61,8 +89,8 @@
 //! `metrics`/`logs` are not implemented for RunPod yet and return a clear
 //! error.
 
-use std::collections::BTreeMap;
-use std::fmt;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::{self, Write as _};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -79,10 +107,11 @@ use amicu_runtime::{
     RuntimeMetrics, RuntimeStatus,
 };
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 
 use crate::client::{
-    CreateEndpoint, CreateSecret, DeleteOutcome, GpuRequest, GpuType, RunPodClient, UpdateEndpoint,
-    WorkersConfig,
+    CreateEndpoint, CreateSecret, DeleteOutcome, Endpoint, GpuRequest, GpuType, OWNER_ENV_VAR,
+    RunPodClient, UpdateEndpoint, WorkersConfig,
 };
 use crate::error::RunPodError;
 use crate::hardware::{exclusions_from_catalog, gpu_placement};
@@ -100,6 +129,14 @@ pub const LLAMACPP_IMAGE_ENV_VAR: &str = "AMICU_RUNPOD_LLAMACPP_IMAGE";
 /// The health route the load balancer polls and `start` waits on. Both
 /// llama-server and vLLM serve it on their own port, unauthenticated by the
 /// runtime (the RunPod gateway still requires the bearer key).
+///
+/// llama-server answers `503` while it loads the model, and RunPod's load
+/// balancer treats anything but `200`/`204` as unhealthy, so a slow model
+/// load may show as unhealthy workers (and possibly get them recycled)
+/// rather than initializing ones.
+// TODO(#306): check in the live test whether RunPod recycles a llama.cpp
+// worker that answers 503 during a long model load; if it does, point the
+// health check at a route that answers 204 while loading.
 pub const HEALTH_PATH: &str = "/health";
 
 /// Idle seconds before a worker scales down, unless the deployment's
@@ -124,9 +161,12 @@ pub const DEFAULT_REQUEST_COUNT: u32 = 32;
 /// option) the model weights download onto this disk at each cold start.
 pub const DEFAULT_CONTAINER_DISK_GB: u32 = 100;
 
-/// Env variables the load balancer reads; the deployment's `env` block may
-/// not set them.
-const RESERVED_ENV: [&str; 3] = ["PORT", "PORT_HEALTH", "HEALTH_CHECK_PATH"];
+/// Env variables the load balancer (or amicu's owner check) reads; the
+/// deployment's `env` block and secrets may not set them.
+const RESERVED_ENV: [&str; 4] = ["PORT", "PORT_HEALTH", "HEALTH_CHECK_PATH", OWNER_ENV_VAR];
+
+/// Hex digits of the value digest in a secret name (48 bits).
+const SECRET_DIGEST_HEX: usize = 12;
 
 /// The public base URL of endpoint `id`.
 #[must_use]
@@ -134,14 +174,57 @@ pub fn endpoint_url(id: &str) -> String {
     format!("https://{id}.api.runpod.ai")
 }
 
-/// The RunPod secret holding env variable `env_key` for a deployment:
-/// `amicu-<project>-<deployment>-<env key>-<hash>`, from the same
-/// [`amicu_core::naming`] scheme as the endpoint name, so it is stable across
-/// runs, distinct per project / deployment / variable, and at most 63
-/// characters of `[a-z0-9-]`.
+/// The first `hex_len` hex digits of SHA-256 over `domain` and the
+/// length-prefixed `parts` (so part boundaries can never shift).
+fn sha256_hex(domain: &str, parts: &[&str], hex_len: usize) -> String {
+    let mut h = Sha256::new();
+    h.update(domain.as_bytes());
+    for p in parts {
+        h.update((p.len() as u64).to_be_bytes());
+        h.update(p.as_bytes());
+    }
+    let mut hex = String::with_capacity(64);
+    for b in h.finalize() {
+        let _ = write!(hex, "{b:02x}");
+    }
+    hex.truncate(hex_len);
+    hex
+}
+
+/// The owner marker amicu sets as [`OWNER_ENV_VAR`] on a deployment's
+/// endpoint: a digest of the workspace (empty when unknown), project and
+/// deployment ids. Not a secret; it lets `start` tell its own endpoint from
+/// another one that happens to carry the same name.
 #[must_use]
-pub fn secret_name(project_id: &str, deployment_id: &str, env_key: &str) -> String {
-    project_app_name(project_id, &format!("{deployment_id}/{env_key}"))
+pub fn owner_marker(workspace_id: Option<&str>, project_id: &str, deployment_id: &str) -> String {
+    sha256_hex(
+        "amicu-runpod-owner/v1",
+        &[workspace_id.unwrap_or(""), project_id, deployment_id],
+        32,
+    )
+}
+
+/// The RunPod secret holding `value` for env variable `env_key` of a
+/// deployment, from the same [`amicu_core::naming`] scheme as the endpoint
+/// name (`amicu-<project>-<deployment>-<env key>-<digest>-<hash>`, at most 63
+/// characters of `[a-z0-9-]`; the readable part may be shortened). `<digest>`
+/// is a truncated SHA-256 of the value salted with `owner` (the
+/// [`owner_marker`]) and `env_key`: equal values give equal names, a changed
+/// value gives a new name, and the name does not reveal a high-entropy value.
+#[must_use]
+pub fn secret_name(
+    project_id: &str,
+    deployment_id: &str,
+    owner: &str,
+    env_key: &str,
+    value: &str,
+) -> String {
+    let digest = sha256_hex(
+        "amicu-runpod-secret/v1",
+        &[owner, env_key, value],
+        SECRET_DIGEST_HEX,
+    );
+    project_app_name(project_id, &format!("{deployment_id}/{env_key}/{digest}"))
 }
 
 /// The endpoint-env template RunPod replaces with secret `name`'s value when
@@ -177,11 +260,53 @@ impl Default for ReadinessTiming {
     }
 }
 
+/// How `stop` retries an endpoint delete RunPod refuses because workers are
+/// still live (after `stop` has scaled them to zero).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StopRetry {
+    /// Delete attempts in total (at least one is always made).
+    pub attempts: u32,
+    /// Pause between attempts.
+    pub delay: Duration,
+}
+
+impl StopRetry {
+    /// Six attempts ten seconds apart (under a minute of waiting).
+    pub const DEFAULT: Self = Self {
+        attempts: 6,
+        delay: Duration::from_secs(10),
+    };
+}
+
+impl Default for StopRetry {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// What [`RunPodSupervisor::stop_endpoint`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopOutcome {
+    /// The endpoint was deleted and its secrets with it.
+    Deleted,
+    /// RunPod reported the endpoint gone (`404`). Its secrets are deleted
+    /// only with [`with_confirmed_account`](RunPodSupervisor::with_confirmed_account)
+    /// (a `404` from the wrong account must not cost the right one its
+    /// secrets); otherwise `kept_secrets` lists the names left in place,
+    /// which also stay in [`created_secrets`](RunPodSupervisor::created_secrets).
+    AlreadyGone {
+        /// Secret names not deleted because the account was not confirmed.
+        kept_secrets: Vec<String>,
+    },
+}
+
 /// Everything `start` sends, built purely from the plan and the resolved
 /// secrets. `Debug` never prints a secret value.
 struct Prepared {
     endpoint: CreateEndpoint,
     secrets: Vec<CreateSecret>,
+    /// The deployment's `api_key` (a RunPod key): only for the readiness
+    /// probe through the gateway, never sent to the endpoint.
     api_key: SecretValue,
 }
 
@@ -202,12 +327,14 @@ impl fmt::Debug for Prepared {
 /// See the module docs for the mapping.
 ///
 /// One instance targets one deployment (`project_id`/`deployment_id` fix the
-/// endpoint and secret names). `status`/`stop` address the endpoint through
-/// the [`RuntimeHandle`] alone; `start` additionally needs
+/// endpoint name and, with [`with_workspace`](Self::with_workspace), the
+/// owner marker and secret names). `status`/`stop` address the endpoint
+/// through the [`RuntimeHandle`] alone; `start` additionally needs
 /// [`with_accelerator`](Self::with_accelerator).
 pub struct RunPodSupervisor {
     client: Arc<RunPodClient>,
     probe: Arc<dyn HttpTransport>,
+    workspace_id: Option<String>,
     project_id: String,
     deployment_id: String,
     endpoint_name: String,
@@ -218,6 +345,9 @@ pub struct RunPodSupervisor {
     disk_gb: u32,
     gguf: Option<GgufSource>,
     readiness: ReadinessTiming,
+    stop_retry: StopRetry,
+    confirmed_account: bool,
+    recorded_endpoint: Option<String>,
     recorded_secrets: Vec<String>,
     deployed_endpoint: Arc<Mutex<Option<String>>>,
     created_secrets: Arc<Mutex<Vec<String>>>,
@@ -244,6 +374,7 @@ impl RunPodSupervisor {
         Self {
             client: Arc::new(client),
             probe: Arc::new(ReqwestTransport::new()),
+            workspace_id: None,
             project_id: project_id.to_owned(),
             deployment_id: deployment_id.to_owned(),
             endpoint_name: project_endpoint_name(project_id, deployment_id),
@@ -254,6 +385,9 @@ impl RunPodSupervisor {
             disk_gb: DEFAULT_CONTAINER_DISK_GB,
             gguf: None,
             readiness: ReadinessTiming::DEFAULT,
+            stop_retry: StopRetry::DEFAULT,
+            confirmed_account: false,
+            recorded_endpoint: None,
             recorded_secrets: Vec::new(),
             deployed_endpoint: Arc::default(),
             created_secrets: Arc::default(),
@@ -264,6 +398,17 @@ impl RunPodSupervisor {
     #[must_use]
     pub fn with_probe_transport(mut self, transport: Arc<dyn HttpTransport>) -> Self {
         self.probe = transport;
+        self
+    }
+
+    /// The workspace the deployment belongs to. It goes into the
+    /// [`owner_marker`] (and so into the secret names), so two workspaces
+    /// sharing a RunPod account never adopt each other's endpoint. Set it
+    /// consistently: a different value makes `start` refuse the existing
+    /// endpoint unless its id is [recorded](Self::with_recorded_endpoint).
+    #[must_use]
+    pub fn with_workspace(mut self, workspace_id: &str) -> Self {
+        self.workspace_id = Some(workspace_id.to_owned());
         self
     }
 
@@ -351,9 +496,37 @@ impl RunPodSupervisor {
         self
     }
 
-    /// Secret names recorded in state for this deployment, deleted by `stop`
-    /// together with the ones this instance created and the standard ones
-    /// ([`planned_secret_names`](Self::planned_secret_names) with no secrets).
+    /// How `stop` retries a delete refused for live workers (default
+    /// [`StopRetry::DEFAULT`]).
+    #[must_use]
+    pub fn with_stop_retry(mut self, retry: StopRetry) -> Self {
+        self.stop_retry = retry;
+        self
+    }
+
+    /// Whether the caller has confirmed these credentials act in the account
+    /// recorded in state (e.g. [`RunPodClient::account_identity`] matches the
+    /// recorded fingerprint). Only then does a `404` on `stop` count as "gone,
+    /// delete its secrets"; without it (the default) the secrets are left and
+    /// reported in [`StopOutcome::AlreadyGone`].
+    #[must_use]
+    pub fn with_confirmed_account(mut self, confirmed: bool) -> Self {
+        self.confirmed_account = confirmed;
+        self
+    }
+
+    /// The endpoint id recorded in state for this deployment. `start` updates
+    /// it in place (falling back to the name lookup only when RunPod no
+    /// longer has it) instead of relying on a name match.
+    #[must_use]
+    pub fn with_recorded_endpoint(mut self, id: &str) -> Self {
+        self.recorded_endpoint = Some(id.to_owned());
+        self
+    }
+
+    /// Secret names recorded in state for this deployment: `start` deletes
+    /// those the new configuration no longer references (once the endpoint
+    /// write succeeded), and `stop` deletes them all.
     #[must_use]
     pub fn with_recorded_secrets(mut self, names: Vec<String>) -> Self {
         self.recorded_secrets = names;
@@ -383,6 +556,16 @@ impl RunPodSupervisor {
         &self.endpoint_name
     }
 
+    /// The [`owner_marker`] this deployment's endpoint carries.
+    #[must_use]
+    pub fn owner(&self) -> String {
+        owner_marker(
+            self.workspace_id.as_deref(),
+            &self.project_id,
+            &self.deployment_id,
+        )
+    }
+
     /// The management client, e.g. for
     /// [`RunPodClient::account_identity`] before recording state.
     #[must_use]
@@ -398,32 +581,34 @@ impl RunPodSupervisor {
         Arc::clone(&self.deployed_endpoint)
     }
 
-    /// Names of the RunPod secrets `start` may have written (each is added
-    /// before its create call). `stop` removes the ones it deletes.
+    /// Names of the RunPod secrets that may exist for this deployment as far
+    /// as this instance knows: the recorded ones until they are deleted, and
+    /// each one `start` writes (added before its create call). Deletions
+    /// remove names, so after `start` or `stop` this is the set to record.
     #[must_use]
     pub fn created_secrets(&self) -> Arc<Mutex<Vec<String>>> {
         Arc::clone(&self.created_secrets)
     }
 
-    /// The RunPod secret names a `start` with `secrets` writes, for recording
-    /// before the call: one per resolved secret, plus the `HF_TOKEN` and both
-    /// runtimes' API-key variables (which a start may add or a previous run
-    /// may have left). Recording a name that is never created is harmless.
-    #[must_use]
-    pub fn planned_secret_names(&self, secrets: &[ResolvedSecret]) -> Vec<String> {
-        let mut keys: Vec<&str> = secrets.iter().map(|s| s.name.as_str()).collect();
-        keys.extend([
-            HF_TOKEN_ENV_VAR,
-            RuntimeKind::Vllm.api_key_env_var(),
-            RuntimeKind::LlamaCpp.api_key_env_var(),
-        ]);
-        let mut names: Vec<String> = keys
-            .into_iter()
-            .map(|k| secret_name(&self.project_id, &self.deployment_id, k))
-            .collect();
+    /// The exact RunPod secret names a `start` with `plan` and `secrets`
+    /// references (they depend on the values), for recording before the
+    /// call alongside the names already recorded. Reads the operator's
+    /// `HF_TOKEN` fallback from the environment, as `start` does.
+    ///
+    /// # Errors
+    /// Whatever `start` refuses before its first call (no `api_key`, a
+    /// reserved env variable, no GPU, ...).
+    pub fn planned_secret_names(
+        &self,
+        plan: &LaunchPlan,
+        secrets: &[ResolvedSecret],
+    ) -> Result<Vec<String>, LlamaCppError> {
+        let hf_token_fallback = std::env::var(HF_TOKEN_ENV_VAR).ok();
+        let prepared = self.prepare(plan, secrets, "", hf_token_fallback.as_deref())?;
+        let mut names: Vec<String> = prepared.secrets.into_iter().map(|s| s.name).collect();
         names.sort();
         names.dedup();
-        names
+        Ok(names)
     }
 
     /// The argv the RunPod worker runs for `plan` (for display and tests).
@@ -450,23 +635,39 @@ impl RunPodSupervisor {
             Runtime::LlamaCpp(s) => s.port,
         };
         let argv = self.launch_argv(plan)?;
-        let RemoteEnv { plain, secret } = remote::split_env(plan, secrets, hf_token_fallback)?;
+        let RemoteEnv { plain, mut secret } = remote::split_env(plan, secrets, hf_token_fallback)?;
 
-        let key_var = runtime.api_key_env_var();
-        let api_key = secret.get(key_var).ok_or_else(|| {
+        // The gateway strips `Authorization`, so a runtime key would reject
+        // every request: neither key variable may reach the worker.
+        let key_vars = [
+            RuntimeKind::Vllm.api_key_env_var(),
+            RuntimeKind::LlamaCpp.api_key_env_var(),
+        ];
+        if let Some(k) = key_vars.iter().find(|k| plain.contains_key(**k)) {
+            return Err(LlamaCppError::Supervisor(format!(
+                "env var '{k}' cannot be set on RunPod: the gateway strips the Authorization \
+                 header, so a runtime API key would reject every request; RunPod's gateway \
+                 checks the deployment's `api_key` instead"
+            )));
+        }
+        let api_key = secret.remove(runtime.api_key_env_var()).ok_or_else(|| {
             LlamaCppError::Supervisor(
-                "RunPod deployments need an `api_key`: the endpoint is public, and RunPod's \
-                 gateway and the runtime both check it as the bearer key"
+                "RunPod deployments need an `api_key`: a RunPod API key with api.runpod.ai \
+                 access (ideally restricted to this endpoint), which RunPod's gateway checks \
+                 as the bearer key"
                     .to_owned(),
             )
         })?;
+        for k in key_vars {
+            secret.remove(k);
+        }
         if let Some(k) = RESERVED_ENV
             .iter()
             .find(|k| plain.contains_key(**k) || secret.contains_key(**k))
         {
             return Err(LlamaCppError::Supervisor(format!(
-                "env var '{k}' is reserved on RunPod (the load balancer reads it); remove it from \
-                 the deployment's `env` block"
+                "env var '{k}' is reserved on RunPod (the load balancer or amicu reads it); \
+                 remove it from the deployment's `env` block"
             )));
         }
         let gpu = self.gpu.clone().ok_or_else(|| {
@@ -476,14 +677,15 @@ impl RunPodSupervisor {
             )
         })?;
 
+        let owner = self.owner();
         let mut env = plain;
-        for k in RESERVED_ENV.iter().take(2) {
-            env.insert((*k).to_owned(), port.to_string());
-        }
+        env.insert("PORT".to_owned(), port.to_string());
+        env.insert("PORT_HEALTH".to_owned(), port.to_string());
         env.insert("HEALTH_CHECK_PATH".to_owned(), HEALTH_PATH.to_owned());
+        env.insert(OWNER_ENV_VAR.to_owned(), owner.clone());
         let mut create_secrets = Vec::with_capacity(secret.len());
         for (key, value) in &secret {
-            let name = secret_name(&self.project_id, &self.deployment_id, key);
+            let name = secret_name(&self.project_id, &self.deployment_id, &owner, key, value);
             env.insert(key.clone(), secret_reference(&name));
             create_secrets.push(CreateSecret {
                 name,
@@ -530,7 +732,7 @@ impl RunPodSupervisor {
         Ok(Prepared {
             endpoint,
             secrets: create_secrets,
-            api_key: SecretValue::new(api_key.clone()),
+            api_key: SecretValue::new(api_key),
         })
     }
 
@@ -554,41 +756,74 @@ impl RunPodSupervisor {
         }
     }
 
-    /// Writes one secret. Names are immutable on RunPod, so an existing
-    /// secret of that name (a previous run, or a create whose response was
-    /// lost) is deleted and written again with the current value.
-    async fn put_secret(&self, secret: &CreateSecret) -> Result<(), LlamaCppError> {
-        self.note_secret(&secret.name);
-        match self.client.create_secret(secret).await {
-            Ok(_) => return Ok(()),
-            Err(RunPodError::Conflict { .. } | RunPodError::Transport(_)) => {}
-            Err(e) => return Err(secret_err(&secret.name, &e)),
-        }
-        if let Some(existing) = self
-            .client
-            .find_secret(&secret.name)
-            .await
-            .map_err(|e| secret_err(&secret.name, &e))?
-        {
-            self.client
-                .delete_secret(&existing.id)
-                .await
-                .map_err(|e| secret_err(&secret.name, &e))?;
-        }
-        self.client
-            .create_secret(secret)
-            .await
-            .map(|_| ())
-            .map_err(|e| secret_err(&secret.name, &e))
+    fn known_secrets(&self) -> Vec<String> {
+        self.created_secrets
+            .lock()
+            .map(|c| c.clone())
+            .unwrap_or_default()
     }
 
-    /// Best-effort removal of secrets written for a create that definitely
-    /// failed; whatever cannot be removed stays in
+    /// Makes sure `secret` exists. Names are content-addressed, so an
+    /// existing name already holds this value and is left alone. Returns
+    /// whether this call created it.
+    async fn ensure_secret(&self, secret: &CreateSecret) -> Result<bool, LlamaCppError> {
+        let name = &secret.name;
+        let exists = self
+            .client
+            .find_secret(name)
+            .await
+            .map_err(|e| secret_err(name, &e))?
+            .is_some();
+        self.note_secret(name);
+        if exists {
+            return Ok(false);
+        }
+        match self.client.create_secret(secret).await {
+            Ok(_) => Ok(true),
+            // Created concurrently under the same name: the same value.
+            Err(RunPodError::Conflict { .. }) => Ok(false),
+            // The response was lost: whether it exists is a lookup away.
+            Err(RunPodError::Transport(detail)) => match self.client.find_secret(name).await {
+                Ok(Some(_)) => Ok(true),
+                Ok(None) => {
+                    self.forget_secret(name);
+                    Err(LlamaCppError::Supervisor(format!(
+                        "writing RunPod secret `{name}` failed in transport ({detail}) and it \
+                         does not exist; run the command again"
+                    )))
+                }
+                Err(e) => Err(LlamaCppError::Supervisor(format!(
+                    "writing RunPod secret `{name}` failed in transport ({detail}) and looking \
+                     it up failed too ({e}); it may exist"
+                ))),
+            },
+            Err(e) => {
+                // RunPod answered and refused: nothing was written.
+                self.forget_secret(name);
+                Err(secret_err(name, &e))
+            }
+        }
+    }
+
+    /// Best-effort removal of secrets this run created for an endpoint write
+    /// RunPod refused; whatever cannot be removed stays in
     /// [`created_secrets`](Self::created_secrets) for the caller.
-    async fn discard_secrets(&self, secrets: &[CreateSecret]) {
-        for s in secrets {
-            if self.delete_secret_by_name(&s.name).await.is_ok() {
-                self.forget_secret(&s.name);
+    async fn discard_secrets(&self, names: &[String]) {
+        for name in names {
+            if self.delete_secret_by_name(name).await.is_ok() {
+                self.forget_secret(name);
+            }
+        }
+    }
+
+    /// Once the endpoint references only `current`: deletes every other
+    /// known secret (the previous generation). Best effort; what cannot be
+    /// deleted stays in [`created_secrets`](Self::created_secrets).
+    async fn retire_stale_secrets(&self, current: &[CreateSecret]) {
+        let current: BTreeSet<&str> = current.iter().map(|s| s.name.as_str()).collect();
+        for name in self.known_secrets() {
+            if !current.contains(name.as_str()) && self.delete_secret_by_name(&name).await.is_ok() {
+                self.forget_secret(&name);
             }
         }
     }
@@ -600,9 +835,67 @@ impl RunPodSupervisor {
         Ok(())
     }
 
-    /// Creates the endpoint, or updates the one already carrying its name.
-    /// Returns the endpoint id.
-    async fn upsert_endpoint(&self, prepared: &Prepared) -> Result<String, LlamaCppError> {
+    /// Refuses an endpoint unless it carries this deployment's owner marker.
+    fn check_owner(&self, endpoint: &Endpoint) -> Result<(), LlamaCppError> {
+        let owner = self.owner();
+        let why = match endpoint.owner.as_deref() {
+            Some(o) if o == owner => return Ok(()),
+            Some(_) => format!("its {OWNER_ENV_VAR} marker belongs to another amicu deployment"),
+            None => format!("it carries no {OWNER_ENV_VAR} marker for this deployment"),
+        };
+        Err(LlamaCppError::Supervisor(format!(
+            "RunPod endpoint {} is named `{}` but {why}; refusing to adopt it. Delete or \
+             rename it, or record its id if it is this deployment's",
+            endpoint.id, endpoint.name
+        )))
+    }
+
+    /// PATCHes endpoint `id` to `prepared`. A refused PATCH removes the
+    /// secrets this run created (`fresh`): the endpoint still references the
+    /// previous ones.
+    async fn patch_endpoint(
+        &self,
+        id: &str,
+        prepared: &Prepared,
+        fresh: &[String],
+    ) -> Result<String, LlamaCppError> {
+        self.set_deployed(id);
+        match self
+            .client
+            .update_endpoint(id, &update_from(&prepared.endpoint))
+            .await
+        {
+            Ok(_) => Ok(id.to_owned()),
+            Err(e) => {
+                if !matches!(e, RunPodError::Transport(_)) {
+                    self.discard_secrets(fresh).await;
+                }
+                Err(runpod_err(&e))
+            }
+        }
+    }
+
+    /// Updates the recorded endpoint, else the one owned endpoint carrying
+    /// the name, else creates it. Returns the endpoint id. `fresh` are the
+    /// secrets this run created.
+    async fn upsert_endpoint(
+        &self,
+        prepared: &Prepared,
+        fresh: &[String],
+    ) -> Result<String, LlamaCppError> {
+        if let Some(id) = &self.recorded_endpoint {
+            match self.client.get_endpoint(id).await {
+                Ok(ep) => {
+                    // Recorded in state, so ours; a foreign marker still stops it.
+                    if ep.owner.is_some() {
+                        self.check_owner(&ep)?;
+                    }
+                    return self.patch_endpoint(&ep.id, prepared, fresh).await;
+                }
+                Err(RunPodError::NotFound { .. }) => {}
+                Err(e) => return Err(runpod_err(&e)),
+            }
+        }
         let name = &prepared.endpoint.name;
         let existing = self
             .client
@@ -612,12 +905,13 @@ impl RunPodSupervisor {
         match existing.as_slice() {
             [] => {}
             [one] => {
-                self.set_deployed(&one.id);
-                self.client
-                    .update_endpoint(&one.id, &update_from(&prepared.endpoint))
+                let ep = self
+                    .client
+                    .get_endpoint(&one.id)
                     .await
                     .map_err(|e| runpod_err(&e))?;
-                return Ok(one.id.clone());
+                self.check_owner(&ep)?;
+                return self.patch_endpoint(&ep.id, prepared, fresh).await;
             }
             many => return Err(duplicate_err(name, many.iter().map(|e| e.id.as_str()))),
         }
@@ -632,29 +926,36 @@ impl RunPodSupervisor {
             Err(e) => {
                 // RunPod answered and refused: nothing references the
                 // secrets written for it.
-                self.discard_secrets(&prepared.secrets).await;
+                self.discard_secrets(fresh).await;
                 Err(runpod_err(&e))
             }
         }
     }
 
     /// The create's response was lost: the endpoint may exist. Look it up by
-    /// name; never send the create again.
+    /// name (with the owner check); never send the create again.
     async fn recover_ambiguous(&self, name: &str, detail: &str) -> Result<String, LlamaCppError> {
+        let lookup_err = |e: &RunPodError| {
+            LlamaCppError::Supervisor(format!(
+                "RunPod create outcome unknown ({detail}) and looking up endpoint `{name}` \
+                 failed ({e}); look it up by name before retrying"
+            ))
+        };
         let found = self
             .client
             .find_endpoints_by_name(name)
             .await
-            .map_err(|e| {
-                LlamaCppError::Supervisor(format!(
-                    "RunPod create outcome unknown ({detail}) and looking up endpoint `{name}` \
-                 failed ({e}); look it up by name before retrying"
-                ))
-            })?;
+            .map_err(|e| lookup_err(&e))?;
         match found.as_slice() {
             [one] => {
-                self.set_deployed(&one.id);
-                Ok(one.id.clone())
+                let ep = self
+                    .client
+                    .get_endpoint(&one.id)
+                    .await
+                    .map_err(|e| lookup_err(&e))?;
+                self.check_owner(&ep)?;
+                self.set_deployed(&ep.id);
+                Ok(ep.id)
             }
             [] => Err(LlamaCppError::Supervisor(format!(
                 "RunPod create outcome unknown ({detail}) and no endpoint named `{name}` exists \
@@ -664,10 +965,11 @@ impl RunPodSupervisor {
         }
     }
 
-    /// Polls `<endpoint>/health` with the bearer key until a worker answers
-    /// `200`. `204` (initializing), "no workers" answers and transport
-    /// failures are retried with a doubling backoff until the timeout; `401`/
-    /// `403` fail at once (the key is not accepted, waiting will not help).
+    /// Polls `<endpoint>/health` through the gateway with the bearer key
+    /// until a worker answers `200`. `204` (initializing), "no workers"
+    /// answers and transport failures are retried with a doubling backoff
+    /// until the timeout; `401`/`403` fail at once (the gateway does not
+    /// accept the key, waiting will not help).
     async fn wait_ready(&self, id: &str, key: &SecretValue) -> Result<(), LlamaCppError> {
         let key = key.expose_secret_str().map_err(|_| {
             LlamaCppError::Supervisor("the endpoint API key is not valid UTF-8".to_owned())
@@ -683,9 +985,9 @@ impl RunPodSupervisor {
                 Ok(r) if r.status == 200 => return Ok(()),
                 Ok(r) if matches!(r.status, 401 | 403) => {
                     return Err(LlamaCppError::Supervisor(format!(
-                        "RunPod endpoint {id} rejected the deployment's api_key on {HEALTH_PATH} \
-                         (HTTP {}); on RunPod the api_key must be a RunPod API key allowed to \
-                         call this endpoint",
+                        "RunPod's gateway rejected the deployment's api_key for endpoint {id} \
+                         (HTTP {}); on RunPod the api_key must be a RunPod API key with \
+                         api.runpod.ai access to this endpoint",
                         r.status
                     )));
                 }
@@ -706,16 +1008,93 @@ impl RunPodSupervisor {
         }
     }
 
-    /// Every secret name `stop` should make sure is gone.
-    fn secrets_to_delete(&self) -> Vec<String> {
-        let mut names = self.planned_secret_names(&[]);
-        names.extend(self.recorded_secrets.iter().cloned());
-        if let Ok(created) = self.created_secrets.lock() {
-            names.extend(created.iter().cloned());
+    /// `DELETE`s endpoint `id`, retrying (bounded by
+    /// [`with_stop_retry`](Self::with_stop_retry)) while RunPod refuses it
+    /// with an error that mentions workers.
+    async fn delete_endpoint_retrying(&self, id: &str) -> Result<DeleteOutcome, LlamaCppError> {
+        let attempts = self.stop_retry.attempts.max(1);
+        let mut attempt = 1;
+        loop {
+            match self.client.delete_endpoint(id).await {
+                Ok(outcome) => return Ok(outcome),
+                Err(e)
+                    if attempt < attempts
+                        && e.to_string().to_ascii_lowercase().contains("worker") =>
+                {
+                    attempt += 1;
+                    tokio::time::sleep(self.stop_retry.delay).await;
+                }
+                Err(e) => return Err(runpod_err(&e)),
+            }
         }
+    }
+
+    /// [`ProcessSupervisor::stop`] with its outcome: scales the endpoint to
+    /// zero workers (best effort), deletes it, then deletes every known
+    /// secret - unless RunPod reported the endpoint already gone and the
+    /// account is not [confirmed](Self::with_confirmed_account), in which
+    /// case the secrets are kept and listed.
+    ///
+    /// # Errors
+    /// [`LlamaCppError::Supervisor`] when the endpoint delete is not
+    /// confirmed (no secret is touched) or a secret could not be deleted
+    /// (named in the message and kept in
+    /// [`created_secrets`](Self::created_secrets)).
+    pub async fn stop_endpoint(
+        &self,
+        handle: &RuntimeHandle,
+    ) -> Result<StopOutcome, LlamaCppError> {
+        // Live workers can keep a delete from going through; drain them
+        // first. Any failure here (a 404 included) is left to the delete.
+        let drain = UpdateEndpoint {
+            workers: Some(WorkersConfig {
+                min: 0,
+                max: 0,
+                idle_timeout: None,
+            }),
+            ..UpdateEndpoint::default()
+        };
+        let _ = self.client.update_endpoint(&handle.id, &drain).await;
+
+        // The endpoint first: its secrets are only removed once RunPod has
+        // confirmed it is gone, never before.
+        let outcome = self.delete_endpoint_retrying(&handle.id).await?;
+        for name in &self.recorded_secrets {
+            self.note_secret(name);
+        }
+        let mut names = self.known_secrets();
         names.sort();
-        names.dedup();
-        names
+        if outcome == DeleteOutcome::AlreadyGone && !self.confirmed_account {
+            return Ok(StopOutcome::AlreadyGone {
+                kept_secrets: names,
+            });
+        }
+        let mut failed: BTreeMap<String, String> = BTreeMap::new();
+        for name in names {
+            match self.delete_secret_by_name(&name).await {
+                Ok(()) => self.forget_secret(&name),
+                Err(e) => {
+                    failed.insert(name, e.to_string());
+                }
+            }
+        }
+        if !failed.is_empty() {
+            return Err(LlamaCppError::Supervisor(format!(
+                "RunPod endpoint {} was deleted, but these secrets could not be: {}",
+                handle.id,
+                failed
+                    .iter()
+                    .map(|(n, e)| format!("`{n}` ({e})"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        Ok(match outcome {
+            DeleteOutcome::Deleted => StopOutcome::Deleted,
+            DeleteOutcome::AlreadyGone => StopOutcome::AlreadyGone {
+                kept_secrets: Vec::new(),
+            },
+        })
     }
 }
 
@@ -789,10 +1168,19 @@ impl ProcessSupervisor for RunPodSupervisor {
             .map_err(|e| runpod_err(&e))?;
         self.exclude_from_catalog(&mut prepared.endpoint.gpu, &catalog)?;
 
-        for secret in &prepared.secrets {
-            self.put_secret(secret).await?;
+        // Recorded secrets may still exist until this run retires them.
+        for name in &self.recorded_secrets {
+            self.note_secret(name);
         }
-        let id = self.upsert_endpoint(&prepared).await?;
+        let mut fresh = Vec::new();
+        for secret in &prepared.secrets {
+            if self.ensure_secret(secret).await? {
+                fresh.push(secret.name.clone());
+            }
+        }
+        let id = self.upsert_endpoint(&prepared, &fresh).await?;
+        // The endpoint now references only the current generation.
+        self.retire_stale_secrets(&prepared.secrets).await;
         self.wait_ready(&id, &prepared.api_key).await?;
         Ok(RuntimeHandle {
             endpoint: endpoint_url(&id),
@@ -825,16 +1213,17 @@ impl ProcessSupervisor for RunPodSupervisor {
             RuntimeStatus::Running {
                 detail: format!("{ready} worker(s) ready"),
             }
+        } else if s.initializing > 0 || s.throttled > 0 {
+            // A cold start or a wait for capacity: not a failure.
+            RuntimeStatus::Running {
+                detail: format!(
+                    "starting ({} initializing, {} throttled)",
+                    s.initializing, s.throttled
+                ),
+            }
         } else if s.unhealthy > 0 {
             RuntimeStatus::Failed {
                 detail: format!("{} worker(s) unhealthy", s.unhealthy),
-            }
-        } else if s.initializing > 0 || s.throttled > 0 {
-            RuntimeStatus::Failed {
-                detail: format!(
-                    "endpoint not ready ({} initializing, {} throttled)",
-                    s.initializing, s.throttled
-                ),
             }
         } else {
             RuntimeStatus::Running {
@@ -855,35 +1244,11 @@ impl ProcessSupervisor for RunPodSupervisor {
         Err(unsupported("logs"))
     }
 
+    /// See [`RunPodSupervisor::stop_endpoint`]; an unconfirmed
+    /// [`StopOutcome::AlreadyGone`] keeps its secrets in
+    /// [`created_secrets`](RunPodSupervisor::created_secrets).
     async fn stop(&self, handle: &RuntimeHandle) -> Result<(), LlamaCppError> {
-        // The endpoint first: its secrets are only removed once RunPod has
-        // confirmed it is gone (deleted now or already), never before.
-        match self.client.delete_endpoint(&handle.id).await {
-            Ok(DeleteOutcome::Deleted | DeleteOutcome::AlreadyGone) => {}
-            Err(e) => return Err(runpod_err(&e)),
-        }
-        let mut failed: BTreeMap<String, String> = BTreeMap::new();
-        for name in self.secrets_to_delete() {
-            match self.delete_secret_by_name(&name).await {
-                Ok(()) => self.forget_secret(&name),
-                Err(e) => {
-                    failed.insert(name, e.to_string());
-                }
-            }
-        }
-        if failed.is_empty() {
-            Ok(())
-        } else {
-            Err(LlamaCppError::Supervisor(format!(
-                "RunPod endpoint {} was deleted, but these secrets could not be: {}",
-                handle.id,
-                failed
-                    .iter()
-                    .map(|(n, e)| format!("`{n}` ({e})"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )))
-        }
+        self.stop_endpoint(handle).await.map(|_| ())
     }
 }
 

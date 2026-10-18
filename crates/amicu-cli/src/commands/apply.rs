@@ -1403,8 +1403,8 @@ async fn verify_handle(
 fn gateway_headers(exposure: &EndpointExposure) -> Result<Vec<(String, SecretValue)>, String> {
     use amicu_modal::proxy_auth::{TOKEN_ID_ENV_VAR, TOKEN_SECRET_ENV_VAR, TokenConfig};
     match exposure {
-        // RunPod's gateway checks the same `Authorization: Bearer` key the
-        // runtime does: the shared check needs nothing beyond the key.
+        // RunPod's gateway checks the `Authorization: Bearer` key (a RunPod
+        // API key) itself: the shared check needs nothing beyond the key.
         EndpointExposure::Loopback
         | EndpointExposure::Public {
             gateway: GatewayAuth::None | GatewayAuth::RunPodBearer,

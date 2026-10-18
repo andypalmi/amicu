@@ -53,6 +53,15 @@ impl Mock {
         self
     }
 
+    /// Like [`on`](Self::on), but matched before every route added so far.
+    fn first(self, method: HttpMethod, suffix: &'static str, answers: &[Canned]) -> Self {
+        self.routes
+            .lock()
+            .unwrap()
+            .insert(0, (method, suffix, answers.iter().cloned().collect()));
+        self
+    }
+
     fn ok(self, method: HttpMethod, suffix: &'static str, status: u16, body: &'static str) -> Self {
         self.on(method, suffix, &[Canned::Status(status, body)])
     }
@@ -218,15 +227,56 @@ fn llama_plan() -> LaunchPlan {
     )
 }
 
-fn key_secret(var: &str) -> Vec<ResolvedSecret> {
-    vec![ResolvedSecret {
-        name: var.to_owned(),
-        value: SecretValue::new(KEY.to_owned()),
-    }]
+/// The operator's Hugging Face token (a RunPod secret, unlike the api_key).
+const HF: &str = "hf_HUGGINGFACETOKEN0123";
+
+/// The deployment's `api_key` under the runtime's variable, plus `HF_TOKEN`
+/// (passed explicitly so a `HF_TOKEN` in the test environment never adds a
+/// fallback).
+fn secrets_for(var: &str) -> Vec<ResolvedSecret> {
+    vec![
+        ResolvedSecret {
+            name: var.to_owned(),
+            value: SecretValue::new(KEY.to_owned()),
+        },
+        ResolvedSecret {
+            name: HF_TOKEN_ENV_VAR.to_owned(),
+            value: SecretValue::new(HF.to_owned()),
+        },
+    ]
+}
+
+fn vllm_secrets() -> Vec<ResolvedSecret> {
+    secrets_for("VLLM_API_KEY")
+}
+
+fn owner() -> String {
+    owner_marker(None, PROJECT, DEP)
+}
+
+fn sname(var: &str, value: &str) -> String {
+    secret_name(PROJECT, DEP, &owner(), var, value)
+}
+
+fn hf_name() -> String {
+    sname(HF_TOKEN_ENV_VAR, HF)
+}
+
+/// `GET /serverless/ep1` for an endpoint carrying this deployment's marker.
+fn owned_endpoint() -> &'static str {
+    Box::leak(
+        format!(
+            r#"{{"id":"ep1","name":"{}","env":{{"{OWNER_ENV_VAR}":"{}","HF_TOKEN":"x"}}}}"#,
+            project_endpoint_name(PROJECT, DEP),
+            owner()
+        )
+        .into_boxed_str(),
+    )
 }
 
 fn happy_mock() -> Mock {
     Mock::default()
+        .ok(HttpMethod::Get, "/account/secrets?name=", 200, NO_SECRETS)
         .ok(HttpMethod::Post, "/account/secrets", 201, SECRET)
         .ok(HttpMethod::Get, "/serverless", 200, NO_ENDPOINTS)
         .ok(HttpMethod::Post, "/serverless", 201, ENDPOINT)
@@ -241,41 +291,53 @@ fn posted(mock: &Mock, suffix: &str) -> Vec<Value> {
         .collect()
 }
 
-fn key_name(var: &str) -> String {
-    secret_name(PROJECT, DEP, var)
+fn position(mock: &Mock, method: HttpMethod, suffix: &str) -> usize {
+    mock.requests()
+        .iter()
+        .position(|s| s.method == method && s.url.ends_with(suffix))
+        .unwrap_or_else(|| panic!("no {method:?} {suffix}"))
 }
 
 // --- naming / templating ---------------------------------------------------
 
 #[test]
-fn secret_names_are_deterministic_scoped_and_runpod_safe() {
-    let a = secret_name(PROJECT, DEP, "VLLM_API_KEY");
-    assert_eq!(a, secret_name(PROJECT, DEP, "VLLM_API_KEY"), "stable");
-    assert!(a.starts_with("amicu-aaaa1111-chat-vllm-api-key-"), "{a}");
+fn secret_names_are_content_addressed_scoped_and_runpod_safe() {
+    let o = owner();
+    let a = secret_name(PROJECT, DEP, &o, "HF_TOKEN", "v1");
+    assert_eq!(a, secret_name(PROJECT, DEP, &o, "HF_TOKEN", "v1"), "stable");
+    assert!(a.starts_with("amicu-aaaa1111-chat-hf-token-"), "{a}");
     assert!(a.len() <= 63);
     assert!(
         a.bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
     );
-    assert_ne!(a, secret_name(PROJECT, DEP, "HF_TOKEN"));
-    assert_ne!(a, secret_name(PROJECT, "other", "VLLM_API_KEY"));
-    assert_ne!(a, secret_name("bbbb2222", DEP, "VLLM_API_KEY"));
+    assert_ne!(a, secret_name(PROJECT, DEP, &o, "HF_TOKEN", "v2"), "value");
+    assert_ne!(a, secret_name(PROJECT, DEP, &o, "OTHER", "v1"), "variable");
+    assert_ne!(a, secret_name(PROJECT, "other", &o, "HF_TOKEN", "v1"));
+    assert_ne!(a, secret_name("bbbb2222", DEP, &o, "HF_TOKEN", "v1"));
+    let other_ws = owner_marker(Some("ws2"), PROJECT, DEP);
+    assert_ne!(o, other_ws, "the workspace is part of the owner");
+    assert_ne!(a, secret_name(PROJECT, DEP, &other_ws, "HF_TOKEN", "v1"));
+    // The value never appears in the name.
+    let long = "hf_abcdefghijklmnopqrstuvwxyz";
+    assert!(!secret_name(PROJECT, DEP, &o, "HF_TOKEN", long).contains("abcdefgh"));
     assert_eq!(secret_reference("n-1"), "{{ RUNPOD_SECRET_n-1 }}");
 }
 
 #[test]
-fn planned_secret_names_cover_every_secret_and_the_standard_ones() {
+fn planned_secret_names_are_exactly_what_start_writes_without_the_api_key() {
     let (sup, _) = supervisor(Mock::default());
-    let mut secrets = key_secret("VLLM_API_KEY");
+    let mut secrets = vllm_secrets();
     secrets.push(ResolvedSecret {
         name: "my_token".into(),
         value: SecretValue::new("v".to_owned()),
     });
-    let names = sup.planned_secret_names(&secrets);
-    for var in ["VLLM_API_KEY", "LLAMA_API_KEY", "HF_TOKEN", "my_token"] {
-        assert!(names.contains(&key_name(var)), "{var}");
-    }
-    assert_eq!(names.len(), 4, "deduplicated");
+    let names = sup.planned_secret_names(&vllm_plan(), &secrets).unwrap();
+    let mut want = vec![hf_name(), sname("my_token", "v")];
+    want.sort();
+    assert_eq!(names, want);
+    // Missing api_key: refused before any call, like start.
+    assert!(sup.planned_secret_names(&vllm_plan(), &[]).is_err());
 }
 
 // --- create bodies -----------------------------------------------------------
@@ -292,10 +354,7 @@ async fn vllm_start_creates_the_secret_then_the_endpoint_and_waits_for_health() 
             default_zone: None,
         }))
         .unwrap();
-    let handle = sup
-        .start(&vllm_plan(), &key_secret("VLLM_API_KEY"))
-        .await
-        .unwrap();
+    let handle = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
     assert_eq!(handle.id, "ep1");
     assert_eq!(handle.endpoint, "https://ep1.api.runpod.ai");
     assert_eq!(
@@ -309,28 +368,18 @@ async fn vllm_start_creates_the_secret_then_the_endpoint_and_waits_for_health() 
         Some("ep1")
     );
 
-    // The secret holds the key; it is written before the endpoint.
-    let order: Vec<(HttpMethod, String)> = mock
-        .requests()
-        .into_iter()
-        .map(|s| (s.method, s.url))
-        .collect();
-    let secret_at = order
-        .iter()
-        .position(|(m, u)| *m == HttpMethod::Post && u.ends_with("/account/secrets"))
-        .unwrap();
-    let create_at = order
-        .iter()
-        .position(|(m, u)| *m == HttpMethod::Post && u.ends_with("/serverless"))
-        .unwrap();
-    assert!(secret_at < create_at);
-    let secret = &posted(&mock, "/account/secrets")[0];
-    assert_eq!(secret["name"], json!(key_name("VLLM_API_KEY")));
-    assert_eq!(secret["value"], json!(KEY));
-    assert_eq!(
-        *sup.created_secrets().lock().unwrap(),
-        vec![key_name("VLLM_API_KEY")]
+    // Only HF_TOKEN becomes a RunPod secret, written before the endpoint;
+    // the api_key is a RunPod credential and never leaves this machine
+    // except as the gateway bearer.
+    assert!(
+        position(&mock, HttpMethod::Post, "/account/secrets")
+            < position(&mock, HttpMethod::Post, "/serverless")
     );
+    let written = posted(&mock, "/account/secrets");
+    assert_eq!(written.len(), 1);
+    assert_eq!(written[0]["name"], json!(hf_name()));
+    assert_eq!(written[0]["value"], json!(HF));
+    assert_eq!(*sup.created_secrets().lock().unwrap(), vec![hf_name()]);
 
     let body = &posted(&mock, "/serverless")[0];
     let name = project_endpoint_name(PROJECT, DEP);
@@ -352,11 +401,13 @@ async fn vllm_start_creates_the_secret_then_the_endpoint_and_waits_for_health() 
     assert_eq!(
         body["env"],
         json!({
+            "AMICU_OWNER": owner(),
             "HEALTH_CHECK_PATH": "/health",
+            "HF_TOKEN": secret_reference(&hf_name()),
             "PORT": "8000",
             "PORT_HEALTH": "8000",
-            "VLLM_API_KEY": format!("{{{{ RUNPOD_SECRET_{} }}}}", key_name("VLLM_API_KEY")),
-        })
+        }),
+        "no runtime API key: the gateway strips Authorization"
     );
     assert_eq!(body["ports"], json!(["8000/http"]));
     assert_eq!(body["disk"], json!(DEFAULT_CONTAINER_DISK_GB));
@@ -382,13 +433,25 @@ async fn vllm_start_creates_the_secret_then_the_endpoint_and_waits_for_health() 
         dcs.iter().all(|d| d.as_str().unwrap().starts_with("EU")),
         "{dcs:?}"
     );
-    // The key is never in the endpoint config, only its template.
+    // No value is in the endpoint config, only templates.
     assert!(!body.to_string().contains(KEY));
+    assert!(!body.to_string().contains(HF));
 
-    // Management calls carry the RunPod key; the health probe the end-user key.
+    // Management calls carry the RunPod key; the health probe the end-user
+    // key, and no other request carries it at all.
     for s in mock.requests() {
         let want = if s.url == HEALTH { KEY } else { MGMT };
         assert_eq!(s.bearer.as_deref(), Some(want), "{}", s.url);
+        if s.url != HEALTH {
+            assert!(
+                !s.body
+                    .map(|b| b.to_string())
+                    .unwrap_or_default()
+                    .contains(KEY),
+                "{}",
+                s.url
+            );
+        }
     }
 }
 
@@ -406,7 +469,7 @@ async fn llama_start_runs_the_image_server_with_an_hf_gguf() {
         repo: "ggml-org/gemma-3-1b-it-GGUF".into(),
         file: "gemma-q4_k_m.gguf".into(),
     });
-    sup.start(&llama_plan(), &key_secret("LLAMA_API_KEY"))
+    sup.start(&llama_plan(), &secrets_for("LLAMA_API_KEY"))
         .await
         .unwrap();
     let body = &posted(&mock, "/serverless")[0];
@@ -427,10 +490,8 @@ async fn llama_start_runs_the_image_server_with_an_hf_gguf() {
         ])
     );
     assert_eq!(body["env"]["PORT"], json!("8080"));
-    assert_eq!(
-        body["env"]["LLAMA_API_KEY"],
-        json!(secret_reference(&key_name("LLAMA_API_KEY")))
-    );
+    assert!(body["env"].get("LLAMA_API_KEY").is_none());
+    assert!(!body.to_string().contains(KEY));
     assert_eq!(
         body["workers"],
         json!({"min": 1, "max": 5, "idleTimeout": MAX_IDLE_TIMEOUT_SECS})
@@ -443,30 +504,30 @@ async fn llama_start_runs_the_image_server_with_an_hf_gguf() {
 }
 
 #[test]
-fn every_secret_goes_through_a_runpod_secret_and_plain_env_stays_plain() {
+fn every_other_secret_goes_through_a_runpod_secret_and_plain_env_stays_plain() {
     let (sup, _) = supervisor(Mock::default());
     let mut p = vllm_plan();
     if let Runtime::Vllm(s) = &mut p.settings {
         s.env = BTreeMap::from([("VLLM_LOGGING_LEVEL".to_owned(), "DEBUG".to_owned())]);
     }
+    let key_only = vec![ResolvedSecret {
+        name: "VLLM_API_KEY".to_owned(),
+        value: SecretValue::new(KEY.to_owned()),
+    }];
     let prepared = sup
-        .prepare(
-            &p,
-            &key_secret("VLLM_API_KEY"),
-            "img",
-            Some("hf_operator_token"),
-        )
+        .prepare(&p, &key_only, "img", Some("hf_operator_token"))
         .unwrap();
     let env = &prepared.endpoint.env;
     assert_eq!(env["VLLM_LOGGING_LEVEL"], "DEBUG");
     assert_eq!(
         env["HF_TOKEN"],
-        secret_reference(&key_name("HF_TOKEN")),
+        secret_reference(&sname("HF_TOKEN", "hf_operator_token")),
         "the operator HF token fallback is a secret too"
     );
+    assert!(!env.contains_key("VLLM_API_KEY"));
     let names: Vec<&str> = prepared.secrets.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(names.len(), 2);
-    assert!(names.contains(&key_name("HF_TOKEN").as_str()));
+    assert_eq!(names, vec![sname("HF_TOKEN", "hf_operator_token").as_str()]);
+    assert_eq!(prepared.api_key.expose_secret_str().unwrap(), KEY);
     let dbg = format!("{prepared:?} {sup:?}");
     assert!(
         !dbg.contains(KEY) && !dbg.contains("hf_operator_token"),
@@ -478,23 +539,36 @@ fn every_secret_goes_through_a_runpod_secret_and_plain_env_stays_plain() {
 #[test]
 fn prepare_refuses_what_runpod_cannot_run_safely() {
     let (sup, _) = supervisor(Mock::default());
-    // No api_key: the endpoint would only be guarded by the gateway.
+    // No api_key: the endpoint would have no gateway key to check.
     let err = sup
         .prepare(&vllm_plan(), &[], "img", None)
         .unwrap_err()
         .to_string();
     assert!(err.contains("need an `api_key`"), "{err}");
 
-    // A reserved load-balancer variable in the env block.
+    // Reserved load-balancer / owner variables in the env block.
+    for reserved in ["PORT", OWNER_ENV_VAR] {
+        let mut p = vllm_plan();
+        if let Runtime::Vllm(s) = &mut p.settings {
+            s.env = BTreeMap::from([(reserved.to_owned(), "1".to_owned())]);
+        }
+        let err = sup
+            .prepare(&p, &vllm_secrets(), "img", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&format!("'{reserved}' is reserved")), "{err}");
+    }
+
+    // A runtime key in the env block would reject every request.
     let mut p = vllm_plan();
     if let Runtime::Vllm(s) = &mut p.settings {
-        s.env = BTreeMap::from([("PORT".to_owned(), "1".to_owned())]);
+        s.env = BTreeMap::from([("LLAMA_API_KEY".to_owned(), "x".to_owned())]);
     }
     let err = sup
-        .prepare(&p, &key_secret("VLLM_API_KEY"), "img", None)
+        .prepare(&p, &vllm_secrets(), "img", None)
         .unwrap_err()
         .to_string();
-    assert!(err.contains("'PORT' is reserved"), "{err}");
+    assert!(err.contains("strips the Authorization"), "{err}");
 
     // A local model path, reported with the RunPod name.
     let mut p = vllm_plan();
@@ -502,7 +576,7 @@ fn prepare_refuses_what_runpod_cannot_run_safely() {
         argv[2] = "/models/llama".into();
     }
     let err = sup
-        .prepare(&p, &key_secret("VLLM_API_KEY"), "img", None)
+        .prepare(&p, &vllm_secrets(), "img", None)
         .unwrap_err()
         .to_string();
     assert!(
@@ -514,7 +588,7 @@ fn prepare_refuses_what_runpod_cannot_run_safely() {
     let mock = Arc::new(Mock::default());
     let client = RunPodClient::with_transport(ApiKey::new(MGMT), mock, BASE);
     let err = RunPodSupervisor::new(client, PROJECT, DEP)
-        .prepare(&vllm_plan(), &key_secret("VLLM_API_KEY"), "img", None)
+        .prepare(&vllm_plan(), &vllm_secrets(), "img", None)
         .unwrap_err()
         .to_string();
     assert!(err.contains("needs a GPU"), "{err}");
@@ -536,31 +610,11 @@ fn a_tpu_or_unknown_gpu_is_rejected_before_any_call() {
     assert!(mock.requests().is_empty());
 }
 
-// --- create / ambiguity --------------------------------------------------------
-
-#[tokio::test]
-async fn an_ambiguous_create_is_resolved_by_name_and_never_resent() {
-    let mock = ambiguous_then(named(ONE_ENDPOINT)).ok(HttpMethod::Get, HEALTH, 200, "{}");
-    let (sup, mock) = supervisor(mock);
-    let handle = sup
-        .start(&vllm_plan(), &key_secret("VLLM_API_KEY"))
-        .await
-        .unwrap();
-    assert_eq!(handle.id, "ep1");
-    assert_eq!(
-        mock.count(HttpMethod::Post, "/serverless"),
-        1,
-        "never retried"
-    );
-    assert_eq!(mock.count(HttpMethod::Get, "/serverless"), 2);
-    assert_eq!(
-        sup.deployed_endpoint().lock().unwrap().as_deref(),
-        Some("ep1")
-    );
-}
+// --- create / ambiguity / ownership ------------------------------------------
 
 fn ambiguous_then(after: &'static str) -> Mock {
     Mock::default()
+        .ok(HttpMethod::Get, "/account/secrets?name=", 200, NO_SECRETS)
         .ok(HttpMethod::Post, "/account/secrets", 201, SECRET)
         .on(
             HttpMethod::Get,
@@ -574,10 +628,49 @@ fn ambiguous_then(after: &'static str) -> Mock {
 }
 
 #[tokio::test]
+async fn an_ambiguous_create_is_resolved_by_name_and_never_resent() {
+    let mock = ambiguous_then(named(ONE_ENDPOINT))
+        .ok(HttpMethod::Get, "/serverless/ep1", 200, owned_endpoint())
+        .ok(HttpMethod::Get, HEALTH, 200, "{}");
+    let (sup, mock) = supervisor(mock);
+    let handle = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    assert_eq!(handle.id, "ep1");
+    assert_eq!(
+        mock.count(HttpMethod::Post, "/serverless"),
+        1,
+        "never retried"
+    );
+    assert_eq!(mock.count(HttpMethod::Get, "/serverless"), 2);
+    assert_eq!(
+        sup.deployed_endpoint().lock().unwrap().as_deref(),
+        Some("ep1")
+    );
+}
+
+#[tokio::test]
+async fn an_ambiguous_create_finding_an_unmarked_endpoint_refuses_it() {
+    let mock = ambiguous_then(named(ONE_ENDPOINT)).ok(
+        HttpMethod::Get,
+        "/serverless/ep1",
+        200,
+        named(ENDPOINT),
+    );
+    let (sup, _) = supervisor(mock);
+    let err = sup
+        .start(&vllm_plan(), &vllm_secrets())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("refusing to adopt"), "{err}");
+    assert!(err.contains("ep1"), "the id is reported: {err}");
+    assert!(sup.deployed_endpoint().lock().unwrap().is_none());
+}
+
+#[tokio::test]
 async fn an_ambiguous_create_with_nothing_found_fails_without_retrying() {
     let (sup, mock) = supervisor(ambiguous_then(NO_ENDPOINTS));
     let err = sup
-        .start(&vllm_plan(), &key_secret("VLLM_API_KEY"))
+        .start(&vllm_plan(), &vllm_secrets())
         .await
         .unwrap_err()
         .to_string();
@@ -586,7 +679,7 @@ async fn an_ambiguous_create_with_nothing_found_fails_without_retrying() {
     assert_eq!(mock.count(HttpMethod::Post, "/serverless"), 1);
     assert!(sup.deployed_endpoint().lock().unwrap().is_none());
     // The secret is kept for the caller: the endpoint may still appear.
-    assert_eq!(sup.created_secrets().lock().unwrap().len(), 1);
+    assert_eq!(*sup.created_secrets().lock().unwrap(), vec![hf_name()]);
     assert!(!err.contains(KEY));
 }
 
@@ -594,7 +687,7 @@ async fn an_ambiguous_create_with_nothing_found_fails_without_retrying() {
 async fn an_ambiguous_create_that_finds_duplicates_refuses_to_pick() {
     let (sup, mock) = supervisor(ambiguous_then(named(TWO_ENDPOINTS)));
     let err = sup
-        .start(&vllm_plan(), &key_secret("VLLM_API_KEY"))
+        .start(&vllm_plan(), &vllm_secrets())
         .await
         .unwrap_err()
         .to_string();
@@ -602,30 +695,81 @@ async fn an_ambiguous_create_that_finds_duplicates_refuses_to_pick() {
     assert_eq!(mock.count(HttpMethod::Post, "/serverless"), 1);
 }
 
-#[tokio::test]
-async fn an_existing_endpoint_is_updated_in_place_not_duplicated() {
-    let mock = Mock::default()
+fn update_mock(endpoint: &'static str) -> Mock {
+    Mock::default()
+        .ok(HttpMethod::Get, "/account/secrets?name=", 200, NO_SECRETS)
         .ok(HttpMethod::Post, "/account/secrets", 201, SECRET)
         .ok(HttpMethod::Get, "/serverless", 200, named(ONE_ENDPOINT))
+        .ok(HttpMethod::Get, "/serverless/ep1", 200, endpoint)
         .ok(HttpMethod::Patch, "/serverless/ep1", 200, ENDPOINT)
-        .ok(HttpMethod::Get, HEALTH, 200, "{}");
-    let (sup, mock) = supervisor(mock);
-    let handle = sup
-        .start(&vllm_plan(), &key_secret("VLLM_API_KEY"))
-        .await
-        .unwrap();
-    assert_eq!(handle.id, "ep1");
-    assert_eq!(mock.count(HttpMethod::Post, "/serverless"), 0);
-    let patch = mock
-        .requests()
+        .ok(HttpMethod::Get, HEALTH, 200, "{}")
+}
+
+fn patch_body(mock: &Mock) -> Value {
+    mock.requests()
         .into_iter()
         .find(|s| s.method == HttpMethod::Patch)
         .unwrap()
         .body
-        .unwrap();
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_owned_endpoint_found_by_name_is_updated_in_place() {
+    let (sup, mock) = supervisor(update_mock(owned_endpoint()));
+    let handle = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    assert_eq!(handle.id, "ep1");
+    assert_eq!(mock.count(HttpMethod::Post, "/serverless"), 0);
+    let patch = patch_body(&mock);
     assert_eq!(patch["entrypoint"], json!(["vllm"]));
+    assert_eq!(patch["env"][OWNER_ENV_VAR], json!(owner()));
     assert!(patch.get("name").is_none());
     assert!(!patch.to_string().contains(KEY));
+}
+
+#[tokio::test]
+async fn an_endpoint_found_by_name_without_our_marker_is_refused() {
+    let foreign: &'static str = Box::leak(
+        format!(
+            r#"{{"id":"ep1","name":"x","env":{{"{OWNER_ENV_VAR}":"{}"}}}}"#,
+            owner_marker(Some("other-ws"), PROJECT, DEP)
+        )
+        .into_boxed_str(),
+    );
+    for (endpoint, why) in [
+        (named(ENDPOINT), "carries no AMICU_OWNER marker"),
+        (foreign, "belongs to another amicu deployment"),
+    ] {
+        let (sup, mock) = supervisor(update_mock(endpoint));
+        let err = sup
+            .start(&vllm_plan(), &vllm_secrets())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refusing to adopt"), "{err}");
+        assert!(err.contains(why), "{err}");
+        assert_eq!(mock.count(HttpMethod::Patch, "/serverless/ep1"), 0);
+        assert_eq!(mock.count(HttpMethod::Post, "/serverless"), 0);
+        assert!(sup.deployed_endpoint().lock().unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_recorded_endpoint_is_updated_without_a_name_lookup() {
+    // Recorded in state: trusted even without a marker (an older endpoint).
+    let (sup, mock) = supervisor(update_mock(named(ENDPOINT)));
+    let sup = sup.with_recorded_endpoint("ep1");
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    assert_eq!(mock.count(HttpMethod::Get, "/serverless"), 0);
+    assert_eq!(mock.count(HttpMethod::Patch, "/serverless/ep1"), 1);
+
+    // Gone from RunPod: fall back to the name lookup and create.
+    let mock = happy_mock().ok(HttpMethod::Get, "/serverless/gone", 404, "{}");
+    let (sup, mock) = supervisor(mock);
+    let sup = sup.with_recorded_endpoint("gone");
+    let handle = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    assert_eq!(handle.id, "ep1");
+    assert_eq!(mock.count(HttpMethod::Post, "/serverless"), 1);
 }
 
 #[tokio::test]
@@ -638,7 +782,7 @@ async fn a_catalog_that_does_not_list_the_card_stops_before_any_write() {
     );
     let (sup, mock) = supervisor(mock);
     let err = sup
-        .start(&vllm_plan(), &key_secret("VLLM_API_KEY"))
+        .start(&vllm_plan(), &vllm_secrets())
         .await
         .unwrap_err()
         .to_string();
@@ -650,17 +794,21 @@ async fn a_catalog_that_does_not_list_the_card_stops_before_any_write() {
 
     // An unreadable catalog also stops the deploy (never guess the exclusions).
     let (sup, mock) = supervisor(happy_mock().ok(HttpMethod::Get, "/catalog/gpus", 500, "{}"));
-    assert!(
-        sup.start(&vllm_plan(), &key_secret("VLLM_API_KEY"))
-            .await
-            .is_err()
-    );
+    assert!(sup.start(&vllm_plan(), &vllm_secrets()).await.is_err());
     assert_eq!(mock.count(HttpMethod::Post, "/account/secrets"), 0);
 }
 
 #[tokio::test]
 async fn a_refused_create_removes_the_secrets_it_wrote() {
     let mock = Mock::default()
+        .on(
+            HttpMethod::Get,
+            "/account/secrets?name=",
+            &[
+                Canned::Status(200, NO_SECRETS),
+                Canned::Status(200, FOUND_SECRET),
+            ],
+        )
         .ok(HttpMethod::Post, "/account/secrets", 201, SECRET)
         .ok(HttpMethod::Get, "/serverless", 200, NO_ENDPOINTS)
         .ok(
@@ -669,11 +817,10 @@ async fn a_refused_create_removes_the_secrets_it_wrote() {
             400,
             r#"{"detail":"bad gpu"}"#,
         )
-        .ok(HttpMethod::Get, "/account/secrets?name=", 200, FOUND_SECRET)
         .ok(HttpMethod::Delete, "/account/secrets/s1", 204, "");
     let (sup, mock) = supervisor(mock);
     let err = sup
-        .start(&vllm_plan(), &key_secret("VLLM_API_KEY"))
+        .start(&vllm_plan(), &vllm_secrets())
         .await
         .unwrap_err()
         .to_string();
@@ -684,38 +831,126 @@ async fn a_refused_create_removes_the_secrets_it_wrote() {
 }
 
 #[tokio::test]
-async fn an_existing_secret_is_replaced_with_the_current_value() {
+async fn an_existing_secret_name_already_holds_the_value_and_is_left_alone() {
     let mock = Mock::default()
-        .on(
-            HttpMethod::Post,
-            "/account/secrets",
-            &[
-                Canned::Status(409, r#"{"detail":"exists"}"#),
-                Canned::Status(201, SECRET),
-            ],
-        )
         .ok(HttpMethod::Get, "/account/secrets?name=", 200, FOUND_SECRET)
-        .ok(HttpMethod::Delete, "/account/secrets/s1", 204, "")
         .ok(HttpMethod::Get, "/serverless", 200, NO_ENDPOINTS)
         .ok(HttpMethod::Post, "/serverless", 201, ENDPOINT)
         .ok(HttpMethod::Get, HEALTH, 200, "{}");
     let (sup, mock) = supervisor(mock);
-    sup.start(&vllm_plan(), &key_secret("VLLM_API_KEY"))
-        .await
-        .unwrap();
-    assert_eq!(mock.count(HttpMethod::Post, "/account/secrets"), 2);
-    assert_eq!(mock.count(HttpMethod::Delete, "/account/secrets/s1"), 1);
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    assert_eq!(mock.count(HttpMethod::Post, "/account/secrets"), 0);
+    assert_eq!(mock.count(HttpMethod::Delete, "/account/secrets/s1"), 0);
+    assert_eq!(*sup.created_secrets().lock().unwrap(), vec![hf_name()]);
+}
+
+#[tokio::test]
+async fn a_redeploy_retires_the_previous_secrets_only_after_the_update() {
+    let mock = update_mock(owned_endpoint())
+        .first(
+            HttpMethod::Get,
+            "/account/secrets?name=",
+            &[
+                Canned::Status(200, NO_SECRETS),
+                Canned::Status(200, FOUND_SECRET),
+            ],
+        )
+        .ok(HttpMethod::Delete, "/account/secrets/s1", 204, "");
+    let (sup, mock) = supervisor(mock);
+    let sup = sup.with_recorded_secrets(vec!["old-gen".into()]);
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
     assert!(
-        posted(&mock, "/account/secrets")
-            .iter()
-            .all(|b| b["value"] == json!(KEY))
+        position(&mock, HttpMethod::Patch, "/serverless/ep1")
+            < position(&mock, HttpMethod::Delete, "/account/secrets/s1"),
+        "old secrets go only once the endpoint no longer references them"
     );
+    assert!(
+        mock.requests()
+            .iter()
+            .any(|s| s.url.ends_with("?name=old-gen"))
+    );
+    assert_eq!(mock.count(HttpMethod::Delete, "/account/secrets/s1"), 1);
+    assert_eq!(*sup.created_secrets().lock().unwrap(), vec![hf_name()]);
+}
+
+#[tokio::test]
+async fn a_refused_update_keeps_the_live_secrets_and_drops_the_new_ones() {
+    let mock = Mock::default()
+        .on(
+            HttpMethod::Get,
+            "/account/secrets?name=",
+            &[
+                Canned::Status(200, NO_SECRETS),
+                Canned::Status(200, FOUND_SECRET),
+            ],
+        )
+        .ok(HttpMethod::Post, "/account/secrets", 201, SECRET)
+        .ok(HttpMethod::Delete, "/account/secrets/s1", 204, "")
+        .ok(HttpMethod::Get, "/serverless/ep1", 200, owned_endpoint())
+        .ok(
+            HttpMethod::Patch,
+            "/serverless/ep1",
+            400,
+            r#"{"detail":"bad"}"#,
+        );
+    let (sup, mock) = supervisor(mock);
+    let sup = sup
+        .with_recorded_endpoint("ep1")
+        .with_recorded_secrets(vec!["old-gen".into()]);
+    assert!(sup.start(&vllm_plan(), &vllm_secrets()).await.is_err());
+    let lookups: Vec<String> = mock
+        .requests()
+        .into_iter()
+        .filter(|s| s.url.contains("?name="))
+        .map(|s| s.url)
+        .collect();
+    assert!(
+        lookups.iter().all(|u| !u.ends_with("=old-gen")),
+        "the live endpoint's secret is untouched: {lookups:?}"
+    );
+    assert_eq!(mock.count(HttpMethod::Delete, "/account/secrets/s1"), 1);
+    assert_eq!(
+        *sup.created_secrets().lock().unwrap(),
+        vec!["old-gen".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn a_secret_create_lost_in_transport_is_checked_by_name() {
+    // Found afterwards: it was written.
+    let mock = happy_mock()
+        .first(
+            HttpMethod::Get,
+            "/account/secrets?name=",
+            &[
+                Canned::Status(200, NO_SECRETS),
+                Canned::Status(200, FOUND_SECRET),
+            ],
+        )
+        .first(HttpMethod::Post, "/account/secrets", &[Canned::Timeout]);
+    let (sup, mock) = supervisor(mock);
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    assert_eq!(mock.count(HttpMethod::Post, "/account/secrets"), 1);
+
+    // Not found: fail before the endpoint, nothing to record.
+    let mock = happy_mock().first(HttpMethod::Post, "/account/secrets", &[Canned::Timeout]);
+    let (sup, mock) = supervisor(mock);
+    let err = sup
+        .start(&vllm_plan(), &vllm_secrets())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("does not exist"), "{err}");
+    assert!(!err.contains(HF));
+    assert_eq!(mock.count(HttpMethod::Post, "/serverless"), 0);
+    assert!(sup.created_secrets().lock().unwrap().is_empty());
 }
 
 // --- readiness -------------------------------------------------------------------
 
 fn ready_mock(health: &[Canned]) -> Mock {
     Mock::default()
+        .ok(HttpMethod::Get, "/account/secrets?name=", 200, NO_SECRETS)
         .ok(HttpMethod::Post, "/account/secrets", 201, SECRET)
         .ok(HttpMethod::Get, "/serverless", 200, NO_ENDPOINTS)
         .ok(HttpMethod::Post, "/serverless", 201, ENDPOINT)
@@ -730,9 +965,7 @@ async fn readiness_waits_through_initializing_and_cold_start_answers() {
         Canned::Status(503, "no workers available"),
         Canned::Status(200, "{}"),
     ]));
-    sup.start(&vllm_plan(), &key_secret("VLLM_API_KEY"))
-        .await
-        .unwrap();
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
     assert_eq!(mock.count(HttpMethod::Get, HEALTH), 4);
 }
 
@@ -740,7 +973,7 @@ async fn readiness_waits_through_initializing_and_cold_start_answers() {
 async fn readiness_times_out_naming_the_last_answer_and_keeps_the_id() {
     let (sup, _) = supervisor(ready_mock(&[Canned::Status(204, "")]));
     let err = sup
-        .start(&vllm_plan(), &key_secret("VLLM_API_KEY"))
+        .start(&vllm_plan(), &vllm_secrets())
         .await
         .unwrap_err()
         .to_string();
@@ -757,11 +990,14 @@ async fn readiness_times_out_naming_the_last_answer_and_keeps_the_id() {
 async fn a_rejected_key_fails_readiness_at_once() {
     let (sup, mock) = supervisor(ready_mock(&[Canned::Status(401, "")]));
     let err = sup
-        .start(&vllm_plan(), &key_secret("VLLM_API_KEY"))
+        .start(&vllm_plan(), &vllm_secrets())
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("rejected the deployment's api_key"), "{err}");
+    assert!(
+        err.contains("gateway rejected the deployment's api_key"),
+        "{err}"
+    );
     assert!(!err.contains(KEY));
     assert_eq!(mock.count(HttpMethod::Get, HEALTH), 1);
 }
@@ -794,8 +1030,18 @@ async fn status_reads_the_worker_summary() {
     assert!(
         matches!(&zero, RuntimeStatus::Running { detail } if detail.contains("scaled to zero"))
     );
-    let starting = status_with(r#"{"workers":[],"summary":{"initializing":1}}"#).await;
-    assert!(matches!(&starting, RuntimeStatus::Failed { detail } if detail.contains("not ready")));
+    // A cold start or a capacity wait is not a failure.
+    for summary in [
+        r#"{"workers":[],"summary":{"initializing":1}}"#,
+        r#"{"workers":[],"summary":{"throttled":1}}"#,
+        r#"{"workers":[],"summary":{"initializing":1,"unhealthy":1}}"#,
+    ] {
+        let starting = status_with(summary).await;
+        assert!(
+            matches!(&starting, RuntimeStatus::Running { detail } if detail.contains("starting")),
+            "{summary}: {starting:?}"
+        );
+    }
     let sick = status_with(r#"{"workers":[],"summary":{"unhealthy":2}}"#).await;
     assert!(matches!(&sick, RuntimeStatus::Failed { detail } if detail.contains("unhealthy")));
 
@@ -823,56 +1069,113 @@ async fn metrics_and_logs_say_they_are_not_supported_yet() {
 
 // --- stop --------------------------------------------------------------------------
 
+const FAST_STOP: StopRetry = StopRetry {
+    attempts: 3,
+    delay: Duration::from_millis(1),
+};
+
 fn stop_mock(endpoint_status: u16) -> Mock {
     Mock::default()
+        .ok(HttpMethod::Patch, "/serverless/ep1", 200, ENDPOINT)
         .ok(HttpMethod::Delete, "/serverless/ep1", endpoint_status, "")
         .ok(HttpMethod::Get, "/account/secrets?name=", 200, FOUND_SECRET)
         .ok(HttpMethod::Delete, "/account/secrets/s1", 204, "")
 }
 
+fn stopper(mock: Mock) -> (RunPodSupervisor, Arc<Mock>) {
+    let (sup, mock) = supervisor(mock);
+    (sup.with_stop_retry(FAST_STOP), mock)
+}
+
 #[tokio::test]
-async fn stop_deletes_the_endpoint_then_its_secrets() {
-    for status in [204, 404] {
-        let (sup, mock) = supervisor(stop_mock(status));
-        let sup = sup.with_recorded_secrets(vec!["recorded-secret".into()]);
-        sup.stop(&handle()).await.unwrap();
-        let seen = mock.requests();
-        assert_eq!(seen[0].method, HttpMethod::Delete);
-        assert!(seen[0].url.ends_with("/serverless/ep1"), "endpoint first");
-        let looked_up: Vec<String> = seen
-            .iter()
-            .filter(|s| s.url.contains("/account/secrets?name="))
-            .map(|s| s.url.clone())
-            .collect();
+async fn stop_drains_and_deletes_the_endpoint_then_its_secrets() {
+    let (sup, mock) = stopper(stop_mock(204));
+    let sup = sup.with_recorded_secrets(vec!["recorded-secret".into()]);
+    sup.note_secret("made-here");
+    assert_eq!(
+        sup.stop_endpoint(&handle()).await.unwrap(),
+        StopOutcome::Deleted
+    );
+    let seen = mock.requests();
+    assert_eq!(seen[0].method, HttpMethod::Patch, "drain first");
+    assert_eq!(
+        seen[0].body.as_ref().unwrap(),
+        &json!({"workers": {"min": 0, "max": 0}})
+    );
+    assert_eq!(seen[1].method, HttpMethod::Delete);
+    assert!(seen[1].url.ends_with("/serverless/ep1"), "endpoint next");
+    for name in ["recorded-secret", "made-here"] {
         assert!(
-            looked_up
-                .iter()
-                .any(|u| u.ends_with("name=recorded-secret"))
-        );
-        let api_key = key_name("VLLM_API_KEY");
-        assert!(
-            looked_up
-                .iter()
-                .any(|u| u.ends_with(&format!("name={api_key}")))
-        );
-        assert_eq!(
-            mock.count(HttpMethod::Delete, "/account/secrets/s1"),
-            looked_up.len(),
-            "status {status}"
+            seen.iter()
+                .any(|s| s.url.ends_with(&format!("?name={name}"))),
+            "{name}"
         );
     }
+    assert_eq!(mock.count(HttpMethod::Delete, "/account/secrets/s1"), 2);
+    assert!(sup.created_secrets().lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_404_deletes_secrets_only_for_a_confirmed_account() {
+    let (sup, mock) = stopper(stop_mock(404));
+    let sup = sup.with_recorded_secrets(vec!["recorded-secret".into()]);
+    assert_eq!(
+        sup.stop_endpoint(&handle()).await.unwrap(),
+        StopOutcome::AlreadyGone {
+            kept_secrets: vec!["recorded-secret".into()]
+        }
+    );
+    assert!(mock.requests().iter().all(|s| !s.url.contains("/account/")));
+    assert_eq!(
+        *sup.created_secrets().lock().unwrap(),
+        vec!["recorded-secret".to_owned()],
+        "kept for the caller to record"
+    );
+
+    let (sup, mock) = stopper(stop_mock(404));
+    let sup = sup
+        .with_recorded_secrets(vec!["recorded-secret".into()])
+        .with_confirmed_account(true);
+    assert_eq!(
+        sup.stop_endpoint(&handle()).await.unwrap(),
+        StopOutcome::AlreadyGone {
+            kept_secrets: Vec::new()
+        }
+    );
+    assert_eq!(mock.count(HttpMethod::Delete, "/account/secrets/s1"), 1);
+}
+
+#[tokio::test]
+async fn a_delete_refused_for_live_workers_is_retried_a_bounded_number_of_times() {
+    let busy = Canned::Status(400, r#"{"detail":"endpoint still has active workers"}"#);
+    let mock = stop_mock(204).first(
+        HttpMethod::Delete,
+        "/serverless/ep1",
+        &[busy.clone(), Canned::Status(204, "")],
+    );
+    let (sup, mock) = stopper(mock);
+    sup.stop(&handle()).await.unwrap();
+    assert_eq!(mock.count(HttpMethod::Delete, "/serverless/ep1"), 2);
+
+    let (sup, mock) = stopper(Mock::default().on(HttpMethod::Delete, "/serverless/ep1", &[busy]));
+    let err = sup.stop(&handle()).await.unwrap_err().to_string();
+    assert!(err.contains("active workers"), "{err}");
+    assert_eq!(
+        mock.count(HttpMethod::Delete, "/serverless/ep1"),
+        FAST_STOP.attempts as usize
+    );
 }
 
 #[tokio::test]
 async fn secrets_stay_when_the_endpoint_delete_is_not_confirmed() {
-    let (sup, mock) = supervisor(stop_mock(500));
+    let (sup, mock) = stopper(stop_mock(500));
     let err = sup.stop(&handle()).await.unwrap_err().to_string();
     assert!(err.contains("500"), "{err}");
-    assert_eq!(
-        mock.requests().len(),
-        1,
+    assert!(
+        mock.requests().iter().all(|s| !s.url.contains("/account/")),
         "no secret call after a failed endpoint delete"
     );
+    assert_eq!(mock.count(HttpMethod::Delete, "/serverless/ep1"), 1);
 }
 
 #[tokio::test]
@@ -880,14 +1183,14 @@ async fn a_secret_that_cannot_be_deleted_is_reported_and_kept() {
     let mock = Mock::default()
         .ok(HttpMethod::Delete, "/serverless/ep1", 204, "")
         .ok(HttpMethod::Get, "/account/secrets?name=", 200, NO_SECRETS);
-    let (sup, _) = supervisor(mock);
+    let (sup, _) = stopper(mock);
     sup.stop(&handle()).await.unwrap();
 
     let mock = Mock::default()
         .ok(HttpMethod::Delete, "/serverless/ep1", 204, "")
         .ok(HttpMethod::Get, "/account/secrets?name=", 200, FOUND_SECRET)
         .ok(HttpMethod::Delete, "/account/secrets/s1", 500, "");
-    let (sup, _) = supervisor(mock);
+    let (sup, _) = stopper(mock);
     sup.created_secrets()
         .lock()
         .unwrap()

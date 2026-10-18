@@ -18,7 +18,7 @@ pub mod regions;
 pub mod supervisor;
 
 pub use amicu_core::naming::project_endpoint_name;
-pub use client::{ACCOUNT_MARKER_SECRET, AccountIdentity, GpuType};
+pub use client::{ACCOUNT_MARKER_SECRET, AccountIdentity, GpuType, OWNER_ENV_VAR};
 pub use client::{
     ApiKey, BASE_URL, CreateEndpoint, CreateSecret, DeleteOutcome, Endpoint, EndpointGpu,
     EndpointWorkers, FlashBoot, GpuRequest, Organization, RequestUrls, RunPodClient, Secret,
@@ -28,5 +28,6 @@ pub use error::RunPodError;
 pub use hardware::{GpuPlacement, exclusions_from_catalog, gpu_placement, parse_gpu_spec};
 pub use regions::select_data_centers;
 pub use supervisor::{
-    ReadinessTiming, RunPodSupervisor, endpoint_url, secret_name, secret_reference,
+    ReadinessTiming, RunPodSupervisor, StopOutcome, StopRetry, endpoint_url, owner_marker,
+    secret_name, secret_reference,
 };

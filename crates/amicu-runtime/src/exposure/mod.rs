@@ -66,10 +66,13 @@ pub enum GatewayAuth {
     /// `Modal-Secret` Proxy Auth Token headers.
     ModalProxyToken,
     /// RunPod serverless gateway (`https://<id>.api.runpod.ai`): every request
-    /// needs `Authorization: Bearer <key>`, and the gateway forwards that same
-    /// header to the worker, whose runtime enforces the deployment's API key.
-    /// One header satisfies both, so there are no extra gateway headers:
-    /// callers send `Authorization: Bearer <api_key>` and nothing else.
+    /// needs `Authorization: Bearer <key>`, where the key is a RunPod API key
+    /// with `api.runpod.ai` access (ideally restricted to the endpoint). The
+    /// gateway is the only auth layer: it strips `Authorization` before the
+    /// worker, so the runtime runs without its own API key, and the
+    /// deployment's `api_key` (a RunPod credential) never reaches the worker.
+    /// No extra gateway headers: callers send `Authorization: Bearer
+    /// <api_key>` and nothing else; anonymous requests get `401`.
     #[serde(rename = "runpod_bearer")]
     RunPodBearer,
 }
