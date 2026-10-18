@@ -1,39 +1,7 @@
-//! [`PodSupervisor`]: runs a rendered vLLM / llama.cpp launch as an always-on
-//! RunPod GPU Pod behind [`amicu_llamacpp::ProcessSupervisor`].
-//!
-//! # What runs
-//!
-//! The same container as the serverless mode (stock image, amicu's argv made
-//! container-ready by [`amicu_llamacpp::remote::launch_argv`], `argv[0]` as
-//! ENTRYPOINT), on an exact GPU type id and count resolved through the shared
-//! catalog ([`crate::hardware::pod_gpu_placement`]; pods-only cards allowed),
-//! `SECURE` or `COMMUNITY` cloud. Only `<port>/http` is exposed; RunPod's SSH and Jupyter bootstrap
-//! are off and the variables that would enable them are reserved.
-//!
-//! # Authentication: the runtime's own key
-//!
-//! The pod is reachable at `https://<podId>-<port>.proxy.runpod.net`
-//! ([`pod_proxy_url`]) and that proxy adds **no** authentication. So, unlike
-//! serverless, the runtime's key (`VLLM_API_KEY` / `LLAMA_API_KEY`) is
-//! required and delivered to the pod as a RunPod secret; it is the only
-//! guard ([`GatewayAuth::None`]). Before returning, `start` checks that an
-//! anonymous request to [`PROBE_PATH`] is refused (`401`/`403`); anything
-//! else terminates the pod (fail closed). It then checks the key is accepted.
-//!
-//! # Lifecycle
-//!
-//! Secrets, owner marker, naming and write-ahead slots
-//! ([`deployed_pod`](PodSupervisor::deployed_pod),
-//! [`created_secrets`](PodSupervisor::created_secrets),
-//! [`planned_secret_names`](PodSupervisor::planned_secret_names)) follow
-//! [`crate::supervisor`]. An existing pod (recorded, or the one owned pod
-//! with the name) is PATCHed in place for image / argv / env changes; a
-//! GPU, count, cloud or placement change is refused
-//! ([`replacement_reason`](PodSupervisor::replacement_reason)) for the caller
-//! to replace it. Readiness waits for `RUNNING` (`ERROR` / `EXITED` fail at
-//! once), then for `/health` through the proxy. `stop` always terminates,
-//! never stops (a stopped pod still bills for its disk), and removes secrets
-//! only once the terminate is confirmed.
+//! [`PodSupervisor`]: runs a vLLM / llama.cpp launch as an always-on RunPod
+//! GPU Pod. The pod proxy adds no authentication, so the runtime's own API key
+//! is required and `start` fails closed unless anonymous requests are refused.
+//! `stop` always terminates (a stopped pod still bills for its disk).
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -90,6 +58,30 @@ impl fmt::Debug for Prepared {
     }
 }
 
+/// Route for the anonymous exposure check. llama-server exempts `/health`
+/// and, in some versions, `/v1/models` from `--api-key`; this one is always
+/// guarded.
+const ANON_PROBE_PATH: &str = "/v1/chat/completions";
+
+/// How long a just (re)started pod may still report its previous container's
+/// `EXITED` / `ERROR` before that counts as a failure.
+const START_GRACE: Duration = Duration::from_secs(120);
+
+/// The pod `start` deployed to.
+struct Rollout {
+    id: String,
+    expect: Expect,
+}
+
+/// Which container readiness may trust.
+enum Expect {
+    /// Whatever runs (a new pod, or one left as it was).
+    Any,
+    /// One started after this run (re)started the pod, whose `startedAt` was
+    /// this before.
+    StartedAfter(Option<String>),
+}
+
 /// Why `start` gave up while waiting.
 enum NotReady {
     /// Leave the pod in place (recorded) and report.
@@ -115,6 +107,7 @@ pub struct PodSupervisor {
     disk_gb: u32,
     gguf: Option<GgufSource>,
     readiness: ReadinessTiming,
+    start_grace: Duration,
     confirmed_account: bool,
     recorded_pod: Option<String>,
     recorded_secrets: Vec<String>,
@@ -157,6 +150,7 @@ impl PodSupervisor {
             disk_gb: DEFAULT_CONTAINER_DISK_GB,
             gguf: None,
             readiness: ReadinessTiming::DEFAULT,
+            start_grace: START_GRACE,
             confirmed_account: false,
             recorded_pod: None,
             recorded_secrets: Vec::new(),
@@ -366,6 +360,7 @@ impl PodSupervisor {
             }
         }
         if let Some(cloud) = pod.cloud
+            && cloud != Cloud::Unknown
             && cloud != self.cloud
         {
             return Some(format!(
@@ -494,7 +489,7 @@ impl PodSupervisor {
 
     fn check_owner(&self, pod: &Pod) -> Result<(), LlamaCppError> {
         let owner = self.owner();
-        let why = match pod.owner.as_deref() {
+        let why = match pod.env.owner.as_deref() {
             Some(o) if o == owner => return Ok(()),
             Some(_) => format!("its {OWNER_ENV_VAR} marker belongs to another amicu deployment"),
             None => format!("it carries no {OWNER_ENV_VAR} marker for this deployment"),
@@ -506,14 +501,16 @@ impl PodSupervisor {
         )))
     }
 
-    /// PATCHes an existing pod to `prepared` (starting it again if it was
-    /// stopped). A refused write drops the secrets this run created.
+    /// Brings the existing pod (as just read) to `prepared`: PATCHed only when
+    /// its config differs, then restarted (or started, if stopped) so the new
+    /// container is what readiness sees. A refused write drops the secrets
+    /// this run created.
     async fn update_existing(
         &self,
         pod: &Pod,
         prepared: &Prepared,
         fresh: &[String],
-    ) -> Result<String, LlamaCppError> {
+    ) -> Result<Rollout, LlamaCppError> {
         self.set_deployed(Some(&pod.id));
         if let Some(why) = self.replacement_reason(pod) {
             self.secrets.discard(fresh).await;
@@ -522,37 +519,58 @@ impl PodSupervisor {
                 pod.id
             )));
         }
-        let updated = match self
-            .client
-            .update_pod(&pod.id, &update_from(&prepared.pod))
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                if !matches!(e, RunPodError::Transport(_)) {
-                    self.secrets.discard(fresh).await;
-                }
-                return Err(runpod_err(&e));
-            }
-        };
-        if matches!(updated.status, PodStatus::Exited | PodStatus::Error) {
-            self.client
-                .pod_action(&pod.id, PodAction::Start)
+        let changed = !pod_matches(pod, &prepared.pod);
+        let current = if changed {
+            match self
+                .client
+                .update_pod(&pod.id, &update_from(&prepared.pod))
                 .await
-                .map_err(|e| runpod_err(&e))?;
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    if !matches!(e, RunPodError::Transport(_)) {
+                        self.secrets.discard(fresh).await;
+                    }
+                    return Err(runpod_err(&e));
+                }
+            }
+        } else {
+            pod.clone()
+        };
+        let action = match current.status {
+            PodStatus::Exited | PodStatus::Error => Some(PodAction::Start),
+            PodStatus::Running if changed && current.started_at == pod.started_at => {
+                Some(PodAction::Restart)
+            }
+            _ => None,
+        };
+        if let Some(action) = action {
+            match self.client.pod_action(&pod.id, action).await {
+                Ok(_) => {}
+                // Already restarting on its own after the PATCH.
+                Err(RunPodError::Conflict { .. }) if action == PodAction::Restart => {}
+                Err(e) => return Err(runpod_err(&e)),
+            }
         }
-        Ok(pod.id.clone())
+        Ok(Rollout {
+            id: pod.id.clone(),
+            expect: if changed || action.is_some() {
+                Expect::StartedAfter(pod.started_at.clone())
+            } else {
+                Expect::Any
+            },
+        })
     }
 
     async fn upsert_pod(
         &self,
         prepared: &Prepared,
         fresh: &[String],
-    ) -> Result<String, LlamaCppError> {
+    ) -> Result<Rollout, LlamaCppError> {
         if let Some(id) = &self.recorded_pod {
             match self.client.get_pod(id).await {
                 Ok(pod) if pod.status != PodStatus::Terminated => {
-                    if pod.owner.is_some() {
+                    if pod.env.owner.is_some() {
                         self.check_owner(&pod)?;
                     }
                     return self.update_existing(&pod, prepared, fresh).await;
@@ -580,7 +598,7 @@ impl PodSupervisor {
             }
             many => return Err(duplicate_err(name, many)),
         }
-        match self.client.create_pod(&prepared.pod).await {
+        let id = match self.client.create_pod(&prepared.pod).await {
             Ok(created) => {
                 self.set_deployed(Some(&created.id));
                 Ok(created.id)
@@ -592,7 +610,11 @@ impl PodSupervisor {
                 self.secrets.discard(fresh).await;
                 Err(runpod_err(&e))
             }
-        }
+        }?;
+        Ok(Rollout {
+            id,
+            expect: Expect::Any,
+        })
     }
 
     /// The create's response was lost: look the pod up by name (with the
@@ -638,11 +660,14 @@ impl PodSupervisor {
         true
     }
 
-    /// Waits for `RUNNING`, then for `/health` on the proxy (public on both
-    /// runtimes) to answer `200`.
-    async fn wait_ready(&self, id: &str, url: &str) -> Result<(), NotReady> {
+    /// Waits for `RUNNING` of the container this run deployed, then for
+    /// `/health` on the proxy (public on both runtimes) to answer `200`.
+    async fn wait_ready(&self, rollout: &Rollout, url: &str) -> Result<(), NotReady> {
+        let id = rollout.id.as_str();
         let health = format!("{url}{HEALTH_PATH}");
-        let deadline = tokio::time::Instant::now() + self.readiness.timeout;
+        let started = tokio::time::Instant::now();
+        let deadline = started + self.readiness.timeout;
+        let grace_end = started + self.start_grace;
         let mut backoff = self.readiness.initial_backoff;
         let mut last = "no answer".to_owned();
         loop {
@@ -651,7 +676,29 @@ impl PodSupervisor {
                     if let Some(why) = self.residency_violation(&pod) {
                         return Err(NotReady::Unsafe(format!("RunPod pod {id} was {why}")));
                     }
+                    let current = match &rollout.expect {
+                        Expect::Any => true,
+                        Expect::StartedAfter(before) => {
+                            pod.started_at.is_some() && pod.started_at != *before
+                        }
+                    };
                     match pod.status {
+                        PodStatus::Terminated => {
+                            return Err(NotReady::Leave(LlamaCppError::Supervisor(format!(
+                                "RunPod pod {id} was terminated while starting"
+                            ))));
+                        }
+                        PodStatus::Error | PodStatus::Exited
+                            if current || tokio::time::Instant::now() >= grace_end =>
+                        {
+                            return Err(NotReady::Leave(LlamaCppError::Supervisor(format!(
+                                "RunPod pod {id} is {} instead of starting; it is left in place",
+                                pod.status.as_str()
+                            ))));
+                        }
+                        PodStatus::Running if !current => {
+                            "RUNNING (previous container)".clone_into(&mut last);
+                        }
                         PodStatus::Running => {
                             let req = HttpRequest::new(HttpMethod::Get, health.clone());
                             match self.probe.execute(req).await {
@@ -661,12 +708,6 @@ impl PodSupervisor {
                                 }
                                 Err(e) => last = format!("RUNNING, /health unreachable ({e})"),
                             }
-                        }
-                        PodStatus::Error | PodStatus::Exited | PodStatus::Terminated => {
-                            return Err(NotReady::Leave(LlamaCppError::Supervisor(format!(
-                                "RunPod pod {id} is {} instead of starting; it is left in place",
-                                pod.status.as_str()
-                            ))));
                         }
                         s => s.as_str().clone_into(&mut last),
                     }
@@ -689,20 +730,23 @@ impl PodSupervisor {
         }
     }
 
-    /// Anonymous [`PROBE_PATH`] must be refused (else [`NotReady::Unsafe`]),
-    /// then the key must be accepted.
+    /// An anonymous [`ANON_PROBE_PATH`] request must be refused (else
+    /// [`NotReady::Unsafe`]), then the key must be accepted on [`PROBE_PATH`].
     async fn verify_exposure(&self, url: &str, key: &SecretValue) -> Result<(), NotReady> {
+        let anon_url = format!("{url}{ANON_PROBE_PATH}");
         let probe_url = format!("{url}{PROBE_PATH}");
         let deadline = tokio::time::Instant::now() + self.readiness.timeout;
         let mut backoff = self.readiness.initial_backoff;
         loop {
-            let req = HttpRequest::new(HttpMethod::Get, probe_url.clone());
+            let req = HttpRequest::new(HttpMethod::Post, anon_url.clone())
+                .with_json(serde_json::json!({}));
             match self.probe.execute(req).await {
                 Ok(r) if matches!(r.status, 401 | 403) => break,
-                Ok(r) if (200..300).contains(&r.status) => {
+                // Reached the handler: success, or the empty body's validation error.
+                Ok(r) if (200..300).contains(&r.status) || matches!(r.status, 400 | 422) => {
                     return Err(NotReady::Unsafe(format!(
-                        "the pod answered an unauthenticated request to {PROBE_PATH} (HTTP {}); \
-                         it was open to anyone with its URL",
+                        "the pod answered an unauthenticated request to {ANON_PROBE_PATH} \
+                         (HTTP {}); it was open to anyone with its URL",
                         r.status
                     )));
                 }
@@ -711,7 +755,7 @@ impl PodSupervisor {
             if !self.pause(deadline, &mut backoff).await {
                 return Err(NotReady::Unsafe(format!(
                     "could not verify that the pod rejects unauthenticated requests to \
-                     {PROBE_PATH} (no 401/403 answer)"
+                     {ANON_PROBE_PATH} (no 401/403 answer)"
                 )));
             }
         }
@@ -815,6 +859,17 @@ fn update_from(create: &CreatePod) -> UpdatePod {
     }
 }
 
+/// Whether `pod` already runs `want`'s container config (env compared as
+/// written, secret references included).
+fn pod_matches(pod: &Pod, want: &CreatePod) -> bool {
+    pod.image.as_deref() == Some(want.image.as_str())
+        && pod.entrypoint == want.entrypoint
+        && pod.cmd == want.cmd
+        && pod.ports == want.ports
+        && (want.disk_gb.is_none() || pod.disk == want.disk_gb)
+        && pod.env.matches(&want.env)
+}
+
 fn duplicate_err(name: &str, pods: &[Pod]) -> LlamaCppError {
     LlamaCppError::Supervisor(format!(
         "several RunPod pods are named `{name}` ({}); terminate the extra ones first",
@@ -845,14 +900,15 @@ impl ProcessSupervisor for PodSupervisor {
                 fresh.push(secret.name.clone());
             }
         }
-        let id = self.upsert_pod(&prepared, &fresh).await?;
+        let rollout = self.upsert_pod(&prepared, &fresh).await?;
         self.secrets.retire_stale(&prepared.secrets).await;
 
-        let url = pod_proxy_url(&id, prepared.port);
-        let checked = match self.wait_ready(&id, &url).await {
+        let url = pod_proxy_url(&rollout.id, prepared.port);
+        let checked = match self.wait_ready(&rollout, &url).await {
             Ok(()) => self.verify_exposure(&url, &prepared.api_key).await,
             Err(e) => Err(e),
         };
+        let id = rollout.id;
         match checked {
             Ok(()) => Ok(RuntimeHandle {
                 endpoint: url,

@@ -22,6 +22,7 @@ const POD: &str = "/pods/pod1";
 const ACTION: &str = "/pods/pod1/action";
 const HEALTH: &str = "https://pod1-8000.proxy.runpod.net/health";
 const MODELS: &str = "https://pod1-8000.proxy.runpod.net/v1/models";
+const CHAT: &str = "https://pod1-8000.proxy.runpod.net/v1/chat/completions";
 
 fn owner() -> String {
     owner_marker(None, PROJECT, DEP)
@@ -39,18 +40,41 @@ fn leak(s: String) -> &'static str {
     Box::leak(s.into_boxed_str())
 }
 
-/// `GET /pods/pod1` in `status`, owned by this deployment.
+/// `GET /pods/pod1` in `status`, owned by this deployment, started at `t0`.
 fn pod(status: &str) -> &'static str {
-    pod_with(status, TYPE, "EU-RO-1", &owner())
+    pod_at(status, "t0")
+}
+
+fn pod_at(status: &str, started: &str) -> &'static str {
+    pod_full(status, TYPE, "EU-RO-1", &owner(), started)
 }
 
 fn pod_with(status: &str, gpu: &str, dc: &str, owner: &str) -> &'static str {
+    pod_full(status, gpu, dc, owner, "t0")
+}
+
+fn pod_full(status: &str, gpu: &str, dc: &str, owner: &str, started: &str) -> &'static str {
     leak(format!(
         r#"{{"id":"pod1","name":"{}","status":"{status}","gpu":{{"id":"{gpu}","count":2}},
-        "cloud":"SECURE","dataCenterId":"{dc}","cost":5.38,
+        "cloud":"SECURE","dataCenterId":"{dc}","cost":5.38,"startedAt":"{started}",
         "env":{{"{OWNER_ENV_VAR}":"{owner}","HF_TOKEN":"x"}}}}"#,
         name()
     ))
+}
+
+/// The pod exactly as `start` would configure it for the vLLM plan.
+fn matching_pod(sup: &PodSupervisor, status: &str, started: &str) -> &'static str {
+    let image = runtime_image(RuntimeKind::Vllm);
+    let prepared = sup
+        .prepare(&vllm_plan(), &vllm_secrets(), &image, None)
+        .unwrap();
+    let mut body = prepared.pod.to_body();
+    let m = body.as_object_mut().unwrap();
+    m.insert("id".into(), json!("pod1"));
+    m.insert("status".into(), json!(status));
+    m.insert("startedAt".into(), json!(started));
+    m.insert("dataCenterId".into(), json!("EU-RO-1"));
+    leak(body.to_string())
 }
 
 fn one_pod(status: &str) -> &'static str {
@@ -82,9 +106,9 @@ fn supervisor(mock: Mock) -> (PodSupervisor, Arc<Mock>) {
     (sup, mock)
 }
 
-/// Secrets, an empty pod list, a create, then RUNNING / health / exposure
-/// answers as given.
-fn create_mock(status: &[Canned], health: &[Canned], models: &[Canned]) -> Mock {
+/// Secrets, an empty pod list, a create, then RUNNING / health / anonymous
+/// and keyed exposure answers as given.
+fn create_mock(status: &[Canned], health: &[Canned], anon: &[Canned], keyed: &[Canned]) -> Mock {
     // Two "does it exist?" lookups, then every lookup finds it.
     Mock::default()
         .on(
@@ -102,7 +126,8 @@ fn create_mock(status: &[Canned], health: &[Canned], models: &[Canned]) -> Mock 
         .ok(HttpMethod::Post, PODS, 201, pod("PROVISIONING"))
         .on(HttpMethod::Get, POD, status)
         .on(HttpMethod::Get, HEALTH, health)
-        .on(HttpMethod::Get, MODELS, models)
+        .on(HttpMethod::Post, CHAT, anon)
+        .on(HttpMethod::Get, MODELS, keyed)
         .ok(HttpMethod::Post, ACTION, 204, "")
 }
 
@@ -110,7 +135,8 @@ fn happy_mock() -> Mock {
     create_mock(
         &[Canned::Status(200, pod("RUNNING"))],
         &[Canned::Status(200, "{}")],
-        &[Canned::Status(401, ""), Canned::Status(200, "{}")],
+        &[Canned::Status(401, "")],
+        &[Canned::Status(200, "{}")],
     )
 }
 
@@ -190,13 +216,19 @@ async fn vllm_start_creates_secrets_then_the_pod_and_checks_exposure() {
 
     // Anonymous first, then with the key; neither probe carries the
     // management key, and nothing but the key ever does.
-    let probes: Vec<Option<String>> = mock
+    let probes: Vec<(HttpMethod, Option<String>)> = mock
         .requests()
         .into_iter()
-        .filter(|s| s.url == MODELS)
-        .map(|s| s.bearer)
+        .filter(|s| s.url == MODELS || s.url == CHAT)
+        .map(|s| (s.method, s.bearer))
         .collect();
-    assert_eq!(probes, [None, Some(KEY.to_owned())]);
+    assert_eq!(
+        probes,
+        [
+            (HttpMethod::Post, None),
+            (HttpMethod::Get, Some(KEY.to_owned()))
+        ]
+    );
     assert!(
         mock.requests()
             .iter()
@@ -233,7 +265,8 @@ async fn llama_start_uses_the_image_server_and_its_key_var() {
     let (sup, mock) = supervisor(create_mock(
         &[Canned::Status(200, pod("RUNNING"))],
         &[Canned::Status(200, "{}")],
-        &[Canned::Status(401, ""), Canned::Status(200, "{}")],
+        &[Canned::Status(401, "")],
+        &[Canned::Status(200, "{}")],
     ));
     let mut p = llama_plan();
     if let Runtime::LlamaCpp(s) = &mut p.settings {
@@ -398,7 +431,9 @@ async fn an_owned_pod_found_by_name_is_patched_and_restarted_if_stopped() {
             POD,
             &[
                 Canned::Status(200, pod("EXITED")),
-                Canned::Status(200, pod("RUNNING")),
+                // The previous container's status, right after `start`.
+                Canned::Status(200, pod("EXITED")),
+                Canned::Status(200, pod_at("RUNNING", "t1")),
             ],
         )
         .ok(HttpMethod::Patch, POD, 200, pod("EXITED"))
@@ -468,7 +503,114 @@ async fn a_refused_create_removes_the_secrets_it_wrote() {
     assert!(sup.deployed_pod().lock().unwrap().is_none());
 }
 
+#[tokio::test]
+async fn a_patched_running_pod_is_restarted_and_its_old_container_not_trusted() {
+    let mock = happy_mock()
+        .first(
+            HttpMethod::Get,
+            POD,
+            &[
+                Canned::Status(200, pod("RUNNING")),
+                // Still the old container (its /health answers 200).
+                Canned::Status(200, pod("RUNNING")),
+                Canned::Status(200, pod("STARTING")),
+                Canned::Status(200, pod_at("RUNNING", "t1")),
+            ],
+        )
+        .ok(HttpMethod::Patch, POD, 200, pod("RUNNING"))
+        .first(
+            HttpMethod::Post,
+            ACTION,
+            &[Canned::Status(200, pod("RUNNING"))],
+        );
+    let (sup, mock) = supervisor(mock);
+    let sup = sup.with_recorded_pod("pod1");
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    assert_eq!(count(&mock, HttpMethod::Patch, POD), 1);
+    assert_eq!(
+        body_of(&mock, HttpMethod::Post, ACTION),
+        json!({"action": "restart"})
+    );
+    assert!(position(&mock, HttpMethod::Patch, POD) < position(&mock, HttpMethod::Post, ACTION));
+    assert_eq!(count(&mock, HttpMethod::Get, POD), 4, "waited for t1");
+    assert_eq!(count(&mock, HttpMethod::Get, HEALTH), 1, "only the new one");
+}
+
+#[tokio::test]
+async fn an_unchanged_pod_is_neither_patched_nor_restarted() {
+    let (probe, _) = supervisor(Mock::default());
+    let same = matching_pod(&probe, "RUNNING", "t0");
+    let mock = happy_mock().first(HttpMethod::Get, POD, &[Canned::Status(200, same)]);
+    let (sup, mock) = supervisor(mock);
+    let sup = sup.with_recorded_pod("pod1");
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    assert_eq!(count(&mock, HttpMethod::Patch, POD), 0);
+    assert_eq!(count(&mock, HttpMethod::Post, ACTION), 0);
+}
+
+#[tokio::test]
+async fn a_started_pod_that_stays_exited_fails_after_the_grace_window() {
+    let mock = happy_mock()
+        .first(HttpMethod::Get, POD, &[Canned::Status(200, pod("EXITED"))])
+        .ok(HttpMethod::Patch, POD, 200, pod("EXITED"))
+        .first(
+            HttpMethod::Post,
+            ACTION,
+            &[Canned::Status(200, pod("STARTING"))],
+        );
+    let (mut sup, mock) = supervisor(mock);
+    sup.start_grace = Duration::from_millis(20);
+    let sup = sup.with_recorded_pod("pod1");
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    let text = err_text(&e);
+    assert!(
+        text.contains("EXITED") && text.contains("left in place"),
+        "{text}"
+    );
+    assert!(
+        count(&mock, HttpMethod::Get, POD) > 2,
+        "not the first EXITED"
+    );
+}
+
 // --- readiness and exposure ----------------------------------------------------
+
+#[tokio::test]
+async fn a_terminated_pod_is_not_reported_as_left_in_place() {
+    let (sup, _) = supervisor(create_mock(
+        &[Canned::Status(200, pod("TERMINATED"))],
+        &[Canned::Status(200, "{}")],
+        &[Canned::Status(401, "")],
+        &[Canned::Status(200, "{}")],
+    ));
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    let text = err_text(&e);
+    assert!(
+        text.contains("terminated") && !text.contains("left in place"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_validation_error_to_an_anonymous_request_means_open() {
+    let (sup, mock) = supervisor(create_mock(
+        &[Canned::Status(200, pod("RUNNING"))],
+        &[Canned::Status(200, "{}")],
+        &[Canned::Status(400, "{}")],
+        &[Canned::Status(200, "{}")],
+    ));
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    let text = err_text(&e);
+    assert!(
+        text.contains("unauthenticated") && text.contains("was terminated"),
+        "{text}"
+    );
+    assert_eq!(
+        body_of(&mock, HttpMethod::Post, CHAT),
+        json!({}),
+        "anonymous probe is a guarded POST"
+    );
+}
 
 #[tokio::test]
 async fn readiness_waits_for_running_then_health() {
@@ -483,7 +625,8 @@ async fn readiness_waits_for_running_then_health() {
             Canned::Timeout,
             Canned::Status(200, "{}"),
         ],
-        &[Canned::Status(401, ""), Canned::Status(200, "{}")],
+        &[Canned::Status(401, "")],
+        &[Canned::Status(200, "{}")],
     ));
     sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
     assert_eq!(count(&mock, HttpMethod::Get, HEALTH), 3);
@@ -496,6 +639,7 @@ async fn an_error_or_exited_pod_fails_at_once_and_stays_recorded() {
             &[Canned::Status(200, pod(status))],
             &[Canned::Status(200, "{}")],
             &[Canned::Status(401, "")],
+            &[Canned::Status(200, "{}")],
         ));
         let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
         assert!(err_text(&e).contains(status), "{e}");
@@ -511,6 +655,7 @@ async fn readiness_times_out_and_keeps_the_pod() {
         &[Canned::Status(200, pod("STARTING"))],
         &[Canned::Status(200, "{}")],
         &[Canned::Status(401, "")],
+        &[Canned::Status(200, "{}")],
     ));
     let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
     assert!(err_text(&e).contains("STARTING"), "{e}");
@@ -522,6 +667,7 @@ async fn readiness_times_out_and_keeps_the_pod() {
 async fn an_open_pod_is_terminated_before_its_secrets_are_removed() {
     let (sup, mock) = supervisor(create_mock(
         &[Canned::Status(200, pod("RUNNING"))],
+        &[Canned::Status(200, "{}")],
         &[Canned::Status(200, "{}")],
         &[Canned::Status(200, "{}")],
     ));
@@ -549,6 +695,7 @@ async fn no_definite_refusal_fails_closed() {
         &[Canned::Status(200, pod("RUNNING"))],
         &[Canned::Status(200, "{}")],
         &[Canned::Status(502, "")],
+        &[Canned::Status(200, "{}")],
     ));
     let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
     assert!(err_text(&e).contains("could not verify"), "{e}");
@@ -559,6 +706,7 @@ async fn no_definite_refusal_fails_closed() {
 async fn a_failed_teardown_says_so() {
     let mock = create_mock(
         &[Canned::Status(200, pod("RUNNING"))],
+        &[Canned::Status(200, "{}")],
         &[Canned::Status(200, "{}")],
         &[Canned::Status(200, "{}")],
     )
@@ -577,6 +725,7 @@ async fn a_pod_outside_the_region_is_terminated() {
         &[Canned::Status(200, outside)],
         &[Canned::Status(200, "{}")],
         &[Canned::Status(401, "")],
+        &[Canned::Status(200, "{}")],
     ));
     let region = Region {
         code: "eu".into(),
@@ -599,6 +748,7 @@ async fn a_rejected_key_is_reported_and_the_pod_kept() {
     let (sup, mock) = supervisor(create_mock(
         &[Canned::Status(200, pod("RUNNING"))],
         &[Canned::Status(200, "{}")],
+        &[Canned::Status(401, "")],
         &[Canned::Status(401, "")],
     ));
     let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();

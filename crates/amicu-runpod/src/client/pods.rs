@@ -7,10 +7,11 @@ use std::fmt;
 use amicu_providers::HttpMethod;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 
 use super::{
-    DeleteOutcome, MAX_PAGES, Pagination, RunPodClient, check, decode, encode_query,
-    insert_container, non_empty, owner_from_env, segment,
+    DeleteOutcome, MAX_PAGES, OWNER_ENV_VAR, Pagination, RunPodClient, check, decode, encode_query,
+    insert_container, non_empty, segment,
 };
 use crate::error::RunPodError;
 
@@ -23,6 +24,9 @@ pub enum Cloud {
     Secure,
     /// Community-hosted hardware.
     Community,
+    /// A tier this client does not know yet.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Cloud {
@@ -32,6 +36,7 @@ impl Cloud {
         match self {
             Self::Secure => "SECURE",
             Self::Community => "COMMUNITY",
+            Self::Unknown => "UNKNOWN",
         }
     }
 }
@@ -271,9 +276,67 @@ pub struct PodGpu {
     pub count: Option<u32>,
 }
 
-/// A pod as RunPod returns it. As with [`Endpoint`](super::Endpoint), env
-/// values are not modelled; only the [`OWNER_ENV_VAR`](super::OWNER_ENV_VAR)
-/// marker is read.
+/// A pod's env as RunPod returns it: the [`OWNER_ENV_VAR`] marker plus a
+/// digest of the whole map, so it can be compared without keeping the values.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct PodEnv {
+    /// The owner marker, when present.
+    pub owner: Option<String>,
+    digest: Option<[u8; 32]>,
+}
+
+impl PodEnv {
+    /// Whether the pod's env is exactly `env`.
+    #[must_use]
+    pub fn matches(&self, env: &BTreeMap<String, String>) -> bool {
+        self.digest.is_some_and(|d| d == env_digest(env))
+    }
+}
+
+impl fmt::Debug for PodEnv {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PodEnv")
+            .field("owner", &self.owner)
+            .finish_non_exhaustive()
+    }
+}
+
+fn env_digest(env: &BTreeMap<String, String>) -> [u8; 32] {
+    let mut h = Sha256::new();
+    for (k, v) in env {
+        for part in [k, v] {
+            h.update((part.len() as u64).to_le_bytes());
+            h.update(part.as_bytes());
+        }
+    }
+    h.finalize().into()
+}
+
+fn pod_env<'de, D>(d: D) -> Result<PodEnv, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(raw) = Option::<BTreeMap<String, Value>>::deserialize(d)? else {
+        return Ok(PodEnv::default());
+    };
+    let owner = raw
+        .get(OWNER_ENV_VAR)
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let strings: Option<BTreeMap<String, String>> = raw
+        .into_iter()
+        .map(|(k, v)| match v {
+            Value::String(s) => Some((k, s)),
+            _ => None,
+        })
+        .collect();
+    Ok(PodEnv {
+        owner,
+        digest: strings.as_ref().map(env_digest),
+    })
+}
+
+/// A pod as RunPod returns it; env values are only kept as a [`PodEnv`].
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Pod {
@@ -286,9 +349,18 @@ pub struct Pod {
     /// Container image.
     #[serde(default)]
     pub image: Option<String>,
+    /// Container ENTRYPOINT.
+    #[serde(default)]
+    pub entrypoint: Vec<String>,
+    /// Container CMD.
+    #[serde(default)]
+    pub cmd: Vec<String>,
     /// Exposed ports (`port/protocol`).
     #[serde(default)]
     pub ports: Vec<String>,
+    /// Container disk in GB.
+    #[serde(default)]
+    pub disk: Option<u32>,
     /// GPU settings (absent for CPU pods).
     #[serde(default)]
     pub gpu: Option<PodGpu>,
@@ -307,9 +379,9 @@ pub struct Pod {
     /// Last start time (RFC 3339).
     #[serde(default)]
     pub started_at: Option<String>,
-    /// The owner marker in the pod env, when RunPod returns it.
-    #[serde(default, rename = "env", deserialize_with = "owner_from_env")]
-    pub owner: Option<String>,
+    /// The pod env, reduced to the owner marker and a digest.
+    #[serde(default, deserialize_with = "pod_env")]
+    pub env: PodEnv,
 }
 
 #[derive(Deserialize)]

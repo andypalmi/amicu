@@ -9,12 +9,12 @@
 //! It is built on [`HttpTransport`], so tests inject a mock and nothing here
 //! touches a concrete HTTP client. The API key and secret values are held in
 //! types whose `Debug` redacts them and are never put in an error.
-//!
-//! The Pods resource (`/pods`) lives in [`pods`].
 
 mod pods;
 
-pub use pods::{Cloud, CreatePod, Pod, PodAction, PodGpu, PodStatus, UpdatePod, pod_proxy_url};
+pub use pods::{
+    Cloud, CreatePod, Pod, PodAction, PodEnv, PodGpu, PodStatus, UpdatePod, pod_proxy_url,
+};
 
 use std::collections::BTreeMap;
 use std::fmt;

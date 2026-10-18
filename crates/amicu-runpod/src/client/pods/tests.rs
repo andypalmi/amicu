@@ -37,7 +37,7 @@ async fn create_pod_sends_exact_body() {
     assert_eq!(pod.status, PodStatus::Running);
     assert_eq!(pod.cost, Some(5.38));
     assert_eq!(pod.cloud, Some(Cloud::Secure));
-    assert_eq!(pod.owner.as_deref(), Some("own"));
+    assert_eq!(pod.env.owner.as_deref(), Some("own"));
     assert!(!format!("{pod:?}").contains("leaky"));
 
     let seen = mock.requests();
@@ -294,4 +294,23 @@ fn proxy_url_shape() {
         pod_proxy_url("abc123", 8000),
         "https://abc123-8000.proxy.runpod.net"
     );
+}
+
+#[test]
+fn pod_env_compares_by_digest_and_unknown_cloud_decodes() {
+    let pod: Pod = serde_json::from_str(
+        r#"{"id":"p","name":"n","status":"RUNNING","cloud":"ORBITAL",
+        "env":{"AMICU_OWNER":"own","A":"{{ RUNPOD_SECRET_a }}"}}"#,
+    )
+    .unwrap();
+    assert_eq!(pod.cloud, Some(Cloud::Unknown));
+    let mut want = BTreeMap::from([
+        ("AMICU_OWNER".to_owned(), "own".to_owned()),
+        ("A".to_owned(), "{{ RUNPOD_SECRET_a }}".to_owned()),
+    ]);
+    assert!(pod.env.matches(&want));
+    want.insert("A".to_owned(), "{{ RUNPOD_SECRET_b }}".to_owned());
+    assert!(!pod.env.matches(&want));
+    assert!(!PodEnv::default().matches(&BTreeMap::new()));
+    assert!(!format!("{pod:?}").contains("RUNPOD_SECRET"));
 }

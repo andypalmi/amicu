@@ -26,7 +26,9 @@ pub use client::{
     EndpointWorkers, FlashBoot, GpuRequest, Organization, RequestUrls, RunPodClient, Secret,
     UpdateEndpoint, Worker, WorkerSummary, WorkersConfig, WorkersList,
 };
-pub use client::{Cloud, CreatePod, Pod, PodAction, PodGpu, PodStatus, UpdatePod, pod_proxy_url};
+pub use client::{
+    Cloud, CreatePod, Pod, PodAction, PodEnv, PodGpu, PodStatus, UpdatePod, pod_proxy_url,
+};
 pub use error::RunPodError;
 pub use hardware::{
     GpuPlacement, PodGpuPlacement, exclusions_from_catalog, gpu_placement, parse_gpu_spec,
