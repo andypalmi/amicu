@@ -1,0 +1,24 @@
+[package]
+name = "amicu-runpod"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "RunPod v2 REST client for amicu: serverless endpoints, secrets, hardware and region mapping."
+
+[dependencies]
+amicu-core = { path = "../amicu-core" }
+# The `HttpTransport` seam, the shared residency / data-center table, and the
+# error-mapping conventions the other REST providers use.
+amicu-providers = { path = "../amicu-providers" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+async-trait = "0.1"
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[lints]
+workspace = true

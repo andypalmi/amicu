@@ -19,6 +19,7 @@ use serde::de::DeserializeOwned;
 pub enum HttpMethod {
     Get,
     Post,
+    Patch,
     Delete,
 }
 
@@ -182,6 +183,7 @@ impl HttpTransport for ReqwestTransport {
         let method = match request.method {
             HttpMethod::Get => reqwest::Method::GET,
             HttpMethod::Post => reqwest::Method::POST,
+            HttpMethod::Patch => reqwest::Method::PATCH,
             HttpMethod::Delete => reqwest::Method::DELETE,
         };
         let mut builder = self
