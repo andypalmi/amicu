@@ -1,7 +1,7 @@
 # Telemetry database (Supabase `amicu-telemetry`)
 
 Schema for the opt-in telemetry rollups. It lives in its own Supabase project
-(EU, Frankfurt), separate from the product database. Its only writer is the
+(EU West, Ireland, eu-west-1), separate from the product database. Its only writer is the
 ingestion endpoint (`web/apps/telemetry-ingest`, see
 `docs/ops/telemetry-ingest.md`), which calls one RPC with the project's secret
 key. The sender's wire format is
