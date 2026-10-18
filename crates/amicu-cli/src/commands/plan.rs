@@ -190,15 +190,20 @@ pub(crate) fn provider_switches(
     let mut switches = ProviderSwitches::new();
     for item in result.items.iter().filter(|i| i.launch.is_some()) {
         let id = item.deployment.as_str();
-        let (backend, identity) = if item.action.provider.as_deref() == Some("modal") {
-            (Backend::Modal, project_id.map(|p| project_app_name(p, id)))
-        } else {
+        let (backend, identity) = match item.action.provider.as_deref() {
+            Some("modal") => (Backend::Modal, project_id.map(|p| project_app_name(p, id))),
+            Some("runpod") => (
+                Backend::Runpod,
+                project_id.map(|p| amicu_runpod::project_endpoint_name(p, id)),
+            ),
+            _ => {
             // Without a project id apply mints one, so no recorded host label
             // can match the new one.
             (
                 Backend::host(),
                 project_id.map(|p| amicu_llamacpp::project_host_label(p, id)),
             )
+            }
         };
         let old: Vec<OldInstance> = stops
             .iter()

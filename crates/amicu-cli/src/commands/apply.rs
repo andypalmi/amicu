@@ -16,6 +16,7 @@ use amicu_llamacpp::{
 };
 use amicu_modal::ModalSupervisor;
 use amicu_modal::supervisor::project_app_name;
+use amicu_runpod::{RunPodSupervisor, StopOutcome};
 use amicu_runtime::exposure::{CheckTiming, EndpointCheck, PROBE_PATH};
 use amicu_runtime::{
     EndpointExposure, EndpointRegistry, GatewayAuth, LaunchPlan, RuntimeAdapter, RuntimeHandle,
@@ -33,6 +34,7 @@ use crate::modal_ops::{
 };
 use crate::planner::{PlanError, PlanResult, build_project_plan};
 use crate::project::{LocalState, Project};
+use crate::runpod_ops::RunPodOps;
 use crate::secret::EnvSecretResolver;
 use crate::stops::{Backend, StopRecord};
 use crate::write_json;
@@ -247,6 +249,9 @@ pub(crate) type HostSupervisorFactory =
 pub(crate) struct Env<'a> {
     pub host: &'a HostSupervisorFactory,
     pub modal: &'a dyn ModalBackend,
+    pub runpod: &'a dyn RunPodOps,
+    /// Resolves the launch secrets (the process environment for real runs).
+    pub resolver: &'a dyn SecretResolver,
     /// Destroy only: treat a Modal app that cannot be found by name (and has
     /// no recorded id) as gone, instead of refusing to forget it.
     pub forget_unconfirmed: bool,
@@ -272,6 +277,8 @@ impl Env<'static> {
         Self {
             host: &host_supervisor_with_sidecar,
             modal: &crate::refresh::ModalLookup,
+            runpod: &crate::runpod_ops::RealRunPod,
+            resolver: &EnvSecretResolver,
             forget_unconfirmed,
             purge,
             proxy_tokens: amicu_modal::proxy_auth::TokenConfig::from_env,
@@ -342,6 +349,13 @@ fn derive_stop(state: &LocalState, d: &Deployment) -> StopRecord {
         Dispatch::Modal => {
             StopRecord::modal(&d.id, find_handle(state, &d.id).map(|h| h.id.clone()), None)
         }
+        Dispatch::RunPod => StopRecord::runpod_in(
+            state.project_id.as_deref().unwrap_or_default(),
+            &d.id,
+            find_handle(state, &d.id).map(|h| h.id.clone()),
+            None,
+            Vec::new(),
+        ),
     }
 }
 
@@ -838,6 +852,9 @@ fn save_failed_message(op: Op, progress: &Progress, save_err: &CliError) -> Stri
 /// [`ModalSupervisor`] instead of the local host supervisor
 const MODAL_PROVIDER: &str = "modal";
 
+/// Hardware profile `provider` value that routes through [`RunPodSupervisor`].
+const RUNPOD_PROVIDER: &str = "runpod";
+
 /// The per-deployment supervisor `apply_all` routes to, decided purely from
 /// a deployment's runtime family and its hardware profile's `provider`.
 /// Factored out of the dispatch loop so the routing decision itself is unit
@@ -850,10 +867,12 @@ enum Dispatch {
     /// `provider = "modal"`, vLLM or llama.cpp: route through
     /// [`ModalSupervisor`] (the runtime picks the adapter and the image).
     Modal,
+    /// `provider = "runpod"`: a [`RunPodSupervisor`] load-balancing endpoint.
+    RunPod,
 }
 
 /// Providers `apply` can deploy to today, for the error message.
-const SUPPORTED_PROVIDERS: &str = "local, local_apple, local_cpu, on_prem, modal";
+const SUPPORTED_PROVIDERS: &str = "local, local_apple, local_cpu, on_prem, modal, runpod";
 
 /// Computes [`Dispatch`] for one deployment's runtime family and hardware
 /// profile provider. `None` when `apply` has no path for that provider.
@@ -861,6 +880,7 @@ fn dispatch_for(runtime: amicu_runtime::RuntimeKind, provider: Option<&str>) -> 
     use amicu_runtime::RuntimeKind::{LlamaCpp, Vllm};
     match (runtime, provider) {
         (LlamaCpp | Vllm, Some(MODAL_PROVIDER)) => Some(Dispatch::Modal),
+        (LlamaCpp | Vllm, Some(RUNPOD_PROVIDER)) => Some(Dispatch::RunPod),
         // A profile with no provider has always meant the local host.
         (LlamaCpp | Vllm, None) => Some(Dispatch::Host),
         (LlamaCpp | Vllm, Some(p)) if is_local_provider(p) => Some(Dispatch::Host),
@@ -895,19 +915,7 @@ fn modal_supervisor(
     runtime: amicu_runtime::RuntimeKind,
     previous_endpoint: Option<String>,
 ) -> Result<ModalSupervisor, CliError> {
-    let deployment = find_deployment(graph, id).ok_or_else(|| {
-        CliError::Message(format!(
-            "deployment '{id}' missing from its own graph while dispatching to Modal"
-        ))
-    })?;
-    let hardware = catalog
-        .resolve_hardware(&deployment.hardware_profile)
-        .ok_or_else(|| {
-            CliError::Message(format!(
-                "deployment '{id}': hardware profile '{}' not found in the catalog",
-                deployment.hardware_profile
-            ))
-        })?;
+    let (deployment, hardware) = deployment_hardware(graph, catalog, id)?;
     let supervisor = ModalSupervisor::for_hardware(app_name, &hardware)
         .map_err(|e| CliError::Adapter(AdapterError::from_kind(e)))?;
     let supervisor = supervisor
@@ -919,6 +927,65 @@ fn modal_supervisor(
         }
         _ => supervisor,
     })
+}
+
+fn deployment_hardware<'g>(
+    graph: &'g Graph,
+    catalog: &dyn Catalog,
+    id: &DeploymentId,
+) -> Result<(&'g Deployment, amicu_core::resource::HardwareProfile), CliError> {
+    let deployment = find_deployment(graph, id).ok_or_else(|| {
+        CliError::Message(format!(
+            "deployment '{id}' missing from its own graph while dispatching it"
+        ))
+    })?;
+    let hardware = catalog
+        .resolve_hardware(&deployment.hardware_profile)
+        .ok_or_else(|| {
+            CliError::Message(format!(
+                "deployment '{id}': hardware profile '{}' not found in the catalog",
+                deployment.hardware_profile
+            ))
+        })?;
+    Ok((deployment, hardware))
+}
+
+fn supervisor_err(e: amicu_llamacpp::LlamaCppError) -> CliError {
+    CliError::Adapter(amicu_core::adapter::AdapterErrorKind::into_adapter_error(e))
+}
+
+/// The [`RunPodSupervisor`] for one deployment, adopting the endpoint and
+/// secrets recorded in `prior`. The caller has already checked that `prior`
+/// lives in `account`, so a `404` on stop counts as confirmed.
+fn runpod_supervisor(
+    graph: &Graph,
+    catalog: &dyn Catalog,
+    id: &DeploymentId,
+    project_id: &str,
+    account: &str,
+    ops: &dyn RunPodOps,
+    prior: Option<&StopRecord>,
+) -> Result<RunPodSupervisor, CliError> {
+    let (deployment, hardware) = deployment_hardware(graph, catalog, id)?;
+    let mut supervisor =
+        RunPodSupervisor::for_hardware(ops.client()?, project_id, id.as_str(), &hardware)
+            .map_err(supervisor_err)?
+            .with_probe_transport(ops.probe())
+            .with_workspace(account)
+            .with_scaling(deployment.scaling.as_ref())
+            .with_confirmed_account(true);
+    if let Some(prior) = prior {
+        if let Some(endpoint) = &prior.app_id {
+            supervisor = supervisor.with_recorded_endpoint(endpoint);
+        }
+        supervisor = supervisor.with_recorded_secrets(prior.secrets.clone());
+    }
+    if amicu_runtime::RuntimeKind::of(&deployment.runtime) == amicu_runtime::RuntimeKind::LlamaCpp
+        && let Some(resolved) = catalog.resolve_model(&deployment.model)
+    {
+        supervisor = supervisor.with_gguf_model(&resolved.model);
+    }
+    Ok(supervisor)
 }
 
 /// Reject unsupported providers, and off-machine endpoints with no API key,
@@ -940,6 +1007,17 @@ fn preflight(result: &PlanResult, env: &Env<'_>) -> Result<(), CliError> {
                 item.action.provider.as_deref(),
                 &item.deployment,
             )?;
+            if item.action.provider.as_deref() == Some(RUNPOD_PROVIDER)
+                && launch.api_key.is_none()
+            {
+                return Err(CliError::Message(format!(
+                    "deployment '{}': RunPod deployments need an `api_key`, and it must be a \
+                     RunPod API key with api.runpod.ai access (ideally restricted to this \
+                     endpoint): RunPod's gateway checks it on every request and the runtime has \
+                     no key of its own (AMICU-POLICY-007); nothing was started",
+                    item.deployment
+                )));
+            }
             if Deployment::requires_api_key(item.action.provider.as_deref().unwrap_or_default())
                 && launch.api_key.is_none()
             {
@@ -1007,9 +1085,10 @@ async fn apply_all(
     let vllm_adapter = VllmAdapter::new(Box::new(catalog.clone()), (env.host)(sidecar));
     let host_probe = (env.host)(None);
     let host_ctx = host_probe.host_context();
-    let resolver = EnvSecretResolver;
+    let resolver = env.resolver;
     let registry = EndpointRegistry::new();
     preflight(result, env)?;
+    let runpod_account = runpod_preflight(result, env).await?;
 
     for item in &result.items {
         if let Some(launch) = &item.launch {

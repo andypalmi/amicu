@@ -775,6 +775,19 @@ impl RunPodClient {
         )))
     }
 
+    /// `GET /serverless?limit=1`: proves the key is accepted. Not
+    /// `/organization`, which answers `403` for every personal account.
+    pub async fn verify_key(&self) -> Result<(), RunPodError> {
+        self.send(
+            HttpMethod::Get,
+            "/serverless?limit=1",
+            None,
+            "serverless endpoints",
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Every endpoint whose name is exactly `name` (RunPod does not enforce
     /// unique names), newest first.
     pub async fn find_endpoints_by_name(&self, name: &str) -> Result<Vec<Endpoint>, RunPodError> {
