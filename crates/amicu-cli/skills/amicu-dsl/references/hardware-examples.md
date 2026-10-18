@@ -37,7 +37,8 @@ A GPU `accelerator.model` must resolve to exactly one card of the GPU catalog
 `l4-24gb`, `l40s-48gb`, `rtx-pro-6000-96gb`, `rtx-pro-6000-mig-48gb`, ...
 A short family name (`l4`, `h100`) is accepted only when `accelerator.memory`
 leaves one card (`h100` + `94GiB` is `h100-nvl-94gb`); otherwise validate fails
-with `AMICU-CAP-012` listing the variants. With a canonical id,
+with `AMICU-CAP-012` (an error on `modal`/`runpod`, a warning elsewhere)
+listing the variants. With a canonical id,
 `accelerator.memory` may be omitted (it defaults to the card's VRAM). Full
 table: the `hardware_profile` docs page, section "GPU names".
 

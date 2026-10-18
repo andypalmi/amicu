@@ -53,8 +53,6 @@ mod gpu_catalog_tests {
 
     use crate::Provider;
 
-    /// Every GPU offering names a canonical GPU catalog id whose VRAM matches
-    /// the offering's, so a profile generated from it validates as written.
     #[test]
     fn every_gpu_offering_is_a_canonical_catalog_card() {
         let providers: Vec<Box<dyn Provider>> = vec![

@@ -104,15 +104,16 @@ Every GPU amicu knows is one exact card with a canonical id of the form `<family
 
 `accelerator.model` resolves to exactly one card, using `accelerator.memory` when it is needed:
 
-- A canonical id, or an exact provider spelling such as RunPod's `NVIDIA A100-SXM4-80GB` or `nvidia-smi`'s `NVIDIA H100 80GB HBM3`, names one card. If `memory` is set it must match that card. `80GiB` and `80GB` both match an 80 GB card; `96GiB` does not match `h100-nvl-94gb`.
-- A family (`h100`), a family and variant (`a100-sxm4`), or a family and size (`a100-80gb`) works only when `memory` leaves a single card. `h100` with `94GiB` is `h100-nvl-94gb`, and `l4` is always `l4-24gb`.
-- Anything else fails `amicu validate` and `amicu plan`. An ambiguous name lists the candidates:
+- A canonical id names one card. If `memory` is set it must be within 2% of the card's VRAM, read as GB or GiB: `80GiB`, `80GB` and `nvidia-smi`'s 81559 MiB all match an 80 GB card; `96GiB` does not match `h100-nvl-94gb`.
+- An exact provider spelling such as RunPod's `NVIDIA A100-SXM4-80GB` or `nvidia-smi`'s `NVIDIA H100 80GB HBM3` names one card regardless of `memory`.
+- A family (`h100`), a family and variant (`a100-sxm4`), or a family and size (`a100-80gb`) works only when `memory` leaves a single card (the nearest size wins). `h100` with `94GiB` is `h100-nvl-94gb`, and `l4` is always `l4-24gb`.
+- Anything else is `AMICU-CAP-012`. On `modal` and `runpod`, which place GPUs by catalog card, it is an error, so a bare ambiguous name (`h100`, `a100`) now needs an exact id there; elsewhere it is a warning. The message lists the candidates:
 
 ```text
   error [AMICU-CAP-012] hardware_profile `gpu`: `a100` with 80GiB is ambiguous: a100-sxm4-80gb (80 GB), a100-pcie-80gb (80 GB); set `accelerator.model` to one of these ids
 ```
 
-Matching ignores case and punctuation and drops the words `NVIDIA`, `GeForce`, `Tesla`, `AMD`, and `Radeon`. A GPU the catalog does not know is `AMICU-CAP-013`: an error on `modal` and `runpod`, which place GPUs by catalog id, and a warning elsewhere. `amicu plan` shows the resolved card, for example `gpu.h100-sxm-80gb (80 GB)`.
+Matching ignores case and punctuation and drops the words `NVIDIA`, `GeForce`, `Tesla`, `AMD`, and `Radeon`. A GPU the catalog does not know is `AMICU-CAP-013`: an error on `modal` and `runpod`, which place GPUs by catalog id, and a warning elsewhere. `amicu plan` shows the resolved card, for example `gpu.h100-sxm-80gb (80 GB)`. Rewriting a name to the card it already ran as (`h100` with `80GiB` on RunPod or Modal was the SXM part) is not a change and does not restart the deployment.
 
 | GPU id | Family | Vendor | VRAM |
 |---|---|---|---|
@@ -134,7 +135,7 @@ Matching ignores case and punctuation and drops the words `NVIDIA`, `GeForce`, `
 | `h100-pcie-80gb` | `h100` | NVIDIA | 80 GB |
 | `h100-nvl-94gb` | `h100` | NVIDIA | 94 GB |
 | `h200-sxm-141gb` | `h200` | NVIDIA | 141 GB |
-| `h200-nvl-143gb` | `h200` | NVIDIA | 143 GB |
+| `h200-nvl-141gb` | `h200` | NVIDIA | 141 GB |
 | `b200-180gb` | `b200` | NVIDIA | 180 GB |
 | `b300-288gb` | `b300` | NVIDIA | 288 GB |
 | `rtx-a4000-16gb` | `rtx-a4000` | NVIDIA | 16 GB |

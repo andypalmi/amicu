@@ -5,7 +5,8 @@ use std::collections::HashSet;
 use amicu_core::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticReport, Severity, catalog};
 use amicu_core::graph::Graph;
 use amicu_core::resource::{
-    Accelerator, Deployment, GpuResolveError, MemoryCheck, Residency, RuleEffect, Runtime,
+    Accelerator, CATALOG_GPU_PROVIDERS, Deployment, GpuResolveError, MemoryCheck, Residency,
+    RuleEffect, Runtime,
 };
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
 use amicu_providers::resolve_residency;
@@ -93,33 +94,24 @@ pub(crate) fn apply_memory_check(
         .collect()
 }
 
-/// Providers that place GPUs through the shared GPU catalog: a model the
-/// catalog does not know cannot be deployed there, so it is an error rather
-/// than a warning.
-const CATALOG_GPU_PROVIDERS: [&str; 2] = ["modal", "runpod"];
-
-/// Resolve every GPU hardware profile's `accelerator.model` (with its
-/// `accelerator.memory`) against the GPU catalog: `AMICU-CAP-012` when it
-/// names no single card (ambiguous family, or a size no variant has),
-/// `AMICU-CAP-013` when the catalog does not know the model.
+/// `AMICU-CAP-012` / `AMICU-CAP-013` for GPU models that do not resolve to one
+/// catalog card: errors on [`CATALOG_GPU_PROVIDERS`], warnings elsewhere.
 fn gpu_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for hw in &graph.hardware_profiles {
         let Some(Err(err)) = hw.accelerator.as_ref().and_then(Accelerator::gpu_card) else {
             continue;
         };
-        let (code, severity) = match err {
-            GpuResolveError::Unknown { .. } => (
-                catalog::CAP_GPU_UNKNOWN,
-                if CATALOG_GPU_PROVIDERS.contains(&hw.provider.as_str()) {
-                    Severity::Error
-                } else {
-                    Severity::Warning
-                },
-            ),
+        let code = match err {
+            GpuResolveError::Unknown { .. } => catalog::CAP_GPU_UNKNOWN,
             GpuResolveError::Ambiguous { .. } | GpuResolveError::MemoryMismatch { .. } => {
-                (catalog::CAP_GPU_UNRESOLVED, Severity::Error)
+                catalog::CAP_GPU_UNRESOLVED
             }
+        };
+        let severity = if CATALOG_GPU_PROVIDERS.contains(&hw.provider.as_str()) {
+            Severity::Error
+        } else {
+            Severity::Warning
         };
         let mut diag = Diagnostic::new(
             code,
@@ -615,7 +607,6 @@ mod vllm_dispatch_tests {
             region: None,
             accelerator: Some(Accelerator {
                 kind: AcceleratorKind::Gpu,
-                // A real card of that size, so the GPU catalog check passes.
                 model: match vram_gib {
                     8 => "rtx-3060-ti-8gb",
                     24 => "rtx-4090-24gb",
@@ -1268,10 +1259,18 @@ mod gpu_tests {
     }
 
     #[test]
-    fn a_memory_mismatch_is_an_error() {
+    fn a_memory_mismatch_is_an_error_on_catalog_providers_only() {
+        assert_eq!(
+            codes(&graph("runpod", "h100-nvl-94gb", 96)),
+            [("AMICU-CAP-012".to_owned(), Severity::Error)]
+        );
         assert_eq!(
             codes(&graph("on_prem", "h100-nvl-94gb", 96)),
-            [("AMICU-CAP-012".to_owned(), Severity::Error)]
+            [("AMICU-CAP-012".to_owned(), Severity::Warning)]
+        );
+        assert_eq!(
+            codes(&graph("local", "a100", 80)),
+            [("AMICU-CAP-012".to_owned(), Severity::Warning)]
         );
     }
 

@@ -370,9 +370,7 @@ fn memory_mb(memory: ByteSize) -> Option<u32> {
 // keep working.
 pub use amicu_core::naming::{app_name_for, project_app_name};
 
-/// Renders an [`Accelerator`] as Modal's `gpu=` string (`"H100"`, `"H100:2"`):
-/// `model` + `memory` resolve to one GPU catalog card, which must be one Modal
-/// offers ([`modal_gpu`]).
+/// Renders an [`Accelerator`] as Modal's `gpu=` string (`"H100"`, `"H100:2"`).
 fn gpu_string(accelerator: &Accelerator) -> Result<String, LlamaCppError> {
     let card = match accelerator.gpu_card() {
         None => {
@@ -1175,14 +1173,17 @@ mod tests {
         let mut acc = accelerator(AcceleratorKind::Gpu, "l4", 1);
         acc.memory = ByteSize::from_bytes(24 * 1024 * 1024 * 1024);
         assert_eq!(gpu_string(&acc).unwrap(), "L4");
+        acc.model = "a10g".into();
+        assert_eq!(gpu_string(&acc).unwrap(), "A10G");
+        let mut acc = accelerator(AcceleratorKind::Gpu, "b300-288gb", 1);
+        acc.memory = ByteSize::from_bytes(288 * 1024 * 1024 * 1024);
+        assert_eq!(gpu_string(&acc).unwrap(), "B300");
     }
 
     #[test]
     fn gpu_string_rejects_unresolved_or_unoffered_cards() {
-        // Ambiguous: SXM and PCIe A100s both have 80 GB.
         let err = gpu_string(&accelerator(AcceleratorKind::Gpu, "a100", 1)).unwrap_err();
         assert!(err.to_string().contains("ambiguous"), "{err}");
-        // A real card Modal does not sell.
         let err = gpu_string(&accelerator(AcceleratorKind::Gpu, "h100-pcie-80gb", 1)).unwrap_err();
         assert!(err.to_string().contains("does not offer"), "{err}");
         assert!(gpu_string(&accelerator(AcceleratorKind::Gpu, "potato", 1)).is_err());

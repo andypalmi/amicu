@@ -195,11 +195,9 @@ mod tests {
         let g = parse_graph(&gpu_profile("h100-nvl-94gb", None)).unwrap();
         let acc = g.hardware_profiles[0].accelerator.as_ref().unwrap();
         assert_eq!(acc.memory, "94GiB".parse().unwrap());
-        // A unique family resolves too.
         let g = parse_graph(&gpu_profile("l4", None)).unwrap();
         let acc = g.hardware_profiles[0].accelerator.as_ref().unwrap();
         assert_eq!(acc.memory, "24GiB".parse().unwrap());
-        // Stated memory is kept as written.
         let g = parse_graph(&gpu_profile("a100", Some("80GiB"))).unwrap();
         let acc = g.hardware_profiles[0].accelerator.as_ref().unwrap();
         assert_eq!(acc.memory, "80GiB".parse().unwrap());

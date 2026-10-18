@@ -40,9 +40,7 @@ use amicu_core::resource::{Accelerator, AcceleratorKind, HardwareProfile, resolv
 /// duplicating the VRAM size.
 const DESKTOP_HOST_MEMORY: &str = "64GiB";
 
-/// A discrete GPU profile. The profile id stays the short slug (`rtx_4090`)
-/// HCL already references; `accelerator.model` is the card's canonical GPU
-/// catalog id (`rtx-4090-24gb`).
+/// The profile id keeps the slug HCL already references (`rtx_4090`).
 fn discrete_gpu(id: &str, vram: &str, bandwidth_gbps: u32) -> HardwareProfile {
     let memory = vram.parse().expect("valid ByteSize literal");
     let card = resolve_gpu(id, Some(memory)).expect("consumer GPU is in the GPU catalog");

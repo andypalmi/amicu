@@ -1,11 +1,6 @@
 //! Map an amicu GPU spec onto RunPod serverless GPU pool ids, a per-worker
 //! count, and the GPU types to exclude so only the requested card is eligible.
 //!
-//! The accelerator's `model` (plus `memory`) first resolves to exactly one
-//! card of the shared GPU catalog ([`amicu_core::resource::resolve_gpu`]); an
-//! ambiguous name such as `a100` is an error, never a silent pick. The table
-//! below then maps that canonical id to RunPod's GPU type id and pool.
-//!
 //! RunPod serverless endpoints select hardware by **pool** (`ADA_24`,
 //! `AMPERE_80`, ...), not by GPU type id (that is what pods use), and a pool
 //! can hold several card models. To make the requested card the *only*
@@ -17,17 +12,17 @@
 //! The table is static and serves offline planning. At deploy time the
 //! exclusion list is recomputed from the live `GET /v2/catalog/gpus`
 //! ([`exclusions_from_catalog`]), so a card RunPod later adds to a pool is
-//! still excluded, and the live entry's memory is checked against the card's
-//! VRAM ([`verify_catalog_memory`]); the table's own exclusions are only the
-//! offline approximation.
+//! still excluded, and the live memory must match the card
+//! ([`verify_catalog_memory`]).
 
-use amicu_core::resource::{Accelerator, AcceleratorKind, GpuResolveError, resolve_gpu};
+use amicu_core::ByteSize;
+use amicu_core::resource::{
+    Accelerator, AcceleratorKind, GpuResolveError, resolve_gpu, vram_matches,
+};
 
 use crate::client::GpuType;
 use crate::error::RunPodError;
 
-/// One GPU catalog card RunPod serves: its canonical id, serverless pool and
-/// RunPod's GPU type id (as used in `excludedTypes`).
 struct Card {
     id: &'static str,
     pool: &'static str,
@@ -120,16 +115,13 @@ pub struct GpuPlacement {
     pub excluded_types: Vec<String>,
     /// RunPod's GPU type id of the requested card (`"NVIDIA L40S"`).
     pub type_id: String,
-    /// The card's canonical GPU catalog id (`"l40s-48gb"`).
+    /// GPU catalog id (`"l40s-48gb"`).
     pub card_id: String,
-    /// The card's VRAM in GB, checked against the live catalog at deploy.
+    /// Nominal VRAM in GB.
     pub vram_gb: u32,
 }
 
-fn card_for(
-    model: &str,
-    memory: Option<amicu_core::ByteSize>,
-) -> Result<(&'static Card, u32), RunPodError> {
+fn card_for(model: &str, memory: Option<ByteSize>) -> Result<(&'static Card, u32), RunPodError> {
     let resolved = resolve_gpu(model, memory).map_err(|e| match e {
         GpuResolveError::Unknown { .. } => RunPodError::UnknownGpu {
             model: model.to_owned(),
@@ -145,8 +137,7 @@ fn card_for(
         })
 }
 
-/// Map an amicu [`Accelerator`] (`model` resolved with its `memory`) to a
-/// RunPod [`GpuPlacement`].
+/// Map an amicu [`Accelerator`] to a RunPod [`GpuPlacement`].
 pub fn gpu_placement(accelerator: &Accelerator) -> Result<GpuPlacement, RunPodError> {
     if accelerator.kind != AcceleratorKind::Gpu {
         return Err(RunPodError::InvalidGpu(format!(
@@ -189,13 +180,8 @@ pub fn exclusions_from_catalog(
         .collect())
 }
 
-/// Check that the live catalog's memory for `type_id` is the requested card's
-/// VRAM, so a RunPod type id that came to mean a different variant is caught
-/// before deploying. An entry without a memory figure is not checked.
-///
-/// # Errors
-/// [`RunPodError::InvalidGpu`] when the catalog lists a different memory size,
-/// or does not list `type_id` at all.
+/// Catches a RunPod type id that came to mean a different variant. An entry
+/// without a memory figure is not checked.
 pub fn verify_catalog_memory(
     type_id: &str,
     vram_gb: u32,
@@ -205,18 +191,23 @@ pub fn verify_catalog_memory(
         RunPodError::InvalidGpu(format!("RunPod's GPU catalog does not list `{type_id}`"))
     })?;
     match entry.memory {
-        Some(memory) if memory != vram_gb => Err(RunPodError::InvalidGpu(format!(
-            "RunPod's GPU catalog lists `{type_id}` with {memory} GB, but the requested card \
+        Some(memory)
+            if !vram_matches(
+                vram_gb,
+                ByteSize::from_bytes(u64::from(memory) * 1_000_000_000),
+            ) =>
+        {
+            Err(RunPodError::InvalidGpu(format!(
+                "RunPod's GPU catalog lists `{type_id}` with {memory} GB, but the requested card \
              has {vram_gb} GB"
-        ))),
+            )))
+        }
         _ => Ok(()),
     }
 }
 
-/// Map a Modal-style spec string (`"h100-sxm-80gb"`, `"h100-sxm-80gb:2"`) to
-/// a [`GpuPlacement`]. With no memory to go on, the model must name exactly
-/// one card on its own (a canonical id, an exact alias, or a single-card
-/// family such as `l4`).
+/// Map a Modal-style spec string (`"h100-sxm-80gb:2"`) to a [`GpuPlacement`].
+/// Without a memory size, the model must name a single card on its own.
 pub fn parse_gpu_spec(spec: &str) -> Result<GpuPlacement, RunPodError> {
     let (model, count) = match spec.split_once(':') {
         Some((model, count)) => {
@@ -233,7 +224,7 @@ pub fn parse_gpu_spec(spec: &str) -> Result<GpuPlacement, RunPodError> {
 
 fn placement(
     model: &str,
-    memory: Option<amicu_core::ByteSize>,
+    memory: Option<ByteSize>,
     count: u32,
 ) -> Result<GpuPlacement, RunPodError> {
     if count == 0 {
@@ -286,9 +277,15 @@ mod tests {
             assert!(gpu_card(c.id).is_some(), "{} is not a catalog id", c.id);
             assert!(ids.insert(c.id), "{}", c.id);
             assert!(type_ids.insert(c.type_id), "{}", c.type_id);
-            // RunPod's own type id resolves back to the same card.
+            // `NVIDIA H200` is a family name (SXM and NVL).
             let vram = gpu_card(c.id).unwrap().memory();
-            assert_eq!(resolve_gpu(c.type_id, Some(vram)).unwrap().id, c.id);
+            match resolve_gpu(c.type_id, Some(vram)) {
+                Ok(card) => assert_eq!(card.id, c.id),
+                Err(GpuResolveError::Ambiguous { candidates, .. }) => {
+                    assert!(candidates.iter().any(|k| k.id == c.id), "{}", c.type_id);
+                }
+                Err(e) => panic!("{}: {e}", c.type_id),
+            }
         }
     }
 
@@ -307,7 +304,7 @@ mod tests {
             ("rtx-a4500", 20, "AMPERE_16"),
             ("rtx-a5000", 24, "AMPERE_24"),
             ("rtx-5090", 32, "ADA_32_PRO"),
-            ("h200", 141, "HOPPER_141"),
+            ("h200-sxm", 141, "HOPPER_141"),
             ("b200", 180, "BLACKWELL_180"),
             // RunPod's own GPU type names.
             ("NVIDIA RTX 4000 Ada Generation", 20, "AMPERE_16"),
@@ -329,7 +326,6 @@ mod tests {
 
     #[test]
     fn ambiguous_models_are_rejected_not_guessed() {
-        // Both A100 80 GB variants share a pool; a bare `a100` used to pick SXM.
         let err = gpu_placement(&acc(AcceleratorKind::Gpu, "a100", 1, 80)).unwrap_err();
         assert!(
             matches!(err, RunPodError::InvalidGpu(ref m) if m.contains("ambiguous")),
@@ -339,7 +335,6 @@ mod tests {
             gpu_placement(&acc(AcceleratorKind::Gpu, "h100", 1, 80)),
             Err(RunPodError::InvalidGpu(_))
         ));
-        // A size the card does not have.
         assert!(matches!(
             gpu_placement(&acc(AcceleratorKind::Gpu, "h100-nvl-94gb", 1, 96)),
             Err(RunPodError::InvalidGpu(_))
@@ -436,9 +431,11 @@ mod tests {
             gt("NVIDIA L4", Some("AMPERE_24"), None),
         ];
         assert!(verify_catalog_memory("NVIDIA H100 NVL", 94, &catalog).is_ok());
+        // RunPod's 143 GB for a 141 GB H200 NVL is within tolerance.
+        let h200 = [gt("NVIDIA H200 NVL", None, Some(143))];
+        assert!(verify_catalog_memory("NVIDIA H200 NVL", 141, &h200).is_ok());
         let err = verify_catalog_memory("NVIDIA H100 PCIe", 80, &catalog).unwrap_err();
         assert!(err.to_string().contains("96 GB"), "{err}");
-        // No figure to compare: not checked.
         assert!(verify_catalog_memory("NVIDIA L4", 24, &catalog).is_ok());
         assert!(verify_catalog_memory("NVIDIA B200", 180, &catalog).is_err());
     }
@@ -459,7 +456,6 @@ mod tests {
                 model: "mi300x".into()
             })
         );
-        // In the catalog, but RunPod serverless has no pool for it.
         assert_eq!(
             parse_gpu_spec("t4"),
             Err(RunPodError::UnknownGpu {
@@ -494,7 +490,6 @@ mod tests {
             }
         );
         assert_eq!(parse_gpu_spec("L4").unwrap().count, 1);
-        // Without a memory size a family must be a single card.
         assert!(matches!(
             parse_gpu_spec("H100:1"),
             Err(RunPodError::InvalidGpu(_))

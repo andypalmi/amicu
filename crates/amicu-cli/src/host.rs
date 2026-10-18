@@ -19,8 +19,7 @@ const MIB: u64 = 1024 * 1024;
 /// NVIDIA GPUs found through `nvidia-smi`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NvidiaGpu {
-    /// Canonical GPU catalog id (`rtx-4090-24gb`) when the name and VRAM
-    /// identify one card, else a slug of the name (`rtx_4090`).
+    /// GPU catalog id (`rtx-4090-24gb`), else a slug of the name (`rtx_4090`).
     pub model: String,
     pub count: u32,
     /// VRAM of one card (the smallest, when they differ).
@@ -165,8 +164,6 @@ pub(crate) fn parse_nvidia_smi(text: &str) -> Option<NvidiaGpu> {
         min_mib = Some(min_mib.map_or(mib, |m| m.min(mib)));
     }
     let memory = ByteSize::from_bytes(min_mib?.saturating_mul(MIB));
-    // The catalog's canonical id when the name and VRAM pin one card, so the
-    // generated profile validates; the plain slug otherwise.
     let model = resolve_gpu(&name, Some(memory)).map_or_else(|_| slug(&name), |c| c.id.to_owned());
     Some(NvidiaGpu {
         model,
@@ -262,7 +259,6 @@ mod tests {
         assert_eq!(g.memory.bytes(), 24564 * MIB);
         let g = parse_nvidia_smi("NVIDIA H100 80GB HBM3, 81559\n").unwrap();
         assert_eq!(g.model, "h100-sxm-80gb");
-        // Not in the catalog: the slug.
         let g = parse_nvidia_smi("NVIDIA Quadro P400, 2048\n").unwrap();
         assert_eq!(g.model, "quadro_p400");
     }
@@ -272,7 +268,7 @@ mod tests {
         let g = parse_nvidia_smi("NVIDIA A100-SXM4-80GB, 81920\nNVIDIA A100-SXM4-80GB, 40960\n")
             .unwrap();
         assert_eq!(g.count, 2);
-        assert_eq!(g.model, "a100_sxm4_80gb");
+        assert_eq!(g.model, "a100-sxm4-80gb");
         assert_eq!(g.memory.bytes(), 40960 * MIB);
     }
 

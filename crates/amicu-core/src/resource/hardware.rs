@@ -32,9 +32,7 @@ pub struct HardwareProfile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Accelerator {
     pub kind: AcceleratorKind,
-    /// Accelerator model. For a GPU, a canonical catalog id such as
-    /// `"h100-sxm-80gb"` (or a name that resolves to one, see
-    /// [`resolve_gpu`]); for Apple Silicon the chip id, e.g. `"m3_max"`.
+    /// Accelerator model, e.g. `"h100-sxm-80gb"` (see [`resolve_gpu`]), `"m3_max"`.
     pub model: String,
     pub count: u32,
     /// Memory per accelerator.
@@ -47,8 +45,7 @@ pub struct Accelerator {
 }
 
 impl Accelerator {
-    /// The catalog card this GPU accelerator names: `model` resolved with
-    /// `memory` (see [`resolve_gpu`]). `None` for a non-GPU accelerator.
+    /// `None` for a non-GPU accelerator.
     #[must_use]
     pub fn gpu_card(&self) -> Option<Result<&'static GpuCard, GpuResolveError>> {
         (self.kind == AcceleratorKind::Gpu).then(|| resolve_gpu(&self.model, Some(self.memory)))

@@ -44,7 +44,8 @@ signal; the number identifies the specific check.
 - `AMICU-CAP-011` - a typed llama.cpp field is out of range or inconsistent
   (`top_p` outside `[0, 1]`, `parallel_slots = 0`, ...). The message names the
   field. `ubatch_size` above `batch_size` is only a warning (llama-server clamps it).
-- `AMICU-CAP-012` - a GPU `accelerator.model` (with `accelerator.memory`) does
+- `AMICU-CAP-012` - (error on `modal`/`runpod`, warning elsewhere) a GPU
+  `accelerator.model` (with `accelerator.memory`) does
   not name exactly one GPU catalog card: an ambiguous short name such as
   `a100`, or a size no variant has. Set `model` to one of the canonical ids the
   message lists (`a100-sxm4-80gb`, `a100-pcie-80gb`, ...).

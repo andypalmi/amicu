@@ -464,8 +464,7 @@ impl Histogram {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HardwareInfo {
-    /// Accelerator model: the GPU catalog id (`h100-sxm-80gb`) when the card
-    /// resolves to one, else a short label of the probed name.
+    /// Accelerator model, e.g. `h100-sxm-80gb`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accelerator: Option<Label>,
     /// Number of accelerators.

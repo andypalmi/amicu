@@ -1,36 +1,8 @@
-//! The provider-agnostic GPU catalog: one entry per exact card variant, with a
-//! canonical id, its family, vendor, VRAM and the spellings it goes by.
+//! Provider-agnostic GPU catalog: one entry per exact card variant.
 //!
-//! # Canonical ids
-//!
-//! `<family>[-<variant>]-<vram>gb`, lowercase and hyphenated:
-//!
-//! - `family` is the short product name users already write (`a100`, `h100`,
-//!   `l40s`, `rtx-4090`, `rtx-pro-6000`).
-//! - `variant` is present only when the family ships in more than one form
-//!   factor or edition with otherwise identical names: `sxm` / `sxm4`
-//!   (vendor's own spelling for that generation), `pcie`, `nvl`, `maxq`,
-//!   `server`, `mig`.
-//! - `vram` is the vendor's nominal VRAM per card, in GB, always present, so an
-//!   id is unambiguous on its own (`a100-sxm4-40gb` vs `a100-sxm4-80gb`).
-//!
-//! # Resolving `accelerator.model`
-//!
-//! [`resolve_gpu`] maps a model string plus an optional memory size onto
-//! exactly one card:
-//!
-//! 1. A canonical id or an exact alias (a provider spelling such as RunPod's
-//!    `NVIDIA A100-SXM4-80GB` or `nvidia-smi`'s `NVIDIA H100 80GB HBM3`) names
-//!    one card. If a memory size is also given it must match that card's VRAM.
-//! 2. A family (`a100`), a family plus variant without the size (`a100-sxm4`)
-//!    or a family plus size (`a100-80gb`) names a group of cards. The memory
-//!    size narrows the group; it must end with exactly one card, otherwise the
-//!    error lists the candidates with their VRAM.
-//!
-//! Matching ignores case and punctuation and drops the vendor words `nvidia`,
-//! `geforce`, `tesla`, `amd` and `radeon`. A memory size matches a card when
-//! it rounds to the card's VRAM read either as GB or as GiB, so `80GiB`
-//! matches an 80 GB card but `96GiB` does not match a 94 GB one.
+//! Canonical ids are `<family>[-<variant>]-<vram>gb` (`h100-sxm-80gb`,
+//! `l4-24gb`); the variant appears only when a family ships in several form
+//! factors or editions. See [`resolve_gpu`] for how a model name maps to a card.
 
 use std::fmt;
 
@@ -41,7 +13,6 @@ use crate::units::ByteSize;
 const GB: u64 = 1_000_000_000;
 const GIB: u64 = 1 << 30;
 
-/// Who makes the card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GpuVendor {
@@ -49,53 +20,61 @@ pub enum GpuVendor {
     Amd,
 }
 
-/// One exact GPU variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuCard {
-    /// Canonical id, e.g. `a100-sxm4-80gb`. See the module docs for the scheme.
     pub id: &'static str,
-    /// Short family name, e.g. `a100`. Never resolves to a card on its own
-    /// unless the family has a single card (or memory picks one).
     pub family: &'static str,
     pub vendor: GpuVendor,
-    /// Nominal VRAM per card, in GB.
+    /// Nominal VRAM, in GB.
     pub vram_gb: u32,
-    /// Other exact spellings of this card (provider type ids, `nvidia-smi`
-    /// names). Matched after normalization; see the module docs.
+    /// Provider and `nvidia-smi` spellings. They pin the card, so memory is
+    /// not checked against them.
     pub aliases: &'static [&'static str],
 }
 
 impl GpuCard {
-    /// The id without its `-<vram>gb` suffix (`a100-sxm4`).
     #[must_use]
     pub fn stem(&self) -> &'static str {
         self.id.rsplit_once('-').map_or(self.id, |(stem, _)| stem)
     }
 
-    /// The card's VRAM as a [`ByteSize`], in GiB (`80GiB` for an 80 GB card),
-    /// the convention amicu's configs use for `accelerator.memory`.
+    /// In GiB, the convention configs use for `accelerator.memory`.
     #[must_use]
     pub fn memory(&self) -> ByteSize {
         ByteSize::from_bytes(u64::from(self.vram_gb) * GIB)
     }
 
-    /// Whether `memory` is this card's VRAM, read as GB or as GiB.
     #[must_use]
     pub fn memory_matches(&self, memory: ByteSize) -> bool {
-        let vram = u64::from(self.vram_gb);
-        let bytes = memory.bytes();
-        rounded(bytes, GB) == vram || rounded(bytes, GIB) == vram
+        vram_matches(self.vram_gb, memory)
     }
 
-    /// `a100-sxm4-80gb (80 GB)`.
+    fn distance(&self, memory: ByteSize) -> f64 {
+        vram_distance(self.vram_gb, memory)
+    }
+
     #[must_use]
     pub fn describe(&self) -> String {
         format!("{} ({} GB)", self.id, self.vram_gb)
     }
 }
 
-fn rounded(bytes: u64, unit: u64) -> u64 {
-    (bytes + unit / 2) / unit
+/// Relative tolerance between a memory size (read as GB or GiB) and a card's
+/// nominal VRAM. Real `nvidia-smi` totals sit within 0.6% (81559 MiB for an
+/// 80 GB H100, 143771 MiB for a 141 GB H200), while 94 vs 96 GB is 2.1% apart.
+pub const VRAM_TOLERANCE: f64 = 0.02;
+
+#[allow(clippy::cast_precision_loss)] // byte counts far below 2^52
+fn vram_distance(vram_gb: u32, memory: ByteSize) -> f64 {
+    let bytes = memory.bytes() as f64;
+    let vram = f64::from(vram_gb);
+    let rel = |unit: u64| ((bytes / unit as f64) - vram).abs() / vram;
+    rel(GB).min(rel(GIB))
+}
+
+#[must_use]
+pub fn vram_matches(vram_gb: u32, memory: ByteSize) -> bool {
+    vram_gb > 0 && vram_distance(vram_gb, memory) <= VRAM_TOLERANCE
 }
 
 const fn nv(
@@ -114,7 +93,6 @@ const fn nv(
 }
 
 const GPU_CARDS: &[GpuCard] = &[
-    // --- NVIDIA data center ---
     nv("t4-16gb", "t4", 16, &[]),
     nv("p100-16gb", "p100", 16, &[]),
     nv(
@@ -163,7 +141,13 @@ const GPU_CARDS: &[GpuCard] = &[
     ),
     nv("h100-nvl-94gb", "h100", 94, &["NVIDIA H100 NVL"]),
     nv("h200-sxm-141gb", "h200", 141, &["H200 SXM"]),
-    nv("h200-nvl-143gb", "h200", 143, &["NVIDIA H200 NVL"]),
+    // RunPod lists the NVL at 143 GB; the nominal size is 141 GB.
+    nv(
+        "h200-nvl-141gb",
+        "h200",
+        141,
+        &["NVIDIA H200 NVL", "h200-nvl-143gb"],
+    ),
     nv("b200-180gb", "b200", 180, &[]),
     nv(
         "b300-288gb",
@@ -171,7 +155,6 @@ const GPU_CARDS: &[GpuCard] = &[
         288,
         &["NVIDIA B300 SXM6 AC", "B300 SXM6"],
     ),
-    // --- NVIDIA workstation ---
     nv("rtx-a4000-16gb", "rtx-a4000", 16, &["A4000"]),
     nv("rtx-a4500-20gb", "rtx-a4500", 20, &["A4500"]),
     nv("rtx-a5000-24gb", "rtx-a5000", 24, &["A5000"]),
@@ -239,14 +222,12 @@ const GPU_CARDS: &[GpuCard] = &[
         24,
         &["NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 1g.24gb"],
     ),
-    // --- NVIDIA consumer ---
     nv("rtx-3060-ti-8gb", "rtx-3060-ti", 8, &[]),
     nv("rtx-3090-24gb", "rtx-3090", 24, &["3090"]),
     nv("rtx-4070-ti-super-16gb", "rtx-4070-ti-super", 16, &[]),
     nv("rtx-4080-16gb", "rtx-4080", 16, &[]),
     nv("rtx-4090-24gb", "rtx-4090", 24, &["4090"]),
     nv("rtx-5090-32gb", "rtx-5090", 32, &["5090"]),
-    // --- AMD ---
     GpuCard {
         id: "rx-7900-xtx-24gb",
         family: "rx-7900-xtx",
@@ -256,19 +237,16 @@ const GPU_CARDS: &[GpuCard] = &[
     },
 ];
 
-/// Every card in the catalog.
 #[must_use]
 pub fn gpu_cards() -> &'static [GpuCard] {
     GPU_CARDS
 }
 
-/// The card with this exact canonical id.
 #[must_use]
 pub fn gpu_card(id: &str) -> Option<&'static GpuCard> {
     GPU_CARDS.iter().find(|c| c.id == id)
 }
 
-/// Lowercase, keep `[a-z0-9]`, drop vendor words.
 #[must_use]
 pub fn normalize_gpu_name(name: &str) -> String {
     let mut s: String = name
@@ -282,18 +260,16 @@ pub fn normalize_gpu_name(name: &str) -> String {
     s
 }
 
-/// Why a model string did not resolve to exactly one card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GpuResolveError {
-    /// Nothing in the catalog goes by this name.
-    Unknown { model: String },
-    /// Several cards fit; `candidates` are the ones still in the running.
+    Unknown {
+        model: String,
+    },
     Ambiguous {
         model: String,
         memory: Option<ByteSize>,
         candidates: Vec<&'static GpuCard>,
     },
-    /// The name is known but no card of it has this much VRAM.
     MemoryMismatch {
         model: String,
         memory: ByteSize,
@@ -354,12 +330,12 @@ impl fmt::Display for GpuResolveError {
 
 impl std::error::Error for GpuResolveError {}
 
-/// Resolve `model` (and optionally the declared per-card `memory`) to exactly
-/// one card. See the module docs for the rules.
+/// Resolve `model` (with the optional per-card `memory`) to exactly one card.
 ///
-/// # Errors
-/// [`GpuResolveError`] when the name is unknown, still ambiguous, or no card
-/// of it has `memory`.
+/// A canonical id must match `memory`; an alias pins its card regardless. A
+/// family, family+variant (`a100-sxm4`) or family+size (`a100-80gb`) must be
+/// narrowed by `memory` (nearest VRAM wins) to a single card. Matching ignores
+/// case, punctuation and vendor words.
 pub fn resolve_gpu(
     model: &str,
     memory: Option<ByteSize>,
@@ -372,9 +348,13 @@ pub fn resolve_gpu(
         return Err(unknown());
     }
 
-    if let Some(card) = GPU_CARDS.iter().find(|c| {
-        normalize_gpu_name(c.id) == key || c.aliases.iter().any(|a| normalize_gpu_name(a) == key)
-    }) {
+    if let Some(card) = GPU_CARDS
+        .iter()
+        .find(|c| c.aliases.iter().any(|a| normalize_gpu_name(a) == key))
+    {
+        return Ok(card);
+    }
+    if let Some(card) = GPU_CARDS.iter().find(|c| normalize_gpu_name(c.id) == key) {
         return match memory {
             Some(memory) if !card.memory_matches(memory) => Err(GpuResolveError::MemoryMismatch {
                 model: model.to_owned(),
@@ -409,11 +389,21 @@ pub fn resolve_gpu(
     }
 
     let fitting: Vec<&'static GpuCard> = match memory {
-        Some(memory) => group
-            .iter()
-            .copied()
-            .filter(|c| c.memory_matches(memory))
-            .collect(),
+        Some(memory) => {
+            let matching: Vec<&'static GpuCard> = group
+                .iter()
+                .copied()
+                .filter(|c| c.memory_matches(memory))
+                .collect();
+            let best = matching
+                .iter()
+                .map(|c| c.distance(memory))
+                .fold(f64::INFINITY, f64::min);
+            matching
+                .into_iter()
+                .filter(|c| (c.distance(memory) - best).abs() < 1e-9)
+                .collect()
+        }
         None => group.clone(),
     };
     match fitting.as_slice() {
@@ -428,6 +418,43 @@ pub fn resolve_gpu(
             memory,
             candidates: fitting,
         }),
+    }
+}
+
+/// Providers that place GPUs by catalog card, so they cannot deploy a model
+/// that does not resolve.
+pub const CATALOG_GPU_PROVIDERS: [&str; 2] = ["modal", "runpod"];
+
+/// The card a profile on `provider` runs on. For a short name that is now
+/// ambiguous this is the card `modal`/`runpod` picked before exact names were
+/// required, so rewriting `h100` to `h100-sxm-80gb` is not a config change.
+#[must_use]
+pub fn effective_gpu_card(
+    provider: &str,
+    model: &str,
+    memory: Option<ByteSize>,
+) -> Option<&'static GpuCard> {
+    match resolve_gpu(model, memory) {
+        Ok(card) => Some(card),
+        Err(GpuResolveError::Ambiguous { candidates, .. })
+            if CATALOG_GPU_PROVIDERS.contains(&provider) =>
+        {
+            let legacy = |id: &str| candidates.iter().copied().find(|c| c.id == id);
+            let sxm: Vec<&'static GpuCard> = candidates
+                .iter()
+                .copied()
+                .filter(|c| {
+                    let stem = c.stem();
+                    stem.ends_with("-sxm") || stem.ends_with("-sxm4")
+                })
+                .collect();
+            match sxm.as_slice() {
+                [card] => Some(card),
+                _ if provider == "runpod" => legacy("rtx-pro-6000-96gb"),
+                _ => legacy("rtx-pro-6000-server-96gb"),
+            }
+        }
+        Err(_) => None,
     }
 }
 
@@ -474,7 +501,6 @@ mod tests {
 
     #[test]
     fn exact_names_are_unique_and_never_a_family_or_stem() {
-        // Group name -> the cards it covers.
         let mut groups: HashMap<String, HashSet<&str>> = HashMap::new();
         for c in GPU_CARDS {
             for g in [c.family, c.stem()] {
@@ -541,8 +567,11 @@ mod tests {
     #[test]
     fn memory_disambiguates_a_family() {
         assert_eq!(id("h100", gib(94)), "h100-nvl-94gb");
-        assert_eq!(id("h200", gb(141)), "h200-sxm-141gb");
-        assert_eq!(id("h200", gb(143)), "h200-nvl-143gb");
+        assert_eq!(id("h200-nvl-143gb", None), "h200-nvl-141gb");
+        assert!(matches!(
+            resolve_gpu("h200", gb(141)),
+            Err(GpuResolveError::Ambiguous { .. })
+        ));
         assert_eq!(id("rtx-pro-6000", gib(48)), "rtx-pro-6000-mig-48gb");
         assert_eq!(id("a100-sxm4", gib(40)), "a100-sxm4-40gb");
         assert_eq!(id("v100", gib(32)), "v100-32gb");
@@ -575,7 +604,6 @@ mod tests {
 
     #[test]
     fn memory_must_match_the_card() {
-        // GiB and GB spellings of the same nominal size both match.
         assert_eq!(id("a100-sxm4-80gb", gib(80)), "a100-sxm4-80gb");
         assert_eq!(id("a100-sxm4-80gb", gb(80)), "a100-sxm4-80gb");
         let err = resolve_gpu("h100-nvl-94gb", gib(96)).unwrap_err();
@@ -589,8 +617,45 @@ mod tests {
             err.to_string()
                 .starts_with("no `h100` card has 96GiB of VRAM")
         );
-        // Size spelled in the name and as memory must agree.
         assert!(resolve_gpu("a100-40gb", gib(80)).is_err());
+    }
+
+    #[test]
+    fn real_nvidia_smi_totals_match_their_card() {
+        const MIB: u64 = 1 << 20;
+        let smi = |mib: u64| Some(ByteSize::from_bytes(mib * MIB));
+        for (name, mib, want) in [
+            ("h100-sxm-80gb", 81_559, "h100-sxm-80gb"),
+            ("h200-sxm-141gb", 143_771, "h200-sxm-141gb"),
+            ("b200", 183_359, "b200-180gb"),
+            ("a100-sxm4", 40_960, "a100-sxm4-40gb"),
+            ("a100-sxm4", 81_920, "a100-sxm4-80gb"),
+            ("l4", 23_034, "l4-24gb"),
+            ("rtx-4090", 24_564, "rtx-4090-24gb"),
+            ("h100", 95_830, "h100-nvl-94gb"),
+        ] {
+            assert_eq!(id(name, smi(mib)), want, "{name} {mib} MiB");
+        }
+        assert_eq!(id("NVIDIA A100-SXM4-80GB", smi(40_960)), "a100-sxm4-80gb");
+        assert!(!vram_matches(94, ByteSize::from_bytes(96 * GIB)));
+        assert!(vram_matches(141, ByteSize::from_bytes(143 * GB)));
+    }
+
+    #[test]
+    fn legacy_short_names_keep_their_former_card_on_catalog_providers() {
+        let eff = |provider: &str, model: &str, gib: u64| {
+            effective_gpu_card(provider, model, Some(ByteSize::from_bytes(gib * GIB))).map(|c| c.id)
+        };
+        assert_eq!(eff("runpod", "h100", 80), Some("h100-sxm-80gb"));
+        assert_eq!(eff("modal", "a100", 80), Some("a100-sxm4-80gb"));
+        assert_eq!(eff("modal", "a100", 40), Some("a100-sxm4-40gb"));
+        assert_eq!(eff("runpod", "rtx-pro-6000", 96), Some("rtx-pro-6000-96gb"));
+        assert_eq!(
+            eff("modal", "rtx-pro-6000", 96),
+            Some("rtx-pro-6000-server-96gb")
+        );
+        assert_eq!(eff("on_prem", "h100", 80), None);
+        assert_eq!(eff("runpod", "h100-sxm-80gb", 80), Some("h100-sxm-80gb"));
     }
 
     #[test]

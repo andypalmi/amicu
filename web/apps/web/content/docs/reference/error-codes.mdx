@@ -52,7 +52,7 @@ Diagnostics have the form `AMICU-<CATEGORY>-<NNN>`. The category is the fastest 
 | `AMICU-CAP-009` | error | `scaling {}` on a provider with no scaling support | Remove the block or use a provider with scaling support (Modal today) |
 | `AMICU-CAP-010` | warning | vLLM KV cache not estimated; the model has no `n_layers`, `n_kv_heads`, `head_dim` | Declare the shape on the model |
 | `AMICU-CAP-011` | error | A typed `llama_cpp` field is out of range or inconsistent (for example `top_p` outside 0 to 1, or `parallel_slots = 0`). The message names the field. `ubatch_size` above `batch_size` is only a warning, because llama-server clamps it | Fix the named field |
-| `AMICU-CAP-012` | error | A GPU `accelerator.model` (with `accelerator.memory`) does not name exactly one card: a short name several variants share, such as `a100`, or a size no variant has. The message lists the candidate ids with their VRAM | Set `model` to one of the listed ids. See [GPU names](/docs/configuration/hardware-profile#gpu-names) |
+| `AMICU-CAP-012` | error on `modal`/`runpod`, else warning | A GPU `accelerator.model` (with `accelerator.memory`) does not name exactly one card: a short name several variants share, such as `a100`, or a size no variant has. The message lists the candidate ids with their VRAM | Set `model` to one of the listed ids. See [GPU names](/docs/configuration/hardware-profile#gpu-names) |
 | `AMICU-CAP-013` | error on `modal`/`runpod`, else warning | The GPU `accelerator.model` is not in amicu's GPU catalog | Use a GPU id from [GPU names](/docs/configuration/hardware-profile#gpu-names) |
 
 ## MEM

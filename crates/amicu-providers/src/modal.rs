@@ -226,10 +226,8 @@ struct GpuSpec {
     id: &'static str,
     /// Modal's `gpu=` string.
     model: &'static str,
-    /// The card's canonical GPU catalog id ([`amicu_core::resource::gpu_card`]),
-    /// which is what the offering's `accelerator.model` carries. Modal runs
-    /// H100/H200 as SXM (Modal GPU guide); A100 is assumed SXM4 and
-    /// RTX-PRO-6000 the Server Edition (not documented by Modal).
+    /// Modal documents H100/H200 as SXM; A100 as SXM4 and RTX-PRO-6000 as the
+    /// Server Edition are assumptions.
     card: &'static str,
     vram_gib: u32,
     /// Maximum GPUs of this kind per Modal container (`gpu="<model>:<max_count>"`).
@@ -379,11 +377,20 @@ const GPUS: &[GpuSpec] = &[
     },
 ];
 
-/// Modal's `gpu=` string for a canonical GPU catalog id (`"h100-sxm-80gb"`
-/// -> `"H100"`), or `None` when Modal does not offer that card.
+/// Accepted by Modal but without a verified rate, so not catalog offerings.
+const UNPRICED_GPUS: [(&str, &str); 2] = [("a10g-24gb", "A10G"), ("b300-288gb", "B300")];
+
 #[must_use]
 pub fn modal_gpu(card_id: &str) -> Option<&'static str> {
-    GPUS.iter().find(|g| g.card == card_id).map(|g| g.model)
+    GPUS.iter()
+        .find(|g| g.card == card_id)
+        .map(|g| g.model)
+        .or_else(|| {
+            UNPRICED_GPUS
+                .iter()
+                .find(|(card, _)| *card == card_id)
+                .map(|(_, gpu)| *gpu)
+        })
 }
 
 /// Modal's price multiplier for a broad region (`us`, `eu`, `ap`).

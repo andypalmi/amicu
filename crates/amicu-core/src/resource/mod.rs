@@ -30,7 +30,8 @@ pub use deployment::{
 };
 pub use governance::{GovernanceRule, RuleEffect};
 pub use gpu::{
-    GpuCard, GpuResolveError, GpuVendor, gpu_card, gpu_cards, normalize_gpu_name, resolve_gpu,
+    CATALOG_GPU_PROVIDERS, GpuCard, GpuResolveError, GpuVendor, VRAM_TOLERANCE, effective_gpu_card,
+    gpu_card, gpu_cards, normalize_gpu_name, resolve_gpu, vram_matches,
 };
 pub use hardware::{Accelerator, AcceleratorKind, Cpu, HardwareProfile, Interconnect, Price};
 pub use model::{

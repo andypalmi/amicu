@@ -339,7 +339,7 @@ pub struct RunPodSupervisor {
     deployment_id: String,
     endpoint_name: String,
     gpu: Option<GpuRequest>,
-    /// RunPod GPU type id of the requested card and its VRAM in GB.
+    /// RunPod GPU type id and nominal VRAM in GB.
     gpu_type: Option<(String, u32)>,
     data_center_ids: Vec<String>,
     scaling: ScalingSettings,
@@ -434,8 +434,7 @@ impl RunPodSupervisor {
     }
 
     /// Replaces the static `excludedTypes` with every other GPU type the live
-    /// catalog lists in the requested pool, after checking that the live
-    /// entry's memory is the requested card's VRAM.
+    /// catalog lists in the requested pool.
     fn exclude_from_catalog(
         &self,
         gpu: &mut GpuRequest,

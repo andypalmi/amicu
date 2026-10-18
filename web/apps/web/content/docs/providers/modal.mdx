@@ -175,7 +175,7 @@ The region also selects the proxy region of the web endpoint: `eu`, `eu-west`, `
 
 ## GPU types
 
-Set `accelerator.kind = "gpu"` and `accelerator.model` to one of these ids. A short name works when it, with `accelerator.memory`, picks exactly one card (`l4` with `24GiB`); an ambiguous one such as `a100` fails `amicu validate` (see [GPU names](/docs/configuration/hardware-profile#gpu-names)). Amicu maps the card to Modal's GPU name (`h100-sxm-80gb` becomes `H100`). Modal runs H100 and H200 as SXM. Only GPU accelerators are valid; `tpu`, `cpu`, and `apple_silicon` are rejected before any call.
+Set `accelerator.kind = "gpu"` and `accelerator.model` to one of these ids. A short name works when it, with `accelerator.memory`, picks exactly one card (`l4` with `24GiB`); an ambiguous one such as `a100` fails `amicu validate` (see [GPU names](/docs/configuration/hardware-profile#gpu-names)). Amicu maps the card to Modal's GPU name (`h100-sxm-80gb` becomes `H100`). Modal runs H100 and H200 as SXM. `a10g-24gb` (`A10G`) and `b300-288gb` (`B300`) are accepted too; they have no catalog price. Only GPU accelerators are valid; `tpu`, `cpu`, and `apple_silicon` are rejected before any call.
 
 | `model` | Modal GPU | VRAM | Maximum count |
 |---|---|---|---|

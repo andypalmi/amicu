@@ -792,7 +792,6 @@ async fn a_catalog_that_does_not_list_the_card_stops_before_any_write() {
         "nothing created"
     );
 
-    // A live entry whose memory is not the requested card's VRAM stops it too.
     let mock = happy_mock().ok(
         HttpMethod::Get,
         "/catalog/gpus",

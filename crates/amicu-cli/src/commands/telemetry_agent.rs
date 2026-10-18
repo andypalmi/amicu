@@ -634,9 +634,6 @@ fn accelerator_label(name: &str) -> String {
     out.trim_end_matches('-').chars().take(64).collect()
 }
 
-/// The GPU catalog's canonical id (`h100-sxm-80gb`) for a probed card name
-/// and its VRAM, when they identify exactly one card. The id is a fixed
-/// catalog value, so it is as coarse as the Apple Silicon chip labels.
 fn gpu_label(name: &str, vram_bytes: Option<u64>) -> Option<String> {
     let memory = vram_bytes.map(amicu_core::ByteSize::from_bytes);
     amicu_core::resource::resolve_gpu(name, memory)
@@ -912,7 +909,6 @@ mod tests {
             gpu_label("NVIDIA L4", Some(23_034 * MIB)).as_deref(),
             Some("l4-24gb")
         );
-        // Unknown cards and Apple chips keep the plain label.
         assert_eq!(gpu_label("Apple M3 Max", None), None);
         assert_eq!(gpu_label("NVIDIA Quadro P400", Some(2048 * MIB)), None);
         let label = Label::new(gpu_label("NVIDIA H100 NVL", None).unwrap());

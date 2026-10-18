@@ -135,8 +135,6 @@ fn hardware_profile(name: &str, f: &Fields) -> Result<HardwareProfile> {
                 let model = a.string("model")?;
                 let memory = match a.opt_byte_size("memory")? {
                     Some(memory) => memory,
-                    // A GPU model that names exactly one catalog card carries
-                    // its VRAM; anything else must state the memory.
                     None if kind == AcceleratorKind::Gpu => resolve_gpu(&model, None)
                         .map(GpuCard::memory)
                         .map_err(|err| {
