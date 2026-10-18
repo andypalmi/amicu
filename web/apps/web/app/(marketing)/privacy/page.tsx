@@ -70,9 +70,11 @@ export default function PrivacyPage() {
           install id and a deployment id, not derived from your machine, user or deployment
           name). Prompts, completions and other request content, IP addresses, hostnames, file
           paths, endpoint URLs, usernames and API keys are not part of the payload, and we do not
-          store the IP address a request comes from. Turn it off with{' '}
-          <code>amicu telemetry disable</code>, or set <code>DO_NOT_TRACK=1</code> or{' '}
-          <code>AMICU_TELEMETRY=0</code>; running agents stop and delete their local queue. Legal
+          store the IP address a request comes from. <code>amicu telemetry disable</code>{' '}
+          turns it off immediately: running agents stop and delete their local queue. Setting{' '}
+          <code>DO_NOT_TRACK=1</code> or <code>AMICU_TELEMETRY=0</code> also turns it off, taking
+          effect the next time you run <code>amicu apply</code>, which then stops the agents and
+          deletes their queues. Legal
           basis: your consent (Art. 6(1)(a)), which you can withdraw at any time. The exact
           fields and how the setting works are documented in{' '}
           <a className={link} href="/docs/security/telemetry">
@@ -97,9 +99,10 @@ export default function PrivacyPage() {
       <ul>
         <li>
           <strong>Cloudflare</strong> hosts and delivers the website and web app (Workers/CDN).
-          Cloudflare also runs the CLI telemetry ingestion endpoint (api.amicu.dev). It also provides Cloudflare Web Analytics, a cookieless service that reports page
-          views and performance without cookies or cross-site tracking, and Turnstile, a bot
-          check used on sign-up, password-reset and verification forms.
+          Cloudflare also runs the CLI telemetry ingestion endpoint (api.amicu.dev).
+          It provides Cloudflare Web Analytics, a cookieless service that reports page views and
+          performance without cookies or cross-site tracking, and Turnstile, a bot check used on
+          sign-up, password-reset and verification forms.
         </li>
         <li>
           <strong>PostHog (EU cloud)</strong> provides cookieless product
