@@ -9,6 +9,7 @@ import { githubUrl, quickstartUrl } from '../_lib/content';
 
 const siteLinks = [
   { href: '/docs', label: 'Docs' },
+  { href: '/install', label: 'Install' },
   { href: '/providers', label: 'Providers' },
   { href: '/pricing', label: 'Pricing' },
   { href: '/security', label: 'Security' },
@@ -25,6 +26,7 @@ const mobileItems: MobileNavItem[] = [
       { href: '/docs/reference/cli', label: 'CLI reference' },
     ],
   },
+  { href: '/install', label: 'Install' },
   { href: '/providers', label: 'Providers' },
   { href: '/pricing', label: 'Pricing' },
   { href: '/security', label: 'Security' },
