@@ -1,0 +1,712 @@
+use std::collections::BTreeMap;
+
+use amicu_core::ByteSize;
+use amicu_core::resource::{AcceleratorKind, Residency, Runtime, VllmSettings};
+use serde_json::{Value, json};
+
+use super::*;
+use crate::client::ApiKey;
+use crate::supervisor::secret_name;
+use crate::supervisor::tests::{
+    BASE, Canned, DEP, FAST, FOUND_SECRET, HF, KEY, MGMT, Mock, NO_SECRETS, PROJECT, SECRET,
+    llama_plan, plan, position, posted, secrets_for, vllm_plan, vllm_secrets,
+};
+
+const TYPE: &str = "NVIDIA H100 80GB HBM3";
+const CATALOG: &str = r#"{"gpus":[
+    {"id":"NVIDIA H100 80GB HBM3","name":"H100 SXM","pool":"ADA_80_PRO","memory":80},
+    {"id":"NVIDIA H200 NVL","name":"H200 NVL","memory":143}]}"#;
+const NO_PODS: &str = r#"{"pods":[],"pagination":{"hasNextPage":false}}"#;
+const PODS: &str = "/pods";
+const POD: &str = "/pods/pod1";
+const ACTION: &str = "/pods/pod1/action";
+const HEALTH: &str = "https://pod1-8000.proxy.runpod.net/health";
+const MODELS: &str = "https://pod1-8000.proxy.runpod.net/v1/models";
+
+fn owner() -> String {
+    owner_marker(None, PROJECT, DEP)
+}
+
+fn name() -> String {
+    project_endpoint_name(PROJECT, DEP)
+}
+
+fn sname(var: &str, value: &str) -> String {
+    secret_name(PROJECT, DEP, &owner(), var, value)
+}
+
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+/// `GET /pods/pod1` in `status`, owned by this deployment.
+fn pod(status: &str) -> &'static str {
+    pod_with(status, TYPE, "EU-RO-1", &owner())
+}
+
+fn pod_with(status: &str, gpu: &str, dc: &str, owner: &str) -> &'static str {
+    leak(format!(
+        r#"{{"id":"pod1","name":"{}","status":"{status}","gpu":{{"id":"{gpu}","count":2}},
+        "cloud":"SECURE","dataCenterId":"{dc}","cost":5.38,
+        "env":{{"{OWNER_ENV_VAR}":"{owner}","HF_TOKEN":"x"}}}}"#,
+        name()
+    ))
+}
+
+fn one_pod(status: &str) -> &'static str {
+    leak(format!(
+        r#"{{"pods":[{{"id":"pod1","name":"{}","status":"{status}"}}],
+        "pagination":{{"hasNextPage":false}}}}"#,
+        name()
+    ))
+}
+
+fn h100() -> Accelerator {
+    Accelerator {
+        kind: AcceleratorKind::Gpu,
+        model: "h100-sxm-80gb".to_owned(),
+        count: 2,
+        memory: ByteSize::from_bytes(80 * (1 << 30)),
+        memory_bandwidth_gbps: None,
+    }
+}
+
+fn supervisor(mock: Mock) -> (PodSupervisor, Arc<Mock>) {
+    let mock = Arc::new(mock.ok(HttpMethod::Get, "/catalog/gpus", 200, CATALOG));
+    let client = RunPodClient::with_transport(ApiKey::new(MGMT), mock.clone(), BASE);
+    let sup = PodSupervisor::new(client, PROJECT, DEP)
+        .with_probe_transport(mock.clone())
+        .with_accelerator(Some(&h100()))
+        .unwrap()
+        .with_readiness_timing(FAST);
+    (sup, mock)
+}
+
+/// Secrets, an empty pod list, a create, then RUNNING / health / exposure
+/// answers as given.
+fn create_mock(status: &[Canned], health: &[Canned], models: &[Canned]) -> Mock {
+    // Two "does it exist?" lookups, then every lookup finds it.
+    Mock::default()
+        .on(
+            HttpMethod::Get,
+            "/account/secrets?name=",
+            &[
+                Canned::Status(200, NO_SECRETS),
+                Canned::Status(200, NO_SECRETS),
+                Canned::Status(200, FOUND_SECRET),
+            ],
+        )
+        .ok(HttpMethod::Post, "/account/secrets", 201, SECRET)
+        .ok(HttpMethod::Delete, "/account/secrets/s1", 204, "")
+        .ok(HttpMethod::Get, PODS, 200, NO_PODS)
+        .ok(HttpMethod::Post, PODS, 201, pod("PROVISIONING"))
+        .on(HttpMethod::Get, POD, status)
+        .on(HttpMethod::Get, HEALTH, health)
+        .on(HttpMethod::Get, MODELS, models)
+        .ok(HttpMethod::Post, ACTION, 204, "")
+}
+
+fn happy_mock() -> Mock {
+    create_mock(
+        &[Canned::Status(200, pod("RUNNING"))],
+        &[Canned::Status(200, "{}")],
+        &[Canned::Status(401, ""), Canned::Status(200, "{}")],
+    )
+}
+
+fn body_of(mock: &Mock, method: HttpMethod, suffix: &str) -> Value {
+    mock.requests()
+        .into_iter()
+        .find(|s| s.method == method && s.url.ends_with(suffix))
+        .and_then(|s| s.body)
+        .unwrap_or_else(|| panic!("no {method:?} {suffix}"))
+}
+
+fn count(mock: &Mock, method: HttpMethod, suffix: &str) -> usize {
+    mock.requests()
+        .iter()
+        .filter(|s| s.method == method && s.url.ends_with(suffix))
+        .count()
+}
+
+fn err_text(e: &LlamaCppError) -> String {
+    format!("{e} {e:?}")
+}
+
+// --- create ------------------------------------------------------------------
+
+#[tokio::test]
+async fn vllm_start_creates_secrets_then_the_pod_and_checks_exposure() {
+    let (sup, mock) = supervisor(happy_mock());
+    let handle = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    assert_eq!(handle.id, "pod1");
+    assert_eq!(handle.endpoint, "https://pod1-8000.proxy.runpod.net");
+    assert_eq!(
+        handle.exposure,
+        EndpointExposure::Public {
+            gateway: GatewayAuth::None
+        }
+    );
+
+    let key_secret = sname("VLLM_API_KEY", KEY);
+    let hf_secret = sname("HF_TOKEN", HF);
+    assert_eq!(
+        body_of(&mock, HttpMethod::Post, PODS),
+        json!({
+            "name": name(),
+            "image": amicu_llamacpp::remote::DEFAULT_VLLM_IMAGE,
+            "entrypoint": ["vllm"],
+            "cmd": ["serve", "meta-llama/Llama-3.1-8B-Instruct", "--port", "8000",
+                    "--host", "0.0.0.0"],
+            "env": {
+                "AMICU_OWNER": owner(),
+                "HF_TOKEN": format!("{{{{ RUNPOD_SECRET_{hf_secret} }}}}"),
+                "VLLM_API_KEY": format!("{{{{ RUNPOD_SECRET_{key_secret} }}}}"),
+            },
+            "ports": ["8000/http"],
+            "disk": 100,
+            "gpu": {"id": TYPE, "count": 2},
+            "cloud": "SECURE",
+            "startSsh": false,
+            "startJupyter": false
+        })
+    );
+
+    // The runtime key is a RunPod secret here (the proxy adds no auth).
+    let secret_bodies = posted(&mock, "/account/secrets");
+    let values: Vec<&str> = secret_bodies
+        .iter()
+        .map(|b| b["value"].as_str().unwrap())
+        .collect();
+    assert!(values.contains(&KEY) && values.contains(&HF));
+    assert!(
+        position(&mock, HttpMethod::Post, "/account/secrets")
+            < position(&mock, HttpMethod::Post, PODS)
+    );
+    assert!(
+        position(&mock, HttpMethod::Get, "/catalog/gpus")
+            < position(&mock, HttpMethod::Post, "/account/secrets")
+    );
+
+    // Anonymous first, then with the key; neither probe carries the
+    // management key, and nothing but the key ever does.
+    let probes: Vec<Option<String>> = mock
+        .requests()
+        .into_iter()
+        .filter(|s| s.url == MODELS)
+        .map(|s| s.bearer)
+        .collect();
+    assert_eq!(probes, [None, Some(KEY.to_owned())]);
+    assert!(
+        mock.requests()
+            .iter()
+            .filter(|s| s.url == HEALTH)
+            .all(|s| s.bearer.is_none())
+    );
+    assert_eq!(sup.deployed_pod().lock().unwrap().as_deref(), Some("pod1"));
+    let mut created = sup.created_secrets().lock().unwrap().clone();
+    created.sort();
+    let mut want = vec![key_secret, hf_secret];
+    want.sort();
+    assert_eq!(created, want);
+}
+
+#[tokio::test]
+async fn planned_secret_names_match_what_start_writes() {
+    let (sup, mock) = supervisor(happy_mock());
+    let planned = sup
+        .planned_secret_names(&vllm_plan(), &vllm_secrets())
+        .unwrap();
+    assert!(mock.requests().is_empty(), "planning makes no calls");
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    let written: Vec<String> = posted(&mock, "/account/secrets")
+        .iter()
+        .map(|b| b["name"].as_str().unwrap().to_owned())
+        .collect();
+    let mut written = written;
+    written.sort();
+    assert_eq!(planned, written);
+}
+
+#[tokio::test]
+async fn llama_start_uses_the_image_server_and_its_key_var() {
+    let (sup, mock) = supervisor(create_mock(
+        &[Canned::Status(200, pod("RUNNING"))],
+        &[Canned::Status(200, "{}")],
+        &[Canned::Status(401, ""), Canned::Status(200, "{}")],
+    ));
+    let mut p = llama_plan();
+    if let Runtime::LlamaCpp(s) = &mut p.settings {
+        s.port = 8000;
+    }
+    let mut sup = sup;
+    sup.gguf = Some(GgufSource {
+        repo: "org/g-GGUF".into(),
+        file: "g.gguf".into(),
+    });
+    sup.start(&p, &secrets_for("LLAMA_API_KEY")).await.unwrap();
+    let body = body_of(&mock, HttpMethod::Post, PODS);
+    assert_eq!(body["entrypoint"], json!(["/app/llama-server"]));
+    assert!(
+        body["env"]["LLAMA_API_KEY"]
+            .as_str()
+            .unwrap()
+            .starts_with("{{ RUNPOD_SECRET_")
+    );
+}
+
+#[tokio::test]
+async fn prepare_refuses_what_a_pod_cannot_run_safely() {
+    let (sup, mock) = supervisor(Mock::default());
+    // No api_key: the proxy would be open.
+    let only_hf = vec![vllm_secrets().remove(1)];
+    let e = sup.start(&vllm_plan(), &only_hf).await.unwrap_err();
+    assert!(err_text(&e).contains("need an `api_key`"), "{e}");
+
+    // The key var in the plain env block (plain text in the pod config).
+    let mut p = plan(
+        &["vllm", "serve", "m", "--port", "8000"],
+        Runtime::Vllm(VllmSettings {
+            port: 8000,
+            env: BTreeMap::from([("VLLM_API_KEY".to_owned(), "plain".to_owned())]),
+            ..Default::default()
+        }),
+    );
+    let e = sup.start(&p, &[]).await.unwrap_err();
+    assert!(err_text(&e).contains("plain text"), "{e}");
+
+    // Variables that would turn on SSH / Jupyter.
+    for reserved in ["PUBLIC_KEY", "JUPYTER_PASSWORD", OWNER_ENV_VAR] {
+        if let Runtime::Vllm(s) = &mut p.settings {
+            s.env = BTreeMap::from([(reserved.to_owned(), "x".to_owned())]);
+        }
+        let e = sup.start(&p, &vllm_secrets()).await.unwrap_err();
+        assert!(err_text(&e).contains("reserved"), "{reserved}: {e}");
+    }
+
+    // A key the runtime would read as a list.
+    let mut bad = vllm_secrets();
+    bad[0].value = SecretValue::new("a,b".to_owned());
+    assert!(sup.start(&vllm_plan(), &bad).await.is_err());
+
+    assert!(mock.requests().is_empty(), "nothing is sent");
+}
+
+#[tokio::test]
+async fn no_gpu_or_an_unlisted_type_stops_before_any_write() {
+    let client = RunPodClient::with_transport(ApiKey::new(MGMT), Arc::new(Mock::default()), BASE);
+    let sup = PodSupervisor::new(client, PROJECT, DEP);
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    assert!(err_text(&e).contains("GPU accelerator"), "{e}");
+
+    let mock = Mock::default().ok(HttpMethod::Get, "/catalog/gpus", 200, r#"{"gpus":[]}"#);
+    let (sup, mock) = supervisor(mock);
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    assert!(err_text(&e).contains("does not list"), "{e}");
+    assert!(mock.requests().iter().all(|s| s.method == HttpMethod::Get));
+}
+
+#[test]
+fn pods_only_cards_resolve_for_pods() {
+    let client = RunPodClient::with_transport(ApiKey::new(MGMT), Arc::new(Mock::default()), BASE);
+    let nvl = Accelerator {
+        model: "h200-nvl".into(),
+        count: 1,
+        memory: ByteSize::from_bytes(141 * (1 << 30)),
+        ..h100()
+    };
+    let sup = PodSupervisor::new(client, PROJECT, DEP)
+        .with_accelerator(Some(&nvl))
+        .unwrap();
+    assert_eq!(sup.gpu_type_id.as_deref(), Some("NVIDIA H200 NVL"));
+}
+
+#[tokio::test]
+async fn community_cloud_and_region_reach_the_body() {
+    let (sup, mock) = supervisor(happy_mock());
+    let region = Region {
+        code: "EU-RO-1".into(),
+        residency: Residency::Eu,
+        display_name: None,
+        country: None,
+        default_zone: None,
+    };
+    let sup = sup
+        .with_cloud(Cloud::Community)
+        .with_region(Some(&region))
+        .unwrap();
+    // The pod reports SECURE, so this only checks the create body.
+    let _ = sup.start(&vllm_plan(), &vllm_secrets()).await;
+    let body = body_of(&mock, HttpMethod::Post, PODS);
+    assert_eq!(body["cloud"], json!("COMMUNITY"));
+    assert_eq!(body["dataCenterIds"], json!(["EU-RO-1"]));
+}
+
+// --- ambiguity, adoption, update ---------------------------------------------
+
+#[tokio::test]
+async fn an_ambiguous_create_is_resolved_by_name_and_never_resent() {
+    let mock = happy_mock()
+        .first(HttpMethod::Post, PODS, &[Canned::Timeout])
+        .first(
+            HttpMethod::Get,
+            PODS,
+            &[
+                Canned::Status(200, NO_PODS),
+                Canned::Status(200, one_pod("STARTING")),
+            ],
+        );
+    let (sup, mock) = supervisor(mock);
+    let handle = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    assert_eq!(handle.id, "pod1");
+    assert_eq!(count(&mock, HttpMethod::Post, PODS), 1);
+}
+
+#[tokio::test]
+async fn an_ambiguous_create_with_nothing_found_fails_without_retrying() {
+    let mock = happy_mock().first(HttpMethod::Post, PODS, &[Canned::Timeout]);
+    let (sup, mock) = supervisor(mock);
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    assert!(err_text(&e).contains("not retried"), "{e}");
+    assert_eq!(count(&mock, HttpMethod::Post, PODS), 1);
+}
+
+#[tokio::test]
+async fn duplicate_pods_by_name_are_refused() {
+    let two = leak(format!(
+        r#"{{"pods":[{{"id":"a","name":"{n}","status":"RUNNING"}},
+        {{"id":"b","name":"{n}","status":"EXITED"}}],"pagination":{{"hasNextPage":false}}}}"#,
+        n = name()
+    ));
+    let (sup, mock) =
+        supervisor(happy_mock().first(HttpMethod::Get, PODS, &[Canned::Status(200, two)]));
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    assert!(err_text(&e).contains("several RunPod pods"), "{e}");
+    assert_eq!(count(&mock, HttpMethod::Post, PODS), 0);
+}
+
+#[tokio::test]
+async fn an_owned_pod_found_by_name_is_patched_and_restarted_if_stopped() {
+    let mock = happy_mock()
+        .first(
+            HttpMethod::Get,
+            PODS,
+            &[Canned::Status(200, one_pod("EXITED"))],
+        )
+        .first(
+            HttpMethod::Get,
+            POD,
+            &[
+                Canned::Status(200, pod("EXITED")),
+                Canned::Status(200, pod("RUNNING")),
+            ],
+        )
+        .ok(HttpMethod::Patch, POD, 200, pod("EXITED"))
+        .first(
+            HttpMethod::Post,
+            ACTION,
+            &[Canned::Status(200, pod("STARTING"))],
+        );
+    let (sup, mock) = supervisor(mock);
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    assert_eq!(count(&mock, HttpMethod::Post, PODS), 0, "no create");
+    let patch = body_of(&mock, HttpMethod::Patch, POD);
+    assert!(patch.get("gpu").is_none() && patch.get("cloud").is_none());
+    assert_eq!(patch["ports"], json!(["8000/http"]));
+    assert_eq!(patch["env"]["AMICU_OWNER"], json!(owner()));
+    assert_eq!(
+        body_of(&mock, HttpMethod::Post, ACTION),
+        json!({"action": "start"})
+    );
+}
+
+#[tokio::test]
+async fn a_pod_found_by_name_without_our_marker_is_refused() {
+    let foreign = pod_with("RUNNING", TYPE, "EU-RO-1", "someone-else");
+    let mock = happy_mock()
+        .first(
+            HttpMethod::Get,
+            PODS,
+            &[Canned::Status(200, one_pod("RUNNING"))],
+        )
+        .first(HttpMethod::Get, POD, &[Canned::Status(200, foreign)]);
+    let (sup, mock) = supervisor(mock);
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    assert!(err_text(&e).contains("refusing to adopt"), "{e}");
+    assert_eq!(count(&mock, HttpMethod::Patch, POD), 0);
+}
+
+#[tokio::test]
+async fn a_recorded_pod_on_other_hardware_must_be_replaced() {
+    let other = pod_with("RUNNING", "NVIDIA A40", "EU-RO-1", &owner());
+    let mock = happy_mock().first(HttpMethod::Get, POD, &[Canned::Status(200, other)]);
+    let (sup, mock) = supervisor(mock);
+    let sup = sup.with_recorded_pod("pod1");
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    assert!(err_text(&e).contains("must be replaced"), "{e}");
+    assert_eq!(count(&mock, HttpMethod::Patch, POD), 0);
+    assert_eq!(count(&mock, HttpMethod::Get, PODS), 0, "no name lookup");
+    // The secrets written for the refused configuration are dropped again.
+    assert_eq!(
+        count(&mock, HttpMethod::Post, "/account/secrets"),
+        count(&mock, HttpMethod::Delete, "/account/secrets/s1")
+    );
+    assert_eq!(sup.deployed_pod().lock().unwrap().as_deref(), Some("pod1"));
+}
+
+#[tokio::test]
+async fn a_refused_create_removes_the_secrets_it_wrote() {
+    let mock = happy_mock().first(
+        HttpMethod::Post,
+        PODS,
+        &[Canned::Status(400, r#"{"detail":"no capacity"}"#)],
+    );
+    let (sup, mock) = supervisor(mock);
+    assert!(sup.start(&vllm_plan(), &vllm_secrets()).await.is_err());
+    assert_eq!(count(&mock, HttpMethod::Delete, "/account/secrets/s1"), 2);
+    assert!(sup.created_secrets().lock().unwrap().is_empty());
+    assert!(sup.deployed_pod().lock().unwrap().is_none());
+}
+
+// --- readiness and exposure ----------------------------------------------------
+
+#[tokio::test]
+async fn readiness_waits_for_running_then_health() {
+    let (sup, mock) = supervisor(create_mock(
+        &[
+            Canned::Status(200, pod("PROVISIONING")),
+            Canned::Status(200, pod("STARTING")),
+            Canned::Status(200, pod("RUNNING")),
+        ],
+        &[
+            Canned::Status(502, ""),
+            Canned::Timeout,
+            Canned::Status(200, "{}"),
+        ],
+        &[Canned::Status(401, ""), Canned::Status(200, "{}")],
+    ));
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    assert_eq!(count(&mock, HttpMethod::Get, HEALTH), 3);
+}
+
+#[tokio::test]
+async fn an_error_or_exited_pod_fails_at_once_and_stays_recorded() {
+    for status in ["ERROR", "EXITED"] {
+        let (sup, mock) = supervisor(create_mock(
+            &[Canned::Status(200, pod(status))],
+            &[Canned::Status(200, "{}")],
+            &[Canned::Status(401, "")],
+        ));
+        let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+        assert!(err_text(&e).contains(status), "{e}");
+        assert_eq!(count(&mock, HttpMethod::Get, POD), 1, "no polling");
+        assert_eq!(count(&mock, HttpMethod::Post, ACTION), 0, "left in place");
+        assert_eq!(sup.deployed_pod().lock().unwrap().as_deref(), Some("pod1"));
+    }
+}
+
+#[tokio::test]
+async fn readiness_times_out_and_keeps_the_pod() {
+    let (sup, mock) = supervisor(create_mock(
+        &[Canned::Status(200, pod("STARTING"))],
+        &[Canned::Status(200, "{}")],
+        &[Canned::Status(401, "")],
+    ));
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    assert!(err_text(&e).contains("STARTING"), "{e}");
+    assert_eq!(count(&mock, HttpMethod::Post, ACTION), 0);
+    assert_eq!(sup.deployed_pod().lock().unwrap().as_deref(), Some("pod1"));
+}
+
+#[tokio::test]
+async fn an_open_pod_is_terminated_before_its_secrets_are_removed() {
+    let (sup, mock) = supervisor(create_mock(
+        &[Canned::Status(200, pod("RUNNING"))],
+        &[Canned::Status(200, "{}")],
+        &[Canned::Status(200, "{}")],
+    ));
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    let text = err_text(&e);
+    assert!(
+        text.contains("unauthenticated") && text.contains("was terminated"),
+        "{text}"
+    );
+    assert_eq!(
+        body_of(&mock, HttpMethod::Post, ACTION),
+        json!({"action": "terminate"})
+    );
+    assert!(
+        position(&mock, HttpMethod::Post, ACTION)
+            < position(&mock, HttpMethod::Delete, "/account/secrets/s1")
+    );
+    assert!(sup.deployed_pod().lock().unwrap().is_none());
+    assert!(sup.created_secrets().lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn no_definite_refusal_fails_closed() {
+    let (sup, mock) = supervisor(create_mock(
+        &[Canned::Status(200, pod("RUNNING"))],
+        &[Canned::Status(200, "{}")],
+        &[Canned::Status(502, "")],
+    ));
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    assert!(err_text(&e).contains("could not verify"), "{e}");
+    assert_eq!(count(&mock, HttpMethod::Post, ACTION), 1);
+}
+
+#[tokio::test]
+async fn a_failed_teardown_says_so() {
+    let mock = create_mock(
+        &[Canned::Status(200, pod("RUNNING"))],
+        &[Canned::Status(200, "{}")],
+        &[Canned::Status(200, "{}")],
+    )
+    .first(HttpMethod::Post, ACTION, &[Canned::Status(500, "{}")]);
+    let (sup, mock) = supervisor(mock);
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    assert!(err_text(&e).contains("FAILED"), "{e}");
+    assert_eq!(count(&mock, HttpMethod::Delete, "/account/secrets/s1"), 0);
+    assert_eq!(sup.deployed_pod().lock().unwrap().as_deref(), Some("pod1"));
+}
+
+#[tokio::test]
+async fn a_pod_outside_the_region_is_terminated() {
+    let outside = pod_with("STARTING", TYPE, "US-TX-3", &owner());
+    let (sup, mock) = supervisor(create_mock(
+        &[Canned::Status(200, outside)],
+        &[Canned::Status(200, "{}")],
+        &[Canned::Status(401, "")],
+    ));
+    let region = Region {
+        code: "eu".into(),
+        residency: Residency::Eu,
+        display_name: None,
+        country: None,
+        default_zone: None,
+    };
+    let sup = sup.with_region(Some(&region)).unwrap();
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    assert!(err_text(&e).contains("US-TX-3"), "{e}");
+    assert_eq!(
+        body_of(&mock, HttpMethod::Post, ACTION),
+        json!({"action": "terminate"})
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_key_is_reported_and_the_pod_kept() {
+    let (sup, mock) = supervisor(create_mock(
+        &[Canned::Status(200, pod("RUNNING"))],
+        &[Canned::Status(200, "{}")],
+        &[Canned::Status(401, "")],
+    ));
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    assert!(
+        err_text(&e).contains("rejected the deployment's api_key"),
+        "{e}"
+    );
+    assert_eq!(count(&mock, HttpMethod::Post, ACTION), 0);
+    assert!(!err_text(&e).contains(KEY));
+}
+
+// --- status / stop ---------------------------------------------------------------
+
+fn handle() -> RuntimeHandle {
+    RuntimeHandle {
+        id: "pod1".into(),
+        endpoint: "https://pod1-8000.proxy.runpod.net".into(),
+        deployment: amicu_core::id::DeploymentId::from(DEP),
+        exposure: EndpointExposure::Public {
+            gateway: GatewayAuth::None,
+        },
+    }
+}
+
+#[tokio::test]
+async fn status_maps_pod_states() {
+    for (body, want_running, needle) in [
+        (pod("RUNNING"), true, "$5.38/hr"),
+        (pod("STARTING"), true, "STARTING"),
+        (pod("EXITED"), false, "EXITED"),
+        (pod("ERROR"), false, "ERROR"),
+    ] {
+        let (sup, _) = supervisor(Mock::default().ok(HttpMethod::Get, POD, 200, body));
+        let s = sup.status(&handle()).await.unwrap();
+        assert_eq!(s.is_running(), want_running, "{s:?}");
+        assert!(format!("{s:?}").contains(needle), "{s:?}");
+    }
+    let (sup, _) = supervisor(Mock::default().ok(HttpMethod::Get, POD, 404, "{}"));
+    assert!(matches!(
+        sup.status(&handle()).await.unwrap(),
+        RuntimeStatus::Stopped { .. }
+    ));
+}
+
+fn stop_mock(terminate: u16) -> Mock {
+    Mock::default()
+        .ok(HttpMethod::Post, ACTION, terminate, "")
+        .ok(HttpMethod::Get, "/account/secrets?name=", 200, FOUND_SECRET)
+        .ok(HttpMethod::Delete, "/account/secrets/s1", 204, "")
+}
+
+#[tokio::test]
+async fn stop_terminates_then_deletes_secrets() {
+    let (sup, mock) = supervisor(stop_mock(204));
+    let sup = sup.with_recorded_secrets(vec!["recorded".into()]);
+    assert_eq!(sup.stop_pod(&handle()).await.unwrap(), StopOutcome::Deleted);
+    let seen = mock.requests();
+    assert_eq!(seen[0].method, HttpMethod::Post);
+    assert!(seen[0].url.ends_with(ACTION));
+    assert_eq!(seen[0].body, Some(json!({"action": "terminate"})));
+    assert!(
+        seen.iter().all(|s| s.method != HttpMethod::Patch),
+        "never a stop"
+    );
+    assert_eq!(count(&mock, HttpMethod::Delete, "/account/secrets/s1"), 1);
+    assert!(sup.created_secrets().lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_unconfirmed_404_keeps_the_secrets() {
+    let (sup, mock) = supervisor(stop_mock(404));
+    let sup = sup.with_recorded_secrets(vec!["recorded".into()]);
+    assert_eq!(
+        sup.stop_pod(&handle()).await.unwrap(),
+        StopOutcome::AlreadyGone {
+            kept_secrets: vec!["recorded".into()]
+        }
+    );
+    assert_eq!(count(&mock, HttpMethod::Delete, "/account/secrets/s1"), 0);
+    let e = sup.stop(&handle()).await.unwrap_err();
+    assert!(err_text(&e).contains("`recorded`"), "{e}");
+
+    let (sup, mock) = supervisor(stop_mock(404));
+    let sup = sup
+        .with_recorded_secrets(vec!["recorded".into()])
+        .with_confirmed_account(true);
+    sup.stop(&handle()).await.unwrap();
+    assert_eq!(count(&mock, HttpMethod::Delete, "/account/secrets/s1"), 1);
+}
+
+#[tokio::test]
+async fn a_conflicting_terminate_is_resolved_by_reading_the_pod() {
+    let (sup, mock) = supervisor(stop_mock(409).ok(HttpMethod::Get, POD, 200, pod("TERMINATED")));
+    let sup = sup.with_recorded_secrets(vec!["recorded".into()]);
+    assert_eq!(sup.stop_pod(&handle()).await.unwrap(), StopOutcome::Deleted);
+    assert_eq!(count(&mock, HttpMethod::Delete, "/account/secrets/s1"), 1);
+
+    let (sup, mock) = supervisor(stop_mock(409).ok(HttpMethod::Get, POD, 200, pod("RUNNING")));
+    let sup = sup.with_recorded_secrets(vec!["recorded".into()]);
+    assert!(sup.stop_pod(&handle()).await.is_err());
+    assert_eq!(count(&mock, HttpMethod::Delete, "/account/secrets/s1"), 0);
+}
+
+#[tokio::test]
+async fn a_failed_terminate_touches_no_secret() {
+    let (sup, mock) = supervisor(stop_mock(500));
+    let sup = sup.with_recorded_secrets(vec!["recorded".into()]);
+    assert!(sup.stop(&handle()).await.is_err());
+    assert_eq!(count(&mock, HttpMethod::Get, "/account/secrets?name="), 0);
+    assert_eq!(*sup.created_secrets().lock().unwrap(), Vec::<String>::new());
+}

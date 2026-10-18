@@ -15,8 +15,8 @@ pub enum RunPodError {
         "RunPod create outcome unknown (transport failure: {0}); look up by name before retrying"
     )]
     AmbiguousCreate(String),
-    /// More than one endpoint carries the requested name.
-    #[error("{count} RunPod endpoints are named `{name}`")]
+    /// More than one endpoint (or pod) carries the requested name.
+    #[error("{count} RunPod resources are named `{name}`")]
     DuplicateName { name: String, count: usize },
     /// The exchange never completed (timeout, DNS, TLS). Transient.
     #[error("RunPod transport failure: {0}")]
