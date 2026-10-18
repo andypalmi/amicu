@@ -44,7 +44,7 @@ The adapter authenticates with a RunPod API token. `apply` does not run this pro
 | `provider` | string | none | yes | `"runpod"`. |
 | `region` | string | none | no | One of the region codes below. Used for residency checks and cost estimates. |
 | `accelerator.kind` | string | none | yes (with `accelerator`) | `gpu`. |
-| `accelerator.model` | string | none | yes (with `accelerator`) | A GPU model from the table below. |
+| `accelerator.model` | string | none | yes (with `accelerator`) | A GPU id from the table below, or any name that resolves to it (see [GPU names](/docs/configuration/hardware-profile#gpu-names)). |
 | `accelerator.count` | number | none | yes (with `accelerator`) | Number of accelerators. |
 | `accelerator.memory` | size | none | yes (with `accelerator`) | VRAM, for the fit check. |
 | `memory` | size | none | yes | Host RAM. |
@@ -71,11 +71,11 @@ These are the generic [`hardware_profile`](/docs/configuration/hardware-profile)
 
 | `model` | VRAM |
 |---|---|
-| `h100` | 80 GiB |
-| `a100` | 80 GiB |
-| `l40s` | 48 GiB |
-| `rtx-a6000` | 48 GiB |
-| `rtx-4090` | 24 GiB |
+| `h100-sxm-80gb` | 80 GiB |
+| `a100-sxm4-80gb` | 80 GiB |
+| `l40s-48gb` | 48 GiB |
+| `rtx-a6000-48gb` | 48 GiB |
+| `rtx-4090-24gb` | 24 GiB |
 
 ## Limits
 

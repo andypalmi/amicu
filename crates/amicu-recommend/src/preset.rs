@@ -812,7 +812,7 @@ fn build_private_eu_production(preset: &Preset, answers: &WizardAnswers) -> Grap
         region: Some(Region::from_code("fsn1")),
         accelerator: Some(Accelerator {
             kind: AcceleratorKind::Gpu,
-            model: "h100".to_string(),
+            model: "h100-sxm-80gb".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(80 * GIB),
             memory_bandwidth_gbps: None,
@@ -908,7 +908,7 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
         accelerator: Some(Accelerator {
             kind: AcceleratorKind::Gpu,
             // Cheaper accelerator for throughput-first, latency-tolerant work.
-            model: "a10g".to_string(),
+            model: "a10g-24gb".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(24 * GIB),
             memory_bandwidth_gbps: None,
@@ -1003,7 +1003,7 @@ fn build_internal_knowledge_chatbot(preset: &Preset, answers: &WizardAnswers) ->
         region: None,
         accelerator: Some(Accelerator {
             kind: AcceleratorKind::Gpu,
-            model: "a100".to_string(),
+            model: "a100-sxm4-80gb".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(80 * GIB),
             memory_bandwidth_gbps: None,
@@ -1086,7 +1086,7 @@ fn build_customer_support_assistant(preset: &Preset, answers: &WizardAnswers) ->
         region: None,
         accelerator: Some(Accelerator {
             kind: AcceleratorKind::Gpu,
-            model: "l40s".to_string(),
+            model: "l40s-48gb".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(48 * GIB),
             memory_bandwidth_gbps: None,
@@ -1169,7 +1169,7 @@ fn build_document_extraction_pipeline(preset: &Preset, answers: &WizardAnswers) 
         region: None,
         accelerator: Some(Accelerator {
             kind: AcceleratorKind::Gpu,
-            model: "a10g".to_string(),
+            model: "a10g-24gb".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(24 * GIB),
             memory_bandwidth_gbps: None,
@@ -1253,7 +1253,7 @@ fn build_code_assistant_endpoint(preset: &Preset, answers: &WizardAnswers) -> Gr
         region: None,
         accelerator: Some(Accelerator {
             kind: AcceleratorKind::Gpu,
-            model: "a100".to_string(),
+            model: "a100-sxm4-80gb".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(80 * GIB),
             memory_bandwidth_gbps: None,
@@ -1335,7 +1335,7 @@ fn build_api_replacement_migration(preset: &Preset, answers: &WizardAnswers) -> 
         region: None,
         accelerator: Some(Accelerator {
             kind: AcceleratorKind::Gpu,
-            model: "l40s".to_string(),
+            model: "l40s-48gb".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(48 * GIB),
             memory_bandwidth_gbps: None,
@@ -1417,7 +1417,7 @@ fn build_custom_stack(preset: &Preset, answers: &WizardAnswers) -> Graph {
         region: None,
         accelerator: Some(Accelerator {
             kind: AcceleratorKind::Gpu,
-            model: "l40s".to_string(),
+            model: "l40s-48gb".to_string(),
             count: gpu_count,
             memory: ByteSize::from_bytes(48 * GIB),
             memory_bandwidth_gbps: None,

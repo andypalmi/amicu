@@ -155,7 +155,7 @@
           "properties": {
             "accelerator": {
               "$ref": "#/$defs/label",
-              "description": "Accelerator model, e.g. h100-80gb."
+              "description": "Accelerator model: the GPU catalog id, e.g. h100-sxm-80gb."
             },
             "accelerator_count": {
               "type": "integer",

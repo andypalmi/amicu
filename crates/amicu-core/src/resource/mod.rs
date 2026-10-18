@@ -12,6 +12,7 @@ mod credential;
 mod data_class;
 mod deployment;
 mod governance;
+mod gpu;
 mod hardware;
 mod model;
 mod region;
@@ -28,6 +29,10 @@ pub use deployment::{
     VllmKvCacheDtype, VllmSettings, is_local_provider,
 };
 pub use governance::{GovernanceRule, RuleEffect};
+pub use gpu::{
+    CATALOG_GPU_PROVIDERS, GpuCard, GpuResolveError, GpuVendor, VRAM_TOLERANCE, effective_gpu_card,
+    gpu_card, gpu_cards, normalize_gpu_name, resolve_gpu, vram_matches,
+};
 pub use hardware::{Accelerator, AcceleratorKind, Cpu, HardwareProfile, Interconnect, Price};
 pub use model::{
     Artifact, ArtifactFormat, GgufVariant, Model, ModelSource, Quantization, SourceRegistry,

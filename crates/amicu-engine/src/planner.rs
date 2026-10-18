@@ -8,8 +8,8 @@ use amicu_core::diagnostic::{Diagnostic, DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
 use amicu_core::id::DeploymentId;
 use amicu_core::resource::{
-    Accelerator, Deployment, GgufVariant, HardwareProfile, LlamaCppSettings, Model, Quantization,
-    Runtime, VllmSettings,
+    Accelerator, AcceleratorKind, Deployment, GgufVariant, HardwareProfile, LlamaCppSettings,
+    Model, Quantization, Runtime, VllmSettings, effective_gpu_card,
 };
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
 use amicu_plan::Plan;
@@ -281,11 +281,7 @@ fn find_deployment<'a>(graph: &'a Graph, id: &DeploymentId) -> Option<&'a Deploy
 /// Change detection compares this resolved closure, so editing a referenced
 /// model or hardware profile (variant, quantization, size, ...) is seen as an
 /// update even when the deployment block itself is byte-for-byte identical.
-type Resolved<'a> = (
-    &'a Deployment,
-    Option<&'a Model>,
-    Option<&'a HardwareProfile>,
-);
+type Resolved<'a> = (&'a Deployment, Option<&'a Model>, Option<HardwareProfile>);
 
 fn resolve<'a>(graph: &'a Graph, d: &'a Deployment) -> Resolved<'a> {
     (
@@ -294,8 +290,23 @@ fn resolve<'a>(graph: &'a Graph, d: &'a Deployment) -> Resolved<'a> {
         graph
             .hardware_profiles
             .iter()
-            .find(|h| h.id == d.hardware_profile),
+            .find(|h| h.id == d.hardware_profile)
+            .map(effective_hardware),
     )
+}
+
+/// Compare GPUs by the card they run on, not by spelling, so `h100` ->
+/// `h100-sxm-80gb` or `80GiB` -> `80GB` does not restart a deployment.
+fn effective_hardware(hardware: &HardwareProfile) -> HardwareProfile {
+    let mut hw = hardware.clone();
+    if let Some(acc) = hw.accelerator.as_mut()
+        && acc.kind == AcceleratorKind::Gpu
+        && let Some(card) = effective_gpu_card(&hw.provider, &acc.model, Some(acc.memory))
+    {
+        card.id.clone_into(&mut acc.model);
+        acc.memory = card.memory();
+    }
+    hw
 }
 
 /// Why a deployment whose configuration changed is an update, and what
@@ -340,7 +351,7 @@ fn describe_config_changes(
     let collect = |r: Resolved<'_>| {
         let mut all = fields("", Some(r.0));
         all.extend(fields("model", r.1));
-        all.extend(fields("hardware", r.2));
+        all.extend(fields("hardware", r.2.as_ref()));
         all
     };
     let (old, new) = (collect(prev), collect(next));
@@ -1103,10 +1114,20 @@ fn kv_cache_assumption(
 
 fn hardware_label(hardware: &HardwareProfile) -> String {
     match &hardware.accelerator {
-        Some(Accelerator {
-            kind, model, count, ..
-        }) => {
-            let base = format!("{}.{}", accelerator_token(*kind), model);
+        Some(
+            accelerator @ Accelerator {
+                kind, model, count, ..
+            },
+        ) => {
+            let base = match accelerator.gpu_card() {
+                Some(Ok(card)) => format!(
+                    "{}.{} ({} GB)",
+                    accelerator_token(*kind),
+                    card.id,
+                    card.vram_gb
+                ),
+                _ => format!("{}.{}", accelerator_token(*kind), model),
+            };
             // Single-accelerator output stays unchanged; only show a count
             // when it is above 1.
             if *count > 1 {
@@ -1207,9 +1228,12 @@ mod tests {
         let acc = hw.accelerator.as_mut().unwrap();
         acc.kind = AcceleratorKind::Gpu;
         acc.model = "l4".into();
-        assert_eq!(hardware_label(&hw), "gpu.l4");
+        acc.memory = ByteSize::from_bytes(24 * GIB);
+        assert_eq!(hardware_label(&hw), "gpu.l4-24gb (24 GB)");
         hw.accelerator.as_mut().unwrap().count = 2;
-        assert_eq!(hardware_label(&hw), "gpu.l4 x2");
+        assert_eq!(hardware_label(&hw), "gpu.l4-24gb (24 GB) x2");
+        hw.accelerator.as_mut().unwrap().model = "a100".into();
+        assert_eq!(hardware_label(&hw), "gpu.a100 x2");
     }
 
     fn deployment(extra_args: Vec<String>) -> Deployment {
@@ -1720,6 +1744,46 @@ mod tests {
         assert!(format!("{:?}", result.plan).contains("******"));
     }
 
+    fn on_gpu(provider: &str, model: &str, memory: ByteSize) -> Graph {
+        let mut g = graph(Vec::new());
+        let hw = &mut g.hardware_profiles[0];
+        provider.clone_into(&mut hw.provider);
+        let acc = hw.accelerator.as_mut().unwrap();
+        acc.kind = AcceleratorKind::Gpu;
+        model.clone_into(&mut acc.model);
+        acc.memory = memory;
+        g
+    }
+
+    #[test]
+    fn spelling_the_same_gpu_card_exactly_is_not_a_change() {
+        let gib80 = ByteSize::from_bytes(80 * GIB);
+        // RunPod and Modal ran a bare `h100` with 80 GiB as the SXM part.
+        for provider in ["runpod", "modal"] {
+            let prior = on_gpu(provider, "h100", gib80);
+            let next = on_gpu(provider, "h100-sxm-80gb", gib80);
+            assert!(
+                build_plan(&next, Some(&prior)).unwrap().items.is_empty(),
+                "{provider}"
+            );
+            let gb = on_gpu(
+                provider,
+                "h100-sxm-80gb",
+                ByteSize::from_bytes(80_000_000_000),
+            );
+            assert!(build_plan(&gb, Some(&next)).unwrap().items.is_empty());
+            let pcie = on_gpu(provider, "h100-pcie-80gb", gib80);
+            let item = &build_plan(&pcie, Some(&prior)).unwrap().items[0];
+            assert_eq!(item.action.kind, ActionKind::Update);
+            assert_eq!(
+                change(&item.changes, "hardware.accelerator.model")
+                    .new
+                    .as_deref(),
+                Some("h100-pcie-80gb")
+            );
+        }
+    }
+
     #[test]
     fn changing_the_api_key_reference_is_an_update() {
         let prior = with_key(graph(Vec::new()), "OLD_KEY");
@@ -1864,15 +1928,19 @@ mod tests {
             unreachable!()
         };
         s.temperature = Some(0.5);
-        let (_, added) =
-            describe_config_changes((&dep, Some(&m), Some(&hw)), (&dep2, Some(&m), Some(&hw)));
+        let (_, added) = describe_config_changes(
+            (&dep, Some(&m), Some(hw.clone())),
+            (&dep2, Some(&m), Some(hw.clone())),
+        );
         let c = change(&added, "temperature");
         assert_eq!(
             (c.op, c.old.as_deref(), c.new.as_deref()),
             (ChangeOp::Added, None, Some("0.5"))
         );
-        let (_, removed) =
-            describe_config_changes((&dep2, Some(&m), Some(&hw)), (&dep, Some(&m), Some(&hw)));
+        let (_, removed) = describe_config_changes(
+            (&dep2, Some(&m), Some(hw.clone())),
+            (&dep, Some(&m), Some(hw.clone())),
+        );
         let c = change(&removed, "temperature");
         assert_eq!(
             (c.op, c.old.as_deref(), c.new.as_deref()),
@@ -1925,8 +1993,10 @@ mod tests {
         hw2.price = Some(amicu_core::resource::Price {
             per_hour: amicu_core::resource::Money::new(1.5, "USD"),
         });
-        let (reason, changes) =
-            describe_config_changes((&dep, Some(&m), Some(&hw)), (&dep, Some(&m), Some(&hw2)));
+        let (reason, changes) = describe_config_changes(
+            (&dep, Some(&m), Some(hw.clone())),
+            (&dep, Some(&m), Some(hw2.clone())),
+        );
         assert_eq!(reason.as_deref(), Some("configuration changed"));
         assert!(changes.iter().all(|c| !c.restart));
         assert!(changes.iter().any(|c| c.key.starts_with("hardware.price")));
@@ -1939,8 +2009,10 @@ mod tests {
         s.context_length = 16384;
         let mut hw3 = hw2.clone();
         hw3.region = Some(amicu_core::resource::Region::from_code("eu-west-1"));
-        let (reason, changes) =
-            describe_config_changes((&dep, Some(&m), Some(&hw)), (&dep2, Some(&m), Some(&hw3)));
+        let (reason, changes) = describe_config_changes(
+            (&dep, Some(&m), Some(hw.clone())),
+            (&dep2, Some(&m), Some(hw3.clone())),
+        );
         assert_eq!(changes[0].key, "context_length");
         assert_eq!(changes[0].new.as_deref(), Some("16384"));
         assert_eq!(

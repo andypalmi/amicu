@@ -59,9 +59,9 @@ resource "hardware_profile" "gpu_l4" {
 | `region` | string | no | Provider region code. Used for residency checks. |
 | `accelerator` | block | no | GPU, TPU, or Apple Silicon |
 | `accelerator.kind` | string | yes | `gpu`, `tpu`, `apple_silicon`, or `cpu` |
-| `accelerator.model` | string | yes | Model name, for example `l4`, `h100`, `m4_pro`, `m5_max`, `m3_ultra` (any shipped Apple Silicon chip, `m1` to `m5` base/Pro/Max/Ultra; chip only, the memory size goes in `memory`) |
+| `accelerator.model` | string | yes | For a GPU, a [GPU id](#gpu-names) such as `h100-sxm-80gb` or a short name that resolves to one (`l4`). For Apple Silicon, the chip: `m4_pro`, `m5_max`, `m3_ultra` (any shipped chip, `m1` to `m5` base/Pro/Max/Ultra; chip only, the memory size goes in `memory`) |
 | `accelerator.count` | number | yes | Number of accelerators |
-| `accelerator.memory` | size | yes | Memory of the accelerator (VRAM or unified memory) |
+| `accelerator.memory` | size | yes, except for a GPU id | Memory of one accelerator (VRAM or unified memory). For a GPU it must match the card's VRAM; when `model` is a GPU id it can be left out and defaults to the card's VRAM. |
 | `accelerator.bandwidth_gbps` | number | no | Memory bandwidth in GB/s. Recorded for planning; not read by the fit check yet. |
 | `cpu` | block | no | Host CPU |
 | `cpu.model` | string | yes | CPU model name |
@@ -75,9 +75,8 @@ resource "hardware_profile" "priced" {
   provider = "modal"
   accelerator {
     kind   = "gpu"
-    model  = "h100"
+    model  = "h100-sxm-80gb"
     count  = 1
-    memory = "80GiB"
   }
   memory = "64GiB"
   price {
@@ -93,4 +92,69 @@ resource "hardware_profile" "priced" {
 
 Local providers (`local`, `local_apple`, `local_cpu`, `on_prem`) run on this machine and bind to loopback. Every other provider serves the endpoint off-machine, so its deployments must set `api_key`. See [Providers](/docs/providers).
 
-How `accelerator`, `memory`, and `cpu` map to a provider's request is provider-specific. For example, on Modal `h100` with `count = 2` becomes `H100:2`. See the [provider page](/docs/providers).
+How `accelerator`, `memory`, and `cpu` map to a provider's request is provider-specific. For example, on Modal `h100-sxm-80gb` with `count = 2` becomes `H100:2`. See the [provider page](/docs/providers).
+
+## GPU names
+
+Every GPU amicu knows is one exact card with a canonical id of the form `<family>[-<variant>]-<vram>gb`, in lowercase with hyphens:
+
+- `family` is the product name: `a100`, `h100`, `l40s`, `rtx-4090`, `rtx-pro-6000`.
+- `variant` appears only when a family ships in more than one form factor or edition: `sxm` or `sxm4` (NVIDIA's own spelling for that generation), `pcie`, `nvl`, `maxq`, `server`, `mig`.
+- `vram` is the card's nominal memory in GB, always present.
+
+`accelerator.model` resolves to exactly one card, using `accelerator.memory` when it is needed:
+
+- A canonical id names one card. If `memory` is set it must be within 2% of the card's VRAM, read as GB or GiB: `80GiB`, `80GB` and `nvidia-smi`'s 81559 MiB all match an 80 GB card; `96GiB` does not match `h100-nvl-94gb`.
+- An exact provider spelling such as RunPod's `NVIDIA A100-SXM4-80GB` or `nvidia-smi`'s `NVIDIA H100 80GB HBM3` names one card regardless of `memory`.
+- A family (`h100`), a family and variant (`a100-sxm4`), or a family and size (`a100-80gb`) works only when `memory` leaves a single card (the nearest size wins). `h100` with `94GiB` is `h100-nvl-94gb`, and `l4` is always `l4-24gb`.
+- Anything else is `AMICU-CAP-012`. On `modal` and `runpod`, which place GPUs by catalog card, it is an error, so a bare ambiguous name (`h100`, `a100`) now needs an exact id there; elsewhere it is a warning. The message lists the candidates:
+
+```text
+  error [AMICU-CAP-012] hardware_profile `gpu`: `a100` with 80GiB is ambiguous: a100-sxm4-80gb (80 GB), a100-pcie-80gb (80 GB); set `accelerator.model` to one of these ids
+```
+
+Matching ignores case and punctuation and drops the words `NVIDIA`, `GeForce`, `Tesla`, `AMD`, and `Radeon`. A GPU the catalog does not know is `AMICU-CAP-013`: an error on `modal` and `runpod`, which place GPUs by catalog id, and a warning elsewhere. `amicu plan` shows the resolved card, for example `gpu.h100-sxm-80gb (80 GB)`. Rewriting a name to the card it already ran as (`h100` with `80GiB` on RunPod or Modal was the SXM part) is not a change and does not restart the deployment.
+
+| GPU id | Family | Vendor | VRAM |
+|---|---|---|---|
+| `t4-16gb` | `t4` | NVIDIA | 16 GB |
+| `p100-16gb` | `p100` | NVIDIA | 16 GB |
+| `v100-16gb` | `v100` | NVIDIA | 16 GB |
+| `v100-32gb` | `v100` | NVIDIA | 32 GB |
+| `a10-24gb` | `a10` | NVIDIA | 24 GB |
+| `a10g-24gb` | `a10g` | NVIDIA | 24 GB |
+| `a40-48gb` | `a40` | NVIDIA | 48 GB |
+| `l4-24gb` | `l4` | NVIDIA | 24 GB |
+| `l40-48gb` | `l40` | NVIDIA | 48 GB |
+| `l40s-48gb` | `l40s` | NVIDIA | 48 GB |
+| `a100-sxm4-80gb` | `a100` | NVIDIA | 80 GB |
+| `a100-pcie-80gb` | `a100` | NVIDIA | 80 GB |
+| `a100-sxm4-40gb` | `a100` | NVIDIA | 40 GB |
+| `a100-pcie-40gb` | `a100` | NVIDIA | 40 GB |
+| `h100-sxm-80gb` | `h100` | NVIDIA | 80 GB |
+| `h100-pcie-80gb` | `h100` | NVIDIA | 80 GB |
+| `h100-nvl-94gb` | `h100` | NVIDIA | 94 GB |
+| `h200-sxm-141gb` | `h200` | NVIDIA | 141 GB |
+| `h200-nvl-141gb` | `h200` | NVIDIA | 141 GB |
+| `b200-180gb` | `b200` | NVIDIA | 180 GB |
+| `b300-288gb` | `b300` | NVIDIA | 288 GB |
+| `rtx-a4000-16gb` | `rtx-a4000` | NVIDIA | 16 GB |
+| `rtx-a4500-20gb` | `rtx-a4500` | NVIDIA | 20 GB |
+| `rtx-a5000-24gb` | `rtx-a5000` | NVIDIA | 24 GB |
+| `rtx-a6000-48gb` | `rtx-a6000` | NVIDIA | 48 GB |
+| `rtx-2000-ada-16gb` | `rtx-2000-ada` | NVIDIA | 16 GB |
+| `rtx-4000-ada-20gb` | `rtx-4000-ada` | NVIDIA | 20 GB |
+| `rtx-6000-ada-48gb` | `rtx-6000-ada` | NVIDIA | 48 GB |
+| `rtx-pro-4500-32gb` | `rtx-pro-4500` | NVIDIA | 32 GB |
+| `rtx-pro-6000-96gb` | `rtx-pro-6000` | NVIDIA | 96 GB |
+| `rtx-pro-6000-maxq-96gb` | `rtx-pro-6000` | NVIDIA | 96 GB |
+| `rtx-pro-6000-server-96gb` | `rtx-pro-6000` | NVIDIA | 96 GB |
+| `rtx-pro-6000-mig-48gb` | `rtx-pro-6000` | NVIDIA | 48 GB |
+| `rtx-pro-6000-mig-24gb` | `rtx-pro-6000` | NVIDIA | 24 GB |
+| `rtx-3060-ti-8gb` | `rtx-3060-ti` | NVIDIA | 8 GB |
+| `rtx-3090-24gb` | `rtx-3090` | NVIDIA | 24 GB |
+| `rtx-4070-ti-super-16gb` | `rtx-4070-ti-super` | NVIDIA | 16 GB |
+| `rtx-4080-16gb` | `rtx-4080` | NVIDIA | 16 GB |
+| `rtx-4090-24gb` | `rtx-4090` | NVIDIA | 24 GB |
+| `rtx-5090-32gb` | `rtx-5090` | NVIDIA | 32 GB |
+| `rx-7900-xtx-24gb` | `rx-7900-xtx` | AMD | 24 GB |

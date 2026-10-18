@@ -464,7 +464,7 @@ impl Histogram {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HardwareInfo {
-    /// Accelerator model, e.g. `h100-80gb`.
+    /// Accelerator model, e.g. `h100-sxm-80gb`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accelerator: Option<Label>,
     /// Number of accelerators.
@@ -960,7 +960,7 @@ mod tests {
             },
             amicu_version: Label::new("0.4.0").unwrap(),
             hardware: HardwareInfo {
-                accelerator: Some(Label::new("h100-80gb").unwrap()),
+                accelerator: Some(Label::new("h100-sxm-80gb").unwrap()),
                 accelerator_count: 1,
                 vram_bytes: Some(80 << 30),
                 cpu_cores: Some(24),

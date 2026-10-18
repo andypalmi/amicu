@@ -103,7 +103,7 @@ struct GpuSpec {
 const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "gpu.h200-141gb.1x",
-        model: "h200",
+        model: "h200-sxm-141gb",
         vram_gib: 141,
         vcpus: 16,
         host_mem_gib: 200,
@@ -113,7 +113,7 @@ const GPUS: &[GpuSpec] = &[
     },
     GpuSpec {
         id: "gpu.h100-80gb.1x",
-        model: "h100",
+        model: "h100-sxm-80gb",
         vram_gib: 80,
         vcpus: 16,
         host_mem_gib: 200,
@@ -123,7 +123,7 @@ const GPUS: &[GpuSpec] = &[
     },
     GpuSpec {
         id: "gpu.l40s-48gb.1x",
-        model: "l40s",
+        model: "l40s-48gb",
         vram_gib: 48,
         vcpus: 8,
         host_mem_gib: 96,

@@ -634,6 +634,13 @@ fn accelerator_label(name: &str) -> String {
     out.trim_end_matches('-').chars().take(64).collect()
 }
 
+fn gpu_label(name: &str, vram_bytes: Option<u64>) -> Option<String> {
+    let memory = vram_bytes.map(amicu_core::ByteSize::from_bytes);
+    amicu_core::resource::resolve_gpu(name, memory)
+        .ok()
+        .map(|card| card.id.to_owned())
+}
+
 /// Static hardware facts from one probe: model, count, per-device memory and
 /// CPU cores. No serials, bus ids or host names exist in the probe output.
 fn hardware_info(sample: &amicu_telemetry::hardware::HardwareSample) -> HardwareInfo {
@@ -648,7 +655,8 @@ fn hardware_info(sample: &amicu_telemetry::hardware::HardwareSample) -> Hardware
         ..HardwareInfo::default()
     };
     if let Some(name) = accs.iter().find_map(|a| a.name.as_deref()) {
-        info = info.with_accelerator(&accelerator_label(name), count);
+        let label = gpu_label(name, info.vram_bytes).unwrap_or_else(|| accelerator_label(name));
+        info = info.with_accelerator(&label, count);
     } else {
         info.accelerator_count = count;
     }
@@ -884,6 +892,27 @@ mod tests {
         ] {
             assert_eq!(public_model_name(&model(registry, reference)), "custom");
         }
+    }
+
+    #[test]
+    fn catalog_gpus_are_labelled_with_their_canonical_id() {
+        const MIB: u64 = 1024 * 1024;
+        assert_eq!(
+            gpu_label("NVIDIA H100 80GB HBM3", Some(81_559 * MIB)).as_deref(),
+            Some("h100-sxm-80gb")
+        );
+        assert_eq!(
+            gpu_label("NVIDIA A100 80GB PCIe", Some(81_920 * MIB)).as_deref(),
+            Some("a100-pcie-80gb")
+        );
+        assert_eq!(
+            gpu_label("NVIDIA L4", Some(23_034 * MIB)).as_deref(),
+            Some("l4-24gb")
+        );
+        assert_eq!(gpu_label("Apple M3 Max", None), None);
+        assert_eq!(gpu_label("NVIDIA Quadro P400", Some(2048 * MIB)), None);
+        let label = Label::new(gpu_label("NVIDIA H100 NVL", None).unwrap());
+        assert!(label.is_ok());
     }
 
     #[test]

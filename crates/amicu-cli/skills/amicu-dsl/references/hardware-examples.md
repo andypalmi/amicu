@@ -28,6 +28,20 @@ resource "hardware_profile" "cpu_box" {
 }
 ```
 
+## GPU names
+
+A GPU `accelerator.model` must resolve to exactly one card of the GPU catalog
+(`amicu_core::resource::resolve_gpu`). Canonical ids are
+`<family>[-<variant>]-<vram>gb`: `h100-sxm-80gb`, `h100-pcie-80gb`,
+`h100-nvl-94gb`, `a100-sxm4-80gb`, `a100-pcie-80gb`, `a100-sxm4-40gb`,
+`l4-24gb`, `l40s-48gb`, `rtx-pro-6000-96gb`, `rtx-pro-6000-mig-48gb`, ...
+A short family name (`l4`, `h100`) is accepted only when `accelerator.memory`
+leaves one card (`h100` + `94GiB` is `h100-nvl-94gb`); otherwise validate fails
+with `AMICU-CAP-012` (an error on `modal`/`runpod`, a warning elsewhere)
+listing the variants. With a canonical id,
+`accelerator.memory` may be omitted (it defaults to the card's VRAM). Full
+table: the `hardware_profile` docs page, section "GPU names".
+
 ## NVIDIA GPU (cloud, EU region)
 
 Plan-only: `amicu apply` supports only local providers (`local`, `local_apple`,
@@ -39,9 +53,9 @@ resource "hardware_profile" "eu_a100" {
   region   = "eu-central"
   accelerator {
     kind   = "gpu"
-    model  = "a100_80gb"
+    model  = "a100-sxm4-80gb"
     count  = 2
-    memory = "160GiB"
+    memory = "80GiB"
   }
   memory = "256GiB"
   price {
@@ -67,7 +81,7 @@ resource "hardware_profile" "modal_h100" {
   region   = "eu-west"
   accelerator {
     kind   = "gpu"
-    model  = "H100"
+    model  = "h100-sxm-80gb"
     count  = 1
     memory = "80GiB"
   }
@@ -163,8 +177,8 @@ Notes:
   `m4_max()`, and `rx_7900_xtx()` catalog entries. Apple Silicon ids are the
   chip only (`m1` through `m5`, each as base, `_pro`, `_max` and
   `_ultra` where Apple shipped it, e.g. `m4_pro`, `m5_max`, `m3_ultra`): set the
-  memory size with the `memory` fields, not in `model`. Discrete GPU ids keep
-  their fixed memory (`rtx_4090` is 24 GiB). `provider =
+  memory size with the `memory` fields, not in `model`. Discrete GPUs resolve
+  through the shared GPU catalog: `rtx_4090` is the `rtx-4090-24gb` card. `provider =
   "on_prem"` is the convention for hardware the user already owns - distinct
   from the pre-existing `"local_apple"` / `"local_cpu"` examples above, which
   predate this catalog and are left as-is.
@@ -177,7 +191,7 @@ resource "hardware_profile" "modal_h100" {
   region   = "eu-west"
   accelerator {
     kind   = "gpu"
-    model  = "h100"
+    model  = "h100-sxm-80gb"
     count  = 2
     memory = "80GiB"
   }
@@ -198,13 +212,11 @@ Notes:
   `amicu apply`'s `ModalSupervisor` (`crates/amicu-modal/src/supervisor.rs`)
   instead of a local process. `accelerator.model` + `accelerator.count`
   become Modal's `gpu=` request string - `"H100:2"` for the profile above
-  (upper-cased; the `:<count>` suffix is omitted when `count == 1`;
-  `amicu plan` shows `gpu.h100 x2`) - and
-  `region` (when set) becomes Modal's region constraint. This mapping is a
-  hand-maintained string pass-through, not validated against Modal's GPU
-  catalog at parse time (that catalog, `amicu-providers::modal`, lands
-  separately) - an unsupported `model` string surfaces as a Modal-side
-  rejection at apply time, not a parse-time diagnostic.
+  (the card's Modal name from `amicu_providers::modal::modal_gpu`; the
+  `:<count>` suffix is omitted when `count == 1`; `amicu plan` shows
+  `gpu.h100-sxm-80gb (80 GB) x2`) - and `region` (when set) becomes Modal's
+  region constraint. A card Modal does not sell (e.g. `h100-pcie-80gb`) is
+  rejected before any RPC.
 - Only GPU accelerators are deployable to Modal today: a `tpu` or
   `apple_silicon` accelerator on a `provider = "modal"` profile is rejected
   before any RPC (Modal has no such offering).

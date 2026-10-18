@@ -25,9 +25,9 @@
 //! model reference must be a Hugging Face repo id, not a local path Modal's
 //! container cannot see ([`remote::reject_local_path_model`]); `gpu` is the hardware
 //! profile's [`Accelerator`] rendered as Modal's `"<MODEL>:<count>"` string
-//! ([`gpu_string`] - a **hand-maintained coupling**, not validated against
-//! `amicu-providers::modal`'s GPU catalog, although this crate does now
-//! depend on `amicu-providers` for [`modal_proxy_region`]); `image` is [`DEFAULT_VLLM_IMAGE`], overridable via
+//! ([`gpu_string`]: the model resolves to one card of the shared GPU catalog,
+//! and [`modal_gpu`] in `amicu-providers::modal`'s GPU table gives Modal's
+//! name for it); `image` is [`DEFAULT_VLLM_IMAGE`], overridable via
 //! [`VLLM_IMAGE_ENV_VAR`] (no HCL schema seam exists for it yet); `secret_env`
 //! carries only resolved [`LaunchPlan::secret_refs`] (never a plain
 //! `vllm { env = {...} }` entry - those become baked-in image env) plus the
@@ -56,7 +56,7 @@ use std::time::Duration;
 
 use amicu_core::ByteSize;
 use amicu_core::resource::ScalingSettings;
-use amicu_core::resource::{Accelerator, AcceleratorKind, Cpu, HardwareProfile, Model, Runtime};
+use amicu_core::resource::{Accelerator, Cpu, HardwareProfile, Model, Runtime};
 use amicu_llamacpp::remote::{self, RemoteEnv};
 use amicu_llamacpp::{LlamaCppError, ProcessSupervisor, ResolvedSecret};
 use amicu_runtime::{
@@ -66,7 +66,7 @@ use amicu_runtime::{
 use amicu_telemetry::hardware::HardwareSample;
 use async_trait::async_trait;
 
-use amicu_providers::modal::modal_proxy_region;
+use amicu_providers::modal::{modal_gpu, modal_proxy_region};
 
 use crate::client::ModalClient;
 use crate::credentials::Credentials;
@@ -372,22 +372,26 @@ pub use amicu_core::naming::{app_name_for, project_app_name};
 
 /// Renders an [`Accelerator`] as Modal's `gpu=` string (`"H100"`, `"H100:2"`).
 fn gpu_string(accelerator: &Accelerator) -> Result<String, LlamaCppError> {
-    if accelerator.kind != AcceleratorKind::Gpu {
-        return Err(LlamaCppError::Supervisor(format!(
-            "Modal has no {:?} offering; only GPU accelerators can be deployed there",
-            accelerator.kind
-        )));
-    }
-    let model = accelerator.model.to_uppercase();
+    let card = match accelerator.gpu_card() {
+        None => {
+            return Err(LlamaCppError::Supervisor(format!(
+                "Modal has no {:?} offering; only GPU accelerators can be deployed there",
+                accelerator.kind
+            )));
+        }
+        Some(card) => card.map_err(|e| LlamaCppError::Supervisor(e.to_string()))?,
+    };
+    let model = modal_gpu(card.id)
+        .ok_or_else(|| LlamaCppError::Supervisor(format!("Modal does not offer `{}`", card.id)))?;
     Ok(if accelerator.count <= 1 {
-        model
+        model.to_owned()
     } else {
         format!("{model}:{}", accelerator.count)
     })
 }
 
 #[cfg(test)]
-use amicu_core::resource::SourceRegistry;
+use amicu_core::resource::{AcceleratorKind, SourceRegistry};
 #[cfg(test)]
 use amicu_llamacpp::remote::{
     LLAMA_LOCAL_PATH_FLAGS, LLAMA_SECRET_FLAGS, bind_all_interfaces, is_llama_server,
@@ -1143,21 +1147,46 @@ mod tests {
             kind,
             model: model.to_owned(),
             count,
-            memory: ByteSize::from_bytes(0),
+            memory: ByteSize::from_bytes(80 * 1024 * 1024 * 1024),
             memory_bandwidth_gbps: None,
         }
     }
 
     #[test]
     fn gpu_string_upper_cases_and_omits_count_of_one() {
-        let acc = accelerator(AcceleratorKind::Gpu, "h100", 1);
+        let acc = accelerator(AcceleratorKind::Gpu, "h100-sxm-80gb", 1);
         assert_eq!(gpu_string(&acc).unwrap(), "H100");
     }
 
     #[test]
     fn gpu_string_includes_count_above_one() {
-        let acc = accelerator(AcceleratorKind::Gpu, "h100", 2);
+        let acc = accelerator(AcceleratorKind::Gpu, "h100-sxm-80gb", 2);
         assert_eq!(gpu_string(&acc).unwrap(), "H100:2");
+    }
+
+    #[test]
+    fn gpu_string_maps_catalog_cards_to_modal_names() {
+        let acc = accelerator(AcceleratorKind::Gpu, "h100-sxm-80gb", 1);
+        assert_eq!(gpu_string(&acc).unwrap(), "H100");
+        let acc = accelerator(AcceleratorKind::Gpu, "a100-sxm4-80gb", 4);
+        assert_eq!(gpu_string(&acc).unwrap(), "A100-80GB:4");
+        let mut acc = accelerator(AcceleratorKind::Gpu, "l4", 1);
+        acc.memory = ByteSize::from_bytes(24 * 1024 * 1024 * 1024);
+        assert_eq!(gpu_string(&acc).unwrap(), "L4");
+        acc.model = "a10g".into();
+        assert_eq!(gpu_string(&acc).unwrap(), "A10G");
+        let mut acc = accelerator(AcceleratorKind::Gpu, "b300-288gb", 1);
+        acc.memory = ByteSize::from_bytes(288 * 1024 * 1024 * 1024);
+        assert_eq!(gpu_string(&acc).unwrap(), "B300");
+    }
+
+    #[test]
+    fn gpu_string_rejects_unresolved_or_unoffered_cards() {
+        let err = gpu_string(&accelerator(AcceleratorKind::Gpu, "a100", 1)).unwrap_err();
+        assert!(err.to_string().contains("ambiguous"), "{err}");
+        let err = gpu_string(&accelerator(AcceleratorKind::Gpu, "h100-pcie-80gb", 1)).unwrap_err();
+        assert!(err.to_string().contains("does not offer"), "{err}");
+        assert!(gpu_string(&accelerator(AcceleratorKind::Gpu, "potato", 1)).is_err());
     }
 
     #[test]
@@ -1198,7 +1227,7 @@ mod tests {
             id: "hw".into(),
             provider: "modal".into(),
             region: None,
-            accelerator: Some(accelerator(AcceleratorKind::Gpu, "l4", 1)),
+            accelerator: Some(accelerator(AcceleratorKind::Gpu, "a100-sxm4-80gb", 1)),
             cpu,
             memory,
             interconnect: None,

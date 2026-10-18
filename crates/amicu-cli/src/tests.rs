@@ -3849,10 +3849,12 @@ mod host_catalog {
         for gib in [4, 8, 16, 24, 48, 128] {
             v.push((InitTarget::Mac, fake::mac("m4_pro", gib)));
             v.push((InitTarget::LinuxCpu, fake::linux(gib, None)));
-            v.push((
-                InitTarget::LinuxCuda,
-                fake::linux(64, Some(("rtx_4090", gib))),
-            ));
+            let gpu = if gib == 24 {
+                "rtx-4090-24gb"
+            } else {
+                "custom_gpu"
+            };
+            v.push((InitTarget::LinuxCuda, fake::linux(64, Some((gpu, gib)))));
         }
         v.push((InitTarget::Modal, fake::linux(8, None)));
         v

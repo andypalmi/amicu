@@ -10,11 +10,11 @@ use serde::de::DeserializeOwned;
 
 use amicu_core::graph::Graph;
 use amicu_core::resource::{
-    Accelerator, Artifact, Budget, Cpu, Credential, DataClass, Deployment, FlashAttention,
-    GgufVariant, GovernanceRule, HardwareProfile, KvCacheType, LlamaCppSettings, MemoryCheck,
-    Model, ModelSource, Money, MultimodalSettings, Price, Quota, ReasoningFormat, Region,
-    Residency, RoutingPolicy, RoutingTarget, Runtime, ScalingSettings, SpeculativeSettings, Tenant,
-    UseCase, VllmKvCacheDtype, VllmSettings,
+    Accelerator, AcceleratorKind, Artifact, Budget, Cpu, Credential, DataClass, Deployment,
+    FlashAttention, GgufVariant, GovernanceRule, GpuCard, HardwareProfile, KvCacheType,
+    LlamaCppSettings, MemoryCheck, Model, ModelSource, Money, MultimodalSettings, Price, Quota,
+    ReasoningFormat, Region, Residency, RoutingPolicy, RoutingTarget, Runtime, ScalingSettings,
+    SpeculativeSettings, Tenant, UseCase, VllmKvCacheDtype, VllmSettings, resolve_gpu,
 };
 use amicu_core::secret::SecretRef;
 use amicu_core::units::ByteSize;
@@ -131,11 +131,26 @@ fn hardware_profile(name: &str, f: &Fields) -> Result<HardwareProfile> {
         accelerator: f
             .opt_block("accelerator")
             .map(|a| -> Result<Accelerator> {
+                let kind: AcceleratorKind = a.enum_val("kind")?;
+                let model = a.string("model")?;
+                let memory = match a.opt_byte_size("memory")? {
+                    Some(memory) => memory,
+                    None if kind == AcceleratorKind::Gpu => resolve_gpu(&model, None)
+                        .map(GpuCard::memory)
+                        .map_err(|err| {
+                            HclError::schema(format!(
+                                "{}: missing `memory` (it may be omitted only when `model` \
+                                 is an exact GPU id; {err})",
+                                a.ctx
+                            ))
+                        })?,
+                    None => return Err(a.missing("memory")),
+                };
                 Ok(Accelerator {
-                    kind: a.enum_val("kind")?,
-                    model: a.string("model")?,
+                    kind,
+                    model,
                     count: a.u32("count")?,
-                    memory: a.byte_size("memory")?,
+                    memory,
                     memory_bandwidth_gbps: a.opt_u32("bandwidth_gbps")?,
                 })
             })

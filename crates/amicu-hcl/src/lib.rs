@@ -181,6 +181,37 @@ mod tests {
         );
     }
 
+    fn gpu_profile(model: &str, memory: Option<&str>) -> String {
+        let memory = memory.map_or(String::new(), |m| format!("    memory = \"{m}\"\n"));
+        format!(
+            "resource \"hardware_profile\" \"g\" {{\n  provider = \"runpod\"\n  \
+             accelerator {{\n    kind  = \"gpu\"\n    model = \"{model}\"\n    count = 1\n\
+             {memory}  }}\n  memory = \"64GiB\"\n}}\n"
+        )
+    }
+
+    #[test]
+    fn gpu_memory_defaults_from_an_exact_catalog_id() {
+        let g = parse_graph(&gpu_profile("h100-nvl-94gb", None)).unwrap();
+        let acc = g.hardware_profiles[0].accelerator.as_ref().unwrap();
+        assert_eq!(acc.memory, "94GiB".parse().unwrap());
+        let g = parse_graph(&gpu_profile("l4", None)).unwrap();
+        let acc = g.hardware_profiles[0].accelerator.as_ref().unwrap();
+        assert_eq!(acc.memory, "24GiB".parse().unwrap());
+        let g = parse_graph(&gpu_profile("a100", Some("80GiB"))).unwrap();
+        let acc = g.hardware_profiles[0].accelerator.as_ref().unwrap();
+        assert_eq!(acc.memory, "80GiB".parse().unwrap());
+    }
+
+    #[test]
+    fn gpu_memory_is_required_for_an_ambiguous_family() {
+        let err = parse_graph(&gpu_profile("a100", None))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing `memory`"), "{err}");
+        assert!(err.contains("a100-sxm4-80gb (80 GB)"), "{err}");
+    }
+
     #[test]
     fn accelerator_bandwidth_gbps_omitted_when_absent() {
         let g = graph_with_hardware(None);

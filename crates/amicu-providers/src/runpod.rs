@@ -167,7 +167,7 @@ struct GpuSpec {
 const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "gpu.h100-80gb.1x",
-        model: "h100",
+        model: "h100-sxm-80gb",
         vram_gib: 80,
         vcpus: 20,
         host_mem_gib: 251,
@@ -177,7 +177,7 @@ const GPUS: &[GpuSpec] = &[
     },
     GpuSpec {
         id: "gpu.a100-80gb.1x",
-        model: "a100",
+        model: "a100-sxm4-80gb",
         vram_gib: 80,
         vcpus: 16,
         host_mem_gib: 125,
@@ -187,7 +187,7 @@ const GPUS: &[GpuSpec] = &[
     },
     GpuSpec {
         id: "gpu.l40s.1x",
-        model: "l40s",
+        model: "l40s-48gb",
         vram_gib: 48,
         vcpus: 16,
         host_mem_gib: 94,
@@ -197,7 +197,7 @@ const GPUS: &[GpuSpec] = &[
     },
     GpuSpec {
         id: "gpu.rtx-a6000.1x",
-        model: "rtx-a6000",
+        model: "rtx-a6000-48gb",
         vram_gib: 48,
         vcpus: 8,
         host_mem_gib: 50,
@@ -207,7 +207,7 @@ const GPUS: &[GpuSpec] = &[
     },
     GpuSpec {
         id: "gpu.rtx-4090.1x",
-        model: "rtx-4090",
+        model: "rtx-4090-24gb",
         vram_gib: 24,
         vcpus: 8,
         host_mem_gib: 41,

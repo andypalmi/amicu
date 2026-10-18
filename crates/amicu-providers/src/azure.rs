@@ -136,7 +136,7 @@ struct GpuSpec {
 const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "Standard_ND96isr_H100_v5",
-        model: "h100",
+        model: "h100-sxm-80gb",
         count: 8,
         vram_gib: 80,
         vcpus: 96,
@@ -147,7 +147,7 @@ const GPUS: &[GpuSpec] = &[
     },
     GpuSpec {
         id: "Standard_NC24ads_A100_v4",
-        model: "a100",
+        model: "a100-pcie-80gb",
         count: 1,
         vram_gib: 80,
         vcpus: 24,
@@ -158,7 +158,7 @@ const GPUS: &[GpuSpec] = &[
     },
     GpuSpec {
         id: "Standard_NV36ads_A10_v5",
-        model: "a10",
+        model: "a10-24gb",
         count: 1,
         vram_gib: 24,
         vcpus: 36,
@@ -169,7 +169,7 @@ const GPUS: &[GpuSpec] = &[
     },
     GpuSpec {
         id: "Standard_NC4as_T4_v3",
-        model: "t4",
+        model: "t4-16gb",
         count: 1,
         vram_gib: 16,
         vcpus: 4,

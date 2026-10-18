@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use amicu_core::ByteSize;
 use amicu_core::id::HardwareProfileId;
-use amicu_core::resource::{Accelerator, AcceleratorKind, HardwareProfile};
+use amicu_core::resource::{Accelerator, AcceleratorKind, HardwareProfile, resolve_gpu};
 use amicu_engine::host::HostFacts;
 use amicu_runtime::discovery::discover_report;
 
@@ -19,7 +19,7 @@ const MIB: u64 = 1024 * 1024;
 /// NVIDIA GPUs found through `nvidia-smi`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NvidiaGpu {
-    /// Model slug, e.g. `rtx_4090`.
+    /// GPU catalog id (`rtx-4090-24gb`), else a slug of the name (`rtx_4090`).
     pub model: String,
     pub count: u32,
     /// VRAM of one card (the smallest, when they differ).
@@ -163,10 +163,12 @@ pub(crate) fn parse_nvidia_smi(text: &str) -> Option<NvidiaGpu> {
         count = count.saturating_add(1);
         min_mib = Some(min_mib.map_or(mib, |m| m.min(mib)));
     }
+    let memory = ByteSize::from_bytes(min_mib?.saturating_mul(MIB));
+    let model = resolve_gpu(&name, Some(memory)).map_or_else(|_| slug(&name), |c| c.id.to_owned());
     Some(NvidiaGpu {
-        model: slug(&name),
+        model,
         count,
-        memory: ByteSize::from_bytes(min_mib?.saturating_mul(MIB)),
+        memory,
     })
 }
 
@@ -252,9 +254,13 @@ mod tests {
     #[test]
     fn parses_nvidia_smi_csv() {
         let g = parse_nvidia_smi("NVIDIA GeForce RTX 4090, 24564\n").unwrap();
-        assert_eq!(g.model, "rtx_4090");
+        assert_eq!(g.model, "rtx-4090-24gb");
         assert_eq!(g.count, 1);
         assert_eq!(g.memory.bytes(), 24564 * MIB);
+        let g = parse_nvidia_smi("NVIDIA H100 80GB HBM3, 81559\n").unwrap();
+        assert_eq!(g.model, "h100-sxm-80gb");
+        let g = parse_nvidia_smi("NVIDIA Quadro P400, 2048\n").unwrap();
+        assert_eq!(g.model, "quadro_p400");
     }
 
     #[test]
@@ -262,7 +268,7 @@ mod tests {
         let g = parse_nvidia_smi("NVIDIA A100-SXM4-80GB, 81920\nNVIDIA A100-SXM4-80GB, 40960\n")
             .unwrap();
         assert_eq!(g.count, 2);
-        assert_eq!(g.model, "a100_sxm4_80gb");
+        assert_eq!(g.model, "a100-sxm4-80gb");
         assert_eq!(g.memory.bytes(), 40960 * MIB);
     }
 
@@ -274,7 +280,7 @@ NVIDIA GeForce RTX 4090, 24564\nbroken line\n",
         )
         .unwrap();
         assert_eq!(g.count, 1);
-        assert_eq!(g.model, "rtx_4090");
+        assert_eq!(g.model, "rtx-4090-24gb");
         // An absurd value saturates instead of overflowing.
         let g = parse_nvidia_smi(&format!("X, {}\n", u64::MAX)).unwrap();
         assert_eq!(g.memory.bytes(), u64::MAX);

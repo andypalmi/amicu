@@ -133,7 +133,7 @@ fn gpu(model: &str, count: u32) -> Accelerator {
         kind: AcceleratorKind::Gpu,
         model: model.to_owned(),
         count,
-        memory: ByteSize::from_bytes(0),
+        memory: ByteSize::from_bytes(80 * 1024 * 1024 * 1024),
         memory_bandwidth_gbps: None,
     }
 }
@@ -164,7 +164,7 @@ fn supervisor(mock: Mock) -> (RunPodSupervisor, Arc<Mock>) {
     let client = RunPodClient::with_transport(ApiKey::new(MGMT), mock.clone(), BASE);
     let sup = RunPodSupervisor::new(client, PROJECT, DEP)
         .with_probe_transport(mock.clone())
-        .with_accelerator(Some(&gpu("H100", 2)))
+        .with_accelerator(Some(&gpu("h100-sxm-80gb", 2)))
         .unwrap()
         .with_readiness_timing(FAST);
     (sup, mock)
@@ -791,6 +791,21 @@ async fn a_catalog_that_does_not_list_the_card_stops_before_any_write() {
         mock.requests().iter().all(|s| s.method == HttpMethod::Get),
         "nothing created"
     );
+
+    let mock = happy_mock().ok(
+        HttpMethod::Get,
+        "/catalog/gpus",
+        200,
+        r#"{"gpus":[{"id":"NVIDIA H100 80GB HBM3","name":"x","pool":"ADA_80_PRO","memory":94}]}"#,
+    );
+    let (sup, mock) = supervisor(mock);
+    let err = sup
+        .start(&vllm_plan(), &vllm_secrets())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("94 GB"), "{err}");
+    assert_eq!(mock.count(HttpMethod::Post, "/account/secrets"), 0);
 
     // An unreadable catalog also stops the deploy (never guess the exclusions).
     let (sup, mock) = supervisor(happy_mock().ok(HttpMethod::Get, "/catalog/gpus", 500, "{}"));
