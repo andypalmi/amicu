@@ -1388,59 +1388,16 @@ mod tests {
         }
     }
 
-    // --- app_name_for -------------------------------------------------
+    // --- naming (implementation and its tests live in amicu_core::naming) ---
 
     #[test]
-    fn app_name_sanitizes_and_prefixes() {
-        assert_eq!(app_name_for("support-chat"), "amicu-support-chat");
+    fn naming_functions_are_the_core_ones_and_unchanged() {
         assert_eq!(app_name_for("Support_Chat.01"), "amicu-support-chat-01");
-        assert_eq!(app_name_for("  weird//id--"), "amicu-weird-id");
-    }
-
-    #[test]
-    fn project_app_names_are_distinct_per_project_and_per_exact_id() {
-        let a = project_app_name("aaaa1111", "a_b");
-        let b = project_app_name("aaaa1111", "a-b");
-        assert_ne!(a, b, "ids that sanitize alike must not collide");
-        assert_ne!(a, project_app_name("bbbb2222", "a_b"));
-        assert_ne!(project_app_name("p", "Chat"), project_app_name("p", "chat"));
-        assert_eq!(a, project_app_name("aaaa1111", "a_b"), "deterministic");
-        assert!(a.starts_with("amicu-aaaa1111-a-b-"), "{a}");
-    }
-
-    #[test]
-    fn a_long_project_id_is_capped_but_still_tells_projects_apart() {
-        let (a, b) = ("p".repeat(60) + "a", "p".repeat(60) + "b");
-        let (na, nb) = (project_app_name(&a, "chat"), project_app_name(&b, "chat"));
-        assert!(na.len() <= 63 && nb.len() <= 63, "{na} {nb}");
-        assert_ne!(na, nb, "the digest covers the whole project id");
-    }
-
-    #[test]
-    fn project_app_names_are_stable_and_modal_safe() {
-        // Pinned below: the name is recorded in state, so it must never drift.
+        // Pinned: the name is recorded in state, so it must never drift.
         assert_eq!(
             project_app_name("aaaa1111", "support-chat"),
             "amicu-aaaa1111-support-chat-e285b9df4c23"
         );
-        for (p, d) in [
-            ("", ""),
-            ("--", "//"),
-            ("P.1", &"x".repeat(200)[..]),
-            (&"p".repeat(100)[..], "dep"),
-            (&"p".repeat(100)[..], &"d".repeat(100)[..]),
-            ("aaaa1111", "Support_Chat.01"),
-        ] {
-            let n = project_app_name(p, d);
-            assert!(n.len() <= 63, "{n}");
-            assert!(n.starts_with("amicu-"), "{n}");
-            assert!(
-                n.bytes()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-'),
-                "{n}"
-            );
-            assert!(!n.ends_with('-') && !n.contains("--"), "{n}");
-        }
     }
 
     // --- gpu_string -----------------------------------------------------

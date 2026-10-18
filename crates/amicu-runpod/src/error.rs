@@ -9,6 +9,15 @@
 /// calls drop even that.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RunPodError {
+    /// A `POST` that never got a response: the endpoint may or may not exist.
+    /// Not retryable: look it up by name first or a duplicate may result.
+    #[error(
+        "RunPod create outcome unknown (transport failure: {0}); look up by name before retrying"
+    )]
+    AmbiguousCreate(String),
+    /// More than one endpoint carries the requested name.
+    #[error("{count} RunPod endpoints are named `{name}`")]
+    DuplicateName { name: String, count: usize },
     /// The exchange never completed (timeout, DNS, TLS). Transient.
     #[error("RunPod transport failure: {0}")]
     Transport(String),

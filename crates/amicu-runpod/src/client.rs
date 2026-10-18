@@ -73,7 +73,9 @@ impl FlashBoot {
 }
 
 /// GPU request for an endpoint: serverless pool ids (see
-/// [`crate::hardware`]) and GPUs per worker.
+/// [`crate::hardware`]), GPUs per worker, and the GPU types excluded from those
+/// pools. A pool can hold several cards, so [`crate::hardware::gpu_placement`]
+/// fills `excluded_types` to leave only the requested card eligible.
 ///
 /// On update, supplying `pools` replaces the pool selection **and clears
 /// `excluded_types`** unless restated (RunPod's documented behavior).
@@ -104,7 +106,7 @@ impl From<crate::hardware::GpuPlacement> for GpuRequest {
         Self {
             pools: p.pools,
             count: p.count,
-            excluded_types: Vec::new(),
+            excluded_types: p.excluded_types,
         }
     }
 }
@@ -642,15 +644,26 @@ impl RunPodClient {
     }
 
     /// `POST /serverless`: create a load-balancing endpoint.
+    ///
+    /// A transport failure here is [`RunPodError::AmbiguousCreate`]: the
+    /// request may have reached RunPod and created the endpoint, and names are
+    /// not unique, so a blind retry could create a duplicate. Callers must
+    /// [`find_endpoints_by_name`](Self::find_endpoints_by_name) before retrying.
+    /// Error details are withheld when the request carries env values.
     pub async fn create_endpoint(&self, req: &CreateEndpoint) -> Result<Endpoint, RunPodError> {
         let resp = self
-            .send(
+            .send_inner(
                 HttpMethod::Post,
                 "/serverless",
                 Some(req.to_body()),
                 "serverless endpoint",
+                !req.env.is_empty(),
             )
-            .await?;
+            .await
+            .map_err(|e| match e {
+                RunPodError::Transport(m) => RunPodError::AmbiguousCreate(m),
+                other => other,
+            })?;
         decode(&resp)
     }
 
@@ -682,20 +695,38 @@ impl RunPodClient {
                 _ => return Ok(all),
             }
         }
-        Ok(all)
+        Err(RunPodError::Decode(format!(
+            "endpoint list still paginating after {MAX_PAGES} pages"
+        )))
     }
 
-    /// The endpoint whose name is exactly `name` (RunPod does not enforce
-    /// unique names; with duplicates the newest wins), or `None`.
-    pub async fn find_endpoint_by_name(&self, name: &str) -> Result<Option<Endpoint>, RunPodError> {
+    /// Every endpoint whose name is exactly `name` (RunPod does not enforce
+    /// unique names), newest first.
+    pub async fn find_endpoints_by_name(&self, name: &str) -> Result<Vec<Endpoint>, RunPodError> {
         Ok(self
             .list_endpoints()
             .await?
             .into_iter()
-            .find(|e| e.name == name))
+            .filter(|e| e.name == name)
+            .collect())
     }
 
-    /// `PATCH /serverless/{id}`: apply a partial update.
+    /// The one endpoint named exactly `name`, or `None`. More than one match is
+    /// [`RunPodError::DuplicateName`] rather than a silent pick.
+    pub async fn find_endpoint_by_name(&self, name: &str) -> Result<Option<Endpoint>, RunPodError> {
+        let mut found = self.find_endpoints_by_name(name).await?;
+        match found.len() {
+            0 => Ok(None),
+            1 => Ok(found.pop()),
+            count => Err(RunPodError::DuplicateName {
+                name: name.to_owned(),
+                count,
+            }),
+        }
+    }
+
+    /// `PATCH /serverless/{id}`: apply a partial update. Error details are
+    /// withheld when the request carries env values.
     pub async fn update_endpoint(
         &self,
         id: &str,
@@ -703,11 +734,12 @@ impl RunPodClient {
     ) -> Result<Endpoint, RunPodError> {
         let path = format!("/serverless/{}", segment(id)?);
         let resp = self
-            .send(
+            .send_inner(
                 HttpMethod::Patch,
                 &path,
                 Some(update.to_body()),
                 &format!("endpoint `{id}`"),
+                update.env.as_ref().is_some_and(|e| !e.is_empty()),
             )
             .await?;
         decode(&resp)
@@ -921,8 +953,8 @@ mod tests {
         body: Option<Value>,
     }
 
-    /// Canned responses consumed in order per `(method, url-suffix)`; the last
-    /// match is reused. Records every request.
+    /// Canned responses; the first route matching `(method, url-suffix)` is
+    /// used. Records every request.
     #[derive(Default)]
     struct Mock {
         routes: Mutex<Vec<Route>>,
@@ -1153,6 +1185,96 @@ mod tests {
         let body = r#"{"endpoints":[],"pagination":{"nextCursor":null,"hasNextPage":false}}"#;
         let (c, _) = client(Mock::default().on(HttpMethod::Get, "/serverless", 200, body));
         assert!(c.find_endpoint_by_name("nope").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn create_transport_failure_is_ambiguous_and_not_retryable() {
+        let (c, _) =
+            client(Mock::default().fail(HttpMethod::Post, "/serverless", TransportError::Timeout));
+        let err = c.create_endpoint(&full_request()).await.unwrap_err();
+        assert!(matches!(err, RunPodError::AmbiguousCreate(_)), "{err:?}");
+        assert!(!err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn duplicate_names_are_listed_and_the_single_lookup_errors() {
+        let body = r#"{"endpoints":[{"id":"a","name":"dup"},{"id":"b","name":"dup"},
+            {"id":"c","name":"other"}],
+            "pagination":{"nextCursor":null,"hasNextPage":false}}"#;
+        let (c, _) = client(Mock::default().on(HttpMethod::Get, "/serverless", 200, body));
+        let all = c.find_endpoints_by_name("dup").await.unwrap();
+        assert_eq!(
+            all.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert_eq!(
+            c.find_endpoint_by_name("dup").await.unwrap_err(),
+            RunPodError::DuplicateName {
+                name: "dup".into(),
+                count: 2
+            }
+        );
+        assert_eq!(
+            c.find_endpoint_by_name("other").await.unwrap().unwrap().id,
+            "c"
+        );
+    }
+
+    #[tokio::test]
+    async fn endless_pagination_is_an_error_not_a_partial_list() {
+        let page = r#"{"endpoints":[],"pagination":{"nextCursor":"x","hasNextPage":true}}"#;
+        let (c, mock) = client(
+            Mock::default()
+                .on(HttpMethod::Get, "/serverless?cursor=x", 200, page)
+                .on(HttpMethod::Get, "/serverless", 200, page),
+        );
+        assert!(matches!(
+            c.list_endpoints().await.unwrap_err(),
+            RunPodError::Decode(_)
+        ));
+        assert_eq!(mock.requests().len(), MAX_PAGES);
+    }
+
+    #[tokio::test]
+    async fn api_detail_is_withheld_when_env_is_sent() {
+        let body = r#"{"detail":"env HF_TOKEN=env-secret-value is invalid"}"#;
+        let mut req = full_request();
+        req.env.insert("HF_TOKEN".into(), "env-secret-value".into());
+        let (c, _) = client(Mock::default().on(HttpMethod::Post, "/serverless", 400, body));
+        let err = c.create_endpoint(&req).await.unwrap_err();
+        assert!(!format!("{err}{err:?}").contains("env-secret-value"));
+
+        let (c, _) = client(Mock::default().on(HttpMethod::Patch, "/serverless/ep1", 400, body));
+        let update = UpdateEndpoint {
+            env: Some(BTreeMap::from([(
+                "K".to_owned(),
+                "env-secret-value".to_owned(),
+            )])),
+            ..UpdateEndpoint::default()
+        };
+        let err = c.update_endpoint("ep1", &update).await.unwrap_err();
+        assert!(!format!("{err}{err:?}").contains("env-secret-value"));
+
+        // Without env the detail is kept for diagnosis.
+        let (c, _) = client(Mock::default().on(HttpMethod::Patch, "/serverless/ep1", 400, body));
+        let err = c
+            .update_endpoint("ep1", &UpdateEndpoint::default())
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("is invalid"));
+    }
+
+    #[test]
+    fn gpu_placement_exclusions_reach_the_request_body() {
+        let g: GpuRequest = crate::hardware::parse_gpu_spec("l40s").unwrap().into();
+        assert_eq!(
+            g.to_json(),
+            json!({
+                "pools": ["ADA_48_PRO"],
+                "count": 1,
+                "excludedTypes": ["NVIDIA L40", "NVIDIA RTX 6000 Ada Generation"]
+            })
+        );
     }
 
     #[tokio::test]
