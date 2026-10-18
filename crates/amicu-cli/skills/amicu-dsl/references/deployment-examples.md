@@ -326,7 +326,7 @@ resource "hardware_profile" "modal_h100" {
   region   = "eu-west"
   accelerator {
     kind   = "gpu"
-    model  = "h100"
+    model  = "h100-sxm-80gb"
     count  = 2
     memory = "80GiB"
   }

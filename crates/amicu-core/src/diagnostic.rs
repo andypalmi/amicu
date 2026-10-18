@@ -390,6 +390,19 @@ pub mod catalog {
     /// `ubatch_size` above `batch_size` is the one warning, since
     /// `llama-server` clamps it to `batch_size`.
     pub const CAP_RUNTIME_FIELD_INVALID: DiagnosticCode = DiagnosticCode::new(Category::Cap, 11);
+    // --- GPU catalog resolution ---
+    /// `AMICU-CAP-012` - a GPU hardware profile's `accelerator.model` (with
+    /// its `accelerator.memory`) does not name exactly one card in the GPU
+    /// catalog: a short family name such as `a100` that several variants
+    /// share, or a size no variant of it has. Error: the plan would otherwise
+    /// pick a card the user did not choose. The message lists the candidate
+    /// canonical ids with their VRAM.
+    pub const CAP_GPU_UNRESOLVED: DiagnosticCode = DiagnosticCode::new(Category::Cap, 12);
+    /// `AMICU-CAP-013` - a GPU hardware profile's `accelerator.model` is not
+    /// in the GPU catalog at all. Error for providers that place GPUs through
+    /// the catalog (`modal`, `runpod`), which could not deploy it; a warning
+    /// elsewhere (owned or self-hosted hardware may be any card).
+    pub const CAP_GPU_UNKNOWN: DiagnosticCode = DiagnosticCode::new(Category::Cap, 13);
     /// `AMICU-MEM-001` - model does not fit in available VRAM.
     pub const MEM_VRAM_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Mem, 1);
     /// `AMICU-MEM-002` - a single artifact/weight file exceeds the available
@@ -487,7 +500,7 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 38] {
+    pub const fn all() -> [DiagnosticCode; 40] {
         [
             PARSE_UNCLOSED_BLOCK,
             PARSE_INVALID_SYNTAX,
@@ -506,6 +519,8 @@ pub mod catalog {
             CAP_SCALING_UNSUPPORTED_PROVIDER,
             CAP_KV_CACHE_NOT_ESTIMATED,
             CAP_RUNTIME_FIELD_INVALID,
+            CAP_GPU_UNRESOLVED,
+            CAP_GPU_UNKNOWN,
             MEM_VRAM_EXCEEDED,
             MEM_ARTIFACT_OVERSIZE,
             MEM_PROFILE_EXCEEDS_HOST,

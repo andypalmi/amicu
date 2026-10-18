@@ -569,7 +569,7 @@ resource "hardware_profile" "cloud_gpu" {
   provider = "modal"
   accelerator {
     kind   = "gpu"
-    model  = "h100"
+    model  = "h100-sxm-80gb"
     count  = 1
     memory = "80GiB"
   }

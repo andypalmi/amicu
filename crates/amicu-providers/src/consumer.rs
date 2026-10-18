@@ -30,7 +30,7 @@
 //! from the vendor's published memory-bandwidth spec, for forward-looking
 //! planning; it is not yet read by the fit check.
 
-use amicu_core::resource::{Accelerator, AcceleratorKind, HardwareProfile};
+use amicu_core::resource::{Accelerator, AcceleratorKind, HardwareProfile, resolve_gpu};
 
 /// A typical enthusiast/workstation desktop build's system RAM. Independent of
 /// GPU VRAM and not fit-check-relevant for a discrete accelerator (the fit
@@ -40,16 +40,21 @@ use amicu_core::resource::{Accelerator, AcceleratorKind, HardwareProfile};
 /// duplicating the VRAM size.
 const DESKTOP_HOST_MEMORY: &str = "64GiB";
 
+/// A discrete GPU profile. The profile id stays the short slug (`rtx_4090`)
+/// HCL already references; `accelerator.model` is the card's canonical GPU
+/// catalog id (`rtx-4090-24gb`).
 fn discrete_gpu(id: &str, vram: &str, bandwidth_gbps: u32) -> HardwareProfile {
+    let memory = vram.parse().expect("valid ByteSize literal");
+    let card = resolve_gpu(id, Some(memory)).expect("consumer GPU is in the GPU catalog");
     HardwareProfile {
         id: id.into(),
         provider: "on_prem".to_string(),
         region: None,
         accelerator: Some(Accelerator {
             kind: AcceleratorKind::Gpu,
-            model: id.to_string(),
+            model: card.id.to_string(),
             count: 1,
-            memory: vram.parse().expect("valid ByteSize literal"),
+            memory,
             memory_bandwidth_gbps: Some(bandwidth_gbps),
         }),
         cpu: None,

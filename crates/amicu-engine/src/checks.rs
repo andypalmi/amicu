@@ -4,7 +4,9 @@ use std::collections::HashSet;
 
 use amicu_core::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticReport, Severity, catalog};
 use amicu_core::graph::Graph;
-use amicu_core::resource::{Deployment, MemoryCheck, Residency, RuleEffect, Runtime};
+use amicu_core::resource::{
+    Accelerator, Deployment, GpuResolveError, MemoryCheck, Residency, RuleEffect, Runtime,
+};
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
 use amicu_providers::resolve_residency;
 use amicu_runtime::RuntimeAdapter;
@@ -20,6 +22,7 @@ pub fn report_for(graph: &Graph) -> DiagnosticReport {
     diagnostics.extend(amicu_hcl::scan_runtime_env_secrets(graph));
     diagnostics.extend(scaling_diagnostics(graph));
     diagnostics.extend(api_key_diagnostics(graph));
+    diagnostics.extend(gpu_diagnostics(graph));
 
     for missing in graph.missing_references() {
         let mut d = Diagnostic::new(
@@ -88,6 +91,45 @@ pub(crate) fn apply_memory_check(
             d
         })
         .collect()
+}
+
+/// Providers that place GPUs through the shared GPU catalog: a model the
+/// catalog does not know cannot be deployed there, so it is an error rather
+/// than a warning.
+const CATALOG_GPU_PROVIDERS: [&str; 2] = ["modal", "runpod"];
+
+/// Resolve every GPU hardware profile's `accelerator.model` (with its
+/// `accelerator.memory`) against the GPU catalog: `AMICU-CAP-012` when it
+/// names no single card (ambiguous family, or a size no variant has),
+/// `AMICU-CAP-013` when the catalog does not know the model.
+fn gpu_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    for hw in &graph.hardware_profiles {
+        let Some(Err(err)) = hw.accelerator.as_ref().and_then(Accelerator::gpu_card) else {
+            continue;
+        };
+        let (code, severity) = match err {
+            GpuResolveError::Unknown { .. } => (
+                catalog::CAP_GPU_UNKNOWN,
+                if CATALOG_GPU_PROVIDERS.contains(&hw.provider.as_str()) {
+                    Severity::Error
+                } else {
+                    Severity::Warning
+                },
+            ),
+            GpuResolveError::Ambiguous { .. } | GpuResolveError::MemoryMismatch { .. } => {
+                (catalog::CAP_GPU_UNRESOLVED, Severity::Error)
+            }
+        };
+        let mut diag = Diagnostic::new(
+            code,
+            severity,
+            format!("hardware_profile `{}`: {err}", hw.id),
+        );
+        diag.resource = Some(format!("hardware_profile.{}", hw.id));
+        out.push(diag);
+    }
+    out
 }
 
 /// Hardware-profile `provider` value whose deployments honor `scaling {}`.
@@ -573,7 +615,14 @@ mod vllm_dispatch_tests {
             region: None,
             accelerator: Some(Accelerator {
                 kind: AcceleratorKind::Gpu,
-                model: "rtx4090".into(),
+                // A real card of that size, so the GPU catalog check passes.
+                model: match vram_gib {
+                    8 => "rtx-3060-ti-8gb",
+                    24 => "rtx-4090-24gb",
+                    80 => "a100-sxm4-80gb",
+                    other => panic!("no fixture card with {other} GiB"),
+                }
+                .into(),
                 count: 1,
                 memory: ByteSize::from_bytes(vram_gib * GIB),
                 memory_bandwidth_gbps: None,
@@ -1155,5 +1204,93 @@ mod api_key_tests {
                 .any(|d| d.code.to_string() == "AMICU-POLICY-007")
         );
         assert!(!report.valid);
+    }
+}
+
+#[cfg(test)]
+mod gpu_tests {
+    use super::*;
+    use amicu_core::resource::{AcceleratorKind, HardwareProfile};
+    use amicu_core::units::ByteSize;
+
+    const GIB: u64 = 1 << 30;
+
+    fn graph(provider: &str, model: &str, memory_gib: u64) -> Graph {
+        let mut g = Graph::new();
+        g.hardware_profiles.push(HardwareProfile {
+            id: "hw".into(),
+            provider: provider.to_owned(),
+            region: None,
+            accelerator: Some(Accelerator {
+                kind: AcceleratorKind::Gpu,
+                model: model.to_owned(),
+                count: 1,
+                memory: ByteSize::from_bytes(memory_gib * GIB),
+                memory_bandwidth_gbps: None,
+            }),
+            cpu: None,
+            memory: ByteSize::from_bytes(64 * GIB),
+            interconnect: None,
+            price: None,
+        });
+        g
+    }
+
+    fn codes(g: &Graph) -> Vec<(String, Severity)> {
+        gpu_diagnostics(g)
+            .into_iter()
+            .map(|d| (d.code.to_string(), d.severity))
+            .collect()
+    }
+
+    #[test]
+    fn exact_ids_and_unique_families_are_clean() {
+        assert_eq!(codes(&graph("modal", "l4", 24)), Vec::new());
+        assert_eq!(codes(&graph("runpod", "a100-sxm4-80gb", 80)), Vec::new());
+        assert_eq!(codes(&graph("runpod", "h100", 94)), Vec::new());
+    }
+
+    #[test]
+    fn an_ambiguous_family_is_an_error_listing_the_variants() {
+        let diags = gpu_diagnostics(&graph("runpod", "a100", 80));
+        assert_eq!(diags.len(), 1);
+        let d = &diags[0];
+        assert_eq!(d.code.to_string(), "AMICU-CAP-012");
+        assert_eq!(d.severity, Severity::Error);
+        assert_eq!(d.resource.as_deref(), Some("hardware_profile.hw"));
+        assert!(
+            d.message
+                .contains("a100-sxm4-80gb (80 GB), a100-pcie-80gb (80 GB)"),
+            "{}",
+            d.message
+        );
+        assert!(!report_for(&graph("runpod", "a100", 80)).valid);
+    }
+
+    #[test]
+    fn a_memory_mismatch_is_an_error() {
+        assert_eq!(
+            codes(&graph("on_prem", "h100-nvl-94gb", 96)),
+            [("AMICU-CAP-012".to_owned(), Severity::Error)]
+        );
+    }
+
+    #[test]
+    fn an_unknown_model_errors_only_where_the_catalog_places_gpus() {
+        assert_eq!(
+            codes(&graph("runpod", "mi300x", 192)),
+            [("AMICU-CAP-013".to_owned(), Severity::Error)]
+        );
+        assert_eq!(
+            codes(&graph("on_prem", "mi300x", 192)),
+            [("AMICU-CAP-013".to_owned(), Severity::Warning)]
+        );
+    }
+
+    #[test]
+    fn non_gpu_accelerators_are_not_checked() {
+        let mut g = graph("local_apple", "m4_pro", 48);
+        g.hardware_profiles[0].accelerator.as_mut().unwrap().kind = AcceleratorKind::AppleSilicon;
+        assert_eq!(codes(&g), Vec::new());
     }
 }

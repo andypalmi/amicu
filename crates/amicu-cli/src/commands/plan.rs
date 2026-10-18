@@ -713,7 +713,7 @@ mod tests {
                 "      action:   update",
                 "      reason:   launch settings changed, so the service restarts",
                 "      ~ model.source.reference: \"Qwen/Qwen3.6-27B\" -> \"Qwen/Qwen3.8-27B\"",
-                "      hardware: gpu.l4",
+                "      hardware: gpu.l4-24gb (24 GB)",
             ],
             "{text}"
         );

@@ -1,141 +1,110 @@
 //! Map an amicu GPU spec onto RunPod serverless GPU pool ids, a per-worker
 //! count, and the GPU types to exclude so only the requested card is eligible.
 //!
+//! The accelerator's `model` (plus `memory`) first resolves to exactly one
+//! card of the shared GPU catalog ([`amicu_core::resource::resolve_gpu`]); an
+//! ambiguous name such as `a100` is an error, never a silent pick. The table
+//! below then maps that canonical id to RunPod's GPU type id and pool.
+//!
 //! RunPod serverless endpoints select hardware by **pool** (`ADA_24`,
 //! `AMPERE_80`, ...), not by GPU type id (that is what pods use), and a pool
 //! can hold several card models. To make the requested card the *only*
 //! eligible one, the placement lists the pool and puts every other type of that
-//! pool in `excludedTypes`. Models with no pool are a typed error rather than a
+//! pool in `excludedTypes`. Cards with no pool are a typed error rather than a
 //! silent fallback, so a deployment never lands on different hardware than the
 //! plan said.
 //!
-//! The table below is static and serves alias -> type id / pool resolution
-//! and offline planning. At deploy time the exclusion list is recomputed from
-//! the live `GET /v2/catalog/gpus` ([`exclusions_from_catalog`]), so a card
-//! RunPod later adds to a pool is still excluded; the table's own
-//! `excluded_types` are only the offline approximation.
+//! The table is static and serves offline planning. At deploy time the
+//! exclusion list is recomputed from the live `GET /v2/catalog/gpus`
+//! ([`exclusions_from_catalog`]), so a card RunPod later adds to a pool is
+//! still excluded, and the live entry's memory is checked against the card's
+//! VRAM ([`verify_catalog_memory`]); the table's own exclusions are only the
+//! offline approximation.
 
-use amicu_core::resource::{Accelerator, AcceleratorKind};
+use amicu_core::resource::{Accelerator, AcceleratorKind, GpuResolveError, resolve_gpu};
 
 use crate::client::GpuType;
 use crate::error::RunPodError;
 
-/// One GPU type: normalized aliases (see [`normalize`]), its serverless pool,
-/// and RunPod's GPU type id (as used in `excludedTypes`).
+/// One GPU catalog card RunPod serves: its canonical id, serverless pool and
+/// RunPod's GPU type id (as used in `excludedTypes`).
 struct Card {
-    aliases: &'static [&'static str],
+    id: &'static str,
     pool: &'static str,
     type_id: &'static str,
 }
 
-const fn card(aliases: &'static [&'static str], pool: &'static str, type_id: &'static str) -> Card {
-    Card {
-        aliases,
-        pool,
-        type_id,
-    }
+const fn card(id: &'static str, pool: &'static str, type_id: &'static str) -> Card {
+    Card { id, pool, type_id }
 }
 
 const CARDS: &[Card] = &[
-    card(&["A4000", "RTXA4000"], "AMPERE_16", "NVIDIA RTX A4000"),
-    card(&["A4500", "RTXA4500"], "AMPERE_16", "NVIDIA RTX A4500"),
+    card("rtx-a4000-16gb", "AMPERE_16", "NVIDIA RTX A4000"),
+    card("rtx-a4500-20gb", "AMPERE_16", "NVIDIA RTX A4500"),
     card(
-        &["RTX4000ADA", "RTX4000ADAGENERATION", "RTX4000"],
+        "rtx-4000-ada-20gb",
         "AMPERE_16",
         "NVIDIA RTX 4000 Ada Generation",
     ),
     card(
-        &["RTX2000ADA", "RTX2000ADAGENERATION", "RTX2000"],
+        "rtx-2000-ada-16gb",
         "AMPERE_16",
         "NVIDIA RTX 2000 Ada Generation",
     ),
-    card(&["L4"], "AMPERE_24", "NVIDIA L4"),
-    card(&["A5000", "RTXA5000"], "AMPERE_24", "NVIDIA RTX A5000"),
-    card(&["RTX3090", "3090"], "AMPERE_24", "NVIDIA GeForce RTX 3090"),
-    card(&["RTX4090", "4090"], "ADA_24", "NVIDIA GeForce RTX 4090"),
+    card("l4-24gb", "AMPERE_24", "NVIDIA L4"),
+    card("rtx-a5000-24gb", "AMPERE_24", "NVIDIA RTX A5000"),
+    card("rtx-3090-24gb", "AMPERE_24", "NVIDIA GeForce RTX 3090"),
+    card("rtx-4090-24gb", "ADA_24", "NVIDIA GeForce RTX 4090"),
+    card("rtx-5090-32gb", "ADA_32_PRO", "NVIDIA GeForce RTX 5090"),
+    card("a40-48gb", "AMPERE_48", "NVIDIA A40"),
+    card("rtx-a6000-48gb", "AMPERE_48", "NVIDIA RTX A6000"),
+    card("l40-48gb", "ADA_48_PRO", "NVIDIA L40"),
+    card("l40s-48gb", "ADA_48_PRO", "NVIDIA L40S"),
     card(
-        &["RTX5090", "5090"],
-        "ADA_32_PRO",
-        "NVIDIA GeForce RTX 5090",
-    ),
-    card(&["A40"], "AMPERE_48", "NVIDIA A40"),
-    card(&["A6000", "RTXA6000"], "AMPERE_48", "NVIDIA RTX A6000"),
-    card(&["L40"], "ADA_48_PRO", "NVIDIA L40"),
-    card(&["L40S"], "ADA_48_PRO", "NVIDIA L40S"),
-    card(
-        &["RTX6000ADA", "RTX6000ADAGENERATION", "6000ADA"],
+        "rtx-6000-ada-48gb",
         "ADA_48_PRO",
         "NVIDIA RTX 6000 Ada Generation",
     ),
-    // A bare "A100" / "H100" means the SXM part, the common one.
+    card("a100-sxm4-80gb", "AMPERE_80", "NVIDIA A100-SXM4-80GB"),
+    card("a100-pcie-80gb", "AMPERE_80", "NVIDIA A100 80GB PCIe"),
+    card("h100-sxm-80gb", "ADA_80_PRO", "NVIDIA H100 80GB HBM3"),
+    card("h100-pcie-80gb", "ADA_80_PRO", "NVIDIA H100 PCIe"),
+    card("h100-nvl-94gb", "ADA_80_PRO", "NVIDIA H100 NVL"),
+    card("h200-sxm-141gb", "HOPPER_141", "NVIDIA H200"),
     card(
-        &["A100", "A10080GB", "A100SXM", "A100SXM480GB"],
-        "AMPERE_80",
-        "NVIDIA A100-SXM4-80GB",
-    ),
-    card(
-        &["A100PCIE", "A10080GBPCIE"],
-        "AMPERE_80",
-        "NVIDIA A100 80GB PCIe",
-    ),
-    card(
-        &["H100", "H100SXM", "H10080GBHBM3"],
-        "ADA_80_PRO",
-        "NVIDIA H100 80GB HBM3",
-    ),
-    card(&["H100PCIE"], "ADA_80_PRO", "NVIDIA H100 PCIe"),
-    card(&["H100NVL"], "ADA_80_PRO", "NVIDIA H100 NVL"),
-    card(&["H200", "H200SXM"], "HOPPER_141", "NVIDIA H200"),
-    card(
-        &[
-            "RTXPRO6000",
-            "PRO6000",
-            "RTXPRO6000BLACKWELLWORKSTATIONEDITION",
-        ],
+        "rtx-pro-6000-96gb",
         "BLACKWELL_96",
         "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
     ),
     card(
-        &[
-            "RTXPRO6000MAXQ",
-            "RTXPRO6000BLACKWELLMAXQ",
-            "RTXPRO6000BLACKWELLMAXQWORKSTATIONEDITION",
-        ],
+        "rtx-pro-6000-maxq-96gb",
         "BLACKWELL_96",
         "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
     ),
     card(
-        &[
-            "RTXPRO6000SERVER",
-            "RTXPRO6000BLACKWELLSERVER",
-            "RTXPRO6000BLACKWELLSERVEREDITION",
-        ],
+        "rtx-pro-6000-server-96gb",
         "BLACKWELL_96",
         "NVIDIA RTX PRO 6000 Blackwell Server Edition",
     ),
     // MIG slices of the RTX PRO 6000 Server Edition share pools with whole
     // cards; listed so they are excluded when the whole card is requested.
     card(
-        &["RTXPRO6000BLACKWELLSERVEREDITIONMIG2G48GB"],
+        "rtx-pro-6000-mig-48gb",
         "ADA_48_PRO",
         "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb",
     ),
     card(
-        &["RTXPRO6000BLACKWELLSERVEREDITIONMIG1G24GB"],
+        "rtx-pro-6000-mig-24gb",
         "AMPERE_24",
         "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 1g.24gb",
     ),
     card(
-        &["RTXPRO4500", "RTXPRO4500BLACKWELL"],
+        "rtx-pro-4500-32gb",
         "BLACKWELL_32",
         "NVIDIA RTX PRO 4500 Blackwell",
     ),
-    card(&["B200"], "BLACKWELL_180", "NVIDIA B200"),
-    card(
-        &["B300", "B300SXM6", "B300SXM6AC"],
-        "BLACKWELL_288",
-        "NVIDIA B300 SXM6 AC",
-    ),
+    card("b200-180gb", "BLACKWELL_180", "NVIDIA B200"),
+    card("b300-288gb", "BLACKWELL_288", "NVIDIA B300 SXM6 AC"),
 ];
 
 /// Where a deployment's GPUs go: the pool ids to list under `gpu.pools`, the
@@ -151,29 +120,33 @@ pub struct GpuPlacement {
     pub excluded_types: Vec<String>,
     /// RunPod's GPU type id of the requested card (`"NVIDIA L40S"`).
     pub type_id: String,
+    /// The card's canonical GPU catalog id (`"l40s-48gb"`).
+    pub card_id: String,
+    /// The card's VRAM in GB, checked against the live catalog at deploy.
+    pub vram_gb: u32,
 }
 
-/// Upper-case, keep only `[A-Z0-9]`, drop `NVIDIA` / `GEFORCE`.
-fn normalize(model: &str) -> String {
-    let upper = model.to_ascii_uppercase();
-    let mut s: String = upper.chars().filter(char::is_ascii_alphanumeric).collect();
-    for noise in ["NVIDIA", "GEFORCE"] {
-        s = s.replace(noise, "");
-    }
-    s
-}
-
-fn card_for(model: &str) -> Result<&'static Card, RunPodError> {
-    let key = normalize(model);
+fn card_for(
+    model: &str,
+    memory: Option<amicu_core::ByteSize>,
+) -> Result<(&'static Card, u32), RunPodError> {
+    let resolved = resolve_gpu(model, memory).map_err(|e| match e {
+        GpuResolveError::Unknown { .. } => RunPodError::UnknownGpu {
+            model: model.to_owned(),
+        },
+        other => RunPodError::InvalidGpu(other.to_string()),
+    })?;
     CARDS
         .iter()
-        .find(|c| c.aliases.contains(&key.as_str()))
+        .find(|c| c.id == resolved.id)
+        .map(|c| (c, resolved.vram_gb))
         .ok_or_else(|| RunPodError::UnknownGpu {
-            model: model.to_owned(),
+            model: resolved.id.to_owned(),
         })
 }
 
-/// Map an amicu [`Accelerator`] to a RunPod [`GpuPlacement`].
+/// Map an amicu [`Accelerator`] (`model` resolved with its `memory`) to a
+/// RunPod [`GpuPlacement`].
 pub fn gpu_placement(accelerator: &Accelerator) -> Result<GpuPlacement, RunPodError> {
     if accelerator.kind != AcceleratorKind::Gpu {
         return Err(RunPodError::InvalidGpu(format!(
@@ -181,7 +154,11 @@ pub fn gpu_placement(accelerator: &Accelerator) -> Result<GpuPlacement, RunPodEr
             accelerator.kind
         )));
     }
-    placement(&accelerator.model, accelerator.count)
+    placement(
+        &accelerator.model,
+        Some(accelerator.memory),
+        accelerator.count,
+    )
 }
 
 /// The `excludedTypes` for `type_id` in `pool`, from the live GPU catalog:
@@ -212,7 +189,34 @@ pub fn exclusions_from_catalog(
         .collect())
 }
 
-/// Map a Modal-style spec string (`"H100"`, `"H100:2"`) to a [`GpuPlacement`].
+/// Check that the live catalog's memory for `type_id` is the requested card's
+/// VRAM, so a RunPod type id that came to mean a different variant is caught
+/// before deploying. An entry without a memory figure is not checked.
+///
+/// # Errors
+/// [`RunPodError::InvalidGpu`] when the catalog lists a different memory size,
+/// or does not list `type_id` at all.
+pub fn verify_catalog_memory(
+    type_id: &str,
+    vram_gb: u32,
+    catalog: &[GpuType],
+) -> Result<(), RunPodError> {
+    let entry = catalog.iter().find(|g| g.id == type_id).ok_or_else(|| {
+        RunPodError::InvalidGpu(format!("RunPod's GPU catalog does not list `{type_id}`"))
+    })?;
+    match entry.memory {
+        Some(memory) if memory != vram_gb => Err(RunPodError::InvalidGpu(format!(
+            "RunPod's GPU catalog lists `{type_id}` with {memory} GB, but the requested card \
+             has {vram_gb} GB"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Map a Modal-style spec string (`"h100-sxm-80gb"`, `"h100-sxm-80gb:2"`) to
+/// a [`GpuPlacement`]. With no memory to go on, the model must name exactly
+/// one card on its own (a canonical id, an exact alias, or a single-card
+/// family such as `l4`).
 pub fn parse_gpu_spec(spec: &str) -> Result<GpuPlacement, RunPodError> {
     let (model, count) = match spec.split_once(':') {
         Some((model, count)) => {
@@ -224,16 +228,20 @@ pub fn parse_gpu_spec(spec: &str) -> Result<GpuPlacement, RunPodError> {
         }
         None => (spec, 1),
     };
-    placement(model.trim(), count)
+    placement(model.trim(), None, count)
 }
 
-fn placement(model: &str, count: u32) -> Result<GpuPlacement, RunPodError> {
+fn placement(
+    model: &str,
+    memory: Option<amicu_core::ByteSize>,
+    count: u32,
+) -> Result<GpuPlacement, RunPodError> {
     if count == 0 {
         return Err(RunPodError::InvalidGpu(
             "GPU count must be at least 1".into(),
         ));
     }
-    let card = card_for(model)?;
+    let (card, vram_gb) = card_for(model, memory)?;
     Ok(GpuPlacement {
         pools: vec![card.pool.to_owned()],
         count,
@@ -243,60 +251,99 @@ fn placement(model: &str, count: u32) -> Result<GpuPlacement, RunPodError> {
             .map(|c| c.type_id.to_owned())
             .collect(),
         type_id: card.type_id.to_owned(),
+        card_id: card.id.to_owned(),
+        vram_gb,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use amicu_core::resource::gpu_card;
     use amicu_core::units::ByteSize;
 
-    fn acc(kind: AcceleratorKind, model: &str, count: u32) -> Accelerator {
+    const GIB: u64 = 1 << 30;
+
+    fn acc(kind: AcceleratorKind, model: &str, count: u32, vram_gib: u64) -> Accelerator {
         Accelerator {
             kind,
             model: model.to_owned(),
             count,
-            memory: ByteSize::from_bytes(0),
+            memory: ByteSize::from_bytes(vram_gib * GIB),
             memory_bandwidth_gbps: None,
         }
     }
 
     fn placed(model: &str) -> GpuPlacement {
-        gpu_placement(&acc(AcceleratorKind::Gpu, model, 1)).unwrap()
+        parse_gpu_spec(model).unwrap_or_else(|e| panic!("{model}: {e}"))
+    }
+
+    #[test]
+    fn every_table_entry_is_a_catalog_card() {
+        let mut ids = std::collections::HashSet::new();
+        let mut type_ids = std::collections::HashSet::new();
+        for c in CARDS {
+            assert!(gpu_card(c.id).is_some(), "{} is not a catalog id", c.id);
+            assert!(ids.insert(c.id), "{}", c.id);
+            assert!(type_ids.insert(c.type_id), "{}", c.type_id);
+            // RunPod's own type id resolves back to the same card.
+            let vram = gpu_card(c.id).unwrap().memory();
+            assert_eq!(resolve_gpu(c.type_id, Some(vram)).unwrap().id, c.id);
+        }
     }
 
     #[test]
     fn maps_models_to_pools() {
-        for (model, pool) in [
-            ("h100", "ADA_80_PRO"),
-            ("H100", "ADA_80_PRO"),
-            ("a100", "AMPERE_80"),
-            ("l40s", "ADA_48_PRO"),
-            ("rtx-a6000", "AMPERE_48"),
-            ("rtx-4090", "ADA_24"),
-            ("NVIDIA GeForce RTX 4090", "ADA_24"),
-            ("rtx_3090", "AMPERE_24"),
-            ("rtx-a4000", "AMPERE_16"),
-            ("rtx-a4500", "AMPERE_16"),
-            ("rtx-a5000", "AMPERE_24"),
-            ("rtx-5090", "ADA_32_PRO"),
-            ("h200", "HOPPER_141"),
-            ("b200", "BLACKWELL_180"),
+        for (model, gib, pool) in [
+            ("h100-sxm-80gb", 80, "ADA_80_PRO"),
+            ("h100", 94, "ADA_80_PRO"),
+            ("a100-sxm4-80gb", 80, "AMPERE_80"),
+            ("l40s", 48, "ADA_48_PRO"),
+            ("rtx-a6000", 48, "AMPERE_48"),
+            ("rtx-4090", 24, "ADA_24"),
+            ("NVIDIA GeForce RTX 4090", 24, "ADA_24"),
+            ("rtx_3090", 24, "AMPERE_24"),
+            ("rtx-a4000", 16, "AMPERE_16"),
+            ("rtx-a4500", 20, "AMPERE_16"),
+            ("rtx-a5000", 24, "AMPERE_24"),
+            ("rtx-5090", 32, "ADA_32_PRO"),
+            ("h200", 141, "HOPPER_141"),
+            ("b200", 180, "BLACKWELL_180"),
             // RunPod's own GPU type names.
-            ("NVIDIA RTX 4000 Ada Generation", "AMPERE_16"),
-            ("NVIDIA RTX 6000 Ada Generation", "ADA_48_PRO"),
-            ("NVIDIA H100 80GB HBM3", "ADA_80_PRO"),
-            ("NVIDIA H100 PCIe", "ADA_80_PRO"),
-            ("NVIDIA H100 NVL", "ADA_80_PRO"),
-            ("NVIDIA A100-SXM4-80GB", "AMPERE_80"),
-            ("NVIDIA A100 80GB PCIe", "AMPERE_80"),
-            ("NVIDIA GeForce RTX 5090", "ADA_32_PRO"),
-            ("NVIDIA RTX A6000", "AMPERE_48"),
+            ("NVIDIA RTX 4000 Ada Generation", 20, "AMPERE_16"),
+            ("NVIDIA RTX 6000 Ada Generation", 48, "ADA_48_PRO"),
+            ("NVIDIA H100 80GB HBM3", 80, "ADA_80_PRO"),
+            ("NVIDIA H100 PCIe", 80, "ADA_80_PRO"),
+            ("NVIDIA H100 NVL", 94, "ADA_80_PRO"),
+            ("NVIDIA A100-SXM4-80GB", 80, "AMPERE_80"),
+            ("NVIDIA A100 80GB PCIe", 80, "AMPERE_80"),
+            ("NVIDIA GeForce RTX 5090", 32, "ADA_32_PRO"),
+            ("NVIDIA RTX A6000", 48, "AMPERE_48"),
         ] {
-            let p = placed(model);
+            let p = gpu_placement(&acc(AcceleratorKind::Gpu, model, 1, gib))
+                .unwrap_or_else(|e| panic!("{model}: {e}"));
             assert_eq!(p.pools, vec![pool.to_owned()], "{model}");
             assert_eq!(p.count, 1);
         }
+    }
+
+    #[test]
+    fn ambiguous_models_are_rejected_not_guessed() {
+        // Both A100 80 GB variants share a pool; a bare `a100` used to pick SXM.
+        let err = gpu_placement(&acc(AcceleratorKind::Gpu, "a100", 1, 80)).unwrap_err();
+        assert!(
+            matches!(err, RunPodError::InvalidGpu(ref m) if m.contains("ambiguous")),
+            "{err}"
+        );
+        assert!(matches!(
+            gpu_placement(&acc(AcceleratorKind::Gpu, "h100", 1, 80)),
+            Err(RunPodError::InvalidGpu(_))
+        ));
+        // A size the card does not have.
+        assert!(matches!(
+            gpu_placement(&acc(AcceleratorKind::Gpu, "h100-nvl-94gb", 1, 96)),
+            Err(RunPodError::InvalidGpu(_))
+        ));
     }
 
     #[test]
@@ -310,7 +357,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            placed("h100").excluded_types,
+            placed("h100-sxm-80gb").excluded_types,
             vec!["NVIDIA H100 PCIe", "NVIDIA H100 NVL"]
         );
         assert_eq!(
@@ -326,34 +373,24 @@ mod tests {
             ]
         );
         assert_eq!(placed("rtx-a6000").excluded_types, vec!["NVIDIA A40"]);
-        assert_eq!(placed("a100").excluded_types, vec!["NVIDIA A100 80GB PCIe"]);
+        assert_eq!(
+            placed("a100-sxm4-80gb").excluded_types,
+            vec!["NVIDIA A100 80GB PCIe"]
+        );
         assert!(
             placed("rtx-4090").excluded_types.is_empty(),
             "sole member of its pool"
         );
         assert!(
-            placed("h200").excluded_types.is_empty(),
+            placed("h200-sxm-141gb").excluded_types.is_empty(),
             "sole member of its pool"
         );
     }
 
     #[test]
-    fn table_has_no_duplicate_aliases_or_type_ids() {
-        let mut aliases = std::collections::HashSet::new();
-        let mut ids = std::collections::HashSet::new();
-        for c in CARDS {
-            assert!(ids.insert(c.type_id), "{}", c.type_id);
-            for a in c.aliases {
-                assert!(aliases.insert(*a), "{a}");
-                assert_eq!(normalize(a), *a, "alias must be pre-normalized");
-            }
-        }
-    }
-
-    #[test]
     fn new_blackwell_pools_and_members_are_known() {
         assert_eq!(
-            placed("rtx-pro-6000").excluded_types,
+            placed("rtx-pro-6000-96gb").excluded_types,
             vec![
                 "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
                 "NVIDIA RTX PRO 6000 Blackwell Server Edition"
@@ -363,23 +400,23 @@ mod tests {
         assert_eq!(placed("b300").pools, vec!["BLACKWELL_288"]);
     }
 
-    fn gt(id: &str, pool: Option<&str>) -> GpuType {
+    fn gt(id: &str, pool: Option<&str>, memory: Option<u32>) -> GpuType {
         GpuType {
             id: id.into(),
             name: String::new(),
             pool: pool.map(Into::into),
-            memory: None,
+            memory,
         }
     }
 
     #[test]
     fn catalog_exclusions_cover_every_other_pool_member() {
         let catalog = [
-            gt("NVIDIA L40S", Some("ADA_48_PRO")),
-            gt("NVIDIA L40", Some("ADA_48_PRO")),
-            gt("Brand New Card", Some("ADA_48_PRO")),
-            gt("NVIDIA A40", Some("AMPERE_48")),
-            gt("No Pool", None),
+            gt("NVIDIA L40S", Some("ADA_48_PRO"), None),
+            gt("NVIDIA L40", Some("ADA_48_PRO"), None),
+            gt("Brand New Card", Some("ADA_48_PRO"), None),
+            gt("NVIDIA A40", Some("AMPERE_48"), None),
+            gt("No Pool", None, None),
         ];
         assert_eq!(
             exclusions_from_catalog("NVIDIA L40S", "ADA_48_PRO", &catalog).unwrap(),
@@ -392,17 +429,41 @@ mod tests {
     }
 
     #[test]
-    fn count_is_carried_through() {
-        let p = gpu_placement(&acc(AcceleratorKind::Gpu, "h100", 4)).unwrap();
-        assert_eq!(p.count, 4);
+    fn catalog_memory_must_match_the_card() {
+        let catalog = [
+            gt("NVIDIA H100 NVL", Some("ADA_80_PRO"), Some(94)),
+            gt("NVIDIA H100 PCIe", Some("ADA_80_PRO"), Some(96)),
+            gt("NVIDIA L4", Some("AMPERE_24"), None),
+        ];
+        assert!(verify_catalog_memory("NVIDIA H100 NVL", 94, &catalog).is_ok());
+        let err = verify_catalog_memory("NVIDIA H100 PCIe", 80, &catalog).unwrap_err();
+        assert!(err.to_string().contains("96 GB"), "{err}");
+        // No figure to compare: not checked.
+        assert!(verify_catalog_memory("NVIDIA L4", 24, &catalog).is_ok());
+        assert!(verify_catalog_memory("NVIDIA B200", 180, &catalog).is_err());
     }
 
     #[test]
-    fn unknown_model_is_a_typed_error() {
+    fn count_is_carried_through() {
+        let p = gpu_placement(&acc(AcceleratorKind::Gpu, "h100-sxm-80gb", 4, 80)).unwrap();
+        assert_eq!(p.count, 4);
+        assert_eq!(p.card_id, "h100-sxm-80gb");
+        assert_eq!(p.vram_gb, 80);
+    }
+
+    #[test]
+    fn unknown_or_unserved_model_is_a_typed_error() {
         assert_eq!(
-            gpu_placement(&acc(AcceleratorKind::Gpu, "mi300x", 1)),
+            gpu_placement(&acc(AcceleratorKind::Gpu, "mi300x", 1, 192)),
             Err(RunPodError::UnknownGpu {
                 model: "mi300x".into()
+            })
+        );
+        // In the catalog, but RunPod serverless has no pool for it.
+        assert_eq!(
+            parse_gpu_spec("t4"),
+            Err(RunPodError::UnknownGpu {
+                model: "t4-16gb".into()
             })
         );
     }
@@ -410,11 +471,11 @@ mod tests {
     #[test]
     fn non_gpu_and_zero_count_are_rejected() {
         assert!(matches!(
-            gpu_placement(&acc(AcceleratorKind::Tpu, "h100", 1)),
+            gpu_placement(&acc(AcceleratorKind::Tpu, "h100-sxm-80gb", 1, 80)),
             Err(RunPodError::InvalidGpu(_))
         ));
         assert!(matches!(
-            gpu_placement(&acc(AcceleratorKind::Gpu, "h100", 0)),
+            gpu_placement(&acc(AcceleratorKind::Gpu, "h100-sxm-80gb", 0, 80)),
             Err(RunPodError::InvalidGpu(_))
         ));
     }
@@ -422,21 +483,28 @@ mod tests {
     #[test]
     fn parses_modal_style_specs() {
         assert_eq!(
-            parse_gpu_spec("H100:2").unwrap(),
+            parse_gpu_spec("h100-sxm-80gb:2").unwrap(),
             GpuPlacement {
                 pools: vec!["ADA_80_PRO".into()],
                 count: 2,
                 excluded_types: vec!["NVIDIA H100 PCIe".into(), "NVIDIA H100 NVL".into()],
                 type_id: "NVIDIA H100 80GB HBM3".into(),
+                card_id: "h100-sxm-80gb".into(),
+                vram_gb: 80,
             }
         );
-        assert_eq!(parse_gpu_spec("A100").unwrap().count, 1);
+        assert_eq!(parse_gpu_spec("L4").unwrap().count, 1);
+        // Without a memory size a family must be a single card.
         assert!(matches!(
-            parse_gpu_spec("H100:x"),
+            parse_gpu_spec("H100:1"),
             Err(RunPodError::InvalidGpu(_))
         ));
         assert!(matches!(
-            parse_gpu_spec("H100:0"),
+            parse_gpu_spec("l4:x"),
+            Err(RunPodError::InvalidGpu(_))
+        ));
+        assert!(matches!(
+            parse_gpu_spec("l4:0"),
             Err(RunPodError::InvalidGpu(_))
         ));
         assert!(matches!(

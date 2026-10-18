@@ -114,7 +114,7 @@ use crate::client::{
     RunPodClient, UpdateEndpoint, WorkersConfig,
 };
 use crate::error::RunPodError;
-use crate::hardware::{exclusions_from_catalog, gpu_placement};
+use crate::hardware::{exclusions_from_catalog, gpu_placement, verify_catalog_memory};
 use crate::regions::select_data_centers;
 
 /// The provider name the shared remote-launch renderer puts in its errors.
@@ -339,7 +339,8 @@ pub struct RunPodSupervisor {
     deployment_id: String,
     endpoint_name: String,
     gpu: Option<GpuRequest>,
-    gpu_type: Option<String>,
+    /// RunPod GPU type id of the requested card and its VRAM in GB.
+    gpu_type: Option<(String, u32)>,
     data_center_ids: Vec<String>,
     scaling: ScalingSettings,
     disk_gb: u32,
@@ -427,23 +428,25 @@ impl RunPodSupervisor {
             .map(gpu_placement)
             .transpose()
             .map_err(|e| runpod_err(&e))?;
-        self.gpu_type = placement.as_ref().map(|p| p.type_id.clone());
+        self.gpu_type = placement.as_ref().map(|p| (p.type_id.clone(), p.vram_gb));
         self.gpu = placement.map(GpuRequest::from);
         Ok(self)
     }
 
     /// Replaces the static `excludedTypes` with every other GPU type the live
-    /// catalog lists in the requested pool.
+    /// catalog lists in the requested pool, after checking that the live
+    /// entry's memory is the requested card's VRAM.
     fn exclude_from_catalog(
         &self,
         gpu: &mut GpuRequest,
         catalog: &[GpuType],
     ) -> Result<(), LlamaCppError> {
-        let (Some(type_id), [pool]) = (&self.gpu_type, gpu.pools.as_slice()) else {
+        let (Some((type_id, vram_gb)), [pool]) = (&self.gpu_type, gpu.pools.as_slice()) else {
             return Err(LlamaCppError::Supervisor(
                 "RunPod GPU placement needs exactly one pool and a known GPU type".to_owned(),
             ));
         };
+        verify_catalog_memory(type_id, *vram_gb, catalog).map_err(|e| runpod_err(&e))?;
         gpu.excluded_types =
             exclusions_from_catalog(type_id, pool, catalog).map_err(|e| runpod_err(&e))?;
         Ok(())

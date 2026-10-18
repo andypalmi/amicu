@@ -1103,10 +1103,21 @@ fn kv_cache_assumption(
 
 fn hardware_label(hardware: &HardwareProfile) -> String {
     match &hardware.accelerator {
-        Some(Accelerator {
-            kind, model, count, ..
-        }) => {
-            let base = format!("{}.{}", accelerator_token(*kind), model);
+        Some(
+            accelerator @ Accelerator {
+                kind, model, count, ..
+            },
+        ) => {
+            // A GPU shows the catalog card it resolved to, with its VRAM.
+            let base = match accelerator.gpu_card() {
+                Some(Ok(card)) => format!(
+                    "{}.{} ({} GB)",
+                    accelerator_token(*kind),
+                    card.id,
+                    card.vram_gb
+                ),
+                _ => format!("{}.{}", accelerator_token(*kind), model),
+            };
             // Single-accelerator output stays unchanged; only show a count
             // when it is above 1.
             if *count > 1 {
@@ -1207,9 +1218,13 @@ mod tests {
         let acc = hw.accelerator.as_mut().unwrap();
         acc.kind = AcceleratorKind::Gpu;
         acc.model = "l4".into();
-        assert_eq!(hardware_label(&hw), "gpu.l4");
+        acc.memory = ByteSize::from_bytes(24 * GIB);
+        assert_eq!(hardware_label(&hw), "gpu.l4-24gb (24 GB)");
         hw.accelerator.as_mut().unwrap().count = 2;
-        assert_eq!(hardware_label(&hw), "gpu.l4 x2");
+        assert_eq!(hardware_label(&hw), "gpu.l4-24gb (24 GB) x2");
+        // A model the catalog cannot resolve is shown as written.
+        hw.accelerator.as_mut().unwrap().model = "a100".into();
+        assert_eq!(hardware_label(&hw), "gpu.a100 x2");
     }
 
     fn deployment(extra_args: Vec<String>) -> Deployment {

@@ -153,7 +153,7 @@ struct GpuSpec {
 const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "gpu.rtx-4000-ada.1x",
-        model: "rtx-4000-ada",
+        model: "rtx-4000-ada-20gb",
         vram_gib: 20,
         vcpus: 24,
         host_mem_gib: 64,
@@ -162,7 +162,7 @@ const GPUS: &[GpuSpec] = &[
     },
     GpuSpec {
         id: "gpu.rtx-6000-ada.1x",
-        model: "rtx-6000-ada",
+        model: "rtx-6000-ada-48gb",
         vram_gib: 48,
         vcpus: 40,
         host_mem_gib: 128,

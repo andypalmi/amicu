@@ -338,7 +338,8 @@ fn private_eu_production_variants(preset: &Preset, base: &Graph) -> Vec<VariantS
         hw.region = None;
         if let Some(accel) = hw.accelerator.as_mut() {
             accel.kind = AcceleratorKind::Gpu;
-            accel.model = "a10g".to_string();
+            accel.model = "a10g-24gb".to_string();
+            accel.memory = ByteSize::from_bytes(24 * GIB);
         }
     }
     let decoy_reason = hard_violation(preset, &decoy)
@@ -348,7 +349,7 @@ fn private_eu_production_variants(preset: &Preset, base: &Graph) -> Vec<VariantS
     if let Some(hw) = cost_optimized.hardware_profiles.first_mut()
         && let Some(accel) = hw.accelerator.as_mut()
     {
-        accel.model = "l40s".to_string();
+        accel.model = "l40s-48gb".to_string();
         accel.memory = ByteSize::from_bytes(48 * GIB);
     }
 
@@ -419,6 +420,8 @@ fn cost_optimized_batch_variants(base: &Graph) -> Vec<VariantSpec> {
     if let Some(hw) = quality_optimized.hardware_profiles.first_mut() {
         hw.memory = ByteSize::from_bytes(80 * GIB);
         if let Some(accel) = hw.accelerator.as_mut() {
+            // 40 GB per card needs a card that has it: an A10G has 24 GB.
+            accel.model = "a100-sxm4-40gb".to_string();
             accel.memory = ByteSize::from_bytes(40 * GIB);
         }
     }
@@ -457,7 +460,7 @@ fn internal_knowledge_chatbot_variants(base: &Graph) -> Vec<VariantSpec> {
     if let Some(hw) = cost_optimized.hardware_profiles.first_mut()
         && let Some(accel) = hw.accelerator.as_mut()
     {
-        accel.model = "l40s".to_string();
+        accel.model = "l40s-48gb".to_string();
         accel.memory = ByteSize::from_bytes(48 * GIB);
     }
 
@@ -522,7 +525,7 @@ fn customer_support_assistant_variants(base: &Graph) -> Vec<VariantSpec> {
     if let Some(hw) = cost_optimized.hardware_profiles.first_mut()
         && let Some(accel) = hw.accelerator.as_mut()
     {
-        accel.model = "a10g".to_string();
+        accel.model = "a10g-24gb".to_string();
         accel.memory = ByteSize::from_bytes(24 * GIB);
     }
 
@@ -589,7 +592,7 @@ fn document_extraction_pipeline_variants(base: &Graph) -> Vec<VariantSpec> {
     if let Some(hw) = quality_optimized.hardware_profiles.first_mut() {
         hw.memory = ByteSize::from_bytes(80 * GIB);
         if let Some(accel) = hw.accelerator.as_mut() {
-            accel.model = "l40s".to_string();
+            accel.model = "l40s-48gb".to_string();
             accel.memory = ByteSize::from_bytes(48 * GIB);
         }
     }
@@ -627,7 +630,7 @@ fn code_assistant_endpoint_variants(base: &Graph) -> Vec<VariantSpec> {
     if let Some(hw) = cost_optimized.hardware_profiles.first_mut()
         && let Some(accel) = hw.accelerator.as_mut()
     {
-        accel.model = "l40s".to_string();
+        accel.model = "l40s-48gb".to_string();
         accel.memory = ByteSize::from_bytes(48 * GIB);
     }
 
@@ -693,7 +696,7 @@ fn api_replacement_migration_variants(base: &Graph) -> Vec<VariantSpec> {
     if let Some(hw) = cost_optimized.hardware_profiles.first_mut()
         && let Some(accel) = hw.accelerator.as_mut()
     {
-        accel.model = "a10g".to_string();
+        accel.model = "a10g-24gb".to_string();
         accel.memory = ByteSize::from_bytes(24 * GIB);
     }
 
@@ -760,7 +763,7 @@ fn custom_stack_variants(base: &Graph) -> Vec<VariantSpec> {
     if let Some(hw) = performance_optimized.hardware_profiles.first_mut() {
         hw.memory = ByteSize::from_bytes(160 * GIB);
         if let Some(accel) = hw.accelerator.as_mut() {
-            accel.model = "a100".to_string();
+            accel.model = "a100-sxm4-80gb".to_string();
             accel.memory = ByteSize::from_bytes(80 * GIB);
         }
     }

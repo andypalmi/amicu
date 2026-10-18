@@ -42,7 +42,7 @@ Nothing to set up yet: nothing connects to AWS today. The adapter is modelled on
 | `provider` | string | none | yes | `"aws"`. |
 | `region` | string | none | no | One of the region codes below. Used for residency checks and cost estimates. |
 | `accelerator.kind` | string | none | yes (with `accelerator`) | `gpu`. |
-| `accelerator.model` | string | none | yes (with `accelerator`) | A GPU model from the table below. |
+| `accelerator.model` | string | none | yes (with `accelerator`) | A GPU id from the table below, or any name that resolves to it (see [GPU names](/docs/configuration/hardware-profile#gpu-names)). |
 | `accelerator.count` | number | none | yes (with `accelerator`) | Number of accelerators. |
 | `accelerator.memory` | size | none | yes (with `accelerator`) | VRAM, for the fit check. |
 | `memory` | size | none | yes | Host RAM. |
@@ -63,13 +63,13 @@ These are the generic [`hardware_profile`](/docs/configuration/hardware-profile)
 | `us-west-2` | Oregon | `us` |
 | `ap-southeast-1` | Singapore | `apac` |
 
-| Instance type | GPU model |
+| Instance type | GPU (`accelerator.model`) |
 |---|---|
-| `p5.48xlarge` | `h100` |
-| `p4d.24xlarge` | `a100` |
-| `g6e.xlarge` | `l40s` |
-| `g6.xlarge` | `l4` |
-| `g5.xlarge` | `a10g` |
+| `p5.48xlarge` | `h100-sxm-80gb` |
+| `p4d.24xlarge` | `a100-sxm4-40gb` |
+| `g6e.xlarge` | `l40s-48gb` |
+| `g6.xlarge` | `l4-24gb` |
+| `g5.xlarge` | `a10g-24gb` |
 
 ## Limits
 

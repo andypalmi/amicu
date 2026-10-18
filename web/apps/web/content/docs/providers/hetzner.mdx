@@ -17,7 +17,7 @@ resource "hardware_profile" "hetzner_gpu" {
   region   = "fsn1"
   accelerator {
     kind   = "gpu"
-    model  = "rtx-4000-ada"
+    model  = "rtx-4000-ada-20gb"
     count  = 1
     memory = "20GiB"
   }
@@ -44,7 +44,7 @@ The adapter authenticates to the hcloud API with an API token sent as a bearer t
 | `provider` | string | none | yes | `"hetzner"`. |
 | `region` | string | none | no | One of the region codes below. Used for residency checks and cost estimates. |
 | `accelerator.kind` | string | none | yes (with `accelerator`) | `gpu`. |
-| `accelerator.model` | string | none | yes (with `accelerator`) | A GPU model from the table below. |
+| `accelerator.model` | string | none | yes (with `accelerator`) | A GPU id from the table below, or any name that resolves to it (see [GPU names](/docs/configuration/hardware-profile#gpu-names)). |
 | `accelerator.count` | number | none | yes (with `accelerator`) | Number of accelerators. |
 | `accelerator.memory` | size | none | yes (with `accelerator`) | VRAM, for the fit check. |
 | `memory` | size | none | yes | Host RAM. |
@@ -65,8 +65,8 @@ These are the generic [`hardware_profile`](/docs/configuration/hardware-profile)
 
 | `model` | VRAM |
 |---|---|
-| `rtx-4000-ada` | 20 GiB |
-| `rtx-6000-ada` | 48 GiB |
+| `rtx-4000-ada-20gb` | 20 GiB |
+| `rtx-6000-ada-48gb` | 48 GiB |
 
 ## Limits
 

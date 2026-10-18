@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use super::gpu::{GpuCard, GpuResolveError, resolve_gpu};
 use super::{Money, Region};
 use crate::id::HardwareProfileId;
 use crate::units::ByteSize;
@@ -31,7 +32,9 @@ pub struct HardwareProfile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Accelerator {
     pub kind: AcceleratorKind,
-    /// Accelerator model, e.g. `"h100"`, `"m3_max"`.
+    /// Accelerator model. For a GPU, a canonical catalog id such as
+    /// `"h100-sxm-80gb"` (or a name that resolves to one, see
+    /// [`resolve_gpu`]); for Apple Silicon the chip id, e.g. `"m3_max"`.
     pub model: String,
     pub count: u32,
     /// Memory per accelerator.
@@ -41,6 +44,15 @@ pub struct Accelerator {
     /// check (`amicu_registry::fit`), which evaluates capacity only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_bandwidth_gbps: Option<u32>,
+}
+
+impl Accelerator {
+    /// The catalog card this GPU accelerator names: `model` resolved with
+    /// `memory` (see [`resolve_gpu`]). `None` for a non-GPU accelerator.
+    #[must_use]
+    pub fn gpu_card(&self) -> Option<Result<&'static GpuCard, GpuResolveError>> {
+        (self.kind == AcceleratorKind::Gpu).then(|| resolve_gpu(&self.model, Some(self.memory)))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -7,7 +7,7 @@
       "context_length": 8192,
       "deployment_id": "02020202-0202-4202-8202-020202020202",
       "hardware": {
-        "accelerator": "h100-80gb",
+        "accelerator": "h100-sxm-80gb",
         "accelerator_count": 1,
         "cpu_cores": 24,
         "memory_bytes": 274877906944,

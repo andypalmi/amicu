@@ -43,7 +43,7 @@ resource "hardware_profile" "gpu_a100" {
   region   = "eu-west"
   accelerator {
     kind   = "gpu"
-    model  = "a100-80gb"
+    model  = "a100-sxm4-80gb"
     count  = 2
     memory = "80GiB"
   }

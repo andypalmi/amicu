@@ -224,7 +224,13 @@ pub fn modal_proxy_region(region: Option<&str>) -> &'static str {
 /// figure when one is unambiguously available.
 struct GpuSpec {
     id: &'static str,
+    /// Modal's `gpu=` string.
     model: &'static str,
+    /// The card's canonical GPU catalog id ([`amicu_core::resource::gpu_card`]),
+    /// which is what the offering's `accelerator.model` carries. Modal runs
+    /// H100/H200 as SXM (Modal GPU guide); A100 is assumed SXM4 and
+    /// RTX-PRO-6000 the Server Edition (not documented by Modal).
+    card: &'static str,
     vram_gib: u32,
     /// Maximum GPUs of this kind per Modal container (`gpu="<model>:<max_count>"`).
     max_count: u32,
@@ -260,6 +266,7 @@ const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "t4",
         model: "T4",
+        card: "t4-16gb",
         vram_gib: 16,
         max_count: 8,
         per_gpu_hourly: 0.5904,
@@ -270,6 +277,7 @@ const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "l4",
         model: "L4",
+        card: "l4-24gb",
         vram_gib: 24,
         max_count: 8,
         per_gpu_hourly: 0.7992,
@@ -280,6 +288,7 @@ const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "a10",
         model: "A10",
+        card: "a10-24gb",
         vram_gib: 24,
         max_count: 4,
         per_gpu_hourly: 1.1016,
@@ -290,6 +299,7 @@ const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "l40s",
         model: "L40S",
+        card: "l40s-48gb",
         vram_gib: 48,
         max_count: 8,
         per_gpu_hourly: 1.9512,
@@ -300,6 +310,7 @@ const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "a100-40gb",
         model: "A100-40GB",
+        card: "a100-sxm4-40gb",
         vram_gib: 40,
         max_count: 8,
         per_gpu_hourly: 2.0988,
@@ -310,6 +321,7 @@ const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "a100-80gb",
         model: "A100-80GB",
+        card: "a100-sxm4-80gb",
         vram_gib: 80,
         max_count: 8,
         per_gpu_hourly: 2.4984,
@@ -322,6 +334,7 @@ const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "h100",
         model: "H100",
+        card: "h100-sxm-80gb",
         vram_gib: 80,
         max_count: 8,
         per_gpu_hourly: 3.9492,
@@ -332,6 +345,7 @@ const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "h200",
         model: "H200",
+        card: "h200-sxm-141gb",
         vram_gib: 141,
         max_count: 8,
         per_gpu_hourly: 4.5396,
@@ -342,6 +356,7 @@ const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "b200",
         model: "B200",
+        card: "b200-180gb",
         vram_gib: 180,
         max_count: 8,
         per_gpu_hourly: 6.2496,
@@ -353,6 +368,7 @@ const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "rtx-pro-6000",
         model: "RTX-PRO-6000",
+        card: "rtx-pro-6000-server-96gb",
         vram_gib: 96,
         max_count: 1,
         per_gpu_hourly: 3.0312,
@@ -362,6 +378,13 @@ const GPUS: &[GpuSpec] = &[
         availability: AvailabilityState::Available,
     },
 ];
+
+/// Modal's `gpu=` string for a canonical GPU catalog id (`"h100-sxm-80gb"`
+/// -> `"H100"`), or `None` when Modal does not offer that card.
+#[must_use]
+pub fn modal_gpu(card_id: &str) -> Option<&'static str> {
+    GPUS.iter().find(|g| g.card == card_id).map(|g| g.model)
+}
 
 /// Modal's price multiplier for a broad region (`us`, `eu`, `ap`).
 const BROAD_REGION_MULTIPLIER: f64 = 1.15;
@@ -392,7 +415,7 @@ fn offering(g: &GpuSpec, count: u32, region_codes: &[String]) -> ComputeOffering
         id: format!("gpu.{}.{count}x", g.id),
         accelerator: Some(Accelerator {
             kind: AcceleratorKind::Gpu,
-            model: g.model.into(),
+            model: g.card.into(),
             count,
             memory: format!("{}GiB", g.vram_gib).parse().expect("valid size"),
             memory_bandwidth_gbps: g.memory_bandwidth_gbps,

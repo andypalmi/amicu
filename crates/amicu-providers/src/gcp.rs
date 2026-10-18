@@ -147,7 +147,7 @@ struct GpuSpec {
 const GPUS: &[GpuSpec] = &[
     GpuSpec {
         id: "a3-highgpu-8g",
-        model: "nvidia-h100-80gb",
+        model: "h100-sxm-80gb",
         count: 8,
         vram_gib: 80,
         vcpus: 208,
@@ -158,7 +158,7 @@ const GPUS: &[GpuSpec] = &[
     },
     GpuSpec {
         id: "a2-ultragpu-1g",
-        model: "nvidia-a100-80gb",
+        model: "a100-sxm4-80gb",
         count: 1,
         vram_gib: 80,
         vcpus: 12,
@@ -169,7 +169,7 @@ const GPUS: &[GpuSpec] = &[
     },
     GpuSpec {
         id: "g2-standard-8",
-        model: "nvidia-l4",
+        model: "l4-24gb",
         count: 1,
         vram_gib: 24,
         vcpus: 8,
@@ -180,7 +180,7 @@ const GPUS: &[GpuSpec] = &[
     },
     GpuSpec {
         id: "n1-standard-8",
-        model: "nvidia-tesla-t4",
+        model: "t4-16gb",
         count: 1,
         vram_gib: 16,
         vcpus: 8,
@@ -655,7 +655,7 @@ mod tests {
             .expect("a3-highgpu-8g offering present");
         let accel = a3.accelerator.as_ref().expect("accelerator present");
         assert_eq!(accel.count, 8);
-        assert_eq!(accel.model, "nvidia-h100-80gb");
+        assert_eq!(accel.model, "h100-sxm-80gb");
         // Memory is per accelerator (80 GiB per H100), not the aggregate.
         assert_eq!(accel.memory, "80GiB".parse().unwrap());
     }

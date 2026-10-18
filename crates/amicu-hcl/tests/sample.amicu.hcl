@@ -36,7 +36,7 @@ resource "hardware_profile" "a100_cloud" {
   region   = "us-east-1"
   accelerator {
     kind   = "gpu"
-    model  = "a100"
+    model  = "a100-sxm4-80gb"
     count  = 2
     memory = "80GiB"
   }
