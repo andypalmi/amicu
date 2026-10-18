@@ -1167,6 +1167,41 @@ async fn a_delete_refused_for_live_workers_is_retried_a_bounded_number_of_times(
 }
 
 #[tokio::test]
+async fn stop_errors_when_an_unconfirmed_404_keeps_secrets() {
+    let (sup, _) = stopper(stop_mock(404));
+    let sup = sup.with_recorded_secrets(vec!["recorded-secret".into()]);
+    let err = sup.stop(&handle()).await.unwrap_err().to_string();
+    assert!(err.contains("`recorded-secret`"), "{err}");
+    assert!(err.contains("could not be confirmed"), "{err}");
+    assert!(err.contains("kept"), "{err}");
+
+    let (sup, _) = stopper(stop_mock(404));
+    sup.stop(&handle()).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_delete_refused_with_409_or_a_detail_less_400_is_retried() {
+    for refusal in [Canned::Status(409, ""), Canned::Status(400, "")] {
+        let mock = stop_mock(204).first(
+            HttpMethod::Delete,
+            "/serverless/ep1",
+            &[refusal, Canned::Status(204, "")],
+        );
+        let (sup, mock) = stopper(mock);
+        sup.stop(&handle()).await.unwrap();
+        assert_eq!(mock.count(HttpMethod::Delete, "/serverless/ep1"), 2);
+    }
+}
+
+#[tokio::test]
+async fn a_failed_delete_after_the_drain_says_it_is_scaled_to_zero_but_tracked() {
+    let (sup, _) = stopper(stop_mock(500));
+    let err = sup.stop(&handle()).await.unwrap_err().to_string();
+    assert!(err.contains("scaled to zero"), "{err}");
+    assert!(err.contains("still recorded"), "{err}");
+}
+
+#[tokio::test]
 async fn secrets_stay_when_the_endpoint_delete_is_not_confirmed() {
     let (sup, mock) = stopper(stop_mock(500));
     let err = sup.stop(&handle()).await.unwrap_err().to_string();

@@ -1010,16 +1010,15 @@ impl RunPodSupervisor {
 
     /// `DELETE`s endpoint `id`, retrying (bounded by
     /// [`with_stop_retry`](Self::with_stop_retry)) while RunPod refuses it
-    /// with an error that mentions workers.
+    /// with HTTP 400 or 409 (live workers; the detail may be withheld).
     async fn delete_endpoint_retrying(&self, id: &str) -> Result<DeleteOutcome, LlamaCppError> {
         let attempts = self.stop_retry.attempts.max(1);
         let mut attempt = 1;
         loop {
             match self.client.delete_endpoint(id).await {
                 Ok(outcome) => return Ok(outcome),
-                Err(e)
-                    if attempt < attempts
-                        && e.to_string().to_ascii_lowercase().contains("worker") =>
+                Err(RunPodError::Conflict { .. } | RunPodError::BadRequest { status: 400, .. })
+                    if attempt < attempts =>
                 {
                     attempt += 1;
                     tokio::time::sleep(self.stop_retry.delay).await;
@@ -1054,11 +1053,25 @@ impl RunPodSupervisor {
             }),
             ..UpdateEndpoint::default()
         };
-        let _ = self.client.update_endpoint(&handle.id, &drain).await;
+        let drained = self
+            .client
+            .update_endpoint(&handle.id, &drain)
+            .await
+            .is_ok();
 
         // The endpoint first: its secrets are only removed once RunPod has
         // confirmed it is gone, never before.
-        let outcome = self.delete_endpoint_retrying(&handle.id).await?;
+        let outcome = match self.delete_endpoint_retrying(&handle.id).await {
+            Ok(o) => o,
+            Err(e) if drained => {
+                return Err(LlamaCppError::Supervisor(format!(
+                    "RunPod endpoint {} was scaled to zero workers but could not be deleted, \
+                     so it is still recorded (the deployment is down but tracked): {e}",
+                    handle.id
+                )));
+            }
+            Err(e) => return Err(e),
+        };
         for name in &self.recorded_secrets {
             self.note_secret(name);
         }
@@ -1248,7 +1261,20 @@ impl ProcessSupervisor for RunPodSupervisor {
     /// [`StopOutcome::AlreadyGone`] keeps its secrets in
     /// [`created_secrets`](RunPodSupervisor::created_secrets).
     async fn stop(&self, handle: &RuntimeHandle) -> Result<(), LlamaCppError> {
-        self.stop_endpoint(handle).await.map(|_| ())
+        match self.stop_endpoint(handle).await? {
+            StopOutcome::Deleted => Ok(()),
+            StopOutcome::AlreadyGone { kept_secrets } if kept_secrets.is_empty() => Ok(()),
+            StopOutcome::AlreadyGone { kept_secrets } => Err(LlamaCppError::Supervisor(format!(
+                "RunPod endpoint {} was already gone, but the account could not be \
+                     confirmed, so these secrets were kept: {}",
+                handle.id,
+                kept_secrets
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))),
+        }
     }
 }
 
