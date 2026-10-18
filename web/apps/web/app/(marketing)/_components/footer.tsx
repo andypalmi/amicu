@@ -19,6 +19,12 @@ export function SiteFooter() {
         <div className="flex flex-col items-center gap-1">
           <Brand className="text-lg" />
           <span className="text-muted-foreground">Open source under AGPL-3.0.</span>
+          {legalPages.privacy ? (
+            <span className="text-muted-foreground">
+              No tracking cookies. No cookie banner.{' '}
+              <Link className="underline hover:text-foreground" href="/privacy">Privacy</Link>
+            </span>
+          ) : null}
         </div>
         <div className="flex flex-col items-center gap-3">
           <nav aria-label="Footer" className="flex flex-wrap justify-center gap-x-6 gap-y-2">
