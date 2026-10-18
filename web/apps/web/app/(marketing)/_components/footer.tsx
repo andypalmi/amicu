@@ -22,6 +22,7 @@ export function SiteFooter() {
         </div>
         <div className="flex flex-col items-center gap-3">
           <nav aria-label="Footer" className="flex flex-wrap justify-center gap-x-6 gap-y-2">
+            <Link className={linkCls} href="/install">Install</Link>
             <Link className={linkCls} href="/docs/quickstart">Quickstart</Link>
             <Link className={linkCls} href="/docs">Docs</Link>
             <Link className={linkCls} href="/pricing">Pricing</Link>

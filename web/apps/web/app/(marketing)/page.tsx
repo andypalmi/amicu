@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { Button, cn } from '@amicu/ui';
 import { appName, appTagline, siteUrl } from '@/lib/shared';
 import { ApplyDemo } from './_components/apply-demo';
+import { InstallTabs } from './_components/install';
 import { HclCode, Transcript } from './_components/code';
 import {
   DiffBody,
@@ -99,6 +100,18 @@ export default function LandingPage() {
           </Button>
         </div>
         <ApplyDemo className={cn(GAP_HEAD, 'lg:mt-8')} />
+      </HomeSection>
+
+      {/* Install */}
+      <HomeSection id="install">
+        <Headline>Install in one line.</Headline>
+        <InstallTabs className={cn(GAP_HEAD, 'max-w-3xl')} />
+        <p className="mt-6 text-sm text-muted-foreground">
+          Other options and manual downloads:{' '}
+          <Link href="/install" className="text-foreground underline underline-offset-4">
+            install guide
+          </Link>
+        </p>
       </HomeSection>
 
       {/* Describe, apply */}

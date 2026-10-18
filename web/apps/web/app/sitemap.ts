@@ -10,6 +10,7 @@ import { siteUrl } from '@/lib/shared';
 
 const marketingRoutes = [
   '/',
+  '/install',
   '/pricing',
   '/providers',
   '/security',

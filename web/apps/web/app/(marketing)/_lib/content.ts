@@ -12,6 +12,17 @@ import { gitConfig } from '@/lib/shared';
 export const githubUrl = `https://github.com/${gitConfig.user}/${gitConfig.repo}`;
 /** The docs quickstart (install the CLI, `amicu init`, plan, apply). */
 export const quickstartUrl = '/docs/quickstart';
+/** Prebuilt binaries for manual download. */
+export const releasesUrl = `${githubUrl}/releases`;
+/** Install commands, kept in step with README.md and the docs quickstart. */
+export const installCommands = {
+  unix: { label: 'macOS / Linux', command: 'curl -LsSf https://amicu.dev/install.sh | sh' },
+  brew: { label: 'Homebrew', command: 'brew install andypalmi/tap/amicu' },
+  windows: {
+    label: 'Windows (PowerShell)',
+    command: 'powershell -ExecutionPolicy Bypass -c "irm https://amicu.dev/install.ps1 | iex"',
+  },
+} as const;
 /**
  * Issue tracker, used as a public support channel (general contact is
  * `company.contactEmail` in `lib/legal/company.ts`).
