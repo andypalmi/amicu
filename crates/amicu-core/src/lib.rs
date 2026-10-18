@@ -10,6 +10,7 @@ pub mod diagnostic;
 pub mod estimate;
 pub mod graph;
 pub mod id;
+pub mod naming;
 pub mod resource;
 pub mod secret;
 pub mod units;

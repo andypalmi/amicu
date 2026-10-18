@@ -297,6 +297,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "amicu-runpod"
+version = "0.1.3"
+dependencies = [
+ "amicu-core",
+ "amicu-providers",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "amicu-runtime"
 version = "0.1.3"
 dependencies = [
