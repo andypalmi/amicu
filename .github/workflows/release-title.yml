@@ -1,0 +1,24 @@
+# Custom dist job (post-announce-jobs): cargo-dist titles the GitHub release
+# from the CHANGELOG heading ("0.1.3 - 2026-10-17"). Reset it to the bare tag.
+name: Release title
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  retitle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set release title to the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+        run: gh release edit "$TAG" --title "$TAG"
