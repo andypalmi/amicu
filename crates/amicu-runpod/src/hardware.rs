@@ -9,12 +9,15 @@
 //! silent fallback, so a deployment never lands on different hardware than the
 //! plan said.
 //!
-//! The table below is static. It should be checked against the `pool` and `id`
-//! fields of `GET /v2/catalog/gpus`; a card RunPod later adds to a pool is not
-//! excluded until it is added here.
+//! The table below is static and serves alias -> type id / pool resolution
+//! and offline planning. At deploy time the exclusion list is recomputed from
+//! the live `GET /v2/catalog/gpus` ([`exclusions_from_catalog`]), so a card
+//! RunPod later adds to a pool is still excluded; the table's own
+//! `excluded_types` are only the offline approximation.
 
 use amicu_core::resource::{Accelerator, AcceleratorKind};
 
+use crate::client::GpuType;
 use crate::error::RunPodError;
 
 /// One GPU type: normalized aliases (see [`normalize`]), its serverless pool,
@@ -92,7 +95,47 @@ const CARDS: &[Card] = &[
         "BLACKWELL_96",
         "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
     ),
+    card(
+        &[
+            "RTXPRO6000MAXQ",
+            "RTXPRO6000BLACKWELLMAXQ",
+            "RTXPRO6000BLACKWELLMAXQWORKSTATIONEDITION",
+        ],
+        "BLACKWELL_96",
+        "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    ),
+    card(
+        &[
+            "RTXPRO6000SERVER",
+            "RTXPRO6000BLACKWELLSERVER",
+            "RTXPRO6000BLACKWELLSERVEREDITION",
+        ],
+        "BLACKWELL_96",
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    ),
+    // MIG slices of the RTX PRO 6000 Server Edition share pools with whole
+    // cards; listed so they are excluded when the whole card is requested.
+    card(
+        &["RTXPRO6000BLACKWELLSERVEREDITIONMIG2G48GB"],
+        "ADA_48_PRO",
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb",
+    ),
+    card(
+        &["RTXPRO6000BLACKWELLSERVEREDITIONMIG1G24GB"],
+        "AMPERE_24",
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 1g.24gb",
+    ),
+    card(
+        &["RTXPRO4500", "RTXPRO4500BLACKWELL"],
+        "BLACKWELL_32",
+        "NVIDIA RTX PRO 4500 Blackwell",
+    ),
     card(&["B200"], "BLACKWELL_180", "NVIDIA B200"),
+    card(
+        &["B300", "B300SXM6", "B300SXM6AC"],
+        "BLACKWELL_288",
+        "NVIDIA B300 SXM6 AC",
+    ),
 ];
 
 /// Where a deployment's GPUs go: the pool ids to list under `gpu.pools`, the
@@ -106,6 +149,8 @@ pub struct GpuPlacement {
     pub count: u32,
     /// GPU type ids excluded so only the requested card is eligible.
     pub excluded_types: Vec<String>,
+    /// RunPod's GPU type id of the requested card (`"NVIDIA L40S"`).
+    pub type_id: String,
 }
 
 /// Upper-case, keep only `[A-Z0-9]`, drop `NVIDIA` / `GEFORCE`.
@@ -139,6 +184,34 @@ pub fn gpu_placement(accelerator: &Accelerator) -> Result<GpuPlacement, RunPodEr
     placement(&accelerator.model, accelerator.count)
 }
 
+/// The `excludedTypes` for `type_id` in `pool`, from the live GPU catalog:
+/// every other type RunPod lists in that pool, so only the requested card is
+/// eligible even after RunPod adds a card the static table does not know.
+///
+/// # Errors
+/// [`RunPodError::InvalidGpu`] when the catalog does not list `type_id` in
+/// `pool` (the static table is out of date; deploying could land elsewhere).
+pub fn exclusions_from_catalog(
+    type_id: &str,
+    pool: &str,
+    catalog: &[GpuType],
+) -> Result<Vec<String>, RunPodError> {
+    let members: Vec<&GpuType> = catalog
+        .iter()
+        .filter(|g| g.pool.as_deref() == Some(pool))
+        .collect();
+    if !members.iter().any(|g| g.id == type_id) {
+        return Err(RunPodError::InvalidGpu(format!(
+            "RunPod's GPU catalog does not list `{type_id}` in pool `{pool}`"
+        )));
+    }
+    Ok(members
+        .into_iter()
+        .filter(|g| g.id != type_id)
+        .map(|g| g.id.clone())
+        .collect())
+}
+
 /// Map a Modal-style spec string (`"H100"`, `"H100:2"`) to a [`GpuPlacement`].
 pub fn parse_gpu_spec(spec: &str) -> Result<GpuPlacement, RunPodError> {
     let (model, count) = match spec.split_once(':') {
@@ -169,6 +242,7 @@ fn placement(model: &str, count: u32) -> Result<GpuPlacement, RunPodError> {
             .filter(|c| c.pool == card.pool && c.type_id != card.type_id)
             .map(|c| c.type_id.to_owned())
             .collect(),
+        type_id: card.type_id.to_owned(),
     })
 }
 
@@ -229,7 +303,11 @@ mod tests {
     fn only_the_requested_card_stays_eligible() {
         assert_eq!(
             placed("l40s").excluded_types,
-            vec!["NVIDIA L40", "NVIDIA RTX 6000 Ada Generation"]
+            vec![
+                "NVIDIA L40",
+                "NVIDIA RTX 6000 Ada Generation",
+                "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb"
+            ]
         );
         assert_eq!(
             placed("h100").excluded_types,
@@ -241,7 +319,11 @@ mod tests {
         );
         assert_eq!(
             placed("rtx_3090").excluded_types,
-            vec!["NVIDIA L4", "NVIDIA RTX A5000"]
+            vec![
+                "NVIDIA L4",
+                "NVIDIA RTX A5000",
+                "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 1g.24gb"
+            ]
         );
         assert_eq!(placed("rtx-a6000").excluded_types, vec!["NVIDIA A40"]);
         assert_eq!(placed("a100").excluded_types, vec!["NVIDIA A100 80GB PCIe"]);
@@ -266,6 +348,47 @@ mod tests {
                 assert_eq!(normalize(a), *a, "alias must be pre-normalized");
             }
         }
+    }
+
+    #[test]
+    fn new_blackwell_pools_and_members_are_known() {
+        assert_eq!(
+            placed("rtx-pro-6000").excluded_types,
+            vec![
+                "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+                "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+            ]
+        );
+        assert_eq!(placed("rtx-pro-4500").pools, vec!["BLACKWELL_32"]);
+        assert_eq!(placed("b300").pools, vec!["BLACKWELL_288"]);
+    }
+
+    fn gt(id: &str, pool: Option<&str>) -> GpuType {
+        GpuType {
+            id: id.into(),
+            name: String::new(),
+            pool: pool.map(Into::into),
+            memory: None,
+        }
+    }
+
+    #[test]
+    fn catalog_exclusions_cover_every_other_pool_member() {
+        let catalog = [
+            gt("NVIDIA L40S", Some("ADA_48_PRO")),
+            gt("NVIDIA L40", Some("ADA_48_PRO")),
+            gt("Brand New Card", Some("ADA_48_PRO")),
+            gt("NVIDIA A40", Some("AMPERE_48")),
+            gt("No Pool", None),
+        ];
+        assert_eq!(
+            exclusions_from_catalog("NVIDIA L40S", "ADA_48_PRO", &catalog).unwrap(),
+            vec!["NVIDIA L40", "Brand New Card"]
+        );
+        assert!(matches!(
+            exclusions_from_catalog("NVIDIA L40S", "AMPERE_48", &catalog),
+            Err(RunPodError::InvalidGpu(_))
+        ));
     }
 
     #[test]
@@ -303,7 +426,8 @@ mod tests {
             GpuPlacement {
                 pools: vec!["ADA_80_PRO".into()],
                 count: 2,
-                excluded_types: vec!["NVIDIA H100 PCIe".into(), "NVIDIA H100 NVL".into()]
+                excluded_types: vec!["NVIDIA H100 PCIe".into(), "NVIDIA H100 NVL".into()],
+                type_id: "NVIDIA H100 80GB HBM3".into(),
             }
         );
         assert_eq!(parse_gpu_spec("A100").unwrap().count, 1);

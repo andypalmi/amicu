@@ -320,8 +320,47 @@ fn exposure_round_trips_through_json() {
         EndpointExposure::Public {
             gateway: GatewayAuth::None,
         },
+        EndpointExposure::Public {
+            gateway: GatewayAuth::RunPodBearer,
+        },
     ] {
         let json = serde_json::to_string(&e).unwrap();
         assert_eq!(serde_json::from_str::<EndpointExposure>(&json).unwrap(), e);
     }
+}
+
+#[test]
+fn runpod_bearer_serializes_stably_and_needs_no_extra_headers() {
+    // Recorded in state: the wire name must never drift.
+    assert_eq!(
+        serde_json::to_string(&GatewayAuth::RunPodBearer).unwrap(),
+        "\"runpod_bearer\""
+    );
+    assert!(!GatewayAuth::RunPodBearer.needs_extra_headers());
+    assert!(!GatewayAuth::None.needs_extra_headers());
+    assert!(GatewayAuth::ModalProxyToken.needs_extra_headers());
+}
+
+/// A RunPod-style gateway: one `Authorization: Bearer` header is checked by
+/// the gateway and forwarded to the runtime, so the shared check runs with no
+/// gateway headers: anonymous is refused, the key works.
+#[tokio::test]
+async fn a_runpod_bearer_endpoint_passes_with_no_gateway_headers() {
+    let url = serve(|r| {
+        if has_key(r) {
+            "200 OK"
+        } else {
+            "401 Unauthorized"
+        }
+    })
+    .await;
+    verify_endpoint(&check(&url, &key(), &[])).await.unwrap();
+
+    // A gateway that lets anonymous requests through is still an exposure.
+    let open = serve(|_| "200 OK").await;
+    let err = verify_endpoint(&check(&open, &key(), &[]))
+        .await
+        .unwrap_err();
+    assert!(err.detail().contains("unauthenticated request"), "{err}");
+    assert!(!err.to_string().contains(KEY));
 }

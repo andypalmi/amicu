@@ -12,12 +12,21 @@ amicu-core = { path = "../amicu-core" }
 # The `HttpTransport` seam, the shared residency / data-center table, and the
 # error-mapping conventions the other REST providers use.
 amicu-providers = { path = "../amicu-providers" }
+# `supervisor.rs`: `RunPodSupervisor` implements `amicu_llamacpp::ProcessSupervisor`
+# (an `#[async_trait]`) and renders the launch with the shared remote-container
+# rewrite in `amicu_llamacpp::remote`. Neither crate depends back on this one.
+amicu-llamacpp = { path = "../amicu-llamacpp" }
+amicu-runtime = { path = "../amicu-runtime" }
+async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Content-addressed secret names and the endpoint owner marker.
+sha2 = "0.10"
 thiserror = "2"
+# The readiness wait's backoff sleeps and deadline.
+tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
-async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt"] }
 
 [lints]

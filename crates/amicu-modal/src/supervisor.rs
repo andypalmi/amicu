@@ -20,10 +20,10 @@
 //!
 //! Mapping a vLLM launch onto a Modal [`ServerSpec`] (see each item's own doc
 //! comment for the reasoning): `argv` is `RenderedLaunch::Command`'s, with
-//! `--host 127.0.0.1` rewritten to `0.0.0.0` ([`bind_all_interfaces`] - Modal
+//! `--host 127.0.0.1` rewritten to `0.0.0.0` ([`remote::bind_all_interfaces`] - Modal
 //! reaches the container over its internal network, never loopback); the
 //! model reference must be a Hugging Face repo id, not a local path Modal's
-//! container cannot see ([`reject_local_path_model`]); `gpu` is the hardware
+//! container cannot see ([`remote::reject_local_path_model`]); `gpu` is the hardware
 //! profile's [`Accelerator`] rendered as Modal's `"<MODEL>:<count>"` string
 //! ([`gpu_string`] - a **hand-maintained coupling**, not validated against
 //! `amicu-providers::modal`'s GPU catalog, although this crate does now
@@ -51,17 +51,14 @@
 //!   model that is not on Hugging Face is rejected with a clear error.
 //!   `HF_TOKEN` is forwarded through `secret_env` exactly as for vLLM.
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use amicu_core::ByteSize;
 use amicu_core::resource::ScalingSettings;
-use amicu_core::resource::{
-    Accelerator, AcceleratorKind, Cpu, HardwareProfile, Model, Runtime, SourceRegistry,
-};
+use amicu_core::resource::{Accelerator, AcceleratorKind, Cpu, HardwareProfile, Model, Runtime};
+use amicu_llamacpp::remote::{self, RemoteEnv};
 use amicu_llamacpp::{LlamaCppError, ProcessSupervisor, ResolvedSecret};
-use amicu_registry::GgufResolver;
 use amicu_runtime::{
     EndpointExposure, GatewayAuth, LaunchPlan, LogOptions, LogStream, RuntimeHandle, RuntimeKind,
     RuntimeMetrics, RuntimeStatus,
@@ -81,7 +78,7 @@ use crate::image::ImageSpec;
 /// [`VLLM_IMAGE_ENV_VAR`]. Must already contain Python and vLLM on `PATH`
 /// (see `crate::image::ImageSpec::base_registry_image`'s doc comment) - the
 /// official `vllm/vllm-openai` tags do.
-pub const DEFAULT_VLLM_IMAGE: &str = "vllm/vllm-openai:v0.29.0";
+pub const DEFAULT_VLLM_IMAGE: &str = remote::DEFAULT_VLLM_IMAGE;
 
 /// Environment variable overriding [`DEFAULT_VLLM_IMAGE`]. There is no HCL
 /// schema seam for this today (see the module docs), so this is the entire
@@ -97,7 +94,7 @@ pub const VLLM_IMAGE_ENV_VAR: &str = "AMICU_MODAL_VLLM_IMAGE";
 /// on 2026-10-10; the image ships `llama-server` at `/app/llama-server` with
 /// `ENTRYPOINT ["/app/llama-server"]` and no Python (see
 /// [`llamacpp_setup_commands`]).
-pub const DEFAULT_LLAMACPP_IMAGE: &str = "ghcr.io/ggml-org/llama.cpp:server-cuda-b11515";
+pub const DEFAULT_LLAMACPP_IMAGE: &str = remote::DEFAULT_LLAMACPP_IMAGE;
 
 /// Environment variable overriding [`DEFAULT_LLAMACPP_IMAGE`]; same
 /// semantics as [`VLLM_IMAGE_ENV_VAR`].
@@ -185,7 +182,7 @@ pub fn vllm_setup_commands() -> Vec<String> {
 /// through Modal's Secret mechanism (never baked into the image). Like
 /// [`VLLM_IMAGE_ENV_VAR`], this is read fresh on every `start()` call, not
 /// cached.
-pub const HF_TOKEN_ENV_VAR: &str = "HF_TOKEN";
+pub const HF_TOKEN_ENV_VAR: &str = remote::HF_TOKEN_ENV_VAR;
 
 /// Persistent Modal Volumes every Modal-deployed vLLM server mounts, as
 /// `(volume name, container mount path)` pairs. Created if missing
@@ -237,16 +234,8 @@ pub struct ModalSupervisor {
     deployed_app: Arc<Mutex<Option<String>>>,
 }
 
-/// A GGUF file on Hugging Face: what a Modal-deployed llama-server fetches
-/// with `-hf <repo> -hff <file>` instead of the local `-m <path>` the
-/// renderer emits.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GgufSource {
-    /// Hugging Face repo id (`org/model`).
-    pub repo: String,
-    /// File name within the repo.
-    pub file: String,
-}
+/// A GGUF file on Hugging Face (shared with the other remote backends).
+pub use amicu_llamacpp::remote::GgufSource;
 
 impl ModalSupervisor {
     /// A supervisor for `app_name`, with no GPU/region constraint yet. Valid
@@ -346,17 +335,7 @@ impl ModalSupervisor {
     /// registry or no variants. A no-op for vLLM launches.
     #[must_use]
     pub fn with_gguf_model(mut self, model: &Model) -> Self {
-        self.gguf = (model.source.registry == SourceRegistry::HuggingFace)
-            .then(|| {
-                GgufResolver::from_variants(&model.variants)
-                    .recommended()
-                    .cloned()
-            })
-            .flatten()
-            .map(|variant| GgufSource {
-                repo: model.source.reference.clone(),
-                file: variant.file,
-            });
+        self.gguf = GgufSource::for_model(model);
         self
     }
 
@@ -407,155 +386,21 @@ fn gpu_string(accelerator: &Accelerator) -> Result<String, LlamaCppError> {
     })
 }
 
-/// Whether `model_reference` looks like a local filesystem path rather than
-/// a Hugging Face repo id (`"org/model"`). Deliberately conservative - it
-/// only catches the unambiguous cases (a leading `/`, `./`, `../`, or `~`) -
-/// because false positives here would block a legitimate deploy, whereas a
-/// false negative just reaches Modal's own "no such repo" error instead of
-/// amicu's clearer one.
-#[must_use]
-fn looks_like_local_path(model_reference: &str) -> bool {
-    model_reference.starts_with('/')
-        || model_reference.starts_with("./")
-        || model_reference.starts_with("../")
-        || model_reference.starts_with('~')
-}
+#[cfg(test)]
+use amicu_core::resource::SourceRegistry;
+#[cfg(test)]
+use amicu_llamacpp::remote::{
+    LLAMA_LOCAL_PATH_FLAGS, LLAMA_SECRET_FLAGS, bind_all_interfaces, is_llama_server,
+    model_reference,
+};
 
-/// llama-server flags that name a Hugging Face repo (`-hf <repo>[:quant]`).
-const LLAMA_HF_FLAGS: [&str; 3] = ["-hf", "-hfr", "--hf-repo"];
-/// llama-server flags that name a local model file.
-const LLAMA_MODEL_FLAGS: [&str; 2] = ["-m", "--model"];
-/// llama-server flags whose value is a local file path (besides the model
-/// and draft model handled separately).
-const LLAMA_LOCAL_PATH_FLAGS: [&str; 7] = [
-    "--mmproj",
-    "-mm",
-    "--chat-template-file",
-    "--lora",
-    "--lora-scaled",
-    "--control-vector",
-    "--control-vector-scaled",
-];
-/// llama-server flags that carry (or point at) a secret; baked into the image
-/// argv they would leak.
-const LLAMA_SECRET_FLAGS: [&str; 4] = ["-hft", "--hf-token", "--api-key-file", "--api-key"];
-/// llama-server flags that name a speculative-decoding draft model (a local
-/// path when rendered by amicu).
-const LLAMA_DRAFT_FLAGS: [&str; 3] = ["-md", "--model-draft", "--spec-draft-model"];
+/// The provider name the shared remote-launch renderer puts in its errors.
+const PROVIDER: &str = "Modal";
 
-/// Whether `argv` is a `llama-server` launch (`argv[0]` is `llama-server`,
-/// bare or by absolute path).
-fn is_llama_server(argv: &[String]) -> bool {
-    argv.first()
-        .is_some_and(|a| a == "llama-server" || a.ends_with("/llama-server"))
-}
-
-/// The first of `flags` present in `argv[1..]`, as `--flag value` or
-/// `--flag=value`.
-fn first_flag<'a>(argv: &[String], flags: &[&'a str]) -> Option<&'a str> {
-    argv.iter().skip(1).find_map(|arg| {
-        let name = arg.split_once('=').map_or(arg.as_str(), |(n, _)| n);
-        flags.iter().copied().find(|f| *f == name)
-    })
-}
-
-/// The value of the first of `flags` in `argv[1..]`, accepting both
-/// `--flag value` and `--flag=value`.
-fn flag_value<'a>(argv: &'a [String], flags: &[&str]) -> Option<&'a str> {
-    let mut rest = argv.iter().skip(1);
-    while let Some(arg) = rest.next() {
-        if flags.contains(&arg.as_str()) {
-            return rest.next().map(String::as_str);
-        }
-        if let Some((name, value)) = arg.split_once('=')
-            && flags.contains(&name)
-        {
-            return Some(value);
-        }
-    }
-    None
-}
-
-/// The rendered model reference from a launch `argv`, if the shape matches:
-/// `["vllm", "serve", "<model>", ...]` for vLLM, or a `llama-server` argv,
-/// where a Hugging Face reference (`-hf <repo>[:quant]`) wins over a model
-/// file (`-m <path>`, what the amicu renderer emits).
-fn model_reference(argv: &[String]) -> Option<&str> {
-    if is_llama_server(argv) {
-        return flag_value(argv, &LLAMA_HF_FLAGS).or_else(|| flag_value(argv, &LLAMA_MODEL_FLAGS));
-    }
-    (argv.first().map(String::as_str) == Some("vllm")
-        && argv.get(1).map(String::as_str) == Some("serve"))
-    .then(|| argv.get(2).map(String::as_str))
-    .flatten()
-}
-
-/// `argv` without any `-m`/`--model` model-file flag (and its value).
-fn without_model_file(argv: &[String]) -> Vec<String> {
-    let mut out = Vec::with_capacity(argv.len());
-    let mut iter = argv.iter().enumerate();
-    while let Some((i, arg)) = iter.next() {
-        if i > 0 && LLAMA_MODEL_FLAGS.contains(&arg.as_str()) {
-            iter.next();
-        } else if i > 0
-            && arg
-                .split_once('=')
-                .is_some_and(|(name, _)| LLAMA_MODEL_FLAGS.contains(&name))
-        {
-            // `--model=<path>` carries its value inline.
-        } else {
-            out.push(arg.clone());
-        }
-    }
-    out
-}
-
-/// Refuses a launch whose model reference is a local path: Modal's
-/// container has no access to the operator's filesystem, so the server there
-/// must be given a Hugging Face repo id (vLLM) or `-hf` GGUF repo
-/// (llama-server).
+/// [`amicu_llamacpp::remote::reject_local_path_model`] for Modal (test helper).
+#[cfg(test)]
 fn reject_local_path_model(argv: &[String]) -> Result<(), LlamaCppError> {
-    if is_llama_server(argv) && flag_value(argv, &LLAMA_HF_FLAGS).is_none() {
-        // A llama-server `-m` value is always a file path, however relative
-        // (the amicu renderer emits `models/<id>/<file>`), so it never
-        // reaches `looks_like_local_path`'s prefix heuristic.
-        if let Some(path) = flag_value(argv, &LLAMA_MODEL_FLAGS) {
-            return Err(LlamaCppError::Supervisor(format!(
-                "Modal deployments need a Hugging Face GGUF reference (a model whose source \
-                 registry is hugging_face, e.g. 'ggml-org/gemma-3-1b-it-GGUF'), not a local \
-                 model file; got '{path}' - Modal's container cannot see this machine's \
-                 filesystem"
-            )));
-        }
-    }
-    match model_reference(argv) {
-        Some(reference) if looks_like_local_path(reference) => {
-            Err(LlamaCppError::Supervisor(format!(
-                "Modal deployments need a Hugging Face model id (e.g. \
-                 'meta-llama/Llama-3.1-8B-Instruct'), not a local path; got '{reference}' - \
-                 Modal's container cannot see this machine's filesystem"
-            )))
-        }
-        _ => Ok(()),
-    }
-}
-
-/// Rewrites `--host 127.0.0.1` (what `amicu_vllm::command::render_command`
-/// always renders) to `--host 0.0.0.0`. See the module docs for why this
-/// happens here rather than in the vLLM renderer.
-fn bind_all_interfaces(argv: &[String]) -> Vec<String> {
-    let mut out = argv.to_vec();
-    if let Some(pos) = out.iter().position(|a| a == "--host") {
-        if let Some(value) = out.get_mut(pos + 1) {
-            "0.0.0.0".clone_into(value);
-        } else {
-            out.push("0.0.0.0".to_owned());
-        }
-    } else {
-        out.push("--host".to_owned());
-        out.push("0.0.0.0".to_owned());
-    }
-    out
+    remote::reject_local_path_model(argv, PROVIDER)
 }
 
 /// Folds a [`ModalError`] into the [`LlamaCppError`] the `ProcessSupervisor`
@@ -643,106 +488,17 @@ impl ModalSupervisor {
             .reduce(u64::saturating_add)
     }
 
-    /// Validates a llama-server launch for Modal and rewrites its model flags
-    /// (see [`ModalSupervisor::rewrite_gguf_args`]). Rejects, before any RPC,
-    /// flags that point at this machine's filesystem
-    /// ([`LLAMA_LOCAL_PATH_FLAGS`]) or would bake a secret into the image's
-    /// argv ([`LLAMA_SECRET_FLAGS`]; only the flag name is reported, never a
-    /// value). `-hf` auto-downloads the repo's multimodal projector, so
-    /// `--no-mmproj` is appended unless the deployment declared `multimodal`.
-    fn hf_llama_argv(
-        &self,
-        argv: &[String],
-        has_multimodal: bool,
-    ) -> Result<Vec<String>, LlamaCppError> {
-        if !is_llama_server(argv) {
-            return Err(LlamaCppError::Supervisor(
-                "the Modal supervisor expected a `llama-server` command for a llama.cpp launch"
-                    .to_owned(),
-            ));
-        }
-        if let Some(flag) = first_flag(argv, &LLAMA_LOCAL_PATH_FLAGS) {
-            return Err(LlamaCppError::Supervisor(format!(
-                "'{flag}' is not supported on Modal yet: it names a local file Modal's \
-                 container cannot see"
-            )));
-        }
-        if let Some(flag) = first_flag(argv, &LLAMA_SECRET_FLAGS) {
-            return Err(LlamaCppError::Supervisor(format!(
-                "'{flag}' is not allowed on Modal: it would bake a secret into the container \
-                 image's command line; pass the Hugging Face token as the HF_TOKEN secret \
-                 instead"
-            )));
-        }
-        let mut out = self.rewrite_gguf_args(argv)?;
-        if !has_multimodal && first_flag(&out, &["--no-mmproj"]).is_none() {
-            out.push("--no-mmproj".to_owned());
-        }
-        Ok(out)
-    }
-
-    /// The llama-server argv for a Modal container: the renderer's local
-    /// `-m <path>` is replaced by `-hf <repo> -hff <file>` from
-    /// [`ModalSupervisor::with_gguf_model`] (unless the launch already names a
-    /// Hugging Face repo itself), and anything that points at this machine's
-    /// filesystem is rejected.
-    fn rewrite_gguf_args(&self, argv: &[String]) -> Result<Vec<String>, LlamaCppError> {
-        if flag_value(argv, &LLAMA_DRAFT_FLAGS).is_some() {
-            return Err(LlamaCppError::Supervisor(
-                "speculative decoding (a draft model) is not yet supported on Modal: the draft \
-                 GGUF is a local path Modal's container cannot see"
-                    .to_owned(),
-            ));
-        }
-        if flag_value(argv, &LLAMA_HF_FLAGS).is_some() {
-            let out = without_model_file(argv);
-            reject_local_path_model(&out)?;
-            return Ok(out);
-        }
-        let Some(source) = &self.gguf else {
-            // No Hugging Face source known: surface the local-path error.
-            reject_local_path_model(argv)?;
-            return Err(LlamaCppError::Supervisor(
-                "Modal deployments need a Hugging Face GGUF reference (a model whose source \
-                 registry is hugging_face, with at least one variant)"
-                    .to_owned(),
-            ));
-        };
-        let mut out = without_model_file(argv);
-        out.splice(
-            1..1,
-            [
-                "-hf".to_owned(),
-                source.repo.clone(),
-                "-hff".to_owned(),
-                source.file.clone(),
-            ],
-        );
-        reject_local_path_model(&out)?;
-        Ok(out)
-    }
-
     /// The argv the Modal container actually runs for `plan`: the renderer's
-    /// local launch with the Modal rewrites applied (`-hf`/`-hff` and
-    /// `--no-mmproj` for llama.cpp, `--host 0.0.0.0` for both). Single source
-    /// of truth for [`ModalSupervisor::build_spec`] and `amicu plan`'s display.
+    /// local launch with the remote rewrites applied (`-hf`/`-hff` and
+    /// `--no-mmproj` for llama.cpp, `--host 0.0.0.0` for both; see
+    /// [`amicu_llamacpp::remote::launch_argv`]). Single source of truth for
+    /// [`ModalSupervisor::build_spec`] and `amicu plan`'s display.
     ///
     /// # Errors
     /// [`LlamaCppError::Supervisor`] if `plan` is not a command launch or names
     /// something Modal cannot reach (a local model path, a secret flag, ...).
     pub fn launch_argv(&self, plan: &LaunchPlan) -> Result<Vec<String>, LlamaCppError> {
-        let argv = plan.rendered.argv().ok_or_else(|| {
-            LlamaCppError::Supervisor("Modal supervisor expects a command launch".to_owned())
-        })?;
-        Ok(match &plan.settings {
-            Runtime::Vllm(_) => {
-                reject_local_path_model(argv)?;
-                bind_all_interfaces(argv)
-            }
-            Runtime::LlamaCpp(s) => {
-                bind_all_interfaces(&self.hf_llama_argv(argv, s.multimodal.is_some())?)
-            }
-        })
+        remote::launch_argv(plan, self.gguf.as_ref(), PROVIDER)
     }
 
     /// [`ModalSupervisor::launch_argv`] as one shell-quoted line, for display.
@@ -764,7 +520,7 @@ impl ModalSupervisor {
     /// # Errors
     /// - [`LlamaCppError::Supervisor`] if `plan` is not a vLLM launch, is not
     ///   a [`amicu_runtime::RenderedLaunch::Command`], names a local-path
-    ///   model (see [`reject_local_path_model`]), or has a settings `env` key
+    ///   model (see [`remote::reject_local_path_model`]), or has a settings `env` key
     ///   that collides with a resolved secret name (ambiguous - which one
     ///   should win is not guessable, same rule
     ///   `amicu_llamacpp::ServiceSupervisor::start` applies to the local
@@ -783,45 +539,25 @@ impl ModalSupervisor {
         base_registry_image: &str,
         hf_token_fallback: Option<&str>,
     ) -> Result<ServerSpec, LlamaCppError> {
-        let (settings_env, port, runtime) = match &plan.settings {
-            Runtime::Vllm(s) => (&s.env, s.port, RuntimeKind::Vllm),
-            Runtime::LlamaCpp(s) => (&s.env, s.port, RuntimeKind::LlamaCpp),
+        let (port, runtime) = match &plan.settings {
+            Runtime::Vllm(s) => (s.port, RuntimeKind::Vllm),
+            Runtime::LlamaCpp(s) => (s.port, RuntimeKind::LlamaCpp),
         };
         let argv = self.launch_argv(plan)?;
 
-        if let Some(s) = secrets.iter().find(|s| settings_env.contains_key(&s.name)) {
-            return Err(LlamaCppError::Supervisor(format!(
-                "env var '{}' is set both by the deployment's `env` block and a resolved secret",
-                s.name
-            )));
-        }
-
-        let mut image_env: BTreeMap<String, String> = settings_env
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        // Settings `env` becomes image env, every resolved secret (plus the
+        // documented `HF_TOKEN` fallback, read from the operator's own
+        // environment, never the deployment's) becomes Modal Secret env.
+        let RemoteEnv {
+            plain: mut image_env,
+            secret: secret_env,
+        } = remote::split_env(plan, secrets, hf_token_fallback)?;
         if runtime == RuntimeKind::LlamaCpp {
             // `-hf` downloads land here, on the Volume mounted at the same
             // path. A value the deployment's own `env` block set wins.
             image_env
                 .entry("LLAMA_CACHE".to_owned())
                 .or_insert_with(|| LLAMA_CACHE_PATH.to_owned());
-        }
-
-        let mut secret_env = BTreeMap::new();
-        for secret in secrets {
-            let value = secret.value.expose_secret_str().map_err(|_| {
-                LlamaCppError::Supervisor(format!("secret '{}' is not valid utf-8", secret.name))
-            })?;
-            secret_env.insert(secret.name.clone(), value.to_owned());
-        }
-        // Documented fallback (see the module docs and `HF_TOKEN_ENV_VAR`):
-        // read from the operator's own environment, never the deployment's.
-        if !secret_env.contains_key(HF_TOKEN_ENV_VAR)
-            && !image_env.contains_key(HF_TOKEN_ENV_VAR)
-            && let Some(token) = hf_token_fallback
-        {
-            secret_env.insert(HF_TOKEN_ENV_VAR.to_owned(), token.to_owned());
         }
 
         Ok(ServerSpec {
