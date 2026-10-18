@@ -18,7 +18,7 @@ export function InstallCommand({
 }) {
   return (
     <MockWindow title={title} action={<CopyButton />} className={className}>
-      <pre className="whitespace-pre-wrap break-all px-4 py-4 font-mono text-xs leading-6 sm:text-[0.8125rem]">
+      <pre className="whitespace-pre-wrap break-words px-4 py-4 font-mono text-xs leading-6 sm:text-[0.8125rem]">
         <code>{command}</code>
       </pre>
     </MockWindow>
