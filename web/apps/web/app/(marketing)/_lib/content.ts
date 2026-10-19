@@ -262,12 +262,15 @@ export interface Provider {
   exampleGpus: string;
   /** Remote GPU cloud that `amicu apply` deploys to. */
   cloud?: true;
-  /** Hourly cost, only where the docs state one. */
+  /** Hourly cost, from the provider's pricing page; indicative, not a live quote. */
   hourlyCost?: string;
 }
 
 /** Stated in the RunPod docs page (Serverless billing); indicative, not a live quote. */
 export const RUNPOD_24GB_HOURLY = '$0.69';
+
+/** modal.com/pricing, L4 at $0.000222/s (checked 2026-10-19); indicative, not a live quote. */
+export const MODAL_L4_HOURLY = '$0.80';
 
 // Verified against crates/amicu-cli/src/commands/apply.rs (dispatch is local
 // launchd/systemd, Modal or RunPod) and the catalogs in crates/amicu-providers.
@@ -292,6 +295,7 @@ export const providers: Provider[] = [
     status: 'supported',
     residency: 'Region pinning, EU included (for example eu-west)',
     exampleGpus: 'T4, L4, L40S, A100, H100',
+    hourlyCost: `About ${MODAL_L4_HOURLY} per hour for an L4 (24 GB), billed per second`,
   },
   {
     slug: 'hetzner',
