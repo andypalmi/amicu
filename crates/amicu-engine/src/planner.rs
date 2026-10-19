@@ -1219,6 +1219,7 @@ mod tests {
             memory: ByteSize::from_bytes(48 * GIB),
             interconnect: None,
             price: None,
+            runpod: None,
         }
     }
 

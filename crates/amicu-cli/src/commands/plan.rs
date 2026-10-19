@@ -6,6 +6,7 @@ use std::io::Write;
 use amicu_core::diagnostic::{DiagnosticReport, Severity};
 use amicu_core::graph::Graph;
 use amicu_core::id::DeploymentId;
+use amicu_core::resource::{HardwareProfile, RunpodCloud, RunpodMode};
 use amicu_modal::ModalSupervisor;
 use amicu_modal::supervisor::project_app_name;
 use amicu_plan::Plan;
@@ -113,12 +114,12 @@ pub(crate) fn run_with_host(
     }
 
     if output.is_json() {
-        let switches = provider_switches(&result, &stops, project_id.as_deref());
+        let switches = provider_switches(&result, &graph, &stops, project_id.as_deref());
         let mut plan = result.plan.clone();
         add_switch_actions(&mut plan, &switches);
         write_json(out, &plan)?;
     } else {
-        let switches = provider_switches(&result, &stops, project_id.as_deref());
+        let switches = provider_switches(&result, &graph, &stops, project_id.as_deref());
         print_human_with(&result, &graph, &switches, out)?;
     }
     Ok(0)
@@ -184,6 +185,7 @@ impl OldInstance {
 /// Destroys are not switches.
 pub(crate) fn provider_switches(
     result: &PlanResult,
+    graph: &Graph,
     stops: &[StopRecord],
     project_id: Option<&str>,
 ) -> ProviderSwitches {
@@ -193,7 +195,13 @@ pub(crate) fn provider_switches(
         let (backend, identity) = match item.action.provider.as_deref() {
             Some("modal") => (Backend::Modal, project_id.map(|p| project_app_name(p, id))),
             Some("runpod") => (
-                Backend::Runpod,
+                if runpod_hardware(graph, &item.deployment)
+                    .is_some_and(|h| h.runpod_mode() == RunpodMode::Pod)
+                {
+                    Backend::RunpodPod
+                } else {
+                    Backend::Runpod
+                },
                 project_id.map(|p| amicu_runpod::project_endpoint_name(p, id)),
             ),
             _ => {
@@ -342,6 +350,11 @@ pub(crate) fn print_human_with(
                     None => io(writeln!(out, "      target:   {provider}"))?,
                 }
             }
+            if item.launch.is_some()
+                && let Some(billing) = runpod_billing(graph, &item.deployment)
+            {
+                io(writeln!(out, "      billing:  {billing}"))?;
+            }
             if let Some(artifact) = &item.action.artifact {
                 io(writeln!(out, "      artifact: {}", artifact.name))?;
             }
@@ -402,6 +415,35 @@ pub(crate) fn print_human_with(
         }
     }
     Ok(())
+}
+
+/// The hardware profile of `deployment` when it runs on RunPod.
+fn runpod_hardware<'g>(graph: &'g Graph, deployment: &DeploymentId) -> Option<&'g HardwareProfile> {
+    let d = graph.deployments.iter().find(|d| &d.id == deployment)?;
+    graph
+        .hardware_profiles
+        .iter()
+        .find(|h| h.id == d.hardware_profile && h.provider == "runpod")
+}
+
+/// How a RunPod deployment is billed, with a static hourly estimate when one
+/// is known for its GPU.
+fn runpod_billing(graph: &Graph, deployment: &DeploymentId) -> Option<String> {
+    let hw = runpod_hardware(graph, deployment)?;
+    let acc = hw.accelerator.as_ref();
+    Some(match hw.runpod_mode() {
+        RunpodMode::Pod => {
+            let community = hw.runpod.and_then(|r| r.cloud) == Some(RunpodCloud::Community);
+            match acc.and_then(amicu_runpod::pod_hourly_usd) {
+                Some(usd) if !community => format!("always on \u{b7} ~${usd:.2}/hr"),
+                _ => "always on".to_owned(),
+            }
+        }
+        RunpodMode::Serverless => match acc.and_then(amicu_runpod::serverless_hourly_usd) {
+            Some(usd) => format!("scale to zero \u{b7} ~${usd:.2}/hr while active"),
+            None => "scale to zero".to_owned(),
+        },
+    })
 }
 
 /// The launch line `ModalSupervisor` would really send for `item`, or `None`
@@ -556,6 +598,7 @@ mod tests {
             memory: ByteSize::from_bytes(48 * GIB),
             interconnect: None,
             price: None,
+            runpod: None,
         });
         g.deployments.push(Deployment {
             scaling: None,

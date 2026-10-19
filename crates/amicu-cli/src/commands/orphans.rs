@@ -922,6 +922,7 @@ mod tests {
                 memory: amicu_core::ByteSize::from_bytes(1 << 30),
                 interconnect: None,
                 price: None,
+                runpod: None,
             });
         let from_config = Tracked::default().with_config(Some(&graph));
         let report = discover(&env(Platform::Other, &exec, &modal, None), &from_config);

@@ -150,6 +150,7 @@ fn sample_hardware() -> HardwareProfile {
         price: Some(Price {
             per_hour: Money::new(1.5, "USD"),
         }),
+        runpod: None,
     }
 }
 

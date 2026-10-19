@@ -541,6 +541,34 @@ async fn a_patched_running_pod_is_restarted_and_its_old_container_not_trusted() 
     assert_eq!(count(&mock, HttpMethod::Get, HEALTH), 1, "only the new one");
 }
 
+#[tokio::test(start_paused = true)]
+async fn the_restart_retries_and_the_readiness_wait_share_one_deadline() {
+    let timing = ReadinessTiming {
+        timeout: Duration::from_millis(300),
+        ..FAST
+    };
+    let mut action = vec![Canned::Status(409, r#"{"detail":"not running"}"#); 50];
+    action.push(Canned::Status(200, pod("STARTING")));
+    let mock = happy_mock()
+        .first(
+            HttpMethod::Get,
+            POD,
+            &[
+                Canned::Status(200, pod("RUNNING")),
+                Canned::Status(200, pod("STARTING")),
+            ],
+        )
+        .ok(HttpMethod::Patch, POD, 200, pod("STARTING"))
+        .first(HttpMethod::Post, ACTION, &action);
+    let (sup, mock) = supervisor(mock);
+    let sup = sup.with_recorded_pod("pod1").with_readiness_timing(timing);
+    let started = tokio::time::Instant::now();
+    let err = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    assert!(err_text(&err).contains("did not become ready"), "{err:?}");
+    assert_eq!(count(&mock, HttpMethod::Post, ACTION), 51);
+    assert!(started.elapsed() <= timing.timeout + timing.max_backoff);
+}
+
 #[tokio::test]
 async fn an_unchanged_pod_is_neither_patched_nor_restarted() {
     let (probe, _) = supervisor(Mock::default());

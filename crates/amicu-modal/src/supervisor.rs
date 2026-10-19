@@ -1218,6 +1218,7 @@ mod tests {
             memory: ByteSize::from_bytes(0),
             interconnect: None,
             price: None,
+            runpod: None,
         };
         assert!(ModalSupervisor::for_hardware("amicu-x", &hardware).is_err());
     }
@@ -1232,6 +1233,7 @@ mod tests {
             memory,
             interconnect: None,
             price: None,
+            runpod: None,
         }
     }
 

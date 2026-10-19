@@ -316,6 +316,13 @@ fn hardware_block(h: &HardwareProfile) -> Block {
                 .build(),
         );
     }
+    if let Some(r) = &h.runpod {
+        let mut rb = Block::builder("runpod").add_attribute(("mode", variant(&r.mode)));
+        if let Some(cloud) = &r.cloud {
+            rb = rb.add_attribute(("cloud", variant(cloud)));
+        }
+        body = body.add_block(rb.build());
+    }
     resource("hardware_profile", h.id.as_str(), body.build())
 }
 

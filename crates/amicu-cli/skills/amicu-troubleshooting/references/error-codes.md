@@ -51,6 +51,10 @@ signal; the number identifies the specific check.
   message lists (`a100-sxm4-80gb`, `a100-pcie-80gb`, ...).
 - `AMICU-CAP-013` - the GPU model is not in the GPU catalog. Error on `modal`
   and `runpod` (they place GPUs by catalog id), warning elsewhere.
+- `AMICU-CAP-014` - a hardware profile's `runpod {}` block does not fit: it is
+  set on another provider, sets `cloud` outside `mode = "pod"`, a pod has
+  `scaling {}` other than one replica, or a pods-only GPU is used in serverless
+  mode (add `runpod { mode = "pod" }`).
 - `AMICU-MEM-001` / `AMICU-MEM-002` - capacity/memory fit failures.
 - `AMICU-MEM-003` - warning: a local hardware profile declares more memory than
   this machine has (`plan` and `doctor` report it). Fix the profile, or ignore

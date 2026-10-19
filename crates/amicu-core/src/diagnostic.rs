@@ -398,6 +398,10 @@ pub mod catalog {
     /// Error on `modal`/`runpod`, warning elsewhere (owned hardware may be any
     /// card).
     pub const CAP_GPU_UNKNOWN: DiagnosticCode = DiagnosticCode::new(Category::Cap, 13);
+    /// `AMICU-CAP-014` - a hardware profile's `runpod {}` block does not fit:
+    /// set on another provider, `cloud` outside pod mode, `scaling {}` on a
+    /// pod other than one replica, or a pods-only GPU in serverless mode.
+    pub const CAP_RUNPOD_SETTINGS_INVALID: DiagnosticCode = DiagnosticCode::new(Category::Cap, 14);
     /// `AMICU-MEM-001` - model does not fit in available VRAM.
     pub const MEM_VRAM_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Mem, 1);
     /// `AMICU-MEM-002` - a single artifact/weight file exceeds the available
@@ -495,7 +499,7 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 40] {
+    pub const fn all() -> [DiagnosticCode; 41] {
         [
             PARSE_UNCLOSED_BLOCK,
             PARSE_INVALID_SYNTAX,
@@ -516,6 +520,7 @@ pub mod catalog {
             CAP_RUNTIME_FIELD_INVALID,
             CAP_GPU_UNRESOLVED,
             CAP_GPU_UNKNOWN,
+            CAP_RUNPOD_SETTINGS_INVALID,
             MEM_VRAM_EXCEEDED,
             MEM_ARTIFACT_OVERSIZE,
             MEM_PROFILE_EXCEEDS_HOST,

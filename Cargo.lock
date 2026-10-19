@@ -190,6 +190,7 @@ dependencies = [
  "amicu-plan",
  "amicu-providers",
  "amicu-registry",
+ "amicu-runpod",
  "amicu-runtime",
  "amicu-vllm",
  "serde",

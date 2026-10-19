@@ -269,6 +269,69 @@ pub fn verify_catalog_memory(
     }
 }
 
+/// Approximate secure-cloud pod price per GPU-hour (USD), by catalog id, for
+/// plan output. Live prices vary; a card not listed shows no price.
+const POD_SECURE_USD_PER_GPU_HOUR: &[(&str, f64)] = &[
+    ("rtx-a4000-16gb", 0.25),
+    ("rtx-2000-ada-16gb", 0.24),
+    ("rtx-4000-ada-20gb", 0.26),
+    ("rtx-a5000-24gb", 0.27),
+    ("l4-24gb", 0.43),
+    ("rtx-3090-24gb", 0.46),
+    ("rtx-4090-24gb", 0.69),
+    ("rtx-5090-32gb", 0.94),
+    ("a40-48gb", 0.40),
+    ("rtx-a6000-48gb", 0.49),
+    ("rtx-6000-ada-48gb", 0.77),
+    ("l40s-48gb", 0.86),
+    ("l40-48gb", 0.99),
+    ("a100-pcie-80gb", 1.64),
+    ("a100-sxm4-80gb", 1.74),
+    ("h100-pcie-80gb", 2.39),
+    ("h100-sxm-80gb", 2.69),
+    ("h100-nvl-94gb", 2.79),
+    ("h200-sxm-141gb", 3.99),
+    ("b200-180gb", 5.99),
+];
+
+/// Approximate serverless (flex worker) price per GPU-hour while a worker
+/// runs (USD), by pool.
+const SERVERLESS_USD_PER_GPU_HOUR: &[(&str, f64)] = &[
+    ("AMPERE_16", 0.58),
+    ("AMPERE_24", 0.68),
+    ("ADA_24", 1.12),
+    ("ADA_32_PRO", 1.58),
+    ("AMPERE_48", 1.22),
+    ("ADA_48_PRO", 1.91),
+    ("AMPERE_80", 2.72),
+    ("ADA_80_PRO", 4.18),
+    ("HOPPER_141", 5.58),
+    ("BLACKWELL_180", 8.64),
+];
+
+/// Approximate hourly price of a secure-cloud pod with `accelerator`, or
+/// `None` when the card has no static estimate.
+#[must_use]
+pub fn pod_hourly_usd(accelerator: &Accelerator) -> Option<f64> {
+    let placement = pod_gpu_placement(accelerator).ok()?;
+    POD_SECURE_USD_PER_GPU_HOUR
+        .iter()
+        .find(|(id, _)| *id == placement.card_id)
+        .map(|(_, usd)| usd * f64::from(placement.count))
+}
+
+/// Approximate hourly price of one serverless worker with `accelerator`
+/// while it runs, or `None` when there is no static estimate.
+#[must_use]
+pub fn serverless_hourly_usd(accelerator: &Accelerator) -> Option<f64> {
+    let placement = gpu_placement(accelerator).ok()?;
+    let pool = placement.pools.first()?;
+    SERVERLESS_USD_PER_GPU_HOUR
+        .iter()
+        .find(|(p, _)| p == pool)
+        .map(|(_, usd)| usd * f64::from(placement.count))
+}
+
 /// Map a Modal-style spec string (`"h100-sxm-80gb:2"`) to a [`GpuPlacement`].
 /// Without a memory size, the model must name a single card on its own.
 pub fn parse_gpu_spec(spec: &str) -> Result<GpuPlacement, RunPodError> {
@@ -569,6 +632,29 @@ mod tests {
             parse_gpu_spec("potato:1"),
             Err(RunPodError::UnknownGpu { .. })
         ));
+    }
+
+    #[test]
+    fn hourly_estimates_scale_with_the_gpu_count() {
+        let one = acc(AcceleratorKind::Gpu, "h100-sxm-80gb", 1, 80);
+        assert_eq!(pod_hourly_usd(&one), Some(2.69));
+        let two = acc(AcceleratorKind::Gpu, "h100-sxm-80gb", 2, 80);
+        assert_eq!(pod_hourly_usd(&two), Some(5.38));
+        let l4 = acc(AcceleratorKind::Gpu, "l4", 1, 24);
+        assert_eq!(serverless_hourly_usd(&l4), Some(0.68));
+        let pods_only = acc(AcceleratorKind::Gpu, "h200-nvl-141gb", 1, 141);
+        assert_eq!(serverless_hourly_usd(&pods_only), None);
+        assert_eq!(pod_hourly_usd(&pods_only), None);
+    }
+
+    #[test]
+    fn every_price_names_a_known_card_or_pool() {
+        for (id, _) in POD_SECURE_USD_PER_GPU_HOUR {
+            assert!(CARDS.iter().any(|c| c.id == *id), "{id}");
+        }
+        for (pool, _) in SERVERLESS_USD_PER_GPU_HOUR {
+            assert!(CARDS.iter().any(|c| c.pool == *pool), "{pool}");
+        }
     }
 
     #[test]
