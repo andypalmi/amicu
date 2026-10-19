@@ -297,11 +297,27 @@ const POD_USD_PER_GPU_HOUR: &[(&str, f64, f64)] = &[
     ("NVIDIA RTX A5000", 0.27, 0.16),
     ("NVIDIA RTX A6000", 0.59, 0.33),
     ("NVIDIA RTX PRO 4500 Blackwell", 0.72, 0.34),
-    ("NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition", 0.5, 1.64),
+    (
+        "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        0.5,
+        1.64,
+    ),
     ("NVIDIA RTX PRO 6000 Blackwell Server Edition", 2.49, 1.69),
-    ("NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 1g.24gb", 0.69, 0.5),
-    ("NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb", 1.29, 1.0),
-    ("NVIDIA RTX PRO 6000 Blackwell Workstation Edition", 2.59, 1.69),
+    (
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 1g.24gb",
+        0.69,
+        0.5,
+    ),
+    (
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb",
+        1.29,
+        1.0,
+    ),
+    (
+        "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+        2.59,
+        1.69,
+    ),
 ];
 
 /// Serverless flex-worker price per GPU-hour in USD while a worker runs, by

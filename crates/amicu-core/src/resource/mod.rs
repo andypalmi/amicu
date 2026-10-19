@@ -30,9 +30,9 @@ pub use deployment::{
 };
 pub use governance::{GovernanceRule, RuleEffect};
 pub use gpu::{
-    CATALOG_GPU_PROVIDERS, GpuCard, GpuResolveError, GpuVendor, RUNPOD_PODS_ONLY_GPUS, VRAM_TOLERANCE,
-    alias_memory_conflict, effective_gpu_card, gpu_card, gpu_cards, normalize_gpu_name,
-    resolve_gpu, verify_probed_gpu, vram_matches,
+    CATALOG_GPU_PROVIDERS, GpuCard, GpuResolveError, GpuVendor, RUNPOD_PODS_ONLY_GPUS,
+    VRAM_TOLERANCE, alias_memory_conflict, effective_gpu_card, gpu_card, gpu_cards,
+    normalize_gpu_name, resolve_gpu, verify_probed_gpu, vram_matches,
 };
 pub use hardware::{
     Accelerator, AcceleratorKind, Cpu, HardwareProfile, Interconnect, Price, RunpodCloud,

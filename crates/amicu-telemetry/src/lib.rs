@@ -35,6 +35,7 @@ pub mod queue;
 mod report;
 pub mod rollup;
 mod schema;
+pub mod scrape;
 pub mod upload;
 
 pub use identity::{

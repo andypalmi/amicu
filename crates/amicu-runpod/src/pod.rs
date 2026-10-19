@@ -990,6 +990,8 @@ impl ProcessSupervisor for PodSupervisor {
         })
     }
 
+    // TODO: Pod logs come from `GET /pods/{id}/logs` and metrics through the
+    // Pod proxy URL, not the serverless helpers in `logs`/`metrics`.
     async fn metrics(&self, _handle: &RuntimeHandle) -> Result<RuntimeMetrics, LlamaCppError> {
         Err(unsupported("metrics"))
     }

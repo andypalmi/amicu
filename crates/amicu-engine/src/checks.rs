@@ -6,8 +6,8 @@ use amicu_core::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticReport, Sever
 use amicu_core::graph::Graph;
 use amicu_core::resource::{
     Accelerator, AcceleratorKind, CATALOG_GPU_PROVIDERS, Deployment, GpuResolveError,
-    HardwareProfile, MemoryCheck, Residency, RuleEffect, RunpodMode, Runtime, ScalingSettings,
-    RUNPOD_PODS_ONLY_GPUS, alias_memory_conflict,
+    HardwareProfile, MemoryCheck, RUNPOD_PODS_ONLY_GPUS, Residency, RuleEffect, RunpodMode,
+    Runtime, ScalingSettings, alias_memory_conflict,
 };
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
 use amicu_providers::resolve_residency;
@@ -144,8 +144,29 @@ fn gpu_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
     out
 }
 
-/// Hardware-profile `provider` value whose deployments honor `scaling {}`.
-const SCALING_PROVIDER: &str = "modal";
+/// Hardware-profile `provider` values whose deployments honor `scaling {}`.
+const SCALING_PROVIDERS: [&str; 2] = ["modal", "runpod"];
+
+/// RunPod's ceiling for a worker's idle timeout (`workers.idleTimeout`).
+const RUNPOD_MAX_IDLE_SECS: u32 = 3600;
+
+/// Limits a provider adds to [`ScalingSettings::problems`].
+fn provider_scaling_problems(
+    provider: &str,
+    scaling: &amicu_core::resource::ScalingSettings,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if provider == "runpod"
+        && let Some(secs) = scaling.scaledown_window_secs
+        && secs > RUNPOD_MAX_IDLE_SECS
+    {
+        out.push(format!(
+            "`scaledown_window` must be at most 1h on RunPod (got {})",
+            amicu_core::resource::ScalingSettings::format_window(secs)
+        ));
+    }
+    out
+}
 
 /// Validate each deployment's `scaling {}` block:
 /// `AMICU-CAP-008` for invalid values, `AMICU-CAP-009` when the deployment's
@@ -157,7 +178,14 @@ fn scaling_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
             continue;
         };
         let resource = format!("deployment.{}", d.id);
-        for problem in scaling.problems() {
+        let provider = graph
+            .hardware_profiles
+            .iter()
+            .find(|h| h.id == d.hardware_profile)
+            .map(|h| h.provider.as_str());
+        let mut problems = scaling.problems();
+        problems.extend(provider_scaling_problems(provider.unwrap_or(""), scaling));
+        for problem in problems {
             let mut diag = Diagnostic::new(
                 catalog::CAP_SCALING_INVALID,
                 Severity::Error,
@@ -166,25 +194,16 @@ fn scaling_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
             diag.resource = Some(resource.clone());
             out.push(diag);
         }
-        let provider = graph
-            .hardware_profiles
-            .iter()
-            .find(|h| h.id == d.hardware_profile)
-            .map(|h| h.provider.as_str());
-        let pod = graph
-            .hardware_profiles
-            .iter()
-            .any(|h| h.id == d.hardware_profile && is_runpod_pod(h));
         if let Some(provider) = provider
-            && provider != SCALING_PROVIDER
-            && !pod
+            && !SCALING_PROVIDERS.contains(&provider)
         {
             let mut diag = Diagnostic::new(
                 catalog::CAP_SCALING_UNSUPPORTED_PROVIDER,
                 Severity::Error,
                 format!(
-                    "deployment `{}`: `scaling {{}}` is not supported for provider `{provider}` yet (only `{SCALING_PROVIDER}`); remove the block",
-                    d.id
+                    "deployment `{}`: `scaling {{}}` is not supported for provider `{provider}` yet (only {}); remove the block",
+                    d.id,
+                    SCALING_PROVIDERS.map(|p| format!("`{p}`")).join(", ")
                 ),
             );
             diag.resource = Some(resource.clone());
@@ -1215,6 +1234,33 @@ mod scaling_tests {
     }
 
     #[test]
+    fn runpod_accepts_scaling_within_its_limits() {
+        assert_eq!(codes(&graph("runpod", Some(valid()))), Vec::<String>::new());
+        let long = ScalingSettings {
+            scaledown_window_secs: Some(7200),
+            ..ScalingSettings::default()
+        };
+        assert_eq!(
+            codes(&graph("runpod", Some(long.clone()))),
+            vec!["AMICU-CAP-008"]
+        );
+        assert_eq!(codes(&graph("modal", Some(long))), Vec::<String>::new());
+        for bad in [
+            ScalingSettings {
+                max_replicas: Some(0),
+                ..ScalingSettings::default()
+            },
+            ScalingSettings {
+                min_replicas: Some(2),
+                max_replicas: Some(1),
+                ..ScalingSettings::default()
+            },
+        ] {
+            assert_eq!(codes(&graph("runpod", Some(bad))), vec!["AMICU-CAP-008"]);
+        }
+    }
+
+    #[test]
     fn non_modal_provider_is_cap_009_error() {
         let g = graph("local_apple", Some(valid()));
         assert_eq!(codes(&g), vec!["AMICU-CAP-009"]);
@@ -1548,13 +1594,6 @@ mod runpod_tests {
         };
         let m = messages(&graph("runpod", "l4", 24, Some(pod(None)), Some(two)));
         assert!(m[0].contains("exactly one replica"), "{m:?}");
-    }
-
-    #[test]
-    fn serverless_runpod_scaling_is_still_unsupported() {
-        let g = graph("runpod", "l4", 24, None, Some(one_replica()));
-        let codes: Vec<_> = scaling_diagnostics(&g).iter().map(|d| d.code).collect();
-        assert_eq!(codes, [catalog::CAP_SCALING_UNSUPPORTED_PROVIDER]);
     }
 
     #[test]
