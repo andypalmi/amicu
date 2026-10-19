@@ -354,6 +354,7 @@ fn planned_secret_names_are_exactly_what_start_writes_without_the_api_key() {
 // --- create bodies -----------------------------------------------------------
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn vllm_start_creates_the_secret_then_the_endpoint_and_waits_for_health() {
     let (sup, mock) = supervisor(happy_mock());
     let sup = sup
@@ -418,6 +419,7 @@ async fn vllm_start_creates_the_secret_then_the_endpoint_and_waits_for_health() 
             "HF_TOKEN": secret_reference(&hf_name()),
             "PORT": "8000",
             "PORT_HEALTH": "8000",
+            "RUNPOD_INIT_TIMEOUT": "1800",
         }),
         "no runtime API key: the gateway strips Authorization"
     );
@@ -1776,4 +1778,37 @@ fn a_deployment_hf_home_wins_over_the_volume_default() {
         .endpoint
         .to_body();
     assert_eq!(body["env"]["HF_HOME"], json!("/data/hf"));
+}
+
+#[test]
+fn serverless_endpoints_raise_the_startup_timeout_unless_the_user_set_it() {
+    let (sup, _) = supervisor(Mock::default());
+    let default = DEFAULT_INIT_TIMEOUT_SECS.to_string();
+    let vllm = sup
+        .prepare(&vllm_plan(), &vllm_secrets(), "img", None)
+        .unwrap();
+    assert_eq!(vllm.endpoint.env[INIT_TIMEOUT_ENV], default);
+    let llama = sup
+        .prepare(&llama_hf_plan(), &secrets_for("LLAMA_API_KEY"), "img", None)
+        .unwrap();
+    assert_eq!(llama.endpoint.env[INIT_TIMEOUT_ENV], default);
+
+    let mut p = vllm_plan();
+    if let Runtime::Vllm(s) = &mut p.settings {
+        s.env = BTreeMap::from([(INIT_TIMEOUT_ENV.to_owned(), "3000".to_owned())]);
+    }
+    let custom = sup.prepare(&p, &vllm_secrets(), "img", None).unwrap();
+    assert_eq!(custom.endpoint.env[INIT_TIMEOUT_ENV], "3000");
+    assert_eq!(
+        update_from(&custom.endpoint, &live(None)).to_body()["env"][INIT_TIMEOUT_ENV],
+        json!("3000")
+    );
+}
+
+#[test]
+fn the_serverless_readiness_wait_outlasts_the_startup_timeout() {
+    assert!(
+        ReadinessTiming::SERVERLESS.timeout
+            > Duration::from_secs(u64::from(DEFAULT_INIT_TIMEOUT_SECS))
+    );
 }

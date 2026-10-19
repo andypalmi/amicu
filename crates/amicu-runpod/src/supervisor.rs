@@ -78,12 +78,18 @@ pub const HEALTH_PATH: &str = "/health";
 /// `HEALTH_CHECK_PATH` says: vLLM serves `/ping`, llama-server is given it
 /// through its Vertex AI mode ([`llamacpp_ping_env`]).
 ///
-/// llama-server answers `503` while it loads the model, and the load
-/// balancer treats anything but `200`/`204` as unhealthy, so a slow model
-/// load may show as unhealthy workers rather than initializing ones.
-// TODO(#334): check whether RunPod recycles a llama.cpp worker that answers
-// 503 during a long model load.
+/// A worker whose `/ping` is not `200` gets `RUNPOD_INIT_TIMEOUT` seconds
+/// (RunPod's default is 7 minutes) to become healthy before it is restarted;
+/// amicu raises it to [`DEFAULT_INIT_TIMEOUT_SECS`].
 pub const LB_PING_PATH: &str = "/ping";
+
+/// Env variable that sets how long RunPod waits for a worker to answer
+/// `/ping` with `200` before restarting it.
+pub const INIT_TIMEOUT_ENV: &str = "RUNPOD_INIT_TIMEOUT";
+
+/// Default for [`INIT_TIMEOUT_ENV`] on serverless endpoints: 30 minutes, for
+/// large models that download and load slowly.
+pub const DEFAULT_INIT_TIMEOUT_SECS: u32 = 1800;
 
 /// The env that makes llama-server serve its `/health` handler at
 /// [`LB_PING_PATH`] too: its Vertex AI compatibility mode (`AIP_MODE`) adds
@@ -280,6 +286,14 @@ impl ReadinessTiming {
         initial_backoff: Duration::from_secs(2),
         max_backoff: Duration::from_secs(15),
     };
+
+    /// [`DEFAULT`](Self::DEFAULT) with a wait that outlasts
+    /// [`DEFAULT_INIT_TIMEOUT_SECS`], so `start` never gives up on a worker
+    /// RunPod still lets load.
+    pub const SERVERLESS: Self = Self {
+        timeout: Duration::from_mins(35),
+        ..Self::DEFAULT
+    };
 }
 
 impl Default for ReadinessTiming {
@@ -427,7 +441,7 @@ impl RunPodSupervisor {
             scaling: ScalingSettings::default(),
             disk_gb: DEFAULT_CONTAINER_DISK_GB,
             gguf: None,
-            readiness: ReadinessTiming::DEFAULT,
+            readiness: ReadinessTiming::SERVERLESS,
             stop_retry: StopRetry::DEFAULT,
             confirmed_account: false,
             recorded_endpoint: None,
@@ -595,7 +609,7 @@ impl RunPodSupervisor {
         self
     }
 
-    /// Readiness polling bounds (default [`ReadinessTiming::DEFAULT`]).
+    /// Readiness polling bounds (default [`ReadinessTiming::SERVERLESS`]).
     #[must_use]
     pub fn with_readiness_timing(mut self, timing: ReadinessTiming) -> Self {
         self.readiness = timing;
@@ -829,6 +843,10 @@ impl RunPodSupervisor {
             env.extend(llamacpp_ping_env(port).map(|(k, v)| (k.to_owned(), v)));
         }
         env.insert(OWNER_ENV_VAR.to_owned(), owner.clone());
+        if !secret.contains_key(INIT_TIMEOUT_ENV) {
+            env.entry(INIT_TIMEOUT_ENV.to_owned())
+                .or_insert_with(|| DEFAULT_INIT_TIMEOUT_SECS.to_string());
+        }
         if self.network_volume.is_some() {
             insert_volume_cache_env(&mut env, &secret, runtime);
         }
