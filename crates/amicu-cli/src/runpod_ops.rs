@@ -39,8 +39,7 @@ impl RunPodOps for RealRunPod {
     }
 
     fn is_management_key(&self, key: &SecretValue) -> bool {
-        std::env::var(API_KEY_ENV_VAR)
-            .is_ok_and(|k| !k.trim().is_empty() && k.as_bytes() == key.expose_secret())
+        std::env::var(API_KEY_ENV_VAR).is_ok_and(|k| same_key(&k, key))
     }
 
     fn probe(&self) -> Arc<dyn HttpTransport> {
@@ -59,6 +58,14 @@ impl RunPodOps for RealRunPod {
         .await
         .map_err(|e| e.detail().to_owned())
     }
+}
+
+fn same_key(management: &str, key: &SecretValue) -> bool {
+    let management = management.trim();
+    !management.is_empty()
+        && key
+            .expose_secret_str()
+            .is_ok_and(|k| k.trim() == management)
 }
 
 pub(crate) fn missing_key() -> CliError {
@@ -128,5 +135,22 @@ pub(crate) fn check_account(
              changed",
             a.unwrap_or("an account amicu has not seen (no amicu-account-marker secret)")
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_management_key_matches_regardless_of_surrounding_whitespace() {
+        let key = SecretValue::new("rpa_KEY\n".to_owned());
+        assert!(same_key("rpa_KEY", &key));
+        assert!(same_key(
+            " rpa_KEY\n",
+            &SecretValue::new("rpa_KEY".to_owned())
+        ));
+        assert!(!same_key("rpa_OTHER", &key));
+        assert!(!same_key("  ", &SecretValue::new("  ".to_owned())));
     }
 }

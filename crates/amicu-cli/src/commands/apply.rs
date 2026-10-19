@@ -1317,7 +1317,8 @@ async fn apply_all(
                     }
                     if let Some(rp) = &runpod {
                         let note =
-                            runpod_failed_start(rp, adapter, &new_stop, &mut progress.stops).await;
+                            runpod_failed_start(rp, adapter, &new_stop, &mut progress.stops, None)
+                                .await;
                         return Err(CliError::Message(format!("{e}{note}")));
                     }
                     return Err(e.into());
@@ -1331,8 +1332,14 @@ async fn apply_all(
                 match verify_handle(&handle, launch, resolver, env.runpod).await {
                     Ok(()) => Ok(()),
                     Err(detail) => {
-                        let note =
-                            runpod_failed_start(rp, adapter, &new_stop, &mut progress.stops).await;
+                        let note = runpod_failed_start(
+                            rp,
+                            adapter,
+                            &new_stop,
+                            &mut progress.stops,
+                            Some(env.runpod),
+                        )
+                        .await;
                         Err(CliError::Message(format!(
                             "deployment '{}': endpoint {} failed its exposure check: \
                              {detail}{note}",
@@ -1817,13 +1824,15 @@ fn runpod_handle(deployment: &DeploymentId, id: &str) -> RuntimeHandle {
 
 /// After a failed RunPod start or exposure check: record what exists, and
 /// tear down an endpoint this run created (nothing was serving from it). An
-/// endpoint adopted by name or recorded id is left in place. Either way the
-/// record stays until a stop is confirmed. Returns a note for the error.
+/// endpoint adopted by name or recorded id is left in place, scaled to zero
+/// workers when `scale_down` is given (a failed exposure check). Either way
+/// the record stays until a stop is confirmed. Returns a note for the error.
 async fn runpod_failed_start(
     rp: &RunPodStart,
     adapter: &dyn RuntimeAdapter,
     record: &StopRecord,
     stops: &mut [StopRecord],
+    scale_down: Option<&dyn RunPodOps>,
 ) -> String {
     let deployed = rp.deployed.lock().ok().and_then(|d| d.clone());
     sync_runpod_record(stops, record, deployed.as_deref(), rp, false);
@@ -1834,11 +1843,43 @@ async fn runpod_failed_start(
         .created_endpoint
         .load(std::sync::atomic::Ordering::SeqCst)
     {
-        return format!(
-            "; RunPod endpoint {id} existed before this run, so it was left in place and stays \
-             recorded (`amicu destroy --target {}` removes it)",
-            record.deployment
-        );
+        let Some(ops) = scale_down else {
+            return format!(
+                "; RunPod endpoint {id} existed before this run, so it was left in place and \
+                 stays recorded (`amicu destroy --target {}` removes it)",
+                record.deployment
+            );
+        };
+        let drain = amicu_runpod::UpdateEndpoint {
+            workers: Some(amicu_runpod::WorkersConfig {
+                min: 0,
+                max: 0,
+                idle_timeout: None,
+            }),
+            ..amicu_runpod::UpdateEndpoint::default()
+        };
+        let scaled = match ops.client() {
+            Ok(client) => client
+                .update_endpoint(&id, &drain)
+                .await
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        return match scaled {
+            Ok(()) => format!(
+                "; RunPod endpoint {id} existed before this run, so it was scaled to zero \
+                 workers (not deleted) and stays recorded; fix the api_key and apply again, or \
+                 `amicu destroy --target {}` removes it",
+                record.deployment
+            ),
+            Err(e) => format!(
+                "; RunPod endpoint {id} existed before this run and scaling it to zero workers \
+                 FAILED ({e}); it may still be serving. Scale it down in the RunPod console or \
+                 run `amicu destroy --target {}`",
+                record.deployment
+            ),
+        };
     }
     match adapter.stop(&runpod_handle(&record.deployment, &id)).await {
         Ok(()) => {
@@ -1899,10 +1940,10 @@ async fn stop_runpod(
         ),
         Err(e) => format!("{}: {e}", record.describe()),
     };
-    let remaining = supervisor
-        .created_secrets()
-        .lock()
-        .map_or_else(|_| record.secrets.clone(), |c| merged_names(&c, &[]));
+    let remaining = supervisor.created_secrets().lock().map_or_else(
+        |_| record.secrets.clone(),
+        |c| merged_names(&record.secrets, &c),
+    );
     if let Some(r) = stops.iter_mut().find(|r| r.same_instance(record)) {
         r.app_id = Some(id);
         r.secrets = remaining;

@@ -24,6 +24,7 @@ struct Ep {
     id: String,
     name: String,
     owner: Option<String>,
+    max_workers: Option<u64>,
 }
 
 #[derive(Default)]
@@ -131,6 +132,7 @@ impl HttpTransport for World {
                         .unwrap()
                         .to_owned(),
                     owner: owner_in(req.body.as_ref()),
+                    max_workers: None,
                 };
                 w.endpoints.push(ep.clone());
                 if w.lose_create_response {
@@ -147,6 +149,13 @@ impl HttpTransport for World {
                     HttpMethod::Patch => {
                         if let Some(o) = owner_in(req.body.as_ref()) {
                             w.endpoints[i].owner = Some(o);
+                        }
+                        if let Some(max) = req
+                            .body
+                            .as_ref()
+                            .and_then(|b| b.get("workers")?.get("max")?.as_u64())
+                        {
+                            w.endpoints[i].max_workers = Some(max);
                         }
                         reply(200, &ep_json(&w.endpoints[i]))
                     }
@@ -362,6 +371,7 @@ fn add_endpoint(rig: &Rig, id: &str, owner: Option<String>) {
         id: id.to_owned(),
         name: endpoint_name(),
         owner,
+        max_workers: None,
     });
 }
 
@@ -701,8 +711,13 @@ fn a_failed_exposure_check_leaves_an_adopted_endpoint_in_place() {
     rig.runpod.exposure_fails = true;
     let err = apply_with(&project, &rig).unwrap_err().to_string();
     assert!(err.contains("existed before this run"), "{err}");
+    assert!(err.contains("scaled to zero workers"), "{err}");
     assert!(err.contains("unauthenticated request"), "{err}");
     assert_eq!(rig.runpod.world.endpoint_ids(), ["ep9"]);
+    assert_eq!(
+        rig.runpod.world.state.lock().unwrap().endpoints[0].max_workers,
+        Some(0)
+    );
     assert_eq!(stops_for(&project, DEP)[0].app_id.as_deref(), Some("ep9"));
 }
 
@@ -881,4 +896,25 @@ fn the_write_ahead_keeps_unknown_fields_of_the_existing_record() {
     add_endpoint(&rig, "ep7", Some(owner()));
     apply_with(&project, &rig).unwrap();
     assert_eq!(stops_for(&project, DEP)[0].extra["future"], json!(1));
+}
+
+#[test]
+fn a_failed_endpoint_delete_keeps_every_recorded_secret() {
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(Some("ep7"), ACCOUNT, &["amicu-x"])));
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    add_secret(&rig, "s5", "amicu-x");
+    rig.runpod.world.state.lock().unwrap().delete_fails = true;
+    destroy(&project, &rig).unwrap_err();
+    assert_eq!(stops_for(&project, DEP)[0].secrets, ["amicu-x"]);
+
+    rig.runpod.world.state.lock().unwrap().delete_fails = false;
+    destroy(&project, &rig).unwrap();
+    assert_eq!(rig.runpod.world.endpoint_ids().len(), 0);
+    assert_eq!(
+        rig.runpod.world.secret_names(),
+        [amicu_runpod::ACCOUNT_MARKER_SECRET]
+    );
+    assert_eq!(stops_for(&project, DEP).len(), 0);
 }
