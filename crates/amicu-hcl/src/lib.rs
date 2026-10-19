@@ -157,6 +157,7 @@ mod tests {
             memory: "64GiB".parse().unwrap(),
             interconnect: None,
             price: None,
+            runpod: None,
         });
         g
     }
@@ -188,6 +189,50 @@ mod tests {
              accelerator {{\n    kind  = \"gpu\"\n    model = \"{model}\"\n    count = 1\n\
              {memory}  }}\n  memory = \"64GiB\"\n}}\n"
         )
+    }
+
+    fn with_runpod_block(block: &str) -> String {
+        gpu_profile("l4", None).replace(
+            "  memory = \"64GiB\"\n",
+            &format!("  memory = \"64GiB\"\n{block}"),
+        )
+    }
+
+    #[test]
+    fn runpod_block_parses_and_round_trips() {
+        use amicu_core::resource::{RunpodCloud, RunpodMode, RunpodSettings};
+        let g = parse_graph(&with_runpod_block(
+            "  runpod {\n    mode  = \"pod\"\n    cloud = \"community\"\n  }\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            g.hardware_profiles[0].runpod,
+            Some(RunpodSettings {
+                mode: RunpodMode::Pod,
+                cloud: Some(RunpodCloud::Community),
+            })
+        );
+        assert_eq!(parse_graph(&format_graph(&g).unwrap()).unwrap(), g);
+
+        let g = parse_graph(&with_runpod_block("  runpod {}\n")).unwrap();
+        assert_eq!(g.hardware_profiles[0].runpod_mode(), RunpodMode::Serverless);
+        assert_eq!(parse_graph(&format_graph(&g).unwrap()).unwrap(), g);
+
+        let g = parse_graph(&gpu_profile("l4", None)).unwrap();
+        assert_eq!(g.hardware_profiles[0].runpod, None);
+        assert!(!format_graph(&g).unwrap().contains("runpod {"));
+    }
+
+    #[test]
+    fn runpod_block_rejects_unknown_values_and_fields() {
+        let err = parse_graph(&with_runpod_block("  runpod {\n    mode = \"spot\"\n  }\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mode"), "{err}");
+        let err = parse_graph(&with_runpod_block("  runpod {\n    gpus = 2\n  }\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("gpus"), "{err}");
     }
 
     #[test]
@@ -270,6 +315,7 @@ mod tests {
             memory: ByteSize::from_bytes(48 * 1024 * 1024 * 1024),
             interconnect: None,
             price: None,
+            runpod: None,
         }
     }
 

@@ -53,6 +53,10 @@ signal; the number identifies the specific check.
   and `runpod` (they place GPUs by catalog id), warning elsewhere.
 - `AMICU-CAP-014` - warning: a GPU alias (e.g. `NVIDIA H100 80GB HBM3`) pins its
   card and ignores `accelerator.memory`, which disagrees with that card's VRAM.
+- `AMICU-CAP-015` - a hardware profile's `runpod {}` block does not fit: it is
+  set on another provider, sets `cloud` outside `mode = "pod"`, a pod has
+  `scaling {}` other than one replica, or a pods-only GPU is used in serverless
+  mode (add `runpod { mode = "pod" }`).
 - `AMICU-MEM-001` / `AMICU-MEM-002` - capacity/memory fit failures.
 - `AMICU-MEM-003` - warning: a local hardware profile declares more memory than
   this machine has (`plan` and `doctor` report it). Fix the profile, or ignore

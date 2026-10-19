@@ -273,6 +273,7 @@ fn parse_windows_cpu(
         memory: ByteSize::from_bytes(memory),
         interconnect: None,
         price: None,
+        runpod: None,
     })
 }
 
@@ -326,6 +327,7 @@ fn parse_apple_silicon(text: &str) -> Result<HardwareProfile, DiscoveryError> {
         memory,
         interconnect: None,
         price: None,
+        runpod: None,
     })
 }
 
@@ -347,6 +349,7 @@ fn parse_macos_cpu(text: &str) -> Result<HardwareProfile, DiscoveryError> {
         memory,
         interconnect: None,
         price: None,
+        runpod: None,
     })
 }
 
@@ -377,6 +380,7 @@ fn parse_linux_cpu(cpuinfo: &str, meminfo: &str) -> Result<HardwareProfile, Disc
         memory,
         interconnect: None,
         price: None,
+        runpod: None,
     })
 }
 

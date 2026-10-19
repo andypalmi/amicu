@@ -269,6 +269,100 @@ pub fn verify_catalog_memory(
     }
 }
 
+// Snapshot of RunPod's `GET /v2/catalog/gpus` and runpod.io/pricing, Oct 2026.
+/// Pod list price per GPU-hour in USD by RunPod type id: (secure, community);
+/// `0.0` means not offered.
+const POD_USD_PER_GPU_HOUR: &[(&str, f64, f64)] = &[
+    ("NVIDIA A100 80GB PCIe", 1.79, 1.19),
+    ("NVIDIA A100-SXM4-80GB", 1.79, 1.39),
+    ("NVIDIA A40", 0.59, 0.35),
+    ("NVIDIA B200", 7.99, 5.98),
+    ("NVIDIA B300 SXM6 AC", 8.99, 6.94),
+    ("NVIDIA GeForce RTX 3090", 0.5, 0.22),
+    ("NVIDIA GeForce RTX 4090", 0.89, 0.34),
+    ("NVIDIA GeForce RTX 5090", 1.19, 0.69),
+    ("NVIDIA H100 80GB HBM3", 3.99, 2.69),
+    ("NVIDIA H100 NVL", 3.19, 2.59),
+    ("NVIDIA H100 PCIe", 2.89, 1.99),
+    ("NVIDIA H200", 5.29, 3.59),
+    ("NVIDIA H200 NVL", 3.79, 0.0),
+    ("NVIDIA L4", 0.59, 0.44),
+    ("NVIDIA L40", 0.82, 0.69),
+    ("NVIDIA L40S", 1.09, 0.79),
+    ("NVIDIA RTX 2000 Ada Generation", 0.24, 0.0),
+    ("NVIDIA RTX 4000 Ada Generation", 0.28, 0.2),
+    ("NVIDIA RTX 6000 Ada Generation", 0.99, 0.74),
+    ("NVIDIA RTX A4000", 0.25, 0.17),
+    ("NVIDIA RTX A4500", 0.25, 0.19),
+    ("NVIDIA RTX A5000", 0.27, 0.16),
+    ("NVIDIA RTX A6000", 0.59, 0.33),
+    ("NVIDIA RTX PRO 4500 Blackwell", 0.72, 0.34),
+    (
+        "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        0.0,
+        1.64,
+    ),
+    ("NVIDIA RTX PRO 6000 Blackwell Server Edition", 2.49, 1.69),
+    (
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 1g.24gb",
+        0.69,
+        0.0,
+    ),
+    (
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb",
+        1.29,
+        1.0,
+    ),
+    (
+        "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
+        2.59,
+        1.69,
+    ),
+];
+
+/// Serverless flex-worker price per GPU-hour in USD while a worker runs, by
+/// pool.
+const SERVERLESS_USD_PER_GPU_HOUR: &[(&str, f64)] = &[
+    ("BLACKWELL_288", 10.65),
+    ("BLACKWELL_180", 8.64),
+    ("HOPPER_141", 5.93),
+    ("ADA_80_PRO", 4.79),
+    ("BLACKWELL_96", 3.49),
+    ("AMPERE_80", 2.72),
+    ("ADA_48_PRO", 1.75),
+    ("ADA_32_PRO", 1.58),
+    ("AMPERE_48", 1.22),
+    ("BLACKWELL_32", 1.15),
+    ("ADA_24", 1.10),
+    ("AMPERE_24", 0.69),
+    ("AMPERE_16", 0.58),
+];
+
+/// List price per hour of a pod with `accelerator` in the secure or
+/// community cloud, or `None` when that cloud does not list the card.
+#[must_use]
+pub fn pod_hourly_usd(accelerator: &Accelerator, community: bool) -> Option<f64> {
+    let placement = pod_gpu_placement(accelerator).ok()?;
+    POD_USD_PER_GPU_HOUR
+        .iter()
+        .find(|(id, _, _)| *id == placement.type_id)
+        .map(|(_, secure, comm)| if community { *comm } else { *secure })
+        .filter(|usd| *usd > 0.0)
+        .map(|usd| usd * f64::from(placement.count))
+}
+
+/// Price per hour of one serverless worker with `accelerator` while it
+/// runs, or `None` when its pool has no listed price.
+#[must_use]
+pub fn serverless_hourly_usd(accelerator: &Accelerator) -> Option<f64> {
+    let placement = gpu_placement(accelerator).ok()?;
+    let pool = placement.pools.first()?;
+    SERVERLESS_USD_PER_GPU_HOUR
+        .iter()
+        .find(|(p, _)| p == pool)
+        .map(|(_, usd)| usd * f64::from(placement.count))
+}
+
 /// Map a Modal-style spec string (`"h100-sxm-80gb:2"`) to a [`GpuPlacement`].
 /// Without a memory size, the model must name a single card on its own.
 pub fn parse_gpu_spec(spec: &str) -> Result<GpuPlacement, RunPodError> {
@@ -569,6 +663,49 @@ mod tests {
             parse_gpu_spec("potato:1"),
             Err(RunPodError::UnknownGpu { .. })
         ));
+    }
+
+    #[test]
+    fn hourly_prices_scale_with_the_gpu_count() {
+        let one = acc(AcceleratorKind::Gpu, "h100-sxm-80gb", 1, 80);
+        assert_eq!(pod_hourly_usd(&one, false), Some(3.99));
+        assert_eq!(pod_hourly_usd(&one, true), Some(2.69));
+        let two = acc(AcceleratorKind::Gpu, "h100-sxm-80gb", 2, 80);
+        assert_eq!(pod_hourly_usd(&two, false), Some(7.98));
+        let l4 = acc(AcceleratorKind::Gpu, "l4", 1, 24);
+        assert_eq!(serverless_hourly_usd(&l4), Some(0.69));
+        let pods_only = acc(AcceleratorKind::Gpu, "h200-nvl-141gb", 1, 141);
+        assert_eq!(serverless_hourly_usd(&pods_only), None);
+        assert_eq!(pod_hourly_usd(&pods_only, false), Some(3.79));
+    }
+
+    #[test]
+    fn community_never_costs_more_than_secure() {
+        for (id, secure, community) in POD_USD_PER_GPU_HOUR {
+            if *secure > 0.0 && *community > 0.0 {
+                assert!(community <= secure, "{id}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_price_names_a_known_card_or_pool() {
+        for (id, _, _) in POD_USD_PER_GPU_HOUR {
+            assert!(
+                CARDS.iter().any(|c| c.type_id == *id)
+                    || POD_ONLY_CARDS.iter().any(|(_, t)| t == id),
+                "{id}"
+            );
+        }
+        for (pool, _) in SERVERLESS_USD_PER_GPU_HOUR {
+            assert!(CARDS.iter().any(|c| c.pool == *pool), "{pool}");
+        }
+    }
+
+    #[test]
+    fn pods_only_cards_match_the_shared_catalog_list() {
+        let ids: Vec<&str> = POD_ONLY_CARDS.iter().map(|(c, _)| *c).collect();
+        assert_eq!(ids, amicu_core::resource::RUNPOD_PODS_ONLY_GPUS);
     }
 
     #[test]

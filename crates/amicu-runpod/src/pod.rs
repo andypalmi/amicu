@@ -4,6 +4,7 @@
 //! `stop` always terminates (a stopped pod still bills for its disk).
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -112,6 +113,7 @@ pub struct PodSupervisor {
     recorded_pod: Option<String>,
     recorded_secrets: Vec<String>,
     deployed_pod: Arc<Mutex<Option<String>>>,
+    created_pod: Arc<AtomicBool>,
     secrets: SecretLedger,
 }
 
@@ -155,6 +157,7 @@ impl PodSupervisor {
             recorded_pod: None,
             recorded_secrets: Vec::new(),
             deployed_pod: Arc::default(),
+            created_pod: Arc::default(),
         }
     }
 
@@ -312,6 +315,13 @@ impl PodSupervisor {
         Arc::clone(&self.deployed_pod)
     }
 
+    /// Set once `start` created the pod (not adopted it by name or recorded
+    /// id).
+    #[must_use]
+    pub fn created_pod(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.created_pod)
+    }
+
     /// Names of the RunPod secrets that may exist for this deployment as far
     /// as this instance knows.
     #[must_use]
@@ -335,6 +345,22 @@ impl PodSupervisor {
         names.sort();
         names.dedup();
         Ok(names)
+    }
+
+    /// Everything `start` checks before its first write: the launch, the
+    /// api_key and the GPU type in RunPod's live catalog.
+    ///
+    /// # Errors
+    /// Whatever `start` would refuse before writing.
+    pub async fn check_before_write(
+        &self,
+        plan: &LaunchPlan,
+        secrets: &[ResolvedSecret],
+    ) -> Result<(), LlamaCppError> {
+        let image = runtime_image(RuntimeKind::of(&plan.settings));
+        let hf_token_fallback = std::env::var(HF_TOKEN_ENV_VAR).ok();
+        let prepared = self.prepare(plan, secrets, &image, hf_token_fallback.as_deref())?;
+        self.check_catalog(&prepared.pod.gpu_type_id).await
     }
 
     /// The argv the pod runs for `plan`.
@@ -510,6 +536,7 @@ impl PodSupervisor {
         pod: &Pod,
         prepared: &Prepared,
         fresh: &[String],
+        deadline: tokio::time::Instant,
     ) -> Result<Rollout, LlamaCppError> {
         self.set_deployed(Some(&pod.id));
         if let Some(why) = self.replacement_reason(pod) {
@@ -546,7 +573,8 @@ impl PodSupervisor {
             _ => None,
         };
         if let Some(action) = action {
-            self.pod_action_when_allowed(&pod.id, action).await?;
+            self.pod_action_when_allowed(&pod.id, action, deadline)
+                .await?;
         }
         Ok(Rollout {
             id: pod.id.clone(),
@@ -564,8 +592,8 @@ impl PodSupervisor {
         &self,
         id: &str,
         action: PodAction,
+        deadline: tokio::time::Instant,
     ) -> Result<(), LlamaCppError> {
-        let deadline = tokio::time::Instant::now() + self.readiness.timeout;
         let mut backoff = self.readiness.initial_backoff;
         loop {
             match self.client.pod_action(id, action).await {
@@ -580,6 +608,7 @@ impl PodSupervisor {
         &self,
         prepared: &Prepared,
         fresh: &[String],
+        deadline: tokio::time::Instant,
     ) -> Result<Rollout, LlamaCppError> {
         if let Some(id) = &self.recorded_pod {
             match self.client.get_pod(id).await {
@@ -587,7 +616,7 @@ impl PodSupervisor {
                     if pod.env.owner.is_some() {
                         self.check_owner(&pod)?;
                     }
-                    return self.update_existing(&pod, prepared, fresh).await;
+                    return self.update_existing(&pod, prepared, fresh, deadline).await;
                 }
                 Ok(_) | Err(RunPodError::NotFound { .. }) => {}
                 Err(e) => return Err(runpod_err(&e)),
@@ -608,13 +637,14 @@ impl PodSupervisor {
                     .await
                     .map_err(|e| runpod_err(&e))?;
                 self.check_owner(&pod)?;
-                return self.update_existing(&pod, prepared, fresh).await;
+                return self.update_existing(&pod, prepared, fresh, deadline).await;
             }
             many => return Err(duplicate_err(name, many)),
         }
         let id = match self.client.create_pod(&prepared.pod).await {
             Ok(created) => {
                 self.set_deployed(Some(&created.id));
+                self.created_pod.store(true, Ordering::SeqCst);
                 Ok(created.id)
             }
             Err(RunPodError::AmbiguousCreate(detail)) => {
@@ -654,6 +684,7 @@ impl PodSupervisor {
                     .map_err(|e| lookup_err(&e))?;
                 self.check_owner(&pod)?;
                 self.set_deployed(Some(&pod.id));
+                self.created_pod.store(true, Ordering::SeqCst);
                 Ok(pod.id)
             }
             [] => Err(LlamaCppError::Supervisor(format!(
@@ -676,11 +707,15 @@ impl PodSupervisor {
 
     /// Waits for `RUNNING` of the container this run deployed, then for
     /// `/health` on the proxy (public on both runtimes) to answer `200`.
-    async fn wait_ready(&self, rollout: &Rollout, url: &str) -> Result<(), NotReady> {
+    async fn wait_ready(
+        &self,
+        rollout: &Rollout,
+        url: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), NotReady> {
         let id = rollout.id.as_str();
         let health = format!("{url}{HEALTH_PATH}");
         let started = tokio::time::Instant::now();
-        let deadline = started + self.readiness.timeout;
         let grace_end = started + self.start_grace;
         let mut backoff = self.readiness.initial_backoff;
         let mut last = "no answer".to_owned();
@@ -746,10 +781,14 @@ impl PodSupervisor {
 
     /// An anonymous [`ANON_PROBE_PATH`] request must be refused (else
     /// [`NotReady::Unsafe`]), then the key must be accepted on [`PROBE_PATH`].
-    async fn verify_exposure(&self, url: &str, key: &SecretValue) -> Result<(), NotReady> {
+    async fn verify_exposure(
+        &self,
+        url: &str,
+        key: &SecretValue,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), NotReady> {
         let anon_url = format!("{url}{ANON_PROBE_PATH}");
         let probe_url = format!("{url}{PROBE_PATH}");
-        let deadline = tokio::time::Instant::now() + self.readiness.timeout;
         let mut backoff = self.readiness.initial_backoff;
         loop {
             let req = HttpRequest::new(HttpMethod::Post, anon_url.clone())
@@ -915,12 +954,16 @@ impl ProcessSupervisor for PodSupervisor {
                 fresh.push(secret.name.clone());
             }
         }
-        let rollout = self.upsert_pod(&prepared, &fresh).await?;
+        let deadline = tokio::time::Instant::now() + self.readiness.timeout;
+        let rollout = self.upsert_pod(&prepared, &fresh, deadline).await?;
         self.secrets.retire_stale(&prepared.secrets).await;
 
         let url = pod_proxy_url(&rollout.id, prepared.port);
-        let checked = match self.wait_ready(&rollout, &url).await {
-            Ok(()) => self.verify_exposure(&url, &prepared.api_key).await,
+        let checked = match self.wait_ready(&rollout, &url, deadline).await {
+            Ok(()) => {
+                self.verify_exposure(&url, &prepared.api_key, deadline)
+                    .await
+            }
             Err(e) => Err(e),
         };
         let id = rollout.id;

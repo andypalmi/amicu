@@ -98,6 +98,7 @@ fn apple_silicon(mem_gib: u64) -> HardwareProfile {
         memory: ByteSize::from_bytes(mem_gib * GIB),
         interconnect: None,
         price: None,
+        runpod: None,
     }
 }
 
@@ -156,6 +157,7 @@ fn nvidia_gpu(vram_gib: u64, sys_gib: u64) -> HardwareProfile {
         memory: ByteSize::from_bytes(sys_gib * GIB),
         interconnect: None,
         price: None,
+        runpod: None,
     }
 }
 

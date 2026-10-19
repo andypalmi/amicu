@@ -740,6 +740,7 @@ fn build_local_dev_chat(preset: &Preset, answers: &WizardAnswers) -> Graph {
         interconnect: None,
         // Zero marginal cost: no rental price.
         price: None,
+        runpod: None,
     });
 
     graph.deployments.push(Deployment {
@@ -825,6 +826,7 @@ fn build_private_eu_production(preset: &Preset, answers: &WizardAnswers) -> Grap
         // figure the wizard fabricates into the user's downloaded config. See
         // `amicu_providers::cost::estimate_cost` for the provider-sourced path.
         price: None,
+        runpod: None,
     });
 
     graph.deployments.push(Deployment {
@@ -921,6 +923,7 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
         // figure the wizard fabricates into the user's downloaded config. See
         // `amicu_providers::cost::estimate_cost` for the provider-sourced path.
         price: None,
+        runpod: None,
     });
 
     graph.deployments.push(Deployment {
@@ -1012,6 +1015,7 @@ fn build_internal_knowledge_chatbot(preset: &Preset, answers: &WizardAnswers) ->
         memory: ByteSize::from_bytes(160 * GIB),
         interconnect: None,
         price: None,
+        runpod: None,
     });
 
     graph.deployments.push(Deployment {
@@ -1095,6 +1099,7 @@ fn build_customer_support_assistant(preset: &Preset, answers: &WizardAnswers) ->
         memory: ByteSize::from_bytes(96 * GIB),
         interconnect: None,
         price: None,
+        runpod: None,
     });
 
     graph.deployments.push(Deployment {
@@ -1178,6 +1183,7 @@ fn build_document_extraction_pipeline(preset: &Preset, answers: &WizardAnswers) 
         memory: ByteSize::from_bytes(64 * GIB),
         interconnect: None,
         price: None,
+        runpod: None,
     });
 
     graph.deployments.push(Deployment {
@@ -1262,6 +1268,7 @@ fn build_code_assistant_endpoint(preset: &Preset, answers: &WizardAnswers) -> Gr
         memory: ByteSize::from_bytes(160 * GIB),
         interconnect: None,
         price: None,
+        runpod: None,
     });
 
     graph.deployments.push(Deployment {
@@ -1344,6 +1351,7 @@ fn build_api_replacement_migration(preset: &Preset, answers: &WizardAnswers) -> 
         memory: ByteSize::from_bytes(96 * GIB),
         interconnect: None,
         price: None,
+        runpod: None,
     });
 
     graph.deployments.push(Deployment {
@@ -1426,6 +1434,7 @@ fn build_custom_stack(preset: &Preset, answers: &WizardAnswers) -> Graph {
         memory: ByteSize::from_bytes(96 * GIB),
         interconnect: None,
         price: None,
+        runpod: None,
     });
 
     graph.deployments.push(Deployment {

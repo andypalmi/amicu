@@ -28,6 +28,8 @@ pub(crate) enum Backend {
     Modal,
     /// A RunPod Serverless endpoint.
     Runpod,
+    /// An always-on RunPod Pod.
+    RunpodPod,
 }
 
 impl Backend {
@@ -61,6 +63,10 @@ impl Backend {
         )
     }
 
+    pub(crate) fn is_runpod(self) -> bool {
+        matches!(self, Self::Runpod | Self::RunpodPod)
+    }
+
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::HostLaunchd => "launchd",
@@ -68,6 +74,7 @@ impl Backend {
             Self::HostTaskScheduler => "task-scheduler",
             Self::Modal => "modal",
             Self::Runpod => "runpod",
+            Self::RunpodPod => "runpod-pod",
         }
     }
 }
@@ -79,9 +86,9 @@ pub(crate) struct StopRecord {
     pub deployment: DeploymentId,
     pub backend: Backend,
     /// Host: the launchd label / systemd unit. Modal: the app name. RunPod:
-    /// the endpoint name.
+    /// the endpoint or pod name.
     pub identity: String,
-    /// Modal: the app id; RunPod: the endpoint id. Set once known; stopping
+    /// Modal: the app id; RunPod: the endpoint or pod id. Set once known; stopping
     /// by id is preferred over a name lookup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_id: Option<String>,
@@ -117,7 +124,7 @@ pub(crate) struct StopRecord {
     /// destroy can list them; never deleted by amicu (other projects share them).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<String>,
-    /// RunPod only: every account secret that may exist for the endpoint,
+    /// RunPod only: every account secret that may exist for the endpoint or pod,
     /// recorded before it is written and dropped only once deleted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<String>,
@@ -246,6 +253,20 @@ impl StopRecord {
         }
     }
 
+    /// [`Self::runpod_in`] for an always-on pod.
+    pub(crate) fn runpod_pod_in(
+        project_id: &str,
+        deployment: &DeploymentId,
+        pod_id: Option<String>,
+        account: Option<&str>,
+        secrets: Vec<String>,
+    ) -> Self {
+        Self {
+            backend: Backend::RunpodPod,
+            ..Self::runpod_in(project_id, deployment, pod_id, account, secrets)
+        }
+    }
+
     /// Whether `other` addresses the same running thing: the same backend
     /// (launchd and systemd are never interchangeable) and identity.
     pub(crate) fn same_target(&self, other: &Self) -> bool {
@@ -284,7 +305,7 @@ impl StopRecord {
             }
             Backend::HostSystemd => ("service", &[".config/systemd/user"]),
             Backend::HostTaskScheduler => ("xml", &["amicu/tasks"]),
-            Backend::Modal | Backend::Runpod => {
+            Backend::Modal | Backend::Runpod | Backend::RunpodPod => {
                 return Err(format!(
                     "a {} record has a service file '{def}'",
                     self.backend.name()
@@ -377,6 +398,12 @@ impl StopRecord {
             ),
             Backend::Runpod => format!(
                 "{}: RunPod endpoint '{}' (endpoint id {})",
+                self.deployment,
+                self.identity,
+                self.app_id.as_deref().unwrap_or("unknown")
+            ),
+            Backend::RunpodPod => format!(
+                "{}: RunPod pod '{}' (pod id {})",
                 self.deployment,
                 self.identity,
                 self.app_id.as_deref().unwrap_or("unknown")

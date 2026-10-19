@@ -601,6 +601,7 @@ mod tests {
             memory: ByteSize::from_bytes(mem_gib * GIB),
             interconnect: None,
             price: None,
+            runpod: None,
         }
     }
 
@@ -624,6 +625,7 @@ mod tests {
             memory: ByteSize::from_bytes(256 * GIB),
             interconnect: None,
             price: None,
+            runpod: None,
         }
     }
 

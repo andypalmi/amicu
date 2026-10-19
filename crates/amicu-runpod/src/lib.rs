@@ -27,7 +27,7 @@ pub use client::{
 pub use error::RunPodError;
 pub use hardware::{
     GpuPlacement, PodGpuPlacement, exclusions_from_catalog, gpu_placement, parse_gpu_spec,
-    pod_gpu_placement, verify_catalog_memory,
+    pod_gpu_placement, pod_hourly_usd, serverless_hourly_usd, verify_catalog_memory,
 };
 pub use pod::PodSupervisor;
 pub use regions::select_data_centers;
