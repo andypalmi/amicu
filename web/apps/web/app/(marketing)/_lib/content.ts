@@ -223,6 +223,8 @@ export type ProviderStatus = 'supported' | 'preview' | 'planned';
 
 export const PROVIDER_STATUS_ORDER: ProviderStatus[] = ['supported', 'preview', 'planned'];
 
+export const RUNPOD_SIGNUP_URL = 'https://runpod.io?ref=w068dutc';
+
 export const PROVIDER_STATUS_LABEL: Record<ProviderStatus, string> = {
   supported: 'Supported',
   preview: 'Preview',
@@ -232,7 +234,7 @@ export const PROVIDER_STATUS_LABEL: Record<ProviderStatus, string> = {
 /** What each status means, shown under its heading on the registry list. */
 export const PROVIDER_STATUS_NOTE: Record<ProviderStatus, string> = {
   supported:
-    'Wired into amicu apply: this machine (local, local_apple, local_cpu, on_prem) and Modal. Modal is the only one tested end to end.',
+    'Wired into amicu apply: this machine (local, local_apple, local_cpu, on_prem), Modal and RunPod.',
   preview: 'An adapter exists and is tested against mocks. Not wired into apply.',
   planned: 'No adapter yet. Region and GPU catalog data only.',
 };
@@ -248,7 +250,7 @@ export interface Provider {
   /** Two or three short capability tags, taken from the adapter or apply path. */
   tags: string[];
   /**
-   * `supported`: wired into `amicu apply` (this machine, Modal).
+   * `supported`: wired into `amicu apply` (this machine, Modal, RunPod).
    * `preview`: provisioning adapter built (bare machine only), tested against
    * mocks, not live-tested and not wired into apply.
    * `planned`: region and pricing data only; provisioning not built.
@@ -259,7 +261,7 @@ export interface Provider {
 }
 
 // Verified against crates/amicu-cli/src/commands/apply.rs (dispatch is local
-// launchd/systemd or Modal) and the catalogs in crates/amicu-providers.
+// launchd/systemd, Modal or RunPod) and the catalogs in crates/amicu-providers.
 export const providers: Provider[] = [
   {
     slug: 'local',
@@ -309,10 +311,10 @@ export const providers: Provider[] = [
   {
     slug: 'runpod',
     name: 'RunPod',
-    kind: 'GPU cloud',
-    blurb: 'Provider-managed GPU pods across EU, EEA and worldwide data centers.',
-    tags: ['GPU pods', 'On-demand and interruptible', 'EU and EEA'],
-    status: 'preview',
+    kind: 'Serverless GPU cloud',
+    blurb: 'Deploy llama.cpp or vLLM to RunPod Serverless endpoints that scale to zero.',
+    tags: ['Serverless GPU', 'Per-second billing', 'EU data centers'],
+    status: 'supported',
     residency: 'EU and EEA data centers, plus US, Canada and APAC',
   },
   {

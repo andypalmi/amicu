@@ -12,7 +12,7 @@ Two equal paths. Pick one; steps 2 and 3 are shared.
 | Where | macOS, Linux or Windows; launchd, systemd or Task Scheduler user service | A remote GPU provider you have an account with |
 | Runtime | llama.cpp or vLLM | llama.cpp or vLLM |
 | Endpoint | Loopback, `api_key` optional | Public, `api_key` required |
-| Status | Supported | Today `apply` supports Modal; Hetzner, OVHcloud, Scaleway, RunPod and SSH are in preview, and AWS, Azure, GCP and Nebius are planned |
+| Status | Supported | Today `apply` supports Modal and RunPod; Hetzner, OVHcloud, Scaleway and SSH are in preview, and AWS, Azure, GCP and Nebius are planned |
 
 See [Providers](/docs/providers) for every provider and its status.
 
@@ -194,9 +194,9 @@ The steps are the same for any provider:
 
 `plan` shows `api_key: ******` and never reads the key value (it only checks that the variable is set). `apply` starts the deployment and then checks that the endpoint rejects anonymous requests and accepts your key. The first deploy downloads the weights and can take several minutes.
 
-Today, `apply` supports Modal as a remote GPU provider. Hetzner, OVHcloud, Scaleway, RunPod and SSH are in preview (adapter built, not wired into `apply`), and AWS, Azure, GCP and Nebius are planned. Selecting one of those fails at `apply` with a clear error before anything starts. Each provider page has its own setup and troubleshooting.
+Today, `apply` supports Modal and RunPod as remote GPU providers. Hetzner, OVHcloud, Scaleway and SSH are in preview (adapter built, not wired into `apply`), and AWS, Azure, GCP and Nebius are planned. Selecting one of those fails at `apply` with a clear error before anything starts. Each provider page has its own setup and troubleshooting.
 
-<Tabs items={['Modal']}>
+<Tabs items={['Modal', 'RunPod']}>
   <Tab value="Modal">
     Requirements: a Modal account and four token values. `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` authenticate the control plane. `MODAL_PROXY_TOKEN_ID` and `MODAL_PROXY_TOKEN_SECRET` are a Proxy Auth Token (Modal dashboard, Settings, Proxy Auth Tokens). See [Modal](/docs/providers/modal).
 
@@ -270,6 +270,25 @@ Today, `apply` supports Modal as a remote GPU provider. Hetzner, OVHcloud, Scale
     ```
 
     A `503` while the container cold-starts is normal.
+  </Tab>
+  <Tab value="RunPod">
+    Requirements: a RunPod account (<RunPodSignupLink />) and two API keys. `RUNPOD_API_KEY` manages endpoints: Restricted, with `api.runpod.io/graphql` Read/Write. The deployment's `api_key` is a separate Restricted key with `api.runpod.io/graphql` None and `api.runpod.ai` Read/Write. See [RunPod](/docs/providers/runpod#setup-and-credentials).
+
+    ```bash
+    export RUNPOD_API_KEY=...
+    export CHAT_API_KEY=...
+    ```
+
+    Replace the contents of `amicu.hcl` with the model, hardware profile and deployment from the [RunPod example](/docs/providers/runpod#example). When apply finishes it prints the endpoint URL. Send the endpoint key as a bearer token:
+
+    ```bash
+    curl "$URL/v1/chat/completions" \
+      -H "Authorization: Bearer $CHAT_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{"model": "unsloth/Qwen3.5-9B-GGUF", "messages": [{"role": "user", "content": "Hello"}]}'
+    ```
+
+    The first request after idle waits for a cold start. The endpoint scales to zero and is billed per second while workers run.
   </Tab>
 </Tabs>
 

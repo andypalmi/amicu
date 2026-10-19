@@ -9,14 +9,14 @@ A provider is set by `provider` on a [`hardware_profile`](/docs/configuration/ha
 
 ## Where to start
 
-- **A GPU provider:** open it in the list above. Today `apply` supports Modal as a remote GPU provider; the others are in preview or planned. The [Quickstart, Path B](/docs/quickstart#path-b-on-a-gpu-provider) walks through it.
+- **A GPU provider:** open it in the list above. Today `apply` supports Modal and RunPod as remote GPU providers; the others are in preview or planned. The [Quickstart, Path B](/docs/quickstart#path-b-on-a-gpu-provider) walks through it.
 - **This machine:** see [This machine](/docs/providers/local), or [Quickstart, Path A](/docs/quickstart#path-a-on-this-machine).
 
 ## What the statuses mean
 
 | Status | Meaning |
 |---|---|
-| Supported | Wired into `amicu apply`. Today: this machine (`local`, `local_apple`, `local_cpu`, `on_prem`) and Modal as a remote GPU provider. |
+| Supported | Wired into `amicu apply`. Today: this machine (`local`, `local_apple`, `local_cpu`, `on_prem`) Modal and RunPod as remote GPU providers. |
 | Preview | A provisioning adapter exists and is tested against mocks. Not live-tested and not wired into `apply`. |
 | Planned | Region and GPU catalog data only. Provisioning is not built. |
 
