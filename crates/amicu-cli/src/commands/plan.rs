@@ -438,7 +438,8 @@ fn runpod_billing(graph: &Graph, deployment: &DeploymentId) -> Option<String> {
     let acc = hw.accelerator.as_ref();
     Some(match hw.runpod_mode() {
         RunpodMode::Pod => {
-            let community = hw.runpod.and_then(|r| r.cloud) == Some(RunpodCloud::Community);
+            let community =
+                hw.runpod.as_ref().and_then(|r| r.cloud) == Some(RunpodCloud::Community);
             match acc.and_then(|a| amicu_runpod::pod_hourly_usd(a, community)) {
                 Some(usd) => format!("always on \u{b7} ~${usd:.2}/hr"),
                 None => "always on".to_owned(),
@@ -502,6 +503,7 @@ struct RunpodRemote {
 /// The parts of a create body the plan shows, shared by endpoints and pods.
 struct RemoteBody {
     details: Vec<(&'static str, String)>,
+    volume: Option<String>,
     image: String,
     argv: Vec<String>,
     env: BTreeMap<String, String>,
@@ -521,7 +523,7 @@ fn runpod_remote(graph: &Graph, item: &PlanItem, project_id: Option<&str>) -> Op
     };
     let body = match hw.runpod_mode() {
         RunpodMode::Serverless => {
-            crate::commands::apply::configured_endpoint(client, graph, &catalog, id, pid)
+            crate::commands::apply::configured_endpoint(client, graph, &catalog, id, pid, None)
                 .map_err(|e| e.to_string())
                 .and_then(|s| s.planned_endpoint(launch).map_err(|e| e.to_string()))
                 .map(|b| {
@@ -531,8 +533,13 @@ fn runpod_remote(graph: &Graph, item: &PlanItem, project_id: Option<&str>) -> Op
                         format!(" (excluding {})", b.gpu.excluded_types.join(", "))
                     };
                     let gpu = format!("{} x {}{excluding}", b.gpu.count, b.gpu.pools.join(", "));
+                    let mut details = vec![("endpoint", named(b.name)), ("gpu", gpu)];
+                    if b.flashboot != amicu_runpod::FlashBoot::Off {
+                        details.push(("flashboot", "on".to_owned()));
+                    }
                     RemoteBody {
-                        details: vec![("endpoint", named(b.name)), ("gpu", gpu)],
+                        details,
+                        volume: b.network_volume_ids.first().cloned(),
                         image: b.image,
                         argv: b.entrypoint.into_iter().chain(b.cmd).collect(),
                         env: b.env,
@@ -541,25 +548,28 @@ fn runpod_remote(graph: &Graph, item: &PlanItem, project_id: Option<&str>) -> Op
                     }
                 })
         }
-        RunpodMode::Pod => crate::commands::apply::configured_pod(client, graph, &catalog, id, pid)
-            .map_err(|e| e.to_string())
-            .and_then(|s| {
-                let pod = s.planned_pod(launch).map_err(|e| e.to_string())?;
-                let argv = s.launch_argv(launch).map_err(|e| e.to_string())?;
-                Ok((pod, argv))
-            })
-            .map(|(b, argv)| RemoteBody {
-                details: vec![
-                    ("pod", named(b.name)),
-                    ("gpu", format!("{} x {}", b.gpu_count, b.gpu_type_id)),
-                    ("cloud", b.cloud.wire().to_ascii_lowercase()),
-                ],
-                image: b.image,
-                argv,
-                env: b.env,
-                data_centers: b.data_center_ids,
-                disk_gb: b.disk_gb,
-            }),
+        RunpodMode::Pod => {
+            crate::commands::apply::configured_pod(client, graph, &catalog, id, pid, None)
+                .map_err(|e| e.to_string())
+                .and_then(|s| {
+                    let pod = s.planned_pod(launch).map_err(|e| e.to_string())?;
+                    let argv = s.launch_argv(launch).map_err(|e| e.to_string())?;
+                    Ok((pod, argv))
+                })
+                .map(|(b, argv)| RemoteBody {
+                    details: vec![
+                        ("pod", named(b.name)),
+                        ("gpu", format!("{} x {}", b.gpu_count, b.gpu_type_id)),
+                        ("cloud", b.cloud.wire().to_ascii_lowercase()),
+                    ],
+                    volume: b.network_volume_id,
+                    image: b.image,
+                    argv,
+                    env: b.env,
+                    data_centers: b.data_center_ids,
+                    disk_gb: b.disk_gb,
+                })
+        }
     };
     let body = match body {
         Ok(body) => body,
@@ -583,6 +593,9 @@ fn runpod_remote(graph: &Graph, item: &PlanItem, project_id: Option<&str>) -> Op
     if let Some(gb) = body.disk_gb {
         details.push(("disk", format!("{gb} GB")));
     }
+    if let Some(v) = &body.volume {
+        details.push(("volume", volume_text(v, &body.env)));
+    }
     let secrets: Vec<&str> = body
         .env
         .iter()
@@ -599,6 +612,19 @@ fn runpod_remote(graph: &Graph, item: &PlanItem, project_id: Option<&str>) -> Op
         details,
         launch: amicu_engine::planner::redacted_argv_text(&body.argv),
     })
+}
+
+/// The mounted volume and the cache variables pointed at it.
+fn volume_text(volume: &str, env: &BTreeMap<String, String>) -> String {
+    let cache: Vec<String> = ["HF_HOME", "LLAMA_CACHE"]
+        .iter()
+        .filter_map(|k| env.get(*k).map(|v| format!("{k}={v}")))
+        .collect();
+    format!(
+        "{volume} at {} \u{b7} placement pinned to its data center at apply \u{b7} {}",
+        amicu_runpod::VOLUME_MOUNT_PATH,
+        cache.join(" ")
+    )
 }
 
 fn duration_text(secs: u32) -> String {
@@ -903,8 +929,10 @@ mod tests {
     fn runpod_graph(runtime: Runtime, mode: RunpodMode) -> Graph {
         let mut g = graph("runpod", runtime);
         g.hardware_profiles[0].region = Some(amicu_core::resource::Region::from_code("eu"));
-        g.hardware_profiles[0].runpod =
-            Some(amicu_core::resource::RunpodSettings { mode, cloud: None });
+        g.hardware_profiles[0].runpod = Some(amicu_core::resource::RunpodSettings {
+            mode,
+            ..Default::default()
+        });
         g.deployments[0].api_key = Some(amicu_core::secret::SecretRef::new("RUNPOD_KEY"));
         g
     }

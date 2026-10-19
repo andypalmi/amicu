@@ -37,18 +37,25 @@ impl HardwareProfile {
     /// block says otherwise).
     #[must_use]
     pub fn runpod_mode(&self) -> RunpodMode {
-        self.runpod.map(|r| r.mode).unwrap_or_default()
+        self.runpod.as_ref().map(|r| r.mode).unwrap_or_default()
     }
 }
 
-/// The `runpod { mode, cloud }` block of a hardware profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// The `runpod {}` block of a hardware profile.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RunpodSettings {
     #[serde(default)]
     pub mode: RunpodMode,
     /// Pod mode only; `None` means [`RunpodCloud::Secure`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud: Option<RunpodCloud>,
+    /// Id of an existing RunPod network volume that holds the model cache.
+    /// amicu never creates or deletes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_volume: Option<String>,
+    /// Serverless mode only; `None` means off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flashboot: Option<bool>,
 }
 
 /// A load-balancing serverless endpoint (scales to zero) or an always-on pod.

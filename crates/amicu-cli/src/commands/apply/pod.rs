@@ -12,8 +12,8 @@ use amicu_runtime::{EndpointExposure, GatewayAuth, LaunchPlan, RuntimeAdapter, R
 
 use super::{
     Env, Progress, RUNPOD_PROVIDER, RunPodStart, delete_runpod_secrets, deployment_hardware,
-    find_deployment, gguf_model, merged_names, residency_allowlist, stop_record, supervisor_err,
-    sync_runpod_record, unknown_runpod_account,
+    find_deployment, gguf_model, merged_names, residency_allowlist, runpod_volume, stop_record,
+    supervisor_err, sync_runpod_record, unknown_runpod_account,
 };
 use crate::error::CliError;
 use crate::runpod_ops::{check_account, current_account, runpod_error};
@@ -45,6 +45,7 @@ fn handle(deployment: &DeploymentId, id: &str) -> RuntimeHandle {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build(
     graph: &Graph,
     catalog: &dyn Catalog,
@@ -53,12 +54,14 @@ fn build(
     account: &str,
     env: &Env<'_>,
     prior: Option<&StopRecord>,
+    volume: Option<&amicu_runpod::NetworkVolume>,
 ) -> Result<PodSupervisor, CliError> {
-    let mut supervisor = configured_pod(env.runpod.client()?, graph, catalog, id, project_id)?
-        .with_probe_transport(env.runpod.probe())
-        .with_progress(amicu_runpod::supervisor::PROGRESS_EVERY, env.progress)
-        .with_workspace(account)
-        .with_confirmed_account(true);
+    let mut supervisor =
+        configured_pod(env.runpod.client()?, graph, catalog, id, project_id, volume)?
+            .with_probe_transport(env.runpod.probe())
+            .with_progress(amicu_runpod::supervisor::PROGRESS_EVERY, env.progress)
+            .with_workspace(account)
+            .with_confirmed_account(true);
     if let Some(prior) = prior {
         if let Some(pod) = &prior.app_id {
             supervisor = supervisor.with_recorded_pod(pod);
@@ -70,20 +73,28 @@ fn build(
 
 /// A deployment's pod as configured from the graph (GPU, cloud, placement,
 /// GGUF source): what `apply` starts and `plan` shows.
+/// `volume` as in [`super::configured_endpoint`].
 pub(crate) fn configured_pod(
     client: RunPodClient,
     graph: &Graph,
     catalog: &dyn Catalog,
     id: &DeploymentId,
     project_id: &str,
+    volume: Option<&amicu_runpod::NetworkVolume>,
 ) -> Result<PodSupervisor, CliError> {
     let (deployment, hardware) = deployment_hardware(graph, catalog, id)?;
-    let cloud = match hardware.runpod.and_then(|r| r.cloud) {
+    let settings = hardware.runpod.clone().unwrap_or_default();
+    let cloud = match settings.cloud {
         Some(RunpodCloud::Community) => Cloud::Community,
         _ => Cloud::Secure,
     };
     let supervisor = PodSupervisor::for_hardware(client, project_id, id.as_str(), &hardware)
         .and_then(|s| s.with_allowed_residencies(&residency_allowlist(graph)))
+        .and_then(|s| match (volume, &settings.network_volume) {
+            (Some(v), _) => s.with_network_volume(v),
+            (None, Some(v)) => Ok(s.with_network_volume_id(v)),
+            (None, None) => Ok(s),
+        })
         .map_err(supervisor_err)?
         .with_cloud(cloud);
     Ok(match gguf_model(catalog, deployment) {
@@ -112,7 +123,20 @@ pub(super) async fn prepare(
         .iter()
         .find(|r| r.deployment == *id && r.backend == Backend::RunpodPod && r.identity == name)
         .cloned();
-    let fresh = build(graph, catalog, id, &progress.project_id, account, env, None)?;
+    let volume = runpod_volume(graph, catalog, id, env).await?;
+    let fresh = build(
+        graph,
+        catalog,
+        id,
+        &progress.project_id,
+        account,
+        env,
+        None,
+        volume.as_ref(),
+    )?;
+    if let Some(note) = fresh.volume_gpu_note().await {
+        let _ = writeln!(std::io::stderr(), "note: {note}");
+    }
     let mut replace = None;
     if let Some(old) = &recorded
         && let Some(pod_id) = &old.app_id
@@ -141,6 +165,7 @@ pub(super) async fn prepare(
             account,
             env,
             recorded.as_ref(),
+            volume.as_ref(),
         )?,
     };
     let planned = supervisor

@@ -22,18 +22,19 @@ use amicu_runtime::{
 use async_trait::async_trait;
 
 use crate::client::{
-    Cloud, CreatePod, CreateSecret, DeleteOutcome, OWNER_ENV_VAR, Pod, PodAction, PodStatus,
-    RunPodClient, UpdatePod, pod_proxy_url,
+    Cloud, CreatePod, CreateSecret, DeleteOutcome, NetworkVolume, OWNER_ENV_VAR, Pod, PodAction,
+    PodStatus, RunPodClient, UpdatePod, pod_proxy_url,
 };
 use crate::error::RunPodError;
 use crate::hardware::{pod_gpu_placement, verify_catalog_memory};
 use crate::logs::{TIMEOUT_LOG_LIMITS, TIMEOUT_TAIL, WorkerLogs, merge, tail_block};
-use crate::regions::{restrict_to_residencies, select_data_centers};
+use crate::regions::{place_on_volume, restrict_to_residencies, select_data_centers};
 use crate::secrets::{SecretLedger, reference_secrets, stop_result};
 use crate::supervisor::{
     DEFAULT_CONTAINER_DISK_GB, HEALTH_PATH, ProgressSink, ReadinessTiming, StopOutcome,
-    container_argv, container_command, elapsed, image_min_cuda, owner_marker, placeholder_secrets,
-    planned_hf_token, reserved_env_var, runpod_err, runtime_image, runtime_port, unsupported,
+    container_argv, container_command, elapsed, image_min_cuda, insert_volume_cache_env,
+    owner_marker, placeholder_secrets, planned_hf_token, reserved_env_var, runpod_err,
+    runtime_image, runtime_port, unsupported, volume_gpu_note,
 };
 
 /// Env variables the pod env may not set: amicu's owner marker, and the ones
@@ -156,6 +157,8 @@ pub struct PodSupervisor {
     cloud: Cloud,
     data_center_ids: Vec<String>,
     region: Option<String>,
+    network_volume: Option<String>,
+    placed_volume: Option<(String, String)>,
     disk_gb: u32,
     gguf: Option<GgufSource>,
     readiness: ReadinessTiming,
@@ -202,6 +205,8 @@ impl PodSupervisor {
             cloud: Cloud::Secure,
             data_center_ids: Vec::new(),
             region: None,
+            network_volume: None,
+            placed_volume: None,
             disk_gb: DEFAULT_CONTAINER_DISK_GB,
             gguf: None,
             readiness: ReadinessTiming::DEFAULT,
@@ -314,6 +319,36 @@ impl PodSupervisor {
         )
         .map_err(|e| runpod_err(&e))?;
         Ok(self)
+    }
+
+    /// Mounts volume `id` as the Hugging Face cache without reading it, so
+    /// placement is not narrowed to its data center (for display; `start`
+    /// should get [`with_network_volume`](Self::with_network_volume)).
+    #[must_use]
+    pub fn with_network_volume_id(mut self, id: &str) -> Self {
+        self.network_volume = Some(id.to_owned());
+        self
+    }
+
+    /// Mounts `volume` as the Hugging Face cache and places the pod in the
+    /// volume's data center; see
+    /// [`crate::supervisor::RunPodSupervisor::with_network_volume`].
+    ///
+    /// # Errors
+    /// [`LlamaCppError::Supervisor`] when the volume lies outside the
+    /// deployment's data centers.
+    pub fn with_network_volume(mut self, volume: &NetworkVolume) -> Result<Self, LlamaCppError> {
+        self.data_center_ids =
+            place_on_volume(&self.data_center_ids, volume).map_err(|e| runpod_err(&e))?;
+        self.network_volume = Some(volume.id.clone());
+        self.placed_volume = Some((volume.id.clone(), volume.data_center.clone()));
+        Ok(self)
+    }
+
+    /// See [`crate::supervisor::RunPodSupervisor::volume_gpu_note`].
+    pub async fn volume_gpu_note(&self) -> Option<String> {
+        let type_id = self.gpu_type_id.as_ref()?;
+        volume_gpu_note(&self.client, self.placed_volume.as_ref(), type_id).await
     }
 
     /// The Hugging Face GGUF a llama.cpp launch downloads. A no-op for vLLM.
@@ -481,7 +516,8 @@ impl PodSupervisor {
     }
 
     /// Why `pod` cannot be updated in place to this configuration (GPU type
-    /// or count, cloud, or a data center outside the region), or `None`.
+    /// or count, cloud, network volume, or a data center outside the
+    /// region), or `None`.
     #[must_use]
     pub fn replacement_reason(&self, pod: &Pod) -> Option<String> {
         if let (Some(want), Some(have)) = (&self.gpu_type_id, &pod.gpu) {
@@ -502,6 +538,14 @@ impl PodSupervisor {
                 "cloud is {}, wanted {}",
                 cloud.wire(),
                 self.cloud.wire()
+            ));
+        }
+        if pod.network_volume != self.network_volume {
+            let name = |v: &Option<String>| v.clone().unwrap_or_else(|| "none".to_owned());
+            return Some(format!(
+                "network volume is {}, wanted {}",
+                name(&pod.network_volume),
+                name(&self.network_volume)
             ));
         }
         self.residency_violation(pod)
@@ -570,6 +614,9 @@ impl PodSupervisor {
         let owner = self.owner();
         let mut env = plain;
         env.insert(OWNER_ENV_VAR.to_owned(), owner.clone());
+        if self.network_volume.is_some() {
+            insert_volume_cache_env(&mut env, &secret, runtime);
+        }
         let create_secrets = reference_secrets(
             &self.project_id,
             &self.deployment_id,
@@ -597,6 +644,7 @@ impl PodSupervisor {
         pod.min_cuda_version = image_min_cuda(image, runtime);
         pod.cloud = self.cloud;
         pod.data_center_ids.clone_from(&self.data_center_ids);
+        pod.network_volume_id.clone_from(&self.network_volume);
         Ok(Prepared {
             pod,
             secrets: create_secrets,

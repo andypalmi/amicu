@@ -181,6 +181,8 @@ fn hardware_profile(name: &str, f: &Fields) -> Result<HardwareProfile> {
                 Ok(RunpodSettings {
                     mode: r.opt_enum("mode")?.unwrap_or_default(),
                     cloud: r.opt_enum("cloud")?,
+                    network_volume: r.opt_string("network_volume")?,
+                    flashboot: r.opt_bool("flashboot")?,
                 })
             })
             .transpose()?,

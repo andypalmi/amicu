@@ -496,6 +496,25 @@ pub struct Endpoint {
     /// the env and amicu set the marker.
     #[serde(default, rename = "env", deserialize_with = "owner_from_env")]
     pub owner: Option<String>,
+    /// Mounted network volume ids from `mounts.network`; `None` when RunPod
+    /// did not return `mounts`.
+    #[serde(default, rename = "mounts", deserialize_with = "network_mounts")]
+    pub network_volumes: Option<Vec<String>>,
+}
+
+fn network_mounts<'de, D>(d: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mounts = Option::<Value>::deserialize(d)?;
+    Ok(mounts.map(|m| {
+        m.get("network")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|n| n.get("volumeId")?.as_str().map(str::to_owned))
+            .collect()
+    }))
 }
 
 /// Reads only [`OWNER_ENV_VAR`] out of an endpoint's `env` map; every other
@@ -611,6 +630,35 @@ pub struct GpuType {
     pub pool: Option<String>,
     #[serde(default)]
     pub memory: Option<u32>,
+}
+
+/// Where RunPod mounts a network volume on a serverless worker (fixed), and
+/// where amicu mounts one on a pod.
+pub const VOLUME_MOUNT_PATH: &str = "/runpod-volume";
+
+/// A network volume as `GET /network-volumes/{id}` returns it.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkVolume {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub size: Option<u32>,
+    /// The one data center the volume lives in (immutable).
+    pub data_center: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DataCenterGpus {
+    #[serde(default)]
+    gpu_availability: Vec<CatalogId>,
+}
+
+#[derive(Deserialize)]
+struct CatalogId {
+    id: String,
 }
 
 /// Name of the amicu-owned secret whose id identifies a personal account
@@ -904,6 +952,36 @@ impl RunPodClient {
             .await?;
         let list: GpuCatalog = decode(&resp)?;
         Ok(list.gpus)
+    }
+
+    /// `GET /network-volumes/{id}`. Read only: amicu never creates or deletes
+    /// a volume.
+    pub async fn get_network_volume(&self, id: &str) -> Result<NetworkVolume, RunPodError> {
+        let path = format!("/network-volumes/{}", segment(id)?);
+        let resp = self
+            .send(
+                HttpMethod::Get,
+                &path,
+                None,
+                &format!("network volume `{id}`"),
+            )
+            .await?;
+        decode(&resp)
+    }
+
+    /// The GPU type ids data center `dc` offers (`GET
+    /// /catalog/datacenters/{dc}?include=GPU_AVAILABILITY`), whatever their
+    /// current stock.
+    pub async fn data_center_gpus(&self, dc: &str) -> Result<Vec<String>, RunPodError> {
+        let path = format!(
+            "/catalog/datacenters/{}?include=GPU_AVAILABILITY",
+            segment(dc)?
+        );
+        let resp = self
+            .send(HttpMethod::Get, &path, None, &format!("data center `{dc}`"))
+            .await?;
+        let dc: DataCenterGpus = decode(&resp)?;
+        Ok(dc.gpu_availability.into_iter().map(|g| g.id).collect())
     }
 
     /// `POST /account/secrets`. Error details are withheld for this call.

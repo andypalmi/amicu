@@ -25,6 +25,7 @@ struct Ep {
     name: String,
     owner: Option<String>,
     max_workers: Option<u64>,
+    volumes: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -76,6 +77,12 @@ struct WorldState {
     metrics: String,
     /// Body of every endpoint create.
     created: Vec<Value>,
+    /// Body of every endpoint PATCH.
+    patched: Vec<Value>,
+    /// `(id, data center)` of every network volume.
+    volumes: Vec<(String, String)>,
+    /// A data center whose catalog offers no L4.
+    no_l4_dc: Option<&'static str>,
 }
 
 type Hook = Box<dyn FnOnce() + Send>;
@@ -100,11 +107,23 @@ fn ep_json(e: &Ep) -> Value {
     }
     let mut ep = json!({"id": e.id, "name": e.name, "type": "LOAD_BALANCER", "env": env,
         "gpu": {"pools": ["AMPERE_24"], "count": 1},
-        "dataCenterIds": ["EU-RO-1", "EU-SE-1"]});
+        "dataCenterIds": ["EU-RO-1", "EU-SE-1"],
+        "mounts": {"global": [], "network": e.volumes.iter().map(|v| json!({"volumeId": v}))
+            .collect::<Vec<_>>()}});
     if let Some(max) = e.max_workers {
         ep["workers"] = json!({"min": 0, "max": max});
     }
     ep
+}
+
+fn volumes_in(body: Option<&Value>) -> Option<Vec<String>> {
+    let network = body?.get("mounts")?.get("network")?.as_array()?;
+    Some(
+        network
+            .iter()
+            .filter_map(|n| n["volumeId"].as_str().map(str::to_owned))
+            .collect(),
+    )
 }
 
 fn owner_in(body: Option<&Value>) -> Option<String> {
@@ -212,6 +231,7 @@ impl HttpTransport for World {
                         .to_owned(),
                     owner: owner_in(req.body.as_ref()),
                     max_workers: None,
+                    volumes: volumes_in(req.body.as_ref()).unwrap_or_default(),
                 };
                 w.endpoints.push(ep.clone());
                 if w.lose_create_response {
@@ -253,8 +273,12 @@ impl HttpTransport for World {
                 match method {
                     HttpMethod::Get => reply(200, &ep_json(&w.endpoints[i])),
                     HttpMethod::Patch => {
+                        w.patched.extend(req.body.clone());
                         if let Some(o) = owner_in(req.body.as_ref()) {
                             w.endpoints[i].owner = Some(o);
+                        }
+                        if let Some(v) = volumes_in(req.body.as_ref()) {
+                            w.endpoints[i].volumes = v;
                         }
                         if let Some(max) = req
                             .body
@@ -346,6 +370,24 @@ impl HttpTransport for World {
                     }
                 }
                 reply(200, &pod_json(&w.pods[i]))
+            }
+            (HttpMethod::Get, ["network-volumes", id]) => {
+                match w.volumes.iter().find(|(v, _)| v == id) {
+                    Some((v, dc)) => reply(
+                        200,
+                        &json!({"id": v, "name": "cache", "size": 50, "dataCenter": dc,
+                            "type": "STANDARD"}),
+                    ),
+                    None => reply(404, &json!({"detail": "not found"})),
+                }
+            }
+            (HttpMethod::Get, ["catalog", "datacenters", dc]) => {
+                let gpus = if dc.starts_with(w.no_l4_dc.unwrap_or("-")) {
+                    json!([])
+                } else {
+                    json!([{"id": "NVIDIA L4", "name": "L4", "availability": "LOW"}])
+                };
+                reply(200, &json!({"id": dc, "gpuAvailability": gpus}))
             }
             (HttpMethod::Get, ["catalog", "gpus"]) => reply(
                 200,
@@ -562,6 +604,7 @@ fn add_named_endpoint(rig: &Rig, id: &str, name: &str, owner: Option<String>) {
         name: name.to_owned(),
         owner,
         max_workers: None,
+        volumes: Vec::new(),
     });
 }
 
@@ -1248,6 +1291,7 @@ fn refresh_reports_drift_of_a_live_endpoint_without_touching_it() {
         name: endpoint_name(),
         owner: Some(owner()),
         max_workers: Some(7),
+        volumes: Vec::new(),
     });
     let (r, state) = refresh(&project, &rig);
     assert_eq!(r.notes.len(), 1, "{r:?}");
@@ -2882,4 +2926,246 @@ resource "data_class" "customer" {
         "{err}"
     );
     assert_eq!(pod_ids(&rig).len(), 0);
+}
+
+fn with_runpod_block(config: &str, block: &str) -> String {
+    config.replace(
+        "  memory = \"32GiB\"\n",
+        &format!("  memory = \"32GiB\"\n  runpod {{\n{block}  }}\n"),
+    )
+}
+
+fn volume_config(volume: &str) -> String {
+    with_runpod_block(
+        &runpod_config(),
+        &format!("    network_volume = \"{volume}\"\n    flashboot      = true\n"),
+    )
+}
+
+fn add_volume(rig: &Rig, id: &str, dc: &str) {
+    rig.runpod
+        .world
+        .state
+        .lock()
+        .unwrap()
+        .volumes
+        .push((id.to_owned(), dc.to_owned()));
+}
+
+#[test]
+fn a_network_volume_is_read_then_mounted_in_its_data_center() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    write(&td.path, "amicu.hcl", &volume_config("vol1"));
+    let rig = rig();
+    add_volume(&rig, "vol1", "EU-RO-1");
+    apply_with(&project, &rig).unwrap();
+
+    let log = rig.runpod.world.log();
+    let read = log.iter().position(|l| l == "Get /network-volumes/vol1");
+    let created = log.iter().position(|l| l == "Post /serverless");
+    assert!(read.is_some() && read < created, "{log:?}");
+    assert!(
+        !log.iter()
+            .any(|l| l.contains("network-volumes") && !l.starts_with("Get"))
+    );
+    let body = rig.runpod.world.state.lock().unwrap().created[0].clone();
+    assert_eq!(data_centers(&body), ["EU-RO-1"]);
+    assert_eq!(body["mounts"], json!({"network": [{"volumeId": "vol1"}]}));
+    assert_eq!(body["env"]["HF_HOME"], json!("/runpod-volume/huggingface"));
+    assert_eq!(body["flashboot"], json!("FLASHBOOT"));
+
+    assert_unchanged_rerun(&project, &rig);
+}
+
+fn assert_unchanged_rerun(project: &Project, rig: &Rig) {
+    rig.runpod.world.state.lock().unwrap().log.clear();
+    let mut out = Vec::new();
+    commands::apply::run_with(
+        project,
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &rig.env(),
+    )
+    .unwrap();
+    let text = utf8(out);
+    assert!(text.contains("No changes to apply."), "{text}");
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn a_changed_volume_updates_the_endpoint_in_place() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    write(&td.path, "amicu.hcl", &volume_config("vol1"));
+    let rig = rig();
+    add_volume(&rig, "vol1", "EU-RO-1");
+    add_volume(&rig, "vol2", "EU-SE-1");
+    apply_with(&project, &rig).unwrap();
+
+    write(&td.path, "amicu.hcl", &volume_config("vol2"));
+    let state = project.load_state().unwrap().unwrap();
+    let (text, _) = plan_text_for(&volume_config("vol2"), &state);
+    assert!(text.contains("network_volume"), "{text}");
+    apply_with(&project, &rig).unwrap();
+
+    let w = rig.runpod.world.state.lock().unwrap();
+    assert_eq!(w.created.len(), 1, "updated, not created again");
+    let patch = w.patched.last().unwrap();
+    assert_eq!(patch["mounts"], json!({"network": [{"volumeId": "vol2"}]}));
+    assert_eq!(patch["dataCenterIds"], json!(["EU-SE-1"]));
+}
+
+#[test]
+fn removing_the_volume_detaches_it_and_a_volume_less_update_sends_no_mounts() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    write(&td.path, "amicu.hcl", &volume_config("vol1"));
+    let rig = rig();
+    add_volume(&rig, "vol1", "EU-RO-1");
+    apply_with(&project, &rig).unwrap();
+
+    write(&td.path, "amicu.hcl", &runpod_config());
+    apply_with(&project, &rig).unwrap();
+    {
+        let w = rig.runpod.world.state.lock().unwrap();
+        assert_eq!(w.patched.last().unwrap()["mounts"], json!({"network": []}));
+        assert_eq!(w.endpoints[0].volumes, Vec::<String>::new());
+    }
+
+    let mut config = runpod_config();
+    config = config.replace("context_length = 8192", "context_length = 4096");
+    write(&td.path, "amicu.hcl", &config);
+    apply_with(&project, &rig).unwrap();
+    let w = rig.runpod.world.state.lock().unwrap();
+    let patch = w.patched.last().unwrap();
+    assert!(patch.get("mounts").is_none(), "{patch}");
+}
+
+#[test]
+fn a_volume_data_center_without_the_gpu_in_stock_is_only_a_note() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    write(&td.path, "amicu.hcl", &volume_config("vol1"));
+    let rig = rig();
+    add_volume(&rig, "vol1", "EU-NL-1");
+    rig.runpod.world.state.lock().unwrap().no_l4_dc = Some("EU-NL-1");
+    apply_with(&project, &rig).unwrap();
+    let log = rig.runpod.world.log();
+    let looked = log
+        .iter()
+        .position(|l| l == "Get /catalog/datacenters/EU-NL-1?include=GPU_AVAILABILITY");
+    let created = log.iter().position(|l| l == "Post /serverless");
+    assert!(looked.is_some() && looked < created, "{log:?}");
+}
+
+#[test]
+fn a_volume_outside_the_region_is_refused_before_anything_is_recorded() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let config = volume_config("vol1").replacen(
+        "provider = \"runpod\"",
+        "provider = \"runpod\"\n  region   = \"eu\"",
+        1,
+    );
+    write(&td.path, "amicu.hcl", &config);
+    let rig = rig();
+    add_volume(&rig, "vol1", "US-KS-2");
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("US-KS-2"), "{err}");
+    assert!(
+        err.contains("outside the deployment's data centers"),
+        "{err}"
+    );
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn a_missing_volume_is_refused_before_anything_is_recorded() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    write(&td.path, "amicu.hcl", &volume_config("vol404"));
+    let rig = rig();
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("network volume `vol404`"), "{err}");
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn plan_shows_the_volume_and_flashboot() {
+    let state = state_with(amicu_core::graph::Graph::new());
+    let (text, _) = plan_text_for(&volume_config("vol1"), &state);
+    assert!(
+        text.contains(
+            "      volume:   vol1 at /runpod-volume \u{b7} placement pinned to its data center at apply \u{b7} \
+             HF_HOME=/runpod-volume/huggingface LLAMA_CACHE=/runpod-volume/huggingface/hub\n"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("      flashboot: on\n"), "{text}");
+    let (text, _) = plan_text_for(&pod_config("    network_volume = \"vol1\"\n"), &state);
+    assert!(
+        text.contains("      volume:   vol1 at /runpod-volume"),
+        "{text}"
+    );
+    assert!(!text.contains("flashboot"), "{text}");
+    let (text, _) = plan_text_for(&runpod_config(), &state);
+    assert!(!text.contains("volume:"), "{text}");
+    assert!(!text.contains("flashboot"), "{text}");
+}
+
+#[test]
+fn a_pod_mounts_the_volume_and_a_volume_change_replaces_it() {
+    let td = TempDir::new();
+    let project = pod_project(&td, None);
+    let config = |v: &str| pod_config(&format!("    network_volume = \"{v}\"\n"));
+    write(&td.path, "amicu.hcl", &config("vol1"));
+    let rig = rig();
+    add_volume(&rig, "vol1", "EU-RO-1");
+    add_volume(&rig, "vol2", "EU-RO-1");
+    apply_with(&project, &rig).unwrap();
+    {
+        let w = rig.runpod.world.state.lock().unwrap();
+        assert_eq!(
+            w.pods[0].body["mounts"],
+            json!({"network": [{"volumeId": "vol1", "path": "/runpod-volume"}]})
+        );
+        assert_eq!(w.pods[0].body["dataCenterIds"], json!(["EU-RO-1"]));
+    }
+    assert_unchanged_rerun(&project, &rig);
+
+    write(&td.path, "amicu.hcl", &config("vol2"));
+    rig.runpod.world.state.lock().unwrap().log.clear();
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(pod_writes(&rig), ["action pod1 terminate", "Post /pods"]);
+    let ids = pod_ids(&rig);
+    assert_eq!(ids, ["pod2"]);
+    assert_eq!(stops_for(&project, DEP)[0].app_id.as_deref(), Some("pod2"));
+    let w = rig.runpod.world.state.lock().unwrap();
+    assert_eq!(w.pods[0].body["mounts"]["network"][0]["volumeId"], "vol2");
+}
+
+#[test]
+fn refresh_reports_a_detached_volume_as_drift() {
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(Some("ep7"), ACCOUNT, &[])));
+    write(&td.path, "amicu.hcl", &volume_config("vol1"));
+    let mut state = project.load_state().unwrap().unwrap();
+    state.graph = project.load_graph().unwrap();
+    state.pending.clear();
+    project.save_state(&state).unwrap();
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    let (r, _) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 1, "{r:?}");
+    assert!(
+        r.notes[0].contains("network volume none (applied vol1)"),
+        "{}",
+        r.notes[0]
+    );
 }

@@ -224,6 +224,12 @@ fn pod_scaling_ok(s: &ScalingSettings) -> bool {
             && s.scaledown_window_secs.is_none())
 }
 
+fn is_volume_id(v: &str) -> bool {
+    !v.is_empty()
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// `AMICU-CAP-015`: the `runpod {}` block must fit its profile and the
 /// deployments that use it.
 fn runpod_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
@@ -253,7 +259,29 @@ fn runpod_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
             continue;
         }
         let mode = hw.runpod_mode();
-        if mode == RunpodMode::Serverless && hw.runpod.is_some_and(|r| r.cloud.is_some()) {
+        if let Some(v) = hw.runpod.as_ref().and_then(|r| r.network_volume.as_deref())
+            && !is_volume_id(v)
+        {
+            push(
+                resource.clone(),
+                format!(
+                    "hardware_profile `{}`: `network_volume` must be the id of an existing RunPod \
+                     network volume (letters, digits, `-` and `_`), got `{v}`",
+                    hw.id
+                ),
+            );
+        }
+        if mode == RunpodMode::Pod && hw.runpod.as_ref().is_some_and(|r| r.flashboot.is_some()) {
+            push(
+                resource.clone(),
+                format!(
+                    "hardware_profile `{}`: `flashboot` applies only to `mode = \"serverless\"`; \
+                     remove it",
+                    hw.id
+                ),
+            );
+        }
+        if mode == RunpodMode::Serverless && hw.runpod.as_ref().is_some_and(|r| r.cloud.is_some()) {
             push(
                 resource.clone(),
                 format!(
@@ -1520,6 +1548,7 @@ mod runpod_tests {
         RunpodSettings {
             mode: RunpodMode::Pod,
             cloud,
+            ..RunpodSettings::default()
         }
     }
 
@@ -1527,6 +1556,50 @@ mod runpod_tests {
         RunpodSettings {
             mode: RunpodMode::Serverless,
             cloud,
+            ..RunpodSettings::default()
+        }
+    }
+
+    #[test]
+    fn a_volume_and_flashboot_are_accepted_where_they_apply() {
+        let ok = RunpodSettings {
+            network_volume: Some("vol_ab-1".to_owned()),
+            flashboot: Some(true),
+            ..serverless(None)
+        };
+        assert_eq!(
+            messages(&graph("runpod", "l4", 24, Some(ok), None)),
+            Vec::<String>::new()
+        );
+        let pod_volume = RunpodSettings {
+            network_volume: Some("vol1".to_owned()),
+            ..pod(None)
+        };
+        assert_eq!(
+            messages(&graph("runpod", "l4", 24, Some(pod_volume), None)),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn flashboot_is_only_for_serverless_mode() {
+        let s = RunpodSettings {
+            flashboot: Some(false),
+            ..pod(None)
+        };
+        let m = messages(&graph("runpod", "l4", 24, Some(s), None));
+        assert!(m[0].contains("`flashboot` applies only"), "{m:?}");
+    }
+
+    #[test]
+    fn a_malformed_volume_id_is_refused() {
+        for bad in ["", "vol/../x", "a b"] {
+            let s = RunpodSettings {
+                network_volume: Some(bad.to_owned()),
+                ..serverless(None)
+            };
+            let m = messages(&graph("runpod", "l4", 24, Some(s), None));
+            assert!(m[0].contains("`network_volume` must be"), "{m:?}");
         }
     }
 

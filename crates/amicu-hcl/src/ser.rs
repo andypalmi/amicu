@@ -321,6 +321,12 @@ fn hardware_block(h: &HardwareProfile) -> Block {
         if let Some(cloud) = &r.cloud {
             rb = rb.add_attribute(("cloud", variant(cloud)));
         }
+        if let Some(v) = &r.network_volume {
+            rb = rb.add_attribute(("network_volume", v.as_str()));
+        }
+        if let Some(v) = r.flashboot {
+            rb = rb.add_attribute(("flashboot", v));
+        }
         body = body.add_block(rb.build());
     }
     resource("hardware_profile", h.id.as_str(), body.build())

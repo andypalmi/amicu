@@ -45,6 +45,17 @@ Do not run `cargo test --workspace -- --ignored`: it also runs other ignored tes
 - The `compile_fail` guards in `amicu-core` and `amicu-state` are pinned to rustc 1.97; run them with `cargo +1.97` as in the CI msrv job (see below).
 - The other live Postgres tests need their own setup (custom roles and databases), described in their module docs: `crates/amicu-server/tests/rls_guard_live.rs` and `crates/amicu-server/tests/rate_limit_postgres_live.rs`.
 
+## RunPod live test
+
+`crates/amicu-runpod/tests/live_serverless.rs` deploys a tiny llama.cpp model on a real RunPod Serverless endpoint (L4 by default), sends one chat request, destroys everything and checks nothing is left. It bills a few cents and never runs in CI. It is `#[ignore]`d and also needs `AMICU_RUNPOD_LIVE=1`:
+
+```bash
+AMICU_RUNPOD_LIVE=1 RUNPOD_API_KEY=... AMICU_RUNPOD_INVOKE_KEY=... \
+  cargo test -p amicu-runpod --test live_serverless -- --ignored --nocapture
+```
+
+The module docs list the optional variables, including `AMICU_RUNPOD_LIVE_VOLUME_DC`, which also tests the network-volume model cache with a temporary volume that the test deletes.
+
 ## Run the CI checks locally
 
 Rust (from the repo root; CI uses the stable toolchain):

@@ -1205,3 +1205,48 @@ async fn a_failed_terminate_touches_no_secret() {
     assert_eq!(count(&mock, HttpMethod::Get, "/account/secrets?name="), 0);
     assert_eq!(*sup.created_secrets().lock().unwrap(), Vec::<String>::new());
 }
+
+#[test]
+fn a_pod_mounts_the_volume_as_the_hf_cache_in_its_data_center() {
+    let (sup, _) = supervisor(Mock::default());
+    let sup = sup
+        .with_network_volume(&crate::supervisor::tests::volume("EU-RO-1"))
+        .unwrap();
+    let body = sup
+        .prepare(&vllm_plan(), &vllm_secrets(), "img", None)
+        .unwrap()
+        .pod
+        .to_body();
+    assert_eq!(
+        body["mounts"],
+        json!({"network": [{"volumeId": "vol1", "path": "/runpod-volume"}]})
+    );
+    assert_eq!(body["dataCenterIds"], json!(["EU-RO-1"]));
+    assert_eq!(body["env"]["HF_HOME"], json!("/runpod-volume/huggingface"));
+    let script = body["cmd"].to_string();
+    assert!(
+        script.contains("amicu_auth.py"),
+        "vLLM runs under the middleware: {script}"
+    );
+
+    let same: Pod = serde_json::from_str(matching_pod(&sup, "RUNNING", "t0")).unwrap();
+    assert_eq!(same.network_volume.as_deref(), Some("vol1"));
+    assert_eq!(sup.replacement_reason(&same), None);
+}
+
+#[test]
+fn a_volume_change_replaces_the_pod() {
+    let (plain, _) = supervisor(Mock::default());
+    let without: Pod = serde_json::from_str(matching_pod(&plain, "RUNNING", "t0")).unwrap();
+    assert_eq!(without.network_volume, None);
+    assert_eq!(plain.replacement_reason(&without), None);
+    let (sup, _) = supervisor(Mock::default());
+    let sup = sup
+        .with_network_volume(&crate::supervisor::tests::volume("EU-RO-1"))
+        .unwrap();
+    let why = sup.replacement_reason(&without).unwrap();
+    assert!(why.contains("network volume is none, wanted vol1"), "{why}");
+    let with: Pod = serde_json::from_str(matching_pod(&sup, "RUNNING", "t0")).unwrap();
+    let why = plain.replacement_reason(&with).unwrap();
+    assert!(why.contains("network volume is vol1, wanted none"), "{why}");
+}

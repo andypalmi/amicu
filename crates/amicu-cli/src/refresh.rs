@@ -738,7 +738,7 @@ fn pod_drift(state: &LocalState, record: &StopRecord, pod: &amicu_runpod::Pod) -
             drift.push(format!("GPU count {count} (applied {})", want.count));
         }
     }
-    let applied = match hw.runpod.and_then(|r| r.cloud) {
+    let applied = match hw.runpod.as_ref().and_then(|r| r.cloud) {
         Some(RunpodCloud::Community) => Cloud::Community,
         _ => Cloud::Secure,
     };
@@ -749,7 +749,21 @@ fn pod_drift(state: &LocalState, record: &StopRecord, pod: &amicu_runpod::Pod) -
             applied.wire()
         ));
     }
+    if let Some(want) = hw.runpod.as_ref().and_then(|r| r.network_volume.as_deref())
+        && pod.network_volume.as_deref() != Some(want)
+    {
+        drift.push(volume_drift(pod.network_volume.as_slice(), want));
+    }
     drift
+}
+
+fn volume_drift(live: &[String], applied: &str) -> String {
+    let live = if live.is_empty() {
+        "none".to_owned()
+    } else {
+        live.join(", ")
+    };
+    format!("network volume {live} (applied {applied})")
 }
 
 /// How `ep` differs from what apply set for `record`'s deployment in the
@@ -778,11 +792,23 @@ fn endpoint_drift(
             drift.push(format!("workers {}-{} (applied {min}-{max})", w.min, w.max));
         }
     }
-    let placement = state
+    let hw = state
         .graph
         .hardware_profiles
         .iter()
-        .find(|h| h.id == d.hardware_profile)
+        .find(|h| h.id == d.hardware_profile);
+    let applied = hw
+        .and_then(|h| h.runpod.as_ref())
+        .and_then(|r| r.network_volume.clone());
+    if let Some(live) = &ep.network_volumes
+        && live.as_slice() != applied.as_slice()
+    {
+        drift.push(match &applied {
+            Some(want) => volume_drift(live, want),
+            None => format!("network volume {} (applied none)", live.join(", ")),
+        });
+    }
+    let placement = hw
         .and_then(|h| h.accelerator.as_ref())
         .and_then(|a| amicu_runpod::gpu_placement(a).ok());
     if let (Some(gpu), Some(want)) = (&ep.gpu, placement) {
