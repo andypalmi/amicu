@@ -457,28 +457,30 @@ fn refresh_modal(state: &mut LocalState, lookup: &dyn AppLookup, strict: bool) -
     }
 }
 
-/// What RunPod says about one recorded endpoint.
+/// What RunPod says about one recorded endpoint or pod.
 enum Live {
-    Found(Box<amicu_runpod::Endpoint>),
+    Endpoint(Box<amicu_runpod::Endpoint>),
+    Pod(Box<amicu_runpod::Pod>),
     Missing,
-    /// Endpoints carry the recorded name but none this deployment's owner
+    /// Resources carry the recorded name but none this deployment's owner
     /// marker: not ours, and not proof ours is gone.
     Foreign(Vec<String>),
 }
 
-/// Checks every recorded, confirmed RunPod endpoint against the live API: by
-/// endpoint id, or for a record without one by exact name plus this
-/// deployment's `AMICU_OWNER` marker. A missing endpoint counts as gone only
+/// Checks every recorded, confirmed RunPod endpoint or pod against the live
+/// API: by id, or for a record without one by exact name plus this
+/// deployment's `AMICU_OWNER` marker. A missing one counts as gone only
 /// when the management key acts in the account the record names; it is then
 /// kept in state as pending (apply recreates it, destroy confirms its stop).
 /// Otherwise, and on any lookup failure, nothing changes and a warning says
 /// why. A live endpoint whose workers or GPU pools differ from what was
-/// applied gets a drift note only, like Modal: nothing is marked for update.
+/// applied (a pod: GPU type, count or cloud) gets a drift note only, like
+/// Modal: nothing is marked for update.
 fn refresh_runpod(state: &mut LocalState, ops: &dyn RunPodOps) -> Refresh {
     let records: Vec<StopRecord> = crate::commands::apply::effective_stops(Some(state))
         .into_iter()
         .filter(|r| {
-            r.backend == Backend::Runpod
+            r.backend.is_runpod()
                 && state.graph.deployments.iter().any(|d| d.id == r.deployment)
                 && !state.pending.contains(&r.deployment)
         })
@@ -515,26 +517,26 @@ fn refresh_runpod(state: &mut LocalState, ops: &dyn RunPodOps) -> Refresh {
     let mut unchecked = Vec::new();
     for (r, live) in records.iter().zip(found) {
         let dep = r.deployment.as_str();
-        match live {
-            Ok(Live::Found(ep)) => {
-                let drift = endpoint_drift(state, r, &ep);
-                if !drift.is_empty() {
-                    out.notes.push(format!(
-                        "deployment {dep}: RunPod endpoint '{}' (endpoint id {}) was changed \
-                         outside amicu: {}; apply leaves it as is while this deployment's config \
-                         is unchanged, so revert it in the RunPod console or change the config",
-                        ep.name,
-                        ep.id,
-                        drift.join(", ")
-                    ));
-                }
+        let kind = record_kind(r);
+        if let Some((name, id, drift)) = live_drift(state, r, &live) {
+            if !drift.is_empty() {
+                out.notes.push(format!(
+                    "deployment {dep}: RunPod {kind} '{name}' ({kind} id {id}) was changed \
+                     outside amicu: {}; apply leaves it as is while this deployment's config \
+                     is unchanged, so revert it in the RunPod console or change the config",
+                    drift.join(", ")
+                ));
             }
+            continue;
+        }
+        match live {
+            Ok(Live::Endpoint(_) | Live::Pod(_)) => {}
             Ok(Live::Missing) if account.is_some() && r.workspace == account => {
                 if !state.pending.contains(&r.deployment) {
                     state.pending.push(r.deployment.clone());
                 }
                 out.notes.push(format!(
-                    "deployment {dep}: RunPod endpoint '{}' (endpoint id {}) is gone from \
+                    "deployment {dep}: RunPod {kind} '{}' ({kind} id {}) is gone from \
                      RunPod account {}; kept in state as pending: apply will recreate it, \
                      destroy will confirm its stop",
                     r.identity,
@@ -553,7 +555,7 @@ fn refresh_runpod(state: &mut LocalState, ops: &dyn RunPodOps) -> Refresh {
                     .unwrap_or("an account amicu has not seen (no amicu-account-marker secret)")
             )),
             Ok(Live::Foreign(ids)) => unchecked.push(format!(
-                "{} has no endpoint id recorded, and RunPod endpoint(s) {} named '{}' do not \
+                "{} has no {kind} id recorded, and RunPod {kind}(s) {} named '{}' do not \
                  carry its {} marker",
                 r.describe(),
                 ids.join(", "),
@@ -572,14 +574,38 @@ fn refresh_runpod(state: &mut LocalState, ops: &dyn RunPodOps) -> Refresh {
     out
 }
 
+fn record_kind(r: &StopRecord) -> &'static str {
+    if r.backend == Backend::RunpodPod {
+        "pod"
+    } else {
+        "endpoint"
+    }
+}
+
+/// Name, id and drift of a live endpoint or pod; `None` when not live.
+fn live_drift<'a>(
+    state: &LocalState,
+    r: &StopRecord,
+    live: &'a Result<Live, String>,
+) -> Option<(&'a str, &'a str, Vec<String>)> {
+    match live {
+        Ok(Live::Endpoint(ep)) => Some((&ep.name, &ep.id, endpoint_drift(state, r, ep))),
+        Ok(Live::Pod(pod)) => Some((&pod.name, &pod.id, pod_drift(state, r, pod))),
+        _ => None,
+    }
+}
+
 async fn lookup_endpoint(
     client: &amicu_runpod::RunPodClient,
     record: &StopRecord,
     project_id: &str,
 ) -> Result<Live, String> {
+    if record.backend == Backend::RunpodPod {
+        return lookup_pod(client, record, project_id).await;
+    }
     if let Some(id) = &record.app_id {
         return match client.get_endpoint(id).await {
-            Ok(ep) => Ok(Live::Found(Box::new(ep))),
+            Ok(ep) => Ok(Live::Endpoint(Box::new(ep))),
             Err(amicu_runpod::RunPodError::NotFound { .. }) => Ok(Live::Missing),
             Err(e) => Err(e.to_string()),
         };
@@ -597,9 +623,96 @@ async fn lookup_endpoint(
         record.deployment.as_str(),
     );
     match named.iter().find(|e| e.owner.as_deref() == Some(&owner)) {
-        Some(ep) => Ok(Live::Found(Box::new(ep.clone()))),
+        Some(ep) => Ok(Live::Endpoint(Box::new(ep.clone()))),
         None => Ok(Live::Foreign(named.into_iter().map(|e| e.id).collect())),
     }
+}
+
+/// [`lookup_endpoint`] for a pod; a `TERMINATED` pod counts as missing.
+async fn lookup_pod(
+    client: &amicu_runpod::RunPodClient,
+    record: &StopRecord,
+    project_id: &str,
+) -> Result<Live, String> {
+    use amicu_runpod::{PodStatus, RunPodError};
+
+    if let Some(id) = &record.app_id {
+        return match client.get_pod(id).await {
+            Ok(pod) if pod.status == PodStatus::Terminated => Ok(Live::Missing),
+            Ok(pod) => Ok(Live::Pod(Box::new(pod))),
+            Err(RunPodError::NotFound { .. }) => Ok(Live::Missing),
+            Err(e) => Err(e.to_string()),
+        };
+    }
+    let named = client
+        .find_pods_by_name(&record.identity)
+        .await
+        .map_err(|e| e.to_string())?;
+    let owner = amicu_runpod::owner_marker(
+        record.workspace.as_deref(),
+        project_id,
+        record.deployment.as_str(),
+    );
+    if named.is_empty() {
+        return Ok(Live::Missing);
+    }
+    let mut foreign = Vec::new();
+    for p in named {
+        let pod = client.get_pod(&p.id).await.map_err(|e| e.to_string())?;
+        if pod.env.owner.as_deref() == Some(owner.as_str()) {
+            return Ok(Live::Pod(Box::new(pod)));
+        }
+        foreign.push(pod.id);
+    }
+    Ok(Live::Foreign(foreign))
+}
+
+/// How `pod` differs from what apply set for `record`'s deployment: GPU
+/// type, count and cloud, compared only where RunPod reported them.
+fn pod_drift(state: &LocalState, record: &StopRecord, pod: &amicu_runpod::Pod) -> Vec<String> {
+    use amicu_core::resource::RunpodCloud;
+    use amicu_runpod::Cloud;
+
+    let Some(hw) = state
+        .graph
+        .deployments
+        .iter()
+        .find(|d| d.id == record.deployment)
+        .and_then(|d| {
+            state
+                .graph
+                .hardware_profiles
+                .iter()
+                .find(|h| h.id == d.hardware_profile)
+        })
+    else {
+        return Vec::new();
+    };
+    let mut drift = Vec::new();
+    let placement = hw
+        .accelerator
+        .as_ref()
+        .and_then(|a| amicu_runpod::pod_gpu_placement(a).ok());
+    if let (Some(gpu), Some(want)) = (&pod.gpu, placement) {
+        if gpu.id != want.type_id {
+            drift.push(format!("GPU type {} (applied {})", gpu.id, want.type_id));
+        }
+        if let Some(count) = gpu.count.filter(|c| *c != want.count) {
+            drift.push(format!("GPU count {count} (applied {})", want.count));
+        }
+    }
+    let applied = match hw.runpod.and_then(|r| r.cloud) {
+        Some(RunpodCloud::Community) => Cloud::Community,
+        _ => Cloud::Secure,
+    };
+    if let Some(cloud) = pod.cloud.filter(|c| *c != Cloud::Unknown && *c != applied) {
+        drift.push(format!(
+            "cloud {} (applied {})",
+            cloud.wire(),
+            applied.wire()
+        ));
+    }
+    drift
 }
 
 /// How `ep` differs from what apply set for `record`'s deployment in the

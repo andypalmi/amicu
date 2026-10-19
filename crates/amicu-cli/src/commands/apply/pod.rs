@@ -12,8 +12,8 @@ use amicu_runtime::{EndpointExposure, GatewayAuth, LaunchPlan, RuntimeAdapter, R
 
 use super::{
     Env, Progress, RUNPOD_PROVIDER, RunPodStart, delete_runpod_secrets, deployment_hardware,
-    find_deployment, merged_names, stop_record, supervisor_err, sync_runpod_record,
-    unknown_runpod_account,
+    find_deployment, merged_names, residency_allowlist, stop_record, supervisor_err,
+    sync_runpod_record, unknown_runpod_account,
 };
 use crate::error::CliError;
 use crate::runpod_ops::{check_account, current_account, runpod_error};
@@ -69,6 +69,7 @@ fn build(
     };
     let mut supervisor =
         PodSupervisor::for_hardware(env.runpod.client()?, project_id, id.as_str(), &hardware)
+            .and_then(|s| s.with_allowed_residencies(&residency_allowlist(graph)))
             .map_err(supervisor_err)?
             .with_probe_transport(env.runpod.probe())
             .with_workspace(account)

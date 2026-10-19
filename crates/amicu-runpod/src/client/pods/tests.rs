@@ -295,6 +295,11 @@ fn proxy_url_shape() {
         pod_proxy_url("abc123", 8000),
         "https://abc123-8000.proxy.runpod.net"
     );
+    let pod: Pod = serde_json::from_str(
+        r#"{"id":"p","name":"n","status":"RUNNING","ports":["22/tcp","8080/http"]}"#,
+    )
+    .unwrap();
+    assert_eq!(pod.http_port(), Some(8080));
 }
 
 #[test]

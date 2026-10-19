@@ -1,18 +1,21 @@
 //! `amicu runpod status` / `logs` / `metrics` / `stop` - operate a RunPod
-//! Serverless deployment recorded in this project's state.
+//! Serverless endpoint or always-on Pod recorded in this project's state.
 //!
-//! Each command finds the deployment's RunPod stop record (endpoint id) in
-//! state; management calls use `RUNPOD_API_KEY`, the `/metrics` scrape the
-//! deployment's own `api_key` through the gateway. `stop` is `destroy
-//! --target <deployment>`: the record is dropped only once the stop is
-//! confirmed.
+//! Each command finds the deployment's RunPod stop record (endpoint or pod
+//! id) in state; management calls use `RUNPOD_API_KEY`, the `/metrics`
+//! scrape the deployment's own `api_key` (through the gateway, or a pod's
+//! proxy URL). `stop` is `destroy --target <deployment>`: the record is
+//! dropped only once the stop is confirmed.
 
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 use amicu_core::secret::SecretValue;
-use amicu_runpod::logs::{DEFAULT_TAIL, NO_WORKERS, WORKER_LOG_LIMITS, merge};
-use amicu_runpod::{Endpoint, RunPodError, RunPodSupervisor, WorkersList, endpoint_url};
+use amicu_runpod::logs::{DEFAULT_TAIL, NO_WORKERS, WORKER_LOG_LIMITS, WorkerLogs, merge};
+use amicu_runpod::{
+    Endpoint, Pod, RunPodClient, RunPodError, RunPodSupervisor, WorkersList, endpoint_url,
+    pod_proxy_url,
+};
 use amicu_runtime::{EndpointExposure, GatewayAuth, RuntimeHandle};
 use amicu_telemetry::scrape::MetricsSnapshot;
 use serde_json::json;
@@ -32,7 +35,7 @@ fn io_err(error: io::Error) -> CliError {
 /// What hardware sections say: there is no probe into a RunPod worker.
 const NO_HARDWARE: &str = "not available on RunPod";
 
-/// The deployment's RunPod record and endpoint id, from state.
+/// The deployment's RunPod record (endpoint or pod) and its id, from state.
 fn recorded_endpoint(
     project: &Project,
     deployment: &str,
@@ -41,7 +44,7 @@ fn recorded_endpoint(
     let record = state
         .iter()
         .flat_map(|s| s.stops.iter())
-        .find(|r| r.backend == Backend::Runpod && r.deployment.as_str() == deployment)
+        .find(|r| r.backend.is_runpod() && r.deployment.as_str() == deployment)
         .cloned()
         .ok_or_else(|| {
             CliError::Message(format!(
@@ -50,11 +53,20 @@ fn recorded_endpoint(
         })?;
     let id = record.app_id.clone().ok_or_else(|| {
         CliError::Message(format!(
-            "deployment '{deployment}' has no RunPod endpoint id recorded yet (its start did \
-             not finish); run `amicu apply` or `amicu destroy --target {deployment}`"
+            "deployment '{deployment}' has no RunPod {} id recorded yet (its start did \
+             not finish); run `amicu apply` or `amicu destroy --target {deployment}`",
+            kind(&record)
         ))
     })?;
     Ok((record, id))
+}
+
+fn kind(record: &StopRecord) -> &'static str {
+    if record.backend == Backend::RunpodPod {
+        "pod"
+    } else {
+        "endpoint"
+    }
 }
 
 fn endpoint_gone(deployment: &str, id: &str) -> CliError {
@@ -62,6 +74,27 @@ fn endpoint_gone(deployment: &str, id: &str) -> CliError {
         "RunPod endpoint {id} of deployment '{deployment}' was not found in the account \
          {API_KEY_ENV_VAR} acts in"
     ))
+}
+
+fn pod_gone(deployment: &str, id: &str) -> CliError {
+    CliError::Message(format!(
+        "RunPod pod {id} of deployment '{deployment}' was not found in the account \
+         {API_KEY_ENV_VAR} acts in"
+    ))
+}
+
+/// The live pod `id`; a `404` or a `TERMINATED` pod is [`pod_gone`].
+async fn live_pod(client: &RunPodClient, deployment: &str, id: &str) -> Result<Pod, CliError> {
+    match client.get_pod(id).await {
+        Ok(p) if p.status == amicu_runpod::PodStatus::Terminated => Err(pod_gone(deployment, id)),
+        Ok(p) => Ok(p),
+        Err(RunPodError::NotFound { .. }) => Err(pod_gone(deployment, id)),
+        Err(e) => Err(runpod_error("could not read the RunPod pod", &e)),
+    }
+}
+
+fn pod_url(pod: &Pod) -> Option<String> {
+    pod.http_port().map(|port| pod_proxy_url(&pod.id, port))
 }
 
 /// Endpoint id, workers summary, URL, GPU and data centers.
@@ -72,9 +105,19 @@ pub(crate) fn status(
     out: &mut dyn Write,
     env: &Env<'_>,
 ) -> Result<u8, CliError> {
-    let (_, id) = recorded_endpoint(project, deployment)?;
+    let (record, id) = recorded_endpoint(project, deployment)?;
     let client = env.runpod.client()?;
     let rt = build_runtime()?;
+    if record.backend == Backend::RunpodPod {
+        let pod = rt.block_on(live_pod(&client, deployment, &id))?;
+        match output {
+            OutputFormat::Human => write_pod_status(out, deployment, &pod)?,
+            OutputFormat::Json => {
+                writeln!(out, "{}", pod_status_json(deployment, &pod)).map_err(io_err)?;
+            }
+        }
+        return Ok(0);
+    }
     let (endpoint, workers) = rt.block_on(async {
         let endpoint = match client.get_endpoint(&id).await {
             Ok(e) => e,
@@ -153,6 +196,56 @@ fn write_status(
     writeln!(out, "  data centers: {dcs}").map_err(io_err)
 }
 
+fn write_pod_status(out: &mut dyn Write, deployment: &str, pod: &Pod) -> Result<(), CliError> {
+    writeln!(
+        out,
+        "deployment {deployment}: RunPod pod {} ({})",
+        pod.id, pod.name
+    )
+    .map_err(io_err)?;
+    writeln!(out, "  status:      {}", pod.status.as_str()).map_err(io_err)?;
+    let url = pod_url(pod).unwrap_or_else(|| "n/a (no HTTP port exposed)".to_owned());
+    writeln!(out, "  url:         {url}").map_err(io_err)?;
+    let gpu = pod.gpu.as_ref().map_or_else(
+        || "n/a".to_owned(),
+        |g| match g.count {
+            Some(n) => format!("{} x{n}", g.id),
+            None => g.id.clone(),
+        },
+    );
+    writeln!(out, "  gpu:         {gpu}").map_err(io_err)?;
+    let cloud = pod.cloud.map_or("n/a", amicu_runpod::Cloud::wire);
+    writeln!(out, "  cloud:       {cloud}").map_err(io_err)?;
+    writeln!(
+        out,
+        "  data center: {}",
+        pod.data_center_id.as_deref().unwrap_or("n/a")
+    )
+    .map_err(io_err)?;
+    let cost = pod
+        .cost
+        .map_or_else(|| "n/a".to_owned(), |c| format!("${c:.2}/hr"));
+    writeln!(
+        out,
+        "  cost:        {cost} (always on: billed while it exists)"
+    )
+    .map_err(io_err)
+}
+
+fn pod_status_json(deployment: &str, pod: &Pod) -> serde_json::Value {
+    json!({
+        "deployment": deployment,
+        "pod_id": pod.id,
+        "pod_name": pod.name,
+        "status": pod.status.as_str(),
+        "url": pod_url(pod),
+        "gpu": pod.gpu.as_ref().map(|g| json!({ "id": g.id, "count": g.count })),
+        "cloud": pod.cloud.map(amicu_runpod::Cloud::wire),
+        "data_center": pod.data_center_id,
+        "cost_per_hour_usd": pod.cost,
+    })
+}
+
 fn status_json(deployment: &str, endpoint: &Endpoint, workers: &WorkersList) -> serde_json::Value {
     let s = &workers.summary;
     json!({
@@ -174,8 +267,9 @@ fn status_json(deployment: &str, endpoint: &Endpoint, workers: &WorkersList) -> 
     })
 }
 
-/// Every worker's recent lines (`tail` per worker), `[<worker>]`-prefixed.
-/// A bounded read: RunPod's stream is left after a short quiet spell.
+/// Every worker's recent lines (`tail` per worker), `[<worker>]`-prefixed;
+/// a pod's own lines, `[<pod>]`-prefixed. A bounded read: RunPod's stream is
+/// left after a short quiet spell.
 pub(crate) fn logs(
     project: &Project,
     deployment: &str,
@@ -184,9 +278,12 @@ pub(crate) fn logs(
     out: &mut dyn Write,
     env: &Env<'_>,
 ) -> Result<u8, CliError> {
-    let (_, id) = recorded_endpoint(project, deployment)?;
+    let (record, id) = recorded_endpoint(project, deployment)?;
     let client = env.runpod.client()?;
     let rt = build_runtime()?;
+    if record.backend == Backend::RunpodPod {
+        return pod_logs(&client, deployment, &id, tail, output, out);
+    }
     let workers = rt.block_on(async {
         match client
             .endpoint_logs(&id, tail.unwrap_or(DEFAULT_TAIL), WORKER_LOG_LIMITS)
@@ -223,8 +320,48 @@ pub(crate) fn logs(
     Ok(0)
 }
 
+fn pod_logs(
+    client: &RunPodClient,
+    deployment: &str,
+    id: &str,
+    tail: Option<u32>,
+    output: OutputFormat,
+    out: &mut dyn Write,
+) -> Result<u8, CliError> {
+    let lines = build_runtime()?.block_on(async {
+        match client
+            .pod_logs(id, tail.unwrap_or(DEFAULT_TAIL), WORKER_LOG_LIMITS)
+            .await
+        {
+            Ok(l) => Ok(l),
+            Err(RunPodError::NotFound { .. }) => Err(pod_gone(deployment, id)),
+            Err(e) => Err(runpod_error("could not read the RunPod pod logs", &e)),
+        }
+    })?;
+    if output == OutputFormat::Json {
+        let doc = json!({
+            "deployment": deployment,
+            "pod_id": id,
+            "lines": lines.iter().map(|l| json!({
+                "ts": l.ts, "source": l.source, "line": l.line,
+            })).collect::<Vec<_>>(),
+        });
+        writeln!(out, "{doc}").map_err(io_err)?;
+        return Ok(0);
+    }
+    let merged = merge(&[WorkerLogs {
+        worker_id: id.to_owned(),
+        status: String::new(),
+        lines: Ok(lines),
+    }]);
+    for line in merged {
+        writeln!(out, "{line}").map_err(io_err)?;
+    }
+    Ok(0)
+}
+
 /// The deployment's `api_key` (recorded in the state graph), resolved like
-/// `apply` does: it is the bearer RunPod's gateway accepts.
+/// `apply` does: the bearer RunPod's gateway, or a pod's runtime, accepts.
 fn gateway_key(
     project: &Project,
     deployment: &str,
@@ -243,7 +380,7 @@ fn gateway_key(
         .ok_or_else(|| {
             CliError::Message(format!(
                 "deployment '{deployment}' has no api_key in state; RunPod metrics are read \
-                 through the gateway with it"
+                 with it"
             ))
         })?;
     build_runtime()?
@@ -265,9 +402,16 @@ pub(crate) struct MetricsMode {
     pub wake: bool,
 }
 
+/// What `metrics` scrapes.
+enum Target {
+    Endpoint(Box<RunPodSupervisor>, RuntimeHandle),
+    Pod { port: u16, key: SecretValue },
+}
+
 /// A runtime-metrics snapshot (or one every `interval_secs` with `watch`)
-/// scraped through the gateway; the load balancer picks the worker. A
-/// scaled-to-zero endpoint is refused unless `wake`.
+/// scraped through the gateway, where the load balancer picks the worker (a
+/// scaled-to-zero endpoint is refused unless `wake`), or through a pod's
+/// proxy URL (always on, so `wake` does not apply).
 pub(crate) fn metrics(
     project: &Project,
     deployment: &str,
@@ -281,33 +425,56 @@ pub(crate) fn metrics(
         interval_secs,
         wake,
     } = mode;
-    let (_, id) = recorded_endpoint(project, deployment)?;
+    let (record, id) = recorded_endpoint(project, deployment)?;
     let key = gateway_key(project, deployment, env)?;
-    let project_id = project
-        .load_state()?
-        .and_then(|s| s.project_id)
-        .ok_or_else(|| {
-            CliError::Message(
-                "this project's state has no project id; run `amicu apply` first".to_owned(),
-            )
-        })?;
-    let supervisor = RunPodSupervisor::new(env.runpod.client()?, &project_id, deployment)
-        .with_probe_transport(env.runpod.probe())
-        .with_gateway_key(key);
-    let handle = RuntimeHandle {
-        id: id.clone(),
-        deployment: deployment.into(),
-        endpoint: endpoint_url(&id),
-        exposure: EndpointExposure::Public {
-            gateway: GatewayAuth::RunPodBearer,
-        },
-    };
     let rt = build_runtime()?;
+    let target = if record.backend == Backend::RunpodPod {
+        let pod = rt.block_on(live_pod(&env.runpod.client()?, deployment, &id))?;
+        let port = pod.http_port().ok_or_else(|| {
+            CliError::Message(format!(
+                "RunPod pod {id} of deployment '{deployment}' exposes no HTTP port to scrape"
+            ))
+        })?;
+        Target::Pod { port, key }
+    } else {
+        let project_id = project
+            .load_state()?
+            .and_then(|s| s.project_id)
+            .ok_or_else(|| {
+                CliError::Message(
+                    "this project's state has no project id; run `amicu apply` first".to_owned(),
+                )
+            })?;
+        let supervisor = RunPodSupervisor::new(env.runpod.client()?, &project_id, deployment)
+            .with_probe_transport(env.runpod.probe())
+            .with_gateway_key(key);
+        let handle = RuntimeHandle {
+            id: id.clone(),
+            deployment: deployment.into(),
+            endpoint: endpoint_url(&id),
+            exposure: EndpointExposure::Public {
+                gateway: GatewayAuth::RunPodBearer,
+            },
+        };
+        Target::Endpoint(Box::new(supervisor), handle)
+    };
+    let probe = env.runpod.probe();
     let mut previous: Option<(MetricsSnapshot, Instant)> = None;
     loop {
-        let snapshot = rt
-            .block_on(supervisor.scrape_metrics(&handle, wake || previous.is_some()))
-            .map_err(|e| CliError::Message(e.to_string()))?;
+        let snapshot = match &target {
+            Target::Endpoint(supervisor, handle) => rt
+                .block_on(supervisor.scrape_metrics(handle, wake || previous.is_some()))
+                .map_err(|e| CliError::Message(e.to_string()))?,
+            Target::Pod { port, key } => {
+                let key = key.expose_secret_str().map_err(|_| {
+                    CliError::Message(format!(
+                        "the api_key of deployment '{deployment}' is not valid UTF-8"
+                    ))
+                })?;
+                rt.block_on(amicu_runpod::metrics::scrape_pod(&*probe, &id, *port, key))
+                    .map_err(|e| CliError::Message(e.to_string()))?
+            }
+        };
         let now = Instant::now();
         let snapshot = match &previous {
             Some((before, at)) => snapshot.rate_since(before, now.duration_since(*at)),
@@ -319,9 +486,14 @@ pub(crate) fn metrics(
                 writeln!(out, "hardware: n/a ({NO_HARDWARE})").map_err(io_err)?;
             }
             OutputFormat::Json => {
+                let id_field = if record.backend == Backend::RunpodPod {
+                    "pod_id"
+                } else {
+                    "endpoint_id"
+                };
                 let doc = json!({
                     "deployment": deployment,
-                    "endpoint_id": id,
+                    id_field: id,
                     "runtime": crate::commands::modal::runtime_json(&snapshot),
                     "hardware": { "error": NO_HARDWARE, "containers": [] },
                 });
@@ -337,8 +509,9 @@ pub(crate) fn metrics(
     }
 }
 
-/// Stops the endpoint and deletes its secrets through `destroy`'s path, so
-/// the deployment leaves state only once the stop is confirmed.
+/// Stops the endpoint (terminates the pod) and deletes its secrets through
+/// `destroy`'s path, so the deployment leaves state only once the stop is
+/// confirmed.
 pub(crate) fn stop(
     project: &Project,
     deployment: &str,
@@ -351,7 +524,7 @@ pub(crate) fn stop(
     let is_runpod = state
         .iter()
         .flat_map(|s| s.stops.iter())
-        .any(|r| r.backend == Backend::Runpod && r.deployment.as_str() == deployment);
+        .any(|r| r.backend.is_runpod() && r.deployment.as_str() == deployment);
     if !is_runpod {
         return Err(CliError::Message(format!(
             "no RunPod deployment named '{deployment}' in this project's state"

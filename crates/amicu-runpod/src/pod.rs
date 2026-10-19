@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use amicu_core::naming::project_endpoint_name;
-use amicu_core::resource::{Accelerator, HardwareProfile, Model, Region};
+use amicu_core::resource::{Accelerator, HardwareProfile, Model, Region, Residency};
 use amicu_core::secret::SecretValue;
 use amicu_llamacpp::remote::{self, GgufSource, HF_TOKEN_ENV_VAR, RemoteEnv};
 use amicu_llamacpp::{LlamaCppError, ProcessSupervisor, ResolvedSecret};
@@ -27,7 +27,7 @@ use crate::client::{
 };
 use crate::error::RunPodError;
 use crate::hardware::{pod_gpu_placement, verify_catalog_memory};
-use crate::regions::select_data_centers;
+use crate::regions::{restrict_to_residencies, select_data_centers};
 use crate::secrets::{SecretLedger, reference_secrets, stop_result};
 use crate::supervisor::{
     DEFAULT_CONTAINER_DISK_GB, HEALTH_PATH, ReadinessTiming, StopOutcome, container_argv,
@@ -106,6 +106,7 @@ pub struct PodSupervisor {
     gpu_vram_gb: Option<u32>,
     cloud: Cloud,
     data_center_ids: Vec<String>,
+    region: Option<String>,
     disk_gb: u32,
     gguf: Option<GgufSource>,
     readiness: ReadinessTiming,
@@ -150,6 +151,7 @@ impl PodSupervisor {
             gpu_vram_gb: None,
             cloud: Cloud::Secure,
             data_center_ids: Vec::new(),
+            region: None,
             disk_gb: DEFAULT_CONTAINER_DISK_GB,
             gguf: None,
             readiness: ReadinessTiming::DEFAULT,
@@ -239,6 +241,27 @@ impl PodSupervisor {
             }
             None => Vec::new(),
         };
+        self.region = region.map(|r| r.code.clone());
+        Ok(self)
+    }
+
+    /// Holds placement to the `allowed` residencies (the project's
+    /// `data_class` allowlist); see
+    /// [`crate::supervisor::RunPodSupervisor::with_allowed_residencies`].
+    /// Call after [`with_region`](Self::with_region).
+    ///
+    /// # Errors
+    /// [`LlamaCppError::Supervisor`] when the region lies outside `allowed`.
+    pub fn with_allowed_residencies(
+        mut self,
+        allowed: &[Residency],
+    ) -> Result<Self, LlamaCppError> {
+        self.data_center_ids = restrict_to_residencies(
+            self.region.as_deref(),
+            std::mem::take(&mut self.data_center_ids),
+            allowed,
+        )
+        .map_err(|e| runpod_err(&e))?;
         Ok(self)
     }
 
@@ -1015,8 +1038,6 @@ impl ProcessSupervisor for PodSupervisor {
         })
     }
 
-    // TODO: Pod logs come from `GET /pods/{id}/logs` and metrics through the
-    // Pod proxy URL, not the serverless helpers in `logs`/`metrics`.
     async fn metrics(&self, _handle: &RuntimeHandle) -> Result<RuntimeMetrics, LlamaCppError> {
         Err(unsupported("metrics"))
     }

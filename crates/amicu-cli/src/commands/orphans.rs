@@ -2,7 +2,7 @@
 //! project's state does not record.
 //!
 //! Strictly read-only: it enumerates Modal apps (`amicu-` prefix), RunPod
-//! endpoints carrying an `AMICU_OWNER` marker and `amicu-` RunPod secrets
+//! endpoints and pods carrying an `AMICU_OWNER` marker and `amicu-` RunPod secrets
 //! (never the account marker), launchd jobs/plists (`io.amicu.` prefix),
 //! systemd `--user` units and Task Scheduler tasks (the `\amicu\` folder,
 //! Windows), marks each as
@@ -17,7 +17,7 @@
 //! "not tracked by this project" and may belong to another project. Modal
 //! apps are matched by app id and by name. RunPod endpoints and secrets are
 //! named `amicu-<project id>-...`, so they are judged like scoped labels;
-//! endpoints are matched by endpoint id and by name, secrets by the names
+//! endpoints and pods are matched by id and by name, secrets by the names
 //! recorded in stop records.
 //!
 //! Every external lookup goes through an injectable seam ([`CommandExec`] for
@@ -132,6 +132,7 @@ fn ownership_of_runpod_name(name: &str, project_id: Option<&str>) -> Ownership {
 pub(crate) enum Kind {
     ModalApp,
     RunpodEndpoint,
+    RunpodPod,
     RunpodSecret,
     LaunchdJob,
     SystemdUnit,
@@ -143,6 +144,7 @@ impl Kind {
         match self {
             Kind::ModalApp => "modal app",
             Kind::RunpodEndpoint => "runpod endpoint",
+            Kind::RunpodPod => "runpod pod",
             Kind::RunpodSecret => "runpod secret",
             Kind::LaunchdJob => "launchd job",
             Kind::SystemdUnit => "systemd unit",
@@ -227,6 +229,7 @@ impl ModalApps for RealModal {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RunPodListing {
     pub endpoints: Vec<amicu_runpod::Endpoint>,
+    pub pods: Vec<amicu_runpod::Pod>,
     pub secrets: Vec<amicu_runpod::Secret>,
 }
 
@@ -247,10 +250,17 @@ impl RunPodResources for OpsListing<'_> {
                 let endpoints = client.list_endpoints().await.map_err(|e| {
                     crate::runpod_ops::runpod_error("could not list RunPod endpoints", &e)
                 })?;
+                let pods = client.list_pods().await.map_err(|e| {
+                    crate::runpod_ops::runpod_error("could not list RunPod pods", &e)
+                })?;
                 let secrets = client.list_secrets().await.map_err(|e| {
                     crate::runpod_ops::runpod_error("could not list RunPod secrets", &e)
                 })?;
-                Ok(RunPodListing { endpoints, secrets })
+                Ok(RunPodListing {
+                    endpoints,
+                    pods,
+                    secrets,
+                })
             })
         };
         run().map_err(|e| e.to_string())
@@ -396,8 +406,8 @@ fn runpod_delete_command(platform: Platform, path: &str) -> String {
     }
 }
 
-/// RunPod endpoints amicu created (they carry an `AMICU_OWNER` marker) and
-/// `amicu-` secrets other than the account marker.
+/// RunPod endpoints and live pods amicu created (they carry an
+/// `AMICU_OWNER` marker) and `amicu-` secrets other than the account marker.
 fn runpod(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
     let listing = env.runpod.list()?;
     let project_id = tracked.project_id.as_deref();
@@ -413,6 +423,25 @@ fn runpod(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
             ownership: ownership_of_runpod_name(&ep.name, project_id),
             stop_command: runpod_delete_command(env.platform, &format!("serverless/{}", ep.id)),
             identity: format!("{} ({})", ep.name, ep.id),
+            state,
+        });
+    }
+    for pod in listing
+        .pods
+        .into_iter()
+        .filter(|p| p.env.owner.is_some() && p.status != amicu_runpod::PodStatus::Terminated)
+    {
+        let state = match pod.cost {
+            Some(c) if c > 0.0 => format!("pod {}, ${c:.2}/hr", pod.status.as_str()),
+            _ => format!("pod {}", pod.status.as_str()),
+        };
+        found.push(Found {
+            kind: Kind::RunpodPod,
+            tracked: tracked.runpod_ids.contains(&pod.id)
+                || tracked.runpod_names.contains(&pod.name),
+            ownership: ownership_of_runpod_name(&pod.name, project_id),
+            stop_command: runpod_delete_command(env.platform, &format!("pods/{}", pod.id)),
+            identity: format!("{} ({})", pod.name, pod.id),
             state,
         });
     }

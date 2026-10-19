@@ -3,6 +3,7 @@
 //! (`data: {"ts", "source", "line"}`), read for a bounded time and merged
 //! with a worker prefix. Logs exist only while a worker does: a scaled-to-zero
 //! endpoint has none.
+//! A pod's logs come from `GET /pods/{id}/logs`, the same event stream.
 
 use std::time::Duration;
 
@@ -132,6 +133,29 @@ impl RunPodClient {
         );
         let resp = self
             .get_stream(&path, &format!("worker `{worker_id}`"), limits)
+            .await?;
+        Ok(parse_sse(&resp.body))
+    }
+
+    /// A pod's recent container and system log lines (`GET
+    /// /pods/{id}/logs`, the same event stream as a worker's), `tail`
+    /// backfilled and clamped to [`MAX_TAIL`], read within `limits`.
+    ///
+    /// # Errors
+    /// The usual [`RunPodError`] mapping; `404` when the pod is gone.
+    pub async fn pod_logs(
+        &self,
+        pod_id: &str,
+        tail: u32,
+        limits: StreamLimits,
+    ) -> Result<Vec<LogLine>, RunPodError> {
+        let path = format!(
+            "/pods/{}/logs?tail={}",
+            segment(pod_id)?,
+            tail.min(MAX_TAIL)
+        );
+        let resp = self
+            .get_stream(&path, &format!("pod `{pod_id}`"), limits)
             .await?;
         Ok(parse_sse(&resp.body))
     }
@@ -303,6 +327,26 @@ mod tests {
         );
         assert!(seen[1].2, "asks for an event stream");
         assert_eq!(seen[1].1.as_deref(), Some("rpa_K"));
+    }
+
+    #[tokio::test]
+    async fn pod_logs_stream_from_the_pod_logs_route() {
+        let mock = Arc::new(Mock::default());
+        let client =
+            RunPodClient::with_transport(ApiKey::new("rpa_K"), mock.clone(), "https://x/v2");
+        let lines = client
+            .pod_logs("pod1", 50, WORKER_LOG_LIMITS)
+            .await
+            .unwrap();
+        assert_eq!(lines[0].line, "hello");
+        let first = mock.seen.lock().unwrap()[0].clone();
+        assert_eq!(first.0, "https://x/v2/pods/pod1/logs?tail=50");
+        assert!(first.2, "asks for an event stream");
+        let err = client
+            .pod_logs("../x", 10, WORKER_LOG_LIMITS)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RunPodError::InvalidId(_)));
     }
 
     #[tokio::test]
