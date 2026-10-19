@@ -50,9 +50,7 @@ export default function ProvidersPage() {
           </Link>{' '}
           in the docs.
         </p>
-        <p className={`mt-4 text-sm text-muted-foreground ${MEASURE}`}>
-          <RunPodSignupLink className={linkClass} />
-        </p>
+        <RunPodSignupLink className="mt-6" />
       </HomeSection>
     </main>
   );

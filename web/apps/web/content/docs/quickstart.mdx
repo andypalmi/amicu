@@ -272,7 +272,11 @@ Today, `apply` supports Modal and RunPod as remote GPU providers. Hetzner, OVHcl
     A `503` while the container cold-starts is normal.
   </Tab>
   <Tab value="RunPod">
-    Requirements: a RunPod account and two API keys. <RunPodSignupLink /> `RUNPOD_API_KEY` manages endpoints: it needs read/write access to the RunPod API. The deployment's `api_key` is a separate Restricted key with `api.runpod.io/graphql` None and `api.runpod.ai` Read/Write. See [RunPod](/docs/providers/runpod#setup-and-credentials).
+    Requirements: a RunPod account and two API keys.
+
+    <RunPodSignupLink />
+
+    `RUNPOD_API_KEY` manages endpoints: it needs read/write access to the RunPod API. The deployment's `api_key` is a separate Restricted key with `api.runpod.io/graphql` None and `api.runpod.ai` Read/Write. See [RunPod](/docs/providers/runpod#setup-and-credentials).
 
     ```bash
     export RUNPOD_API_KEY=...
