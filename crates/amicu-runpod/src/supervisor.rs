@@ -25,6 +25,7 @@
 //! that same lookup. The live GPU catalog narrows `excludedTypes` to the
 //! requested card before anything is written.
 
+use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,6 +54,7 @@ use crate::client::{
 };
 use crate::error::RunPodError;
 use crate::hardware::{exclusions_from_catalog, gpu_placement, verify_catalog_memory};
+use crate::logs::{TIMEOUT_LOG_LIMITS, TIMEOUT_TAIL, merge, tail_block};
 use crate::regions::{restrict_to_residencies, select_data_centers};
 use crate::secrets::{SecretLedger, reference_secrets, stop_result};
 
@@ -65,18 +67,36 @@ pub const VLLM_IMAGE_ENV_VAR: &str = "AMICU_RUNPOD_VLLM_IMAGE";
 /// Operator environment variable overriding the llama.cpp image.
 pub const LLAMACPP_IMAGE_ENV_VAR: &str = "AMICU_RUNPOD_LLAMACPP_IMAGE";
 
-/// The health route the load balancer polls and `start` waits on. Both
-/// llama-server and vLLM serve it on their own port, unauthenticated by the
-/// runtime (the RunPod gateway still requires the bearer key).
-///
-/// llama-server answers `503` while it loads the model, and RunPod's load
-/// balancer treats anything but `200`/`204` as unhealthy, so a slow model
-/// load may show as unhealthy workers (and possibly get them recycled)
-/// rather than initializing ones.
-// TODO(#306): check in the live test whether RunPod recycles a llama.cpp
-// worker that answers 503 during a long model load; if it does, point the
-// health check at a route that answers 204 while loading.
+/// The health route `start` waits on through the gateway (and the pod
+/// proxy). Both llama-server and vLLM serve it on their own port,
+/// unauthenticated by the runtime (the RunPod gateway still requires the
+/// bearer key).
 pub const HEALTH_PATH: &str = "/health";
+
+/// The route RunPod's load balancer really polls before it routes to a
+/// worker. Live tests show it polls only `GET /ping`, whatever
+/// `HEALTH_CHECK_PATH` says: vLLM serves `/ping`, llama-server is given it
+/// through its Vertex AI mode ([`llamacpp_ping_env`]).
+///
+/// llama-server answers `503` while it loads the model, and the load
+/// balancer treats anything but `200`/`204` as unhealthy, so a slow model
+/// load may show as unhealthy workers rather than initializing ones.
+// TODO(#306): check whether RunPod recycles a llama.cpp worker that answers
+// 503 during a long model load.
+pub const LB_PING_PATH: &str = "/ping";
+
+/// The env that makes llama-server serve its `/health` handler at
+/// [`LB_PING_PATH`] too: its Vertex AI compatibility mode (`AIP_MODE`) adds
+/// `AIP_HEALTH_ROUTE` as a second health route, and would move the server to
+/// `AIP_HTTP_PORT` (default 8080), so that is pinned to `port`.
+#[must_use]
+pub fn llamacpp_ping_env(port: u16) -> [(&'static str, String); 3] {
+    [
+        ("AIP_MODE", "PREDICTION".to_owned()),
+        ("AIP_HEALTH_ROUTE", LB_PING_PATH.to_owned()),
+        ("AIP_HTTP_PORT", port.to_string()),
+    ]
+}
 
 /// How often the CLI has `start` report progress while it waits for
 /// readiness.
@@ -84,7 +104,7 @@ pub const PROGRESS_EVERY: Duration = Duration::from_secs(30);
 
 /// Receives one readiness progress line (see
 /// [`RunPodSupervisor::with_progress`]).
-type ProgressSink = Arc<dyn Fn(&str) + Send + Sync>;
+pub(crate) type ProgressSink = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Idle seconds before a worker scales down, unless the deployment's
 /// `scaling { scaledown_window }` says otherwise (same default as Modal).
@@ -110,8 +130,27 @@ pub const DEFAULT_REQUEST_COUNT: u32 = 32;
 pub const DEFAULT_CONTAINER_DISK_GB: u32 = 100;
 
 /// Env variables the load balancer (or amicu's owner check) reads; the
-/// deployment's `env` block and secrets may not set them.
+/// deployment's `env` block and secrets may not set them, nor any
+/// [`RESERVED_ENV_PREFIX`] one.
 const RESERVED_ENV: [&str; 4] = ["PORT", "PORT_HEALTH", "HEALTH_CHECK_PATH", OWNER_ENV_VAR];
+
+/// llama-server's Vertex AI mode variables: amicu sets some, and an
+/// `AIP_PREDICT_ROUTE` that collides with a route makes llama-server exit.
+pub(crate) const RESERVED_ENV_PREFIX: &str = "AIP_";
+
+/// The first variable of `plain` or `secret` that is in `names` or starts
+/// with [`RESERVED_ENV_PREFIX`].
+pub(crate) fn reserved_env_var<'a>(
+    names: &[&str],
+    plain: &'a BTreeMap<String, String>,
+    secret: &'a BTreeMap<String, String>,
+) -> Option<&'a str> {
+    plain
+        .keys()
+        .chain(secret.keys())
+        .map(String::as_str)
+        .find(|k| names.contains(k) || k.starts_with(RESERVED_ENV_PREFIX))
+}
 
 /// Hex digits of the value digest in a secret name (48 bits).
 const SECRET_DIGEST_HEX: usize = 12;
@@ -667,10 +706,7 @@ impl RunPodSupervisor {
         for k in key_vars {
             secret.remove(k);
         }
-        if let Some(k) = RESERVED_ENV
-            .iter()
-            .find(|k| plain.contains_key(**k) || secret.contains_key(**k))
-        {
+        if let Some(k) = reserved_env_var(&RESERVED_ENV, &plain, &secret) {
             return Err(LlamaCppError::Supervisor(format!(
                 "env var '{k}' is reserved on RunPod (the load balancer or amicu reads it); \
                  remove it from the deployment's `env` block"
@@ -689,6 +725,9 @@ impl RunPodSupervisor {
         env.insert("PORT".to_owned(), port.to_string());
         env.insert("PORT_HEALTH".to_owned(), port.to_string());
         env.insert("HEALTH_CHECK_PATH".to_owned(), HEALTH_PATH.to_owned());
+        if runtime == RuntimeKind::LlamaCpp {
+            env.extend(llamacpp_ping_env(port).map(|(k, v)| (k.to_owned(), v)));
+        }
         env.insert(OWNER_ENV_VAR.to_owned(), owner.clone());
         let create_secrets = reference_secrets(
             &self.project_id,
@@ -705,7 +744,7 @@ impl RunPodSupervisor {
         endpoint.env = env;
         endpoint.ports = vec![format!("{port}/http")];
         endpoint.disk_gb = Some(self.disk_gb);
-        endpoint.workers = self.workers_config();
+        endpoint.workers = workers_config(Some(&self.scaling));
         endpoint.request_count = self
             .scaling
             .target_concurrency
@@ -718,25 +757,6 @@ impl RunPodSupervisor {
             secrets: create_secrets,
             api_key: SecretValue::new(api_key),
         })
-    }
-
-    /// The `scaling {}` block as RunPod workers: a lone `min_replicas` above
-    /// the default ceiling raises the ceiling with it.
-    fn workers_config(&self) -> WorkersConfig {
-        let min = self.scaling.min_replicas.unwrap_or(DEFAULT_MIN_WORKERS);
-        WorkersConfig {
-            min,
-            max: self
-                .scaling
-                .max_replicas
-                .unwrap_or(DEFAULT_MAX_WORKERS.max(min)),
-            idle_timeout: Some(
-                self.scaling
-                    .scaledown_window_secs
-                    .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS)
-                    .clamp(1, MAX_IDLE_TIMEOUT_SECS),
-            ),
-        }
     }
 
     fn set_deployed(&self, id: &str) {
@@ -919,9 +939,10 @@ impl RunPodSupervisor {
             if now >= deadline {
                 return Err(LlamaCppError::Supervisor(format!(
                     "RunPod endpoint {id} did not become ready within {}s (last health answer: \
-                     {last}; workers: {}); see `amicu runpod logs {deployment}`",
+                     {last}; workers: {}); see `amicu runpod logs {deployment}`{}",
                     timing.timeout.as_secs(),
-                    self.worker_summary(id).await
+                    self.worker_summary(id).await,
+                    self.log_tail(id).await
                 )));
             }
             if let Some((every, sink)) = &self.progress
@@ -936,6 +957,19 @@ impl RunPodSupervisor {
             }
             tokio::time::sleep(backoff.min(deadline - now)).await;
             backoff = (backoff * 2).min(timing.max_backoff);
+        }
+    }
+
+    /// The last worker log lines for a timeout message (empty when none can
+    /// be read: the error is what matters).
+    async fn log_tail(&self, id: &str) -> String {
+        match self
+            .client
+            .endpoint_logs(id, TIMEOUT_TAIL, TIMEOUT_LOG_LIMITS)
+            .await
+        {
+            Ok(workers) => tail_block(&merge(&workers)),
+            Err(_) => String::new(),
         }
     }
 
@@ -1027,7 +1061,7 @@ fn describe_workers(s: &WorkerSummary) -> String {
     )
 }
 
-fn elapsed(d: Duration) -> String {
+pub(crate) fn elapsed(d: Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
         format!("{secs}s")
@@ -1098,6 +1132,25 @@ impl RunPodSupervisor {
     }
 }
 
+/// A deployment's `scaling {}` block as RunPod workers, defaults filled in:
+/// a lone `min_replicas` above the default ceiling raises the ceiling with it.
+#[must_use]
+pub fn workers_config(scaling: Option<&ScalingSettings>) -> WorkersConfig {
+    let none = ScalingSettings::default();
+    let scaling = scaling.unwrap_or(&none);
+    let min = scaling.min_replicas.unwrap_or(DEFAULT_MIN_WORKERS);
+    WorkersConfig {
+        min,
+        max: scaling.max_replicas.unwrap_or(DEFAULT_MAX_WORKERS.max(min)),
+        idle_timeout: Some(
+            scaling
+                .scaledown_window_secs
+                .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS)
+                .clamp(1, MAX_IDLE_TIMEOUT_SECS),
+        ),
+    }
+}
+
 /// The PATCH that makes an existing endpoint match `create`.
 fn update_from(create: &CreateEndpoint) -> UpdateEndpoint {
     // On PATCH, `""` clears a CUDA floor and `[]` data centers clear a placement
@@ -1123,10 +1176,32 @@ fn update_from(create: &CreateEndpoint) -> UpdateEndpoint {
     }
 }
 
-/// Folds a [`RunPodError`] into the trait's error. `RunPodError` never carries
-/// a key or secret value, so its text is always safe to surface.
+/// Folds a [`RunPodError`] into the trait's error, with a hint when RunPod is
+/// out of capacity. `RunPodError` never carries a key or secret value, so its
+/// text is always safe to surface.
 pub(crate) fn runpod_err(error: &RunPodError) -> LlamaCppError {
-    LlamaCppError::Supervisor(error.to_string())
+    let hint = if is_capacity_error(error) {
+        CAPACITY_HINT
+    } else {
+        ""
+    };
+    LlamaCppError::Supervisor(format!("{error}{hint}"))
+}
+
+const CAPACITY_HINT: &str = "; RunPod has no free machine of this kind right now: retry \
+     later, or choose another GPU (`accelerator`) or `region`, or for a pod the other cloud \
+     (`runpod { cloud = \"community\" }` or \"secure\")";
+
+/// RunPod's "There are no longer any instances available with the requested
+/// specifications" (and its variants) on create.
+fn is_capacity_error(error: &RunPodError) -> bool {
+    let detail = match error {
+        RunPodError::BadRequest { detail, .. }
+        | RunPodError::Conflict { detail }
+        | RunPodError::Api { detail, .. } => detail.to_ascii_lowercase(),
+        _ => return false,
+    };
+    detail.contains("no longer any instances available")
 }
 
 fn duplicate_err<'a>(name: &str, ids: impl Iterator<Item = &'a str>) -> LlamaCppError {

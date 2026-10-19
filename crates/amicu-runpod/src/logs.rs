@@ -27,6 +27,70 @@ pub const WORKER_LOG_LIMITS: StreamLimits = StreamLimits {
     max_bytes: 4 * 1024 * 1024,
 };
 
+/// Log lines a readiness-timeout error ends with.
+pub const TIMEOUT_TAIL: u32 = 8;
+
+/// A shorter read than [`WORKER_LOG_LIMITS`]: the timeout error is already
+/// late.
+pub const TIMEOUT_LOG_LIMITS: StreamLimits = StreamLimits {
+    total: Duration::from_secs(6),
+    idle: Duration::from_secs(1),
+    max_bytes: 512 * 1024,
+};
+
+/// The last [`TIMEOUT_TAIL`] of `lines` as an indented block for an error
+/// message (empty when there are none), without ANSI escapes or other
+/// control characters.
+#[must_use]
+pub fn tail_block(lines: &[String]) -> String {
+    let start = lines.len().saturating_sub(TIMEOUT_TAIL as usize);
+    let shown = &lines[start..];
+    if shown.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nlast log lines:");
+    for l in shown {
+        out.push_str("\n  ");
+        out.push_str(&printable(l));
+    }
+    out
+}
+
+/// `line` with ANSI CSI/OSC escape sequences and every other control
+/// character removed.
+fn printable(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    while let Some(c) = chars.next() {
+                        if c == '\u{7}' || (c == '\u{1b}' && chars.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    chars.next();
+                }
+            }
+        } else if !c.is_control() {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// What to say when no worker is up.
 pub const NO_WORKERS: &str = "no RunPod workers are running (the endpoint is scaled to zero); \
      logs exist only while a worker is up - send a request to start one";
@@ -208,6 +272,21 @@ mod tests {
         assert_eq!(lines[0].source.as_deref(), Some("container"));
         assert_eq!(lines[1].line, "plain text");
         assert_eq!(lines[1].ts, None);
+    }
+
+    #[test]
+    fn the_timeout_tail_drops_escapes_and_control_characters() {
+        let lines = vec![
+            "\u{1b}[31mred\u{1b}[0m text\r".to_owned(),
+            "title\u{1b}]0;evil\u{7} ok\u{1b}]8;;x\u{1b}\\ end\u{8}".to_owned(),
+        ];
+        assert_eq!(
+            tail_block(&lines),
+            "\nlast log lines:\n  red text\n  title ok end"
+        );
+        let many: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        assert!(tail_block(&many).ends_with("\n  12\n  13\n  14\n  15\n  16\n  17\n  18\n  19"));
+        assert_eq!(tail_block(&[]), "");
     }
 
     #[test]

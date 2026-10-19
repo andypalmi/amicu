@@ -1909,13 +1909,23 @@ async fn runpod_preflight(
         }
     }
     let account = crate::runpod_ops::preflight(env.runpod).await?;
-    for (d, _) in launches {
+    for (d, launch) in launches {
         if pod::deployment_is_pod(graph, d) {
             let _ = writeln!(
                 std::io::stderr(),
                 "note: '{d}' runs as a RunPod pod: its api_key is the runtime's own key, checked \
                  by the runtime; the pod proxy adds no authentication"
             );
+            if amicu_runtime::RuntimeKind::of(&launch.settings) == amicu_runtime::RuntimeKind::Vllm
+            {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "note: vLLM's --api-key leaves /invocations, /tokenize, /detokenize, \
+                     /metrics and /docs open on the public pod URL (a vLLM issue, \
+                     https://github.com/vllm-project/vllm/issues/58144); serverless mode \
+                     puts RunPod's gateway key in front of every route"
+                );
+            }
             continue;
         }
         let _ = writeln!(

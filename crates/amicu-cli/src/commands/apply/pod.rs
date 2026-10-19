@@ -64,6 +64,7 @@ fn build(
             .and_then(|s| s.with_allowed_residencies(&residency_allowlist(graph)))
             .map_err(supervisor_err)?
             .with_probe_transport(env.runpod.probe())
+            .with_progress(amicu_runpod::supervisor::PROGRESS_EVERY, env.progress)
             .with_workspace(account)
             .with_cloud(cloud)
             .with_confirmed_account(true);

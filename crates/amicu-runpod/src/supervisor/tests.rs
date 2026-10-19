@@ -503,6 +503,9 @@ async fn llama_start_runs_the_image_server_with_an_hf_gguf() {
         ])
     );
     assert_eq!(body["env"]["PORT"], json!("8080"));
+    assert_eq!(body["env"]["AIP_MODE"], json!("PREDICTION"));
+    assert_eq!(body["env"]["AIP_HEALTH_ROUTE"], json!(LB_PING_PATH));
+    assert_eq!(body["env"]["AIP_HTTP_PORT"], json!("8080"));
     assert_eq!(body["gpu"]["minCudaVersion"], json!("12.8"));
     assert!(body["env"].get("LLAMA_API_KEY").is_none());
     assert!(!body.to_string().contains(KEY));
@@ -1135,12 +1138,21 @@ async fn readiness_waits_through_initializing_and_cold_start_answers() {
 
 #[tokio::test]
 async fn readiness_times_out_naming_the_last_answer_and_keeps_the_id() {
-    let (sup, _) = supervisor(ready_mock(&[Canned::Status(204, "")]).ok(
-        HttpMethod::Get,
-        "/serverless/ep1/workers",
-        200,
-        r#"{"workers":[],"summary":{"running":1,"throttled":3,"total":4}}"#,
-    ));
+    let (sup, _) = supervisor(
+        ready_mock(&[Canned::Status(204, "")])
+            .ok(
+                HttpMethod::Get,
+                "/serverless/ep1/workers",
+                200,
+                r#"{"workers":[{"id":"w1","status":"RUNNING"}],"summary":{"running":1,"throttled":3,"total":4}}"#,
+            )
+            .ok(
+                HttpMethod::Get,
+                "/workers/w1/logs?tail=8",
+                200,
+                "data: {\"ts\":\"t\",\"line\":\"listening on :8080\"}\n\n",
+            ),
+    );
     let err = sup
         .start(&vllm_plan(), &vllm_secrets())
         .await
@@ -1153,6 +1165,10 @@ async fn readiness_times_out_naming_the_last_answer_and_keeps_the_id() {
         "{err}"
     );
     assert!(err.contains("`amicu runpod logs chat`"), "{err}");
+    assert!(
+        err.ends_with("\nlast log lines:\n  [w1] listening on :8080"),
+        "{err}"
+    );
     assert!(!err.contains(KEY));
     assert_eq!(
         sup.deployed_endpoint().lock().unwrap().as_deref(),
@@ -1533,4 +1549,43 @@ async fn a_secret_that_cannot_be_deleted_is_reported_and_kept() {
         *sup.created_secrets().lock().unwrap(),
         vec!["made-here".to_owned()]
     );
+}
+
+#[test]
+fn a_capacity_refusal_suggests_another_card_region_or_cloud() {
+    let full = RunPodError::BadRequest {
+        status: 400,
+        detail: "There are no longer any instances available with the requested \
+                 specifications. Please refresh and try again."
+            .into(),
+    };
+    let err = runpod_err(&full).to_string();
+    assert!(err.contains("no longer any instances available"), "{err}");
+    assert!(
+        err.contains("another GPU") && err.contains("cloud"),
+        "{err}"
+    );
+
+    let other = RunPodError::BadRequest {
+        status: 400,
+        detail: "bad image".into(),
+    };
+    assert!(!runpod_err(&other).to_string().contains("another GPU"));
+}
+
+#[test]
+fn llama_server_vertex_env_is_reserved() {
+    let none = BTreeMap::new();
+    for k in [
+        "AIP_MODE",
+        "AIP_HEALTH_ROUTE",
+        "AIP_HTTP_PORT",
+        "AIP_PREDICT_ROUTE",
+    ] {
+        let plain = BTreeMap::from([(k.to_owned(), "x".to_owned())]);
+        assert_eq!(reserved_env_var(&RESERVED_ENV, &plain, &none), Some(k));
+        assert_eq!(reserved_env_var(&RESERVED_ENV, &none, &plain), Some(k));
+    }
+    let fine = BTreeMap::from([("HF_HOME".to_owned(), "/x".to_owned())]);
+    assert_eq!(reserved_env_var(&RESERVED_ENV, &fine, &none), None);
 }

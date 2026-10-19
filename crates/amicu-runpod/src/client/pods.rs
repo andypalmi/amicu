@@ -10,8 +10,8 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use super::{
-    DeleteOutcome, MAX_PAGES, OWNER_ENV_VAR, Pagination, RunPodClient, check, decode, encode_query,
-    insert_container, non_empty, segment,
+    DeleteOutcome, Detail, MAX_PAGES, OWNER_ENV_VAR, Pagination, RunPodClient, check, decode,
+    encode_query, insert_container, non_empty, segment,
 };
 use crate::error::RunPodError;
 
@@ -415,8 +415,8 @@ pub fn pod_proxy_url(id: &str, port: u16) -> String {
 impl RunPodClient {
     /// `POST /pods`. A transport failure is [`RunPodError::AmbiguousCreate`]
     /// (see [`create_endpoint`](Self::create_endpoint)): look the name up with
-    /// [`find_pods_by_name`](Self::find_pods_by_name) before retrying. Error
-    /// details are withheld when the request carries env values.
+    /// [`find_pods_by_name`](Self::find_pods_by_name) before retrying. The
+    /// request's env values are cut out of an error detail.
     pub async fn create_pod(&self, req: &CreatePod) -> Result<Pod, RunPodError> {
         let resp = self
             .send_inner(
@@ -424,7 +424,7 @@ impl RunPodClient {
                 "/pods",
                 Some(req.to_body()),
                 "pod",
-                !req.env.is_empty(),
+                Detail::Scrub(&req.env),
             )
             .await
             .map_err(|e| match e {
@@ -490,8 +490,8 @@ impl RunPodClient {
         }
     }
 
-    /// `PATCH /pods/{id}`. Error details are withheld when the request
-    /// carries env values.
+    /// `PATCH /pods/{id}`. The request's env values are cut out of an error
+    /// detail.
     pub async fn update_pod(&self, id: &str, update: &UpdatePod) -> Result<Pod, RunPodError> {
         let path = format!("/pods/{}", segment(id)?);
         let resp = self
@@ -500,7 +500,7 @@ impl RunPodClient {
                 &path,
                 Some(update.to_body()),
                 &format!("pod `{id}`"),
-                update.env.as_ref().is_some_and(|e| !e.is_empty()),
+                Detail::scrub(update.env.as_ref()),
             )
             .await?;
         decode(&resp)
@@ -549,7 +549,7 @@ impl RunPodClient {
         if resp.status == 404 {
             return Ok(DeleteOutcome::AlreadyGone);
         }
-        check(&resp, &format!("pod `{id}`"), false)?;
+        check(&resp, &format!("pod `{id}`"), Detail::Show)?;
         Ok(DeleteOutcome::Deleted)
     }
 }

@@ -5,8 +5,8 @@
 /// (`401`/`403` credentials, `404` unknown, `409` conflict, `429` rate limit).
 ///
 /// No variant carries credential material: `detail` strings come from the API's
-/// `application/problem+json` `detail` field (truncated), and the secret-write
-/// calls drop even that.
+/// `application/problem+json` `detail` field (truncated, with the request's
+/// env values cut out), and the secret-write calls drop even that.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RunPodError {
     /// A `POST` that never got a response: the endpoint may or may not exist.
