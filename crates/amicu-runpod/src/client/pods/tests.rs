@@ -25,6 +25,7 @@ fn full_request() -> CreatePod {
     r.ports = vec!["8000/http".into()];
     r.disk_gb = Some(100);
     r.cloud = Cloud::Community;
+    r.min_cuda_version = Some("13.0".into());
     r.data_center_ids = vec!["EU-RO-1".into(), "EU-SE-1".into()];
     r
 }
@@ -53,7 +54,7 @@ async fn create_pod_sends_exact_body() {
             "env": {"AMICU_OWNER": "own", "VLLM_API_KEY": "{{ RUNPOD_SECRET_k }}"},
             "ports": ["8000/http"],
             "disk": 100,
-            "gpu": {"id": "NVIDIA H100 80GB HBM3", "count": 2},
+            "gpu": {"id": "NVIDIA H100 80GB HBM3", "count": 2, "minCudaVersion": "13.0"},
             "cloud": "COMMUNITY",
             "dataCenterIds": ["EU-RO-1", "EU-SE-1"],
             "startSsh": false,

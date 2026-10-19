@@ -60,6 +60,41 @@ pub fn select_data_centers(
     Ok(ids.into_iter().map(str::to_owned).collect())
 }
 
+/// Narrows `selected` (from [`select_data_centers`]; empty means anywhere)
+/// to the `allowed` residencies, e.g. a project's `data_class` allowlist.
+/// An empty `allowed` changes nothing; with no region the result is every
+/// data center of the allowed residencies; a region outside them is rejected.
+pub fn restrict_to_residencies(
+    region: Option<&str>,
+    selected: Vec<String>,
+    allowed: &[Residency],
+) -> Result<Vec<String>, RunPodError> {
+    if allowed.is_empty() {
+        return Ok(selected);
+    }
+    if selected.is_empty() {
+        return Ok(allowed
+            .iter()
+            .flat_map(RunPodProvider::datacenter_codes)
+            .map(str::to_owned)
+            .collect());
+    }
+    let inside = |id: &String| {
+        residency_of_code(id).is_some_and(|(r, _)| allowed.contains(&r))
+    };
+    if selected.iter().all(inside) {
+        return Ok(selected);
+    }
+    Err(RunPodError::ResidencyViolation {
+        region: region.unwrap_or_default().to_owned(),
+        required: allowed
+            .iter()
+            .map(residency_label)
+            .collect::<Vec<_>>()
+            .join(" or "),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +134,30 @@ mod tests {
     fn without_a_residency_requirement_any_known_region_is_allowed() {
         let ids = select_data_centers("us", None).unwrap();
         assert!(ids.contains(&"US-CA-1".to_owned()));
+    }
+
+    #[test]
+    fn a_residency_allowlist_places_or_rejects() {
+        let eu = select_data_centers("eu", None).unwrap();
+        assert_eq!(
+            restrict_to_residencies(Some("eu"), eu.clone(), &[]).unwrap(),
+            eu
+        );
+        assert_eq!(
+            restrict_to_residencies(Some("eu"), eu.clone(), &[Residency::Eu]).unwrap(),
+            eu
+        );
+        assert_eq!(
+            restrict_to_residencies(None, Vec::new(), &[Residency::Eu]).unwrap(),
+            eu
+        );
+        assert_eq!(
+            restrict_to_residencies(Some("US-CA-1"), vec!["US-CA-1".into()], &[Residency::Eu]),
+            Err(RunPodError::ResidencyViolation {
+                region: "US-CA-1".into(),
+                required: "eu".into()
+            })
+        );
     }
 
     #[test]

@@ -29,8 +29,9 @@ use crate::hardware::{pod_gpu_placement, verify_catalog_memory};
 use crate::regions::select_data_centers;
 use crate::secrets::{SecretLedger, reference_secrets, stop_result};
 use crate::supervisor::{
-    DEFAULT_CONTAINER_DISK_GB, HEALTH_PATH, PROVIDER, ReadinessTiming, StopOutcome,
-    container_command, owner_marker, runpod_err, runtime_image, runtime_port, unsupported,
+    DEFAULT_CONTAINER_DISK_GB, HEALTH_PATH, ReadinessTiming, StopOutcome,
+    container_argv, container_command, image_min_cuda, owner_marker, runpod_err, runtime_image,
+    runtime_port, unsupported,
 };
 
 /// Env variables the pod env may not set: amicu's owner marker, and the ones
@@ -230,9 +231,8 @@ impl PodSupervisor {
     /// declared residency.
     pub fn with_region(mut self, region: Option<&Region>) -> Result<Self, LlamaCppError> {
         self.data_center_ids = match region {
-            Some(r) => {
-                select_data_centers(&r.code, Some(&r.residency)).map_err(|e| runpod_err(&e))?
-            }
+            Some(r) => select_data_centers(&r.code, r.declared_residency())
+                .map_err(|e| runpod_err(&e))?,
             None => Vec::new(),
         };
         Ok(self)
@@ -342,7 +342,7 @@ impl PodSupervisor {
     /// # Errors
     /// See [`amicu_llamacpp::remote::launch_argv`].
     pub fn launch_argv(&self, plan: &LaunchPlan) -> Result<Vec<String>, LlamaCppError> {
-        remote::launch_argv(plan, self.gguf.as_ref(), PROVIDER)
+        container_argv(plan, self.gguf.as_ref())
     }
 
     /// Why `pod` cannot be updated in place to this configuration (GPU type
@@ -453,6 +453,7 @@ impl PodSupervisor {
         pod.env = env;
         pod.ports = vec![format!("{port}/http")];
         pod.disk_gb = Some(self.disk_gb);
+        pod.min_cuda_version = image_min_cuda(image, runtime);
         pod.cloud = self.cloud;
         pod.data_center_ids.clone_from(&self.data_center_ids);
         Ok(Prepared {

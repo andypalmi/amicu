@@ -191,7 +191,8 @@ async fn vllm_start_creates_secrets_then_the_pod_and_checks_exposure() {
             },
             "ports": ["8000/http"],
             "disk": 100,
-            "gpu": {"id": TYPE, "count": 2},
+            "gpu": {"id": TYPE, "count": 2,
+                    "minCudaVersion": amicu_llamacpp::remote::DEFAULT_VLLM_IMAGE_MIN_CUDA},
             "cloud": "SECURE",
             "startSsh": false,
             "startJupyter": false

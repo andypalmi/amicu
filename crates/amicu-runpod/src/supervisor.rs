@@ -31,7 +31,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use amicu_core::naming::{project_app_name, project_endpoint_name};
-use amicu_core::resource::{Accelerator, HardwareProfile, Model, Region, Runtime, ScalingSettings};
+use amicu_core::resource::{
+    Accelerator, HardwareProfile, Model, Region, Residency, Runtime, ScalingSettings,
+};
 use amicu_core::secret::SecretValue;
 use amicu_llamacpp::remote::{
     self, GgufSource, HF_TOKEN_ENV_VAR, LLAMACPP_IMAGE_SERVER_PATH, RemoteEnv,
@@ -47,11 +49,11 @@ use sha2::{Digest, Sha256};
 
 use crate::client::{
     CreateEndpoint, CreateSecret, DeleteOutcome, Endpoint, GpuRequest, GpuType, OWNER_ENV_VAR,
-    RunPodClient, UpdateEndpoint, WorkersConfig,
+    RunPodClient, UpdateEndpoint, WorkerSummary, WorkersConfig,
 };
 use crate::error::RunPodError;
 use crate::hardware::{exclusions_from_catalog, gpu_placement, verify_catalog_memory};
-use crate::regions::select_data_centers;
+use crate::regions::{restrict_to_residencies, select_data_centers};
 use crate::secrets::{SecretLedger, reference_secrets, stop_result};
 
 /// The provider name the shared remote-launch renderer puts in its errors.
@@ -75,6 +77,9 @@ pub const LLAMACPP_IMAGE_ENV_VAR: &str = "AMICU_RUNPOD_LLAMACPP_IMAGE";
 // worker that answers 503 during a long model load; if it does, point the
 // health check at a route that answers 204 while loading.
 pub const HEALTH_PATH: &str = "/health";
+
+/// How often `start` reports progress while it waits for readiness.
+pub const PROGRESS_EVERY: Duration = Duration::from_secs(30);
 
 /// Idle seconds before a worker scales down, unless the deployment's
 /// `scaling { scaledown_window }` says otherwise (same default as Modal).
@@ -278,6 +283,7 @@ pub struct RunPodSupervisor {
     gpu: Option<GpuRequest>,
     /// RunPod GPU type id and nominal VRAM in GB.
     gpu_type: Option<(String, u32)>,
+    region: Option<String>,
     data_center_ids: Vec<String>,
     scaling: ScalingSettings,
     disk_gb: u32,
@@ -321,6 +327,7 @@ impl RunPodSupervisor {
             endpoint_name: project_endpoint_name(project_id, deployment_id),
             gpu: None,
             gpu_type: None,
+            region: None,
             data_center_ids: Vec::new(),
             scaling: ScalingSettings::default(),
             disk_gb: DEFAULT_CONTAINER_DISK_GB,
@@ -400,11 +407,31 @@ impl RunPodSupervisor {
     /// declared residency.
     pub fn with_region(mut self, region: Option<&Region>) -> Result<Self, LlamaCppError> {
         self.data_center_ids = match region {
-            Some(r) => {
-                select_data_centers(&r.code, Some(&r.residency)).map_err(|e| runpod_err(&e))?
-            }
+            Some(r) => select_data_centers(&r.code, r.declared_residency())
+                .map_err(|e| runpod_err(&e))?,
             None => Vec::new(),
         };
+        self.region = region.map(|r| r.code.clone());
+        Ok(self)
+    }
+
+    /// Holds placement to the `allowed` residencies (the project's
+    /// `data_class` allowlist): without a region, only their data centers;
+    /// with one, it must lie inside them. Call after
+    /// [`with_region`](Self::with_region); empty `allowed` is a no-op.
+    ///
+    /// # Errors
+    /// [`LlamaCppError::Supervisor`] when the region lies outside `allowed`.
+    pub fn with_allowed_residencies(
+        mut self,
+        allowed: &[Residency],
+    ) -> Result<Self, LlamaCppError> {
+        self.data_center_ids = restrict_to_residencies(
+            self.region.as_deref(),
+            std::mem::take(&mut self.data_center_ids),
+            allowed,
+        )
+        .map_err(|e| runpod_err(&e))?;
         Ok(self)
     }
 
@@ -567,7 +594,7 @@ impl RunPodSupervisor {
     /// # Errors
     /// See [`amicu_llamacpp::remote::launch_argv`].
     pub fn launch_argv(&self, plan: &LaunchPlan) -> Result<Vec<String>, LlamaCppError> {
-        remote::launch_argv(plan, self.gguf.as_ref(), PROVIDER)
+        container_argv(plan, self.gguf.as_ref())
     }
 
     /// Builds the endpoint request and the secrets for `plan`. Pure: the
@@ -618,12 +645,13 @@ impl RunPodSupervisor {
                  remove it from the deployment's `env` block"
             )));
         }
-        let gpu = self.gpu.clone().ok_or_else(|| {
+        let mut gpu = self.gpu.clone().ok_or_else(|| {
             LlamaCppError::Supervisor(
                 "RunPod Serverless needs a GPU accelerator in the deployment's hardware profile"
                     .to_owned(),
             )
         })?;
+        gpu.min_cuda_version = image_min_cuda(image, runtime);
 
         let owner = self.owner();
         let mut env = plain;
@@ -812,14 +840,23 @@ impl RunPodSupervisor {
     /// until a worker answers `200`. `204` (initializing), "no workers"
     /// answers and transport failures are retried with a doubling backoff
     /// until the timeout; `401`/`403` fail at once (the gateway does not
-    /// accept the key, waiting will not help).
-    async fn wait_ready(&self, id: &str, key: &SecretValue) -> Result<(), LlamaCppError> {
+    /// accept the key, waiting will not help). Every
+    /// [`PROGRESS_EVERY`] it prints the elapsed time and worker states to
+    /// stderr.
+    async fn wait_ready(
+        &self,
+        id: &str,
+        key: &SecretValue,
+        deployment: &str,
+    ) -> Result<(), LlamaCppError> {
         let key = key.expose_secret_str().map_err(|_| {
             LlamaCppError::Supervisor("the endpoint API key is not valid UTF-8".to_owned())
         })?;
         let url = format!("{}{HEALTH_PATH}", endpoint_url(id));
         let timing = self.readiness;
-        let deadline = tokio::time::Instant::now() + timing.timeout;
+        let started = tokio::time::Instant::now();
+        let deadline = started + timing.timeout;
+        let mut next_progress = started + PROGRESS_EVERY;
         let mut backoff = timing.initial_backoff;
         let mut last = "no answer".to_owned();
         loop {
@@ -842,12 +879,29 @@ impl RunPodSupervisor {
             if now >= deadline {
                 return Err(LlamaCppError::Supervisor(format!(
                     "RunPod endpoint {id} did not become ready within {}s (last health answer: \
-                     {last})",
-                    timing.timeout.as_secs()
+                     {last}; workers: {}); see `amicu runpod logs {deployment}`",
+                    timing.timeout.as_secs(),
+                    self.worker_summary(id).await
                 )));
+            }
+            if now >= next_progress {
+                next_progress = now + PROGRESS_EVERY;
+                eprintln!(
+                    "  waiting for RunPod endpoint {id}: {} elapsed, workers: {}",
+                    elapsed(now - started),
+                    self.worker_summary(id).await
+                );
             }
             tokio::time::sleep(backoff.min(deadline - now)).await;
             backoff = (backoff * 2).min(timing.max_backoff);
+        }
+    }
+
+    /// The endpoint's worker states for a progress or timeout message.
+    async fn worker_summary(&self, id: &str) -> String {
+        match self.client.list_workers(id).await {
+            Ok(w) => describe_workers(&w.summary),
+            Err(e) => format!("unknown ({e})"),
         }
     }
 
@@ -924,6 +978,26 @@ impl RunPodSupervisor {
     }
 }
 
+fn describe_workers(s: &WorkerSummary) -> String {
+    let mut out = format!(
+        "{} running, {} idle, {} initializing, {} throttled",
+        s.running, s.idle, s.initializing, s.throttled
+    );
+    if s.unhealthy > 0 {
+        let _ = write!(out, ", {} unhealthy", s.unhealthy);
+    }
+    out
+}
+
+fn elapsed(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
+}
+
 /// The PATCH that makes an existing endpoint match `create`.
 fn update_from(create: &CreateEndpoint) -> UpdateEndpoint {
     UpdateEndpoint {
@@ -965,12 +1039,35 @@ pub(crate) fn unsupported(what: &str) -> LlamaCppError {
     ))
 }
 
-/// The port the runtime listens on inside the container.
+/// The port the runtime listens on inside the container. llama.cpp uses the
+/// stock image's port whatever the deployment says: only the gateway or
+/// proxy URL is public, and the image's own health check targets that port.
 pub(crate) fn runtime_port(plan: &LaunchPlan) -> u16 {
     match &plan.settings {
         Runtime::Vllm(s) => s.port,
-        Runtime::LlamaCpp(s) => s.port,
+        Runtime::LlamaCpp(_) => remote::LLAMACPP_IMAGE_PORT,
     }
+}
+
+/// [`remote::launch_argv`] with `--port` set to [`runtime_port`].
+pub(crate) fn container_argv(
+    plan: &LaunchPlan,
+    gguf: Option<&GgufSource>,
+) -> Result<Vec<String>, LlamaCppError> {
+    let mut argv = remote::launch_argv(plan, gguf, PROVIDER)?;
+    let port = runtime_port(plan).to_string();
+    match argv.iter().position(|a| a == "--port") {
+        Some(i) if i + 1 < argv.len() => argv[i + 1] = port,
+        _ => argv.extend(["--port".to_owned(), port]),
+    }
+    Ok(argv)
+}
+
+/// The host CUDA floor for `image`: the stock image's requirement, `None`
+/// for an operator override (its requirement is unknown).
+pub(crate) fn image_min_cuda(image: &str, runtime: RuntimeKind) -> Option<String> {
+    (image == remote::default_image(runtime))
+        .then(|| remote::default_image_min_cuda(runtime).to_owned())
 }
 
 /// The container image for `runtime`: the operator override, else the stock
@@ -1031,7 +1128,8 @@ impl ProcessSupervisor for RunPodSupervisor {
         let id = self.upsert_endpoint(&prepared, &fresh).await?;
         // The endpoint now references only the current generation.
         self.secrets.retire_stale(&prepared.secrets).await;
-        self.wait_ready(&id, &prepared.api_key).await?;
+        self.wait_ready(&id, &prepared.api_key, plan.deployment.as_str())
+            .await?;
         Ok(RuntimeHandle {
             endpoint: endpoint_url(&id),
             id,

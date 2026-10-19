@@ -27,7 +27,7 @@ pub use hardware::{
     pod_gpu_placement, verify_catalog_memory,
 };
 pub use pod::PodSupervisor;
-pub use regions::select_data_centers;
+pub use regions::{restrict_to_residencies, select_data_centers};
 pub use supervisor::{
     ReadinessTiming, RunPodSupervisor, StopOutcome, StopRetry, endpoint_url, owner_marker,
     secret_name, secret_reference,

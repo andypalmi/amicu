@@ -32,6 +32,18 @@ pub const DEFAULT_LLAMACPP_IMAGE: &str = "ghcr.io/ggml-org/llama.cpp:server-cuda
 /// Where `llama-server` lives in [`DEFAULT_LLAMACPP_IMAGE`] (off `PATH`).
 pub const LLAMACPP_IMAGE_SERVER_PATH: &str = "/app/llama-server";
 
+/// The port [`DEFAULT_LLAMACPP_IMAGE`] expects: its Docker `HEALTHCHECK`
+/// curls `localhost:8080/health`.
+pub const LLAMACPP_IMAGE_PORT: u16 = 8080;
+
+/// Lowest host CUDA version [`DEFAULT_VLLM_IMAGE`] runs on (its
+/// `NVIDIA_REQUIRE_CUDA` is `cuda>=13.0`).
+pub const DEFAULT_VLLM_IMAGE_MIN_CUDA: &str = "13.0";
+
+/// Lowest host CUDA version [`DEFAULT_LLAMACPP_IMAGE`] runs on (its
+/// `NVIDIA_REQUIRE_CUDA` is `cuda>=12.8`).
+pub const DEFAULT_LLAMACPP_IMAGE_MIN_CUDA: &str = "12.8";
+
 /// The operator environment variable a Hugging Face token is read from when
 /// the launch plan carries no resolved `HF_TOKEN` secret. Read from the
 /// operator's own process, never from the deployment's `env` block, and only
@@ -44,6 +56,15 @@ pub const fn default_image(runtime: RuntimeKind) -> &'static str {
     match runtime {
         RuntimeKind::Vllm => DEFAULT_VLLM_IMAGE,
         RuntimeKind::LlamaCpp => DEFAULT_LLAMACPP_IMAGE,
+    }
+}
+
+/// Lowest host CUDA version (`major.minor`) the runtime's default image needs.
+#[must_use]
+pub const fn default_image_min_cuda(runtime: RuntimeKind) -> &'static str {
+    match runtime {
+        RuntimeKind::Vllm => DEFAULT_VLLM_IMAGE_MIN_CUDA,
+        RuntimeKind::LlamaCpp => DEFAULT_LLAMACPP_IMAGE_MIN_CUDA,
     }
 }
 
