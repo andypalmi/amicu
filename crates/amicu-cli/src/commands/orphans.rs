@@ -39,7 +39,6 @@ use crate::commands::build_runtime;
 use crate::error::CliError;
 use crate::project::{LocalState, Project};
 use crate::runpod_ops::RunPodOps;
-use crate::stops::Backend;
 use crate::write_json;
 
 const MODAL_PREFIX: &str = "amicu-";
@@ -321,7 +320,7 @@ impl Tracked {
                 t.modal_referenced = true;
                 t.modal_names.insert(rec.identity.clone());
                 t.modal_ids.extend(rec.app_id.clone());
-            } else if rec.backend == Backend::Runpod {
+            } else if rec.backend.is_runpod() {
                 t.runpod_referenced = true;
                 match &rec.app_id {
                     Some(id) => t.runpod_ids.insert(id.clone()),

@@ -285,11 +285,11 @@ const POD_USD_PER_GPU_HOUR: &[(&str, f64, f64)] = &[
     ("NVIDIA H100 NVL", 3.19, 2.59),
     ("NVIDIA H100 PCIe", 2.89, 1.99),
     ("NVIDIA H200", 5.29, 3.59),
-    ("NVIDIA H200 NVL", 3.79, 0.5),
+    ("NVIDIA H200 NVL", 3.79, 0.0),
     ("NVIDIA L4", 0.59, 0.44),
     ("NVIDIA L40", 0.82, 0.69),
     ("NVIDIA L40S", 1.09, 0.79),
-    ("NVIDIA RTX 2000 Ada Generation", 0.24, 0.5),
+    ("NVIDIA RTX 2000 Ada Generation", 0.24, 0.0),
     ("NVIDIA RTX 4000 Ada Generation", 0.28, 0.2),
     ("NVIDIA RTX 6000 Ada Generation", 0.99, 0.74),
     ("NVIDIA RTX A4000", 0.25, 0.17),
@@ -299,14 +299,14 @@ const POD_USD_PER_GPU_HOUR: &[(&str, f64, f64)] = &[
     ("NVIDIA RTX PRO 4500 Blackwell", 0.72, 0.34),
     (
         "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
-        0.5,
+        0.0,
         1.64,
     ),
     ("NVIDIA RTX PRO 6000 Blackwell Server Edition", 2.49, 1.69),
     (
         "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 1g.24gb",
         0.69,
-        0.5,
+        0.0,
     ),
     (
         "NVIDIA RTX PRO 6000 Blackwell Server Edition MIG 2g.48gb",
@@ -677,6 +677,15 @@ mod tests {
         let pods_only = acc(AcceleratorKind::Gpu, "h200-nvl-141gb", 1, 141);
         assert_eq!(serverless_hourly_usd(&pods_only), None);
         assert_eq!(pod_hourly_usd(&pods_only, false), Some(3.79));
+    }
+
+    #[test]
+    fn community_never_costs_more_than_secure() {
+        for (id, secure, community) in POD_USD_PER_GPU_HOUR {
+            if *secure > 0.0 && *community > 0.0 {
+                assert!(community <= secure, "{id}");
+            }
+        }
     }
 
     #[test]

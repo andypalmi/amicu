@@ -1396,6 +1396,22 @@ fn orphans_after_apply_finds_no_untracked_runpod_resource() {
 }
 
 #[test]
+fn orphans_after_a_pod_apply_lists_no_untracked_secret() {
+    let td = TempDir::new();
+    let project = pod_project(&td, None);
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    let report = orphans(&project, &rig);
+    let untracked: Vec<&str> = report
+        .resources
+        .iter()
+        .filter(|r| !r.tracked)
+        .map(|r| r.identity.as_str())
+        .collect();
+    assert_eq!(untracked, Vec::<&str>::new());
+}
+
+#[test]
 fn orphans_shows_a_same_named_duplicate_of_a_recorded_endpoint_as_untracked() {
     let td = TempDir::new();
     let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));

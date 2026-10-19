@@ -224,7 +224,7 @@ fn pod_scaling_ok(s: &ScalingSettings) -> bool {
             && s.scaledown_window_secs.is_none())
 }
 
-/// `AMICU-CAP-014`: the `runpod {}` block must fit its profile and the
+/// `AMICU-CAP-015`: the `runpod {}` block must fit its profile and the
 /// deployments that use it.
 fn runpod_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
     let mut out = Vec::new();
