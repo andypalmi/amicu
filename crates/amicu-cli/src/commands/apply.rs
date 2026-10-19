@@ -1920,10 +1920,7 @@ async fn runpod_preflight(
             {
                 let _ = writeln!(
                     std::io::stderr(),
-                    "note: vLLM's --api-key leaves /invocations, /tokenize, /detokenize, \
-                     /metrics and /docs open on the public pod URL (a vLLM issue, \
-                     https://github.com/vllm-project/vllm/issues/58144); serverless mode \
-                     puts RunPod's gateway key in front of every route"
+                    "note: on a vLLM pod every route requires the api_key except GET /health"
                 );
             }
             continue;
