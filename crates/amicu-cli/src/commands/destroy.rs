@@ -91,7 +91,8 @@ pub(crate) fn run_with(
         return Err(CliError::Message(msg));
     }
 
-    let (prior_state, pruned) = crate::refresh::load_refreshed(project, env.modal, output, out)?;
+    let (prior_state, pruned) =
+        crate::refresh::load_refreshed(project, env.modal, env.runpod, output, out)?;
     let empty = Graph::new();
     let prior_graph = prior_state.as_ref().map_or(&empty, |s| &s.graph);
     let orphans = orphan_ids(prior_state.as_ref());
