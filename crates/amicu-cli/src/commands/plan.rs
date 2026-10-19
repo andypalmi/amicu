@@ -356,11 +356,8 @@ pub(crate) fn print_human_with(
                 }
             }
             if item.launch.is_some() {
-                if let Some(billing) = runpod_billing(graph, &item.deployment) {
-                    io(writeln!(out, "      billing:  {billing}"))?;
-                }
-                if let Some(workers) = runpod_workers(graph, &item.deployment) {
-                    io(writeln!(out, "      workers:  {workers}"))?;
+                for line in runpod_lines(graph, &item.deployment) {
+                    io(writeln!(out, "      {line}"))?;
                 }
             }
             if let Some(artifact) = &item.action.artifact {
@@ -441,7 +438,8 @@ fn runpod_billing(graph: &Graph, deployment: &DeploymentId) -> Option<String> {
     let acc = hw.accelerator.as_ref();
     Some(match hw.runpod_mode() {
         RunpodMode::Pod => {
-            let community = hw.runpod.and_then(|r| r.cloud) == Some(RunpodCloud::Community);
+            let community =
+                hw.runpod.as_ref().and_then(|r| r.cloud) == Some(RunpodCloud::Community);
             match acc.and_then(|a| amicu_runpod::pod_hourly_usd(a, community)) {
                 Some(usd) => format!("always on \u{b7} ~${usd:.2}/hr"),
                 None => "always on".to_owned(),
@@ -452,6 +450,27 @@ fn runpod_billing(graph: &Graph, deployment: &DeploymentId) -> Option<String> {
             None => "scale to zero".to_owned(),
         },
     })
+}
+
+/// A RunPod launch's billing, workers, network volume and FlashBoot lines.
+fn runpod_lines(graph: &Graph, deployment: &DeploymentId) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(billing) = runpod_billing(graph, deployment) {
+        lines.push(format!("billing:  {billing}"));
+    }
+    if let Some(workers) = runpod_workers(graph, deployment) {
+        lines.push(format!("workers:  {workers}"));
+    }
+    let Some(r) = runpod_hardware(graph, deployment).and_then(|h| h.runpod.as_ref()) else {
+        return lines;
+    };
+    if let Some(v) = &r.network_volume {
+        lines.push(format!("volume:   {v} (model cache)"));
+    }
+    if r.flashboot == Some(true) {
+        lines.push("flashboot: on".to_owned());
+    }
+    lines
 }
 
 /// How many RunPod workers a deployment may run: serverless min/max and

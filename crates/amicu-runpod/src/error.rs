@@ -62,6 +62,17 @@ pub enum RunPodError {
     /// The region lies outside the required data residency.
     #[error("region `{region}` is not within the required residency ({required})")]
     ResidencyViolation { region: String, required: String },
+    /// The network volume lives outside the data centers the deployment may
+    /// be placed in.
+    #[error(
+        "network volume `{volume}` is in data center {data_center}, outside the deployment's \
+         data centers ({allowed}); use a volume in one of them or change the profile's `region`"
+    )]
+    VolumeOutsidePlacement {
+        volume: String,
+        data_center: String,
+        allowed: String,
+    },
 }
 
 impl RunPodError {

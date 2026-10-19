@@ -706,7 +706,7 @@ fn pod_drift(state: &LocalState, record: &StopRecord, pod: &amicu_runpod::Pod) -
             drift.push(format!("GPU count {count} (applied {})", want.count));
         }
     }
-    let applied = match hw.runpod.and_then(|r| r.cloud) {
+    let applied = match hw.runpod.as_ref().and_then(|r| r.cloud) {
         Some(RunpodCloud::Community) => Cloud::Community,
         _ => Cloud::Secure,
     };

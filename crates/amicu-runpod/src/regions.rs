@@ -4,6 +4,7 @@
 use amicu_core::resource::Residency;
 use amicu_providers::RunPodProvider;
 
+use crate::client::NetworkVolume;
 use crate::error::RunPodError;
 
 const GROUPS: &[(&str, Residency)] = &[
@@ -106,9 +107,53 @@ pub fn restrict_to_residencies(
     Err(violation())
 }
 
+/// The placement for a deployment that mounts `volume`: the volume's data
+/// center alone, which must lie within `selected` (empty means anywhere).
+pub fn place_on_volume(
+    selected: &[String],
+    volume: &NetworkVolume,
+) -> Result<Vec<String>, RunPodError> {
+    let dc = &volume.data_center;
+    if selected.is_empty() || selected.iter().any(|s| s.eq_ignore_ascii_case(dc)) {
+        return Ok(vec![dc.clone()]);
+    }
+    Err(RunPodError::VolumeOutsidePlacement {
+        volume: volume.id.clone(),
+        data_center: dc.clone(),
+        allowed: selected.join(", "),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn volume(dc: &str) -> NetworkVolume {
+        NetworkVolume {
+            id: "vol1".to_owned(),
+            name: String::new(),
+            size: None,
+            data_center: dc.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_volume_pins_placement_to_its_data_center() {
+        assert_eq!(
+            place_on_volume(&[], &volume("EU-RO-1")).unwrap(),
+            ["EU-RO-1"]
+        );
+        let eu = select_data_centers("eu", None).unwrap();
+        assert_eq!(
+            place_on_volume(&eu, &volume("EU-RO-1")).unwrap(),
+            ["EU-RO-1"]
+        );
+        let err = place_on_volume(&eu, &volume("US-KS-2")).unwrap_err();
+        assert!(
+            matches!(&err, RunPodError::VolumeOutsidePlacement { data_center, .. } if data_center == "US-KS-2"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn eu_region_yields_only_eu_data_centers() {

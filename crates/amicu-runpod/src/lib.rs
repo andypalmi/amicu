@@ -18,8 +18,8 @@ pub use amicu_core::naming::project_endpoint_name;
 pub use client::{ACCOUNT_MARKER_SECRET, AccountIdentity, GpuType, OWNER_ENV_VAR};
 pub use client::{
     ApiKey, BASE_URL, CreateEndpoint, CreateSecret, DeleteOutcome, Endpoint, EndpointGpu,
-    EndpointWorkers, FlashBoot, GpuRequest, Organization, RequestUrls, RunPodClient, Secret,
-    UpdateEndpoint, Worker, WorkerSummary, WorkersConfig, WorkersList,
+    EndpointWorkers, FlashBoot, GpuRequest, NetworkVolume, Organization, RequestUrls, RunPodClient,
+    Secret, UpdateEndpoint, VOLUME_MOUNT_PATH, Worker, WorkerSummary, WorkersConfig, WorkersList,
 };
 pub use client::{
     Cloud, CreatePod, Pod, PodAction, PodEnv, PodGpu, PodStatus, UpdatePod, pod_proxy_url,
@@ -30,7 +30,7 @@ pub use hardware::{
     pod_gpu_placement, pod_hourly_usd, serverless_hourly_usd, verify_catalog_memory,
 };
 pub use pod::PodSupervisor;
-pub use regions::{restrict_to_residencies, select_data_centers};
+pub use regions::{place_on_volume, restrict_to_residencies, select_data_centers};
 pub use supervisor::{
     ReadinessTiming, RunPodSupervisor, StopOutcome, StopRetry, endpoint_url, owner_marker,
     secret_name, secret_reference, workers_config,

@@ -10,8 +10,8 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use super::{
-    DeleteOutcome, Detail, MAX_PAGES, OWNER_ENV_VAR, Pagination, RunPodClient, check, decode,
-    encode_query, insert_container, non_empty, segment,
+    DeleteOutcome, Detail, MAX_PAGES, OWNER_ENV_VAR, Pagination, RunPodClient, VOLUME_MOUNT_PATH,
+    check, decode, encode_query, insert_container, non_empty, segment,
 };
 use crate::error::RunPodError;
 
@@ -135,6 +135,8 @@ pub struct CreatePod {
     pub data_center_ids: Vec<String>,
     /// Container registry credential id for a private image.
     pub registry_id: Option<String>,
+    /// Network volume mounted at [`VOLUME_MOUNT_PATH`]; fixed at create.
+    pub network_volume_id: Option<String>,
 }
 
 impl CreatePod {
@@ -161,6 +163,7 @@ impl CreatePod {
             cloud: Cloud::Secure,
             data_center_ids: Vec::new(),
             registry_id: None,
+            network_volume_id: None,
         }
     }
 
@@ -189,6 +192,12 @@ impl CreatePod {
         if !self.data_center_ids.is_empty() {
             m.insert("dataCenterIds".into(), json!(self.data_center_ids));
         }
+        if let Some(v) = &self.network_volume_id {
+            m.insert(
+                "mounts".into(),
+                json!({"network": [{"volumeId": v, "path": VOLUME_MOUNT_PATH}]}),
+            );
+        }
         m.insert("startSsh".into(), json!(false));
         m.insert("startJupyter".into(), json!(false));
         Value::Object(m)
@@ -207,6 +216,7 @@ impl fmt::Debug for CreatePod {
             .field("min_cuda_version", &self.min_cuda_version)
             .field("cloud", &self.cloud)
             .field("data_center_ids", &self.data_center_ids)
+            .field("network_volume_id", &self.network_volume_id)
             .finish_non_exhaustive()
     }
 }
@@ -387,6 +397,26 @@ pub struct Pod {
     /// The pod env, reduced to the owner marker and a digest.
     #[serde(default, deserialize_with = "pod_env")]
     pub env: PodEnv,
+    /// The mounted network volume's id, read from `mounts.network`.
+    #[serde(default, rename = "mounts", deserialize_with = "network_volume")]
+    pub network_volume: Option<String>,
+}
+
+fn network_volume<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mounts = Option::<Value>::deserialize(d)?;
+    Ok(mounts
+        .as_ref()
+        .and_then(|m| {
+            m.get("network")?
+                .as_array()?
+                .first()?
+                .get("volumeId")?
+                .as_str()
+        })
+        .map(str::to_owned))
 }
 
 impl Pod {

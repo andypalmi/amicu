@@ -210,8 +210,18 @@ mod tests {
             Some(RunpodSettings {
                 mode: RunpodMode::Pod,
                 cloud: Some(RunpodCloud::Community),
+                ..Default::default()
             })
         );
+        assert_eq!(parse_graph(&format_graph(&g).unwrap()).unwrap(), g);
+
+        let g = parse_graph(&with_runpod_block(
+            "  runpod {\n    network_volume = \"vol_abc\"\n    flashboot      = true\n  }\n",
+        ))
+        .unwrap();
+        let r = g.hardware_profiles[0].runpod.clone().unwrap();
+        assert_eq!(r.network_volume.as_deref(), Some("vol_abc"));
+        assert_eq!(r.flashboot, Some(true));
         assert_eq!(parse_graph(&format_graph(&g).unwrap()).unwrap(), g);
 
         let g = parse_graph(&with_runpod_block("  runpod {}\n")).unwrap();
@@ -233,6 +243,12 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("gpus"), "{err}");
+        let err = parse_graph(&with_runpod_block(
+            "  runpod {\n    flashboot = \"yes\"\n  }\n",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("flashboot"), "{err}");
     }
 
     #[test]

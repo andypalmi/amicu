@@ -152,10 +152,27 @@ resource "hardware_profile" "runpod_pod" {
 - **Calling.** The URL is `https://<pod id>-<port>.proxy.runpod.net`. Send the key as `Authorization: Bearer <key>`.
 - **vLLM and `/invocations`.** vLLM's `--api-key` does not protect `/invocations`, `/tokenize`, `/detokenize`, `/metrics` or `/docs`. On a pod running vLLM these are reachable on the public pod URL without the key, which was confirmed live. See [vllm-project/vllm#58144](https://github.com/vllm-project/vllm/issues/58144). Serverless is not affected, because RunPod's gateway authenticates every request.
 - **One replica.** `scaling {}` may only set `min_replicas = 1` and `max_replicas = 1`, or be left out. Anything else fails `amicu validate` with `AMICU-CAP-015`.
-- **Replacement.** Changing the GPU, its count or the cloud replaces the pod, and so does a region change when the running pod's data center is outside the new region's data centers. The old pod is terminated, then the new one starts. A new spec that fails a pre-write check leaves the old pod in place.
+- **Replacement.** Changing the GPU, its count, the cloud or the `network_volume` replaces the pod, and so does a region change when the running pod's data center is outside the new region's data centers. The old pod is terminated, then the new one starts. A new spec that fails a pre-write check leaves the old pod in place.
 - **Cloud.** `secure` by default, or `community`. `cloud` is an error on Serverless.
 - **Destroy.** `amicu destroy` and `amicu runpod stop` terminate the pod and delete the secrets amicu created for it. The deployment stays in state until the termination is confirmed.
 - **Cost.** `amicu plan` shows how each mode is billed, for example `billing: always on · ~$0.59/hr` for a pod and `billing: scale to zero · ~$0.69/hr while active` for Serverless. The figure is an estimate from amicu's bundled prices, not a live quote.
+
+## Model cache
+
+Without a volume, every new worker downloads the model onto its container disk. Point `runpod { network_volume = "<volume id>" }` at an existing [network volume](https://docs.runpod.io/storage/network-volumes) and the model is downloaded once, then read from the volume by later workers.
+
+```hcl
+runpod {
+  network_volume = "agv6w2qcg7"
+  flashboot      = true
+}
+```
+
+- **Bring your own.** Create the volume in the RunPod console. amicu reads it but never creates, resizes or deletes it, and `amicu destroy` leaves it and its contents in place. The volume bills for its storage until you delete it.
+- **Placement.** A volume lives in one data center, so workers are placed only there. Before anything is recorded or started, `apply` reads the volume and refuses it if its data center is outside the profile's `region` or the project's `data_class` residency.
+- **Where.** The volume is mounted at `/runpod-volume`, and `HF_HOME` is set to `/runpod-volume/huggingface` for vLLM and llama.cpp (llama.cpp also gets `LLAMA_CACHE=/runpod-volume/huggingface/hub`). A value you set in the deployment's `env` block wins.
+- **Changes.** On Serverless, switching to another volume or removing it updates the endpoint in place. A pod's volume is fixed when the pod is created, so changing it replaces the pod.
+- **Plan.** `amicu plan` shows `volume:` and, when on, `flashboot: on`.
 
 ## Configuration reference
 
@@ -170,6 +187,8 @@ resource "hardware_profile" "runpod_pod" {
 | `memory` | size | none | yes | Host RAM. |
 | `runpod.mode` | string | `"serverless"` | no | `"serverless"`: a load-balancing endpoint that scales to zero. `"pod"`: an always-on GPU pod, billed while it exists. |
 | `runpod.cloud` | string | `"secure"` | no | Pod mode only: `"secure"` or `"community"`. |
+| `runpod.network_volume` | string | none | no | Id of an existing RunPod network volume to hold the model cache. See [Model cache](#model-cache). |
+| `runpod.flashboot` | bool | `false` | no | Serverless only: turns on RunPod FlashBoot, which keeps worker state around for faster cold starts. An error on pods. |
 | deployment `api_key` | `secret(...)` | none | yes | Serverless: a RunPod API key with `api.runpod.ai` access. Pod: the runtime's own key. |
 
 ## GPUs
@@ -217,7 +236,7 @@ To keep spend bounded, remember the defaults: one worker at most, none kept warm
 ## Limits
 
 - A single request is capped at about 5.5 minutes. Keep generations short enough to finish inside it.
-- Cold starts take time: a new worker pulls the image and downloads the model onto its disk, so the first request after idle is slow, and a `503` or a wait is normal.
+- Cold starts take time: a new worker pulls the image and downloads the model onto its disk (unless a [model cache](#model-cache) volume holds it), so the first request after idle is slow, and a `503` or a wait is normal.
 - Logs are available only from live workers. A scaled-to-zero endpoint has none to read; use the RunPod console while a worker is up.
 - Only GPU accelerators are valid.
 - The model must come from Hugging Face.

@@ -613,6 +613,30 @@ pub struct GpuType {
     pub memory: Option<u32>,
 }
 
+/// Where RunPod mounts a network volume on a serverless worker (fixed), and
+/// where amicu mounts one on a pod.
+pub const VOLUME_MOUNT_PATH: &str = "/runpod-volume";
+
+/// A network volume as `GET /network-volumes/{id}` returns it.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkVolume {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub size: Option<u32>,
+    /// The one data center the volume lives in (immutable).
+    pub data_center: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkVolumesPage {
+    network_volumes: Vec<NetworkVolume>,
+    pagination: Pagination,
+}
+
 /// Name of the amicu-owned secret whose id identifies a personal account
 /// (see [`RunPodClient::account_identity`]).
 pub const ACCOUNT_MARKER_SECRET: &str = "amicu-account-marker";
@@ -904,6 +928,45 @@ impl RunPodClient {
             .await?;
         let list: GpuCatalog = decode(&resp)?;
         Ok(list.gpus)
+    }
+
+    /// `GET /network-volumes/{id}`. Read only: amicu never creates or deletes
+    /// a volume.
+    pub async fn get_network_volume(&self, id: &str) -> Result<NetworkVolume, RunPodError> {
+        let path = format!("/network-volumes/{}", segment(id)?);
+        let resp = self
+            .send(
+                HttpMethod::Get,
+                &path,
+                None,
+                &format!("network volume `{id}`"),
+            )
+            .await?;
+        decode(&resp)
+    }
+
+    /// `GET /network-volumes`, following pagination to the end.
+    pub async fn list_network_volumes(&self) -> Result<Vec<NetworkVolume>, RunPodError> {
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_PAGES {
+            let path = match &cursor {
+                Some(c) => format!("/network-volumes?cursor={}", encode_query(c)),
+                None => "/network-volumes".to_owned(),
+            };
+            let resp = self
+                .send(HttpMethod::Get, &path, None, "network volumes")
+                .await?;
+            let page: NetworkVolumesPage = decode(&resp)?;
+            all.extend(page.network_volumes);
+            match page.pagination.next_cursor {
+                Some(next) if page.pagination.has_next_page => cursor = Some(next),
+                _ => return Ok(all),
+            }
+        }
+        Err(RunPodError::Decode(format!(
+            "network volume list still paginating after {MAX_PAGES} pages"
+        )))
     }
 
     /// `POST /account/secrets`. Error details are withheld for this call.

@@ -49,13 +49,13 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 use crate::client::{
-    CreateEndpoint, CreateSecret, DeleteOutcome, Endpoint, GpuRequest, GpuType, OWNER_ENV_VAR,
-    RunPodClient, UpdateEndpoint, WorkerSummary, WorkersConfig,
+    CreateEndpoint, CreateSecret, DeleteOutcome, Endpoint, FlashBoot, GpuRequest, GpuType,
+    NetworkVolume, OWNER_ENV_VAR, RunPodClient, UpdateEndpoint, WorkerSummary, WorkersConfig,
 };
 use crate::error::RunPodError;
 use crate::hardware::{exclusions_from_catalog, gpu_placement, verify_catalog_memory};
 use crate::logs::{TIMEOUT_LOG_LIMITS, TIMEOUT_TAIL, merge, tail_block};
-use crate::regions::{restrict_to_residencies, select_data_centers};
+use crate::regions::{place_on_volume, restrict_to_residencies, select_data_centers};
 use crate::secrets::{SecretLedger, reference_secrets, stop_result};
 
 /// The provider name the shared remote-launch renderer puts in its errors.
@@ -125,9 +125,32 @@ pub const DEFAULT_MAX_WORKERS: u32 = 1;
 /// `scaling { target_concurrency }` says otherwise (same default as Modal).
 pub const DEFAULT_REQUEST_COUNT: u32 = 32;
 
-/// Container disk per worker, in GB. Without a network volume (a later
-/// option) the model weights download onto this disk at each cold start.
+/// Container disk per worker, in GB. Without a network volume the model
+/// weights download onto this disk at each cold start.
 pub const DEFAULT_CONTAINER_DISK_GB: u32 = 100;
+
+/// `HF_HOME` on a mounted network volume: vLLM and llama.cpp both cache
+/// Hugging Face downloads under `<HF_HOME>/hub`.
+pub const VOLUME_HF_HOME: &str = "/runpod-volume/huggingface";
+
+/// Points the Hugging Face cache at the network volume, unless the
+/// deployment set the variable itself. llama.cpp (b11515) reads
+/// `LLAMA_CACHE` before `HF_HOME`, so it is pinned to the same hub directory.
+pub(crate) fn insert_volume_cache_env(
+    env: &mut BTreeMap<String, String>,
+    secret: &BTreeMap<String, String>,
+    runtime: RuntimeKind,
+) {
+    let mut vars = vec![("HF_HOME", VOLUME_HF_HOME.to_owned())];
+    if runtime == RuntimeKind::LlamaCpp {
+        vars.push(("LLAMA_CACHE", format!("{VOLUME_HF_HOME}/hub")));
+    }
+    for (k, v) in vars {
+        if !secret.contains_key(k) {
+            env.entry(k.to_owned()).or_insert(v);
+        }
+    }
+}
 
 /// Env variables the load balancer (or amicu's owner check) reads; the
 /// deployment's `env` block and secrets may not set them, nor any
@@ -330,6 +353,8 @@ pub struct RunPodSupervisor {
     gpu_type: Option<(String, u32)>,
     region: Option<String>,
     data_center_ids: Vec<String>,
+    network_volume: Option<String>,
+    flashboot: bool,
     scaling: ScalingSettings,
     disk_gb: u32,
     gguf: Option<GgufSource>,
@@ -376,6 +401,8 @@ impl RunPodSupervisor {
             gpu_type: None,
             region: None,
             data_center_ids: Vec::new(),
+            network_volume: None,
+            flashboot: false,
             scaling: ScalingSettings::default(),
             disk_gb: DEFAULT_CONTAINER_DISK_GB,
             gguf: None,
@@ -483,6 +510,27 @@ impl RunPodSupervisor {
         )
         .map_err(|e| runpod_err(&e))?;
         Ok(self)
+    }
+
+    /// Mounts `volume` on every worker as the Hugging Face cache and places
+    /// the endpoint in the volume's data center. Call after
+    /// [`with_allowed_residencies`](Self::with_allowed_residencies).
+    ///
+    /// # Errors
+    /// [`LlamaCppError::Supervisor`] when the volume lies outside the
+    /// deployment's data centers.
+    pub fn with_network_volume(mut self, volume: &NetworkVolume) -> Result<Self, LlamaCppError> {
+        self.data_center_ids =
+            place_on_volume(&self.data_center_ids, volume).map_err(|e| runpod_err(&e))?;
+        self.network_volume = Some(volume.id.clone());
+        Ok(self)
+    }
+
+    /// FlashBoot on or off (default off).
+    #[must_use]
+    pub fn with_flashboot(mut self, on: bool) -> Self {
+        self.flashboot = on;
+        self
     }
 
     /// Applies a deployment's `scaling {}` overrides; omitted fields keep the
@@ -729,6 +777,9 @@ impl RunPodSupervisor {
             env.extend(llamacpp_ping_env(port).map(|(k, v)| (k.to_owned(), v)));
         }
         env.insert(OWNER_ENV_VAR.to_owned(), owner.clone());
+        if self.network_volume.is_some() {
+            insert_volume_cache_env(&mut env, &secret, runtime);
+        }
         let create_secrets = reference_secrets(
             &self.project_id,
             &self.deployment_id,
@@ -751,6 +802,10 @@ impl RunPodSupervisor {
             .unwrap_or(DEFAULT_REQUEST_COUNT)
             .max(1);
         endpoint.data_center_ids.clone_from(&self.data_center_ids);
+        endpoint.network_volume_ids = self.network_volume.iter().cloned().collect();
+        if self.flashboot {
+            endpoint.flashboot = FlashBoot::Flashboot;
+        }
 
         Ok(Prepared {
             endpoint,
@@ -1170,7 +1225,7 @@ fn update_from(create: &CreateEndpoint) -> UpdateEndpoint {
         request_count: Some(create.request_count),
         data_center_ids: Some(create.data_center_ids.clone()),
         flashboot: Some(create.flashboot),
-        network_volume_ids: None,
+        network_volume_ids: Some(create.network_volume_ids.clone()),
         timeout_ms: None,
         registry_id: None,
     }

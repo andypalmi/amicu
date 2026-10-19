@@ -999,9 +999,38 @@ fn residency_allowlist(graph: &Graph) -> Vec<amicu_core::resource::Residency> {
     out
 }
 
+/// The network volume a RunPod deployment mounts, read before anything is
+/// recorded or written (amicu never creates one).
+pub(super) async fn runpod_volume(
+    graph: &Graph,
+    catalog: &dyn Catalog,
+    id: &DeploymentId,
+    env: &Env<'_>,
+) -> Result<Option<amicu_runpod::NetworkVolume>, CliError> {
+    let (_, hardware) = deployment_hardware(graph, catalog, id)?;
+    let Some(volume) = hardware.runpod.and_then(|r| r.network_volume) else {
+        return Ok(None);
+    };
+    env.runpod
+        .client()?
+        .get_network_volume(&volume)
+        .await
+        .map(Some)
+        .map_err(|e| {
+            crate::runpod_ops::runpod_error(
+                &format!(
+                    "deployment '{id}': could not read RunPod network volume `{volume}`; nothing \
+                     was started"
+                ),
+                &e,
+            )
+        })
+}
+
 /// The [`RunPodSupervisor`] for one deployment, adopting the endpoint and
 /// secrets recorded in `prior`. The caller has already checked that `prior`
 /// lives in `account`, so a `404` on stop counts as confirmed.
+#[allow(clippy::too_many_arguments)]
 fn runpod_supervisor(
     graph: &Graph,
     catalog: &dyn Catalog,
@@ -1010,12 +1039,23 @@ fn runpod_supervisor(
     account: &str,
     env: &Env<'_>,
     prior: Option<&StopRecord>,
+    volume: Option<&amicu_runpod::NetworkVolume>,
 ) -> Result<RunPodSupervisor, CliError> {
     let (deployment, hardware) = deployment_hardware(graph, catalog, id)?;
+    let flashboot = hardware
+        .runpod
+        .as_ref()
+        .and_then(|r| r.flashboot)
+        .unwrap_or(false);
     let mut supervisor =
         RunPodSupervisor::for_hardware(env.runpod.client()?, project_id, id.as_str(), &hardware)
             .and_then(|s| s.with_allowed_residencies(&residency_allowlist(graph)))
+            .and_then(|s| match volume {
+                Some(v) => s.with_network_volume(v),
+                None => Ok(s),
+            })
             .map_err(supervisor_err)?
+            .with_flashboot(flashboot)
             .with_probe_transport(env.runpod.probe())
             .with_progress(amicu_runpod::supervisor::PROGRESS_EVERY, env.progress)
             .with_workspace(account)
@@ -1219,6 +1259,7 @@ async fn apply_all(
                                     && r.identity == name
                             })
                             .cloned();
+                        let volume = runpod_volume(graph, &catalog, &item.deployment, env).await?;
                         let supervisor = runpod_supervisor(
                             graph,
                             &catalog,
@@ -1227,6 +1268,7 @@ async fn apply_all(
                             account,
                             env,
                             recorded.as_ref(),
+                            volume.as_ref(),
                         )?;
                         let launch_secrets =
                             amicu_llamacpp::resolve_launch_secrets(launch, resolver).await?;
