@@ -73,6 +73,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Refresh page dates
+        run: pnpm --filter @amicu/web gen:facts
+
       # `cf:deploy` (web/apps/web/package.json) is
       # `opennextjs-cloudflare build && opennextjs-cloudflare deploy --
       # --keep-vars` - `--keep-vars` preserves whatever non-secret `vars`
@@ -81,9 +84,6 @@ jobs:
       # now commits the production vars). Runtime
       # secrets (a BFF session secret, etc.) are never set here - see
       # docs/deploy/cloud-run.md and web/apps/web/README-deploy-cloudflare.md.
-      - name: Refresh page dates
-        run: pnpm --filter @amicu/web gen:facts
-
       - name: Build & deploy
         run: pnpm --filter @amicu/web cf:deploy
         env:

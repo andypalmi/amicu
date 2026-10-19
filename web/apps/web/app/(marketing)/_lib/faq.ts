@@ -21,7 +21,7 @@ export const faqs = {
   hosted: {
     question: 'Is amicu a hosted service?',
     answer:
-      'No. amicu is a CLI that runs on your machine and talks only to the providers you deploy to. A managed hosted tier is planned but does not exist yet.',
+      'No. amicu is a CLI that runs on your machine and talks only to the providers you deploy to, plus api.amicu.dev if you opt in to telemetry (off by default). A managed hosted tier is planned but does not exist yet.',
   },
   providers: {
     question: 'Which providers and GPUs does amicu support?',

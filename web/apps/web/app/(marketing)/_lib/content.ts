@@ -260,6 +260,8 @@ export interface Provider {
   residency: string;
   /** Example GPUs from the provider's docs page (GPUs and regions table). */
   exampleGpus: string;
+  /** Remote GPU cloud that `amicu apply` deploys to. */
+  cloud?: true;
   /** Hourly cost, only where the docs state one. */
   hourlyCost?: string;
 }
@@ -282,6 +284,7 @@ export const providers: Provider[] = [
   },
   {
     slug: 'modal',
+    cloud: true,
     name: 'Modal',
     kind: 'Serverless GPU cloud',
     blurb: 'Deploy llama.cpp or vLLM to Modal as an autoscaling app.',
@@ -322,6 +325,7 @@ export const providers: Provider[] = [
   },
   {
     slug: 'runpod',
+    cloud: true,
     name: 'RunPod',
     kind: 'Serverless GPU cloud',
     blurb: 'Deploy llama.cpp or vLLM to RunPod Serverless endpoints that scale to zero.',
@@ -387,7 +391,7 @@ const names = (items: Provider[]) => items.map((p) => p.name).join(', ');
 
 /** Remote GPU providers `amicu apply` supports today, for example `Modal, RunPod`. */
 export const supportedCloudNames = names(
-  providers.filter((p) => p.status === 'supported' && p.kind.toLowerCase().includes('gpu cloud')),
+  providers.filter((p) => p.status === 'supported' && p.cloud),
 );
 export const previewNames = names(providers.filter((p) => p.status === 'preview'));
 export const plannedNames = names(providers.filter((p) => p.status === 'planned'));

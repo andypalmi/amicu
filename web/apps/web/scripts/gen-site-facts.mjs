@@ -24,8 +24,13 @@ const lastCommit = (files) =>
     .at(-1);
 
 const marketing = {
-  '/': ['app/(marketing)/page.tsx', 'app/(marketing)/_lib/landing.ts'],
-  '/about': ['app/(marketing)/about/page.tsx'],
+  '/': [
+    'app/(marketing)/page.tsx',
+    'app/(marketing)/_lib/landing.ts',
+    'app/(marketing)/_lib/faq.ts',
+    'app/(marketing)/_lib/content.ts',
+  ],
+  '/about': ['app/(marketing)/about/page.tsx', 'app/(marketing)/_lib/content.ts'],
   '/install': ['app/(marketing)/install/page.tsx'],
   '/pricing': ['app/(marketing)/pricing/page.tsx'],
   '/providers': ['app/(marketing)/providers/page.tsx', 'app/(marketing)/_lib/content.ts'],
