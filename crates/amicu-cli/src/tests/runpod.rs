@@ -1,5 +1,5 @@
-//! `provider = "runpod"` through apply and destroy, against an in-memory
-//! RunPod v2 API.
+//! `provider = "runpod"` through apply, destroy, refresh and orphans,
+//! against an in-memory RunPod v2 API.
 
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +44,10 @@ struct WorldState {
     lose_create_response: bool,
     /// `METHOD path` of every request, in order.
     log: Vec<String>,
+    /// `(id, status)` of the workers every endpoint reports.
+    workers: Vec<(String, String)>,
+    /// What `/metrics` answers through the gateway.
+    metrics: String,
 }
 
 type Hook = Box<dyn FnOnce() + Send>;
@@ -66,7 +70,13 @@ fn ep_json(e: &Ep) -> Value {
     if let Some(o) = &e.owner {
         env.insert(amicu_runpod::OWNER_ENV_VAR.to_owned(), json!(o));
     }
-    json!({"id": e.id, "name": e.name, "type": "LOAD_BALANCER", "env": env})
+    let mut ep = json!({"id": e.id, "name": e.name, "type": "LOAD_BALANCER", "env": env,
+        "gpu": {"pools": ["AMPERE_24"], "count": 1},
+        "dataCenterIds": ["EU-RO-1", "EU-SE-1"]});
+    if let Some(max) = e.max_workers {
+        ep["workers"] = json!({"min": 0, "max": max});
+    }
+    ep
 }
 
 fn owner_in(body: Option<&Value>) -> Option<String> {
@@ -90,6 +100,18 @@ impl HttpTransport for World {
             w.log.push(format!("health {id}"));
             let status = if w.health == 0 { 200 } else { w.health };
             return reply(status, &json!({}));
+        }
+        if let Some(id) = req
+            .url
+            .strip_prefix("https://")
+            .and_then(|u| u.strip_suffix(".api.runpod.ai/metrics"))
+        {
+            let mut w = self.state.lock().unwrap();
+            w.log.push(format!(
+                "metrics {id} bearer={}",
+                req.bearer.as_deref().unwrap_or("")
+            ));
+            return Ok(HttpResponse::new(200, w.metrics.clone().into_bytes()));
         }
         let path = req
             .url
@@ -140,6 +162,33 @@ impl HttpTransport for World {
                 }
                 reply(201, &ep_json(&ep))
             }
+            (HttpMethod::Get, ["serverless", id, "workers"]) => {
+                if !w.endpoints.iter().any(|e| e.id == *id) {
+                    return reply(404, &json!({"detail": "not found"}));
+                }
+                let running = w.workers.iter().filter(|x| x.1 == "RUNNING").count();
+                let idle = w.workers.iter().filter(|x| x.1 == "IDLE").count();
+                let list: Vec<Value> = w
+                    .workers
+                    .iter()
+                    .map(|(id, status)| json!({"id": id, "status": status}))
+                    .collect();
+                reply(
+                    200,
+                    &json!({"workers": list, "summary": {"running": running, "idle": idle,
+                        "total": list.len()}}),
+                )
+            }
+            (HttpMethod::Get, ["serverless", _, "workers", wid, logs])
+                if logs.starts_with("logs?tail=") =>
+            {
+                let body = format!(
+                    "data: {}\n\ndata: {}\n\n",
+                    json!({"ts": format!("2026-01-01T00:00:0{}Z", wid.len()), "source": "container", "line": format!("hello from {wid}")}),
+                    json!({"ts": "2026-01-01T00:00:09Z", "source": "system", "line": "done"}),
+                );
+                Ok(HttpResponse::new(200, body.into_bytes()))
+            }
             (method, ["serverless", id]) => {
                 let Some(i) = w.endpoints.iter().position(|e| e.id == *id) else {
                     return reply(404, &json!({"detail": "not found"}));
@@ -173,6 +222,14 @@ impl HttpTransport for World {
                 200,
                 &json!({"gpus": [{"id": "NVIDIA L4", "name": "L4", "pool": "AMPERE_24", "memory": 24}]}),
             ),
+            (HttpMethod::Get, ["account", "secrets"]) => {
+                let all: Vec<Value> = w
+                    .secrets
+                    .iter()
+                    .map(|(id, n)| json!({"id": id, "name": n}))
+                    .collect();
+                reply(200, &json!({"secrets": all}))
+            }
             (HttpMethod::Get, ["account", q]) if q.starts_with("secrets?name=") => {
                 let name = q.trim_start_matches("secrets?name=");
                 let found: Vec<Value> = w
@@ -367,9 +424,13 @@ fn record(id: Option<&str>, account: &str, secrets: &[&str]) -> StopRecord {
 }
 
 fn add_endpoint(rig: &Rig, id: &str, owner: Option<String>) {
+    add_named_endpoint(rig, id, &endpoint_name(), owner);
+}
+
+fn add_named_endpoint(rig: &Rig, id: &str, name: &str, owner: Option<String>) {
     rig.runpod.world.state.lock().unwrap().endpoints.push(Ep {
         id: id.to_owned(),
-        name: endpoint_name(),
+        name: name.to_owned(),
         owner,
         max_workers: None,
     });
@@ -917,4 +978,648 @@ fn a_failed_endpoint_delete_keeps_every_recorded_secret() {
         [amicu_runpod::ACCOUNT_MARKER_SECRET]
     );
     assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+/// A project whose state holds `record` for a confirmed (not pending)
+/// deployment, as after a successful apply.
+fn applied_with(td: &TempDir, record: StopRecord) -> Project {
+    let project = project_with(td, Some(record));
+    let mut state = project.load_state().unwrap().unwrap();
+    state.pending.clear();
+    project.save_state(&state).unwrap();
+    project
+}
+
+fn refresh(project: &Project, rig: &Rig) -> (crate::refresh::Refresh, LocalState) {
+    let mut state = project.load_state().unwrap().unwrap();
+    let refresh = crate::refresh::refresh_state_mode(&mut state, &rig.modal, &rig.runpod, true);
+    (refresh, state)
+}
+
+#[test]
+fn refresh_keeps_a_live_endpoint_without_notes() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r, crate::refresh::Refresh::default());
+    assert_eq!(state.pending.len(), 0);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn refresh_marks_an_endpoint_gone_in_the_recorded_account_pending() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &["amicu-x"]));
+    let rig = rig();
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 1, "{r:?}");
+    assert!(
+        r.notes[0].contains("ep7") && r.notes[0].contains(ACCOUNT),
+        "{r:?}"
+    );
+    assert!(r.notes[0].contains("kept in state as pending"), "{r:?}");
+    assert!(state.pending.iter().any(|d| d.as_str() == DEP));
+    // The stop identity is never dropped.
+    assert_eq!(state.stops, [record(Some("ep7"), ACCOUNT, &["amicu-x"])]);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn refresh_never_calls_an_endpoint_gone_from_another_account() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), "personal:s99", &[]));
+    let rig = rig();
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0, "{r:?}");
+    let warning = r.warning.unwrap();
+    assert!(
+        warning.contains("personal:s99") && warning.contains(ACCOUNT),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("cannot tell whether it is gone"),
+        "{warning}"
+    );
+    assert_eq!(state.pending.len(), 0);
+}
+
+#[test]
+fn refresh_with_an_unknown_account_never_calls_an_endpoint_gone() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    rig.runpod.world.state.lock().unwrap().secrets.clear();
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0, "{r:?}");
+    assert!(r.warning.unwrap().contains("account amicu has not seen"));
+    assert_eq!(state.pending.len(), 0);
+    // Reading the identity never creates the marker.
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn refresh_without_a_management_key_warns_and_keeps_state() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let mut rig = rig();
+    rig.runpod.no_key = true;
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0);
+    assert!(r.warning.unwrap().contains("RUNPOD_API_KEY"));
+    assert_eq!(state.pending.len(), 0);
+    assert_eq!(rig.runpod.world.log().len(), 0);
+}
+
+#[test]
+fn refresh_finds_an_id_less_record_by_name_and_owner_marker() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(None, ACCOUNT, &[]));
+    let rig = rig();
+    add_endpoint(&rig, "ep9", Some(owner()));
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r, crate::refresh::Refresh::default());
+    assert_eq!(state.pending.len(), 0);
+}
+
+#[test]
+fn refresh_never_takes_a_foreign_endpoint_for_an_id_less_record() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(None, ACCOUNT, &[]));
+    let rig = rig();
+    add_endpoint(&rig, "ep9", Some("someone-else".to_owned()));
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0, "{r:?}");
+    let warning = r.warning.unwrap();
+    assert!(
+        warning.contains("ep9") && warning.contains("AMICU_OWNER"),
+        "{warning}"
+    );
+    assert_eq!(state.pending.len(), 0);
+}
+
+#[test]
+fn refresh_marks_an_id_less_record_with_no_endpoint_pending() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(None, ACCOUNT, &[]));
+    let rig = rig();
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 1, "{r:?}");
+    assert!(state.pending.iter().any(|d| d.as_str() == DEP));
+}
+
+#[test]
+fn refresh_reports_drift_of_a_live_endpoint_without_touching_it() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    rig.runpod.world.state.lock().unwrap().endpoints.push(Ep {
+        id: "ep7".to_owned(),
+        name: endpoint_name(),
+        owner: Some(owner()),
+        max_workers: Some(7),
+    });
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 1, "{r:?}");
+    let note = &r.notes[0];
+    assert!(
+        note.contains("RunPod endpoint") && note.contains("ep7"),
+        "{note}"
+    );
+    assert!(note.contains("workers 0-7 (applied 0-1)"), "{note}");
+    assert!(note.contains("revert it in the RunPod console"), "{note}");
+    assert_eq!(state.pending.len(), 0);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn plan_after_an_endpoint_is_gone_shows_a_create() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    let text = plan_text(&project, &rig);
+    assert!(
+        text.contains("drift: deployment support_local: RunPod endpoint"),
+        "{text}"
+    );
+    assert!(
+        text.split("|pending=").nth(1).unwrap().contains(DEP),
+        "{text}"
+    );
+}
+
+struct NoModal;
+
+impl crate::commands::orphans::ModalApps for NoModal {
+    fn list(&self) -> Result<Vec<crate::commands::orphans::ModalApp>, String> {
+        Ok(Vec::new())
+    }
+}
+
+fn orphans(project: &Project, rig: &Rig) -> crate::commands::orphans::OrphansReport {
+    use crate::commands::orphans::{Env, OpsListing, Platform, Tracked, discover};
+    let state = project.load_state().unwrap();
+    let tracked =
+        Tracked::from_state(state.as_ref()).with_config(project.load_graph().ok().as_ref());
+    discover(
+        &Env {
+            platform: Platform::Other,
+            exec: &amicu_llamacpp::HostExec,
+            modal: &NoModal,
+            runpod: &OpsListing(&rig.runpod),
+            agents_dir: None,
+        },
+        &tracked,
+    )
+}
+
+#[test]
+fn orphans_lists_untracked_owned_endpoints_and_amicu_secrets_read_only() {
+    use crate::commands::orphans::{Kind, Ownership};
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &["amicu-x"]));
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    let stale = amicu_runpod::project_endpoint_name(PROJECT, "old");
+    add_named_endpoint(&rig, "ep8", &stale, Some("marker".to_owned()));
+    let foreign = amicu_runpod::project_endpoint_name("bbbb2222", "chat");
+    add_named_endpoint(&rig, "ep9", &foreign, Some("marker".to_owned()));
+    add_named_endpoint(&rig, "ep10", "not-amicu", None);
+    add_secret(&rig, "s5", "amicu-x");
+    add_secret(&rig, "s6", &format!("amicu-{PROJECT}-old-api-key-1-2"));
+    add_secret(&rig, "s7", "hf-token");
+
+    let report = orphans(&project, &rig);
+    let runpod = report.sources.iter().find(|s| s.name == "runpod").unwrap();
+    assert_eq!(runpod.status, "ok", "{:?}", runpod.detail);
+    let untracked: Vec<(Kind, &str, Ownership)> = report
+        .resources
+        .iter()
+        .filter(|r| !r.tracked)
+        .map(|r| (r.kind, r.identity.as_str(), r.ownership))
+        .collect();
+    let stale_id = format!("{stale} (ep8)");
+    let foreign_id = format!("{foreign} (ep9)");
+    let secret_id = format!("amicu-{PROJECT}-old-api-key-1-2 (s6)");
+    assert_eq!(
+        untracked,
+        [
+            (
+                Kind::RunpodEndpoint,
+                stale_id.as_str(),
+                Ownership::ThisProject
+            ),
+            (
+                Kind::RunpodSecret,
+                secret_id.as_str(),
+                Ownership::ThisProject
+            ),
+            (
+                Kind::RunpodEndpoint,
+                foreign_id.as_str(),
+                Ownership::OtherProject
+            ),
+        ]
+    );
+    let tracked: Vec<&str> = report
+        .resources
+        .iter()
+        .filter(|r| r.tracked)
+        .map(|r| r.identity.as_str())
+        .collect();
+    assert_eq!(tracked.len(), 2, "{tracked:?}");
+    assert!(
+        !report
+            .resources
+            .iter()
+            .any(|r| r.identity.contains(amicu_runpod::ACCOUNT_MARKER_SECRET)),
+        "the account marker is never listed"
+    );
+    let stop = &report.resources[0].stop_command;
+    assert!(
+        stop.contains("DELETE") && stop.ends_with("/v2/serverless/ep8"),
+        "{stop}"
+    );
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn orphans_skips_runpod_for_a_project_that_does_not_use_it() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let rig = rig();
+    let report = orphans(&project, &rig);
+    let runpod = report.sources.iter().find(|s| s.name == "runpod").unwrap();
+    assert_eq!(runpod.status, "skipped");
+    assert_eq!(rig.runpod.world.log().len(), 0);
+}
+
+#[test]
+fn orphans_reports_a_runpod_listing_failure_as_a_source_error() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let mut rig = rig();
+    rig.runpod.no_key = true;
+    let report = orphans(&project, &rig);
+    let runpod = report.sources.iter().find(|s| s.name == "runpod").unwrap();
+    assert_eq!(runpod.status, "error");
+    assert!(runpod.detail.as_deref().unwrap().contains("RUNPOD_API_KEY"));
+}
+
+#[test]
+fn orphans_after_apply_finds_no_untracked_runpod_resource() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    let report = orphans(&project, &rig);
+    let untracked: Vec<&str> = report
+        .resources
+        .iter()
+        .filter(|r| !r.tracked)
+        .map(|r| r.identity.as_str())
+        .collect();
+    assert_eq!(untracked, Vec::<&str>::new());
+    assert!(
+        report
+            .resources
+            .iter()
+            .any(|r| r.identity.ends_with("(ep1)"))
+    );
+}
+
+#[test]
+fn orphans_shows_a_same_named_duplicate_of_a_recorded_endpoint_as_untracked() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    add_endpoint(&rig, "ep8", Some(owner()));
+    let report = orphans(&project, &rig);
+    let untracked: Vec<&str> = report
+        .resources
+        .iter()
+        .filter(|r| !r.tracked)
+        .map(|r| r.identity.as_str())
+        .collect();
+    assert_eq!(untracked, [format!("{} (ep8)", endpoint_name())]);
+}
+
+// --- amicu runpod status / logs / metrics / stop -----------------------------
+
+fn running_endpoint(rig: &Rig) -> (TempDir, Project) {
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(Some("ep7"), ACCOUNT, &[])));
+    add_endpoint(rig, "ep7", Some(owner()));
+    rig.runpod.world.state.lock().unwrap().endpoints[0].max_workers = Some(1);
+    (td, project)
+}
+
+#[test]
+fn status_shows_the_endpoint_workers_gpu_and_data_centers() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().workers = vec![
+        ("w1".into(), "RUNNING".into()),
+        ("w22".into(), "IDLE".into()),
+    ];
+    let mut out = Vec::new();
+    let code =
+        commands::runpod::status(&project, DEP, OutputFormat::Human, &mut out, &rig.env()).unwrap();
+    assert_eq!(code, 0);
+    let text = utf8(out);
+    assert!(text.contains("RunPod endpoint ep7"), "{text}");
+    assert!(text.contains("https://ep7.api.runpod.ai"), "{text}");
+    assert!(
+        text.contains("running=1 idle=1 initializing=0 throttled=0 unhealthy=0 (min 0, max 1)"),
+        "{text}"
+    );
+    assert!(text.contains("gpu:          AMPERE_24 x1"), "{text}");
+    assert!(text.contains("data centers: EU-RO-1, EU-SE-1"), "{text}");
+
+    let mut out = Vec::new();
+    commands::runpod::status(&project, DEP, OutputFormat::Json, &mut out, &rig.env()).unwrap();
+    let doc: Value = serde_json::from_str(&utf8(out)).unwrap();
+    assert_eq!(doc["endpoint_id"], "ep7");
+    assert_eq!(doc["workers"]["running"], 1);
+    assert_eq!(doc["data_centers"], json!(["EU-RO-1", "EU-SE-1"]));
+}
+
+#[test]
+fn status_reports_scaled_to_zero_and_refuses_unknown_or_unrecorded_deployments() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    let mut out = Vec::new();
+    commands::runpod::status(&project, DEP, OutputFormat::Human, &mut out, &rig.env()).unwrap();
+    assert!(utf8(out).contains("scaled to zero"));
+
+    let err = commands::runpod::status(
+        &project,
+        "nope",
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("no RunPod deployment named 'nope'"), "{err}");
+
+    let td = TempDir::new();
+    let unrecorded = project_with(&td, Some(record(None, ACCOUNT, &[])));
+    let err = commands::runpod::status(
+        &unrecorded,
+        DEP,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("no RunPod endpoint id recorded"), "{err}");
+}
+
+#[test]
+fn status_of_an_endpoint_gone_remotely_says_so() {
+    let rig = rig();
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(Some("ep7"), ACCOUNT, &[])));
+    let err = commands::runpod::status(
+        &project,
+        DEP,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("ep7") && err.contains("not found"), "{err}");
+}
+
+#[test]
+fn logs_merge_every_worker_with_its_prefix() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().workers = vec![
+        ("w22".into(), "RUNNING".into()),
+        ("w1".into(), "IDLE".into()),
+    ];
+    let mut out = Vec::new();
+    commands::runpod::logs(
+        &project,
+        DEP,
+        Some(20),
+        OutputFormat::Human,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let text = utf8(out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "[w1] hello from w1",
+            "[w22] hello from w22",
+            "[w22] (system) done",
+            "[w1] (system) done"
+        ],
+        "{text}"
+    );
+    let log = rig.runpod.world.log();
+    assert!(
+        log.contains(&"Get /serverless/ep7/workers/w1/logs?tail=20".to_owned()),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn logs_of_a_scaled_to_zero_endpoint_say_there_are_no_workers() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    let mut out = Vec::new();
+    let code = commands::runpod::logs(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    assert_eq!(code, 0);
+    assert!(utf8(out).contains("no RunPod workers are running"));
+}
+
+const ONE_SHOT: commands::runpod::MetricsMode = commands::runpod::MetricsMode {
+    watch: false,
+    interval_secs: 5,
+    wake: false,
+};
+
+#[test]
+fn metrics_go_through_the_gateway_with_the_deployment_key() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    {
+        let mut w = rig.runpod.world.state.lock().unwrap();
+        w.metrics = "vllm:num_requests_running 3\nvllm:generation_tokens_total 10\n".to_owned();
+        w.workers = vec![("w1".into(), "RUNNING".into())];
+    }
+    let mut out = Vec::new();
+    commands::runpod::metrics(
+        &project,
+        DEP,
+        ONE_SHOT,
+        OutputFormat::Human,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let text = utf8(out);
+    assert!(text.contains(&format!("metrics {DEP} (vLLM)")), "{text}");
+    assert!(text.contains("running=3"), "{text}");
+    assert!(
+        text.contains("hardware: n/a (not available on RunPod)"),
+        "{text}"
+    );
+    let log = rig.runpod.world.log();
+    assert!(
+        log.contains(&"metrics ep7 bearer=rpa_ENDPOINTKEY".to_owned()),
+        "{log:?}"
+    );
+
+    let mut out = Vec::new();
+    commands::runpod::metrics(
+        &project,
+        DEP,
+        ONE_SHOT,
+        OutputFormat::Json,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let doc: Value = serde_json::from_str(&utf8(out)).unwrap();
+    assert_eq!(doc["runtime"]["requests_running"], 3);
+    assert_eq!(doc["hardware"]["containers"], json!([]));
+}
+
+#[test]
+fn stop_deletes_the_endpoint_then_drops_the_record() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    commands::runpod::stop(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap();
+    assert_eq!(rig.runpod.world.endpoint_ids().len(), 0);
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn an_unconfirmed_stop_keeps_the_record() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().delete_fails = true;
+    let err = commands::runpod::stop(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("kept in state"), "{err}");
+    assert_eq!(stops_for(&project, DEP)[0].app_id.as_deref(), Some("ep7"));
+}
+
+#[test]
+fn stop_refuses_a_deployment_without_a_runpod_record() {
+    let rig = rig();
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let err = commands::runpod::stop(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("no RunPod deployment named"), "{err}");
+    assert_eq!(rig.runpod.world.log().len(), 0);
+}
+
+#[test]
+fn metrics_refuse_to_wake_a_scaled_to_zero_endpoint_without_wake() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().metrics = "vllm:num_requests_running 0\n".to_owned();
+    let err = commands::runpod::metrics(
+        &project,
+        DEP,
+        ONE_SHOT,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("--wake"), "{err}");
+    let scraped = |rig: &Rig| {
+        rig.runpod
+            .world
+            .log()
+            .iter()
+            .any(|l| l.starts_with("metrics "))
+    };
+    assert!(!scraped(&rig));
+
+    let wake = commands::runpod::MetricsMode {
+        wake: true,
+        ..ONE_SHOT
+    };
+    commands::runpod::metrics(
+        &project,
+        DEP,
+        wake,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap();
+    assert!(scraped(&rig));
+}
+
+#[test]
+fn logs_as_json_list_each_worker_with_its_lines() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().workers = vec![("w1".into(), "RUNNING".into())];
+    let mut out = Vec::new();
+    commands::runpod::logs(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Json,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let doc: Value = serde_json::from_str(&utf8(out)).unwrap();
+    assert_eq!(doc["endpoint_id"], "ep7");
+    assert_eq!(doc["workers"][0]["id"], "w1");
+    assert!(doc["workers"][0]["error"].is_null());
+    assert_eq!(doc["workers"][0]["lines"][0]["line"], "hello from w1");
+    assert_eq!(doc["workers"][0]["lines"][1]["source"], "system");
 }

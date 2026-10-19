@@ -1,11 +1,14 @@
 //! RunPod backend: a typed v2 REST client, GPU-pool mapping, data-center
 //! selection, [`RunPodSupervisor`] (a load-balancing endpoint) and
 //! [`PodSupervisor`] (an always-on Pod), both behind the shared
-//! `ProcessSupervisor` contract.
+//! `ProcessSupervisor` contract, plus serverless worker logs and the
+//! `/metrics` scrape.
 
 pub mod client;
 pub mod error;
 pub mod hardware;
+pub mod logs;
+pub mod metrics;
 pub mod pod;
 pub mod regions;
 mod secrets;

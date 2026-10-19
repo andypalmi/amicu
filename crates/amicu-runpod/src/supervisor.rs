@@ -91,9 +91,10 @@ pub const MAX_IDLE_TIMEOUT_SECS: u32 = 3600;
 /// Workers kept warm unless overridden: scale to zero.
 pub const DEFAULT_MIN_WORKERS: u32 = 0;
 
-/// Worker ceiling unless `scaling { max_replicas }` says otherwise. RunPod
-/// needs a finite bound (Modal's default is unlimited).
-pub const DEFAULT_MAX_WORKERS: u32 = 3;
+/// Worker ceiling unless `scaling { max_replicas }` says otherwise: one GPU
+/// at most, so cost stays bounded until the user raises it. RunPod needs a
+/// finite bound (Modal's default is unlimited).
+pub const DEFAULT_MAX_WORKERS: u32 = 1;
 
 /// In-flight requests per worker before RunPod scales out, unless
 /// `scaling { target_concurrency }` says otherwise (same default as Modal).
@@ -293,6 +294,7 @@ pub struct RunPodSupervisor {
     confirmed_account: bool,
     recorded_endpoint: Option<String>,
     recorded_secrets: Vec<String>,
+    gateway_key: Option<SecretValue>,
     deployed_endpoint: Arc<Mutex<Option<String>>>,
     created_endpoint: Arc<AtomicBool>,
     secrets: SecretLedger,
@@ -337,6 +339,7 @@ impl RunPodSupervisor {
             confirmed_account: false,
             recorded_endpoint: None,
             recorded_secrets: Vec::new(),
+            gateway_key: None,
             deployed_endpoint: Arc::default(),
             created_endpoint: Arc::default(),
         }
@@ -499,6 +502,14 @@ impl RunPodSupervisor {
     #[must_use]
     pub fn with_recorded_secrets(mut self, names: Vec<String>) -> Self {
         self.recorded_secrets = names;
+        self
+    }
+
+    /// The deployment's `api_key` (a RunPod key), which `metrics` sends as the
+    /// gateway bearer.
+    #[must_use]
+    pub fn with_gateway_key(mut self, key: SecretValue) -> Self {
+        self.gateway_key = Some(key);
         self
     }
 
@@ -674,16 +685,7 @@ impl RunPodSupervisor {
         endpoint.env = env;
         endpoint.ports = vec![format!("{port}/http")];
         endpoint.disk_gb = Some(self.disk_gb);
-        endpoint.workers = WorkersConfig {
-            min: self.scaling.min_replicas.unwrap_or(DEFAULT_MIN_WORKERS),
-            max: self.scaling.max_replicas.unwrap_or(DEFAULT_MAX_WORKERS),
-            idle_timeout: Some(
-                self.scaling
-                    .scaledown_window_secs
-                    .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS)
-                    .clamp(1, MAX_IDLE_TIMEOUT_SECS),
-            ),
-        };
+        endpoint.workers = self.workers_config();
         endpoint.request_count = self
             .scaling
             .target_concurrency
@@ -696,6 +698,25 @@ impl RunPodSupervisor {
             secrets: create_secrets,
             api_key: SecretValue::new(api_key),
         })
+    }
+
+    /// The `scaling {}` block as RunPod workers: a lone `min_replicas` above
+    /// the default ceiling raises the ceiling with it.
+    fn workers_config(&self) -> WorkersConfig {
+        let min = self.scaling.min_replicas.unwrap_or(DEFAULT_MIN_WORKERS);
+        WorkersConfig {
+            min,
+            max: self
+                .scaling
+                .max_replicas
+                .unwrap_or(DEFAULT_MAX_WORKERS.max(min)),
+            idle_timeout: Some(
+                self.scaling
+                    .scaledown_window_secs
+                    .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS)
+                    .clamp(1, MAX_IDLE_TIMEOUT_SECS),
+            ),
+        }
     }
 
     fn set_deployed(&self, id: &str) {
@@ -979,14 +1000,10 @@ impl RunPodSupervisor {
 }
 
 fn describe_workers(s: &WorkerSummary) -> String {
-    let mut out = format!(
-        "{} running, {} idle, {} initializing, {} throttled",
-        s.running, s.idle, s.initializing, s.throttled
-    );
-    if s.unhealthy > 0 {
-        let _ = write!(out, ", {} unhealthy", s.unhealthy);
-    }
-    out
+    format!(
+        "running={} idle={} initializing={} throttled={} unhealthy={}",
+        s.running, s.idle, s.initializing, s.throttled, s.unhealthy
+    )
 }
 
 fn elapsed(d: Duration) -> String {
@@ -995,6 +1012,68 @@ fn elapsed(d: Duration) -> String {
         format!("{secs}s")
     } else {
         format!("{}m{:02}s", secs / 60, secs % 60)
+    }
+}
+
+impl RunPodSupervisor {
+    fn gateway_key_str(&self) -> Result<&str, LlamaCppError> {
+        self.gateway_key
+            .as_ref()
+            .ok_or_else(|| {
+                LlamaCppError::Supervisor(
+                    "RunPod metrics need the deployment's api_key as the gateway key".to_owned(),
+                )
+            })?
+            .expose_secret_str()
+            .map_err(|_| {
+                LlamaCppError::Supervisor("the endpoint API key is not valid UTF-8".to_owned())
+            })
+    }
+
+    /// Refuses unless a worker is running or idle: any request through the
+    /// gateway would otherwise start (and bill) one. `wake` skips the check.
+    async fn ensure_awake(&self, id: &str, wake: bool) -> Result<(), LlamaCppError> {
+        if wake {
+            return Ok(());
+        }
+        let s = self
+            .client
+            .list_workers(id)
+            .await
+            .map_err(|e| runpod_err(&e))?
+            .summary;
+        if s.running.saturating_add(s.idle) > 0 {
+            return Ok(());
+        }
+        if s.initializing.saturating_add(s.throttled) > 0 {
+            return Err(LlamaCppError::Supervisor(format!(
+                "a RunPod worker of endpoint {id} is starting ({} initializing, {} waiting \
+                 for capacity); retry shortly",
+                s.initializing, s.throttled
+            )));
+        }
+        Err(LlamaCppError::Supervisor(format!(
+            "no RunPod worker of endpoint {id} is up, and scraping /metrics would start one \
+             (billed GPU time); pass --wake to start one anyway"
+        )))
+    }
+
+    /// One `/metrics` scrape through the gateway with the
+    /// [gateway key](Self::with_gateway_key). Without `wake`, a scaled-to-zero
+    /// endpoint is refused rather than woken.
+    ///
+    /// # Errors
+    /// No worker up (without `wake`), no gateway key, or a failed scrape.
+    pub async fn scrape_metrics(
+        &self,
+        handle: &RuntimeHandle,
+        wake: bool,
+    ) -> Result<amicu_telemetry::scrape::MetricsSnapshot, LlamaCppError> {
+        self.ensure_awake(&handle.id, wake).await?;
+        let key = self.gateway_key_str()?;
+        crate::metrics::scrape(&*self.probe, &handle.id, key)
+            .await
+            .map_err(|e| LlamaCppError::Supervisor(e.to_string()))
     }
 }
 
@@ -1180,16 +1259,40 @@ impl ProcessSupervisor for RunPodSupervisor {
         })
     }
 
-    async fn metrics(&self, _handle: &RuntimeHandle) -> Result<RuntimeMetrics, LlamaCppError> {
-        Err(unsupported("metrics"))
+    /// Scrapes `/metrics` through the gateway when a worker is up (never
+    /// waking a scaled-to-zero endpoint); needs
+    /// [`with_gateway_key`](RunPodSupervisor::with_gateway_key).
+    async fn metrics(&self, handle: &RuntimeHandle) -> Result<RuntimeMetrics, LlamaCppError> {
+        self.ensure_awake(&handle.id, false).await?;
+        let key = self.gateway_key_str()?;
+        crate::metrics::scrape_with_rate(&*self.probe, &handle.id, key, Duration::from_secs(1))
+            .await
+            .map(|m| m.to_runtime_metrics())
+            .map_err(|e| LlamaCppError::Supervisor(e.to_string()))
     }
 
+    /// Every worker's recent lines, `[<worker>]`-prefixed; a bounded read, so
+    /// `follow` is refused. A scaled-to-zero endpoint yields one line saying so.
     async fn logs(
         &self,
-        _handle: &RuntimeHandle,
-        _options: LogOptions,
+        handle: &RuntimeHandle,
+        options: LogOptions,
     ) -> Result<LogStream, LlamaCppError> {
-        Err(unsupported("logs"))
+        if options.follow {
+            return Err(LlamaCppError::Supervisor(
+                "following RunPod logs is not supported; read them without follow".to_owned(),
+            ));
+        }
+        let tail = options.tail.unwrap_or(crate::logs::DEFAULT_TAIL);
+        let workers = self
+            .client
+            .endpoint_logs(&handle.id, tail, crate::logs::WORKER_LOG_LIMITS)
+            .await
+            .map_err(|e| runpod_err(&e))?;
+        if workers.is_empty() {
+            return Ok(LogStream(vec![crate::logs::NO_WORKERS.to_owned()]));
+        }
+        Ok(LogStream(crate::logs::merge(&workers)))
     }
 
     /// See [`RunPodSupervisor::stop_endpoint`]; an unconfirmed

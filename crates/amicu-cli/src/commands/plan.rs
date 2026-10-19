@@ -62,8 +62,13 @@ pub(crate) fn run_with_host(
         return Ok(1);
     }
 
-    let state =
-        crate::refresh::load_refreshed_state(project, &crate::refresh::ModalLookup, output, out)?;
+    let state = crate::refresh::load_refreshed_state(
+        project,
+        &crate::refresh::ModalLookup,
+        &crate::runpod_ops::RealRunPod,
+        output,
+        out,
+    )?;
     let recorded = state
         .as_ref()
         .map(|s| s.fingerprints.clone())

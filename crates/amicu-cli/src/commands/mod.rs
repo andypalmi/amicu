@@ -9,6 +9,7 @@ pub(crate) mod init;
 pub(crate) mod modal;
 pub(crate) mod orphans;
 pub(crate) mod plan;
+pub(crate) mod runpod;
 pub(crate) mod skill;
 pub(crate) mod telemetry;
 pub(crate) mod telemetry_agent;

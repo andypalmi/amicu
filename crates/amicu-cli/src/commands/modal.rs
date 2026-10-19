@@ -257,7 +257,7 @@ fn percentiles(value: Option<Percentiles>) -> String {
 /// Renders one snapshot. Split out from [`metrics`] so it is testable
 /// without a network call. `watch` only changes the hint shown where a rate
 /// needs a second scrape.
-fn write_metrics(
+pub(crate) fn write_metrics(
     out: &mut dyn Write,
     app_name: &str,
     m: &MetricsSnapshot,
@@ -411,9 +411,6 @@ fn metrics_json(
     hardware: &HardwareReport,
 ) -> serde_json::Value {
     use serde_json::json;
-    let pct = |p: Option<Percentiles>| {
-        p.map(|p| json!({ "p50_ms": p.p50_ms, "p90_ms": p.p90_ms, "p99_ms": p.p99_ms }))
-    };
     let hardware = match hardware {
         Err(reason) => json!({ "error": reason, "containers": [] }),
         Ok(containers) => json!({
@@ -436,22 +433,32 @@ fn metrics_json(
     };
     json!({
         "app": app_name,
-        "runtime": {
-            "kind": m.runtime.label(),
-            "requests_total": m.requests_total,
-            "requests_running": m.requests_running,
-            "requests_waiting": m.requests_waiting,
-            "prompt_tokens_total": m.prompt_tokens_total,
-            "generation_tokens_total": m.generation_tokens_total,
-            "generation_tokens_per_second": m.generation_tokens_per_second,
-            "prompt_tokens_per_second": m.prompt_tokens_per_second,
-            "kv_cache_usage": m.kv_cache_usage,
-            "preemptions": m.preemptions,
-            "e2e_latency": pct(m.e2e_latency),
-            "time_to_first_token": pct(m.time_to_first_token),
-            "time_per_output_token": pct(m.time_per_output_token),
-        },
+        "runtime": runtime_json(m),
         "hardware": hardware,
+    })
+}
+
+/// The runtime half of the `--output json` metrics document, `null` for
+/// every series the runtime does not report.
+pub(crate) fn runtime_json(m: &MetricsSnapshot) -> serde_json::Value {
+    use serde_json::json;
+    let pct = |p: Option<Percentiles>| {
+        p.map(|p| json!({ "p50_ms": p.p50_ms, "p90_ms": p.p90_ms, "p99_ms": p.p99_ms }))
+    };
+    json!({
+        "kind": m.runtime.label(),
+        "requests_total": m.requests_total,
+        "requests_running": m.requests_running,
+        "requests_waiting": m.requests_waiting,
+        "prompt_tokens_total": m.prompt_tokens_total,
+        "generation_tokens_total": m.generation_tokens_total,
+        "generation_tokens_per_second": m.generation_tokens_per_second,
+        "prompt_tokens_per_second": m.prompt_tokens_per_second,
+        "kv_cache_usage": m.kv_cache_usage,
+        "preemptions": m.preemptions,
+        "e2e_latency": pct(m.e2e_latency),
+        "time_to_first_token": pct(m.time_to_first_token),
+        "time_per_output_token": pct(m.time_per_output_token),
     })
 }
 
