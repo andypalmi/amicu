@@ -85,6 +85,17 @@ const VLLM_AUTH_DIR: &str = "/tmp/amicu";
 const VLLM_AUTH_MIDDLEWARE: &str = "amicu_auth.RequireKey";
 const HEREDOC_END: &str = "AMICU_AUTH_EOF";
 
+/// Whether a live vLLM `pod` starts with amicu's auth middleware; `None`
+/// when RunPod reported no command.
+#[must_use]
+pub fn vllm_pod_guarded(pod: &Pod) -> Option<bool> {
+    if pod.entrypoint.is_empty() && pod.cmd.is_empty() {
+        return None;
+    }
+    let flag = format!("'--middleware' '{VLLM_AUTH_MIDDLEWARE}'");
+    Some(pod.entrypoint == ["/bin/sh", "-c"] && pod.cmd.iter().any(|c| c.contains(&flag)))
+}
+
 /// ENTRYPOINT and CMD of a vLLM pod: a shell writes [`VLLM_AUTH_MODULE`],
 /// then execs `argv`.
 fn vllm_pod_command(argv: &[String]) -> (Vec<String>, Vec<String>) {

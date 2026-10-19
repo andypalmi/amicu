@@ -791,12 +791,11 @@ fn vllm_pod_command_quotes_every_argument() {
     );
 }
 
-/// Runs the rendered script with a stand-in `vllm` that loads the middleware
-/// the way vLLM does and drives it with ASGI requests (needs `python3`).
-#[test]
-fn the_rendered_script_guards_every_route_but_health() {
-    const HARNESS: &str = r#"
-import asyncio, importlib, sys
+/// A stand-in `vllm`: loads the middleware the way vLLM does and drives it
+/// with ASGI requests.
+const HARNESS: &str = r#"
+import asyncio, importlib, os, sys
+print(os.environ["PYTHONPATH"])
 args = sys.argv[1:]
 assert args[-2:] == ["--middleware", "amicu_auth.RequireKey"], args
 assert args[:2] == ["serve", "it's"], args
@@ -819,15 +818,28 @@ async def call(scope):
     await cls(inner)(scope, receive, send)
     return sent
 
-def http(method, path, auth=None):
-    headers = [(b"authorization", auth)] if auth else []
+def http(method, path, *auth):
+    headers = [(b"authorization", a) for a in auth]
     sent = asyncio.run(call({"type": "http", "method": method, "path": path, "headers": headers}))
     return sent[0]["status"]
+
+def other_scope():
+    try:
+        asyncio.run(call({"type": "custom"}))
+    except RuntimeError:
+        return "refused"
+    return "passed"
 
 key = b"Bearer k3y"
 out = [
     http("GET", "/health"),
     http("POST", "/health"),
+    http("HEAD", "/health"),
+    http("GET", "//health"),
+    http("GET", "/health/"),
+    http("GET", "/v1/models", key, key),
+    http("GET", "/v1/models", b"Bearer wrong", key),
+    other_scope(),
     http("POST", "/invocations"),
     http("GET", "/docs"),
     http("GET", "/metrics", b"Bearer wrong"),
@@ -839,6 +851,10 @@ out = [
 ]
 print(out)
 "#;
+
+/// Runs the rendered script with [`HARNESS`] as `vllm` (needs `python3`).
+#[test]
+fn the_rendered_script_guards_every_route_but_health() {
     if std::process::Command::new("python3")
         .arg("--version")
         .output()
@@ -879,26 +895,37 @@ print(out)
         "--middleware".into(),
         VLLM_AUTH_MIDDLEWARE.into(),
     ]);
-    let script = cmd[0].replace(VLLM_AUTH_DIR, &dir.join("auth").display().to_string());
+    let auth = dir.join("auth").display().to_string();
+    let script = cmd[0].replace(VLLM_AUTH_DIR, &auth);
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-    let out = std::process::Command::new(&entrypoint[0])
-        .arg(&entrypoint[1])
-        .arg(&script)
-        .env("PATH", path)
-        .env("VLLM_API_KEY", "k3y")
-        .env_remove("PYTHONPATH")
-        .output()
-        .unwrap();
+    let run = |pythonpath: Option<&str>| {
+        let mut c = std::process::Command::new(&entrypoint[0]);
+        c.arg(&entrypoint[1])
+            .arg(&script)
+            .env("PATH", &path)
+            .env("VLLM_API_KEY", "k3y")
+            .env_remove("PYTHONPATH");
+        if let Some(p) = pythonpath {
+            c.env("PYTHONPATH", p);
+        }
+        c.output().unwrap()
+    };
+    let outs = [run(None), run(Some("/opt/user"))];
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        "[200, 401, 401, 401, 401, 401, 200, 200, 'lifespan.startup.complete', 1008]"
-    );
+    for (out, pythonpath) in outs.iter().zip([auth.clone(), format!("{auth}:/opt/user")]) {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            format!(
+                "{pythonpath}\n[200, 401, 401, 401, 401, 401, 401, 'refused', 401, 401, 401, \
+                 401, 200, 200, 'lifespan.startup.complete', 1008]"
+            )
+        );
+    }
 }
 
 #[tokio::test]

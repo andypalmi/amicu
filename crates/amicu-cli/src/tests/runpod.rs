@@ -2619,6 +2619,55 @@ fn refresh_reports_gpu_and_cloud_drift_of_a_live_pod_as_a_note_only() {
     assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
 }
 
+fn applied_vllm_pod(td: &TempDir) -> Project {
+    let project = project_with(td, Some(pod_record(Some("pod7"), ACCOUNT, &[])));
+    write(&td.path, "amicu.hcl", &vllm_pod_config());
+    let mut state = project.load_state().unwrap().unwrap();
+    state.graph = project.load_graph().unwrap();
+    state.pending.clear();
+    project.save_state(&state).unwrap();
+    project
+}
+
+#[test]
+fn refresh_marks_a_vllm_pod_without_the_auth_middleware_pending_and_apply_fixes_it() {
+    let td = TempDir::new();
+    let project = applied_vllm_pod(&td);
+    let rig = rig();
+    add_pod(&rig, "pod7", "NVIDIA L4", Some(owner()));
+    {
+        let body = &mut rig.runpod.world.state.lock().unwrap().pods[0].body;
+        body["entrypoint"] = json!(["vllm"]);
+        body["cmd"] = json!(["serve", "Qwen/Qwen2.5-0.5B-Instruct"]);
+    }
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 1, "{r:?}");
+    assert!(
+        r.notes[0].contains("without amicu's auth middleware")
+            && r.notes[0].contains("pod id pod7"),
+        "{r:?}"
+    );
+    assert!(state.pending.iter().any(|d| d.as_str() == DEP));
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+    project.save_state(&state).unwrap();
+
+    apply_with(&project, &rig).unwrap();
+    assert!(
+        pod_writes(&rig)
+            .iter()
+            .any(|w| w.starts_with("Patch /pods/pod7")),
+        "{:?}",
+        pod_writes(&rig)
+    );
+    let w = rig.runpod.world.state.lock().unwrap();
+    assert_eq!(w.pods[0].body["entrypoint"], json!(["/bin/sh", "-c"]));
+    drop(w);
+
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r, crate::refresh::Refresh::default());
+    assert_eq!(state.pending.len(), 0);
+}
+
 #[test]
 fn orphans_lists_untracked_owned_pods_with_a_terminate_command() {
     use crate::commands::orphans::{Kind, Ownership};

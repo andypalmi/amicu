@@ -12,12 +12,14 @@ class RequireKey:
 
     async def __call__(self, scope, receive, send):
         kind = scope["type"]
-        if kind not in ("http", "websocket") or (
+        if kind == "lifespan" or (
             kind == "http" and scope["method"] == "GET" and scope["path"] == "/health"
         ):
             return await self.app(scope, receive, send)
-        got = dict(scope["headers"]).get(b"authorization", b"")
-        if hmac.compare_digest(got, _EXPECTED):
+        if kind not in ("http", "websocket"):
+            raise RuntimeError(f"unsupported ASGI scope {kind!r}")
+        got = [v for k, v in scope["headers"] if k == b"authorization"]
+        if len(got) == 1 and hmac.compare_digest(got[0], _EXPECTED):
             return await self.app(scope, receive, send)
         if kind == "websocket":
             return await send({"type": "websocket.close", "code": 1008})
