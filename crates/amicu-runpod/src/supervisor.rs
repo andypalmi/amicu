@@ -134,22 +134,40 @@ pub const DEFAULT_CONTAINER_DISK_GB: u32 = 100;
 pub const VOLUME_HF_HOME: &str = "/runpod-volume/huggingface";
 
 /// Points the Hugging Face cache at the network volume, unless the
-/// deployment set the variable itself. llama.cpp (b11515) reads
-/// `LLAMA_CACHE` before `HF_HOME`, so it is pinned to the same hub directory.
+/// deployment set `HF_HOME` itself. llama.cpp (b11515) reads `LLAMA_CACHE`
+/// before `HF_HOME`, so it is pinned to the same hub directory unless set.
 pub(crate) fn insert_volume_cache_env(
     env: &mut BTreeMap<String, String>,
     secret: &BTreeMap<String, String>,
     runtime: RuntimeKind,
 ) {
-    let mut vars = vec![("HF_HOME", VOLUME_HF_HOME.to_owned())];
-    if runtime == RuntimeKind::LlamaCpp {
-        vars.push(("LLAMA_CACHE", format!("{VOLUME_HF_HOME}/hub")));
+    let user_set = |k: &str| env.contains_key(k) || secret.contains_key(k);
+    if user_set("HF_HOME") {
+        return;
     }
-    for (k, v) in vars {
-        if !secret.contains_key(k) {
-            env.entry(k.to_owned()).or_insert(v);
-        }
+    if runtime == RuntimeKind::LlamaCpp && !user_set("LLAMA_CACHE") {
+        env.insert("LLAMA_CACHE".to_owned(), format!("{VOLUME_HF_HOME}/hub"));
     }
+    env.insert("HF_HOME".to_owned(), VOLUME_HF_HOME.to_owned());
+}
+
+/// A warning when the volume's data center lists no stock of GPU
+/// `type_id` right now. RunPod's per-data-center list only carries types in
+/// stock (live: L4 left EU-RO-1's list within minutes), so this cannot tell
+/// "never offered" from "sold out" and is never a refusal.
+pub(crate) async fn volume_gpu_note(
+    client: &RunPodClient,
+    volume: Option<&(String, String)>,
+    type_id: &str,
+) -> Option<String> {
+    let (id, dc) = volume?;
+    let listed = client.data_center_gpus(dc).await.ok()?;
+    (!listed.iter().any(|g| g == type_id)).then(|| {
+        format!(
+            "RunPod lists no `{type_id}` in stock in {dc}, where network volume `{id}` lives; \
+             workers wait for capacity there"
+        )
+    })
 }
 
 /// Env variables the load balancer (or amicu's owner check) reads; the
@@ -354,6 +372,8 @@ pub struct RunPodSupervisor {
     region: Option<String>,
     data_center_ids: Vec<String>,
     network_volume: Option<String>,
+    /// `(volume id, data center)` once the volume was read from RunPod.
+    placed_volume: Option<(String, String)>,
     flashboot: bool,
     scaling: ScalingSettings,
     disk_gb: u32,
@@ -402,6 +422,7 @@ impl RunPodSupervisor {
             region: None,
             data_center_ids: Vec::new(),
             network_volume: None,
+            placed_volume: None,
             flashboot: false,
             scaling: ScalingSettings::default(),
             disk_gb: DEFAULT_CONTAINER_DISK_GB,
@@ -532,7 +553,16 @@ impl RunPodSupervisor {
         self.data_center_ids =
             place_on_volume(&self.data_center_ids, volume).map_err(|e| runpod_err(&e))?;
         self.network_volume = Some(volume.id.clone());
+        self.placed_volume = Some((volume.id.clone(), volume.data_center.clone()));
         Ok(self)
+    }
+
+    /// A warning when the [network volume](Self::with_network_volume)'s data
+    /// center has no stock of the requested GPU right now (see
+    /// `volume_gpu_note`); `None` otherwise or when it cannot be read.
+    pub async fn volume_gpu_note(&self) -> Option<String> {
+        let (type_id, _) = self.gpu_type.as_ref()?;
+        volume_gpu_note(&self.client, self.placed_volume.as_ref(), type_id).await
     }
 
     /// FlashBoot on or off (default off).
@@ -863,13 +893,14 @@ impl RunPodSupervisor {
     async fn patch_endpoint(
         &self,
         id: &str,
+        live: &Endpoint,
         prepared: &Prepared,
         fresh: &[String],
     ) -> Result<String, LlamaCppError> {
         self.set_deployed(id);
         match self
             .client
-            .update_endpoint(id, &update_from(&prepared.endpoint))
+            .update_endpoint(id, &update_from(&prepared.endpoint, live))
             .await
         {
             Ok(_) => Ok(id.to_owned()),
@@ -897,7 +928,7 @@ impl RunPodSupervisor {
                     if ep.owner.is_some() {
                         self.check_owner(&ep)?;
                     }
-                    return self.patch_endpoint(&ep.id, prepared, fresh).await;
+                    return self.patch_endpoint(&ep.id, &ep, prepared, fresh).await;
                 }
                 Err(RunPodError::NotFound { .. }) => {}
                 Err(e) => return Err(runpod_err(&e)),
@@ -918,7 +949,7 @@ impl RunPodSupervisor {
                     .await
                     .map_err(|e| runpod_err(&e))?;
                 self.check_owner(&ep)?;
-                return self.patch_endpoint(&ep.id, prepared, fresh).await;
+                return self.patch_endpoint(&ep.id, &ep, prepared, fresh).await;
             }
             many => return Err(duplicate_err(name, many.iter().map(|e| e.id.as_str()))),
         }
@@ -1228,8 +1259,11 @@ pub fn workers_config(scaling: Option<&ScalingSettings>) -> WorkersConfig {
     }
 }
 
-/// The PATCH that makes an existing endpoint match `create`.
-fn update_from(create: &CreateEndpoint) -> UpdateEndpoint {
+/// The PATCH that makes `live` match `create`. Volumes are only restated
+/// when either side has one, so a volume-less endpoint gets the same PATCH
+/// as before volumes existed.
+fn update_from(create: &CreateEndpoint, live: &Endpoint) -> UpdateEndpoint {
+    let had_volume = live.network_volumes.as_ref().is_some_and(|v| !v.is_empty());
     // On PATCH, `""` clears a CUDA floor and `[]` data centers clear a placement
     // the previous configuration set.
     let mut gpu = create.gpu.clone();
@@ -1247,7 +1281,8 @@ fn update_from(create: &CreateEndpoint) -> UpdateEndpoint {
         request_count: Some(create.request_count),
         data_center_ids: Some(create.data_center_ids.clone()),
         flashboot: Some(create.flashboot),
-        network_volume_ids: Some(create.network_volume_ids.clone()),
+        network_volume_ids: (had_volume || !create.network_volume_ids.is_empty())
+            .then(|| create.network_volume_ids.clone()),
         timeout_ms: None,
         registry_id: None,
     }

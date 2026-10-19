@@ -1295,6 +1295,9 @@ async fn apply_all(
                             recorded.as_ref(),
                             volume.as_ref(),
                         )?;
+                        if let Some(note) = supervisor.volume_gpu_note().await {
+                            let _ = writeln!(std::io::stderr(), "note: {note}");
+                        }
                         let launch_secrets =
                             amicu_llamacpp::resolve_launch_secrets(launch, resolver).await?;
                         let planned = supervisor

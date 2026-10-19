@@ -34,7 +34,7 @@ use crate::supervisor::{
     DEFAULT_CONTAINER_DISK_GB, HEALTH_PATH, ProgressSink, ReadinessTiming, StopOutcome,
     container_argv, container_command, elapsed, image_min_cuda, insert_volume_cache_env,
     owner_marker, placeholder_secrets, planned_hf_token, reserved_env_var, runpod_err,
-    runtime_image, runtime_port, unsupported,
+    runtime_image, runtime_port, unsupported, volume_gpu_note,
 };
 
 /// Env variables the pod env may not set: amicu's owner marker, and the ones
@@ -110,6 +110,7 @@ pub struct PodSupervisor {
     data_center_ids: Vec<String>,
     region: Option<String>,
     network_volume: Option<String>,
+    placed_volume: Option<(String, String)>,
     disk_gb: u32,
     gguf: Option<GgufSource>,
     readiness: ReadinessTiming,
@@ -157,6 +158,7 @@ impl PodSupervisor {
             data_center_ids: Vec::new(),
             region: None,
             network_volume: None,
+            placed_volume: None,
             disk_gb: DEFAULT_CONTAINER_DISK_GB,
             gguf: None,
             readiness: ReadinessTiming::DEFAULT,
@@ -291,7 +293,14 @@ impl PodSupervisor {
         self.data_center_ids =
             place_on_volume(&self.data_center_ids, volume).map_err(|e| runpod_err(&e))?;
         self.network_volume = Some(volume.id.clone());
+        self.placed_volume = Some((volume.id.clone(), volume.data_center.clone()));
         Ok(self)
+    }
+
+    /// See [`crate::supervisor::RunPodSupervisor::volume_gpu_note`].
+    pub async fn volume_gpu_note(&self) -> Option<String> {
+        let type_id = self.gpu_type_id.as_ref()?;
+        volume_gpu_note(&self.client, self.placed_volume.as_ref(), type_id).await
     }
 
     /// The Hugging Face GGUF a llama.cpp launch downloads. A no-op for vLLM.

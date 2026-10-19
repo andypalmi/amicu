@@ -617,7 +617,7 @@ fn volume_text(volume: &str, env: &BTreeMap<String, String>) -> String {
         .filter_map(|k| env.get(*k).map(|v| format!("{k}={v}")))
         .collect();
     format!(
-        "{volume} at {} in its data center \u{b7} {}",
+        "{volume} at {} \u{b7} placement pinned to its data center at apply \u{b7} {}",
         amicu_runpod::VOLUME_MOUNT_PATH,
         cache.join(" ")
     )

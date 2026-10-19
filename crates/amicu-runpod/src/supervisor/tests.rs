@@ -832,7 +832,7 @@ fn an_update_without_a_floor_clears_the_previous_one() {
             .get("minCudaVersion")
             .is_none()
     );
-    let patch = update_from(&prepared.endpoint).to_body();
+    let patch = update_from(&prepared.endpoint, &live(None)).to_body();
     assert_eq!(patch["gpu"]["minCudaVersion"], json!(""));
 }
 
@@ -1590,7 +1590,15 @@ fn llama_server_vertex_env_is_reserved() {
     assert_eq!(reserved_env_var(&RESERVED_ENV, &fine, &none), None);
 }
 
-// --- network volume / flashboot --------------------------------------------
+/// An endpoint as `GET` returns it, with `mounts.network` when given.
+fn live(volumes: Option<&[&str]>) -> Endpoint {
+    let mut v = json!({"id": "ep1", "name": "x"});
+    if let Some(ids) = volumes {
+        let network: Vec<Value> = ids.iter().map(|i| json!({"volumeId": i})).collect();
+        v["mounts"] = json!({"network": network, "global": []});
+    }
+    serde_json::from_value(v).unwrap()
+}
 
 pub(crate) fn volume(dc: &str) -> NetworkVolume {
     NetworkVolume {
@@ -1658,14 +1666,14 @@ fn a_volume_mounts_the_hf_cache_and_pins_its_data_center() {
     assert_eq!(body["env"]["HF_HOME"], json!("/runpod-volume/huggingface"));
     assert!(body["env"].get("LLAMA_CACHE").is_none());
     assert_eq!(body["flashboot"], json!("FLASHBOOT"));
-    let patch = update_from(&vllm).to_body();
+    let patch = update_from(&vllm, &live(Some(&[]))).to_body();
     assert_eq!(patch["mounts"], json!({"network": [{"volumeId": "vol1"}]}));
     assert_eq!(patch["dataCenterIds"], json!(["EU-RO-1"]));
     assert_eq!(patch["flashboot"], json!("FLASHBOOT"));
 }
 
 #[test]
-fn without_a_volume_nothing_is_mounted_and_an_update_detaches() {
+fn without_a_volume_nothing_is_mounted_and_only_a_held_volume_is_detached() {
     let (sup, _) = supervisor(Mock::default());
     let ep = sup
         .prepare(&vllm_plan(), &vllm_secrets(), "img", None)
@@ -1674,7 +1682,68 @@ fn without_a_volume_nothing_is_mounted_and_an_update_detaches() {
     let body = ep.to_body();
     assert!(body.get("mounts").is_none());
     assert!(body["env"].get("HF_HOME").is_none());
-    assert_eq!(update_from(&ep).to_body()["mounts"], json!({"network": []}));
+    for unmounted in [live(None), live(Some(&[]))] {
+        assert!(
+            update_from(&ep, &unmounted)
+                .to_body()
+                .get("mounts")
+                .is_none()
+        );
+    }
+    assert_eq!(
+        update_from(&ep, &live(Some(&["vol1"]))).to_body()["mounts"],
+        json!({"network": []})
+    );
+}
+
+#[test]
+fn an_endpoint_reads_its_mounted_volumes() {
+    assert_eq!(live(None).network_volumes, None);
+    assert_eq!(
+        live(Some(&["v"])).network_volumes,
+        Some(vec!["v".to_owned()])
+    );
+}
+
+#[tokio::test]
+async fn a_volume_data_center_without_the_gpu_in_stock_gives_a_note() {
+    let mock = Mock::default().ok(
+        HttpMethod::Get,
+        "/catalog/datacenters/EU-RO-1?include=GPU_AVAILABILITY",
+        200,
+        r#"{"id":"EU-RO-1","gpuAvailability":[{"id":"NVIDIA L4","name":"L4","availability":"LOW"}]}"#,
+    );
+    let (sup, _) = supervisor(mock);
+    assert_eq!(sup.volume_gpu_note().await, None, "no volume, no lookup");
+    let sup = sup.with_network_volume(&volume("EU-RO-1")).unwrap();
+    let note = sup.volume_gpu_note().await.unwrap();
+    assert!(
+        note.contains("no `NVIDIA H100 80GB HBM3` in stock in EU-RO-1"),
+        "{note}"
+    );
+}
+
+#[test]
+fn a_user_hf_home_or_llama_cache_is_kept_for_llama_cpp() {
+    let (sup, _) = supervisor(Mock::default());
+    let sup = sup.with_network_volume(&volume("EU-RO-1")).unwrap();
+    let env_for = |k: &str| {
+        let mut p = llama_hf_plan();
+        if let Runtime::LlamaCpp(s) = &mut p.settings {
+            s.env.insert(k.to_owned(), "/data/x".to_owned());
+        }
+        sup.prepare(&p, &secrets_for("LLAMA_API_KEY"), "img", None)
+            .unwrap()
+            .endpoint
+            .to_body()["env"]
+            .clone()
+    };
+    let env = env_for("HF_HOME");
+    assert_eq!(env["HF_HOME"], json!("/data/x"));
+    assert!(env.get("LLAMA_CACHE").is_none(), "{env}");
+    let env = env_for("LLAMA_CACHE");
+    assert_eq!(env["LLAMA_CACHE"], json!("/data/x"));
+    assert_eq!(env["HF_HOME"], json!("/runpod-volume/huggingface"));
 }
 
 #[test]

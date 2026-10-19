@@ -134,6 +134,9 @@ pub(super) async fn prepare(
         None,
         volume.as_ref(),
     )?;
+    if let Some(note) = fresh.volume_gpu_note().await {
+        let _ = writeln!(std::io::stderr(), "note: {note}");
+    }
     let mut replace = None;
     if let Some(old) = &recorded
         && let Some(pod_id) = &old.app_id

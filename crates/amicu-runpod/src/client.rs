@@ -496,6 +496,25 @@ pub struct Endpoint {
     /// the env and amicu set the marker.
     #[serde(default, rename = "env", deserialize_with = "owner_from_env")]
     pub owner: Option<String>,
+    /// Mounted network volume ids from `mounts.network`; `None` when RunPod
+    /// did not return `mounts`.
+    #[serde(default, rename = "mounts", deserialize_with = "network_mounts")]
+    pub network_volumes: Option<Vec<String>>,
+}
+
+fn network_mounts<'de, D>(d: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mounts = Option::<Value>::deserialize(d)?;
+    Ok(mounts.map(|m| {
+        m.get("network")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|n| n.get("volumeId")?.as_str().map(str::to_owned))
+            .collect()
+    }))
 }
 
 /// Reads only [`OWNER_ENV_VAR`] out of an endpoint's `env` map; every other
@@ -632,9 +651,14 @@ pub struct NetworkVolume {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct NetworkVolumesPage {
-    network_volumes: Vec<NetworkVolume>,
-    pagination: Pagination,
+struct DataCenterGpus {
+    #[serde(default)]
+    gpu_availability: Vec<CatalogId>,
+}
+
+#[derive(Deserialize)]
+struct CatalogId {
+    id: String,
 }
 
 /// Name of the amicu-owned secret whose id identifies a personal account
@@ -945,28 +969,19 @@ impl RunPodClient {
         decode(&resp)
     }
 
-    /// `GET /network-volumes`, following pagination to the end.
-    pub async fn list_network_volumes(&self) -> Result<Vec<NetworkVolume>, RunPodError> {
-        let mut all = Vec::new();
-        let mut cursor: Option<String> = None;
-        for _ in 0..MAX_PAGES {
-            let path = match &cursor {
-                Some(c) => format!("/network-volumes?cursor={}", encode_query(c)),
-                None => "/network-volumes".to_owned(),
-            };
-            let resp = self
-                .send(HttpMethod::Get, &path, None, "network volumes")
-                .await?;
-            let page: NetworkVolumesPage = decode(&resp)?;
-            all.extend(page.network_volumes);
-            match page.pagination.next_cursor {
-                Some(next) if page.pagination.has_next_page => cursor = Some(next),
-                _ => return Ok(all),
-            }
-        }
-        Err(RunPodError::Decode(format!(
-            "network volume list still paginating after {MAX_PAGES} pages"
-        )))
+    /// The GPU type ids data center `dc` offers (`GET
+    /// /catalog/datacenters/{dc}?include=GPU_AVAILABILITY`), whatever their
+    /// current stock.
+    pub async fn data_center_gpus(&self, dc: &str) -> Result<Vec<String>, RunPodError> {
+        let path = format!(
+            "/catalog/datacenters/{}?include=GPU_AVAILABILITY",
+            segment(dc)?
+        );
+        let resp = self
+            .send(HttpMethod::Get, &path, None, &format!("data center `{dc}`"))
+            .await?;
+        let dc: DataCenterGpus = decode(&resp)?;
+        Ok(dc.gpu_availability.into_iter().map(|g| g.id).collect())
     }
 
     /// `POST /account/secrets`. Error details are withheld for this call.

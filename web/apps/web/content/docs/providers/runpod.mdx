@@ -169,10 +169,10 @@ runpod {
 ```
 
 - **Bring your own.** Create the volume in the RunPod console. amicu reads it but never creates, resizes or deletes it, and `amicu destroy` leaves it and its contents in place. The volume bills for its storage until you delete it.
-- **Placement.** A volume lives in one data center, so workers are placed only there. Before anything is recorded or started, `apply` reads the volume and refuses it if its data center is outside the profile's `region` or the project's `data_class` residency.
-- **Where.** The volume is mounted at `/runpod-volume`, and `HF_HOME` is set to `/runpod-volume/huggingface` for vLLM and llama.cpp (llama.cpp also gets `LLAMA_CACHE=/runpod-volume/huggingface/hub`). A value you set in the deployment's `env` block wins.
+- **Placement.** A volume lives in one data center, so workers are placed only there. Before anything is recorded or started, `apply` reads the volume and refuses it if its data center is outside the profile's `region` or the project's `data_class` residency. It notes when RunPod lists no stock of the GPU in that data center right now; workers then wait for capacity there.
+- **Where.** The volume is mounted at `/runpod-volume`, and `HF_HOME` is set to `/runpod-volume/huggingface` for vLLM and llama.cpp (llama.cpp also gets `LLAMA_CACHE=/runpod-volume/huggingface/hub`). An `HF_HOME` you set in the deployment's `env` block wins, and llama.cpp then gets no `LLAMA_CACHE` either; an `LLAMA_CACHE` you set wins too.
 - **Changes.** On Serverless, switching to another volume or removing it updates the endpoint in place. A pod's volume is fixed when the pod is created, so changing it replaces the pod.
-- **Plan.** `amicu plan` shows `volume:` and, when on, `flashboot: on`.
+- **Plan.** `amicu plan` shows `volume:` with the mount and cache variables (placement is pinned to the volume's data center at apply) and, when on, `flashboot: on`.
 
 ## Configuration reference
 

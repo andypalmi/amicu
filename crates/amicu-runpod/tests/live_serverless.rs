@@ -102,7 +102,8 @@ async fn raw(key: &str, method: HttpMethod, path: &str, body: Option<Value>) -> 
     }
 }
 
-async fn create_volume(key: &str, dc: &str) -> NetworkVolume {
+/// The created volume, or the id RunPod returned (if any) and why it failed.
+async fn create_volume(key: &str, dc: &str) -> Result<NetworkVolume, (Option<String>, String)> {
     let (status, body) = raw(
         key,
         HttpMethod::Post,
@@ -110,11 +111,11 @@ async fn create_volume(key: &str, dc: &str) -> NetworkVolume {
         Some(json!({"name": VOLUME_NAME, "size": 10, "dataCenter": dc})),
     )
     .await;
-    assert!(
-        (200..300).contains(&status),
-        "volume create: {status} {body}"
-    );
-    serde_json::from_value(body).expect("volume body")
+    let id = body["id"].as_str().map(str::to_owned);
+    if !(200..300).contains(&status) {
+        return Err((id, format!("volume create: {status} {body}")));
+    }
+    serde_json::from_value(body).map_err(|e| (id, format!("volume body: {e}")))
 }
 
 /// Deletes the test volume (retrying while the endpoint still holds it) and
@@ -187,7 +188,7 @@ async fn scenario(
     sup: Arc<RunPodSupervisor>,
     invoke: String,
     model: String,
-    check_cache: bool,
+    volume: Option<String>,
 ) -> Result<(), String> {
     let secrets = vec![ResolvedSecret {
         name: RuntimeKind::LlamaCpp.api_key_env_var().to_owned(),
@@ -198,9 +199,23 @@ async fn scenario(
         .await
         .map_err(|e| format!("start: {e}"))?;
     eprintln!("endpoint {} ready", handle.id);
+    if let Some(v) = &volume {
+        let ep = sup
+            .client()
+            .get_endpoint(&handle.id)
+            .await
+            .map_err(|e| format!("read endpoint: {e}"))?;
+        if ep.network_volumes.as_deref() != Some(std::slice::from_ref(v)) {
+            return Err(format!(
+                "endpoint mounts {:?}, expected [{v}]",
+                ep.network_volumes
+            ));
+        }
+        eprintln!("endpoint mounts volume {v}");
+    }
     let reply = chat(&handle.id, &invoke).await?;
     eprintln!("chat reply: {reply:?}");
-    if check_cache {
+    if volume.is_some() {
         drain(sup.client(), &handle.id).await?;
         let again = sup
             .start(&launch_plan(&model, true), &secrets)
@@ -214,6 +229,7 @@ async fn scenario(
 
 async fn teardown(key: &str, sup: &RunPodSupervisor, project: &str) -> Vec<String> {
     let mut problems = Vec::new();
+    let created: Vec<String> = sup.created_secrets().lock().unwrap().clone();
     let name = project_endpoint_name(project, DEPLOYMENT);
     let mut ids: Vec<String> = sup
         .deployed_endpoint()
@@ -257,10 +273,9 @@ async fn teardown(key: &str, sup: &RunPodSupervisor, project: &str) -> Vec<Strin
         Ok(_) => {}
         Err(e) => problems.push(format!("list pods: {e}")),
     }
-    let prefix = format!("amicu-{project}-");
     match c.list_secrets().await {
         Ok(secrets) => {
-            for s in secrets.iter().filter(|s| s.name.starts_with(&prefix)) {
+            for s in secrets.iter().filter(|s| created.contains(&s.name)) {
                 problems.push(format!("secret `{}` still listed", s.name));
                 let _ = c.delete_secret(&s.id).await;
             }
@@ -309,7 +324,16 @@ async fn serverless_llamacpp_deploys_answers_and_leaves_nothing_behind() {
         })
         .with_progress(Duration::from_secs(30), |l| eprintln!("{l}"));
     let volume = match env("AMICU_RUNPOD_LIVE_VOLUME_DC") {
-        Some(dc) => Some(create_volume(&key, &dc).await),
+        Some(dc) => match create_volume(&key, &dc).await {
+            Ok(v) => Some(v),
+            Err((id, why)) => {
+                let gone = match id {
+                    Some(id) => delete_volume(&key, &id).await,
+                    None => true,
+                };
+                panic!("{why} (volume deleted or never created: {gone})");
+            }
+        },
         None => None,
     };
     if let Some(v) = &volume {
@@ -324,7 +348,13 @@ async fn serverless_llamacpp_deploys_answers_and_leaves_nothing_behind() {
     }
     let sup = Arc::new(sup);
 
-    let outcome = tokio::spawn(scenario(Arc::clone(&sup), invoke, model, volume.is_some())).await;
+    let outcome = tokio::spawn(scenario(
+        Arc::clone(&sup),
+        invoke,
+        model,
+        volume.as_ref().map(|v| v.id.clone()),
+    ))
+    .await;
     let mut problems = teardown(&key, &sup, &project).await;
     if let Some(v) = &volume
         && !delete_volume(&key, &v.id).await
