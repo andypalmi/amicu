@@ -793,6 +793,7 @@ fn vllm_pod_command_quotes_every_argument() {
 
 /// A stand-in `vllm`: loads the middleware the way vLLM does and drives it
 /// with ASGI requests.
+#[cfg(unix)]
 const HARNESS: &str = r#"
 import asyncio, importlib, os, sys
 print(os.environ["PYTHONPATH"])
@@ -853,6 +854,7 @@ print(out)
 "#;
 
 /// Runs the rendered script with [`HARNESS`] as `vllm` (needs `python3`).
+#[cfg(unix)]
 #[test]
 fn the_rendered_script_guards_every_route_but_health() {
     if std::process::Command::new("python3")
