@@ -1419,6 +1419,7 @@ impl Rig {
             interactive: true,
             secret_is_set: |_| true,
             telemetry: &self.telemetry,
+            progress: |_| {},
         }
     }
     fn stopped(&self) -> Vec<String> {
@@ -2279,7 +2280,7 @@ fn state_round_trips_and_refuses_newer_versions() {
     state.stops = vec![host_rec("support_two")];
     project.save_state(&state).unwrap();
     let loaded = project.load_state().unwrap().unwrap();
-    assert_eq!(loaded.version, "v5");
+    assert_eq!(loaded.version, "v6");
     assert_eq!(loaded.pending, state.pending);
     assert_eq!(loaded.stops, state.stops);
 
@@ -2290,7 +2291,7 @@ fn state_round_trips_and_refuses_newer_versions() {
     v1.as_object_mut().unwrap().remove("stops");
     std::fs::write(project.state_file(), v1.to_string()).unwrap();
     let old = project.load_state().unwrap().unwrap();
-    assert_eq!(old.version, "v5", "migrated on load");
+    assert_eq!(old.version, "v6", "migrated on load");
     assert_eq!(old.stops.len(), 0);
 
     // A newer version is refused rather than silently downgraded.
@@ -2699,10 +2700,15 @@ fn apply_with(project: &Project, rig: &Rig) -> Result<u8, crate::error::CliError
 
 fn plan_text(project: &Project, rig: &Rig) -> String {
     let mut out = Vec::new();
-    let state =
-        crate::refresh::load_refreshed_state(project, &rig.modal, OutputFormat::Human, &mut out)
-            .unwrap()
-            .unwrap();
+    let state = crate::refresh::load_refreshed_state(
+        project,
+        &rig.modal,
+        &rig.runpod,
+        OutputFormat::Human,
+        &mut out,
+    )
+    .unwrap()
+    .unwrap();
     format!("{}|pending={:?}", utf8(out), state.pending)
 }
 
@@ -2832,6 +2838,7 @@ fn a_failed_host_update_leaves_the_deployment_pending_with_its_stop_record() {
     let plan = crate::refresh::load_refreshed_state(
         &project,
         &rig.modal,
+        &rig.runpod,
         OutputFormat::Human,
         &mut Vec::new(),
     )
@@ -3038,6 +3045,7 @@ fn plan_text_for(config: &str, state: &LocalState) -> (String, amicu_plan::Plan)
     .unwrap();
     let switches = commands::plan::provider_switches(
         &result,
+        &graph,
         &commands::apply::effective_stops(Some(state)),
         state.project_id.as_deref(),
     );

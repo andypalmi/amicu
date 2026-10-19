@@ -65,87 +65,56 @@ struct DataCenter {
     location: &'static str,
 }
 
-/// RunPod's data centers. EU/EEA entries are what [`RunPodProvider::new`] admits;
-/// the non-EU entries exist so the residency filter is a real exclusion, not a
-/// hand-picked list. Residency uses a `fn` (not a `const`) because
-/// [`Residency::Other`] owns a `String`.
-fn datacenters() -> [DataCenter; 12] {
-    [
-        // EU / EEA.
-        DataCenter {
-            code: "EU-RO-1",
-            residency: Residency::Eu,
-            country: "RO",
-            location: "Romania",
-        },
-        DataCenter {
-            code: "EU-SE-1",
-            residency: Residency::Eu,
-            country: "SE",
-            location: "Sweden",
-        },
-        DataCenter {
-            code: "EU-NL-1",
-            residency: Residency::Eu,
-            country: "NL",
-            location: "Netherlands",
-        },
-        DataCenter {
-            code: "EU-CZ-1",
-            residency: Residency::Eu,
-            country: "CZ",
-            location: "Czechia",
-        },
-        DataCenter {
-            code: "EUR-IS-1",
-            residency: Residency::Eu,
-            country: "IS",
-            location: "Iceland",
-        },
-        DataCenter {
-            code: "EUR-NO-1",
-            residency: Residency::Eu,
-            country: "NO",
-            location: "Norway",
-        },
-        // Non-EU - excluded by the residency filter.
-        DataCenter {
-            code: "US-CA-1",
-            residency: Residency::Us,
-            country: "US",
-            location: "California",
-        },
-        DataCenter {
-            code: "US-GA-1",
-            residency: Residency::Us,
-            country: "US",
-            location: "Georgia",
-        },
-        DataCenter {
-            code: "US-KS-2",
-            residency: Residency::Us,
-            country: "US",
-            location: "Kansas",
-        },
-        DataCenter {
-            code: "CA-MTL-1",
-            residency: Residency::Ca,
-            country: "CA",
-            location: "Montreal",
-        },
-        DataCenter {
-            code: "AP-JP-1",
-            residency: Residency::Apac,
-            country: "JP",
-            location: "Japan",
-        },
-        DataCenter {
-            code: "OC-AU-1",
-            residency: Residency::Apac,
-            country: "AU",
-            location: "Australia",
-        },
-    ]
+/// RunPod's data centers (live `GET /v2/catalog/datacenters` as of 2026-10-19).
+/// EU/EEA entries are what [`RunPodProvider::new`] admits; the rest make the
+/// residency filter a real exclusion. Iceland and Norway count as `eu` (EEA).
+const DATACENTERS: &[(&str, &str, &str, &str)] = &[
+    ("EU-CZ-1", "eu", "CZ", "Czechia"),
+    ("EU-FR-1", "eu", "FR", "France"),
+    ("EU-NL-1", "eu", "NL", "Netherlands"),
+    ("EU-RO-1", "eu", "RO", "Romania"),
+    ("EU-SE-1", "eu", "SE", "Sweden"),
+    ("EUR-IS-1", "eu", "IS", "Iceland"),
+    ("EUR-IS-2", "eu", "IS", "Iceland"),
+    ("EUR-IS-3", "eu", "IS", "Iceland"),
+    ("EUR-IS-4", "eu", "IS", "Iceland"),
+    ("EUR-IS-5", "eu", "IS", "Iceland"),
+    ("EUR-NO-1", "eu", "NO", "Norway"),
+    ("EUR-NO-2", "eu", "NO", "Norway"),
+    ("US-CA-2", "us", "US", "California"),
+    ("US-CO-1", "us", "US", "Colorado"),
+    ("US-GA-2", "us", "US", "Georgia"),
+    ("US-IL-1", "us", "US", "Illinois"),
+    ("US-KS-2", "us", "US", "Kansas"),
+    ("US-MD-1", "us", "US", "Maryland"),
+    ("US-MO-1", "us", "US", "Missouri"),
+    ("US-MO-2", "us", "US", "Missouri"),
+    ("US-NC-1", "us", "US", "North Carolina"),
+    ("US-NC-2", "us", "US", "North Carolina"),
+    ("US-NE-1", "us", "US", "Nebraska"),
+    ("US-PA-1", "us", "US", "Pennsylvania"),
+    ("US-TX-3", "us", "US", "Texas"),
+    ("US-TX-4", "us", "US", "Texas"),
+    ("US-WA-1", "us", "US", "Washington"),
+    ("US-WA-2", "us", "US", "Washington"),
+    ("CA-MTL-1", "ca", "CA", "Montreal"),
+    ("CA-MTL-3", "ca", "CA", "Montreal"),
+    ("CA-MTL-4", "ca", "CA", "Montreal"),
+    ("AP-IN-1", "apac", "IN", "India"),
+    ("AP-JP-1", "apac", "JP", "Japan"),
+    ("OC-AU-1", "apac", "AU", "Australia"),
+];
+
+fn datacenters() -> Vec<DataCenter> {
+    DATACENTERS
+        .iter()
+        .map(|&(code, residency, country, location)| DataCenter {
+            code,
+            residency: Residency::from_token(residency),
+            country,
+            location,
+        })
+        .collect()
 }
 
 /// One entry of RunPod's GPU catalog: an offering id, the accelerator model as
@@ -854,7 +823,7 @@ mod tests {
         assert!(codes.contains(&"EU-RO-1"));
         assert!(codes.contains(&"EUR-IS-1"));
         // No non-EU RunPod data center leaks into the descriptor.
-        assert!(!codes.contains(&"US-CA-1"));
+        assert!(!codes.contains(&"US-CA-2"));
         assert!(!codes.contains(&"AP-JP-1"));
     }
 
@@ -862,7 +831,7 @@ mod tests {
     fn filter_excludes_non_eu_datacenters() {
         // The underlying catalog genuinely contains non-EU data centers, so the
         // EU default is an exclusion, not a hand-picked list.
-        assert!(RunPodProvider::datacenter_codes(&Residency::Us).contains(&"US-CA-1"));
+        assert!(RunPodProvider::datacenter_codes(&Residency::Us).contains(&"US-CA-2"));
         let widened = RunPodProvider::for_residencies(&[Residency::Eu, Residency::Us]);
         let codes: Vec<String> = widened
             .capabilities()
@@ -871,7 +840,7 @@ mod tests {
             .map(|r| r.code.clone())
             .collect();
         assert!(codes.iter().any(|c| c == "EU-RO-1"));
-        assert!(codes.iter().any(|c| c == "US-CA-1"));
+        assert!(codes.iter().any(|c| c == "US-CA-2"));
     }
 
     #[test]
@@ -945,13 +914,13 @@ mod tests {
 
     #[tokio::test]
     async fn provision_in_non_eu_region_is_rejected() {
-        // US-CA-1 is a real RunPod data center, but the EU adapter does not admit
+        // US-CA-2 is a real RunPod data center, but the EU adapter does not admit
         // it: the residency filter restricts pods to compliant regions, before any
         // backend call.
         let p = RunPodProvider::new();
         let err = p
             .provision_request(
-                &ProvisionRequest::new("gpu.a100-80gb.1x", "US-CA-1"),
+                &ProvisionRequest::new("gpu.a100-80gb.1x", "US-CA-2"),
                 &no_creds(),
             )
             .await
@@ -1186,7 +1155,7 @@ mod tests {
     async fn describe_never_serializes_non_eu_regions() {
         let describe_json = serde_json::to_string(&RunPodProvider::new().describe()).unwrap();
         assert!(describe_json.contains("EU-RO-1"));
-        assert!(!describe_json.contains("US-CA-1"));
+        assert!(!describe_json.contains("US-CA-2"));
         assert!(!describe_json.contains("AP-JP-1"));
     }
 

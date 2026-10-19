@@ -13,6 +13,7 @@
 | `amicu catalog hardware\|presets\|fits [--output json]` | Read-only, offline. `hardware`: known GPUs and Apple Silicon chips with memory sizes. `presets`: the wizard presets. `fits`: which starter models and presets fit this machine's memory. Works without a project. |
 | `amicu skill export --target <t> [--path <dir>]` | Render agent skills for a coding agent. Works without a project. |
 | `amicu modal <subcommand>` | Operate a Modal deployment; see "Modal commands" below. Works without a project. |
+| `amicu runpod <subcommand>` | Operate a RunPod Serverless endpoint or Pod recorded in this project's state; see "RunPod commands" below. |
 
 `--output json|human` is global; default `human`.
 
@@ -30,6 +31,18 @@ app name recorded in state: `amicu-<project>-<deployment>-<digest>`
 | `amicu modal logs <app> [--follow] [--since <entry-id>]` | Lines as `[stdout|stderr|info] text`. Without `--follow`, one call held open ~5s (or until the app ends), then returns. `--follow` streams until the app ends or Ctrl-C. `--since` resumes just past a log entry id | 0; 1 with `no deployment named <app>` |
 | `amicu modal metrics <app> [--watch] [--interval N]` | A snapshot: `metrics <app> (vLLM|llama.cpp)`, requests, tokens, tokens/s, kv cache, preemptions, e2e latency, ttft, per token (`n/a` where a series is absent). `--watch` prints a new snapshot every `N` seconds (default 5, min 1) and derives tokens/s from successive scrapes; without it tokens/s is `n/a (run with --watch)`. Needs `MODAL_PROXY_TOKEN_ID`/`MODAL_PROXY_TOKEN_SECRET`; a scaled-to-zero app is woken by the scrape | 0; 1 with `no deployment named <app>` or `<app> has no URL to scrape`; non-zero `error:` if the scrape fails |
 | `amicu modal stop <app>` | `stopped <app> (<app-id>)`; inside a project that holds the deployment, also `removed deployment <id> from local state` | 0; 1 with `no deployment named <app>` |
+
+## RunPod commands
+
+Run inside the project. `<deployment>` is the deployment id; the endpoint or
+pod id comes from state. Management calls use `RUNPOD_API_KEY`.
+
+| Command | Prints | Exit |
+|---|---|---|
+| `amicu runpod status <deployment>` | `deployment <d>: RunPod endpoint <id> (<name>)`, then `url:`, `workers: running=N idle=N initializing=N throttled=N unhealthy=N (min N, max N)` (plus a scaled-to-zero note), `gpu:` and `data centers:`. A pod: `deployment <d>: RunPod pod <id> (<name>)`, then `status:`, `url:` (proxy URL), `gpu:`, `cloud:`, `data center:` and `cost:` (USD/hr) | 0; non-zero `error:` if the deployment has no RunPod record or the endpoint is gone |
+| `amicu runpod logs <deployment> [--tail N]` (`--output json`: one document per worker with its lines) | Each worker's recent lines (default 100, max 5000) as `[<worker>] text` (`[<worker>] (system) text` for host lines), merged by time. A bounded read, no follow. A scaled-to-zero endpoint prints `no RunPod workers are running ...`. A pod: its own lines as `[<pod>] text` | 0 |
+| `amicu runpod metrics <deployment> [--watch] [--interval N] [--wake]` | The same snapshot as `modal metrics`, scraped through the gateway with the deployment's `api_key` (from one worker the load balancer picks), then `hardware: n/a (not available on RunPod)`. With no worker up it refuses (a scrape would start a billed worker) unless `--wake`; `--watch` keeps the endpoint warm, and billed, while it runs. A pod is scraped through its proxy URL; it is always on, so `--wake` does not apply | 0; non-zero `error:` if no worker is up without `--wake`, or the scrape fails |
+| `amicu runpod stop <deployment> [--lock-timeout SECS]` | Same as `amicu destroy --target <deployment> --auto-approve`: deletes the endpoint (terminates the pod) and its secrets; the deployment leaves state only once that is confirmed | 0; non-zero `error:` with the record kept otherwise |
 
 ## Exit codes
 

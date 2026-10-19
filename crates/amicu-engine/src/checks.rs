@@ -5,8 +5,9 @@ use std::collections::HashSet;
 use amicu_core::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticReport, Severity, catalog};
 use amicu_core::graph::Graph;
 use amicu_core::resource::{
-    Accelerator, CATALOG_GPU_PROVIDERS, Deployment, GpuResolveError, MemoryCheck, Residency,
-    RuleEffect, Runtime,
+    Accelerator, AcceleratorKind, CATALOG_GPU_PROVIDERS, Deployment, GpuResolveError, MemoryCheck,
+    RUNPOD_PODS_ONLY_GPUS, Residency, RuleEffect, RunpodMode, Runtime, ScalingSettings,
+    alias_memory_conflict,
 };
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
 use amicu_providers::resolve_residency;
@@ -24,6 +25,7 @@ pub fn report_for(graph: &Graph) -> DiagnosticReport {
     diagnostics.extend(scaling_diagnostics(graph));
     diagnostics.extend(api_key_diagnostics(graph));
     diagnostics.extend(gpu_diagnostics(graph));
+    diagnostics.extend(runpod_diagnostics(graph));
 
     for missing in graph.missing_references() {
         let mut d = Diagnostic::new(
@@ -99,6 +101,24 @@ pub(crate) fn apply_memory_check(
 fn gpu_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for hw in &graph.hardware_profiles {
+        if let Some(acc) = hw.accelerator.as_ref()
+            && acc.kind == AcceleratorKind::Gpu
+            && let Some(card) = alias_memory_conflict(&acc.model, acc.memory)
+        {
+            let mut diag = Diagnostic::new(
+                catalog::CAP_GPU_ALIAS_MEMORY,
+                Severity::Warning,
+                format!(
+                    "hardware_profile `{}`: `{}` is {}, which ignores `accelerator.memory` ({})",
+                    hw.id,
+                    acc.model,
+                    card.describe(),
+                    acc.memory
+                ),
+            );
+            diag.resource = Some(format!("hardware_profile.{}", hw.id));
+            out.push(diag);
+        }
         let Some(Err(err)) = hw.accelerator.as_ref().and_then(Accelerator::gpu_card) else {
             continue;
         };
@@ -124,8 +144,29 @@ fn gpu_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
     out
 }
 
-/// Hardware-profile `provider` value whose deployments honor `scaling {}`.
-const SCALING_PROVIDER: &str = "modal";
+/// Hardware-profile `provider` values whose deployments honor `scaling {}`.
+const SCALING_PROVIDERS: [&str; 2] = ["modal", "runpod"];
+
+/// RunPod's ceiling for a worker's idle timeout (`workers.idleTimeout`).
+const RUNPOD_MAX_IDLE_SECS: u32 = 3600;
+
+/// Limits a provider adds to [`ScalingSettings::problems`].
+fn provider_scaling_problems(
+    provider: &str,
+    scaling: &amicu_core::resource::ScalingSettings,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if provider == "runpod"
+        && let Some(secs) = scaling.scaledown_window_secs
+        && secs > RUNPOD_MAX_IDLE_SECS
+    {
+        out.push(format!(
+            "`scaledown_window` must be at most 1h on RunPod (got {})",
+            amicu_core::resource::ScalingSettings::format_window(secs)
+        ));
+    }
+    out
+}
 
 /// Validate each deployment's `scaling {}` block:
 /// `AMICU-CAP-008` for invalid values, `AMICU-CAP-009` when the deployment's
@@ -137,7 +178,14 @@ fn scaling_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
             continue;
         };
         let resource = format!("deployment.{}", d.id);
-        for problem in scaling.problems() {
+        let provider = graph
+            .hardware_profiles
+            .iter()
+            .find(|h| h.id == d.hardware_profile)
+            .map(|h| h.provider.as_str());
+        let mut problems = scaling.problems();
+        problems.extend(provider_scaling_problems(provider.unwrap_or(""), scaling));
+        for problem in problems {
             let mut diag = Diagnostic::new(
                 catalog::CAP_SCALING_INVALID,
                 Severity::Error,
@@ -146,24 +194,107 @@ fn scaling_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
             diag.resource = Some(resource.clone());
             out.push(diag);
         }
-        let provider = graph
-            .hardware_profiles
-            .iter()
-            .find(|h| h.id == d.hardware_profile)
-            .map(|h| h.provider.as_str());
         if let Some(provider) = provider
-            && provider != SCALING_PROVIDER
+            && !SCALING_PROVIDERS.contains(&provider)
         {
             let mut diag = Diagnostic::new(
                 catalog::CAP_SCALING_UNSUPPORTED_PROVIDER,
                 Severity::Error,
                 format!(
-                    "deployment `{}`: `scaling {{}}` is not supported for provider `{provider}` yet (only `{SCALING_PROVIDER}`); remove the block",
-                    d.id
+                    "deployment `{}`: `scaling {{}}` is not supported for provider `{provider}` yet (only {}); remove the block",
+                    d.id,
+                    SCALING_PROVIDERS.map(|p| format!("`{p}`")).join(", ")
                 ),
             );
             diag.resource = Some(resource.clone());
             out.push(diag);
+        }
+    }
+    out
+}
+
+const RUNPOD_PROVIDER: &str = "runpod";
+
+/// `scaling {}` a pod honours: none, or exactly one replica.
+fn pod_scaling_ok(s: &ScalingSettings) -> bool {
+    s.is_empty()
+        || (s.min_replicas == Some(1)
+            && s.max_replicas == Some(1)
+            && s.target_concurrency.is_none()
+            && s.scaledown_window_secs.is_none())
+}
+
+/// `AMICU-CAP-015`: the `runpod {}` block must fit its profile and the
+/// deployments that use it.
+fn runpod_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let mut push = |resource: String, message: String| {
+        let mut d = Diagnostic::new(
+            catalog::CAP_RUNPOD_SETTINGS_INVALID,
+            Severity::Error,
+            message,
+        );
+        d.resource = Some(resource);
+        out.push(d);
+    };
+    for hw in &graph.hardware_profiles {
+        let resource = format!("hardware_profile.{}", hw.id);
+        if hw.provider != RUNPOD_PROVIDER {
+            if hw.runpod.is_some() {
+                push(
+                    resource,
+                    format!(
+                        "hardware_profile `{}`: a `runpod {{}}` block needs `provider = \"runpod\"` \
+                         (the provider is `{}`); remove the block",
+                        hw.id, hw.provider
+                    ),
+                );
+            }
+            continue;
+        }
+        let mode = hw.runpod_mode();
+        if mode == RunpodMode::Serverless && hw.runpod.is_some_and(|r| r.cloud.is_some()) {
+            push(
+                resource.clone(),
+                format!(
+                    "hardware_profile `{}`: `cloud` applies only to `mode = \"pod\"`; remove it \
+                     or set `mode = \"pod\"`",
+                    hw.id
+                ),
+            );
+        }
+        if mode == RunpodMode::Serverless
+            && let Some(acc) = &hw.accelerator
+            && let Some(Ok(card)) = acc.gpu_card()
+            && RUNPOD_PODS_ONLY_GPUS.contains(&card.id)
+        {
+            push(
+                resource.clone(),
+                format!(
+                    "hardware_profile `{}`: `{}` has no RunPod serverless pool; it is offered only \
+                     as a pod. Add `runpod {{ mode = \"pod\" }}` to run it as an always-on pod",
+                    hw.id, acc.model
+                ),
+            );
+        }
+        if mode == RunpodMode::Pod {
+            for d in graph
+                .deployments
+                .iter()
+                .filter(|d| d.hardware_profile == hw.id)
+            {
+                if d.scaling.as_ref().is_some_and(|s| !pod_scaling_ok(s)) {
+                    push(
+                        format!("deployment.{}", d.id),
+                        format!(
+                            "deployment `{}`: a RunPod pod runs exactly one replica, so `scaling {{}}` \
+                             can only be `min_replicas = 1` and `max_replicas = 1`; remove the \
+                             block or use `mode = \"serverless\"`",
+                            d.id
+                        ),
+                    );
+                }
+            }
         }
     }
     out
@@ -420,6 +551,7 @@ mod residency_tests {
             memory: ByteSize::from_bytes(1024),
             interconnect: None,
             price: None,
+            runpod: None,
         }
     }
 
@@ -622,6 +754,7 @@ mod vllm_dispatch_tests {
             memory: ByteSize::from_bytes(64 * GIB),
             interconnect: None,
             price: None,
+            runpod: None,
         }
     }
 
@@ -1030,6 +1163,7 @@ mod scaling_tests {
             memory: ByteSize::from_bytes(1024),
             interconnect: None,
             price: None,
+            runpod: None,
         });
         g.deployments.push(Deployment {
             scaling,
@@ -1096,6 +1230,33 @@ mod scaling_tests {
     }
 
     #[test]
+    fn runpod_accepts_scaling_within_its_limits() {
+        assert_eq!(codes(&graph("runpod", Some(valid()))), Vec::<String>::new());
+        let long = ScalingSettings {
+            scaledown_window_secs: Some(7200),
+            ..ScalingSettings::default()
+        };
+        assert_eq!(
+            codes(&graph("runpod", Some(long.clone()))),
+            vec!["AMICU-CAP-008"]
+        );
+        assert_eq!(codes(&graph("modal", Some(long))), Vec::<String>::new());
+        for bad in [
+            ScalingSettings {
+                max_replicas: Some(0),
+                ..ScalingSettings::default()
+            },
+            ScalingSettings {
+                min_replicas: Some(2),
+                max_replicas: Some(1),
+                ..ScalingSettings::default()
+            },
+        ] {
+            assert_eq!(codes(&graph("runpod", Some(bad))), vec!["AMICU-CAP-008"]);
+        }
+    }
+
+    #[test]
     fn non_modal_provider_is_cap_009_error() {
         let g = graph("local_apple", Some(valid()));
         assert_eq!(codes(&g), vec!["AMICU-CAP-009"]);
@@ -1131,6 +1292,7 @@ mod api_key_tests {
             memory: ByteSize::from_bytes(1024),
             interconnect: None,
             price: None,
+            runpod: None,
         });
         g.deployments.push(Deployment {
             scaling: None,
@@ -1201,7 +1363,7 @@ mod api_key_tests {
 #[cfg(test)]
 mod gpu_tests {
     use super::*;
-    use amicu_core::resource::{AcceleratorKind, HardwareProfile};
+    use amicu_core::resource::HardwareProfile;
     use amicu_core::units::ByteSize;
 
     const GIB: u64 = 1 << 30;
@@ -1223,6 +1385,7 @@ mod gpu_tests {
             memory: ByteSize::from_bytes(64 * GIB),
             interconnect: None,
             price: None,
+            runpod: None,
         });
         g
     }
@@ -1287,9 +1450,161 @@ mod gpu_tests {
     }
 
     #[test]
+    fn an_alias_that_ignores_the_declared_memory_warns() {
+        assert_eq!(
+            codes(&graph("modal", "NVIDIA H100 80GB HBM3", 40)),
+            [("AMICU-CAP-014".to_owned(), Severity::Warning)]
+        );
+        assert_eq!(
+            codes(&graph("modal", "NVIDIA H100 80GB HBM3", 80)),
+            Vec::new()
+        );
+    }
+
+    #[test]
     fn non_gpu_accelerators_are_not_checked() {
         let mut g = graph("local_apple", "m4_pro", 48);
         g.hardware_profiles[0].accelerator.as_mut().unwrap().kind = AcceleratorKind::AppleSilicon;
         assert_eq!(codes(&g), Vec::new());
+    }
+}
+
+#[cfg(test)]
+mod runpod_tests {
+    use super::*;
+    use amicu_core::resource::{
+        HardwareProfile, LlamaCppSettings, RunpodCloud, RunpodSettings, ScalingSettings,
+    };
+    use amicu_core::units::ByteSize;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    fn graph(
+        provider: &str,
+        gpu: &str,
+        vram_gib: u64,
+        runpod: Option<RunpodSettings>,
+        scaling: Option<ScalingSettings>,
+    ) -> Graph {
+        let mut g = Graph::new();
+        g.hardware_profiles.push(HardwareProfile {
+            id: "hw".into(),
+            provider: provider.to_owned(),
+            region: None,
+            accelerator: Some(Accelerator {
+                kind: AcceleratorKind::Gpu,
+                model: gpu.to_owned(),
+                count: 1,
+                memory: ByteSize::from_bytes(vram_gib * GIB),
+                memory_bandwidth_gbps: None,
+            }),
+            cpu: None,
+            memory: ByteSize::from_bytes(64 * GIB),
+            interconnect: None,
+            price: None,
+            runpod,
+        });
+        g.deployments.push(Deployment {
+            scaling,
+            memory_check: MemoryCheck::default(),
+            api_key: None,
+            id: "dep".into(),
+            model: "m".into(),
+            hardware_profile: "hw".into(),
+            runtime: Runtime::LlamaCpp(LlamaCppSettings::default()),
+        });
+        g
+    }
+
+    fn pod(cloud: Option<RunpodCloud>) -> RunpodSettings {
+        RunpodSettings {
+            mode: RunpodMode::Pod,
+            cloud,
+        }
+    }
+
+    fn serverless(cloud: Option<RunpodCloud>) -> RunpodSettings {
+        RunpodSettings {
+            mode: RunpodMode::Serverless,
+            cloud,
+        }
+    }
+
+    fn messages(g: &Graph) -> Vec<String> {
+        runpod_diagnostics(g)
+            .into_iter()
+            .inspect(|d| assert_eq!(d.code, catalog::CAP_RUNPOD_SETTINGS_INVALID))
+            .map(|d| d.message)
+            .collect()
+    }
+
+    fn one_replica() -> ScalingSettings {
+        ScalingSettings {
+            min_replicas: Some(1),
+            max_replicas: Some(1),
+            ..ScalingSettings::default()
+        }
+    }
+
+    #[test]
+    fn valid_blocks_are_clean() {
+        for runpod in [
+            None,
+            Some(serverless(None)),
+            Some(pod(None)),
+            Some(pod(Some(RunpodCloud::Community))),
+        ] {
+            assert_eq!(
+                messages(&graph("runpod", "l4", 24, runpod, None)),
+                Vec::<String>::new()
+            );
+        }
+    }
+
+    #[test]
+    fn the_block_needs_provider_runpod() {
+        let m = messages(&graph("modal", "l4", 24, Some(pod(None)), None));
+        assert!(m[0].contains("provider = \"runpod\""), "{m:?}");
+    }
+
+    #[test]
+    fn cloud_is_only_for_pod_mode() {
+        let m = messages(&graph(
+            "runpod",
+            "l4",
+            24,
+            Some(serverless(Some(RunpodCloud::Secure))),
+            None,
+        ));
+        assert!(m[0].contains("`cloud` applies only"), "{m:?}");
+    }
+
+    #[test]
+    fn a_pod_accepts_only_one_replica_scaling() {
+        let g = graph("runpod", "l4", 24, Some(pod(None)), Some(one_replica()));
+        assert_eq!(messages(&g), Vec::<String>::new());
+        assert_eq!(scaling_diagnostics(&g).len(), 0);
+        let two = ScalingSettings {
+            max_replicas: Some(2),
+            ..one_replica()
+        };
+        let m = messages(&graph("runpod", "l4", 24, Some(pod(None)), Some(two)));
+        assert!(m[0].contains("exactly one replica"), "{m:?}");
+    }
+
+    #[test]
+    fn a_pods_only_gpu_in_serverless_mode_hints_pod_mode() {
+        let m = messages(&graph("runpod", "h200-nvl-141gb", 141, None, None));
+        assert!(m[0].contains("mode = \"pod\""), "{m:?}");
+        assert_eq!(
+            messages(&graph(
+                "runpod",
+                "h200-nvl-141gb",
+                141,
+                Some(pod(None)),
+                None
+            )),
+            Vec::<String>::new()
+        );
     }
 }

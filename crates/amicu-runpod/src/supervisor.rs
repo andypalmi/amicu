@@ -25,14 +25,15 @@
 //! that same lookup. The live GPU catalog narrows `excludedTypes` to the
 //! requested card before anything is written.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use amicu_core::naming::{project_app_name, project_endpoint_name};
-use amicu_core::resource::{Accelerator, HardwareProfile, Model, Region, Runtime, ScalingSettings};
+use amicu_core::resource::{
+    Accelerator, HardwareProfile, Model, Region, Residency, Runtime, ScalingSettings,
+};
 use amicu_core::secret::SecretValue;
 use amicu_llamacpp::remote::{
     self, GgufSource, HF_TOKEN_ENV_VAR, LLAMACPP_IMAGE_SERVER_PATH, RemoteEnv,
@@ -48,11 +49,12 @@ use sha2::{Digest, Sha256};
 
 use crate::client::{
     CreateEndpoint, CreateSecret, DeleteOutcome, Endpoint, GpuRequest, GpuType, OWNER_ENV_VAR,
-    RunPodClient, UpdateEndpoint, WorkersConfig,
+    RunPodClient, UpdateEndpoint, WorkerSummary, WorkersConfig,
 };
 use crate::error::RunPodError;
 use crate::hardware::{exclusions_from_catalog, gpu_placement, verify_catalog_memory};
-use crate::regions::select_data_centers;
+use crate::regions::{restrict_to_residencies, select_data_centers};
+use crate::secrets::{SecretLedger, reference_secrets, stop_result};
 
 /// The provider name the shared remote-launch renderer puts in its errors.
 pub const PROVIDER: &str = "RunPod";
@@ -76,6 +78,14 @@ pub const LLAMACPP_IMAGE_ENV_VAR: &str = "AMICU_RUNPOD_LLAMACPP_IMAGE";
 // health check at a route that answers 204 while loading.
 pub const HEALTH_PATH: &str = "/health";
 
+/// How often the CLI has `start` report progress while it waits for
+/// readiness.
+pub const PROGRESS_EVERY: Duration = Duration::from_secs(30);
+
+/// Receives one readiness progress line (see
+/// [`RunPodSupervisor::with_progress`]).
+type ProgressSink = Arc<dyn Fn(&str) + Send + Sync>;
+
 /// Idle seconds before a worker scales down, unless the deployment's
 /// `scaling { scaledown_window }` says otherwise (same default as Modal).
 pub const DEFAULT_IDLE_TIMEOUT_SECS: u32 = 900;
@@ -86,9 +96,10 @@ pub const MAX_IDLE_TIMEOUT_SECS: u32 = 3600;
 /// Workers kept warm unless overridden: scale to zero.
 pub const DEFAULT_MIN_WORKERS: u32 = 0;
 
-/// Worker ceiling unless `scaling { max_replicas }` says otherwise. RunPod
-/// needs a finite bound (Modal's default is unlimited).
-pub const DEFAULT_MAX_WORKERS: u32 = 3;
+/// Worker ceiling unless `scaling { max_replicas }` says otherwise: one GPU
+/// at most, so cost stays bounded until the user raises it. RunPod needs a
+/// finite bound (Modal's default is unlimited).
+pub const DEFAULT_MAX_WORKERS: u32 = 1;
 
 /// In-flight requests per worker before RunPod scales out, unless
 /// `scaling { target_concurrency }` says otherwise (same default as Modal).
@@ -278,6 +289,7 @@ pub struct RunPodSupervisor {
     gpu: Option<GpuRequest>,
     /// RunPod GPU type id and nominal VRAM in GB.
     gpu_type: Option<(String, u32)>,
+    region: Option<String>,
     data_center_ids: Vec<String>,
     scaling: ScalingSettings,
     disk_gb: u32,
@@ -287,9 +299,11 @@ pub struct RunPodSupervisor {
     confirmed_account: bool,
     recorded_endpoint: Option<String>,
     recorded_secrets: Vec<String>,
+    gateway_key: Option<SecretValue>,
+    progress: Option<(Duration, ProgressSink)>,
     deployed_endpoint: Arc<Mutex<Option<String>>>,
     created_endpoint: Arc<AtomicBool>,
-    created_secrets: Arc<Mutex<Vec<String>>>,
+    secrets: SecretLedger,
 }
 
 impl fmt::Debug for RunPodSupervisor {
@@ -310,8 +324,10 @@ impl RunPodSupervisor {
     /// [`project_endpoint_name`]`(project_id, deployment_id)`.
     #[must_use]
     pub fn new(client: RunPodClient, project_id: &str, deployment_id: &str) -> Self {
+        let client = Arc::new(client);
         Self {
-            client: Arc::new(client),
+            secrets: SecretLedger::new(Arc::clone(&client)),
+            client,
             probe: Arc::new(ReqwestTransport::new()),
             workspace_id: None,
             project_id: project_id.to_owned(),
@@ -319,6 +335,7 @@ impl RunPodSupervisor {
             endpoint_name: project_endpoint_name(project_id, deployment_id),
             gpu: None,
             gpu_type: None,
+            region: None,
             data_center_ids: Vec::new(),
             scaling: ScalingSettings::default(),
             disk_gb: DEFAULT_CONTAINER_DISK_GB,
@@ -328,9 +345,10 @@ impl RunPodSupervisor {
             confirmed_account: false,
             recorded_endpoint: None,
             recorded_secrets: Vec::new(),
+            gateway_key: None,
+            progress: None,
             deployed_endpoint: Arc::default(),
             created_endpoint: Arc::default(),
-            created_secrets: Arc::default(),
         }
     }
 
@@ -400,10 +418,31 @@ impl RunPodSupervisor {
     pub fn with_region(mut self, region: Option<&Region>) -> Result<Self, LlamaCppError> {
         self.data_center_ids = match region {
             Some(r) => {
-                select_data_centers(&r.code, Some(&r.residency)).map_err(|e| runpod_err(&e))?
+                select_data_centers(&r.code, r.declared_residency()).map_err(|e| runpod_err(&e))?
             }
             None => Vec::new(),
         };
+        self.region = region.map(|r| r.code.clone());
+        Ok(self)
+    }
+
+    /// Holds placement to the `allowed` residencies (the project's
+    /// `data_class` allowlist): without a region, only their data centers;
+    /// with one, it must lie inside them. Call after
+    /// [`with_region`](Self::with_region); empty `allowed` is a no-op.
+    ///
+    /// # Errors
+    /// [`LlamaCppError::Supervisor`] when the region lies outside `allowed`.
+    pub fn with_allowed_residencies(
+        mut self,
+        allowed: &[Residency],
+    ) -> Result<Self, LlamaCppError> {
+        self.data_center_ids = restrict_to_residencies(
+            self.region.as_deref(),
+            std::mem::take(&mut self.data_center_ids),
+            allowed,
+        )
+        .map_err(|e| runpod_err(&e))?;
         Ok(self)
     }
 
@@ -474,6 +513,26 @@ impl RunPodSupervisor {
         self
     }
 
+    /// The deployment's `api_key` (a RunPod key), which `metrics` sends as the
+    /// gateway bearer.
+    #[must_use]
+    pub fn with_gateway_key(mut self, key: SecretValue) -> Self {
+        self.gateway_key = Some(key);
+        self
+    }
+
+    /// Where `start` reports readiness progress, once per `every` (the CLI
+    /// uses [`PROGRESS_EVERY`]); without a sink it stays silent.
+    #[must_use]
+    pub fn with_progress(
+        mut self,
+        every: Duration,
+        sink: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Self {
+        self.progress = Some((every, Arc::new(sink)));
+        self
+    }
+
     /// Convenience: a supervisor configured from a resolved hardware profile
     /// (accelerator and region).
     ///
@@ -537,7 +596,7 @@ impl RunPodSupervisor {
     /// remove names, so after `start` or `stop` this is the set to record.
     #[must_use]
     pub fn created_secrets(&self) -> Arc<Mutex<Vec<String>>> {
-        Arc::clone(&self.created_secrets)
+        self.secrets.shared()
     }
 
     /// The exact RunPod secret names a `start` with `plan` and `secrets`
@@ -566,7 +625,7 @@ impl RunPodSupervisor {
     /// # Errors
     /// See [`amicu_llamacpp::remote::launch_argv`].
     pub fn launch_argv(&self, plan: &LaunchPlan) -> Result<Vec<String>, LlamaCppError> {
-        remote::launch_argv(plan, self.gguf.as_ref(), PROVIDER)
+        container_argv(plan, self.gguf.as_ref())
     }
 
     /// Builds the endpoint request and the secrets for `plan`. Pure: the
@@ -580,10 +639,7 @@ impl RunPodSupervisor {
         hf_token_fallback: Option<&str>,
     ) -> Result<Prepared, LlamaCppError> {
         let runtime = RuntimeKind::of(&plan.settings);
-        let port = match &plan.settings {
-            Runtime::Vllm(s) => s.port,
-            Runtime::LlamaCpp(s) => s.port,
-        };
+        let port = runtime_port(plan);
         let argv = self.launch_argv(plan)?;
         let RemoteEnv { plain, mut secret } = remote::split_env(plan, secrets, hf_token_fallback)?;
 
@@ -620,12 +676,13 @@ impl RunPodSupervisor {
                  remove it from the deployment's `env` block"
             )));
         }
-        let gpu = self.gpu.clone().ok_or_else(|| {
+        let mut gpu = self.gpu.clone().ok_or_else(|| {
             LlamaCppError::Supervisor(
                 "RunPod Serverless needs a GPU accelerator in the deployment's hardware profile"
                     .to_owned(),
             )
         })?;
+        gpu.min_cuda_version = image_min_cuda(image, runtime);
 
         let owner = self.owner();
         let mut env = plain;
@@ -633,45 +690,22 @@ impl RunPodSupervisor {
         env.insert("PORT_HEALTH".to_owned(), port.to_string());
         env.insert("HEALTH_CHECK_PATH".to_owned(), HEALTH_PATH.to_owned());
         env.insert(OWNER_ENV_VAR.to_owned(), owner.clone());
-        let mut create_secrets = Vec::with_capacity(secret.len());
-        for (key, value) in &secret {
-            let name = secret_name(&self.project_id, &self.deployment_id, &owner, key, value);
-            env.insert(key.clone(), secret_reference(&name));
-            create_secrets.push(CreateSecret {
-                name,
-                value: value.clone(),
-                description: Some(format!(
-                    "amicu: {key} for deployment {}",
-                    self.deployment_id
-                )),
-            });
-        }
-
-        let (program, rest) = argv.split_first().ok_or_else(|| {
-            LlamaCppError::Supervisor("the rendered launch command is empty".to_owned())
-        })?;
-        let program = if program == "llama-server" {
-            LLAMACPP_IMAGE_SERVER_PATH.to_owned()
-        } else {
-            program.clone()
-        };
+        let create_secrets = reference_secrets(
+            &self.project_id,
+            &self.deployment_id,
+            &owner,
+            &secret,
+            &mut env,
+        );
+        let (entrypoint, cmd) = container_command(&argv)?;
 
         let mut endpoint = CreateEndpoint::new(self.endpoint_name.clone(), image, gpu);
-        endpoint.entrypoint = vec![program];
-        endpoint.cmd = rest.to_vec();
+        endpoint.entrypoint = entrypoint;
+        endpoint.cmd = cmd;
         endpoint.env = env;
         endpoint.ports = vec![format!("{port}/http")];
         endpoint.disk_gb = Some(self.disk_gb);
-        endpoint.workers = WorkersConfig {
-            min: self.scaling.min_replicas.unwrap_or(DEFAULT_MIN_WORKERS),
-            max: self.scaling.max_replicas.unwrap_or(DEFAULT_MAX_WORKERS),
-            idle_timeout: Some(
-                self.scaling
-                    .scaledown_window_secs
-                    .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS)
-                    .clamp(1, MAX_IDLE_TIMEOUT_SECS),
-            ),
-        };
+        endpoint.workers = self.workers_config();
         endpoint.request_count = self
             .scaling
             .target_concurrency
@@ -686,103 +720,29 @@ impl RunPodSupervisor {
         })
     }
 
+    /// The `scaling {}` block as RunPod workers: a lone `min_replicas` above
+    /// the default ceiling raises the ceiling with it.
+    fn workers_config(&self) -> WorkersConfig {
+        let min = self.scaling.min_replicas.unwrap_or(DEFAULT_MIN_WORKERS);
+        WorkersConfig {
+            min,
+            max: self
+                .scaling
+                .max_replicas
+                .unwrap_or(DEFAULT_MAX_WORKERS.max(min)),
+            idle_timeout: Some(
+                self.scaling
+                    .scaledown_window_secs
+                    .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS)
+                    .clamp(1, MAX_IDLE_TIMEOUT_SECS),
+            ),
+        }
+    }
+
     fn set_deployed(&self, id: &str) {
         if let Ok(mut slot) = self.deployed_endpoint.lock() {
             *slot = Some(id.to_owned());
         }
-    }
-
-    fn note_secret(&self, name: &str) {
-        if let Ok(mut created) = self.created_secrets.lock()
-            && !created.iter().any(|n| n == name)
-        {
-            created.push(name.to_owned());
-        }
-    }
-
-    fn forget_secret(&self, name: &str) {
-        if let Ok(mut created) = self.created_secrets.lock() {
-            created.retain(|n| n != name);
-        }
-    }
-
-    fn known_secrets(&self) -> Vec<String> {
-        self.created_secrets
-            .lock()
-            .map(|c| c.clone())
-            .unwrap_or_default()
-    }
-
-    /// Makes sure `secret` exists. Names are content-addressed, so an
-    /// existing name already holds this value and is left alone. Returns
-    /// whether this call created it.
-    async fn ensure_secret(&self, secret: &CreateSecret) -> Result<bool, LlamaCppError> {
-        let name = &secret.name;
-        let exists = self
-            .client
-            .find_secret(name)
-            .await
-            .map_err(|e| secret_err(name, &e))?
-            .is_some();
-        self.note_secret(name);
-        if exists {
-            return Ok(false);
-        }
-        match self.client.create_secret(secret).await {
-            Ok(_) => Ok(true),
-            // Created concurrently under the same name: the same value.
-            Err(RunPodError::Conflict { .. }) => Ok(false),
-            // The response was lost: whether it exists is a lookup away.
-            Err(RunPodError::Transport(detail)) => match self.client.find_secret(name).await {
-                Ok(Some(_)) => Ok(true),
-                Ok(None) => {
-                    self.forget_secret(name);
-                    Err(LlamaCppError::Supervisor(format!(
-                        "writing RunPod secret `{name}` failed in transport ({detail}) and it \
-                         does not exist; run the command again"
-                    )))
-                }
-                Err(e) => Err(LlamaCppError::Supervisor(format!(
-                    "writing RunPod secret `{name}` failed in transport ({detail}) and looking \
-                     it up failed too ({e}); it may exist"
-                ))),
-            },
-            Err(e) => {
-                // RunPod answered and refused: nothing was written.
-                self.forget_secret(name);
-                Err(secret_err(name, &e))
-            }
-        }
-    }
-
-    /// Best-effort removal of secrets this run created for an endpoint write
-    /// RunPod refused; whatever cannot be removed stays in
-    /// [`created_secrets`](Self::created_secrets) for the caller.
-    async fn discard_secrets(&self, names: &[String]) {
-        for name in names {
-            if self.delete_secret_by_name(name).await.is_ok() {
-                self.forget_secret(name);
-            }
-        }
-    }
-
-    /// Once the endpoint references only `current`: deletes every other
-    /// known secret (the previous generation). Best effort; what cannot be
-    /// deleted stays in [`created_secrets`](Self::created_secrets).
-    async fn retire_stale_secrets(&self, current: &[CreateSecret]) {
-        let current: BTreeSet<&str> = current.iter().map(|s| s.name.as_str()).collect();
-        for name in self.known_secrets() {
-            if !current.contains(name.as_str()) && self.delete_secret_by_name(&name).await.is_ok() {
-                self.forget_secret(&name);
-            }
-        }
-    }
-
-    async fn delete_secret_by_name(&self, name: &str) -> Result<(), RunPodError> {
-        if let Some(existing) = self.client.find_secret(name).await? {
-            self.client.delete_secret(&existing.id).await?;
-        }
-        Ok(())
     }
 
     /// Refuses an endpoint unless it carries this deployment's owner marker.
@@ -818,7 +778,7 @@ impl RunPodSupervisor {
             Ok(_) => Ok(id.to_owned()),
             Err(e) => {
                 if !matches!(e, RunPodError::Transport(_)) {
-                    self.discard_secrets(fresh).await;
+                    self.secrets.discard(fresh).await;
                 }
                 Err(runpod_err(&e))
             }
@@ -877,7 +837,7 @@ impl RunPodSupervisor {
             Err(e) => {
                 // RunPod answered and refused: nothing references the
                 // secrets written for it.
-                self.discard_secrets(fresh).await;
+                self.secrets.discard(fresh).await;
                 Err(runpod_err(&e))
             }
         }
@@ -921,14 +881,22 @@ impl RunPodSupervisor {
     /// until a worker answers `200`. `204` (initializing), "no workers"
     /// answers and transport failures are retried with a doubling backoff
     /// until the timeout; `401`/`403` fail at once (the gateway does not
-    /// accept the key, waiting will not help).
-    async fn wait_ready(&self, id: &str, key: &SecretValue) -> Result<(), LlamaCppError> {
+    /// accept the key, waiting will not help). Reports the elapsed time and
+    /// worker states to the [progress sink](Self::with_progress), if any.
+    async fn wait_ready(
+        &self,
+        id: &str,
+        key: &SecretValue,
+        deployment: &str,
+    ) -> Result<(), LlamaCppError> {
         let key = key.expose_secret_str().map_err(|_| {
             LlamaCppError::Supervisor("the endpoint API key is not valid UTF-8".to_owned())
         })?;
         let url = format!("{}{HEALTH_PATH}", endpoint_url(id));
         let timing = self.readiness;
-        let deadline = tokio::time::Instant::now() + timing.timeout;
+        let started = tokio::time::Instant::now();
+        let deadline = started + timing.timeout;
+        let mut next_progress = started + self.progress.as_ref().map_or(Duration::ZERO, |p| p.0);
         let mut backoff = timing.initial_backoff;
         let mut last = "no answer".to_owned();
         loop {
@@ -951,12 +919,31 @@ impl RunPodSupervisor {
             if now >= deadline {
                 return Err(LlamaCppError::Supervisor(format!(
                     "RunPod endpoint {id} did not become ready within {}s (last health answer: \
-                     {last})",
-                    timing.timeout.as_secs()
+                     {last}; workers: {}); see `amicu runpod logs {deployment}`",
+                    timing.timeout.as_secs(),
+                    self.worker_summary(id).await
                 )));
+            }
+            if let Some((every, sink)) = &self.progress
+                && now >= next_progress
+            {
+                next_progress = now + *every;
+                sink(&format!(
+                    "waiting for RunPod endpoint {id}: {} elapsed, workers: {}",
+                    elapsed(now - started),
+                    self.worker_summary(id).await
+                ));
             }
             tokio::time::sleep(backoff.min(deadline - now)).await;
             backoff = (backoff * 2).min(timing.max_backoff);
+        }
+    }
+
+    /// The endpoint's worker states for a progress or timeout message.
+    async fn worker_summary(&self, id: &str) -> String {
+        match self.client.list_workers(id).await {
+            Ok(w) => describe_workers(&w.summary),
+            Err(e) => format!("unknown ({e})"),
         }
     }
 
@@ -1025,46 +1012,98 @@ impl RunPodSupervisor {
             Err(e) => return Err(e),
         };
         for name in &self.recorded_secrets {
-            self.note_secret(name);
+            self.secrets.note(name);
         }
-        let mut names = self.known_secrets();
-        names.sort();
-        if outcome == DeleteOutcome::AlreadyGone && !self.confirmed_account {
-            return Ok(StopOutcome::AlreadyGone {
-                kept_secrets: names,
-            });
+        self.secrets
+            .finish_stop("endpoint", &handle.id, outcome, self.confirmed_account)
+            .await
+    }
+}
+
+fn describe_workers(s: &WorkerSummary) -> String {
+    format!(
+        "running={} idle={} initializing={} throttled={} unhealthy={}",
+        s.running, s.idle, s.initializing, s.throttled, s.unhealthy
+    )
+}
+
+fn elapsed(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
+}
+
+impl RunPodSupervisor {
+    fn gateway_key_str(&self) -> Result<&str, LlamaCppError> {
+        self.gateway_key
+            .as_ref()
+            .ok_or_else(|| {
+                LlamaCppError::Supervisor(
+                    "RunPod metrics need the deployment's api_key as the gateway key".to_owned(),
+                )
+            })?
+            .expose_secret_str()
+            .map_err(|_| {
+                LlamaCppError::Supervisor("the endpoint API key is not valid UTF-8".to_owned())
+            })
+    }
+
+    /// Refuses unless a worker is running or idle: any request through the
+    /// gateway would otherwise start (and bill) one. `wake` skips the check.
+    async fn ensure_awake(&self, id: &str, wake: bool) -> Result<(), LlamaCppError> {
+        if wake {
+            return Ok(());
         }
-        let mut failed: BTreeMap<String, String> = BTreeMap::new();
-        for name in names {
-            match self.delete_secret_by_name(&name).await {
-                Ok(()) => self.forget_secret(&name),
-                Err(e) => {
-                    failed.insert(name, e.to_string());
-                }
-            }
+        let s = self
+            .client
+            .list_workers(id)
+            .await
+            .map_err(|e| runpod_err(&e))?
+            .summary;
+        if s.running.saturating_add(s.idle) > 0 {
+            return Ok(());
         }
-        if !failed.is_empty() {
+        if s.initializing.saturating_add(s.throttled) > 0 {
             return Err(LlamaCppError::Supervisor(format!(
-                "RunPod endpoint {} was deleted, but these secrets could not be: {}",
-                handle.id,
-                failed
-                    .iter()
-                    .map(|(n, e)| format!("`{n}` ({e})"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                "a RunPod worker of endpoint {id} is starting ({} initializing, {} waiting \
+                 for capacity); retry shortly",
+                s.initializing, s.throttled
             )));
         }
-        Ok(match outcome {
-            DeleteOutcome::Deleted => StopOutcome::Deleted,
-            DeleteOutcome::AlreadyGone => StopOutcome::AlreadyGone {
-                kept_secrets: Vec::new(),
-            },
-        })
+        Err(LlamaCppError::Supervisor(format!(
+            "no RunPod worker of endpoint {id} is up, and scraping /metrics would start one \
+             (billed GPU time); pass --wake to start one anyway"
+        )))
+    }
+
+    /// One `/metrics` scrape through the gateway with the
+    /// [gateway key](Self::with_gateway_key). Without `wake`, a scaled-to-zero
+    /// endpoint is refused rather than woken.
+    ///
+    /// # Errors
+    /// No worker up (without `wake`), no gateway key, or a failed scrape.
+    pub async fn scrape_metrics(
+        &self,
+        handle: &RuntimeHandle,
+        wake: bool,
+    ) -> Result<amicu_telemetry::scrape::MetricsSnapshot, LlamaCppError> {
+        self.ensure_awake(&handle.id, wake).await?;
+        let key = self.gateway_key_str()?;
+        crate::metrics::scrape(&*self.probe, &handle.id, key)
+            .await
+            .map_err(|e| LlamaCppError::Supervisor(e.to_string()))
     }
 }
 
 /// The PATCH that makes an existing endpoint match `create`.
 fn update_from(create: &CreateEndpoint) -> UpdateEndpoint {
+    // On PATCH, `""` clears a CUDA floor and `[]` data centers clear a placement
+    // the previous configuration set.
+    let mut gpu = create.gpu.clone();
+    gpu.min_cuda_version.get_or_insert_with(String::new);
     UpdateEndpoint {
         name: None,
         image: Some(create.image.clone()),
@@ -1073,11 +1112,10 @@ fn update_from(create: &CreateEndpoint) -> UpdateEndpoint {
         env: Some(create.env.clone()),
         ports: Some(create.ports.clone()),
         disk_gb: create.disk_gb,
-        gpu: Some(create.gpu.clone()),
+        gpu: Some(gpu),
         workers: Some(create.workers),
         request_count: Some(create.request_count),
-        data_center_ids: (!create.data_center_ids.is_empty())
-            .then(|| create.data_center_ids.clone()),
+        data_center_ids: Some(create.data_center_ids.clone()),
         flashboot: Some(create.flashboot),
         network_volume_ids: None,
         timeout_ms: None,
@@ -1087,12 +1125,8 @@ fn update_from(create: &CreateEndpoint) -> UpdateEndpoint {
 
 /// Folds a [`RunPodError`] into the trait's error. `RunPodError` never carries
 /// a key or secret value, so its text is always safe to surface.
-fn runpod_err(error: &RunPodError) -> LlamaCppError {
+pub(crate) fn runpod_err(error: &RunPodError) -> LlamaCppError {
     LlamaCppError::Supervisor(error.to_string())
-}
-
-fn secret_err(name: &str, error: &RunPodError) -> LlamaCppError {
-    LlamaCppError::Supervisor(format!("writing RunPod secret `{name}` failed: {error}"))
 }
 
 fn duplicate_err<'a>(name: &str, ids: impl Iterator<Item = &'a str>) -> LlamaCppError {
@@ -1102,10 +1136,67 @@ fn duplicate_err<'a>(name: &str, ids: impl Iterator<Item = &'a str>) -> LlamaCpp
     ))
 }
 
-fn unsupported(what: &str) -> LlamaCppError {
+pub(crate) fn unsupported(what: &str) -> LlamaCppError {
     LlamaCppError::Supervisor(format!(
         "{what} are not yet supported for RunPod deployments"
     ))
+}
+
+/// The port the runtime listens on inside the container. llama.cpp uses the
+/// stock image's port whatever the deployment says: only the gateway or
+/// proxy URL is public, and the image's own health check targets that port.
+pub(crate) fn runtime_port(plan: &LaunchPlan) -> u16 {
+    match &plan.settings {
+        Runtime::Vllm(s) => s.port,
+        Runtime::LlamaCpp(_) => remote::LLAMACPP_IMAGE_PORT,
+    }
+}
+
+/// [`remote::launch_argv`] with `--port` set to [`runtime_port`].
+pub(crate) fn container_argv(
+    plan: &LaunchPlan,
+    gguf: Option<&GgufSource>,
+) -> Result<Vec<String>, LlamaCppError> {
+    let mut argv = remote::launch_argv(plan, gguf, PROVIDER)?;
+    let port = runtime_port(plan).to_string();
+    match argv.iter().position(|a| a == "--port") {
+        Some(i) if i + 1 < argv.len() => argv[i + 1] = port,
+        _ => argv.extend(["--port".to_owned(), port]),
+    }
+    Ok(argv)
+}
+
+/// The host CUDA floor for `image`: the stock image's requirement, `None`
+/// for an operator override (its requirement is unknown).
+pub(crate) fn image_min_cuda(image: &str, runtime: RuntimeKind) -> Option<String> {
+    (image == remote::default_image(runtime))
+        .then(|| remote::default_image_min_cuda(runtime).to_owned())
+}
+
+/// The container image for `runtime`: the operator override, else the stock
+/// image.
+pub(crate) fn runtime_image(runtime: RuntimeKind) -> String {
+    let var = match runtime {
+        RuntimeKind::Vllm => VLLM_IMAGE_ENV_VAR,
+        RuntimeKind::LlamaCpp => LLAMACPP_IMAGE_ENV_VAR,
+    };
+    std::env::var(var).unwrap_or_else(|_| remote::default_image(runtime).to_owned())
+}
+
+/// Splits a rendered argv into the container ENTRYPOINT and CMD;
+/// `llama-server` maps to the stock image's binary path.
+pub(crate) fn container_command(
+    argv: &[String],
+) -> Result<(Vec<String>, Vec<String>), LlamaCppError> {
+    let (program, rest) = argv.split_first().ok_or_else(|| {
+        LlamaCppError::Supervisor("the rendered launch command is empty".to_owned())
+    })?;
+    let program = if program == "llama-server" {
+        LLAMACPP_IMAGE_SERVER_PATH.to_owned()
+    } else {
+        program.clone()
+    };
+    Ok((vec![program], rest.to_vec()))
 }
 
 #[async_trait]
@@ -1115,13 +1206,7 @@ impl ProcessSupervisor for RunPodSupervisor {
         plan: &LaunchPlan,
         secrets: &[ResolvedSecret],
     ) -> Result<RuntimeHandle, LlamaCppError> {
-        let runtime = RuntimeKind::of(&plan.settings);
-        let image_var = match runtime {
-            RuntimeKind::Vllm => VLLM_IMAGE_ENV_VAR,
-            RuntimeKind::LlamaCpp => LLAMACPP_IMAGE_ENV_VAR,
-        };
-        let image =
-            std::env::var(image_var).unwrap_or_else(|_| remote::default_image(runtime).to_owned());
+        let image = runtime_image(RuntimeKind::of(&plan.settings));
         let hf_token_fallback = std::env::var(HF_TOKEN_ENV_VAR).ok();
         let mut prepared = self.prepare(plan, secrets, &image, hf_token_fallback.as_deref())?;
         // Before anything is written: exclude every other card RunPod lists
@@ -1135,18 +1220,19 @@ impl ProcessSupervisor for RunPodSupervisor {
 
         // Recorded secrets may still exist until this run retires them.
         for name in &self.recorded_secrets {
-            self.note_secret(name);
+            self.secrets.note(name);
         }
         let mut fresh = Vec::new();
         for secret in &prepared.secrets {
-            if self.ensure_secret(secret).await? {
+            if self.secrets.ensure(secret).await? {
                 fresh.push(secret.name.clone());
             }
         }
         let id = self.upsert_endpoint(&prepared, &fresh).await?;
         // The endpoint now references only the current generation.
-        self.retire_stale_secrets(&prepared.secrets).await;
-        self.wait_ready(&id, &prepared.api_key).await?;
+        self.secrets.retire_stale(&prepared.secrets).await;
+        self.wait_ready(&id, &prepared.api_key, plan.deployment.as_str())
+            .await?;
         Ok(RuntimeHandle {
             endpoint: endpoint_url(&id),
             id,
@@ -1197,38 +1283,49 @@ impl ProcessSupervisor for RunPodSupervisor {
         })
     }
 
-    async fn metrics(&self, _handle: &RuntimeHandle) -> Result<RuntimeMetrics, LlamaCppError> {
-        Err(unsupported("metrics"))
+    /// Scrapes `/metrics` through the gateway when a worker is up (never
+    /// waking a scaled-to-zero endpoint); needs
+    /// [`with_gateway_key`](RunPodSupervisor::with_gateway_key).
+    async fn metrics(&self, handle: &RuntimeHandle) -> Result<RuntimeMetrics, LlamaCppError> {
+        self.ensure_awake(&handle.id, false).await?;
+        let key = self.gateway_key_str()?;
+        crate::metrics::scrape_with_rate(&*self.probe, &handle.id, key, Duration::from_secs(1))
+            .await
+            .map(|m| m.to_runtime_metrics())
+            .map_err(|e| LlamaCppError::Supervisor(e.to_string()))
     }
 
+    /// Every worker's recent lines, `[<worker>]`-prefixed; a bounded read, so
+    /// `follow` is refused. A scaled-to-zero endpoint yields one line saying so.
     async fn logs(
         &self,
-        _handle: &RuntimeHandle,
-        _options: LogOptions,
+        handle: &RuntimeHandle,
+        options: LogOptions,
     ) -> Result<LogStream, LlamaCppError> {
-        Err(unsupported("logs"))
+        if options.follow {
+            return Err(LlamaCppError::Supervisor(
+                "following RunPod logs is not supported; read them without follow".to_owned(),
+            ));
+        }
+        let tail = options.tail.unwrap_or(crate::logs::DEFAULT_TAIL);
+        let workers = self
+            .client
+            .endpoint_logs(&handle.id, tail, crate::logs::WORKER_LOG_LIMITS)
+            .await
+            .map_err(|e| runpod_err(&e))?;
+        if workers.is_empty() {
+            return Ok(LogStream(vec![crate::logs::NO_WORKERS.to_owned()]));
+        }
+        Ok(LogStream(crate::logs::merge(&workers)))
     }
 
     /// See [`RunPodSupervisor::stop_endpoint`]; an unconfirmed
     /// [`StopOutcome::AlreadyGone`] keeps its secrets in
     /// [`created_secrets`](RunPodSupervisor::created_secrets).
     async fn stop(&self, handle: &RuntimeHandle) -> Result<(), LlamaCppError> {
-        match self.stop_endpoint(handle).await? {
-            StopOutcome::Deleted => Ok(()),
-            StopOutcome::AlreadyGone { kept_secrets } if kept_secrets.is_empty() => Ok(()),
-            StopOutcome::AlreadyGone { kept_secrets } => Err(LlamaCppError::Supervisor(format!(
-                "RunPod endpoint {} was already gone, but the account could not be \
-                     confirmed, so these secrets were kept: {}",
-                handle.id,
-                kept_secrets
-                    .iter()
-                    .map(|n| format!("`{n}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))),
-        }
+        stop_result("endpoint", &handle.id, self.stop_endpoint(handle).await?)
     }
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

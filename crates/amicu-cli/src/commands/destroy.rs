@@ -91,7 +91,8 @@ pub(crate) fn run_with(
         return Err(CliError::Message(msg));
     }
 
-    let (prior_state, pruned) = crate::refresh::load_refreshed(project, env.modal, output, out)?;
+    let (prior_state, pruned) =
+        crate::refresh::load_refreshed(project, env.modal, env.runpod, output, out)?;
     let empty = Graph::new();
     let prior_graph = prior_state.as_ref().map_or(&empty, |s| &s.graph);
     let orphans = orphan_ids(prior_state.as_ref());
@@ -171,13 +172,17 @@ pub(crate) fn run_with(
             for r in crate::commands::apply::effective_stops(prior_state.as_ref())
                 .iter()
                 .filter(|r| {
-                    r.backend == crate::stops::Backend::Runpod
-                        && targets.iter().any(|t| t == r.deployment.as_str())
+                    r.backend.is_runpod() && targets.iter().any(|t| t == r.deployment.as_str())
                 })
             {
                 runpod.push(format!(
-                    "  {} (RunPod endpoint '{}', secrets: {})",
+                    "  {} (RunPod {} '{}', secrets: {})",
                     r.deployment,
+                    if r.backend == crate::stops::Backend::RunpodPod {
+                        "pod"
+                    } else {
+                        "endpoint"
+                    },
                     r.identity,
                     if r.secrets.is_empty() {
                         "none".to_owned()

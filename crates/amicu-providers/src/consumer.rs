@@ -60,6 +60,7 @@ fn discrete_gpu(id: &str, vram: &str, bandwidth_gbps: u32) -> HardwareProfile {
         interconnect: None,
         // Owned hardware has no rental rate.
         price: None,
+        runpod: None,
     }
 }
 
@@ -80,6 +81,7 @@ fn apple_silicon(id: &str, unified_memory: &str, bandwidth_gbps: u32) -> Hardwar
         memory: unified_memory.parse().expect("valid ByteSize literal"),
         interconnect: None,
         price: None,
+        runpod: None,
     }
 }
 

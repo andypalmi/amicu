@@ -1,11 +1,13 @@
-//! Reconciling local state with what is actually live on Modal.
+//! Reconciling local state with what is actually live on Modal, RunPod and
+//! the host service manager.
 //!
-//! `amicu modal stop` (or the Modal dashboard) can end an app behind the
+//! `amicu modal stop` (or a provider dashboard) can end an instance behind the
 //! project's back, leaving `.amicu/state/state.json` recording a deployment
 //! that no longer exists; diffing the config against that stale state yields
-//! "No changes" forever. Before `plan`/`apply` diff,
-//! [`refresh_state`] asks Modal which recorded apps are still live and drops
-//! the ones that are not, so the planner shows a create.
+//! "No changes" forever. Before `plan`/`apply` diff, [`refresh_state`] asks
+//! each backend which recorded instances are still live and marks the missing
+//! ones pending (never dropping their stop identity), so the planner shows a
+//! create.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -19,7 +21,8 @@ use crate::error::CliError;
 use crate::lock::StateLock;
 use crate::modal_ops::{Workspace, check_workspace};
 use crate::project::{LocalState, Project};
-use crate::stops::StopRecord;
+use crate::runpod_ops::RunPodOps;
+use crate::stops::{Backend, StopRecord};
 
 /// Hardware profile `provider` value of a Modal-backed deployment.
 const MODAL_PROVIDER: &str = "modal";
@@ -213,13 +216,15 @@ fn prove_workspaces(
 /// What a refresh found.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Refresh {
-    /// One drift note per deployment dropped from the state.
+    /// One drift note per deployment found missing or changed remotely.
     pub notes: Vec<String>,
     /// Set when the lookup failed and the state was kept as-is.
     pub warning: Option<String>,
     /// Set when the active Modal workspace differs from the one a recorded
     /// instance lives in: the command must refuse to continue.
     pub mismatch: Option<String>,
+    /// Set when a deployment was newly marked pending (state changed).
+    pub pending_added: bool,
 }
 
 /// Drops from `state` every Modal deployment (and its endpoint) whose app is
@@ -227,7 +232,32 @@ pub(crate) struct Refresh {
 /// and [`Refresh::warning`] says so.
 #[cfg(test)]
 pub(crate) fn refresh_state(state: &mut LocalState, lookup: &dyn AppLookup) -> Refresh {
-    refresh_state_mode(state, lookup, true)
+    refresh_state_mode(state, lookup, &NoRunPod, true)
+}
+
+/// A RunPod seam with no management key: tests never reach the network.
+#[cfg(test)]
+pub(crate) struct NoRunPod;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl RunPodOps for NoRunPod {
+    fn client(&self) -> Result<amicu_runpod::RunPodClient, CliError> {
+        Err(crate::runpod_ops::missing_key())
+    }
+    fn is_management_key(&self, _: &amicu_core::secret::SecretValue) -> bool {
+        false
+    }
+    fn probe(&self) -> std::sync::Arc<dyn amicu_providers::HttpTransport> {
+        unreachable!("no RunPod in this test")
+    }
+    async fn verify_exposure(
+        &self,
+        _: &str,
+        _: &amicu_core::secret::SecretValue,
+    ) -> Result<(), String> {
+        unreachable!("no RunPod in this test")
+    }
 }
 
 /// Like [`refresh_state`]. With `strict` false (read-only `plan`), an unknown
@@ -236,21 +266,26 @@ pub(crate) fn refresh_state(state: &mut LocalState, lookup: &dyn AppLookup) -> R
 pub(crate) fn refresh_state_mode(
     state: &mut LocalState,
     lookup: &dyn AppLookup,
+    runpod: &dyn RunPodOps,
     strict: bool,
 ) -> Refresh {
+    let pending_before = state.pending.len();
     let host = refresh_host(state, lookup);
-    let mut modal = refresh_modal(state, lookup, strict);
+    let modal = refresh_modal(state, lookup, strict);
     if modal.mismatch.is_some() {
         return modal;
     }
-    let mut notes = host.notes;
-    notes.append(&mut modal.notes);
-    modal.notes = notes;
-    modal.warning = match (host.warning, modal.warning) {
-        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
-        (a, b) => a.or(b),
-    };
-    modal
+    let runpod = refresh_runpod(state, runpod);
+    let mut out = Refresh::default();
+    for part in [host, modal, runpod] {
+        out.notes.extend(part.notes);
+        out.warning = match (out.warning, part.warning) {
+            (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+            (a, b) => a.or(b),
+        };
+    }
+    out.pending_added = state.pending.len() != pending_before;
+    out
 }
 
 /// Checks every recorded host instance against the host service manager. A
@@ -391,6 +426,7 @@ fn refresh_modal(state: &mut LocalState, lookup: &dyn AppLookup, strict: bool) -
                     "could not check Modal for live apps ({error}); using local state as-is"
                 )),
                 mismatch: None,
+                pending_added: false,
             };
         }
     };
@@ -417,21 +453,336 @@ fn refresh_modal(state: &mut LocalState, lookup: &dyn AppLookup, strict: bool) -
     }
     Refresh {
         notes,
-        warning: None,
-        mismatch: None,
+        ..Refresh::default()
     }
 }
 
-/// Loads the project state and reconciles it with Modal. Drift notes go to
+/// What RunPod says about one recorded endpoint or pod.
+enum Live {
+    Endpoint(Box<amicu_runpod::Endpoint>),
+    Pod(Box<amicu_runpod::Pod>),
+    Missing,
+    /// Resources carry the recorded name but none this deployment's owner
+    /// marker: not ours, and not proof ours is gone.
+    Foreign(Vec<String>),
+}
+
+/// Checks every recorded, confirmed RunPod endpoint or pod against the live
+/// API: by id, or for a record without one by exact name plus this
+/// deployment's `AMICU_OWNER` marker. A missing one counts as gone only
+/// when the management key acts in the account the record names; it is then
+/// kept in state as pending (apply recreates it, destroy confirms its stop).
+/// Otherwise, and on any lookup failure, nothing changes and a warning says
+/// why. A live endpoint whose workers or GPU pools differ from what was
+/// applied (a pod: GPU type, count or cloud) gets a drift note only, like
+/// Modal: nothing is marked for update.
+fn refresh_runpod(state: &mut LocalState, ops: &dyn RunPodOps) -> Refresh {
+    let records: Vec<StopRecord> = crate::commands::apply::effective_stops(Some(state))
+        .into_iter()
+        .filter(|r| {
+            r.backend.is_runpod()
+                && state.graph.deployments.iter().any(|d| d.id == r.deployment)
+                && !state.pending.contains(&r.deployment)
+        })
+        .collect();
+    if records.is_empty() {
+        return Refresh::default();
+    }
+    let project_id = state.project_id.clone().unwrap_or_default();
+    let kinds = runpod_kinds(&records);
+    let looked_up = (|| -> Result<_, CliError> {
+        let client = ops.client()?;
+        let rt = build_runtime()?;
+        rt.block_on(async {
+            let account = crate::runpod_ops::current_account(&client).await?;
+            let mut found = Vec::new();
+            for r in &records {
+                found.push(lookup_endpoint(&client, r, &project_id).await);
+            }
+            Ok((account, found))
+        })
+    })();
+    let (account, found) = match looked_up {
+        Ok(v) => v,
+        Err(e) => {
+            return Refresh {
+                warning: Some(format!(
+                    "could not check RunPod for live {kinds} ({e}); using local state as-is"
+                )),
+                ..Refresh::default()
+            };
+        }
+    };
+
+    let mut out = Refresh::default();
+    let mut unchecked = Vec::new();
+    for (r, live) in records.iter().zip(found) {
+        let dep = r.deployment.as_str();
+        let kind = r.runpod_kind();
+        if let Some((name, id, drift)) = live_drift(state, r, &live) {
+            if !drift.is_empty() {
+                out.notes.push(format!(
+                    "deployment {dep}: RunPod {kind} '{name}' ({kind} id {id}) was changed \
+                     outside amicu: {}; apply leaves it as is while this deployment's config \
+                     is unchanged, so revert it in the RunPod console or change the config",
+                    drift.join(", ")
+                ));
+            }
+            continue;
+        }
+        match live {
+            Ok(Live::Endpoint(_) | Live::Pod(_)) => {}
+            Ok(Live::Missing) if account.is_some() && r.workspace == account => {
+                if !state.pending.contains(&r.deployment) {
+                    state.pending.push(r.deployment.clone());
+                }
+                out.notes.push(format!(
+                    "deployment {dep}: RunPod {kind} '{}' ({kind} id {}) is gone from \
+                     RunPod account {}; kept in state as pending: apply will recreate it, \
+                     destroy will confirm its stop",
+                    r.identity,
+                    r.app_id.as_deref().unwrap_or("unknown"),
+                    r.workspace.as_deref().unwrap_or_default()
+                ));
+            }
+            Ok(Live::Missing) => unchecked.push(format!(
+                "{} not found, but it is recorded in RunPod account {} and {} acts in {}, so \
+                 amicu cannot tell whether it is gone",
+                r.describe(),
+                r.workspace.as_deref().unwrap_or("unknown"),
+                crate::runpod_ops::API_KEY_ENV_VAR,
+                account
+                    .as_deref()
+                    .unwrap_or("an account amicu has not seen (no amicu-account-marker secret)")
+            )),
+            Ok(Live::Foreign(ids)) => unchecked.push(format!(
+                "{} has no {kind} id recorded, and RunPod {kind}(s) {} named '{}' do not \
+                 carry its {} marker",
+                r.describe(),
+                ids.join(", "),
+                r.identity,
+                amicu_runpod::OWNER_ENV_VAR
+            )),
+            Err(e) => unchecked.push(format!("{}: {e}", r.describe())),
+        }
+    }
+    if !unchecked.is_empty() {
+        out.warning = Some(format!(
+            "could not reconcile RunPod {kinds} ({}); kept in state as recorded",
+            unchecked.join("; ")
+        ));
+    }
+    out
+}
+
+/// `"endpoints"`, `"pods"` or `"endpoints and pods"`, by what `records` hold.
+fn runpod_kinds(records: &[StopRecord]) -> &'static str {
+    let pods = records
+        .iter()
+        .filter(|r| r.backend == Backend::RunpodPod)
+        .count();
+    match pods {
+        0 => "endpoints",
+        n if n == records.len() => "pods",
+        _ => "endpoints and pods",
+    }
+}
+
+/// Name, id and drift of a live endpoint or pod; `None` when not live.
+fn live_drift<'a>(
+    state: &LocalState,
+    r: &StopRecord,
+    live: &'a Result<Live, String>,
+) -> Option<(&'a str, &'a str, Vec<String>)> {
+    match live {
+        Ok(Live::Endpoint(ep)) => Some((&ep.name, &ep.id, endpoint_drift(state, r, ep))),
+        Ok(Live::Pod(pod)) => Some((&pod.name, &pod.id, pod_drift(state, r, pod))),
+        _ => None,
+    }
+}
+
+async fn lookup_endpoint(
+    client: &amicu_runpod::RunPodClient,
+    record: &StopRecord,
+    project_id: &str,
+) -> Result<Live, String> {
+    if record.backend == Backend::RunpodPod {
+        return lookup_pod(client, record, project_id).await;
+    }
+    if let Some(id) = &record.app_id {
+        return match client.get_endpoint(id).await {
+            Ok(ep) => Ok(Live::Endpoint(Box::new(ep))),
+            Err(amicu_runpod::RunPodError::NotFound { .. }) => Ok(Live::Missing),
+            Err(e) => Err(e.to_string()),
+        };
+    }
+    let named = client
+        .find_endpoints_by_name(&record.identity)
+        .await
+        .map_err(|e| e.to_string())?;
+    if named.is_empty() {
+        return Ok(Live::Missing);
+    }
+    let owner = amicu_runpod::owner_marker(
+        record.workspace.as_deref(),
+        project_id,
+        record.deployment.as_str(),
+    );
+    match named.iter().find(|e| e.owner.as_deref() == Some(&owner)) {
+        Some(ep) => Ok(Live::Endpoint(Box::new(ep.clone()))),
+        None => Ok(Live::Foreign(named.into_iter().map(|e| e.id).collect())),
+    }
+}
+
+/// [`lookup_endpoint`] for a pod; a `TERMINATED` pod counts as missing.
+async fn lookup_pod(
+    client: &amicu_runpod::RunPodClient,
+    record: &StopRecord,
+    project_id: &str,
+) -> Result<Live, String> {
+    use amicu_runpod::{PodStatus, RunPodError};
+
+    if let Some(id) = &record.app_id {
+        return match client.get_pod(id).await {
+            Ok(pod) if pod.status == PodStatus::Terminated => Ok(Live::Missing),
+            Ok(pod) => Ok(Live::Pod(Box::new(pod))),
+            Err(RunPodError::NotFound { .. }) => Ok(Live::Missing),
+            Err(e) => Err(e.to_string()),
+        };
+    }
+    let named = client
+        .find_pods_by_name(&record.identity)
+        .await
+        .map_err(|e| e.to_string())?;
+    let owner = amicu_runpod::owner_marker(
+        record.workspace.as_deref(),
+        project_id,
+        record.deployment.as_str(),
+    );
+    if named.is_empty() {
+        return Ok(Live::Missing);
+    }
+    let mut foreign = Vec::new();
+    for pod in named {
+        if pod.env.owner.as_deref() == Some(owner.as_str()) {
+            return Ok(Live::Pod(Box::new(pod)));
+        }
+        foreign.push(pod.id);
+    }
+    Ok(Live::Foreign(foreign))
+}
+
+/// How `pod` differs from what apply set for `record`'s deployment: GPU
+/// type, count and cloud, compared only where RunPod reported them.
+fn pod_drift(state: &LocalState, record: &StopRecord, pod: &amicu_runpod::Pod) -> Vec<String> {
+    use amicu_core::resource::RunpodCloud;
+    use amicu_runpod::Cloud;
+
+    let Some(hw) = state
+        .graph
+        .deployments
+        .iter()
+        .find(|d| d.id == record.deployment)
+        .and_then(|d| {
+            state
+                .graph
+                .hardware_profiles
+                .iter()
+                .find(|h| h.id == d.hardware_profile)
+        })
+    else {
+        return Vec::new();
+    };
+    let mut drift = Vec::new();
+    let placement = hw
+        .accelerator
+        .as_ref()
+        .and_then(|a| amicu_runpod::pod_gpu_placement(a).ok());
+    if let (Some(gpu), Some(want)) = (&pod.gpu, placement) {
+        if gpu.id != want.type_id {
+            drift.push(format!("GPU type {} (applied {})", gpu.id, want.type_id));
+        }
+        if let Some(count) = gpu.count.filter(|c| *c != want.count) {
+            drift.push(format!("GPU count {count} (applied {})", want.count));
+        }
+    }
+    let applied = match hw.runpod.and_then(|r| r.cloud) {
+        Some(RunpodCloud::Community) => Cloud::Community,
+        _ => Cloud::Secure,
+    };
+    if let Some(cloud) = pod.cloud.filter(|c| *c != Cloud::Unknown && *c != applied) {
+        drift.push(format!(
+            "cloud {} (applied {})",
+            cloud.wire(),
+            applied.wire()
+        ));
+    }
+    drift
+}
+
+/// How `ep` differs from what apply set for `record`'s deployment in the
+/// recorded graph. Only fields RunPod reported are compared.
+fn endpoint_drift(
+    state: &LocalState,
+    record: &StopRecord,
+    ep: &amicu_runpod::Endpoint,
+) -> Vec<String> {
+    use amicu_runpod::supervisor::{DEFAULT_MAX_WORKERS, DEFAULT_MIN_WORKERS};
+
+    let Some(d) = state
+        .graph
+        .deployments
+        .iter()
+        .find(|d| d.id == record.deployment)
+    else {
+        return Vec::new();
+    };
+    let mut drift = Vec::new();
+    if let Some(w) = &ep.workers {
+        let scaling = d.scaling.clone().unwrap_or_default();
+        let min = scaling.min_replicas.unwrap_or(DEFAULT_MIN_WORKERS);
+        let max = scaling.max_replicas.unwrap_or(DEFAULT_MAX_WORKERS);
+        if (w.min, w.max) != (min, max) {
+            drift.push(format!("workers {}-{} (applied {min}-{max})", w.min, w.max));
+        }
+    }
+    let placement = state
+        .graph
+        .hardware_profiles
+        .iter()
+        .find(|h| h.id == d.hardware_profile)
+        .and_then(|h| h.accelerator.as_ref())
+        .and_then(|a| amicu_runpod::gpu_placement(a).ok());
+    if let (Some(gpu), Some(want)) = (&ep.gpu, placement) {
+        let mut live = gpu.pools.clone();
+        let mut applied = want.pools.clone();
+        live.sort();
+        applied.sort();
+        if live != applied {
+            drift.push(format!(
+                "GPU pools {} (applied {})",
+                live.join("/"),
+                applied.join("/")
+            ));
+        }
+        if let Some(count) = gpu.count.filter(|c| *c != want.count) {
+            drift.push(format!("GPU count {count} (applied {})", want.count));
+        }
+    }
+    drift
+}
+
+/// Loads the project state and reconciles it with the live backends. Drift notes go to
 /// `out` (stderr when `output` is JSON, to keep stdout a single JSON value);
 /// warnings always go to stderr.
 pub(crate) fn load_refreshed_state(
     project: &Project,
     lookup: &dyn AppLookup,
+    runpod: &dyn RunPodOps,
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<Option<LocalState>, CliError> {
-    Ok(load_refreshed_mode(project, lookup, output, out, false)?.0)
+    Ok(load_refreshed_mode(project, lookup, runpod, output, out, false)?.0)
 }
 
 /// Like [`load_refreshed_state`], also reporting whether the refresh dropped
@@ -439,15 +790,17 @@ pub(crate) fn load_refreshed_state(
 pub(crate) fn load_refreshed(
     project: &Project,
     lookup: &dyn AppLookup,
+    runpod: &dyn RunPodOps,
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<(Option<LocalState>, bool), CliError> {
-    load_refreshed_mode(project, lookup, output, out, true)
+    load_refreshed_mode(project, lookup, runpod, output, out, true)
 }
 
 fn load_refreshed_mode(
     project: &Project,
     lookup: &dyn AppLookup,
+    runpod: &dyn RunPodOps,
     output: OutputFormat,
     out: &mut dyn Write,
     strict: bool,
@@ -455,7 +808,7 @@ fn load_refreshed_mode(
     let Some(mut state) = project.load_state()? else {
         return Ok((None, false));
     };
-    let refresh = refresh_state_mode(&mut state, lookup, strict);
+    let refresh = refresh_state_mode(&mut state, lookup, runpod, strict);
     if let Some(mismatch) = refresh.mismatch {
         return Err(CliError::Message(mismatch));
     }
@@ -467,7 +820,7 @@ fn load_refreshed_mode(
     for note in &refresh.notes {
         writeln!(sink, "drift: {note}").map_err(|e| CliError::io("write failed", e))?;
     }
-    Ok((Some(state), !refresh.notes.is_empty()))
+    Ok((Some(state), refresh.pending_added))
 }
 
 /// Removes what `amicu modal stop` just stopped from the project state: the
@@ -833,14 +1186,27 @@ resource "deployment" "support_modal" {
         project.save_state(&legacy).unwrap();
 
         let mut out = Vec::new();
-        let (state, pruned) =
-            load_refreshed(&project, &Fake(Ok(vec![])), OutputFormat::Json, &mut out).unwrap();
+        let (state, pruned) = load_refreshed(
+            &project,
+            &Fake(Ok(vec![])),
+            &NoRunPod,
+            OutputFormat::Json,
+            &mut out,
+        )
+        .unwrap();
         assert!(pruned);
         assert_eq!(state.unwrap().pending.len(), 1);
         assert!(out.is_empty(), "JSON mode must keep stdout clean");
 
         let mut out = Vec::new();
-        load_refreshed(&project, &Fake(Ok(vec![])), OutputFormat::Human, &mut out).unwrap();
+        load_refreshed(
+            &project,
+            &Fake(Ok(vec![])),
+            &NoRunPod,
+            OutputFormat::Human,
+            &mut out,
+        )
+        .unwrap();
         assert!(String::from_utf8(out).unwrap().contains("drift:"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -906,6 +1272,7 @@ resource "deployment" "support_modal" {
         let err = load_refreshed(
             &project,
             &WsFake(acme("other-co"), None),
+            &NoRunPod,
             OutputFormat::Human,
             &mut out,
         )
@@ -1024,7 +1391,7 @@ resource "deployment" "support_modal" {
     #[test]
     fn plan_only_warns_when_the_workspace_is_unknown_and_marks_nothing_pending() {
         let mut state = modal_state_in("acme");
-        let refresh = refresh_state_mode(&mut state, &BrokenWorkspace, false);
+        let refresh = refresh_state_mode(&mut state, &BrokenWorkspace, &NoRunPod, false);
         assert!(refresh.mismatch.is_none());
         let warning = refresh.warning.expect("warns");
         assert!(warning.contains("as-is"), "{warning}");
@@ -1037,10 +1404,15 @@ resource "deployment" "support_modal" {
         let project = Project::new(&dir);
         project.save_state(&modal_state_in("acme")).unwrap();
         let mut out = Vec::new();
-        let loaded =
-            load_refreshed_state(&project, &BrokenWorkspace, OutputFormat::Human, &mut out)
-                .unwrap()
-                .unwrap();
+        let loaded = load_refreshed_state(
+            &project,
+            &BrokenWorkspace,
+            &NoRunPod,
+            OutputFormat::Human,
+            &mut out,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(loaded.pending.len(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }

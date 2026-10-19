@@ -27,6 +27,45 @@ pub struct HardwareProfile {
     pub interconnect: Option<Interconnect>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price: Option<Price>,
+    /// `provider = "runpod"` only: how the deployment runs there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runpod: Option<RunpodSettings>,
+}
+
+impl HardwareProfile {
+    /// The RunPod mode this profile selects (`Serverless` unless a `runpod`
+    /// block says otherwise).
+    #[must_use]
+    pub fn runpod_mode(&self) -> RunpodMode {
+        self.runpod.map(|r| r.mode).unwrap_or_default()
+    }
+}
+
+/// The `runpod { mode, cloud }` block of a hardware profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RunpodSettings {
+    #[serde(default)]
+    pub mode: RunpodMode,
+    /// Pod mode only; `None` means [`RunpodCloud::Secure`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<RunpodCloud>,
+}
+
+/// A load-balancing serverless endpoint (scales to zero) or an always-on pod.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunpodMode {
+    #[default]
+    Serverless,
+    Pod,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunpodCloud {
+    #[default]
+    Secure,
+    Community,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

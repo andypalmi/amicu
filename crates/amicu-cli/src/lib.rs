@@ -149,6 +149,12 @@ enum Command {
         #[command(subcommand)]
         command: ModalCommand,
     },
+    /// Operate a RunPod Serverless endpoint or Pod recorded in this
+    /// project's state. Needs `RUNPOD_API_KEY`.
+    Runpod {
+        #[command(subcommand)]
+        command: RunpodCommand,
+    },
     /// Opt in or out of anonymous performance telemetry. Off by default; does
     /// not require a project.
     ///
@@ -237,6 +243,61 @@ enum ModalCommand {
     Stop {
         /// The app's deployment name.
         app_name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RunpodCommand {
+    /// Show the endpoint id, URL, workers (running / idle / initializing /
+    /// throttled), GPU and data centers; for a pod its id, status, GPU,
+    /// cloud, data center, cost per hour and proxy URL.
+    Status {
+        /// The deployment name.
+        deployment: String,
+    },
+    /// Print each running worker's recent log lines, prefixed with the
+    /// worker id (a pod: its own lines, prefixed with the pod id). A bounded
+    /// read (no follow); a scaled-to-zero endpoint has no workers and so no
+    /// logs.
+    Logs {
+        /// The deployment name.
+        deployment: String,
+        /// Lines per worker (RunPod's default is 100, its maximum 5000).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(0..=5000))]
+        tail: Option<u32>,
+    },
+    /// Show runtime metrics (vLLM or llama.cpp `/metrics`), scraped through
+    /// the RunPod gateway (a pod: its proxy URL) with the deployment's
+    /// `api_key`.
+    ///
+    /// The load balancer answers from one worker of its choosing, so with
+    /// several workers the figures describe one of them. Hardware metrics are
+    /// not available on RunPod. A scaled-to-zero endpoint is refused: the
+    /// request would start a worker (billed GPU time); `--wake` allows it.
+    /// `--watch` keeps the endpoint warm, and billed, while it runs. A pod is
+    /// always on, so `--wake` does not apply.
+    Metrics {
+        /// The deployment name.
+        deployment: String,
+        /// Keep scraping and print a new snapshot every `--interval` seconds.
+        #[arg(long)]
+        watch: bool,
+        /// Seconds between snapshots under `--watch`.
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..))]
+        interval: u64,
+        /// Scrape even when no worker is up, starting one (billed).
+        #[arg(long)]
+        wake: bool,
+    },
+    /// Delete the endpoint (terminate the pod) and its secrets, as `destroy
+    /// --target` does: the deployment leaves state only once the stop is
+    /// confirmed.
+    Stop {
+        /// The deployment name.
+        deployment: String,
+        /// Wait up to this many seconds for the state lock.
+        #[arg(long, value_name = "SECS")]
+        lock_timeout: Option<u64>,
     },
 }
 
@@ -415,6 +476,7 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
             cli.output,
             out,
         ),
+        Command::Runpod { command } => dispatch_runpod(&project, command, cli.output, out),
         Command::Doctor => commands::doctor::run(&project, cli.output, out),
         Command::Orphans => commands::orphans::run(&project, cli.output, out),
         Command::Skill { .. }
@@ -424,6 +486,52 @@ fn dispatch(cli: &Cli, out: &mut dyn Write) -> Result<u8, CliError> {
         | Command::Catalog { .. } => {
             unreachable!("handled before project discovery")
         }
+    }
+}
+
+/// `amicu runpod ...`, against the real RunPod and secret resolver.
+fn dispatch_runpod(
+    project: &Project,
+    command: &RunpodCommand,
+    output: OutputFormat,
+    out: &mut dyn Write,
+) -> Result<u8, CliError> {
+    let env = commands::apply::Env::real(false, false);
+    match command {
+        RunpodCommand::Status { deployment } => {
+            commands::runpod::status(project, deployment, output, out, &env)
+        }
+        RunpodCommand::Logs { deployment, tail } => {
+            commands::runpod::logs(project, deployment, *tail, output, out, &env)
+        }
+        RunpodCommand::Metrics {
+            deployment,
+            watch,
+            interval,
+            wake,
+        } => commands::runpod::metrics(
+            project,
+            deployment,
+            commands::runpod::MetricsMode {
+                watch: *watch,
+                interval_secs: *interval,
+                wake: *wake,
+            },
+            output,
+            out,
+            &env,
+        ),
+        RunpodCommand::Stop {
+            deployment,
+            lock_timeout,
+        } => commands::runpod::stop(
+            project,
+            deployment,
+            lock_timeout.map(std::time::Duration::from_secs),
+            output,
+            out,
+            &env,
+        ),
     }
 }
 

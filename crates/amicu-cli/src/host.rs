@@ -217,6 +217,7 @@ pub(crate) mod fake {
                 memory: ByteSize::from_bytes(gib * GIB),
                 interconnect: None,
                 price: None,
+                runpod: None,
             },
             nvidia: None,
         }
@@ -237,6 +238,7 @@ pub(crate) mod fake {
                 memory: ByteSize::from_bytes(gib * GIB),
                 interconnect: None,
                 price: None,
+                runpod: None,
             },
             nvidia: gpu.map(|(model, vram)| NvidiaGpu {
                 model: model.into(),

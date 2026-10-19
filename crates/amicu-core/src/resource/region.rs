@@ -144,6 +144,16 @@ impl Region {
         self
     }
 
+    /// The residency this region declares, or `None` for a region built by
+    /// [`from_code`](Self::from_code) whose residency is still unresolved.
+    #[must_use]
+    pub fn declared_residency(&self) -> Option<&Residency> {
+        match &self.residency {
+            Residency::Other(s) if s.is_empty() => None,
+            r => Some(r),
+        }
+    }
+
     /// Whether this region resides in the European Union.
     #[must_use]
     pub fn is_eu(&self) -> bool {
@@ -215,5 +225,18 @@ mod tests {
         let zoned = plain.clone().with_default_zone("fr-par-1");
         assert_eq!(plain.residency, zoned.residency);
         assert!(zoned.is_eu());
+    }
+
+    #[test]
+    fn a_code_only_region_declares_no_residency() {
+        assert_eq!(Region::from_code("eu").declared_residency(), None);
+        assert_eq!(
+            Region::new("eu", Residency::Eu).declared_residency(),
+            Some(&Residency::Eu)
+        );
+        assert_eq!(
+            Region::new("x", Residency::Other("latam".into())).declared_residency(),
+            Some(&Residency::Other("latam".into()))
+        );
     }
 }

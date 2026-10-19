@@ -1,5 +1,5 @@
-//! `provider = "runpod"` through apply and destroy, against an in-memory
-//! RunPod v2 API.
+//! `provider = "runpod"` through apply, destroy, refresh and orphans,
+//! against an in-memory RunPod v2 API.
 
 use std::sync::{Arc, Mutex};
 
@@ -27,6 +27,24 @@ struct Ep {
     max_workers: Option<u64>,
 }
 
+#[derive(Clone)]
+struct PodRec {
+    id: String,
+    /// The create body, with PATCHes merged in.
+    body: Value,
+    status: &'static str,
+    started: u32,
+}
+
+fn pod_json(p: &PodRec) -> Value {
+    let mut v = p.body.clone();
+    let m = v.as_object_mut().unwrap();
+    m.insert("id".into(), json!(p.id));
+    m.insert("status".into(), json!(p.status));
+    m.insert("startedAt".into(), json!(format!("t{}", p.started)));
+    v
+}
+
 #[derive(Default)]
 #[allow(clippy::struct_excessive_bools)]
 struct WorldState {
@@ -34,7 +52,13 @@ struct WorldState {
     org: Option<String>,
     secrets: Vec<(String, String)>,
     endpoints: Vec<Ep>,
+    pods: Vec<PodRec>,
+    /// Status a new or (re)started pod reports (default `RUNNING`).
+    pod_status: Option<&'static str>,
+    /// Status the pod proxy answers an anonymous request with (0: 401).
+    anon: u16,
     next: u32,
+    next_pod: u32,
     reject_key: bool,
     /// Health answer of every endpoint (0: 200).
     health: u16,
@@ -44,6 +68,12 @@ struct WorldState {
     lose_create_response: bool,
     /// `METHOD path` of every request, in order.
     log: Vec<String>,
+    /// `(id, status)` of the workers every endpoint reports.
+    workers: Vec<(String, String)>,
+    /// What `/metrics` answers through the gateway.
+    metrics: String,
+    /// Body of every endpoint create.
+    created: Vec<Value>,
 }
 
 type Hook = Box<dyn FnOnce() + Send>;
@@ -66,7 +96,13 @@ fn ep_json(e: &Ep) -> Value {
     if let Some(o) = &e.owner {
         env.insert(amicu_runpod::OWNER_ENV_VAR.to_owned(), json!(o));
     }
-    json!({"id": e.id, "name": e.name, "type": "LOAD_BALANCER", "env": env})
+    let mut ep = json!({"id": e.id, "name": e.name, "type": "LOAD_BALANCER", "env": env,
+        "gpu": {"pools": ["AMPERE_24"], "count": 1},
+        "dataCenterIds": ["EU-RO-1", "EU-SE-1"]});
+    if let Some(max) = e.max_workers {
+        ep["workers"] = json!({"min": 0, "max": max});
+    }
+    ep
 }
 
 fn owner_in(body: Option<&Value>) -> Option<String> {
@@ -81,6 +117,37 @@ fn owner_in(body: Option<&Value>) -> Option<String> {
 impl HttpTransport for World {
     #[allow(clippy::too_many_lines)]
     async fn execute(&self, req: HttpRequest) -> Result<HttpResponse, TransportError> {
+        if let Some(host) = req
+            .url
+            .strip_prefix("https://")
+            .and_then(|u| u.strip_suffix(".proxy.runpod.net/metrics"))
+        {
+            let mut w = self.state.lock().unwrap();
+            w.log.push(format!(
+                "proxy metrics {host} bearer={}",
+                req.bearer.as_deref().unwrap_or("")
+            ));
+            return Ok(HttpResponse::new(200, w.metrics.clone().into_bytes()));
+        }
+        if let Some((id, path)) = req.url.strip_prefix("https://").and_then(|u| {
+            u.split_once("-8080.proxy.runpod.net")
+                .or_else(|| u.split_once("-8000.proxy.runpod.net"))
+        }) {
+            let mut w = self.state.lock().unwrap();
+            w.log.push(format!("proxy {:?} {id}{path}", req.method));
+            let status = match path {
+                "/health" if w.health != 0 => w.health,
+                "/v1/chat/completions" if req.bearer.is_none() => {
+                    if w.anon == 0 {
+                        401
+                    } else {
+                        w.anon
+                    }
+                }
+                _ => 200,
+            };
+            return reply(status, &json!({}));
+        }
         if let Some(id) = req
             .url
             .strip_prefix("https://")
@@ -91,12 +158,24 @@ impl HttpTransport for World {
             let status = if w.health == 0 { 200 } else { w.health };
             return reply(status, &json!({}));
         }
+        if let Some(id) = req
+            .url
+            .strip_prefix("https://")
+            .and_then(|u| u.strip_suffix(".api.runpod.ai/metrics"))
+        {
+            let mut w = self.state.lock().unwrap();
+            w.log.push(format!(
+                "metrics {id} bearer={}",
+                req.bearer.as_deref().unwrap_or("")
+            ));
+            return Ok(HttpResponse::new(200, w.metrics.clone().into_bytes()));
+        }
         let path = req
             .url
             .strip_prefix(BASE)
             .expect("RunPod base URL")
             .to_owned();
-        if req.method == HttpMethod::Post && path == "/serverless" {
+        if req.method == HttpMethod::Post && (path == "/serverless" || path == "/pods") {
             let hook = self.on_create.lock().unwrap().take();
             if let Some(hook) = hook {
                 hook();
@@ -124,6 +203,7 @@ impl HttpTransport for World {
                 )
             }
             (HttpMethod::Post, ["serverless"]) => {
+                w.created.extend(req.body.clone());
                 w.next += 1;
                 let ep = Ep {
                     id: format!("ep{}", w.next),
@@ -139,6 +219,33 @@ impl HttpTransport for World {
                     return Err(TransportError::Timeout);
                 }
                 reply(201, &ep_json(&ep))
+            }
+            (HttpMethod::Get, ["serverless", id, "workers"]) => {
+                if !w.endpoints.iter().any(|e| e.id == *id) {
+                    return reply(404, &json!({"detail": "not found"}));
+                }
+                let running = w.workers.iter().filter(|x| x.1 == "RUNNING").count();
+                let idle = w.workers.iter().filter(|x| x.1 == "IDLE").count();
+                let list: Vec<Value> = w
+                    .workers
+                    .iter()
+                    .map(|(id, status)| json!({"id": id, "status": status}))
+                    .collect();
+                reply(
+                    200,
+                    &json!({"workers": list, "summary": {"running": running, "idle": idle,
+                        "total": list.len()}}),
+                )
+            }
+            (HttpMethod::Get, ["serverless", _, "workers", wid, logs])
+                if logs.starts_with("logs?tail=") =>
+            {
+                let body = format!(
+                    "data: {}\n\ndata: {}\n\n",
+                    json!({"ts": format!("2026-01-01T00:00:0{}Z", wid.len()), "source": "container", "line": format!("hello from {wid}")}),
+                    json!({"ts": "2026-01-01T00:00:09Z", "source": "system", "line": "done"}),
+                );
+                Ok(HttpResponse::new(200, body.into_bytes()))
             }
             (method, ["serverless", id]) => {
                 let Some(i) = w.endpoints.iter().position(|e| e.id == *id) else {
@@ -169,10 +276,90 @@ impl HttpTransport for World {
                     HttpMethod::Post => reply(405, &json!({})),
                 }
             }
+            (HttpMethod::Get, ["pods"]) => {
+                let pods: Vec<Value> = w.pods.iter().map(pod_json).collect();
+                reply(
+                    200,
+                    &json!({"pods": pods, "pagination": {"hasNextPage": false}}),
+                )
+            }
+            (HttpMethod::Post, ["pods"]) => {
+                w.next_pod += 1;
+                let pod = PodRec {
+                    id: format!("pod{}", w.next_pod),
+                    body: req.body.clone().unwrap(),
+                    status: w.pod_status.unwrap_or("RUNNING"),
+                    started: 0,
+                };
+                w.pods.push(pod.clone());
+                if w.lose_create_response {
+                    return Err(TransportError::Timeout);
+                }
+                reply(201, &pod_json(&pod))
+            }
+            (HttpMethod::Post, ["pods", id, "action"]) => {
+                let action = req.body.as_ref().unwrap()["action"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                w.log.push(format!("action {id} {action}"));
+                let Some(i) = w.pods.iter().position(|p| p.id == *id) else {
+                    return reply(404, &json!({"detail": "not found"}));
+                };
+                match action.as_str() {
+                    "terminate" if w.delete_fails => {
+                        reply(500, &json!({"detail": "internal error"}))
+                    }
+                    "terminate" => {
+                        w.pods.remove(i);
+                        Ok(HttpResponse::new(204, Vec::new()))
+                    }
+                    _ => {
+                        let status = w.pod_status.unwrap_or("RUNNING");
+                        let p = &mut w.pods[i];
+                        p.started += 1;
+                        p.status = status;
+                        let body = pod_json(p);
+                        reply(200, &body)
+                    }
+                }
+            }
+            (HttpMethod::Get, ["pods", id, logs]) if logs.starts_with("logs?tail=") => {
+                if !w.pods.iter().any(|p| p.id == *id) {
+                    return reply(404, &json!({"detail": "not found"}));
+                }
+                let body = format!(
+                    "data: {}\n\ndata: {}\n\n",
+                    json!({"ts": "2026-01-01T00:00:02Z", "source": "system", "line": "pulled"}),
+                    json!({"ts": "2026-01-01T00:00:05Z", "source": "container", "line": format!("hello from {id}")}),
+                );
+                Ok(HttpResponse::new(200, body.into_bytes()))
+            }
+            (method, ["pods", id]) => {
+                let Some(i) = w.pods.iter().position(|p| p.id == *id) else {
+                    return reply(404, &json!({"detail": "not found"}));
+                };
+                if method == HttpMethod::Patch {
+                    let update = req.body.clone().unwrap();
+                    let body = w.pods[i].body.as_object_mut().unwrap();
+                    for (k, v) in update.as_object().unwrap() {
+                        body.insert(k.clone(), v.clone());
+                    }
+                }
+                reply(200, &pod_json(&w.pods[i]))
+            }
             (HttpMethod::Get, ["catalog", "gpus"]) => reply(
                 200,
                 &json!({"gpus": [{"id": "NVIDIA L4", "name": "L4", "pool": "AMPERE_24", "memory": 24}]}),
             ),
+            (HttpMethod::Get, ["account", "secrets"]) => {
+                let all: Vec<Value> = w
+                    .secrets
+                    .iter()
+                    .map(|(id, n)| json!({"id": id, "name": n}))
+                    .collect();
+                reply(200, &json!({"secrets": all}))
+            }
             (HttpMethod::Get, ["account", q]) if q.starts_with("secrets?name=") => {
                 let name = q.trim_start_matches("secrets?name=");
                 let found: Vec<Value> = w
@@ -367,9 +554,13 @@ fn record(id: Option<&str>, account: &str, secrets: &[&str]) -> StopRecord {
 }
 
 fn add_endpoint(rig: &Rig, id: &str, owner: Option<String>) {
+    add_named_endpoint(rig, id, &endpoint_name(), owner);
+}
+
+fn add_named_endpoint(rig: &Rig, id: &str, name: &str, owner: Option<String>) {
     rig.runpod.world.state.lock().unwrap().endpoints.push(Ep {
         id: id.to_owned(),
-        name: endpoint_name(),
+        name: name.to_owned(),
         owner,
         max_workers: None,
     });
@@ -917,4 +1108,1547 @@ fn a_failed_endpoint_delete_keeps_every_recorded_secret() {
         [amicu_runpod::ACCOUNT_MARKER_SECRET]
     );
     assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+/// A project whose state holds `record` for a confirmed (not pending)
+/// deployment, as after a successful apply.
+fn applied_with(td: &TempDir, record: StopRecord) -> Project {
+    let project = project_with(td, Some(record));
+    let mut state = project.load_state().unwrap().unwrap();
+    state.pending.clear();
+    project.save_state(&state).unwrap();
+    project
+}
+
+fn refresh(project: &Project, rig: &Rig) -> (crate::refresh::Refresh, LocalState) {
+    let mut state = project.load_state().unwrap().unwrap();
+    let refresh = crate::refresh::refresh_state_mode(&mut state, &rig.modal, &rig.runpod, true);
+    (refresh, state)
+}
+
+#[test]
+fn refresh_keeps_a_live_endpoint_without_notes() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r, crate::refresh::Refresh::default());
+    assert_eq!(state.pending.len(), 0);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn refresh_marks_an_endpoint_gone_in_the_recorded_account_pending() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &["amicu-x"]));
+    let rig = rig();
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 1, "{r:?}");
+    assert!(
+        r.notes[0].contains("ep7") && r.notes[0].contains(ACCOUNT),
+        "{r:?}"
+    );
+    assert!(r.notes[0].contains("kept in state as pending"), "{r:?}");
+    assert!(state.pending.iter().any(|d| d.as_str() == DEP));
+    // The stop identity is never dropped.
+    assert_eq!(state.stops, [record(Some("ep7"), ACCOUNT, &["amicu-x"])]);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn refresh_never_calls_an_endpoint_gone_from_another_account() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), "personal:s99", &[]));
+    let rig = rig();
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0, "{r:?}");
+    let warning = r.warning.unwrap();
+    assert!(
+        warning.contains("personal:s99") && warning.contains(ACCOUNT),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("cannot tell whether it is gone"),
+        "{warning}"
+    );
+    assert_eq!(state.pending.len(), 0);
+}
+
+#[test]
+fn refresh_with_an_unknown_account_never_calls_an_endpoint_gone() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    rig.runpod.world.state.lock().unwrap().secrets.clear();
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0, "{r:?}");
+    assert!(r.warning.unwrap().contains("account amicu has not seen"));
+    assert_eq!(state.pending.len(), 0);
+    // Reading the identity never creates the marker.
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn refresh_without_a_management_key_warns_and_keeps_state() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let mut rig = rig();
+    rig.runpod.no_key = true;
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0);
+    assert!(r.warning.unwrap().contains("RUNPOD_API_KEY"));
+    assert_eq!(state.pending.len(), 0);
+    assert_eq!(rig.runpod.world.log().len(), 0);
+}
+
+#[test]
+fn refresh_finds_an_id_less_record_by_name_and_owner_marker() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(None, ACCOUNT, &[]));
+    let rig = rig();
+    add_endpoint(&rig, "ep9", Some(owner()));
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r, crate::refresh::Refresh::default());
+    assert_eq!(state.pending.len(), 0);
+}
+
+#[test]
+fn refresh_never_takes_a_foreign_endpoint_for_an_id_less_record() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(None, ACCOUNT, &[]));
+    let rig = rig();
+    add_endpoint(&rig, "ep9", Some("someone-else".to_owned()));
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0, "{r:?}");
+    let warning = r.warning.unwrap();
+    assert!(
+        warning.contains("ep9") && warning.contains("AMICU_OWNER"),
+        "{warning}"
+    );
+    assert_eq!(state.pending.len(), 0);
+}
+
+#[test]
+fn refresh_marks_an_id_less_record_with_no_endpoint_pending() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(None, ACCOUNT, &[]));
+    let rig = rig();
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 1, "{r:?}");
+    assert!(state.pending.iter().any(|d| d.as_str() == DEP));
+}
+
+#[test]
+fn refresh_reports_drift_of_a_live_endpoint_without_touching_it() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    rig.runpod.world.state.lock().unwrap().endpoints.push(Ep {
+        id: "ep7".to_owned(),
+        name: endpoint_name(),
+        owner: Some(owner()),
+        max_workers: Some(7),
+    });
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 1, "{r:?}");
+    let note = &r.notes[0];
+    assert!(
+        note.contains("RunPod endpoint") && note.contains("ep7"),
+        "{note}"
+    );
+    assert!(note.contains("workers 0-7 (applied 0-1)"), "{note}");
+    assert!(note.contains("revert it in the RunPod console"), "{note}");
+    assert_eq!(state.pending.len(), 0);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn plan_after_an_endpoint_is_gone_shows_a_create() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    let text = plan_text(&project, &rig);
+    assert!(
+        text.contains("drift: deployment support_local: RunPod endpoint"),
+        "{text}"
+    );
+    assert!(
+        text.split("|pending=").nth(1).unwrap().contains(DEP),
+        "{text}"
+    );
+}
+
+struct NoModal;
+
+impl crate::commands::orphans::ModalApps for NoModal {
+    fn list(&self) -> Result<Vec<crate::commands::orphans::ModalApp>, String> {
+        Ok(Vec::new())
+    }
+}
+
+fn orphans(project: &Project, rig: &Rig) -> crate::commands::orphans::OrphansReport {
+    use crate::commands::orphans::{Env, OpsListing, Platform, Tracked, discover};
+    let state = project.load_state().unwrap();
+    let tracked =
+        Tracked::from_state(state.as_ref()).with_config(project.load_graph().ok().as_ref());
+    discover(
+        &Env {
+            platform: Platform::Other,
+            exec: &amicu_llamacpp::HostExec,
+            modal: &NoModal,
+            runpod: &OpsListing(&rig.runpod),
+            agents_dir: None,
+        },
+        &tracked,
+    )
+}
+
+#[test]
+fn orphans_lists_untracked_owned_endpoints_and_amicu_secrets_read_only() {
+    use crate::commands::orphans::{Kind, Ownership};
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &["amicu-x"]));
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    let stale = amicu_runpod::project_endpoint_name(PROJECT, "old");
+    add_named_endpoint(&rig, "ep8", &stale, Some("marker".to_owned()));
+    let foreign = amicu_runpod::project_endpoint_name("bbbb2222", "chat");
+    add_named_endpoint(&rig, "ep9", &foreign, Some("marker".to_owned()));
+    add_named_endpoint(&rig, "ep10", "not-amicu", None);
+    add_secret(&rig, "s5", "amicu-x");
+    add_secret(&rig, "s6", &format!("amicu-{PROJECT}-old-api-key-1-2"));
+    add_secret(&rig, "s7", "hf-token");
+
+    let report = orphans(&project, &rig);
+    let runpod = report.sources.iter().find(|s| s.name == "runpod").unwrap();
+    assert_eq!(runpod.status, "ok", "{:?}", runpod.detail);
+    let untracked: Vec<(Kind, &str, Ownership)> = report
+        .resources
+        .iter()
+        .filter(|r| !r.tracked)
+        .map(|r| (r.kind, r.identity.as_str(), r.ownership))
+        .collect();
+    let stale_id = format!("{stale} (ep8)");
+    let foreign_id = format!("{foreign} (ep9)");
+    let secret_id = format!("amicu-{PROJECT}-old-api-key-1-2 (s6)");
+    assert_eq!(
+        untracked,
+        [
+            (
+                Kind::RunpodEndpoint,
+                stale_id.as_str(),
+                Ownership::ThisProject
+            ),
+            (
+                Kind::RunpodSecret,
+                secret_id.as_str(),
+                Ownership::ThisProject
+            ),
+            (
+                Kind::RunpodEndpoint,
+                foreign_id.as_str(),
+                Ownership::OtherProject
+            ),
+        ]
+    );
+    let tracked: Vec<&str> = report
+        .resources
+        .iter()
+        .filter(|r| r.tracked)
+        .map(|r| r.identity.as_str())
+        .collect();
+    assert_eq!(tracked.len(), 2, "{tracked:?}");
+    assert!(
+        !report
+            .resources
+            .iter()
+            .any(|r| r.identity.contains(amicu_runpod::ACCOUNT_MARKER_SECRET)),
+        "the account marker is never listed"
+    );
+    let stop = &report.resources[0].stop_command;
+    assert!(
+        stop.contains("DELETE") && stop.ends_with("/v2/serverless/ep8"),
+        "{stop}"
+    );
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn orphans_skips_runpod_for_a_project_that_does_not_use_it() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let rig = rig();
+    let report = orphans(&project, &rig);
+    let runpod = report.sources.iter().find(|s| s.name == "runpod").unwrap();
+    assert_eq!(runpod.status, "skipped");
+    assert_eq!(rig.runpod.world.log().len(), 0);
+}
+
+#[test]
+fn orphans_reports_a_runpod_listing_failure_as_a_source_error() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let mut rig = rig();
+    rig.runpod.no_key = true;
+    let report = orphans(&project, &rig);
+    let runpod = report.sources.iter().find(|s| s.name == "runpod").unwrap();
+    assert_eq!(runpod.status, "error");
+    assert!(runpod.detail.as_deref().unwrap().contains("RUNPOD_API_KEY"));
+}
+
+#[test]
+fn orphans_after_apply_finds_no_untracked_runpod_resource() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    let report = orphans(&project, &rig);
+    let untracked: Vec<&str> = report
+        .resources
+        .iter()
+        .filter(|r| !r.tracked)
+        .map(|r| r.identity.as_str())
+        .collect();
+    assert_eq!(untracked, Vec::<&str>::new());
+    assert!(
+        report
+            .resources
+            .iter()
+            .any(|r| r.identity.ends_with("(ep1)"))
+    );
+}
+
+#[test]
+fn orphans_after_a_pod_apply_lists_no_untracked_secret() {
+    let td = TempDir::new();
+    let project = pod_project(&td, None);
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    let report = orphans(&project, &rig);
+    let untracked: Vec<&str> = report
+        .resources
+        .iter()
+        .filter(|r| !r.tracked)
+        .map(|r| r.identity.as_str())
+        .collect();
+    assert_eq!(untracked, Vec::<&str>::new());
+}
+
+#[test]
+fn orphans_shows_a_same_named_duplicate_of_a_recorded_endpoint_as_untracked() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    add_endpoint(&rig, "ep8", Some(owner()));
+    let report = orphans(&project, &rig);
+    let untracked: Vec<&str> = report
+        .resources
+        .iter()
+        .filter(|r| !r.tracked)
+        .map(|r| r.identity.as_str())
+        .collect();
+    assert_eq!(untracked, [format!("{} (ep8)", endpoint_name())]);
+}
+
+// --- pod mode ---------------------------------------------------------------
+
+fn pod_config(extra: &str) -> String {
+    runpod_config().replace(
+        "  memory = \"32GiB\"\n",
+        &format!("  memory = \"32GiB\"\n  runpod {{\n    mode = \"pod\"\n{extra}  }}\n"),
+    )
+}
+
+fn pod_project(td: &TempDir, record: Option<StopRecord>) -> Project {
+    let project = project_with(td, record);
+    write(&td.path, "amicu.hcl", &pod_config(""));
+    if project.load_state().unwrap().unwrap().stops.is_empty() {
+        return project;
+    }
+    let mut state = project.load_state().unwrap().unwrap();
+    state.graph = project.load_graph().unwrap();
+    project.save_state(&state).unwrap();
+    project
+}
+
+fn pod_record(id: Option<&str>, account: &str, secrets: &[&str]) -> StopRecord {
+    StopRecord::runpod_pod_in(
+        PROJECT,
+        &DEP.into(),
+        id.map(str::to_owned),
+        Some(account),
+        secrets.iter().map(|s| (*s).to_owned()).collect(),
+    )
+}
+
+/// A live pod named like this deployment's, with `gpu` and `owner`.
+fn add_pod(rig: &Rig, id: &str, gpu: &str, owner: Option<String>) {
+    let mut env = serde_json::Map::new();
+    if let Some(o) = owner {
+        env.insert(amicu_runpod::OWNER_ENV_VAR.to_owned(), json!(o));
+    }
+    rig.runpod.world.state.lock().unwrap().pods.push(PodRec {
+        id: id.to_owned(),
+        body: json!({"name": endpoint_name(), "gpu": {"id": gpu, "count": 1},
+            "cloud": "SECURE", "env": env}),
+        status: "RUNNING",
+        started: 0,
+    });
+}
+
+fn pod_ids(rig: &Rig) -> Vec<String> {
+    let w = rig.runpod.world.state.lock().unwrap();
+    w.pods.iter().map(|p| p.id.clone()).collect()
+}
+
+/// Pod writes in order: creates, PATCHes and actions.
+fn pod_writes(rig: &Rig) -> Vec<String> {
+    rig.runpod
+        .world
+        .log()
+        .into_iter()
+        .filter(|l| l == "Post /pods" || l.starts_with("Patch /pods") || l.starts_with("action"))
+        .collect()
+}
+
+#[test]
+fn pod_apply_records_the_pod_ahead_then_its_id_and_secrets() {
+    let td = TempDir::new();
+    let project = pod_project(&td, None);
+    let rig = rig();
+    let seen: Arc<Mutex<Option<StopRecord>>> = Arc::default();
+    {
+        let seen = seen.clone();
+        let p = Project::new(&td.path);
+        *rig.runpod.world.on_create.lock().unwrap() = Some(Box::new(move || {
+            let state = p.load_state().unwrap().unwrap();
+            assert!(state.pending.iter().any(|d| d.as_str() == DEP));
+            *seen.lock().unwrap() = state
+                .stops
+                .into_iter()
+                .find(|r| r.deployment.as_str() == DEP);
+        }));
+    }
+    apply_with(&project, &rig).unwrap();
+
+    let ahead = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("recorded before create");
+    assert_eq!(ahead.backend, Backend::RunpodPod);
+    assert_eq!(ahead.identity, endpoint_name());
+    assert_eq!(ahead.app_id, None);
+    assert_eq!(ahead.workspace.as_deref(), Some(ACCOUNT));
+    assert!(!ahead.secrets.is_empty(), "{ahead:?}");
+
+    let stops = stops_for(&project, DEP);
+    assert_eq!(stops.len(), 1);
+    assert_eq!(stops[0].backend, Backend::RunpodPod);
+    assert_eq!(stops[0].app_id.as_deref(), Some("pod1"));
+    assert_eq!(stops[0].secrets, ahead.secrets);
+    let state = project.load_state().unwrap().unwrap();
+    assert_eq!(state.pending.len(), 0);
+    assert_eq!(state.version, "v6");
+    assert_eq!(
+        state.endpoints[0].endpoint,
+        "https://pod1-8080.proxy.runpod.net"
+    );
+    let log = rig.runpod.world.log();
+    assert!(
+        log.contains(&"proxy Post pod1/v1/chat/completions".to_owned()),
+        "{log:?}"
+    );
+    let w = rig.runpod.world.state.lock().unwrap();
+    assert_eq!(w.pods[0].body["cloud"], "SECURE");
+    assert_eq!(w.pods[0].body["gpu"]["id"], "NVIDIA L4");
+    assert!(w.endpoints.is_empty());
+}
+
+#[test]
+fn pod_apply_honours_the_community_cloud() {
+    let td = TempDir::new();
+    let project = pod_project(&td, None);
+    write(
+        &td.path,
+        "amicu.hcl",
+        &pod_config("    cloud = \"community\"\n"),
+    );
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(
+        rig.runpod.world.state.lock().unwrap().pods[0].body["cloud"],
+        "COMMUNITY"
+    );
+}
+
+#[test]
+fn a_pod_created_before_a_crash_is_adopted_by_name_not_created_again() {
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(None, ACCOUNT, &[])));
+    let rig = rig();
+    add_pod(&rig, "pod9", "NVIDIA L4", Some(owner()));
+    apply_with(&project, &rig).unwrap();
+    let writes = pod_writes(&rig);
+    assert!(!writes.contains(&"Post /pods".to_owned()), "{writes:?}");
+    assert!(
+        writes.contains(&"Patch /pods/pod9".to_owned()),
+        "{writes:?}"
+    );
+    assert_eq!(pod_ids(&rig), ["pod9"]);
+    assert_eq!(stops_for(&project, DEP)[0].app_id.as_deref(), Some("pod9"));
+}
+
+#[test]
+fn a_rerun_against_a_matching_pod_writes_nothing() {
+    let td = TempDir::new();
+    let project = pod_project(&td, None);
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    let mut state = project.load_state().unwrap().unwrap();
+    state.pending = vec![DEP.into()];
+    project.save_state(&state).unwrap();
+    rig.runpod.world.state.lock().unwrap().log.clear();
+
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(pod_writes(&rig), Vec::<String>::new());
+    assert_eq!(pod_ids(&rig), ["pod1"]);
+    assert_eq!(stops_for(&project, DEP)[0].app_id.as_deref(), Some("pod1"));
+}
+
+#[test]
+fn a_recorded_pod_on_another_gpu_is_terminated_then_replaced() {
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(Some("pod7"), ACCOUNT, &[])));
+    let rig = rig();
+    add_pod(&rig, "pod7", "NVIDIA A40", Some(owner()));
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(
+        pod_writes(&rig),
+        ["action pod7 terminate", "Post /pods"],
+        "terminated first, then created"
+    );
+    let ids = pod_ids(&rig);
+    assert_eq!(ids.len(), 1);
+    assert_ne!(ids[0], "pod7");
+    let stops = stops_for(&project, DEP);
+    assert_eq!(stops.len(), 1);
+    assert_eq!(stops[0].app_id.as_deref(), Some(ids[0].as_str()));
+}
+
+#[test]
+fn a_switch_from_serverless_to_pod_deletes_the_endpoint_first() {
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(record(Some("ep7"), ACCOUNT, &[])));
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(rig.runpod.world.endpoint_ids().len(), 0);
+    let log = rig.runpod.world.log();
+    let deleted = log.iter().position(|l| l == "Delete /serverless/ep7");
+    let created = log.iter().position(|l| l == "Post /pods");
+    assert!(deleted.is_some() && deleted < created, "{log:?}");
+    let stops = stops_for(&project, DEP);
+    assert_eq!(stops.len(), 1);
+    assert_eq!(stops[0].backend, Backend::RunpodPod);
+}
+
+#[test]
+fn a_new_pod_that_fails_readiness_is_terminated_and_stays_recorded() {
+    let td = TempDir::new();
+    let project = pod_project(&td, None);
+    let rig = rig();
+    rig.runpod.world.state.lock().unwrap().pod_status = Some("EXITED");
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("created by this run, was terminated"), "{err}");
+    assert_eq!(pod_ids(&rig).len(), 0);
+    let stops = stops_for(&project, DEP);
+    assert_eq!(stops[0].app_id.as_deref(), Some("pod1"));
+    assert!(stops[0].secrets.is_empty(), "{stops:?}");
+    // A later destroy confirms it is gone and drops the record.
+    destroy(&project, &rig).unwrap();
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn a_recorded_pod_that_fails_readiness_is_left_in_place() {
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(Some("pod7"), ACCOUNT, &[])));
+    let rig = rig();
+    add_pod(&rig, "pod7", "NVIDIA L4", Some(owner()));
+    rig.runpod.world.state.lock().unwrap().pod_status = Some("EXITED");
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("left in place"), "{err}");
+    assert_eq!(pod_ids(&rig), ["pod7"]);
+    assert_eq!(stops_for(&project, DEP)[0].app_id.as_deref(), Some("pod7"));
+}
+
+#[test]
+fn an_open_pod_is_terminated_by_the_supervisor() {
+    let td = TempDir::new();
+    let project = pod_project(&td, None);
+    let rig = rig();
+    rig.runpod.world.state.lock().unwrap().anon = 200;
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("open to anyone"), "{err}");
+    assert_eq!(pod_ids(&rig).len(), 0);
+    assert_eq!(stops_for(&project, DEP).len(), 1);
+}
+
+#[test]
+fn a_pod_whose_models_route_is_public_is_kept() {
+    let td = TempDir::new();
+    let project = pod_project(&td, None);
+    let mut rig = rig();
+    // The generic check (anonymous GET /v1/models) would fail on llama-server.
+    rig.runpod.exposure_fails = true;
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(pod_ids(&rig), ["pod1"]);
+    let log = rig.runpod.world.log();
+    assert!(!log.iter().any(|l| l.starts_with("verify")), "{log:?}");
+}
+
+#[test]
+fn a_failed_terminate_on_replace_creates_nothing_and_keeps_the_record() {
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(Some("pod7"), ACCOUNT, &[])));
+    let rig = rig();
+    add_pod(&rig, "pod7", "NVIDIA A40", Some(owner()));
+    rig.runpod.world.state.lock().unwrap().delete_fails = true;
+    apply_with(&project, &rig).unwrap_err();
+    assert_eq!(pod_writes(&rig), ["action pod7 terminate"]);
+    assert_eq!(pod_ids(&rig), ["pod7"]);
+    assert_eq!(stops_for(&project, DEP)[0].app_id.as_deref(), Some("pod7"));
+}
+
+#[test]
+fn a_replacement_whose_new_spec_is_refused_leaves_the_old_pod_running() {
+    struct CommaKey;
+    #[async_trait::async_trait]
+    impl SecretResolver for CommaKey {
+        async fn resolve(&self, _: &SecretRef) -> Result<SecretValue, AdapterError> {
+            Ok(SecretValue::new("a,b".to_owned()))
+        }
+    }
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(Some("pod7"), ACCOUNT, &[])));
+    let mut rig = rig();
+    add_pod(&rig, "pod7", "NVIDIA A40", Some(owner()));
+    rig.resolver = Box::new(CommaKey);
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("comma"), "{err}");
+    assert_eq!(pod_writes(&rig), Vec::<String>::new());
+    assert_eq!(pod_ids(&rig), ["pod7"]);
+}
+
+#[test]
+fn a_cloud_change_alone_replaces_the_pod() {
+    let td = TempDir::new();
+    let project = pod_project(&td, None);
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    write(
+        &td.path,
+        "amicu.hcl",
+        &pod_config("    cloud = \"community\"\n"),
+    );
+    rig.runpod.world.state.lock().unwrap().log.clear();
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(pod_writes(&rig), ["action pod1 terminate", "Post /pods"]);
+    let w = rig.runpod.world.state.lock().unwrap();
+    assert_eq!(w.pods.len(), 1);
+    assert_eq!(w.pods[0].body["cloud"], "COMMUNITY");
+}
+
+#[test]
+fn the_management_key_is_refused_as_a_pod_api_key() {
+    struct ManagementKey;
+    #[async_trait::async_trait]
+    impl SecretResolver for ManagementKey {
+        async fn resolve(&self, _: &SecretRef) -> Result<SecretValue, AdapterError> {
+            Ok(SecretValue::new(MANAGEMENT_KEY.to_owned()))
+        }
+    }
+    let td = TempDir::new();
+    let project = pod_project(&td, None);
+    let mut rig = rig();
+    rig.resolver = Box::new(ManagementKey);
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("management key"), "{err}");
+    assert!(err.contains("separate random key"), "{err}");
+    assert!(!err.contains(MANAGEMENT_KEY), "{err}");
+    assert_eq!(rig.runpod.world.log().len(), 0);
+}
+
+#[test]
+fn a_pod_api_key_need_not_be_a_runpod_key() {
+    struct RuntimeKey;
+    #[async_trait::async_trait]
+    impl SecretResolver for RuntimeKey {
+        async fn resolve(&self, _: &SecretRef) -> Result<SecretValue, AdapterError> {
+            Ok(SecretValue::new("9f2c4e7a1b3d5f60".repeat(4)))
+        }
+    }
+    let td = TempDir::new();
+    let project = pod_project(&td, None);
+    let mut rig = rig();
+    rig.resolver = Box::new(RuntimeKey);
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(pod_ids(&rig), ["pod1"]);
+}
+
+#[test]
+fn destroy_terminates_the_pod_and_deletes_its_secrets() {
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(Some("pod7"), ACCOUNT, &["amicu-x"])));
+    let rig = rig();
+    add_pod(&rig, "pod7", "NVIDIA L4", Some(owner()));
+    add_secret(&rig, "s5", "amicu-x");
+    destroy(&project, &rig).unwrap();
+    assert_eq!(
+        pod_writes(&rig),
+        ["action pod7 terminate"],
+        "never just stopped"
+    );
+    assert_eq!(pod_ids(&rig).len(), 0);
+    assert_eq!(
+        rig.runpod.world.secret_names(),
+        [amicu_runpod::ACCOUNT_MARKER_SECRET]
+    );
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn a_failed_terminate_keeps_the_pod_record_and_its_secrets() {
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(Some("pod7"), ACCOUNT, &["amicu-x"])));
+    let rig = rig();
+    add_pod(&rig, "pod7", "NVIDIA L4", Some(owner()));
+    add_secret(&rig, "s5", "amicu-x");
+    rig.runpod.world.state.lock().unwrap().delete_fails = true;
+    let err = destroy(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("kept in state"), "{err}");
+    assert_eq!(stops_for(&project, DEP)[0].secrets, ["amicu-x"]);
+    assert_eq!(pod_ids(&rig), ["pod7"]);
+}
+
+#[test]
+fn destroy_without_a_pod_id_terminates_the_owned_pod_found_by_name() {
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(None, ACCOUNT, &[])));
+    let rig = rig();
+    add_pod(&rig, "pod9", "NVIDIA L4", Some(owner()));
+    destroy(&project, &rig).unwrap();
+    assert_eq!(pod_ids(&rig).len(), 0);
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn destroy_without_a_pod_id_refuses_a_foreign_pod_unless_forgetting() {
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(None, ACCOUNT, &["amicu-x"])));
+    let mut rig = rig();
+    add_pod(&rig, "pod9", "NVIDIA L4", Some("someone-else".to_owned()));
+    add_secret(&rig, "s5", "amicu-x");
+    let err = destroy(&project, &rig).unwrap_err().to_string();
+    assert!(
+        err.contains("AMICU_OWNER") && err.contains("--forget-unconfirmed"),
+        "{err}"
+    );
+    assert_eq!(pod_ids(&rig), ["pod9"]);
+    assert_eq!(stops_for(&project, DEP).len(), 1);
+
+    rig.forget = true;
+    destroy(&project, &rig).unwrap();
+    assert_eq!(pod_ids(&rig), ["pod9"]);
+    assert_eq!(
+        rig.runpod.world.secret_names(),
+        [amicu_runpod::ACCOUNT_MARKER_SECRET]
+    );
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn destroy_of_a_pod_with_a_key_of_another_account_keeps_the_record() {
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(Some("pod7"), "personal:s99", &[])));
+    let rig = rig();
+    add_pod(&rig, "pod7", "NVIDIA L4", Some(owner()));
+    let err = destroy(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("personal:s99"), "{err}");
+    assert_eq!(pod_ids(&rig), ["pod7"]);
+    assert_eq!(stops_for(&project, DEP).len(), 1);
+}
+
+#[test]
+fn plan_shows_a_neutral_billing_line_per_mode() {
+    let state = state_with(amicu_core::graph::Graph::new());
+    let (text, _) = plan_text_for(&pod_config(""), &state);
+    assert!(
+        text.contains("      billing:  always on \u{b7} ~$0.59/hr\n"),
+        "{text}"
+    );
+    let (text, _) = plan_text_for(&runpod_config(), &state);
+    assert!(
+        text.contains("      billing:  scale to zero \u{b7} ~$0.69/hr while active\n"),
+        "{text}"
+    );
+    let (text, _) = plan_text_for(&pod_config("    cloud = \"community\"\n"), &state);
+    assert!(
+        text.contains("      billing:  always on \u{b7} ~$0.44/hr\n"),
+        "{text}"
+    );
+    for word in ["warn", "WARNING", "expensive"] {
+        assert!(!text.contains(word), "{text}");
+    }
+}
+
+#[test]
+fn plan_shows_no_switch_step_for_a_recorded_pod() {
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(Some("pod7"), ACCOUNT, &[])));
+    let mut state = project.load_state().unwrap().unwrap();
+    state.pending.clear();
+    state.graph = amicu_core::graph::Graph::new();
+    let (text, _) = plan_text_for(&pod_config(""), &state);
+    assert!(!text.contains("destroy old"), "{text}");
+    let (text, _) = plan_text_for(&runpod_config(), &state);
+    assert!(text.contains("destroy old (runpod-pod "), "{text}");
+}
+
+// --- amicu runpod status / logs / metrics / stop -----------------------------
+
+fn running_endpoint(rig: &Rig) -> (TempDir, Project) {
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(Some("ep7"), ACCOUNT, &[])));
+    add_endpoint(rig, "ep7", Some(owner()));
+    rig.runpod.world.state.lock().unwrap().endpoints[0].max_workers = Some(1);
+    (td, project)
+}
+
+#[test]
+fn status_shows_the_endpoint_workers_gpu_and_data_centers() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().workers = vec![
+        ("w1".into(), "RUNNING".into()),
+        ("w22".into(), "IDLE".into()),
+    ];
+    let mut out = Vec::new();
+    let code =
+        commands::runpod::status(&project, DEP, OutputFormat::Human, &mut out, &rig.env()).unwrap();
+    assert_eq!(code, 0);
+    let text = utf8(out);
+    assert!(text.contains("RunPod endpoint ep7"), "{text}");
+    assert!(text.contains("https://ep7.api.runpod.ai"), "{text}");
+    assert!(
+        text.contains("running=1 idle=1 initializing=0 throttled=0 unhealthy=0 (min 0, max 1)"),
+        "{text}"
+    );
+    assert!(text.contains("gpu:          AMPERE_24 x1"), "{text}");
+    assert!(text.contains("data centers: EU-RO-1, EU-SE-1"), "{text}");
+
+    let mut out = Vec::new();
+    commands::runpod::status(&project, DEP, OutputFormat::Json, &mut out, &rig.env()).unwrap();
+    let doc: Value = serde_json::from_str(&utf8(out)).unwrap();
+    assert_eq!(doc["endpoint_id"], "ep7");
+    assert_eq!(doc["workers"]["running"], 1);
+    assert_eq!(doc["data_centers"], json!(["EU-RO-1", "EU-SE-1"]));
+}
+
+#[test]
+fn status_reports_scaled_to_zero_and_refuses_unknown_or_unrecorded_deployments() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    let mut out = Vec::new();
+    commands::runpod::status(&project, DEP, OutputFormat::Human, &mut out, &rig.env()).unwrap();
+    assert!(utf8(out).contains("scaled to zero"));
+
+    let err = commands::runpod::status(
+        &project,
+        "nope",
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("no RunPod deployment named 'nope'"), "{err}");
+
+    let td = TempDir::new();
+    let unrecorded = project_with(&td, Some(record(None, ACCOUNT, &[])));
+    let err = commands::runpod::status(
+        &unrecorded,
+        DEP,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("no RunPod endpoint id recorded"), "{err}");
+}
+
+#[test]
+fn status_of_an_endpoint_gone_remotely_says_so() {
+    let rig = rig();
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(Some("ep7"), ACCOUNT, &[])));
+    let err = commands::runpod::status(
+        &project,
+        DEP,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("ep7") && err.contains("not found"), "{err}");
+}
+
+#[test]
+fn logs_merge_every_worker_with_its_prefix() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().workers = vec![
+        ("w22".into(), "RUNNING".into()),
+        ("w1".into(), "IDLE".into()),
+    ];
+    let mut out = Vec::new();
+    commands::runpod::logs(
+        &project,
+        DEP,
+        Some(20),
+        OutputFormat::Human,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let text = utf8(out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "[w1] hello from w1",
+            "[w22] hello from w22",
+            "[w22] (system) done",
+            "[w1] (system) done"
+        ],
+        "{text}"
+    );
+    let log = rig.runpod.world.log();
+    assert!(
+        log.contains(&"Get /serverless/ep7/workers/w1/logs?tail=20".to_owned()),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn logs_of_a_scaled_to_zero_endpoint_say_there_are_no_workers() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    let mut out = Vec::new();
+    let code = commands::runpod::logs(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    assert_eq!(code, 0);
+    assert!(utf8(out).contains("no RunPod workers are running"));
+}
+
+const ONE_SHOT: commands::runpod::MetricsMode = commands::runpod::MetricsMode {
+    watch: false,
+    interval_secs: 5,
+    wake: false,
+};
+
+#[test]
+fn metrics_go_through_the_gateway_with_the_deployment_key() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    {
+        let mut w = rig.runpod.world.state.lock().unwrap();
+        w.metrics = "vllm:num_requests_running 3\nvllm:generation_tokens_total 10\n".to_owned();
+        w.workers = vec![("w1".into(), "RUNNING".into())];
+    }
+    let mut out = Vec::new();
+    commands::runpod::metrics(
+        &project,
+        DEP,
+        ONE_SHOT,
+        OutputFormat::Human,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let text = utf8(out);
+    assert!(text.contains(&format!("metrics {DEP} (vLLM)")), "{text}");
+    assert!(text.contains("running=3"), "{text}");
+    assert!(
+        text.contains("hardware: n/a (not available on RunPod)"),
+        "{text}"
+    );
+    let log = rig.runpod.world.log();
+    assert!(
+        log.contains(&"metrics ep7 bearer=rpa_ENDPOINTKEY".to_owned()),
+        "{log:?}"
+    );
+
+    let mut out = Vec::new();
+    commands::runpod::metrics(
+        &project,
+        DEP,
+        ONE_SHOT,
+        OutputFormat::Json,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let doc: Value = serde_json::from_str(&utf8(out)).unwrap();
+    assert_eq!(doc["runtime"]["requests_running"], 3);
+    assert_eq!(doc["hardware"]["containers"], json!([]));
+}
+
+#[test]
+fn stop_deletes_the_endpoint_then_drops_the_record() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    commands::runpod::stop(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap();
+    assert_eq!(rig.runpod.world.endpoint_ids().len(), 0);
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn an_unconfirmed_stop_keeps_the_record() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().delete_fails = true;
+    let err = commands::runpod::stop(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("kept in state"), "{err}");
+    assert_eq!(stops_for(&project, DEP)[0].app_id.as_deref(), Some("ep7"));
+}
+
+#[test]
+fn stop_refuses_a_deployment_without_a_runpod_record() {
+    let rig = rig();
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let err = commands::runpod::stop(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("no RunPod deployment named"), "{err}");
+    assert_eq!(rig.runpod.world.log().len(), 0);
+}
+
+#[test]
+fn metrics_refuse_to_wake_a_scaled_to_zero_endpoint_without_wake() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().metrics = "vllm:num_requests_running 0\n".to_owned();
+    let err = commands::runpod::metrics(
+        &project,
+        DEP,
+        ONE_SHOT,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("--wake"), "{err}");
+    let scraped = |rig: &Rig| {
+        rig.runpod
+            .world
+            .log()
+            .iter()
+            .any(|l| l.starts_with("metrics "))
+    };
+    assert!(!scraped(&rig));
+
+    let wake = commands::runpod::MetricsMode {
+        wake: true,
+        ..ONE_SHOT
+    };
+    commands::runpod::metrics(
+        &project,
+        DEP,
+        wake,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap();
+    assert!(scraped(&rig));
+}
+
+#[test]
+fn logs_as_json_list_each_worker_with_its_lines() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().workers = vec![("w1".into(), "RUNNING".into())];
+    let mut out = Vec::new();
+    commands::runpod::logs(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Json,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let doc: Value = serde_json::from_str(&utf8(out)).unwrap();
+    assert_eq!(doc["endpoint_id"], "ep7");
+    assert_eq!(doc["workers"][0]["id"], "w1");
+    assert!(doc["workers"][0]["error"].is_null());
+    assert_eq!(doc["workers"][0]["lines"][0]["line"], "hello from w1");
+    assert_eq!(doc["workers"][0]["lines"][1]["source"], "system");
+}
+
+/// Applies the RunPod config with `region` on the hardware profile and
+/// `extra` HCL appended; returns apply's result and the endpoint create bodies.
+fn apply_in_region(region: &str, extra: &str) -> (Result<u8, crate::error::CliError>, Vec<Value>) {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let config = runpod_config().replacen(
+        "provider = \"runpod\"",
+        &format!("provider = \"runpod\"\n  region   = \"{region}\""),
+        1,
+    );
+    write(&td.path, "amicu.hcl", &format!("{config}{extra}"));
+    let rig = rig();
+    let result = apply_with(&project, &rig);
+    let created = rig.runpod.world.state.lock().unwrap().created.clone();
+    (result, created)
+}
+
+fn created_in(region: &str) -> Value {
+    let (result, created) = apply_in_region(region, "");
+    assert_eq!(result.unwrap(), 0);
+    assert_eq!(created.len(), 1);
+    created[0].clone()
+}
+
+fn data_centers(body: &Value) -> Vec<String> {
+    body["dataCenterIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_region_group_places_the_endpoint_in_its_data_centers() {
+    let body = created_in("eu");
+    let dcs = data_centers(&body);
+    assert!(dcs.len() > 1, "{dcs:?}");
+    assert!(dcs.iter().all(|d| d.starts_with("EU")), "{dcs:?}");
+    // llama.cpp serves on the image's port and asks for its CUDA floor.
+    assert_eq!(body["ports"], json!(["8080/http"]));
+    assert_eq!(body["env"]["PORT_HEALTH"], json!("8080"));
+    assert_eq!(body["gpu"]["minCudaVersion"], json!("12.8"));
+}
+
+#[test]
+fn an_exact_data_center_places_the_endpoint_there() {
+    let body = created_in("EU-RO-1");
+    assert_eq!(data_centers(&body), ["EU-RO-1"]);
+}
+
+#[test]
+fn a_region_group_outside_the_data_class_residency_is_refused_before_any_create() {
+    let extra = r#"
+resource "data_class" "customer" {
+  sensitivity = "confidential"
+  residency   = ["us"]
+}
+"#;
+    // The plan-time check cannot resolve the `eu` group; apply still refuses it.
+    let (result, created) = apply_in_region("eu", extra);
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("not within the required residency (us)"),
+        "{err}"
+    );
+    assert_eq!(created.len(), 0);
+}
+
+// --- pods in refresh, orphans and `amicu runpod` ------------------------------
+
+fn applied_pod(td: &TempDir, record: StopRecord) -> Project {
+    let project = pod_project(td, Some(record));
+    let mut state = project.load_state().unwrap().unwrap();
+    state.pending.clear();
+    project.save_state(&state).unwrap();
+    project
+}
+
+fn add_named_pod(rig: &Rig, id: &str, name: &str, owner: Option<&str>, status: &'static str) {
+    let mut env = serde_json::Map::new();
+    if let Some(o) = owner {
+        env.insert(amicu_runpod::OWNER_ENV_VAR.to_owned(), json!(o));
+    }
+    rig.runpod.world.state.lock().unwrap().pods.push(PodRec {
+        id: id.to_owned(),
+        body: json!({"name": name, "gpu": {"id": "NVIDIA L4", "count": 1},
+            "cloud": "SECURE", "dataCenterId": "EU-RO-1", "cost": 0.44,
+            "ports": ["8080/http"], "env": env}),
+        status,
+        started: 0,
+    });
+}
+
+#[test]
+fn refresh_keeps_a_live_pod_without_notes() {
+    let td = TempDir::new();
+    let project = applied_pod(&td, pod_record(Some("pod7"), ACCOUNT, &[]));
+    let rig = rig();
+    add_pod(&rig, "pod7", "NVIDIA L4", Some(owner()));
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r, crate::refresh::Refresh::default());
+    assert_eq!(state.pending.len(), 0);
+    assert!(
+        rig.runpod
+            .world
+            .log()
+            .contains(&"Get /pods/pod7".to_owned())
+    );
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn refresh_marks_a_pod_gone_or_terminated_in_the_recorded_account_pending() {
+    for terminated in [false, true] {
+        let td = TempDir::new();
+        let project = applied_pod(&td, pod_record(Some("pod7"), ACCOUNT, &["amicu-x"]));
+        let rig = rig();
+        if terminated {
+            add_named_pod(&rig, "pod7", &endpoint_name(), None, "TERMINATED");
+        }
+        let (r, state) = refresh(&project, &rig);
+        assert_eq!(r.notes.len(), 1, "{r:?}");
+        let note = &r.notes[0];
+        assert!(
+            note.contains("RunPod pod") && note.contains("pod id pod7") && note.contains(ACCOUNT),
+            "{note}"
+        );
+        assert!(note.contains("kept in state as pending"), "{note}");
+        assert!(state.pending.iter().any(|d| d.as_str() == DEP));
+        assert_eq!(
+            state.stops,
+            [pod_record(Some("pod7"), ACCOUNT, &["amicu-x"])]
+        );
+        assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+    }
+}
+
+#[test]
+fn refresh_never_calls_a_pod_gone_from_another_account() {
+    let td = TempDir::new();
+    let project = applied_pod(&td, pod_record(Some("pod7"), "personal:s99", &[]));
+    let rig = rig();
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0, "{r:?}");
+    let warning = r.warning.unwrap();
+    assert!(
+        warning.contains("RunPod pod") && warning.contains("cannot tell whether it is gone"),
+        "{warning}"
+    );
+    assert_eq!(state.pending.len(), 0);
+}
+
+#[test]
+fn refresh_finds_an_id_less_pod_by_name_and_owner_and_never_a_foreign_one() {
+    let td = TempDir::new();
+    let project = applied_pod(&td, pod_record(None, ACCOUNT, &[]));
+    let rig = rig();
+    add_pod(&rig, "pod9", "NVIDIA L4", Some(owner()));
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r, crate::refresh::Refresh::default());
+    assert_eq!(state.pending.len(), 0);
+
+    let rig = self::rig();
+    add_pod(&rig, "pod9", "NVIDIA L4", Some("someone-else".to_owned()));
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0, "{r:?}");
+    let warning = r.warning.unwrap();
+    assert!(
+        warning.contains("no pod id recorded")
+            && warning.contains("pod9")
+            && warning.contains("AMICU_OWNER"),
+        "{warning}"
+    );
+    assert_eq!(state.pending.len(), 0);
+}
+
+#[test]
+fn refresh_reports_gpu_and_cloud_drift_of_a_live_pod_as_a_note_only() {
+    let td = TempDir::new();
+    let project = applied_pod(&td, pod_record(Some("pod7"), ACCOUNT, &[]));
+    let rig = rig();
+    add_pod(&rig, "pod7", "NVIDIA A40", Some(owner()));
+    rig.runpod.world.state.lock().unwrap().pods[0].body["cloud"] = json!("COMMUNITY");
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 1, "{r:?}");
+    let note = &r.notes[0];
+    assert!(
+        note.contains("RunPod pod") && note.contains("pod7"),
+        "{note}"
+    );
+    assert!(
+        note.contains("GPU type NVIDIA A40 (applied NVIDIA L4)"),
+        "{note}"
+    );
+    assert!(note.contains("cloud COMMUNITY (applied SECURE)"), "{note}");
+    assert!(note.contains("revert it in the RunPod console"), "{note}");
+    assert_eq!(state.pending.len(), 0);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn orphans_lists_untracked_owned_pods_with_a_terminate_command() {
+    use crate::commands::orphans::{Kind, Ownership};
+    let td = TempDir::new();
+    let project = applied_pod(&td, pod_record(Some("pod7"), ACCOUNT, &[]));
+    let rig = rig();
+    add_named_pod(&rig, "pod7", &endpoint_name(), Some(&owner()), "RUNNING");
+    let stale = amicu_runpod::project_endpoint_name(PROJECT, "old");
+    add_named_pod(&rig, "pod8", &stale, Some("marker"), "EXITED");
+    add_named_pod(&rig, "pod9", "not-amicu", None, "RUNNING");
+    add_named_pod(&rig, "pod10", &stale, Some("marker"), "TERMINATED");
+    let report = orphans(&project, &rig);
+    let pods: Vec<(&str, bool, Ownership)> = report
+        .resources
+        .iter()
+        .filter(|r| r.kind == Kind::RunpodPod)
+        .map(|r| (r.identity.as_str(), r.tracked, r.ownership))
+        .collect();
+    let stale_id = format!("{stale} (pod8)");
+    let ours = format!("{} (pod7)", endpoint_name());
+    assert_eq!(pods.len(), 2, "{pods:?}");
+    assert!(pods.contains(&(stale_id.as_str(), false, Ownership::ThisProject)));
+    assert!(pods.iter().any(|p| p.0 == ours && p.1), "{pods:?}");
+    let orphan = report
+        .resources
+        .iter()
+        .find(|r| r.identity == stale_id)
+        .unwrap();
+    assert!(
+        orphan.stop_command.contains("curl -X DELETE")
+            && orphan.stop_command.contains("$RUNPOD_API_KEY")
+            && orphan.stop_command.contains("/v2/pods/pod8"),
+        "{}",
+        orphan.stop_command
+    );
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+fn running_pod(rig: &Rig) -> (TempDir, Project) {
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(Some("pod7"), ACCOUNT, &[])));
+    add_named_pod(rig, "pod7", &endpoint_name(), Some(&owner()), "RUNNING");
+    (td, project)
+}
+
+#[test]
+fn status_shows_the_pod_gpu_cloud_cost_and_proxy_url() {
+    let rig = rig();
+    let (_td, project) = running_pod(&rig);
+    let mut out = Vec::new();
+    commands::runpod::status(&project, DEP, OutputFormat::Human, &mut out, &rig.env()).unwrap();
+    let text = utf8(out);
+    assert!(text.contains("RunPod pod pod7"), "{text}");
+    assert!(text.contains("status:      RUNNING"), "{text}");
+    assert!(
+        text.contains("url:         https://pod7-8080.proxy.runpod.net"),
+        "{text}"
+    );
+    assert!(text.contains("gpu:         NVIDIA L4 x1"), "{text}");
+    assert!(text.contains("cloud:       SECURE"), "{text}");
+    assert!(text.contains("data center: EU-RO-1"), "{text}");
+    assert!(text.contains("cost:        $0.44/hr"), "{text}");
+
+    let mut out = Vec::new();
+    commands::runpod::status(&project, DEP, OutputFormat::Json, &mut out, &rig.env()).unwrap();
+    let doc: Value = serde_json::from_str(&utf8(out)).unwrap();
+    assert_eq!(doc["pod_id"], "pod7");
+    assert_eq!(doc["url"], "https://pod7-8080.proxy.runpod.net");
+    assert_eq!(doc["cost_per_hour_usd"], 0.44);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn status_of_a_pod_gone_remotely_or_unrecorded_says_so() {
+    let rig = rig();
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(Some("pod7"), ACCOUNT, &[])));
+    let err = commands::runpod::status(
+        &project,
+        DEP,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("RunPod pod pod7") && err.contains("not found"),
+        "{err}"
+    );
+
+    let td = TempDir::new();
+    let unrecorded = pod_project(&td, Some(pod_record(None, ACCOUNT, &[])));
+    let err = commands::runpod::status(
+        &unrecorded,
+        DEP,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("no RunPod pod id recorded"), "{err}");
+}
+
+#[test]
+fn pod_logs_are_read_from_the_pod_logs_route() {
+    let rig = rig();
+    let (_td, project) = running_pod(&rig);
+    let mut out = Vec::new();
+    commands::runpod::logs(
+        &project,
+        DEP,
+        Some(20),
+        OutputFormat::Human,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let text = utf8(out);
+    assert_eq!(
+        text.lines().collect::<Vec<_>>(),
+        ["[pod7] (system) pulled", "[pod7] hello from pod7"],
+        "{text}"
+    );
+    assert!(
+        rig.runpod
+            .world
+            .log()
+            .contains(&"Get /pods/pod7/logs?tail=20".to_owned())
+    );
+
+    let mut out = Vec::new();
+    commands::runpod::logs(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Json,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let doc: Value = serde_json::from_str(&utf8(out)).unwrap();
+    assert_eq!(doc["pod_id"], "pod7");
+    assert_eq!(doc["lines"][1]["line"], "hello from pod7");
+}
+
+#[test]
+fn pod_metrics_go_through_the_proxy_url_with_the_runtime_key() {
+    let rig = rig();
+    let (_td, project) = running_pod(&rig);
+    rig.runpod.world.state.lock().unwrap().metrics = "llamacpp:requests_processing 2\n".to_owned();
+    let mut out = Vec::new();
+    commands::runpod::metrics(
+        &project,
+        DEP,
+        ONE_SHOT,
+        OutputFormat::Json,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let doc: Value = serde_json::from_str(&utf8(out)).unwrap();
+    assert_eq!(doc["pod_id"], "pod7");
+    assert_eq!(doc["runtime"]["requests_running"], 2);
+    let log = rig.runpod.world.log();
+    assert!(
+        log.contains(&"proxy metrics pod7-8080 bearer=rpa_ENDPOINTKEY".to_owned()),
+        "{log:?}"
+    );
+    assert!(!log.iter().any(|l| l.contains("workers")), "{log:?}");
+}
+
+#[test]
+fn stop_terminates_the_pod_then_drops_the_record() {
+    let rig = rig();
+    let (_td, project) = running_pod(&rig);
+    commands::runpod::stop(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap();
+    assert_eq!(pod_writes(&rig), ["action pod7 terminate"]);
+    assert_eq!(pod_ids(&rig).len(), 0);
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn a_pod_region_outside_the_data_class_residency_is_refused_before_any_create() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let config = pod_config("").replacen(
+        "provider = \"runpod\"",
+        "provider = \"runpod\"\n  region   = \"eu\"",
+        1,
+    );
+    let extra = r#"
+resource "data_class" "customer" {
+  sensitivity = "confidential"
+  residency   = ["us"]
+}
+"#;
+    write(&td.path, "amicu.hcl", &format!("{config}{extra}"));
+    let rig = rig();
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(
+        err.contains("not within the required residency (us)"),
+        "{err}"
+    );
+    assert_eq!(pod_ids(&rig).len(), 0);
 }

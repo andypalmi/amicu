@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 
 use amicu_core::ByteSize;
@@ -12,40 +12,40 @@ use super::*;
 use crate::client::ApiKey;
 
 /// The end-user endpoint key (the deployment's `api_key`).
-const KEY: &str = "rpa_ENDUSERKEY0123456789";
+pub(crate) const KEY: &str = "rpa_ENDUSERKEY0123456789";
 /// The operator's RunPod management key.
-const MGMT: &str = "rpa_MANAGEMENTKEY";
-const BASE: &str = "https://api.runpod.io/v2";
-const PROJECT: &str = "aaaa1111";
-const DEP: &str = "chat";
+pub(crate) const MGMT: &str = "rpa_MANAGEMENTKEY";
+pub(crate) const BASE: &str = "https://api.runpod.io/v2";
+pub(crate) const PROJECT: &str = "aaaa1111";
+pub(crate) const DEP: &str = "chat";
 
 #[derive(Clone)]
-enum Canned {
+pub(crate) enum Canned {
     Status(u16, &'static str),
     Timeout,
 }
 
-type Route = (HttpMethod, &'static str, VecDeque<Canned>);
+pub(crate) type Route = (HttpMethod, &'static str, VecDeque<Canned>);
 
 #[derive(Clone)]
-struct Seen {
-    method: HttpMethod,
-    url: String,
-    bearer: Option<String>,
-    body: Option<Value>,
+pub(crate) struct Seen {
+    pub(crate) method: HttpMethod,
+    pub(crate) url: String,
+    pub(crate) bearer: Option<String>,
+    pub(crate) body: Option<Value>,
 }
 
 /// Canned answers by `(method, url suffix)`; a suffix ending in `=` matches
 /// any URL containing it (query lookups). Each route plays its answers in
 /// order and repeats the last one. Every request is recorded.
 #[derive(Default)]
-struct Mock {
+pub(crate) struct Mock {
     routes: Mutex<Vec<Route>>,
     seen: Mutex<Vec<Seen>>,
 }
 
 impl Mock {
-    fn on(self, method: HttpMethod, suffix: &'static str, answers: &[Canned]) -> Self {
+    pub(crate) fn on(self, method: HttpMethod, suffix: &'static str, answers: &[Canned]) -> Self {
         self.routes
             .lock()
             .unwrap()
@@ -54,7 +54,12 @@ impl Mock {
     }
 
     /// Like [`on`](Self::on), but matched before every route added so far.
-    fn first(self, method: HttpMethod, suffix: &'static str, answers: &[Canned]) -> Self {
+    pub(crate) fn first(
+        self,
+        method: HttpMethod,
+        suffix: &'static str,
+        answers: &[Canned],
+    ) -> Self {
         self.routes
             .lock()
             .unwrap()
@@ -62,15 +67,21 @@ impl Mock {
         self
     }
 
-    fn ok(self, method: HttpMethod, suffix: &'static str, status: u16, body: &'static str) -> Self {
+    pub(crate) fn ok(
+        self,
+        method: HttpMethod,
+        suffix: &'static str,
+        status: u16,
+        body: &'static str,
+    ) -> Self {
         self.on(method, suffix, &[Canned::Status(status, body)])
     }
 
-    fn requests(&self) -> Vec<Seen> {
+    pub(crate) fn requests(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
     }
 
-    fn count(&self, method: HttpMethod, suffix: &str) -> usize {
+    pub(crate) fn count(&self, method: HttpMethod, suffix: &str) -> usize {
         self.requests()
             .iter()
             .filter(|s| s.method == method && s.url.ends_with(suffix))
@@ -117,12 +128,12 @@ const ONE_ENDPOINT: &str =
     r#"{"endpoints":[{"id":"ep1","name":"x"}],"pagination":{"hasNextPage":false}}"#;
 const TWO_ENDPOINTS: &str = r#"{"endpoints":[{"id":"ep1","name":"x"},{"id":"ep2","name":"x"}],"pagination":{"hasNextPage":false}}"#;
 const ENDPOINT: &str = r#"{"id":"ep1","name":"x","type":"LOAD_BALANCER"}"#;
-const SECRET: &str = r#"{"id":"s1","name":"x"}"#;
-const FOUND_SECRET: &str = r#"{"secrets":[{"id":"s1","name":"{NAME}"}]}"#;
-const NO_SECRETS: &str = r#"{"secrets":[]}"#;
+pub(crate) const SECRET: &str = r#"{"id":"s1","name":"x"}"#;
+pub(crate) const FOUND_SECRET: &str = r#"{"secrets":[{"id":"s1","name":"{NAME}"}]}"#;
+pub(crate) const NO_SECRETS: &str = r#"{"secrets":[]}"#;
 const HEALTH: &str = "https://ep1.api.runpod.ai/health";
 
-const FAST: ReadinessTiming = ReadinessTiming {
+pub(crate) const FAST: ReadinessTiming = ReadinessTiming {
     timeout: Duration::from_millis(200),
     initial_backoff: Duration::from_millis(1),
     max_backoff: Duration::from_millis(5),
@@ -170,7 +181,7 @@ fn supervisor(mock: Mock) -> (RunPodSupervisor, Arc<Mock>) {
     (sup, mock)
 }
 
-fn plan(argv: &[&str], settings: Runtime) -> LaunchPlan {
+pub(crate) fn plan(argv: &[&str], settings: Runtime) -> LaunchPlan {
     let argv: Vec<String> = argv.iter().map(|s| (*s).to_owned()).collect();
     LaunchPlan {
         deployment: DeploymentId::from(DEP),
@@ -191,7 +202,7 @@ fn plan(argv: &[&str], settings: Runtime) -> LaunchPlan {
     }
 }
 
-fn vllm_plan() -> LaunchPlan {
+pub(crate) fn vllm_plan() -> LaunchPlan {
     plan(
         &[
             "vllm",
@@ -209,7 +220,7 @@ fn vllm_plan() -> LaunchPlan {
     )
 }
 
-fn llama_plan() -> LaunchPlan {
+pub(crate) fn llama_plan() -> LaunchPlan {
     plan(
         &[
             "llama-server",
@@ -228,12 +239,12 @@ fn llama_plan() -> LaunchPlan {
 }
 
 /// The operator's Hugging Face token (a RunPod secret, unlike the api_key).
-const HF: &str = "hf_HUGGINGFACETOKEN0123";
+pub(crate) const HF: &str = "hf_HUGGINGFACETOKEN0123";
 
 /// The deployment's `api_key` under the runtime's variable, plus `HF_TOKEN`
 /// (passed explicitly so a `HF_TOKEN` in the test environment never adds a
 /// fallback).
-fn secrets_for(var: &str) -> Vec<ResolvedSecret> {
+pub(crate) fn secrets_for(var: &str) -> Vec<ResolvedSecret> {
     vec![
         ResolvedSecret {
             name: var.to_owned(),
@@ -246,15 +257,15 @@ fn secrets_for(var: &str) -> Vec<ResolvedSecret> {
     ]
 }
 
-fn vllm_secrets() -> Vec<ResolvedSecret> {
+pub(crate) fn vllm_secrets() -> Vec<ResolvedSecret> {
     secrets_for("VLLM_API_KEY")
 }
 
-fn owner() -> String {
+pub(crate) fn owner() -> String {
     owner_marker(None, PROJECT, DEP)
 }
 
-fn sname(var: &str, value: &str) -> String {
+pub(crate) fn sname(var: &str, value: &str) -> String {
     secret_name(PROJECT, DEP, &owner(), var, value)
 }
 
@@ -283,7 +294,7 @@ fn happy_mock() -> Mock {
         .ok(HttpMethod::Get, HEALTH, 200, "{}")
 }
 
-fn posted(mock: &Mock, suffix: &str) -> Vec<Value> {
+pub(crate) fn posted(mock: &Mock, suffix: &str) -> Vec<Value> {
     mock.requests()
         .into_iter()
         .filter(|s| s.method == HttpMethod::Post && s.url.ends_with(suffix))
@@ -291,7 +302,7 @@ fn posted(mock: &Mock, suffix: &str) -> Vec<Value> {
         .collect()
 }
 
-fn position(mock: &Mock, method: HttpMethod, suffix: &str) -> usize {
+pub(crate) fn position(mock: &Mock, method: HttpMethod, suffix: &str) -> usize {
     mock.requests()
         .iter()
         .position(|s| s.method == method && s.url.ends_with(suffix))
@@ -414,6 +425,7 @@ async fn vllm_start_creates_the_secret_then_the_endpoint_and_waits_for_health() 
     assert_eq!(body["disk"], json!(DEFAULT_CONTAINER_DISK_GB));
     assert_eq!(body["gpu"]["pools"], json!(["ADA_80_PRO"]));
     assert_eq!(body["gpu"]["count"], json!(2));
+    assert_eq!(body["gpu"]["minCudaVersion"], json!("13.0"));
     // Exclusions come from the live catalog, including the card the static
     // table does not know.
     assert_eq!(
@@ -491,6 +503,7 @@ async fn llama_start_runs_the_image_server_with_an_hf_gguf() {
         ])
     );
     assert_eq!(body["env"]["PORT"], json!("8080"));
+    assert_eq!(body["gpu"]["minCudaVersion"], json!("12.8"));
     assert!(body["env"].get("LLAMA_API_KEY").is_none());
     assert!(!body.to_string().contains(KEY));
     assert_eq!(
@@ -502,6 +515,72 @@ async fn llama_start_runs_the_image_server_with_an_hf_gguf() {
         body.get("dataCenterIds").is_none(),
         "no region: RunPod picks"
     );
+}
+
+#[test]
+fn llama_serves_on_the_stock_image_port_whatever_the_deployment_says() {
+    let (mut sup, _) = supervisor(Mock::default());
+    sup.gguf = Some(GgufSource {
+        repo: "org/g-GGUF".into(),
+        file: "g.gguf".into(),
+    });
+    let plan = plan(
+        &["llama-server", "-m", "m.gguf", "--port", "8000"],
+        Runtime::LlamaCpp(LlamaCppSettings {
+            port: 8000,
+            ..Default::default()
+        }),
+    );
+    let argv = sup.launch_argv(&plan).unwrap();
+    let i = argv.iter().position(|a| a == "--port").unwrap();
+    assert_eq!(argv[i + 1], "8080");
+    assert_eq!(argv.iter().filter(|a| *a == "--port").count(), 1);
+    assert_eq!(runtime_port(&plan), remote::LLAMACPP_IMAGE_PORT);
+    assert_eq!(runtime_port(&vllm_plan()), 8000);
+}
+
+#[test]
+fn an_overridden_image_gets_no_cuda_floor() {
+    assert_eq!(
+        image_min_cuda(remote::DEFAULT_LLAMACPP_IMAGE, RuntimeKind::LlamaCpp).as_deref(),
+        Some("12.8")
+    );
+    assert_eq!(
+        image_min_cuda(remote::DEFAULT_VLLM_IMAGE, RuntimeKind::Vllm).as_deref(),
+        Some("13.0")
+    );
+    assert_eq!(image_min_cuda("me/vllm:custom", RuntimeKind::Vllm), None);
+}
+
+#[test]
+fn a_dsl_region_without_residency_places_in_its_data_centers() {
+    let (sup, _) = supervisor(Mock::default());
+    let sup = sup.with_region(Some(&Region::from_code("eu"))).unwrap();
+    assert_ne!(sup.data_center_ids.len(), 0);
+    assert!(sup.data_center_ids.iter().all(|d| d.starts_with("EU")));
+
+    let (sup, _) = supervisor(Mock::default());
+    let sup = sup
+        .with_region(Some(&Region::from_code("eu-ro-1")))
+        .unwrap();
+    assert_eq!(sup.data_center_ids, ["EU-RO-1"]);
+    let err = sup
+        .with_allowed_residencies(&[Residency::Us])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("not within the required residency (us)"),
+        "{err}"
+    );
+
+    let (sup, _) = supervisor(Mock::default());
+    let sup = sup
+        .with_region(None)
+        .unwrap()
+        .with_allowed_residencies(&[Residency::Eu])
+        .unwrap();
+    assert_ne!(sup.data_center_ids.len(), 0);
+    assert!(sup.data_center_ids.iter().all(|d| d.starts_with("EU")));
 }
 
 #[test]
@@ -727,6 +806,73 @@ async fn an_owned_endpoint_found_by_name_is_updated_in_place() {
     assert_eq!(patch["env"][OWNER_ENV_VAR], json!(owner()));
     assert!(patch.get("name").is_none());
     assert!(!patch.to_string().contains(KEY));
+}
+
+#[tokio::test]
+async fn an_update_restates_the_cuda_floor_and_clears_a_stale_placement() {
+    let (sup, mock) = supervisor(update_mock(owned_endpoint()));
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    let patch = patch_body(&mock);
+    assert_eq!(patch["gpu"]["minCudaVersion"], json!("13.0"));
+    assert_eq!(patch["dataCenterIds"], json!([]));
+}
+
+#[test]
+fn an_update_without_a_floor_clears_the_previous_one() {
+    let (sup, _) = supervisor(Mock::default());
+    let prepared = sup
+        .prepare(&vllm_plan(), &vllm_secrets(), "me/vllm:custom", None)
+        .unwrap();
+    assert_eq!(prepared.endpoint.gpu.min_cuda_version, None);
+    assert!(
+        prepared.endpoint.to_body()["gpu"]
+            .get("minCudaVersion")
+            .is_none()
+    );
+    let patch = update_from(&prepared.endpoint).to_body();
+    assert_eq!(patch["gpu"]["minCudaVersion"], json!(""));
+}
+
+#[tokio::test]
+async fn an_update_sends_the_scaling_block_as_workers() {
+    let (sup, mock) = supervisor(update_mock(owned_endpoint()));
+    let sup = sup.with_scaling(Some(&ScalingSettings {
+        min_replicas: Some(1),
+        max_replicas: Some(4),
+        target_concurrency: None,
+        scaledown_window_secs: Some(600),
+    }));
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    let patch = patch_body(&mock);
+    assert_eq!(
+        patch["workers"],
+        json!({"min": 1, "max": 4, "idleTimeout": 600})
+    );
+    assert_eq!(
+        patch["scaling"]["requestCount"],
+        json!(DEFAULT_REQUEST_COUNT)
+    );
+}
+
+#[test]
+fn defaults_to_one_worker_and_a_lone_min_raises_the_ceiling() {
+    let (sup, _) = supervisor(Mock::default());
+    let prepared = sup
+        .prepare(&vllm_plan(), &vllm_secrets(), "img", None)
+        .unwrap();
+    assert_eq!(DEFAULT_MAX_WORKERS, 1);
+    assert_eq!(prepared.endpoint.workers.min, 0);
+    assert_eq!(prepared.endpoint.workers.max, 1);
+
+    let sup = sup.with_scaling(Some(&ScalingSettings {
+        min_replicas: Some(2),
+        ..ScalingSettings::default()
+    }));
+    let prepared = sup
+        .prepare(&vllm_plan(), &vllm_secrets(), "img", None)
+        .unwrap();
+    assert_eq!(prepared.endpoint.workers.min, 2);
+    assert_eq!(prepared.endpoint.workers.max, 2);
 }
 
 #[tokio::test]
@@ -989,7 +1135,12 @@ async fn readiness_waits_through_initializing_and_cold_start_answers() {
 
 #[tokio::test]
 async fn readiness_times_out_naming_the_last_answer_and_keeps_the_id() {
-    let (sup, _) = supervisor(ready_mock(&[Canned::Status(204, "")]));
+    let (sup, _) = supervisor(ready_mock(&[Canned::Status(204, "")]).ok(
+        HttpMethod::Get,
+        "/serverless/ep1/workers",
+        200,
+        r#"{"workers":[],"summary":{"running":1,"throttled":3,"total":4}}"#,
+    ));
     let err = sup
         .start(&vllm_plan(), &vllm_secrets())
         .await
@@ -997,10 +1148,40 @@ async fn readiness_times_out_naming_the_last_answer_and_keeps_the_id() {
         .to_string();
     assert!(err.contains("did not become ready"), "{err}");
     assert!(err.contains("initializing (HTTP 204)"), "{err}");
+    assert!(
+        err.contains("running=1 idle=0 initializing=0 throttled=3 unhealthy=0"),
+        "{err}"
+    );
+    assert!(err.contains("`amicu runpod logs chat`"), "{err}");
     assert!(!err.contains(KEY));
     assert_eq!(
         sup.deployed_endpoint().lock().unwrap().as_deref(),
         Some("ep1")
+    );
+}
+
+#[tokio::test]
+async fn readiness_reports_progress_to_the_sink_only() {
+    let lines: Arc<Mutex<Vec<String>>> = Arc::default();
+    let seen = lines.clone();
+    let (sup, _) = supervisor(ready_mock(&[Canned::Status(204, "")]).ok(
+        HttpMethod::Get,
+        "/serverless/ep1/workers",
+        200,
+        r#"{"workers":[],"summary":{"initializing":1,"total":1}}"#,
+    ));
+    let sup = sup.with_progress(Duration::from_millis(20), move |l| {
+        seen.lock().unwrap().push(l.to_owned());
+    });
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    let lines = lines.lock().unwrap();
+    assert_ne!(lines.len(), 0);
+    assert!(
+        lines[0].starts_with("waiting for RunPod endpoint ep1: ")
+            && lines[0].ends_with(
+                "elapsed, workers: running=0 idle=0 initializing=1 throttled=0 unhealthy=0"
+            ),
+        "{lines:?}"
     );
 }
 
@@ -1072,17 +1253,111 @@ async fn status_reads_the_worker_summary() {
 }
 
 #[tokio::test]
-async fn metrics_and_logs_say_they_are_not_supported_yet() {
-    let (sup, mock) = supervisor(Mock::default());
-    let m = sup.metrics(&handle()).await.unwrap_err().to_string();
-    assert!(m.contains("not yet supported for RunPod"), "{m}");
-    let l = sup
-        .logs(&handle(), LogOptions::default())
+async fn metrics_scrape_through_the_gateway_with_the_deployment_key() {
+    let (sup, mock) = supervisor(
+        Mock::default()
+            .ok(
+                HttpMethod::Get,
+                "https://ep1.api.runpod.ai/metrics",
+                200,
+                "llamacpp:predicted_tokens_seconds 12.5\n",
+            )
+            .ok(
+                HttpMethod::Get,
+                "/serverless/ep1/workers",
+                200,
+                r#"{"workers":[],"summary":{"idle":1}}"#,
+            ),
+    );
+    let err = sup.metrics(&handle()).await.unwrap_err().to_string();
+    assert!(err.contains("api_key"), "{err}");
+    assert!(!mock.requests().iter().any(|s| s.url.ends_with("/metrics")));
+
+    let sup = sup.with_gateway_key(SecretValue::new(KEY.to_owned()));
+    let m = sup.metrics(&handle()).await.unwrap();
+    assert!((m.tokens_per_second - 12.5).abs() < f64::EPSILON);
+    let scrapes: Vec<_> = mock
+        .requests()
+        .into_iter()
+        .filter(|s| s.url.ends_with("/metrics"))
+        .collect();
+    assert_eq!(scrapes.len(), 1);
+    assert_eq!(scrapes[0].bearer.as_deref(), Some(KEY));
+}
+
+#[tokio::test]
+async fn metrics_never_wake_a_scaled_to_zero_endpoint_unless_asked() {
+    let (sup, mock) = supervisor(
+        Mock::default()
+            .ok(
+                HttpMethod::Get,
+                "https://ep1.api.runpod.ai/metrics",
+                200,
+                "vllm:num_requests_running 0\n",
+            )
+            .ok(
+                HttpMethod::Get,
+                "/serverless/ep1/workers",
+                200,
+                r#"{"workers":[],"summary":{"initializing":1}}"#,
+            ),
+    );
+    let sup = sup.with_gateway_key(SecretValue::new(KEY.to_owned()));
+    let err = sup
+        .scrape_metrics(&handle(), false)
         .await
         .unwrap_err()
         .to_string();
-    assert!(l.contains("not yet supported for RunPod"), "{l}");
-    assert!(mock.requests().is_empty());
+    assert!(
+        err.contains("starting") && err.contains("retry shortly"),
+        "{err}"
+    );
+    assert!(sup.metrics(&handle()).await.is_err());
+    assert!(!mock.requests().iter().any(|s| s.url.ends_with("/metrics")));
+
+    sup.scrape_metrics(&handle(), true).await.unwrap();
+    assert_eq!(mock.count(HttpMethod::Get, "/metrics"), 1);
+}
+
+#[tokio::test]
+async fn logs_merge_the_workers_and_say_when_none_is_running() {
+    let none = Mock::default().ok(
+        HttpMethod::Get,
+        "/serverless/ep1/workers",
+        200,
+        r#"{"workers":[],"summary":{}}"#,
+    );
+    let (sup, _) = supervisor(none);
+    let lines = sup.logs(&handle(), LogOptions::default()).await.unwrap();
+    assert_eq!(lines.lines(), [crate::logs::NO_WORKERS.to_owned()]);
+
+    let one = Mock::default()
+        .ok(
+            HttpMethod::Get,
+            "/serverless/ep1/workers",
+            200,
+            r#"{"workers":[{"id":"w1","status":"RUNNING"}],"summary":{"running":1}}"#,
+        )
+        .ok(
+            HttpMethod::Get,
+            "/workers/w1/logs?tail=7",
+            200,
+            "data: {\"ts\":\"t\",\"line\":\"ready\"}\n\n",
+        );
+    let (sup, _) = supervisor(one);
+    let opts = LogOptions {
+        follow: false,
+        tail: Some(7),
+    };
+    let lines = sup.logs(&handle(), opts).await.unwrap();
+    assert_eq!(lines.lines(), ["[w1] ready".to_owned()]);
+
+    let follow = LogOptions {
+        follow: true,
+        tail: None,
+    };
+    let err = sup.logs(&handle(), follow).await.unwrap_err().to_string();
+    assert!(err.contains("not supported"), "{err}");
 }
 
 // --- stop --------------------------------------------------------------------------
@@ -1109,7 +1384,7 @@ fn stopper(mock: Mock) -> (RunPodSupervisor, Arc<Mock>) {
 async fn stop_drains_and_deletes_the_endpoint_then_its_secrets() {
     let (sup, mock) = stopper(stop_mock(204));
     let sup = sup.with_recorded_secrets(vec!["recorded-secret".into()]);
-    sup.note_secret("made-here");
+    sup.secrets.note("made-here");
     assert_eq!(
         sup.stop_endpoint(&handle()).await.unwrap(),
         StopOutcome::Deleted

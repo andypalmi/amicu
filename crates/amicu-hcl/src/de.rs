@@ -13,8 +13,9 @@ use amicu_core::resource::{
     Accelerator, AcceleratorKind, Artifact, Budget, Cpu, Credential, DataClass, Deployment,
     FlashAttention, GgufVariant, GovernanceRule, GpuCard, HardwareProfile, KvCacheType,
     LlamaCppSettings, MemoryCheck, Model, ModelSource, Money, MultimodalSettings, Price, Quota,
-    ReasoningFormat, Region, Residency, RoutingPolicy, RoutingTarget, Runtime, ScalingSettings,
-    SpeculativeSettings, Tenant, UseCase, VllmKvCacheDtype, VllmSettings, resolve_gpu,
+    ReasoningFormat, Region, Residency, RoutingPolicy, RoutingTarget, RunpodSettings, Runtime,
+    ScalingSettings, SpeculativeSettings, Tenant, UseCase, VllmKvCacheDtype, VllmSettings,
+    resolve_gpu,
 };
 use amicu_core::secret::SecretRef;
 use amicu_core::units::ByteSize;
@@ -171,6 +172,15 @@ fn hardware_profile(name: &str, f: &Fields) -> Result<HardwareProfile> {
             .map(|p| -> Result<Price> {
                 Ok(Price {
                     per_hour: money(&p.block("per_hour")?)?,
+                })
+            })
+            .transpose()?,
+        runpod: f
+            .opt_block("runpod")
+            .map(|r| -> Result<RunpodSettings> {
+                Ok(RunpodSettings {
+                    mode: r.opt_enum("mode")?.unwrap_or_default(),
+                    cloud: r.opt_enum("cloud")?,
                 })
             })
             .transpose()?,

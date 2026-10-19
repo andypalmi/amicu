@@ -421,7 +421,7 @@ fn is_launch_field(key: &str) -> bool {
         "speculative",
         "multimodal",
     ];
-    const PREFIXES: [&str; 8] = [
+    const PREFIXES: [&str; 9] = [
         "env.",
         "api_key",
         "speculative.",
@@ -430,6 +430,7 @@ fn is_launch_field(key: &str) -> bool {
         "model.artifact.",
         "hardware.provider",
         "hardware.accelerator.",
+        "hardware.runpod",
     ];
     EXACT.contains(&key) || PREFIXES.iter().any(|p| key.starts_with(p))
 }
@@ -1219,6 +1220,7 @@ mod tests {
             memory: ByteSize::from_bytes(48 * GIB),
             interconnect: None,
             price: None,
+            runpod: None,
         }
     }
 
@@ -1982,6 +1984,8 @@ mod tests {
         assert!(is_launch_field("model.source.reference"));
         assert!(!is_launch_field("hardware.price.per_hour.amount"));
         assert!(!is_launch_field("hardware.region.code"));
+        assert!(is_launch_field("hardware.runpod.mode"));
+        assert!(is_launch_field("hardware.runpod.cloud"));
         assert!(!is_launch_field("scaling.min_replicas"));
         assert!(!is_launch_field("memory_check"));
 

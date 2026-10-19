@@ -2,11 +2,19 @@
 //! (<https://api.runpod.io/v2/openapi.json>), on the [`HttpTransport`] seam.
 //! The API key and secret values are never `Debug`-printed or put in an error.
 
+mod pods;
+
+pub use pods::{
+    Cloud, CreatePod, Pod, PodAction, PodEnv, PodGpu, PodStatus, UpdatePod, pod_proxy_url,
+};
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use amicu_providers::{HttpMethod, HttpRequest, HttpResponse, HttpTransport, ReqwestTransport};
+use amicu_providers::{
+    HttpMethod, HttpRequest, HttpResponse, HttpTransport, ReqwestTransport, StreamLimits,
+};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
@@ -72,6 +80,8 @@ pub struct GpuRequest {
     pub count: u32,
     /// GPU type ids subtracted from the pools.
     pub excluded_types: Vec<String>,
+    /// Lowest host CUDA version (`major.minor`) a worker may be placed on.
+    pub min_cuda_version: Option<String>,
 }
 
 impl GpuRequest {
@@ -81,6 +91,9 @@ impl GpuRequest {
         m.insert("count".into(), json!(self.count));
         if !self.excluded_types.is_empty() {
             m.insert("excludedTypes".into(), json!(self.excluded_types));
+        }
+        if let Some(v) = &self.min_cuda_version {
+            m.insert("minCudaVersion".into(), json!(v));
         }
         Value::Object(m)
     }
@@ -92,6 +105,7 @@ impl From<crate::hardware::GpuPlacement> for GpuRequest {
             pools: p.pools,
             count: p.count,
             excluded_types: p.excluded_types,
+            min_cuda_version: None,
         }
     }
 }
@@ -767,6 +781,26 @@ impl RunPodClient {
         decode(&resp)
     }
 
+    /// A bounded `GET` of an event stream (see
+    /// [`HttpTransport::execute_bounded`]), checked like any other call.
+    pub(crate) async fn get_stream(
+        &self,
+        path: &str,
+        what: &str,
+        limits: StreamLimits,
+    ) -> Result<HttpResponse, RunPodError> {
+        let req = HttpRequest::new(HttpMethod::Get, format!("{}{path}", self.base_url))
+            .with_bearer(self.key.0.clone())
+            .with_header("Accept", "text/event-stream");
+        let resp = self
+            .transport
+            .execute_bounded(req, limits)
+            .await
+            .map_err(|e| RunPodError::Transport(e.to_string()))?;
+        check(&resp, what, false)?;
+        Ok(resp)
+    }
+
     /// `GET /organization`: the account identity.
     ///
     /// A personal account answers `403` "organizations are not enabled for
@@ -876,6 +910,16 @@ impl RunPodClient {
             .find(|s| s.name.eq_ignore_ascii_case(name)))
     }
 
+    /// `GET /account/secrets`: every secret of the account (no values). The
+    /// API defines no pagination for this list.
+    pub async fn list_secrets(&self) -> Result<Vec<Secret>, RunPodError> {
+        let resp = self
+            .send(HttpMethod::Get, "/account/secrets", None, "secrets")
+            .await?;
+        let list: SecretsList = decode(&resp)?;
+        Ok(list.secrets)
+    }
+
     /// `DELETE /account/secrets/{id}`. `404` is [`DeleteOutcome::AlreadyGone`].
     pub async fn delete_secret(&self, id: &str) -> Result<DeleteOutcome, RunPodError> {
         let path = format!("/account/secrets/{}", segment(id)?);
@@ -934,7 +978,7 @@ impl RunPodClient {
 
 /// An id usable as one path segment: non-empty, no separators or anything
 /// that could alter the route.
-fn segment(id: &str) -> Result<&str, RunPodError> {
+pub(crate) fn segment(id: &str) -> Result<&str, RunPodError> {
     if !id.is_empty()
         && id
             .bytes()
@@ -1026,23 +1070,23 @@ mod tests {
     type Route = (HttpMethod, String, Result<HttpResponse, TransportError>);
 
     #[derive(Clone)]
-    struct Seen {
-        method: HttpMethod,
-        url: String,
-        bearer: Option<String>,
-        body: Option<Value>,
+    pub(super) struct Seen {
+        pub(super) method: HttpMethod,
+        pub(super) url: String,
+        pub(super) bearer: Option<String>,
+        pub(super) body: Option<Value>,
     }
 
     /// Canned responses; the first route matching `(method, url-suffix)` is
     /// used. Records every request.
     #[derive(Default)]
-    struct Mock {
+    pub(super) struct Mock {
         routes: Mutex<Vec<Route>>,
         seen: Mutex<Vec<Seen>>,
     }
 
     impl Mock {
-        fn on(self, method: HttpMethod, suffix: &str, status: u16, body: &str) -> Self {
+        pub(super) fn on(self, method: HttpMethod, suffix: &str, status: u16, body: &str) -> Self {
             self.routes.lock().unwrap().push((
                 method,
                 suffix.into(),
@@ -1051,7 +1095,7 @@ mod tests {
             self
         }
 
-        fn fail(self, method: HttpMethod, suffix: &str, e: TransportError) -> Self {
+        pub(super) fn fail(self, method: HttpMethod, suffix: &str, e: TransportError) -> Self {
             self.routes
                 .lock()
                 .unwrap()
@@ -1059,7 +1103,7 @@ mod tests {
             self
         }
 
-        fn requests(&self) -> Vec<Seen> {
+        pub(super) fn requests(&self) -> Vec<Seen> {
             self.seen.lock().unwrap().clone()
         }
     }
@@ -1088,10 +1132,10 @@ mod tests {
         }
     }
 
-    const KEY: &str = "rpa_SUPERSECRETKEY";
+    pub(super) const KEY: &str = "rpa_SUPERSECRETKEY";
     const BASE: &str = "https://api.runpod.io/v2";
 
-    fn client(mock: Mock) -> (RunPodClient, Arc<Mock>) {
+    pub(super) fn client(mock: Mock) -> (RunPodClient, Arc<Mock>) {
         let mock = Arc::new(mock);
         let c = RunPodClient::with_transport(ApiKey::new(KEY), mock.clone(), BASE);
         (c, mock)
@@ -1111,6 +1155,7 @@ mod tests {
                 pools: vec!["ADA_80_PRO".into()],
                 count: 2,
                 excluded_types: vec![],
+                min_cuda_version: Some("12.8".into()),
             },
         );
         r.entrypoint = vec!["python".into()];
@@ -1167,7 +1212,7 @@ mod tests {
                 "ports": ["8000/http"],
                 "disk": 50,
                 "registry": "reg1",
-                "gpu": {"pools": ["ADA_80_PRO"], "count": 2},
+                "gpu": {"pools": ["ADA_80_PRO"], "count": 2, "minCudaVersion": "12.8"},
                 "workers": {"min": 0, "max": 3, "idleTimeout": 30},
                 "scaling": {"type": "REQUEST_COUNT", "requestCount": 4},
                 "dataCenterIds": ["EU-RO-1", "EU-SE-1"],
@@ -1187,6 +1232,7 @@ mod tests {
                 pools: vec!["ADA_24".into()],
                 count: 1,
                 excluded_types: vec![],
+                min_cuda_version: None,
             },
         );
         assert_eq!(
@@ -1209,6 +1255,7 @@ mod tests {
             pools: vec!["ADA_48_PRO".into()],
             count: 1,
             excluded_types: vec!["NVIDIA L40".into()],
+            min_cuda_version: None,
         };
         assert_eq!(g.to_json()["excludedTypes"], json!(["NVIDIA L40"]));
     }
@@ -1521,6 +1568,24 @@ mod tests {
         assert_eq!(
             mock.requests()[0].url,
             "https://api.runpod.io/v2/account/secrets?name=hf%2Ftoken"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_secrets_reads_every_secret() {
+        let body = r#"{"secrets":[{"id":"s1","name":"a"},{"id":"s2","name":"b"}]}"#;
+        let (c, mock) = client(Mock::default().on(HttpMethod::Get, "/account/secrets", 200, body));
+        let names: Vec<String> = c
+            .list_secrets()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(
+            mock.requests()[0].url,
+            "https://api.runpod.io/v2/account/secrets"
         );
     }
 

@@ -44,7 +44,8 @@ pub use self_hosted::{SelfHostedConfigError, SelfHostedProvider};
 pub use ssh::{CommandOutput, RusshTransport, SshTarget, SshTransport, SshTransportError};
 pub use sync::{Freshness, SyncReport, SyncedCapabilities, classify, snapshot, sync_all};
 pub use transport::{
-    HttpMethod, HttpRequest, HttpResponse, HttpTransport, ReqwestTransport, TransportError,
+    HttpMethod, HttpRequest, HttpResponse, HttpTransport, ReqwestTransport, StreamLimits,
+    TransportError,
 };
 
 #[cfg(test)]
