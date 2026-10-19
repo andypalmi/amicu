@@ -299,6 +299,8 @@ pub(crate) struct Tracked {
     /// a `modal` hardware profile). Modal is only queried when it does, so a
     /// local-only project is never told about missing Modal credentials.
     modal_referenced: bool,
+    /// Names of RunPod records with no endpoint id yet; a record with an id
+    /// tracks that id only, so a same-named duplicate shows as untracked.
     runpod_names: BTreeSet<String>,
     runpod_ids: BTreeSet<String>,
     runpod_secrets: BTreeSet<String>,
@@ -321,8 +323,10 @@ impl Tracked {
                 t.modal_ids.extend(rec.app_id.clone());
             } else if rec.backend == Backend::Runpod {
                 t.runpod_referenced = true;
-                t.runpod_names.insert(rec.identity.clone());
-                t.runpod_ids.extend(rec.app_id.clone());
+                match &rec.app_id {
+                    Some(id) => t.runpod_ids.insert(id.clone()),
+                    None => t.runpod_names.insert(rec.identity.clone()),
+                };
                 t.runpod_secrets.extend(rec.secrets.iter().cloned());
             } else if rec.backend.is_host() {
                 t.insert_label(&rec.identity);

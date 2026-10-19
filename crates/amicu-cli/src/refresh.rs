@@ -223,6 +223,8 @@ pub(crate) struct Refresh {
     /// Set when the active Modal workspace differs from the one a recorded
     /// instance lives in: the command must refuse to continue.
     pub mismatch: Option<String>,
+    /// Set when a deployment was newly marked pending (state changed).
+    pub pending_added: bool,
 }
 
 /// Drops from `state` every Modal deployment (and its endpoint) whose app is
@@ -230,7 +232,32 @@ pub(crate) struct Refresh {
 /// and [`Refresh::warning`] says so.
 #[cfg(test)]
 pub(crate) fn refresh_state(state: &mut LocalState, lookup: &dyn AppLookup) -> Refresh {
-    refresh_state_mode(state, lookup, &crate::runpod_ops::RealRunPod, true)
+    refresh_state_mode(state, lookup, &NoRunPod, true)
+}
+
+/// A RunPod seam with no management key: tests never reach the network.
+#[cfg(test)]
+pub(crate) struct NoRunPod;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl RunPodOps for NoRunPod {
+    fn client(&self) -> Result<amicu_runpod::RunPodClient, CliError> {
+        Err(crate::runpod_ops::missing_key())
+    }
+    fn is_management_key(&self, _: &amicu_core::secret::SecretValue) -> bool {
+        false
+    }
+    fn probe(&self) -> std::sync::Arc<dyn amicu_providers::HttpTransport> {
+        unreachable!("no RunPod in this test")
+    }
+    async fn verify_exposure(
+        &self,
+        _: &str,
+        _: &amicu_core::secret::SecretValue,
+    ) -> Result<(), String> {
+        unreachable!("no RunPod in this test")
+    }
 }
 
 /// Like [`refresh_state`]. With `strict` false (read-only `plan`), an unknown
@@ -242,6 +269,7 @@ pub(crate) fn refresh_state_mode(
     runpod: &dyn RunPodOps,
     strict: bool,
 ) -> Refresh {
+    let pending_before = state.pending.len();
     let host = refresh_host(state, lookup);
     let modal = refresh_modal(state, lookup, strict);
     if modal.mismatch.is_some() {
@@ -256,6 +284,7 @@ pub(crate) fn refresh_state_mode(
             (a, b) => a.or(b),
         };
     }
+    out.pending_added = state.pending.len() != pending_before;
     out
 }
 
@@ -397,6 +426,7 @@ fn refresh_modal(state: &mut LocalState, lookup: &dyn AppLookup, strict: bool) -
                     "could not check Modal for live apps ({error}); using local state as-is"
                 )),
                 mismatch: None,
+                pending_added: false,
             };
         }
     };
@@ -423,8 +453,7 @@ fn refresh_modal(state: &mut LocalState, lookup: &dyn AppLookup, strict: bool) -
     }
     Refresh {
         notes,
-        warning: None,
-        mismatch: None,
+        ..Refresh::default()
     }
 }
 
@@ -443,8 +472,8 @@ enum Live {
 /// when the management key acts in the account the record names; it is then
 /// kept in state as pending (apply recreates it, destroy confirms its stop).
 /// Otherwise, and on any lookup failure, nothing changes and a warning says
-/// why. A live endpoint whose workers, GPU pools or image differ from what
-/// was applied gets a drift note.
+/// why. A live endpoint whose workers or GPU pools differ from what was
+/// applied gets a drift note only, like Modal: nothing is marked for update.
 fn refresh_runpod(state: &mut LocalState, ops: &dyn RunPodOps) -> Refresh {
     let records: Vec<StopRecord> = crate::commands::apply::effective_stops(Some(state))
         .into_iter()
@@ -492,7 +521,8 @@ fn refresh_runpod(state: &mut LocalState, ops: &dyn RunPodOps) -> Refresh {
                 if !drift.is_empty() {
                     out.notes.push(format!(
                         "deployment {dep}: RunPod endpoint '{}' (endpoint id {}) was changed \
-                         outside amicu: {}; the next apply that updates it restores the config",
+                         outside amicu: {}; apply leaves it as is while this deployment's config \
+                         is unchanged, so revert it in the RunPod console or change the config",
                         ep.name,
                         ep.id,
                         drift.join(", ")
@@ -579,10 +609,7 @@ fn endpoint_drift(
     record: &StopRecord,
     ep: &amicu_runpod::Endpoint,
 ) -> Vec<String> {
-    use amicu_runpod::supervisor::{
-        DEFAULT_MAX_WORKERS, DEFAULT_MIN_WORKERS, LLAMACPP_IMAGE_ENV_VAR, VLLM_IMAGE_ENV_VAR,
-    };
-    use amicu_runtime::RuntimeKind;
+    use amicu_runpod::supervisor::{DEFAULT_MAX_WORKERS, DEFAULT_MIN_WORKERS};
 
     let Some(d) = state
         .graph
@@ -622,18 +649,6 @@ fn endpoint_drift(
         }
         if let Some(count) = gpu.count.filter(|c| *c != want.count) {
             drift.push(format!("GPU count {count} (applied {})", want.count));
-        }
-    }
-    if let Some(image) = &ep.image {
-        let kind = RuntimeKind::of(&d.runtime);
-        let var = match kind {
-            RuntimeKind::Vllm => VLLM_IMAGE_ENV_VAR,
-            RuntimeKind::LlamaCpp => LLAMACPP_IMAGE_ENV_VAR,
-        };
-        let applied = std::env::var(var)
-            .unwrap_or_else(|_| amicu_llamacpp::remote::default_image(kind).to_owned());
-        if *image != applied {
-            drift.push(format!("image {image} (applied {applied})"));
         }
     }
     drift
@@ -687,7 +702,7 @@ fn load_refreshed_mode(
     for note in &refresh.notes {
         writeln!(sink, "drift: {note}").map_err(|e| CliError::io("write failed", e))?;
     }
-    Ok((Some(state), !refresh.notes.is_empty()))
+    Ok((Some(state), refresh.pending_added))
 }
 
 /// Removes what `amicu modal stop` just stopped from the project state: the
@@ -765,7 +780,6 @@ mod tests {
 
     use super::*;
     use crate::planner::build_plan;
-    use crate::runpod_ops::RealRunPod;
 
     const MODAL_CONFIG: &str = r#"resource "model" "support_chat" {
   source {
@@ -1057,7 +1071,7 @@ resource "deployment" "support_modal" {
         let (state, pruned) = load_refreshed(
             &project,
             &Fake(Ok(vec![])),
-            &RealRunPod,
+            &NoRunPod,
             OutputFormat::Json,
             &mut out,
         )
@@ -1070,7 +1084,7 @@ resource "deployment" "support_modal" {
         load_refreshed(
             &project,
             &Fake(Ok(vec![])),
-            &RealRunPod,
+            &NoRunPod,
             OutputFormat::Human,
             &mut out,
         )
@@ -1140,7 +1154,7 @@ resource "deployment" "support_modal" {
         let err = load_refreshed(
             &project,
             &WsFake(acme("other-co"), None),
-            &RealRunPod,
+            &NoRunPod,
             OutputFormat::Human,
             &mut out,
         )
@@ -1259,7 +1273,7 @@ resource "deployment" "support_modal" {
     #[test]
     fn plan_only_warns_when_the_workspace_is_unknown_and_marks_nothing_pending() {
         let mut state = modal_state_in("acme");
-        let refresh = refresh_state_mode(&mut state, &BrokenWorkspace, &RealRunPod, false);
+        let refresh = refresh_state_mode(&mut state, &BrokenWorkspace, &NoRunPod, false);
         assert!(refresh.mismatch.is_none());
         let warning = refresh.warning.expect("warns");
         assert!(warning.contains("as-is"), "{warning}");
@@ -1275,7 +1289,7 @@ resource "deployment" "support_modal" {
         let loaded = load_refreshed_state(
             &project,
             &BrokenWorkspace,
-            &RealRunPod,
+            &NoRunPod,
             OutputFormat::Human,
             &mut out,
         )

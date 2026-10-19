@@ -876,7 +876,8 @@ impl RunPodClient {
             .find(|s| s.name.eq_ignore_ascii_case(name)))
     }
 
-    /// `GET /account/secrets`: every secret of the account (no values).
+    /// `GET /account/secrets`: every secret of the account (no values). The
+    /// API defines no pagination for this list.
     pub async fn list_secrets(&self) -> Result<Vec<Secret>, RunPodError> {
         let resp = self
             .send(HttpMethod::Get, "/account/secrets", None, "secrets")

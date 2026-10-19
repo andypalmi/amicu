@@ -25,7 +25,6 @@ struct Ep {
     name: String,
     owner: Option<String>,
     max_workers: Option<u64>,
-    image: Option<String>,
 }
 
 #[derive(Default)]
@@ -70,9 +69,6 @@ fn ep_json(e: &Ep) -> Value {
     let mut ep = json!({"id": e.id, "name": e.name, "type": "LOAD_BALANCER", "env": env});
     if let Some(max) = e.max_workers {
         ep["workers"] = json!({"min": 0, "max": max});
-    }
-    if let Some(image) = &e.image {
-        ep["image"] = json!(image);
     }
     ep
 }
@@ -141,7 +137,6 @@ impl HttpTransport for World {
                         .to_owned(),
                     owner: owner_in(req.body.as_ref()),
                     max_workers: None,
-                    image: None,
                 };
                 w.endpoints.push(ep.clone());
                 if w.lose_create_response {
@@ -393,7 +388,6 @@ fn add_named_endpoint(rig: &Rig, id: &str, name: &str, owner: Option<String>) {
         name: name.to_owned(),
         owner,
         max_workers: None,
-        image: None,
     });
 }
 
@@ -1080,7 +1074,6 @@ fn refresh_reports_drift_of_a_live_endpoint_without_touching_it() {
         name: endpoint_name(),
         owner: Some(owner()),
         max_workers: Some(7),
-        image: Some("example/other:1".to_owned()),
     });
     let (r, state) = refresh(&project, &rig);
     assert_eq!(r.notes.len(), 1, "{r:?}");
@@ -1090,7 +1083,7 @@ fn refresh_reports_drift_of_a_live_endpoint_without_touching_it() {
         "{note}"
     );
     assert!(note.contains("workers 0-7 (applied 0-3)"), "{note}");
-    assert!(note.contains("image example/other:1"), "{note}");
+    assert!(note.contains("revert it in the RunPod console"), "{note}");
     assert_eq!(state.pending.len(), 0);
     assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
 }
@@ -1228,4 +1221,43 @@ fn orphans_reports_a_runpod_listing_failure_as_a_source_error() {
     let runpod = report.sources.iter().find(|s| s.name == "runpod").unwrap();
     assert_eq!(runpod.status, "error");
     assert!(runpod.detail.as_deref().unwrap().contains("RUNPOD_API_KEY"));
+}
+
+#[test]
+fn orphans_after_apply_finds_no_untracked_runpod_resource() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    let report = orphans(&project, &rig);
+    let untracked: Vec<&str> = report
+        .resources
+        .iter()
+        .filter(|r| !r.tracked)
+        .map(|r| r.identity.as_str())
+        .collect();
+    assert_eq!(untracked, Vec::<&str>::new());
+    assert!(
+        report
+            .resources
+            .iter()
+            .any(|r| r.identity.ends_with("(ep1)"))
+    );
+}
+
+#[test]
+fn orphans_shows_a_same_named_duplicate_of_a_recorded_endpoint_as_untracked() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    add_endpoint(&rig, "ep8", Some(owner()));
+    let report = orphans(&project, &rig);
+    let untracked: Vec<&str> = report
+        .resources
+        .iter()
+        .filter(|r| !r.tracked)
+        .map(|r| r.identity.as_str())
+        .collect();
+    assert_eq!(untracked, [format!("{} (ep8)", endpoint_name())]);
 }

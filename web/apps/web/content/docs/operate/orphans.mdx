@@ -57,6 +57,8 @@ Each resource comes with the command that stops it by hand. The command is only 
 | `launchd_job` | `launchctl unload -w <plist> && rm <plist>` |
 | `systemd_unit` | `systemctl --user disable --now <unit> \|\| systemctl --user stop <unit>` |
 
+RunPod can refuse to delete an endpoint that still has live workers. Scale it to zero first, in the console or with `curl -X PATCH -H "Authorization: Bearer $RUNPOD_API_KEY" -H "Content-Type: application/json" -d '{"workers":{"min":0,"max":0}}' https://api.runpod.io/v2/serverless/<endpoint id>`, then run the printed `DELETE`. Delete an endpoint before its secrets.
+
 ## Human output
 
 The human output lists only untracked resources. For each one it prints the kind, the identity, the state, the ownership, and the stop command. It then prints how many tracked resources it skipped. A source that failed prints a `warning: could not query <source>` line first.
