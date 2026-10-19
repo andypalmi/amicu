@@ -29,6 +29,11 @@ const marketing: Array<{ path: string; label: string; note: string }> = [
     label: 'Security',
     note: 'Trust model: API-enforced gating, verifiable sessions, secrets by reference.',
   },
+  {
+    path: '/about',
+    label: 'About',
+    note: 'The project, its maintainer, license and how to contribute.',
+  },
   { path: '/docs', label: 'Docs', note: 'Documentation home.' },
 ];
 

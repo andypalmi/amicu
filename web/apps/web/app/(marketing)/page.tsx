@@ -2,7 +2,7 @@ import type { CSSProperties } from 'react';
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Button, cn } from '@amicu/ui';
-import { appName, appTagline, siteUrl } from '@/lib/shared';
+import { appName, appTagline, gitConfig, siteUrl } from '@/lib/shared';
 import { ApplyDemo } from './_components/apply-demo';
 import { InstallTabs } from './_components/install';
 import { HclCode, Transcript } from './_components/code';
@@ -19,7 +19,17 @@ import {
   GAP_HEAD,
   MEASURE,
 } from './_components/home';
-import { githubUrl, providers, quickstartUrl, type ProviderStatus } from './_lib/content';
+import { Faq } from '@/components/seo/faq';
+import { JsonLd } from '@/components/seo/json-ld';
+import { formatDate, pageModified, softwareVersion } from '@/lib/site-facts';
+import {
+  githubUrl,
+  providers,
+  quickstartUrl,
+  releasesUrl,
+  supportedCloudNames,
+  type ProviderStatus,
+} from './_lib/content';
 import {
   APPLY_OUTPUT,
   CONFIG_LINKS,
@@ -35,32 +45,58 @@ import {
 import { pageMetadata } from './_lib/seo';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'Infrastructure as code for open-weight LLMs',
-  description: appTagline,
+  title: 'Deploy vLLM and llama.cpp from one HCL file',
+  description: `amicu is an open-source CLI that deploys vLLM and llama.cpp servers to your own machine or to GPU cloud providers (${supportedCloudNames}) from an HCL file, with plan, apply and destroy.`,
   path: '/',
 });
 
-// SoftwareApplication structured data for the marketing home. Rendered as an
-// inline application/ld+json script (the pattern Next.js recommends); it is
-// inert data, not executable JS, and the app CSP allows 'unsafe-inline' in
-// script-src regardless, so it is not blocked. `<` is escaped to avoid any
-// possibility of breaking out of the script context.
-const jsonLd = {
-  '@context': 'https://schema.org',
-  '@type': 'SoftwareApplication',
-  name: appName,
-  description: appTagline,
-  url: siteUrl,
-  applicationCategory: 'DeveloperApplication',
-  operatingSystem: 'Linux, macOS',
-  offers: {
-    '@type': 'Offer',
-    price: '0',
-    priceCurrency: 'EUR',
+const author = { '@type': 'Person', name: gitConfig.user, url: `https://github.com/${gitConfig.user}` };
+const publisher = { '@type': 'Organization', name: appName, url: siteUrl };
+const license = 'https://www.gnu.org/licenses/agpl-3.0.html';
+
+const jsonLd = [
+  {
+    '@context': 'https://schema.org',
+    '@type': 'SoftwareApplication',
+    name: appName,
+    description: appTagline,
+    url: siteUrl,
+    applicationCategory: 'DeveloperApplication',
+    operatingSystem: 'Linux, macOS, Windows',
+    softwareVersion,
+    downloadUrl: releasesUrl,
+    codeRepository: githubUrl,
+    programmingLanguage: 'Rust',
+    featureList: [
+      'Declare models, hardware and deployments in HCL',
+      'Plan, apply and destroy with recorded state',
+      'Runs vLLM and llama.cpp',
+      `Deploys to your own machine or GPU cloud providers (${supportedCloudNames})`,
+      'Checks that a model fits the hardware before anything starts',
+      'Enforces data residency at plan time',
+    ],
+    offers: {
+      '@type': 'Offer',
+      price: '0',
+      priceCurrency: 'USD',
+    },
+    license,
+    author,
+    publisher,
+    sameAs: [githubUrl],
   },
-  license: 'https://www.gnu.org/licenses/agpl-3.0.html',
-  sameAs: [githubUrl],
-};
+  {
+    '@context': 'https://schema.org',
+    '@type': 'SoftwareSourceCode',
+    name: appName,
+    description: appTagline,
+    codeRepository: githubUrl,
+    programmingLanguage: 'Rust',
+    license,
+    author,
+    url: githubUrl,
+  },
+];
 
 const statusLabel: Record<ProviderStatus, string> = {
   supported: 'Supported',
@@ -72,16 +108,15 @@ const sortedProviders = [...providers].sort(
   (a, b) => statusOrder.indexOf(a.status) - statusOrder.indexOf(b.status),
 );
 const previewCount = providers.filter((p) => p.status === 'preview').length;
+const providersAsOf = pageModified('/providers');
+const statusCounts = statusOrder
+  .map((s) => `${providers.filter((p) => p.status === s).length} ${statusLabel[s].toLowerCase()}`)
+  .join(', ');
 
 export default function LandingPage() {
   return (
     <main className="flex flex-1 flex-col">
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{
-          __html: JSON.stringify(jsonLd).replace(/</g, '\\u003c'),
-        }}
-      />
+      <JsonLd data={jsonLd} />
 
       {/* Hero: tighter on desktop so headline, subline and the whole terminal sit above the fold. */}
       <HomeSection className="lg:py-10">
@@ -90,6 +125,11 @@ export default function LandingPage() {
         </Headline>
         <p className={cn('mt-6 font-mono text-sm text-muted-foreground sm:text-base lg:mt-4', MEASURE)}>
           On your laptop, your servers or a cloud GPU.
+        </p>
+        <p className={cn('mt-4 text-base text-muted-foreground sm:text-lg', MEASURE)}>
+          amicu is an open-source (AGPL-3.0) command-line tool that deploys vLLM and llama.cpp
+          servers to your own machine or to GPU cloud providers ({supportedCloudNames}) from an
+          HCL file, with plan, apply and destroy.
         </p>
         <div className="mt-8 flex flex-wrap items-center gap-3 lg:mt-6">
           <Button asChild size="lg">
@@ -104,7 +144,7 @@ export default function LandingPage() {
 
       {/* Install */}
       <HomeSection id="install">
-        <Headline>Install in one line.</Headline>
+        <Headline>How do I install amicu?</Headline>
         <InstallTabs className={cn(GAP_HEAD, 'max-w-3xl')} />
         <p className="mt-6 text-sm text-muted-foreground">
           Other options and manual downloads:{' '}
@@ -173,7 +213,7 @@ export default function LandingPage() {
 
       {/* Residency */}
       <HomeSection>
-        <Headline>Your data stays where you say.</Headline>
+        <Headline>How does amicu enforce data residency?</Headline>
         <WindowPair
           left={
             <MockWindow title="amicu.hcl">
@@ -200,7 +240,7 @@ export default function LandingPage() {
 
       {/* Providers */}
       <HomeSection>
-        <Headline>Pick a provider. Change it later.</Headline>
+        <Headline>Which providers does amicu support?</Headline>
         <Snapshot>
           <MockWindow title="providers">
             <ul
@@ -239,9 +279,22 @@ export default function LandingPage() {
           </MockWindow>
         </Snapshot>
         <ProofLine
-          lead="Apply runs on your hardware, Modal and RunPod today."
+          lead={`Apply runs on your hardware and on ${supportedCloudNames} today.`}
           rest={`${previewCount} more, such as Hetzner and Scaleway, are in preview.`}
         />
+        {providersAsOf ? (
+          <p className="mt-6 text-sm text-muted-foreground">
+            As of <time dateTime={providersAsOf}>{formatDate(providersAsOf)}</time>: {statusCounts}.
+            See the{' '}
+            <Link
+              href="/providers#status-table"
+              className="text-foreground underline underline-offset-4"
+            >
+              status table
+            </Link>
+            .
+          </p>
+        ) : null}
         <FeatureLinks
           links={[{ label: 'Provider docs', href: '/docs/providers' }]}
           all={{ label: 'All providers', href: '/providers' }}
@@ -256,6 +309,12 @@ export default function LandingPage() {
             <FeatureTile key={t.title} {...t} />
           ))}
         </div>
+      </HomeSection>
+
+      {/* FAQ */}
+      <HomeSection id="faq">
+        <Headline>Frequently asked questions</Headline>
+        <Faq className={GAP_HEAD} />
       </HomeSection>
 
       {/* Closing CTA */}

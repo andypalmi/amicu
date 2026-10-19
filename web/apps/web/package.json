@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
+    "gen:facts": "node scripts/gen-site-facts.mjs",
     "lint:links": "tsx scripts/lint-links.ts",
     "test": "node --test --experimental-strip-types 'lib/**/*.test.ts' && node --conditions=react-server --import tsx --test test/workerd/cookie-refresh.unit.test.ts test/workerd/signin-disabled.unit.test.ts",
     "test:workerd-live": "node --conditions=react-server --import tsx --test test/workerd/live-preview.test.ts",

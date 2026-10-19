@@ -57,6 +57,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+          fetch-depth: 0
 
       # Activates the `packageManager` pin in web/package.json
       # ("pnpm@11.22.0") via Node 22's built-in corepack, same pin CI's
@@ -80,6 +81,9 @@ jobs:
       # now commits the production vars). Runtime
       # secrets (a BFF session secret, etc.) are never set here - see
       # docs/deploy/cloud-run.md and web/apps/web/README-deploy-cloudflare.md.
+      - name: Refresh page dates
+        run: pnpm --filter @amicu/web gen:facts
+
       - name: Build & deploy
         run: pnpm --filter @amicu/web cf:deploy
         env:
