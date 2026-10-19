@@ -1419,6 +1419,7 @@ impl Rig {
             interactive: true,
             secret_is_set: |_| true,
             telemetry: &self.telemetry,
+            progress: |_| {},
         }
     }
     fn stopped(&self) -> Vec<String> {

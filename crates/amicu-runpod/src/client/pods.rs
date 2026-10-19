@@ -127,6 +127,8 @@ pub struct CreatePod {
     pub gpu_type_id: String,
     /// GPUs on the pod.
     pub gpu_count: u32,
+    /// Lowest host CUDA version (`major.minor`) the pod may be placed on.
+    pub min_cuda_version: Option<String>,
     /// Cloud tier.
     pub cloud: Cloud,
     /// Placement data centers; empty lets RunPod choose.
@@ -155,6 +157,7 @@ impl CreatePod {
             disk_gb: None,
             gpu_type_id: gpu_type_id.into(),
             gpu_count,
+            min_cuda_version: None,
             cloud: Cloud::Secure,
             data_center_ids: Vec::new(),
             registry_id: None,
@@ -177,10 +180,11 @@ impl CreatePod {
             self.disk_gb,
             self.registry_id.as_deref(),
         );
-        m.insert(
-            "gpu".into(),
-            json!({"id": self.gpu_type_id, "count": self.gpu_count}),
-        );
+        let mut gpu = json!({"id": self.gpu_type_id, "count": self.gpu_count});
+        if let Some(v) = &self.min_cuda_version {
+            gpu["minCudaVersion"] = json!(v);
+        }
+        m.insert("gpu".into(), gpu);
         m.insert("cloud".into(), json!(self.cloud.wire()));
         if !self.data_center_ids.is_empty() {
             m.insert("dataCenterIds".into(), json!(self.data_center_ids));
@@ -200,6 +204,7 @@ impl fmt::Debug for CreatePod {
             .field("ports", &self.ports)
             .field("gpu_type_id", &self.gpu_type_id)
             .field("gpu_count", &self.gpu_count)
+            .field("min_cuda_version", &self.min_cuda_version)
             .field("cloud", &self.cloud)
             .field("data_center_ids", &self.data_center_ids)
             .finish_non_exhaustive()

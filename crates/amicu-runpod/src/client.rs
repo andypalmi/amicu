@@ -80,6 +80,8 @@ pub struct GpuRequest {
     pub count: u32,
     /// GPU type ids subtracted from the pools.
     pub excluded_types: Vec<String>,
+    /// Lowest host CUDA version (`major.minor`) a worker may be placed on.
+    pub min_cuda_version: Option<String>,
 }
 
 impl GpuRequest {
@@ -89,6 +91,9 @@ impl GpuRequest {
         m.insert("count".into(), json!(self.count));
         if !self.excluded_types.is_empty() {
             m.insert("excludedTypes".into(), json!(self.excluded_types));
+        }
+        if let Some(v) = &self.min_cuda_version {
+            m.insert("minCudaVersion".into(), json!(v));
         }
         Value::Object(m)
     }
@@ -100,6 +105,7 @@ impl From<crate::hardware::GpuPlacement> for GpuRequest {
             pools: p.pools,
             count: p.count,
             excluded_types: p.excluded_types,
+            min_cuda_version: None,
         }
     }
 }
@@ -1149,6 +1155,7 @@ mod tests {
                 pools: vec!["ADA_80_PRO".into()],
                 count: 2,
                 excluded_types: vec![],
+                min_cuda_version: Some("12.8".into()),
             },
         );
         r.entrypoint = vec!["python".into()];
@@ -1205,7 +1212,7 @@ mod tests {
                 "ports": ["8000/http"],
                 "disk": 50,
                 "registry": "reg1",
-                "gpu": {"pools": ["ADA_80_PRO"], "count": 2},
+                "gpu": {"pools": ["ADA_80_PRO"], "count": 2, "minCudaVersion": "12.8"},
                 "workers": {"min": 0, "max": 3, "idleTimeout": 30},
                 "scaling": {"type": "REQUEST_COUNT", "requestCount": 4},
                 "dataCenterIds": ["EU-RO-1", "EU-SE-1"],
@@ -1225,6 +1232,7 @@ mod tests {
                 pools: vec!["ADA_24".into()],
                 count: 1,
                 excluded_types: vec![],
+                min_cuda_version: None,
             },
         );
         assert_eq!(
@@ -1247,6 +1255,7 @@ mod tests {
             pools: vec!["ADA_48_PRO".into()],
             count: 1,
             excluded_types: vec!["NVIDIA L40".into()],
+            min_cuda_version: None,
         };
         assert_eq!(g.to_json()["excludedTypes"], json!(["NVIDIA L40"]));
     }

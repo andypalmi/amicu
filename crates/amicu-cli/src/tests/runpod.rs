@@ -72,6 +72,8 @@ struct WorldState {
     workers: Vec<(String, String)>,
     /// What `/metrics` answers through the gateway.
     metrics: String,
+    /// Body of every endpoint create.
+    created: Vec<Value>,
 }
 
 type Hook = Box<dyn FnOnce() + Send>;
@@ -190,6 +192,7 @@ impl HttpTransport for World {
                 )
             }
             (HttpMethod::Post, ["serverless"]) => {
+                w.created.extend(req.body.clone());
                 w.next += 1;
                 let ep = Ep {
                     id: format!("ep{}", w.next),
@@ -2209,4 +2212,73 @@ fn logs_as_json_list_each_worker_with_its_lines() {
     assert!(doc["workers"][0]["error"].is_null());
     assert_eq!(doc["workers"][0]["lines"][0]["line"], "hello from w1");
     assert_eq!(doc["workers"][0]["lines"][1]["source"], "system");
+}
+
+/// Applies the RunPod config with `region` on the hardware profile and
+/// `extra` HCL appended; returns apply's result and the endpoint create bodies.
+fn apply_in_region(region: &str, extra: &str) -> (Result<u8, crate::error::CliError>, Vec<Value>) {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let config = runpod_config().replacen(
+        "provider = \"runpod\"",
+        &format!("provider = \"runpod\"\n  region   = \"{region}\""),
+        1,
+    );
+    write(&td.path, "amicu.hcl", &format!("{config}{extra}"));
+    let rig = rig();
+    let result = apply_with(&project, &rig);
+    let created = rig.runpod.world.state.lock().unwrap().created.clone();
+    (result, created)
+}
+
+fn created_in(region: &str) -> Value {
+    let (result, created) = apply_in_region(region, "");
+    assert_eq!(result.unwrap(), 0);
+    assert_eq!(created.len(), 1);
+    created[0].clone()
+}
+
+fn data_centers(body: &Value) -> Vec<String> {
+    body["dataCenterIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d.as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_region_group_places_the_endpoint_in_its_data_centers() {
+    let body = created_in("eu");
+    let dcs = data_centers(&body);
+    assert!(dcs.len() > 1, "{dcs:?}");
+    assert!(dcs.iter().all(|d| d.starts_with("EU")), "{dcs:?}");
+    // llama.cpp serves on the image's port and asks for its CUDA floor.
+    assert_eq!(body["ports"], json!(["8080/http"]));
+    assert_eq!(body["env"]["PORT_HEALTH"], json!("8080"));
+    assert_eq!(body["gpu"]["minCudaVersion"], json!("12.8"));
+}
+
+#[test]
+fn an_exact_data_center_places_the_endpoint_there() {
+    let body = created_in("EU-RO-1");
+    assert_eq!(data_centers(&body), ["EU-RO-1"]);
+}
+
+#[test]
+fn a_region_group_outside_the_data_class_residency_is_refused_before_any_create() {
+    let extra = r#"
+resource "data_class" "customer" {
+  sensitivity = "confidential"
+  residency   = ["us"]
+}
+"#;
+    // The plan-time check cannot resolve the `eu` group; apply still refuses it.
+    let (result, created) = apply_in_region("eu", extra);
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("not within the required residency (us)"),
+        "{err}"
+    );
+    assert_eq!(created.len(), 0);
 }
