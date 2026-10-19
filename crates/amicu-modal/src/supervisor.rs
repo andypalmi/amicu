@@ -227,6 +227,7 @@ pub struct ModalSupervisor {
     app_name: String,
     gpu: Option<String>,
     card: Option<&'static GpuCard>,
+    gpu_count: u32,
     region: Option<String>,
     scaling: ScalingSettings,
     gguf: Option<GgufSource>,
@@ -253,6 +254,7 @@ impl ModalSupervisor {
             app_name: app_name.into(),
             gpu: None,
             card: None,
+            gpu_count: 1,
             region: None,
             gguf: None,
             scaling: ScalingSettings::default(),
@@ -325,6 +327,7 @@ impl ModalSupervisor {
         self.card = accelerator
             .and_then(Accelerator::gpu_card)
             .and_then(Result::ok);
+        self.gpu_count = accelerator.map_or(1, |a| a.count);
         Ok(self)
     }
 
@@ -378,7 +381,7 @@ fn memory_mb(memory: ByteSize) -> Option<u32> {
 // keep working.
 pub use amicu_core::naming::{app_name_for, project_app_name};
 
-/// Renders an [`Accelerator`] as Modal's `gpu=` string (`"H100"`, `"H100:2"`).
+/// Renders an [`Accelerator`] as Modal's `gpu=` string (`"H100!"`, `"H100!:2"`).
 fn gpu_string(accelerator: &Accelerator) -> Result<String, LlamaCppError> {
     let card = match accelerator.gpu_card() {
         None => {
@@ -498,16 +501,6 @@ impl ModalSupervisor {
             .filter_map(|c| c.outcome.as_ref().ok())
             .filter_map(HardwareSample::accelerator_memory_used)
             .reduce(u64::saturating_add)
-    }
-
-    /// The first running container whose probed GPU is not the declared card,
-    /// as a failure detail. `None` when the card matches or cannot be probed
-    /// (scaled to zero, exec refused, no accelerator reported).
-    async fn gpu_mismatch(&self, app_id: &str) -> Option<String> {
-        let card = self.card?;
-        let mut client = self.connect().await.ok()?;
-        let containers = client.probe_app_hardware(app_id).await.ok()?;
-        probed_gpu_mismatch(card, &containers)
     }
 
     /// The argv the Modal container actually runs for `plan`: the renderer's
@@ -734,19 +727,44 @@ fn rollback_target(previous: Option<(String, u32)>, deployed_app_id: &str) -> Op
         .map(|(_, version)| version)
 }
 
-fn probed_gpu_mismatch(card: &GpuCard, containers: &[ContainerHardware]) -> Option<String> {
-    containers
-        .iter()
-        .filter_map(|c| c.outcome.as_ref().ok())
-        .flat_map(|sample| &sample.accelerators)
-        .find_map(|acc| {
+/// `Ok(None)` when every probed container matches, `Err` with why nothing
+/// could be verified.
+fn probed_gpu_mismatch(
+    card: &GpuCard,
+    count: u32,
+    containers: &[ContainerHardware],
+) -> Result<Option<String>, &'static str> {
+    let mut verified = false;
+    for sample in containers.iter().filter_map(|c| c.outcome.as_ref().ok()) {
+        if sample.accelerators.is_empty() {
+            continue;
+        }
+        verified = true;
+        if sample.accelerators.len() != count as usize {
+            return Ok(Some(format!(
+                "the container has {} GPU(s), not the declared {count}",
+                sample.accelerators.len()
+            )));
+        }
+        let mismatch = sample.accelerators.iter().find_map(|acc| {
             verify_probed_gpu(
                 card,
                 acc.name.as_deref(),
                 acc.mem_total_bytes.map(ByteSize::from_bytes),
             )
             .err()
-        })
+        });
+        if mismatch.is_some() {
+            return Ok(mismatch);
+        }
+    }
+    if verified {
+        Ok(None)
+    } else if containers.is_empty() {
+        Err("no running container")
+    } else {
+        Err("the hardware probe returned no GPU")
+    }
 }
 
 /// What the exposure-failure handler does to Modal, so it is testable without
@@ -825,6 +843,28 @@ async fn exposure_failure<C: UpdateControl>(
     )
     .await;
     LlamaCppError::Supervisor(message)
+}
+
+/// Fails the deploy through [`exposure_failure`] when the probed GPU is not the
+/// declared card. `None` when it matches or could not be verified (the reason
+/// goes to stderr).
+async fn gpu_failure<C: UpdateControl>(
+    control: &mut C,
+    verdict: Result<Option<String>, &str>,
+    deployment: &Deployment,
+    previous: Option<u32>,
+    previous_endpoint: Option<&str>,
+) -> Option<LlamaCppError> {
+    match verdict {
+        Ok(None) => None,
+        Err(reason) => {
+            eprintln!("GPU check skipped: {reason}");
+            None
+        }
+        Ok(Some(detail)) => {
+            Some(exposure_failure(control, &detail, deployment, previous, previous_endpoint).await)
+        }
+    }
 }
 
 /// One-line phase note printed to stderr before the (possibly slow) deploy.
@@ -983,18 +1023,29 @@ impl ProcessSupervisor for ModalSupervisor {
             )
             .await);
         }
-        if let Some(detail) = self.gpu_mismatch(&deployment.app_id).await {
+        if let Some(card) = self.card {
+            let verdict = if previous.is_some() {
+                Err("an update, where draining containers may still report the old card")
+            } else {
+                match client.probe_app_hardware(&deployment.app_id).await {
+                    Ok(containers) => probed_gpu_mismatch(card, self.gpu_count, &containers),
+                    Err(_) => Err("the container list could not be read"),
+                }
+            };
             let previous = rollback_target(previous, &deployment.app_id);
-            return Err(exposure_failure(
+            if let Some(err) = gpu_failure(
                 &mut ModalUpdateControl {
                     client: &mut client,
                 },
-                &detail,
+                verdict,
                 &deployment,
                 previous,
                 self.previous_endpoint.as_deref(),
             )
-            .await);
+            .await
+            {
+                return Err(err);
+            }
         }
         Ok(RuntimeHandle {
             id: deployment.app_id,
@@ -1201,19 +1252,19 @@ mod tests {
     #[test]
     fn gpu_string_upper_cases_and_omits_count_of_one() {
         let acc = accelerator(AcceleratorKind::Gpu, "h100-sxm-80gb", 1);
-        assert_eq!(gpu_string(&acc).unwrap(), "H100");
+        assert_eq!(gpu_string(&acc).unwrap(), "H100!");
     }
 
     #[test]
     fn gpu_string_includes_count_above_one() {
         let acc = accelerator(AcceleratorKind::Gpu, "h100-sxm-80gb", 2);
-        assert_eq!(gpu_string(&acc).unwrap(), "H100:2");
+        assert_eq!(gpu_string(&acc).unwrap(), "H100!:2");
     }
 
     #[test]
     fn gpu_string_maps_catalog_cards_to_modal_names() {
         let acc = accelerator(AcceleratorKind::Gpu, "h100-sxm-80gb", 1);
-        assert_eq!(gpu_string(&acc).unwrap(), "H100");
+        assert_eq!(gpu_string(&acc).unwrap(), "H100!");
         let acc = accelerator(AcceleratorKind::Gpu, "a100-sxm4-80gb", 4);
         assert_eq!(gpu_string(&acc).unwrap(), "A100-80GB:4");
         let mut acc = accelerator(AcceleratorKind::Gpu, "l4", 1);
@@ -1588,15 +1639,69 @@ mod tests {
     fn a_probed_gpu_that_is_not_the_declared_card_is_a_mismatch() {
         let h100 = amicu_core::resource::gpu_card("h100-sxm-80gb").unwrap();
         let ok = container("NVIDIA H100 80GB HBM3", 81_559);
-        assert_eq!(probed_gpu_mismatch(h100, &[ok]), None);
+        assert_eq!(probed_gpu_mismatch(h100, 1, &[ok]), Ok(None));
         let wrong = container("NVIDIA H200", 143_771);
-        let detail = probed_gpu_mismatch(h100, &[wrong]).expect("mismatch");
+        let detail = probed_gpu_mismatch(h100, 1, &[wrong])
+            .unwrap()
+            .expect("mismatch");
         assert!(detail.contains("H200"), "{detail}");
+        let two = container("NVIDIA H100 80GB HBM3", 81_559);
+        let detail = probed_gpu_mismatch(h100, 2, &[two]).unwrap().unwrap();
+        assert!(detail.contains("1 GPU"), "{detail}");
+    }
+
+    #[test]
+    fn an_unverifiable_probe_is_skipped_with_a_reason() {
+        let h100 = amicu_core::resource::gpu_card("h100-sxm-80gb").unwrap();
+        assert_eq!(
+            probed_gpu_mismatch(h100, 1, &[]),
+            Err("no running container")
+        );
         let failed = ContainerHardware {
             task_id: "ta-2".to_owned(),
             outcome: Err("exec refused".to_owned()),
         };
-        assert_eq!(probed_gpu_mismatch(h100, &[failed]), None);
+        assert!(probed_gpu_mismatch(h100, 1, &[failed]).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_gpu_mismatch_rolls_back_an_update_and_stops_a_fresh_deploy() {
+        let mut c = FakeControl::new();
+        let err = gpu_failure(
+            &mut c,
+            Ok(Some("wrong GPU".into())),
+            &deployed(),
+            Some(4),
+            None,
+        )
+        .await
+        .expect("fails");
+        assert_eq!(
+            c.calls,
+            ["rollback ap-1 v4", "closed https://x.modal.direct"]
+        );
+        assert!(
+            err.to_string().contains("rolled back to version 4"),
+            "{err}"
+        );
+        let mut c = FakeControl::new();
+        gpu_failure(
+            &mut c,
+            Ok(Some("wrong GPU".into())),
+            &deployed(),
+            None,
+            None,
+        )
+        .await
+        .expect("fails");
+        assert_eq!(c.calls, ["stop ap-1"]);
+        let mut c = FakeControl::new();
+        assert!(
+            gpu_failure(&mut c, Err("no running container"), &deployed(), None, None)
+                .await
+                .is_none()
+        );
+        assert_eq!(c.calls, Vec::<String>::new());
     }
 
     fn deployed() -> Deployment {

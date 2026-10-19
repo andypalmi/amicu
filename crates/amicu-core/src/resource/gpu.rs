@@ -485,7 +485,6 @@ pub const CATALOG_GPU_PROVIDERS: [&str; 2] = ["modal", "runpod"];
 /// The card a profile on `provider` runs on. For a short name that is now
 /// ambiguous this is the card `modal`/`runpod` picked before exact names were
 /// required, so rewriting `h100` to `h100-sxm-80gb` is not a config change.
-/// The legacy fallback only covers old configs; new ones must name an exact card.
 #[must_use]
 pub fn effective_gpu_card(
     provider: &str,
