@@ -55,18 +55,10 @@ fn recorded_endpoint(
         CliError::Message(format!(
             "deployment '{deployment}' has no RunPod {} id recorded yet (its start did \
              not finish); run `amicu apply` or `amicu destroy --target {deployment}`",
-            kind(&record)
+            record.runpod_kind()
         ))
     })?;
     Ok((record, id))
-}
-
-fn kind(record: &StopRecord) -> &'static str {
-    if record.backend == Backend::RunpodPod {
-        "pod"
-    } else {
-        "endpoint"
-    }
 }
 
 fn endpoint_gone(deployment: &str, id: &str) -> CliError {
@@ -282,7 +274,7 @@ pub(crate) fn logs(
     let client = env.runpod.client()?;
     let rt = build_runtime()?;
     if record.backend == Backend::RunpodPod {
-        return pod_logs(&client, deployment, &id, tail, output, out);
+        return pod_logs(&rt, &client, deployment, &id, tail, output, out);
     }
     let workers = rt.block_on(async {
         match client
@@ -321,6 +313,7 @@ pub(crate) fn logs(
 }
 
 fn pod_logs(
+    rt: &tokio::runtime::Runtime,
     client: &RunPodClient,
     deployment: &str,
     id: &str,
@@ -328,7 +321,7 @@ fn pod_logs(
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
-    let lines = build_runtime()?.block_on(async {
+    let lines = rt.block_on(async {
         match client
             .pod_logs(id, tail.unwrap_or(DEFAULT_TAIL), WORKER_LOG_LIMITS)
             .await

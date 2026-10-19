@@ -2209,7 +2209,7 @@ async fn delete_runpod_secrets(
     Err(CliError::Message(format!(
         "{}: no {} exists, but these secrets could not be deleted: {}; it was kept in state",
         record.describe(),
-        pod::kind(record),
+        record.runpod_kind(),
         failed.join(", ")
     )))
 }
@@ -2219,7 +2219,7 @@ async fn delete_runpod_secrets(
 fn unknown_runpod_account(record: &StopRecord, env: &Env<'_>) -> Result<(), CliError> {
     let leftovers = format!(
         "{} '{}'{}{}",
-        pod::kind(record),
+        record.runpod_kind(),
         record.identity,
         record
             .app_id

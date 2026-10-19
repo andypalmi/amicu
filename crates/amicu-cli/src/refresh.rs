@@ -489,6 +489,7 @@ fn refresh_runpod(state: &mut LocalState, ops: &dyn RunPodOps) -> Refresh {
         return Refresh::default();
     }
     let project_id = state.project_id.clone().unwrap_or_default();
+    let kinds = runpod_kinds(&records);
     let looked_up = (|| -> Result<_, CliError> {
         let client = ops.client()?;
         let rt = build_runtime()?;
@@ -506,7 +507,7 @@ fn refresh_runpod(state: &mut LocalState, ops: &dyn RunPodOps) -> Refresh {
         Err(e) => {
             return Refresh {
                 warning: Some(format!(
-                    "could not check RunPod for live endpoints ({e}); using local state as-is"
+                    "could not check RunPod for live {kinds} ({e}); using local state as-is"
                 )),
                 ..Refresh::default()
             };
@@ -517,7 +518,7 @@ fn refresh_runpod(state: &mut LocalState, ops: &dyn RunPodOps) -> Refresh {
     let mut unchecked = Vec::new();
     for (r, live) in records.iter().zip(found) {
         let dep = r.deployment.as_str();
-        let kind = record_kind(r);
+        let kind = r.runpod_kind();
         if let Some((name, id, drift)) = live_drift(state, r, &live) {
             if !drift.is_empty() {
                 out.notes.push(format!(
@@ -567,18 +568,23 @@ fn refresh_runpod(state: &mut LocalState, ops: &dyn RunPodOps) -> Refresh {
     }
     if !unchecked.is_empty() {
         out.warning = Some(format!(
-            "could not reconcile RunPod endpoints ({}); kept in state as recorded",
+            "could not reconcile RunPod {kinds} ({}); kept in state as recorded",
             unchecked.join("; ")
         ));
     }
     out
 }
 
-fn record_kind(r: &StopRecord) -> &'static str {
-    if r.backend == Backend::RunpodPod {
-        "pod"
-    } else {
-        "endpoint"
+/// `"endpoints"`, `"pods"` or `"endpoints and pods"`, by what `records` hold.
+fn runpod_kinds(records: &[StopRecord]) -> &'static str {
+    let pods = records
+        .iter()
+        .filter(|r| r.backend == Backend::RunpodPod)
+        .count();
+    match pods {
+        0 => "endpoints",
+        n if n == records.len() => "pods",
+        _ => "endpoints and pods",
     }
 }
 
@@ -657,8 +663,7 @@ async fn lookup_pod(
         return Ok(Live::Missing);
     }
     let mut foreign = Vec::new();
-    for p in named {
-        let pod = client.get_pod(&p.id).await.map_err(|e| e.to_string())?;
+    for pod in named {
         if pod.env.owner.as_deref() == Some(owner.as_str()) {
             return Ok(Live::Pod(Box::new(pod)));
         }

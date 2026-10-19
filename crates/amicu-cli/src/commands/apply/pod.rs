@@ -34,14 +34,6 @@ pub(super) fn deployment_is_pod(graph: &Graph, id: &DeploymentId) -> bool {
         .is_some_and(is_pod)
 }
 
-pub(super) fn kind(record: &StopRecord) -> &'static str {
-    if record.backend == Backend::RunpodPod {
-        "pod"
-    } else {
-        "endpoint"
-    }
-}
-
 fn handle(deployment: &DeploymentId, id: &str) -> RuntimeHandle {
     RuntimeHandle {
         id: id.to_owned(),

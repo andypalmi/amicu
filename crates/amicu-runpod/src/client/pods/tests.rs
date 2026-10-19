@@ -300,6 +300,11 @@ fn proxy_url_shape() {
     )
     .unwrap();
     assert_eq!(pod.http_port(), Some(8080));
+    let vllm: Pod = serde_json::from_str(
+        r#"{"id":"p","name":"n","status":"RUNNING","ports":["8000/http","22/tcp"]}"#,
+    )
+    .unwrap();
+    assert_eq!(vllm.http_port(), Some(8000), "a vLLM pod serves on 8000");
 }
 
 #[test]
