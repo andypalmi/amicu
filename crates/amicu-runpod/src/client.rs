@@ -882,6 +882,16 @@ impl RunPodClient {
             .find(|s| s.name.eq_ignore_ascii_case(name)))
     }
 
+    /// `GET /account/secrets`: every secret of the account (no values). The
+    /// API defines no pagination for this list.
+    pub async fn list_secrets(&self) -> Result<Vec<Secret>, RunPodError> {
+        let resp = self
+            .send(HttpMethod::Get, "/account/secrets", None, "secrets")
+            .await?;
+        let list: SecretsList = decode(&resp)?;
+        Ok(list.secrets)
+    }
+
     /// `DELETE /account/secrets/{id}`. `404` is [`DeleteOutcome::AlreadyGone`].
     pub async fn delete_secret(&self, id: &str) -> Result<DeleteOutcome, RunPodError> {
         let path = format!("/account/secrets/{}", segment(id)?);
@@ -1527,6 +1537,24 @@ mod tests {
         assert_eq!(
             mock.requests()[0].url,
             "https://api.runpod.io/v2/account/secrets?name=hf%2Ftoken"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_secrets_reads_every_secret() {
+        let body = r#"{"secrets":[{"id":"s1","name":"a"},{"id":"s2","name":"b"}]}"#;
+        let (c, mock) = client(Mock::default().on(HttpMethod::Get, "/account/secrets", 200, body));
+        let names: Vec<String> = c
+            .list_secrets()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(
+            mock.requests()[0].url,
+            "https://api.runpod.io/v2/account/secrets"
         );
     }
 

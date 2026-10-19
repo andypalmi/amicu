@@ -87,7 +87,8 @@ pub(crate) fn run_with(
     // Every apply, a no-op one included, enforces an opt-out on this host.
     stop_agents_if_opted_out(env)?;
 
-    let (prior_state, pruned) = crate::refresh::load_refreshed(project, env.modal, output, out)?;
+    let (prior_state, pruned) =
+        crate::refresh::load_refreshed(project, env.modal, env.runpod, output, out)?;
     // A pending deployment (start begun, never confirmed) is planned as absent
     // so apply (re)starts it; destroy still sees it in state.
     let prior_graph = prior_state.as_ref().map(|s| {
