@@ -96,7 +96,7 @@ export default function LandingPage() {
             <Link href={quickstartUrl}>Get started</Link>
           </Button>
           <Button asChild size="lg" variant="outline">
-            <a href={githubUrl}>GitHub</a>
+            <a href="#install">Install</a>
           </Button>
         </div>
         <ApplyDemo className={cn(GAP_HEAD, 'lg:mt-8')} />
