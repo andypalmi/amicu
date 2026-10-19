@@ -167,6 +167,35 @@ pub(crate) fn run_with(
             {
                 lines.push(format!("  {} (Modal app '{}')", r.deployment, r.identity));
             }
+            let mut runpod = Vec::new();
+            for r in crate::commands::apply::effective_stops(prior_state.as_ref())
+                .iter()
+                .filter(|r| {
+                    r.backend == crate::stops::Backend::Runpod
+                        && targets.iter().any(|t| t == r.deployment.as_str())
+                })
+            {
+                runpod.push(format!(
+                    "  {} (RunPod endpoint '{}', secrets: {})",
+                    r.deployment,
+                    r.identity,
+                    if r.secrets.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        r.secrets.join(", ")
+                    }
+                ));
+            }
+            if !runpod.is_empty() {
+                writeln!(
+                    preview,
+                    "--forget-unconfirmed: if amicu cannot confirm the RunPod account, or \
+                     cannot delete these secrets, they will be forgotten WITHOUT confirming \
+                     they are gone:\n{}",
+                    runpod.join("\n")
+                )
+                .map_err(|e| CliError::io("write failed", e))?;
+            }
             if !lines.is_empty() {
                 writeln!(
                     preview,

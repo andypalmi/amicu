@@ -243,7 +243,7 @@ impl Tracked {
                 t.modal_referenced = true;
                 t.modal_names.insert(rec.identity.clone());
                 t.modal_ids.extend(rec.app_id.clone());
-            } else {
+            } else if rec.backend.is_host() {
                 t.insert_label(&rec.identity);
             }
         }

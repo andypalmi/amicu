@@ -13,6 +13,7 @@ mod modal_ops;
 mod planner;
 mod project;
 mod refresh;
+mod runpod_ops;
 mod secret;
 mod skills;
 mod stops;

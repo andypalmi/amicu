@@ -1341,6 +1341,8 @@ struct Rig {
     telemetry: FakeTelemetry,
     host: Box<crate::commands::apply::HostSupervisorFactory>,
     modal: FakeModal,
+    runpod: runpod::FakeRunPod,
+    resolver: Box<dyn amicu_core::secret::SecretResolver>,
     forget: bool,
     purge: bool,
 }
@@ -1394,6 +1396,8 @@ impl Rig {
                 })
             }),
             modal,
+            runpod: runpod::FakeRunPod::default(),
+            resolver: Box::new(crate::secret::EnvSecretResolver),
             forget: false,
             purge: false,
             // Opted in: the opt-out sweep stays out of unrelated tests.
@@ -1407,6 +1411,8 @@ impl Rig {
         Env {
             host: &*self.host,
             modal: &self.modal,
+            runpod: &self.runpod,
+            resolver: &*self.resolver,
             forget_unconfirmed: self.forget,
             purge: self.purge,
             proxy_tokens: amicu_modal::proxy_auth::TokenConfig::from_env,
@@ -2273,7 +2279,7 @@ fn state_round_trips_and_refuses_newer_versions() {
     state.stops = vec![host_rec("support_two")];
     project.save_state(&state).unwrap();
     let loaded = project.load_state().unwrap().unwrap();
-    assert_eq!(loaded.version, "v4");
+    assert_eq!(loaded.version, "v5");
     assert_eq!(loaded.pending, state.pending);
     assert_eq!(loaded.stops, state.stops);
 
@@ -2284,7 +2290,7 @@ fn state_round_trips_and_refuses_newer_versions() {
     v1.as_object_mut().unwrap().remove("stops");
     std::fs::write(project.state_file(), v1.to_string()).unwrap();
     let old = project.load_state().unwrap().unwrap();
-    assert_eq!(old.version, "v4", "migrated on load");
+    assert_eq!(old.version, "v5", "migrated on load");
     assert_eq!(old.stops.len(), 0);
 
     // A newer version is refused rather than silently downgraded.
@@ -4496,3 +4502,5 @@ resource "deployment" "d" {
         }
     }
 }
+
+mod runpod;

@@ -537,20 +537,16 @@ impl PodSupervisor {
         } else {
             pod.clone()
         };
+        // A PATCH resets the container but leaves `startedAt` unchanged, while
+        // `restart` moves it at once: restart explicitly so readiness can tell
+        // the new container from the old one.
         let action = match current.status {
             PodStatus::Exited | PodStatus::Error => Some(PodAction::Start),
-            PodStatus::Running if changed && current.started_at == pod.started_at => {
-                Some(PodAction::Restart)
-            }
+            _ if changed => Some(PodAction::Restart),
             _ => None,
         };
         if let Some(action) = action {
-            match self.client.pod_action(&pod.id, action).await {
-                Ok(_) => {}
-                // Already restarting on its own after the PATCH.
-                Err(RunPodError::Conflict { .. }) if action == PodAction::Restart => {}
-                Err(e) => return Err(runpod_err(&e)),
-            }
+            self.pod_action_when_allowed(&pod.id, action).await?;
         }
         Ok(Rollout {
             id: pod.id.clone(),
@@ -560,6 +556,24 @@ impl PodSupervisor {
                 Expect::Any
             },
         })
+    }
+
+    /// Sends `action`, retrying while RunPod answers `409` (e.g. a `restart`
+    /// while the PATCH's own reset is still in progress).
+    async fn pod_action_when_allowed(
+        &self,
+        id: &str,
+        action: PodAction,
+    ) -> Result<(), LlamaCppError> {
+        let deadline = tokio::time::Instant::now() + self.readiness.timeout;
+        let mut backoff = self.readiness.initial_backoff;
+        loop {
+            match self.client.pod_action(id, action).await {
+                Ok(_) => return Ok(()),
+                Err(RunPodError::Conflict { .. }) if self.pause(deadline, &mut backoff).await => {}
+                Err(e) => return Err(runpod_err(&e)),
+            }
+        }
     }
 
     async fn upsert_pod(
@@ -741,7 +755,8 @@ impl PodSupervisor {
             let req = HttpRequest::new(HttpMethod::Post, anon_url.clone())
                 .with_json(serde_json::json!({}));
             match self.probe.execute(req).await {
-                Ok(r) if matches!(r.status, 401 | 403) => break,
+                // Only the runtime's own 401; a 403 may come from a proxy in front of it.
+                Ok(r) if r.status == 401 => break,
                 // Reached the handler: success, or the empty body's validation error.
                 Ok(r) if (200..300).contains(&r.status) || matches!(r.status, 400 | 422) => {
                     return Err(NotReady::Unsafe(format!(
@@ -755,7 +770,7 @@ impl PodSupervisor {
             if !self.pause(deadline, &mut backoff).await {
                 return Err(NotReady::Unsafe(format!(
                     "could not verify that the pod rejects unauthenticated requests to \
-                     {ANON_PROBE_PATH} (no 401/403 answer)"
+                     {ANON_PROBE_PATH} (no 401 answer)"
                 )));
             }
         }
@@ -769,7 +784,7 @@ impl PodSupervisor {
             let req = HttpRequest::new(HttpMethod::Get, probe_url.clone()).with_bearer(key);
             match self.probe.execute(req).await {
                 Ok(r) if (200..300).contains(&r.status) => return Ok(()),
-                Ok(r) if matches!(r.status, 401 | 403) => {
+                Ok(r) if r.status == 401 => {
                     return Err(NotReady::Leave(LlamaCppError::Supervisor(format!(
                         "the pod rejected the deployment's api_key on {PROBE_PATH} (HTTP {}); \
                          the key delivered to the runtime does not match",

@@ -378,6 +378,7 @@ async fn vllm_start_creates_the_secret_then_the_endpoint_and_waits_for_health() 
         sup.deployed_endpoint().lock().unwrap().as_deref(),
         Some("ep1")
     );
+    assert!(sup.created_endpoint().load(Ordering::SeqCst));
 
     // Only HF_TOKEN becomes a RunPod secret, written before the endpoint;
     // the api_key is a RunPod credential and never leaves this machine
@@ -656,6 +657,7 @@ async fn an_ambiguous_create_is_resolved_by_name_and_never_resent() {
         sup.deployed_endpoint().lock().unwrap().as_deref(),
         Some("ep1")
     );
+    assert!(sup.created_endpoint().load(Ordering::SeqCst));
 }
 
 #[tokio::test]
@@ -773,6 +775,7 @@ async fn a_recorded_endpoint_is_updated_without_a_name_lookup() {
     sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
     assert_eq!(mock.count(HttpMethod::Get, "/serverless"), 0);
     assert_eq!(mock.count(HttpMethod::Patch, "/serverless/ep1"), 1);
+    assert!(!sup.created_endpoint().load(Ordering::SeqCst));
 
     // Gone from RunPod: fall back to the name lookup and create.
     let mock = happy_mock().ok(HttpMethod::Get, "/serverless/gone", 404, "{}");

@@ -26,6 +26,8 @@ pub(crate) enum Backend {
     HostTaskScheduler,
     /// A Modal app.
     Modal,
+    /// A RunPod Serverless endpoint.
+    Runpod,
 }
 
 impl Backend {
@@ -52,12 +54,20 @@ impl Backend {
         self == Self::Modal
     }
 
+    pub(crate) fn is_host(self) -> bool {
+        matches!(
+            self,
+            Self::HostLaunchd | Self::HostSystemd | Self::HostTaskScheduler
+        )
+    }
+
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::HostLaunchd => "launchd",
             Self::HostSystemd => "systemd",
             Self::HostTaskScheduler => "task-scheduler",
             Self::Modal => "modal",
+            Self::Runpod => "runpod",
         }
     }
 }
@@ -68,10 +78,11 @@ pub(crate) struct StopRecord {
     /// The deployment this instance serves.
     pub deployment: DeploymentId,
     pub backend: Backend,
-    /// Host: the launchd label / systemd unit. Modal: the app name.
+    /// Host: the launchd label / systemd unit. Modal: the app name. RunPod:
+    /// the endpoint name.
     pub identity: String,
-    /// Modal only: the app id once known (from the deploy). Stopping by id is
-    /// preferred over a name lookup.
+    /// Modal: the app id; RunPod: the endpoint id. Set once known; stopping
+    /// by id is preferred over a name lookup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_id: Option<String>,
     /// Host only: the effective uid the instance was started as.
@@ -83,7 +94,8 @@ pub(crate) struct StopRecord {
     /// launchd only: the domain (`gui/<uid>` or `user/<uid>`) it was started in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
-    /// Modal only: the workspace the app was deployed in.
+    /// Modal: the workspace the app was deployed in. RunPod: the account
+    /// fingerprint the endpoint was created in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
     /// Modal only: the environment the app was deployed in.
@@ -105,6 +117,10 @@ pub(crate) struct StopRecord {
     /// destroy can list them; never deleted by amicu (other projects share them).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub volumes: Vec<String>,
+    /// RunPod only: every account secret that may exist for the endpoint,
+    /// recorded before it is written and dropped only once deleted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<String>,
     /// Fields this amicu does not know (from a newer build of the same
     /// version), kept verbatim so a load-save cycle never drops them.
     #[serde(flatten)]
@@ -129,6 +145,7 @@ impl StopRecord {
             env_file: None,
             logs: Vec::new(),
             volumes: Vec::new(),
+            secrets: Vec::new(),
             extra: std::collections::BTreeMap::new(),
         }
     }
@@ -196,6 +213,35 @@ impl StopRecord {
             env_file: None,
             logs: Vec::new(),
             volumes: Vec::new(),
+            secrets: Vec::new(),
+            extra: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// A RunPod endpoint of the project `project_id`, in the account
+    /// `account` (an [`amicu_runpod::AccountIdentity`] fingerprint).
+    pub(crate) fn runpod_in(
+        project_id: &str,
+        deployment: &DeploymentId,
+        endpoint_id: Option<String>,
+        account: Option<&str>,
+        secrets: Vec<String>,
+    ) -> Self {
+        Self {
+            deployment: deployment.clone(),
+            backend: Backend::Runpod,
+            identity: amicu_runpod::project_endpoint_name(project_id, deployment.as_str()),
+            app_id: endpoint_id,
+            uid: None,
+            sid: None,
+            domain: None,
+            workspace: account.map(str::to_owned),
+            environment: None,
+            definition: None,
+            env_file: None,
+            logs: Vec::new(),
+            volumes: Vec::new(),
+            secrets,
             extra: std::collections::BTreeMap::new(),
         }
     }
@@ -238,7 +284,12 @@ impl StopRecord {
             }
             Backend::HostSystemd => ("service", &[".config/systemd/user"]),
             Backend::HostTaskScheduler => ("xml", &["amicu/tasks"]),
-            Backend::Modal => return Err(format!("a Modal record has a service file '{def}'")),
+            Backend::Modal | Backend::Runpod => {
+                return Err(format!(
+                    "a {} record has a service file '{def}'",
+                    self.backend.name()
+                ));
+            }
         };
         Self::check_file(&path, &format!("{}.{ext}", self.identity), dirs)?;
         if self.backend == Backend::HostTaskScheduler {
@@ -320,6 +371,12 @@ impl StopRecord {
         match self.backend {
             Backend::Modal => format!(
                 "{}: Modal app '{}' (app id {})",
+                self.deployment,
+                self.identity,
+                self.app_id.as_deref().unwrap_or("unknown")
+            ),
+            Backend::Runpod => format!(
+                "{}: RunPod endpoint '{}' (endpoint id {})",
                 self.deployment,
                 self.identity,
                 self.app_id.as_deref().unwrap_or("unknown")

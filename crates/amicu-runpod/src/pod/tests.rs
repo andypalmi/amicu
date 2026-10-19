@@ -517,16 +517,21 @@ async fn a_patched_running_pod_is_restarted_and_its_old_container_not_trusted() 
                 Canned::Status(200, pod_at("RUNNING", "t1")),
             ],
         )
-        .ok(HttpMethod::Patch, POD, 200, pod("RUNNING"))
+        // The PATCH's own reset is in progress: STARTING, same startedAt.
+        .ok(HttpMethod::Patch, POD, 200, pod("STARTING"))
         .first(
             HttpMethod::Post,
             ACTION,
-            &[Canned::Status(200, pod("RUNNING"))],
+            &[
+                Canned::Status(409, r#"{"detail":"not running"}"#),
+                Canned::Status(200, pod("RUNNING")),
+            ],
         );
     let (sup, mock) = supervisor(mock);
     let sup = sup.with_recorded_pod("pod1");
     sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
     assert_eq!(count(&mock, HttpMethod::Patch, POD), 1);
+    assert_eq!(count(&mock, HttpMethod::Post, ACTION), 2, "409 retried");
     assert_eq!(
         body_of(&mock, HttpMethod::Post, ACTION),
         json!({"action": "restart"})
@@ -610,6 +615,23 @@ async fn a_validation_error_to_an_anonymous_request_means_open() {
         json!({}),
         "anonymous probe is a guarded POST"
     );
+}
+
+#[tokio::test]
+async fn a_403_is_not_taken_as_the_runtime_refusing() {
+    let (sup, mock) = supervisor(create_mock(
+        &[Canned::Status(200, pod("RUNNING"))],
+        &[Canned::Status(200, "{}")],
+        &[Canned::Status(403, "")],
+        &[Canned::Status(200, "{}")],
+    ));
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    let text = err_text(&e);
+    assert!(
+        text.contains("no 401 answer") && text.contains("was terminated"),
+        "{text}"
+    );
+    assert_eq!(count(&mock, HttpMethod::Get, MODELS), 0);
 }
 
 #[tokio::test]
