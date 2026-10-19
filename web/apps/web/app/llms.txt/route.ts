@@ -30,6 +30,11 @@ const marketing: Array<{ path: string; label: string; note: string }> = [
     note: 'Trust model: API-enforced gating, verifiable sessions, secrets by reference.',
   },
   {
+    path: '/compare',
+    label: 'Compare',
+    note: 'amicu compared with Terraform and OpenTofu, SkyPilot, Ollama, and using RunPod or Modal directly.',
+  },
+  {
     path: '/about',
     label: 'About',
     note: 'The project, its maintainer, license and how to contribute.',

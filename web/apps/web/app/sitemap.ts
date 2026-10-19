@@ -1,6 +1,7 @@
 import type { MetadataRoute } from 'next';
 import { source } from '@/lib/source';
 import { legalPages } from '@/lib/legal/company';
+import { comparePages } from '@/app/(marketing)/_lib/compare';
 import { siteUrl } from '@/lib/shared';
 import { pageModified } from '@/lib/site-facts';
 
@@ -16,6 +17,8 @@ const marketingRoutes = [
   '/providers',
   '/security',
   '/about',
+  '/compare',
+  ...comparePages.map((c) => `/compare/${c.slug}`),
   // Legal pages are listed only per lib/legal/company.ts (imprint stays hidden until identity is filled).
   ...(legalPages.privacy ? ['/privacy'] : []),
   ...(legalPages.terms ? ['/terms'] : []),
