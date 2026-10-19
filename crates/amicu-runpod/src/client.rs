@@ -2,6 +2,12 @@
 //! (<https://api.runpod.io/v2/openapi.json>), on the [`HttpTransport`] seam.
 //! The API key and secret values are never `Debug`-printed or put in an error.
 
+mod pods;
+
+pub use pods::{
+    Cloud, CreatePod, Pod, PodAction, PodEnv, PodGpu, PodStatus, UpdatePod, pod_proxy_url,
+};
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
@@ -1026,23 +1032,23 @@ mod tests {
     type Route = (HttpMethod, String, Result<HttpResponse, TransportError>);
 
     #[derive(Clone)]
-    struct Seen {
-        method: HttpMethod,
-        url: String,
-        bearer: Option<String>,
-        body: Option<Value>,
+    pub(super) struct Seen {
+        pub(super) method: HttpMethod,
+        pub(super) url: String,
+        pub(super) bearer: Option<String>,
+        pub(super) body: Option<Value>,
     }
 
     /// Canned responses; the first route matching `(method, url-suffix)` is
     /// used. Records every request.
     #[derive(Default)]
-    struct Mock {
+    pub(super) struct Mock {
         routes: Mutex<Vec<Route>>,
         seen: Mutex<Vec<Seen>>,
     }
 
     impl Mock {
-        fn on(self, method: HttpMethod, suffix: &str, status: u16, body: &str) -> Self {
+        pub(super) fn on(self, method: HttpMethod, suffix: &str, status: u16, body: &str) -> Self {
             self.routes.lock().unwrap().push((
                 method,
                 suffix.into(),
@@ -1051,7 +1057,7 @@ mod tests {
             self
         }
 
-        fn fail(self, method: HttpMethod, suffix: &str, e: TransportError) -> Self {
+        pub(super) fn fail(self, method: HttpMethod, suffix: &str, e: TransportError) -> Self {
             self.routes
                 .lock()
                 .unwrap()
@@ -1059,7 +1065,7 @@ mod tests {
             self
         }
 
-        fn requests(&self) -> Vec<Seen> {
+        pub(super) fn requests(&self) -> Vec<Seen> {
             self.seen.lock().unwrap().clone()
         }
     }
@@ -1088,10 +1094,10 @@ mod tests {
         }
     }
 
-    const KEY: &str = "rpa_SUPERSECRETKEY";
+    pub(super) const KEY: &str = "rpa_SUPERSECRETKEY";
     const BASE: &str = "https://api.runpod.io/v2";
 
-    fn client(mock: Mock) -> (RunPodClient, Arc<Mock>) {
+    pub(super) fn client(mock: Mock) -> (RunPodClient, Arc<Mock>) {
         let mock = Arc::new(mock);
         let c = RunPodClient::with_transport(ApiKey::new(KEY), mock.clone(), BASE);
         (c, mock)
