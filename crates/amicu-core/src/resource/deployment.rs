@@ -228,16 +228,17 @@ pub struct SpeculativeSettings {
     pub n_gpu_layers: Option<i32>,
 }
 
-/// Per-deployment autoscaling knobs for the Modal provider
-///, the deployment's optional `scaling { ... }` block.
+/// Per-deployment autoscaling knobs for the Modal and RunPod providers, the
+/// deployment's optional `scaling { ... }` block.
 ///
 /// Every field is optional and independent: an omitted field keeps the
 /// provider default exactly as it was before this block existed
 /// (`min_replicas = 0`, `max_replicas` unlimited,
 /// `target_concurrency = 32`, `scaledown_window = 15m`; the constants live in
-/// `amicu_modal::supervisor`). Only meaningful when the deployment's hardware
-/// profile has `provider = "modal"`; on any other provider it is rejected with
-/// the `AMICU-CAP-009` error.
+/// `amicu_modal::supervisor`; RunPod's, with `max_replicas = 1`, in
+/// `amicu_runpod::supervisor`). Only meaningful when the deployment's hardware
+/// profile has `provider = "modal"` or `"runpod"`; on any other provider it is
+/// rejected with the `AMICU-CAP-009` error.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScalingSettings {
     /// Replicas kept warm; `0` scales to zero when idle.

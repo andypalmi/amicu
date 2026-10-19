@@ -370,8 +370,8 @@ pub mod catalog {
     /// `scaledown_window`, or `min_replicas` above `max_replicas`). Error.
     pub const CAP_SCALING_INVALID: DiagnosticCode = DiagnosticCode::new(Category::Cap, 8);
     /// `AMICU-CAP-009` - a deployment sets `scaling {}` but its hardware
-    /// profile's provider has no scaling mapping yet (only `modal` does;
-    /// the rest are future work). Error rather than a silent no-op:
+    /// profile's provider has no scaling mapping yet (only `modal` and
+    /// `runpod` do; the rest are future work). Error rather than a silent no-op:
     /// the block's point is to cap spend, so ignoring it would be a lie.
     pub const CAP_SCALING_UNSUPPORTED_PROVIDER: DiagnosticCode =
         DiagnosticCode::new(Category::Cap, 9);

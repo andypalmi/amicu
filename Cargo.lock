@@ -304,6 +304,7 @@ dependencies = [
  "amicu-llamacpp",
  "amicu-providers",
  "amicu-runtime",
+ "amicu-telemetry",
  "async-trait",
  "serde",
  "serde_json",

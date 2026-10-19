@@ -142,6 +142,33 @@ pub trait HttpTransport: Send + Sync {
     /// [`TransportError`] when the exchange does not complete. A completed
     /// exchange is an `Ok(HttpResponse)` regardless of status code.
     async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, TransportError>;
+
+    /// Like [`execute`](Self::execute), for a body that may never end (a
+    /// Server-Sent Events stream): reading stops at EOF or at the first of
+    /// `limits`, and what arrived so far is the body. The default delegates to
+    /// [`execute`](Self::execute), which suits canned test transports.
+    ///
+    /// # Errors
+    /// [`TransportError`] when no response arrives.
+    async fn execute_bounded(
+        &self,
+        request: HttpRequest,
+        limits: StreamLimits,
+    ) -> Result<HttpResponse, TransportError> {
+        let _ = limits;
+        self.execute(request).await
+    }
+}
+
+/// When [`HttpTransport::execute_bounded`] stops reading a body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamLimits {
+    /// Overall time from the request until reading stops.
+    pub total: std::time::Duration,
+    /// Stop once no data arrived for this long.
+    pub idle: std::time::Duration,
+    /// Stop once this many body bytes arrived (the body is cut there).
+    pub max_bytes: usize,
 }
 
 /// The production [`HttpTransport`], backed by a `reqwest` client.
@@ -177,19 +204,15 @@ impl Default for ReqwestTransport {
     }
 }
 
-#[async_trait]
-impl HttpTransport for ReqwestTransport {
-    async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+impl ReqwestTransport {
+    fn builder(&self, request: &HttpRequest) -> reqwest::RequestBuilder {
         let method = match request.method {
             HttpMethod::Get => reqwest::Method::GET,
             HttpMethod::Post => reqwest::Method::POST,
             HttpMethod::Patch => reqwest::Method::PATCH,
             HttpMethod::Delete => reqwest::Method::DELETE,
         };
-        let mut builder = self
-            .client
-            .request(method, &request.url)
-            .timeout(self.timeout);
+        let mut builder = self.client.request(method, &request.url);
         if let Some(token) = &request.bearer {
             builder = builder.bearer_auth(token);
         }
@@ -199,21 +222,66 @@ impl HttpTransport for ReqwestTransport {
         if let Some(body) = &request.body {
             builder = builder.json(body);
         }
-        let response = builder.send().await.map_err(|e| {
-            if e.is_timeout() {
-                TransportError::Timeout
-            } else {
-                // reqwest error Display carries the URL and cause, never the
-                // Authorization header, so it is safe to surface.
-                TransportError::Connection(e.to_string())
-            }
-        })?;
+        builder
+    }
+}
+
+/// reqwest error Display carries the URL and cause, never the Authorization
+/// header, so it is safe to surface.
+fn send_error(e: &reqwest::Error) -> TransportError {
+    if e.is_timeout() {
+        TransportError::Timeout
+    } else {
+        TransportError::Connection(e.to_string())
+    }
+}
+
+#[async_trait]
+impl HttpTransport for ReqwestTransport {
+    async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, TransportError> {
+        let response = self
+            .builder(&request)
+            .timeout(self.timeout)
+            .send()
+            .await
+            .map_err(|e| send_error(&e))?;
         let status = response.status().as_u16();
         let body = response
             .bytes()
             .await
             .map_err(|e| TransportError::Connection(e.to_string()))?
             .to_vec();
+        Ok(HttpResponse { status, body })
+    }
+
+    async fn execute_bounded(
+        &self,
+        request: HttpRequest,
+        limits: StreamLimits,
+    ) -> Result<HttpResponse, TransportError> {
+        let deadline = tokio::time::Instant::now() + limits.total;
+        let mut response = tokio::time::timeout_at(deadline, self.builder(&request).send())
+            .await
+            .map_err(|_| TransportError::Timeout)?
+            .map_err(|e| send_error(&e))?;
+        let status = response.status().as_u16();
+        let mut body = Vec::new();
+        loop {
+            let until = deadline.min(tokio::time::Instant::now() + limits.idle);
+            match tokio::time::timeout_at(until, response.chunk()).await {
+                Ok(Ok(Some(chunk))) => {
+                    let room = limits.max_bytes.saturating_sub(body.len());
+                    body.extend_from_slice(&chunk[..chunk.len().min(room)]);
+                    if body.len() >= limits.max_bytes {
+                        break;
+                    }
+                }
+                Ok(Err(e)) if body.is_empty() => {
+                    return Err(TransportError::Connection(e.to_string()));
+                }
+                Ok(Ok(None) | Err(_)) | Err(_) => break,
+            }
+        }
         Ok(HttpResponse { status, body })
     }
 }
@@ -352,6 +420,58 @@ mod tests {
         let seen = mock.requests();
         assert_eq!(seen[0].method, HttpMethod::Post);
         assert_eq!(seen[0].bearer.as_deref(), Some("tok"));
+    }
+
+    /// Answers one request with `head` and `body`, then holds the connection
+    /// open without closing it (an event stream that never ends).
+    async fn serve_open_stream(head: &'static str, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 2048];
+            let _ = sock.read(&mut buf).await;
+            sock.write_all(head.as_bytes()).await.unwrap();
+            sock.write_all(body.as_bytes()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        });
+        url
+    }
+
+    const STREAM_HEAD: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n";
+
+    #[tokio::test]
+    async fn bounded_read_returns_what_arrived_once_the_stream_goes_idle() {
+        let url = serve_open_stream(STREAM_HEAD, "data: a\n\ndata: b\n\n").await;
+        let limits = StreamLimits {
+            total: std::time::Duration::from_secs(10),
+            idle: std::time::Duration::from_millis(200),
+            max_bytes: 1024,
+        };
+        let started = std::time::Instant::now();
+        let resp = ReqwestTransport::new()
+            .execute_bounded(HttpRequest::new(HttpMethod::Get, url), limits)
+            .await
+            .unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, b"data: a\n\ndata: b\n\n");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn bounded_read_cuts_the_body_at_max_bytes() {
+        let url = serve_open_stream(STREAM_HEAD, "0123456789").await;
+        let limits = StreamLimits {
+            total: std::time::Duration::from_secs(10),
+            idle: std::time::Duration::from_secs(5),
+            max_bytes: 4,
+        };
+        let resp = ReqwestTransport::new()
+            .execute_bounded(HttpRequest::new(HttpMethod::Get, url), limits)
+            .await
+            .unwrap();
+        assert_eq!(resp.body, b"0123");
     }
 
     #[tokio::test]

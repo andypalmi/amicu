@@ -44,6 +44,10 @@ struct WorldState {
     lose_create_response: bool,
     /// `METHOD path` of every request, in order.
     log: Vec<String>,
+    /// `(id, status)` of the workers every endpoint reports.
+    workers: Vec<(String, String)>,
+    /// What `/metrics` answers through the gateway.
+    metrics: String,
 }
 
 type Hook = Box<dyn FnOnce() + Send>;
@@ -66,7 +70,10 @@ fn ep_json(e: &Ep) -> Value {
     if let Some(o) = &e.owner {
         env.insert(amicu_runpod::OWNER_ENV_VAR.to_owned(), json!(o));
     }
-    json!({"id": e.id, "name": e.name, "type": "LOAD_BALANCER", "env": env})
+    json!({"id": e.id, "name": e.name, "type": "LOAD_BALANCER", "env": env,
+        "gpu": {"pools": ["AMPERE_24"], "count": 1},
+        "workers": {"min": 0, "max": e.max_workers.unwrap_or(1)},
+        "dataCenterIds": ["EU-RO-1", "EU-SE-1"]})
 }
 
 fn owner_in(body: Option<&Value>) -> Option<String> {
@@ -90,6 +97,18 @@ impl HttpTransport for World {
             w.log.push(format!("health {id}"));
             let status = if w.health == 0 { 200 } else { w.health };
             return reply(status, &json!({}));
+        }
+        if let Some(id) = req
+            .url
+            .strip_prefix("https://")
+            .and_then(|u| u.strip_suffix(".api.runpod.ai/metrics"))
+        {
+            let mut w = self.state.lock().unwrap();
+            w.log.push(format!(
+                "metrics {id} bearer={}",
+                req.bearer.as_deref().unwrap_or("")
+            ));
+            return Ok(HttpResponse::new(200, w.metrics.clone().into_bytes()));
         }
         let path = req
             .url
@@ -139,6 +158,33 @@ impl HttpTransport for World {
                     return Err(TransportError::Timeout);
                 }
                 reply(201, &ep_json(&ep))
+            }
+            (HttpMethod::Get, ["serverless", id, "workers"]) => {
+                if !w.endpoints.iter().any(|e| e.id == *id) {
+                    return reply(404, &json!({"detail": "not found"}));
+                }
+                let running = w.workers.iter().filter(|x| x.1 == "RUNNING").count();
+                let idle = w.workers.iter().filter(|x| x.1 == "IDLE").count();
+                let list: Vec<Value> = w
+                    .workers
+                    .iter()
+                    .map(|(id, status)| json!({"id": id, "status": status}))
+                    .collect();
+                reply(
+                    200,
+                    &json!({"workers": list, "summary": {"running": running, "idle": idle,
+                        "total": list.len()}}),
+                )
+            }
+            (HttpMethod::Get, ["serverless", _, "workers", wid, logs])
+                if logs.starts_with("logs?tail=") =>
+            {
+                let body = format!(
+                    "data: {}\n\ndata: {}\n\n",
+                    json!({"ts": format!("2026-01-01T00:00:0{}Z", wid.len()), "source": "container", "line": format!("hello from {wid}")}),
+                    json!({"ts": "2026-01-01T00:00:09Z", "source": "system", "line": "done"}),
+                );
+                Ok(HttpResponse::new(200, body.into_bytes()))
             }
             (method, ["serverless", id]) => {
                 let Some(i) = w.endpoints.iter().position(|e| e.id == *id) else {
@@ -917,4 +963,233 @@ fn a_failed_endpoint_delete_keeps_every_recorded_secret() {
         [amicu_runpod::ACCOUNT_MARKER_SECRET]
     );
     assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+// --- amicu runpod status / logs / metrics / stop -----------------------------
+
+fn running_endpoint(rig: &Rig) -> (TempDir, Project) {
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(Some("ep7"), ACCOUNT, &[])));
+    add_endpoint(rig, "ep7", Some(owner()));
+    (td, project)
+}
+
+#[test]
+fn status_shows_the_endpoint_workers_gpu_and_data_centers() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().workers = vec![
+        ("w1".into(), "RUNNING".into()),
+        ("w22".into(), "IDLE".into()),
+    ];
+    let mut out = Vec::new();
+    let code =
+        commands::runpod::status(&project, DEP, OutputFormat::Human, &mut out, &rig.env()).unwrap();
+    assert_eq!(code, 0);
+    let text = utf8(out);
+    assert!(text.contains("RunPod endpoint ep7"), "{text}");
+    assert!(text.contains("https://ep7.api.runpod.ai"), "{text}");
+    assert!(
+        text.contains("running=1 idle=1 initializing=0 throttled=0 unhealthy=0 (min 0, max 1)"),
+        "{text}"
+    );
+    assert!(text.contains("gpu:          AMPERE_24 x1"), "{text}");
+    assert!(text.contains("data centers: EU-RO-1, EU-SE-1"), "{text}");
+
+    let mut out = Vec::new();
+    commands::runpod::status(&project, DEP, OutputFormat::Json, &mut out, &rig.env()).unwrap();
+    let doc: Value = serde_json::from_str(&utf8(out)).unwrap();
+    assert_eq!(doc["endpoint_id"], "ep7");
+    assert_eq!(doc["workers"]["running"], 1);
+    assert_eq!(doc["data_centers"], json!(["EU-RO-1", "EU-SE-1"]));
+}
+
+#[test]
+fn status_reports_scaled_to_zero_and_refuses_unknown_or_unrecorded_deployments() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    let mut out = Vec::new();
+    commands::runpod::status(&project, DEP, OutputFormat::Human, &mut out, &rig.env()).unwrap();
+    assert!(utf8(out).contains("scaled to zero"));
+
+    let err = commands::runpod::status(
+        &project,
+        "nope",
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("no RunPod deployment named 'nope'"), "{err}");
+
+    let td = TempDir::new();
+    let unrecorded = project_with(&td, Some(record(None, ACCOUNT, &[])));
+    let err = commands::runpod::status(
+        &unrecorded,
+        DEP,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("no RunPod endpoint id recorded"), "{err}");
+}
+
+#[test]
+fn status_of_an_endpoint_gone_remotely_says_so() {
+    let rig = rig();
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(Some("ep7"), ACCOUNT, &[])));
+    let err = commands::runpod::status(
+        &project,
+        DEP,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("ep7") && err.contains("not found"), "{err}");
+}
+
+#[test]
+fn logs_merge_every_worker_with_its_prefix() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().workers = vec![
+        ("w22".into(), "RUNNING".into()),
+        ("w1".into(), "IDLE".into()),
+    ];
+    let mut out = Vec::new();
+    commands::runpod::logs(&project, DEP, Some(20), &mut out, &rig.env()).unwrap();
+    let text = utf8(out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "[w1] hello from w1",
+            "[w22] hello from w22",
+            "[w22] (system) done",
+            "[w1] (system) done"
+        ],
+        "{text}"
+    );
+    let log = rig.runpod.world.log();
+    assert!(
+        log.contains(&"Get /serverless/ep7/workers/w1/logs?tail=20".to_owned()),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn logs_of_a_scaled_to_zero_endpoint_say_there_are_no_workers() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    let mut out = Vec::new();
+    let code = commands::runpod::logs(&project, DEP, None, &mut out, &rig.env()).unwrap();
+    assert_eq!(code, 0);
+    assert!(utf8(out).contains("no RunPod workers are running"));
+}
+
+#[test]
+fn metrics_go_through_the_gateway_with_the_deployment_key() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().metrics =
+        "vllm:num_requests_running 3\nvllm:generation_tokens_total 10\n".to_owned();
+    let mut out = Vec::new();
+    commands::runpod::metrics(
+        &project,
+        DEP,
+        false,
+        5,
+        OutputFormat::Human,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let text = utf8(out);
+    assert!(text.contains(&format!("metrics {DEP} (vLLM)")), "{text}");
+    assert!(text.contains("running=3"), "{text}");
+    assert!(
+        text.contains("hardware: n/a (not available on RunPod)"),
+        "{text}"
+    );
+    let log = rig.runpod.world.log();
+    assert!(
+        log.contains(&"metrics ep7 bearer=rpa_ENDPOINTKEY".to_owned()),
+        "{log:?}"
+    );
+
+    let mut out = Vec::new();
+    commands::runpod::metrics(
+        &project,
+        DEP,
+        false,
+        5,
+        OutputFormat::Json,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let doc: Value = serde_json::from_str(&utf8(out)).unwrap();
+    assert_eq!(doc["runtime"]["requests_running"], 3);
+    assert_eq!(doc["hardware"]["containers"], json!([]));
+}
+
+#[test]
+fn stop_deletes_the_endpoint_then_drops_the_record() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    commands::runpod::stop(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap();
+    assert_eq!(rig.runpod.world.endpoint_ids().len(), 0);
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn an_unconfirmed_stop_keeps_the_record() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().delete_fails = true;
+    let err = commands::runpod::stop(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("kept in state"), "{err}");
+    assert_eq!(stops_for(&project, DEP)[0].app_id.as_deref(), Some("ep7"));
+}
+
+#[test]
+fn stop_refuses_a_deployment_without_a_runpod_record() {
+    let rig = rig();
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let err = commands::runpod::stop(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("no RunPod deployment named"), "{err}");
+    assert_eq!(rig.runpod.world.log().len(), 0);
 }
