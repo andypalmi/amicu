@@ -23,7 +23,7 @@ fn residency_of_code(code: &str) -> Option<(Residency, &'static str)> {
 }
 
 fn residency_label(r: &Residency) -> String {
-    format!("{r:?}").to_ascii_lowercase()
+    r.as_token().to_owned()
 }
 
 /// The `dataCenterIds` for `region`, enforcing `required` residency if given.
@@ -57,6 +57,12 @@ pub fn select_data_centers(
             required: residency_label(required),
         });
     }
+    if ids.is_empty() {
+        // Empty `dataCenterIds` would mean "anywhere".
+        return Err(RunPodError::UnknownRegion {
+            region: region.to_owned(),
+        });
+    }
     Ok(ids.into_iter().map(str::to_owned).collect())
 }
 
@@ -72,25 +78,32 @@ pub fn restrict_to_residencies(
     if allowed.is_empty() {
         return Ok(selected);
     }
-    if selected.is_empty() {
-        return Ok(allowed
-            .iter()
-            .flat_map(RunPodProvider::datacenter_codes)
-            .map(str::to_owned)
-            .collect());
-    }
-    let inside = |id: &String| residency_of_code(id).is_some_and(|(r, _)| allowed.contains(&r));
-    if selected.iter().all(inside) {
-        return Ok(selected);
-    }
-    Err(RunPodError::ResidencyViolation {
-        region: region.unwrap_or_default().to_owned(),
+    let violation = || RunPodError::ResidencyViolation {
+        region: region.unwrap_or("any RunPod data center").to_owned(),
         required: allowed
             .iter()
             .map(residency_label)
             .collect::<Vec<_>>()
             .join(" or "),
-    })
+    };
+    if selected.is_empty() {
+        let ids: Vec<String> = allowed
+            .iter()
+            .flat_map(RunPodProvider::datacenter_codes)
+            .map(str::to_owned)
+            .collect();
+        // Empty `dataCenterIds` would mean "anywhere".
+        return if ids.is_empty() {
+            Err(violation())
+        } else {
+            Ok(ids)
+        };
+    }
+    let inside = |id: &String| residency_of_code(id).is_some_and(|(r, _)| allowed.contains(&r));
+    if selected.iter().all(inside) {
+        return Ok(selected);
+    }
+    Err(violation())
 }
 
 #[cfg(test)]
@@ -116,7 +129,7 @@ mod tests {
 
     #[test]
     fn non_eu_region_with_eu_residency_is_rejected() {
-        for region in ["us", "US-CA-1", "apac"] {
+        for region in ["us", "US-CA-2", "apac"] {
             assert_eq!(
                 select_data_centers(region, Some(&Residency::Eu)),
                 Err(RunPodError::ResidencyViolation {
@@ -131,7 +144,7 @@ mod tests {
     #[test]
     fn without_a_residency_requirement_any_known_region_is_allowed() {
         let ids = select_data_centers("us", None).unwrap();
-        assert!(ids.contains(&"US-CA-1".to_owned()));
+        assert!(ids.contains(&"US-CA-2".to_owned()));
     }
 
     #[test]
@@ -150,12 +163,35 @@ mod tests {
             eu
         );
         assert_eq!(
-            restrict_to_residencies(Some("US-CA-1"), vec!["US-CA-1".into()], &[Residency::Eu]),
+            restrict_to_residencies(Some("US-CA-2"), vec!["US-CA-2".into()], &[Residency::Eu]),
             Err(RunPodError::ResidencyViolation {
-                region: "US-CA-1".into(),
+                region: "US-CA-2".into(),
                 required: "eu".into()
             })
         );
+    }
+
+    #[test]
+    fn an_allowlist_with_no_runpod_data_center_is_refused_not_widened() {
+        for allowed in [vec![Residency::Uk], vec![Residency::Other("latam".into())]] {
+            let err = restrict_to_residencies(None, Vec::new(), &allowed).unwrap_err();
+            assert!(
+                matches!(err, RunPodError::ResidencyViolation { .. }),
+                "{err:?}"
+            );
+        }
+        assert!(matches!(
+            restrict_to_residencies(Some("eu"), vec!["EU-RO-1".into()], &[Residency::Uk]),
+            Err(RunPodError::ResidencyViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn eu_includes_france_iceland_and_norway() {
+        let ids = select_data_centers("eu", None).unwrap();
+        for dc in ["EU-FR-1", "EUR-IS-1", "EUR-IS-5", "EUR-NO-2"] {
+            assert!(ids.contains(&dc.to_owned()), "{dc}: {ids:?}");
+        }
     }
 
     #[test]

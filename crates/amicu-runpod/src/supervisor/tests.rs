@@ -809,6 +809,31 @@ async fn an_owned_endpoint_found_by_name_is_updated_in_place() {
 }
 
 #[tokio::test]
+async fn an_update_restates_the_cuda_floor_and_clears_a_stale_placement() {
+    let (sup, mock) = supervisor(update_mock(owned_endpoint()));
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    let patch = patch_body(&mock);
+    assert_eq!(patch["gpu"]["minCudaVersion"], json!("13.0"));
+    assert_eq!(patch["dataCenterIds"], json!([]));
+}
+
+#[test]
+fn an_update_without_a_floor_clears_the_previous_one() {
+    let (sup, _) = supervisor(Mock::default());
+    let prepared = sup
+        .prepare(&vllm_plan(), &vllm_secrets(), "me/vllm:custom", None)
+        .unwrap();
+    assert_eq!(prepared.endpoint.gpu.min_cuda_version, None);
+    assert!(
+        prepared.endpoint.to_body()["gpu"]
+            .get("minCudaVersion")
+            .is_none()
+    );
+    let patch = update_from(&prepared.endpoint).to_body();
+    assert_eq!(patch["gpu"]["minCudaVersion"], json!(""));
+}
+
+#[tokio::test]
 async fn an_update_sends_the_scaling_block_as_workers() {
     let (sup, mock) = supervisor(update_mock(owned_endpoint()));
     let sup = sup.with_scaling(Some(&ScalingSettings {
@@ -1132,6 +1157,31 @@ async fn readiness_times_out_naming_the_last_answer_and_keeps_the_id() {
     assert_eq!(
         sup.deployed_endpoint().lock().unwrap().as_deref(),
         Some("ep1")
+    );
+}
+
+#[tokio::test]
+async fn readiness_reports_progress_to_the_sink_only() {
+    let lines: Arc<Mutex<Vec<String>>> = Arc::default();
+    let seen = lines.clone();
+    let (sup, _) = supervisor(ready_mock(&[Canned::Status(204, "")]).ok(
+        HttpMethod::Get,
+        "/serverless/ep1/workers",
+        200,
+        r#"{"workers":[],"summary":{"initializing":1,"total":1}}"#,
+    ));
+    let sup = sup.with_progress(Duration::from_millis(20), move |l| {
+        seen.lock().unwrap().push(l.to_owned());
+    });
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    let lines = lines.lock().unwrap();
+    assert_ne!(lines.len(), 0);
+    assert!(
+        lines[0].starts_with("waiting for RunPod endpoint ep1: ")
+            && lines[0].ends_with(
+                "elapsed, workers: running=0 idle=0 initializing=1 throttled=0 unhealthy=0"
+            ),
+        "{lines:?}"
     );
 }
 

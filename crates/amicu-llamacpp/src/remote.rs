@@ -36,8 +36,8 @@ pub const LLAMACPP_IMAGE_SERVER_PATH: &str = "/app/llama-server";
 /// curls `localhost:8080/health`.
 pub const LLAMACPP_IMAGE_PORT: u16 = 8080;
 
-/// Lowest host CUDA version [`DEFAULT_VLLM_IMAGE`] runs on (its
-/// `NVIDIA_REQUIRE_CUDA` is `cuda>=13.0`).
+/// Lowest host CUDA version [`DEFAULT_VLLM_IMAGE`] runs on: it matches the
+/// image's CUDA 13.0.2 base (`NVIDIA_REQUIRE_CUDA` is `cuda>=13.0`).
 pub const DEFAULT_VLLM_IMAGE_MIN_CUDA: &str = "13.0";
 
 /// Lowest host CUDA version [`DEFAULT_LLAMACPP_IMAGE`] runs on (its

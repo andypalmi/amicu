@@ -78,8 +78,13 @@ pub const LLAMACPP_IMAGE_ENV_VAR: &str = "AMICU_RUNPOD_LLAMACPP_IMAGE";
 // health check at a route that answers 204 while loading.
 pub const HEALTH_PATH: &str = "/health";
 
-/// How often `start` reports progress while it waits for readiness.
+/// How often the CLI has `start` report progress while it waits for
+/// readiness.
 pub const PROGRESS_EVERY: Duration = Duration::from_secs(30);
+
+/// Receives one readiness progress line (see
+/// [`RunPodSupervisor::with_progress`]).
+type ProgressSink = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Idle seconds before a worker scales down, unless the deployment's
 /// `scaling { scaledown_window }` says otherwise (same default as Modal).
@@ -295,6 +300,7 @@ pub struct RunPodSupervisor {
     recorded_endpoint: Option<String>,
     recorded_secrets: Vec<String>,
     gateway_key: Option<SecretValue>,
+    progress: Option<(Duration, ProgressSink)>,
     deployed_endpoint: Arc<Mutex<Option<String>>>,
     created_endpoint: Arc<AtomicBool>,
     secrets: SecretLedger,
@@ -340,6 +346,7 @@ impl RunPodSupervisor {
             recorded_endpoint: None,
             recorded_secrets: Vec::new(),
             gateway_key: None,
+            progress: None,
             deployed_endpoint: Arc::default(),
             created_endpoint: Arc::default(),
         }
@@ -511,6 +518,18 @@ impl RunPodSupervisor {
     #[must_use]
     pub fn with_gateway_key(mut self, key: SecretValue) -> Self {
         self.gateway_key = Some(key);
+        self
+    }
+
+    /// Where `start` reports readiness progress, once per `every` (the CLI
+    /// uses [`PROGRESS_EVERY`]); without a sink it stays silent.
+    #[must_use]
+    pub fn with_progress(
+        mut self,
+        every: Duration,
+        sink: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Self {
+        self.progress = Some((every, Arc::new(sink)));
         self
     }
 
@@ -862,9 +881,8 @@ impl RunPodSupervisor {
     /// until a worker answers `200`. `204` (initializing), "no workers"
     /// answers and transport failures are retried with a doubling backoff
     /// until the timeout; `401`/`403` fail at once (the gateway does not
-    /// accept the key, waiting will not help). Every
-    /// [`PROGRESS_EVERY`] it prints the elapsed time and worker states to
-    /// stderr.
+    /// accept the key, waiting will not help). Reports the elapsed time and
+    /// worker states to the [progress sink](Self::with_progress), if any.
     async fn wait_ready(
         &self,
         id: &str,
@@ -878,7 +896,7 @@ impl RunPodSupervisor {
         let timing = self.readiness;
         let started = tokio::time::Instant::now();
         let deadline = started + timing.timeout;
-        let mut next_progress = started + PROGRESS_EVERY;
+        let mut next_progress = started + self.progress.as_ref().map_or(Duration::ZERO, |p| p.0);
         let mut backoff = timing.initial_backoff;
         let mut last = "no answer".to_owned();
         loop {
@@ -906,13 +924,15 @@ impl RunPodSupervisor {
                     self.worker_summary(id).await
                 )));
             }
-            if now >= next_progress {
-                next_progress = now + PROGRESS_EVERY;
-                eprintln!(
-                    "  waiting for RunPod endpoint {id}: {} elapsed, workers: {}",
+            if let Some((every, sink)) = &self.progress
+                && now >= next_progress
+            {
+                next_progress = now + *every;
+                sink(&format!(
+                    "waiting for RunPod endpoint {id}: {} elapsed, workers: {}",
                     elapsed(now - started),
                     self.worker_summary(id).await
-                );
+                ));
             }
             tokio::time::sleep(backoff.min(deadline - now)).await;
             backoff = (backoff * 2).min(timing.max_backoff);
@@ -1080,6 +1100,10 @@ impl RunPodSupervisor {
 
 /// The PATCH that makes an existing endpoint match `create`.
 fn update_from(create: &CreateEndpoint) -> UpdateEndpoint {
+    // On PATCH, `""` clears a CUDA floor and `[]` data centers clear a placement
+    // the previous configuration set.
+    let mut gpu = create.gpu.clone();
+    gpu.min_cuda_version.get_or_insert_with(String::new);
     UpdateEndpoint {
         name: None,
         image: Some(create.image.clone()),
@@ -1088,11 +1112,10 @@ fn update_from(create: &CreateEndpoint) -> UpdateEndpoint {
         env: Some(create.env.clone()),
         ports: Some(create.ports.clone()),
         disk_gb: create.disk_gb,
-        gpu: Some(create.gpu.clone()),
+        gpu: Some(gpu),
         workers: Some(create.workers),
         request_count: Some(create.request_count),
-        data_center_ids: (!create.data_center_ids.is_empty())
-            .then(|| create.data_center_ids.clone()),
+        data_center_ids: Some(create.data_center_ids.clone()),
         flashboot: Some(create.flashboot),
         network_volume_ids: None,
         timeout_ms: None,

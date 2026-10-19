@@ -70,6 +70,23 @@ pub(crate) fn run_with(
     input: &mut dyn std::io::BufRead,
     env: &Env,
 ) -> Result<u8, CliError> {
+    let quiet = Env {
+        progress: |_| {},
+        ..*env
+    };
+    let env = if output.is_json() { &quiet } else { env };
+    run_for(project, auto_approve, lock_timeout, output, out, input, env)
+}
+
+fn run_for(
+    project: &Project,
+    auto_approve: bool,
+    lock_timeout: Option<std::time::Duration>,
+    output: OutputFormat,
+    out: &mut dyn Write,
+    input: &mut dyn std::io::BufRead,
+    env: &Env,
+) -> Result<u8, CliError> {
     let graph = project.load_graph()?;
 
     // Surface structural errors through the same diagnostic path as `validate`,
@@ -270,6 +287,12 @@ pub(crate) struct Env<'a> {
     /// Consent, the sidecar planner and the telemetry data dir; a parameter
     /// so tests never read the real consent file.
     pub telemetry: &'a dyn TelemetryHooks,
+    /// Receives progress lines from long waits (stderr; silent for JSON output).
+    pub progress: fn(&str),
+}
+
+fn progress_to_stderr(line: &str) {
+    let _ = writeln!(std::io::stderr(), "  {line}");
 }
 
 impl Env<'static> {
@@ -286,6 +309,7 @@ impl Env<'static> {
             interactive: std::io::IsTerminal::is_terminal(&std::io::stdin()),
             secret_is_set: crate::secret::env_has_secret,
             telemetry: &crate::commands::telemetry_agent::HostTelemetry,
+            progress: progress_to_stderr,
         }
     }
 }
@@ -974,15 +998,16 @@ fn runpod_supervisor(
     id: &DeploymentId,
     project_id: &str,
     account: &str,
-    ops: &dyn RunPodOps,
+    env: &Env<'_>,
     prior: Option<&StopRecord>,
 ) -> Result<RunPodSupervisor, CliError> {
     let (deployment, hardware) = deployment_hardware(graph, catalog, id)?;
     let mut supervisor =
-        RunPodSupervisor::for_hardware(ops.client()?, project_id, id.as_str(), &hardware)
+        RunPodSupervisor::for_hardware(env.runpod.client()?, project_id, id.as_str(), &hardware)
             .and_then(|s| s.with_allowed_residencies(&residency_allowlist(graph)))
             .map_err(supervisor_err)?
-            .with_probe_transport(ops.probe())
+            .with_probe_transport(env.runpod.probe())
+            .with_progress(amicu_runpod::supervisor::PROGRESS_EVERY, env.progress)
             .with_workspace(account)
             .with_scaling(deployment.scaling.as_ref())
             .with_confirmed_account(true);
@@ -1166,7 +1191,7 @@ async fn apply_all(
                             &item.deployment,
                             &progress.project_id,
                             account,
-                            env.runpod,
+                            env,
                             recorded.as_ref(),
                         )?;
                         let launch_secrets =
