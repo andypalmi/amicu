@@ -129,11 +129,10 @@ impl HttpTransport for World {
             ));
             return Ok(HttpResponse::new(200, w.metrics.clone().into_bytes()));
         }
-        if let Some((id, path)) = req
-            .url
-            .strip_prefix("https://")
-            .and_then(|u| u.split_once("-8000.proxy.runpod.net"))
-        {
+        if let Some((id, path)) = req.url.strip_prefix("https://").and_then(|u| {
+            u.split_once("-8080.proxy.runpod.net")
+                .or_else(|| u.split_once("-8000.proxy.runpod.net"))
+        }) {
             let mut w = self.state.lock().unwrap();
             w.log.push(format!("proxy {:?} {id}{path}", req.method));
             let status = match path {
@@ -1556,7 +1555,7 @@ fn pod_apply_records_the_pod_ahead_then_its_id_and_secrets() {
     assert_eq!(state.version, "v6");
     assert_eq!(
         state.endpoints[0].endpoint,
-        "https://pod1-8000.proxy.runpod.net"
+        "https://pod1-8080.proxy.runpod.net"
     );
     let log = rig.runpod.world.log();
     assert!(
