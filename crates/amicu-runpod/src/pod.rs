@@ -32,8 +32,8 @@ use crate::regions::{restrict_to_residencies, select_data_centers};
 use crate::secrets::{SecretLedger, reference_secrets, stop_result};
 use crate::supervisor::{
     DEFAULT_CONTAINER_DISK_GB, HEALTH_PATH, ProgressSink, ReadinessTiming, StopOutcome,
-    container_argv, container_command, elapsed, image_min_cuda, owner_marker, reserved_env_var,
-    runpod_err, runtime_image, runtime_port, unsupported,
+    container_argv, container_command, elapsed, image_min_cuda, owner_marker, placeholder_secrets,
+    planned_hf_token, reserved_env_var, runpod_err, runtime_image, runtime_port, unsupported,
 };
 
 /// Env variables the pod env may not set: amicu's owner marker, and the ones
@@ -408,6 +408,17 @@ impl PodSupervisor {
     /// See [`amicu_llamacpp::remote::launch_argv`].
     pub fn launch_argv(&self, plan: &LaunchPlan) -> Result<Vec<String>, LlamaCppError> {
         container_argv(plan, self.gguf.as_ref())
+    }
+
+    /// The create body `start` would send for `plan`, with placeholder
+    /// secret values. For `amicu plan`.
+    ///
+    /// # Errors
+    /// Whatever `start` refuses before its first call.
+    pub fn planned_pod(&self, plan: &LaunchPlan) -> Result<CreatePod, LlamaCppError> {
+        let image = runtime_image(RuntimeKind::of(&plan.settings));
+        self.prepare(plan, &placeholder_secrets(plan), &image, planned_hf_token())
+            .map(|p| p.pod)
     }
 
     /// Why `pod` cannot be updated in place to this configuration (GPU type
