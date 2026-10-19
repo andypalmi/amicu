@@ -89,11 +89,17 @@ async fn create_transport_failure_is_ambiguous() {
 }
 
 #[tokio::test]
-async fn create_error_detail_is_withheld_when_env_is_sent() {
+async fn create_error_detail_is_kept_with_env_values_scrubbed() {
     let body = r#"{"detail":"env VLLM_API_KEY={{ RUNPOD_SECRET_k }} bad"}"#;
     let (c, _) = client(Mock::default().on(HttpMethod::Post, "/pods", 400, body));
     let err = c.create_pod(&full_request()).await.unwrap_err();
     assert!(!format!("{err}{err:?}").contains("RUNPOD_SECRET"));
+    assert!(format!("{err}").contains("env VLLM_API_KEY=<redacted> bad"));
+
+    let full = r#"{"detail":"There are no longer any instances available with the requested specifications."}"#;
+    let (c, _) = client(Mock::default().on(HttpMethod::Post, "/pods", 400, full));
+    let err = c.create_pod(&full_request()).await.unwrap_err();
+    assert!(format!("{err}").contains("no longer any instances available"));
 }
 
 #[tokio::test]

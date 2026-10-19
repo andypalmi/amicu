@@ -1909,13 +1909,22 @@ async fn runpod_preflight(
         }
     }
     let account = crate::runpod_ops::preflight(env.runpod).await?;
-    for (d, _) in launches {
+    for (d, launch) in launches {
         if pod::deployment_is_pod(graph, d) {
             let _ = writeln!(
                 std::io::stderr(),
                 "note: '{d}' runs as a RunPod pod: its api_key is the runtime's own key, checked \
                  by the runtime; the pod proxy adds no authentication"
             );
+            if amicu_runtime::RuntimeKind::of(&launch.settings) == amicu_runtime::RuntimeKind::Vllm
+            {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "note: vLLM checks its api_key only under /v1, /v2, /inference and \
+                     /cohere: routes such as /metrics, /health, /version, /tokenize and the \
+                     SageMaker /invocations answer anyone with the pod's URL"
+                );
+            }
             continue;
         }
         let _ = writeln!(

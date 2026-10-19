@@ -27,12 +27,13 @@ use crate::client::{
 };
 use crate::error::RunPodError;
 use crate::hardware::{pod_gpu_placement, verify_catalog_memory};
+use crate::logs::{TIMEOUT_LOG_LIMITS, TIMEOUT_TAIL, WorkerLogs, merge, tail_block};
 use crate::regions::{restrict_to_residencies, select_data_centers};
 use crate::secrets::{SecretLedger, reference_secrets, stop_result};
 use crate::supervisor::{
-    DEFAULT_CONTAINER_DISK_GB, HEALTH_PATH, ReadinessTiming, StopOutcome, container_argv,
-    container_command, image_min_cuda, owner_marker, runpod_err, runtime_image, runtime_port,
-    unsupported,
+    DEFAULT_CONTAINER_DISK_GB, HEALTH_PATH, ProgressSink, ReadinessTiming, StopOutcome,
+    container_argv, container_command, elapsed, image_min_cuda, owner_marker, runpod_err,
+    runtime_image, runtime_port, unsupported,
 };
 
 /// Env variables the pod env may not set: amicu's owner marker, and the ones
@@ -110,6 +111,7 @@ pub struct PodSupervisor {
     disk_gb: u32,
     gguf: Option<GgufSource>,
     readiness: ReadinessTiming,
+    progress: Option<(Duration, ProgressSink)>,
     start_grace: Duration,
     confirmed_account: bool,
     recorded_pod: Option<String>,
@@ -155,6 +157,7 @@ impl PodSupervisor {
             disk_gb: DEFAULT_CONTAINER_DISK_GB,
             gguf: None,
             readiness: ReadinessTiming::DEFAULT,
+            progress: None,
             start_grace: START_GRACE,
             confirmed_account: false,
             recorded_pod: None,
@@ -283,6 +286,18 @@ impl PodSupervisor {
     #[must_use]
     pub fn with_readiness_timing(mut self, timing: ReadinessTiming) -> Self {
         self.readiness = timing;
+        self
+    }
+
+    /// Where `start` reports readiness progress, once per `every`; without a
+    /// sink it stays silent.
+    #[must_use]
+    pub fn with_progress(
+        mut self,
+        every: Duration,
+        sink: impl Fn(&str) + Send + Sync + 'static,
+    ) -> Self {
+        self.progress = Some((every, Arc::new(sink)));
         self
     }
 
@@ -742,6 +757,7 @@ impl PodSupervisor {
         let health = format!("{url}{HEALTH_PATH}");
         let started = tokio::time::Instant::now();
         let grace_end = started + self.start_grace;
+        let mut next_progress = started + self.progress.as_ref().map_or(Duration::ZERO, |p| p.0);
         let mut backoff = self.readiness.initial_backoff;
         let mut last = "no answer".to_owned();
         loop {
@@ -794,13 +810,42 @@ impl PodSupervisor {
                 Err(e) if e.is_retryable() => last = e.to_string(),
                 Err(e) => return Err(NotReady::Leave(runpod_err(&e))),
             }
+            let now = tokio::time::Instant::now();
+            if let Some((every, sink)) = &self.progress
+                && now >= next_progress
+            {
+                next_progress = now + *every;
+                sink(&format!(
+                    "waiting for RunPod pod {id}: {} elapsed, {last}",
+                    elapsed(now - started)
+                ));
+            }
             if !self.pause(deadline, &mut backoff).await {
                 return Err(NotReady::Leave(LlamaCppError::Supervisor(format!(
                     "RunPod pod {id} did not become ready within {}s (last: {last}); it is left \
-                     in place and keeps billing",
-                    self.readiness.timeout.as_secs()
+                     in place and keeps billing; see `amicu runpod logs {}`{}",
+                    self.readiness.timeout.as_secs(),
+                    self.deployment_id,
+                    self.log_tail(id).await
                 ))));
             }
+        }
+    }
+
+    /// The pod's last log lines for a timeout message (empty when they
+    /// cannot be read).
+    async fn log_tail(&self, id: &str) -> String {
+        match self
+            .client
+            .pod_logs(id, TIMEOUT_TAIL, TIMEOUT_LOG_LIMITS)
+            .await
+        {
+            Ok(lines) => tail_block(&merge(&[WorkerLogs {
+                worker_id: id.to_owned(),
+                status: String::new(),
+                lines: Ok(lines),
+            }])),
+            Err(_) => String::new(),
         }
     }
 

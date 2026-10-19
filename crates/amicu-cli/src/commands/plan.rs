@@ -359,6 +359,9 @@ pub(crate) fn print_human_with(
                 && let Some(billing) = runpod_billing(graph, &item.deployment)
             {
                 io(writeln!(out, "      billing:  {billing}"))?;
+                if let Some(workers) = runpod_workers(graph, &item.deployment) {
+                    io(writeln!(out, "      workers:  {workers}"))?;
+                }
             }
             if let Some(artifact) = &item.action.artifact {
                 io(writeln!(out, "      artifact: {}", artifact.name))?;
@@ -449,6 +452,29 @@ fn runpod_billing(graph: &Graph, deployment: &DeploymentId) -> Option<String> {
             None => "scale to zero".to_owned(),
         },
     })
+}
+
+/// How many RunPod workers a deployment may run: serverless min/max and
+/// idle window as `apply` sends them, or the one always-on pod.
+fn runpod_workers(graph: &Graph, deployment: &DeploymentId) -> Option<String> {
+    let hw = runpod_hardware(graph, deployment)?;
+    if hw.runpod_mode() == RunpodMode::Pod {
+        return Some("1 pod (always on, never scales)".to_owned());
+    }
+    let d = graph.deployments.iter().find(|d| &d.id == deployment)?;
+    let w = amicu_runpod::workers_config(d.scaling.as_ref());
+    let idle = w.idle_timeout.map_or_else(String::new, |s| {
+        format!(" \u{b7} scale down after {} idle", duration_text(s))
+    });
+    Some(format!("min {} \u{b7} max {}{idle}", w.min, w.max))
+}
+
+fn duration_text(secs: u32) -> String {
+    match (secs / 60, secs % 60) {
+        (0, s) => format!("{s}s"),
+        (m, 0) => format!("{m}m"),
+        (m, s) => format!("{m}m{s:02}s"),
+    }
 }
 
 /// The launch line `ModalSupervisor` would really send for `item`, or `None`

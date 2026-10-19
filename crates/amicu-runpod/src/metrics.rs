@@ -5,7 +5,10 @@
 //! come from different ones. A scaled-to-zero endpoint cold-starts a worker
 //! to answer. A pod is scraped through its proxy URL
 //! (`https://<podId>-<port>.proxy.runpod.net/metrics`) with the runtime's own
-//! key; it is always on, so nothing is woken.
+//! key; it is always on, so nothing is woken. llama-server requires that key
+//! for `/metrics`; vLLM checks its key only under `/v1` (and `/v2`,
+//! `/inference`, `/cohere`), so a vLLM pod's `/metrics` is readable by anyone
+//! with its URL. The proxy cannot filter paths, so `apply` says so instead.
 
 use std::time::{Duration, Instant};
 

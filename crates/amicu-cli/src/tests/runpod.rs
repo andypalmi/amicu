@@ -1891,9 +1891,17 @@ fn plan_shows_a_neutral_billing_line_per_mode() {
         text.contains("      billing:  always on \u{b7} ~$0.59/hr\n"),
         "{text}"
     );
+    assert!(
+        text.contains("      workers:  1 pod (always on, never scales)\n"),
+        "{text}"
+    );
     let (text, _) = plan_text_for(&runpod_config(), &state);
     assert!(
         text.contains("      billing:  scale to zero \u{b7} ~$0.69/hr while active\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("      workers:  min 0 \u{b7} max 1 \u{b7} scale down after 15m idle\n"),
         "{text}"
     );
     let (text, _) = plan_text_for(&pod_config("    cloud = \"community\"\n"), &state);
@@ -1978,18 +1986,28 @@ fn status_reports_scaled_to_zero_and_refuses_unknown_or_unrecorded_deployments()
     .to_string();
     assert!(err.contains("no RunPod deployment named 'nope'"), "{err}");
 
+    // A start still waiting for readiness has recorded no id: the endpoint
+    // carrying the recorded name is used.
     let td = TempDir::new();
     let unrecorded = project_with(&td, Some(record(None, ACCOUNT, &[])));
+    let mut out = Vec::new();
+    commands::runpod::status(&unrecorded, DEP, OutputFormat::Human, &mut out, &rig.env()).unwrap();
+    assert!(utf8(out).contains("RunPod endpoint ep7"));
+
+    let empty = self::rig();
     let err = commands::runpod::status(
         &unrecorded,
         DEP,
         OutputFormat::Human,
         &mut Vec::new(),
-        &rig.env(),
+        &empty.env(),
     )
     .unwrap_err()
     .to_string();
-    assert!(err.contains("no RunPod endpoint id recorded"), "{err}");
+    assert!(
+        err.contains("no RunPod endpoint id recorded and no endpoint named"),
+        "{err}"
+    );
 }
 
 #[test]

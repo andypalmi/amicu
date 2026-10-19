@@ -30,6 +30,29 @@ const MAX_PAGES: usize = 100;
 /// Longest API-supplied `detail` kept in an error.
 const MAX_DETAIL: usize = 300;
 
+/// What replaces a request value cut out of an error detail.
+const SCRUBBED: &str = "<redacted>";
+
+/// Shorter request values are left in an error detail: cutting every `1` or
+/// `on` would garble it, and such a value is no credential.
+const MIN_SCRUB_LEN: usize = 4;
+
+/// What a non-`2xx` answer may show of RunPod's `detail`.
+#[derive(Clone, Copy)]
+pub(crate) enum Detail<'a> {
+    Show,
+    /// Dropped entirely: the body could echo a secret value.
+    Withhold,
+    /// Shown with every one of these request env values cut out.
+    Scrub(&'a BTreeMap<String, String>),
+}
+
+impl<'a> Detail<'a> {
+    pub(crate) fn scrub(env: Option<&'a BTreeMap<String, String>>) -> Self {
+        env.map_or(Self::Show, Self::Scrub)
+    }
+}
+
 /// A RunPod API key. `Debug` never prints it; there is no `Display`.
 #[derive(Clone)]
 pub struct ApiKey(String);
@@ -658,7 +681,7 @@ impl RunPodClient {
     /// request may have reached RunPod and created the endpoint, and names are
     /// not unique, so a blind retry could create a duplicate. Callers must
     /// [`find_endpoints_by_name`](Self::find_endpoints_by_name) before retrying.
-    /// Error details are withheld when the request carries env values.
+    /// The request's env values are cut out of an error detail.
     pub async fn create_endpoint(&self, req: &CreateEndpoint) -> Result<Endpoint, RunPodError> {
         let resp = self
             .send_inner(
@@ -666,7 +689,7 @@ impl RunPodClient {
                 "/serverless",
                 Some(req.to_body()),
                 "serverless endpoint",
-                !req.env.is_empty(),
+                Detail::Scrub(&req.env),
             )
             .await
             .map_err(|e| match e {
@@ -746,8 +769,8 @@ impl RunPodClient {
         }
     }
 
-    /// `PATCH /serverless/{id}`: apply a partial update. Error details are
-    /// withheld when the request carries env values.
+    /// `PATCH /serverless/{id}`: apply a partial update. The request's env
+    /// values are cut out of an error detail.
     pub async fn update_endpoint(
         &self,
         id: &str,
@@ -760,7 +783,7 @@ impl RunPodClient {
                 &path,
                 Some(update.to_body()),
                 &format!("endpoint `{id}`"),
-                update.env.as_ref().is_some_and(|e| !e.is_empty()),
+                Detail::scrub(update.env.as_ref()),
             )
             .await?;
         decode(&resp)
@@ -797,7 +820,7 @@ impl RunPodClient {
             .execute_bounded(req, limits)
             .await
             .map_err(|e| RunPodError::Transport(e.to_string()))?;
-        check(&resp, what, false)?;
+        check(&resp, what, Detail::Show)?;
         Ok(resp)
     }
 
@@ -815,7 +838,7 @@ impl RunPodClient {
         {
             return Err(RunPodError::OrganizationsDisabled);
         }
-        check(&resp, "organization", false)?;
+        check(&resp, "organization", Detail::Show)?;
         decode(&resp)
     }
 
@@ -891,7 +914,7 @@ impl RunPodClient {
                 "/account/secrets",
                 Some(req.to_body()),
                 "secret",
-                true,
+                Detail::Withhold,
             )
             .await?;
         decode(&resp)
@@ -931,7 +954,7 @@ impl RunPodClient {
         if resp.status == 404 {
             return Ok(DeleteOutcome::AlreadyGone);
         }
-        check(&resp, what, false)?;
+        check(&resp, what, Detail::Show)?;
         Ok(DeleteOutcome::Deleted)
     }
 
@@ -942,7 +965,8 @@ impl RunPodClient {
         body: Option<Value>,
         what: &str,
     ) -> Result<HttpResponse, RunPodError> {
-        self.send_inner(method, path, body, what, false).await
+        self.send_inner(method, path, body, what, Detail::Show)
+            .await
     }
 
     async fn send_inner(
@@ -951,10 +975,10 @@ impl RunPodClient {
         path: &str,
         body: Option<Value>,
         what: &str,
-        redact: bool,
+        detail: Detail<'_>,
     ) -> Result<HttpResponse, RunPodError> {
         let resp = self.execute(method, path, body).await?;
-        check(&resp, what, redact)?;
+        check(&resp, what, detail)?;
         Ok(resp)
     }
 
@@ -1008,16 +1032,16 @@ fn decode<T: DeserializeOwned>(resp: &HttpResponse) -> Result<T, RunPodError> {
     resp.json().map_err(|e| RunPodError::Decode(e.to_string()))
 }
 
-/// Map a non-`2xx` response onto a typed error. `redact` drops the
-/// API-supplied detail (used where a body could echo a secret).
-fn check(resp: &HttpResponse, what: &str, redact: bool) -> Result<(), RunPodError> {
+/// Map a non-`2xx` response onto a typed error, showing as much of the
+/// API-supplied detail as `detail` allows.
+fn check(resp: &HttpResponse, what: &str, detail: Detail<'_>) -> Result<(), RunPodError> {
     if resp.is_success() {
         return Ok(());
     }
-    let detail = if redact {
-        "details withheld".to_owned()
-    } else {
-        problem_detail(&resp.body)
+    let detail = match detail {
+        Detail::Show => bounded(&problem_detail(&resp.body)),
+        Detail::Withhold => "details withheld".to_owned(),
+        Detail::Scrub(env) => bounded(&scrub(problem_detail(&resp.body), env)),
     };
     Err(match resp.status {
         401 | 403 => RunPodError::CredentialsRejected {
@@ -1036,8 +1060,29 @@ fn check(resp: &HttpResponse, what: &str, redact: bool) -> Result<(), RunPodErro
     })
 }
 
+/// `text` with every request value of at least [`MIN_SCRUB_LEN`] bytes
+/// replaced (longest first, so a value containing another goes whole).
+fn scrub(mut text: String, env: &BTreeMap<String, String>) -> String {
+    let mut values: Vec<&str> = env
+        .values()
+        .map(String::as_str)
+        .filter(|v| v.len() >= MIN_SCRUB_LEN)
+        .collect();
+    values.sort_by_key(|v| std::cmp::Reverse(v.len()));
+    for v in values {
+        text = text.replace(v, SCRUBBED);
+    }
+    text
+}
+
+/// At most [`MAX_DETAIL`] characters, cut only after scrubbing so no value
+/// survives in part.
+fn bounded(text: &str) -> String {
+    text.chars().take(MAX_DETAIL).collect()
+}
+
 /// `detail` (plus validation `errors`) from an `application/problem+json`
-/// body, truncated; empty when the body is not that shape.
+/// body; empty when the body is not that shape.
 fn problem_detail(body: &[u8]) -> String {
     let Ok(v) = serde_json::from_slice::<Value>(body) else {
         return String::new();
@@ -1056,7 +1101,7 @@ fn problem_detail(body: &[u8]) -> String {
             text.push_str(&joined.join("; "));
         }
     }
-    text.chars().take(MAX_DETAIL).collect()
+    text
 }
 
 #[cfg(test)]
@@ -1363,7 +1408,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_detail_is_withheld_when_env_is_sent() {
+    async fn env_values_are_scrubbed_from_the_api_detail() {
         let body = r#"{"detail":"env HF_TOKEN=env-secret-value is invalid"}"#;
         let mut req = full_request();
         req.env.insert("HF_TOKEN".into(), "env-secret-value".into());
@@ -1381,6 +1426,7 @@ mod tests {
         };
         let err = c.update_endpoint("ep1", &update).await.unwrap_err();
         assert!(!format!("{err}{err:?}").contains("env-secret-value"));
+        assert!(format!("{err}").contains("env HF_TOKEN=<redacted> is invalid"));
 
         // Without env the detail is kept for diagnosis.
         let (c, _) = client(Mock::default().on(HttpMethod::Patch, "/serverless/ep1", 400, body));

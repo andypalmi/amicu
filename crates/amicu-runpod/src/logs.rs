@@ -27,6 +27,34 @@ pub const WORKER_LOG_LIMITS: StreamLimits = StreamLimits {
     max_bytes: 4 * 1024 * 1024,
 };
 
+/// Log lines a readiness-timeout error ends with.
+pub const TIMEOUT_TAIL: u32 = 8;
+
+/// A shorter read than [`WORKER_LOG_LIMITS`]: the timeout error is already
+/// late.
+pub const TIMEOUT_LOG_LIMITS: StreamLimits = StreamLimits {
+    total: Duration::from_secs(6),
+    idle: Duration::from_secs(1),
+    max_bytes: 512 * 1024,
+};
+
+/// The last [`TIMEOUT_TAIL`] of `lines` as an indented block for an error
+/// message (empty when there are none).
+#[must_use]
+pub fn tail_block(lines: &[String]) -> String {
+    let start = lines.len().saturating_sub(TIMEOUT_TAIL as usize);
+    let shown = &lines[start..];
+    if shown.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nlast log lines:");
+    for l in shown {
+        out.push_str("\n  ");
+        out.push_str(l);
+    }
+    out
+}
+
 /// What to say when no worker is up.
 pub const NO_WORKERS: &str = "no RunPod workers are running (the endpoint is scaled to zero); \
      logs exist only while a worker is up - send a request to start one";

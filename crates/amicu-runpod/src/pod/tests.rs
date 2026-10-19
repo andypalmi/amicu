@@ -749,14 +749,41 @@ async fn an_error_or_exited_pod_fails_at_once_and_stays_recorded() {
 
 #[tokio::test]
 async fn readiness_times_out_and_keeps_the_pod() {
-    let (sup, mock) = supervisor(create_mock(
-        &[Canned::Status(200, pod("STARTING"))],
-        &[Canned::Status(200, "{}")],
-        &[Canned::Status(401, "")],
-        &[Canned::Status(200, "{}")],
-    ));
+    let lines: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let seen = lines.clone();
+    let (sup, mock) = supervisor(
+        create_mock(
+            &[Canned::Status(200, pod("STARTING"))],
+            &[Canned::Status(200, "{}")],
+            &[Canned::Status(401, "")],
+            &[Canned::Status(200, "{}")],
+        )
+        .ok(
+            HttpMethod::Get,
+            "/pods/pod1/logs?tail=8",
+            200,
+            "data: {\"ts\":\"t\",\"line\":\"pulling image\"}\n\n",
+        ),
+    );
+    let sup = sup.with_progress(Duration::from_millis(20), move |l| {
+        seen.lock().unwrap().push(l.to_owned());
+    });
     let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
-    assert!(err_text(&e).contains("STARTING"), "{e}");
+    let text = e.to_string();
+    assert!(text.contains("STARTING"), "{e}");
+    assert!(text.contains("`amicu runpod logs chat`"), "{text}");
+    assert!(
+        text.ends_with("\nlast log lines:\n  [pod1] pulling image"),
+        "{text}"
+    );
+    let lines = lines.lock().unwrap();
+    assert!(
+        lines
+            .first()
+            .is_some_and(|l| l.starts_with("waiting for RunPod pod pod1: ")
+                && l.ends_with("elapsed, STARTING")),
+        "{lines:?}"
+    );
     assert_eq!(count(&mock, HttpMethod::Post, ACTION), 0);
     assert_eq!(sup.deployed_pod().lock().unwrap().as_deref(), Some("pod1"));
 }

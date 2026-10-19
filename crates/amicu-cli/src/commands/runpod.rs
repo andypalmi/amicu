@@ -35,13 +35,10 @@ fn io_err(error: io::Error) -> CliError {
 /// What hardware sections say: there is no probe into a RunPod worker.
 const NO_HARDWARE: &str = "not available on RunPod";
 
-/// The deployment's RunPod record (endpoint or pod) and its id, from state.
-fn recorded_endpoint(
-    project: &Project,
-    deployment: &str,
-) -> Result<(StopRecord, String), CliError> {
+/// The deployment's RunPod record (endpoint or pod), from state.
+fn recorded(project: &Project, deployment: &str) -> Result<StopRecord, CliError> {
     let state = project.load_state()?;
-    let record = state
+    state
         .iter()
         .flat_map(|s| s.stops.iter())
         .find(|r| r.backend.is_runpod() && r.deployment.as_str() == deployment)
@@ -50,15 +47,38 @@ fn recorded_endpoint(
             CliError::Message(format!(
                 "no RunPod deployment named '{deployment}' in this project's state"
             ))
-        })?;
-    let id = record.app_id.clone().ok_or_else(|| {
-        CliError::Message(format!(
-            "deployment '{deployment}' has no RunPod {} id recorded yet (its start did \
-             not finish); run `amicu apply` or `amicu destroy --target {deployment}`",
-            record.runpod_kind()
-        ))
-    })?;
-    Ok((record, id))
+        })
+}
+
+/// The record's endpoint or pod id; while a start has not recorded one yet
+/// (it is still waiting for readiness), the one live resource carrying the
+/// recorded name.
+async fn resolve_id(client: &RunPodClient, record: &StopRecord) -> Result<String, CliError> {
+    if let Some(id) = &record.app_id {
+        return Ok(id.clone());
+    }
+    let (deployment, kind, name) = (
+        record.deployment.as_str(),
+        record.runpod_kind(),
+        &record.identity,
+    );
+    let found = if record.backend == Backend::RunpodPod {
+        client.find_pod_by_name(name).await.map(|p| p.map(|p| p.id))
+    } else {
+        client
+            .find_endpoint_by_name(name)
+            .await
+            .map(|e| e.map(|e| e.id))
+    };
+    found
+        .map_err(|e| runpod_error(&format!("could not look up RunPod {kind} `{name}`"), &e))?
+        .ok_or_else(|| {
+            CliError::Message(format!(
+                "deployment '{deployment}' has no RunPod {kind} id recorded and no {kind} \
+                 named `{name}` exists; run `amicu apply` or `amicu destroy --target \
+                 {deployment}`"
+            ))
+        })
 }
 
 fn endpoint_gone(deployment: &str, id: &str) -> CliError {
@@ -97,9 +117,10 @@ pub(crate) fn status(
     out: &mut dyn Write,
     env: &Env<'_>,
 ) -> Result<u8, CliError> {
-    let (record, id) = recorded_endpoint(project, deployment)?;
+    let record = recorded(project, deployment)?;
     let client = env.runpod.client()?;
     let rt = build_runtime()?;
+    let id = rt.block_on(resolve_id(&client, &record))?;
     if record.backend == Backend::RunpodPod {
         let pod = rt.block_on(live_pod(&client, deployment, &id))?;
         match output {
@@ -270,9 +291,10 @@ pub(crate) fn logs(
     out: &mut dyn Write,
     env: &Env<'_>,
 ) -> Result<u8, CliError> {
-    let (record, id) = recorded_endpoint(project, deployment)?;
+    let record = recorded(project, deployment)?;
     let client = env.runpod.client()?;
     let rt = build_runtime()?;
+    let id = rt.block_on(resolve_id(&client, &record))?;
     if record.backend == Backend::RunpodPod {
         return pod_logs(&rt, &client, deployment, &id, tail, output, out);
     }
@@ -418,11 +440,13 @@ pub(crate) fn metrics(
         interval_secs,
         wake,
     } = mode;
-    let (record, id) = recorded_endpoint(project, deployment)?;
+    let record = recorded(project, deployment)?;
     let key = gateway_key(project, deployment, env)?;
+    let client = env.runpod.client()?;
     let rt = build_runtime()?;
+    let id = rt.block_on(resolve_id(&client, &record))?;
     let target = if record.backend == Backend::RunpodPod {
-        let pod = rt.block_on(live_pod(&env.runpod.client()?, deployment, &id))?;
+        let pod = rt.block_on(live_pod(&client, deployment, &id))?;
         let port = pod.http_port().ok_or_else(|| {
             CliError::Message(format!(
                 "RunPod pod {id} of deployment '{deployment}' exposes no HTTP port to scrape"
@@ -438,7 +462,7 @@ pub(crate) fn metrics(
                     "this project's state has no project id; run `amicu apply` first".to_owned(),
                 )
             })?;
-        let supervisor = RunPodSupervisor::new(env.runpod.client()?, &project_id, deployment)
+        let supervisor = RunPodSupervisor::new(client, &project_id, deployment)
             .with_probe_transport(env.runpod.probe())
             .with_gateway_key(key);
         let handle = RuntimeHandle {
