@@ -6,7 +6,7 @@ import { Accordion, Accordions } from 'fumadocs-ui/components/accordion';
 import type { MDXComponents } from 'mdx/types';
 import { ProviderFacts } from '@/components/providers/provider-facts';
 import { ProviderGrid } from '@/components/providers/provider-grid';
-import { RUNPOD_SIGNUP_URL } from '@/app/(marketing)/_lib/content';
+import { RunPodSignupLink } from '@/components/runpod-signup';
 import { CircleCheck, CircleX, Info, Lightbulb, TriangleAlert } from 'lucide-react';
 
 type CalloutType = 'info' | 'warning' | 'error' | 'success' | 'idea' | 'tip' | 'warn';
@@ -48,14 +48,6 @@ function Callout({
         <CalloutDescription>{children}</CalloutDescription>
       </div>
     </div>
-  );
-}
-
-function RunPodSignupLink({ children = 'Get started with RunPod' }: { children?: ReactNode }) {
-  return (
-    <a href={RUNPOD_SIGNUP_URL} target="_blank" rel="noopener noreferrer">
-      {children}
-    </a>
   );
 }
 

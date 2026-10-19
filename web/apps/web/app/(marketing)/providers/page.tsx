@@ -1,9 +1,10 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { RunPodSignupLink } from '@/components/runpod-signup';
 import { ProviderList } from '@/components/providers/provider-list';
 import { HclCode } from '../_components/code';
 import { GAP_HEAD, Headline, HomeSection, MEASURE, MockWindow } from '../_components/home';
-import { providers, RUNPOD_SIGNUP_URL } from '../_lib/content';
+import { providers } from '../_lib/content';
 import { pageMetadata } from '../_lib/seo';
 
 export const metadata: Metadata = pageMetadata({
@@ -50,9 +51,7 @@ export default function ProvidersPage() {
           in the docs.
         </p>
         <p className={`mt-4 text-sm text-muted-foreground ${MEASURE}`}>
-          <a href={RUNPOD_SIGNUP_URL} target="_blank" rel="noopener noreferrer" className={linkClass}>
-            Get started with RunPod
-          </a>
+          <RunPodSignupLink className={linkClass} />
         </p>
       </HomeSection>
     </main>
