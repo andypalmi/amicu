@@ -9,7 +9,7 @@ amicu [--output human|json] <command>
 
 `--output` is global. The default is `human`. Run `amicu <command> --help` for the authoritative flag list of your build.
 
-Commands operate on the project in the current directory. `catalog`, `skill` and the provider commands (`modal` today) do not need a project.
+Commands operate on the project in the current directory. `catalog`, `skill` and `amicu modal` do not need a project. `amicu runpod` reads the project's state.
 
 ## Project commands
 
@@ -86,7 +86,7 @@ See [Agent skills](/docs/reference/agent-skills).
 
 ## Provider commands
 
-Today only Modal has provider commands. Other providers will add theirs when they are wired into `apply`.
+Modal and RunPod have provider commands. Other providers will add theirs when they are wired into `apply`.
 
 The `modal` commands read `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` from the environment, never from flags. `<app>` is the Modal app name recorded in state, of the form `amicu-<project>-<deployment>-<digest>`; older apps are `amicu-` plus the deployment id.
 
@@ -97,6 +97,15 @@ The `modal` commands read `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` from the env
 | `amicu modal logs <app> [--follow] [--since <entry-id>]` | Print logs. `--follow` keeps tailing. `--since` resumes after a log entry id. |
 | `amicu modal metrics <app> [--watch] [--interval <secs>]` | Runtime and hardware metrics. `--interval` defaults to 5 and must be at least 1. Needs `MODAL_PROXY_TOKEN_ID` and `MODAL_PROXY_TOKEN_SECRET`. |
 | `amicu modal stop <app>` | Stop the app. Inside a project, also removes the deployment from local state. |
+
+The `runpod` commands act on a deployment recorded in the project's state, by deployment name, for both Serverless endpoints and pods. They read `RUNPOD_API_KEY` from the environment, never from flags. The deployment must have been applied, so its RunPod id is in state.
+
+| Command | Description |
+|---|---|
+| `amicu runpod status <deployment>` | The endpoint id, URL, workers (running, idle, initializing, throttled), GPU and data centers. For a pod: its id, status, GPU, cloud, data center, cost per hour and proxy URL. |
+| `amicu runpod logs <deployment> [--tail <n>]` | Print each running worker's recent log lines, prefixed with the worker id (a pod: its own lines, prefixed with the pod id). A bounded read with no follow. A scaled-to-zero endpoint has no workers and so no logs. `--tail` is lines per worker: RunPod's default is 100, its maximum 5000. |
+| `amicu runpod metrics <deployment> [--watch] [--interval <secs>] [--wake]` | Runtime metrics (vLLM or llama.cpp `/metrics`), scraped through the RunPod gateway (a pod: its proxy URL) with the deployment's `api_key`. The load balancer answers from one worker of its choosing, so with several workers the figures describe one of them. Hardware metrics are not available on RunPod. A scaled-to-zero endpoint is refused, because the request would start a billed worker; `--wake` allows it. `--watch` prints a new snapshot every `--interval` seconds (default 5, at least 1) and keeps the endpoint warm, and billed, while it runs. A pod is always on, so `--wake` does not apply. |
+| `amicu runpod stop <deployment> [--lock-timeout <secs>]` | Delete the endpoint (terminate the pod) and its secrets, as `destroy --target` does. The deployment leaves state only once the stop is confirmed. `--lock-timeout` waits up to that many seconds for the state lock. |
 
 ## Telemetry commands
 

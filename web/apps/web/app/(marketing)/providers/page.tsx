@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { RunPodSignupLink } from '@/components/runpod-signup';
 import { ProviderList } from '@/components/providers/provider-list';
 import { HclCode } from '../_components/code';
 import { GAP_HEAD, Headline, HomeSection, MEASURE, MockWindow } from '../_components/home';
@@ -9,7 +10,7 @@ import { pageMetadata } from '../_lib/seo';
 export const metadata: Metadata = pageMetadata({
   title: 'Providers',
   description:
-    'amicu applies to this machine (local, Apple, CPU or on-prem hardware you run amicu on) and Modal today. Other providers are in preview or planned.',
+    'amicu applies to this machine (local, Apple, CPU or on-prem hardware you run amicu on), Modal and RunPod today. Other providers are in preview or planned.',
   path: '/providers',
 });
 
@@ -48,6 +49,9 @@ export default function ProvidersPage() {
             Hardware profile
           </Link>{' '}
           in the docs.
+        </p>
+        <p className={`mt-4 text-sm text-muted-foreground ${MEASURE}`}>
+          <RunPodSignupLink className={linkClass} />
         </p>
       </HomeSection>
     </main>

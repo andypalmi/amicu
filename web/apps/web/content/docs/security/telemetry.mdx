@@ -12,9 +12,13 @@ If you opt in to telemetry (see [Telemetry setting](#telemetry-setting)), each d
 | When | Destination | What is sent |
 |---|---|---|
 | `validate`, `fmt`, `init`, `doctor`, `skill export` | None | Nothing. These commands are offline. Provider region and GPU catalogs are compiled in. |
-| `plan` | None, unless state records a remote deployment | Offline for local-only projects. If state holds a remote provider deployment, `plan` first asks that provider whether it still exists (today only Modal does this; see the provider rows below). |
+| `plan` | None, unless state records a remote deployment | Offline for local-only projects. If state holds a remote provider deployment, `plan` first asks that provider whether it still exists (today Modal and RunPod do this; see the provider rows below). |
 | `apply` on this machine | `127.0.0.1:<port>` | Health probes and the endpoint auth check (`GET /v1/models`) to the service amicu just started. If you set an `api_key`, the check sends it as a Bearer header to that loopback address. |
 | Provider rows: `apply`, `plan` and provider commands when a remote provider is involved. Today, Modal: | `api.modal.com:443` (gRPC over TLS) | Your Modal token pair for authentication, and the app, image, and function definitions needed to deploy: image build steps, the launch command, GPU and region request, and a Modal Secret holding the endpoint API key (and `HF_TOKEN` if set). `plan`, `apply` and `destroy` also look up whether recorded apps still exist whenever state contains a Modal deployment. |
+| Provider rows, RunPod: `apply`, `plan`, `destroy` and `amicu runpod` | `api.runpod.io:443` (HTTPS) | Your `RUNPOD_API_KEY` for authentication, and the endpoint or pod definition: image, launch command, GPU and data center request, and RunPod secrets holding the runtime `api_key` (pods) and `HF_TOKEN` if set. |
+| `apply` on RunPod Serverless | `<id>.api.runpod.ai` | The readiness and auth checks, with the deployment's `api_key` as a Bearer header. |
+| `apply` on a RunPod pod | `<podId>-<port>.proxy.runpod.net` | An unauthenticated request that must be rejected, then the readiness and auth checks with the runtime `api_key` as a Bearer header. |
+| `amicu runpod status`, `logs`, `metrics`, `stop` | `api.runpod.io:443`; `metrics` also the endpoint or pod URL | Management calls with `RUNPOD_API_KEY`. `metrics` sends `GET /metrics` with the deployment's `api_key`. |
 | `apply` on a remote provider (Modal today) | The deployment's Modal URL | The endpoint auth check, and the proxy token headers (`Modal-Key`, `Modal-Secret`). |
 | `amicu modal metrics` | The deployment's Modal URL | A `GET /metrics` with the proxy token headers. Hardware metrics use a read-only probe run inside the container through Modal's API. |
 | Only when telemetry is on: the telemetry agent next to each local deployment | `127.0.0.1:<port>/metrics` | A `GET /metrics` to the deployment's own server, about once a minute. Nothing leaves the machine. |
@@ -26,6 +30,7 @@ Credentials are sent only to the endpoint they protect. The exposure check does 
 
 Amicu starts runtimes that make their own connections:
 
+- **RunPod workers** download model weights from Hugging Face when they start, and pull the same base images. If you set `HF_TOKEN`, it is stored as a RunPod secret and available to the worker. A pod's runtime `api_key` is stored as a RunPod secret too.
 - **Modal containers** download model weights from Hugging Face when they start, and pull the base container image (by default `vllm/vllm-openai` or `ghcr.io/ggml-org/llama.cpp`). If you set `HF_TOKEN`, it is available to that container.
 - **llama-server and vLLM on your machine** are third-party programs. Whatever they fetch (for example a model when given a Hugging Face reference by `extra_args`) is their behavior, not amicu's. Amicu itself does not download model files for local deployments.
 - **Clients** you point at the endpoint talk to it directly. Amicu is not in the request path and never sees prompts or completions.

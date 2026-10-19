@@ -25,7 +25,7 @@ Loopback endpoints with no `api_key` skip the check; there is nothing to protect
 
 ## Providers with a gateway
 
-Some providers put a gateway in front of the app that requires its own credential. amicu needs that credential to prove the runtime enforces its own key behind the gateway, so `apply` stops in preflight, before anything starts, if it is missing. Today this applies to Modal; see [Modal: endpoint auth](/docs/providers/modal#endpoint-auth).
+Some providers put a gateway in front of the app that requires its own credential. amicu needs that credential to prove the runtime enforces its own key behind the gateway, so `apply` stops in preflight, before anything starts, if it is missing. This applies to Modal; see [Modal: endpoint auth](/docs/providers/modal#endpoint-auth). On RunPod the gateway is the only layer: it checks the deployment's `api_key` as a RunPod API key and strips the header before the worker; see [RunPod: setup and credentials](/docs/providers/runpod#setup-and-credentials).
 
 ## Calling the endpoint
 

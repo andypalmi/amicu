@@ -166,7 +166,7 @@ export default function LandingPage() {
         />
         <ProofLine
           lead="Change the provider line to switch targets:"
-          rest="your machine or a cloud GPU (Modal)."
+          rest="your machine or a cloud GPU (Modal, RunPod)."
         />
         <FeatureLinks links={PROVIDER_SWITCH_LINKS} />
       </HomeSection>
@@ -239,7 +239,7 @@ export default function LandingPage() {
           </MockWindow>
         </Snapshot>
         <ProofLine
-          lead="Apply runs on this machine, on-prem hardware you run amicu on, and Modal today."
+          lead="Apply runs on this machine, on-prem hardware you run amicu on, Modal and RunPod today."
           rest={`${previewCount} more, such as Hetzner and Scaleway, are in preview.`}
         />
         <FeatureLinks

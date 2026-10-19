@@ -79,7 +79,7 @@ resource "deployment" "chat_prod" {
 | `llama_cpp` | block | with `runtime = "llama_cpp"` | llama.cpp settings |
 | `vllm` | block | with `runtime = "vllm"` | vLLM settings |
 | `api_key` | `secret("NAME")` | off-machine providers | The endpoint's API key, by reference. A literal is rejected (`AMICU-POLICY-004`). Required unless the provider is local (`AMICU-POLICY-007`). |
-| `scaling` | block | no | Autoscaling limits. Providers with autoscaling only (Modal today). |
+| `scaling` | block | no | Autoscaling limits. Providers with autoscaling only (Modal and RunPod Serverless; a RunPod pod runs one replica). |
 | `memory_check` | string | no | `"enforce"` (default) or `"warn"`. See [memory_check](#memory_check). |
 
 ### memory_check
