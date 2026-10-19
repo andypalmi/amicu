@@ -239,7 +239,7 @@ export default function LandingPage() {
           </MockWindow>
         </Snapshot>
         <ProofLine
-          lead="Apply runs on this machine, on-prem hardware you run amicu on, Modal and RunPod today."
+          lead="Apply runs on your hardware, Modal and RunPod today."
           rest={`${previewCount} more, such as Hetzner and Scaleway, are in preview.`}
         />
         <FeatureLinks

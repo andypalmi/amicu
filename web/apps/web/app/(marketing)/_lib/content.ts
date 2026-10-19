@@ -234,7 +234,7 @@ export const PROVIDER_STATUS_LABEL: Record<ProviderStatus, string> = {
 /** What each status means, shown under its heading on the registry list. */
 export const PROVIDER_STATUS_NOTE: Record<ProviderStatus, string> = {
   supported:
-    'Wired into amicu apply: this machine (local, local_apple, local_cpu, on_prem), Modal and RunPod.',
+    'Wired into amicu apply: your hardware (local, local_apple, local_cpu, on_prem), Modal and RunPod.',
   preview: 'An adapter exists and is tested against mocks. Not wired into apply.',
   planned: 'No adapter yet. Region and GPU catalog data only.',
 };
@@ -250,7 +250,7 @@ export interface Provider {
   /** Two or three short capability tags, taken from the adapter or apply path. */
   tags: string[];
   /**
-   * `supported`: wired into `amicu apply` (this machine, Modal, RunPod).
+   * `supported`: wired into `amicu apply` (your hardware, Modal, RunPod).
    * `preview`: provisioning adapter built (bare machine only), tested against
    * mocks, not live-tested and not wired into apply.
    * `planned`: region and pricing data only; provisioning not built.
@@ -265,7 +265,7 @@ export interface Provider {
 export const providers: Provider[] = [
   {
     slug: 'local',
-    name: 'This machine',
+    name: 'Your hardware',
     kind: 'launchd or systemd service',
     blurb: 'Run llama.cpp or vLLM as a user service on the machine where you invoke amicu.',
     tags: ['macOS and Linux', 'Loopback endpoint', 'Apple Silicon and CPU'],

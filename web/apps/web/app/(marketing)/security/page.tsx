@@ -93,7 +93,7 @@ const NETWORK: TermLine[] = [
   { text: 'plan', tone: 'muted' },
   { text: '  none, or Modal or RunPod if state' },
   { text: '  holds a deployment there' },
-  { text: 'apply on this machine', tone: 'muted' },
+  { text: 'apply on your hardware', tone: 'muted' },
   { text: '  127.0.0.1:<port>' },
   { text: 'apply on Modal', tone: 'muted' },
   { text: '  api.modal.com:443' },
@@ -111,7 +111,7 @@ const NETWORK: TermLine[] = [
 const SECRET_LINKS: FeatureLink[] = [{ label: 'Secrets', href: '/docs/security/secrets' }];
 const ENDPOINT_LINKS: FeatureLink[] = [
   { label: 'Endpoint auth', href: '/docs/security/endpoint-auth' },
-  { label: 'This machine (local)', href: '/docs/providers/local' },
+  { label: 'Your hardware (local)', href: '/docs/providers/local' },
 ];
 const STATE_LINKS: FeatureLink[] = [
   { label: 'State', href: '/docs/security/state' },
