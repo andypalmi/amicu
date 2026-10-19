@@ -1,0 +1,15 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "amicu",
+  "description": "Open-source CLI that deploys vLLM and llama.cpp model servers to your own machine or to GPU cloud providers (Modal, RunPod) from HCL files, with plan, apply and destroy.",
+  "branch": "main",
+  "folders": ["web/apps/web/content/docs"],
+  "excludeFiles": ["CHANGELOG.md", "RELEASING.md", "CODE_OF_CONDUCT.md", "AGENTS.md"],
+  "rules": [
+    "Run `amicu validate` and `amicu plan` before `amicu apply`, and review the plan.",
+    "Start a new project with `amicu init` or `amicu init --example <name>`.",
+    "Never put API keys in HCL files; reference them with `secret(...)` in a `credential` block.",
+    "Use `amicu destroy` to stop deployments so state stays in sync.",
+    "Run `amicu doctor` when local setup or provider credentials fail."
+  ]
+}
