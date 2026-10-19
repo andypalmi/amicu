@@ -57,6 +57,8 @@ struct WorldState {
     pod_status: Option<&'static str>,
     /// Status the pod proxy answers an anonymous request with (0: 401).
     anon: u16,
+    /// Pod routes that answer an anonymous request with 200.
+    open_routes: Vec<&'static str>,
     next: u32,
     next_pod: u32,
     reject_key: bool,
@@ -137,12 +139,9 @@ impl HttpTransport for World {
             w.log.push(format!("proxy {:?} {id}{path}", req.method));
             let status = match path {
                 "/health" if w.health != 0 => w.health,
-                "/v1/chat/completions" if req.bearer.is_none() => {
-                    if w.anon == 0 {
-                        401
-                    } else {
-                        w.anon
-                    }
+                p if req.bearer.is_none() && w.open_routes.contains(&p) => 200,
+                "/v1/chat/completions" | "/invocations" | "/docs" if req.bearer.is_none() => {
+                    if w.anon == 0 { 401 } else { w.anon }
                 }
                 _ => 200,
             };
@@ -1711,6 +1710,108 @@ fn a_pod_whose_models_route_is_public_is_kept() {
     assert!(!log.iter().any(|l| l.starts_with("verify")), "{log:?}");
 }
 
+fn vllm_pod_project(td: &TempDir) -> Project {
+    let project = pod_project(td, None);
+    write(&td.path, "amicu.hcl", &vllm_pod_config());
+    project
+}
+
+fn vllm_pod_config() -> String {
+    let config = pod_config("");
+    let (head, deployment) = config.split_once("resource \"deployment\"").unwrap();
+    assert!(deployment.contains("llama_cpp {"));
+    format!(
+        r#"{head}
+resource "model" "small" {{
+  source {{
+    registry  = "hugging_face"
+    reference = "Qwen/Qwen2.5-0.5B-Instruct"
+  }}
+  architecture   = "qwen2"
+  modalities     = ["text"]
+  artifact {{
+    format       = "safetensors"
+    quantization = "bf16"
+  }}
+  context_length = 8192
+  n_layers       = 24
+  n_kv_heads     = 2
+  head_dim       = 64
+}}
+
+resource "deployment" "support_local" {{
+  model    = model.small.id
+  hardware = hardware_profile.runpod_l4.id
+  runtime  = "vllm"
+  api_key  = secret("RUNPOD_TEST_ENDPOINT_KEY")
+  vllm {{
+    context_length = 8192
+    port           = 8000
+  }}
+}}
+"#
+    )
+}
+
+#[test]
+fn plan_shows_the_vllm_pod_launch_with_the_auth_middleware_and_no_key() {
+    let state = state_with(amicu_core::graph::Graph::new());
+    let (text, _) = plan_text_for(&vllm_pod_config(), &state);
+    let launch = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("launch:"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        launch.contains("vllm serve Qwen/Qwen2.5-0.5B-Instruct")
+            && launch.ends_with("--middleware amicu_auth.RequireKey"),
+        "{launch}"
+    );
+    assert!(!launch.contains("--api-key"), "{launch}");
+    assert!(!text.contains("AMICU_AUTH_EOF"), "{text}");
+    assert!(!text.contains("rpa_ENDPOINTKEY"), "{text}");
+}
+
+#[test]
+fn a_vllm_pod_apply_probes_the_routes_vllm_leaves_open() {
+    let td = TempDir::new();
+    let project = vllm_pod_project(&td);
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(pod_ids(&rig), ["pod1"]);
+    let log = rig.runpod.world.log();
+    for probe in [
+        "proxy Post pod1/v1/chat/completions",
+        "proxy Post pod1/invocations",
+        "proxy Get pod1/docs",
+    ] {
+        assert!(log.contains(&probe.to_owned()), "{probe}: {log:?}");
+    }
+    let w = rig.runpod.world.state.lock().unwrap();
+    assert_eq!(w.pods[0].body["entrypoint"], json!(["/bin/sh", "-c"]));
+    let script = w.pods[0].body["cmd"][0].as_str().unwrap();
+    assert!(
+        script.contains("'--middleware' 'amicu_auth.RequireKey'"),
+        "{script}"
+    );
+}
+
+#[test]
+fn a_vllm_pod_with_open_invocations_or_docs_is_terminated() {
+    for route in ["/invocations", "/docs"] {
+        let td = TempDir::new();
+        let project = vllm_pod_project(&td);
+        let rig = rig();
+        rig.runpod.world.state.lock().unwrap().open_routes = vec![route];
+        let err = apply_with(&project, &rig).unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("unauthenticated request to {route}"))
+                && err.contains("open to anyone"),
+            "{err}"
+        );
+        assert_eq!(pod_ids(&rig).len(), 0, "{route}");
+    }
+}
+
 #[test]
 fn a_failed_terminate_on_replace_creates_nothing_and_keeps_the_record() {
     let td = TempDir::new();
@@ -2516,6 +2617,55 @@ fn refresh_reports_gpu_and_cloud_drift_of_a_live_pod_as_a_note_only() {
     assert!(note.contains("revert it in the RunPod console"), "{note}");
     assert_eq!(state.pending.len(), 0);
     assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+fn applied_vllm_pod(td: &TempDir) -> Project {
+    let project = project_with(td, Some(pod_record(Some("pod7"), ACCOUNT, &[])));
+    write(&td.path, "amicu.hcl", &vllm_pod_config());
+    let mut state = project.load_state().unwrap().unwrap();
+    state.graph = project.load_graph().unwrap();
+    state.pending.clear();
+    project.save_state(&state).unwrap();
+    project
+}
+
+#[test]
+fn refresh_marks_a_vllm_pod_without_the_auth_middleware_pending_and_apply_fixes_it() {
+    let td = TempDir::new();
+    let project = applied_vllm_pod(&td);
+    let rig = rig();
+    add_pod(&rig, "pod7", "NVIDIA L4", Some(owner()));
+    {
+        let body = &mut rig.runpod.world.state.lock().unwrap().pods[0].body;
+        body["entrypoint"] = json!(["vllm"]);
+        body["cmd"] = json!(["serve", "Qwen/Qwen2.5-0.5B-Instruct"]);
+    }
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 1, "{r:?}");
+    assert!(
+        r.notes[0].contains("without amicu's auth middleware")
+            && r.notes[0].contains("pod id pod7"),
+        "{r:?}"
+    );
+    assert!(state.pending.iter().any(|d| d.as_str() == DEP));
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+    project.save_state(&state).unwrap();
+
+    apply_with(&project, &rig).unwrap();
+    assert!(
+        pod_writes(&rig)
+            .iter()
+            .any(|w| w.starts_with("Patch /pods/pod7")),
+        "{:?}",
+        pod_writes(&rig)
+    );
+    let w = rig.runpod.world.state.lock().unwrap();
+    assert_eq!(w.pods[0].body["entrypoint"], json!(["/bin/sh", "-c"]));
+    drop(w);
+
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r, crate::refresh::Refresh::default());
+    assert_eq!(state.pending.len(), 0);
 }
 
 #[test]

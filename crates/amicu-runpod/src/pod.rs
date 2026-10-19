@@ -46,6 +46,7 @@ struct Prepared {
     secrets: Vec<CreateSecret>,
     api_key: SecretValue,
     port: u16,
+    anon_probes: &'static [(HttpMethod, &'static str)],
 }
 
 impl fmt::Debug for Prepared {
@@ -57,6 +58,7 @@ impl fmt::Debug for Prepared {
                 &self.secrets.iter().map(|s| &s.name).collect::<Vec<_>>(),
             )
             .field("port", &self.port)
+            .field("anon_probes", &self.anon_probes)
             .finish_non_exhaustive()
     }
 }
@@ -65,6 +67,52 @@ impl fmt::Debug for Prepared {
 /// and, in some versions, `/v1/models` from `--api-key`; this one is always
 /// guarded.
 const ANON_PROBE_PATH: &str = "/v1/chat/completions";
+
+const LLAMACPP_ANON_PROBES: [(HttpMethod, &str); 1] = [(HttpMethod::Post, ANON_PROBE_PATH)];
+/// Besides the API, routes that vLLM's own `--api-key` leaves open and only
+/// [`VLLM_AUTH_MODULE`] guards.
+const VLLM_ANON_PROBES: [(HttpMethod, &str); 3] = [
+    (HttpMethod::Post, ANON_PROBE_PATH),
+    (HttpMethod::Post, "/invocations"),
+    (HttpMethod::Get, "/docs"),
+];
+
+/// ASGI middleware a vLLM pod loads with `--middleware`: vLLM's `--api-key`
+/// guards only `/v1`-style prefixes and the pod proxy is public, so every
+/// route but `GET /health` needs the key.
+const VLLM_AUTH_MODULE: &str = include_str!("pod/amicu_auth.py");
+const VLLM_AUTH_DIR: &str = "/tmp/amicu";
+const VLLM_AUTH_MIDDLEWARE: &str = "amicu_auth.RequireKey";
+const HEREDOC_END: &str = "AMICU_AUTH_EOF";
+
+/// Whether a live vLLM `pod` starts with amicu's auth middleware; `None`
+/// when RunPod reported no command.
+#[must_use]
+pub fn vllm_pod_guarded(pod: &Pod) -> Option<bool> {
+    if pod.entrypoint.is_empty() && pod.cmd.is_empty() {
+        return None;
+    }
+    let flag = format!("'--middleware' '{VLLM_AUTH_MIDDLEWARE}'");
+    Some(pod.entrypoint == ["/bin/sh", "-c"] && pod.cmd.iter().any(|c| c.contains(&flag)))
+}
+
+/// ENTRYPOINT and CMD of a vLLM pod: a shell writes [`VLLM_AUTH_MODULE`],
+/// then execs `argv`.
+fn vllm_pod_command(argv: &[String]) -> (Vec<String>, Vec<String>) {
+    let run = argv
+        .iter()
+        .map(|a| format!("'{}'", a.replace('\'', r"'\''")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let script = format!(
+        "set -e\nmkdir -p {VLLM_AUTH_DIR}\n\
+         cat > {VLLM_AUTH_DIR}/amicu_auth.py <<'{HEREDOC_END}'\n\
+         {VLLM_AUTH_MODULE}{HEREDOC_END}\n\
+         export PYTHONPATH={VLLM_AUTH_DIR}${{PYTHONPATH:+:$PYTHONPATH}}\n\
+         exec {run}\n"
+    );
+    (vec!["/bin/sh".to_owned(), "-c".to_owned()], vec![script])
+}
 
 /// How long a just (re)started pod may still report its previous container's
 /// `EXITED` / `ERROR` before that counts as a failure.
@@ -402,12 +450,23 @@ impl PodSupervisor {
         self.check_catalog(&prepared.pod.gpu_type_id).await
     }
 
-    /// The argv the pod runs for `plan`.
+    /// The argv the pod runs for `plan`. On vLLM it loads
+    /// [`VLLM_AUTH_MODULE`], which a shell writes first.
     ///
     /// # Errors
     /// See [`amicu_llamacpp::remote::launch_argv`].
     pub fn launch_argv(&self, plan: &LaunchPlan) -> Result<Vec<String>, LlamaCppError> {
-        container_argv(plan, self.gguf.as_ref())
+        let mut argv = container_argv(plan, self.gguf.as_ref())?;
+        match RuntimeKind::of(&plan.settings) {
+            RuntimeKind::Vllm => {
+                argv.extend(["--middleware".to_owned(), VLLM_AUTH_MIDDLEWARE.to_owned()]);
+            }
+            RuntimeKind::LlamaCpp => {
+                let (entrypoint, cmd) = container_command(&argv)?;
+                argv = entrypoint.into_iter().chain(cmd).collect();
+            }
+        }
+        Ok(argv)
     }
 
     /// The create body `start` would send for `plan`, with placeholder
@@ -518,7 +577,16 @@ impl PodSupervisor {
             &secret,
             &mut env,
         );
-        let (entrypoint, cmd) = container_command(&argv)?;
+        let (entrypoint, cmd, anon_probes): (_, _, &'static [_]) = match runtime {
+            RuntimeKind::Vllm => {
+                let (e, c) = vllm_pod_command(&argv);
+                (e, c, &VLLM_ANON_PROBES)
+            }
+            RuntimeKind::LlamaCpp => {
+                let (e, c) = container_command(&argv)?;
+                (e, c, &LLAMACPP_ANON_PROBES)
+            }
+        };
 
         let mut pod = CreatePod::new(self.pod_name.clone(), image, gpu_type_id, self.gpu_count);
         pod.entrypoint = entrypoint;
@@ -534,6 +602,7 @@ impl PodSupervisor {
             secrets: create_secrets,
             api_key,
             port,
+            anon_probes,
         })
     }
 
@@ -857,40 +926,19 @@ impl PodSupervisor {
         }
     }
 
-    /// An anonymous [`ANON_PROBE_PATH`] request must be refused (else
+    /// Every anonymous `anon` request must be refused (else
     /// [`NotReady::Unsafe`]), then the key must be accepted on [`PROBE_PATH`].
     async fn verify_exposure(
         &self,
         url: &str,
         key: &SecretValue,
+        anon: &[(HttpMethod, &str)],
         deadline: tokio::time::Instant,
     ) -> Result<(), NotReady> {
-        let anon_url = format!("{url}{ANON_PROBE_PATH}");
-        let probe_url = format!("{url}{PROBE_PATH}");
-        let mut backoff = self.readiness.initial_backoff;
-        loop {
-            let req = HttpRequest::new(HttpMethod::Post, anon_url.clone())
-                .with_json(serde_json::json!({}));
-            match self.probe.execute(req).await {
-                // Only the runtime's own 401; a 403 may come from a proxy in front of it.
-                Ok(r) if r.status == 401 => break,
-                // Reached the handler: success, or the empty body's validation error.
-                Ok(r) if (200..300).contains(&r.status) || matches!(r.status, 400 | 422) => {
-                    return Err(NotReady::Unsafe(format!(
-                        "the pod answered an unauthenticated request to {ANON_PROBE_PATH} \
-                         (HTTP {}); it was open to anyone with its URL",
-                        r.status
-                    )));
-                }
-                _ => {}
-            }
-            if !self.pause(deadline, &mut backoff).await {
-                return Err(NotReady::Unsafe(format!(
-                    "could not verify that the pod rejects unauthenticated requests to \
-                     {ANON_PROBE_PATH} (no 401 answer)"
-                )));
-            }
+        for &(method, path) in anon {
+            self.verify_refused(url, method, path, deadline).await?;
         }
+        let probe_url = format!("{url}{PROBE_PATH}");
         let key = key.expose_secret_str().map_err(|_| {
             NotReady::Leave(LlamaCppError::Supervisor(
                 "the deployment's api_key is not valid UTF-8".to_owned(),
@@ -915,6 +963,42 @@ impl PodSupervisor {
                     "could not verify that the pod accepts the api_key on {PROBE_PATH} before \
                      the deadline; it is left in place"
                 ))));
+            }
+        }
+    }
+
+    async fn verify_refused(
+        &self,
+        url: &str,
+        method: HttpMethod,
+        path: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), NotReady> {
+        let anon_url = format!("{url}{path}");
+        let mut backoff = self.readiness.initial_backoff;
+        loop {
+            let mut req = HttpRequest::new(method, anon_url.clone());
+            if method == HttpMethod::Post {
+                req = req.with_json(serde_json::json!({}));
+            }
+            match self.probe.execute(req).await {
+                // Only the runtime's own 401; a 403 may come from a proxy in front of it.
+                Ok(r) if r.status == 401 => return Ok(()),
+                // Reached the handler: success, or the empty body's validation error.
+                Ok(r) if (200..300).contains(&r.status) || matches!(r.status, 400 | 422) => {
+                    return Err(NotReady::Unsafe(format!(
+                        "the pod answered an unauthenticated request to {path} (HTTP {}); it \
+                         was open to anyone with its URL",
+                        r.status
+                    )));
+                }
+                _ => {}
+            }
+            if !self.pause(deadline, &mut backoff).await {
+                return Err(NotReady::Unsafe(format!(
+                    "could not verify that the pod rejects unauthenticated requests to {path} \
+                     (no 401 answer)"
+                )));
             }
         }
     }
@@ -1039,7 +1123,7 @@ impl ProcessSupervisor for PodSupervisor {
         let url = pod_proxy_url(&rollout.id, prepared.port);
         let checked = match self.wait_ready(&rollout, &url, deadline).await {
             Ok(()) => {
-                self.verify_exposure(&url, &prepared.api_key, deadline)
+                self.verify_exposure(&url, &prepared.api_key, prepared.anon_probes, deadline)
                     .await
             }
             Err(e) => Err(e),
