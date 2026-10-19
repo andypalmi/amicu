@@ -20,9 +20,9 @@ export function Faq({ ids, className }: { ids?: FaqId[]; className?: string }) {
       />
       <dl className={cn('border-b border-border', className)}>
         {items.map(({ question, answer, link }) => (
-          <div key={question} className="border-t border-border py-6">
+          <div key={question} className="grid gap-2 border-t border-border py-6 md:grid-cols-3 md:gap-8">
             <dt className="text-lg font-semibold tracking-tight text-foreground">{question}</dt>
-            <dd className="mt-2 max-w-3xl text-base text-muted-foreground">{answer}
+            <dd className="max-w-3xl text-base text-muted-foreground md:col-span-2">{answer}
               {link ? (
                 <>
                   {' '}
