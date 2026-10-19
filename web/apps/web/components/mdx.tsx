@@ -7,6 +7,7 @@ import type { MDXComponents } from 'mdx/types';
 import { ProviderFacts } from '@/components/providers/provider-facts';
 import { ProviderGrid } from '@/components/providers/provider-grid';
 import { RunPodSignupLink } from '@/components/runpod-signup';
+import { Faq } from '@/components/seo/faq';
 import { CircleCheck, CircleX, Info, Lightbulb, TriangleAlert } from 'lucide-react';
 
 type CalloutType = 'info' | 'warning' | 'error' | 'success' | 'idea' | 'tip' | 'warn';
@@ -55,6 +56,7 @@ export function getMDXComponents(components?: MDXComponents) {
   return {
     ...defaultMdxComponents,
     Callout,
+    Faq,
     RunPodSignupLink,
     Tab,
     Tabs,

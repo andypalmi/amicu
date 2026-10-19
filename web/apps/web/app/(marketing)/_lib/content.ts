@@ -258,7 +258,16 @@ export interface Provider {
   status: ProviderStatus;
   /** Residency note for this provider. */
   residency: string;
+  /** Example GPUs from the provider's docs page (GPUs and regions table). */
+  exampleGpus: string;
+  /** Remote GPU cloud that `amicu apply` deploys to. */
+  cloud?: true;
+  /** Hourly cost, only where the docs state one. */
+  hourlyCost?: string;
 }
+
+/** Stated in the RunPod docs page (Serverless billing); indicative, not a live quote. */
+export const RUNPOD_24GB_HOURLY = '$0.69';
 
 // Verified against crates/amicu-cli/src/commands/apply.rs (dispatch is local
 // launchd/systemd, Modal or RunPod) and the catalogs in crates/amicu-providers.
@@ -271,15 +280,18 @@ export const providers: Provider[] = [
     tags: ['macOS and Linux', 'Loopback endpoint', 'Apple Silicon and CPU'],
     status: 'supported',
     residency: 'Wherever the machine is',
+    exampleGpus: "The machine's own GPU, Apple Silicon or CPU",
   },
   {
     slug: 'modal',
+    cloud: true,
     name: 'Modal',
     kind: 'Serverless GPU cloud',
     blurb: 'Deploy llama.cpp or vLLM to Modal as an autoscaling app.',
     tags: ['Serverless GPU', 'Region pinning', 'Autoscaling'],
     status: 'supported',
     residency: 'Region pinning, EU included (for example eu-west)',
+    exampleGpus: 'T4, L4, L40S, A100, H100',
   },
   {
     slug: 'hetzner',
@@ -289,6 +301,7 @@ export const providers: Provider[] = [
     tags: ['Dedicated servers', 'Monthly billing', 'EU data centers'],
     status: 'preview',
     residency: 'Germany, Finland, plus US and APAC',
+    exampleGpus: 'RTX 4000 Ada, RTX 6000 Ada',
   },
   {
     slug: 'ovhcloud',
@@ -298,6 +311,7 @@ export const providers: Provider[] = [
     tags: ['GPU instances', 'On-demand', 'EU data centers'],
     status: 'preview',
     residency: 'France, Germany, Poland, plus non-EU regions',
+    exampleGpus: 'H100, A100, L40S, L4, V100, T4',
   },
   {
     slug: 'scaleway',
@@ -307,15 +321,19 @@ export const providers: Provider[] = [
     tags: ['GPU instances', 'On-demand', 'EU only'],
     status: 'preview',
     residency: 'France, Netherlands, Poland',
+    exampleGpus: 'H100, L40S, L4, P100',
   },
   {
     slug: 'runpod',
+    cloud: true,
     name: 'RunPod',
     kind: 'Serverless GPU cloud',
     blurb: 'Deploy llama.cpp or vLLM to RunPod Serverless endpoints that scale to zero.',
     tags: ['Serverless GPU', 'Per-second billing', 'EU data centers'],
     status: 'supported',
     residency: 'EU and EEA data centers, plus US, Canada and APAC',
+    exampleGpus: 'L4, RTX 4090, L40S, A100, H100',
+    hourlyCost: `About ${RUNPOD_24GB_HOURLY} per worker on Serverless, 24 GB GPU group`,
   },
   {
     slug: 'self-hosted',
@@ -325,6 +343,7 @@ export const providers: Provider[] = [
     tags: ['Your hardware', 'SSH key auth', 'Declared location'],
     status: 'preview',
     residency: 'The location you declare for each host',
+    exampleGpus: 'Declared per host',
   },
   {
     slug: 'nebius',
@@ -334,6 +353,7 @@ export const providers: Provider[] = [
     tags: ['High-end GPUs', 'Catalog data only'],
     status: 'planned',
     residency: 'EU regions, plus a US region',
+    exampleGpus: 'H200, H100, L40S',
   },
   {
     slug: 'aws',
@@ -343,6 +363,7 @@ export const providers: Provider[] = [
     tags: ['GPU EC2', 'Catalog data only'],
     status: 'planned',
     residency: 'Ireland, Frankfurt, Stockholm, Milan, Paris, plus US and APAC',
+    exampleGpus: 'H100, A100, L40S, L4, A10G',
   },
   {
     slug: 'azure',
@@ -352,6 +373,7 @@ export const providers: Provider[] = [
     tags: ['GPU VMs', 'Catalog data only'],
     status: 'planned',
     residency: 'West and North Europe, Germany, Sweden, France, plus UK, US and APAC',
+    exampleGpus: 'H100, A100, A10, T4',
   },
   {
     slug: 'gcp',
@@ -361,5 +383,15 @@ export const providers: Provider[] = [
     tags: ['GPU Compute Engine', 'Catalog data only'],
     status: 'planned',
     residency: 'Belgium, Netherlands, Finland, Frankfurt, Paris, plus US and APAC',
+    exampleGpus: 'H100, A100, L4, T4',
   },
 ];
+
+const names = (items: Provider[]) => items.map((p) => p.name).join(', ');
+
+/** Remote GPU providers `amicu apply` supports today, for example `Modal, RunPod`. */
+export const supportedCloudNames = names(
+  providers.filter((p) => p.status === 'supported' && p.cloud),
+);
+export const previewNames = names(providers.filter((p) => p.status === 'preview'));
+export const plannedNames = names(providers.filter((p) => p.status === 'planned'));

@@ -35,6 +35,7 @@ export function SiteFooter() {
             <Link className={linkCls} href="/providers">Providers</Link>
             <Link className={linkCls} href="/security">Security</Link>
             <Link className={linkCls} href="/compare">Compare</Link>
+            <Link className={linkCls} href="/about">About</Link>
             <a className={linkCls} href={githubUrl}>GitHub</a>
             <a className={linkCls} href={`${githubUrl}/blob/main/LICENSE`}>License</a>
           </nav>

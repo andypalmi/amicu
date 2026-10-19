@@ -6,8 +6,9 @@ import type { Metadata, Viewport } from 'next';
 import { Analytics } from '@/components/analytics/analytics';
 import { CloudflareBeacon } from '@/components/analytics/cf-beacon';
 import { Toaster } from '@/components/common/toaster';
+import { JsonLd } from '@/components/seo/json-ld';
 import { tokens } from '@/lib/generated/tokens';
-import { appName, appTagline, siteUrl } from '@/lib/shared';
+import { appName, appTagline, gitConfig, siteUrl } from '@/lib/shared';
 
 const schibsted = Schibsted_Grotesk({
   subsets: ['latin'],
@@ -54,10 +55,29 @@ export const metadata: Metadata = {
   },
 };
 
+const orgJsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'Organization',
+  name: appName,
+  url: siteUrl,
+  logo: `${siteUrl}/icon.svg`,
+  description: appTagline,
+  sameAs: [`https://github.com/${gitConfig.user}/${gitConfig.repo}`],
+};
+
+const siteJsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'WebSite',
+  name: appName,
+  url: siteUrl,
+  description: appTagline,
+};
+
 export default function Layout({ children }: LayoutProps<'/'>) {
   return (
     <html lang="en" className={`${schibsted.variable} ${martian.variable}`} suppressHydrationWarning>
       <body className="flex flex-col min-h-screen bg-background text-foreground">
+        <JsonLd data={[orgJsonLd, siteJsonLd]} />
         <RootProvider>
           {children}
           <Toaster />

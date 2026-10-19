@@ -34,6 +34,11 @@ const marketing: Array<{ path: string; label: string; note: string }> = [
     label: 'Compare',
     note: 'amicu compared with Terraform and OpenTofu, SkyPilot, Ollama, and using RunPod or Modal directly.',
   },
+  {
+    path: '/about',
+    label: 'About',
+    note: 'The project, its maintainer, license and how to contribute.',
+  },
   { path: '/docs', label: 'Docs', note: 'Documentation home.' },
 ];
 

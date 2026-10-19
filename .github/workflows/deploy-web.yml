@@ -57,6 +57,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+          fetch-depth: 0
 
       # Activates the `packageManager` pin in web/package.json
       # ("pnpm@11.22.0") via Node 22's built-in corepack, same pin CI's
@@ -71,6 +72,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Refresh page dates
+        run: pnpm --filter @amicu/web gen:facts
 
       # `cf:deploy` (web/apps/web/package.json) is
       # `opennextjs-cloudflare build && opennextjs-cloudflare deploy --
