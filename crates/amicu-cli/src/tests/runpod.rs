@@ -1518,7 +1518,7 @@ fn pod_apply_records_the_pod_ahead_then_its_id_and_secrets() {
     );
     let log = rig.runpod.world.log();
     assert!(
-        log.contains(&"verify https://pod1-8000.proxy.runpod.net".to_owned()),
+        log.contains(&"proxy Post pod1/v1/chat/completions".to_owned()),
         "{log:?}"
     );
     let w = rig.runpod.world.state.lock().unwrap();
@@ -1658,19 +1658,68 @@ fn an_open_pod_is_terminated_by_the_supervisor() {
 }
 
 #[test]
-fn a_failed_exposure_check_terminates_even_a_recorded_pod() {
+fn a_pod_whose_models_route_is_public_is_kept() {
+    let td = TempDir::new();
+    let project = pod_project(&td, None);
+    let mut rig = rig();
+    // The generic check (anonymous GET /v1/models) would fail on llama-server.
+    rig.runpod.exposure_fails = true;
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(pod_ids(&rig), ["pod1"]);
+    let log = rig.runpod.world.log();
+    assert!(!log.iter().any(|l| l.starts_with("verify")), "{log:?}");
+}
+
+#[test]
+fn a_failed_terminate_on_replace_creates_nothing_and_keeps_the_record() {
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(Some("pod7"), ACCOUNT, &[])));
+    let rig = rig();
+    add_pod(&rig, "pod7", "NVIDIA A40", Some(owner()));
+    rig.runpod.world.state.lock().unwrap().delete_fails = true;
+    apply_with(&project, &rig).unwrap_err();
+    assert_eq!(pod_writes(&rig), ["action pod7 terminate"]);
+    assert_eq!(pod_ids(&rig), ["pod7"]);
+    assert_eq!(stops_for(&project, DEP)[0].app_id.as_deref(), Some("pod7"));
+}
+
+#[test]
+fn a_replacement_whose_new_spec_is_refused_leaves_the_old_pod_running() {
+    struct CommaKey;
+    #[async_trait::async_trait]
+    impl SecretResolver for CommaKey {
+        async fn resolve(&self, _: &SecretRef) -> Result<SecretValue, AdapterError> {
+            Ok(SecretValue::new("a,b".to_owned()))
+        }
+    }
     let td = TempDir::new();
     let project = pod_project(&td, Some(pod_record(Some("pod7"), ACCOUNT, &[])));
     let mut rig = rig();
-    add_pod(&rig, "pod7", "NVIDIA L4", Some(owner()));
-    rig.runpod.exposure_fails = true;
+    add_pod(&rig, "pod7", "NVIDIA A40", Some(owner()));
+    rig.resolver = Box::new(CommaKey);
     let err = apply_with(&project, &rig).unwrap_err().to_string();
-    assert!(
-        err.contains("which existed before this run, was terminated"),
-        "{err}"
+    assert!(err.contains("comma"), "{err}");
+    assert_eq!(pod_writes(&rig), Vec::<String>::new());
+    assert_eq!(pod_ids(&rig), ["pod7"]);
+}
+
+#[test]
+fn a_cloud_change_alone_replaces_the_pod() {
+    let td = TempDir::new();
+    let project = pod_project(&td, None);
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    write(
+        &td.path,
+        "amicu.hcl",
+        &pod_config("    cloud = \"community\"\n"),
     );
-    assert_eq!(pod_ids(&rig).len(), 0);
-    assert_eq!(stops_for(&project, DEP)[0].app_id.as_deref(), Some("pod7"));
+    rig.runpod.world.state.lock().unwrap().log.clear();
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(pod_writes(&rig), ["action pod1 terminate", "Post /pods"]);
+    let w = rig.runpod.world.state.lock().unwrap();
+    assert_eq!(w.pods.len(), 1);
+    assert_eq!(w.pods[0].body["cloud"], "COMMUNITY");
 }
 
 #[test]

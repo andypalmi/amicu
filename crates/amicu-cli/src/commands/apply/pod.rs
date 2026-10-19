@@ -1,5 +1,4 @@
-//! RunPod pod mode (`runpod { mode = "pod" }`) for apply and destroy: the
-//! write-ahead start, replacement, failure teardown and terminate.
+//! RunPod pod mode (`runpod { mode = "pod" }`) for apply and destroy.
 
 use std::io::Write;
 use std::sync::atomic::Ordering;
@@ -35,7 +34,6 @@ pub(super) fn deployment_is_pod(graph: &Graph, id: &DeploymentId) -> bool {
         .is_some_and(is_pod)
 }
 
-/// What a RunPod record names, for messages.
 pub(super) fn kind(record: &StopRecord) -> &'static str {
     if record.backend == Backend::RunpodPod {
         "pod"
@@ -90,11 +88,9 @@ fn build(
     Ok(supervisor)
 }
 
-/// The supervisor for one pod deployment, plus what its start is recorded
-/// with. A recorded pod whose GPU, count, cloud or data center no longer
-/// matches is terminated first (confirmed, like any stale record), so the
-/// start creates its replacement. The caller has checked every RunPod record
-/// of the deployment against `account`.
+/// The supervisor for one pod deployment and what its start is recorded
+/// with. A recorded pod that must be replaced is terminated (confirmed) only
+/// after the new spec passed every pre-write check.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn prepare(
     graph: &Graph,
@@ -107,56 +103,69 @@ pub(super) async fn prepare(
     progress: &mut Progress,
 ) -> Result<(PodSupervisor, RunPodStart), CliError> {
     let name = amicu_runpod::project_endpoint_name(&progress.project_id, id.as_str());
-    let mut recorded = progress
+    let recorded = progress
         .stops
         .iter()
         .find(|r| r.deployment == *id && r.backend == Backend::RunpodPod && r.identity == name)
         .cloned();
-    if let Some(old) = recorded.clone()
+    let fresh = build(graph, catalog, id, &progress.project_id, account, env, None)?;
+    let mut replace = None;
+    if let Some(old) = &recorded
         && let Some(pod_id) = &old.app_id
     {
-        let probe = build(graph, catalog, id, &progress.project_id, account, env, None)?;
-        let why = match probe.client().get_pod(pod_id).await {
-            Ok(pod) if pod.status != PodStatus::Terminated => probe.replacement_reason(&pod),
-            Ok(_) | Err(RunPodError::NotFound { .. }) => None,
+        match fresh.client().get_pod(pod_id).await {
+            Ok(pod) if pod.status != PodStatus::Terminated => {
+                replace = fresh.replacement_reason(&pod).map(|why| (old.clone(), why));
+            }
+            Ok(_) | Err(RunPodError::NotFound { .. }) => {}
             Err(e) => {
                 return Err(runpod_error(
                     &format!("could not read RunPod pod {pod_id} of '{id}'; nothing was changed"),
                     &e,
                 ));
             }
-        };
-        if let Some(why) = why {
-            let _ = writeln!(
-                std::io::stderr(),
-                "replacing RunPod pod {pod_id} of '{id}' ({why}): it is terminated before the \
-                 new pod starts"
-            );
-            stop_record(
-                &old,
-                env,
-                host_probe,
-                &progress.project_id,
-                &mut progress.stops,
-            )
-            .await?;
-            progress.stops.retain(|r| !r.same_instance(&old));
-            recorded = None;
         }
     }
-    let supervisor = build(
-        graph,
-        catalog,
-        id,
-        &progress.project_id,
-        account,
-        env,
-        recorded.as_ref(),
-    )?;
     let launch_secrets = amicu_llamacpp::resolve_launch_secrets(launch, env.resolver).await?;
+    let supervisor = match &replace {
+        Some(_) => fresh,
+        None => build(
+            graph,
+            catalog,
+            id,
+            &progress.project_id,
+            account,
+            env,
+            recorded.as_ref(),
+        )?,
+    };
     let planned = supervisor
         .planned_secret_names(launch, &launch_secrets)
         .map_err(supervisor_err)?;
+    let recorded = if let Some((old, why)) = replace {
+        supervisor
+            .check_before_write(launch, &launch_secrets)
+            .await
+            .map_err(supervisor_err)?;
+        let _ = writeln!(
+            std::io::stderr(),
+            "replacing RunPod pod {} of '{id}' ({why}): it is terminated before the new pod \
+             starts",
+            old.app_id.as_deref().unwrap_or_default()
+        );
+        stop_record(
+            &old,
+            env,
+            host_probe,
+            &progress.project_id,
+            &mut progress.stops,
+        )
+        .await?;
+        progress.stops.retain(|r| !r.same_instance(&old));
+        None
+    } else {
+        recorded
+    };
     let start = RunPodStart {
         pod: true,
         account: account.to_owned(),
@@ -172,56 +181,45 @@ pub(super) async fn prepare(
     Ok((supervisor, start))
 }
 
-/// After a failed pod start or exposure check: record what exists, and
-/// terminate a pod this run created. A pod that existed before is left in
-/// place after a failed start, but terminated when it failed the exposure
-/// check (it must not keep serving). The record stays until a stop is
-/// confirmed. Returns a note for the error.
+/// After a failed start: record what exists and terminate a pod this run
+/// created; one that existed before is left in place. The record stays until
+/// a stop is confirmed. Returns a note for the error.
 pub(super) async fn failed_start(
     rp: &RunPodStart,
     adapter: &dyn RuntimeAdapter,
     record: &StopRecord,
     stops: &mut [StopRecord],
-    exposure_failed: bool,
 ) -> String {
     let deployed = rp.deployed.lock().ok().and_then(|d| d.clone());
     sync_runpod_record(stops, record, deployed.as_deref(), rp, false);
     let Some(id) = deployed else {
         return String::new();
     };
-    let created = rp.created_endpoint.load(Ordering::SeqCst);
-    if !created && !exposure_failed {
+    if !rp.created_endpoint.load(Ordering::SeqCst) {
         return format!(
             "; RunPod pod {id} existed before this run, so it was left in place and stays \
              recorded (`amicu destroy --target {}` removes it)",
             record.deployment
         );
     }
-    let origin = if created {
-        "created by this run"
-    } else {
-        "which existed before this run"
-    };
     match adapter.stop(&handle(&record.deployment, &id)).await {
         Ok(()) => {
             sync_runpod_record(stops, record, None, rp, true);
             format!(
-                "; RunPod pod {id}, {origin}, was terminated (it stays recorded until a later \
+                "; RunPod pod {id}, created by this run, was terminated (it stays recorded until a later \
                  apply or destroy confirms it is gone)"
             )
         }
         Err(e) => format!(
-            "; terminating RunPod pod {id}, {origin}, FAILED ({e}); it stays recorded and \
+            "; terminating RunPod pod {id}, created by this run, FAILED ({e}); it stays recorded and \
              `amicu destroy --target {}` retries",
             record.deployment
         ),
     }
 }
 
-/// Terminates a pod (never just stops it) and deletes its secrets. Only a
-/// confirmed terminate in the recorded account is `Ok`; anything else keeps
-/// the record. A record without a pod id is resolved by exact name and owner
-/// marker.
+/// Terminates a pod (never just stops it) and deletes its secrets; `Ok` only
+/// once confirmed in the recorded account.
 pub(super) async fn stop(
     record: &StopRecord,
     env: &Env<'_>,
@@ -270,10 +268,8 @@ pub(super) async fn stop(
     Err(CliError::Message(format!("{kept}; it was kept in state")))
 }
 
-/// The id of the one live pod named `record.identity` that carries this
-/// deployment's owner marker in `account`, or `None` when no pod has the
-/// name. A foreign or duplicate name is refused, unless
-/// `--forget-unconfirmed` (the foreign pod is then left untouched).
+/// The one live pod named `record.identity` with this deployment's owner
+/// marker, or `None` when none has the name.
 async fn owned_pod_by_name(
     client: &RunPodClient,
     record: &StopRecord,

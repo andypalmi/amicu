@@ -5,9 +5,9 @@ use std::collections::HashSet;
 use amicu_core::diagnostic::{Diagnostic, DiagnosticCode, DiagnosticReport, Severity, catalog};
 use amicu_core::graph::Graph;
 use amicu_core::resource::{
-    Accelerator, AcceleratorKind, CATALOG_GPU_PROVIDERS, Deployment, GpuResolveError,
-    HardwareProfile, MemoryCheck, RUNPOD_PODS_ONLY_GPUS, Residency, RuleEffect, RunpodMode,
-    Runtime, ScalingSettings, alias_memory_conflict,
+    Accelerator, AcceleratorKind, CATALOG_GPU_PROVIDERS, Deployment, GpuResolveError, MemoryCheck,
+    RUNPOD_PODS_ONLY_GPUS, Residency, RuleEffect, RunpodMode, Runtime, ScalingSettings,
+    alias_memory_conflict,
 };
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
 use amicu_providers::resolve_residency;
@@ -214,10 +214,6 @@ fn scaling_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
 }
 
 const RUNPOD_PROVIDER: &str = "runpod";
-
-fn is_runpod_pod(hw: &HardwareProfile) -> bool {
-    hw.provider == RUNPOD_PROVIDER && hw.runpod_mode() == RunpodMode::Pod
-}
 
 /// `scaling {}` a pod honours: none, or exactly one replica.
 fn pod_scaling_ok(s: &ScalingSettings) -> bool {

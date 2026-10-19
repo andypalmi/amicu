@@ -347,6 +347,22 @@ impl PodSupervisor {
         Ok(names)
     }
 
+    /// Everything `start` checks before its first write: the launch, the
+    /// api_key and the GPU type in RunPod's live catalog.
+    ///
+    /// # Errors
+    /// Whatever `start` would refuse before writing.
+    pub async fn check_before_write(
+        &self,
+        plan: &LaunchPlan,
+        secrets: &[ResolvedSecret],
+    ) -> Result<(), LlamaCppError> {
+        let image = runtime_image(RuntimeKind::of(&plan.settings));
+        let hf_token_fallback = std::env::var(HF_TOKEN_ENV_VAR).ok();
+        let prepared = self.prepare(plan, secrets, &image, hf_token_fallback.as_deref())?;
+        self.check_catalog(&prepared.pod.gpu_type_id).await
+    }
+
     /// The argv the pod runs for `plan`.
     ///
     /// # Errors
@@ -765,10 +781,14 @@ impl PodSupervisor {
 
     /// An anonymous [`ANON_PROBE_PATH`] request must be refused (else
     /// [`NotReady::Unsafe`]), then the key must be accepted on [`PROBE_PATH`].
-    async fn verify_exposure(&self, url: &str, key: &SecretValue) -> Result<(), NotReady> {
+    async fn verify_exposure(
+        &self,
+        url: &str,
+        key: &SecretValue,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), NotReady> {
         let anon_url = format!("{url}{ANON_PROBE_PATH}");
         let probe_url = format!("{url}{PROBE_PATH}");
-        let deadline = tokio::time::Instant::now() + self.readiness.timeout;
         let mut backoff = self.readiness.initial_backoff;
         loop {
             let req = HttpRequest::new(HttpMethod::Post, anon_url.clone())
@@ -940,7 +960,10 @@ impl ProcessSupervisor for PodSupervisor {
 
         let url = pod_proxy_url(&rollout.id, prepared.port);
         let checked = match self.wait_ready(&rollout, &url, deadline).await {
-            Ok(()) => self.verify_exposure(&url, &prepared.api_key).await,
+            Ok(()) => {
+                self.verify_exposure(&url, &prepared.api_key, deadline)
+                    .await
+            }
             Err(e) => Err(e),
         };
         let id = rollout.id;

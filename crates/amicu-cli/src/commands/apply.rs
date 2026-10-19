@@ -1016,25 +1016,19 @@ fn preflight(result: &PlanResult, graph: &Graph, env: &Env<'_>) -> Result<(), Cl
                 item.action.provider.as_deref(),
                 &item.deployment,
             )?;
-            if item.action.provider.as_deref() == Some(RUNPOD_PROVIDER)
-                && launch.api_key.is_none()
-                && pod::deployment_is_pod(graph, &item.deployment)
-            {
-                return Err(CliError::Message(format!(
-                    "deployment '{}': RunPod pods need an `api_key`: the pod proxy adds no \
-                     authentication, so the runtime's own key is the only guard. Generate one \
-                     (for example `openssl rand -hex 32`); it is not a RunPod API key \
-                     (AMICU-POLICY-007); nothing was started",
-                    item.deployment
-                )));
-            }
             if item.action.provider.as_deref() == Some(RUNPOD_PROVIDER) && launch.api_key.is_none()
             {
-                return Err(CliError::Message(format!(
-                    "deployment '{}': RunPod deployments need an `api_key`, and it must be a \
-                     RunPod API key with api.runpod.ai access (ideally restricted to this \
+                let why = if pod::deployment_is_pod(graph, &item.deployment) {
+                    "a random key the runtime checks (for example `openssl rand -hex 32`, not a \
+                     RunPod API key): the pod proxy adds no authentication"
+                } else {
+                    "a RunPod API key with api.runpod.ai access (ideally restricted to this \
                      endpoint): RunPod's gateway checks it on every request and the runtime has \
-                     no key of its own (AMICU-POLICY-007); nothing was started",
+                     no key of its own"
+                };
+                return Err(CliError::Message(format!(
+                    "deployment '{}': RunPod deployments need an `api_key`, and it must be {why} \
+                     (AMICU-POLICY-007); nothing was started",
                     item.deployment
                 )));
             }
@@ -1376,7 +1370,13 @@ async fn apply_all(
             // down, and apply fails. RunPod tears down only an endpoint this
             // run created, as after a failed start.
             let secured = if let Some(rp) = &runpod {
-                match verify_runpod_handle(&handle, launch, resolver, env.runpod).await {
+                // A pod's supervisor already proved anonymous requests are refused.
+                let checked = if rp.pod {
+                    Ok(())
+                } else {
+                    verify_runpod_handle(&handle, launch, resolver, env.runpod).await
+                };
+                match checked {
                     Ok(()) => Ok(()),
                     Err(detail) => {
                         let note = runpod_failed_start(
@@ -1843,21 +1843,17 @@ async fn runpod_preflight(
             continue;
         };
         let key = env.resolver.resolve(key_ref).await?;
-        if env.runpod.is_management_key(&key) && pod::deployment_is_pod(graph, d) {
-            return Err(CliError::Message(format!(
-                "deployment '{d}': its api_key is the same key as {var}, the management key \
-                 amicu deploys with. A pod sends its api_key to every client, so clients would \
-                 hold full control of the RunPod account; use a separate random key for the \
-                 runtime (for example `openssl rand -hex 32`). Nothing was started",
-                var = crate::runpod_ops::API_KEY_ENV_VAR
-            )));
-        }
         if env.runpod.is_management_key(&key) {
+            let fix = if pod::deployment_is_pod(graph, d) {
+                "use a separate random key for the runtime (for example `openssl rand -hex 32`)"
+            } else {
+                "create a separate RunPod API key restricted to invoking this endpoint \
+                 (api.runpod.ai access) and use it as the api_key"
+            };
             return Err(CliError::Message(format!(
                 "deployment '{d}': its api_key is the same key as {var}, the management key \
                  amicu deploys with. Clients would hold full control of the RunPod account; \
-                 create a separate RunPod API key restricted to invoking this endpoint \
-                 (api.runpod.ai access) and use it as the api_key. Nothing was started",
+                 {fix}. Nothing was started",
                 var = crate::runpod_ops::API_KEY_ENV_VAR
             )));
         }
@@ -1931,7 +1927,7 @@ async fn runpod_failed_start(
     scale_down: Option<&dyn RunPodOps>,
 ) -> String {
     if rp.pod {
-        return pod::failed_start(rp, adapter, record, stops, scale_down.is_some()).await;
+        return pod::failed_start(rp, adapter, record, stops).await;
     }
     let deployed = rp.deployed.lock().ok().and_then(|d| d.clone());
     sync_runpod_record(stops, record, deployed.as_deref(), rp, false);
