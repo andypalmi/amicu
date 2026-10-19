@@ -54,9 +54,9 @@ export function GET() {
 ${appName} is a command-line tool for deploying open-weight LLM inference. You describe
 models, hardware, and deployments in HCL (amicu.hcl). \`amicu validate\` checks
 the configuration, \`amicu plan\` shows a diff against recorded state, and
-\`amicu apply\` runs llama.cpp or vLLM for you, on this machine, on on-prem
-hardware you run amicu on, on Modal, or on RunPod. \`amicu destroy\` stops and removes the
-deployments recorded in state, and it confirms each stop before forgetting a
+\`amicu apply\` runs llama.cpp or vLLM for you, on your hardware (this machine
+or on-prem servers you run amicu on), on Modal, or on RunPod. \`amicu destroy\` stops and
+removes the deployments recorded in state, and it confirms each stop before forgetting a
 deployment. It is not a hosted service and is not stable yet.
 
 Start with the [Introduction](${absolute('/docs')}) and the
