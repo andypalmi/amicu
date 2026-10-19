@@ -23,6 +23,12 @@ const lastCommit = (files) =>
     .sort()
     .at(-1);
 
+const compareInputs = [
+  'app/(marketing)/compare/[slug]/page.tsx',
+  'app/(marketing)/_lib/compare.ts',
+  'app/(marketing)/_components/compare.tsx',
+];
+
 const marketing = {
   '/': [
     'app/(marketing)/page.tsx',
@@ -31,6 +37,7 @@ const marketing = {
     'app/(marketing)/_lib/content.ts',
   ],
   '/about': ['app/(marketing)/about/page.tsx', 'app/(marketing)/_lib/content.ts'],
+  '/compare': ['app/(marketing)/compare/page.tsx', ...compareInputs],
   '/install': ['app/(marketing)/install/page.tsx'],
   '/pricing': ['app/(marketing)/pricing/page.tsx'],
   '/providers': ['app/(marketing)/providers/page.tsx', 'app/(marketing)/_lib/content.ts'],
@@ -39,6 +46,13 @@ const marketing = {
   '/terms': ['app/(marketing)/terms/page.tsx'],
   '/imprint': ['app/(marketing)/imprint/page.tsx'],
 };
+
+const compareSlugs = [
+  ...readFileSync(path.join(root, 'app/(marketing)/_lib/compare.ts'), 'utf8').matchAll(
+    /^ {4}slug: '([^']+)',/gm,
+  ),
+].map((m) => m[1]);
+for (const slug of compareSlugs) marketing[`/compare/${slug}`] = compareInputs;
 
 const pages = {};
 for (const [route, files] of Object.entries(marketing)) {

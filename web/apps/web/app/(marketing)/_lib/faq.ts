@@ -1,3 +1,4 @@
+import { compareHref } from './compare';
 import {
   plannedNames,
   previewNames,
@@ -9,6 +10,7 @@ import {
 export interface FaqItem {
   question: string;
   answer: string;
+  link?: { label: string; href: string };
 }
 
 const gpusOf = (slug: string) => providers.find((p) => p.slug === slug)?.exampleGpus;
@@ -39,6 +41,7 @@ export const faqs = {
     question: 'How does amicu compare to Terraform?',
     answer:
       'The workflow is the same: declarative HCL, a plan you read before anything changes, state that records what was applied, and destroy. amicu is a separate tool with its own HCL schema, built for LLM inference rather than general cloud infrastructure. It checks that a model fits the hardware, enforces data residency at plan time and runs vLLM or llama.cpp for you. It is not a Terraform provider.',
+    link: { label: 'Compare amicu and Terraform in detail.', href: compareHref('terraform') },
   },
 } satisfies Record<string, FaqItem>;
 
