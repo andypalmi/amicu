@@ -7,10 +7,16 @@
 
 use std::time::{Duration, Instant};
 
-use amicu_providers::{HttpMethod, HttpRequest, HttpTransport};
+use amicu_providers::{HttpMethod, HttpRequest, HttpTransport, StreamLimits};
 use amicu_telemetry::scrape::{MetricsSnapshot, snapshot_from_text};
 
 use crate::supervisor::endpoint_url;
+
+/// Largest `/metrics` body accepted (as for Modal).
+pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// A cold start answers the first request, so the scrape waits generously.
+const SCRAPE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Why a scrape failed. `Display` never contains the key.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -33,6 +39,8 @@ pub enum MetricsError {
     Unreachable(String),
     #[error("the endpoint exposes no recognised vLLM or llama.cpp series")]
     Unrecognized,
+    #[error("the /metrics response is larger than {} MiB", MAX_BODY_BYTES / (1024 * 1024))]
+    TooLarge,
 }
 
 fn status_note(code: u16) -> &'static str {
@@ -52,8 +60,16 @@ pub async fn scrape(
     key: &str,
 ) -> Result<MetricsSnapshot, MetricsError> {
     let url = format!("{}/metrics", endpoint_url(endpoint_id));
+    let limits = StreamLimits {
+        total: SCRAPE_TIMEOUT,
+        idle: SCRAPE_TIMEOUT,
+        max_bytes: MAX_BODY_BYTES + 1,
+    };
     let resp = transport
-        .execute(HttpRequest::new(HttpMethod::Get, url).with_bearer(key))
+        .execute_bounded(
+            HttpRequest::new(HttpMethod::Get, url).with_bearer(key),
+            limits,
+        )
         .await
         .map_err(|e| MetricsError::Unreachable(e.to_string()))?;
     match resp.status {
@@ -61,6 +77,9 @@ pub async fn scrape(
         401 | 403 => return Err(MetricsError::Auth(resp.status)),
         404 | 501 => return Err(MetricsError::NotEnabled(resp.status)),
         other => return Err(MetricsError::Status(other)),
+    }
+    if resp.body.len() > MAX_BODY_BYTES {
+        return Err(MetricsError::TooLarge);
     }
     let text = String::from_utf8_lossy(&resp.body);
     snapshot_from_text(&text).ok_or(MetricsError::Unrecognized)
@@ -149,6 +168,9 @@ mod tests {
         }
         let junk = scrape(&Canned::new(200, &["hello 1\n"]), "ep1", "k").await;
         assert_eq!(junk, Err(MetricsError::Unrecognized));
+        let huge: &'static str = Box::leak(" ".repeat(MAX_BODY_BYTES + 1).into_boxed_str());
+        let big = scrape(&Canned::new(200, &[huge]), "ep1", "k").await;
+        assert_eq!(big, Err(MetricsError::TooLarge));
     }
 
     #[tokio::test]

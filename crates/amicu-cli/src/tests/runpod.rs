@@ -1063,7 +1063,15 @@ fn logs_merge_every_worker_with_its_prefix() {
         ("w1".into(), "IDLE".into()),
     ];
     let mut out = Vec::new();
-    commands::runpod::logs(&project, DEP, Some(20), &mut out, &rig.env()).unwrap();
+    commands::runpod::logs(
+        &project,
+        DEP,
+        Some(20),
+        OutputFormat::Human,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
     let text = utf8(out);
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(
@@ -1088,23 +1096,39 @@ fn logs_of_a_scaled_to_zero_endpoint_say_there_are_no_workers() {
     let rig = rig();
     let (_td, project) = running_endpoint(&rig);
     let mut out = Vec::new();
-    let code = commands::runpod::logs(&project, DEP, None, &mut out, &rig.env()).unwrap();
+    let code = commands::runpod::logs(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
     assert_eq!(code, 0);
     assert!(utf8(out).contains("no RunPod workers are running"));
 }
+
+const ONE_SHOT: commands::runpod::MetricsMode = commands::runpod::MetricsMode {
+    watch: false,
+    interval_secs: 5,
+    wake: false,
+};
 
 #[test]
 fn metrics_go_through_the_gateway_with_the_deployment_key() {
     let rig = rig();
     let (_td, project) = running_endpoint(&rig);
-    rig.runpod.world.state.lock().unwrap().metrics =
-        "vllm:num_requests_running 3\nvllm:generation_tokens_total 10\n".to_owned();
+    {
+        let mut w = rig.runpod.world.state.lock().unwrap();
+        w.metrics = "vllm:num_requests_running 3\nvllm:generation_tokens_total 10\n".to_owned();
+        w.workers = vec![("w1".into(), "RUNNING".into())];
+    }
     let mut out = Vec::new();
     commands::runpod::metrics(
         &project,
         DEP,
-        false,
-        5,
+        ONE_SHOT,
         OutputFormat::Human,
         &mut out,
         &rig.env(),
@@ -1127,8 +1151,7 @@ fn metrics_go_through_the_gateway_with_the_deployment_key() {
     commands::runpod::metrics(
         &project,
         DEP,
-        false,
-        5,
+        ONE_SHOT,
         OutputFormat::Json,
         &mut out,
         &rig.env(),
@@ -1192,4 +1215,68 @@ fn stop_refuses_a_deployment_without_a_runpod_record() {
     .to_string();
     assert!(err.contains("no RunPod deployment named"), "{err}");
     assert_eq!(rig.runpod.world.log().len(), 0);
+}
+
+#[test]
+fn metrics_refuse_to_wake_a_scaled_to_zero_endpoint_without_wake() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().metrics = "vllm:num_requests_running 0\n".to_owned();
+    let err = commands::runpod::metrics(
+        &project,
+        DEP,
+        ONE_SHOT,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("--wake"), "{err}");
+    let scraped = |rig: &Rig| {
+        rig.runpod
+            .world
+            .log()
+            .iter()
+            .any(|l| l.starts_with("metrics "))
+    };
+    assert!(!scraped(&rig));
+
+    let wake = commands::runpod::MetricsMode {
+        wake: true,
+        ..ONE_SHOT
+    };
+    commands::runpod::metrics(
+        &project,
+        DEP,
+        wake,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap();
+    assert!(scraped(&rig));
+}
+
+#[test]
+fn logs_as_json_list_each_worker_with_its_lines() {
+    let rig = rig();
+    let (_td, project) = running_endpoint(&rig);
+    rig.runpod.world.state.lock().unwrap().workers = vec![("w1".into(), "RUNNING".into())];
+    let mut out = Vec::new();
+    commands::runpod::logs(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Json,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let doc: Value = serde_json::from_str(&utf8(out)).unwrap();
+    assert_eq!(doc["endpoint_id"], "ep7");
+    assert_eq!(doc["workers"][0]["id"], "w1");
+    assert!(doc["workers"][0]["error"].is_null());
+    assert_eq!(doc["workers"][0]["lines"][0]["line"], "hello from w1");
+    assert_eq!(doc["workers"][0]["lines"][1]["source"], "system");
 }

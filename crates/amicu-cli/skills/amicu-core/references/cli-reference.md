@@ -40,8 +40,8 @@ comes from state. Management calls use `RUNPOD_API_KEY`.
 | Command | Prints | Exit |
 |---|---|---|
 | `amicu runpod status <deployment>` | `deployment <d>: RunPod endpoint <id> (<name>)`, then `url:`, `workers: running=N idle=N initializing=N throttled=N unhealthy=N (min N, max N)` (plus a scaled-to-zero note), `gpu:` and `data centers:` | 0; non-zero `error:` if the deployment has no RunPod record or the endpoint is gone |
-| `amicu runpod logs <deployment> [--tail N]` | Each worker's recent lines (default 100, max 5000) as `[<worker>] text` (`[<worker>] (system) text` for host lines), merged by time. A bounded read, no follow. A scaled-to-zero endpoint prints `no RunPod workers are running ...` | 0 |
-| `amicu runpod metrics <deployment> [--watch] [--interval N]` | The same snapshot as `modal metrics`, scraped through the gateway with the deployment's `api_key` (from one worker the load balancer picks), then `hardware: n/a (not available on RunPod)` | 0; non-zero `error:` if the scrape fails |
+| `amicu runpod logs <deployment> [--tail N]` (`--output json`: one document per worker with its lines) | Each worker's recent lines (default 100, max 5000) as `[<worker>] text` (`[<worker>] (system) text` for host lines), merged by time. A bounded read, no follow. A scaled-to-zero endpoint prints `no RunPod workers are running ...` | 0 |
+| `amicu runpod metrics <deployment> [--watch] [--interval N] [--wake]` | The same snapshot as `modal metrics`, scraped through the gateway with the deployment's `api_key` (from one worker the load balancer picks), then `hardware: n/a (not available on RunPod)`. With no worker up it refuses (a scrape would start a billed worker) unless `--wake`; `--watch` keeps the endpoint warm, and billed, while it runs | 0; non-zero `error:` if no worker is up without `--wake`, or the scrape fails |
 | `amicu runpod stop <deployment> [--lock-timeout SECS]` | Same as `amicu destroy --target <deployment> --auto-approve`: deletes the endpoint and its secrets; the deployment leaves state only once that is confirmed | 0; non-zero `error:` with the record kept otherwise |
 
 ## Exit codes

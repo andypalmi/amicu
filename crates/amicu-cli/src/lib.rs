@@ -269,8 +269,9 @@ enum RunpodCommand {
     ///
     /// The load balancer answers from one worker of its choosing, so with
     /// several workers the figures describe one of them. Hardware metrics are
-    /// not available on RunPod. A scaled-to-zero endpoint is woken by the
-    /// request, so the first call can be slow.
+    /// not available on RunPod. A scaled-to-zero endpoint is refused: the
+    /// request would start a worker (billed GPU time); `--wake` allows it.
+    /// `--watch` keeps the endpoint warm, and billed, while it runs.
     Metrics {
         /// The deployment name.
         deployment: String,
@@ -280,6 +281,9 @@ enum RunpodCommand {
         /// Seconds between snapshots under `--watch`.
         #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..))]
         interval: u64,
+        /// Scrape even when no worker is up, starting one (billed).
+        #[arg(long)]
+        wake: bool,
     },
     /// Delete the endpoint and its secrets, as `destroy --target` does: the
     /// deployment leaves state only once the stop is confirmed.
@@ -493,13 +497,25 @@ fn dispatch_runpod(
             commands::runpod::status(project, deployment, output, out, &env)
         }
         RunpodCommand::Logs { deployment, tail } => {
-            commands::runpod::logs(project, deployment, *tail, out, &env)
+            commands::runpod::logs(project, deployment, *tail, output, out, &env)
         }
         RunpodCommand::Metrics {
             deployment,
             watch,
             interval,
-        } => commands::runpod::metrics(project, deployment, *watch, *interval, output, out, &env),
+            wake,
+        } => commands::runpod::metrics(
+            project,
+            deployment,
+            commands::runpod::MetricsMode {
+                watch: *watch,
+                interval_secs: *interval,
+                wake: *wake,
+            },
+            output,
+            out,
+            &env,
+        ),
         RunpodCommand::Stop {
             deployment,
             lock_timeout,

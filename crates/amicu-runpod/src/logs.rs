@@ -85,9 +85,10 @@ pub fn parse_sse(body: &[u8]) -> Vec<LogLine> {
     out
 }
 
-/// Every worker's lines as `[<worker>] <line>`, ordered by timestamp (stable,
-/// so a worker's own order is kept); a worker whose logs failed contributes
-/// one `[<worker>] logs unavailable: ...` line.
+/// Every worker's lines as `[<worker>] <line>`, timed lines first in
+/// timestamp order, then untimed ones (stable, so a worker's own order is
+/// kept); a worker whose logs failed contributes one
+/// `[<worker>] logs unavailable: ...` line.
 #[must_use]
 pub fn merge(workers: &[WorkerLogs]) -> Vec<String> {
     let mut lines: Vec<(Option<&str>, String)> = Vec::new();
@@ -106,10 +107,7 @@ pub fn merge(workers: &[WorkerLogs]) -> Vec<String> {
             Err(e) => lines.push((None, format!("[{}] logs unavailable: {e}", w.worker_id))),
         }
     }
-    lines.sort_by(|a, b| match (a.0, b.0) {
-        (Some(x), Some(y)) => x.cmp(y),
-        _ => std::cmp::Ordering::Equal,
-    });
+    lines.sort_by(|a, b| a.0.is_none().cmp(&b.0.is_none()).then(a.0.cmp(&b.0)));
     lines.into_iter().map(|(_, l)| l).collect()
 }
 
@@ -139,7 +137,8 @@ impl RunPodClient {
     }
 
     /// The logs of every worker endpoint `endpoint_id` has, one entry per
-    /// worker (empty when it is scaled to zero). A worker whose stream fails
+    /// worker (empty when it is scaled to zero), read concurrently so the
+    /// whole call stays within `limits.total`. A worker whose stream fails
     /// keeps its error rather than failing the rest.
     ///
     /// # Errors
@@ -151,19 +150,18 @@ impl RunPodClient {
         limits: StreamLimits,
     ) -> Result<Vec<WorkerLogs>, RunPodError> {
         let workers = self.list_workers(endpoint_id).await?.workers;
-        let mut out = Vec::with_capacity(workers.len());
-        for w in workers {
+        let reads = workers.into_iter().map(|w| async move {
             let lines = self
                 .worker_logs(endpoint_id, &w.id, tail, limits)
                 .await
                 .map_err(|e| e.to_string());
-            out.push(WorkerLogs {
+            WorkerLogs {
                 worker_id: w.id,
                 status: w.status,
                 lines,
-            });
-        }
-        Ok(out)
+            }
+        });
+        Ok(futures_util::future::join_all(reads).await)
     }
 }
 
@@ -220,6 +218,28 @@ mod tests {
                 "[w3] logs unavailable: RunPod resource not found: worker `w3`"
             ]
         );
+    }
+
+    #[test]
+    fn merge_is_a_total_order_over_timed_and_untimed_lines() {
+        let lines: Vec<LogLine> = (0..40)
+            .map(|i| LogLine {
+                ts: (i % 3 != 0).then(|| format!("2026-01-01T00:00:{:02}Z", 59 - i)),
+                source: None,
+                line: format!("l{i}"),
+            })
+            .collect();
+        let merged = merge(&[WorkerLogs {
+            worker_id: "w".into(),
+            status: "RUNNING".into(),
+            lines: Ok(lines),
+        }]);
+        assert_eq!(merged.len(), 40);
+        let first_untimed = merged.iter().position(|l| l == "[w] l0").unwrap();
+        assert_eq!(first_untimed, 26, "{merged:?}");
+        assert_eq!(merged[0], "[w] l38");
+        assert_eq!(merged[25], "[w] l1");
+        assert_eq!(merged[27], "[w] l3");
     }
 
     #[derive(Default)]

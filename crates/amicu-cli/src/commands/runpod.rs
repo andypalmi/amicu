@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use amicu_core::secret::SecretValue;
 use amicu_runpod::logs::{DEFAULT_TAIL, NO_WORKERS, WORKER_LOG_LIMITS, merge};
-use amicu_runpod::{Endpoint, RunPodError, WorkersList, endpoint_url};
+use amicu_runpod::{Endpoint, RunPodError, RunPodSupervisor, WorkersList, endpoint_url};
+use amicu_runtime::{EndpointExposure, GatewayAuth, RuntimeHandle};
 use amicu_telemetry::scrape::MetricsSnapshot;
 use serde_json::json;
 
@@ -179,6 +180,7 @@ pub(crate) fn logs(
     project: &Project,
     deployment: &str,
     tail: Option<u32>,
+    output: OutputFormat,
     out: &mut dyn Write,
     env: &Env<'_>,
 ) -> Result<u8, CliError> {
@@ -195,6 +197,22 @@ pub(crate) fn logs(
             Err(e) => Err(runpod_error("could not read the RunPod worker logs", &e)),
         }
     })?;
+    if output == OutputFormat::Json {
+        let doc = json!({
+            "deployment": deployment,
+            "endpoint_id": id,
+            "workers": workers.iter().map(|w| json!({
+                "id": w.worker_id,
+                "status": w.status,
+                "error": w.lines.as_ref().err(),
+                "lines": w.lines.as_ref().map_or(&[][..], Vec::as_slice).iter().map(|l| json!({
+                    "ts": l.ts, "source": l.source, "line": l.line,
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+        });
+        writeln!(out, "{doc}").map_err(io_err)?;
+        return Ok(0);
+    }
     if workers.is_empty() {
         writeln!(out, "{NO_WORKERS}").map_err(io_err)?;
         return Ok(0);
@@ -237,29 +255,50 @@ fn gateway_key(
         })
 }
 
+/// How `metrics` scrapes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MetricsMode {
+    /// Keep scraping every `interval_secs`.
+    pub watch: bool,
+    pub interval_secs: u64,
+    /// Scrape even when no worker is up (starts a billed one).
+    pub wake: bool,
+}
+
 /// A runtime-metrics snapshot (or one every `interval_secs` with `watch`)
-/// scraped through the gateway; the load balancer picks the worker.
-#[allow(clippy::too_many_arguments)]
+/// scraped through the gateway; the load balancer picks the worker. A
+/// scaled-to-zero endpoint is refused unless `wake`.
 pub(crate) fn metrics(
     project: &Project,
     deployment: &str,
-    watch: bool,
-    interval_secs: u64,
+    mode: MetricsMode,
     output: OutputFormat,
     out: &mut dyn Write,
     env: &Env<'_>,
 ) -> Result<u8, CliError> {
+    let MetricsMode {
+        watch,
+        interval_secs,
+        wake,
+    } = mode;
     let (_, id) = recorded_endpoint(project, deployment)?;
     let key = gateway_key(project, deployment, env)?;
-    let key = key
-        .expose_secret_str()
-        .map_err(|_| CliError::Message("the endpoint api_key is not valid UTF-8".to_owned()))?;
-    let probe = env.runpod.probe();
+    let supervisor = RunPodSupervisor::new(env.runpod.client()?, "", deployment)
+        .with_probe_transport(env.runpod.probe())
+        .with_gateway_key(key);
+    let handle = RuntimeHandle {
+        id: id.clone(),
+        deployment: deployment.into(),
+        endpoint: endpoint_url(&id),
+        exposure: EndpointExposure::Public {
+            gateway: GatewayAuth::RunPodBearer,
+        },
+    };
     let rt = build_runtime()?;
     let mut previous: Option<(MetricsSnapshot, Instant)> = None;
     loop {
         let snapshot = rt
-            .block_on(amicu_runpod::metrics::scrape(&*probe, &id, key))
+            .block_on(supervisor.scrape_metrics(&handle, wake || previous.is_some()))
             .map_err(|e| CliError::Message(e.to_string()))?;
         let now = Instant::now();
         let snapshot = match &previous {

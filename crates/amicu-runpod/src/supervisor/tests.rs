@@ -1126,22 +1126,66 @@ async fn status_reads_the_worker_summary() {
 
 #[tokio::test]
 async fn metrics_scrape_through_the_gateway_with_the_deployment_key() {
-    let (sup, mock) = supervisor(Mock::default().ok(
-        HttpMethod::Get,
-        "https://ep1.api.runpod.ai/metrics",
-        200,
-        "llamacpp:predicted_tokens_seconds 12.5\n",
-    ));
+    let (sup, mock) = supervisor(
+        Mock::default()
+            .ok(
+                HttpMethod::Get,
+                "https://ep1.api.runpod.ai/metrics",
+                200,
+                "llamacpp:predicted_tokens_seconds 12.5\n",
+            )
+            .ok(
+                HttpMethod::Get,
+                "/serverless/ep1/workers",
+                200,
+                r#"{"workers":[],"summary":{"idle":1}}"#,
+            ),
+    );
     let err = sup.metrics(&handle()).await.unwrap_err().to_string();
     assert!(err.contains("api_key"), "{err}");
-    assert!(mock.requests().is_empty());
+    assert!(!mock.requests().iter().any(|s| s.url.ends_with("/metrics")));
 
     let sup = sup.with_gateway_key(SecretValue::new(KEY.to_owned()));
     let m = sup.metrics(&handle()).await.unwrap();
     assert!((m.tokens_per_second - 12.5).abs() < f64::EPSILON);
-    let seen = mock.requests();
-    assert_eq!(seen.len(), 1);
-    assert_eq!(seen[0].bearer.as_deref(), Some(KEY));
+    let scrapes: Vec<_> = mock
+        .requests()
+        .into_iter()
+        .filter(|s| s.url.ends_with("/metrics"))
+        .collect();
+    assert_eq!(scrapes.len(), 1);
+    assert_eq!(scrapes[0].bearer.as_deref(), Some(KEY));
+}
+
+#[tokio::test]
+async fn metrics_never_wake_a_scaled_to_zero_endpoint_unless_asked() {
+    let (sup, mock) = supervisor(
+        Mock::default()
+            .ok(
+                HttpMethod::Get,
+                "https://ep1.api.runpod.ai/metrics",
+                200,
+                "vllm:num_requests_running 0\n",
+            )
+            .ok(
+                HttpMethod::Get,
+                "/serverless/ep1/workers",
+                200,
+                r#"{"workers":[],"summary":{"initializing":1}}"#,
+            ),
+    );
+    let sup = sup.with_gateway_key(SecretValue::new(KEY.to_owned()));
+    let err = sup
+        .scrape_metrics(&handle(), false)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("--wake"), "{err}");
+    assert!(sup.metrics(&handle()).await.is_err());
+    assert!(!mock.requests().iter().any(|s| s.url.ends_with("/metrics")));
+
+    sup.scrape_metrics(&handle(), true).await.unwrap();
+    assert_eq!(mock.count(HttpMethod::Get, "/metrics"), 1);
 }
 
 #[tokio::test]

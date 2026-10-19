@@ -460,6 +460,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bounded_read_stops_at_the_total_deadline_of_a_stream_that_never_idles() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 2048];
+            let _ = sock.read(&mut buf).await;
+            sock.write_all(STREAM_HEAD.as_bytes()).await.unwrap();
+            loop {
+                if sock.write_all(b"x").await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        });
+        let limits = StreamLimits {
+            total: std::time::Duration::from_millis(400),
+            idle: std::time::Duration::from_secs(5),
+            max_bytes: 1 << 20,
+        };
+        let started = std::time::Instant::now();
+        let resp = ReqwestTransport::new()
+            .execute_bounded(HttpRequest::new(HttpMethod::Get, url), limits)
+            .await
+            .unwrap();
+        assert_eq!(resp.status, 200);
+        assert_ne!(resp.body.len(), 0);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    #[tokio::test]
     async fn bounded_read_cuts_the_body_at_max_bytes() {
         let url = serve_open_stream(STREAM_HEAD, "0123456789").await;
         let limits = StreamLimits {

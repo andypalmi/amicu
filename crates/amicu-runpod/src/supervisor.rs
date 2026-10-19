@@ -945,6 +945,61 @@ impl RunPodSupervisor {
     }
 }
 
+impl RunPodSupervisor {
+    fn gateway_key_str(&self) -> Result<&str, LlamaCppError> {
+        self.gateway_key
+            .as_ref()
+            .ok_or_else(|| {
+                LlamaCppError::Supervisor(
+                    "RunPod metrics need the deployment's api_key as the gateway key".to_owned(),
+                )
+            })?
+            .expose_secret_str()
+            .map_err(|_| {
+                LlamaCppError::Supervisor("the endpoint API key is not valid UTF-8".to_owned())
+            })
+    }
+
+    /// Refuses unless a worker is running or idle: any request through the
+    /// gateway would otherwise start (and bill) one. `wake` skips the check.
+    async fn ensure_awake(&self, id: &str, wake: bool) -> Result<(), LlamaCppError> {
+        if wake {
+            return Ok(());
+        }
+        let s = self
+            .client
+            .list_workers(id)
+            .await
+            .map_err(|e| runpod_err(&e))?
+            .summary;
+        if s.running.saturating_add(s.idle) > 0 {
+            return Ok(());
+        }
+        Err(LlamaCppError::Supervisor(format!(
+            "no RunPod worker of endpoint {id} is up, and scraping /metrics would start one \
+             (billed GPU time); pass --wake to start one anyway"
+        )))
+    }
+
+    /// One `/metrics` scrape through the gateway with the
+    /// [gateway key](Self::with_gateway_key). Without `wake`, a scaled-to-zero
+    /// endpoint is refused rather than woken.
+    ///
+    /// # Errors
+    /// No worker up (without `wake`), no gateway key, or a failed scrape.
+    pub async fn scrape_metrics(
+        &self,
+        handle: &RuntimeHandle,
+        wake: bool,
+    ) -> Result<amicu_telemetry::scrape::MetricsSnapshot, LlamaCppError> {
+        self.ensure_awake(&handle.id, wake).await?;
+        let key = self.gateway_key_str()?;
+        crate::metrics::scrape(&*self.probe, &handle.id, key)
+            .await
+            .map_err(|e| LlamaCppError::Supervisor(e.to_string()))
+    }
+}
+
 /// The PATCH that makes an existing endpoint match `create`.
 fn update_from(create: &CreateEndpoint) -> UpdateEndpoint {
     UpdateEndpoint {
@@ -1103,21 +1158,12 @@ impl ProcessSupervisor for RunPodSupervisor {
         })
     }
 
-    /// Scrapes `/metrics` through the gateway (one worker the load balancer
-    /// picks); needs [`with_gateway_key`](RunPodSupervisor::with_gateway_key).
+    /// Scrapes `/metrics` through the gateway when a worker is up (never
+    /// waking a scaled-to-zero endpoint); needs
+    /// [`with_gateway_key`](RunPodSupervisor::with_gateway_key).
     async fn metrics(&self, handle: &RuntimeHandle) -> Result<RuntimeMetrics, LlamaCppError> {
-        let key = self
-            .gateway_key
-            .as_ref()
-            .ok_or_else(|| {
-                LlamaCppError::Supervisor(
-                    "RunPod metrics need the deployment's api_key as the gateway key".to_owned(),
-                )
-            })?
-            .expose_secret_str()
-            .map_err(|_| {
-                LlamaCppError::Supervisor("the endpoint API key is not valid UTF-8".to_owned())
-            })?;
+        self.ensure_awake(&handle.id, false).await?;
+        let key = self.gateway_key_str()?;
         crate::metrics::scrape_with_rate(&*self.probe, &handle.id, key, Duration::from_secs(1))
             .await
             .map(|m| m.to_runtime_metrics())
