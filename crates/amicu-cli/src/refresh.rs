@@ -139,7 +139,7 @@ fn recorded_app_id(state: &LocalState, id: &str) -> Option<String> {
     state
         .stops
         .iter()
-        .find(|r| r.deployment.as_str() == id && r.app_id.is_some())
+        .find(|r| r.deployment.as_str() == id && r.backend.is_modal() && r.app_id.is_some())
         .and_then(|r| r.app_id.clone())
         .or_else(|| {
             state
@@ -263,7 +263,7 @@ fn refresh_host(state: &mut LocalState, lookup: &dyn AppLookup) -> Refresh {
     let mut out = Refresh::default();
     let mut unchecked = Vec::new();
     for record in crate::commands::apply::effective_stops(Some(state)) {
-        if record.backend.is_modal()
+        if !record.backend.is_host()
             || !state
                 .graph
                 .deployments

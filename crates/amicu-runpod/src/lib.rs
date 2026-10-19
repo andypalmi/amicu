@@ -1,15 +1,6 @@
-//! RunPod serverless backend building blocks: a typed client over the RunPod
-//! v2 REST API, amicu-GPU to RunPod-GPU-pool mapping, and residency-aware
-//! data-center selection.
-//!
-//! [`RunPodSupervisor`] runs a deployment as a load-balancing endpoint behind
-//! the shared `ProcessSupervisor` contract. Nothing here is wired into the
-//! CLI yet. The client talks through the
-//! [`amicu_providers::HttpTransport`] seam, so everything is unit-tested with a
-//! mock and no network or credentials.
-//!
-//! Credentials: the API key and secret values are never logged or
-//! `Debug`-printed by this crate (see [`ApiKey`]).
+//! RunPod Serverless backend: a typed v2 REST client, GPU-pool mapping,
+//! data-center selection, and [`RunPodSupervisor`], which runs a deployment as
+//! a load-balancing endpoint behind the shared `ProcessSupervisor` contract.
 
 pub mod client;
 pub mod error;
