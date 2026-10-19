@@ -125,7 +125,7 @@ pub(crate) fn run_with_host(
         write_json(out, &plan)?;
     } else {
         let switches = provider_switches(&result, &graph, &stops, project_id.as_deref());
-        print_human_with(&result, &graph, &switches, out)?;
+        print_human_with(&result, &graph, &switches, project_id.as_deref(), out)?;
     }
     Ok(0)
 }
@@ -297,15 +297,16 @@ pub(crate) fn print_human(
     graph: &Graph,
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
-    print_human_with(result, graph, &ProviderSwitches::new(), out)
+    print_human_with(result, graph, &ProviderSwitches::new(), None, out)
 }
 
 /// [`print_human`], plus a `destroy old` step before each provider-switch
-/// create.
+/// create. `project_id` names RunPod endpoints and pods once state has one.
 pub(crate) fn print_human_with(
     result: &PlanResult,
     graph: &Graph,
     switches: &ProviderSwitches,
+    project_id: Option<&str>,
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
     let io = |r: std::io::Result<()>| r.map_err(|e| CliError::io("write failed", e));
@@ -355,14 +356,8 @@ pub(crate) fn print_human_with(
                     None => io(writeln!(out, "      target:   {provider}"))?,
                 }
             }
-            if item.launch.is_some() {
-                if let Some(billing) = runpod_billing(graph, &item.deployment) {
-                    io(writeln!(out, "      billing:  {billing}"))?;
-                }
-                if let Some(workers) = runpod_workers(graph, &item.deployment) {
-                    io(writeln!(out, "      workers:  {workers}"))?;
-                }
-            }
+            let remote_launch = write_runpod(out, graph, item, project_id)
+                .map_err(|e| CliError::io("write failed", e))?;
             if let Some(artifact) = &item.action.artifact {
                 io(writeln!(out, "      artifact: {}", artifact.name))?;
             }
@@ -395,7 +390,9 @@ pub(crate) fn print_human_with(
                 // On Modal the supervisor rewrites the argv before launch
                 // (`-hf`/`-hff`, `--no-mmproj`, `--host 0.0.0.0`); show what
                 // is really sent, via the supervisor's own transformation.
-                let cmd = if item.action.provider.as_deref() == Some("modal") {
+                let cmd = if let Some(remote) = remote_launch {
+                    remote
+                } else if item.action.provider.as_deref() == Some("modal") {
                     modal_launch_text(graph, item).unwrap_or_else(|| cmd.clone())
                 } else {
                     cmd.clone()
@@ -467,6 +464,137 @@ fn runpod_workers(graph: &Graph, deployment: &DeploymentId) -> Option<String> {
         format!(" \u{b7} scale down after {} idle", duration_text(s))
     });
     Some(format!("min {} \u{b7} max {}{idle}", w.min, w.max))
+}
+
+/// The RunPod lines of `item` (billing, workers, what the create body holds);
+/// returns the remote launch line.
+fn write_runpod(
+    out: &mut dyn Write,
+    graph: &Graph,
+    item: &PlanItem,
+    project_id: Option<&str>,
+) -> std::io::Result<Option<String>> {
+    if item.launch.is_none() {
+        return Ok(None);
+    }
+    if let Some(billing) = runpod_billing(graph, &item.deployment) {
+        writeln!(out, "      billing:  {billing}")?;
+    }
+    if let Some(workers) = runpod_workers(graph, &item.deployment) {
+        writeln!(out, "      workers:  {workers}")?;
+    }
+    let Some(remote) = runpod_remote(graph, item, project_id) else {
+        return Ok(None);
+    };
+    for (key, value) in &remote.details {
+        writeln!(out, "      {:<9} {value}", format!("{key}:"))?;
+    }
+    Ok(Some(remote.launch))
+}
+
+/// What a RunPod deployment is created with, rendered from the create body
+/// `apply` sends.
+struct RunpodRemote {
+    details: Vec<(&'static str, String)>,
+    launch: String,
+}
+
+/// The parts of a create body the plan shows, shared by endpoints and pods.
+struct RemoteBody {
+    details: Vec<(&'static str, String)>,
+    image: String,
+    argv: Vec<String>,
+    env: BTreeMap<String, String>,
+    data_centers: Vec<String>,
+    disk_gb: Option<u32>,
+}
+
+fn runpod_remote(graph: &Graph, item: &PlanItem, project_id: Option<&str>) -> Option<RunpodRemote> {
+    let hw = runpod_hardware(graph, &item.deployment)?;
+    let launch = item.launch.as_ref()?;
+    let catalog = crate::catalog::build_catalog(graph);
+    let client = amicu_runpod::RunPodClient::new(amicu_runpod::ApiKey::new(String::new()));
+    let (id, pid) = (&item.deployment, project_id.unwrap_or_default());
+    let named = |name: String| match project_id {
+        Some(_) => name,
+        None => "named on first apply".to_owned(),
+    };
+    let body = match hw.runpod_mode() {
+        RunpodMode::Serverless => {
+            crate::commands::apply::configured_endpoint(client, graph, &catalog, id, pid)
+                .map_err(|e| e.to_string())
+                .and_then(|s| s.planned_endpoint(launch).map_err(|e| e.to_string()))
+                .map(|b| {
+                    let excluding = if b.gpu.excluded_types.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (excluding {})", b.gpu.excluded_types.join(", "))
+                    };
+                    let gpu = format!("{} x {}{excluding}", b.gpu.count, b.gpu.pools.join(", "));
+                    RemoteBody {
+                        details: vec![("endpoint", named(b.name)), ("gpu", gpu)],
+                        image: b.image,
+                        argv: b.entrypoint.into_iter().chain(b.cmd).collect(),
+                        env: b.env,
+                        data_centers: b.data_center_ids,
+                        disk_gb: b.disk_gb,
+                    }
+                })
+        }
+        RunpodMode::Pod => crate::commands::apply::configured_pod(client, graph, &catalog, id, pid)
+            .map_err(|e| e.to_string())
+            .and_then(|s| s.planned_pod(launch).map_err(|e| e.to_string()))
+            .map(|b| RemoteBody {
+                details: vec![
+                    ("pod", named(b.name)),
+                    ("gpu", format!("{} x {}", b.gpu_count, b.gpu_type_id)),
+                    ("cloud", b.cloud.wire().to_ascii_lowercase()),
+                ],
+                image: b.image,
+                argv: b.entrypoint.into_iter().chain(b.cmd).collect(),
+                env: b.env,
+                data_centers: b.data_center_ids,
+                disk_gb: b.disk_gb,
+            }),
+    };
+    let body = match body {
+        Ok(body) => body,
+        Err(e) => {
+            return Some(RunpodRemote {
+                details: Vec::new(),
+                launch: format!("cannot be derived: {e}"),
+            });
+        }
+    };
+    let mut details = body.details;
+    details.insert(1, ("image", body.image));
+    details.push((
+        "location",
+        if body.data_centers.is_empty() {
+            "any data center".to_owned()
+        } else {
+            body.data_centers.join(", ")
+        },
+    ));
+    if let Some(gb) = body.disk_gb {
+        details.push(("disk", format!("{gb} GB")));
+    }
+    let secrets: Vec<&str> = body
+        .env
+        .iter()
+        .filter(|(_, v)| v.contains("RUNPOD_SECRET_"))
+        .map(|(k, _)| k.as_str())
+        .collect();
+    if !secrets.is_empty() {
+        details.push((
+            "secrets",
+            format!("{} (as RunPod secrets)", secrets.join(", ")),
+        ));
+    }
+    Some(RunpodRemote {
+        details,
+        launch: amicu_engine::planner::redacted_argv_text(&body.argv),
+    })
 }
 
 fn duration_text(secs: u32) -> String {
@@ -766,6 +894,113 @@ mod tests {
         assert!(!line.contains(" -m "), "{line}");
         assert!(line.contains("--host 0.0.0.0"), "{line}");
         assert!(line.contains("--no-mmproj"), "{line}");
+    }
+
+    fn runpod_graph(runtime: Runtime, mode: RunpodMode) -> Graph {
+        let mut g = graph("runpod", runtime);
+        g.hardware_profiles[0].region = Some(amicu_core::resource::Region::from_code("eu"));
+        g.hardware_profiles[0].runpod =
+            Some(amicu_core::resource::RunpodSettings { mode, cloud: None });
+        g.deployments[0].api_key = Some(amicu_core::secret::SecretRef::new("RUNPOD_KEY"));
+        g
+    }
+
+    fn line<'t>(text: &'t str, key: &str) -> &'t str {
+        text.lines()
+            .find_map(|l| l.trim().strip_prefix(key).map(str::trim))
+            .unwrap_or_else(|| panic!("no {key} line in:\n{text}"))
+    }
+
+    fn assert_remote_only(text: &str) {
+        assert!(!text.contains("127.0.0.1"), "{text}");
+        assert!(!text.contains("models/"), "{text}");
+        assert!(!text.contains(" -m "), "{text}");
+        assert!(!text.contains("--api-key"), "{text}");
+    }
+
+    #[test]
+    fn runpod_serverless_llamacpp_shows_what_the_endpoint_runs() {
+        let text = human_plan(&runpod_graph(llama(), RunpodMode::Serverless));
+        let launch = line(&text, "launch:");
+        assert!(launch.starts_with("/app/llama-server "), "{launch}");
+        assert!(
+            launch.contains("-hf org/tiny-1B -hff m.q4_k_m.gguf"),
+            "{launch}"
+        );
+        assert!(launch.contains("--host 0.0.0.0"), "{launch}");
+        assert!(launch.contains("--port 8080"), "{launch}");
+        assert!(launch.contains("--no-mmproj"), "{launch}");
+        assert_remote_only(&text);
+        assert_eq!(line(&text, "endpoint:"), "named on first apply");
+        assert_eq!(
+            line(&text, "image:"),
+            amicu_llamacpp::remote::DEFAULT_LLAMACPP_IMAGE
+        );
+        assert!(line(&text, "gpu:").starts_with("1 x "), "{text}");
+        let placement = line(&text, "location:");
+        assert!(placement.contains("EU-"), "{placement}");
+        assert!(!placement.contains("US-"), "{placement}");
+        assert_eq!(line(&text, "disk:"), "100 GB");
+        assert!(line(&text, "workers:").starts_with("min 0"), "{text}");
+        assert_eq!(line(&text, "api_key:"), "****** (secret \"RUNPOD_KEY\")");
+    }
+
+    #[test]
+    fn runpod_endpoint_is_named_once_the_project_has_an_id() {
+        let g = runpod_graph(vllm(), RunpodMode::Serverless);
+        let result = build_plan(&g, None).expect("plan");
+        let mut out = Vec::new();
+        print_human_with(&result, &g, &ProviderSwitches::new(), Some("p1"), &mut out)
+            .expect("print");
+        let text = String::from_utf8(out).expect("utf8");
+        assert_eq!(
+            line(&text, "endpoint:"),
+            amicu_runpod::project_endpoint_name("p1", "dep")
+        );
+        let launch = line(&text, "launch:");
+        assert!(launch.contains("--host 0.0.0.0"), "{launch}");
+        assert_remote_only(&text);
+    }
+
+    #[test]
+    fn runpod_pod_shows_what_the_pod_runs() {
+        let text = human_plan(&runpod_graph(llama(), RunpodMode::Pod));
+        let launch = line(&text, "launch:");
+        assert!(
+            launch.contains("-hf org/tiny-1B -hff m.q4_k_m.gguf"),
+            "{launch}"
+        );
+        assert!(launch.contains("--host 0.0.0.0"), "{launch}");
+        assert_remote_only(&text);
+        assert_eq!(line(&text, "pod:"), "named on first apply");
+        assert_eq!(line(&text, "cloud:"), "secure");
+        assert!(line(&text, "gpu:").starts_with("1 x NVIDIA"), "{text}");
+        assert!(line(&text, "location:").contains("EU-"), "{text}");
+        let secrets = line(&text, "secrets:");
+        assert!(secrets.contains("LLAMA_API_KEY"), "{secrets}");
+        assert!(secrets.ends_with("(as RunPod secrets)"), "{secrets}");
+        assert_eq!(line(&text, "workers:"), "1 pod (always on, never scales)");
+    }
+
+    #[test]
+    fn runpod_plan_never_shows_secret_values() {
+        let mut g = leaky_graph("runpod");
+        g.deployments[0].api_key = Some(amicu_core::secret::SecretRef::new("RUNPOD_KEY"));
+        let refused = human_plan(&g);
+        assert_no_secrets(&refused);
+        assert!(
+            line(&refused, "launch:").starts_with("cannot be derived: "),
+            "{refused}"
+        );
+
+        let Runtime::LlamaCpp(s) = &mut g.deployments[0].runtime else {
+            unreachable!()
+        };
+        s.extra_args.retain(|a| !a.starts_with("--hf-token"));
+        let text = human_plan(&g);
+        assert_no_secrets(&text);
+        assert!(!text.contains("amicu-plan-placeholder"), "{text}");
+        assert!(line(&text, "launch:").contains("--threads 4"), "{text}");
     }
 
     fn update_text(prior: &Graph, next: &Graph) -> String {

@@ -42,6 +42,8 @@ use amicu_engine::fingerprint::Fingerprint;
 
 mod pod;
 
+pub(crate) use pod::configured_pod;
+
 /// Recompute the plan, gate on approval, apply, and persist state.
 pub(crate) fn run(
     project: &Project,
@@ -190,7 +192,8 @@ fn run_for(
                 )
             })
             .unwrap_or_default();
-        crate::commands::plan::print_human_with(&result, &graph, &switches, preview)?;
+        let project_id = prior_state.as_ref().and_then(|s| s.project_id.as_deref());
+        crate::commands::plan::print_human_with(&result, &graph, &switches, project_id, preview)?;
         if !auto_approve {
             require_interactive(env, "apply")?;
         }
@@ -1011,28 +1014,49 @@ fn runpod_supervisor(
     env: &Env<'_>,
     prior: Option<&StopRecord>,
 ) -> Result<RunPodSupervisor, CliError> {
-    let (deployment, hardware) = deployment_hardware(graph, catalog, id)?;
-    let mut supervisor =
-        RunPodSupervisor::for_hardware(env.runpod.client()?, project_id, id.as_str(), &hardware)
-            .and_then(|s| s.with_allowed_residencies(&residency_allowlist(graph)))
-            .map_err(supervisor_err)?
-            .with_probe_transport(env.runpod.probe())
-            .with_progress(amicu_runpod::supervisor::PROGRESS_EVERY, env.progress)
-            .with_workspace(account)
-            .with_scaling(deployment.scaling.as_ref())
-            .with_confirmed_account(true);
+    let mut supervisor = configured_endpoint(env.runpod.client()?, graph, catalog, id, project_id)?
+        .with_probe_transport(env.runpod.probe())
+        .with_progress(amicu_runpod::supervisor::PROGRESS_EVERY, env.progress)
+        .with_workspace(account)
+        .with_confirmed_account(true);
     if let Some(prior) = prior {
         if let Some(endpoint) = &prior.app_id {
             supervisor = supervisor.with_recorded_endpoint(endpoint);
         }
         supervisor = supervisor.with_recorded_secrets(prior.secrets.clone());
     }
-    if amicu_runtime::RuntimeKind::of(&deployment.runtime) == amicu_runtime::RuntimeKind::LlamaCpp
-        && let Some(resolved) = catalog.resolve_model(&deployment.model)
-    {
-        supervisor = supervisor.with_gguf_model(&resolved.model);
-    }
     Ok(supervisor)
+}
+
+/// A deployment's endpoint as configured from the graph (GPU, placement,
+/// scaling, GGUF source): what `apply` starts and `plan` shows.
+pub(crate) fn configured_endpoint(
+    client: amicu_runpod::RunPodClient,
+    graph: &Graph,
+    catalog: &dyn Catalog,
+    id: &DeploymentId,
+    project_id: &str,
+) -> Result<RunPodSupervisor, CliError> {
+    let (deployment, hardware) = deployment_hardware(graph, catalog, id)?;
+    let supervisor = RunPodSupervisor::for_hardware(client, project_id, id.as_str(), &hardware)
+        .and_then(|s| s.with_allowed_residencies(&residency_allowlist(graph)))
+        .map_err(supervisor_err)?
+        .with_scaling(deployment.scaling.as_ref());
+    Ok(match gguf_model(catalog, deployment) {
+        Some(model) => supervisor.with_gguf_model(&model),
+        None => supervisor,
+    })
+}
+
+/// The model a remote llama.cpp launch downloads; `None` for vLLM.
+fn gguf_model(
+    catalog: &dyn Catalog,
+    deployment: &Deployment,
+) -> Option<amicu_core::resource::Model> {
+    (amicu_runtime::RuntimeKind::of(&deployment.runtime) == amicu_runtime::RuntimeKind::LlamaCpp)
+        .then(|| catalog.resolve_model(&deployment.model))
+        .flatten()
+        .map(|resolved| resolved.model)
 }
 
 /// Reject unsupported providers, and off-machine endpoints with no API key,
@@ -1920,8 +1944,8 @@ async fn runpod_preflight(
             {
                 let _ = writeln!(
                     std::io::stderr(),
-                    "note: vLLM's --api-key leaves /invocations, /tokenize, /detokenize, \
-                     /metrics and /docs open on the public pod URL (a vLLM issue, \
+                    "note: vLLM's --api-key leaves /invocations, /generative_scoring, /tokenize, \
+                     /detokenize, /metrics and /docs open on the public pod URL (a vLLM issue, \
                      https://github.com/vllm-project/vllm/issues/58144); serverless mode \
                      puts RunPod's gateway key in front of every route"
                 );

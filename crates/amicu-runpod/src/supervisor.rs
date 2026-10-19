@@ -667,6 +667,19 @@ impl RunPodSupervisor {
         container_argv(plan, self.gguf.as_ref())
     }
 
+    /// The create body `start` would send for `plan`, with placeholder
+    /// secret values and before the live GPU catalog refines
+    /// `excludedTypes`. For `amicu plan`.
+    ///
+    /// # Errors
+    /// Whatever `start` refuses before its first call.
+    pub fn planned_endpoint(&self, plan: &LaunchPlan) -> Result<CreateEndpoint, LlamaCppError> {
+        let image = runtime_image(RuntimeKind::of(&plan.settings));
+        let hf_token = planned_hf_token();
+        self.prepare(plan, &placeholder_secrets(plan), &image, hf_token)
+            .map(|p| p.endpoint)
+    }
+
     /// Builds the endpoint request and the secrets for `plan`. Pure: the
     /// image and the `HF_TOKEN` fallback are passed in rather than read from
     /// the environment.
@@ -1239,6 +1252,27 @@ pub(crate) fn container_argv(
         _ => argv.extend(["--port".to_owned(), port]),
     }
     Ok(argv)
+}
+
+const PLACEHOLDER: &str = "amicu-plan-placeholder";
+
+/// Placeholder values for every secret `resolve_launch_secrets` would hand
+/// `start`, the endpoint key always included.
+pub(crate) fn placeholder_secrets(plan: &LaunchPlan) -> Vec<ResolvedSecret> {
+    plan.secret_refs
+        .iter()
+        .map(|r| r.name.as_str())
+        .chain([plan.runtime.api_key_env_var()])
+        .map(|name| ResolvedSecret {
+            name: name.to_owned(),
+            value: SecretValue::new(PLACEHOLDER),
+        })
+        .collect()
+}
+
+/// The operator's `HF_TOKEN` fallback as `start` would see it, value replaced.
+pub(crate) fn planned_hf_token() -> Option<&'static str> {
+    std::env::var_os(HF_TOKEN_ENV_VAR).map(|_| PLACEHOLDER)
 }
 
 /// The host CUDA floor for `image`: the stock image's requirement, `None`
