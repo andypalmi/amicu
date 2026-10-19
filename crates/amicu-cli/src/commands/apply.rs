@@ -42,6 +42,8 @@ use amicu_engine::fingerprint::Fingerprint;
 
 mod pod;
 
+pub(crate) use pod::configured_pod;
+
 /// Recompute the plan, gate on approval, apply, and persist state.
 pub(crate) fn run(
     project: &Project,
@@ -190,7 +192,8 @@ fn run_for(
                 )
             })
             .unwrap_or_default();
-        crate::commands::plan::print_human_with(&result, &graph, &switches, preview)?;
+        let project_id = prior_state.as_ref().and_then(|s| s.project_id.as_deref());
+        crate::commands::plan::print_human_with(&result, &graph, &switches, project_id, preview)?;
         if !auto_approve {
             require_interactive(env, "apply")?;
         }
@@ -1041,25 +1044,11 @@ fn runpod_supervisor(
     prior: Option<&StopRecord>,
     volume: Option<&amicu_runpod::NetworkVolume>,
 ) -> Result<RunPodSupervisor, CliError> {
-    let (deployment, hardware) = deployment_hardware(graph, catalog, id)?;
-    let flashboot = hardware
-        .runpod
-        .as_ref()
-        .and_then(|r| r.flashboot)
-        .unwrap_or(false);
     let mut supervisor =
-        RunPodSupervisor::for_hardware(env.runpod.client()?, project_id, id.as_str(), &hardware)
-            .and_then(|s| s.with_allowed_residencies(&residency_allowlist(graph)))
-            .and_then(|s| match volume {
-                Some(v) => s.with_network_volume(v),
-                None => Ok(s),
-            })
-            .map_err(supervisor_err)?
-            .with_flashboot(flashboot)
+        configured_endpoint(env.runpod.client()?, graph, catalog, id, project_id, volume)?
             .with_probe_transport(env.runpod.probe())
             .with_progress(amicu_runpod::supervisor::PROGRESS_EVERY, env.progress)
             .with_workspace(account)
-            .with_scaling(deployment.scaling.as_ref())
             .with_confirmed_account(true);
     if let Some(prior) = prior {
         if let Some(endpoint) = &prior.app_id {
@@ -1067,12 +1056,48 @@ fn runpod_supervisor(
         }
         supervisor = supervisor.with_recorded_secrets(prior.secrets.clone());
     }
-    if amicu_runtime::RuntimeKind::of(&deployment.runtime) == amicu_runtime::RuntimeKind::LlamaCpp
-        && let Some(resolved) = catalog.resolve_model(&deployment.model)
-    {
-        supervisor = supervisor.with_gguf_model(&resolved.model);
-    }
     Ok(supervisor)
+}
+
+/// A deployment's endpoint as configured from the graph (GPU, placement,
+/// scaling, GGUF source): what `apply` starts and `plan` shows.
+/// `volume` is the network volume as read from RunPod (apply); without it
+/// (plan) the configured volume is mounted but placement is not narrowed.
+pub(crate) fn configured_endpoint(
+    client: amicu_runpod::RunPodClient,
+    graph: &Graph,
+    catalog: &dyn Catalog,
+    id: &DeploymentId,
+    project_id: &str,
+    volume: Option<&amicu_runpod::NetworkVolume>,
+) -> Result<RunPodSupervisor, CliError> {
+    let (deployment, hardware) = deployment_hardware(graph, catalog, id)?;
+    let settings = hardware.runpod.clone().unwrap_or_default();
+    let supervisor = RunPodSupervisor::for_hardware(client, project_id, id.as_str(), &hardware)
+        .and_then(|s| s.with_allowed_residencies(&residency_allowlist(graph)))
+        .and_then(|s| match (volume, &settings.network_volume) {
+            (Some(v), _) => s.with_network_volume(v),
+            (None, Some(v)) => Ok(s.with_network_volume_id(v)),
+            (None, None) => Ok(s),
+        })
+        .map_err(supervisor_err)?
+        .with_flashboot(settings.flashboot.unwrap_or(false))
+        .with_scaling(deployment.scaling.as_ref());
+    Ok(match gguf_model(catalog, deployment) {
+        Some(model) => supervisor.with_gguf_model(&model),
+        None => supervisor,
+    })
+}
+
+/// The model a remote llama.cpp launch downloads; `None` for vLLM.
+fn gguf_model(
+    catalog: &dyn Catalog,
+    deployment: &Deployment,
+) -> Option<amicu_core::resource::Model> {
+    (amicu_runtime::RuntimeKind::of(&deployment.runtime) == amicu_runtime::RuntimeKind::LlamaCpp)
+        .then(|| catalog.resolve_model(&deployment.model))
+        .flatten()
+        .map(|resolved| resolved.model)
 }
 
 /// Reject unsupported providers, and off-machine endpoints with no API key,
@@ -1962,8 +1987,8 @@ async fn runpod_preflight(
             {
                 let _ = writeln!(
                     std::io::stderr(),
-                    "note: vLLM's --api-key leaves /invocations, /tokenize, /detokenize, \
-                     /metrics and /docs open on the public pod URL (a vLLM issue, \
+                    "note: vLLM's --api-key leaves /invocations, /generative_scoring, /tokenize, \
+                     /detokenize, /metrics and /docs open on the public pod URL (a vLLM issue, \
                      https://github.com/vllm-project/vllm/issues/58144); serverless mode \
                      puts RunPod's gateway key in front of every route"
                 );

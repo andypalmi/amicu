@@ -2881,10 +2881,19 @@ fn plan_shows_the_volume_and_flashboot() {
     let state = state_with(amicu_core::graph::Graph::new());
     let (text, _) = plan_text_for(&volume_config("vol1"), &state);
     assert!(
-        text.contains("      volume:   vol1 (model cache)\n"),
+        text.contains(
+            "      volume:   vol1 at /runpod-volume in its data center \u{b7} \
+             HF_HOME=/runpod-volume/huggingface LLAMA_CACHE=/runpod-volume/huggingface/hub\n"
+        ),
         "{text}"
     );
     assert!(text.contains("      flashboot: on\n"), "{text}");
+    let (text, _) = plan_text_for(&pod_config("    network_volume = \"vol1\"\n"), &state);
+    assert!(
+        text.contains("      volume:   vol1 at /runpod-volume"),
+        "{text}"
+    );
+    assert!(!text.contains("flashboot"), "{text}");
     let (text, _) = plan_text_for(&runpod_config(), &state);
     assert!(!text.contains("volume:"), "{text}");
     assert!(!text.contains("flashboot"), "{text}");

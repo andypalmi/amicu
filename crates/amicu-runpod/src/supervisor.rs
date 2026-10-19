@@ -81,7 +81,7 @@ pub const HEALTH_PATH: &str = "/health";
 /// llama-server answers `503` while it loads the model, and the load
 /// balancer treats anything but `200`/`204` as unhealthy, so a slow model
 /// load may show as unhealthy workers rather than initializing ones.
-// TODO(#306): check whether RunPod recycles a llama.cpp worker that answers
+// TODO(#334): check whether RunPod recycles a llama.cpp worker that answers
 // 503 during a long model load.
 pub const LB_PING_PATH: &str = "/ping";
 
@@ -512,6 +512,15 @@ impl RunPodSupervisor {
         Ok(self)
     }
 
+    /// Mounts volume `id` as the Hugging Face cache without reading it, so
+    /// placement is not narrowed to its data center (for display; `start`
+    /// should get [`with_network_volume`](Self::with_network_volume)).
+    #[must_use]
+    pub fn with_network_volume_id(mut self, id: &str) -> Self {
+        self.network_volume = Some(id.to_owned());
+        self
+    }
+
     /// Mounts `volume` on every worker as the Hugging Face cache and places
     /// the endpoint in the volume's data center. Call after
     /// [`with_allowed_residencies`](Self::with_allowed_residencies).
@@ -713,6 +722,19 @@ impl RunPodSupervisor {
     /// See [`amicu_llamacpp::remote::launch_argv`].
     pub fn launch_argv(&self, plan: &LaunchPlan) -> Result<Vec<String>, LlamaCppError> {
         container_argv(plan, self.gguf.as_ref())
+    }
+
+    /// The create body `start` would send for `plan`, with placeholder
+    /// secret values and before the live GPU catalog refines
+    /// `excludedTypes`. For `amicu plan`.
+    ///
+    /// # Errors
+    /// Whatever `start` refuses before its first call.
+    pub fn planned_endpoint(&self, plan: &LaunchPlan) -> Result<CreateEndpoint, LlamaCppError> {
+        let image = runtime_image(RuntimeKind::of(&plan.settings));
+        let hf_token = planned_hf_token();
+        self.prepare(plan, &placeholder_secrets(plan), &image, hf_token)
+            .map(|p| p.endpoint)
     }
 
     /// Builds the endpoint request and the secrets for `plan`. Pure: the
@@ -1294,6 +1316,27 @@ pub(crate) fn container_argv(
         _ => argv.extend(["--port".to_owned(), port]),
     }
     Ok(argv)
+}
+
+const PLACEHOLDER: &str = "amicu-plan-placeholder";
+
+/// Placeholder values for every secret `resolve_launch_secrets` would hand
+/// `start`, the endpoint key always included.
+pub(crate) fn placeholder_secrets(plan: &LaunchPlan) -> Vec<ResolvedSecret> {
+    plan.secret_refs
+        .iter()
+        .map(|r| r.name.as_str())
+        .chain([plan.runtime.api_key_env_var()])
+        .map(|name| ResolvedSecret {
+            name: name.to_owned(),
+            value: SecretValue::new(PLACEHOLDER),
+        })
+        .collect()
+}
+
+/// The operator's `HF_TOKEN` fallback as `start` would see it, value replaced.
+pub(crate) fn planned_hf_token() -> Option<&'static str> {
+    std::env::var_os(HF_TOKEN_ENV_VAR).map(|_| PLACEHOLDER)
 }
 
 /// The host CUDA floor for `image`: the stock image's requirement, `None`
