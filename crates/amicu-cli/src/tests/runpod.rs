@@ -1,5 +1,5 @@
-//! `provider = "runpod"` through apply and destroy, against an in-memory
-//! RunPod v2 API.
+//! `provider = "runpod"` through apply, destroy, refresh and orphans,
+//! against an in-memory RunPod v2 API.
 
 use std::sync::{Arc, Mutex};
 
@@ -70,10 +70,13 @@ fn ep_json(e: &Ep) -> Value {
     if let Some(o) = &e.owner {
         env.insert(amicu_runpod::OWNER_ENV_VAR.to_owned(), json!(o));
     }
-    json!({"id": e.id, "name": e.name, "type": "LOAD_BALANCER", "env": env,
+    let mut ep = json!({"id": e.id, "name": e.name, "type": "LOAD_BALANCER", "env": env,
         "gpu": {"pools": ["AMPERE_24"], "count": 1},
-        "workers": {"min": 0, "max": e.max_workers.unwrap_or(1)},
-        "dataCenterIds": ["EU-RO-1", "EU-SE-1"]})
+        "dataCenterIds": ["EU-RO-1", "EU-SE-1"]});
+    if let Some(max) = e.max_workers {
+        ep["workers"] = json!({"min": 0, "max": max});
+    }
+    ep
 }
 
 fn owner_in(body: Option<&Value>) -> Option<String> {
@@ -219,6 +222,14 @@ impl HttpTransport for World {
                 200,
                 &json!({"gpus": [{"id": "NVIDIA L4", "name": "L4", "pool": "AMPERE_24", "memory": 24}]}),
             ),
+            (HttpMethod::Get, ["account", "secrets"]) => {
+                let all: Vec<Value> = w
+                    .secrets
+                    .iter()
+                    .map(|(id, n)| json!({"id": id, "name": n}))
+                    .collect();
+                reply(200, &json!({"secrets": all}))
+            }
             (HttpMethod::Get, ["account", q]) if q.starts_with("secrets?name=") => {
                 let name = q.trim_start_matches("secrets?name=");
                 let found: Vec<Value> = w
@@ -413,9 +424,13 @@ fn record(id: Option<&str>, account: &str, secrets: &[&str]) -> StopRecord {
 }
 
 fn add_endpoint(rig: &Rig, id: &str, owner: Option<String>) {
+    add_named_endpoint(rig, id, &endpoint_name(), owner);
+}
+
+fn add_named_endpoint(rig: &Rig, id: &str, name: &str, owner: Option<String>) {
     rig.runpod.world.state.lock().unwrap().endpoints.push(Ep {
         id: id.to_owned(),
-        name: endpoint_name(),
+        name: name.to_owned(),
         owner,
         max_workers: None,
     });
@@ -965,12 +980,340 @@ fn a_failed_endpoint_delete_keeps_every_recorded_secret() {
     assert_eq!(stops_for(&project, DEP).len(), 0);
 }
 
+/// A project whose state holds `record` for a confirmed (not pending)
+/// deployment, as after a successful apply.
+fn applied_with(td: &TempDir, record: StopRecord) -> Project {
+    let project = project_with(td, Some(record));
+    let mut state = project.load_state().unwrap().unwrap();
+    state.pending.clear();
+    project.save_state(&state).unwrap();
+    project
+}
+
+fn refresh(project: &Project, rig: &Rig) -> (crate::refresh::Refresh, LocalState) {
+    let mut state = project.load_state().unwrap().unwrap();
+    let refresh = crate::refresh::refresh_state_mode(&mut state, &rig.modal, &rig.runpod, true);
+    (refresh, state)
+}
+
+#[test]
+fn refresh_keeps_a_live_endpoint_without_notes() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r, crate::refresh::Refresh::default());
+    assert_eq!(state.pending.len(), 0);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn refresh_marks_an_endpoint_gone_in_the_recorded_account_pending() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &["amicu-x"]));
+    let rig = rig();
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 1, "{r:?}");
+    assert!(
+        r.notes[0].contains("ep7") && r.notes[0].contains(ACCOUNT),
+        "{r:?}"
+    );
+    assert!(r.notes[0].contains("kept in state as pending"), "{r:?}");
+    assert!(state.pending.iter().any(|d| d.as_str() == DEP));
+    // The stop identity is never dropped.
+    assert_eq!(state.stops, [record(Some("ep7"), ACCOUNT, &["amicu-x"])]);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn refresh_never_calls_an_endpoint_gone_from_another_account() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), "personal:s99", &[]));
+    let rig = rig();
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0, "{r:?}");
+    let warning = r.warning.unwrap();
+    assert!(
+        warning.contains("personal:s99") && warning.contains(ACCOUNT),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("cannot tell whether it is gone"),
+        "{warning}"
+    );
+    assert_eq!(state.pending.len(), 0);
+}
+
+#[test]
+fn refresh_with_an_unknown_account_never_calls_an_endpoint_gone() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    rig.runpod.world.state.lock().unwrap().secrets.clear();
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0, "{r:?}");
+    assert!(r.warning.unwrap().contains("account amicu has not seen"));
+    assert_eq!(state.pending.len(), 0);
+    // Reading the identity never creates the marker.
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn refresh_without_a_management_key_warns_and_keeps_state() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let mut rig = rig();
+    rig.runpod.no_key = true;
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0);
+    assert!(r.warning.unwrap().contains("RUNPOD_API_KEY"));
+    assert_eq!(state.pending.len(), 0);
+    assert_eq!(rig.runpod.world.log().len(), 0);
+}
+
+#[test]
+fn refresh_finds_an_id_less_record_by_name_and_owner_marker() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(None, ACCOUNT, &[]));
+    let rig = rig();
+    add_endpoint(&rig, "ep9", Some(owner()));
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r, crate::refresh::Refresh::default());
+    assert_eq!(state.pending.len(), 0);
+}
+
+#[test]
+fn refresh_never_takes_a_foreign_endpoint_for_an_id_less_record() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(None, ACCOUNT, &[]));
+    let rig = rig();
+    add_endpoint(&rig, "ep9", Some("someone-else".to_owned()));
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0, "{r:?}");
+    let warning = r.warning.unwrap();
+    assert!(
+        warning.contains("ep9") && warning.contains("AMICU_OWNER"),
+        "{warning}"
+    );
+    assert_eq!(state.pending.len(), 0);
+}
+
+#[test]
+fn refresh_marks_an_id_less_record_with_no_endpoint_pending() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(None, ACCOUNT, &[]));
+    let rig = rig();
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 1, "{r:?}");
+    assert!(state.pending.iter().any(|d| d.as_str() == DEP));
+}
+
+#[test]
+fn refresh_reports_drift_of_a_live_endpoint_without_touching_it() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    rig.runpod.world.state.lock().unwrap().endpoints.push(Ep {
+        id: "ep7".to_owned(),
+        name: endpoint_name(),
+        owner: Some(owner()),
+        max_workers: Some(7),
+    });
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 1, "{r:?}");
+    let note = &r.notes[0];
+    assert!(
+        note.contains("RunPod endpoint") && note.contains("ep7"),
+        "{note}"
+    );
+    assert!(note.contains("workers 0-7 (applied 0-1)"), "{note}");
+    assert!(note.contains("revert it in the RunPod console"), "{note}");
+    assert_eq!(state.pending.len(), 0);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn plan_after_an_endpoint_is_gone_shows_a_create() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    let text = plan_text(&project, &rig);
+    assert!(
+        text.contains("drift: deployment support_local: RunPod endpoint"),
+        "{text}"
+    );
+    assert!(
+        text.split("|pending=").nth(1).unwrap().contains(DEP),
+        "{text}"
+    );
+}
+
+struct NoModal;
+
+impl crate::commands::orphans::ModalApps for NoModal {
+    fn list(&self) -> Result<Vec<crate::commands::orphans::ModalApp>, String> {
+        Ok(Vec::new())
+    }
+}
+
+fn orphans(project: &Project, rig: &Rig) -> crate::commands::orphans::OrphansReport {
+    use crate::commands::orphans::{Env, OpsListing, Platform, Tracked, discover};
+    let state = project.load_state().unwrap();
+    let tracked =
+        Tracked::from_state(state.as_ref()).with_config(project.load_graph().ok().as_ref());
+    discover(
+        &Env {
+            platform: Platform::Other,
+            exec: &amicu_llamacpp::HostExec,
+            modal: &NoModal,
+            runpod: &OpsListing(&rig.runpod),
+            agents_dir: None,
+        },
+        &tracked,
+    )
+}
+
+#[test]
+fn orphans_lists_untracked_owned_endpoints_and_amicu_secrets_read_only() {
+    use crate::commands::orphans::{Kind, Ownership};
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &["amicu-x"]));
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    let stale = amicu_runpod::project_endpoint_name(PROJECT, "old");
+    add_named_endpoint(&rig, "ep8", &stale, Some("marker".to_owned()));
+    let foreign = amicu_runpod::project_endpoint_name("bbbb2222", "chat");
+    add_named_endpoint(&rig, "ep9", &foreign, Some("marker".to_owned()));
+    add_named_endpoint(&rig, "ep10", "not-amicu", None);
+    add_secret(&rig, "s5", "amicu-x");
+    add_secret(&rig, "s6", &format!("amicu-{PROJECT}-old-api-key-1-2"));
+    add_secret(&rig, "s7", "hf-token");
+
+    let report = orphans(&project, &rig);
+    let runpod = report.sources.iter().find(|s| s.name == "runpod").unwrap();
+    assert_eq!(runpod.status, "ok", "{:?}", runpod.detail);
+    let untracked: Vec<(Kind, &str, Ownership)> = report
+        .resources
+        .iter()
+        .filter(|r| !r.tracked)
+        .map(|r| (r.kind, r.identity.as_str(), r.ownership))
+        .collect();
+    let stale_id = format!("{stale} (ep8)");
+    let foreign_id = format!("{foreign} (ep9)");
+    let secret_id = format!("amicu-{PROJECT}-old-api-key-1-2 (s6)");
+    assert_eq!(
+        untracked,
+        [
+            (
+                Kind::RunpodEndpoint,
+                stale_id.as_str(),
+                Ownership::ThisProject
+            ),
+            (
+                Kind::RunpodSecret,
+                secret_id.as_str(),
+                Ownership::ThisProject
+            ),
+            (
+                Kind::RunpodEndpoint,
+                foreign_id.as_str(),
+                Ownership::OtherProject
+            ),
+        ]
+    );
+    let tracked: Vec<&str> = report
+        .resources
+        .iter()
+        .filter(|r| r.tracked)
+        .map(|r| r.identity.as_str())
+        .collect();
+    assert_eq!(tracked.len(), 2, "{tracked:?}");
+    assert!(
+        !report
+            .resources
+            .iter()
+            .any(|r| r.identity.contains(amicu_runpod::ACCOUNT_MARKER_SECRET)),
+        "the account marker is never listed"
+    );
+    let stop = &report.resources[0].stop_command;
+    assert!(
+        stop.contains("DELETE") && stop.ends_with("/v2/serverless/ep8"),
+        "{stop}"
+    );
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn orphans_skips_runpod_for_a_project_that_does_not_use_it() {
+    let td = TempDir::new();
+    let project = Project::new(&td.path);
+    write(&td.path, "amicu.hcl", VALID_CONFIG);
+    let rig = rig();
+    let report = orphans(&project, &rig);
+    let runpod = report.sources.iter().find(|s| s.name == "runpod").unwrap();
+    assert_eq!(runpod.status, "skipped");
+    assert_eq!(rig.runpod.world.log().len(), 0);
+}
+
+#[test]
+fn orphans_reports_a_runpod_listing_failure_as_a_source_error() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let mut rig = rig();
+    rig.runpod.no_key = true;
+    let report = orphans(&project, &rig);
+    let runpod = report.sources.iter().find(|s| s.name == "runpod").unwrap();
+    assert_eq!(runpod.status, "error");
+    assert!(runpod.detail.as_deref().unwrap().contains("RUNPOD_API_KEY"));
+}
+
+#[test]
+fn orphans_after_apply_finds_no_untracked_runpod_resource() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    let report = orphans(&project, &rig);
+    let untracked: Vec<&str> = report
+        .resources
+        .iter()
+        .filter(|r| !r.tracked)
+        .map(|r| r.identity.as_str())
+        .collect();
+    assert_eq!(untracked, Vec::<&str>::new());
+    assert!(
+        report
+            .resources
+            .iter()
+            .any(|r| r.identity.ends_with("(ep1)"))
+    );
+}
+
+#[test]
+fn orphans_shows_a_same_named_duplicate_of_a_recorded_endpoint_as_untracked() {
+    let td = TempDir::new();
+    let project = applied_with(&td, record(Some("ep7"), ACCOUNT, &[]));
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    add_endpoint(&rig, "ep8", Some(owner()));
+    let report = orphans(&project, &rig);
+    let untracked: Vec<&str> = report
+        .resources
+        .iter()
+        .filter(|r| !r.tracked)
+        .map(|r| r.identity.as_str())
+        .collect();
+    assert_eq!(untracked, [format!("{} (ep8)", endpoint_name())]);
+}
+
 // --- amicu runpod status / logs / metrics / stop -----------------------------
 
 fn running_endpoint(rig: &Rig) -> (TempDir, Project) {
     let td = TempDir::new();
     let project = project_with(&td, Some(record(Some("ep7"), ACCOUNT, &[])));
     add_endpoint(rig, "ep7", Some(owner()));
+    rig.runpod.world.state.lock().unwrap().endpoints[0].max_workers = Some(1);
     (td, project)
 }
 

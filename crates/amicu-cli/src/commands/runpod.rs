@@ -283,7 +283,15 @@ pub(crate) fn metrics(
     } = mode;
     let (_, id) = recorded_endpoint(project, deployment)?;
     let key = gateway_key(project, deployment, env)?;
-    let supervisor = RunPodSupervisor::new(env.runpod.client()?, "", deployment)
+    let project_id = project
+        .load_state()?
+        .and_then(|s| s.project_id)
+        .ok_or_else(|| {
+            CliError::Message(
+                "this project's state has no project id; run `amicu apply` first".to_owned(),
+            )
+        })?;
+    let supervisor = RunPodSupervisor::new(env.runpod.client()?, &project_id, deployment)
         .with_probe_transport(env.runpod.probe())
         .with_gateway_key(key);
     let handle = RuntimeHandle {

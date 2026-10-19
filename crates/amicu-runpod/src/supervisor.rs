@@ -975,6 +975,13 @@ impl RunPodSupervisor {
         if s.running.saturating_add(s.idle) > 0 {
             return Ok(());
         }
+        if s.initializing.saturating_add(s.throttled) > 0 {
+            return Err(LlamaCppError::Supervisor(format!(
+                "a RunPod worker of endpoint {id} is starting ({} initializing, {} waiting \
+                 for capacity); retry shortly",
+                s.initializing, s.throttled
+            )));
+        }
         Err(LlamaCppError::Supervisor(format!(
             "no RunPod worker of endpoint {id} is up, and scraping /metrics would start one \
              (billed GPU time); pass --wake to start one anyway"

@@ -1180,7 +1180,10 @@ async fn metrics_never_wake_a_scaled_to_zero_endpoint_unless_asked() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("--wake"), "{err}");
+    assert!(
+        err.contains("starting") && err.contains("retry shortly"),
+        "{err}"
+    );
     assert!(sup.metrics(&handle()).await.is_err());
     assert!(!mock.requests().iter().any(|s| s.url.ends_with("/metrics")));
 
