@@ -741,6 +741,48 @@ async fn an_owned_endpoint_found_by_name_is_updated_in_place() {
 }
 
 #[tokio::test]
+async fn an_update_sends_the_scaling_block_as_workers() {
+    let (sup, mock) = supervisor(update_mock(owned_endpoint()));
+    let sup = sup.with_scaling(Some(&ScalingSettings {
+        min_replicas: Some(1),
+        max_replicas: Some(4),
+        target_concurrency: None,
+        scaledown_window_secs: Some(600),
+    }));
+    sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap();
+    let patch = patch_body(&mock);
+    assert_eq!(
+        patch["workers"],
+        json!({"min": 1, "max": 4, "idleTimeout": 600})
+    );
+    assert_eq!(
+        patch["scaling"]["requestCount"],
+        json!(DEFAULT_REQUEST_COUNT)
+    );
+}
+
+#[test]
+fn defaults_to_one_worker_and_a_lone_min_raises_the_ceiling() {
+    let (sup, _) = supervisor(Mock::default());
+    let prepared = sup
+        .prepare(&vllm_plan(), &vllm_secrets(), "img", None)
+        .unwrap();
+    assert_eq!(DEFAULT_MAX_WORKERS, 1);
+    assert_eq!(prepared.endpoint.workers.min, 0);
+    assert_eq!(prepared.endpoint.workers.max, 1);
+
+    let sup = sup.with_scaling(Some(&ScalingSettings {
+        min_replicas: Some(2),
+        ..ScalingSettings::default()
+    }));
+    let prepared = sup
+        .prepare(&vllm_plan(), &vllm_secrets(), "img", None)
+        .unwrap();
+    assert_eq!(prepared.endpoint.workers.min, 2);
+    assert_eq!(prepared.endpoint.workers.max, 2);
+}
+
+#[tokio::test]
 async fn an_endpoint_found_by_name_without_our_marker_is_refused() {
     let foreign: &'static str = Box::leak(
         format!(
@@ -1083,17 +1125,111 @@ async fn status_reads_the_worker_summary() {
 }
 
 #[tokio::test]
-async fn metrics_and_logs_say_they_are_not_supported_yet() {
-    let (sup, mock) = supervisor(Mock::default());
-    let m = sup.metrics(&handle()).await.unwrap_err().to_string();
-    assert!(m.contains("not yet supported for RunPod"), "{m}");
-    let l = sup
-        .logs(&handle(), LogOptions::default())
+async fn metrics_scrape_through_the_gateway_with_the_deployment_key() {
+    let (sup, mock) = supervisor(
+        Mock::default()
+            .ok(
+                HttpMethod::Get,
+                "https://ep1.api.runpod.ai/metrics",
+                200,
+                "llamacpp:predicted_tokens_seconds 12.5\n",
+            )
+            .ok(
+                HttpMethod::Get,
+                "/serverless/ep1/workers",
+                200,
+                r#"{"workers":[],"summary":{"idle":1}}"#,
+            ),
+    );
+    let err = sup.metrics(&handle()).await.unwrap_err().to_string();
+    assert!(err.contains("api_key"), "{err}");
+    assert!(!mock.requests().iter().any(|s| s.url.ends_with("/metrics")));
+
+    let sup = sup.with_gateway_key(SecretValue::new(KEY.to_owned()));
+    let m = sup.metrics(&handle()).await.unwrap();
+    assert!((m.tokens_per_second - 12.5).abs() < f64::EPSILON);
+    let scrapes: Vec<_> = mock
+        .requests()
+        .into_iter()
+        .filter(|s| s.url.ends_with("/metrics"))
+        .collect();
+    assert_eq!(scrapes.len(), 1);
+    assert_eq!(scrapes[0].bearer.as_deref(), Some(KEY));
+}
+
+#[tokio::test]
+async fn metrics_never_wake_a_scaled_to_zero_endpoint_unless_asked() {
+    let (sup, mock) = supervisor(
+        Mock::default()
+            .ok(
+                HttpMethod::Get,
+                "https://ep1.api.runpod.ai/metrics",
+                200,
+                "vllm:num_requests_running 0\n",
+            )
+            .ok(
+                HttpMethod::Get,
+                "/serverless/ep1/workers",
+                200,
+                r#"{"workers":[],"summary":{"initializing":1}}"#,
+            ),
+    );
+    let sup = sup.with_gateway_key(SecretValue::new(KEY.to_owned()));
+    let err = sup
+        .scrape_metrics(&handle(), false)
         .await
         .unwrap_err()
         .to_string();
-    assert!(l.contains("not yet supported for RunPod"), "{l}");
-    assert!(mock.requests().is_empty());
+    assert!(
+        err.contains("starting") && err.contains("retry shortly"),
+        "{err}"
+    );
+    assert!(sup.metrics(&handle()).await.is_err());
+    assert!(!mock.requests().iter().any(|s| s.url.ends_with("/metrics")));
+
+    sup.scrape_metrics(&handle(), true).await.unwrap();
+    assert_eq!(mock.count(HttpMethod::Get, "/metrics"), 1);
+}
+
+#[tokio::test]
+async fn logs_merge_the_workers_and_say_when_none_is_running() {
+    let none = Mock::default().ok(
+        HttpMethod::Get,
+        "/serverless/ep1/workers",
+        200,
+        r#"{"workers":[],"summary":{}}"#,
+    );
+    let (sup, _) = supervisor(none);
+    let lines = sup.logs(&handle(), LogOptions::default()).await.unwrap();
+    assert_eq!(lines.lines(), [crate::logs::NO_WORKERS.to_owned()]);
+
+    let one = Mock::default()
+        .ok(
+            HttpMethod::Get,
+            "/serverless/ep1/workers",
+            200,
+            r#"{"workers":[{"id":"w1","status":"RUNNING"}],"summary":{"running":1}}"#,
+        )
+        .ok(
+            HttpMethod::Get,
+            "/workers/w1/logs?tail=7",
+            200,
+            "data: {\"ts\":\"t\",\"line\":\"ready\"}\n\n",
+        );
+    let (sup, _) = supervisor(one);
+    let opts = LogOptions {
+        follow: false,
+        tail: Some(7),
+    };
+    let lines = sup.logs(&handle(), opts).await.unwrap();
+    assert_eq!(lines.lines(), ["[w1] ready".to_owned()]);
+
+    let follow = LogOptions {
+        follow: true,
+        tail: None,
+    };
+    let err = sup.logs(&handle(), follow).await.unwrap_err().to_string();
+    assert!(err.contains("not supported"), "{err}");
 }
 
 // --- stop --------------------------------------------------------------------------

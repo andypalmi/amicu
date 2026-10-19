@@ -301,9 +301,11 @@ own default (captured) in effect.
 
 ## Modal autoscaling: `scaling {}`
 
-Deployment-level, optional, provider-agnostic block; only the `modal` provider
-maps it today (others get `AMICU-CAP-009`). Omitted fields keep today's
-defaults (min 0, no max, target concurrency 32, scaledown 15m).
+Deployment-level, optional, provider-agnostic block; the `modal` and `runpod`
+providers map it today (others get `AMICU-CAP-009`). Omitted fields keep the
+provider defaults (Modal: min 0, no max, target concurrency 32, scaledown 15m;
+RunPod serverless: min 0 workers, max 1, target concurrency 32, idle 15m, at
+most 1h).
 
 ```hcl
   scaling {

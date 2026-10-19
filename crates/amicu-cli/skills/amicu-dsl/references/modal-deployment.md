@@ -131,7 +131,9 @@ into many GPU containers.
   a string with a single `s`/`m`/`h` unit (anything else is a schema error).
   Modal's client only requires the window to be greater than zero; amicu does
   not invent an upper bound.
-- Providers other than Modal have no scaling mapping yet:
+- RunPod serverless maps the same block onto its workers (`min_replicas` ->
+  `workers.min`, `max_replicas` -> `workers.max`, default 1, `scaledown_window`
+  -> `idleTimeout`, at most 1h). Other providers have no scaling mapping yet:
   a `scaling {}` block on them is `AMICU-CAP-009`
   (error), never silently ignored.
 - `plan` lists the fields you set as `scaling_min_replicas`,

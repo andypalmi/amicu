@@ -17,7 +17,11 @@ amicu-providers = { path = "../amicu-providers" }
 # rewrite in `amicu_llamacpp::remote`. Neither crate depends back on this one.
 amicu-llamacpp = { path = "../amicu-llamacpp" }
 amicu-runtime = { path = "../amicu-runtime" }
+# `metrics.rs`: the shared `/metrics` parser (core/runtime deps only).
+amicu-telemetry = { path = "../amicu-telemetry" }
 async-trait = "0.1"
+# `logs.rs` reads the workers' log streams concurrently.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Content-addressed secret names and the endpoint owner marker.

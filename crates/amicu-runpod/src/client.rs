@@ -12,7 +12,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
-use amicu_providers::{HttpMethod, HttpRequest, HttpResponse, HttpTransport, ReqwestTransport};
+use amicu_providers::{
+    HttpMethod, HttpRequest, HttpResponse, HttpTransport, ReqwestTransport, StreamLimits,
+};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
@@ -773,6 +775,26 @@ impl RunPodClient {
         decode(&resp)
     }
 
+    /// A bounded `GET` of an event stream (see
+    /// [`HttpTransport::execute_bounded`]), checked like any other call.
+    pub(crate) async fn get_stream(
+        &self,
+        path: &str,
+        what: &str,
+        limits: StreamLimits,
+    ) -> Result<HttpResponse, RunPodError> {
+        let req = HttpRequest::new(HttpMethod::Get, format!("{}{path}", self.base_url))
+            .with_bearer(self.key.0.clone())
+            .with_header("Accept", "text/event-stream");
+        let resp = self
+            .transport
+            .execute_bounded(req, limits)
+            .await
+            .map_err(|e| RunPodError::Transport(e.to_string()))?;
+        check(&resp, what, false)?;
+        Ok(resp)
+    }
+
     /// `GET /organization`: the account identity.
     ///
     /// A personal account answers `403` "organizations are not enabled for
@@ -950,7 +972,7 @@ impl RunPodClient {
 
 /// An id usable as one path segment: non-empty, no separators or anything
 /// that could alter the route.
-fn segment(id: &str) -> Result<&str, RunPodError> {
+pub(crate) fn segment(id: &str) -> Result<&str, RunPodError> {
     if !id.is_empty()
         && id
             .bytes()
