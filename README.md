@@ -61,7 +61,7 @@ amicu apply     # shows the plan, asks for approval, starts the model, checks th
 amicu destroy   # stops and removes the recorded deployments (asks for approval)
 ```
 
-Point the `hardware_profile` at `provider = "modal"` instead and the same deployment runs on a cloud GPU (see [Deploy to Modal](#deploy-to-modal)). Step by step: [quickstart](https://amicu.dev/docs/quickstart).
+Point the `hardware_profile` at `provider = "modal"` or `provider = "runpod"` instead and the same deployment runs on a cloud GPU (see [Deploy to Modal](#deploy-to-modal) and [Deploy to RunPod](#deploy-to-runpod)). Step by step: [quickstart](https://amicu.dev/docs/quickstart).
 
 More starters are in [`examples/`](examples): `mac`, `linux-cuda`, `linux-cpu` and `modal`.
 
@@ -74,14 +74,15 @@ Local runs need the GGUF weights on disk first; see [Get the GGUF](https://amicu
 | Your Mac (launchd) | llama.cpp | Supported |
 | Linux (systemd) | llama.cpp, vLLM (GPU) | Supported |
 | Modal (serverless GPU) | llama.cpp, vLLM | Supported |
-| Hetzner, OVHcloud, Scaleway, RunPod, SSH hosts | n/a | Preview: adapters built, not wired into `apply` |
+| RunPod (Serverless endpoints or Pods) | llama.cpp, vLLM | Supported |
+| Hetzner, OVHcloud, Scaleway, SSH hosts | n/a | Preview: adapters built, not wired into `apply` |
 | AWS, Azure, GCP, Nebius | n/a | Catalog and pricing data only; `apply` fails with an error |
 
 Local runs target macOS, Linux and Windows. A provider `apply` cannot deploy to fails with a clear error; it never falls back to running locally.
 
 ## Why amicu
 
-- **Your models, on infrastructure you chose.** Your prompts go to your own endpoint, not a model API provider. Data residency is a policy you write: a `data_class` plus a region (for example Modal `eu-west`), checked at plan time. A Modal deployment runs on Modal; the point is that you choose where.
+- **Your models, on infrastructure you chose.** Your prompts go to your own endpoint, not a model API provider. Data residency is a policy you write: a `data_class` plus a region (for example Modal `eu-west`), checked at plan time. A Modal or RunPod deployment runs there; the point is that you choose where.
 - **Config in git, with a reviewable plan.** Every change is a plan against recorded state that you read before it runs, not a pile of imperative scripts.
 - **Built to avoid orphaned GPUs.** `apply` records a deployment in state before it starts anything, and it leaves state only after its stop is confirmed, so `destroy` is designed to find what may still be running.
 
@@ -161,13 +162,38 @@ resource "deployment" "chat" {
 
 Inspect with `amicu modal status|logs|metrics|stop <app>`, where the app is `amicu-` plus the deployment id with `_` as `-`. The full guide (llama.cpp GGUF example, multi-GPU, metrics, state) is the `modal-deployment.md` reference in the `amicu-dsl` skill: `crates/amicu-cli/skills/amicu-dsl/references/modal-deployment.md`, also available via `amicu skill export`.
 
+## Deploy to RunPod
+
+`amicu apply` can deploy a model to RunPod when the hardware profile has `provider = "runpod"`: a Serverless endpoint that scales to zero (the default), or an always-on Pod with `runpod { mode = "pod" }`. Both `vllm` and `llama_cpp` runtimes work, and the model must come from Hugging Face. An optional RunPod network volume (`runpod { network_volume = "<id>" }`) caches the model across workers.
+
+```bash
+export RUNPOD_API_KEY=...                       # management key: plan, apply, destroy, amicu runpod
+export CHAT_API_KEY=...                         # Serverless: a second RunPod key with api.runpod.ai access
+```
+
+```hcl
+resource "hardware_profile" "runpod_l4" {
+  provider = "runpod"
+  region   = "eu"
+  accelerator {
+    kind   = "gpu"
+    model  = "l4-24gb"
+    count  = 1
+    memory = "24GiB"
+  }
+  memory = "32GiB"
+}
+```
+
+Bind a deployment to it with `hardware = hardware_profile.runpod_l4.id` and `api_key = secret("CHAT_API_KEY")`, then `amicu plan` and `amicu apply`. Inspect with `amicu runpod status|logs|metrics|stop <deployment>`. The endpoint key, Pods, the model cache, GPUs and regions are covered in the [RunPod docs](https://amicu.dev/docs/providers/runpod).
+
 ## Endpoint API keys
 
 Every deployment can declare an `api_key = secret("NAME")`. It is a reference, never a value: a literal string is rejected (`AMICU-POLICY-004`), `plan` shows `api_key: ******` and only checks that the variable is set (an unset one fails `plan` and `apply` with `AMICU-POLICY-002`, before anything starts), and `apply` reads the value from the environment variable `NAME` and hands it to the runtime through its environment (`LLAMA_API_KEY` for llama.cpp, `VLLM_API_KEY` for vLLM), never argv, logs, state, or plan output. Users cannot set those variables or `--api-key` themselves through `extra_args`/`env`.
 
-- **Required off-machine.** A deployment on any provider other than `local`, `local_apple`, `local_cpu` and `on_prem` (Modal today) must have an `api_key`; `amicu validate`/`plan` fail with `AMICU-POLICY-007` otherwise. Local loopback deployments may omit it.
+- **Required off-machine.** A deployment on any provider other than `local`, `local_apple`, `local_cpu` and `on_prem` (Modal and RunPod today) must have an `api_key`; `amicu validate`/`plan` fail with `AMICU-POLICY-007` otherwise. Local loopback deployments may omit it.
 - **Checked after deploy.** For every endpoint `apply` starts, it sends an unauthenticated `GET /v1/models` (no key, no provider headers). A `401`/`403` passes; a `2xx` means the endpoint is open, so it is stopped and apply fails (a failed stop is reported with the command to run by hand). It then sends the key (plus the Modal proxy headers) and requires a `2xx`. Loopback endpoints without a key skip the check.
-- **Calling it.** After a successful apply the output includes a ready-to-copy `curl` and OpenAI SDK snippet that refer to the key and, on Modal, the `Modal-Key`/`Modal-Secret` proxy token by environment variable name.
+- **Calling it.** After a successful apply the output includes a ready-to-copy `curl` and OpenAI SDK snippet that refer to the key and, on Modal, the `Modal-Key`/`Modal-Secret` proxy token by environment variable name. On RunPod you send the key as a normal bearer token.
 
 ## Platform notes
 
@@ -254,7 +280,7 @@ that module and `amicu-store`'s `state` module docs for details.
 
 ## Status
 
-Early stage. Working today: the HCL DSL and parser, the CLI (`init`, `fmt`, `validate`, `plan`, `apply`, `destroy`, `doctor`, `skill export`), the planner and local state (with write-ahead stop records), and the local and Modal providers above. State is local only. Not yet built: the browser UI and hosted service. Expect breaking changes to the DSL and CLI.
+Early stage. Working today: the HCL DSL and parser, the CLI (`init`, `fmt`, `validate`, `plan`, `apply`, `destroy`, `doctor`, `skill export`), the planner and local state (with write-ahead stop records), and the local, Modal and RunPod providers above. State is local only. Not yet built: the browser UI and hosted service. Expect breaking changes to the DSL and CLI.
 
 ## Learn more
 
