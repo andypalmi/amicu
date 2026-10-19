@@ -121,20 +121,83 @@ pub struct GpuPlacement {
     pub vram_gb: u32,
 }
 
-fn card_for(model: &str, memory: Option<ByteSize>) -> Result<(&'static Card, u32), RunPodError> {
+/// Cards RunPod offers only as pods (no serverless pool): catalog id to
+/// RunPod GPU type id.
+// TODO: MI300X, RTX PRO 4000/5000 and V100 once the shared catalog has them.
+const POD_ONLY_CARDS: &[(&str, &str)] = &[("h200-nvl-141gb", "NVIDIA H200 NVL")];
+
+fn resolve(model: &str, memory: Option<ByteSize>) -> Result<(&'static str, u32), RunPodError> {
     let resolved = resolve_gpu(model, memory).map_err(|e| match e {
         GpuResolveError::Unknown { .. } => RunPodError::UnknownGpu {
             model: model.to_owned(),
         },
         other => RunPodError::InvalidGpu(other.to_string()),
     })?;
-    CARDS
+    Ok((resolved.id, resolved.vram_gb))
+}
+
+fn card_for(model: &str, memory: Option<ByteSize>) -> Result<(&'static Card, u32), RunPodError> {
+    let (id, vram_gb) = resolve(model, memory)?;
+    if let Some(card) = CARDS.iter().find(|c| c.id == id) {
+        return Ok((card, vram_gb));
+    }
+    if POD_ONLY_CARDS.iter().any(|(c, _)| *c == id) {
+        return Err(RunPodError::InvalidGpu(format!(
+            "`{id}` has no RunPod serverless pool; it is only available as a pod (mode = \"pod\")"
+        )));
+    }
+    Err(RunPodError::UnknownGpu {
+        model: id.to_owned(),
+    })
+}
+
+/// Where a pod's GPUs go: an exact RunPod GPU type id and a count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PodGpuPlacement {
+    /// RunPod's GPU type id (`"NVIDIA H100 80GB HBM3"`).
+    pub type_id: String,
+    /// GPUs on the pod.
+    pub count: u32,
+    /// GPU catalog id (`"h100-sxm-80gb"`).
+    pub card_id: String,
+    /// Nominal VRAM in GB.
+    pub vram_gb: u32,
+}
+
+/// Map an amicu [`Accelerator`] to a pod's GPU type. Unlike
+/// [`gpu_placement`], pods-only cards are allowed.
+pub fn pod_gpu_placement(accelerator: &Accelerator) -> Result<PodGpuPlacement, RunPodError> {
+    if accelerator.kind != AcceleratorKind::Gpu {
+        return Err(RunPodError::InvalidGpu(format!(
+            "RunPod pods are GPU-only here; {:?} is not supported",
+            accelerator.kind
+        )));
+    }
+    if accelerator.count == 0 {
+        return Err(RunPodError::InvalidGpu(
+            "GPU count must be at least 1".into(),
+        ));
+    }
+    let (id, vram_gb) = resolve(&accelerator.model, Some(accelerator.memory))?;
+    let type_id = CARDS
         .iter()
-        .find(|c| c.id == resolved.id)
-        .map(|c| (c, resolved.vram_gb))
-        .ok_or_else(|| RunPodError::UnknownGpu {
-            model: resolved.id.to_owned(),
+        .find(|c| c.id == id)
+        .map(|c| c.type_id)
+        .or_else(|| {
+            POD_ONLY_CARDS
+                .iter()
+                .find(|(c, _)| *c == id)
+                .map(|(_, t)| *t)
         })
+        .ok_or_else(|| RunPodError::UnknownGpu {
+            model: id.to_owned(),
+        })?;
+    Ok(PodGpuPlacement {
+        type_id: type_id.to_owned(),
+        count: accelerator.count,
+        card_id: id.to_owned(),
+        vram_gb,
+    })
 }
 
 /// Map an amicu [`Accelerator`] to a RunPod [`GpuPlacement`].
@@ -506,5 +569,22 @@ mod tests {
             parse_gpu_spec("potato:1"),
             Err(RunPodError::UnknownGpu { .. })
         ));
+    }
+
+    #[test]
+    fn pods_take_an_exact_type_id_and_allow_pods_only_cards() {
+        let p = pod_gpu_placement(&acc(AcceleratorKind::Gpu, "h100-sxm-80gb", 2, 80)).unwrap();
+        assert_eq!(
+            (p.type_id.as_str(), p.count, p.card_id.as_str()),
+            ("NVIDIA H100 80GB HBM3", 2, "h100-sxm-80gb")
+        );
+        let nvl = pod_gpu_placement(&acc(AcceleratorKind::Gpu, "NVIDIA H200 NVL", 1, 141)).unwrap();
+        assert_eq!(nvl.type_id, "NVIDIA H200 NVL");
+
+        let err = parse_gpu_spec("h200-nvl-141gb").unwrap_err();
+        assert!(err.to_string().contains("mode = \"pod\""), "{err}");
+
+        assert!(pod_gpu_placement(&acc(AcceleratorKind::Gpu, "h100-sxm-80gb", 0, 80)).is_err());
+        assert!(pod_gpu_placement(&acc(AcceleratorKind::Tpu, "v5e", 1, 16)).is_err());
     }
 }

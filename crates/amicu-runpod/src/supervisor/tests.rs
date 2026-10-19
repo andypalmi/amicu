@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 
 use amicu_core::ByteSize;
@@ -12,40 +12,40 @@ use super::*;
 use crate::client::ApiKey;
 
 /// The end-user endpoint key (the deployment's `api_key`).
-const KEY: &str = "rpa_ENDUSERKEY0123456789";
+pub(crate) const KEY: &str = "rpa_ENDUSERKEY0123456789";
 /// The operator's RunPod management key.
-const MGMT: &str = "rpa_MANAGEMENTKEY";
-const BASE: &str = "https://api.runpod.io/v2";
-const PROJECT: &str = "aaaa1111";
-const DEP: &str = "chat";
+pub(crate) const MGMT: &str = "rpa_MANAGEMENTKEY";
+pub(crate) const BASE: &str = "https://api.runpod.io/v2";
+pub(crate) const PROJECT: &str = "aaaa1111";
+pub(crate) const DEP: &str = "chat";
 
 #[derive(Clone)]
-enum Canned {
+pub(crate) enum Canned {
     Status(u16, &'static str),
     Timeout,
 }
 
-type Route = (HttpMethod, &'static str, VecDeque<Canned>);
+pub(crate) type Route = (HttpMethod, &'static str, VecDeque<Canned>);
 
 #[derive(Clone)]
-struct Seen {
-    method: HttpMethod,
-    url: String,
-    bearer: Option<String>,
-    body: Option<Value>,
+pub(crate) struct Seen {
+    pub(crate) method: HttpMethod,
+    pub(crate) url: String,
+    pub(crate) bearer: Option<String>,
+    pub(crate) body: Option<Value>,
 }
 
 /// Canned answers by `(method, url suffix)`; a suffix ending in `=` matches
 /// any URL containing it (query lookups). Each route plays its answers in
 /// order and repeats the last one. Every request is recorded.
 #[derive(Default)]
-struct Mock {
+pub(crate) struct Mock {
     routes: Mutex<Vec<Route>>,
     seen: Mutex<Vec<Seen>>,
 }
 
 impl Mock {
-    fn on(self, method: HttpMethod, suffix: &'static str, answers: &[Canned]) -> Self {
+    pub(crate) fn on(self, method: HttpMethod, suffix: &'static str, answers: &[Canned]) -> Self {
         self.routes
             .lock()
             .unwrap()
@@ -54,7 +54,12 @@ impl Mock {
     }
 
     /// Like [`on`](Self::on), but matched before every route added so far.
-    fn first(self, method: HttpMethod, suffix: &'static str, answers: &[Canned]) -> Self {
+    pub(crate) fn first(
+        self,
+        method: HttpMethod,
+        suffix: &'static str,
+        answers: &[Canned],
+    ) -> Self {
         self.routes
             .lock()
             .unwrap()
@@ -62,15 +67,21 @@ impl Mock {
         self
     }
 
-    fn ok(self, method: HttpMethod, suffix: &'static str, status: u16, body: &'static str) -> Self {
+    pub(crate) fn ok(
+        self,
+        method: HttpMethod,
+        suffix: &'static str,
+        status: u16,
+        body: &'static str,
+    ) -> Self {
         self.on(method, suffix, &[Canned::Status(status, body)])
     }
 
-    fn requests(&self) -> Vec<Seen> {
+    pub(crate) fn requests(&self) -> Vec<Seen> {
         self.seen.lock().unwrap().clone()
     }
 
-    fn count(&self, method: HttpMethod, suffix: &str) -> usize {
+    pub(crate) fn count(&self, method: HttpMethod, suffix: &str) -> usize {
         self.requests()
             .iter()
             .filter(|s| s.method == method && s.url.ends_with(suffix))
@@ -117,12 +128,12 @@ const ONE_ENDPOINT: &str =
     r#"{"endpoints":[{"id":"ep1","name":"x"}],"pagination":{"hasNextPage":false}}"#;
 const TWO_ENDPOINTS: &str = r#"{"endpoints":[{"id":"ep1","name":"x"},{"id":"ep2","name":"x"}],"pagination":{"hasNextPage":false}}"#;
 const ENDPOINT: &str = r#"{"id":"ep1","name":"x","type":"LOAD_BALANCER"}"#;
-const SECRET: &str = r#"{"id":"s1","name":"x"}"#;
-const FOUND_SECRET: &str = r#"{"secrets":[{"id":"s1","name":"{NAME}"}]}"#;
-const NO_SECRETS: &str = r#"{"secrets":[]}"#;
+pub(crate) const SECRET: &str = r#"{"id":"s1","name":"x"}"#;
+pub(crate) const FOUND_SECRET: &str = r#"{"secrets":[{"id":"s1","name":"{NAME}"}]}"#;
+pub(crate) const NO_SECRETS: &str = r#"{"secrets":[]}"#;
 const HEALTH: &str = "https://ep1.api.runpod.ai/health";
 
-const FAST: ReadinessTiming = ReadinessTiming {
+pub(crate) const FAST: ReadinessTiming = ReadinessTiming {
     timeout: Duration::from_millis(200),
     initial_backoff: Duration::from_millis(1),
     max_backoff: Duration::from_millis(5),
@@ -170,7 +181,7 @@ fn supervisor(mock: Mock) -> (RunPodSupervisor, Arc<Mock>) {
     (sup, mock)
 }
 
-fn plan(argv: &[&str], settings: Runtime) -> LaunchPlan {
+pub(crate) fn plan(argv: &[&str], settings: Runtime) -> LaunchPlan {
     let argv: Vec<String> = argv.iter().map(|s| (*s).to_owned()).collect();
     LaunchPlan {
         deployment: DeploymentId::from(DEP),
@@ -191,7 +202,7 @@ fn plan(argv: &[&str], settings: Runtime) -> LaunchPlan {
     }
 }
 
-fn vllm_plan() -> LaunchPlan {
+pub(crate) fn vllm_plan() -> LaunchPlan {
     plan(
         &[
             "vllm",
@@ -209,7 +220,7 @@ fn vllm_plan() -> LaunchPlan {
     )
 }
 
-fn llama_plan() -> LaunchPlan {
+pub(crate) fn llama_plan() -> LaunchPlan {
     plan(
         &[
             "llama-server",
@@ -228,12 +239,12 @@ fn llama_plan() -> LaunchPlan {
 }
 
 /// The operator's Hugging Face token (a RunPod secret, unlike the api_key).
-const HF: &str = "hf_HUGGINGFACETOKEN0123";
+pub(crate) const HF: &str = "hf_HUGGINGFACETOKEN0123";
 
 /// The deployment's `api_key` under the runtime's variable, plus `HF_TOKEN`
 /// (passed explicitly so a `HF_TOKEN` in the test environment never adds a
 /// fallback).
-fn secrets_for(var: &str) -> Vec<ResolvedSecret> {
+pub(crate) fn secrets_for(var: &str) -> Vec<ResolvedSecret> {
     vec![
         ResolvedSecret {
             name: var.to_owned(),
@@ -246,15 +257,15 @@ fn secrets_for(var: &str) -> Vec<ResolvedSecret> {
     ]
 }
 
-fn vllm_secrets() -> Vec<ResolvedSecret> {
+pub(crate) fn vllm_secrets() -> Vec<ResolvedSecret> {
     secrets_for("VLLM_API_KEY")
 }
 
-fn owner() -> String {
+pub(crate) fn owner() -> String {
     owner_marker(None, PROJECT, DEP)
 }
 
-fn sname(var: &str, value: &str) -> String {
+pub(crate) fn sname(var: &str, value: &str) -> String {
     secret_name(PROJECT, DEP, &owner(), var, value)
 }
 
@@ -283,7 +294,7 @@ fn happy_mock() -> Mock {
         .ok(HttpMethod::Get, HEALTH, 200, "{}")
 }
 
-fn posted(mock: &Mock, suffix: &str) -> Vec<Value> {
+pub(crate) fn posted(mock: &Mock, suffix: &str) -> Vec<Value> {
     mock.requests()
         .into_iter()
         .filter(|s| s.method == HttpMethod::Post && s.url.ends_with(suffix))
@@ -291,7 +302,7 @@ fn posted(mock: &Mock, suffix: &str) -> Vec<Value> {
         .collect()
 }
 
-fn position(mock: &Mock, method: HttpMethod, suffix: &str) -> usize {
+pub(crate) fn position(mock: &Mock, method: HttpMethod, suffix: &str) -> usize {
     mock.requests()
         .iter()
         .position(|s| s.method == method && s.url.ends_with(suffix))
@@ -1198,7 +1209,7 @@ fn stopper(mock: Mock) -> (RunPodSupervisor, Arc<Mock>) {
 async fn stop_drains_and_deletes_the_endpoint_then_its_secrets() {
     let (sup, mock) = stopper(stop_mock(204));
     let sup = sup.with_recorded_secrets(vec!["recorded-secret".into()]);
-    sup.note_secret("made-here");
+    sup.secrets.note("made-here");
     assert_eq!(
         sup.stop_endpoint(&handle()).await.unwrap(),
         StopOutcome::Deleted

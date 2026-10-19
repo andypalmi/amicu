@@ -25,7 +25,6 @@
 //! that same lookup. The live GPU catalog narrows `excludedTypes` to the
 //! requested card before anything is written.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,6 +52,7 @@ use crate::client::{
 use crate::error::RunPodError;
 use crate::hardware::{exclusions_from_catalog, gpu_placement, verify_catalog_memory};
 use crate::regions::select_data_centers;
+use crate::secrets::{SecretLedger, reference_secrets, stop_result};
 
 /// The provider name the shared remote-launch renderer puts in its errors.
 pub const PROVIDER: &str = "RunPod";
@@ -291,7 +291,7 @@ pub struct RunPodSupervisor {
     gateway_key: Option<SecretValue>,
     deployed_endpoint: Arc<Mutex<Option<String>>>,
     created_endpoint: Arc<AtomicBool>,
-    created_secrets: Arc<Mutex<Vec<String>>>,
+    secrets: SecretLedger,
 }
 
 impl fmt::Debug for RunPodSupervisor {
@@ -312,8 +312,10 @@ impl RunPodSupervisor {
     /// [`project_endpoint_name`]`(project_id, deployment_id)`.
     #[must_use]
     pub fn new(client: RunPodClient, project_id: &str, deployment_id: &str) -> Self {
+        let client = Arc::new(client);
         Self {
-            client: Arc::new(client),
+            secrets: SecretLedger::new(Arc::clone(&client)),
+            client,
             probe: Arc::new(ReqwestTransport::new()),
             workspace_id: None,
             project_id: project_id.to_owned(),
@@ -333,7 +335,6 @@ impl RunPodSupervisor {
             gateway_key: None,
             deployed_endpoint: Arc::default(),
             created_endpoint: Arc::default(),
-            created_secrets: Arc::default(),
         }
     }
 
@@ -548,7 +549,7 @@ impl RunPodSupervisor {
     /// remove names, so after `start` or `stop` this is the set to record.
     #[must_use]
     pub fn created_secrets(&self) -> Arc<Mutex<Vec<String>>> {
-        Arc::clone(&self.created_secrets)
+        self.secrets.shared()
     }
 
     /// The exact RunPod secret names a `start` with `plan` and `secrets`
@@ -591,10 +592,7 @@ impl RunPodSupervisor {
         hf_token_fallback: Option<&str>,
     ) -> Result<Prepared, LlamaCppError> {
         let runtime = RuntimeKind::of(&plan.settings);
-        let port = match &plan.settings {
-            Runtime::Vllm(s) => s.port,
-            Runtime::LlamaCpp(s) => s.port,
-        };
+        let port = runtime_port(plan);
         let argv = self.launch_argv(plan)?;
         let RemoteEnv { plain, mut secret } = remote::split_env(plan, secrets, hf_token_fallback)?;
 
@@ -644,32 +642,18 @@ impl RunPodSupervisor {
         env.insert("PORT_HEALTH".to_owned(), port.to_string());
         env.insert("HEALTH_CHECK_PATH".to_owned(), HEALTH_PATH.to_owned());
         env.insert(OWNER_ENV_VAR.to_owned(), owner.clone());
-        let mut create_secrets = Vec::with_capacity(secret.len());
-        for (key, value) in &secret {
-            let name = secret_name(&self.project_id, &self.deployment_id, &owner, key, value);
-            env.insert(key.clone(), secret_reference(&name));
-            create_secrets.push(CreateSecret {
-                name,
-                value: value.clone(),
-                description: Some(format!(
-                    "amicu: {key} for deployment {}",
-                    self.deployment_id
-                )),
-            });
-        }
-
-        let (program, rest) = argv.split_first().ok_or_else(|| {
-            LlamaCppError::Supervisor("the rendered launch command is empty".to_owned())
-        })?;
-        let program = if program == "llama-server" {
-            LLAMACPP_IMAGE_SERVER_PATH.to_owned()
-        } else {
-            program.clone()
-        };
+        let create_secrets = reference_secrets(
+            &self.project_id,
+            &self.deployment_id,
+            &owner,
+            &secret,
+            &mut env,
+        );
+        let (entrypoint, cmd) = container_command(&argv)?;
 
         let mut endpoint = CreateEndpoint::new(self.endpoint_name.clone(), image, gpu);
-        endpoint.entrypoint = vec![program];
-        endpoint.cmd = rest.to_vec();
+        endpoint.entrypoint = entrypoint;
+        endpoint.cmd = cmd;
         endpoint.env = env;
         endpoint.ports = vec![format!("{port}/http")];
         endpoint.disk_gb = Some(self.disk_gb);
@@ -713,99 +697,6 @@ impl RunPodSupervisor {
         }
     }
 
-    fn note_secret(&self, name: &str) {
-        if let Ok(mut created) = self.created_secrets.lock()
-            && !created.iter().any(|n| n == name)
-        {
-            created.push(name.to_owned());
-        }
-    }
-
-    fn forget_secret(&self, name: &str) {
-        if let Ok(mut created) = self.created_secrets.lock() {
-            created.retain(|n| n != name);
-        }
-    }
-
-    fn known_secrets(&self) -> Vec<String> {
-        self.created_secrets
-            .lock()
-            .map(|c| c.clone())
-            .unwrap_or_default()
-    }
-
-    /// Makes sure `secret` exists. Names are content-addressed, so an
-    /// existing name already holds this value and is left alone. Returns
-    /// whether this call created it.
-    async fn ensure_secret(&self, secret: &CreateSecret) -> Result<bool, LlamaCppError> {
-        let name = &secret.name;
-        let exists = self
-            .client
-            .find_secret(name)
-            .await
-            .map_err(|e| secret_err(name, &e))?
-            .is_some();
-        self.note_secret(name);
-        if exists {
-            return Ok(false);
-        }
-        match self.client.create_secret(secret).await {
-            Ok(_) => Ok(true),
-            // Created concurrently under the same name: the same value.
-            Err(RunPodError::Conflict { .. }) => Ok(false),
-            // The response was lost: whether it exists is a lookup away.
-            Err(RunPodError::Transport(detail)) => match self.client.find_secret(name).await {
-                Ok(Some(_)) => Ok(true),
-                Ok(None) => {
-                    self.forget_secret(name);
-                    Err(LlamaCppError::Supervisor(format!(
-                        "writing RunPod secret `{name}` failed in transport ({detail}) and it \
-                         does not exist; run the command again"
-                    )))
-                }
-                Err(e) => Err(LlamaCppError::Supervisor(format!(
-                    "writing RunPod secret `{name}` failed in transport ({detail}) and looking \
-                     it up failed too ({e}); it may exist"
-                ))),
-            },
-            Err(e) => {
-                // RunPod answered and refused: nothing was written.
-                self.forget_secret(name);
-                Err(secret_err(name, &e))
-            }
-        }
-    }
-
-    /// Best-effort removal of secrets this run created for an endpoint write
-    /// RunPod refused; whatever cannot be removed stays in
-    /// [`created_secrets`](Self::created_secrets) for the caller.
-    async fn discard_secrets(&self, names: &[String]) {
-        for name in names {
-            if self.delete_secret_by_name(name).await.is_ok() {
-                self.forget_secret(name);
-            }
-        }
-    }
-
-    /// Once the endpoint references only `current`: deletes every other
-    /// known secret (the previous generation). Best effort; what cannot be
-    /// deleted stays in [`created_secrets`](Self::created_secrets).
-    async fn retire_stale_secrets(&self, current: &[CreateSecret]) {
-        let current: BTreeSet<&str> = current.iter().map(|s| s.name.as_str()).collect();
-        for name in self.known_secrets() {
-            if !current.contains(name.as_str()) && self.delete_secret_by_name(&name).await.is_ok() {
-                self.forget_secret(&name);
-            }
-        }
-    }
-
-    async fn delete_secret_by_name(&self, name: &str) -> Result<(), RunPodError> {
-        if let Some(existing) = self.client.find_secret(name).await? {
-            self.client.delete_secret(&existing.id).await?;
-        }
-        Ok(())
-    }
-
     /// Refuses an endpoint unless it carries this deployment's owner marker.
     fn check_owner(&self, endpoint: &Endpoint) -> Result<(), LlamaCppError> {
         let owner = self.owner();
@@ -839,7 +730,7 @@ impl RunPodSupervisor {
             Ok(_) => Ok(id.to_owned()),
             Err(e) => {
                 if !matches!(e, RunPodError::Transport(_)) {
-                    self.discard_secrets(fresh).await;
+                    self.secrets.discard(fresh).await;
                 }
                 Err(runpod_err(&e))
             }
@@ -898,7 +789,7 @@ impl RunPodSupervisor {
             Err(e) => {
                 // RunPod answered and refused: nothing references the
                 // secrets written for it.
-                self.discard_secrets(fresh).await;
+                self.secrets.discard(fresh).await;
                 Err(runpod_err(&e))
             }
         }
@@ -1046,41 +937,11 @@ impl RunPodSupervisor {
             Err(e) => return Err(e),
         };
         for name in &self.recorded_secrets {
-            self.note_secret(name);
+            self.secrets.note(name);
         }
-        let mut names = self.known_secrets();
-        names.sort();
-        if outcome == DeleteOutcome::AlreadyGone && !self.confirmed_account {
-            return Ok(StopOutcome::AlreadyGone {
-                kept_secrets: names,
-            });
-        }
-        let mut failed: BTreeMap<String, String> = BTreeMap::new();
-        for name in names {
-            match self.delete_secret_by_name(&name).await {
-                Ok(()) => self.forget_secret(&name),
-                Err(e) => {
-                    failed.insert(name, e.to_string());
-                }
-            }
-        }
-        if !failed.is_empty() {
-            return Err(LlamaCppError::Supervisor(format!(
-                "RunPod endpoint {} was deleted, but these secrets could not be: {}",
-                handle.id,
-                failed
-                    .iter()
-                    .map(|(n, e)| format!("`{n}` ({e})"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
-        }
-        Ok(match outcome {
-            DeleteOutcome::Deleted => StopOutcome::Deleted,
-            DeleteOutcome::AlreadyGone => StopOutcome::AlreadyGone {
-                kept_secrets: Vec::new(),
-            },
-        })
+        self.secrets
+            .finish_stop("endpoint", &handle.id, outcome, self.confirmed_account)
+            .await
     }
 }
 
@@ -1108,12 +969,8 @@ fn update_from(create: &CreateEndpoint) -> UpdateEndpoint {
 
 /// Folds a [`RunPodError`] into the trait's error. `RunPodError` never carries
 /// a key or secret value, so its text is always safe to surface.
-fn runpod_err(error: &RunPodError) -> LlamaCppError {
+pub(crate) fn runpod_err(error: &RunPodError) -> LlamaCppError {
     LlamaCppError::Supervisor(error.to_string())
-}
-
-fn secret_err(name: &str, error: &RunPodError) -> LlamaCppError {
-    LlamaCppError::Supervisor(format!("writing RunPod secret `{name}` failed: {error}"))
 }
 
 fn duplicate_err<'a>(name: &str, ids: impl Iterator<Item = &'a str>) -> LlamaCppError {
@@ -1123,6 +980,46 @@ fn duplicate_err<'a>(name: &str, ids: impl Iterator<Item = &'a str>) -> LlamaCpp
     ))
 }
 
+pub(crate) fn unsupported(what: &str) -> LlamaCppError {
+    LlamaCppError::Supervisor(format!(
+        "{what} are not yet supported for RunPod deployments"
+    ))
+}
+
+/// The port the runtime listens on inside the container.
+pub(crate) fn runtime_port(plan: &LaunchPlan) -> u16 {
+    match &plan.settings {
+        Runtime::Vllm(s) => s.port,
+        Runtime::LlamaCpp(s) => s.port,
+    }
+}
+
+/// The container image for `runtime`: the operator override, else the stock
+/// image.
+pub(crate) fn runtime_image(runtime: RuntimeKind) -> String {
+    let var = match runtime {
+        RuntimeKind::Vllm => VLLM_IMAGE_ENV_VAR,
+        RuntimeKind::LlamaCpp => LLAMACPP_IMAGE_ENV_VAR,
+    };
+    std::env::var(var).unwrap_or_else(|_| remote::default_image(runtime).to_owned())
+}
+
+/// Splits a rendered argv into the container ENTRYPOINT and CMD;
+/// `llama-server` maps to the stock image's binary path.
+pub(crate) fn container_command(
+    argv: &[String],
+) -> Result<(Vec<String>, Vec<String>), LlamaCppError> {
+    let (program, rest) = argv.split_first().ok_or_else(|| {
+        LlamaCppError::Supervisor("the rendered launch command is empty".to_owned())
+    })?;
+    let program = if program == "llama-server" {
+        LLAMACPP_IMAGE_SERVER_PATH.to_owned()
+    } else {
+        program.clone()
+    };
+    Ok((vec![program], rest.to_vec()))
+}
+
 #[async_trait]
 impl ProcessSupervisor for RunPodSupervisor {
     async fn start(
@@ -1130,13 +1027,7 @@ impl ProcessSupervisor for RunPodSupervisor {
         plan: &LaunchPlan,
         secrets: &[ResolvedSecret],
     ) -> Result<RuntimeHandle, LlamaCppError> {
-        let runtime = RuntimeKind::of(&plan.settings);
-        let image_var = match runtime {
-            RuntimeKind::Vllm => VLLM_IMAGE_ENV_VAR,
-            RuntimeKind::LlamaCpp => LLAMACPP_IMAGE_ENV_VAR,
-        };
-        let image =
-            std::env::var(image_var).unwrap_or_else(|_| remote::default_image(runtime).to_owned());
+        let image = runtime_image(RuntimeKind::of(&plan.settings));
         let hf_token_fallback = std::env::var(HF_TOKEN_ENV_VAR).ok();
         let mut prepared = self.prepare(plan, secrets, &image, hf_token_fallback.as_deref())?;
         // Before anything is written: exclude every other card RunPod lists
@@ -1150,17 +1041,17 @@ impl ProcessSupervisor for RunPodSupervisor {
 
         // Recorded secrets may still exist until this run retires them.
         for name in &self.recorded_secrets {
-            self.note_secret(name);
+            self.secrets.note(name);
         }
         let mut fresh = Vec::new();
         for secret in &prepared.secrets {
-            if self.ensure_secret(secret).await? {
+            if self.secrets.ensure(secret).await? {
                 fresh.push(secret.name.clone());
             }
         }
         let id = self.upsert_endpoint(&prepared, &fresh).await?;
         // The endpoint now references only the current generation.
-        self.retire_stale_secrets(&prepared.secrets).await;
+        self.secrets.retire_stale(&prepared.secrets).await;
         self.wait_ready(&id, &prepared.api_key).await?;
         Ok(RuntimeHandle {
             endpoint: endpoint_url(&id),
@@ -1261,22 +1152,9 @@ impl ProcessSupervisor for RunPodSupervisor {
     /// [`StopOutcome::AlreadyGone`] keeps its secrets in
     /// [`created_secrets`](RunPodSupervisor::created_secrets).
     async fn stop(&self, handle: &RuntimeHandle) -> Result<(), LlamaCppError> {
-        match self.stop_endpoint(handle).await? {
-            StopOutcome::Deleted => Ok(()),
-            StopOutcome::AlreadyGone { kept_secrets } if kept_secrets.is_empty() => Ok(()),
-            StopOutcome::AlreadyGone { kept_secrets } => Err(LlamaCppError::Supervisor(format!(
-                "RunPod endpoint {} was already gone, but the account could not be \
-                     confirmed, so these secrets were kept: {}",
-                handle.id,
-                kept_secrets
-                    .iter()
-                    .map(|n| format!("`{n}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))),
-        }
+        stop_result("endpoint", &handle.id, self.stop_endpoint(handle).await?)
     }
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
