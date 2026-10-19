@@ -33,7 +33,7 @@ Hardware profiles with `provider` set to `local`, `local_apple`, `local_cpu`, or
 
 A profile with no `provider` also means the local host.
 
-These ids are supported by `apply`, which runs the runtime on the host you invoke it from. Modal is the only provider tested end to end on real GPUs; the local path is implemented for macOS (launchd), Linux (systemd) and Windows x86_64 (Task Scheduler), as described below. vLLM is Linux-only.
+These ids are supported by `apply`, which runs the runtime on the host you invoke it from. Modal is tested end to end on real GPUs, and RunPod was tested live with vLLM on Serverless (eu region) and vLLM on pods (L4); the llama.cpp live test on RunPod is still pending; the local path is implemented for macOS (launchd), Linux (systemd) and Windows x86_64 (Task Scheduler), as described below. vLLM is Linux-only.
 
 ## How it runs
 

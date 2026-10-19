@@ -25,4 +25,4 @@ llama-server serves Prometheus metrics at `/metrics` because amicu adds `--metri
 
 ## Remote provider deployments
 
-Status, logs, and metrics for a remote deployment come from the provider. Today `amicu` ships these commands for Modal only (`amicu modal status`, `logs`, `metrics`, `stop`); the full list, the metrics shown, and their limits are on the [Modal](/docs/providers/modal#monitoring) page. Other providers will document theirs on their own page when they are wired into `apply`.
+Status, logs, and metrics for a remote deployment come from the provider. Today `amicu` ships these commands for Modal (`amicu modal status`, `logs`, `metrics`, `stop`) and RunPod (`amicu runpod status`, `logs`, `metrics`, `stop`). The Modal list, the metrics shown, and their limits are on the [Modal](/docs/providers/modal#monitoring) page; the RunPod commands are in the [CLI reference](/docs/reference/cli#provider-commands). Other providers will document theirs on their own page when they are wired into `apply`.

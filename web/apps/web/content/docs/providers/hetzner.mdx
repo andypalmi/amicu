@@ -79,7 +79,7 @@ These are the generic [`hardware_profile`](/docs/configuration/hardware-profile)
 
 <Accordions>
   <Accordion title="apply says the provider is not supported">
-  Expected. The error reads `provider "hetzner" is not supported by apply yet`. `apply` deploys to this machine and Modal only. Provision the machine yourself, install the runtime there, and run amicu on it with the [`on_prem`](/docs/providers/local) provider. The endpoint then binds to loopback on that host.
+  Expected. The error reads `provider "hetzner" is not supported by apply yet`. `apply` deploys to this machine, Modal and RunPod only. Provision the machine yourself, install the runtime there, and run amicu on it with the [`on_prem`](/docs/providers/local) provider. The endpoint then binds to loopback on that host.
   </Accordion>
   <Accordion title="validate or plan rejects the region">
   The region code must be one the catalog lists, and its jurisdiction must satisfy your [`data_class`](/docs/configuration/data-class) residency constraint. An unknown code is not guessed at: the residency check fails closed. See [Residency](/docs/concepts/residency).
