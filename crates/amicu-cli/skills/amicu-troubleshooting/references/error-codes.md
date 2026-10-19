@@ -51,6 +51,8 @@ signal; the number identifies the specific check.
   message lists (`a100-sxm4-80gb`, `a100-pcie-80gb`, ...).
 - `AMICU-CAP-013` - the GPU model is not in the GPU catalog. Error on `modal`
   and `runpod` (they place GPUs by catalog id), warning elsewhere.
+- `AMICU-CAP-014` - warning: a GPU alias (e.g. `NVIDIA H100 80GB HBM3`) pins its
+  card and ignores `accelerator.memory`, which disagrees with that card's VRAM.
 - `AMICU-MEM-001` / `AMICU-MEM-002` - capacity/memory fit failures.
 - `AMICU-MEM-003` - warning: a local hardware profile declares more memory than
   this machine has (`plan` and `doctor` report it). Fix the profile, or ignore

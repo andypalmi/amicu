@@ -330,12 +330,72 @@ impl fmt::Display for GpuResolveError {
 
 impl std::error::Error for GpuResolveError {}
 
+fn alias_card(key: &str) -> Option<&'static GpuCard> {
+    GPU_CARDS
+        .iter()
+        .find(|c| c.aliases.iter().any(|a| normalize_gpu_name(a) == key))
+}
+
+/// The card an exact alias pins when the declared `memory` is outside the
+/// tolerance of its VRAM (resolution ignores `memory` for aliases).
+#[must_use]
+pub fn alias_memory_conflict(model: &str, memory: ByteSize) -> Option<&'static GpuCard> {
+    alias_card(&normalize_gpu_name(model)).filter(|c| !c.memory_matches(memory))
+}
+
+/// Relative VRAM band for a probed total: `nvidia-smi` totals and provider
+/// sizing can drift further from nominal than a declared `memory` does.
+pub const PROBE_VRAM_TOLERANCE: f64 = 0.05;
+
+/// Checks one probed accelerator (`nvidia-smi` name and total VRAM) against the
+/// resolved `card`. The name is matched first, by card family; a name outside
+/// the catalog is left to the VRAM check.
+///
+/// # Errors
+/// A message naming the probed and expected card.
+pub fn verify_probed_gpu(
+    card: &GpuCard,
+    name: Option<&str>,
+    total: Option<ByteSize>,
+) -> Result<(), String> {
+    let mismatch = || {
+        let probed = match (name, total) {
+            (Some(n), Some(t)) => format!("{n} ({t})"),
+            (Some(n), None) => n.to_owned(),
+            (None, Some(t)) => t.to_string(),
+            (None, None) => "unknown".to_owned(),
+        };
+        format!(
+            "the running GPU is {probed}, not the declared {}",
+            card.describe()
+        )
+    };
+    if let Some(name) = name {
+        let same_family = match resolve_gpu(name, total) {
+            Ok(found) => Some(found.family == card.family),
+            Err(
+                GpuResolveError::Ambiguous { candidates, .. }
+                | GpuResolveError::MemoryMismatch { candidates, .. },
+            ) => Some(candidates.iter().any(|c| c.family == card.family)),
+            Err(GpuResolveError::Unknown { .. }) => None,
+        };
+        if same_family == Some(false) {
+            return Err(mismatch());
+        }
+    }
+    match total {
+        Some(total) if vram_distance(card.vram_gb, total) > PROBE_VRAM_TOLERANCE => Err(mismatch()),
+        _ => Ok(()),
+    }
+}
+
 /// Resolve `model` (with the optional per-card `memory`) to exactly one card.
 ///
 /// A canonical id must match `memory`; an alias pins its card regardless. A
 /// family, family+variant (`a100-sxm4`) or family+size (`a100-80gb`) must be
 /// narrowed by `memory` (nearest VRAM wins) to a single card. Matching ignores
-/// case, punctuation and vendor words.
+/// case, punctuation and vendor words. An alias that disagrees with `memory`
+/// still resolves; [`alias_memory_conflict`] reports it.
 pub fn resolve_gpu(
     model: &str,
     memory: Option<ByteSize>,
@@ -348,10 +408,7 @@ pub fn resolve_gpu(
         return Err(unknown());
     }
 
-    if let Some(card) = GPU_CARDS
-        .iter()
-        .find(|c| c.aliases.iter().any(|a| normalize_gpu_name(a) == key))
-    {
+    if let Some(card) = alias_card(&key) {
         return Ok(card);
     }
     if let Some(card) = GPU_CARDS.iter().find(|c| normalize_gpu_name(c.id) == key) {
@@ -428,6 +485,7 @@ pub const CATALOG_GPU_PROVIDERS: [&str; 2] = ["modal", "runpod"];
 /// The card a profile on `provider` runs on. For a short name that is now
 /// ambiguous this is the card `modal`/`runpod` picked before exact names were
 /// required, so rewriting `h100` to `h100-sxm-80gb` is not a config change.
+/// The legacy fallback only covers old configs; new ones must name an exact card.
 #[must_use]
 pub fn effective_gpu_card(
     provider: &str,
@@ -671,5 +729,32 @@ mod tests {
         }
         // `a10` must not swallow `a100-80gb`'s size.
         assert_ne!(resolve_gpu("a100-80gb", None).map(|c| c.id), Ok("a10-24gb"));
+    }
+
+    #[test]
+    fn probed_gpus_are_verified_by_name_then_vram() {
+        const MIB: u64 = 1 << 20;
+        let card = gpu_card("h200-sxm-141gb").unwrap();
+        let mib = |n: u64| Some(ByteSize::from_bytes(n * MIB));
+        assert!(verify_probed_gpu(card, Some("NVIDIA H200"), mib(143_771)).is_ok());
+        let h100 = gpu_card("h100-sxm-80gb").unwrap();
+        assert!(verify_probed_gpu(h100, Some("NVIDIA H100 80GB HBM3"), mib(81_559)).is_ok());
+        let err = verify_probed_gpu(h100, Some("NVIDIA H200"), mib(143_771)).unwrap_err();
+        assert!(
+            err.contains("H200") && err.contains("h100-sxm-80gb"),
+            "{err}"
+        );
+        assert!(verify_probed_gpu(h100, Some("NVIDIA A100-SXM4-80GB"), mib(81_920)).is_err());
+        assert!(verify_probed_gpu(h100, Some("Mystery GPU"), mib(143_771)).is_err());
+        assert!(verify_probed_gpu(h100, Some("Mystery GPU"), mib(81_559)).is_ok());
+        assert!(verify_probed_gpu(h100, Some("NVIDIA H100 80GB HBM3"), None).is_ok());
+    }
+
+    #[test]
+    fn an_alias_with_a_disagreeing_memory_is_reported() {
+        let size = |g: u64| ByteSize::from_bytes(g * GIB);
+        assert!(alias_memory_conflict("NVIDIA H100 80GB HBM3", size(40)).is_some());
+        assert!(alias_memory_conflict("NVIDIA H100 80GB HBM3", size(80)).is_none());
+        assert!(alias_memory_conflict("h100-sxm-80gb", size(40)).is_none());
     }
 }

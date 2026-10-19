@@ -56,7 +56,9 @@ use std::time::Duration;
 
 use amicu_core::ByteSize;
 use amicu_core::resource::ScalingSettings;
-use amicu_core::resource::{Accelerator, Cpu, HardwareProfile, Model, Runtime};
+use amicu_core::resource::{
+    Accelerator, Cpu, GpuCard, HardwareProfile, Model, Runtime, verify_probed_gpu,
+};
 use amicu_llamacpp::remote::{self, RemoteEnv};
 use amicu_llamacpp::{LlamaCppError, ProcessSupervisor, ResolvedSecret};
 use amicu_runtime::{
@@ -72,6 +74,7 @@ use crate::client::ModalClient;
 use crate::credentials::Credentials;
 use crate::deploy::{Deployment, ServerSpec};
 use crate::error::ModalError;
+use crate::hardware::ContainerHardware;
 use crate::image::ImageSpec;
 
 /// The vLLM base image `ModalSupervisor::start` builds unless overridden by
@@ -223,6 +226,7 @@ pub const MIN_CONTAINERS: u32 = 0;
 pub struct ModalSupervisor {
     app_name: String,
     gpu: Option<String>,
+    card: Option<&'static GpuCard>,
     region: Option<String>,
     scaling: ScalingSettings,
     gguf: Option<GgufSource>,
@@ -248,6 +252,7 @@ impl ModalSupervisor {
         Self {
             app_name: app_name.into(),
             gpu: None,
+            card: None,
             region: None,
             gguf: None,
             scaling: ScalingSettings::default(),
@@ -317,6 +322,9 @@ impl ModalSupervisor {
         accelerator: Option<&Accelerator>,
     ) -> Result<Self, LlamaCppError> {
         self.gpu = accelerator.map(gpu_string).transpose()?;
+        self.card = accelerator
+            .and_then(Accelerator::gpu_card)
+            .and_then(Result::ok);
         Ok(self)
     }
 
@@ -490,6 +498,16 @@ impl ModalSupervisor {
             .filter_map(|c| c.outcome.as_ref().ok())
             .filter_map(HardwareSample::accelerator_memory_used)
             .reduce(u64::saturating_add)
+    }
+
+    /// The first running container whose probed GPU is not the declared card,
+    /// as a failure detail. `None` when the card matches or cannot be probed
+    /// (scaled to zero, exec refused, no accelerator reported).
+    async fn gpu_mismatch(&self, app_id: &str) -> Option<String> {
+        let card = self.card?;
+        let mut client = self.connect().await.ok()?;
+        let containers = client.probe_app_hardware(app_id).await.ok()?;
+        probed_gpu_mismatch(card, &containers)
     }
 
     /// The argv the Modal container actually runs for `plan`: the renderer's
@@ -716,6 +734,21 @@ fn rollback_target(previous: Option<(String, u32)>, deployed_app_id: &str) -> Op
         .map(|(_, version)| version)
 }
 
+fn probed_gpu_mismatch(card: &GpuCard, containers: &[ContainerHardware]) -> Option<String> {
+    containers
+        .iter()
+        .filter_map(|c| c.outcome.as_ref().ok())
+        .flat_map(|sample| &sample.accelerators)
+        .find_map(|acc| {
+            verify_probed_gpu(
+                card,
+                acc.name.as_deref(),
+                acc.mem_total_bytes.map(ByteSize::from_bytes),
+            )
+            .err()
+        })
+}
+
 /// What the exposure-failure handler does to Modal, so it is testable without
 /// the network.
 #[async_trait]
@@ -938,6 +971,19 @@ impl ProcessSupervisor for ModalSupervisor {
         )
         .await
         {
+            let previous = rollback_target(previous, &deployment.app_id);
+            return Err(exposure_failure(
+                &mut ModalUpdateControl {
+                    client: &mut client,
+                },
+                &detail,
+                &deployment,
+                previous,
+                self.previous_endpoint.as_deref(),
+            )
+            .await);
+        }
+        if let Some(detail) = self.gpu_mismatch(&deployment.app_id).await {
             let previous = rollback_target(previous, &deployment.app_id);
             return Err(exposure_failure(
                 &mut ModalUpdateControl {
@@ -1515,6 +1561,42 @@ mod tests {
             self.calls.push(format!("closed {endpoint}"));
             self.closed.clone()
         }
+    }
+
+    fn container(name: &str, total_mib: u64) -> ContainerHardware {
+        use amicu_telemetry::hardware::{AcceleratorSample, Vendor};
+        let acc = AcceleratorSample {
+            index: 0,
+            vendor: Vendor::Nvidia,
+            name: Some(name.to_owned()),
+            util_pct: None,
+            mem_used_bytes: None,
+            mem_total_bytes: Some(total_mib << 20),
+            temp_c: None,
+            power_w: None,
+        };
+        ContainerHardware {
+            task_id: "ta-1".to_owned(),
+            outcome: Ok(HardwareSample {
+                accelerators: vec![acc],
+                ..HardwareSample::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn a_probed_gpu_that_is_not_the_declared_card_is_a_mismatch() {
+        let h100 = amicu_core::resource::gpu_card("h100-sxm-80gb").unwrap();
+        let ok = container("NVIDIA H100 80GB HBM3", 81_559);
+        assert_eq!(probed_gpu_mismatch(h100, &[ok]), None);
+        let wrong = container("NVIDIA H200", 143_771);
+        let detail = probed_gpu_mismatch(h100, &[wrong]).expect("mismatch");
+        assert!(detail.contains("H200"), "{detail}");
+        let failed = ContainerHardware {
+            task_id: "ta-2".to_owned(),
+            outcome: Err("exec refused".to_owned()),
+        };
+        assert_eq!(probed_gpu_mismatch(h100, &[failed]), None);
     }
 
     fn deployed() -> Deployment {
