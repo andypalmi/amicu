@@ -1712,14 +1712,16 @@ fn a_pod_whose_models_route_is_public_is_kept() {
 
 fn vllm_pod_project(td: &TempDir) -> Project {
     let project = pod_project(td, None);
+    write(&td.path, "amicu.hcl", &vllm_pod_config());
+    project
+}
+
+fn vllm_pod_config() -> String {
     let config = pod_config("");
     let (head, deployment) = config.split_once("resource \"deployment\"").unwrap();
     assert!(deployment.contains("llama_cpp {"));
-    write(
-        &td.path,
-        "amicu.hcl",
-        &format!(
-            r#"{head}
+    format!(
+        r#"{head}
 resource "model" "small" {{
   source {{
     registry  = "hugging_face"
@@ -1748,9 +1750,25 @@ resource "deployment" "support_local" {{
   }}
 }}
 "#
-        ),
+    )
+}
+
+#[test]
+fn plan_shows_the_vllm_pod_launch_with_the_auth_middleware_and_no_key() {
+    let state = state_with(amicu_core::graph::Graph::new());
+    let (text, _) = plan_text_for(&vllm_pod_config(), &state);
+    let launch = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("launch:"))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(
+        launch.contains("vllm serve Qwen/Qwen2.5-0.5B-Instruct")
+            && launch.ends_with("--middleware amicu_auth.RequireKey"),
+        "{launch}"
     );
-    project
+    assert!(!launch.contains("--api-key"), "{launch}");
+    assert!(!text.contains("AMICU_AUTH_EOF"), "{text}");
+    assert!(!text.contains("rpa_ENDPOINTKEY"), "{text}");
 }
 
 #[test]
@@ -1772,7 +1790,7 @@ fn a_vllm_pod_apply_probes_the_routes_vllm_leaves_open() {
     assert_eq!(w.pods[0].body["entrypoint"], json!(["/bin/sh", "-c"]));
     let script = w.pods[0].body["cmd"][0].as_str().unwrap();
     assert!(
-        script.contains("--middleware amicu_auth.RequireKey"),
+        script.contains("'--middleware' 'amicu_auth.RequireKey'"),
         "{script}"
     );
 }

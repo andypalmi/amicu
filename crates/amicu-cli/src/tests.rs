@@ -3050,7 +3050,7 @@ fn plan_text_for(config: &str, state: &LocalState) -> (String, amicu_plan::Plan)
         state.project_id.as_deref(),
     );
     let mut out = Vec::new();
-    commands::plan::print_human_with(&result, &graph, &switches, &mut out).unwrap();
+    commands::plan::print_human_with(&result, &graph, &switches, None, &mut out).unwrap();
     // The JSON plan carries the same steps, so the counts agree.
     let mut plan = result.plan.clone();
     commands::plan::add_switch_actions(&mut plan, &switches);

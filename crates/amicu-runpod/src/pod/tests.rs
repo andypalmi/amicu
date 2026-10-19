@@ -189,6 +189,7 @@ async fn vllm_start_creates_secrets_then_the_pod_and_checks_exposure() {
             "cmd": [vllm_pod_command(&[
                 "vllm".into(), "serve".into(), "meta-llama/Llama-3.1-8B-Instruct".into(),
                 "--port".into(), "8000".into(), "--host".into(), "0.0.0.0".into(),
+                "--middleware".into(), "amicu_auth.RequireKey".into(),
             ]).1[0].clone()],
             "env": {
                 "AMICU_OWNER": owner(),
@@ -767,7 +768,7 @@ fn the_vllm_pod_command_loads_the_auth_middleware_without_the_key() {
         script.ends_with(
             "export PYTHONPATH=/tmp/amicu${PYTHONPATH:+:$PYTHONPATH}\nexec 'vllm' 'serve' \
              'meta-llama/Llama-3.1-8B-Instruct' '--port' '8000' '--host' '0.0.0.0' \
-             --middleware amicu_auth.RequireKey\n"
+             '--middleware' 'amicu_auth.RequireKey'\n"
         ),
         "{script}"
     );
@@ -784,7 +785,7 @@ fn the_vllm_pod_command_loads_the_auth_middleware_without_the_key() {
 fn vllm_pod_command_quotes_every_argument() {
     let (_, cmd) = vllm_pod_command(&["vllm".into(), "it's $HOME".into()]);
     assert!(
-        cmd[0].contains("exec 'vllm' 'it'\\''s $HOME' --middleware"),
+        cmd[0].ends_with("exec 'vllm' 'it'\\''s $HOME'\n"),
         "{}",
         cmd[0]
     );
@@ -871,7 +872,13 @@ print(out)
         .arg(&vllm)
         .status()
         .unwrap();
-    let (entrypoint, cmd) = vllm_pod_command(&["vllm".into(), "serve".into(), "it's".into()]);
+    let (entrypoint, cmd) = vllm_pod_command(&[
+        "vllm".into(),
+        "serve".into(),
+        "it's".into(),
+        "--middleware".into(),
+        VLLM_AUTH_MIDDLEWARE.into(),
+    ]);
     let script = cmd[0].replace(VLLM_AUTH_DIR, &dir.join("auth").display().to_string());
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
     let out = std::process::Command::new(&entrypoint[0])

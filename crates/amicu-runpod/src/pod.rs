@@ -32,8 +32,8 @@ use crate::regions::{restrict_to_residencies, select_data_centers};
 use crate::secrets::{SecretLedger, reference_secrets, stop_result};
 use crate::supervisor::{
     DEFAULT_CONTAINER_DISK_GB, HEALTH_PATH, ProgressSink, ReadinessTiming, StopOutcome,
-    container_argv, container_command, elapsed, image_min_cuda, owner_marker, reserved_env_var,
-    runpod_err, runtime_image, runtime_port, unsupported,
+    container_argv, container_command, elapsed, image_min_cuda, owner_marker, placeholder_secrets,
+    planned_hf_token, reserved_env_var, runpod_err, runtime_image, runtime_port, unsupported,
 };
 
 /// Env variables the pod env may not set: amicu's owner marker, and the ones
@@ -86,7 +86,7 @@ const VLLM_AUTH_MIDDLEWARE: &str = "amicu_auth.RequireKey";
 const HEREDOC_END: &str = "AMICU_AUTH_EOF";
 
 /// ENTRYPOINT and CMD of a vLLM pod: a shell writes [`VLLM_AUTH_MODULE`],
-/// then execs `argv` with it loaded.
+/// then execs `argv`.
 fn vllm_pod_command(argv: &[String]) -> (Vec<String>, Vec<String>) {
     let run = argv
         .iter()
@@ -98,7 +98,7 @@ fn vllm_pod_command(argv: &[String]) -> (Vec<String>, Vec<String>) {
          cat > {VLLM_AUTH_DIR}/amicu_auth.py <<'{HEREDOC_END}'\n\
          {VLLM_AUTH_MODULE}{HEREDOC_END}\n\
          export PYTHONPATH={VLLM_AUTH_DIR}${{PYTHONPATH:+:$PYTHONPATH}}\n\
-         exec {run} --middleware {VLLM_AUTH_MIDDLEWARE}\n"
+         exec {run}\n"
     );
     (vec!["/bin/sh".to_owned(), "-c".to_owned()], vec![script])
 }
@@ -439,12 +439,34 @@ impl PodSupervisor {
         self.check_catalog(&prepared.pod.gpu_type_id).await
     }
 
-    /// The argv the pod runs for `plan`.
+    /// The argv the pod runs for `plan`. On vLLM it loads
+    /// [`VLLM_AUTH_MODULE`], which a shell writes first.
     ///
     /// # Errors
     /// See [`amicu_llamacpp::remote::launch_argv`].
     pub fn launch_argv(&self, plan: &LaunchPlan) -> Result<Vec<String>, LlamaCppError> {
-        container_argv(plan, self.gguf.as_ref())
+        let mut argv = container_argv(plan, self.gguf.as_ref())?;
+        match RuntimeKind::of(&plan.settings) {
+            RuntimeKind::Vllm => {
+                argv.extend(["--middleware".to_owned(), VLLM_AUTH_MIDDLEWARE.to_owned()]);
+            }
+            RuntimeKind::LlamaCpp => {
+                let (entrypoint, cmd) = container_command(&argv)?;
+                argv = entrypoint.into_iter().chain(cmd).collect();
+            }
+        }
+        Ok(argv)
+    }
+
+    /// The create body `start` would send for `plan`, with placeholder
+    /// secret values. For `amicu plan`.
+    ///
+    /// # Errors
+    /// Whatever `start` refuses before its first call.
+    pub fn planned_pod(&self, plan: &LaunchPlan) -> Result<CreatePod, LlamaCppError> {
+        let image = runtime_image(RuntimeKind::of(&plan.settings));
+        self.prepare(plan, &placeholder_secrets(plan), &image, planned_hf_token())
+            .map(|p| p.pod)
     }
 
     /// Why `pod` cannot be updated in place to this configuration (GPU type
