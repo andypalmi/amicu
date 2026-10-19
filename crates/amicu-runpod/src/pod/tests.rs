@@ -395,6 +395,34 @@ async fn community_cloud_and_region_reach_the_body() {
     assert_eq!(body["dataCenterIds"], json!(["EU-RO-1"]));
 }
 
+#[test]
+fn the_data_class_residency_allowlist_bounds_placement() {
+    let (sup, _) = supervisor(Mock::default());
+    let err = sup
+        .with_region(Some(&Region::from_code("eu-ro-1")))
+        .unwrap()
+        .with_allowed_residencies(&[Residency::Us])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("not within the required residency (us)"),
+        "{err}"
+    );
+
+    let (sup, _) = supervisor(Mock::default());
+    let sup = sup
+        .with_region(None)
+        .unwrap()
+        .with_allowed_residencies(&[Residency::Eu])
+        .unwrap();
+    assert_ne!(sup.data_center_ids.len(), 0);
+    assert!(sup.data_center_ids.iter().all(|d| d.starts_with("EU")));
+
+    let (sup, _) = supervisor(Mock::default());
+    let sup = sup.with_allowed_residencies(&[]).unwrap();
+    assert_eq!(sup.data_center_ids, Vec::<String>::new());
+}
+
 // --- ambiguity, adoption, update ---------------------------------------------
 
 #[tokio::test]

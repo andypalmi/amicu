@@ -149,8 +149,8 @@ enum Command {
         #[command(subcommand)]
         command: ModalCommand,
     },
-    /// Operate a RunPod Serverless deployment recorded in this project's
-    /// state. Needs `RUNPOD_API_KEY`.
+    /// Operate a RunPod Serverless endpoint or Pod recorded in this
+    /// project's state. Needs `RUNPOD_API_KEY`.
     Runpod {
         #[command(subcommand)]
         command: RunpodCommand,
@@ -249,14 +249,16 @@ enum ModalCommand {
 #[derive(Debug, Subcommand)]
 enum RunpodCommand {
     /// Show the endpoint id, URL, workers (running / idle / initializing /
-    /// throttled), GPU and data centers.
+    /// throttled), GPU and data centers; for a pod its id, status, GPU,
+    /// cloud, data center, cost per hour and proxy URL.
     Status {
         /// The deployment name.
         deployment: String,
     },
     /// Print each running worker's recent log lines, prefixed with the
-    /// worker id. A bounded read (no follow); a scaled-to-zero endpoint has
-    /// no workers and so no logs.
+    /// worker id (a pod: its own lines, prefixed with the pod id). A bounded
+    /// read (no follow); a scaled-to-zero endpoint has no workers and so no
+    /// logs.
     Logs {
         /// The deployment name.
         deployment: String,
@@ -265,13 +267,15 @@ enum RunpodCommand {
         tail: Option<u32>,
     },
     /// Show runtime metrics (vLLM or llama.cpp `/metrics`), scraped through
-    /// the RunPod gateway with the deployment's `api_key`.
+    /// the RunPod gateway (a pod: its proxy URL) with the deployment's
+    /// `api_key`.
     ///
     /// The load balancer answers from one worker of its choosing, so with
     /// several workers the figures describe one of them. Hardware metrics are
     /// not available on RunPod. A scaled-to-zero endpoint is refused: the
     /// request would start a worker (billed GPU time); `--wake` allows it.
-    /// `--watch` keeps the endpoint warm, and billed, while it runs.
+    /// `--watch` keeps the endpoint warm, and billed, while it runs. A pod is
+    /// always on, so `--wake` does not apply.
     Metrics {
         /// The deployment name.
         deployment: String,
@@ -285,8 +289,9 @@ enum RunpodCommand {
         #[arg(long)]
         wake: bool,
     },
-    /// Delete the endpoint and its secrets, as `destroy --target` does: the
-    /// deployment leaves state only once the stop is confirmed.
+    /// Delete the endpoint (terminate the pod) and its secrets, as `destroy
+    /// --target` does: the deployment leaves state only once the stop is
+    /// confirmed.
     Stop {
         /// The deployment name.
         deployment: String,

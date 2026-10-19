@@ -3,13 +3,16 @@
 //! balancer forwards each request to one worker of its choosing, so with
 //! several workers a scrape describes one of them and consecutive scrapes may
 //! come from different ones. A scaled-to-zero endpoint cold-starts a worker
-//! to answer.
+//! to answer. A pod is scraped through its proxy URL
+//! (`https://<podId>-<port>.proxy.runpod.net/metrics`) with the runtime's own
+//! key; it is always on, so nothing is woken.
 
 use std::time::{Duration, Instant};
 
 use amicu_providers::{HttpMethod, HttpRequest, HttpTransport, StreamLimits};
 use amicu_telemetry::scrape::{MetricsSnapshot, snapshot_from_text};
 
+use crate::client::pod_proxy_url;
 use crate::supervisor::endpoint_url;
 
 /// Largest `/metrics` body accepted (as for Modal).
@@ -27,6 +30,9 @@ pub enum MetricsError {
          RunPod API key with api.runpod.ai access to this endpoint"
     )]
     Auth(u16),
+    /// The pod's runtime refused the key.
+    #[error("the pod's runtime rejected the key (HTTP {0}); metrics need the deployment's api_key")]
+    PodAuth(u16),
     /// The runtime answered but does not serve `/metrics`.
     #[error(
         "the server does not expose /metrics (HTTP {0}); llama-server needs `--metrics` - \
@@ -60,6 +66,29 @@ pub async fn scrape(
     key: &str,
 ) -> Result<MetricsSnapshot, MetricsError> {
     let url = format!("{}/metrics", endpoint_url(endpoint_id));
+    scrape_url(transport, url, key, MetricsError::Auth).await
+}
+
+/// One scrape of pod `pod_id` through its proxy URL on `port`.
+///
+/// # Errors
+/// See [`MetricsError`].
+pub async fn scrape_pod(
+    transport: &dyn HttpTransport,
+    pod_id: &str,
+    port: u16,
+    key: &str,
+) -> Result<MetricsSnapshot, MetricsError> {
+    let url = format!("{}/metrics", pod_proxy_url(pod_id, port));
+    scrape_url(transport, url, key, MetricsError::PodAuth).await
+}
+
+async fn scrape_url(
+    transport: &dyn HttpTransport,
+    url: String,
+    key: &str,
+    auth: fn(u16) -> MetricsError,
+) -> Result<MetricsSnapshot, MetricsError> {
     let limits = StreamLimits {
         total: SCRAPE_TIMEOUT,
         idle: SCRAPE_TIMEOUT,
@@ -74,7 +103,7 @@ pub async fn scrape(
         .map_err(|e| MetricsError::Unreachable(e.to_string()))?;
     match resp.status {
         200..=299 => {}
-        401 | 403 => return Err(MetricsError::Auth(resp.status)),
+        401 | 403 => return Err(auth(resp.status)),
         404 | 501 => return Err(MetricsError::NotEnabled(resp.status)),
         other => return Err(MetricsError::Status(other)),
     }
@@ -151,6 +180,21 @@ mod tests {
         let seen = t.seen.lock().unwrap();
         assert_eq!(seen[0].0, "https://ep1.api.runpod.ai/metrics");
         assert_eq!(seen[0].1.as_deref(), Some("rpa_END"));
+    }
+
+    #[tokio::test]
+    async fn a_pod_is_scraped_through_its_proxy_url() {
+        let t = Canned::new(200, &["llamacpp:requests_processing 1\n"]);
+        let m = scrape_pod(&t, "pod1", 8080, "sk-runtime").await.unwrap();
+        assert_eq!(m.requests_running, Some(1));
+        let first = t.seen.lock().unwrap()[0].clone();
+        assert_eq!(first.0, "https://pod1-8080.proxy.runpod.net/metrics");
+        assert_eq!(first.1.as_deref(), Some("sk-runtime"));
+        let err = scrape_pod(&Canned::new(401, &[]), "pod1", 8080, "sk-runtime")
+            .await
+            .unwrap_err();
+        assert_eq!(err, MetricsError::PodAuth(401));
+        assert!(!err.to_string().contains("sk-runtime"));
     }
 
     #[tokio::test]

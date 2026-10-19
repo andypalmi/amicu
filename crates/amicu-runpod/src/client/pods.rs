@@ -389,6 +389,16 @@ pub struct Pod {
     pub env: PodEnv,
 }
 
+impl Pod {
+    /// The first exposed HTTP port (`<port>/http`), the runtime's.
+    #[must_use]
+    pub fn http_port(&self) -> Option<u16> {
+        self.ports
+            .iter()
+            .find_map(|p| p.strip_suffix("/http").and_then(|n| n.parse().ok()))
+    }
+}
+
 #[derive(Deserialize)]
 struct PodsPage {
     pods: Vec<Pod>,

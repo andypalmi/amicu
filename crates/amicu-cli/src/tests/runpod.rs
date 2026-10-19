@@ -117,6 +117,18 @@ fn owner_in(body: Option<&Value>) -> Option<String> {
 impl HttpTransport for World {
     #[allow(clippy::too_many_lines)]
     async fn execute(&self, req: HttpRequest) -> Result<HttpResponse, TransportError> {
+        if let Some(host) = req
+            .url
+            .strip_prefix("https://")
+            .and_then(|u| u.strip_suffix(".proxy.runpod.net/metrics"))
+        {
+            let mut w = self.state.lock().unwrap();
+            w.log.push(format!(
+                "proxy metrics {host} bearer={}",
+                req.bearer.as_deref().unwrap_or("")
+            ));
+            return Ok(HttpResponse::new(200, w.metrics.clone().into_bytes()));
+        }
         if let Some((id, path)) = req.url.strip_prefix("https://").and_then(|u| {
             u.split_once("-8080.proxy.runpod.net")
                 .or_else(|| u.split_once("-8000.proxy.runpod.net"))
@@ -311,6 +323,17 @@ impl HttpTransport for World {
                         reply(200, &body)
                     }
                 }
+            }
+            (HttpMethod::Get, ["pods", id, logs]) if logs.starts_with("logs?tail=") => {
+                if !w.pods.iter().any(|p| p.id == *id) {
+                    return reply(404, &json!({"detail": "not found"}));
+                }
+                let body = format!(
+                    "data: {}\n\ndata: {}\n\n",
+                    json!({"ts": "2026-01-01T00:00:02Z", "source": "system", "line": "pulled"}),
+                    json!({"ts": "2026-01-01T00:00:05Z", "source": "container", "line": format!("hello from {id}")}),
+                );
+                Ok(HttpResponse::new(200, body.into_bytes()))
             }
             (method, ["pods", id]) => {
                 let Some(i) = w.pods.iter().position(|p| p.id == *id) else {
@@ -2280,4 +2303,352 @@ resource "data_class" "customer" {
         "{err}"
     );
     assert_eq!(created.len(), 0);
+}
+
+// --- pods in refresh, orphans and `amicu runpod` ------------------------------
+
+fn applied_pod(td: &TempDir, record: StopRecord) -> Project {
+    let project = pod_project(td, Some(record));
+    let mut state = project.load_state().unwrap().unwrap();
+    state.pending.clear();
+    project.save_state(&state).unwrap();
+    project
+}
+
+fn add_named_pod(rig: &Rig, id: &str, name: &str, owner: Option<&str>, status: &'static str) {
+    let mut env = serde_json::Map::new();
+    if let Some(o) = owner {
+        env.insert(amicu_runpod::OWNER_ENV_VAR.to_owned(), json!(o));
+    }
+    rig.runpod.world.state.lock().unwrap().pods.push(PodRec {
+        id: id.to_owned(),
+        body: json!({"name": name, "gpu": {"id": "NVIDIA L4", "count": 1},
+            "cloud": "SECURE", "dataCenterId": "EU-RO-1", "cost": 0.44,
+            "ports": ["8080/http"], "env": env}),
+        status,
+        started: 0,
+    });
+}
+
+#[test]
+fn refresh_keeps_a_live_pod_without_notes() {
+    let td = TempDir::new();
+    let project = applied_pod(&td, pod_record(Some("pod7"), ACCOUNT, &[]));
+    let rig = rig();
+    add_pod(&rig, "pod7", "NVIDIA L4", Some(owner()));
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r, crate::refresh::Refresh::default());
+    assert_eq!(state.pending.len(), 0);
+    assert!(
+        rig.runpod
+            .world
+            .log()
+            .contains(&"Get /pods/pod7".to_owned())
+    );
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn refresh_marks_a_pod_gone_or_terminated_in_the_recorded_account_pending() {
+    for terminated in [false, true] {
+        let td = TempDir::new();
+        let project = applied_pod(&td, pod_record(Some("pod7"), ACCOUNT, &["amicu-x"]));
+        let rig = rig();
+        if terminated {
+            add_named_pod(&rig, "pod7", &endpoint_name(), None, "TERMINATED");
+        }
+        let (r, state) = refresh(&project, &rig);
+        assert_eq!(r.notes.len(), 1, "{r:?}");
+        let note = &r.notes[0];
+        assert!(
+            note.contains("RunPod pod") && note.contains("pod id pod7") && note.contains(ACCOUNT),
+            "{note}"
+        );
+        assert!(note.contains("kept in state as pending"), "{note}");
+        assert!(state.pending.iter().any(|d| d.as_str() == DEP));
+        assert_eq!(
+            state.stops,
+            [pod_record(Some("pod7"), ACCOUNT, &["amicu-x"])]
+        );
+        assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+    }
+}
+
+#[test]
+fn refresh_never_calls_a_pod_gone_from_another_account() {
+    let td = TempDir::new();
+    let project = applied_pod(&td, pod_record(Some("pod7"), "personal:s99", &[]));
+    let rig = rig();
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0, "{r:?}");
+    let warning = r.warning.unwrap();
+    assert!(
+        warning.contains("RunPod pod") && warning.contains("cannot tell whether it is gone"),
+        "{warning}"
+    );
+    assert_eq!(state.pending.len(), 0);
+}
+
+#[test]
+fn refresh_finds_an_id_less_pod_by_name_and_owner_and_never_a_foreign_one() {
+    let td = TempDir::new();
+    let project = applied_pod(&td, pod_record(None, ACCOUNT, &[]));
+    let rig = rig();
+    add_pod(&rig, "pod9", "NVIDIA L4", Some(owner()));
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r, crate::refresh::Refresh::default());
+    assert_eq!(state.pending.len(), 0);
+
+    let rig = self::rig();
+    add_pod(&rig, "pod9", "NVIDIA L4", Some("someone-else".to_owned()));
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 0, "{r:?}");
+    let warning = r.warning.unwrap();
+    assert!(
+        warning.contains("no pod id recorded")
+            && warning.contains("pod9")
+            && warning.contains("AMICU_OWNER"),
+        "{warning}"
+    );
+    assert_eq!(state.pending.len(), 0);
+}
+
+#[test]
+fn refresh_reports_gpu_and_cloud_drift_of_a_live_pod_as_a_note_only() {
+    let td = TempDir::new();
+    let project = applied_pod(&td, pod_record(Some("pod7"), ACCOUNT, &[]));
+    let rig = rig();
+    add_pod(&rig, "pod7", "NVIDIA A40", Some(owner()));
+    rig.runpod.world.state.lock().unwrap().pods[0].body["cloud"] = json!("COMMUNITY");
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r.notes.len(), 1, "{r:?}");
+    let note = &r.notes[0];
+    assert!(
+        note.contains("RunPod pod") && note.contains("pod7"),
+        "{note}"
+    );
+    assert!(
+        note.contains("GPU type NVIDIA A40 (applied NVIDIA L4)"),
+        "{note}"
+    );
+    assert!(note.contains("cloud COMMUNITY (applied SECURE)"), "{note}");
+    assert!(note.contains("revert it in the RunPod console"), "{note}");
+    assert_eq!(state.pending.len(), 0);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn orphans_lists_untracked_owned_pods_with_a_terminate_command() {
+    use crate::commands::orphans::{Kind, Ownership};
+    let td = TempDir::new();
+    let project = applied_pod(&td, pod_record(Some("pod7"), ACCOUNT, &[]));
+    let rig = rig();
+    add_named_pod(&rig, "pod7", &endpoint_name(), Some(&owner()), "RUNNING");
+    let stale = amicu_runpod::project_endpoint_name(PROJECT, "old");
+    add_named_pod(&rig, "pod8", &stale, Some("marker"), "EXITED");
+    add_named_pod(&rig, "pod9", "not-amicu", None, "RUNNING");
+    add_named_pod(&rig, "pod10", &stale, Some("marker"), "TERMINATED");
+    let report = orphans(&project, &rig);
+    let pods: Vec<(&str, bool, Ownership)> = report
+        .resources
+        .iter()
+        .filter(|r| r.kind == Kind::RunpodPod)
+        .map(|r| (r.identity.as_str(), r.tracked, r.ownership))
+        .collect();
+    let stale_id = format!("{stale} (pod8)");
+    let ours = format!("{} (pod7)", endpoint_name());
+    assert_eq!(pods.len(), 2, "{pods:?}");
+    assert!(pods.contains(&(stale_id.as_str(), false, Ownership::ThisProject)));
+    assert!(pods.iter().any(|p| p.0 == ours && p.1), "{pods:?}");
+    let orphan = report
+        .resources
+        .iter()
+        .find(|r| r.identity == stale_id)
+        .unwrap();
+    assert!(
+        orphan.stop_command.contains("curl -X DELETE")
+            && orphan.stop_command.contains("$RUNPOD_API_KEY")
+            && orphan.stop_command.contains("/v2/pods/pod8"),
+        "{}",
+        orphan.stop_command
+    );
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+fn running_pod(rig: &Rig) -> (TempDir, Project) {
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(Some("pod7"), ACCOUNT, &[])));
+    add_named_pod(rig, "pod7", &endpoint_name(), Some(&owner()), "RUNNING");
+    (td, project)
+}
+
+#[test]
+fn status_shows_the_pod_gpu_cloud_cost_and_proxy_url() {
+    let rig = rig();
+    let (_td, project) = running_pod(&rig);
+    let mut out = Vec::new();
+    commands::runpod::status(&project, DEP, OutputFormat::Human, &mut out, &rig.env()).unwrap();
+    let text = utf8(out);
+    assert!(text.contains("RunPod pod pod7"), "{text}");
+    assert!(text.contains("status:      RUNNING"), "{text}");
+    assert!(
+        text.contains("url:         https://pod7-8080.proxy.runpod.net"),
+        "{text}"
+    );
+    assert!(text.contains("gpu:         NVIDIA L4 x1"), "{text}");
+    assert!(text.contains("cloud:       SECURE"), "{text}");
+    assert!(text.contains("data center: EU-RO-1"), "{text}");
+    assert!(text.contains("cost:        $0.44/hr"), "{text}");
+
+    let mut out = Vec::new();
+    commands::runpod::status(&project, DEP, OutputFormat::Json, &mut out, &rig.env()).unwrap();
+    let doc: Value = serde_json::from_str(&utf8(out)).unwrap();
+    assert_eq!(doc["pod_id"], "pod7");
+    assert_eq!(doc["url"], "https://pod7-8080.proxy.runpod.net");
+    assert_eq!(doc["cost_per_hour_usd"], 0.44);
+    assert_eq!(rig.runpod.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn status_of_a_pod_gone_remotely_or_unrecorded_says_so() {
+    let rig = rig();
+    let td = TempDir::new();
+    let project = pod_project(&td, Some(pod_record(Some("pod7"), ACCOUNT, &[])));
+    let err = commands::runpod::status(
+        &project,
+        DEP,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("RunPod pod pod7") && err.contains("not found"),
+        "{err}"
+    );
+
+    let td = TempDir::new();
+    let unrecorded = pod_project(&td, Some(pod_record(None, ACCOUNT, &[])));
+    let err = commands::runpod::status(
+        &unrecorded,
+        DEP,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("no RunPod pod id recorded"), "{err}");
+}
+
+#[test]
+fn pod_logs_are_read_from_the_pod_logs_route() {
+    let rig = rig();
+    let (_td, project) = running_pod(&rig);
+    let mut out = Vec::new();
+    commands::runpod::logs(
+        &project,
+        DEP,
+        Some(20),
+        OutputFormat::Human,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let text = utf8(out);
+    assert_eq!(
+        text.lines().collect::<Vec<_>>(),
+        ["[pod7] (system) pulled", "[pod7] hello from pod7"],
+        "{text}"
+    );
+    assert!(
+        rig.runpod
+            .world
+            .log()
+            .contains(&"Get /pods/pod7/logs?tail=20".to_owned())
+    );
+
+    let mut out = Vec::new();
+    commands::runpod::logs(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Json,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let doc: Value = serde_json::from_str(&utf8(out)).unwrap();
+    assert_eq!(doc["pod_id"], "pod7");
+    assert_eq!(doc["lines"][1]["line"], "hello from pod7");
+}
+
+#[test]
+fn pod_metrics_go_through_the_proxy_url_with_the_runtime_key() {
+    let rig = rig();
+    let (_td, project) = running_pod(&rig);
+    rig.runpod.world.state.lock().unwrap().metrics = "llamacpp:requests_processing 2\n".to_owned();
+    let mut out = Vec::new();
+    commands::runpod::metrics(
+        &project,
+        DEP,
+        ONE_SHOT,
+        OutputFormat::Json,
+        &mut out,
+        &rig.env(),
+    )
+    .unwrap();
+    let doc: Value = serde_json::from_str(&utf8(out)).unwrap();
+    assert_eq!(doc["pod_id"], "pod7");
+    assert_eq!(doc["runtime"]["requests_running"], 2);
+    let log = rig.runpod.world.log();
+    assert!(
+        log.contains(&"proxy metrics pod7-8080 bearer=rpa_ENDPOINTKEY".to_owned()),
+        "{log:?}"
+    );
+    assert!(!log.iter().any(|l| l.contains("workers")), "{log:?}");
+}
+
+#[test]
+fn stop_terminates_the_pod_then_drops_the_record() {
+    let rig = rig();
+    let (_td, project) = running_pod(&rig);
+    commands::runpod::stop(
+        &project,
+        DEP,
+        None,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap();
+    assert_eq!(pod_writes(&rig), ["action pod7 terminate"]);
+    assert_eq!(pod_ids(&rig).len(), 0);
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn a_pod_region_outside_the_data_class_residency_is_refused_before_any_create() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let config = pod_config("").replacen(
+        "provider = \"runpod\"",
+        "provider = \"runpod\"\n  region   = \"eu\"",
+        1,
+    );
+    let extra = r#"
+resource "data_class" "customer" {
+  sensitivity = "confidential"
+  residency   = ["us"]
+}
+"#;
+    write(&td.path, "amicu.hcl", &format!("{config}{extra}"));
+    let rig = rig();
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(
+        err.contains("not within the required residency (us)"),
+        "{err}"
+    );
+    assert_eq!(pod_ids(&rig).len(), 0);
 }

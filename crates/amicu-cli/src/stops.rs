@@ -135,6 +135,15 @@ pub(crate) struct StopRecord {
 }
 
 impl StopRecord {
+    /// What a RunPod record names: `"pod"` for a Pod, else `"endpoint"`.
+    pub(crate) fn runpod_kind(&self) -> &'static str {
+        if self.backend == Backend::RunpodPod {
+            "pod"
+        } else {
+            "endpoint"
+        }
+    }
+
     /// A host instance, started as `context` (None: not known, e.g. state
     /// that predates these fields; the current user is assumed on stop).
     pub(crate) fn host(deployment: &DeploymentId, context: Option<&HostContext>) -> Self {
