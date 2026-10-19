@@ -7,7 +7,7 @@ import { quickstartUrl } from '../_lib/content';
 import { pageMetadata } from '../_lib/seo';
 
 export const metadata: Metadata = pageMetadata({
-  title: 'Compare amicu',
+  title: 'Compare',
   description:
     'How amicu, an open-source CLI for deploying LLMs, compares with Terraform and OpenTofu, SkyPilot, Ollama, and using RunPod or Modal directly.',
   path: '/compare',

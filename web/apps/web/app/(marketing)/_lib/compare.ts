@@ -1,13 +1,5 @@
-// Comparison page content. amicu claims follow content/docs (introduction,
-// providers, plan-apply-state, state-and-backends, budget, security). Claims
-// about other tools come from their official documentation:
-//   Terraform  developer.hashicorp.com/terraform/intro
-//   OpenTofu   opentofu.org/docs/intro, github.com/opentofu/opentofu (MPL-2.0)
-//   SkyPilot   docs.skypilot.ai/en/latest/overview.html and /getting-started/installation.html
-//   Ollama     docs.ollama.com, github.com/ollama/ollama (MIT)
-//   Modal      modal.com/docs/guide and /guide/gpu
-//   RunPod     docs.runpod.io/overview and /runpodctl/overview
-// Keep both sides in step with those sources when editing.
+// Comparison page content. amicu claims follow content/docs; claims about other
+// tools come from their official docs (linked per page in `sources`).
 
 export interface CompareRow {
   aspect: string;
@@ -79,7 +71,7 @@ export const comparePages: ComparePage[] = [
       },
       {
         aspect: 'State storage',
-        other: 'A state file as the source of truth for your environment; remote backends are available.',
+        other: 'A state file as the source of truth for your environment; remote backends such as S3, GCS and Azure are available.',
         amicu: 'Local state file in the project only; there is no remote backend yet.',
       },
       {
@@ -89,7 +81,7 @@ export const comparePages: ComparePage[] = [
       },
       {
         aspect: 'License',
-        other: 'OpenTofu is MPL-2.0.',
+        other: 'Terraform: BUSL 1.1 (since 2023). OpenTofu: MPL-2.0.',
         amicu: 'AGPL-3.0-only.',
       },
     ],
@@ -154,7 +146,7 @@ export const comparePages: ComparePage[] = [
       },
       {
         aspect: 'Plan before change',
-        other: 'Launches and manages clusters and jobs with commands.',
+        other: 'Shows the chosen resources and asks for confirmation on launch; no diff against recorded state.',
         amicu: 'plan shows a diff against recorded state; apply asks for approval.',
       },
       {
@@ -169,7 +161,7 @@ export const comparePages: ComparePage[] = [
       },
       {
         aspect: 'Cost control',
-        other: 'Clusters can be set to stop automatically when idle.',
+        other: 'Clusters can autostop or tear down when idle; SkyServe replicas can scale to zero.',
         amicu: 'RunPod serverless endpoints scale to zero by default; budgets are recorded but not enforced.',
       },
       {
@@ -184,7 +176,7 @@ export const comparePages: ComparePage[] = [
       },
       {
         aspect: 'License',
-        other: 'See the SkyPilot repository.',
+        other: 'Apache-2.0.',
         amicu: 'AGPL-3.0-only.',
       },
     ],
@@ -195,8 +187,8 @@ export const comparePages: ComparePage[] = [
     ],
     chooseAmicu: [
       'You only need open-weight LLM endpoints and want a plan-and-apply workflow for them.',
-      'You want policy checks (residency, provider allowlists, endpoint auth) before anything starts.',
-      'You want one small CLI whose state records what to stop, so nothing is left running by mistake.',
+      'You want policy checks (residency, provider allowlists) before anything starts and an endpoint auth check after deploy.',
+      'You want one small CLI whose state records how to stop each deployment, so destroy knows what to stop.',
     ],
     faq: [
       {
@@ -226,7 +218,7 @@ export const comparePages: ComparePage[] = [
     headline: 'amicu vs Ollama',
     summary: 'A local model runner compared with a declarative deployment tool. They complement each other.',
     verdict:
-      'Ollama is an easy way to download and run open models on your own computer, with its own API and model library. amicu is a deploy tool: you describe models, hardware and deployments in HCL, review a plan, and amicu runs llama.cpp or vLLM on your machine or on GPU providers such as Modal and RunPod, tracking what it started. If you want to chat with a model on your laptop, Ollama is simpler. If you want a repeatable, reviewable deployment, possibly on a remote GPU, amicu fits. Many people will use both.',
+      'Ollama is an easy way to download and run open models on your own computer, with its own API and model library. amicu is a deploy tool: you describe models, hardware and deployments in HCL, review a plan, and amicu runs llama.cpp or vLLM on your machine or on GPU providers such as Modal and RunPod, tracking what it started. If you want to chat with a model on your laptop, Ollama is simpler. If you want a repeatable, reviewable deployment, possibly on a remote GPU, amicu fits. They can be used side by side.',
     rows: [
       {
         aspect: 'What it is',
@@ -240,7 +232,7 @@ export const comparePages: ComparePage[] = [
       },
       {
         aspect: 'Engine',
-        other: 'Its own runtime; llama.cpp is among its supported backends.',
+        other: 'Its own runtime; its README lists llama.cpp as a supported backend.',
         amicu: 'llama.cpp or vLLM, chosen per deployment.',
       },
       {
@@ -260,7 +252,7 @@ export const comparePages: ComparePage[] = [
       },
       {
         aspect: 'Auth on remote endpoints',
-        other: 'Not applicable to a local-only server.',
+        other: 'Local by default; securing a network-exposed server is up to you.',
         amicu: 'Off-machine endpoints require an api_key secret, and apply verifies anonymous requests are rejected.',
       },
       {
@@ -287,7 +279,7 @@ export const comparePages: ComparePage[] = [
     faq: [
       {
         q: 'Are amicu and Ollama competitors?',
-        a: 'Only partly. Ollama is a local runner. amicu is a deploy tool for llama.cpp and vLLM servers, locally or on GPU providers. Many setups use both.',
+        a: 'Only partly. Ollama is a local runner. amicu is a deploy tool for llama.cpp and vLLM servers, locally or on GPU providers. They can be used side by side.',
       },
       {
         q: 'Does amicu use Ollama?',
@@ -407,5 +399,5 @@ export function getComparePage(slug: string): ComparePage | undefined {
 }
 
 export function compareHref(slug: string): string {
-  return ["/compare", slug].join("/");
+  return ['/compare', slug].join('/');
 }
