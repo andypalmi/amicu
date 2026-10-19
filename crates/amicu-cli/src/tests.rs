@@ -2699,10 +2699,15 @@ fn apply_with(project: &Project, rig: &Rig) -> Result<u8, crate::error::CliError
 
 fn plan_text(project: &Project, rig: &Rig) -> String {
     let mut out = Vec::new();
-    let state =
-        crate::refresh::load_refreshed_state(project, &rig.modal, OutputFormat::Human, &mut out)
-            .unwrap()
-            .unwrap();
+    let state = crate::refresh::load_refreshed_state(
+        project,
+        &rig.modal,
+        &rig.runpod,
+        OutputFormat::Human,
+        &mut out,
+    )
+    .unwrap()
+    .unwrap();
     format!("{}|pending={:?}", utf8(out), state.pending)
 }
 
@@ -2832,6 +2837,7 @@ fn a_failed_host_update_leaves_the_deployment_pending_with_its_stop_record() {
     let plan = crate::refresh::load_refreshed_state(
         &project,
         &rig.modal,
+        &rig.runpod,
         OutputFormat::Human,
         &mut Vec::new(),
     )

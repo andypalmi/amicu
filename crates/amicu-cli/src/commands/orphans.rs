@@ -1,9 +1,11 @@
 //! `amicu orphans [--output json]` - list amicu-owned resources that this
 //! project's state does not record.
 //!
-//! Strictly read-only: it enumerates Modal apps (`amicu-` prefix), launchd
-//! jobs/plists (`io.amicu.` prefix), systemd `--user` units and Task Scheduler
-//! tasks (the `\amicu\` folder, Windows), marks each as
+//! Strictly read-only: it enumerates Modal apps (`amicu-` prefix), RunPod
+//! endpoints carrying an `AMICU_OWNER` marker and `amicu-` RunPod secrets
+//! (never the account marker), launchd jobs/plists (`io.amicu.` prefix),
+//! systemd `--user` units and Task Scheduler tasks (the `\amicu\` folder,
+//! Windows), marks each as
 //! tracked or not by comparing against what `.amicu/state/state.json`
 //! references (every stop record and every endpoint), and prints the exact
 //! manual command that stops it. It never stops, imports or edits anything.
@@ -13,11 +15,15 @@
 //! project is reported as a likely orphan; every other untracked resource
 //! (another project's scoped label, a legacy label, a Modal app) is only
 //! "not tracked by this project" and may belong to another project. Modal
-//! apps are matched by app id and by name.
+//! apps are matched by app id and by name. RunPod endpoints and secrets are
+//! named `amicu-<project id>-...`, so they are judged like scoped labels;
+//! endpoints are matched by endpoint id and by name, secrets by the names
+//! recorded in stop records.
 //!
 //! Every external lookup goes through an injectable seam ([`CommandExec`] for
-//! `launchctl`/`systemctl`, [`ModalApps`] for Modal, a directory path for the
-//! plist scan) so tests never touch the real host.
+//! `launchctl`/`systemctl`, [`ModalApps`] for Modal, [`RunPodResources`] for
+//! RunPod, a directory path for the plist scan) so tests never touch the real
+//! host.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -32,6 +38,8 @@ use crate::OutputFormat;
 use crate::commands::build_runtime;
 use crate::error::CliError;
 use crate::project::{LocalState, Project};
+use crate::runpod_ops::RunPodOps;
+use crate::stops::Backend;
 use crate::write_json;
 
 const MODAL_PREFIX: &str = "amicu-";
@@ -40,8 +48,8 @@ const LAUNCHD_PREFIX: &str = "io.amicu.";
 const LLAMA_PREFIX: &str = "io.amicu.llama.";
 
 const SCOPE_NOTE: &str = "Not tracked by this project does not mean orphaned: resources of other \
-projects on this machine or Modal workspace appear here too. Only labels scoped to this project \
-are reported as likely orphans. Check before stopping.";
+projects on this machine, Modal workspace or RunPod account appear here too. Only labels and \
+RunPod names scoped to this project are reported as likely orphans. Check before stopping.";
 
 /// Whose a resource most plausibly is, judged from its name alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -53,7 +61,8 @@ pub(crate) enum Ownership {
     OtherProject,
     /// A legacy unscoped label (`io.amicu.llama.<dep>`): any project's.
     Legacy,
-    /// Not decidable from the name (Modal apps, plain units).
+    /// Not decidable from the name (Modal apps, plain units, unscoped RunPod
+    /// names).
     Unknown,
 }
 
@@ -95,11 +104,36 @@ fn ownership_of_label(label: &str, project_id: Option<&str>) -> Ownership {
     }
 }
 
+/// Classify a RunPod endpoint or secret name (`amicu-<project id>-...`).
+fn ownership_of_runpod_name(name: &str, project_id: Option<&str>) -> Ownership {
+    match name
+        .strip_prefix(MODAL_PREFIX)
+        .and_then(|rest| rest.split_once('-'))
+    {
+        Some((scope, rest))
+            if !rest.is_empty()
+                && scope.len() == 8
+                && scope
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) =>
+        {
+            if project_id == Some(scope) {
+                Ownership::ThisProject
+            } else {
+                Ownership::OtherProject
+            }
+        }
+        _ => Ownership::Unknown,
+    }
+}
+
 /// Which resource family an entry belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Kind {
     ModalApp,
+    RunpodEndpoint,
+    RunpodSecret,
     LaunchdJob,
     SystemdUnit,
     ScheduledTask,
@@ -109,6 +143,8 @@ impl Kind {
     fn label(self) -> &'static str {
         match self {
             Kind::ModalApp => "modal app",
+            Kind::RunpodEndpoint => "runpod endpoint",
+            Kind::RunpodSecret => "runpod secret",
             Kind::LaunchdJob => "launchd job",
             Kind::SystemdUnit => "systemd unit",
             Kind::ScheduledTask => "scheduled task",
@@ -188,6 +224,40 @@ impl ModalApps for RealModal {
     }
 }
 
+/// What RunPod lists for the account the management key acts in.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RunPodListing {
+    pub endpoints: Vec<amicu_runpod::Endpoint>,
+    pub secrets: Vec<amicu_runpod::Secret>,
+}
+
+/// Injectable read-only RunPod lookup.
+pub(crate) trait RunPodResources {
+    fn list(&self) -> Result<RunPodListing, String>;
+}
+
+/// Lists through a [`RunPodOps`] management client: only `GET` calls.
+pub(crate) struct OpsListing<'a>(pub &'a dyn RunPodOps);
+
+impl RunPodResources for OpsListing<'_> {
+    fn list(&self) -> Result<RunPodListing, String> {
+        let run = || -> Result<RunPodListing, CliError> {
+            let client = self.0.client()?;
+            let rt = build_runtime()?;
+            rt.block_on(async {
+                let endpoints = client.list_endpoints().await.map_err(|e| {
+                    crate::runpod_ops::runpod_error("could not list RunPod endpoints", &e)
+                })?;
+                let secrets = client.list_secrets().await.map_err(|e| {
+                    crate::runpod_ops::runpod_error("could not list RunPod secrets", &e)
+                })?;
+                Ok(RunPodListing { endpoints, secrets })
+            })
+        };
+        run().map_err(|e| e.to_string())
+    }
+}
+
 /// The host platform, injectable for tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Platform {
@@ -213,6 +283,7 @@ pub(crate) struct Env<'a> {
     pub platform: Platform,
     pub exec: &'a dyn CommandExec,
     pub modal: &'a dyn ModalApps,
+    pub runpod: &'a dyn RunPodResources,
     /// `~/Library/LaunchAgents` (macOS plist scan).
     pub agents_dir: Option<PathBuf>,
 }
@@ -228,6 +299,13 @@ pub(crate) struct Tracked {
     /// a `modal` hardware profile). Modal is only queried when it does, so a
     /// local-only project is never told about missing Modal credentials.
     modal_referenced: bool,
+    /// Names of RunPod records with no endpoint id yet; a record with an id
+    /// tracks that id only, so a same-named duplicate shows as untracked.
+    runpod_names: BTreeSet<String>,
+    runpod_ids: BTreeSet<String>,
+    runpod_secrets: BTreeSet<String>,
+    /// Like `modal_referenced`, for RunPod.
+    runpod_referenced: bool,
 }
 
 impl Tracked {
@@ -243,11 +321,19 @@ impl Tracked {
                 t.modal_referenced = true;
                 t.modal_names.insert(rec.identity.clone());
                 t.modal_ids.extend(rec.app_id.clone());
+            } else if rec.backend == Backend::Runpod {
+                t.runpod_referenced = true;
+                match &rec.app_id {
+                    Some(id) => t.runpod_ids.insert(id.clone()),
+                    None => t.runpod_names.insert(rec.identity.clone()),
+                };
+                t.runpod_secrets.extend(rec.secrets.iter().cloned());
             } else if rec.backend.is_host() {
                 t.insert_label(&rec.identity);
             }
         }
         t.modal_referenced |= uses_modal(&state.graph);
+        t.runpod_referenced |= uses_provider(&state.graph, "runpod");
         for ep in &state.endpoints {
             // Modal app ids (`ap-...`) mean Modal is in play even with no stop
             // record or Modal profile in the graph.
@@ -256,6 +342,7 @@ impl Tracked {
             }
             t.modal_names.insert(ep.id.clone());
             t.modal_ids.insert(ep.id.clone());
+            t.runpod_ids.insert(ep.id.clone());
             t.insert_label(&ep.id);
         }
         t
@@ -264,6 +351,7 @@ impl Tracked {
     /// Also count a Modal hardware profile in the current config as a reference.
     pub(crate) fn with_config(mut self, config: Option<&Graph>) -> Self {
         self.modal_referenced |= config.is_some_and(uses_modal);
+        self.runpod_referenced |= config.is_some_and(|g| uses_provider(g, "runpod"));
         self
     }
 
@@ -282,10 +370,72 @@ impl Tracked {
 
 /// Whether any hardware profile in `graph` runs on Modal.
 fn uses_modal(graph: &Graph) -> bool {
+    uses_provider(graph, "modal")
+}
+
+fn uses_provider(graph: &Graph, provider: &str) -> bool {
     graph
         .hardware_profiles
         .iter()
-        .any(|h| h.provider.eq_ignore_ascii_case("modal"))
+        .any(|h| h.provider.eq_ignore_ascii_case(provider))
+}
+
+/// The commands that delete a RunPod resource at `path` (relative to the v2
+/// API) with the management key, for the shell the user most likely uses.
+fn runpod_delete_command(platform: Platform, path: &str) -> String {
+    let url = format!("{}/{path}", amicu_runpod::BASE_URL);
+    let var = crate::runpod_ops::API_KEY_ENV_VAR;
+    match platform {
+        Platform::Windows => format!(
+            "curl.exe -X DELETE -H \"Authorization: Bearer $env:{var}\" {}",
+            quote_for(platform, &url)
+        ),
+        _ => format!(
+            "curl -X DELETE -H \"Authorization: Bearer ${var}\" {}",
+            shell_quote(&url)
+        ),
+    }
+}
+
+/// RunPod endpoints amicu created (they carry an `AMICU_OWNER` marker) and
+/// `amicu-` secrets other than the account marker.
+fn runpod(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
+    let listing = env.runpod.list()?;
+    let project_id = tracked.project_id.as_deref();
+    let mut found = Vec::new();
+    for ep in listing.endpoints.into_iter().filter(|e| e.owner.is_some()) {
+        let state = ep.workers.as_ref().map_or_else(
+            || "serverless".to_owned(),
+            |w| format!("serverless, workers {}-{}", w.min, w.max),
+        );
+        found.push(Found {
+            kind: Kind::RunpodEndpoint,
+            tracked: tracked.runpod_ids.contains(&ep.id) || tracked.runpod_names.contains(&ep.name),
+            ownership: ownership_of_runpod_name(&ep.name, project_id),
+            stop_command: runpod_delete_command(env.platform, &format!("serverless/{}", ep.id)),
+            identity: format!("{} ({})", ep.name, ep.id),
+            state,
+        });
+    }
+    for secret in listing.secrets.into_iter().filter(|s| {
+        s.name.starts_with(MODAL_PREFIX)
+            && !s
+                .name
+                .eq_ignore_ascii_case(amicu_runpod::ACCOUNT_MARKER_SECRET)
+    }) {
+        found.push(Found {
+            kind: Kind::RunpodSecret,
+            tracked: tracked.runpod_secrets.contains(&secret.name),
+            ownership: ownership_of_runpod_name(&secret.name, project_id),
+            stop_command: runpod_delete_command(
+                env.platform,
+                &format!("account/secrets/{}", secret.id),
+            ),
+            identity: format!("{} ({})", secret.name, secret.id),
+            state: "secret".to_owned(),
+        });
+    }
+    Ok(found)
 }
 
 /// Discover untracked (and tracked) amicu resources. Never mutates anything.
@@ -322,6 +472,22 @@ pub(crate) fn discover(env: &Env<'_>, tracked: &Tracked) -> OrphansReport {
     } else {
         sources.push(source(
             "modal",
+            "skipped",
+            Some("not used by this project".to_owned()),
+        ));
+    }
+
+    if tracked.runpod_referenced {
+        match runpod(env, tracked) {
+            Ok(found) => {
+                sources.push(source("runpod", "ok", None));
+                resources.extend(found);
+            }
+            Err(e) => sources.push(source("runpod", "error", Some(e))),
+        }
+    } else {
+        sources.push(source(
+            "runpod",
             "skipped",
             Some("not used by this project".to_owned()),
         ));
@@ -622,6 +788,7 @@ pub(crate) fn run(
         platform: Platform::current(),
         exec: &HostExec,
         modal: &RealModal,
+        runpod: &OpsListing(&crate::runpod_ops::RealRunPod),
         agents_dir,
     };
     render(&discover(&env, &tracked), output, out)
@@ -813,6 +980,14 @@ mod tests {
         Tracked::from_state(Some(&state_with(stops, Vec::new())))
     }
 
+    struct NoRunPod;
+
+    impl RunPodResources for NoRunPod {
+        fn list(&self) -> Result<RunPodListing, String> {
+            panic!("RunPod must not be queried")
+        }
+    }
+
     fn env<'a>(
         platform: Platform,
         exec: &'a FakeExec,
@@ -823,6 +998,7 @@ mod tests {
             platform,
             exec,
             modal,
+            runpod: &NoRunPod,
             agents_dir,
         }
     }
@@ -1281,6 +1457,7 @@ io.amicu.llama.old.service loaded active running c\n";
             status,
             [
                 ("modal", "ok"),
+                ("runpod", "skipped"),
                 ("launchd", "skipped"),
                 ("systemd", "skipped"),
                 ("task-scheduler", "ok"),

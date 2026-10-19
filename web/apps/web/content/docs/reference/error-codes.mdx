@@ -54,7 +54,7 @@ Diagnostics have the form `AMICU-<CATEGORY>-<NNN>`. The category is the fastest 
 | `AMICU-CAP-011` | error | A typed `llama_cpp` field is out of range or inconsistent (for example `top_p` outside 0 to 1, or `parallel_slots = 0`). The message names the field. `ubatch_size` above `batch_size` is only a warning, because llama-server clamps it | Fix the named field |
 | `AMICU-CAP-012` | error on `modal`/`runpod`, else warning | A GPU `accelerator.model` (with `accelerator.memory`) does not name exactly one card: a short name several variants share, such as `a100`, or a size no variant has. The message lists the candidate ids with their VRAM | Set `model` to one of the listed ids. See [GPU names](/docs/configuration/hardware-profile#gpu-names) |
 | `AMICU-CAP-013` | error on `modal`/`runpod`, else warning | The GPU `accelerator.model` is not in amicu's GPU catalog | Use a GPU id from [GPU names](/docs/configuration/hardware-profile#gpu-names) |
-| `AMICU-CAP-014` | error | A `runpod {}` block does not fit: set on another provider, `cloud` outside pod mode, `scaling {}` on a pod other than one replica, or a GPU RunPod offers only as a pod in serverless mode | Follow the message; for a pods-only GPU add `runpod { mode = "pod" }` |
+| `AMICU-CAP-015` | error | A `runpod {}` block does not fit: set on another provider, `cloud` outside pod mode, `scaling {}` on a pod other than one replica, or a GPU RunPod offers only as a pod in serverless mode | Follow the message; for a pods-only GPU add `runpod { mode = "pod" }` |
 
 ## MEM
 

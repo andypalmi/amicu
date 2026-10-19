@@ -51,7 +51,9 @@ signal; the number identifies the specific check.
   message lists (`a100-sxm4-80gb`, `a100-pcie-80gb`, ...).
 - `AMICU-CAP-013` - the GPU model is not in the GPU catalog. Error on `modal`
   and `runpod` (they place GPUs by catalog id), warning elsewhere.
-- `AMICU-CAP-014` - a hardware profile's `runpod {}` block does not fit: it is
+- `AMICU-CAP-014` - warning: a GPU alias (e.g. `NVIDIA H100 80GB HBM3`) pins its
+  card and ignores `accelerator.memory`, which disagrees with that card's VRAM.
+- `AMICU-CAP-015` - a hardware profile's `runpod {}` block does not fit: it is
   set on another provider, sets `cloud` outside `mode = "pod"`, a pod has
   `scaling {}` other than one replica, or a pods-only GPU is used in serverless
   mode (add `runpod { mode = "pod" }`).

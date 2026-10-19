@@ -1,6 +1,6 @@
 ---
 title: Orphaned resources
-description: Find amicu resources on this machine or in Modal that the project state does not track, and stop them by hand.
+description: Find amicu resources on this machine, in Modal or in RunPod that the project state does not track, and stop them by hand.
 ---
 
 `amicu orphans` lists amicu-owned resources that this project's state does not record. It is read-only. It never stops, imports, or edits anything.
@@ -17,12 +17,13 @@ Run it in the project directory. It reads `.amicu/state/state.json`. If the proj
 | Source | Where it looks | Notes |
 |---|---|---|
 | `modal` | Apps in the Modal workspace for `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` | Only apps whose name starts with `amicu-`. Apps in state `stopped` are skipped. |
+| `runpod` | Serverless endpoints and secrets in the RunPod account for `RUNPOD_API_KEY` | Only endpoints that carry an `AMICU_OWNER` env marker, and secrets whose name starts with `amicu-`. The `amicu-account-marker` secret is never listed. |
 | `launchd` | macOS: `launchctl list` and plists in `~/Library/LaunchAgents/` | Labels that start with `io.amicu.`. A plist that is not loaded is reported as `plist only (not loaded)`. |
 | `systemd` | Linux: `systemctl --user list-units` and `list-unit-files` | Units that start with `io.amicu.` or `amicu`. A unit file that is installed but not loaded is reported as `not loaded (<unit file state>)`, for example `not loaded (enabled)`. |
 
-On other platforms, the host sources are skipped. Without Modal credentials, the `modal` source reports an error. The local sources still print.
+On other platforms, the host sources are skipped. Modal and RunPod are only queried when the project uses them (a stop record in state or a hardware profile with that provider). Without credentials, the `modal` or `runpod` source reports an error. The other sources still print.
 
-A resource is **tracked** when state references it: a stop record or an endpoint. Modal apps are matched by app name or app id. Host services are matched by label.
+A resource is **tracked** when state references it: a stop record or an endpoint. Modal apps are matched by app name or app id. RunPod endpoints are matched by endpoint id or name, and RunPod secrets by the secret names a stop record lists. Host services are matched by label.
 
 ## Ownership
 
@@ -31,16 +32,18 @@ Ownership is judged from the name alone. Host labels from amicu have one of thes
 - `io.amicu.llama.<project_id>.<deployment>`: scoped to one project.
 - `io.amicu.llama.<deployment>`: legacy, unscoped. Deployments created before state v3 use this form until their next `apply`.
 
+RunPod endpoint and secret names have the form `amicu-<project_id>-<deployment>-...`, so they are judged like scoped labels.
+
 | Ownership | Human output | JSON value |
 |---|---|---|
 | Scoped to this project, untracked | scoped to this project, likely an orphan | `this_project` |
 | Scoped to another project | scoped to another project, may belong to it | `other_project` |
 | Legacy unscoped label | legacy unscoped label, may belong to another project | `legacy` |
-| Modal app, or a unit or label without the `io.amicu.llama.` form | may belong to another project | `unknown` |
+| Modal app, or a unit, label or RunPod name without a project scope | may belong to another project | `unknown` |
 
 Only `this_project` means the resource is likely an orphan of this project. The other values mean another project, or another user of the machine or workspace, may own it.
 
-**Not tracked does not mean orphaned.** Other projects on the same machine, and other people in the same Modal workspace, show up here too. Check before you stop anything. For Modal, check the dashboard. For host services, check which project directory and config they came from.
+**Not tracked does not mean orphaned.** Other projects on the same machine, and other people in the same Modal workspace or RunPod account, show up here too. Check before you stop anything. For Modal and RunPod, check the console. For host services, check which project directory and config they came from.
 
 ## Stop commands
 
@@ -49,8 +52,12 @@ Each resource comes with the command that stops it by hand. The command is only 
 | Kind | Stop command |
 |---|---|
 | `modal_app` | `amicu modal stop <app>` |
+| `runpod_endpoint` | `curl -X DELETE -H "Authorization: Bearer $RUNPOD_API_KEY" https://api.runpod.io/v2/serverless/<endpoint id>` |
+| `runpod_secret` | `curl -X DELETE -H "Authorization: Bearer $RUNPOD_API_KEY" https://api.runpod.io/v2/account/secrets/<secret id>` |
 | `launchd_job` | `launchctl unload -w <plist> && rm <plist>` |
 | `systemd_unit` | `systemctl --user disable --now <unit> \|\| systemctl --user stop <unit>` |
+
+RunPod can refuse to delete an endpoint that still has live workers. Scale it to zero first, in the console or with `curl -X PATCH -H "Authorization: Bearer $RUNPOD_API_KEY" -H "Content-Type: application/json" -d '{"workers":{"min":0,"max":0}}' https://api.runpod.io/v2/serverless/<endpoint id>`, then run the printed `DELETE`. Delete an endpoint before its secrets.
 
 ## Human output
 
@@ -84,7 +91,7 @@ The command exits `0` when it can print the report. This includes runs where a s
 ```
 
 - `sources[].status` is `ok`, `skipped`, or `error`. `detail` appears for `skipped` and `error`.
-- `resources[].kind` is `modal_app`, `launchd_job`, or `systemd_unit`.
+- `resources[].kind` is `modal_app`, `runpod_endpoint`, `runpod_secret`, `launchd_job`, `systemd_unit`, or `scheduled_task`.
 - `resources[].ownership` is one of `this_project`, `other_project`, `legacy`, or `unknown`.
 - `note` repeats the scope warning: not tracked does not mean orphaned.
 

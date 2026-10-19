@@ -49,19 +49,8 @@ The adapter authenticates with a RunPod API token. `apply` does not run this pro
 | `accelerator.memory` | size | none | yes (with `accelerator`) | VRAM, for the fit check. |
 | `memory` | size | none | yes | Host RAM. |
 | `price.per_hour` | money block | none | no | Your own price, for cost planning. |
-| `runpod.mode` | string | `"serverless"` | no | `"serverless"`: a load-balancing endpoint that scales to zero. `"pod"`: an always-on GPU pod, billed while it exists. |
-| `runpod.cloud` | string | `"secure"` | no | Pod mode only: `"secure"` or `"community"`. |
 
-Apart from the `runpod` block, these are the generic [`hardware_profile`](/docs/configuration/hardware-profile) fields.
-
-```hcl
-runpod {
-  mode  = "pod"
-  cloud = "secure"
-}
-```
-
-In pod mode the deployment's `api_key` is the runtime's own key (generate a random one); the pod proxy adds no authentication. A pod runs one replica, so `scaling {}` may only set `min_replicas = 1` and `max_replicas = 1`. Changing the GPU, its count, the cloud or the region replaces the pod; destroy terminates it. `amicu plan` shows how each mode is billed, for example `billing: always on · ~$0.43/hr`.
+These are the generic [`hardware_profile`](/docs/configuration/hardware-profile) fields. There are no runpod-specific arguments.
 
 ## GPUs and regions
 

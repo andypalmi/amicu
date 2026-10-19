@@ -211,7 +211,7 @@ Notes:
 - `provider = "modal"` routes a `vllm` deployment on this profile through
   `amicu apply`'s `ModalSupervisor` (`crates/amicu-modal/src/supervisor.rs`)
   instead of a local process. `accelerator.model` + `accelerator.count`
-  become Modal's `gpu=` request string - `"H100:2"` for the profile above
+  become Modal's `gpu=` request string - `"H100!:2"` for the profile above
   (the card's Modal name from `amicu_providers::modal::modal_gpu`; the
   `:<count>` suffix is omitted when `count == 1`; `amicu plan` shows
   `gpu.h100-sxm-80gb (80 GB) x2`) - and `region` (when set) becomes Modal's

@@ -331,7 +331,7 @@ const GPUS: &[GpuSpec] = &[
     },
     GpuSpec {
         id: "h100",
-        model: "H100",
+        model: "H100!",
         card: "h100-sxm-80gb",
         vram_gib: 80,
         max_count: 8,
@@ -380,6 +380,8 @@ const GPUS: &[GpuSpec] = &[
 /// Accepted by Modal but without a verified rate, so not catalog offerings.
 const UNPRICED_GPUS: [(&str, &str); 2] = [("a10g-24gb", "A10G"), ("b300-288gb", "B300")];
 
+/// Modal's GPU string for a catalog card. Exact names (`H100!`, `A100-40GB`,
+/// `A100-80GB`) opt out of Modal's automatic upgrade to a larger card.
 #[must_use]
 pub fn modal_gpu(card_id: &str) -> Option<&'static str> {
     GPUS.iter()
@@ -590,6 +592,14 @@ impl Provider for ModalProvider {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exact_cards_opt_out_of_modals_automatic_upgrades() {
+        assert_eq!(super::modal_gpu("h100-sxm-80gb"), Some("H100!"));
+        assert_eq!(super::modal_gpu("a100-sxm4-40gb"), Some("A100-40GB"));
+        assert_eq!(super::modal_gpu("a100-sxm4-80gb"), Some("A100-80GB"));
+        assert_eq!(super::modal_gpu("h200-sxm-141gb"), Some("H200"));
+    }
+
     use super::*;
     use crate::provider::ProvisionCompat;
     use amicu_core::adapter::Registry;

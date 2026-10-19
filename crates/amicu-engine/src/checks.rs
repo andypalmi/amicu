@@ -7,6 +7,7 @@ use amicu_core::graph::Graph;
 use amicu_core::resource::{
     Accelerator, AcceleratorKind, CATALOG_GPU_PROVIDERS, Deployment, GpuResolveError,
     HardwareProfile, MemoryCheck, Residency, RuleEffect, RunpodMode, Runtime, ScalingSettings,
+    RUNPOD_PODS_ONLY_GPUS, alias_memory_conflict,
 };
 use amicu_llamacpp::{LlamaCppAdapter, host_supervisor};
 use amicu_providers::resolve_residency;
@@ -100,6 +101,24 @@ pub(crate) fn apply_memory_check(
 fn gpu_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
     let mut out = Vec::new();
     for hw in &graph.hardware_profiles {
+        if let Some(acc) = hw.accelerator.as_ref()
+            && acc.kind == AcceleratorKind::Gpu
+            && let Some(card) = alias_memory_conflict(&acc.model, acc.memory)
+        {
+            let mut diag = Diagnostic::new(
+                catalog::CAP_GPU_ALIAS_MEMORY,
+                Severity::Warning,
+                format!(
+                    "hardware_profile `{}`: `{}` is {}, which ignores `accelerator.memory` ({})",
+                    hw.id,
+                    acc.model,
+                    card.describe(),
+                    acc.memory
+                ),
+            );
+            diag.resource = Some(format!("hardware_profile.{}", hw.id));
+            out.push(diag);
+        }
         let Some(Err(err)) = hw.accelerator.as_ref().and_then(Accelerator::gpu_card) else {
             continue;
         };
@@ -231,9 +250,8 @@ fn runpod_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
         }
         if mode == RunpodMode::Serverless
             && let Some(acc) = &hw.accelerator
-            && acc.kind == AcceleratorKind::Gpu
-            && amicu_runpod::gpu_placement(acc).is_err()
-            && amicu_runpod::pod_gpu_placement(acc).is_ok()
+            && let Some(Ok(card)) = acc.gpu_card()
+            && RUNPOD_PODS_ONLY_GPUS.contains(&card.id)
         {
             push(
                 resource.clone(),
@@ -1303,7 +1321,7 @@ mod api_key_tests {
 #[cfg(test)]
 mod gpu_tests {
     use super::*;
-    use amicu_core::resource::{AcceleratorKind, HardwareProfile};
+    use amicu_core::resource::HardwareProfile;
     use amicu_core::units::ByteSize;
 
     const GIB: u64 = 1 << 30;
@@ -1386,6 +1404,18 @@ mod gpu_tests {
         assert_eq!(
             codes(&graph("on_prem", "mi300x", 192)),
             [("AMICU-CAP-013".to_owned(), Severity::Warning)]
+        );
+    }
+
+    #[test]
+    fn an_alias_that_ignores_the_declared_memory_warns() {
+        assert_eq!(
+            codes(&graph("modal", "NVIDIA H100 80GB HBM3", 40)),
+            [("AMICU-CAP-014".to_owned(), Severity::Warning)]
+        );
+        assert_eq!(
+            codes(&graph("modal", "NVIDIA H100 80GB HBM3", 80)),
+            Vec::new()
         );
     }
 

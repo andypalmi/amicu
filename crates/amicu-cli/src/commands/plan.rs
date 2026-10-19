@@ -63,8 +63,13 @@ pub(crate) fn run_with_host(
         return Ok(1);
     }
 
-    let state =
-        crate::refresh::load_refreshed_state(project, &crate::refresh::ModalLookup, output, out)?;
+    let state = crate::refresh::load_refreshed_state(
+        project,
+        &crate::refresh::ModalLookup,
+        &crate::runpod_ops::RealRunPod,
+        output,
+        out,
+    )?;
     let recorded = state
         .as_ref()
         .map(|s| s.fingerprints.clone())
@@ -434,9 +439,9 @@ fn runpod_billing(graph: &Graph, deployment: &DeploymentId) -> Option<String> {
     Some(match hw.runpod_mode() {
         RunpodMode::Pod => {
             let community = hw.runpod.and_then(|r| r.cloud) == Some(RunpodCloud::Community);
-            match acc.and_then(amicu_runpod::pod_hourly_usd) {
-                Some(usd) if !community => format!("always on \u{b7} ~${usd:.2}/hr"),
-                _ => "always on".to_owned(),
+            match acc.and_then(|a| amicu_runpod::pod_hourly_usd(a, community)) {
+                Some(usd) => format!("always on \u{b7} ~${usd:.2}/hr"),
+                None => "always on".to_owned(),
             }
         }
         RunpodMode::Serverless => match acc.and_then(amicu_runpod::serverless_hourly_usd) {
