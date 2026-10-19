@@ -263,12 +263,25 @@ async fn planned_secret_names_match_what_start_writes() {
 
 #[tokio::test]
 async fn llama_start_uses_the_image_server_and_its_key_var() {
-    let (sup, mock) = supervisor(create_mock(
-        &[Canned::Status(200, pod("RUNNING"))],
-        &[Canned::Status(200, "{}")],
-        &[Canned::Status(401, "")],
-        &[Canned::Status(200, "{}")],
-    ));
+    // llama.cpp serves on the image's port 8080 even when the deployment says 8000.
+    let (sup, mock) = supervisor(
+        create_mock(&[Canned::Status(200, pod("RUNNING"))], &[], &[], &[])
+            .first(
+                HttpMethod::Get,
+                "https://pod1-8080.proxy.runpod.net/health",
+                &[Canned::Status(200, "{}")],
+            )
+            .first(
+                HttpMethod::Post,
+                "https://pod1-8080.proxy.runpod.net/v1/chat/completions",
+                &[Canned::Status(401, "")],
+            )
+            .first(
+                HttpMethod::Get,
+                "https://pod1-8080.proxy.runpod.net/v1/models",
+                &[Canned::Status(200, "{}")],
+            ),
+    );
     let mut p = llama_plan();
     if let Runtime::LlamaCpp(s) = &mut p.settings {
         s.port = 8000;
@@ -278,9 +291,15 @@ async fn llama_start_uses_the_image_server_and_its_key_var() {
         repo: "org/g-GGUF".into(),
         file: "g.gguf".into(),
     });
-    sup.start(&p, &secrets_for("LLAMA_API_KEY")).await.unwrap();
+    let handle = sup.start(&p, &secrets_for("LLAMA_API_KEY")).await.unwrap();
+    assert_eq!(handle.endpoint, "https://pod1-8080.proxy.runpod.net");
     let body = body_of(&mock, HttpMethod::Post, PODS);
     assert_eq!(body["entrypoint"], json!(["/app/llama-server"]));
+    assert_eq!(body["ports"], json!(["8080/http"]));
+    assert_eq!(
+        body["gpu"]["minCudaVersion"],
+        json!(amicu_llamacpp::remote::DEFAULT_LLAMACPP_IMAGE_MIN_CUDA)
+    );
     assert!(
         body["env"]["LLAMA_API_KEY"]
             .as_str()

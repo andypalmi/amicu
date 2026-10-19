@@ -425,6 +425,7 @@ async fn vllm_start_creates_the_secret_then_the_endpoint_and_waits_for_health() 
     assert_eq!(body["disk"], json!(DEFAULT_CONTAINER_DISK_GB));
     assert_eq!(body["gpu"]["pools"], json!(["ADA_80_PRO"]));
     assert_eq!(body["gpu"]["count"], json!(2));
+    assert_eq!(body["gpu"]["minCudaVersion"], json!("13.0"));
     // Exclusions come from the live catalog, including the card the static
     // table does not know.
     assert_eq!(
@@ -502,6 +503,7 @@ async fn llama_start_runs_the_image_server_with_an_hf_gguf() {
         ])
     );
     assert_eq!(body["env"]["PORT"], json!("8080"));
+    assert_eq!(body["gpu"]["minCudaVersion"], json!("12.8"));
     assert!(body["env"].get("LLAMA_API_KEY").is_none());
     assert!(!body.to_string().contains(KEY));
     assert_eq!(
@@ -513,6 +515,72 @@ async fn llama_start_runs_the_image_server_with_an_hf_gguf() {
         body.get("dataCenterIds").is_none(),
         "no region: RunPod picks"
     );
+}
+
+#[test]
+fn llama_serves_on_the_stock_image_port_whatever_the_deployment_says() {
+    let (mut sup, _) = supervisor(Mock::default());
+    sup.gguf = Some(GgufSource {
+        repo: "org/g-GGUF".into(),
+        file: "g.gguf".into(),
+    });
+    let plan = plan(
+        &["llama-server", "-m", "m.gguf", "--port", "8000"],
+        Runtime::LlamaCpp(LlamaCppSettings {
+            port: 8000,
+            ..Default::default()
+        }),
+    );
+    let argv = sup.launch_argv(&plan).unwrap();
+    let i = argv.iter().position(|a| a == "--port").unwrap();
+    assert_eq!(argv[i + 1], "8080");
+    assert_eq!(argv.iter().filter(|a| *a == "--port").count(), 1);
+    assert_eq!(runtime_port(&plan), remote::LLAMACPP_IMAGE_PORT);
+    assert_eq!(runtime_port(&vllm_plan()), 8000);
+}
+
+#[test]
+fn an_overridden_image_gets_no_cuda_floor() {
+    assert_eq!(
+        image_min_cuda(remote::DEFAULT_LLAMACPP_IMAGE, RuntimeKind::LlamaCpp).as_deref(),
+        Some("12.8")
+    );
+    assert_eq!(
+        image_min_cuda(remote::DEFAULT_VLLM_IMAGE, RuntimeKind::Vllm).as_deref(),
+        Some("13.0")
+    );
+    assert_eq!(image_min_cuda("me/vllm:custom", RuntimeKind::Vllm), None);
+}
+
+#[test]
+fn a_dsl_region_without_residency_places_in_its_data_centers() {
+    let (sup, _) = supervisor(Mock::default());
+    let sup = sup.with_region(Some(&Region::from_code("eu"))).unwrap();
+    assert_ne!(sup.data_center_ids.len(), 0);
+    assert!(sup.data_center_ids.iter().all(|d| d.starts_with("EU")));
+
+    let (sup, _) = supervisor(Mock::default());
+    let sup = sup
+        .with_region(Some(&Region::from_code("eu-ro-1")))
+        .unwrap();
+    assert_eq!(sup.data_center_ids, ["EU-RO-1"]);
+    let err = sup
+        .with_allowed_residencies(&[Residency::Us])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("not within the required residency (us)"),
+        "{err}"
+    );
+
+    let (sup, _) = supervisor(Mock::default());
+    let sup = sup
+        .with_region(None)
+        .unwrap()
+        .with_allowed_residencies(&[Residency::Eu])
+        .unwrap();
+    assert_ne!(sup.data_center_ids.len(), 0);
+    assert!(sup.data_center_ids.iter().all(|d| d.starts_with("EU")));
 }
 
 #[test]
@@ -1042,7 +1110,12 @@ async fn readiness_waits_through_initializing_and_cold_start_answers() {
 
 #[tokio::test]
 async fn readiness_times_out_naming_the_last_answer_and_keeps_the_id() {
-    let (sup, _) = supervisor(ready_mock(&[Canned::Status(204, "")]));
+    let (sup, _) = supervisor(ready_mock(&[Canned::Status(204, "")]).ok(
+        HttpMethod::Get,
+        "/serverless/ep1/workers",
+        200,
+        r#"{"workers":[],"summary":{"running":1,"throttled":3,"total":4}}"#,
+    ));
     let err = sup
         .start(&vllm_plan(), &vllm_secrets())
         .await
@@ -1050,6 +1123,11 @@ async fn readiness_times_out_naming_the_last_answer_and_keeps_the_id() {
         .to_string();
     assert!(err.contains("did not become ready"), "{err}");
     assert!(err.contains("initializing (HTTP 204)"), "{err}");
+    assert!(
+        err.contains("running=1 idle=0 initializing=0 throttled=3 unhealthy=0"),
+        "{err}"
+    );
+    assert!(err.contains("`amicu runpod logs chat`"), "{err}");
     assert!(!err.contains(KEY));
     assert_eq!(
         sup.deployed_endpoint().lock().unwrap().as_deref(),

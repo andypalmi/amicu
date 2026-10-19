@@ -953,6 +953,18 @@ fn supervisor_err(e: amicu_llamacpp::LlamaCppError) -> CliError {
     CliError::Adapter(amicu_core::adapter::AdapterErrorKind::into_adapter_error(e))
 }
 
+/// Every jurisdiction the project's `data_class`es allow (graph-wide, as the
+/// plan-time residency check); empty when none is declared.
+fn residency_allowlist(graph: &Graph) -> Vec<amicu_core::resource::Residency> {
+    let mut out: Vec<_> = Vec::new();
+    for r in graph.data_classes.iter().flat_map(|d| d.residency.iter()) {
+        if !out.contains(r) {
+            out.push(r.clone());
+        }
+    }
+    out
+}
+
 /// The [`RunPodSupervisor`] for one deployment, adopting the endpoint and
 /// secrets recorded in `prior`. The caller has already checked that `prior`
 /// lives in `account`, so a `404` on stop counts as confirmed.
@@ -968,6 +980,7 @@ fn runpod_supervisor(
     let (deployment, hardware) = deployment_hardware(graph, catalog, id)?;
     let mut supervisor =
         RunPodSupervisor::for_hardware(ops.client()?, project_id, id.as_str(), &hardware)
+            .and_then(|s| s.with_allowed_residencies(&residency_allowlist(graph)))
             .map_err(supervisor_err)?
             .with_probe_transport(ops.probe())
             .with_workspace(account)
@@ -1582,7 +1595,7 @@ async fn verify_handle(
             "verifying endpoint authentication at {} ...",
             handle.endpoint
         );
-        return runpod.verify_exposure(&handle.endpoint, &key).await;
+        return report_verify(runpod.verify_exposure(&handle.endpoint, &key).await);
     }
     let timing = if handle.exposure.is_public() {
         CheckTiming::PUBLIC
@@ -1597,15 +1610,27 @@ async fn verify_handle(
         "verifying endpoint authentication at {} ...",
         handle.endpoint
     );
-    amicu_runtime::exposure::verify_endpoint(&EndpointCheck {
-        endpoint: &handle.endpoint,
-        path: PROBE_PATH,
-        api_key: &key,
-        gateway_headers: &gateway,
-        timing,
-    })
-    .await
-    .map_err(|e| e.detail().to_owned())
+    report_verify(
+        amicu_runtime::exposure::verify_endpoint(&EndpointCheck {
+            endpoint: &handle.endpoint,
+            path: PROBE_PATH,
+            api_key: &key,
+            gateway_headers: &gateway,
+            timing,
+        })
+        .await
+        .map_err(|e| e.detail().to_owned()),
+    )
+}
+
+/// Prints the outcome of the "verifying endpoint authentication" check.
+fn report_verify(result: Result<(), String>) -> Result<(), String> {
+    let line = match &result {
+        Ok(()) => "endpoint authentication: ok".to_owned(),
+        Err(e) => format!("endpoint authentication: failed ({e})"),
+    };
+    let _ = writeln!(std::io::stderr(), "{line}");
+    result
 }
 
 /// The provider-gateway headers to attach to the authenticated probe. `Err`

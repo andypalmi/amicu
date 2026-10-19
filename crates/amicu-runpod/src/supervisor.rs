@@ -410,8 +410,9 @@ impl RunPodSupervisor {
     /// declared residency.
     pub fn with_region(mut self, region: Option<&Region>) -> Result<Self, LlamaCppError> {
         self.data_center_ids = match region {
-            Some(r) => select_data_centers(&r.code, r.declared_residency())
-                .map_err(|e| runpod_err(&e))?,
+            Some(r) => {
+                select_data_centers(&r.code, r.declared_residency()).map_err(|e| runpod_err(&e))?
+            }
             None => Vec::new(),
         };
         self.region = region.map(|r| r.code.clone());

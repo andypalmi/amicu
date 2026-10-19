@@ -79,9 +79,7 @@ pub fn restrict_to_residencies(
             .map(str::to_owned)
             .collect());
     }
-    let inside = |id: &String| {
-        residency_of_code(id).is_some_and(|(r, _)| allowed.contains(&r))
-    };
+    let inside = |id: &String| residency_of_code(id).is_some_and(|(r, _)| allowed.contains(&r));
     if selected.iter().all(inside) {
         return Ok(selected);
     }
