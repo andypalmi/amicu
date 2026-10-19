@@ -503,8 +503,6 @@ async fn llama_start_runs_the_image_server_with_an_hf_gguf() {
         ])
     );
     assert_eq!(body["env"]["PORT"], json!("8080"));
-    // The load balancer polls only /ping: llama-server's Vertex AI mode
-    // serves its /health handler there too, on the same port.
     assert_eq!(body["env"]["AIP_MODE"], json!("PREDICTION"));
     assert_eq!(body["env"]["AIP_HEALTH_ROUTE"], json!(LB_PING_PATH));
     assert_eq!(body["env"]["AIP_HTTP_PORT"], json!("8080"));
@@ -1576,8 +1574,18 @@ fn a_capacity_refusal_suggests_another_card_region_or_cloud() {
 }
 
 #[test]
-fn the_load_balancer_ping_env_is_reserved() {
-    for k in ["AIP_MODE", "AIP_HEALTH_ROUTE", "AIP_HTTP_PORT"] {
-        assert!(RESERVED_ENV.contains(&k), "{k}");
+fn llama_server_vertex_env_is_reserved() {
+    let none = BTreeMap::new();
+    for k in [
+        "AIP_MODE",
+        "AIP_HEALTH_ROUTE",
+        "AIP_HTTP_PORT",
+        "AIP_PREDICT_ROUTE",
+    ] {
+        let plain = BTreeMap::from([(k.to_owned(), "x".to_owned())]);
+        assert_eq!(reserved_env_var(&RESERVED_ENV, &plain, &none), Some(k));
+        assert_eq!(reserved_env_var(&RESERVED_ENV, &none, &plain), Some(k));
     }
+    let fine = BTreeMap::from([("HF_HOME".to_owned(), "/x".to_owned())]);
+    assert_eq!(reserved_env_var(&RESERVED_ENV, &fine, &none), None);
 }

@@ -32,8 +32,8 @@ use crate::regions::{restrict_to_residencies, select_data_centers};
 use crate::secrets::{SecretLedger, reference_secrets, stop_result};
 use crate::supervisor::{
     DEFAULT_CONTAINER_DISK_GB, HEALTH_PATH, ProgressSink, ReadinessTiming, StopOutcome,
-    container_argv, container_command, elapsed, image_min_cuda, owner_marker, runpod_err,
-    runtime_image, runtime_port, unsupported,
+    container_argv, container_command, elapsed, image_min_cuda, owner_marker, reserved_env_var,
+    runpod_err, runtime_image, runtime_port, unsupported,
 };
 
 /// Env variables the pod env may not set: amicu's owner marker, and the ones
@@ -484,10 +484,7 @@ impl PodSupervisor {
         for k in key_vars.iter().filter(|k| **k != key_var) {
             secret.remove(*k);
         }
-        if let Some(k) = RESERVED_ENV
-            .iter()
-            .find(|k| plain.contains_key(**k) || secret.contains_key(**k))
-        {
+        if let Some(k) = reserved_env_var(&RESERVED_ENV, &plain, &secret) {
             return Err(LlamaCppError::Supervisor(format!(
                 "env var '{k}' is reserved on a RunPod pod; remove it from the deployment's \
                  `env` block"

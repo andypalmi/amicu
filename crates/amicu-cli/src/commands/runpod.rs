@@ -35,10 +35,11 @@ fn io_err(error: io::Error) -> CliError {
 /// What hardware sections say: there is no probe into a RunPod worker.
 const NO_HARDWARE: &str = "not available on RunPod";
 
-/// The deployment's RunPod record (endpoint or pod), from state.
-fn recorded(project: &Project, deployment: &str) -> Result<StopRecord, CliError> {
+/// The deployment's RunPod record (endpoint or pod) and the project id, from
+/// state.
+fn recorded(project: &Project, deployment: &str) -> Result<(StopRecord, Option<String>), CliError> {
     let state = project.load_state()?;
-    state
+    let record = state
         .iter()
         .flat_map(|s| s.stops.iter())
         .find(|r| r.backend.is_runpod() && r.deployment.as_str() == deployment)
@@ -47,13 +48,20 @@ fn recorded(project: &Project, deployment: &str) -> Result<StopRecord, CliError>
             CliError::Message(format!(
                 "no RunPod deployment named '{deployment}' in this project's state"
             ))
-        })
+        })?;
+    Ok((record, state.and_then(|s| s.project_id)))
 }
 
 /// The record's endpoint or pod id; while a start has not recorded one yet
-/// (it is still waiting for readiness), the one live resource carrying the
-/// recorded name.
-async fn resolve_id(client: &RunPodClient, record: &StopRecord) -> Result<String, CliError> {
+/// (it is still waiting for readiness), the one resource with the recorded
+/// name that carries this deployment's owner marker. A same-named resource
+/// of another project or account is never used: `metrics` would send it the
+/// deployment's api_key.
+async fn resolve_id(
+    client: &RunPodClient,
+    record: &StopRecord,
+    project_id: Option<&str>,
+) -> Result<String, CliError> {
     if let Some(id) = &record.app_id {
         return Ok(id.clone());
     }
@@ -62,23 +70,65 @@ async fn resolve_id(client: &RunPodClient, record: &StopRecord) -> Result<String
         record.runpod_kind(),
         &record.identity,
     );
-    let found = if record.backend == Backend::RunpodPod {
-        client.find_pod_by_name(name).await.map(|p| p.map(|p| p.id))
+    let project_id = project_id.ok_or_else(|| {
+        CliError::Message(format!(
+            "deployment '{deployment}' has no RunPod {kind} id recorded and this project's \
+             state has no project id to check ownership with; run `amicu apply` first"
+        ))
+    })?;
+    let owner = amicu_runpod::owner_marker(record.workspace.as_deref(), project_id, deployment);
+    let lookup =
+        |e: RunPodError| runpod_error(&format!("could not look up RunPod {kind} `{name}`"), &e);
+    let named: Vec<(String, bool)> = if record.backend == Backend::RunpodPod {
+        client
+            .find_pods_by_name(name)
+            .await
+            .map_err(lookup)?
+            .into_iter()
+            .map(|p| {
+                let ours = p.env.owner.as_deref() == Some(owner.as_str());
+                (p.id, ours)
+            })
+            .collect()
     } else {
         client
-            .find_endpoint_by_name(name)
+            .find_endpoints_by_name(name)
             .await
-            .map(|e| e.map(|e| e.id))
+            .map_err(lookup)?
+            .into_iter()
+            .map(|e| {
+                let ours = e.owner.as_deref() == Some(owner.as_str());
+                (e.id, ours)
+            })
+            .collect()
     };
-    found
-        .map_err(|e| runpod_error(&format!("could not look up RunPod {kind} `{name}`"), &e))?
-        .ok_or_else(|| {
-            CliError::Message(format!(
-                "deployment '{deployment}' has no RunPod {kind} id recorded and no {kind} \
-                 named `{name}` exists; run `amicu apply` or `amicu destroy --target \
-                 {deployment}`"
-            ))
-        })
+    let ours_ids: Vec<&str> = named
+        .iter()
+        .filter(|(_, ours)| *ours)
+        .map(|(id, _)| id.as_str())
+        .collect();
+    match ours_ids.as_slice() {
+        [id] => Ok((*id).to_owned()),
+        [] if named.is_empty() => Err(CliError::Message(format!(
+            "deployment '{deployment}' has no RunPod {kind} id recorded and no {kind} named \
+             `{name}` exists; run `amicu apply` or `amicu destroy --target {deployment}`"
+        ))),
+        [] => Err(CliError::Message(format!(
+            "deployment '{deployment}' has no RunPod {kind} id recorded, and no {kind} named \
+             `{name}` carries its owner marker ({} of another project or account); nothing \
+             was read",
+            named
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+        many => Err(CliError::Message(format!(
+            "deployment '{deployment}' has no RunPod {kind} id recorded and several {kind}s \
+             named `{name}` carry its owner marker ({}); delete the extra ones",
+            many.join(", ")
+        ))),
+    }
 }
 
 fn endpoint_gone(deployment: &str, id: &str) -> CliError {
@@ -117,10 +167,10 @@ pub(crate) fn status(
     out: &mut dyn Write,
     env: &Env<'_>,
 ) -> Result<u8, CliError> {
-    let record = recorded(project, deployment)?;
+    let (record, project_id) = recorded(project, deployment)?;
     let client = env.runpod.client()?;
     let rt = build_runtime()?;
-    let id = rt.block_on(resolve_id(&client, &record))?;
+    let id = rt.block_on(resolve_id(&client, &record, project_id.as_deref()))?;
     if record.backend == Backend::RunpodPod {
         let pod = rt.block_on(live_pod(&client, deployment, &id))?;
         match output {
@@ -291,10 +341,10 @@ pub(crate) fn logs(
     out: &mut dyn Write,
     env: &Env<'_>,
 ) -> Result<u8, CliError> {
-    let record = recorded(project, deployment)?;
+    let (record, project_id) = recorded(project, deployment)?;
     let client = env.runpod.client()?;
     let rt = build_runtime()?;
-    let id = rt.block_on(resolve_id(&client, &record))?;
+    let id = rt.block_on(resolve_id(&client, &record, project_id.as_deref()))?;
     if record.backend == Backend::RunpodPod {
         return pod_logs(&rt, &client, deployment, &id, tail, output, out);
     }
@@ -440,11 +490,11 @@ pub(crate) fn metrics(
         interval_secs,
         wake,
     } = mode;
-    let record = recorded(project, deployment)?;
+    let (record, project_id) = recorded(project, deployment)?;
     let key = gateway_key(project, deployment, env)?;
     let client = env.runpod.client()?;
     let rt = build_runtime()?;
-    let id = rt.block_on(resolve_id(&client, &record))?;
+    let id = rt.block_on(resolve_id(&client, &record, project_id.as_deref()))?;
     let target = if record.backend == Backend::RunpodPod {
         let pod = rt.block_on(live_pod(&client, deployment, &id))?;
         let port = pod.http_port().ok_or_else(|| {

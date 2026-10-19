@@ -25,6 +25,7 @@
 //! that same lookup. The live GPU catalog narrows `excludedTypes` to the
 //! requested card before anything is written.
 
+use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -129,16 +130,27 @@ pub const DEFAULT_REQUEST_COUNT: u32 = 32;
 pub const DEFAULT_CONTAINER_DISK_GB: u32 = 100;
 
 /// Env variables the load balancer (or amicu's owner check) reads; the
-/// deployment's `env` block and secrets may not set them.
-const RESERVED_ENV: [&str; 7] = [
-    "PORT",
-    "PORT_HEALTH",
-    "HEALTH_CHECK_PATH",
-    "AIP_MODE",
-    "AIP_HEALTH_ROUTE",
-    "AIP_HTTP_PORT",
-    OWNER_ENV_VAR,
-];
+/// deployment's `env` block and secrets may not set them, nor any
+/// [`RESERVED_ENV_PREFIX`] one.
+const RESERVED_ENV: [&str; 4] = ["PORT", "PORT_HEALTH", "HEALTH_CHECK_PATH", OWNER_ENV_VAR];
+
+/// llama-server's Vertex AI mode variables: amicu sets some, and an
+/// `AIP_PREDICT_ROUTE` that collides with a route makes llama-server exit.
+pub(crate) const RESERVED_ENV_PREFIX: &str = "AIP_";
+
+/// The first variable of `plain` or `secret` that is in `names` or starts
+/// with [`RESERVED_ENV_PREFIX`].
+pub(crate) fn reserved_env_var<'a>(
+    names: &[&str],
+    plain: &'a BTreeMap<String, String>,
+    secret: &'a BTreeMap<String, String>,
+) -> Option<&'a str> {
+    plain
+        .keys()
+        .chain(secret.keys())
+        .map(String::as_str)
+        .find(|k| names.contains(k) || k.starts_with(RESERVED_ENV_PREFIX))
+}
 
 /// Hex digits of the value digest in a secret name (48 bits).
 const SECRET_DIGEST_HEX: usize = 12;
@@ -694,10 +706,7 @@ impl RunPodSupervisor {
         for k in key_vars {
             secret.remove(k);
         }
-        if let Some(k) = RESERVED_ENV
-            .iter()
-            .find(|k| plain.contains_key(**k) || secret.contains_key(**k))
-        {
+        if let Some(k) = reserved_env_var(&RESERVED_ENV, &plain, &secret) {
             return Err(LlamaCppError::Supervisor(format!(
                 "env var '{k}' is reserved on RunPod (the load balancer or amicu reads it); \
                  remove it from the deployment's `env` block"
@@ -1192,7 +1201,7 @@ fn is_capacity_error(error: &RunPodError) -> bool {
         | RunPodError::Api { detail, .. } => detail.to_ascii_lowercase(),
         _ => return false,
     };
-    detail.contains("instances available") || detail.contains("no available")
+    detail.contains("no longer any instances available")
 }
 
 fn duplicate_err<'a>(name: &str, ids: impl Iterator<Item = &'a str>) -> LlamaCppError {

@@ -1920,9 +1920,10 @@ async fn runpod_preflight(
             {
                 let _ = writeln!(
                     std::io::stderr(),
-                    "note: vLLM checks its api_key only under /v1, /v2, /inference and \
-                     /cohere: routes such as /metrics, /health, /version, /tokenize and the \
-                     SageMaker /invocations answer anyone with the pod's URL"
+                    "note: vLLM's --api-key leaves /invocations, /tokenize, /detokenize, \
+                     /metrics and /docs open on the public pod URL (a vLLM issue, \
+                     https://github.com/vllm-project/vllm/issues/58144); serverless mode \
+                     puts RunPod's gateway key in front of every route"
                 );
             }
             continue;

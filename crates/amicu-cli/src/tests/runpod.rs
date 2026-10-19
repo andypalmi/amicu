@@ -1986,8 +1986,6 @@ fn status_reports_scaled_to_zero_and_refuses_unknown_or_unrecorded_deployments()
     .to_string();
     assert!(err.contains("no RunPod deployment named 'nope'"), "{err}");
 
-    // A start still waiting for readiness has recorded no id: the endpoint
-    // carrying the recorded name is used.
     let td = TempDir::new();
     let unrecorded = project_with(&td, Some(record(None, ACCOUNT, &[])));
     let mut out = Vec::new();
@@ -2008,6 +2006,71 @@ fn status_reports_scaled_to_zero_and_refuses_unknown_or_unrecorded_deployments()
         err.contains("no RunPod endpoint id recorded and no endpoint named"),
         "{err}"
     );
+}
+
+#[test]
+fn an_unrecorded_id_never_resolves_to_a_same_named_foreign_resource() {
+    let rig = rig();
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(None, ACCOUNT, &[])));
+    add_endpoint(&rig, "ep9", None);
+    add_endpoint(&rig, "ep8", Some("someone-else".into()));
+    let err = commands::runpod::metrics(
+        &project,
+        DEP,
+        commands::runpod::MetricsMode {
+            watch: false,
+            interval_secs: 1,
+            wake: true,
+        },
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("carries its owner marker (ep9, ep8"), "{err}");
+    assert!(
+        !rig.runpod
+            .world
+            .log()
+            .iter()
+            .any(|l| l.starts_with("metrics")),
+        "no key sent to a foreign endpoint"
+    );
+
+    let td = TempDir::new();
+    let pods = pod_project(&td, Some(pod_record(None, ACCOUNT, &[])));
+    add_pod(&rig, "pod9", "NVIDIA L4", Some("someone-else".into()));
+    let err =
+        commands::runpod::status(&pods, DEP, OutputFormat::Human, &mut Vec::new(), &rig.env())
+            .unwrap_err()
+            .to_string();
+    assert!(err.contains("carries its owner marker (pod9"), "{err}");
+}
+
+#[test]
+fn among_same_named_resources_the_one_carrying_our_marker_is_used() {
+    let rig = rig();
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(None, ACCOUNT, &[])));
+    add_endpoint(&rig, "ep8", Some("someone-else".into()));
+    add_endpoint(&rig, "ep9", Some(owner()));
+    let mut out = Vec::new();
+    commands::runpod::status(&project, DEP, OutputFormat::Human, &mut out, &rig.env()).unwrap();
+    assert!(utf8(out).contains("RunPod endpoint ep9"));
+
+    add_endpoint(&rig, "ep10", Some(owner()));
+    let err = commands::runpod::status(
+        &project,
+        DEP,
+        OutputFormat::Human,
+        &mut Vec::new(),
+        &rig.env(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("carry its owner marker (ep9, ep10)"), "{err}");
 }
 
 #[test]

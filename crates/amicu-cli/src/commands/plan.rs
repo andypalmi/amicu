@@ -355,10 +355,10 @@ pub(crate) fn print_human_with(
                     None => io(writeln!(out, "      target:   {provider}"))?,
                 }
             }
-            if item.launch.is_some()
-                && let Some(billing) = runpod_billing(graph, &item.deployment)
-            {
-                io(writeln!(out, "      billing:  {billing}"))?;
+            if item.launch.is_some() {
+                if let Some(billing) = runpod_billing(graph, &item.deployment) {
+                    io(writeln!(out, "      billing:  {billing}"))?;
+                }
                 if let Some(workers) = runpod_workers(graph, &item.deployment) {
                     io(writeln!(out, "      workers:  {workers}"))?;
                 }
