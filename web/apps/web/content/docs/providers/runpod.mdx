@@ -1,6 +1,6 @@
 ---
 title: RunPod
-description: Deploy llama.cpp or vLLM to RunPod Serverless endpoints that scale to zero, with API keys, GPUs, regions, and costs.
+description: Deploy llama.cpp or vLLM to RunPod Serverless endpoints that scale to zero or to always-on pods, with API keys, GPUs, regions, and costs.
 ---
 
 <ProviderFacts slug="runpod" ids="runpod" />
@@ -25,20 +25,22 @@ RunPod is one of the providers `amicu apply` and `amicu destroy` can deploy to. 
 
 ## Overview
 
-A hardware profile with `provider = "runpod"` makes `apply` create a RunPod Serverless load-balancing endpoint. Both `vllm` and `llama_cpp` runtimes work, using the stock images. The model must come from Hugging Face; the worker downloads it.
+A hardware profile with `provider = "runpod"` makes `apply` create a RunPod Serverless load-balancing endpoint, or, with `runpod { mode = "pod" }`, an always-on [pod](#pods). Both `vllm` and `llama_cpp` runtimes work, using the stock images. The model must come from Hugging Face; the worker downloads it.
 
-The endpoint scales to zero when idle and is billed per second while workers run. `amicu destroy` deletes the endpoint and the RunPod secrets amicu created for it.
+A Serverless endpoint scales to zero when idle and is billed per second while workers run. `amicu destroy` deletes the endpoint and the RunPod secrets amicu created for it.
 
-By default amicu keeps no warm workers and allows one worker (min 0, max 1). For more throughput, raise `max_replicas` in the deployment's [`scaling {}`](/docs/configuration/deployment) block. Other defaults: scale out at 32 in-flight requests per worker, scale a worker down after 900 s idle.
+The stock images need a host CUDA version of at least 13.0 for vLLM and 12.8 for llama.cpp. amicu sets that as the placement floor, so workers and pods land only on hosts that meet it. An image overridden through the environment variables below gets no floor.
+
+By default amicu keeps no warm workers and allows one worker (min 0, max 1). For more throughput, raise `max_replicas` in the deployment's [`scaling {}`](/docs/configuration/deployment) block. Other defaults: scale out at 32 in-flight requests per worker, scale a worker down after 900 s idle (at most 3600 s). A lone `min_replicas` above 1 raises the ceiling to match.
 
 ## Setup and credentials
 
-Two kinds of key are involved. Keep them apart: RunPod's gateway checks the endpoint key on every request, and amicu will not accept your management key as an endpoint key.
+Two kinds of key are involved. On Serverless, keep them apart: RunPod's gateway checks the endpoint key on every request, and amicu will not accept your management key as an endpoint key.
 
 | Variable | Needed for | Notes |
 |---|---|---|
-| `RUNPOD_API_KEY` | `plan`/`apply` refresh, `apply`, `destroy` | The management key. Create it in the RunPod console under Settings, API Keys, as a Restricted key with `api.runpod.io/graphql` set to Read/Write (needed for the REST API). Add `api.runpod.ai` access as you see fit. |
-| The deployment's `api_key` secret, for example `CHAT_API_KEY` | `apply`, and every client call | A second RunPod API key, used as the endpoint key. See below. |
+| `RUNPOD_API_KEY` | `plan`/`apply` refresh, `apply`, `destroy`, `amicu runpod` | The management key. Create it in the RunPod console under Settings, API Keys, as a Restricted key with `api.runpod.io/graphql` set to Read/Write (needed for the REST API). Add `api.runpod.ai` access as you see fit. |
+| The deployment's `api_key` secret, for example `CHAT_API_KEY` | `apply`, and every client call | Serverless: a second RunPod API key, used as the endpoint key (see below). Pods: the runtime's own random key (see [Pods](#pods)). |
 | `HF_TOKEN` (optional) | Gated or private Hugging Face repos | Stored as a RunPod secret and injected into the worker. |
 | `AMICU_RUNPOD_VLLM_IMAGE`, `AMICU_RUNPOD_LLAMACPP_IMAGE` (optional) | Override the base image | Process-wide. There is no HCL field for the image. |
 
@@ -111,6 +113,8 @@ Run `amicu validate`, `amicu plan`, then `amicu apply`. `apply` waits for the en
 
 ## Calling the endpoint
 
+This section covers Serverless; for a pod see [Pods](#pods).
+
 The endpoint URL has the form `https://<endpoint id>.api.runpod.ai`. Send the endpoint key as a bearer token, with a capital `B`:
 
 ```bash
@@ -122,24 +126,55 @@ curl "$URL/v1/chat/completions" \
 
 With the OpenAI Python SDK, `api_key=os.environ["CHAT_API_KEY"]` and `base_url=f"{url}/v1"` are enough; the SDK sends `Authorization: Bearer`. There are no extra gateway headers.
 
+## Pods
+
+Set `runpod { mode = "pod" }` on the hardware profile for an always-on GPU pod instead of a Serverless endpoint. A pod is billed while it exists, whether or not it serves traffic, until you destroy it.
+
+```hcl
+resource "hardware_profile" "runpod_pod" {
+  provider = "runpod"
+  region   = "eu"
+  runpod {
+    mode  = "pod"
+    cloud = "secure"
+  }
+  accelerator {
+    kind   = "gpu"
+    model  = "a100-sxm4-80gb"
+    count  = 1
+  }
+  memory = "64GiB"
+}
+```
+
+- **Key.** The deployment's `api_key` is the runtime's own key, not a RunPod key. Generate a random one, for example `openssl rand -hex 32`, and export it. The pod proxy adds no authentication and the URL is public, so the runtime's key is the only guard. amicu refuses a key equal to `RUNPOD_API_KEY`. `apply` checks that the pod rejects an unauthenticated request and accepts the key.
+- **Calling.** The URL is `https://<pod id>-<port>.proxy.runpod.net`. Send the key as `Authorization: Bearer <key>`.
+- **One replica.** `scaling {}` may only set `min_replicas = 1` and `max_replicas = 1`, or be left out. Anything else fails `amicu validate` with `AMICU-CAP-015`.
+- **Replacement.** Changing the GPU, its count, the cloud or the region replaces the pod: the old pod is terminated, then the new one starts. A new spec that fails a pre-write check leaves the old pod in place.
+- **Cloud.** `secure` by default, or `community`. `cloud` is an error on Serverless.
+- **Destroy.** `amicu destroy` and `amicu runpod stop` terminate the pod and delete the secrets amicu created for it. The deployment stays in state until the termination is confirmed.
+- **Cost.** `amicu plan` shows how each mode is billed, for example `billing: always on · ~$0.59/hr` for a pod and `billing: scale to zero · ~$0.69/hr while active` for Serverless. The figure is an estimate from amicu's bundled prices, not a live quote.
+
 ## Configuration reference
 
 | Argument | Type | Default | Required | Notes |
 |---|---|---|---|---|
 | `provider` | string | none | yes | `"runpod"`. |
-| `region` | string | none | no | `eu`, `us`, `ca`, `apac`, or an exact data center id from [Regions](#regions). Unset lets RunPod place workers anywhere. |
+| `region` | string | none | no | `eu`, `us`, `ca`, `apac`, or an exact data center id from [Regions](#regions). Unset lets RunPod place workers anywhere, unless a [`data_class`](/docs/configuration/data-class) residency narrows it to the allowed data centers. |
 | `accelerator.kind` | string | none | yes | Must be `gpu`. |
 | `accelerator.model` | string | none | yes | A GPU id from [GPUs](#gpus), or a name that resolves to exactly one of them (see [GPU names](/docs/configuration/hardware-profile#gpu-names)). |
 | `accelerator.count` | number | none | yes | GPUs per worker. |
 | `accelerator.memory` | size | none | yes | VRAM, for the fit check. |
 | `memory` | size | none | yes | Host RAM. |
-| deployment `api_key` | `secret(...)` | none | yes | A RunPod API key with `api.runpod.ai` access. |
+| `runpod.mode` | string | `"serverless"` | no | `"serverless"`: a load-balancing endpoint that scales to zero. `"pod"`: an always-on GPU pod, billed while it exists. |
+| `runpod.cloud` | string | `"secure"` | no | Pod mode only: `"secure"` or `"community"`. |
+| deployment `api_key` | `secret(...)` | none | yes | Serverless: a RunPod API key with `api.runpod.ai` access. Pod: the runtime's own key. |
 
 ## GPUs
 
-Use an exact catalog id such as `l4-24gb` or `h100-sxm-80gb`. A short name such as `l4` works only when, together with `accelerator.memory`, it names exactly one card. Ambiguous names (`h100`, `a100`) and unknown ids fail `amicu validate` with `AMICU-CAP-012` or `AMICU-CAP-013`.
+Use an exact catalog id such as `a100-sxm4-80gb` or `l4-24gb`, or a family name that `accelerator.memory` makes unique: `l4` always names `l4-24gb`, and `h100` with `94GiB` names `h100-nvl-94gb`. A name that still matches several cards (`a100` with `80GiB` fits both the SXM4 and the PCIe card) fails `amicu validate` with `AMICU-CAP-012`, and an id the catalog does not know with `AMICU-CAP-013`. Both are errors on RunPod. `AMICU-CAP-014` warns when `memory` is outside the named card's VRAM. See [GPU names](/docs/configuration/hardware-profile#gpu-names).
 
-amicu places the deployment in the card's RunPod GPU group and excludes the group's other cards, so only the card you named is used.:
+On Serverless, amicu places the deployment in the card's RunPod GPU group and excludes the group's other cards, so only the card you named is used.
 
 | Group | Cards (ids) | VRAM |
 |---|---|---|
@@ -147,13 +182,14 @@ amicu places the deployment in the card's RunPod GPU group and excludes the grou
 | 24 GB | `l4-24gb`, `rtx-a5000-24gb`, `rtx-3090-24gb` | 24 GB |
 | 24 GB (Ada) | `rtx-4090-24gb` | 24 GB |
 | 32 GB | `rtx-5090-32gb` | 32 GB |
+| 32 GB (Blackwell) | `rtx-pro-4500-32gb` | 32 GB |
 | 48 GB | `a40-48gb`, `rtx-a6000-48gb`, `l40-48gb`, `l40s-48gb`, `rtx-6000-ada-48gb` | 48 GB |
 | 80 GB | `a100-sxm4-80gb`, `a100-pcie-80gb`, `h100-sxm-80gb`, `h100-pcie-80gb`, `h100-nvl-94gb` | 80 to 94 GB |
 | 141 GB | `h200-sxm-141gb` | 141 GB |
 | 96 GB | `rtx-pro-6000-96gb`, `rtx-pro-6000-maxq-96gb`, `rtx-pro-6000-server-96gb` | 96 GB |
 | 180 GB and 288 GB | `b200-180gb`, `b300-288gb` | 180 and 288 GB |
 
-Some cards, such as the MI300X and the H200 NVL, are only offered as pods, not on Serverless. They need a Pods mode that amicu does not have yet; it is coming.
+The H200 NVL (`h200-nvl-141gb`) is offered only as a pod, not on Serverless. Using it without `runpod { mode = "pod" }` fails `amicu validate` with `AMICU-CAP-015`.
 
 ## Regions
 
@@ -169,9 +205,9 @@ Some cards, such as the MI300X and the H200 NVL, are only offered as pods, not o
 
 ## Costs
 
-Only running workers are billed, per second; idle and initializing workers are free. With no traffic, nothing runs and nothing is billed. The 24 GB group (L4, RTX A5000, RTX 3090) is about $0.69 per hour per worker; see the [RunPod price list](https://www.runpod.io/pricing) for current rates, which vary by GPU and change over time. `amicu plan` shows indicative estimates from amicu's bundled catalog, not live quotes.
+Only running workers are billed, per second, from start until the worker stops. That includes the cold start and the idle timeout (900 s by default) before scale-down. With no traffic and none kept warm, nothing runs and nothing is billed. The 24 GB group (L4, RTX A5000, RTX 3090) is about $0.69 per hour per worker; see the [RunPod price list](https://www.runpod.io/pricing) for current rates, which vary by GPU and change over time. `amicu plan` shows indicative estimates from amicu's bundled catalog, not live quotes.
 
-To keep spend bounded, remember the defaults: one worker at most, none kept warm. Run `amicu destroy` when you are done.
+To keep spend bounded, remember the defaults: one worker at most, none kept warm. Run `amicu destroy` when you are done. A pod is billed for as long as it exists; see [Pods](#pods).
 
 ## Limits
 
@@ -181,7 +217,6 @@ To keep spend bounded, remember the defaults: one worker at most, none kept warm
 - Only GPU accelerators are valid.
 - The model must come from Hugging Face.
 - Flags that refer to local files and secret-bearing flags are rejected before any RunPod call.
-- Pods mode is not available yet.
 
 ## Troubleshooting
 
@@ -190,10 +225,10 @@ To keep spend bounded, remember the defaults: one worker at most, none kept warm
     Export the management key (`RUNPOD_API_KEY`) with `api.runpod.io/graphql` Read/Write, then run again. Nothing was changed.
   </Accordion>
   <Accordion title="RunPod deployments need an api_key">
-    Add `api_key = secret("NAME")` to the deployment and export `NAME` as a RunPod API key with `api.runpod.ai` access. The runtime has no key of its own on RunPod.
+    Add `api_key = secret("NAME")` to the deployment and export `NAME` as a RunPod API key with `api.runpod.ai` access. For a pod, export a random key of your own: the runtime enforces it itself.
   </Accordion>
   <Accordion title="amicu refuses the api_key">
-    The `api_key` equals `RUNPOD_API_KEY`. Create a separate Restricted key for the endpoint (`api.runpod.io/graphql` None, `api.runpod.ai` Read/Write).
+    The `api_key` equals `RUNPOD_API_KEY`. On Serverless, create a separate Restricted key for the endpoint (`api.runpod.io/graphql` None, `api.runpod.ai` Read/Write). For a pod, use a random key of your own.
   </Accordion>
   <Accordion title="401 or 403 from the endpoint, or from the readiness check">
     The key lacks `api.runpod.ai` access to this endpoint, or the client sent it wrongly. Use `Authorization: Bearer <key>` with a capital `B`.
@@ -206,6 +241,9 @@ To keep spend bounded, remember the defaults: one worker at most, none kept warm
   </Accordion>
   <Accordion title="AMICU-CAP-012 or AMICU-CAP-013">
     The GPU name is ambiguous or not in the catalog. Use an exact id from [GPUs](#gpus).
+  </Accordion>
+  <Accordion title="AMICU-CAP-015">
+    The `runpod {}` block does not fit: `cloud` outside pod mode, `scaling {}` on a pod other than one replica, a pods-only GPU on Serverless, or the block on another provider.
   </Accordion>
   <Accordion title="The deployment lives in another RunPod account">
     `RUNPOD_API_KEY` belongs to a different account than the one that created the endpoint. Switch to a key of that account. Nothing was changed.
