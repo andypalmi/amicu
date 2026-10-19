@@ -4,6 +4,35 @@ All notable changes to amicu are documented here. Maintained by release-plz from
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/andypalmi/amicu/compare/v0.1.3...v0.1.4) - 2026-10-19
+
+### Added
+
+- *(runpod)* network-volume model cache, flashboot and live test ([#333](https://github.com/andypalmi/amicu/pull/333))
+- *(runpod)* Pods in refresh, orphans and runpod commands ([#328](https://github.com/andypalmi/amicu/pull/328))
+- *(runpod)* always-on Pods mode ([#324](https://github.com/andypalmi/amicu/pull/324))
+- *(runpod)* status, logs and metrics ([#320](https://github.com/andypalmi/amicu/pull/320))
+- *(runpod)* reconcile RunPod in refresh and orphans ([#319](https://github.com/andypalmi/amicu/pull/319))
+- *(hardware)* verify the running GPU matches the declared card ([#318](https://github.com/andypalmi/amicu/pull/318))
+- *(runpod)* wire RunPod into apply with write-ahead state ([#316](https://github.com/andypalmi/amicu/pull/316))
+- *(hardware)* shared GPU catalog with exact variant names ([#312](https://github.com/andypalmi/amicu/pull/312))
+- *(runpod)* supervisor and gateway auth ([#309](https://github.com/andypalmi/amicu/pull/309))
+- *(runpod)* crate skeleton and v2 REST client ([#307](https://github.com/andypalmi/amicu/pull/307))
+- *(runpod)* pod client and PodSupervisor ([#315](https://github.com/andypalmi/amicu/pull/315))
+
+### Fixed
+
+- *(runpod)* require the key on every vLLM pod route ([#332](https://github.com/andypalmi/amicu/pull/332))
+- *(runpod)* plan shows the remote launch and placement ([#331](https://github.com/andypalmi/amicu/pull/331))
+- *(runpod)* llama.cpp routing and live-test follow-ups ([#330](https://github.com/andypalmi/amicu/pull/330))
+- *(runpod)* pod tests after port and CUDA changes ([#327](https://github.com/andypalmi/amicu/pull/327))
+- *(runpod)* region placement, llama.cpp health and CUDA floor, readiness progress ([#325](https://github.com/andypalmi/amicu/pull/325))
+- *(runpod)* raise the serverless startup timeout for long model loads ([#337](https://github.com/andypalmi/amicu/pull/337))
+
+### Other
+
+- list RunPod as supported in the README ([#335](https://github.com/andypalmi/amicu/pull/335))
+
 ## [0.1.3](https://github.com/andypalmi/amicu/compare/v0.1.2...v0.1.3) - 2026-10-17
 
 ### Added
