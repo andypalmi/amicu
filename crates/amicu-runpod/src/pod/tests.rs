@@ -23,6 +23,8 @@ const ACTION: &str = "/pods/pod1/action";
 const HEALTH: &str = "https://pod1-8000.proxy.runpod.net/health";
 const MODELS: &str = "https://pod1-8000.proxy.runpod.net/v1/models";
 const CHAT: &str = "https://pod1-8000.proxy.runpod.net/v1/chat/completions";
+const INVOCATIONS: &str = "https://pod1-8000.proxy.runpod.net/invocations";
+const DOCS: &str = "https://pod1-8000.proxy.runpod.net/docs";
 
 fn owner() -> String {
     owner_marker(None, PROJECT, DEP)
@@ -127,6 +129,8 @@ fn create_mock(status: &[Canned], health: &[Canned], anon: &[Canned], keyed: &[C
         .on(HttpMethod::Get, POD, status)
         .on(HttpMethod::Get, HEALTH, health)
         .on(HttpMethod::Post, CHAT, anon)
+        .ok(HttpMethod::Post, INVOCATIONS, 401, "")
+        .ok(HttpMethod::Get, DOCS, 401, "")
         .on(HttpMethod::Get, MODELS, keyed)
         .ok(HttpMethod::Post, ACTION, 204, "")
 }
@@ -181,9 +185,12 @@ async fn vllm_start_creates_secrets_then_the_pod_and_checks_exposure() {
         json!({
             "name": name(),
             "image": amicu_llamacpp::remote::DEFAULT_VLLM_IMAGE,
-            "entrypoint": ["vllm"],
-            "cmd": ["serve", "meta-llama/Llama-3.1-8B-Instruct", "--port", "8000",
-                    "--host", "0.0.0.0"],
+            "entrypoint": ["/bin/sh", "-c"],
+            "cmd": [vllm_pod_command(&[
+                "vllm".into(), "serve".into(), "meta-llama/Llama-3.1-8B-Instruct".into(),
+                "--port".into(), "8000".into(), "--host".into(), "0.0.0.0".into(),
+                "--middleware".into(), "amicu_auth.RequireKey".into(),
+            ]).1[0].clone()],
             "env": {
                 "AMICU_OWNER": owner(),
                 "HF_TOKEN": format!("{{{{ RUNPOD_SECRET_{hf_secret} }}}}"),
@@ -217,17 +224,19 @@ async fn vllm_start_creates_secrets_then_the_pod_and_checks_exposure() {
 
     // Anonymous first, then with the key; neither probe carries the
     // management key, and nothing but the key ever does.
-    let probes: Vec<(HttpMethod, Option<String>)> = mock
+    let probes: Vec<(HttpMethod, String, Option<String>)> = mock
         .requests()
         .into_iter()
-        .filter(|s| s.url == MODELS || s.url == CHAT)
-        .map(|s| (s.method, s.bearer))
+        .filter(|s| [MODELS, CHAT, INVOCATIONS, DOCS].contains(&s.url.as_str()))
+        .map(|s| (s.method, s.url, s.bearer))
         .collect();
     assert_eq!(
         probes,
         [
-            (HttpMethod::Post, None),
-            (HttpMethod::Get, Some(KEY.to_owned()))
+            (HttpMethod::Post, CHAT.to_owned(), None),
+            (HttpMethod::Post, INVOCATIONS.to_owned(), None),
+            (HttpMethod::Get, DOCS.to_owned(), None),
+            (HttpMethod::Get, MODELS.to_owned(), Some(KEY.to_owned()))
         ]
     );
     assert!(
@@ -295,6 +304,8 @@ async fn llama_start_uses_the_image_server_and_its_key_var() {
     assert_eq!(handle.endpoint, "https://pod1-8080.proxy.runpod.net");
     let body = body_of(&mock, HttpMethod::Post, PODS);
     assert_eq!(body["entrypoint"], json!(["/app/llama-server"]));
+    assert_eq!(count(&mock, HttpMethod::Post, "/invocations"), 0);
+    assert_eq!(count(&mock, HttpMethod::Get, "/docs"), 0);
     assert_eq!(body["ports"], json!(["8080/http"]));
     assert_eq!(
         body["gpu"]["minCudaVersion"],
@@ -710,6 +721,215 @@ async fn a_403_is_not_taken_as_the_runtime_refusing() {
     assert_eq!(count(&mock, HttpMethod::Get, MODELS), 0);
 }
 
+async fn open_route_is_terminated(method: HttpMethod, url: &'static str, path: &str) {
+    let (sup, mock) = supervisor(happy_mock().first(method, url, &[Canned::Status(200, "{}")]));
+    let e = sup.start(&vllm_plan(), &vllm_secrets()).await.unwrap_err();
+    let text = err_text(&e);
+    assert!(
+        text.contains(&format!("unauthenticated request to {path} (HTTP 200)"))
+            && text.contains("was terminated"),
+        "{text}"
+    );
+    assert_eq!(count(&mock, HttpMethod::Get, MODELS), 0);
+}
+
+#[tokio::test]
+async fn an_open_vllm_invocations_route_tears_the_pod_down() {
+    open_route_is_terminated(HttpMethod::Post, INVOCATIONS, "/invocations").await;
+}
+
+#[tokio::test]
+async fn an_open_vllm_docs_route_tears_the_pod_down() {
+    open_route_is_terminated(HttpMethod::Get, DOCS, "/docs").await;
+}
+
+#[test]
+fn the_vllm_pod_command_loads_the_auth_middleware_without_the_key() {
+    let sup = PodSupervisor::new(
+        RunPodClient::with_transport(ApiKey::new(MGMT), Arc::new(Mock::default()), BASE),
+        PROJECT,
+        DEP,
+    )
+    .with_accelerator(Some(&h100()))
+    .unwrap();
+    let prepared = sup
+        .prepare(&vllm_plan(), &vllm_secrets(), "img", None)
+        .unwrap();
+    assert_eq!(prepared.pod.entrypoint, ["/bin/sh", "-c"]);
+    let [script] = prepared.pod.cmd.as_slice() else {
+        panic!("{:?}", prepared.pod.cmd)
+    };
+    assert!(
+        script.contains("cat > /tmp/amicu/amicu_auth.py <<'AMICU_AUTH_EOF'\n"),
+        "{script}"
+    );
+    assert!(script.contains(VLLM_AUTH_MODULE));
+    assert!(
+        script.ends_with(
+            "export PYTHONPATH=/tmp/amicu${PYTHONPATH:+:$PYTHONPATH}\nexec 'vllm' 'serve' \
+             'meta-llama/Llama-3.1-8B-Instruct' '--port' '8000' '--host' '0.0.0.0' \
+             '--middleware' 'amicu_auth.RequireKey'\n"
+        ),
+        "{script}"
+    );
+    assert!(!script.contains(KEY));
+    assert!(!VLLM_AUTH_MODULE.contains(HEREDOC_END));
+    assert!(VLLM_AUTH_MODULE.contains(&format!(
+        "os.environ[\"{}\"]",
+        RuntimeKind::Vllm.api_key_env_var()
+    )));
+    assert_eq!(prepared.anon_probes, VLLM_ANON_PROBES);
+}
+
+#[test]
+fn vllm_pod_command_quotes_every_argument() {
+    let (_, cmd) = vllm_pod_command(&["vllm".into(), "it's $HOME".into()]);
+    assert!(
+        cmd[0].ends_with("exec 'vllm' 'it'\\''s $HOME'\n"),
+        "{}",
+        cmd[0]
+    );
+}
+
+/// A stand-in `vllm`: loads the middleware the way vLLM does and drives it
+/// with ASGI requests.
+#[cfg(unix)]
+const HARNESS: &str = r#"
+import asyncio, importlib, os, sys
+print(os.environ["PYTHONPATH"])
+args = sys.argv[1:]
+assert args[-2:] == ["--middleware", "amicu_auth.RequireKey"], args
+assert args[:2] == ["serve", "it's"], args
+mod, name = args[-1].rsplit(".", 1)
+cls = getattr(importlib.import_module(mod), name)
+
+async def inner(scope, receive, send):
+    if scope["type"] == "http":
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+    else:
+        await send({"type": "lifespan.startup.complete"})
+
+async def call(scope):
+    sent = []
+    async def send(m):
+        sent.append(m)
+    async def receive():
+        return {"type": "lifespan.startup"}
+    await cls(inner)(scope, receive, send)
+    return sent
+
+def http(method, path, *auth):
+    headers = [(b"authorization", a) for a in auth]
+    sent = asyncio.run(call({"type": "http", "method": method, "path": path, "headers": headers}))
+    return sent[0]["status"]
+
+def other_scope():
+    try:
+        asyncio.run(call({"type": "custom"}))
+    except RuntimeError:
+        return "refused"
+    return "passed"
+
+key = b"Bearer k3y"
+out = [
+    http("GET", "/health"),
+    http("POST", "/health"),
+    http("HEAD", "/health"),
+    http("GET", "//health"),
+    http("GET", "/health/"),
+    http("GET", "/v1/models", key, key),
+    http("GET", "/v1/models", b"Bearer wrong", key),
+    other_scope(),
+    http("POST", "/invocations"),
+    http("GET", "/docs"),
+    http("GET", "/metrics", b"Bearer wrong"),
+    http("GET", "/metrics", b"bearer k3y"),
+    http("POST", "/tokenize", key),
+    http("POST", "/v1/chat/completions", key),
+    asyncio.run(call({"type": "lifespan"}))[0]["type"],
+    asyncio.run(call({"type": "websocket", "path": "/v1/realtime", "headers": []}))[0]["code"],
+]
+print(out)
+"#;
+
+/// Runs the rendered script with [`HARNESS`] as `vllm` (needs `python3`).
+#[cfg(unix)]
+#[test]
+fn the_rendered_script_guards_every_route_but_health() {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipped: no python3");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "amicu-auth-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(dir.join("harness.py"), HARNESS).unwrap();
+    let vllm = bin.join("vllm");
+    std::fs::write(
+        &vllm,
+        format!(
+            "#!/bin/sh\nexec python3 {} \"$@\"\n",
+            dir.join("harness.py").display()
+        ),
+    )
+    .unwrap();
+    std::process::Command::new("chmod")
+        .arg("+x")
+        .arg(&vllm)
+        .status()
+        .unwrap();
+    let (entrypoint, cmd) = vllm_pod_command(&[
+        "vllm".into(),
+        "serve".into(),
+        "it's".into(),
+        "--middleware".into(),
+        VLLM_AUTH_MIDDLEWARE.into(),
+    ]);
+    let auth = dir.join("auth").display().to_string();
+    let script = cmd[0].replace(VLLM_AUTH_DIR, &auth);
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let run = |pythonpath: Option<&str>| {
+        let mut c = std::process::Command::new(&entrypoint[0]);
+        c.arg(&entrypoint[1])
+            .arg(&script)
+            .env("PATH", &path)
+            .env("VLLM_API_KEY", "k3y")
+            .env_remove("PYTHONPATH");
+        if let Some(p) = pythonpath {
+            c.env("PYTHONPATH", p);
+        }
+        c.output().unwrap()
+    };
+    let outs = [run(None), run(Some("/opt/user"))];
+    let _ = std::fs::remove_dir_all(&dir);
+    for (out, pythonpath) in outs.iter().zip([auth.clone(), format!("{auth}:/opt/user")]) {
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            format!(
+                "{pythonpath}\n[200, 401, 401, 401, 401, 401, 401, 'refused', 401, 401, 401, \
+                 401, 200, 200, 'lifespan.startup.complete', 1008]"
+            )
+        );
+    }
+}
+
 #[tokio::test]
 async fn readiness_waits_for_running_then_health() {
     let (sup, mock) = supervisor(create_mock(
@@ -1003,6 +1223,11 @@ fn a_pod_mounts_the_volume_as_the_hf_cache_in_its_data_center() {
     );
     assert_eq!(body["dataCenterIds"], json!(["EU-RO-1"]));
     assert_eq!(body["env"]["HF_HOME"], json!("/runpod-volume/huggingface"));
+    let script = body["cmd"].to_string();
+    assert!(
+        script.contains("amicu_auth.py"),
+        "vLLM runs under the middleware: {script}"
+    );
 
     let same: Pod = serde_json::from_str(matching_pod(&sup, "RUNNING", "t0")).unwrap();
     assert_eq!(same.network_volume.as_deref(), Some("vol1"));

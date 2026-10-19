@@ -475,7 +475,8 @@ enum Live {
 /// Otherwise, and on any lookup failure, nothing changes and a warning says
 /// why. A live endpoint whose workers or GPU pools differ from what was
 /// applied (a pod: GPU type, count or cloud) gets a drift note only, like
-/// Modal: nothing is marked for update.
+/// Modal: nothing is marked for update. The exception is a vLLM pod started
+/// without amicu's auth middleware: it is marked pending so apply fixes it.
 fn refresh_runpod(state: &mut LocalState, ops: &dyn RunPodOps) -> Refresh {
     let records: Vec<StopRecord> = crate::commands::apply::effective_stops(Some(state))
         .into_iter()
@@ -519,6 +520,11 @@ fn refresh_runpod(state: &mut LocalState, ops: &dyn RunPodOps) -> Refresh {
     for (r, live) in records.iter().zip(found) {
         let dep = r.deployment.as_str();
         let kind = r.runpod_kind();
+        if let Ok(Live::Pod(pod)) = &live
+            && let Some(note) = mark_unguarded_vllm_pod(state, r, pod)
+        {
+            out.notes.push(note);
+        }
         if let Some((name, id, drift)) = live_drift(state, r, &live) {
             if !drift.is_empty() {
                 out.notes.push(format!(
@@ -670,6 +676,32 @@ async fn lookup_pod(
         foreign.push(pod.id);
     }
     Ok(Live::Foreign(foreign))
+}
+
+/// Marks `record`'s deployment pending when its live vLLM `pod` runs without
+/// amicu's auth middleware, so apply updates it; returns the note.
+fn mark_unguarded_vllm_pod(
+    state: &mut LocalState,
+    record: &StopRecord,
+    pod: &amicu_runpod::Pod,
+) -> Option<String> {
+    let vllm = state.graph.deployments.iter().any(|d| {
+        d.id == record.deployment && matches!(d.runtime, amicu_core::resource::Runtime::Vllm(_))
+    });
+    if !vllm || amicu_runpod::vllm_pod_guarded(pod) != Some(false) {
+        return None;
+    }
+    if !state.pending.contains(&record.deployment) {
+        state.pending.push(record.deployment.clone());
+    }
+    Some(format!(
+        "deployment {}: RunPod pod '{}' (pod id {}) runs vLLM without amicu's auth middleware, \
+         so routes outside /v1 answer without the api_key; marked pending: apply will update \
+         it in place",
+        record.deployment.as_str(),
+        pod.name,
+        pod.id
+    ))
 }
 
 /// How `pod` differs from what apply set for `record`'s deployment: GPU

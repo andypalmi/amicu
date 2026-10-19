@@ -29,7 +29,7 @@ pub use hardware::{
     GpuPlacement, PodGpuPlacement, exclusions_from_catalog, gpu_placement, parse_gpu_spec,
     pod_gpu_placement, pod_hourly_usd, serverless_hourly_usd, verify_catalog_memory,
 };
-pub use pod::PodSupervisor;
+pub use pod::{PodSupervisor, vllm_pod_guarded};
 pub use regions::{place_on_volume, restrict_to_residencies, select_data_centers};
 pub use supervisor::{
     ReadinessTiming, RunPodSupervisor, StopOutcome, StopRetry, endpoint_url, owner_marker,

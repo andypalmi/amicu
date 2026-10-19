@@ -551,8 +551,12 @@ fn runpod_remote(graph: &Graph, item: &PlanItem, project_id: Option<&str>) -> Op
         RunpodMode::Pod => {
             crate::commands::apply::configured_pod(client, graph, &catalog, id, pid, None)
                 .map_err(|e| e.to_string())
-                .and_then(|s| s.planned_pod(launch).map_err(|e| e.to_string()))
-                .map(|b| RemoteBody {
+                .and_then(|s| {
+                    let pod = s.planned_pod(launch).map_err(|e| e.to_string())?;
+                    let argv = s.launch_argv(launch).map_err(|e| e.to_string())?;
+                    Ok((pod, argv))
+                })
+                .map(|(b, argv)| RemoteBody {
                     details: vec![
                         ("pod", named(b.name)),
                         ("gpu", format!("{} x {}", b.gpu_count, b.gpu_type_id)),
@@ -560,7 +564,7 @@ fn runpod_remote(graph: &Graph, item: &PlanItem, project_id: Option<&str>) -> Op
                     ],
                     volume: b.network_volume_id,
                     image: b.image,
-                    argv: b.entrypoint.into_iter().chain(b.cmd).collect(),
+                    argv,
                     env: b.env,
                     data_centers: b.data_center_ids,
                     disk_gb: b.disk_gb,
