@@ -17,6 +17,14 @@ async-trait = "0.1"
 # own client (builds on reqwest 0.13 / rustls aws-lc-rs, like the rest of the
 # workspace). Only `auth.rs` touches it.
 google-cloud-auth = "1"
+# Base64 for Secret Manager payloads.
+base64 = "0.22"
+# The pinned-certificate HTTPS client for the VM: reqwest with a custom rustls
+# verifier (same reqwest and rustls aws-lc-rs stack as the rest of the workspace).
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# Self-signed certificate generation for the VM's TLS endpoint.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The owner label value.
@@ -26,7 +34,9 @@ thiserror = "2"
 tokio = { version = "1", features = ["time"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "test-util"] }
+tokio = { version = "1", features = ["macros", "rt", "test-util", "net", "io-util"] }
+# A local TLS server for the pinning tests.
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
 
 [lints]
 workspace = true

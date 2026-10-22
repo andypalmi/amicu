@@ -16,6 +16,7 @@ pub mod compute;
 pub mod error;
 pub mod labels;
 pub mod operations;
+pub mod secrets;
 pub mod validate;
 
 pub use auth::{
@@ -29,5 +30,8 @@ pub use labels::{
 };
 pub use operations::{
     PollTiming, wait_compute_global_operation, wait_compute_zone_operation, wait_run_operation,
+};
+pub use secrets::{
+    ACCESSOR_ROLE, Replication, SECRETMANAGER_BASE_URL, SecretDelete, SecretKind, secret_id,
 };
 pub use validate::{validate_project_id, validate_region, validate_zone, zone_region};
