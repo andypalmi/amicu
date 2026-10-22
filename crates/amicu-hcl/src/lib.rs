@@ -260,6 +260,7 @@ mod tests {
              machine_type = \"n1-standard-4\"\n    provisioning = \"flex_start\"\n    \
              max_run_duration = \"2h\"\n    boot_disk_gb = 100\n    \
              service_account = \"vm@my-proj.iam.gserviceaccount.com\"\n    \
+             insecure_metadata_secrets = true\n    \
              allowed_source_cidrs = [\"203.0.113.4/32\"]\n    \
              impersonate_service_account = \"amicu@my-proj.iam.gserviceaccount.com\"\n  }\n",
         ))
@@ -270,6 +271,7 @@ mod tests {
         assert_eq!(s.provisioning, GcpProvisioning::FlexStart);
         assert_eq!(s.max_run_duration_secs, Some(7200));
         assert_eq!(s.allowed_source_cidrs, ["203.0.113.4/32"]);
+        assert!(s.insecure_metadata_secrets);
         assert_eq!(parse_graph(&format_graph(&g).unwrap()).unwrap(), g);
 
         let g = parse_graph(&with_runpod_block(

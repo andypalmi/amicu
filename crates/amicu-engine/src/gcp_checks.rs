@@ -196,6 +196,17 @@ fn compute_problems(
     if s.boot_disk_gb.is_some_and(|g| g < 50) {
         out.push((invalid, "`boot_disk_gb` must be at least 50".to_owned()));
     }
+    if s.service_account.as_deref().is_none_or(str::is_empty) && !s.insecure_metadata_secrets {
+        out.push((
+            invalid,
+            "`gcp {}` needs a `service_account`: the VM reads its API key, Hugging Face token \
+             and TLS key from Secret Manager as that account. Create one (for example \
+             `gcloud iam service-accounts create amicu-vm`) and set `service_account` to its \
+             email, or set `insecure_metadata_secrets = true` to put the secrets in instance \
+             metadata instead, where anyone who can read the instance can read them"
+                .to_owned(),
+        ));
+    }
     for c in s.allowed_source_cidrs.iter().filter(|c| !cidr_ok(c)) {
         out.push((
             invalid,
@@ -223,10 +234,16 @@ mod tests {
 
     /// A profile with one vLLM deployment; `gpu` and `gcp` fill the blanks.
     fn graph(provider: &str, region: &str, gpu: &str, gcp: &str, extra: &str) -> Graph {
+        // The secrets need a service account unless the test says otherwise.
+        let sa = if gcp.contains("service_account") || gcp.contains("insecure_metadata_secrets") {
+            ""
+        } else {
+            "\nservice_account = \"vm@my-proj.iam.gserviceaccount.com\""
+        };
         let gcp_block = if gcp.is_empty() {
             String::new()
         } else {
-            format!("gcp {{\n{gcp}\n}}")
+            format!("gcp {{\n{gcp}{sa}\n}}")
         };
         let text = format!(
             r#"
@@ -296,11 +313,48 @@ resource "deployment" "d" {{
     }
 
     #[test]
+    fn secrets_need_a_service_account_or_the_explicit_metadata_opt_in() {
+        let base = "project = \"my-proj\"\nmachine_type = \"n1-standard-4\"\n";
+        let g = graph(
+            "gcp",
+            EU,
+            "t4",
+            &format!("{base}zone = \"europe-west4-a\"\nservice_account = \"\""),
+            "",
+        );
+        assert_eq!(codes(&g), ["AMICU-CAP-016"]);
+        let d = &gcp_diagnostics(&g)[0];
+        assert!(d.message.contains("service_account"), "{}", d.message);
+        assert!(
+            d.message.contains("insecure_metadata_secrets"),
+            "{}",
+            d.message
+        );
+        let g = graph(
+            "gcp",
+            EU,
+            "t4",
+            &format!("{base}insecure_metadata_secrets = true"),
+            "",
+        );
+        assert_eq!(codes(&g), Vec::<String>::new());
+        let g = graph(
+            "gcp",
+            EU,
+            "t4",
+            &format!("{base}service_account = \"vm@my-proj.iam.gserviceaccount.com\""),
+            "",
+        );
+        assert_eq!(codes(&g), Vec::<String>::new());
+    }
+
+    #[test]
     fn missing_project_and_wrong_provider_are_reported() {
         let g = graph("gcp", EU, "t4", "zone = \"europe-west4-a\"", "");
         assert_eq!(codes(&g), ["AMICU-CAP-016"]);
+        // No block at all: no project and no service account.
         let g = graph("gcp", EU, "t4", "", "");
-        assert_eq!(codes(&g), ["AMICU-CAP-016"]);
+        assert_eq!(codes(&g), ["AMICU-CAP-016", "AMICU-CAP-016"]);
         let g = graph("runpod", EU, "l4", "project = \"my-proj\"", "");
         assert_eq!(codes(&g), ["AMICU-CAP-016"]);
     }

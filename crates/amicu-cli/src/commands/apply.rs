@@ -213,7 +213,8 @@ fn run_for(
         env,
         Op::Apply,
     )?;
-    let code = report(&handles, &state.graph, output, out)?;
+    let tls = gce::tls_notes(project, &effective_stops(Some(&state)));
+    let code = report(&handles, &state.graph, &tls, output, out)?;
     // A host deployment comes back after a reboot; tell the user when this
     // machine would only do so at their next login (systemd lingering off).
     if !output.is_json()
@@ -1533,7 +1534,7 @@ async fn apply_all(
                     }
                 }
             } else if let Some(gs) = &gce_start {
-                match verify_gce_handle(&handle, launch, resolver, env.gcp).await {
+                match verify_gce_handle(&handle, &gs.stop, launch, resolver, env.gcp).await {
                     Ok(()) => Ok(()),
                     Err(detail) => {
                         let note = gce::failed_start(gs, adapter, &mut progress.stops).await;
@@ -1569,6 +1570,9 @@ async fn apply_all(
                     );
                 }
                 return Err(e);
+            }
+            if let Some(gs) = &gce_start {
+                gce::write_cert(project, gs);
             }
             registry.register(&handle);
             let mut superseded = Vec::new();
@@ -1780,6 +1784,7 @@ async fn verify_runpod_handle(
 /// refused and the deployment's key is accepted.
 async fn verify_gce_handle(
     handle: &RuntimeHandle,
+    stop: &StopRecord,
     launch: &LaunchPlan,
     resolver: &dyn SecretResolver,
     gcp: &dyn GcpOps,
@@ -1799,12 +1804,18 @@ async fn verify_gce_handle(
         "verifying endpoint authentication at {} ...",
         handle.endpoint
     );
-    report_verify(gcp.verify_exposure(&handle.endpoint, &key).await)
+    let Some(g) = &stop.gcp else {
+        return Err("the VM has no recorded certificate to verify the endpoint against".to_owned());
+    };
+    report_verify(
+        gcp.verify_exposure(&handle.endpoint, &g.vm(&g.zone), &key)
+            .await,
+    )
 }
 
 /// Checks the Google credentials and project of every Compute Engine launch,
-/// once per project, and says the endpoint is plain HTTP. Nothing is written
-/// before this passes.
+/// once per project, and warns when secrets would go through instance metadata.
+/// Nothing is written before this passes.
 async fn gce_preflight(
     result: &PlanResult,
     graph: &Graph,
@@ -1824,13 +1835,16 @@ async fn gce_preflight(
             crate::gcp_ops::preflight(env.gcp, &access.0, access.1.as_deref()).await?;
             checked.push(access);
         }
-        let _ = writeln!(
-            std::io::stderr(),
-            "note: '{}' runs on a Compute Engine VM and is served over plain HTTP until TLS is \
-             supported: its api_key crosses the network unencrypted, so only use it from \
-             addresses the firewall rule allows and rotate the key afterwards if that is a concern",
-            item.deployment
-        );
+        if gce::uses_metadata_secrets(graph, catalog, &item.deployment)? {
+            let _ = writeln!(
+                std::io::stderr(),
+                "warning: '{}' sets `insecure_metadata_secrets`: its api_key, Hugging Face \
+                 token and TLS key will be instance metadata, readable by anyone who can read \
+                 the instance in the project. Use a `service_account` to keep them in Secret \
+                 Manager instead",
+                item.deployment
+            );
+        }
     }
     Ok(())
 }
@@ -2747,6 +2761,7 @@ fn find_deployment<'a>(
 fn report(
     handles: &[RuntimeHandle],
     graph: &Graph,
+    tls: &[(String, std::path::PathBuf, String)],
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
@@ -2762,11 +2777,23 @@ fn report(
                     gateway: GatewayAuth::GceBearer,
                 })
             {
-                io(writeln!(
-                    out,
-                    "    note: plain HTTP (no TLS yet): the api_key is sent unencrypted; the \
-                     firewall rule limits who can connect"
-                ))?;
+                if let Some((_, path, fingerprint)) = tls.iter().find(|t| t.0 == h.id) {
+                    io(writeln!(
+                        out,
+                        "    HTTPS with a pinned self-signed certificate; the firewall rule \
+                         limits who can connect\n    certificate: {}\n    SHA-256 \
+                         fingerprint: {fingerprint}\n    note: the certificate names no \
+                         resolvable host, so clients must pin it (a client that skips \
+                         verification is not protected)",
+                        path.display()
+                    ))?;
+                } else {
+                    io(writeln!(
+                        out,
+                        "    note: plain HTTP: the api_key is sent unencrypted; the firewall \
+                         rule limits who can connect"
+                    ))?;
+                }
             }
             let deployment = find_deployment(graph, &h.deployment);
             let model = deployment

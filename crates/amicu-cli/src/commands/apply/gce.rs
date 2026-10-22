@@ -3,8 +3,10 @@
 //!
 //! The stop record (project, zones, instance, firewall rule, owner marker) is
 //! written to state before anything is created, so a crash never leaves a VM
-//! that state cannot find. The VM serves plain HTTP on its external IP until
-//! TLS is added.
+//! that state cannot find. The record also names the deployment's Secret
+//! Manager secrets and the VM's certificate fingerprint, so destroy removes the
+//! secrets even after a crash. The VM serves HTTPS with a self-signed
+//! certificate that every request pins.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +16,7 @@ use std::time::Duration;
 use amicu_core::graph::Graph;
 use amicu_core::id::DeploymentId;
 use amicu_core::resource::{GcpBackend, GcpProvisioning, Residency};
-use amicu_gcp::compute::Provisioning as VmProvisioning;
+use amicu_gcp::compute::{Provisioning as VmProvisioning, SecretDelivery};
 use amicu_gcp::gce::teardown;
 use amicu_gcp::{GceLaunch, GceSupervisor, GcpCatalog, candidate_zones, resolve_shape};
 use amicu_llamacpp::Catalog;
@@ -36,6 +38,8 @@ const DEFAULT_BOOT_DISK_GB: u32 = 100;
 pub(super) struct GceStart {
     /// The write-ahead stop record.
     pub stop: StopRecord,
+    /// The VM's certificate (public), written next to state once it serves.
+    pub cert_pem: Option<String>,
     landed: Arc<Mutex<Option<String>>>,
     created: Arc<AtomicBool>,
 }
@@ -54,6 +58,17 @@ pub(super) fn access_for(
         ))
     })?;
     Ok((project, settings.impersonate_service_account))
+}
+
+/// Whether the deployment opted into delivering its secrets as instance
+/// metadata.
+pub(super) fn uses_metadata_secrets(
+    graph: &Graph,
+    catalog: &dyn Catalog,
+    id: &DeploymentId,
+) -> Result<bool, CliError> {
+    let (_, hardware) = deployment_hardware(graph, catalog, id)?;
+    Ok(hardware.gcp.unwrap_or_default().insecure_metadata_secrets)
 }
 
 fn residency_ok(region: &str, allowed: &[Residency]) -> bool {
@@ -122,7 +137,7 @@ pub(crate) fn launch_for(
             &"no candidate zone lies in a jurisdiction the project's data_class allows",
         ));
     }
-    Ok(GceLaunch {
+    GceLaunch {
         project,
         project_id: project_id.to_owned(),
         deployment_id: id.as_str().to_owned(),
@@ -138,7 +153,15 @@ pub(crate) fn launch_for(
         service_account: s.service_account,
         source_ranges,
         impersonate: s.impersonate_service_account,
-    })
+        delivery: if s.insecure_metadata_secrets {
+            SecretDelivery::InstanceMetadata
+        } else {
+            SecretDelivery::SecretManager
+        },
+        tls: None,
+    }
+    .with_tls()
+    .map_err(|e| fail(&e))
 }
 
 /// Who may reach the serving port: the profile's list, else this machine's
@@ -200,8 +223,13 @@ pub(super) async fn prepare(
     let new_record = spec
         .record()
         .map_err(|e| CliError::Message(e.to_string()))?;
+    let cert_pem = spec.cert_pem().map(str::to_owned);
+    let probe = env
+        .gcp
+        .probe(&new_record.vm(&new_record.zone))
+        .map_err(|e| CliError::Message(e.to_string()))?;
     let mut supervisor = GceSupervisor::new(client, spec)
-        .with_probe_transport(env.gcp.probe())
+        .with_probe_transport(probe)
         .with_timing(env.gcp.timing())
         .with_progress(env.progress);
     let prior = progress
@@ -220,6 +248,7 @@ pub(super) async fn prepare(
         .map_err(supervisor_err)?;
     let start = GceStart {
         stop: StopRecord::gce(id, new_record),
+        cert_pem,
         landed: supervisor.landed_zone(),
         created: supervisor.created(),
     };
@@ -284,8 +313,42 @@ pub(super) async fn failed_start(
     }
 }
 
-/// Deletes the VM and then the firewall rule, each only if it carries the
-/// record's owner marker; `Ok` only once both are confirmed gone.
+/// Writes the VM's certificate next to state, for clients to pin. A failure
+/// is a note, not an error: the VM is serving and the fingerprint is in state.
+pub(super) fn write_cert(project: &crate::project::Project, start: &GceStart) {
+    let (Some(pem), Some(g)) = (&start.cert_pem, &start.stop.gcp) else {
+        return;
+    };
+    if let Err(e) = amicu_gcp::compute::write_cert_pem(&project.state_dir(), &g.instance, pem) {
+        let _ = writeln!(
+            std::io::stderr(),
+            "note: could not write the certificate of {} next to state ({e}); clients can pin \
+             its fingerprint instead",
+            g.instance
+        );
+    }
+}
+
+/// What a client of each applied Compute Engine VM pins: the VM's id, the
+/// certificate file next to state and the certificate's fingerprint.
+pub(super) fn tls_notes(
+    project: &crate::project::Project,
+    stops: &[StopRecord],
+) -> Vec<(String, std::path::PathBuf, String)> {
+    stops
+        .iter()
+        .filter_map(|r| r.gcp.as_ref())
+        .filter_map(|g| {
+            let f = g.tls_fingerprint.clone()?;
+            let path = amicu_gcp::compute::cert_path(&project.state_dir(), &g.instance);
+            Some((g.instance.clone(), path, f))
+        })
+        .collect()
+}
+
+/// Deletes the VM, then the firewall rule, then the deployment's secrets, each
+/// only if it carries the record's owner marker; `Ok` only once all are
+/// confirmed gone.
 pub(super) async fn stop(record: &StopRecord, env: &Env<'_>) -> Result<(), CliError> {
     let Some(g) = &record.gcp else {
         return Err(CliError::Message(format!(

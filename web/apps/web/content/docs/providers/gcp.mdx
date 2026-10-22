@@ -23,6 +23,7 @@ resource "hardware_profile" "gcp_t4" {
     machine_type     = "n1-standard-4"
     provisioning     = "spot"
     max_run_duration = "2h"
+    service_account  = "amicu-vm@my-project-id.iam.gserviceaccount.com"
   }
 }
 ```
@@ -33,21 +34,43 @@ A complete example is in `examples/gcp-t4-spot`.
 
 `apply` creates one Compute Engine VM per deployment, with the GPU attached (N1) or built in (A2, A3, G2, G4), and one firewall rule for the serving port. A startup script runs the vLLM container behind amicu's key check: every route except `GET /health` needs the deployment's `api_key`. Only `runtime = "vllm"` is supported; llama.cpp is rejected (`AMICU-CAP-016`).
 
-<Callout type="warning" title="Plain HTTP for now">
-  The endpoint is `http://<VM IP>:8000`. TLS is not built yet, so the `api_key` crosses the network unencrypted. The firewall rule allows only the addresses in `allowed_source_cidrs`, or by default this machine's public IP as a `/32`. amicu never opens the port to `0.0.0.0/0` unless you list it.
+The endpoint is `https://<VM IP>:8000`. The VM serves a self-signed certificate that amicu generates before it creates the VM. The certificate names no host you can resolve, so clients pin it instead of trusting a CA: `apply` writes it to `.amicu/state/<instance>.tls.crt` and prints its path and SHA-256 fingerprint. amicu pins it for its own health and exposure checks. A client that skips certificate verification is not protected. The firewall rule allows only the addresses in `allowed_source_cidrs`, or by default this machine's public IP as a `/32`. amicu never opens the port to `0.0.0.0/0` unless you list it.
+
+The API key, the Hugging Face token and the TLS private key are stored in Secret Manager (one secret each, in the deployment's region only) before the VM is created. The VM's service account reads them at boot, so they are never in instance metadata. The secret ids and the certificate fingerprint are in the record `apply` writes to state first, so `destroy` removes the secrets even after a crash.
+
+<Callout type="warning" title="Insecure metadata fallback">
+  `insecure_metadata_secrets = true` skips Secret Manager and puts the three secrets in instance metadata, where anyone who can read the instance in the project can read them, and the console shows them. Use it only when Secret Manager cannot be used. TLS stays on.
 </Callout>
 
-The VM is deleted by Compute Engine after `max_run_duration` (default 8 hours) whatever else happens, and a preempted Spot VM is deleted too. `apply` writes the VM's record to state before it creates anything, tries the next zone of the region on a capacity stockout (at most 4 zones), and waits until vLLM answers. `amicu destroy` deletes the VM and then the firewall rule, and only resources that carry amicu's owner marker (a label on the VM, a marker in the rule's description). A resource of the same name without it is left alone and reported.
+The VM is deleted by Compute Engine after `max_run_duration` (default 8 hours) whatever else happens, and a preempted Spot VM is deleted too. `apply` writes the VM's record to state before it creates anything, tries the next zone of the region on a capacity stockout (at most 4 zones), and waits until vLLM answers. `amicu destroy` deletes the VM, then the firewall rule, then the secrets, confirms each is gone, and can be run again after a failure. It deletes only resources that carry amicu's owner marker (a label on the VM, a marker in the rule's description). A resource of the same name without it is left alone and reported.
 
 ## Setup and credentials
 
-amicu uses Application Default Credentials: run `gcloud auth application-default login`, or set `GOOGLE_APPLICATION_CREDENTIALS`. To act as a service account, set `impersonate_service_account` in the block (or `GOOGLE_IMPERSONATE_SERVICE_ACCOUNT`). `apply` makes one read of the project before it writes anything, so missing credentials fail first. The caller needs permission to create and delete instances and firewall rules in the project, and GPU quota in the region.
+amicu uses Application Default Credentials: run `gcloud auth application-default login`, or set `GOOGLE_APPLICATION_CREDENTIALS`. To act as a service account, set `impersonate_service_account` in the block (or `GOOGLE_IMPERSONATE_SERVICE_ACCOUNT`). `apply` makes one read of the project before it writes anything, so missing credentials fail first. The caller needs permission to create and delete instances and firewall rules in the project, to create, version, set the IAM policy of and delete secrets (`roles/secretmanager.admin` covers it), and GPU quota in the region.
+
+### The service account
+
+The VM runs as a service account that reads its secrets. Create one once per project; it needs no project-level roles:
+
+```sh
+gcloud iam service-accounts create amicu-vm --project my-project-id
+```
+
+Set `service_account = "amicu-vm@my-project-id.iam.gserviceaccount.com"` in the `gcp {}` block. amicu itself grants `roles/secretmanager.secretAccessor` to that account on each of the deployment's secrets, one secret at a time, and never changes project-level IAM. The account that runs `apply` needs `roles/iam.serviceAccountUser` on the VM's service account, so it may attach it to a VM:
+
+```sh
+gcloud iam service-accounts add-iam-policy-binding \
+  amicu-vm@my-project-id.iam.gserviceaccount.com \
+  --member "user:you@example.com" --role roles/iam.serviceAccountUser
+```
+
+Without a `service_account` and without `insecure_metadata_secrets = true`, `validate`, `plan` and `apply` fail with `AMICU-CAP-016`.
 
 | Variable | Needed for | Notes |
 |---|---|---|
 | `GOOGLE_APPLICATION_CREDENTIALS` (optional) | all commands | A service-account key file. Otherwise the `gcloud` login is used. |
-| The deployment's `api_key` secret, for example `CHAT_API_KEY` | `apply`, and every client call | A random key (`openssl rand -hex 32`). It is delivered to the VM as instance metadata until Secret Manager support lands, so anyone who can read the instance in the project can read it. |
-| `HF_TOKEN` (optional) | Gated Hugging Face repos | Delivered the same way. |
+| The deployment's `api_key` secret, for example `CHAT_API_KEY` | `apply`, and every client call | A random key (`openssl rand -hex 32`). It is stored in Secret Manager and read by the VM's service account at boot (instance metadata only with `insecure_metadata_secrets = true`). |
+| `HF_TOKEN` (optional) | Gated Hugging Face repos | Delivered the same way, as its own secret. |
 | `AMICU_GCP_VLLM_IMAGE` (optional) | Override the vLLM image | Process-wide. |
 
 ## Configuration reference
@@ -63,7 +86,8 @@ The `gcp {}` block on a `hardware_profile` with `provider = "gcp"`:
 | `provisioning` | string | `spot` | no | `spot`, `flex_start` or `standard`. Not every machine offers every mode (`AMICU-CAP-018`, for example `standard` on `a3-highgpu-1g`). |
 | `max_run_duration` | duration | `8h` | no | 10m to 7d (120d unless `flex_start`). Compute Engine deletes the VM after it. |
 | `boot_disk_gb` | number | `100` | no | At least 50. |
-| `service_account` | string | none | no | Email of the account the VM runs as. None attached by default. |
+| `service_account` | string | none | yes, unless `insecure_metadata_secrets` | Email of the account the VM runs as; it reads the VM's secrets from Secret Manager (`AMICU-CAP-016` if missing). |
+| `insecure_metadata_secrets` | bool | `false` | no | INSECURE. Deliver the secrets as instance metadata instead of Secret Manager, readable by anyone who can read the instance. |
 | `allowed_source_cidrs` | list | this machine's public IP `/32` | no | Who may reach the serving port. |
 | `impersonate_service_account` | string | none | no | Service account amicu acts as. |
 
@@ -97,7 +121,7 @@ Other checks: an unknown GPU or one not offered in the zone or region is `AMICU-
 
 ## Limits
 
-- Plain HTTP, no TLS yet; the `api_key` and `HF_TOKEN` are instance metadata, not Secret Manager.
+- The certificate is self-signed and pinned, not CA-signed: clients must pin its fingerprint.
 - vLLM only, one VM per deployment, no `env` block, no metrics or logs through amicu.
 - Cloud Run is not supported by `apply` yet.
 - Prices in the catalog are illustrative values, not live quotes, so cost estimates are indicative.
@@ -113,6 +137,9 @@ Other checks: an unknown GPU or one not offered in the zone or region is `AMICU-
   </Accordion>
   <Accordion title="I cannot reach the endpoint">
   The firewall rule allows only `allowed_source_cidrs`, or the public IP of the machine that ran `apply`. If your address changed, set `allowed_source_cidrs` and run `apply` again.
+  </Accordion>
+  <Accordion title="apply or destroy refuses a secret">
+  A Secret Manager secret of amicu's name exists without amicu's owner label, so amicu will not use or delete it. Rename or delete it yourself if it is not needed.
   </Accordion>
   <Accordion title="destroy refuses a VM or firewall rule">
   It does not carry amicu's owner marker, so amicu will not touch it. Check it in the Google Cloud console; the record stays in state.

@@ -4,9 +4,10 @@
 use std::sync::Arc;
 
 use amicu_core::secret::SecretValue;
-use amicu_gcp::{AdcTokenSource, AuthConfig, GceTiming, GcpClient};
+use amicu_gcp::compute::{VmRecord, probe_transport};
+use amicu_gcp::{AdcTokenSource, AuthConfig, GceTiming, GcpClient, GcpError};
 use amicu_providers::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport};
-use amicu_runtime::exposure::{CheckTiming, EndpointCheck, PROBE_PATH};
+use amicu_runtime::exposure::{CheckTiming, PROBE_PATH, validate_api_key_value};
 use async_trait::async_trait;
 
 use crate::error::CliError;
@@ -20,13 +21,23 @@ pub(crate) trait GcpOps: Send + Sync {
     /// A client acting as the caller (or as `impersonate`). Reads local
     /// credential files only; the first token call is the preflight.
     fn client(&self, impersonate: Option<&str>) -> Result<GcpClient, CliError>;
-    /// The transport the readiness probe goes through.
-    fn probe(&self) -> Arc<dyn HttpTransport>;
+    /// The transport for requests to the VM itself: pinned to the record's
+    /// certificate fingerprint when it has one.
+    ///
+    /// # Errors
+    /// [`GcpError::Invalid`] for a malformed fingerprint.
+    fn probe(&self, record: &VmRecord) -> Result<Arc<dyn HttpTransport>, GcpError>;
     /// The caller's public IPv4 address. `Err` is a message safe to print.
     async fn caller_ip(&self) -> Result<String, String>;
     /// The post-deploy check: an anonymous request is refused and `key` is
-    /// accepted. `Err` is secret-free.
-    async fn verify_exposure(&self, endpoint: &str, key: &SecretValue) -> Result<(), String>;
+    /// accepted, over a connection pinned to `record`'s certificate. `Err` is
+    /// secret-free.
+    async fn verify_exposure(
+        &self,
+        endpoint: &str,
+        record: &VmRecord,
+        key: &SecretValue,
+    ) -> Result<(), String>;
     /// Poll and readiness bounds.
     fn timing(&self) -> GceTiming {
         GceTiming::default()
@@ -45,8 +56,8 @@ impl GcpOps for RealGcp {
         Ok(GcpClient::new(Arc::new(tokens)))
     }
 
-    fn probe(&self) -> Arc<dyn HttpTransport> {
-        Arc::new(ReqwestTransport::new())
+    fn probe(&self, record: &VmRecord) -> Result<Arc<dyn HttpTransport>, GcpError> {
+        probe_transport(record)
     }
 
     async fn caller_ip(&self) -> Result<String, String> {
@@ -61,16 +72,74 @@ impl GcpOps for RealGcp {
         }
     }
 
-    async fn verify_exposure(&self, endpoint: &str, key: &SecretValue) -> Result<(), String> {
-        amicu_runtime::exposure::verify_endpoint(&EndpointCheck {
-            endpoint,
-            path: PROBE_PATH,
-            api_key: key,
-            gateway_headers: &[],
-            timing: CheckTiming::PUBLIC,
-        })
-        .await
-        .map_err(|e| e.detail().to_owned())
+    async fn verify_exposure(
+        &self,
+        endpoint: &str,
+        record: &VmRecord,
+        key: &SecretValue,
+    ) -> Result<(), String> {
+        let transport = probe_transport(record).map_err(|e| e.to_string())?;
+        verify_pinned(&*transport, endpoint, key, CheckTiming::PUBLIC).await
+    }
+}
+
+/// The exposure check of `amicu_runtime::exposure::verify_endpoint`, sent
+/// through `transport` (pinned to the VM's certificate): an anonymous request
+/// must be refused, then `key` must be accepted. Unreachable or not-ready
+/// answers are retried until the timing runs out.
+async fn verify_pinned(
+    transport: &dyn HttpTransport,
+    endpoint: &str,
+    key: &SecretValue,
+    timing: CheckTiming,
+) -> Result<(), String> {
+    let key = validate_api_key_value(key).map_err(|why| format!("the endpoint API key {why}"))?;
+    let url = format!("{}{PROBE_PATH}", endpoint.trim_end_matches('/'));
+    let status = |bearer: Option<&str>| {
+        let mut req = HttpRequest::new(HttpMethod::Get, url.clone());
+        if let Some(k) = bearer {
+            req = req.with_bearer(k);
+        }
+        async move { transport.execute(req).await.ok().map(|r| r.status) }
+    };
+    let deadline = tokio::time::Instant::now() + timing.reject_timeout;
+    loop {
+        match status(None).await {
+            Some(401 | 403) => break,
+            Some(code) if (200..300).contains(&code) => {
+                return Err(format!(
+                    "{PROBE_PATH} answered an unauthenticated request ({code}); the endpoint is \
+                     not protected by its api_key"
+                ));
+            }
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "could not confirm that {PROBE_PATH} refuses unauthenticated requests over the \
+                 pinned certificate before the deadline"
+            ));
+        }
+        tokio::time::sleep(timing.interval).await;
+    }
+    let deadline = tokio::time::Instant::now() + timing.accept_timeout;
+    loop {
+        match status(Some(key)).await {
+            Some(code) if (200..300).contains(&code) => return Ok(()),
+            Some(code @ (401 | 403)) => {
+                return Err(format!(
+                    "endpoint rejected the configured API key on {PROBE_PATH} ({code}); the key \
+                     delivered to the runtime does not match"
+                ));
+            }
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "{PROBE_PATH} did not accept the configured API key before the deadline"
+            ));
+        }
+        tokio::time::sleep(timing.interval).await;
     }
 }
 
@@ -107,13 +176,13 @@ impl GcpOps for NoGcp {
     fn client(&self, _: Option<&str>) -> Result<GcpClient, CliError> {
         Err(CliError::Message("no Google Cloud in this test".to_owned()))
     }
-    fn probe(&self) -> Arc<dyn HttpTransport> {
+    fn probe(&self, _: &VmRecord) -> Result<Arc<dyn HttpTransport>, GcpError> {
         unreachable!("no Google Cloud in this test")
     }
     async fn caller_ip(&self) -> Result<String, String> {
         Err("no Google Cloud in this test".to_owned())
     }
-    async fn verify_exposure(&self, _: &str, _: &SecretValue) -> Result<(), String> {
+    async fn verify_exposure(&self, _: &str, _: &VmRecord, _: &SecretValue) -> Result<(), String> {
         unreachable!("no Google Cloud in this test")
     }
 }

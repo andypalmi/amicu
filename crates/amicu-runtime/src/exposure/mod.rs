@@ -77,9 +77,11 @@ pub enum GatewayAuth {
     RunPodBearer,
     /// A Compute Engine VM serving vLLM directly: no provider gateway, the
     /// runtime's own middleware checks `Authorization: Bearer <api_key>` on
-    /// every route but `GET /health`. The endpoint is plain HTTP (the key
-    /// crosses the network unencrypted) until TLS is added; the firewall rule
-    /// limits who can connect. No extra headers.
+    /// every route but `GET /health`. The endpoint is HTTPS with a
+    /// self-signed certificate that clients pin by its SHA-256 fingerprint
+    /// (apply writes the certificate next to state and prints the
+    /// fingerprint); the firewall rule limits who can connect. No extra
+    /// headers.
     #[serde(rename = "gce_bearer")]
     GceBearer,
 }

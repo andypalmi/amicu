@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use amicu_core::adapter::AdapterError;
 use amicu_core::secret::{SecretRef, SecretResolver, SecretValue};
+use amicu_gcp::compute::VmRecord;
 use amicu_gcp::{AccessToken, GcpClient, GcpError, TokenSource};
 use amicu_providers::{HttpMethod, HttpRequest, HttpResponse, HttpTransport, TransportError};
 use serde_json::{Value, json};
@@ -13,6 +14,8 @@ use super::*;
 use crate::gcp_ops::GcpOps;
 
 const BASE: &str = "https://compute.googleapis.com/compute/v1";
+const SM_BASE: &str = "https://secretmanager.googleapis.com/v1";
+const SERVICE_ACCOUNT: &str = "vm@my-proj.iam.gserviceaccount.com";
 const PROJECT: &str = "aaaa1111";
 const DEP: &str = "chat";
 const GOOGLE_PROJECT: &str = "my-proj";
@@ -42,6 +45,16 @@ struct WorldState {
     firewall_bodies: Vec<Value>,
     /// Zone of every instance insert, in order.
     inserts: Vec<String>,
+    /// Body of every instance insert.
+    insert_bodies: Vec<Value>,
+    /// `(id, labels, replication)` of every Secret Manager secret.
+    secrets: Vec<(String, Value, Value)>,
+    /// `(id, member)` of every accessor grant.
+    grants: Vec<(String, String)>,
+    /// The fingerprint (if any) of the transport asked for the VM.
+    probe_pins: Vec<Option<String>>,
+    /// The fingerprint (if any) of the record the exposure check ran against.
+    verify_pins: Vec<Option<String>>,
 }
 
 type Hook = Box<dyn FnOnce() + Send>;
@@ -66,6 +79,80 @@ fn not_found() -> Result<HttpResponse, TransportError> {
 }
 
 impl World {
+    /// The Secret Manager API: secrets, versions and per-secret IAM.
+    fn secret_manager(
+        &self,
+        method: HttpMethod,
+        path: &str,
+        req: &HttpRequest,
+    ) -> Result<HttpResponse, TransportError> {
+        let (path, query) = path.split_once('?').unwrap_or((path, ""));
+        let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+        let mut w = self.state.lock().unwrap();
+        let m = format!("{method:?}");
+        match (method, parts.as_slice()) {
+            (HttpMethod::Post, ["projects", _, "secrets"]) => {
+                let id = query.strip_prefix("secretId=").unwrap_or_default();
+                if w.secrets.iter().any(|s| s.0 == id) {
+                    return json_reply(
+                        409,
+                        &json!({"error": {"code": 409, "status": "ALREADY_EXISTS", "message": "exists"}}),
+                    );
+                }
+                let body = req.body.clone().unwrap_or_default();
+                w.log.push(format!("secret-create {id}"));
+                w.secrets.push((
+                    id.to_owned(),
+                    body["labels"].clone(),
+                    body["replication"].clone(),
+                ));
+                json_reply(200, &json!({}))
+            }
+            (_, ["projects", _, "secrets", last]) => {
+                let (id, action) = last.split_once(':').unwrap_or((last, ""));
+                let exists = w.secrets.iter().any(|s| s.0 == id);
+                if !exists {
+                    return not_found();
+                }
+                match (method, action) {
+                    (HttpMethod::Get, "") => {
+                        let labels = w.secrets.iter().find(|s| s.0 == id).unwrap().1.clone();
+                        json_reply(200, &json!({"name": id, "labels": labels}))
+                    }
+                    (HttpMethod::Post, "addVersion") => {
+                        w.log.push(format!("secret-version {id}"));
+                        json_reply(200, &json!({}))
+                    }
+                    (HttpMethod::Get, "getIamPolicy") => json_reply(200, &json!({"etag": "e"})),
+                    (HttpMethod::Post, "setIamPolicy") => {
+                        let body = req.body.clone().unwrap_or_default();
+                        for b in body["policy"]["bindings"].as_array().into_iter().flatten() {
+                            assert_eq!(b["role"], "roles/secretmanager.secretAccessor");
+                            for member in b["members"].as_array().into_iter().flatten() {
+                                let member = member.as_str().unwrap_or_default().to_owned();
+                                w.grants.push((id.to_owned(), member));
+                            }
+                        }
+                        json_reply(200, &json!({}))
+                    }
+                    (HttpMethod::Delete, "") => {
+                        w.log.push(format!("secret-delete {id}"));
+                        w.secrets.retain(|s| s.0 != id);
+                        json_reply(200, &json!({}))
+                    }
+                    _ => json_reply(
+                        400,
+                        &json!({"error": {"code": 400, "status": "INVALID_ARGUMENT", "message": format!("unexpected {m} {path}")}}),
+                    ),
+                }
+            }
+            _ => json_reply(
+                400,
+                &json!({"error": {"code": 400, "status": "INVALID_ARGUMENT", "message": format!("unexpected {m} {path}")}}),
+            ),
+        }
+    }
+
     fn log(&self) -> Vec<String> {
         self.state.lock().unwrap().log.clone()
     }
@@ -94,6 +181,20 @@ impl World {
     fn firewall_names(&self) -> Vec<String> {
         let w = self.state.lock().unwrap();
         w.firewalls.iter().map(|f| f.0.clone()).collect()
+    }
+    fn secret_ids(&self) -> Vec<String> {
+        let w = self.state.lock().unwrap();
+        w.secrets.iter().map(|s| s.0.clone()).collect()
+    }
+    fn add_secret(&self, id: &str, labels: Value) {
+        self.state
+            .lock()
+            .unwrap()
+            .secrets
+            .push((id.to_owned(), labels, json!({})));
+    }
+    fn position(&self, prefix: &str) -> Option<usize> {
+        self.log().iter().position(|l| l.starts_with(prefix))
     }
     fn add_vm(&self, zone: &str, name: &str, labels: Value) {
         self.state.lock().unwrap().vms.push(Vm {
@@ -129,6 +230,9 @@ impl HttpTransport for World {
     async fn execute(&self, req: HttpRequest) -> Result<HttpResponse, TransportError> {
         let method = req.method;
         let m = format!("{method:?}");
+        if let Some(path) = req.url.strip_prefix(SM_BASE) {
+            return self.secret_manager(method, path, &req);
+        }
         let Some(path) = req.url.strip_prefix(BASE) else {
             // The readiness probe to the VM itself.
             self.state
@@ -201,6 +305,7 @@ impl HttpTransport for World {
                 let name = body["name"].as_str().unwrap_or_default().to_owned();
                 let mut w = self.state.lock().unwrap();
                 w.inserts.push((*zone).to_owned());
+                w.insert_bodies.push(body.clone());
                 if w.vms.iter().any(|v| v.name == name) {
                     return json_reply(
                         409,
@@ -299,19 +404,29 @@ impl GcpOps for FakeGcp {
             self.world.clone(),
         ))
     }
-    fn probe(&self) -> Arc<dyn HttpTransport> {
-        self.world.clone()
-    }
-    async fn caller_ip(&self) -> Result<String, String> {
-        self.ip.clone()
-    }
-    async fn verify_exposure(&self, endpoint: &str, _: &SecretValue) -> Result<(), String> {
+    fn probe(&self, record: &VmRecord) -> Result<Arc<dyn HttpTransport>, GcpError> {
         self.world
             .state
             .lock()
             .unwrap()
-            .log
-            .push(format!("verify {endpoint}"));
+            .probe_pins
+            .push(record.tls_fingerprint.clone());
+        Ok(self.world.clone())
+    }
+    async fn caller_ip(&self) -> Result<String, String> {
+        self.ip.clone()
+    }
+    async fn verify_exposure(
+        &self,
+        endpoint: &str,
+        record: &VmRecord,
+        _: &SecretValue,
+    ) -> Result<(), String> {
+        {
+            let mut w = self.world.state.lock().unwrap();
+            w.log.push(format!("verify {endpoint}"));
+            w.verify_pins.push(record.tls_fingerprint.clone());
+        }
         if self.exposure_fails {
             Err("endpoint answered an unauthenticated request".to_owned())
         } else {
@@ -342,6 +457,12 @@ impl SecretResolver for AnyKey {
 }
 
 fn gcp_config(extra_gcp: &str) -> String {
+    gcp_config_with(&format!(
+        "service_account = \"{SERVICE_ACCOUNT}\"\n    {extra_gcp}"
+    ))
+}
+
+fn gcp_config_with(extra_gcp: &str) -> String {
     format!(
         r#"
 resource "model" "qwen" {{
@@ -400,8 +521,12 @@ fn rig() -> Rig {
 }
 
 fn project_with(td: &TempDir, extra_gcp: &str) -> Project {
+    project_from(td, &gcp_config(extra_gcp))
+}
+
+fn project_from(td: &TempDir, config: &str) -> Project {
     let project = Project::new(&td.path);
-    write(&td.path, "amicu.hcl", &gcp_config(extra_gcp));
+    write(&td.path, "amicu.hcl", config);
     let mut state = state_with(amicu_core::graph::Graph::new());
     state.project_id = Some(PROJECT.to_owned());
     project.save_state(&state).unwrap();
@@ -482,8 +607,11 @@ fn apply_records_the_vm_ahead_creates_the_firewall_first_and_returns_the_endpoin
 
     let state = project.load_state().unwrap().unwrap();
     assert_eq!(state.pending.len(), 0);
-    assert_eq!(state.endpoints[0].endpoint, format!("http://{IP}:8000"));
-    assert!(log.contains(&format!("verify http://{IP}:8000")), "{log:?}");
+    assert_eq!(state.endpoints[0].endpoint, format!("https://{IP}:8000"));
+    assert!(
+        log.contains(&format!("verify https://{IP}:8000")),
+        "{log:?}"
+    );
     assert_eq!(the_record(&project).zone, g.zone);
 }
 
@@ -765,4 +893,276 @@ impl crate::commands::orphans::RunPodResources for NoRunPodListing {
     fn list(&self) -> Result<crate::commands::orphans::RunPodListing, String> {
         panic!("RunPod must not be queried")
     }
+}
+
+const SECRET_SUFFIXES: [&str; 3] = ["api-key", "hf-token", "tls-key"];
+
+fn secret_ids() -> Vec<String> {
+    SECRET_SUFFIXES
+        .iter()
+        .map(|s| format!("{}-{s}", instance()))
+        .collect()
+}
+
+fn metadata_keys(body: &Value) -> Vec<String> {
+    body["metadata"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["key"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn secrets_are_created_before_the_vm_and_recorded_with_the_fingerprint() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    let seen: Arc<Mutex<Option<StopRecord>>> = Arc::default();
+    {
+        let seen = seen.clone();
+        let p = Project::new(&td.path);
+        *rig.gcp.world.on_insert.lock().unwrap() = Some(Box::new(move || {
+            *seen.lock().unwrap() = p
+                .load_state()
+                .unwrap()
+                .unwrap()
+                .stops
+                .into_iter()
+                .find(|r| r.deployment.as_str() == DEP);
+        }));
+    }
+    apply_with(&project, &rig).unwrap();
+
+    // Recorded before the create: the ids and the pin.
+    let ahead = seen.lock().unwrap().clone().unwrap().gcp.unwrap();
+    assert_eq!(ahead.secrets, secret_ids());
+    let fingerprint = ahead.tls_fingerprint.clone().expect("a fingerprint");
+    assert_eq!(fingerprint.len(), 64, "{fingerprint}");
+    assert_eq!(the_record(&project).tls_fingerprint, Some(fingerprint));
+
+    // The api key and the TLS key (and, with no token set, nothing else) were
+    // stored before the VM, each readable by the service account alone.
+    let log = rig.gcp.world.log();
+    let vm = log
+        .iter()
+        .position(|l| l.starts_with("Post") && l.ends_with("/instances"))
+        .unwrap();
+    for id in [&secret_ids()[0], &secret_ids()[2]] {
+        let created = rig.gcp.world.position(&format!("secret-create {id}"));
+        let version = rig.gcp.world.position(&format!("secret-version {id}"));
+        assert!(created.unwrap() < version.unwrap(), "{log:?}");
+        assert!(version.unwrap() < vm, "{log:?}");
+    }
+    let w = rig.gcp.world.state.lock().unwrap();
+    assert_eq!(w.secrets.len(), 2, "{:?}", w.secrets);
+    for (id, labels, replication) in &w.secrets {
+        assert!(secret_ids().contains(id), "{id}");
+        assert!(labels.get("amicu-owner").is_some(), "{labels}");
+        assert_eq!(
+            replication,
+            &json!({"userManaged": {"replicas": [{"location": "europe-west4"}]}})
+        );
+    }
+    assert!(
+        w.grants
+            .iter()
+            .all(|(_, m)| m == &format!("serviceAccount:{SERVICE_ACCOUNT}")),
+        "{:?}",
+        w.grants
+    );
+    assert_eq!(w.grants.len(), 2);
+
+    // No secret in the instance metadata; the certificate (public) is.
+    let keys = metadata_keys(&w.insert_bodies[0]);
+    assert!(keys.contains(&"startup-script".to_owned()), "{keys:?}");
+    assert!(keys.contains(&"amicu-tls-cert".to_owned()), "{keys:?}");
+    assert!(
+        !keys
+            .iter()
+            .any(|k| k == "amicu-api-key" || k == "amicu-tls-key"),
+        "{keys:?}"
+    );
+    assert_eq!(
+        w.insert_bodies[0]["serviceAccounts"][0]["email"],
+        SERVICE_ACCOUNT
+    );
+}
+
+#[test]
+fn the_pinned_transport_is_used_and_the_certificate_is_written_and_printed() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    let mut out = Vec::new();
+    crate::commands::apply::run_with(
+        &project,
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &rig.env(),
+    )
+    .unwrap();
+    let out = utf8(out);
+    let g = the_record(&project);
+    let fingerprint = g.tls_fingerprint.clone().unwrap();
+
+    let w = rig.gcp.world.state.lock().unwrap();
+    assert_eq!(w.probe_pins, [Some(fingerprint.clone())]);
+    assert_eq!(w.verify_pins, [Some(fingerprint.clone())]);
+    assert!(
+        w.log
+            .contains(&format!("probe Get https://{IP}:8000/health")),
+        "{:?}",
+        w.log
+    );
+    assert!(!w.log.iter().any(|l| l.contains("http://")), "{:?}", w.log);
+    drop(w);
+
+    let cert = project.state_dir().join(format!("{}.tls.crt", instance()));
+    let pem = std::fs::read_to_string(&cert).expect("the certificate next to state");
+    assert_eq!(
+        amicu_gcp::compute::fingerprint_of_pem(&pem).unwrap(),
+        fingerprint
+    );
+    assert!(out.contains(&format!("https://{IP}:8000")), "{out}");
+    assert!(out.contains("pinned self-signed certificate"), "{out}");
+    assert!(out.contains(&cert.display().to_string()), "{out}");
+    assert!(out.contains(&fingerprint), "{out}");
+    assert!(!out.contains("plain HTTP"), "{out}");
+}
+
+#[test]
+fn destroy_deletes_the_vm_then_the_firewall_then_the_secrets() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(rig.gcp.world.secret_ids().len(), 2);
+    destroy(&project, &rig).unwrap();
+
+    assert_eq!(rig.gcp.world.vm_names(), Vec::<String>::new());
+    assert_eq!(rig.gcp.world.firewall_names(), Vec::<String>::new());
+    assert_eq!(rig.gcp.world.secret_ids(), Vec::<String>::new());
+    let log = rig.gcp.world.log();
+    let at = |p: &str| log.iter().position(|l| l.starts_with(p)).unwrap();
+    let del_vm = log
+        .iter()
+        .position(|l| l.starts_with("Delete") && l.contains("/instances/"))
+        .unwrap();
+    let del_fw = log
+        .iter()
+        .position(|l| l.starts_with("Delete") && l.contains("/firewalls/"))
+        .unwrap();
+    assert!(del_vm < del_fw && del_fw < at("secret-delete"), "{log:?}");
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn teardown_is_idempotent_and_never_deletes_a_secret_that_is_not_ours() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    let record = the_record(&project);
+    let client = rig.gcp.client(None).unwrap();
+    let timing = rig.gcp.timing().poll;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(amicu_gcp::gce::teardown(&client, &record, timing))
+        .unwrap();
+    assert_eq!(rig.gcp.world.secret_ids(), Vec::<String>::new());
+    // Again, as after a crash that kept the record: nothing left, no error.
+    rt.block_on(amicu_gcp::gce::teardown(&client, &record, timing))
+        .unwrap();
+
+    // A secret of that name without our label is refused and left alone.
+    rig.gcp
+        .world
+        .add_secret(&secret_ids()[0], json!({"env": "prod"}));
+    let err = rt
+        .block_on(amicu_gcp::gce::teardown(&client, &record, timing))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("owner label"), "{err}");
+    assert_eq!(rig.gcp.world.secret_ids(), [secret_ids()[0].clone()]);
+}
+
+#[test]
+fn a_foreign_secret_of_our_name_stops_apply_before_the_vm_exists() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    rig.gcp
+        .world
+        .add_secret(&secret_ids()[0], json!({"env": "prod"}));
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("without amicu's owner label"), "{err}");
+    assert_eq!(rig.gcp.world.vm_names(), Vec::<String>::new());
+    assert_eq!(rig.gcp.world.secret_ids(), [secret_ids()[0].clone()]);
+}
+
+#[test]
+fn a_gcp_block_without_a_service_account_is_a_diagnostic_and_nothing_is_written() {
+    let td = TempDir::new();
+    let project = project_from(
+        &td,
+        &gcp_config_with("allowed_source_cidrs = [\"203.0.113.4/32\"]"),
+    );
+    let rig = rig();
+    let mut out = Vec::new();
+    let code = crate::commands::apply::run_with(
+        &project,
+        true,
+        None,
+        OutputFormat::Human,
+        &mut out,
+        &mut std::io::Cursor::new(Vec::new()),
+        &rig.env(),
+    )
+    .unwrap();
+    let err = utf8(out);
+    assert_ne!(code, 0, "{err}");
+    assert!(err.contains("service_account"), "{err}");
+    assert!(err.contains("insecure_metadata_secrets"), "{err}");
+    assert!(err.contains("AMICU-CAP-016"), "{err}");
+    assert_eq!(rig.gcp.world.log(), Vec::<String>::new());
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn the_metadata_opt_in_skips_secret_manager_and_says_so_in_the_instance_metadata() {
+    let td = TempDir::new();
+    let project = project_from(
+        &td,
+        &gcp_config_with(
+            "allowed_source_cidrs = [\"203.0.113.4/32\"]\n    insecure_metadata_secrets = true",
+        ),
+    );
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+
+    assert_eq!(rig.gcp.world.secret_ids(), Vec::<String>::new());
+    assert!(
+        !rig.gcp.world.log().iter().any(|l| l.starts_with("secret-")),
+        "{:?}",
+        rig.gcp.world.log()
+    );
+    let g = the_record(&project);
+    assert_eq!(g.secrets, Vec::<String>::new());
+    assert!(g.tls_fingerprint.is_some(), "TLS stays on");
+    let w = rig.gcp.world.state.lock().unwrap();
+    let keys = metadata_keys(&w.insert_bodies[0]);
+    assert!(keys.contains(&"amicu-api-key".to_owned()), "{keys:?}");
+    assert!(keys.contains(&"amicu-tls-key".to_owned()), "{keys:?}");
+    assert!(w.insert_bodies[0]["serviceAccounts"].is_array());
+    drop(w);
+
+    destroy(&project, &rig).unwrap();
+    assert_eq!(rig.gcp.world.vm_names(), Vec::<String>::new());
+    assert_eq!(rig.gcp.world.firewall_names(), Vec::<String>::new());
 }

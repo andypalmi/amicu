@@ -43,6 +43,14 @@ resource "hardware_profile" "gcp_t4" {
     machine_type = "n1-standard-4"
     provisioning = "spot"
     max_run_duration = "2h"
+
+    # The account the VM runs as. It reads the API key, the Hugging Face token
+    # and the TLS key from Secret Manager at boot; amicu grants it access to
+    # those secrets only. Create it first (see the GCP provider docs) and replace
+    # the placeholder. Setting `insecure_metadata_secrets = true` instead puts the
+    # secrets in instance metadata, readable by anyone who can read the VM: do
+    # not use it for anything you care about.
+    service_account = "amicu-vm@your-gcp-project-id.iam.gserviceaccount.com"
   }
 }
 

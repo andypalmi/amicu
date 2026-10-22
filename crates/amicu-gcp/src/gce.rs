@@ -8,8 +8,13 @@
 //! took the VM replaces the list once known. Teardown checks every listed
 //! zone, so a crash between the record and the create loses nothing.
 //!
-//! Serving is plain HTTP on the VM's external IP until TLS lands; the firewall
-//! rule is the only network guard besides the bearer key.
+//! The API key, the Hugging Face token and the TLS private key go to Secret
+//! Manager (in the deployment's own region) before the VM exists, and the VM's
+//! service account reads them at boot. The ids are in the record, so teardown
+//! removes them even after a crash. The VM serves HTTPS with a self-signed
+//! certificate whose fingerprint is in the record; every request amicu sends to
+//! the VM pins it. With [`SecretDelivery::InstanceMetadata`] (an explicit,
+//! insecure opt-in) the secrets are instance metadata instead.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,7 +24,7 @@ use std::time::Duration;
 use amicu_core::secret::SecretValue;
 use amicu_llamacpp::remote::{self, HF_TOKEN_ENV_VAR, RemoteEnv};
 use amicu_llamacpp::{LlamaCppError, ProcessSupervisor, ResolvedSecret};
-use amicu_providers::{HttpMethod, HttpTransport, ReqwestTransport};
+use amicu_providers::{HttpMethod, HttpTransport};
 use amicu_runtime::exposure::validate_api_key_value;
 use amicu_runtime::{
     EndpointExposure, GatewayAuth, LaunchPlan, LogOptions, LogStream, RuntimeHandle, RuntimeKind,
@@ -30,14 +35,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::{COMPUTE_BASE_URL, GcpClient};
 use crate::compute::{
-    DEFAULT_IMAGE_FAMILY, DeleteOutcome, FirewallSpec, HealthTiming, StartupConfig, VmRecord,
-    VmSpec, VmState, create, create_firewall, delete, delete_firewall, firewall_name,
-    instance_name, prepare, status, wait_ready,
+    DEFAULT_IMAGE_FAMILY, DeleteOutcome, FirewallSpec, HealthTiming, SecretDelivery, StartupConfig,
+    TlsIdentity, VmRecord, VmSpec, VmState, create, create_firewall, delete, delete_firewall,
+    firewall_name, instance_name, prepare, probe_transport, provision_secrets, status, wait_ready,
 };
 use crate::error::GcpError;
 use crate::labels::{owner_labels, owner_marker};
 use crate::operations::PollTiming;
 use crate::placement::Shape;
+use crate::secrets::{Replication, SecretDelete, SecretKind, delete_secret, secret_id};
 
 /// Zones tried for one create before giving up.
 pub const MAX_ZONE_ATTEMPTS: usize = 4;
@@ -46,8 +52,8 @@ const FLEX_WAIT: Duration = Duration::from_hours(1);
 /// The image override, for the vLLM container.
 pub const VLLM_IMAGE_ENV_VAR: &str = "AMICU_GCP_VLLM_IMAGE";
 
-/// What amicu persists for one deployment's VM and firewall rule. Free of
-/// secrets.
+/// What amicu persists for one deployment's VM, firewall rule and secrets.
+/// Free of secret values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GceRecord {
     pub project: String,
@@ -63,6 +69,13 @@ pub struct GceRecord {
     /// The service account amicu acted as (for destroy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impersonate: Option<String>,
+    /// Ids of the Secret Manager secrets the deployment uses (some may never
+    /// have been created); empty with the metadata delivery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<String>,
+    /// SHA-256 fingerprint (hex) of the VM's pinned certificate. Public.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_fingerprint: Option<String>,
 }
 
 impl GceRecord {
@@ -74,12 +87,15 @@ impl GceRecord {
             .collect()
     }
 
-    fn vm(&self, zone: &str) -> VmRecord {
+    /// The VM's record in `zone`, as the compute functions take it.
+    #[must_use]
+    pub fn vm(&self, zone: &str) -> VmRecord {
         VmRecord {
             project: self.project.clone(),
             zone: zone.to_owned(),
             name: self.instance.clone(),
             owner: self.owner.clone(),
+            tls_fingerprint: self.tls_fingerprint.clone(),
         }
     }
 
@@ -110,9 +126,30 @@ pub struct GceLaunch {
     pub service_account: Option<String>,
     pub source_ranges: Vec<String>,
     pub impersonate: Option<String>,
+    /// Where the VM gets its secrets.
+    pub delivery: SecretDelivery,
+    /// The VM's certificate and key, generated before the write-ahead record
+    /// (see [`Self::with_tls`]); `None` serves plain HTTP.
+    pub tls: Option<TlsIdentity>,
 }
 
 impl GceLaunch {
+    /// Generates the VM's TLS identity, so the write-ahead record can carry
+    /// its fingerprint.
+    ///
+    /// # Errors
+    /// [`GcpError::Invalid`] for a bad name or when generation fails.
+    pub fn with_tls(mut self) -> Result<Self, GcpError> {
+        self.tls = Some(TlsIdentity::generate(&self.instance()?)?);
+        Ok(self)
+    }
+
+    /// The certificate to give clients (public), when TLS is on.
+    #[must_use]
+    pub fn cert_pem(&self) -> Option<&str> {
+        self.tls.as_ref().map(|t| t.cert_pem.as_str())
+    }
+
     fn owner(&self) -> String {
         owner_marker(None, &self.project_id, &self.deployment_id)
     }
@@ -133,6 +170,14 @@ impl GceLaunch {
             reason: "no zone to place the VM in",
         })?;
         let instance = self.instance()?;
+        let secrets = if self.delivery == SecretDelivery::SecretManager {
+            SecretKind::ALL
+                .into_iter()
+                .map(|k| secret_id(&instance, k))
+                .collect::<Result<_, _>>()?
+        } else {
+            Vec::new()
+        };
         Ok(GceRecord {
             project: self.project.clone(),
             zone: zone.clone(),
@@ -141,6 +186,12 @@ impl GceLaunch {
             instance,
             owner: self.owner(),
             impersonate: self.impersonate.clone(),
+            secrets,
+            tls_fingerprint: self
+                .tls
+                .as_ref()
+                .map(TlsIdentity::fingerprint)
+                .transpose()?,
         })
     }
 }
@@ -157,7 +208,7 @@ type Sink = Arc<dyn Fn(&str) + Send + Sync>;
 /// Starts, inspects and deletes one deployment's VM. See the module docs.
 pub struct GceSupervisor {
     client: Arc<GcpClient>,
-    probe: Arc<dyn HttpTransport>,
+    probe: Option<Arc<dyn HttpTransport>>,
     launch: GceLaunch,
     timing: GceTiming,
     recorded: Option<GceRecord>,
@@ -197,7 +248,7 @@ impl GceSupervisor {
     pub fn new(client: GcpClient, launch: GceLaunch) -> Self {
         Self {
             client: Arc::new(client),
-            probe: Arc::new(ReqwestTransport::new()),
+            probe: None,
             launch,
             timing: GceTiming::default(),
             recorded: None,
@@ -207,10 +258,11 @@ impl GceSupervisor {
         }
     }
 
-    /// Probe the VM through `transport` instead (tests inject a mock).
+    /// Probe the VM through `transport` instead of the pinned transport built
+    /// from its record (tests inject a mock).
     #[must_use]
     pub fn with_probe_transport(mut self, transport: Arc<dyn HttpTransport>) -> Self {
-        self.probe = transport;
+        self.probe = Some(transport);
         self
     }
 
@@ -266,6 +318,7 @@ impl GceSupervisor {
 
     /// The container argument list, the key and the token for `plan`.
     fn prepare_startup(
+        &self,
         plan: &LaunchPlan,
         secrets: &[ResolvedSecret],
     ) -> Result<StartupConfig, LlamaCppError> {
@@ -330,6 +383,8 @@ impl GceSupervisor {
             serving_port: port,
             api_key,
             hf_token,
+            delivery: self.launch.delivery,
+            tls: self.launch.tls.clone(),
         })
     }
 
@@ -358,6 +413,33 @@ impl GceSupervisor {
         }
     }
 
+    /// Stores the VM's secrets in Secret Manager, in the region of its zone,
+    /// before the VM exists (or warns that the metadata fallback is in use).
+    async fn store_secrets(
+        &self,
+        record: &GceRecord,
+        startup: &StartupConfig,
+    ) -> Result<(), LlamaCppError> {
+        if startup.delivery != SecretDelivery::SecretManager {
+            self.say(
+                "warning: secrets are delivered through instance metadata, readable by anyone \
+                 who can read the instance (insecure_metadata_secrets)",
+            );
+            return Ok(());
+        }
+        let region = crate::validate::zone_region(&record.zone).map_err(|e| err(&e))?;
+        self.say(&format!(
+            "storing the VM's secrets in Secret Manager (region {region})"
+        ));
+        provision_secrets(
+            &self.client,
+            &self.spec(&record.zone, record, startup),
+            &Replication::Region(region.to_owned()),
+        )
+        .await
+        .map_err(|e| err(&e))
+    }
+
     /// Plans and checks everything `start` checks before its first write, so
     /// a bad launch fails before the record is written.
     ///
@@ -368,7 +450,7 @@ impl GceSupervisor {
         plan: &LaunchPlan,
         secrets: &[ResolvedSecret],
     ) -> Result<(), LlamaCppError> {
-        let startup = Self::prepare_startup(plan, secrets)?;
+        let startup = self.prepare_startup(plan, secrets)?;
         let record = self.launch.record().map_err(|e| err(&e))?;
         self.spec(&record.zone, &record, &startup)
             .validate()
@@ -383,7 +465,7 @@ impl ProcessSupervisor for GceSupervisor {
         plan: &LaunchPlan,
         secrets: &[ResolvedSecret],
     ) -> Result<RuntimeHandle, LlamaCppError> {
-        let startup = Self::prepare_startup(plan, secrets)?;
+        let startup = self.prepare_startup(plan, secrets)?;
         let port = startup.serving_port;
         let record = self.launch.record().map_err(|e| err(&e))?;
         // Validate the first spec before touching anything.
@@ -399,6 +481,7 @@ impl ProcessSupervisor for GceSupervisor {
         }
 
         self.created.store(true, Ordering::SeqCst);
+        self.store_secrets(&record, &startup).await?;
         self.say(&format!("creating firewall rule {}", record.firewall));
         create_firewall(
             &self.client,
@@ -445,13 +528,22 @@ impl ProcessSupervisor for GceSupervisor {
         if let Ok(mut slot) = self.landed.lock() {
             *slot = Some(zone.clone());
         }
-        self.say(&format!(
-            "VM created in {zone}; waiting for vLLM (plain HTTP on port {port})"
-        ));
         let vm = record.landed(&zone).vm(&zone);
+        let (scheme, how) = if vm.tls_fingerprint.is_some() {
+            ("https", "HTTPS, pinned certificate")
+        } else {
+            ("http", "plain HTTP")
+        };
+        self.say(&format!(
+            "VM created in {zone}; waiting for vLLM ({how}, port {port})"
+        ));
+        let probe = match &self.probe {
+            Some(p) => Arc::clone(p),
+            None => probe_transport(&vm).map_err(|e| err(&e))?,
+        };
         let ip = wait_ready(
             &self.client,
-            Arc::clone(&self.probe),
+            probe,
             &vm,
             port,
             &startup.api_key,
@@ -462,7 +554,7 @@ impl ProcessSupervisor for GceSupervisor {
         Ok(RuntimeHandle {
             id: record.instance.clone(),
             deployment: plan.deployment.clone(),
-            endpoint: format!("http://{ip}:{port}"),
+            endpoint: format!("{scheme}://{ip}:{port}"),
             exposure: EndpointExposure::Public {
                 gateway: GatewayAuth::GceBearer,
             },
@@ -525,14 +617,16 @@ impl ProcessSupervisor for GceSupervisor {
 pub const GONE: &str =
     "the VM is gone: preempted (Spot), past its max_run_duration, or deleted outside amicu";
 
-/// Deletes the VM (in every zone it may be in) and then the firewall rule,
-/// each only when it carries the record's owner marker, and confirms both are
-/// gone. [`DeleteOutcome::AlreadyGone`] when the VM was absent everywhere.
+/// Deletes the VM (in every zone it may be in), then the firewall rule, then
+/// the recorded Secret Manager secrets, each only when it carries the record's
+/// owner marker, and confirms each is gone. [`DeleteOutcome::AlreadyGone`]
+/// when the VM was absent everywhere. Safe to run again: what is gone is
+/// skipped.
 ///
 /// # Errors
-/// [`GcpError::NotOwned`] (nothing deleted) for a VM or rule of that name
-/// that is not ours, or an API error. The firewall rule is left in place when
-/// the VM could not be removed.
+/// [`GcpError::NotOwned`] (nothing deleted) for a VM, rule or secret of that
+/// name that is not ours, or an API error. The firewall rule and the secrets
+/// are left in place when the VM could not be removed.
 pub async fn teardown(
     client: &GcpClient,
     record: &GceRecord,
@@ -552,6 +646,17 @@ pub async fn teardown(
         timing,
     )
     .await?;
+    for id in &record.secrets {
+        delete_secret(client, &record.project, id, &record.owner).await?;
+        // Confirm: asking again finds nothing.
+        if delete_secret(client, &record.project, id, &record.owner).await?
+            != SecretDelete::AlreadyGone
+        {
+            return Err(GcpError::Conflict {
+                message: format!("secret `{id}` still exists after it was deleted"),
+            });
+        }
+    }
     Ok(outcome)
 }
 
@@ -691,9 +796,11 @@ mod tests {
             provisioning: Provisioning::Spot,
             max_run: Duration::from_hours(2),
             boot_disk_gb: 100,
-            service_account: None,
+            service_account: Some("vm@my-proj.iam.gserviceaccount.com".into()),
             source_ranges: vec!["203.0.113.4/32".into()],
             impersonate: None,
+            delivery: SecretDelivery::SecretManager,
+            tls: None,
         }
     }
 
@@ -717,6 +824,28 @@ mod tests {
         assert_eq!(serde_json::from_str::<GceRecord>(&json).unwrap(), r);
         let landed = r.landed("europe-west4-b");
         assert_eq!(landed.zones(), ["europe-west4-b"]);
+    }
+
+    #[test]
+    fn the_record_names_the_secrets_and_the_certificate_fingerprint() {
+        let l = launch().with_tls().unwrap();
+        let r = l.record().unwrap();
+        assert_eq!(
+            r.secrets,
+            ["api-key", "hf-token", "tls-key"].map(|k| format!("{}-{k}", r.instance))
+        );
+        assert_eq!(
+            r.tls_fingerprint,
+            Some(l.tls.unwrap().fingerprint().unwrap())
+        );
+        assert_eq!(r.vm("europe-west4-a").tls_fingerprint, r.tls_fingerprint);
+
+        let mut l = launch();
+        l.delivery = SecretDelivery::InstanceMetadata;
+        let r = l.record().unwrap();
+        assert_eq!(r.secrets, Vec::<String>::new());
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("secrets"), "{json}");
     }
 
     #[test]

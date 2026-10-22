@@ -211,6 +211,7 @@ fn gcp_settings(g: &Fields) -> Result<GcpSettings> {
             .transpose()?,
         boot_disk_gb: g.opt_u32("boot_disk_gb")?,
         service_account: g.opt_string("service_account")?,
+        insecure_metadata_secrets: g.opt_bool("insecure_metadata_secrets")?.unwrap_or(false),
         allowed_source_cidrs: g.string_vec("allowed_source_cidrs")?,
         impersonate_service_account: g.opt_string("impersonate_service_account")?,
     })

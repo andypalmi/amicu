@@ -66,9 +66,16 @@ pub struct GcpSettings {
     pub max_run_duration_secs: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_disk_gb: Option<u32>,
-    /// Runtime service account email for the VM; `None` attaches none.
+    /// Runtime service account email for the VM. It reads the VM's secrets
+    /// from Secret Manager at boot, so it is required unless
+    /// [`Self::insecure_metadata_secrets`] is set; `None` then attaches none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_account: Option<String>,
+    /// INSECURE opt-in: deliver the API key, Hugging Face token and TLS key as
+    /// instance metadata instead of through Secret Manager. Anyone who can
+    /// read the instance can read them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub insecure_metadata_secrets: bool,
     /// Who may reach the serving port. Empty: the caller's public IP, `/32`,
     /// detected at apply (never `0.0.0.0/0` unless listed here).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

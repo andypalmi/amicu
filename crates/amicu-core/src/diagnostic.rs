@@ -406,8 +406,8 @@ pub mod catalog {
     /// pod other than one replica, or a pods-only GPU in serverless mode.
     pub const CAP_RUNPOD_SETTINGS_INVALID: DiagnosticCode = DiagnosticCode::new(Category::Cap, 15);
     /// `AMICU-CAP-016` - a hardware profile's `gcp {}` block does not fit: no
-    /// `project`, set on another provider, a bad zone, machine type, duration,
-    /// disk size or CIDR, `scaling {}` beyond one replica, or a runtime
+    /// `project`, no `service_account` (and no `insecure_metadata_secrets`), set
+    /// on another provider, a bad zone, machine type, duration, disk size or CIDR, `scaling {}` beyond one replica, or a runtime
     /// the Compute Engine backend does not run.
     pub const CAP_GCP_SETTINGS_INVALID: DiagnosticCode = DiagnosticCode::new(Category::Cap, 16);
     /// `AMICU-CAP-017` - the GPU is not available on Google Cloud as configured:

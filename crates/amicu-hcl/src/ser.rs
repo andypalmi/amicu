@@ -351,6 +351,9 @@ fn hardware_block(h: &HardwareProfile) -> Block {
         if let Some(v) = &g.service_account {
             gb = gb.add_attribute(("service_account", v.as_str()));
         }
+        if g.insecure_metadata_secrets {
+            gb = gb.add_attribute(("insecure_metadata_secrets", true));
+        }
         if !g.allowed_source_cidrs.is_empty() {
             gb = gb.add_attribute(("allowed_source_cidrs", g.allowed_source_cidrs.clone()));
         }

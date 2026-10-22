@@ -58,7 +58,8 @@ signal; the number identifies the specific check.
   `scaling {}` other than one replica, or a pods-only GPU is used in serverless
   mode (add `runpod { mode = "pod" }`).
 - `AMICU-CAP-016` - a hardware profile's `gcp {}` block does not fit: no
-  `project`, no `region`/`zone`, a bad zone, duration, disk size or CIDR,
+  `project`, no `service_account` (or `insecure_metadata_secrets = true`), no
+  `region`/`zone`, a bad zone, duration, disk size or CIDR,
   `scaling {}` beyond one replica, or a `llama_cpp` runtime.
 - `AMICU-CAP-017` - the GPU is unknown to the GCP catalog or not offered in the
   zone or region (or on Cloud Run).
