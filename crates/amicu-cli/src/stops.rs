@@ -30,6 +30,8 @@ pub(crate) enum Backend {
     Runpod,
     /// An always-on RunPod Pod.
     RunpodPod,
+    /// A Google Compute Engine VM and its firewall rule.
+    Gce,
 }
 
 impl Backend {
@@ -67,6 +69,10 @@ impl Backend {
         matches!(self, Self::Runpod | Self::RunpodPod)
     }
 
+    pub(crate) fn is_gce(self) -> bool {
+        self == Self::Gce
+    }
+
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::HostLaunchd => "launchd",
@@ -75,6 +81,7 @@ impl Backend {
             Self::Modal => "modal",
             Self::Runpod => "runpod",
             Self::RunpodPod => "runpod-pod",
+            Self::Gce => "gce",
         }
     }
 }
@@ -128,6 +135,10 @@ pub(crate) struct StopRecord {
     /// recorded before it is written and dropped only once deleted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<String>,
+    /// Compute Engine only: the project, zones, instance, firewall rule and
+    /// owner marker. Written before the VM is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gcp: Option<amicu_gcp::GceRecord>,
     /// Fields this amicu does not know (from a newer build of the same
     /// version), kept verbatim so a load-save cycle never drops them.
     #[serde(flatten)]
@@ -162,6 +173,7 @@ impl StopRecord {
             logs: Vec::new(),
             volumes: Vec::new(),
             secrets: Vec::new(),
+            gcp: None,
             extra: std::collections::BTreeMap::new(),
         }
     }
@@ -230,6 +242,7 @@ impl StopRecord {
             logs: Vec::new(),
             volumes: Vec::new(),
             secrets: Vec::new(),
+            gcp: None,
             extra: std::collections::BTreeMap::new(),
         }
     }
@@ -258,6 +271,7 @@ impl StopRecord {
             logs: Vec::new(),
             volumes: Vec::new(),
             secrets,
+            gcp: None,
             extra: std::collections::BTreeMap::new(),
         }
     }
@@ -273,6 +287,26 @@ impl StopRecord {
         Self {
             backend: Backend::RunpodPod,
             ..Self::runpod_in(project_id, deployment, pod_id, account, secrets)
+        }
+    }
+
+    /// A Compute Engine VM: `record` is persisted before the first create.
+    pub(crate) fn gce(deployment: &DeploymentId, record: amicu_gcp::GceRecord) -> Self {
+        Self {
+            backend: Backend::Gce,
+            identity: record.instance.clone(),
+            gcp: Some(record),
+            ..Self::modal(deployment, None, None)
+        }
+    }
+
+    /// A Compute Engine record derived without one in state (state written
+    /// before it existed): it names nothing, and stopping it explains why.
+    pub(crate) fn gce_unrecorded(deployment: &DeploymentId) -> Self {
+        Self {
+            backend: Backend::Gce,
+            identity: format!("gce-{deployment}"),
+            ..Self::modal(deployment, None, None)
         }
     }
 
@@ -314,7 +348,7 @@ impl StopRecord {
             }
             Backend::HostSystemd => ("service", &[".config/systemd/user"]),
             Backend::HostTaskScheduler => ("xml", &["amicu/tasks"]),
-            Backend::Modal | Backend::Runpod | Backend::RunpodPod => {
+            Backend::Modal | Backend::Runpod | Backend::RunpodPod | Backend::Gce => {
                 return Err(format!(
                     "a {} record has a service file '{def}'",
                     self.backend.name()
@@ -417,6 +451,13 @@ impl StopRecord {
                 self.identity,
                 self.app_id.as_deref().unwrap_or("unknown")
             ),
+            Backend::Gce => match &self.gcp {
+                Some(g) => format!(
+                    "{}: Compute Engine VM '{}' (project {}, zone {})",
+                    self.deployment, self.identity, g.project, g.zone
+                ),
+                None => format!("{}: Compute Engine VM '{}'", self.deployment, self.identity),
+            },
             _ => format!(
                 "{}: {} job '{}'",
                 self.deployment,

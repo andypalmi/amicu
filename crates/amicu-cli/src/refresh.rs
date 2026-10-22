@@ -18,6 +18,7 @@ use amicu_modal::{Credentials, ModalClient, ModalError};
 use crate::OutputFormat;
 use crate::commands::build_runtime;
 use crate::error::CliError;
+use crate::gcp_ops::GcpOps;
 use crate::lock::StateLock;
 use crate::modal_ops::{Workspace, check_workspace};
 use crate::project::{LocalState, Project};
@@ -232,7 +233,7 @@ pub(crate) struct Refresh {
 /// and [`Refresh::warning`] says so.
 #[cfg(test)]
 pub(crate) fn refresh_state(state: &mut LocalState, lookup: &dyn AppLookup) -> Refresh {
-    refresh_state_mode(state, lookup, &NoRunPod, true)
+    refresh_state_mode(state, lookup, &NoRunPod, &crate::gcp_ops::NoGcp, true)
 }
 
 /// A RunPod seam with no management key: tests never reach the network.
@@ -267,6 +268,7 @@ pub(crate) fn refresh_state_mode(
     state: &mut LocalState,
     lookup: &dyn AppLookup,
     runpod: &dyn RunPodOps,
+    gcp: &dyn GcpOps,
     strict: bool,
 ) -> Refresh {
     let pending_before = state.pending.len();
@@ -276,8 +278,9 @@ pub(crate) fn refresh_state_mode(
         return modal;
     }
     let runpod = refresh_runpod(state, runpod);
+    let gce = refresh_gce(state, gcp);
     let mut out = Refresh::default();
-    for part in [host, modal, runpod] {
+    for part in [host, modal, runpod, gce] {
         out.notes.extend(part.notes);
         out.warning = match (out.warning, part.warning) {
             (Some(a), Some(b)) => Some(format!("{a}; {b}")),
@@ -581,6 +584,86 @@ fn refresh_runpod(state: &mut LocalState, ops: &dyn RunPodOps) -> Refresh {
     out
 }
 
+/// Checks every recorded, settled Compute Engine VM against the API. One that
+/// is gone (a Spot preemption, the `max_run_duration` backstop, or a delete
+/// outside amicu) or stopped is kept in state as pending: apply recreates it,
+/// destroy confirms the VM and firewall rule are removed. A lookup that fails
+/// changes nothing and warns.
+fn refresh_gce(state: &mut LocalState, ops: &dyn GcpOps) -> Refresh {
+    use amicu_gcp::compute::VmState;
+
+    let records: Vec<StopRecord> = crate::commands::apply::effective_stops(Some(state))
+        .into_iter()
+        .filter(|r| {
+            r.backend.is_gce()
+                && r.gcp.is_some()
+                && state.graph.deployments.iter().any(|d| d.id == r.deployment)
+                && !state.pending.contains(&r.deployment)
+        })
+        .collect();
+    if records.is_empty() {
+        return Refresh::default();
+    }
+    let looked_up = (|| -> Result<_, CliError> {
+        let rt = build_runtime()?;
+        let mut found = Vec::new();
+        for r in &records {
+            let g = r.gcp.as_ref().expect("filtered on a recorded VM");
+            let one = match ops.client(g.impersonate.as_deref()) {
+                Ok(client) => rt
+                    .block_on(amicu_gcp::gce::vm_state(&client, g))
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            found.push(one);
+        }
+        Ok(found)
+    })();
+    let found = match looked_up {
+        Ok(v) => v,
+        Err(e) => {
+            return Refresh {
+                warning: Some(format!(
+                    "could not check Compute Engine for live VMs ({e}); using local state as-is"
+                )),
+                ..Refresh::default()
+            };
+        }
+    };
+    let mut out = Refresh::default();
+    let mut unchecked = Vec::new();
+    for (r, live) in records.iter().zip(found) {
+        let dep = r.deployment.as_str();
+        let why = match live {
+            Ok((_, VmState::Gone)) => amicu_gcp::gce::GONE.to_owned(),
+            Ok((zone, VmState::Terminated { preempted })) => format!(
+                "the VM in {zone} is stopped{}",
+                if preempted { " (preempted)" } else { "" }
+            ),
+            Ok((zone, VmState::Suspended)) => format!("the VM in {zone} is suspended"),
+            Ok(_) => continue,
+            Err(e) => {
+                unchecked.push(format!("{}: {e}", r.describe()));
+                continue;
+            }
+        };
+        state.pending.push(r.deployment.clone());
+        out.notes.push(format!(
+            "deployment {dep}: Compute Engine VM '{}' is not running: {why}; kept in state as \
+             pending: apply will recreate it, destroy will confirm its VM and firewall rule are \
+             removed",
+            r.identity
+        ));
+    }
+    if !unchecked.is_empty() {
+        out.warning = Some(format!(
+            "could not reconcile Compute Engine VMs ({}); kept in state as recorded",
+            unchecked.join("; ")
+        ));
+    }
+    out
+}
+
 /// `"endpoints"`, `"pods"` or `"endpoints and pods"`, by what `records` hold.
 fn runpod_kinds(records: &[StopRecord]) -> &'static str {
     let pods = records
@@ -837,10 +920,11 @@ pub(crate) fn load_refreshed_state(
     project: &Project,
     lookup: &dyn AppLookup,
     runpod: &dyn RunPodOps,
+    gcp: &dyn GcpOps,
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<Option<LocalState>, CliError> {
-    Ok(load_refreshed_mode(project, lookup, runpod, output, out, false)?.0)
+    Ok(load_refreshed_mode(project, lookup, runpod, gcp, output, out, false)?.0)
 }
 
 /// Like [`load_refreshed_state`], also reporting whether the refresh dropped
@@ -849,16 +933,18 @@ pub(crate) fn load_refreshed(
     project: &Project,
     lookup: &dyn AppLookup,
     runpod: &dyn RunPodOps,
+    gcp: &dyn GcpOps,
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<(Option<LocalState>, bool), CliError> {
-    load_refreshed_mode(project, lookup, runpod, output, out, true)
+    load_refreshed_mode(project, lookup, runpod, gcp, output, out, true)
 }
 
 fn load_refreshed_mode(
     project: &Project,
     lookup: &dyn AppLookup,
     runpod: &dyn RunPodOps,
+    gcp: &dyn GcpOps,
     output: OutputFormat,
     out: &mut dyn Write,
     strict: bool,
@@ -866,7 +952,7 @@ fn load_refreshed_mode(
     let Some(mut state) = project.load_state()? else {
         return Ok((None, false));
     };
-    let refresh = refresh_state_mode(&mut state, lookup, runpod, strict);
+    let refresh = refresh_state_mode(&mut state, lookup, runpod, gcp, strict);
     if let Some(mismatch) = refresh.mismatch {
         return Err(CliError::Message(mismatch));
     }
@@ -1248,6 +1334,7 @@ resource "deployment" "support_modal" {
             &project,
             &Fake(Ok(vec![])),
             &NoRunPod,
+            &crate::gcp_ops::NoGcp,
             OutputFormat::Json,
             &mut out,
         )
@@ -1261,6 +1348,7 @@ resource "deployment" "support_modal" {
             &project,
             &Fake(Ok(vec![])),
             &NoRunPod,
+            &crate::gcp_ops::NoGcp,
             OutputFormat::Human,
             &mut out,
         )
@@ -1331,6 +1419,7 @@ resource "deployment" "support_modal" {
             &project,
             &WsFake(acme("other-co"), None),
             &NoRunPod,
+            &crate::gcp_ops::NoGcp,
             OutputFormat::Human,
             &mut out,
         )
@@ -1449,7 +1538,13 @@ resource "deployment" "support_modal" {
     #[test]
     fn plan_only_warns_when_the_workspace_is_unknown_and_marks_nothing_pending() {
         let mut state = modal_state_in("acme");
-        let refresh = refresh_state_mode(&mut state, &BrokenWorkspace, &NoRunPod, false);
+        let refresh = refresh_state_mode(
+            &mut state,
+            &BrokenWorkspace,
+            &NoRunPod,
+            &crate::gcp_ops::NoGcp,
+            false,
+        );
         assert!(refresh.mismatch.is_none());
         let warning = refresh.warning.expect("warns");
         assert!(warning.contains("as-is"), "{warning}");
@@ -1466,6 +1561,7 @@ resource "deployment" "support_modal" {
             &project,
             &BrokenWorkspace,
             &NoRunPod,
+            &crate::gcp_ops::NoGcp,
             OutputFormat::Human,
             &mut out,
         )

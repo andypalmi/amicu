@@ -37,6 +37,7 @@ amicu-registry = { path = "../amicu-registry" }
 # builder-stage step still compiles this crate's build-dependency graph
 # (protoc-bin-vendored, tonic-prost-build) as part of its caching layer.
 amicu-modal = { path = "../amicu-modal" }
+amicu-gcp = { path = "../amicu-gcp" }
 amicu-runpod = { path = "../amicu-runpod" }
 # `telemetry-agent`: the opt-in rollup payload, queue and uploader.
 amicu-telemetry = { path = "../amicu-telemetry" }

@@ -37,6 +37,7 @@ use serde::Serialize;
 use crate::OutputFormat;
 use crate::commands::build_runtime;
 use crate::error::CliError;
+use crate::gcp_ops::GcpOps;
 use crate::project::{LocalState, Project};
 use crate::runpod_ops::RunPodOps;
 use crate::write_json;
@@ -134,6 +135,8 @@ pub(crate) enum Kind {
     RunpodEndpoint,
     RunpodPod,
     RunpodSecret,
+    GceVm,
+    GceFirewall,
     LaunchdJob,
     SystemdUnit,
     ScheduledTask,
@@ -146,6 +149,8 @@ impl Kind {
             Kind::RunpodEndpoint => "runpod endpoint",
             Kind::RunpodPod => "runpod pod",
             Kind::RunpodSecret => "runpod secret",
+            Kind::GceVm => "compute engine vm",
+            Kind::GceFirewall => "compute engine firewall rule",
             Kind::LaunchdJob => "launchd job",
             Kind::SystemdUnit => "systemd unit",
             Kind::ScheduledTask => "scheduled task",
@@ -267,6 +272,71 @@ impl RunPodResources for OpsListing<'_> {
     }
 }
 
+/// An amicu-labelled VM in a Google Cloud project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GcpVm {
+    pub project: String,
+    pub zone: String,
+    pub name: String,
+    pub status: String,
+}
+
+/// An amicu-marked firewall rule in a Google Cloud project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GcpFirewall {
+    pub project: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct GcpListing {
+    pub vms: Vec<GcpVm>,
+    pub firewalls: Vec<GcpFirewall>,
+}
+
+/// Injectable read-only Google Cloud lookup, per project (and the service
+/// account to act as, if any).
+pub(crate) trait GcpResources {
+    fn list(&self, projects: &[(String, Option<String>)]) -> Result<GcpListing, String>;
+}
+
+/// Lists through a [`GcpOps`] client: only `GET` calls.
+pub(crate) struct GcpOpsListing<'a>(pub &'a dyn GcpOps);
+
+impl GcpResources for GcpOpsListing<'_> {
+    fn list(&self, projects: &[(String, Option<String>)]) -> Result<GcpListing, String> {
+        let run = || -> Result<GcpListing, CliError> {
+            let rt = build_runtime()?;
+            let mut out = GcpListing::default();
+            for (project, impersonate) in projects {
+                let client = self.0.client(impersonate.as_deref())?;
+                let fail = |what: &str, e: amicu_gcp::GcpError| {
+                    CliError::Message(format!("could not list {what} in {project}: {e}"))
+                };
+                let vms = rt
+                    .block_on(amicu_gcp::gce::list_owned_instances(&client, project))
+                    .map_err(|e| fail("VMs", e))?;
+                let fws = rt
+                    .block_on(amicu_gcp::gce::list_owned_firewalls(&client, project))
+                    .map_err(|e| fail("firewall rules", e))?;
+                out.vms.extend(vms.into_iter().map(|v| GcpVm {
+                    project: project.clone(),
+                    zone: v.zone,
+                    name: v.name,
+                    status: v.status,
+                }));
+                out.firewalls
+                    .extend(fws.into_iter().map(|(name, _)| GcpFirewall {
+                        project: project.clone(),
+                        name,
+                    }));
+            }
+            Ok(out)
+        };
+        run().map_err(|e| e.to_string())
+    }
+}
+
 /// The host platform, injectable for tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Platform {
@@ -293,6 +363,7 @@ pub(crate) struct Env<'a> {
     pub exec: &'a dyn CommandExec,
     pub modal: &'a dyn ModalApps,
     pub runpod: &'a dyn RunPodResources,
+    pub gcp: &'a dyn GcpResources,
     /// `~/Library/LaunchAgents` (macOS plist scan).
     pub agents_dir: Option<PathBuf>,
 }
@@ -315,6 +386,11 @@ pub(crate) struct Tracked {
     runpod_secrets: BTreeSet<String>,
     /// Like `modal_referenced`, for RunPod.
     runpod_referenced: bool,
+    /// Google projects (and the account to act as) that state or config name.
+    gcp_projects: BTreeSet<(String, Option<String>)>,
+    /// `(project, name)` of recorded VMs and firewall rules.
+    gcp_vms: BTreeSet<(String, String)>,
+    gcp_firewalls: BTreeSet<(String, String)>,
 }
 
 impl Tracked {
@@ -337,12 +413,19 @@ impl Tracked {
                     None => t.runpod_names.insert(rec.identity.clone()),
                 };
                 t.runpod_secrets.extend(rec.secrets.iter().cloned());
+            } else if let Some(g) = &rec.gcp {
+                t.gcp_projects
+                    .insert((g.project.clone(), g.impersonate.clone()));
+                t.gcp_vms.insert((g.project.clone(), g.instance.clone()));
+                t.gcp_firewalls
+                    .insert((g.project.clone(), g.firewall.clone()));
             } else if rec.backend.is_host() {
                 t.insert_label(&rec.identity);
             }
         }
         t.modal_referenced |= uses_modal(&state.graph);
         t.runpod_referenced |= uses_provider(&state.graph, "runpod");
+        t.add_gcp_profiles(&state.graph);
         for ep in &state.endpoints {
             // Modal app ids (`ap-...`) mean Modal is in play even with no stop
             // record or Modal profile in the graph.
@@ -361,7 +444,24 @@ impl Tracked {
     pub(crate) fn with_config(mut self, config: Option<&Graph>) -> Self {
         self.modal_referenced |= config.is_some_and(uses_modal);
         self.runpod_referenced |= config.is_some_and(|g| uses_provider(g, "runpod"));
+        if let Some(g) = config {
+            self.add_gcp_profiles(g);
+        }
         self
+    }
+
+    /// The Google projects the graph's `gcp` profiles name.
+    fn add_gcp_profiles(&mut self, graph: &Graph) {
+        for s in graph
+            .hardware_profiles
+            .iter()
+            .filter_map(|h| h.gcp.as_ref())
+        {
+            if let Some(p) = &s.project {
+                self.gcp_projects
+                    .insert((p.clone(), s.impersonate_service_account.clone()));
+            }
+        }
     }
 
     fn insert_label(&mut self, label: &str) {
@@ -466,6 +566,87 @@ fn runpod(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
     Ok(found)
 }
 
+/// Compute Engine VMs and firewall rules amicu created (they carry its owner
+/// marker) in the projects state or config names, with the `gcloud` commands
+/// that delete them by hand.
+fn gcp(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
+    let projects: Vec<_> = tracked.gcp_projects.iter().cloned().collect();
+    let listing = env.gcp.list(&projects)?;
+    let project_id = tracked.project_id.as_deref();
+    let q = |s: &str| quote_for(env.platform, s);
+    let mut found = Vec::new();
+    for v in &listing.vms {
+        found.push(Found {
+            kind: Kind::GceVm,
+            identity: format!("{} ({}, {})", v.name, v.project, v.zone),
+            state: v.status.to_lowercase(),
+            tracked: tracked
+                .gcp_vms
+                .contains(&(v.project.clone(), v.name.clone())),
+            ownership: ownership_of_runpod_name(&v.name, project_id),
+            stop_command: format!(
+                "gcloud compute instances delete {} --zone {} --project {}",
+                q(&v.name),
+                q(&v.zone),
+                q(&v.project)
+            ),
+        });
+    }
+    for r in &listing.firewalls {
+        found.push(Found {
+            kind: Kind::GceFirewall,
+            identity: format!("{} ({})", r.name, r.project),
+            state: "firewall rule".to_owned(),
+            tracked: tracked
+                .gcp_firewalls
+                .contains(&(r.project.clone(), r.name.clone())),
+            ownership: ownership_of_runpod_name(&r.name, project_id),
+            stop_command: format!(
+                "gcloud compute firewall-rules delete {} --project {}",
+                q(&r.name),
+                q(&r.project)
+            ),
+        });
+    }
+    Ok(found)
+}
+
+/// The RunPod source entry, adding what it found to `resources`.
+fn runpod_source(env: &Env<'_>, tracked: &Tracked, resources: &mut Vec<Found>) -> Source {
+    if !tracked.runpod_referenced {
+        return source(
+            "runpod",
+            "skipped",
+            Some("not used by this project".to_owned()),
+        );
+    }
+    match runpod(env, tracked) {
+        Ok(found) => {
+            resources.extend(found);
+            source("runpod", "ok", None)
+        }
+        Err(e) => source("runpod", "error", Some(e)),
+    }
+}
+
+/// The Google Cloud source entry, adding what it found to `resources`.
+fn gcp_source(env: &Env<'_>, tracked: &Tracked, resources: &mut Vec<Found>) -> Source {
+    if tracked.gcp_projects.is_empty() {
+        return source(
+            "gcp",
+            "skipped",
+            Some("not used by this project".to_owned()),
+        );
+    }
+    match gcp(env, tracked) {
+        Ok(found) => {
+            resources.extend(found);
+            source("gcp", "ok", None)
+        }
+        Err(e) => source("gcp", "error", Some(e)),
+    }
+}
+
 /// Discover untracked (and tracked) amicu resources. Never mutates anything.
 pub(crate) fn discover(env: &Env<'_>, tracked: &Tracked) -> OrphansReport {
     let mut sources = Vec::new();
@@ -505,21 +686,8 @@ pub(crate) fn discover(env: &Env<'_>, tracked: &Tracked) -> OrphansReport {
         ));
     }
 
-    if tracked.runpod_referenced {
-        match runpod(env, tracked) {
-            Ok(found) => {
-                sources.push(source("runpod", "ok", None));
-                resources.extend(found);
-            }
-            Err(e) => sources.push(source("runpod", "error", Some(e))),
-        }
-    } else {
-        sources.push(source(
-            "runpod",
-            "skipped",
-            Some("not used by this project".to_owned()),
-        ));
-    }
+    sources.push(runpod_source(env, tracked, &mut resources));
+    sources.push(gcp_source(env, tracked, &mut resources));
 
     match env.platform {
         Platform::MacOs => {
@@ -817,6 +985,7 @@ pub(crate) fn run(
         exec: &HostExec,
         modal: &RealModal,
         runpod: &OpsListing(&crate::runpod_ops::RealRunPod),
+        gcp: &GcpOpsListing(&crate::gcp_ops::RealGcp),
         agents_dir,
     };
     render(&discover(&env, &tracked), output, out)
@@ -1008,6 +1177,14 @@ mod tests {
         Tracked::from_state(Some(&state_with(stops, Vec::new())))
     }
 
+    struct NoGcpResources;
+
+    impl GcpResources for NoGcpResources {
+        fn list(&self, _: &[(String, Option<String>)]) -> Result<GcpListing, String> {
+            panic!("Google Cloud must not be queried")
+        }
+    }
+
     struct NoRunPod;
 
     impl RunPodResources for NoRunPod {
@@ -1027,6 +1204,7 @@ mod tests {
             exec,
             modal,
             runpod: &NoRunPod,
+            gcp: &NoGcpResources,
             agents_dir,
         }
     }
@@ -1487,6 +1665,7 @@ io.amicu.llama.old.service loaded active running c\n";
             [
                 ("modal", "ok"),
                 ("runpod", "skipped"),
+                ("gcp", "skipped"),
                 ("launchd", "skipped"),
                 ("systemd", "skipped"),
                 ("task-scheduler", "ok"),

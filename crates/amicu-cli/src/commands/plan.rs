@@ -67,6 +67,7 @@ pub(crate) fn run_with_host(
         project,
         &crate::refresh::ModalLookup,
         &crate::runpod_ops::RealRunPod,
+        &crate::gcp_ops::RealGcp,
         output,
         out,
     )?;
@@ -208,6 +209,13 @@ pub(crate) fn provider_switches(
                     Backend::Runpod
                 },
                 project_id.map(|p| amicu_runpod::project_endpoint_name(p, id)),
+            ),
+            Some("gcp") => (
+                Backend::Gce,
+                project_id.and_then(|p| {
+                    let owner = amicu_gcp::owner_marker(None, p, id);
+                    amicu_gcp::compute::instance_name(p, id, &owner[..8]).ok()
+                }),
             ),
             _ => {
                 // Without a project id apply mints one, so no recorded host label

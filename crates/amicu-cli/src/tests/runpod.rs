@@ -1164,7 +1164,13 @@ fn applied_with(td: &TempDir, record: StopRecord) -> Project {
 
 fn refresh(project: &Project, rig: &Rig) -> (crate::refresh::Refresh, LocalState) {
     let mut state = project.load_state().unwrap().unwrap();
-    let refresh = crate::refresh::refresh_state_mode(&mut state, &rig.modal, &rig.runpod, true);
+    let refresh = crate::refresh::refresh_state_mode(
+        &mut state,
+        &rig.modal,
+        &rig.runpod,
+        &crate::gcp_ops::NoGcp,
+        true,
+    );
     (refresh, state)
 }
 
@@ -1330,6 +1336,17 @@ impl crate::commands::orphans::ModalApps for NoModal {
     }
 }
 
+struct NoGcpListing;
+
+impl crate::commands::orphans::GcpResources for NoGcpListing {
+    fn list(
+        &self,
+        _: &[(String, Option<String>)],
+    ) -> Result<crate::commands::orphans::GcpListing, String> {
+        panic!("Google Cloud must not be queried")
+    }
+}
+
 fn orphans(project: &Project, rig: &Rig) -> crate::commands::orphans::OrphansReport {
     use crate::commands::orphans::{Env, OpsListing, Platform, Tracked, discover};
     let state = project.load_state().unwrap();
@@ -1341,6 +1358,7 @@ fn orphans(project: &Project, rig: &Rig) -> crate::commands::orphans::OrphansRep
             exec: &amicu_llamacpp::HostExec,
             modal: &NoModal,
             runpod: &OpsListing(&rig.runpod),
+            gcp: &NoGcpListing,
             agents_dir: None,
         },
         &tracked,
