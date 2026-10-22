@@ -3005,6 +3005,16 @@ mod dispatch_tests {
     }
 
     #[test]
+    fn vllm_on_gcp_selects_the_compute_engine_supervisor_and_llama_cpp_is_refused() {
+        assert_eq!(
+            dispatch_for(RuntimeKind::Vllm, Some("gcp")),
+            Some(Dispatch::Gce)
+        );
+        assert_eq!(dispatch_for(RuntimeKind::LlamaCpp, Some("gcp")), None);
+        assert!(super::SUPPORTED_PROVIDERS.contains("gcp"));
+    }
+
+    #[test]
     fn llama_cpp_on_modal_selects_the_modal_supervisor() {
         assert_eq!(
             dispatch_for(RuntimeKind::LlamaCpp, Some("modal")),
