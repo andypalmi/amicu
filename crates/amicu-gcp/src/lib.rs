@@ -3,7 +3,7 @@
 //! Credentials with optional service-account impersonation ([`auth`]), a JSON
 //! REST client with long-running-operation polling ([`client`], [`operations`]),
 //! owner labels ([`labels`]), project / region / zone checks ([`validate`]) and
-//! the seam for the GPU catalog ([`catalog`]).
+//! the GPU catalog with its drift check ([`catalog`]).
 //!
 //! No backend lives here yet, and nothing in this crate calls Google unless a
 //! caller builds an [`AdcTokenSource`] and a [`GcpClient`] over the real
@@ -20,7 +20,7 @@ pub mod validate;
 pub use auth::{
     AccessToken, AdcTokenSource, AuthConfig, IMPERSONATE_ENV_VAR, TokenSource, impersonation_target,
 };
-pub use catalog::GcpCatalog;
+pub use catalog::{GcpCatalog, Provisioning, resolve_model};
 pub use client::{COMPUTE_BASE_URL, GcpClient, RUN_BASE_URL};
 pub use error::GcpError;
 pub use labels::{
