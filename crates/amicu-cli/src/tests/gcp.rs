@@ -53,6 +53,7 @@ struct World {
     on_insert: Mutex<Option<Hook>>,
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn json_reply(status: u16, body: &Value) -> Result<HttpResponse, TransportError> {
     Ok(HttpResponse::new(status, body.to_string().into_bytes()))
 }
@@ -142,8 +143,11 @@ impl HttpTransport for World {
         let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         match (method, parts.as_slice()) {
             (HttpMethod::Get, ["projects", _]) => json_reply(200, &json!({})),
-            (_, ["projects", _, "global", "operations", name, "wait"])
-            | (_, ["projects", _, "zones", _, "operations", name, "wait"]) => {
+            (
+                _,
+                ["projects", _, "global", "operations", name, "wait"]
+                | ["projects", _, "zones", _, "operations", name, "wait"],
+            ) => {
                 let w = self.state.lock().unwrap();
                 let mut body = json!({"name": name, "status": "DONE"});
                 if let Some((_, code)) = w.failing_ops.iter().find(|(n, _)| n == name) {
@@ -487,9 +491,9 @@ fn apply_records_the_vm_ahead_creates_the_firewall_first_and_returns_the_endpoin
 fn without_allowed_source_cidrs_the_firewall_opens_to_this_machine_only() {
     let td = TempDir::new();
     let project = project_with(&td, "");
-    let rig = rig();
-    apply_with(&project, &rig).unwrap();
-    let body = rig.gcp.world.state.lock().unwrap().firewall_bodies[0].clone();
+    let found = rig();
+    apply_with(&project, &found).unwrap();
+    let body = found.gcp.world.state.lock().unwrap().firewall_bodies[0].clone();
     assert_eq!(body["sourceRanges"], json!(["203.0.113.9/32"]));
 
     // When the address cannot be found, nothing is created and nothing opens.
@@ -532,8 +536,8 @@ fn when_every_zone_is_out_of_capacity_apply_fails_and_cleans_up_what_it_made() {
     rig.gcp.world.state.lock().unwrap().stockout = zones.iter().map(|z| (*z).to_owned()).collect();
     let err = apply_with(&project, &rig).unwrap_err().to_string();
     assert!(err.contains("no capacity"), "{err}");
-    assert!(rig.gcp.world.firewall_names().is_empty());
-    assert!(rig.gcp.world.vm_names().is_empty());
+    assert_eq!(rig.gcp.world.firewall_names(), Vec::<String>::new());
+    assert_eq!(rig.gcp.world.vm_names(), Vec::<String>::new());
     // The record stays, listing every zone, until a stop is confirmed.
     let g = the_record(&project);
     assert_eq!(
@@ -577,8 +581,8 @@ fn destroy_deletes_the_vm_then_the_firewall_and_confirms_both_are_gone() {
     assert_eq!(rig.gcp.world.vm_names(), [instance()]);
     destroy(&project, &rig).unwrap();
 
-    assert!(rig.gcp.world.vm_names().is_empty());
-    assert!(rig.gcp.world.firewall_names().is_empty());
+    assert_eq!(rig.gcp.world.vm_names(), Vec::<String>::new());
+    assert_eq!(rig.gcp.world.firewall_names(), Vec::<String>::new());
     let log = rig.gcp.world.log();
     let del_vm = log
         .iter()
@@ -595,9 +599,9 @@ fn destroy_deletes_the_vm_then_the_firewall_and_confirms_both_are_gone() {
             .iter()
             .any(|l| l.starts_with("Get") && l.contains("/instances/"))
     );
-    assert!(stops_for(&project, DEP).is_empty());
+    assert_eq!(stops_for(&project, DEP).len(), 0);
     let state = project.load_state().unwrap().unwrap();
-    assert!(state.graph.deployments.is_empty());
+    assert_eq!(state.graph.deployments.len(), 0);
 }
 
 #[test]
@@ -632,7 +636,7 @@ fn refresh_marks_a_preempted_or_expired_vm_pending_with_a_clear_note() {
         crate::refresh::Refresh::default(),
         "a live VM has no notes"
     );
-    assert!(state.pending.is_empty());
+    assert_eq!(state.pending.len(), 0);
 
     rig.gcp.world.remove_vm(&instance());
     let (r, state) = refresh(&project, &rig);
@@ -649,7 +653,7 @@ fn refresh_marks_a_preempted_or_expired_vm_pending_with_a_clear_note() {
     // Destroy still finds the record and cleans up the firewall rule.
     assert_eq!(rig.gcp.world.firewall_names().len(), 1);
     destroy(&project, &rig).unwrap();
-    assert!(rig.gcp.world.firewall_names().is_empty());
+    assert_eq!(rig.gcp.world.firewall_names(), Vec::<String>::new());
 }
 
 fn refresh(project: &Project, rig: &Rig) -> (crate::refresh::Refresh, LocalState) {
@@ -671,7 +675,7 @@ fn missing_credentials_stop_apply_before_anything_is_written() {
         err.contains("gcloud auth application-default login"),
         "{err}"
     );
-    assert!(stops_for(&project, DEP).is_empty());
+    assert_eq!(stops_for(&project, DEP).len(), 0);
     assert_eq!(rig.gcp.world.log(), Vec::<String>::new());
 }
 
@@ -683,8 +687,8 @@ fn a_failed_exposure_check_deletes_what_this_run_created() {
     rig.gcp.exposure_fails = true;
     let err = apply_with(&project, &rig).unwrap_err().to_string();
     assert!(err.contains("failed its exposure check"), "{err}");
-    assert!(rig.gcp.world.vm_names().is_empty());
-    assert!(rig.gcp.world.firewall_names().is_empty());
+    assert_eq!(rig.gcp.world.vm_names(), Vec::<String>::new());
+    assert_eq!(rig.gcp.world.firewall_names(), Vec::<String>::new());
 }
 
 #[test]
