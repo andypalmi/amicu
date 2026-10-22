@@ -3,15 +3,16 @@
 //! Credentials with optional service-account impersonation ([`auth`]), a JSON
 //! REST client with long-running-operation polling ([`client`], [`operations`]),
 //! owner labels ([`labels`]), project / region / zone checks ([`validate`]) and
-//! the GPU catalog with its drift check ([`catalog`]).
+//! the GPU catalog with its drift check ([`catalog`]) and the Compute Engine
+//! VM lifecycle for vLLM ([`compute`]).
 //!
-//! No backend lives here yet, and nothing in this crate calls Google unless a
-//! caller builds an [`AdcTokenSource`] and a [`GcpClient`] over the real
-//! transport. Tokens and keys are never `Debug`-printed or put in an error.
+//! Nothing in this crate calls Google unless a caller builds an
+//! [`AdcTokenSource`] and a [`GcpClient`] over the real transport. Tokens and keys are never `Debug`-printed or put in an error.
 
 pub mod auth;
 pub mod catalog;
 pub mod client;
+pub mod compute;
 pub mod error;
 pub mod labels;
 pub mod operations;
@@ -26,5 +27,7 @@ pub use error::GcpError;
 pub use labels::{
     OWNER_LABEL, ensure_owned, has_owner_marker, owner_labels, owner_marker, sanitize_label_value,
 };
-pub use operations::{PollTiming, wait_compute_zone_operation, wait_run_operation};
+pub use operations::{
+    PollTiming, wait_compute_global_operation, wait_compute_zone_operation, wait_run_operation,
+};
 pub use validate::{validate_project_id, validate_region, validate_zone, zone_region};
