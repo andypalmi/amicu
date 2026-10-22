@@ -61,15 +61,30 @@ pub fn validate_zone(zone: &str) -> Result<(), GcpError> {
     zone_region(zone).map(|_| ())
 }
 
-/// The region a zone belongs to (`us-central1-a` is in `us-central1`).
+/// The region a zone belongs to (`us-central1-a` is in `us-central1`, the AI
+/// zone `europe-west4-ai1a` in `europe-west4`).
 pub fn zone_region(zone: &str) -> Result<&str, GcpError> {
     let bad = || invalid("zone", zone, "expected a name like `us-central1-a`");
-    let (region, letter) = zone.rsplit_once('-').ok_or_else(bad)?;
-    if letter.len() != 1 || !letter.starts_with(|c: char| c.is_ascii_lowercase()) {
+    let (region, suffix) = zone.rsplit_once('-').ok_or_else(bad)?;
+    if !is_zone_suffix(suffix) {
         return Err(bad());
     }
     validate_region(region).map_err(|_| bad())?;
     Ok(region)
+}
+
+/// `a`, or an AI zone's `ai<digits><letter>`.
+fn is_zone_suffix(suffix: &str) -> bool {
+    let letter = |s: &str| s.len() == 1 && s.starts_with(|c: char| c.is_ascii_lowercase());
+    match suffix.strip_prefix("ai") {
+        Some(rest) => {
+            let digits = rest.trim_end_matches(|c: char| c.is_ascii_lowercase());
+            !digits.is_empty()
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && letter(&rest[digits.len()..])
+        }
+        None => letter(suffix),
+    }
 }
 
 /// A name for an instance, Cloud Run service or operation: RFC 1035, 1 to 63
@@ -156,7 +171,12 @@ mod tests {
         assert_eq!(zone_region("us-central1-a").unwrap(), "us-central1");
         assert_eq!(zone_region("europe-west4-c").unwrap(), "europe-west4");
         assert!(validate_zone("us-east5-b").is_ok());
+        assert_eq!(zone_region("europe-west4-ai1a").unwrap(), "europe-west4");
         for bad in [
+            "europe-west4-ai",
+            "europe-west4-aia",
+            "europe-west4-ai1",
+            "europe-west4-ai1ab",
             "us-central1",
             "us-central1-",
             "us-central1-ab",

@@ -560,8 +560,7 @@ mod tests {
         for z in ZONES {
             assert!(seen.insert(z.name), "duplicate zone {}", z.name);
             assert!(cat().region(z.region).is_some(), "{} has no region", z.name);
-            // `validate_zone` rejects AI zone names (`europe-west4-ai1a`), so split by hand.
-            assert_eq!(z.name.rsplit_once('-').unwrap().0, z.region);
+            assert_eq!(crate::validate::zone_region(z.name).unwrap(), z.region);
             for g in z.gpus {
                 assert!(resolve_model(g).is_some(), "{} offers unknown {g}", z.name);
             }
