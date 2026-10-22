@@ -9,11 +9,15 @@
 //! caller builds an [`AdcTokenSource`] and a [`GcpClient`] over the real
 //! transport. Tokens and keys are never `Debug`-printed or put in an error.
 
+pub mod auth;
 pub mod catalog;
 pub mod error;
 pub mod labels;
 pub mod validate;
 
+pub use auth::{
+    AccessToken, AdcTokenSource, AuthConfig, IMPERSONATE_ENV_VAR, TokenSource, impersonation_target,
+};
 pub use catalog::GcpCatalog;
 pub use error::GcpError;
 pub use labels::{
