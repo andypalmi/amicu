@@ -12,6 +12,7 @@
 pub mod auth;
 pub mod catalog;
 pub mod client;
+pub mod cloudrun;
 pub mod compute;
 pub mod error;
 pub mod labels;
