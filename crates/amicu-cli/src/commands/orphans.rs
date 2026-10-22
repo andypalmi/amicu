@@ -1127,6 +1127,7 @@ mod tests {
                 interconnect: None,
                 price: None,
                 runpod: None,
+                gcp: None,
             });
         let from_config = Tracked::default().with_config(Some(&graph));
         let report = discover(&env(Platform::Other, &exec, &modal, None), &from_config);

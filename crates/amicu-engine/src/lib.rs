@@ -19,6 +19,7 @@
 pub mod catalog;
 pub mod checks;
 pub mod fingerprint;
+pub mod gcp_checks;
 pub mod host;
 pub mod planner;
 

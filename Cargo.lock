@@ -185,6 +185,7 @@ name = "amicu-engine"
 version = "0.1.4"
 dependencies = [
  "amicu-core",
+ "amicu-gcp",
  "amicu-hcl",
  "amicu-llamacpp",
  "amicu-plan",

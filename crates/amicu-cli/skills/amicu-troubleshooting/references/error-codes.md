@@ -57,6 +57,13 @@ signal; the number identifies the specific check.
   set on another provider, sets `cloud` outside `mode = "pod"`, a pod has
   `scaling {}` other than one replica, or a pods-only GPU is used in serverless
   mode (add `runpod { mode = "pod" }`).
+- `AMICU-CAP-016` - a hardware profile's `gcp {}` block does not fit: no
+  `project`, no `region`/`zone`, a bad zone, duration, disk size or CIDR,
+  `scaling {}` beyond one replica, or a `llama_cpp` runtime.
+- `AMICU-CAP-017` - the GPU is unknown to the GCP catalog or not offered in the
+  zone or region (or on Cloud Run).
+- `AMICU-CAP-018` - `provisioning` is not offered for that machine type.
+- `AMICU-CAP-019` - `backend = "cloud_run"` is not supported by `apply` yet.
 - `AMICU-MEM-001` / `AMICU-MEM-002` - capacity/memory fit failures.
 - `AMICU-MEM-003` - warning: a local hardware profile declares more memory than
   this machine has (`plan` and `doctor` report it). Fix the profile, or ignore

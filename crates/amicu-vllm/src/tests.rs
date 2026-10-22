@@ -123,6 +123,7 @@ fn gpu_hardware(vram_gib: u64, count: u32) -> HardwareProfile {
         interconnect: None,
         price: None,
         runpod: None,
+        gcp: None,
     }
 }
 

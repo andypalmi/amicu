@@ -480,7 +480,7 @@ pub fn resolve_gpu(
 
 /// Providers that place GPUs by catalog card, so they cannot deploy a model
 /// that does not resolve.
-pub const CATALOG_GPU_PROVIDERS: [&str; 2] = ["modal", "runpod"];
+pub const CATALOG_GPU_PROVIDERS: [&str; 3] = ["modal", "runpod", "gcp"];
 
 /// Catalog ids RunPod offers only as pods (no serverless pool).
 pub const RUNPOD_PODS_ONLY_GPUS: &[&str] = &["h200-nvl-141gb"];

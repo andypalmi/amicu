@@ -1221,6 +1221,7 @@ mod tests {
             interconnect: None,
             price: None,
             runpod: None,
+            gcp: None,
         }
     }
 

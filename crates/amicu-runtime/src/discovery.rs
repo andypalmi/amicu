@@ -274,6 +274,7 @@ fn parse_windows_cpu(
         interconnect: None,
         price: None,
         runpod: None,
+        gcp: None,
     })
 }
 
@@ -328,6 +329,7 @@ fn parse_apple_silicon(text: &str) -> Result<HardwareProfile, DiscoveryError> {
         interconnect: None,
         price: None,
         runpod: None,
+        gcp: None,
     })
 }
 
@@ -350,6 +352,7 @@ fn parse_macos_cpu(text: &str) -> Result<HardwareProfile, DiscoveryError> {
         interconnect: None,
         price: None,
         runpod: None,
+        gcp: None,
     })
 }
 
@@ -381,6 +384,7 @@ fn parse_linux_cpu(cpuinfo: &str, meminfo: &str) -> Result<HardwareProfile, Disc
         interconnect: None,
         price: None,
         runpod: None,
+        gcp: None,
     })
 }
 

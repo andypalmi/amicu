@@ -26,6 +26,7 @@ pub fn report_for(graph: &Graph) -> DiagnosticReport {
     diagnostics.extend(api_key_diagnostics(graph));
     diagnostics.extend(gpu_diagnostics(graph));
     diagnostics.extend(runpod_diagnostics(graph));
+    diagnostics.extend(crate::gcp_checks::gcp_diagnostics(graph));
 
     for missing in graph.missing_references() {
         let mut d = Diagnostic::new(
@@ -145,7 +146,7 @@ fn gpu_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
 }
 
 /// Hardware-profile `provider` values whose deployments honor `scaling {}`.
-const SCALING_PROVIDERS: [&str; 2] = ["modal", "runpod"];
+const SCALING_PROVIDERS: [&str; 3] = ["modal", "runpod", "gcp"];
 
 /// RunPod's ceiling for a worker's idle timeout (`workers.idleTimeout`).
 const RUNPOD_MAX_IDLE_SECS: u32 = 3600;
@@ -580,6 +581,7 @@ mod residency_tests {
             interconnect: None,
             price: None,
             runpod: None,
+            gcp: None,
         }
     }
 
@@ -783,6 +785,7 @@ mod vllm_dispatch_tests {
             interconnect: None,
             price: None,
             runpod: None,
+            gcp: None,
         }
     }
 
@@ -1192,6 +1195,7 @@ mod scaling_tests {
             interconnect: None,
             price: None,
             runpod: None,
+            gcp: None,
         });
         g.deployments.push(Deployment {
             scaling,
@@ -1321,6 +1325,7 @@ mod api_key_tests {
             interconnect: None,
             price: None,
             runpod: None,
+            gcp: None,
         });
         g.deployments.push(Deployment {
             scaling: None,
@@ -1414,6 +1419,7 @@ mod gpu_tests {
             interconnect: None,
             price: None,
             runpod: None,
+            gcp: None,
         });
         g
     }
@@ -1531,6 +1537,7 @@ mod runpod_tests {
             interconnect: None,
             price: None,
             runpod,
+            gcp: None,
         });
         g.deployments.push(Deployment {
             scaling,

@@ -71,6 +71,7 @@ fn sample_hardware() -> HardwareProfile {
             per_hour: Money::new(1.5, "USD"),
         }),
         runpod: None,
+        gcp: None,
     }
 }
 

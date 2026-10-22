@@ -99,6 +99,7 @@ fn apple_silicon(mem_gib: u64) -> HardwareProfile {
         interconnect: None,
         price: None,
         runpod: None,
+        gcp: None,
     }
 }
 
@@ -158,6 +159,7 @@ fn nvidia_gpu(vram_gib: u64, sys_gib: u64) -> HardwareProfile {
         interconnect: None,
         price: None,
         runpod: None,
+        gcp: None,
     }
 }
 

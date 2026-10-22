@@ -788,6 +788,7 @@ mod tests {
             interconnect: None,
             price: None,
             runpod: None,
+            gcp: None,
         });
         g.deployments.push(Deployment {
             scaling: None,

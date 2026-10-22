@@ -741,6 +741,7 @@ fn build_local_dev_chat(preset: &Preset, answers: &WizardAnswers) -> Graph {
         // Zero marginal cost: no rental price.
         price: None,
         runpod: None,
+        gcp: None,
     });
 
     graph.deployments.push(Deployment {
@@ -827,6 +828,7 @@ fn build_private_eu_production(preset: &Preset, answers: &WizardAnswers) -> Grap
         // `amicu_providers::cost::estimate_cost` for the provider-sourced path.
         price: None,
         runpod: None,
+        gcp: None,
     });
 
     graph.deployments.push(Deployment {
@@ -924,6 +926,7 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
         // `amicu_providers::cost::estimate_cost` for the provider-sourced path.
         price: None,
         runpod: None,
+        gcp: None,
     });
 
     graph.deployments.push(Deployment {
@@ -1016,6 +1019,7 @@ fn build_internal_knowledge_chatbot(preset: &Preset, answers: &WizardAnswers) ->
         interconnect: None,
         price: None,
         runpod: None,
+        gcp: None,
     });
 
     graph.deployments.push(Deployment {
@@ -1100,6 +1104,7 @@ fn build_customer_support_assistant(preset: &Preset, answers: &WizardAnswers) ->
         interconnect: None,
         price: None,
         runpod: None,
+        gcp: None,
     });
 
     graph.deployments.push(Deployment {
@@ -1184,6 +1189,7 @@ fn build_document_extraction_pipeline(preset: &Preset, answers: &WizardAnswers) 
         interconnect: None,
         price: None,
         runpod: None,
+        gcp: None,
     });
 
     graph.deployments.push(Deployment {
@@ -1269,6 +1275,7 @@ fn build_code_assistant_endpoint(preset: &Preset, answers: &WizardAnswers) -> Gr
         interconnect: None,
         price: None,
         runpod: None,
+        gcp: None,
     });
 
     graph.deployments.push(Deployment {
@@ -1352,6 +1359,7 @@ fn build_api_replacement_migration(preset: &Preset, answers: &WizardAnswers) -> 
         interconnect: None,
         price: None,
         runpod: None,
+        gcp: None,
     });
 
     graph.deployments.push(Deployment {
@@ -1435,6 +1443,7 @@ fn build_custom_stack(preset: &Preset, answers: &WizardAnswers) -> Graph {
         interconnect: None,
         price: None,
         runpod: None,
+        gcp: None,
     });
 
     graph.deployments.push(Deployment {
