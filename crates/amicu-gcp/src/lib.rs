@@ -11,16 +11,20 @@
 
 pub mod auth;
 pub mod catalog;
+pub mod client;
 pub mod error;
 pub mod labels;
+pub mod operations;
 pub mod validate;
 
 pub use auth::{
     AccessToken, AdcTokenSource, AuthConfig, IMPERSONATE_ENV_VAR, TokenSource, impersonation_target,
 };
 pub use catalog::GcpCatalog;
+pub use client::{COMPUTE_BASE_URL, GcpClient, RUN_BASE_URL};
 pub use error::GcpError;
 pub use labels::{
     OWNER_LABEL, ensure_owned, has_owner_marker, owner_labels, owner_marker, sanitize_label_value,
 };
+pub use operations::{PollTiming, wait_compute_zone_operation, wait_run_operation};
 pub use validate::{validate_project_id, validate_region, validate_zone, zone_region};
