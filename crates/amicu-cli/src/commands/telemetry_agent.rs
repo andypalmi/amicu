@@ -21,8 +21,11 @@
 //! agent on the host when consent resolves to off
 //! (`apply::stop_agents_if_opted_out`).
 //!
-//! Modal deployments get no agent: the container image does not carry the
-//! amicu binary, and the CLI does not run continuously beside them.
+//! Cloud deployments (Modal, RunPod) have no process on this machine, and
+//! their container image does not carry the amicu binary, so `apply` starts
+//! the same agent as a job of its own that scrapes the provider's endpoint
+//! instead of a loopback port; see [`super::telemetry_cloud`] for how it
+//! authenticates and why it never wakes a scaled-to-zero deployment.
 
 // `Duration::from_mins` is unstable on our MSRV 1.97; keep `from_secs`.
 #![allow(clippy::duration_suboptimal_units)]
@@ -47,6 +50,9 @@ use amicu_telemetry::{
 use serde::{Deserialize, Serialize};
 
 use crate::commands::telemetry::{ConfigStore, effective};
+use crate::commands::telemetry_cloud::{
+    self as cloud, Auth, CloudAgent, ModalGate, Polled, Remote, RunPodGate, SourceKind,
+};
 use crate::error::CliError;
 use crate::planner::PlanResult;
 
@@ -293,10 +299,29 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// What the agent is told about one deployment, decided at apply time.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Descriptor {
-    model: String,
-    quantization: Option<String>,
-    provider: String,
+pub(crate) struct Descriptor {
+    pub(crate) model: String,
+    pub(crate) quantization: Option<String>,
+    pub(crate) provider: String,
+}
+
+/// The model, quantization and provider labels for `deployment`.
+pub(crate) fn describe(
+    catalog: &dyn Catalog,
+    deployment: &amicu_core::resource::Deployment,
+    provider: &str,
+) -> Descriptor {
+    let model = catalog.resolve_model(&deployment.model);
+    Descriptor {
+        model: model
+            .as_ref()
+            .map_or_else(|| "custom".to_owned(), |m| public_model_name(&m.model)),
+        quantization: model
+            .and_then(|m| m.model.artifact.quantization)
+            .and_then(|q| serde_json::to_value(q).ok())
+            .and_then(|v| v.as_str().map(str::to_owned)),
+        provider: provider.to_owned(),
+    }
 }
 
 /// Renders the agent's job for each opted-in host deployment.
@@ -308,33 +333,35 @@ pub(crate) struct TelemetrySidecar {
     descriptors: HashMap<DeploymentId, Descriptor>,
 }
 
-/// The agent's argv for one instance. Every value is local configuration;
-/// none of it is sent anywhere except as the report fields it becomes.
-fn agent_argv(
-    s: &TelemetrySidecar,
-    d: &Descriptor,
-    plan: &LaunchPlan,
-    anon: AnonDeploymentId,
-) -> Vec<String> {
-    let (runtime, port, context, batch) = match &plan.settings {
-        Runtime::LlamaCpp(x) => ("llama.cpp", x.port, x.context_length, x.batch_size),
-        Runtime::Vllm(x) => ("vllm", x.port, x.context_length, x.max_num_seqs),
-    };
+/// What goes into an agent's argv besides where it scrapes and what it is.
+struct Facts<'a> {
+    source: SourceKind,
+    metrics_url: String,
+    runtime: &'a str,
+    context_length: u32,
+    batch_size: Option<u32>,
+    descriptor: &'a Descriptor,
+}
+
+/// The agent's argv. Every value is local configuration; none of it is sent
+/// anywhere except as the report fields it becomes.
+fn argv_for(s: &TelemetrySidecar, f: &Facts<'_>, anon: AnonDeploymentId) -> Vec<String> {
+    let d = f.descriptor;
     let mut argv = vec![
         s.exe.to_string_lossy().into_owned(),
         "telemetry-agent".to_owned(),
         "--metrics-url".to_owned(),
-        format!("http://127.0.0.1:{port}/metrics"),
+        f.metrics_url.clone(),
         "--deployment-id".to_owned(),
         anon.to_uuid_string(),
         "--runtime".to_owned(),
-        runtime.to_owned(),
+        f.runtime.to_owned(),
         "--model".to_owned(),
         d.model.clone(),
         "--provider".to_owned(),
         d.provider.clone(),
         "--context-length".to_owned(),
-        context.to_string(),
+        f.context_length.to_string(),
         "--endpoint".to_owned(),
         s.endpoint.clone(),
         "--config".to_owned(),
@@ -342,13 +369,46 @@ fn agent_argv(
         "--data-dir".to_owned(),
         s.data.to_string_lossy().into_owned(),
     ];
+    if f.source != SourceKind::Local {
+        argv.extend(["--source".to_owned(), f.source.arg().to_owned()]);
+    }
     if let Some(q) = &d.quantization {
         argv.extend(["--quantization".to_owned(), q.clone()]);
     }
-    if let Some(b) = batch {
+    if let Some(b) = f.batch_size {
         argv.extend(["--batch-size".to_owned(), b.to_string()]);
     }
     argv
+}
+
+/// The runtime name, port, context length and batch size a launch configures.
+pub(crate) fn runtime_facts(settings: &Runtime) -> (&'static str, u16, u32, Option<u32>) {
+    match settings {
+        Runtime::LlamaCpp(x) => ("llama.cpp", x.port, x.context_length, x.batch_size),
+        Runtime::Vllm(x) => ("vllm", x.port, x.context_length, x.max_num_seqs),
+    }
+}
+
+/// The agent's argv for one host instance, scraping its loopback port.
+fn agent_argv(
+    s: &TelemetrySidecar,
+    d: &Descriptor,
+    plan: &LaunchPlan,
+    anon: AnonDeploymentId,
+) -> Vec<String> {
+    let (runtime, port, context, batch) = runtime_facts(&plan.settings);
+    argv_for(
+        s,
+        &Facts {
+            source: SourceKind::Local,
+            metrics_url: format!("http://127.0.0.1:{port}/metrics"),
+            runtime,
+            context_length: context,
+            batch_size: batch,
+            descriptor: d,
+        },
+        anon,
+    )
 }
 
 impl SidecarPlanner for TelemetrySidecar {
@@ -366,6 +426,41 @@ impl SidecarPlanner for TelemetrySidecar {
 }
 
 impl TelemetrySidecar {
+    /// The job for a cloud deployment: the agent pointed at its endpoint, with
+    /// the provider credentials `env` in the job's environment (never argv).
+    fn cloud_spec(
+        &self,
+        req: &CloudAgent,
+        anon: AnonDeploymentId,
+        env: Vec<(String, String)>,
+    ) -> ServiceSpec {
+        let mut argv = argv_for(
+            self,
+            &Facts {
+                source: req.kind,
+                metrics_url: format!("{}/metrics", req.endpoint.trim_end_matches('/')),
+                runtime: req.runtime,
+                context_length: req.context_length,
+                batch_size: req.batch_size,
+                descriptor: &req.descriptor,
+            },
+            anon,
+        );
+        argv.extend(["--resource-id".to_owned(), req.resource_id.clone()]);
+        argv.extend([
+            "--idle-pause-secs".to_owned(),
+            req.idle_pause_secs.to_string(),
+        ]);
+        if let Some(region) = &req.region {
+            argv.extend(["--region".to_owned(), region.clone()]);
+        }
+        ServiceSpec {
+            label: sidecar_label(&req.main_label),
+            argv,
+            env,
+        }
+    }
+
     fn new(
         exe: PathBuf,
         endpoint: String,
@@ -380,23 +475,13 @@ impl TelemetrySidecar {
             let Some(d) = graph.deployments.iter().find(|d| d.id == item.deployment) else {
                 continue;
             };
-            let model = catalog.resolve_model(&d.model);
             descriptors.insert(
                 item.deployment.clone(),
-                Descriptor {
-                    model: model
-                        .as_ref()
-                        .map_or_else(|| "custom".to_owned(), |m| public_model_name(&m.model)),
-                    quantization: model
-                        .and_then(|m| m.model.artifact.quantization)
-                        .and_then(|q| serde_json::to_value(q).ok())
-                        .and_then(|v| v.as_str().map(str::to_owned)),
-                    provider: item
-                        .action
-                        .provider
-                        .clone()
-                        .unwrap_or_else(|| "local".to_owned()),
-                },
+                describe(
+                    catalog,
+                    d,
+                    item.action.provider.as_deref().unwrap_or("local"),
+                ),
             );
         }
         Self {
@@ -445,6 +530,17 @@ pub(crate) trait TelemetryHooks: Sync {
         catalog: &dyn Catalog,
         result: &PlanResult,
     ) -> Option<Arc<dyn SidecarPlanner>>;
+    /// The job for the cloud deployment `req`, which reads metrics with
+    /// `gateway_key` (RunPod's bearer) and the provider credentials in the
+    /// environment; `None` unless consent is on and the credentials are there.
+    ///
+    /// # Errors
+    /// Why no agent can be started, for a note (names, never values).
+    fn cloud_agent(
+        &self,
+        req: &CloudAgent,
+        gateway_key: Option<&str>,
+    ) -> Result<Option<ServiceSpec>, String>;
     /// Delete every agent's queue.
     fn clear_queues(&self);
     /// An instance (and so its agent) is confirmed stopped for good: drop its
@@ -486,6 +582,43 @@ impl TelemetryHooks for HostTelemetry {
         )))
     }
 
+    fn cloud_agent(
+        &self,
+        req: &CloudAgent,
+        gateway_key: Option<&str>,
+    ) -> Result<Option<ServiceSpec>, String> {
+        let Some(store) = ConfigStore::host() else {
+            return Ok(None);
+        };
+        if !consent_on(store.path()) {
+            return Ok(None);
+        }
+        let (Some(endpoint), Some(data), Some(exe)) = (
+            endpoint_from(&|k: &str| std::env::var(k).ok()),
+            data_dir(),
+            stable_exe(),
+        ) else {
+            return Ok(None);
+        };
+        let env = cloud::credentials(req.kind, &|k| std::env::var(k).ok(), gateway_key)?;
+        let identity = Identity::new(FileIdentity::new(&data));
+        // As for a host deployment, the CLI creates the ids; the agent reads.
+        let (Ok(_), Ok(anon)) = (
+            identity.install_id(),
+            identity.deployment_id(&DeploymentId::new(&req.main_label)),
+        ) else {
+            return Ok(None);
+        };
+        let planner = TelemetrySidecar {
+            exe,
+            endpoint,
+            config: store.path().to_path_buf(),
+            data,
+            descriptors: HashMap::new(),
+        };
+        Ok(Some(planner.cloud_spec(req, anon, env)))
+    }
+
     fn clear_queues(&self) {
         if let Some(data) = data_dir() {
             let _ = std::fs::remove_dir_all(queue_dir(&data));
@@ -504,9 +637,24 @@ impl TelemetryHooks for HostTelemetry {
 /// `amicu telemetry-agent` arguments, written by apply into the sidecar job.
 #[derive(Debug, Clone, clap::Args)]
 pub(crate) struct AgentArgs {
-    /// The server's loopback metrics URL (`http://127.0.0.1:<port>/metrics`).
+    /// The server's metrics URL: `http://127.0.0.1:<port>/metrics`, or for a
+    /// cloud deployment its provider endpoint's `https://.../metrics`.
     #[arg(long)]
     metrics_url: String,
+    /// Where the metrics come from.
+    #[arg(long, value_enum, default_value_t = SourceKind::Local)]
+    source: SourceKind,
+    /// Cloud only: the Modal app id or RunPod endpoint id the provider is
+    /// asked whether a replica is running.
+    #[arg(long)]
+    resource_id: Option<String>,
+    /// Cloud only: stop scraping this long after an idle scrape, so the
+    /// deployment can scale down.
+    #[arg(long, default_value_t = 0)]
+    idle_pause_secs: u64,
+    /// Cloud only: the provider's region code.
+    #[arg(long)]
+    region: Option<String>,
     /// The deployment's anonymous id.
     #[arg(long)]
     deployment_id: String,
@@ -541,6 +689,7 @@ struct Static {
     model: ModelInfo,
     runtime: RuntimeInfo,
     provider: Option<Label>,
+    region: Option<Label>,
     context_length: Option<u32>,
     batch_size: Option<u32>,
 }
@@ -551,8 +700,12 @@ impl Static {
         let deployment_id: AnonDeploymentId =
             serde_json::from_value(serde_json::Value::String(a.deployment_id.clone()))
                 .map_err(|_| bad("--deployment-id"))?;
-        if !is_loopback_metrics_url(&a.metrics_url) {
-            return Err(bad("--metrics-url (must be loopback)"));
+        let url_ok = match a.source {
+            SourceKind::Local => is_loopback_metrics_url(&a.metrics_url),
+            kind => cloud::is_cloud_metrics_url(kind, &a.metrics_url),
+        };
+        if !url_ok {
+            return Err(bad("--metrics-url (must be loopback, or the provider's)"));
         }
         if !a.endpoint.starts_with("https://") {
             return Err(bad("--endpoint (must be https)"));
@@ -573,6 +726,12 @@ impl Static {
                 .provider
                 .as_deref()
                 .and_then(TelemetryReport::provider_label),
+            // Only Modal has regions in the report schema.
+            region: a
+                .region
+                .as_deref()
+                .filter(|_| a.provider.as_deref() == Some("modal"))
+                .and_then(Label::sanitized),
             context_length: a.context_length,
             batch_size: a.batch_size,
         })
@@ -595,7 +754,7 @@ impl Static {
             model: self.model.clone(),
             runtime: self.runtime.clone(),
             provider: self.provider.clone(),
-            region: None,
+            region: self.region.clone(),
             context_length: self.context_length,
             batch_size: self.batch_size,
             metrics: closed.metrics,
@@ -643,13 +802,16 @@ fn gpu_label(name: &str, vram_bytes: Option<u64>) -> Option<String> {
 
 /// Static hardware facts from one probe: model, count, per-device memory and
 /// CPU cores. No serials, bus ids or host names exist in the probe output.
-fn hardware_info(sample: &amicu_telemetry::hardware::HardwareSample) -> HardwareInfo {
+/// `local`: the probe ran on this machine, so its core count is this
+/// machine's (a cloud container's is not known, and is left out).
+fn hardware_info(sample: &amicu_telemetry::hardware::HardwareSample, local: bool) -> HardwareInfo {
     let accs = &sample.accelerators;
     let count = u32::try_from(accs.len()).unwrap_or(u32::MAX);
     let mut info = HardwareInfo {
         vram_bytes: accs.iter().filter_map(|a| a.mem_total_bytes).max(),
-        cpu_cores: std::thread::available_parallelism()
-            .ok()
+        cpu_cores: local
+            .then(|| std::thread::available_parallelism().ok())
+            .flatten()
             .and_then(|n| u32::try_from(n.get()).ok()),
         memory_bytes: sample.host.mem_limit_bytes,
         ..HardwareInfo::default()
@@ -714,9 +876,9 @@ impl Transport for HttpTransport {
     }
 }
 
-/// `GET` the loopback metrics text, bounded in time and size.
-async fn scrape(client: &reqwest::Client, url: &str) -> Option<(ScrapeRuntime, Scrape)> {
-    let mut response = client.get(url).send().await.ok()?;
+/// Send `request` for the metrics text, bounded in time and size.
+pub(super) async fn scrape(request: reqwest::RequestBuilder) -> Option<(ScrapeRuntime, Scrape)> {
+    let mut response = request.send().await.ok()?;
     if !response.status().is_success() {
         return None;
     }
@@ -752,67 +914,156 @@ fn consent_on(config: &Path) -> bool {
 pub(crate) fn run(args: &AgentArgs) -> Result<u8, CliError> {
     let fixed = Static::from_args(args)?;
     let transport = HttpTransport::new(&args.endpoint)?;
+    let source = Source::from_args(args)?;
     let runtime = crate::commands::build_runtime()?;
-    runtime.block_on(agent_loop(args, &fixed, &transport))
+    runtime.block_on(agent_loop(args, fixed, &transport, source))
+}
+
+/// Where each tick's scrape and hardware sample come from.
+enum Source {
+    /// The server's own loopback port, on this machine.
+    Local { url: String },
+    /// A cloud deployment (never woken: see [`cloud`]).
+    Remote(Box<Remote>),
+}
+
+impl Source {
+    fn from_args(a: &AgentArgs) -> Result<Self, CliError> {
+        let bad = |what: &str| CliError::Message(format!("telemetry-agent: {what}"));
+        let remote = |gate: Box<dyn cloud::Gate>| {
+            let auth =
+                Auth::from_env(a.source).ok_or_else(|| bad("provider credentials not set"))?;
+            Remote::new(a.metrics_url.clone(), auth, gate, a.idle_pause_secs)
+                .map(|r| Self::Remote(Box::new(r)))
+                .map_err(|e| bad(&format!("scrape client: {e}")))
+        };
+        let id = a.resource_id.as_deref();
+        match a.source {
+            SourceKind::Local => Ok(Self::Local {
+                url: a.metrics_url.clone(),
+            }),
+            SourceKind::Modal => remote(Box::new(
+                id.and_then(ModalGate::from_env)
+                    .ok_or_else(|| bad("Modal app id or credentials not set"))?,
+            )),
+            SourceKind::RunpodEndpoint => remote(Box::new(
+                id.and_then(RunPodGate::from_env)
+                    .ok_or_else(|| bad("RunPod endpoint id or key not set"))?,
+            )),
+            SourceKind::RunpodPod => remote(Box::new(cloud::AlwaysUp)),
+        }
+    }
+
+    async fn poll(&mut self, local: &reqwest::Client, now: u64) -> Polled {
+        match self {
+            Self::Local { url } => Polled {
+                scrape: scrape(local.get(url.as_str())).await.map(|(_, s)| s),
+                hardware: tokio::task::spawn_blocking(|| {
+                    amicu_telemetry::hardware::probe_local(amicu_telemetry::hardware::PROBE_TIMEOUT)
+                        .ok()
+                })
+                .await
+                .ok()
+                .flatten(),
+            },
+            Self::Remote(remote) => remote.poll(now).await,
+        }
+    }
+}
+
+/// One agent: what it has collected so far and where it sends it.
+struct Agent<'a> {
+    config: &'a Path,
+    fixed: Static,
+    transport: &'a HttpTransport,
+    queue: DiskQueue,
+    identity: FileIdentity,
+    /// Whether consent resolves to on; read again at every step.
+    consent: fn(&Path) -> bool,
+    aggregator: WindowAggregator,
+    uploader: Uploader,
+    backoff: Backoff,
+    hardware: HardwareInfo,
+    next_upload: u64,
+}
+
+impl<'a> Agent<'a> {
+    fn new(args: &'a AgentArgs, fixed: Static, transport: &'a HttpTransport) -> Self {
+        let queue = DiskQueue::new(
+            queue_dir(&args.data_dir).join(format!("{}.jsonl", fixed.deployment_id)),
+            QueueLimits::DEFAULT,
+        );
+        Self {
+            config: &args.config,
+            fixed,
+            transport,
+            queue,
+            // Read-only: apply created the install id.
+            identity: FileIdentity::new(&args.data_dir),
+            consent: consent_on,
+            aggregator: WindowAggregator::new(),
+            uploader: Uploader::new(),
+            backoff: Backoff::new(BACKOFF_BASE, BACKOFF_MAX),
+            hardware: HardwareInfo::default(),
+            // The first upload lands at a random point in the first hour, so
+            // agents started together (a reboot) do not upload together.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            next_upload: unix_now() + (jitter() * 3600.0) as u64,
+        }
+    }
+
+    /// One tick, at `now`: collect, queue a closed window, upload when due.
+    async fn step(&mut self, source: &mut Source, local: &reqwest::Client, now: u64) {
+        if !(self.consent)(self.config) {
+            // Opted out since apply: collect nothing, keep nothing, send nothing.
+            let _ = self.queue.clear();
+            self.aggregator = WindowAggregator::new();
+            return;
+        }
+        let polled = source.poll(local, now).await;
+        if let Some(s) = &polled.hardware
+            && self.hardware == HardwareInfo::default()
+        {
+            self.hardware = hardware_info(s, matches!(source, Source::Local { .. }));
+        }
+        if let Some(closed) = self
+            .aggregator
+            .observe(now, polled.scrape, polled.hardware.as_ref())
+            && let Ok(Some(install_id)) = self.identity.load_install_id()
+        {
+            let report = self.fixed.report(install_id, &self.hardware, closed);
+            if report.validate().is_ok() {
+                let _ = self.queue.push(report, now);
+            }
+        }
+        if now >= self.next_upload {
+            self.next_upload = upload(
+                &mut self.uploader,
+                &mut self.backoff,
+                &self.queue,
+                self.transport,
+                (self.consent, self.config),
+            )
+            .await;
+        }
+    }
 }
 
 async fn agent_loop(
     args: &AgentArgs,
-    fixed: &Static,
+    fixed: Static,
     transport: &HttpTransport,
+    mut source: Source,
 ) -> Result<u8, CliError> {
-    let scraper = reqwest::Client::builder()
+    let local = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .timeout(SCRAPE_TIMEOUT)
         .build()
         .map_err(|e| CliError::Message(format!("telemetry scrape client: {e}")))?;
-    let queue = DiskQueue::new(
-        queue_dir(&args.data_dir).join(format!("{}.jsonl", fixed.deployment_id)),
-        QueueLimits::DEFAULT,
-    );
-    // Read-only: apply created the install id.
-    let identity = FileIdentity::new(&args.data_dir);
-    let mut aggregator = WindowAggregator::new();
-    let mut uploader = Uploader::new();
-    let mut backoff = Backoff::new(BACKOFF_BASE, BACKOFF_MAX);
-    let mut hardware = HardwareInfo::default();
-    // The first upload lands at a random point in the first hour, so agents
-    // started together (a reboot) do not upload together.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let mut next_upload = unix_now() + (jitter() * 3600.0) as u64;
+    let mut agent = Agent::new(args, fixed, transport);
     loop {
-        let now = unix_now();
-        if consent_on(&args.config) {
-            let metrics = scrape(&scraper, &args.metrics_url).await.map(|(_, s)| s);
-            let sample = tokio::task::spawn_blocking(|| {
-                amicu_telemetry::hardware::probe_local(amicu_telemetry::hardware::PROBE_TIMEOUT)
-                    .ok()
-            })
-            .await
-            .ok()
-            .flatten();
-            if let Some(s) = &sample
-                && hardware == HardwareInfo::default()
-            {
-                hardware = hardware_info(s);
-            }
-            if let Some(closed) = aggregator.observe(now, metrics, sample.as_ref())
-                && let Ok(Some(install_id)) = identity.load_install_id()
-            {
-                let report = fixed.report(install_id, &hardware, closed);
-                if report.validate().is_ok() {
-                    let _ = queue.push(report, now);
-                }
-            }
-            if now >= next_upload {
-                next_upload = upload(&mut uploader, &mut backoff, &queue, transport, args).await;
-            }
-        } else {
-            // Opted out since apply: collect nothing, keep nothing, send nothing.
-            let _ = queue.clear();
-            aggregator = WindowAggregator::new();
-        }
+        agent.step(&mut source, &local, unix_now()).await;
         tokio::time::sleep(SCRAPE_EVERY).await;
     }
 }
@@ -824,12 +1075,12 @@ async fn upload(
     backoff: &mut Backoff,
     queue: &DiskQueue,
     transport: &HttpTransport,
-    args: &AgentArgs,
+    (consent, config): (fn(&Path) -> bool, &Path),
 ) -> u64 {
     let hourly = || unix_now() + (UPLOAD_EVERY_MIN_S + jitter() * UPLOAD_JITTER_S) as u64;
     // Drain in batches while the server accepts; stop at the first failure.
     loop {
-        if !consent_on(&args.config) {
+        if !consent(config) {
             return hourly();
         }
         match uploader.upload_once(queue, transport, unix_now()).await {
@@ -944,6 +1195,10 @@ mod tests {
     fn args() -> AgentArgs {
         AgentArgs {
             metrics_url: "http://127.0.0.1:8080/metrics".into(),
+            source: SourceKind::Local,
+            resource_id: None,
+            idle_pause_secs: 0,
+            region: None,
             deployment_id: AnonDeploymentId::generate().to_uuid_string(),
             runtime: "llama.cpp".into(),
             model: "custom".into(),
@@ -1295,6 +1550,231 @@ mod tests {
             Attempt::Kept
         );
         assert_eq!(queue.load().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn cloud_request(kind: SourceKind) -> CloudAgent {
+        CloudAgent {
+            kind,
+            main_label: "io.amicu.llama.a1b2c3d4.chat".into(),
+            resource_id: "ap-abc123".into(),
+            endpoint: "https://ws--app-server.us-east.modal.direct/".into(),
+            runtime: "vllm",
+            descriptor: Descriptor {
+                model: "Qwen/Qwen3.5-35B-A3B".into(),
+                quantization: Some("int4".into()),
+                provider: "modal".into(),
+            },
+            region: Some("eu-west".into()),
+            context_length: 32768,
+            batch_size: Some(64),
+            idle_pause_secs: 1020,
+        }
+    }
+
+    #[test]
+    fn the_cloud_agent_job_keeps_credentials_in_its_environment_and_parses_back() {
+        let s = sidecar();
+        let anon = AnonDeploymentId::generate();
+        let creds = vec![(
+            "MODAL_TOKEN_SECRET".to_owned(),
+            "as-secret-value".to_owned(),
+        )];
+        let spec = s.cloud_spec(&cloud_request(SourceKind::Modal), anon, creds.clone());
+        assert_eq!(spec.label, "io.amicu.telemetry.a1b2c3d4.chat");
+        assert_eq!(spec.env, creds);
+        assert!(
+            !spec.argv.iter().any(|a| a.contains("as-secret-value")),
+            "credentials never reach argv"
+        );
+        assert!(
+            !spec.argv.iter().any(|a| a.contains("chat")),
+            "no deployment name"
+        );
+        assert!(
+            spec.argv
+                .contains(&"https://ws--app-server.us-east.modal.direct/metrics".to_owned())
+        );
+        let parsed = <P as clap::Parser>::try_parse_from(&spec.argv[1..])
+            .unwrap()
+            .a;
+        assert_eq!(parsed.source, SourceKind::Modal);
+        assert_eq!(parsed.resource_id.as_deref(), Some("ap-abc123"));
+        assert_eq!(parsed.idle_pause_secs, 1020);
+        let fixed = Static::from_args(&parsed).unwrap();
+        assert_eq!(fixed.deployment_id, anon);
+        assert_eq!(fixed.provider.as_ref().unwrap().as_str(), "modal");
+        assert_eq!(fixed.region.as_ref().unwrap().as_str(), "eu-west");
+        assert_eq!(fixed.batch_size, Some(64));
+    }
+
+    #[test]
+    fn a_cloud_agent_only_scrapes_its_providers_hosts() {
+        let mut a = args();
+        a.source = SourceKind::Modal;
+        a.provider = Some("modal".into());
+        a.metrics_url = "https://ws--app-server.us-east.modal.direct/metrics".into();
+        assert!(Static::from_args(&a).is_ok());
+        a.metrics_url = "https://evil.example/metrics".into();
+        assert!(
+            Static::from_args(&a).is_err(),
+            "credentials go nowhere else"
+        );
+        // A local agent is still loopback-only.
+        let mut b = args();
+        b.metrics_url = "https://ws--app-server.us-east.modal.direct/metrics".into();
+        assert!(Static::from_args(&b).is_err());
+        // RunPod has no region in the report schema, and is `other` there.
+        let mut c = args();
+        c.source = SourceKind::RunpodPod;
+        c.provider = Some("runpod".into());
+        c.region = Some("eu-ro-1".into());
+        c.metrics_url = "https://p1-8000.proxy.runpod.net/metrics".into();
+        let fixed = Static::from_args(&c).unwrap();
+        assert_eq!(fixed.provider.as_ref().unwrap().as_str(), "other");
+        assert!(fixed.region.is_none());
+    }
+
+    fn cloud_args(dir: &Path, config: &Path) -> AgentArgs {
+        let mut a = args();
+        a.source = SourceKind::RunpodPod;
+        a.provider = Some("runpod".into());
+        a.runtime = "vllm".into();
+        a.model = "Qwen/Qwen3.5-9B".into();
+        a.metrics_url = "https://p1-8000.proxy.runpod.net/metrics".into();
+        a.config = config.to_path_buf();
+        a.data_dir = dir.to_path_buf();
+        a
+    }
+
+    #[tokio::test]
+    async fn a_cloud_deployment_is_scraped_rolled_up_and_uploaded() {
+        use crate::commands::telemetry_cloud::test_support::{
+            remote, serve as serve_metrics, vllm,
+        };
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        const T0: u64 = 1_750_000_200;
+        let dir = std::env::temp_dir().join(format!("amicu-agent-cloud-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // The mock endpoint and the mock ingestion service.
+        let (metrics_url, scraped) = serve_metrics(vec![
+            vllm(10, 1_000),
+            vllm(12, 1_400),
+            vllm(15, 2_000),
+            vllm(19, 3_000),
+            vllm(19, 3_000),
+            vllm(24, 4_000),
+        ])
+        .await;
+        let (upload_url, uploads) = serve(vec!["202 Accepted"]).await;
+        let up = Arc::new(AtomicBool::new(true));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let mut source = Source::Remote(Box::new(remote(&metrics_url, &up, &asked, 0)));
+        let args = cloud_args(&dir, &dir.join("telemetry.json"));
+        let fixed = Static::from_args(&args).unwrap();
+        let install = Identity::new(FileIdentity::new(&dir)).install_id().unwrap();
+        let transport = HttpTransport::new(&upload_url).unwrap();
+        let mut agent = Agent::new(&args, fixed, &transport);
+        agent.consent = |_| true;
+        let local = reqwest::Client::new();
+        // A minute apart across a window boundary (T0 + 300).
+        for step in 0..6 {
+            agent.step(&mut source, &local, T0 + 60 * step).await;
+        }
+        assert_eq!(scraped.lock().unwrap().len(), 6, "one scrape a minute");
+        assert!(
+            scraped.lock().unwrap()[0]
+                .to_ascii_lowercase()
+                .contains("authorization: bearer k-1"),
+            "scraped with the provider credential"
+        );
+        assert_eq!(agent.queue.load().unwrap().len(), 1, "one closed window");
+        // Upload is due: the batch reaches the ingestion service.
+        agent.next_upload = 0;
+        agent.step(&mut source, &local, T0 + 360).await;
+        let sent = uploads.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1);
+        assert!(
+            sent[0].starts_with("POST /v1/telemetry/rollups"),
+            "{}",
+            sent[0]
+        );
+        let body = &sent[0][sent[0].find("\r\n\r\n").unwrap() + 4..];
+        let batch = amicu_telemetry::TelemetryBatch::from_json(body).unwrap();
+        assert_eq!(batch.reports.len(), 1);
+        let r = &batch.reports[0];
+        assert_eq!(r.install_id, install);
+        assert_eq!(r.window.start_unix_s, T0);
+        assert_eq!(r.provider.as_ref().unwrap().as_str(), "other");
+        assert_eq!(r.runtime.name.as_str(), "vllm");
+        assert_eq!(r.model.name.as_str(), "Qwen/Qwen3.5-9B");
+        // Deltas against the baseline scrape: 1_000 -> 3_000 tokens, 10 -> 19 requests.
+        assert_eq!(r.metrics.output_tokens, 2_000);
+        assert_eq!(r.metrics.requests, Some(9));
+        // Aggregates only: nothing that identifies the endpoint, its owner
+        // or the credential is in what was sent.
+        for secret in ["k-1", "proxy.runpod.net", "p1-8000", "127.0.0.1"] {
+            assert!(!body.contains(secret), "{secret} leaked into the upload");
+        }
+        assert!(
+            agent.queue.load().unwrap().is_empty(),
+            "202 drained the queue"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn an_agent_whose_consent_is_gone_scrapes_and_sends_nothing() {
+        use crate::commands::telemetry_cloud::test_support::{
+            remote, serve as serve_metrics, vllm,
+        };
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        let dir = std::env::temp_dir().join(format!("amicu-agent-optout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (metrics_url, scraped) = serve_metrics(vec![vllm(1, 10)]).await;
+        let (upload_url, uploads) = serve(vec!["202 Accepted"]).await;
+        let up = Arc::new(AtomicBool::new(true));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let mut source = Source::Remote(Box::new(remote(&metrics_url, &up, &asked, 0)));
+        let args = cloud_args(&dir, &dir.join("telemetry.json"));
+        let fixed = Static::from_args(&args).unwrap();
+        let transport = HttpTransport::new(&upload_url).unwrap();
+        let mut agent = Agent::new(&args, fixed, &transport);
+        agent.consent = |_| false;
+        // Something buffered before the opt-out is deleted, not sent.
+        let closed = ClosedWindow {
+            window: Window {
+                start_unix_s: 1_750_000_200,
+                duration_s: WINDOW_SECONDS,
+            },
+            metrics: Rollup {
+                output_tokens: 5,
+                ..Rollup::default()
+            },
+        };
+        let report = agent
+            .fixed
+            .report(InstallId::generate(), &HardwareInfo::default(), closed);
+        agent.queue.push(report, 1_750_000_200).unwrap();
+        agent.next_upload = 0;
+        agent
+            .step(
+                &mut Source::Local { url: String::new() },
+                &reqwest::Client::new(),
+                1_750_000_500,
+            )
+            .await;
+        agent
+            .step(&mut source, &reqwest::Client::new(), 1_750_000_560)
+            .await;
+        assert_eq!(agent.queue.load().unwrap().len(), 0);
+        assert!(scraped.lock().unwrap().is_empty(), "no scrape");
+        assert_eq!(
+            asked.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no control-plane call"
+        );
+        assert!(uploads.lock().unwrap().is_empty(), "no upload");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
