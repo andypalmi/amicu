@@ -106,59 +106,58 @@ pub fn resolve_shape(
             }),
         })
     };
-    match machine {
-        Some(name) => match catalog.machine_type(name) {
-            Some(m) => {
-                if m.gpu != model.name {
-                    return Err(PlacementError::GpuMismatch {
-                        machine: name.to_owned(),
-                        has: m.gpu.to_owned(),
-                        gpu: model.name.to_owned(),
-                    });
-                }
-                if m.gpu_count() != Some(count) {
-                    return Err(PlacementError::BadCount {
-                        machine: name.to_owned(),
-                        gpu: model.name.to_owned(),
-                        count,
-                    });
-                }
-                if !m.supports(provisioning) {
-                    return Err(PlacementError::ProvisioningUnsupported {
-                        machine: name.to_owned(),
-                        provisioning: label(provisioning),
-                        offered: offered(m.consumption),
-                    });
-                }
-                Ok(Shape {
-                    machine_type: name.to_owned(),
-                    accelerator: None,
-                })
-            }
-            None if name.starts_with("n1-") => n1(name),
-            None => Err(PlacementError::UnknownMachine {
-                machine: name.to_owned(),
-            }),
-        },
-        None => {
-            if let Some(m) = catalog
-                .machine_types_for_gpu(gpu, count)
-                .into_iter()
-                .find(|m| m.supports(provisioning))
-            {
-                return Ok(Shape {
-                    machine_type: m.name.to_owned(),
-                    accelerator: None,
-                });
-            }
-            let name = format!("n1-standard-{}", 4 * count);
-            n1(&name).map_err(|_| PlacementError::NoMachine {
-                gpu: model.name.to_owned(),
-                count,
-                provisioning: label(provisioning),
-            })
+    let Some(name) = machine else {
+        if let Some(m) = catalog
+            .machine_types_for_gpu(gpu, count)
+            .into_iter()
+            .find(|m| m.supports(provisioning))
+        {
+            return Ok(Shape {
+                machine_type: m.name.to_owned(),
+                accelerator: None,
+            });
         }
+        let name = format!("n1-standard-{}", 4 * count);
+        return n1(&name).map_err(|_| PlacementError::NoMachine {
+            gpu: model.name.to_owned(),
+            count,
+            provisioning: label(provisioning),
+        });
+    };
+    let Some(m) = catalog.machine_type(name) else {
+        return if name.starts_with("n1-") {
+            n1(name)
+        } else {
+            Err(PlacementError::UnknownMachine {
+                machine: name.to_owned(),
+            })
+        };
+    };
+    if m.gpu != model.name {
+        return Err(PlacementError::GpuMismatch {
+            machine: name.to_owned(),
+            has: m.gpu.to_owned(),
+            gpu: model.name.to_owned(),
+        });
     }
+    if m.gpu_count() != Some(count) {
+        return Err(PlacementError::BadCount {
+            machine: name.to_owned(),
+            gpu: model.name.to_owned(),
+            count,
+        });
+    }
+    if !m.supports(provisioning) {
+        return Err(PlacementError::ProvisioningUnsupported {
+            machine: name.to_owned(),
+            provisioning: label(provisioning),
+            offered: offered(m.consumption),
+        });
+    }
+    Ok(Shape {
+        machine_type: name.to_owned(),
+        accelerator: None,
+    })
 }
 
 fn offered(options: &[Provisioning]) -> String {
@@ -257,7 +256,6 @@ mod tests {
             zones.iter().all(|z| z.starts_with("europe-west4-")),
             "{zones:?}"
         );
-        assert!(!zones.is_empty());
         assert!(candidate_zones("t4", None, None, None).is_err());
         assert_eq!(
             candidate_zones("t4", None, None, Some(zones[0])).unwrap(),

@@ -15,6 +15,7 @@ pub mod client;
 pub mod cloudrun;
 pub mod compute;
 pub mod error;
+pub mod gce;
 pub mod labels;
 pub mod operations;
 pub mod secrets;
@@ -30,6 +31,7 @@ pub use catalog::{GcpCatalog, Provisioning as CatalogProvisioning, resolve_model
 pub use client::{COMPUTE_BASE_URL, GcpClient, RUN_BASE_URL};
 pub use compute::Provisioning as VmProvisioning;
 pub use error::GcpError;
+pub use gce::{GceLaunch, GceRecord, GceSupervisor, GceTiming};
 pub use labels::{
     OWNER_LABEL, ensure_owned, has_owner_marker, owner_labels, owner_marker, sanitize_label_value,
 };

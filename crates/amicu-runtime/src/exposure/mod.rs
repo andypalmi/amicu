@@ -75,6 +75,13 @@ pub enum GatewayAuth {
     /// <api_key>` and nothing else; anonymous requests get `401`.
     #[serde(rename = "runpod_bearer")]
     RunPodBearer,
+    /// A Compute Engine VM serving vLLM directly: no provider gateway, the
+    /// runtime's own middleware checks `Authorization: Bearer <api_key>` on
+    /// every route but `GET /health`. The endpoint is plain HTTP (the key
+    /// crosses the network unencrypted) until TLS is added; the firewall rule
+    /// limits who can connect. No extra headers.
+    #[serde(rename = "gce_bearer")]
+    GceBearer,
 }
 
 impl GatewayAuth {
@@ -83,7 +90,7 @@ impl GatewayAuth {
     #[must_use]
     pub fn needs_extra_headers(self) -> bool {
         match self {
-            Self::None | Self::RunPodBearer => false,
+            Self::None | Self::RunPodBearer | Self::GceBearer => false,
             Self::ModalProxyToken => true,
         }
     }

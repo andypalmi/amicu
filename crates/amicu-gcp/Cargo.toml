@@ -12,6 +12,10 @@ description = "Google Cloud foundation for amicu: ADC access tokens, REST client
 amicu-providers = { path = "../amicu-providers" }
 # `project_app_name`: the resource-name scheme shared with the other backends.
 amicu-core = { path = "../amicu-core" }
+# `GceSupervisor` implements `amicu_llamacpp::ProcessSupervisor` and renders the
+# launch with the shared remote-container rewrite, like the RunPod pod supervisor.
+amicu-llamacpp = { path = "../amicu-llamacpp" }
+amicu-runtime = { path = "../amicu-runtime" }
 async-trait = "0.1"
 # Application Default Credentials and service-account impersonation: Google's
 # own client (builds on reqwest 0.13 / rustls aws-lc-rs, like the rest of the
