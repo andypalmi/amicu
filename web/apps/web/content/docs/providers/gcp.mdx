@@ -1,54 +1,79 @@
 ---
 title: GCP
-description: "GPU Compute Engine instances on Google Cloud. Planned: catalog data only."
+description: Deploy vLLM to a Google Compute Engine GPU VM (Spot by default) with an API key, a firewall rule limited to your IP, and a lifetime backstop.
 ---
 
 <ProviderFacts slug="gcp" ids="gcp" />
 
-<Callout type="info" title="Planned: catalog data only">
-  amicu carries region and GPU catalog data for this provider, which `validate` and `plan` use for residency and cost checks. Provisioning is not built, and `amicu apply` cannot deploy to it.
-</Callout>
-
 ## Use this provider
 
 ```hcl
-resource "hardware_profile" "gcp_gpu" {
+resource "hardware_profile" "gcp_t4" {
   provider = "gcp"
   region   = "europe-west4"
   accelerator {
     kind   = "gpu"
-    model  = "l4"
+    model  = "t4"
     count  = 1
-    memory = "24GiB"
+    memory = "16GiB"
   }
-  memory = "32GiB"
+  memory = "15GiB"
+  gcp {
+    project          = "my-project-id"
+    machine_type     = "n1-standard-4"
+    provisioning     = "spot"
+    max_run_duration = "2h"
+  }
 }
 ```
 
-Running `amicu apply` against this profile fails before anything starts. To check it today, run `amicu validate` and `amicu plan`.
+A complete example is in `examples/gcp-t4-spot`.
 
 ## Overview
 
-Google Cloud is a global hyperscaler. amicu carries its EU regions and a few non-EU regions, plus a slice of the GPU Compute Engine catalog with on-demand and Spot rates. The provisioning surface only simulates an instance lifecycle in memory; no Google Cloud API is called.
+`apply` creates one Compute Engine VM per deployment, with the GPU attached (N1) or built in (A2, A3, G2, G4), and one firewall rule for the serving port. A startup script runs the vLLM container behind amicu's key check: every route except `GET /health` needs the deployment's `api_key`. Only `runtime = "vllm"` is supported; llama.cpp is rejected (`AMICU-CAP-016`).
+
+<Callout type="warning" title="Plain HTTP for now">
+  The endpoint is `http://<VM IP>:8000`. TLS is not built yet, so the `api_key` crosses the network unencrypted. The firewall rule allows only the addresses in `allowed_source_cidrs`, or by default this machine's public IP as a `/32`. amicu never opens the port to `0.0.0.0/0` unless you list it.
+</Callout>
+
+The VM is deleted by Compute Engine after `max_run_duration` (default 8 hours) whatever else happens, and a preempted Spot VM is deleted too. `apply` writes the VM's record to state before it creates anything, tries the next zone of the region on a capacity stockout (at most 4 zones), and waits until vLLM answers. `amicu destroy` deletes the VM and then the firewall rule, and only resources that carry amicu's owner marker (a label on the VM, a marker in the rule's description). A resource of the same name without it is left alone and reported.
 
 ## Setup and credentials
 
-Nothing to set up yet: nothing connects to Google Cloud today. The adapter is modelled on a service-account credential.
+amicu uses Application Default Credentials: run `gcloud auth application-default login`, or set `GOOGLE_APPLICATION_CREDENTIALS`. To act as a service account, set `impersonate_service_account` in the block (or `GOOGLE_IMPERSONATE_SERVICE_ACCOUNT`). `apply` makes one read of the project before it writes anything, so missing credentials fail first. The caller needs permission to create and delete instances and firewall rules in the project, and GPU quota in the region.
+
+| Variable | Needed for | Notes |
+|---|---|---|
+| `GOOGLE_APPLICATION_CREDENTIALS` (optional) | all commands | A service-account key file. Otherwise the `gcloud` login is used. |
+| The deployment's `api_key` secret, for example `CHAT_API_KEY` | `apply`, and every client call | A random key (`openssl rand -hex 32`). It is delivered to the VM as instance metadata until Secret Manager support lands, so anyone who can read the instance in the project can read it. |
+| `HF_TOKEN` (optional) | Gated Hugging Face repos | Delivered the same way. |
+| `AMICU_GCP_VLLM_IMAGE` (optional) | Override the vLLM image | Process-wide. |
 
 ## Configuration reference
 
+The `gcp {}` block on a `hardware_profile` with `provider = "gcp"`:
+
 | Argument | Type | Default | Required | Notes |
 |---|---|---|---|---|
-| `provider` | string | none | yes | `"gcp"`. |
-| `region` | string | none | no | One of the region codes below. Used for residency checks and cost estimates. |
-| `accelerator.kind` | string | none | yes (with `accelerator`) | `gpu`. |
-| `accelerator.model` | string | none | yes (with `accelerator`) | A GPU id from the table below, or any name that resolves to it (see [GPU names](/docs/configuration/hardware-profile#gpu-names)). |
-| `accelerator.count` | number | none | yes (with `accelerator`) | Number of accelerators. |
-| `accelerator.memory` | size | none | yes (with `accelerator`) | VRAM, for the fit check. |
-| `memory` | size | none | yes | Host RAM. |
-| `price.per_hour` | money block | none | no | Your own price, for cost planning. |
+| `project` | string | none | yes | Google Cloud project id (`AMICU-CAP-016` if missing). |
+| `backend` | string | `compute` | no | `compute`. `cloud_run` parses but `apply` cannot deploy it yet (`AMICU-CAP-019`). |
+| `zone` | string | first zone offering the GPU | no | Pins one zone. Otherwise the catalog zones of `region` that offer the GPU are tried in order. |
+| `machine_type` | string | smallest catalog machine for the GPU | no | For N1 GPUs (T4, V100, P4) an `n1-standard-N`; the default is `n1-standard-4` per GPU. |
+| `provisioning` | string | `spot` | no | `spot`, `flex_start` or `standard`. Not every machine offers every mode (`AMICU-CAP-018`, for example `standard` on `a3-highgpu-1g`). |
+| `max_run_duration` | duration | `8h` | no | 10m to 7d (120d unless `flex_start`). Compute Engine deletes the VM after it. |
+| `boot_disk_gb` | number | `100` | no | At least 50. |
+| `service_account` | string | none | no | Email of the account the VM runs as. None attached by default. |
+| `allowed_source_cidrs` | list | this machine's public IP `/32` | no | Who may reach the serving port. |
+| `impersonate_service_account` | string | none | no | Service account amicu acts as. |
 
-These are the generic [`hardware_profile`](/docs/configuration/hardware-profile) fields. There are no gcp-specific arguments.
+`region` is required unless `zone` is set, so the VM is placed where you expect. The profile's `region` and the project's `data_class` residency are checked against every candidate zone. A deployment on this provider runs one replica: `scaling {}` with more than 1 is rejected (`AMICU-CAP-016`).
+
+Other checks: an unknown GPU or one not offered in the zone or region is `AMICU-CAP-017`.
+
+## Operations
+
+`amicu plan` and `apply` compare state with Compute Engine. A VM that is gone or stopped (a Spot preemption, the `max_run_duration` backstop, a delete outside amicu) is reported as drift and marked pending: `apply` recreates it, `destroy` confirms its firewall rule is removed. `amicu orphans` lists VMs and firewall rules in the project that carry amicu's marker but that state does not record, with the `gcloud` command to delete each. It never deletes anything.
 
 ## GPUs and regions
 
@@ -72,14 +97,25 @@ These are the generic [`hardware_profile`](/docs/configuration/hardware-profile)
 
 ## Limits
 
-- Provisioning is not built, and not wired into `apply`.
-- Prices in the catalog are illustrative values, not live quotes. amicu does not sync live capacity or pricing yet, so cost estimates are indicative.
+- Plain HTTP, no TLS yet; the `api_key` and `HF_TOKEN` are instance metadata, not Secret Manager.
+- vLLM only, one VM per deployment, no `env` block, no metrics or logs through amicu.
+- Cloud Run is not supported by `apply` yet.
+- Prices in the catalog are illustrative values, not live quotes, so cost estimates are indicative.
 
 ## Troubleshooting
 
 <Accordions>
-  <Accordion title="apply says the provider is not supported">
-  Expected. The error reads `provider "gcp" is not supported by apply yet`. `apply` deploys to this machine, Modal and RunPod only. Provision the machine yourself, install the runtime there, and run amicu on it with the [`on_prem`](/docs/providers/local) provider. The endpoint then binds to loopback on that host.
+  <Accordion title="apply says no Google Cloud credentials were found">
+  Run `gcloud auth application-default login`, or set `GOOGLE_APPLICATION_CREDENTIALS` to a service-account key file. Nothing was created.
+  </Accordion>
+  <Accordion title="apply says no zone has capacity">
+  Compute Engine had no GPUs of that kind in the zones tried. Retry later, pick another `region` or `zone`, another GPU, or `provisioning = "flex_start"`. What the run created was deleted.
+  </Accordion>
+  <Accordion title="I cannot reach the endpoint">
+  The firewall rule allows only `allowed_source_cidrs`, or the public IP of the machine that ran `apply`. If your address changed, set `allowed_source_cidrs` and run `apply` again.
+  </Accordion>
+  <Accordion title="destroy refuses a VM or firewall rule">
+  It does not carry amicu's owner marker, so amicu will not touch it. Check it in the Google Cloud console; the record stays in state.
   </Accordion>
   <Accordion title="validate or plan rejects the region">
   The region code must be one the catalog lists, and its jurisdiction must satisfy your [`data_class`](/docs/configuration/data-class) residency constraint. An unknown code is not guessed at: the residency check fails closed. See [Residency](/docs/concepts/residency).
@@ -88,4 +124,4 @@ These are the generic [`hardware_profile`](/docs/configuration/hardware-profile)
 
 ## Source
 
-Adapter: [`crates/amicu-providers/src/gcp.rs`](https://github.com/andypalmi/amicu/blob/main/crates/amicu-providers/src/gcp.rs). Status of every provider: [Providers](/docs/providers).
+Supervisor: [`crates/amicu-gcp/src/gce.rs`](https://github.com/andypalmi/amicu/blob/main/crates/amicu-gcp/src/gce.rs). Catalog adapter: [`crates/amicu-providers/src/gcp.rs`](https://github.com/andypalmi/amicu/blob/main/crates/amicu-providers/src/gcp.rs). Status of every provider: [Providers](/docs/providers).
