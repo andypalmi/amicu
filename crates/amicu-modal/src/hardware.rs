@@ -164,7 +164,7 @@ impl ModalClient {
 
     /// Probes one container. Never returns a transport error: it becomes the
     /// `Err` text of the result.
-    async fn probe_container(&mut self, task_id: &str) -> Result<HardwareSample, String> {
+    pub async fn probe_container(&mut self, task_id: &str) -> Result<HardwareSample, String> {
         let command = amicu_telemetry::hardware::probe_command();
         debug_assert_eq!(command[2], PROBE_SCRIPT);
         let run = self.exec_capture(task_id, command, PROBE_TIMEOUT, MAX_PROBE_OUTPUT_BYTES);
