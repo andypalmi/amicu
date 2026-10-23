@@ -63,7 +63,7 @@ If the stored file exists but cannot be read, the question is skipped and the fi
 
 When the effective setting is on at `amicu apply` time, apply starts a second job next to each launchd (macOS) or systemd (Linux) deployment. The job is `io.amicu.telemetry.<project>.<deployment>`, and it runs `amicu telemetry-agent`. The job of a local deployment holds no secrets. It is stopped before its deployment whenever amicu stops, updates or destroys that deployment.
 
-For a Modal or RunPod deployment, apply starts the same job once the deployment serves, named after the deployment as for a local one. It reads `/metrics` from the provider endpoint instead of a loopback port, so its job definition holds the credentials it needs, as the job of a local deployment holds the endpoint `api_key`: your Modal token pair and Proxy Auth Token, or the RunPod key and the deployment's `api_key`. The file is private to you and is deleted when the agent stops. It is stopped and deleted when you destroy the deployment. A scrape is a request, so the agent first asks the provider whether a replica is already running and does nothing if not, and it pauses for the scale-down window once a scrape shows no new traffic. It never keeps a deployment awake, but traffic that starts during a pause is missed until the next scrape. RunPod reports are sent with provider `other`. When the setting is off at apply time, no agent is started.
+For a Modal or RunPod deployment, apply starts the same job once the deployment serves, named after the deployment as for a local one. It reads `/metrics` from the provider endpoint instead of a loopback port, so its job definition holds the credentials it needs, as the job of a local deployment holds the endpoint `api_key`: your Modal token pair and Proxy Auth Token, or the RunPod key and the deployment's `api_key`. The file is private to you and is deleted when the agent stops. It is stopped and deleted when you destroy the deployment. A scrape is a request, so the agent first asks the provider whether a replica is already running and does nothing if not, and it pauses for the scale-down window once a scrape shows no new traffic. It never keeps a deployment awake, but it is not free: the agent's scrapes are requests, so detecting that a deployment is idle takes one or two more polls (about 1-2 minutes of extra warm time per idle cycle), and the pause is the scale-down window plus a margin. Traffic that starts during a pause is missed until the next scrape. If the Modal token the agent holds is rotated or revoked, the agent can no longer ask Modal whether a container is running and stops sending data. It logs one warning to its own log when that happens. Its job keeps the token it was started with, so after rotating a token, destroy and apply the deployment again to give the agent the new one. RunPod reports are sent with provider `other`. When the setting is off at apply time, no agent is started.
 
 The agent:
 
@@ -81,7 +81,7 @@ How opting out reaches running agents:
 
 If you opt in after deploying, a deployment gets its agent the next time `amicu apply` starts or updates it.
 
-Not covered yet: Modal deployments get no agent, because the container does not carry the amicu binary. Windows deployments do not get one yet either.
+Not covered yet: Windows deployments do not get an agent.
 
 ### What is sent
 
