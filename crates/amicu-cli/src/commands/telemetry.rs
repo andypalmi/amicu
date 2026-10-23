@@ -13,7 +13,8 @@
 //!
 //! This module only records consent and makes no network calls. When the
 //! effective setting is on, `apply` starts the telemetry agent
-//! (`commands::telemetry_agent`) beside each local deployment; the agent
+//! (`commands::telemetry_agent`) beside each local deployment, and as a job of
+//! its own for each Modal or RunPod one; the agent
 //! re-reads this setting before every scrape and upload.
 
 use std::io::{BufRead, IsTerminal, Write};

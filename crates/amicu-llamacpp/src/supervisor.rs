@@ -188,6 +188,24 @@ pub trait ProcessSupervisor: Send + Sync {
     async fn stop_all_sidecars(&self) -> Result<Vec<String>, LlamaCppError> {
         Ok(Vec::new())
     }
+
+    /// Run `spec` as the telemetry sidecar of `main_label`, a deployment that
+    /// runs in the cloud and so has no host instance of its own. Replaces a
+    /// previous sidecar of the same label. Unlike an instance's sidecar it
+    /// may carry the provider credentials it reads metrics with.
+    async fn start_cloud_sidecar(
+        &self,
+        _main_label: &str,
+        _spec: &ServiceSpec,
+    ) -> Result<(), LlamaCppError> {
+        Ok(())
+    }
+
+    /// Stop the sidecar of `main_label`, if one was ever started, and delete
+    /// its definition.
+    async fn stop_sidecar_of(&self, _main_label: &str) -> Result<(), LlamaCppError> {
+        Ok(())
+    }
 }
 
 /// Decides whether a host instance gets a sidecar job (the telemetry agent)
@@ -778,5 +796,18 @@ impl<M: ServiceManager, P: HealthProbe> ProcessSupervisor for ServiceSupervisor<
             stopped.push(label);
         }
         Ok(stopped)
+    }
+
+    async fn start_cloud_sidecar(
+        &self,
+        main_label: &str,
+        spec: &ServiceSpec,
+    ) -> Result<(), LlamaCppError> {
+        self.stop_sidecar(main_label, None).await?;
+        self.manager.start(spec)
+    }
+
+    async fn stop_sidecar_of(&self, main_label: &str) -> Result<(), LlamaCppError> {
+        self.stop_sidecar(main_label, None).await
     }
 }

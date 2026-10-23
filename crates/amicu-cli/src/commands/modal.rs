@@ -490,6 +490,20 @@ pub(crate) fn stop(app_name: &str, out: &mut dyn Write) -> Result<u8, CliError> 
     Ok(code)
 }
 
+/// Stops the telemetry agent of a deployment that leaves state (a no-op when it
+/// has none) and forgets its anonymous id and queue.
+fn stop_agent_of(project_id: &str, deployment: &str) -> Result<(), CliError> {
+    use crate::commands::telemetry_agent::TelemetryHooks;
+    let label = amicu_llamacpp::project_host_label(project_id, deployment);
+    build_runtime()?
+        .block_on(amicu_llamacpp::host_supervisor().stop_sidecar_of(&label))
+        .map_err(|e| {
+            CliError::Adapter(amicu_core::adapter::AdapterErrorKind::into_adapter_error(e))
+        })?;
+    crate::commands::telemetry_agent::HostTelemetry.forget(&label);
+    Ok(())
+}
+
 /// Keeps a project's state consistent with a successful `stop`: when run in a
 /// project whose state holds `app_name`, drops that deployment and its
 /// endpoint so the next `plan`/`apply` recreates it. Outside a project (no
@@ -501,9 +515,15 @@ fn forget_stopped_app(
     active: Option<&crate::modal_ops::Workspace>,
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
-    match Project::discover()
-        .and_then(|project| crate::refresh::forget_app(&project, app_name, app_id, active))
-    {
+    match Project::discover().and_then(|project| {
+        crate::refresh::forget_app(
+            &project,
+            app_name,
+            app_id,
+            active,
+            &mut |project_id, deployment| stop_agent_of(project_id, deployment),
+        )
+    }) {
         Ok(Some(id)) => {
             writeln!(out, "removed deployment {id} from local state").map_err(io_err)?;
         }

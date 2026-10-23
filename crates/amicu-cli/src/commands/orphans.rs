@@ -428,6 +428,15 @@ impl Tracked {
         let Some(state) = state else { return t };
         t.project_id.clone_from(&state.project_id);
         for rec in &state.stops {
+            // A cloud deployment's telemetry agent is a host job named for it.
+            if !rec.backend.is_host()
+                && let Some(project_id) = &state.project_id
+            {
+                t.insert_label(&amicu_llamacpp::project_host_label(
+                    project_id,
+                    rec.deployment.as_str(),
+                ));
+            }
             if rec.backend.is_modal() {
                 t.modal_referenced = true;
                 t.modal_names.insert(rec.identity.clone());
@@ -1303,6 +1312,18 @@ mod tests {
             ownership_of_label("io.amicu.telemetry.a1b2c3d4.other", Some("a1b2c3d4")),
             Ownership::ThisProject
         );
+    }
+
+    #[test]
+    fn a_cloud_deployments_agent_follows_its_deployment() {
+        // The agent of a Modal app is a host job named for the deployment.
+        let tracked = tracked_of(vec![modal_stop("amicu-chat", Some("ap-1"))]);
+        assert!(tracked.has_label(&amicu_llamacpp::sidecar_label(
+            &amicu_llamacpp::project_host_label(PID, "x")
+        )));
+        assert!(!tracked.has_label(&amicu_llamacpp::sidecar_label(
+            &amicu_llamacpp::project_host_label(PID, "other")
+        )));
     }
 
     #[test]
