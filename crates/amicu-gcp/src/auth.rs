@@ -153,47 +153,85 @@ impl TokenSource for AdcTokenSource {
             Err(e) => Err(classify_token_error(
                 adc_file_present(),
                 e.is_transient(),
-                is_not_found_shaped(&e),
+                ErrorShape::of(&e),
             )),
         }
     }
 }
 
+/// What a failed token request looks like, read from its source chain.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ErrorShape {
+    /// A resource or file "not found" (I/O `NotFound`, an HTTP 404).
+    not_found: bool,
+    /// The request never got a response: DNS or connect failure, refused or
+    /// unreachable network, timeout.
+    connect: bool,
+}
+
+impl ErrorShape {
+    fn of(err: &(dyn std::error::Error + 'static)) -> Self {
+        let mut shape = Self::default();
+        let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+        while let Some(e) = cur {
+            if e.downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            {
+                shape.not_found = true;
+            }
+            let msg = e.to_string().to_ascii_lowercase();
+            shape.not_found |= msg_is_not_found(&msg);
+            shape.connect |= msg_is_connect_failure(&msg);
+            cur = e.source();
+        }
+        shape
+    }
+}
+
+/// A message saying the resource or file was not found. "404" must be a whole
+/// token, so a port or id such as `40412` does not match.
+fn msg_is_not_found(msg: &str) -> bool {
+    msg.contains("not found")
+        || msg.contains("no such file")
+        || msg
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|tok| tok == "404")
+}
+
+/// A message from the transport layer saying no response was received.
+fn msg_is_connect_failure(msg: &str) -> bool {
+    [
+        "client error (connect)",
+        "dns error",
+        "connection refused",
+        "network is unreachable",
+        "no route to host",
+        "timed out",
+        "error sending request",
+    ]
+    .iter()
+    .any(|needle| msg.contains(needle))
+}
+
 /// Maps a failed token request to a [`GcpError`].
 ///
-/// With no ADC file the chain falls through to the metadata server, which is
-/// absent off Google Cloud: a non-transient, not-found-shaped failure then
-/// means "not logged in" ([`GcpError::MissingCredentials`]). Anything else
-/// (a transient network error, a rejected refresh token, an ADC file that
-/// exists but fails) is returned as a token error, retryable only when the
+/// With no ADC file and no `GOOGLE_APPLICATION_CREDENTIALS`, the metadata
+/// server is the only credential source. Off Google Cloud it does not exist,
+/// and `google-cloud-auth` reports that connect failure as transient, so a
+/// connect failure or timeout there means "not logged in"
+/// ([`GcpError::MissingCredentials`]), as does a permanent not-found. A
+/// metadata server that answered with a transient error (5xx) stays a
+/// retryable token error. With an ADC file or explicit credentials the
+/// failure is never "missing": it is a token error, retryable only when the
 /// underlying error is transient.
-fn classify_token_error(adc_file_present: bool, transient: bool, not_found: bool) -> GcpError {
-    if !adc_file_present && !transient && not_found {
+fn classify_token_error(adc_file_present: bool, transient: bool, shape: ErrorShape) -> GcpError {
+    if !adc_file_present && (shape.connect || (!transient && shape.not_found)) {
         GcpError::MissingCredentials
     } else {
         GcpError::Token {
             retryable: transient,
         }
     }
-}
-
-/// Whether the error, or anything in its source chain, reads as "not found":
-/// an I/O `NotFound`, or a message saying the resource or file was not found.
-fn is_not_found_shaped(err: &(dyn std::error::Error + 'static)) -> bool {
-    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
-    while let Some(e) = cur {
-        if e.downcast_ref::<std::io::Error>()
-            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
-        {
-            return true;
-        }
-        let msg = e.to_string().to_ascii_lowercase();
-        if msg.contains("not found") || msg.contains("404") || msg.contains("no such file") {
-            return true;
-        }
-        cur = e.source();
-    }
-    false
 }
 
 /// Candidate directories holding `application_default_credentials.json`, in
@@ -291,42 +329,117 @@ mod tests {
         }
     }
 
+    const CONNECT: ErrorShape = ErrorShape {
+        not_found: false,
+        connect: true,
+    };
+    const NOT_FOUND: ErrorShape = ErrorShape {
+        not_found: true,
+        connect: false,
+    };
+    const OTHER: ErrorShape = ErrorShape {
+        not_found: false,
+        connect: false,
+    };
+
     #[test]
     fn token_error_maps_to_missing_credentials_only_when_not_logged_in() {
-        // No ADC file, permanent, not-found-shaped: not logged in.
+        // No ADC file: the metadata server is unreachable (reported transient
+        // by google-cloud-auth) or absent: not logged in.
         assert_eq!(
-            classify_token_error(false, false, true),
+            classify_token_error(false, true, CONNECT),
             GcpError::MissingCredentials
         );
-        // A transient failure (metadata server unreachable, 5xx) is retryable.
         assert_eq!(
-            classify_token_error(false, true, true),
+            classify_token_error(false, false, CONNECT),
+            GcpError::MissingCredentials
+        );
+        assert_eq!(
+            classify_token_error(false, false, NOT_FOUND),
+            GcpError::MissingCredentials
+        );
+        // The metadata server answered with a transient server error: retry.
+        assert_eq!(
+            classify_token_error(false, true, OTHER),
+            GcpError::Token { retryable: true }
+        );
+        assert_eq!(
+            classify_token_error(false, true, NOT_FOUND),
             GcpError::Token { retryable: true }
         );
         // Permanent but not not-found-shaped (rejected credentials).
         assert_eq!(
-            classify_token_error(false, false, false),
+            classify_token_error(false, false, OTHER),
             GcpError::Token { retryable: false }
         );
-        // An ADC file exists: never "missing", whatever the failure.
+        // An ADC file or explicit credentials exist: never "missing".
         assert_eq!(
-            classify_token_error(true, false, true),
+            classify_token_error(true, false, NOT_FOUND),
             GcpError::Token { retryable: false }
         );
         assert_eq!(
-            classify_token_error(true, true, false),
+            classify_token_error(true, true, CONNECT),
             GcpError::Token { retryable: true }
         );
     }
 
     #[test]
-    fn not_found_shape_is_read_from_the_source_chain() {
+    fn not_found_and_connect_shape_are_read_from_the_source_chain() {
         let nf = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
-        assert!(is_not_found_shaped(&nf));
+        assert!(ErrorShape::of(&nf).not_found);
         let other = std::io::Error::other("boom");
-        assert!(!is_not_found_shaped(&other));
+        assert_eq!(ErrorShape::of(&other), OTHER);
         let wrapped = std::io::Error::other(std::io::Error::other("metadata: 404 Not Found"));
-        assert!(is_not_found_shaped(&wrapped));
+        assert!(ErrorShape::of(&wrapped).not_found);
+        let conn = std::io::Error::other(std::io::Error::other("client error (Connect)"));
+        assert!(ErrorShape::of(&conn).connect);
+    }
+
+    #[test]
+    fn four_oh_four_must_be_a_whole_token() {
+        assert!(msg_is_not_found("http status: 404"));
+        assert!(msg_is_not_found("got 404, body=<>"));
+        assert!(!msg_is_not_found("port 40412 refused"));
+        assert!(!msg_is_not_found("request id a404b failed"));
+        assert!(!msg_is_not_found("503 service unavailable"));
+    }
+
+    const CHILD_MARKER: &str = "AMICU_GCP_AUTH_TEST_CHILD";
+
+    /// Runs only inside the child process of
+    /// [`no_adc_off_google_cloud_is_missing_credentials`].
+    #[tokio::test]
+    async fn child_no_adc_token() {
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            return;
+        }
+        let source = AdcTokenSource::new(&AuthConfig::default()).unwrap();
+        let got = source.token().await;
+        assert_eq!(got.unwrap_err(), GcpError::MissingCredentials);
+    }
+
+    /// The real token path with no ADC file and no metadata server. The
+    /// environment is isolated by re-running this test binary as a child with
+    /// a cleared environment (the crate forbids `unsafe`, which setting
+    /// process variables needs), a nonexistent `HOME`, and the metadata host
+    /// pointed at a closed local port.
+    #[test]
+    fn no_adc_off_google_cloud_is_missing_credentials() {
+        let exe = std::env::current_exe().unwrap();
+        let out = std::process::Command::new(exe)
+            .args(["--exact", "auth::tests::child_no_adc_token", "--nocapture"])
+            .env_clear()
+            .env("HOME", "/nonexistent")
+            .env("GCE_METADATA_HOST", "127.0.0.1:1")
+            .env(CHILD_MARKER, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("1 passed"),
+            "child failed: {stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]
