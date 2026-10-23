@@ -19,7 +19,7 @@ use std::fmt::Write as _;
 use amicu_providers::HttpMethod;
 use serde_json::Value;
 
-use super::{GcpCatalog, MACHINE_TYPES, ZONES, Zone, resolve_model};
+use super::{GcpCatalog, MACHINE_TYPES, ZONES, resolve_model};
 use crate::client::{COMPUTE_BASE_URL, GcpClient};
 use crate::error::GcpError;
 use crate::validate::validate_project_id;
@@ -52,7 +52,7 @@ pub struct Diff {
     /// In the catalog, not visible in the API. Excludes [`Self::hidden`].
     pub missing: BTreeSet<Pair>,
     /// In the catalog but not visible in the API, in an AI zone
-    /// ([`Zone::ai_zone`]) that the API may hide. Not drift.
+    /// ([`super::Zone::ai_zone`]) that the API may hide. Not drift.
     pub hidden: BTreeSet<Pair>,
     /// In the API, not in the catalog.
     pub extra: BTreeSet<Pair>,
@@ -301,7 +301,7 @@ mod tests {
             .into_iter()
             .filter(|(z, _)| z == "europe-west4-ai1a")
             .collect();
-        assert!(!ai.is_empty());
+        assert_ne!(ai.len(), 0);
         for p in &ai {
             live.accelerators.remove(p);
         }
