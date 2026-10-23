@@ -887,11 +887,16 @@ fn load_refreshed_mode(
 /// endpoint. Records for anything else (another app id, a host instance) are
 /// kept. Refuses when the active workspace differs from a record's. Returns the
 /// deployment id removed, or `None` when the state does not hold that app.
+///
+/// A deployment that leaves state takes its telemetry agent with it:
+/// `stop_agent` is called with the project id and the deployment id, before
+/// the state is saved, so a stop that fails keeps the record for a retry.
 pub(crate) fn forget_app(
     project: &Project,
     app_name: &str,
     stopped_id: &str,
     active: Option<&Workspace>,
+    stop_agent: &mut dyn FnMut(&str, &str) -> Result<(), CliError>,
 ) -> Result<Option<String>, CliError> {
     // No state file: nothing to update, and do not create `.amicu/`.
     if !project.state_file().exists() {
@@ -943,6 +948,11 @@ pub(crate) fn forget_app(
         project.save_state(&state)?;
         return Ok(Some(id));
     }
+    // The agent holds provider credentials and would outlive the record that
+    // lets `destroy` find it.
+    if let Some(project_id) = &state.project_id {
+        stop_agent(project_id, &id)?;
+    }
     state.graph.deployments.retain(|d| d.id.as_str() != id);
     state.endpoints.retain(|h| h.deployment.as_str() != id);
     state.pending.retain(|p| p.as_str() != id);
@@ -956,6 +966,16 @@ mod tests {
 
     use super::*;
     use crate::planner::build_plan;
+
+    /// `forget_app` for a project whose deployments have no agent to stop.
+    fn forget_app(
+        project: &Project,
+        app_name: &str,
+        stopped_id: &str,
+        active: Option<&Workspace>,
+    ) -> Result<Option<String>, CliError> {
+        super::forget_app(project, app_name, stopped_id, active, &mut |_, _| Ok(()))
+    }
 
     const MODAL_CONFIG: &str = r#"resource "model" "support_chat" {
   source {
@@ -1419,6 +1439,58 @@ resource "deployment" "support_modal" {
         assert_eq!(after.graph.deployments.len(), 1, "other record keeps it");
         let ids: Vec<_> = after.stops.iter().map(|r| r.app_id.as_deref()).collect();
         assert_eq!(ids, [Some("app-OTHER")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forgetting_a_deployment_stops_its_agent_first() {
+        let mut state = modal_state_in("acme");
+        state.project_id = Some("proj-1".to_owned());
+        let id = state.graph.deployments[0].id.clone();
+        let (project, dir) = project_with(&state, "agent");
+        let mut stopped = Vec::new();
+        let removed =
+            super::forget_app(&project, APP, "app-id", Some(&acme("acme")), &mut |p, d| {
+                stopped.push(format!("{p}/{d}"));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(removed.as_deref(), Some(id.as_str()));
+        assert_eq!(stopped, [format!("proj-1/{id}")]);
+
+        // An agent that cannot be stopped keeps the record, so a retry (or
+        // `destroy`) can still find it.
+        let (project, dir2) = project_with(&state, "agent-fails");
+        let err = super::forget_app(&project, APP, "app-id", Some(&acme("acme")), &mut |_, _| {
+            Err(CliError::Message("launchctl failed".to_owned()))
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("launchctl failed"), "{err}");
+        let after = project.load_state().unwrap().unwrap();
+        assert_eq!(after.graph.deployments.len(), 1);
+        assert_eq!(after.stops, state.stops);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn a_deployment_that_stays_in_state_keeps_its_agent() {
+        let mut state = modal_state_in("acme");
+        state.project_id = Some("proj-1".to_owned());
+        let id = state.graph.deployments[0].id.clone();
+        state.stops.push(crate::stops::StopRecord::modal(
+            &id,
+            Some("app-OTHER".to_owned()),
+            Some(&acme("acme")),
+        ));
+        let (project, dir) = project_with(&state, "agent-kept");
+        let mut stopped = 0;
+        super::forget_app(&project, APP, "app-id", Some(&acme("acme")), &mut |_, _| {
+            stopped += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(stopped, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

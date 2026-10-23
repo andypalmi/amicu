@@ -4548,3 +4548,39 @@ async fn opting_out_stops_every_sidecar_on_the_host() {
     assert!(m.def("io.amicu.llama.a1b2c3d4.chat").exists());
     assert!(m.dir.join("notes.txt").exists());
 }
+
+#[tokio::test]
+async fn a_cloud_deployment_gets_a_sidecar_without_an_instance() {
+    let m = std::sync::Arc::new(DirManager::new("cloud"));
+    let sup = sidecar_supervisor(&m, false);
+    let main = "io.amicu.llama.a1b2c3d4.chat";
+    let side = crate::sidecar_label(main);
+    let spec = ServiceSpec {
+        label: side.clone(),
+        argv: vec!["/bin/amicu".into(), "telemetry-agent".into()],
+        env: vec![("MODAL_PROXY_TOKEN_ID".into(), "wk-x".into())],
+    };
+    sup.start_cloud_sidecar(main, &spec).await.expect("start");
+    assert_eq!(m.calls(), [format!("start {side}")]);
+    assert!(m.def(&side).exists());
+    assert_eq!(sup.sidecars().len(), 1, "counted with the host's sidecars");
+    // A second start replaces the first: it is stopped before the new one runs.
+    m.calls.lock().unwrap().clear();
+    sup.start_cloud_sidecar(main, &spec).await.expect("restart");
+    assert_eq!(m.calls(), [format!("stop {side}"), format!("start {side}")]);
+    // Opting out reaches it like any other sidecar.
+    assert_eq!(
+        sup.stop_all_sidecars().await.unwrap(),
+        std::slice::from_ref(&side)
+    );
+    sup.start_cloud_sidecar(main, &spec).await.expect("start");
+    // Destroy stops it by its deployment's label and deletes its definition.
+    m.calls.lock().unwrap().clear();
+    sup.stop_sidecar_of(main).await.expect("stop");
+    assert_eq!(m.calls(), [format!("stop {side}")]);
+    assert!(!m.def(&side).exists());
+    // Nothing to stop: no manager call.
+    m.calls.lock().unwrap().clear();
+    sup.stop_sidecar_of(main).await.expect("stop again");
+    assert_eq!(m.calls(), Vec::<String>::new());
+}

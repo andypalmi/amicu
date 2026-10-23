@@ -1066,6 +1066,26 @@ struct FakeHost {
 
 #[async_trait::async_trait]
 impl amicu_llamacpp::ProcessSupervisor for FakeHost {
+    async fn start_cloud_sidecar(
+        &self,
+        main_label: &str,
+        spec: &amicu_llamacpp::ServiceSpec,
+    ) -> Result<(), amicu_llamacpp::LlamaCppError> {
+        self.log
+            .events
+            .lock()
+            .unwrap()
+            .push(format!("start agent {} for {main_label}", spec.label));
+        Ok(())
+    }
+    async fn stop_sidecar_of(&self, main_label: &str) -> Result<(), amicu_llamacpp::LlamaCppError> {
+        self.log
+            .events
+            .lock()
+            .unwrap()
+            .push(format!("stop agent of {main_label}"));
+        Ok(())
+    }
     async fn stop_all_sidecars(&self) -> Result<Vec<String>, amicu_llamacpp::LlamaCppError> {
         self.log
             .events
@@ -1307,6 +1327,10 @@ struct FakeTelemetry {
     stored: Option<bool>,
     cleared: std::sync::atomic::AtomicBool,
     forgotten: Mutex<Vec<String>>,
+    /// Cloud agents asked for: kind, label, resource id, idle pause and key.
+    cloud_requests: Mutex<Vec<String>>,
+    /// Why no cloud agent can be started.
+    cloud_error: Option<&'static str>,
 }
 
 impl crate::commands::telemetry_agent::TelemetryHooks for FakeTelemetry {
@@ -1326,6 +1350,31 @@ impl crate::commands::telemetry_agent::TelemetryHooks for FakeTelemetry {
         _: &crate::planner::PlanResult,
     ) -> Option<Arc<dyn amicu_llamacpp::SidecarPlanner>> {
         None
+    }
+    fn cloud_agent(
+        &self,
+        req: &crate::commands::telemetry_cloud::CloudAgent,
+        gateway_key: Option<&str>,
+    ) -> Result<Option<amicu_llamacpp::ServiceSpec>, String> {
+        if !self.consent_on() {
+            return Ok(None);
+        }
+        if let Some(why) = self.cloud_error {
+            return Err(why.to_owned());
+        }
+        self.cloud_requests.lock().unwrap().push(format!(
+            "{} {} {} pause={} key={}",
+            req.kind.arg(),
+            req.main_label,
+            req.resource_id,
+            req.idle_pause_secs,
+            gateway_key.unwrap_or("-")
+        ));
+        Ok(Some(amicu_llamacpp::ServiceSpec {
+            label: amicu_llamacpp::sidecar_label(&req.main_label),
+            argv: vec!["amicu".into(), "telemetry-agent".into()],
+            env: Vec::new(),
+        }))
     }
     fn clear_queues(&self) {
         self.cleared
@@ -3155,13 +3204,13 @@ fn modal_to_host_stops_and_confirms_the_old_app_before_starting_the_host() {
     apply_with(&project, &rig).unwrap();
 
     let events = rig.log.events.lock().unwrap().clone();
-    assert_eq!(
-        events,
-        [
-            "stop modal ap-old".to_owned(),
-            format!("start host {}", label("support_local")),
-        ]
+    // The Modal app's telemetry agent goes with it.
+    assert!(
+        events[1].starts_with("stop agent of io.amicu.llama.") && events.len() == 3,
+        "{events:?}"
     );
+    assert_eq!(events[0], "stop modal ap-old");
+    assert_eq!(events[2], format!("start host {}", label("support_local")));
     let stops = stops_for(&project, "support_local");
     assert_eq!(stops.len(), 1, "{stops:?}");
     assert_eq!(stops[0].backend, Backend::host());
