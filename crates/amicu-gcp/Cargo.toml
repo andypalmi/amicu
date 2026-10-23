@@ -1,0 +1,32 @@
+[package]
+name = "amicu-gcp"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Google Cloud foundation for amicu: ADC access tokens, REST client with operation polling, owner labels and name validation."
+
+[dependencies]
+# `HttpTransport`, the seam every REST backend mocks in tests.
+amicu-providers = { path = "../amicu-providers" }
+# `project_app_name`: the resource-name scheme shared with the other backends.
+amicu-core = { path = "../amicu-core" }
+async-trait = "0.1"
+# Application Default Credentials and service-account impersonation: Google's
+# own client (builds on reqwest 0.13 / rustls aws-lc-rs, like the rest of the
+# workspace). Only `auth.rs` touches it.
+google-cloud-auth = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The owner label value.
+sha2 = "0.10"
+thiserror = "2"
+# Operation polling: the poll interval and the overall deadline.
+tokio = { version = "1", features = ["time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "test-util"] }
+
+[lints]
+workspace = true

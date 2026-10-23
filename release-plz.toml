@@ -25,10 +25,14 @@ changelog_update = true
 changelog_include = [
   "amicu-core", "amicu-hcl", "amicu-plan", "amicu-engine", "amicu-llamacpp",
   "amicu-vllm", "amicu-runtime", "amicu-modal", "amicu-providers",
-  "amicu-registry", "amicu-state", "amicu-runpod",
+  "amicu-registry", "amicu-state", "amicu-runpod", "amicu-gcp",
 ]
 
 # No tag matches, so it is an initial release. Remove after the first release containing it.
 [[package]]
 name = "amicu-runpod"
 git_tag_name = "amicu-runpod-v{{ version }}"
+
+[[package]]
+name = "amicu-gcp"
+git_tag_name = "amicu-gcp-v{{ version }}"
