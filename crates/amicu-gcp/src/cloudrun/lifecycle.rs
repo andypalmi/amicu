@@ -344,8 +344,6 @@ impl CloudRunLifecycle {
     }
 }
 
-/// Quota failures arrive as HTTP 429 / `RESOURCE_EXHAUSTED`, or as a failed
-/// operation with gRPC code 8.
 /// `timing` with the timeout raised to the startup budget plus the margin.
 fn create_timing(timing: PollTiming, spec: &ServiceSpec) -> PollTiming {
     PollTiming {
@@ -356,6 +354,8 @@ fn create_timing(timing: PollTiming, spec: &ServiceSpec) -> PollTiming {
     }
 }
 
+/// Quota failures arrive as HTTP 429 / `RESOURCE_EXHAUSTED`, or as a failed
+/// operation with gRPC code 8.
 fn with_quota_hint(e: GcpError) -> GcpError {
     match e {
         GcpError::QuotaExceeded { message } => GcpError::QuotaExceeded {
