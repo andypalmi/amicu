@@ -247,11 +247,14 @@ impl Gate for AlwaysUp {
     }
 }
 
-/// A Modal app's running containers, and the hardware probe run in the first
-/// that answers.
+/// A Modal app's running containers. The hardware probe runs in the first that
+/// answers, until one has: it execs in the container, so it is not repeated
+/// once the agent has what it reports.
 pub(crate) struct ModalGate {
     app_id: String,
     credentials: Credentials,
+    probed: std::sync::atomic::AtomicBool,
+    warned: std::sync::atomic::AtomicBool,
 }
 
 impl ModalGate {
@@ -259,6 +262,8 @@ impl ModalGate {
         Some(Self {
             app_id: app_id.to_owned(),
             credentials: Credentials::from_env().ok()?,
+            probed: std::sync::atomic::AtomicBool::new(false),
+            warned: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -266,12 +271,43 @@ impl ModalGate {
 #[async_trait]
 impl Gate for ModalGate {
     async fn running(&self) -> Option<Option<HardwareSample>> {
-        let mut client = ModalClient::connect(self.credentials.clone()).await.ok()?;
-        let containers = client.probe_app_hardware(&self.app_id).await.ok()?;
-        if containers.is_empty() {
+        use std::io::Write;
+        use std::sync::atomic::Ordering;
+        let tasks = async {
+            let mut client = ModalClient::connect(self.credentials.clone()).await?;
+            let tasks = client.app_task_ids(&self.app_id).await?;
+            Ok::<_, amicu_modal::ModalError>((client, tasks))
+        }
+        .await;
+        let (mut client, tasks) = match tasks {
+            Ok(v) => v,
+            Err(e) => {
+                // A rotated or revoked token ends up here every poll: say so
+                // once, in the agent's log, instead of failing silently.
+                if !self.warned.swap(true, Ordering::Relaxed) {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "telemetry-agent: cannot ask Modal whether the deployment is running \
+                         ({e}); no data is collected until it can (was the Modal token rotated?)"
+                    );
+                }
+                return None;
+            }
+        };
+        self.warned.store(false, Ordering::Relaxed);
+        if tasks.is_empty() {
             return None;
         }
-        Some(containers.into_iter().find_map(|c| c.outcome.ok()))
+        if self.probed.load(Ordering::Relaxed) {
+            return Some(None);
+        }
+        for task in &tasks {
+            if let Ok(sample) = client.probe_container(task).await {
+                self.probed.store(true, Ordering::Relaxed);
+                return Some(Some(sample));
+            }
+        }
+        Some(None)
     }
 }
 
@@ -362,6 +398,11 @@ impl Remote {
         let scrape = super::telemetry_agent::scrape(request)
             .await
             .map(|(_, s)| s);
+        if scrape.is_none() {
+            // A request that fails still reaches the container and resets its
+            // scale-down timer: back off like for an idle one.
+            self.paused_until = now + self.idle_pause_secs;
+        }
         if let Some(s) = &scrape {
             let seen = [
                 s.requests_total,
@@ -437,6 +478,31 @@ pub(crate) mod test_support {
         (url, seen)
     }
 
+    /// A loopback server answering every request with a 500.
+    pub(crate) async fn serve_failing() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/metrics", listener.local_addr().unwrap());
+        let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let log = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = vec![0u8; 16 * 1024];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let reply = "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\
+                             connection: close\r\n\r\n";
+                let _ = sock.write_all(reply.as_bytes()).await;
+            }
+        });
+        (url, seen)
+    }
+
     pub(crate) fn remote(
         url: &str,
         up: &Arc<AtomicBool>,
@@ -459,7 +525,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{remote, serve, vllm};
+    use super::test_support::{remote, serve, serve_failing, vllm};
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -559,6 +625,30 @@ mod tests {
         let first = seen.lock().unwrap()[0].to_ascii_lowercase();
         assert!(first.starts_with("get /metrics http/1.1"), "{first}");
         assert!(first.contains("authorization: bearer k-1"), "{first}");
+    }
+
+    #[tokio::test]
+    async fn a_failing_scrape_backs_off_instead_of_hitting_the_container_every_minute() {
+        let (url, seen) = serve_failing().await;
+        let (up, asked) = (
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let mut remote = remote(&url, &up, &asked, 1200);
+        assert!(remote.poll(0).await.scrape.is_none());
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        for t in [60, 600, 1199] {
+            assert!(remote.poll(t).await.scrape.is_none(), "paused at {t}");
+        }
+        assert_eq!(seen.lock().unwrap().len(), 1, "the pause sends no request");
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            1,
+            "nor asks the control plane"
+        );
+        // Tried again once the pause is over.
+        assert!(remote.poll(1200).await.scrape.is_none());
+        assert_eq!(seen.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]
