@@ -3187,6 +3187,7 @@ fn host_label_of_dep() -> String {
     amicu_llamacpp::project_host_label(PROJECT, DEP)
 }
 
+#[cfg(unix)]
 #[test]
 fn apply_starts_an_agent_for_an_opted_in_cloud_deployment() {
     let td = TempDir::new();
@@ -3213,6 +3214,23 @@ fn apply_starts_an_agent_for_an_opted_in_cloud_deployment() {
     );
 }
 
+// Agent jobs are not started on Windows yet, as for host deployments.
+#[cfg(windows)]
+#[test]
+fn apply_starts_no_agent_on_windows() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(agent_events(&rig).len(), 0);
+    assert!(rig.telemetry.cloud_requests.lock().unwrap().is_empty());
+    assert_eq!(
+        stops_for(&project, DEP).len(),
+        1,
+        "the endpoint is recorded"
+    );
+}
+
 #[test]
 fn apply_without_consent_starts_no_cloud_agent() {
     let td = TempDir::new();
@@ -3222,6 +3240,14 @@ fn apply_without_consent_starts_no_cloud_agent() {
     apply_with(&project, &rig).unwrap();
     assert_eq!(agent_events(&rig).len(), 0);
     assert!(rig.telemetry.cloud_requests.lock().unwrap().is_empty());
+    // Opting out also sweeps the agents already running, cloud ones included.
+    assert!(
+        rig.log
+            .events
+            .lock()
+            .unwrap()
+            .contains(&"stop telemetry agents".to_owned())
+    );
     // `DO_NOT_TRACK` beats an opt-in file, as everywhere else.
     let mut rig = self::rig();
     rig.telemetry.env = vec![("DO_NOT_TRACK", "1")];
