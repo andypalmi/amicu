@@ -3,7 +3,7 @@
 //! the config checks and the supervisor so both agree.
 
 use crate::catalog::{GcpCatalog, Provisioning, resolve_model};
-use crate::compute::Accelerator;
+use crate::compute::{Accelerator, is_a4x_machine_type};
 
 /// Why a GPU, machine type, provisioning mode and region do not fit together.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -36,6 +36,10 @@ pub enum PlacementError {
         count: u32,
         provisioning: &'static str,
     },
+    #[error(
+        "A4X (a4x-*) is not supported yet: its Arm boot images ship without Docker and the NVIDIA container toolkit"
+    )]
+    A4xUnsupported,
     #[error("no zone {scope} offers {what}")]
     NoZone { scope: String, what: String },
 }
@@ -54,6 +58,10 @@ fn label(p: Provisioning) -> &'static str {
 /// The machine type for `count` x `gpu` obtained as `provisioning`: `machine`
 /// when given (checked), else the catalog's smallest one, or for N1-only GPUs
 /// an N1 standard shape of 4 vCPUs per GPU.
+///
+/// A4X machine types are never chosen, and one named in `machine` is refused
+/// with [`PlacementError::A4xUnsupported`]; so is a GPU (GB200, GB300) that
+/// only A4X carries.
 ///
 /// # Errors
 /// [`PlacementError`] when the pieces do not fit together.
@@ -106,16 +114,12 @@ pub fn resolve_shape(
             }),
         })
     };
+    if machine.is_some_and(is_a4x_machine_type) {
+        return Err(PlacementError::A4xUnsupported);
+    }
     let Some(name) = machine else {
-        if let Some(m) = catalog
-            .machine_types_for_gpu(gpu, count)
-            .into_iter()
-            .find(|m| m.supports(provisioning))
-        {
-            return Ok(Shape {
-                machine_type: m.name.to_owned(),
-                accelerator: None,
-            });
+        if let Some(shape) = default_machine(gpu, count, provisioning)? {
+            return Ok(shape);
         }
         let name = format!("n1-standard-{}", 4 * count);
         return n1(&name).map_err(|_| PlacementError::NoMachine {
@@ -158,6 +162,35 @@ pub fn resolve_shape(
         machine_type: name.to_owned(),
         accelerator: None,
     })
+}
+
+/// The smallest catalog machine for `count` x `gpu` that is not A4X.
+/// `Ok(None)` when the catalog has none (an N1-only GPU).
+fn default_machine(
+    gpu: &str,
+    count: u32,
+    provisioning: Provisioning,
+) -> Result<Option<Shape>, PlacementError> {
+    let catalog = GcpCatalog::new();
+    if let Some(m) = catalog
+        .machine_types_for_gpu(gpu, count)
+        .into_iter()
+        .find(|m| !is_a4x_machine_type(m.name) && m.supports(provisioning))
+    {
+        return Ok(Some(Shape {
+            machine_type: m.name.to_owned(),
+            accelerator: None,
+        }));
+    }
+    let model = resolve_model(gpu).ok_or_else(|| PlacementError::UnknownGpu(gpu.to_owned()))?;
+    if catalog
+        .machine_types()
+        .iter()
+        .any(|m| m.gpu == model.name && is_a4x_machine_type(m.name))
+    {
+        return Err(PlacementError::A4xUnsupported);
+    }
+    Ok(None)
 }
 
 fn offered(options: &[Provisioning]) -> String {
@@ -223,6 +256,29 @@ mod tests {
         assert_eq!((a.type_name.as_str(), a.count), ("nvidia-tesla-t4", 1));
         let d = resolve_shape("t4", 1, None, Provisioning::Spot).unwrap();
         assert_eq!(d.machine_type, "n1-standard-4");
+    }
+
+    #[test]
+    fn a4x_is_never_chosen_and_never_accepted() {
+        use crate::compute::A4X_UNSUPPORTED;
+        for machine in ["a4x-highgpu-4g", "a4x-maxgpu-4g-metal"] {
+            for gpu in ["gb200", "gb300"] {
+                let err =
+                    resolve_shape(gpu, 4, Some(machine), Provisioning::CapacityBlock).unwrap_err();
+                assert_eq!(err, PlacementError::A4xUnsupported, "{machine}");
+                assert_eq!(err.to_string(), A4X_UNSUPPORTED);
+            }
+        }
+        // GB200 and GB300 are only carried by A4X: no default pick.
+        for (gpu, count) in [("gb200", 4), ("gb300", 4), ("gb200", 1)] {
+            for p in [Provisioning::Spot, Provisioning::CapacityBlock] {
+                assert_eq!(
+                    resolve_shape(gpu, count, None, p),
+                    Err(PlacementError::A4xUnsupported),
+                    "{gpu} x{count} {p:?}"
+                );
+            }
+        }
     }
 
     #[test]

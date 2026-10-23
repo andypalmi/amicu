@@ -124,6 +124,7 @@ Other checks: an unknown GPU or one not offered in the zone or region is `AMICU-
 - The certificate is self-signed and pinned, not CA-signed: clients must pin its fingerprint.
 - vLLM only, one VM per deployment, no `env` block, no metrics or logs through amicu.
 - Cloud Run is not supported by `apply` yet.
+- A4X (`a4x-*`, the GB200 and GB300 machines) is not supported yet: its Arm boot images ship without Docker and the NVIDIA container toolkit. `apply` and `plan` reject an `a4x-*` `machine_type`, and a GB200 or GB300 GPU never picks one by default.
 - Prices in the catalog are illustrative values, not live quotes, so cost estimates are indicative.
 
 ## Troubleshooting

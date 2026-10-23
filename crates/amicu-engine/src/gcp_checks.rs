@@ -400,6 +400,23 @@ resource "deployment" "d" {{
     }
 
     #[test]
+    fn a4x_is_reported_as_not_supported_yet() {
+        let g = graph(
+            "gcp",
+            EU,
+            "h100",
+            "project = \"my-proj\"\n machine_type = \"a4x-highgpu-4g\"",
+            "",
+        );
+        let d = gcp_diagnostics(&g);
+        assert!(
+            d.iter()
+                .any(|d| d.message.contains("A4X (a4x-*) is not supported yet")),
+            "{d:?}"
+        );
+    }
+
+    #[test]
     fn provisioning_the_machine_does_not_offer_is_reported() {
         let g = graph(
             "gcp",
