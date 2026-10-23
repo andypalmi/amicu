@@ -123,6 +123,9 @@ impl VmSpec {
         self.owner()?;
         token("machine type", &self.machine_type)?;
         token("image family", &self.image_family)?;
+        if is_a4x_machine_type(&self.machine_type) {
+            return Err(invalid("machine type", &self.machine_type, A4X_UNSUPPORTED));
+        }
         let arm_machine = is_arm_machine_type(&self.machine_type);
         if arm_machine != self.image_family.contains("arm64") {
             return Err(invalid(
@@ -264,6 +267,17 @@ impl VmSpec {
             None => json!([]),
         }
     }
+}
+
+/// Why A4X machine types are refused. Shared with the placement checks so the
+/// message is the same wherever a machine type is picked.
+pub const A4X_UNSUPPORTED: &str = "A4X (a4x-*) is not supported yet: its Arm boot images ship without Docker and the NVIDIA container toolkit";
+
+/// Whether a machine type is in the A4X family (A4X and A4X Max), which amicu
+/// cannot launch yet.
+#[must_use]
+pub fn is_a4x_machine_type(machine_type: &str) -> bool {
+    machine_type.starts_with("a4x-")
 }
 
 /// Whether a machine type runs on Arm CPUs. Of the GPU series, only A4X and
@@ -446,31 +460,39 @@ pub(crate) mod tests {
         }
         for m in ["a4x-highgpu-4g", "a4x-maxgpu-4g-metal"] {
             assert_eq!(default_image_family(m), ARM64_IMAGE_FAMILY);
-            let mut s = spec(m, None, Provisioning::Standard);
-            s.image_family = default_image_family(m).into();
             assert_eq!(
-                s.insert_body().unwrap()["disks"][0]["initializeParams"]["sourceImage"],
-                "projects/ubuntu-os-accelerator-images/global/images/family/ubuntu-accelerator-2404-arm64-with-nvidia-580"
+                image_project(default_image_family(m)),
+                "ubuntu-os-accelerator-images"
             );
         }
     }
 
     #[test]
+    fn a4x_is_rejected_whatever_the_image() {
+        for m in ["a4x-highgpu-4g", "a4x-maxgpu-4g-metal"] {
+            for family in [ARM64_IMAGE_FAMILY, DEFAULT_IMAGE_FAMILY] {
+                let mut s = spec(m, None, Provisioning::Standard);
+                s.image_family = family.into();
+                let msg = s.validate().unwrap_err().to_string();
+                assert!(msg.contains(A4X_UNSUPPORTED), "{msg}");
+                assert!(msg.contains("A4X (a4x-*) is not supported yet"), "{msg}");
+                assert!(s.insert_body().is_err());
+            }
+        }
+        assert!(is_a4x_machine_type("a4x-highgpu-4g"));
+        assert!(!is_a4x_machine_type("a4-highgpu-8g"));
+    }
+
+    #[test]
     fn the_image_architecture_must_match_the_machine() {
-        // x86 image on an Arm machine, and the reverse.
-        let a4x = spec("a4x-highgpu-4g", None, Provisioning::Standard);
-        assert!(a4x.validate().unwrap_err().to_string().contains("arm64"));
+        // An arm64 image on an x86 machine is refused.
         let mut g2 = spec("g2-standard-4", None, Provisioning::Standard);
         g2.image_family = ARM64_IMAGE_FAMILY.into();
         assert!(g2.validate().is_err());
         // The Rocky arm64 family resolves to its own project.
-        let mut s = spec("a4x-highgpu-4g", None, Provisioning::Standard);
-        s.image_family = "rocky-linux-9-optimized-gcp-nvidia-580-arm64".into();
-        assert!(
-            s.insert_body().unwrap()["disks"][0]["initializeParams"]["sourceImage"]
-                .as_str()
-                .unwrap()
-                .starts_with("projects/rocky-linux-accelerator-cloud/")
+        assert_eq!(
+            image_project("rocky-linux-9-optimized-gcp-nvidia-580-arm64"),
+            ROCKY_ACCELERATOR_PROJECT
         );
     }
 
