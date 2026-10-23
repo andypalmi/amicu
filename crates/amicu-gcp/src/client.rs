@@ -21,12 +21,13 @@ pub const RUN_BASE_URL: &str = "https://run.googleapis.com/v2";
 /// The longest Google error message kept in a [`GcpError`].
 const MAX_MESSAGE: usize = 300;
 
-/// Reasons and statuses Google uses for quota and rate limits.
-const QUOTA_REASONS: [&str; 5] = [
-    "quotaExceeded",
+/// Reasons and statuses Google uses for hard quotas.
+const QUOTA_REASONS: [&str; 2] = ["quotaExceeded", "RESOURCE_EXHAUSTED"];
+
+/// Reasons Google uses for rate limiting. A `429` is also rate limiting.
+const RATE_LIMIT_REASONS: [&str; 3] = [
     "rateLimitExceeded",
     "userRateLimitExceeded",
-    "RESOURCE_EXHAUSTED",
     "RATE_LIMIT_EXCEEDED",
 ];
 
@@ -58,13 +59,14 @@ impl GcpClient {
     /// response (`null` for an empty `2xx` body, as a `DELETE` may return).
     ///
     /// A transport failure on a `POST` is a plain [`GcpError::Transport`]: the
-    /// request may have been applied, so callers look the resource up before
-    /// retrying a create.
+    /// request may have been applied, so create `POST`s must not be retried
+    /// automatically on it. Callers look the resource up before retrying a
+    /// create. (`GET`s, `DELETE`s and operation polls are safe to retry.)
     ///
     /// # Errors
     /// A token failure, [`GcpError::Transport`], or the mapped Google error:
-    /// [`GcpError::NotFound`] for `404`, [`GcpError::QuotaExceeded`] for quota
-    /// and rate limits, and so on.
+    /// [`GcpError::NotFound`] for `404`, [`GcpError::QuotaExceeded`] for hard quota,
+    /// [`GcpError::RateLimited`] for rate limits, and so on.
     pub async fn request(
         &self,
         method: HttpMethod,
@@ -121,7 +123,7 @@ fn map_error(status: u16, body: &[u8], url: &str) -> GcpError {
         .chars()
         .take(MAX_MESSAGE)
         .collect();
-    let reason_is_quota = err["errors"]
+    let reasons: Vec<&str> = err["errors"]
         .as_array()
         .into_iter()
         .flatten()
@@ -134,9 +136,12 @@ fn map_error(status: u16, body: &[u8], url: &str) -> GcpError {
                 .filter_map(|d| d["reason"].as_str()),
         )
         .chain(std::iter::once(code.as_str()))
-        .any(|r| QUOTA_REASONS.contains(&r));
-
-    if status == 429 || reason_is_quota {
+        .collect();
+    // Rate limiting wins over a quota reason: a `429` is always worth retrying.
+    if status == 429 || reasons.iter().any(|r| RATE_LIMIT_REASONS.contains(r)) {
+        return GcpError::RateLimited { message };
+    }
+    if reasons.iter().any(|r| QUOTA_REASONS.contains(r)) {
         return GcpError::QuotaExceeded { message };
     }
     match status {
@@ -354,20 +359,36 @@ pub(crate) mod tests {
             r#"{"error":{"code":403,"message":"Quota 'GPUS' exceeded.","errors":[{"reason":"quotaExceeded"}]}}"#,
         )
         .await;
-        assert!(e.is_quota() && e.is_retryable(), "{e:?}");
-        // Cloud Run / gRPC style.
+        assert!(e.is_quota() && !e.is_retryable(), "{e:?}");
+        // gRPC style RESOURCE_EXHAUSTED on a non-429 status is a hard quota.
+        let e = status_error(
+            403,
+            r#"{"error":{"code":403,"status":"RESOURCE_EXHAUSTED","message":"quota"}}"#,
+        )
+        .await;
+        assert!(e.is_quota() && !e.is_retryable(), "{e:?}");
+        // A 429 is rate limiting, whatever its status string.
         let e = status_error(
             429,
             r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota"}}"#,
         )
         .await;
-        assert!(e.is_quota());
+        assert!(
+            e.is_rate_limited() && !e.is_quota() && e.is_retryable(),
+            "{e:?}"
+        );
         let e = status_error(
             403,
             r#"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"nope","details":[{"reason":"RATE_LIMIT_EXCEEDED"}]}}"#,
         )
         .await;
-        assert!(e.is_quota());
+        assert!(e.is_rate_limited() && e.is_retryable(), "{e:?}");
+        let e = status_error(
+            403,
+            r#"{"error":{"code":403,"message":"slow down","errors":[{"reason":"rateLimitExceeded"}]}}"#,
+        )
+        .await;
+        assert!(e.is_rate_limited() && e.is_retryable(), "{e:?}");
         // A plain 403 is a permission problem, not a quota.
         let e = status_error(
             403,

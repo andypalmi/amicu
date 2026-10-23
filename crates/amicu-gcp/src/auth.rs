@@ -150,14 +150,70 @@ impl TokenSource for AdcTokenSource {
     async fn token(&self) -> Result<AccessToken, GcpError> {
         match self.credentials.access_token().await {
             Ok(t) => Ok(AccessToken::new(t.token)),
-            // With no ADC file the chain falls through to the metadata server,
-            // which is unreachable off Google Cloud: that is "not logged in".
-            Err(_) if !adc_file_present() => Err(GcpError::MissingCredentials),
-            Err(e) => Err(GcpError::Token {
-                retryable: e.is_transient(),
-            }),
+            Err(e) => Err(classify_token_error(
+                adc_file_present(),
+                e.is_transient(),
+                is_not_found_shaped(&e),
+            )),
         }
     }
+}
+
+/// Maps a failed token request to a [`GcpError`].
+///
+/// With no ADC file the chain falls through to the metadata server, which is
+/// absent off Google Cloud: a non-transient, not-found-shaped failure then
+/// means "not logged in" ([`GcpError::MissingCredentials`]). Anything else
+/// (a transient network error, a rejected refresh token, an ADC file that
+/// exists but fails) is returned as a token error, retryable only when the
+/// underlying error is transient.
+fn classify_token_error(adc_file_present: bool, transient: bool, not_found: bool) -> GcpError {
+    if !adc_file_present && !transient && not_found {
+        GcpError::MissingCredentials
+    } else {
+        GcpError::Token {
+            retryable: transient,
+        }
+    }
+}
+
+/// Whether the error, or anything in its source chain, reads as "not found":
+/// an I/O `NotFound`, or a message saying the resource or file was not found.
+fn is_not_found_shaped(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(e) = cur {
+        if e.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+        {
+            return true;
+        }
+        let msg = e.to_string().to_ascii_lowercase();
+        if msg.contains("not found") || msg.contains("404") || msg.contains("no such file") {
+            return true;
+        }
+        cur = e.source();
+    }
+    false
+}
+
+/// Candidate directories holding `application_default_credentials.json`, in
+/// lookup order. Every candidate is probed, so a Windows machine with `HOME`
+/// set (Git Bash) but credentials under `APPDATA` still counts as logged in.
+fn adc_dirs() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let var = |name| std::env::var_os(name).map(PathBuf::from);
+    let appdata = var("APPDATA").map(|a| a.join("gcloud"));
+    let home = var("HOME").map(|h| h.join(".config/gcloud"));
+    // gcloud uses %APPDATA%\gcloud on Windows and ~/.config/gcloud elsewhere.
+    let (first, second) = if cfg!(windows) {
+        (appdata, home)
+    } else {
+        (home, appdata)
+    };
+    [var("CLOUDSDK_CONFIG"), first, second]
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Whether an ADC file exists: the one `GOOGLE_APPLICATION_CREDENTIALS` names
@@ -168,15 +224,9 @@ fn adc_file_present() -> bool {
     if std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS").is_some() {
         return true;
     }
-    let dir = std::env::var_os("CLOUDSDK_CONFIG")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config/gcloud"))
-        })
-        .or_else(|| {
-            std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join("gcloud"))
-        });
-    dir.is_some_and(|d| d.join("application_default_credentials.json").is_file())
+    adc_dirs()
+        .iter()
+        .any(|d| d.join("application_default_credentials.json").is_file())
 }
 
 #[cfg(test)]
@@ -239,6 +289,44 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn token_error_maps_to_missing_credentials_only_when_not_logged_in() {
+        // No ADC file, permanent, not-found-shaped: not logged in.
+        assert_eq!(
+            classify_token_error(false, false, true),
+            GcpError::MissingCredentials
+        );
+        // A transient failure (metadata server unreachable, 5xx) is retryable.
+        assert_eq!(
+            classify_token_error(false, true, true),
+            GcpError::Token { retryable: true }
+        );
+        // Permanent but not not-found-shaped (rejected credentials).
+        assert_eq!(
+            classify_token_error(false, false, false),
+            GcpError::Token { retryable: false }
+        );
+        // An ADC file exists: never "missing", whatever the failure.
+        assert_eq!(
+            classify_token_error(true, false, true),
+            GcpError::Token { retryable: false }
+        );
+        assert_eq!(
+            classify_token_error(true, true, false),
+            GcpError::Token { retryable: true }
+        );
+    }
+
+    #[test]
+    fn not_found_shape_is_read_from_the_source_chain() {
+        let nf = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        assert!(is_not_found_shaped(&nf));
+        let other = std::io::Error::other("boom");
+        assert!(!is_not_found_shaped(&other));
+        let wrapped = std::io::Error::other(std::io::Error::other("metadata: 404 Not Found"));
+        assert!(is_not_found_shaped(&wrapped));
     }
 
     #[test]
