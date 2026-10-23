@@ -13,6 +13,7 @@ pub(crate) mod runpod;
 pub(crate) mod skill;
 pub(crate) mod telemetry;
 pub(crate) mod telemetry_agent;
+pub(crate) mod telemetry_cloud;
 pub(crate) mod validate;
 
 /// A fresh current-thread Tokio runtime with every driver (IO, time) enabled.
