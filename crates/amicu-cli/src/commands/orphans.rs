@@ -137,6 +137,7 @@ pub(crate) enum Kind {
     RunpodSecret,
     GceVm,
     GceFirewall,
+    GceSecret,
     LaunchdJob,
     SystemdUnit,
     ScheduledTask,
@@ -151,6 +152,7 @@ impl Kind {
             Kind::RunpodSecret => "runpod secret",
             Kind::GceVm => "compute engine vm",
             Kind::GceFirewall => "compute engine firewall rule",
+            Kind::GceSecret => "secret manager secret",
             Kind::LaunchdJob => "launchd job",
             Kind::SystemdUnit => "systemd unit",
             Kind::ScheduledTask => "scheduled task",
@@ -288,10 +290,18 @@ pub(crate) struct GcpFirewall {
     pub name: String,
 }
 
+/// An amicu-owned Secret Manager secret in a Google Cloud project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GcpSecret {
+    pub project: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GcpListing {
     pub vms: Vec<GcpVm>,
     pub firewalls: Vec<GcpFirewall>,
+    pub secrets: Vec<GcpSecret>,
 }
 
 /// Injectable read-only Google Cloud lookup, per project (and the service
@@ -319,6 +329,20 @@ impl GcpResources for GcpOpsListing<'_> {
                 let fws = rt
                     .block_on(amicu_gcp::gce::list_owned_firewalls(&client, project))
                     .map_err(|e| fail("firewall rules", e))?;
+                // A project that delivers secrets as instance metadata may
+                // never have enabled Secret Manager: not being allowed to list
+                // there means no secrets, not a failed listing.
+                let secrets =
+                    match rt.block_on(amicu_gcp::gce::list_owned_secrets(&client, project)) {
+                        Ok(s) => s,
+                        Err(amicu_gcp::GcpError::PermissionDenied { .. }) => Vec::new(),
+                        Err(e) => return Err(fail("secrets", e)),
+                    };
+                out.secrets
+                    .extend(secrets.into_iter().map(|(name, _)| GcpSecret {
+                        project: project.clone(),
+                        name,
+                    }));
                 out.vms.extend(vms.into_iter().map(|v| GcpVm {
                     project: project.clone(),
                     zone: v.zone,
@@ -391,6 +415,8 @@ pub(crate) struct Tracked {
     /// `(project, name)` of recorded VMs and firewall rules.
     gcp_vms: BTreeSet<(String, String)>,
     gcp_firewalls: BTreeSet<(String, String)>,
+    /// `(project, id)` of recorded Secret Manager secrets.
+    gcp_secrets: BTreeSet<(String, String)>,
 }
 
 impl Tracked {
@@ -419,6 +445,8 @@ impl Tracked {
                 t.gcp_vms.insert((g.project.clone(), g.instance.clone()));
                 t.gcp_firewalls
                     .insert((g.project.clone(), g.firewall.clone()));
+                t.gcp_secrets
+                    .extend(g.secrets.iter().map(|id| (g.project.clone(), id.clone())));
             } else if rec.backend.is_host() {
                 t.insert_label(&rec.identity);
             }
@@ -566,7 +594,7 @@ fn runpod(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
     Ok(found)
 }
 
-/// Compute Engine VMs and firewall rules amicu created (they carry its owner
+/// Compute Engine VMs, firewall rules and Secret Manager secrets amicu created (they carry its owner
 /// marker) in the projects state or config names, with the `gcloud` commands
 /// that delete them by hand.
 fn gcp(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
@@ -603,6 +631,22 @@ fn gcp(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
             ownership: ownership_of_runpod_name(&r.name, project_id),
             stop_command: format!(
                 "gcloud compute firewall-rules delete {} --project {}",
+                q(&r.name),
+                q(&r.project)
+            ),
+        });
+    }
+    for r in &listing.secrets {
+        found.push(Found {
+            kind: Kind::GceSecret,
+            identity: format!("{} ({})", r.name, r.project),
+            state: "secret".to_owned(),
+            tracked: tracked
+                .gcp_secrets
+                .contains(&(r.project.clone(), r.name.clone())),
+            ownership: ownership_of_runpod_name(&r.name, project_id),
+            stop_command: format!(
+                "gcloud secrets delete {} --project {}",
                 q(&r.name),
                 q(&r.project)
             ),

@@ -188,9 +188,17 @@ fn compute_problems(
     let flex = s.provisioning == GcpProvisioning::FlexStart;
     let run = Duration::from_secs(u64::from(s.max_run_secs()));
     if run < MIN_RUN || run > if flex { MAX_FLEX_RUN } else { MAX_RUN } {
+        let limit = if flex {
+            "168h (7 days, the limit for `flex_start`)"
+        } else {
+            "2880h (120 days; 168h with `provisioning = \"flex_start\"`)"
+        };
         out.push((
             invalid,
-            "`max_run_duration` must be between 10m and 7d (120d unless flex_start)".to_owned(),
+            format!(
+                "`max_run_duration` must be between 10m and {limit}; write it in s, m or h \
+                 (days are not accepted)"
+            ),
         ));
     }
     if s.boot_disk_gb.is_some_and(|g| g < 50) {
@@ -371,6 +379,24 @@ resource "deployment" "d" {{
             "",
         );
         assert_eq!(codes(&g), ["AMICU-CAP-017"]);
+    }
+
+    #[test]
+    fn max_run_limits_are_stated_in_hours_and_flex_start_is_seven_days() {
+        let base = "project = \"my-proj\"\nmachine_type = \"n1-standard-4\"\n";
+        let run = |extra: &str| {
+            let g = graph("gcp", EU, "t4", &format!("{base}{extra}"), "");
+            gcp_diagnostics(&g)
+        };
+        // 8 days is fine on-demand or spot, too long for flex_start.
+        assert_eq!(run("max_run_duration = \"192h\"").len(), 0);
+        let d = run("max_run_duration = \"192h\"\nprovisioning = \"flex_start\"");
+        assert_eq!(d.len(), 1);
+        assert!(d[0].message.contains("168h (7 days"), "{}", d[0].message);
+        let d = run("max_run_duration = \"2881h\"");
+        assert_eq!(d.len(), 1);
+        assert!(d[0].message.contains("2880h (120 days"), "{}", d[0].message);
+        assert!(!d[0].message.contains("120d"), "{}", d[0].message);
     }
 
     #[test]

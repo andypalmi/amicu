@@ -421,7 +421,7 @@ fn is_launch_field(key: &str) -> bool {
         "speculative",
         "multimodal",
     ];
-    const PREFIXES: [&str; 9] = [
+    const PREFIXES: [&str; 10] = [
         "env.",
         "api_key",
         "speculative.",
@@ -431,6 +431,7 @@ fn is_launch_field(key: &str) -> bool {
         "hardware.provider",
         "hardware.accelerator.",
         "hardware.runpod",
+        "hardware.gcp",
     ];
     EXACT.contains(&key) || PREFIXES.iter().any(|p| key.starts_with(p))
 }
@@ -1987,6 +1988,8 @@ mod tests {
         assert!(!is_launch_field("hardware.region.code"));
         assert!(is_launch_field("hardware.runpod.mode"));
         assert!(is_launch_field("hardware.runpod.cloud"));
+        assert!(is_launch_field("hardware.gcp.machine_type"));
+        assert!(is_launch_field("hardware.gcp.project"));
         assert!(!is_launch_field("scaling.min_replicas"));
         assert!(!is_launch_field("memory_check"));
 

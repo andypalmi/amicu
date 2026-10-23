@@ -1432,7 +1432,13 @@ async fn apply_all(
             // A provider (or identity) change: stop what is running under the
             // OLD identity first, and confirm it, before starting the new one.
             // The old record stays in state until that stop is confirmed.
-            let stale = stale_records(&progress.stops, &item.deployment, &new_stop);
+            let mut stale = stale_records(&progress.stops, &item.deployment, &new_stop);
+            if dispatch == Dispatch::Gce {
+                // The same VM under another Google project (or impersonation
+                // target) is stopped and confirmed first too: its record would
+                // otherwise be overwritten by the new one below.
+                stale.extend(gce::moved_records(&progress.stops, &new_stop));
+            }
             for old in stale {
                 stop_record(
                     &old,
@@ -1458,7 +1464,7 @@ async fn apply_all(
                     progress.stops.push(new_stop.clone());
                 }
             } else if dispatch == Dispatch::Gce {
-                gce::write_ahead(&mut progress.stops, &new_stop);
+                gce::write_ahead(&mut progress.stops, &new_stop)?;
             } else if !progress
                 .stops
                 .iter()

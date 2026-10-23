@@ -64,6 +64,10 @@ struct World {
     state: Mutex<WorldState>,
     /// Fired once, just before the first instance insert.
     on_insert: Mutex<Option<Hook>>,
+    /// Fired once, just before the first secret create.
+    on_secret_create: Mutex<Option<Hook>>,
+    /// Fired once, just before the first firewall create.
+    on_firewall: Mutex<Option<Hook>>,
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -91,7 +95,20 @@ impl World {
         let mut w = self.state.lock().unwrap();
         let m = format!("{method:?}");
         match (method, parts.as_slice()) {
+            (HttpMethod::Get, ["projects", _, "secrets"]) => {
+                let items: Vec<Value> = w
+                    .secrets
+                    .iter()
+                    .map(|(id, labels, _)| {
+                        json!({"name": format!("projects/1/secrets/{id}"), "labels": labels})
+                    })
+                    .collect();
+                json_reply(200, &json!({"secrets": items}))
+            }
             (HttpMethod::Post, ["projects", _, "secrets"]) => {
+                if let Some(hook) = self.on_secret_create.lock().unwrap().take() {
+                    hook();
+                }
                 let id = query.strip_prefix("secretId=").unwrap_or_default();
                 if w.secrets.iter().any(|s| s.0 == id) {
                     return json_reply(
@@ -116,8 +133,11 @@ impl World {
                 }
                 match (method, action) {
                     (HttpMethod::Get, "") => {
-                        let labels = w.secrets.iter().find(|s| s.0 == id).unwrap().1.clone();
-                        json_reply(200, &json!({"name": id, "labels": labels}))
+                        let found = w.secrets.iter().find(|s| s.0 == id).unwrap();
+                        json_reply(
+                            200,
+                            &json!({"name": id, "labels": found.1, "replication": found.2}),
+                        )
                     }
                     (HttpMethod::Post, "addVersion") => {
                         w.log.push(format!("secret-version {id}"));
@@ -260,6 +280,9 @@ impl HttpTransport for World {
                 json_reply(200, &body)
             }
             (HttpMethod::Post, ["projects", _, "global", "firewalls"]) => {
+                if let Some(hook) = self.on_firewall.lock().unwrap().take() {
+                    hook();
+                }
                 let body = req.body.clone().unwrap_or_default();
                 let name = body["name"].as_str().unwrap_or_default().to_owned();
                 let mut w = self.state.lock().unwrap();
@@ -838,6 +861,13 @@ fn orphans_lists_owned_vms_and_firewall_rules_read_only() {
     rig.gcp
         .world
         .add_vm("europe-west4-a", "unrelated", json!({"env": "prod"}));
+    rig.gcp.world.add_secret(
+        &format!("amicu-{PROJECT}-old-0123abcd-api-key"),
+        json!(other),
+    );
+    rig.gcp
+        .world
+        .add_secret("someone-elses-secret", json!({"env": "prod"}));
     let writes_before = rig.gcp.world.writes();
 
     let state = project.load_state().unwrap();
@@ -877,6 +907,164 @@ fn orphans_lists_owned_vms_and_firewall_rules_read_only() {
         stop.stop_command
     );
     assert_eq!(rig.gcp.world.writes(), writes_before);
+}
+
+/// Reads the stop record of `DEP` from state each time it is called.
+fn record_taker(td: &TempDir, slot: &Arc<Mutex<Option<StopRecord>>>) -> Hook {
+    let slot = slot.clone();
+    let p = Project::new(&td.path);
+    Box::new(move || {
+        let state = p.load_state().unwrap().unwrap();
+        assert!(state.pending.iter().any(|d| d.as_str() == DEP));
+        *slot.lock().unwrap() = state
+            .stops
+            .into_iter()
+            .find(|r| r.deployment.as_str() == DEP);
+    })
+}
+
+#[test]
+fn the_record_is_saved_before_the_first_secret_the_firewall_and_the_vm() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    let at_secret: Arc<Mutex<Option<StopRecord>>> = Arc::default();
+    let at_firewall: Arc<Mutex<Option<StopRecord>>> = Arc::default();
+    let at_vm: Arc<Mutex<Option<StopRecord>>> = Arc::default();
+    *rig.gcp.world.on_secret_create.lock().unwrap() = Some(record_taker(&td, &at_secret));
+    *rig.gcp.world.on_firewall.lock().unwrap() = Some(record_taker(&td, &at_firewall));
+    *rig.gcp.world.on_insert.lock().unwrap() = Some(record_taker(&td, &at_vm));
+    apply_with(&project, &rig).unwrap();
+
+    let expected = the_record(&project);
+    for (when, seen) in [
+        ("first secret", at_secret),
+        ("firewall rule", at_firewall),
+        ("vm", at_vm),
+    ] {
+        let g = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| panic!("no record before the {when} create"))
+            .gcp
+            .unwrap();
+        assert_eq!(g.instance, expected.instance, "{when}");
+        assert_eq!(g.firewall, expected.firewall, "{when}");
+        assert_eq!(g.secrets, secret_ids(), "{when}");
+        assert_eq!(g.project, GOOGLE_PROJECT, "{when}");
+    }
+}
+
+fn with_project(td: &TempDir, project: &str) {
+    let config = gcp_config("allowed_source_cidrs = [\"203.0.113.4/32\"]").replace(
+        &format!("project          = \"{GOOGLE_PROJECT}\""),
+        &format!("project          = \"{project}\""),
+    );
+    assert!(config.contains(project), "{config}");
+    write(&td.path, "amicu.hcl", &config);
+}
+
+#[test]
+fn a_project_change_stops_the_old_vm_first_and_never_overwrites_its_record() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(the_record(&project).project, GOOGLE_PROJECT);
+
+    // Move the deployment to another Google project; the instance name does
+    // not depend on it.
+    with_project(&td, "other-proj");
+    let at_secret: Arc<Mutex<Option<StopRecord>>> = Arc::default();
+    *rig.gcp.world.on_secret_create.lock().unwrap() = Some(record_taker(&td, &at_secret));
+    let before = rig.gcp.world.log().len();
+    apply_with(&project, &rig).unwrap();
+
+    let log = rig.gcp.world.log()[before..].to_vec();
+    let old = format!("/projects/{GOOGLE_PROJECT}/");
+    let new = "/projects/other-proj/".to_owned();
+    let last_old_delete = log
+        .iter()
+        .rposition(|l| l.starts_with("Delete") && l.contains(&old))
+        .unwrap_or_else(|| panic!("the old VM was not deleted: {log:?}"));
+    let first_new_write = log
+        .iter()
+        .position(|l| l.starts_with("Post") && l.contains(&new) || l.starts_with("secret-create"))
+        .unwrap();
+    assert!(last_old_delete < first_new_write, "{log:?}");
+    // Its firewall rule and secrets went with it.
+    assert!(
+        log.iter()
+            .any(|l| l.starts_with("Delete") && l.contains(&old) && l.contains("/firewalls/")),
+        "{log:?}"
+    );
+    assert!(
+        log.iter().any(|l| l.starts_with("secret-delete")),
+        "{log:?}"
+    );
+    // By the first new write the state names only the new project.
+    let g = at_secret.lock().unwrap().clone().unwrap().gcp.unwrap();
+    assert_eq!(g.project, "other-proj");
+    let stops = stops_for(&project, DEP);
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    assert_eq!(the_record(&project).project, "other-proj");
+}
+
+#[test]
+fn a_project_change_with_a_failed_old_teardown_keeps_the_old_record_and_creates_nothing() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    // The old VM lost our label: its teardown is refused.
+    let zone = the_record(&project).zone;
+    rig.gcp.world.remove_vm(&instance());
+    rig.gcp
+        .world
+        .add_vm(&zone, &instance(), json!({"env": "prod"}));
+
+    with_project(&td, "other-proj");
+    let before = rig.gcp.world.log().len();
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("owner label"), "{err}");
+    let log = rig.gcp.world.log()[before..].to_vec();
+    assert!(
+        !log.iter()
+            .any(|l| l.starts_with("Post") && l.contains("/projects/other-proj/")),
+        "{log:?}"
+    );
+    // The old record is untouched, so destroy still finds the old resources.
+    let stops = stops_for(&project, DEP);
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    let g = the_record(&project);
+    assert_eq!(g.project, GOOGLE_PROJECT);
+    assert_eq!(g.secrets, secret_ids());
+    assert_eq!(rig.gcp.world.firewall_names().len(), 1);
+}
+
+#[test]
+fn switching_to_the_metadata_delivery_keeps_the_old_secrets_recorded() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(the_record(&project).secrets, secret_ids());
+
+    // Same project, same instance, but no Secret Manager any more. The old
+    // secrets must stay on the record until they are deleted.
+    write(
+        &td.path,
+        "amicu.hcl",
+        &gcp_config_with(
+            "allowed_source_cidrs = [\"203.0.113.4/32\"]\ninsecure_metadata_secrets = true",
+        ),
+    );
+    let at_vm: Arc<Mutex<Option<StopRecord>>> = Arc::default();
+    *rig.gcp.world.on_insert.lock().unwrap() = Some(record_taker(&td, &at_vm));
+    apply_with(&project, &rig).unwrap();
+    let g = at_vm.lock().unwrap().clone().unwrap().gcp.unwrap();
+    assert_eq!(g.secrets, secret_ids(), "{g:?}");
 }
 
 struct NoModalApps;

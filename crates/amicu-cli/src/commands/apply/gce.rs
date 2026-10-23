@@ -18,7 +18,7 @@ use amicu_core::id::DeploymentId;
 use amicu_core::resource::{GcpBackend, GcpProvisioning, Residency};
 use amicu_gcp::compute::{Provisioning as VmProvisioning, SecretDelivery};
 use amicu_gcp::gce::teardown;
-use amicu_gcp::{GceLaunch, GceSupervisor, GcpCatalog, candidate_zones, resolve_shape};
+use amicu_gcp::{GceLaunch, GceRecord, GceSupervisor, GcpCatalog, candidate_zones, resolve_shape};
 use amicu_llamacpp::Catalog;
 use amicu_runtime::{
     EndpointExposure, GatewayAuth, LaunchPlan, RuntimeAdapter, RuntimeHandle, RuntimeKind,
@@ -239,7 +239,12 @@ pub(super) async fn prepare(
             r.deployment == *id && r.backend == Backend::Gce && r.identity == new_record.instance
         })
         .and_then(|r| r.gcp.clone());
-    if let Some(prior) = prior {
+    // A record made for another project or impersonation target is not torn
+    // down by the supervisor (it would act as the new identity): apply stops
+    // it first and confirms, see `moved_records`.
+    if let Some(prior) = prior
+        && !moved(&prior, &new_record)
+    {
         supervisor = supervisor.with_recorded(prior);
     }
     let secrets = amicu_llamacpp::resolve_launch_secrets(launch, env.resolver).await?;
@@ -255,24 +260,67 @@ pub(super) async fn prepare(
     Ok((supervisor, start))
 }
 
-/// The write-ahead record, merged with the one already in state: the zones of
-/// both stay listed, so an old VM is still found if this run stops halfway.
-pub(super) fn write_ahead(stops: &mut Vec<StopRecord>, new: &StopRecord) {
+/// Whether `old` was made for another Google project or impersonation target
+/// than `new`: the same instance name (it does not depend on the project), but
+/// resources that the new identity cannot reach.
+fn moved(old: &GceRecord, new: &GceRecord) -> bool {
+    old.project != new.project || old.impersonate != new.impersonate
+}
+
+/// The recorded VMs of this deployment that `new` would replace but that live
+/// under another project or impersonation target. Apply stops them, and
+/// confirms, before the write-ahead record overwrites them: the instance name
+/// is the same, so the new record would otherwise take their place in state
+/// and the old VM, firewall rule and secrets would no longer be findable.
+pub(super) fn moved_records(stops: &[StopRecord], new: &StopRecord) -> Vec<StopRecord> {
+    let Some(fresh) = new.gcp.as_ref() else {
+        return Vec::new();
+    };
+    stops
+        .iter()
+        .filter(|r| r.deployment == new.deployment && r.same_target(new))
+        .filter(|r| r.gcp.as_ref().is_some_and(|old| moved(old, fresh)))
+        .cloned()
+        .collect()
+}
+
+/// The write-ahead record, merged with the one already in state: the zones and
+/// secrets of both stay listed, so an old VM (and the secrets of an old
+/// delivery) are still found if this run stops halfway.
+///
+/// # Errors
+/// When the record in state belongs to another project or impersonation target
+/// (see [`moved_records`], which apply stops first): it is never overwritten
+/// while it may still own resources.
+pub(super) fn write_ahead(stops: &mut Vec<StopRecord>, new: &StopRecord) -> Result<(), CliError> {
     let Some(r) = stops.iter_mut().find(|r| r.same_target(new)) else {
         stops.push(new.clone());
-        return;
+        return Ok(());
     };
     let (Some(old), Some(fresh)) = (r.gcp.as_ref(), new.gcp.as_ref()) else {
         r.gcp.clone_from(&new.gcp);
-        return;
+        return Ok(());
     };
+    if moved(old, fresh) {
+        return Err(CliError::Message(format!(
+            "the recorded VM {} belongs to project {} and cannot be replaced by one in project \
+             {} before it is stopped; nothing was changed",
+            old.instance, old.project, fresh.project
+        )));
+    }
     let mut merged = fresh.clone();
     for z in old.zones() {
         if !merged.zones().contains(&z) {
             merged.alternates.push(z.to_owned());
         }
     }
+    for id in &old.secrets {
+        if !merged.secrets.contains(id) {
+            merged.secrets.push(id.clone());
+        }
+    }
     r.gcp = Some(merged);
+    Ok(())
 }
 
 /// Records the zone the VM landed in (when known) in the matching record.
@@ -368,4 +416,82 @@ pub(super) async fn stop(record: &StopRecord, env: &Env<'_>) -> Result<(), CliEr
                 record.describe()
             ))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(project: &str, zone: &str, secrets: &[&str]) -> StopRecord {
+        StopRecord::gce(
+            &"chat".into(),
+            GceRecord {
+                project: project.to_owned(),
+                zone: zone.to_owned(),
+                alternates: Vec::new(),
+                instance: "amicu-p-chat-0123abcd".to_owned(),
+                firewall: "amicu-p-chat-0123abcd-fw".to_owned(),
+                owner: "owner".to_owned(),
+                impersonate: None,
+                secrets: secrets.iter().map(|s| (*s).to_owned()).collect(),
+                tls_fingerprint: None,
+            },
+        )
+    }
+
+    fn gcp(r: &StopRecord) -> &GceRecord {
+        r.gcp.as_ref().unwrap()
+    }
+
+    #[test]
+    fn write_ahead_unions_zones_and_secrets_of_the_same_project() {
+        let mut stops = vec![record("p", "europe-west4-a", &["s-api-key", "s-tls-key"])];
+        write_ahead(&mut stops, &record("p", "europe-west4-b", &[])).unwrap();
+        assert_eq!(stops.len(), 1);
+        let g = gcp(&stops[0]);
+        assert_eq!(g.zones(), ["europe-west4-b", "europe-west4-a"]);
+        // The metadata delivery lists no secrets, but the old ones stay.
+        assert_eq!(g.secrets, ["s-api-key", "s-tls-key"]);
+
+        // Repeating adds nothing twice.
+        write_ahead(&mut stops, &record("p", "europe-west4-b", &["s-api-key"])).unwrap();
+        let g = gcp(&stops[0]);
+        assert_eq!(g.zones(), ["europe-west4-b", "europe-west4-a"]);
+        assert_eq!(g.secrets, ["s-api-key", "s-tls-key"]);
+    }
+
+    #[test]
+    fn write_ahead_pushes_a_new_record_and_refuses_to_overwrite_another_project() {
+        let mut stops = Vec::new();
+        write_ahead(&mut stops, &record("p", "europe-west4-a", &[])).unwrap();
+        assert_eq!(stops.len(), 1);
+
+        let before = stops.clone();
+        let e = write_ahead(&mut stops, &record("q", "europe-west4-a", &[])).unwrap_err();
+        assert!(e.to_string().contains("belongs to project p"), "{e}");
+        assert_eq!(stops, before, "the old record is untouched");
+
+        // Another impersonation target is another identity too.
+        let mut other = record("p", "europe-west4-a", &[]);
+        other.gcp.as_mut().unwrap().impersonate = Some("sa@p.iam.gserviceaccount.com".into());
+        assert!(write_ahead(&mut stops, &other).is_err());
+    }
+
+    #[test]
+    fn moved_records_are_the_same_instance_under_another_project_or_account() {
+        let new = record("q", "europe-west4-a", &[]);
+        let same = record("q", "europe-west4-b", &[]);
+        let old = record("p", "europe-west4-a", &["s-api-key"]);
+        let mut other_dep = old.clone();
+        other_dep.deployment = "other".into();
+        let stops = vec![same.clone(), old.clone(), other_dep];
+        assert_eq!(moved_records(&stops, &new), vec![old.clone()]);
+        assert_eq!(moved_records(&[same], &new).len(), 0);
+        assert_eq!(moved_records(&[], &new).len(), 0);
+
+        let mut impersonated = new.clone();
+        impersonated.gcp.as_mut().unwrap().impersonate =
+            Some("sa@q.iam.gserviceaccount.com".into());
+        assert_eq!(moved_records(&[new], &impersonated).len(), 1);
+    }
 }

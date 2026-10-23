@@ -84,7 +84,7 @@ The `gcp {}` block on a `hardware_profile` with `provider = "gcp"`:
 | `zone` | string | first zone offering the GPU | no | Pins one zone. Otherwise the catalog zones of `region` that offer the GPU are tried in order. |
 | `machine_type` | string | smallest catalog machine for the GPU | no | For N1 GPUs (T4, V100, P4) an `n1-standard-N`; the default is `n1-standard-4` per GPU. |
 | `provisioning` | string | `spot` | no | `spot`, `flex_start` or `standard`. Not every machine offers every mode (`AMICU-CAP-018`, for example `standard` on `a3-highgpu-1g`). |
-| `max_run_duration` | duration | `8h` | no | 10m to 7d (120d unless `flex_start`). Compute Engine deletes the VM after it. |
+| `max_run_duration` | duration | `8h` | no | `10m` to `2880h` (120 days), or `168h` (7 days) with `flex_start`. Write it in `s`, `m` or `h`: days are not accepted. Compute Engine deletes the VM after it. |
 | `boot_disk_gb` | number | `100` | no | At least 50. |
 | `service_account` | string | none | yes, unless `insecure_metadata_secrets` | Email of the account the VM runs as; it reads the VM's secrets from Secret Manager (`AMICU-CAP-016` if missing). |
 | `insecure_metadata_secrets` | bool | `false` | no | INSECURE. Deliver the secrets as instance metadata instead of Secret Manager, readable by anyone who can read the instance. |
@@ -97,7 +97,7 @@ Other checks: an unknown GPU or one not offered in the zone or region is `AMICU-
 
 ## Operations
 
-`amicu plan` and `apply` compare state with Compute Engine. A VM that is gone or stopped (a Spot preemption, the `max_run_duration` backstop, a delete outside amicu) is reported as drift and marked pending: `apply` recreates it, `destroy` confirms its firewall rule is removed. `amicu orphans` lists VMs and firewall rules in the project that carry amicu's marker but that state does not record, with the `gcloud` command to delete each. It never deletes anything.
+`amicu plan` and `apply` compare state with Compute Engine. A VM that is gone or stopped (a Spot preemption, the `max_run_duration` backstop, a delete outside amicu) is reported as drift and marked pending: `apply` recreates it, `destroy` confirms its firewall rule is removed. `amicu orphans` lists VMs, firewall rules and Secret Manager secrets in the project that carry amicu's marker but that state does not record, with the `gcloud` command to delete each. It never deletes anything.
 
 ## GPUs and regions
 

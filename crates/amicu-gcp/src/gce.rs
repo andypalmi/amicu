@@ -541,16 +541,16 @@ impl ProcessSupervisor for GceSupervisor {
             Some(p) => Arc::clone(p),
             None => probe_transport(&vm).map_err(|e| err(&e))?,
         };
-        let ip = wait_ready(
-            &self.client,
-            probe,
-            &vm,
-            port,
-            &startup.api_key,
-            self.timing.health,
-        )
-        .await
-        .map_err(|e| err(&e))?;
+        // The default health timeout does not cover a flex-start queue: size it
+        // from the spec unless the caller set one.
+        let health = if self.timing.health == HealthTiming::default() {
+            HealthTiming::for_spec(&self.spec(&zone, &record, &startup))
+        } else {
+            self.timing.health
+        };
+        let ip = wait_ready(&self.client, probe, &vm, port, health)
+            .await
+            .map_err(|e| err(&e))?;
         Ok(RuntimeHandle {
             id: record.instance.clone(),
             deployment: plan.deployment.clone(),
@@ -759,6 +759,50 @@ pub async fn list_owned_firewalls(
             }
         }
         token = page["nextPageToken"].as_str().map(str::to_owned);
+        if token.is_none() {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// The ids and owner markers of `project`'s Secret Manager secrets that carry
+/// amicu's owner label (read-only). The label is checked here, not in a list
+/// filter, so every page is read.
+///
+/// # Errors
+/// An API error ([`GcpError::PermissionDenied`] when the API is not enabled or
+/// listing is not allowed).
+pub async fn list_owned_secrets(
+    client: &GcpClient,
+    project: &str,
+) -> Result<Vec<(String, String)>, GcpError> {
+    crate::validate::validate_project_id(project)?;
+    let mut out = Vec::new();
+    let mut token: Option<String> = None;
+    for _ in 0..50 {
+        let mut url = format!(
+            "{}/projects/{project}/secrets?pageSize=100",
+            crate::secrets::SECRETMANAGER_BASE_URL
+        );
+        if let Some(t) = &token {
+            url = format!("{url}&pageToken={}", pct(t));
+        }
+        let page = client.request(HttpMethod::Get, &url, None).await?;
+        for s in page["secrets"].as_array().into_iter().flatten() {
+            let id = s["name"]
+                .as_str()
+                .and_then(|n| n.rsplit('/').next())
+                .filter(|id| !id.is_empty());
+            let owner = s["labels"][crate::labels::OWNER_LABEL].as_str();
+            if let (Some(id), Some(owner)) = (id, owner) {
+                out.push((id.to_owned(), owner.to_owned()));
+            }
+        }
+        token = page["nextPageToken"]
+            .as_str()
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned);
         if token.is_none() {
             break;
         }
