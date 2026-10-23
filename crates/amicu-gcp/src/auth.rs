@@ -152,6 +152,7 @@ impl TokenSource for AdcTokenSource {
             Ok(t) => Ok(AccessToken::new(t.token)),
             Err(e) => Err(classify_token_error(
                 adc_file_present(),
+                on_google_cloud(),
                 e.is_transient(),
                 ErrorShape::of(&e),
             )),
@@ -219,19 +220,56 @@ fn msg_is_connect_failure(msg: &str) -> bool {
 /// server is the only credential source. Off Google Cloud it does not exist,
 /// and `google-cloud-auth` reports that connect failure as transient, so a
 /// connect failure or timeout there means "not logged in"
-/// ([`GcpError::MissingCredentials`]), as does a permanent not-found. A
-/// metadata server that answered with a transient error (5xx) stays a
-/// retryable token error. With an ADC file or explicit credentials the
+/// ([`GcpError::MissingCredentials`]), as does a permanent not-found. On a
+/// Google Cloud host (`on_google_cloud`) the metadata server does exist, so a
+/// connect failure or timeout is a transient outage, not a missing login: it
+/// stays a retryable token error, as does a metadata server that answered
+/// with a transient error (5xx). With an ADC file or explicit credentials the
 /// failure is never "missing": it is a token error, retryable only when the
 /// underlying error is transient.
-fn classify_token_error(adc_file_present: bool, transient: bool, shape: ErrorShape) -> GcpError {
-    if !adc_file_present && (shape.connect || (!transient && shape.not_found)) {
+fn classify_token_error(
+    adc_file_present: bool,
+    on_google_cloud: bool,
+    transient: bool,
+    shape: ErrorShape,
+) -> GcpError {
+    let unreachable = shape.connect && !on_google_cloud;
+    if !adc_file_present && (unreachable || (!transient && shape.not_found)) {
         GcpError::MissingCredentials
     } else {
         GcpError::Token {
             retryable: transient,
         }
     }
+}
+
+/// Whether this process runs on Google Cloud (Compute Engine, GKE, Cloud Run,
+/// App Engine), judged from local hints only, with no network call.
+fn on_google_cloud() -> bool {
+    let product_name = std::fs::read_to_string("/sys/class/dmi/id/product_name").ok();
+    google_cloud_hints(
+        |name| std::env::var_os(name).is_some_and(|v| !v.is_empty()),
+        product_name.as_deref(),
+    )
+}
+
+/// The detection behind [`on_google_cloud`], with the environment and the
+/// DMI product name (`/sys/class/dmi/id/product_name`, Linux) injected.
+/// `GCE_METADATA_HOST` is what `google-cloud-auth` itself honours to find the
+/// metadata server; the `K_*`, `CLOUD_RUN_JOB` and `GAE_ENV` variables are set
+/// by Cloud Run and App Engine; GCE and GKE nodes report a "Google ..."
+/// product name.
+fn google_cloud_hints(env_is_set: impl Fn(&str) -> bool, product_name: Option<&str>) -> bool {
+    [
+        "GCE_METADATA_HOST",
+        "K_SERVICE",
+        "K_CONFIGURATION",
+        "CLOUD_RUN_JOB",
+        "GAE_ENV",
+    ]
+    .iter()
+    .any(|name| env_is_set(name))
+        || product_name.is_some_and(|p| p.contains("Google"))
 }
 
 /// Candidate directories holding `application_default_credentials.json`, in
@@ -347,40 +385,69 @@ mod tests {
         // No ADC file: the metadata server is unreachable (reported transient
         // by google-cloud-auth) or absent: not logged in.
         assert_eq!(
-            classify_token_error(false, true, CONNECT),
+            classify_token_error(false, false, true, CONNECT),
             GcpError::MissingCredentials
         );
         assert_eq!(
-            classify_token_error(false, false, CONNECT),
+            classify_token_error(false, false, false, CONNECT),
             GcpError::MissingCredentials
         );
         assert_eq!(
-            classify_token_error(false, false, NOT_FOUND),
+            classify_token_error(false, false, false, NOT_FOUND),
             GcpError::MissingCredentials
         );
         // The metadata server answered with a transient server error: retry.
         assert_eq!(
-            classify_token_error(false, true, OTHER),
+            classify_token_error(false, false, true, OTHER),
             GcpError::Token { retryable: true }
         );
         assert_eq!(
-            classify_token_error(false, true, NOT_FOUND),
+            classify_token_error(false, false, true, NOT_FOUND),
             GcpError::Token { retryable: true }
         );
         // Permanent but not not-found-shaped (rejected credentials).
         assert_eq!(
-            classify_token_error(false, false, OTHER),
+            classify_token_error(false, false, false, OTHER),
             GcpError::Token { retryable: false }
         );
         // An ADC file or explicit credentials exist: never "missing".
         assert_eq!(
-            classify_token_error(true, false, NOT_FOUND),
+            classify_token_error(true, false, false, NOT_FOUND),
             GcpError::Token { retryable: false }
         );
         assert_eq!(
-            classify_token_error(true, true, CONNECT),
+            classify_token_error(true, false, true, CONNECT),
             GcpError::Token { retryable: true }
         );
+    }
+
+    #[test]
+    fn on_google_cloud_a_connect_failure_stays_a_retryable_token_error() {
+        // No ADC file, but the metadata server should exist: an outage.
+        for transient in [true, false] {
+            assert_eq!(
+                classify_token_error(false, true, transient, CONNECT),
+                GcpError::Token {
+                    retryable: transient
+                }
+            );
+        }
+        // A real not-found still means there is no credential source.
+        assert_eq!(
+            classify_token_error(false, true, false, NOT_FOUND),
+            GcpError::MissingCredentials
+        );
+    }
+
+    #[test]
+    fn google_cloud_is_detected_from_local_hints() {
+        let none = |_: &str| false;
+        assert!(!google_cloud_hints(none, None));
+        assert!(!google_cloud_hints(none, Some("MacBookPro18,3\n")));
+        assert!(google_cloud_hints(none, Some("Google Compute Engine\n")));
+        assert!(google_cloud_hints(|n| n == "GCE_METADATA_HOST", None));
+        assert!(google_cloud_hints(|n| n == "K_SERVICE", None));
+        assert!(!google_cloud_hints(|n| n == "HOME", None));
     }
 
     #[test]
@@ -407,7 +474,7 @@ mod tests {
     const CHILD_MARKER: &str = "AMICU_GCP_AUTH_TEST_CHILD";
 
     /// Runs only inside the child process of
-    /// [`no_adc_off_google_cloud_is_missing_credentials`].
+    /// [`no_adc_on_unreachable_google_cloud_is_a_retryable_token_error`].
     #[tokio::test]
     async fn child_no_adc_token() {
         if std::env::var_os(CHILD_MARKER).is_none() {
@@ -415,16 +482,19 @@ mod tests {
         }
         let source = AdcTokenSource::new(&AuthConfig::default()).unwrap();
         let got = source.token().await;
-        assert_eq!(got.unwrap_err(), GcpError::MissingCredentials);
+        assert_eq!(got.unwrap_err(), GcpError::Token { retryable: true });
     }
 
-    /// The real token path with no ADC file and no metadata server. The
+    /// The real token path with no ADC file and a metadata server that does
+    /// not answer, on a host marked as Google Cloud (`GCE_METADATA_HOST`): a
+    /// retryable outage, not a missing login. The off-Google-Cloud case needs
+    /// no network and is covered by the `classify_token_error` unit tests. The
     /// environment is isolated by re-running this test binary as a child with
     /// a cleared environment (the crate forbids `unsafe`, which setting
     /// process variables needs), a nonexistent `HOME`, and the metadata host
     /// pointed at a closed local port.
     #[test]
-    fn no_adc_off_google_cloud_is_missing_credentials() {
+    fn no_adc_on_unreachable_google_cloud_is_a_retryable_token_error() {
         let exe = std::env::current_exe().unwrap();
         let out = std::process::Command::new(exe)
             .args(["--exact", "auth::tests::child_no_adc_token", "--nocapture"])
