@@ -111,6 +111,7 @@ fn validate_run_operation_name(name: &str) -> Result<(), GcpError> {
     let parts: Vec<&str> = name.split('/').collect();
     let token = |s: &str| {
         !s.is_empty()
+            && s != "."
             && s != ".."
             && s.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
@@ -143,7 +144,16 @@ async fn poll(
 ) -> Result<Value, GcpError> {
     let deadline = Instant::now() + timing.timeout;
     loop {
-        match client.request(method, url, None).await {
+        // Bound each request by what is left of the deadline so a slow
+        // response cannot overshoot the total timeout.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(response) = tokio::time::timeout(remaining, client.request(method, url, None)).await
+        else {
+            return Err(GcpError::OperationTimeout {
+                operation: operation.to_owned(),
+            });
+        };
+        match response {
             Ok(op) => match finished(&op) {
                 Some(Ok(())) => return Ok(op),
                 Some(Err((code, message))) => {
@@ -328,6 +338,8 @@ mod tests {
         for bad in [
             "operations/x",
             "projects/p/locations/l/operations/../x",
+            "projects/p/locations/l/operations/./x",
+            "projects/./locations/l/operations/x",
             "projects/p/locations/l/operations/a?b",
             "projects/p/locations/l/operations/a/b",
             "",
@@ -335,5 +347,58 @@ mod tests {
             assert!(wait_run_operation(&c, bad, fast()).await.is_err(), "{bad}");
         }
         assert!(mock.requests().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hard_quota_ends_the_wait_but_rate_limits_are_retried() {
+        let mock = Mock::default().on(
+            HttpMethod::Post,
+            WAIT,
+            403,
+            r#"{"error":{"errors":[{"reason":"quotaExceeded"}],"message":"q"}}"#,
+        );
+        let (r, calls) = compute(mock).await;
+        assert!(r.unwrap_err().is_quota());
+        assert_eq!(calls, 1);
+
+        let mock = Mock::default().on(HttpMethod::Post, WAIT, 429, "{}").on(
+            HttpMethod::Post,
+            WAIT,
+            200,
+            r#"{"status":"DONE"}"#,
+        );
+        let (r, calls) = compute(mock).await;
+        assert!(r.is_ok());
+        assert_eq!(calls, 2);
+    }
+
+    /// A transport whose requests never complete.
+    struct Hang;
+
+    #[async_trait::async_trait]
+    impl amicu_providers::HttpTransport for Hang {
+        async fn execute(
+            &self,
+            _request: amicu_providers::HttpRequest,
+        ) -> Result<HttpResponse, TransportError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hanging_request_cannot_overshoot_the_deadline() {
+        let c = GcpClient::with_transport(
+            std::sync::Arc::new(crate::auth::fake::FakeTokens(Ok("t"))),
+            std::sync::Arc::new(Hang),
+        );
+        let start = Instant::now();
+        let r = wait_run_operation(&c, RUN_OP, fast()).await;
+        assert_eq!(
+            r,
+            Err(GcpError::OperationTimeout {
+                operation: RUN_OP.into()
+            })
+        );
+        assert!(start.elapsed() <= Duration::from_secs(30) + Duration::from_millis(1));
     }
 }
