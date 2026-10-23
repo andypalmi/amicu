@@ -329,15 +329,12 @@ impl GcpResources for GcpOpsListing<'_> {
                 let fws = rt
                     .block_on(amicu_gcp::gce::list_owned_firewalls(&client, project))
                     .map_err(|e| fail("firewall rules", e))?;
-                // A project that delivers secrets as instance metadata may
-                // never have enabled Secret Manager: not being allowed to list
-                // there means no secrets, not a failed listing.
-                let secrets =
-                    match rt.block_on(amicu_gcp::gce::list_owned_secrets(&client, project)) {
-                        Ok(s) => s,
-                        Err(amicu_gcp::GcpError::PermissionDenied { .. }) => Vec::new(),
-                        Err(e) => return Err(fail("secrets", e)),
-                    };
+                let secrets = tolerate_secret_listing(
+                    project,
+                    rt.block_on(amicu_gcp::gce::list_owned_secrets(&client, project)),
+                    &mut std::io::stderr(),
+                )
+                .map_err(|e| fail("secrets", e))?;
                 out.secrets
                     .extend(secrets.into_iter().map(|(name, _)| GcpSecret {
                         project: project.clone(),
@@ -358,6 +355,45 @@ impl GcpResources for GcpOpsListing<'_> {
             Ok(out)
         };
         run().map_err(|e| e.to_string())
+    }
+}
+
+/// Whether the error says the API is switched off in the project
+/// (`SERVICE_DISABLED`, "has not been used ... or it is disabled").
+fn api_disabled(e: &amicu_gcp::GcpError) -> bool {
+    let amicu_gcp::GcpError::PermissionDenied { code, message, .. } = e else {
+        return false;
+    };
+    let m = message.to_ascii_lowercase();
+    code.contains("SERVICE_DISABLED")
+        || m.contains("service_disabled")
+        || m.contains("has not been used")
+        || m.contains("it is disabled")
+        || m.contains("not enabled")
+        || m.contains("api is disabled")
+}
+
+/// Handles the result of listing a project's secrets. A project that delivers
+/// secrets as instance metadata may never have enabled Secret Manager, so a
+/// disabled-API error means no secrets. Any other permission error does not:
+/// the secrets may exist but not be visible to this caller, so a note goes to
+/// `note` and the scan carries on without them.
+fn tolerate_secret_listing(
+    project: &str,
+    listed: Result<Vec<(String, String)>, amicu_gcp::GcpError>,
+    note: &mut dyn std::io::Write,
+) -> Result<Vec<(String, String)>, amicu_gcp::GcpError> {
+    match listed {
+        Err(e) if api_disabled(&e) => Ok(Vec::new()),
+        Err(amicu_gcp::GcpError::PermissionDenied { .. }) => {
+            let _ = writeln!(
+                note,
+                "secrets not listed in {project}: permission denied (needs \
+                 secretmanager.secrets.list); leaked secrets there would not show"
+            );
+            Ok(Vec::new())
+        }
+        other => other,
     }
 }
 
@@ -603,9 +639,9 @@ fn runpod(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
     Ok(found)
 }
 
-/// Compute Engine VMs, firewall rules and Secret Manager secrets amicu created (they carry its owner
-/// marker) in the projects state or config names, with the `gcloud` commands
-/// that delete them by hand.
+/// Compute Engine VMs, firewall rules and Secret Manager secrets amicu created
+/// (they carry its owner marker) in the projects state or config names, with
+/// the `gcloud` commands that delete them by hand.
 fn gcp(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
     let projects: Vec<_> = tracked.gcp_projects.iter().cloned().collect();
     let listing = env.gcp.list(&projects)?;
@@ -1093,6 +1129,55 @@ fn render(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn secret_listing_tolerates_only_a_disabled_api() {
+        use amicu_gcp::GcpError;
+        let denied = |code: &str, message: &str| GcpError::PermissionDenied {
+            status: 403,
+            code: code.into(),
+            message: message.into(),
+        };
+        // API switched off: no secrets, no note.
+        let mut note = Vec::new();
+        let off = denied(
+            "PERMISSION_DENIED",
+            "Secret Manager API has not been used in project p before or it is disabled.",
+        );
+        assert_eq!(
+            tolerate_secret_listing("p", Err(off), &mut note),
+            Ok(vec![])
+        );
+        assert_eq!(note, Vec::<u8>::new());
+        let off = denied("SERVICE_DISABLED", "x");
+        assert_eq!(
+            tolerate_secret_listing("p", Err(off), &mut note),
+            Ok(vec![])
+        );
+        assert_eq!(note, Vec::<u8>::new());
+        // A real permission failure: continue, but say so.
+        let no = denied(
+            "PERMISSION_DENIED",
+            "Permission 'secretmanager.secrets.list' denied",
+        );
+        assert_eq!(tolerate_secret_listing("p", Err(no), &mut note), Ok(vec![]));
+        let note = String::from_utf8(note).unwrap();
+        assert!(
+            note.contains("secrets not listed in p: permission denied"),
+            "{note}"
+        );
+        // Other errors still fail; successes pass through.
+        let e = GcpError::Transport("x".into());
+        assert_eq!(
+            tolerate_secret_listing("p", Err(e.clone()), &mut Vec::new()),
+            Err(e)
+        );
+        let ok = vec![("s".to_owned(), "o".to_owned())];
+        assert_eq!(
+            tolerate_secret_listing("p", Ok(ok.clone()), &mut Vec::new()),
+            Ok(ok)
+        );
+    }
+
     use super::*;
     use crate::stops::StopRecord;
     use amicu_llamacpp::{ExecOutput, LlamaCppError};

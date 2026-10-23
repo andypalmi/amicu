@@ -144,6 +144,9 @@ Other checks: an unknown GPU or one not offered in the zone or region is `AMICU-
   <Accordion title="destroy refuses a VM or firewall rule">
   It does not carry amicu's owner marker, so amicu will not touch it. Check it in the Google Cloud console; the record stays in state.
   </Accordion>
+  <Accordion title="apply fails after I changed the project or the impersonated account">
+  `apply` first tears down the old record, using the project and account that record names. If that project or service account is gone, the teardown fails on every `apply` until you revert the config to the old project and account (so `amicu destroy` can clean up), or, once you have checked in the Google Cloud console that nothing of amicu's is left, delete that deployment's record from `.amicu/state/state.json` by hand. No amicu command forgets a Google Cloud record.
+  </Accordion>
   <Accordion title="validate or plan rejects the region">
   The region code must be one the catalog lists, and its jurisdiction must satisfy your [`data_class`](/docs/configuration/data-class) residency constraint. An unknown code is not guessed at: the residency check fails closed. See [Residency](/docs/concepts/residency).
   </Accordion>
