@@ -238,10 +238,18 @@ pub fn startup_script(cfg: &StartupConfig, project: &str, instance: &str) -> Str
          {run} >/dev/null\n\
          sleep 5\n\
          state=\"$(docker inspect -f '{{{{.State.Status}}}}' {CONTAINER_NAME} 2>/dev/null || true)\"\n\
-         case \"$state\" in running|restarting) ;; *)\n\
+         if [ \"$state\" != running ]; then\n\
          echo \"amicu: container {CONTAINER_NAME} is not running (state: ${{state:-unknown}})\" >&2\n\
          docker logs --tail 50 {CONTAINER_NAME} >&2 || true\n\
-         exit 1;; esac\n\
+         exit 1\n\
+         fi\n\
+         sleep 15\n\
+         state=\"$(docker inspect -f '{{{{.State.Status}}}}' {CONTAINER_NAME} 2>/dev/null || true)\"\n\
+         if [ \"$state\" != running ]; then\n\
+         echo \"amicu: container {CONTAINER_NAME} stopped or is crash-looping (state: ${{state:-unknown}})\" >&2\n\
+         docker logs --tail 50 {CONTAINER_NAME} >&2 || true\n\
+         exit 1\n\
+         fi\n\
          echo 'amicu: container {CONTAINER_NAME} started' >&2\n"
     )
 }
@@ -464,7 +472,16 @@ mod tests {
         assert!(!s.contains("exec 'docker'"));
         assert!(s.contains("docker inspect -f"));
         assert!(s.contains("docker logs --tail 50 amicu-vllm"));
-        assert!(s.contains("exit 1;; esac"));
+        // `restarting` is a crash loop, not a pass: only `running` is accepted,
+        // checked twice, 15 s apart, with the container logs on failure.
+        assert!(!s.contains("restarting"));
+        assert_eq!(s.matches("[ \"$state\" != running ]").count(), 2);
+        assert_eq!(
+            s.matches("docker logs --tail 50 amicu-vllm >&2 || true")
+                .count(),
+            2
+        );
+        assert!(s.contains("sleep 15\n"));
     }
 
     #[test]
