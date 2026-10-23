@@ -27,6 +27,7 @@ use crate::OutputFormat;
 use crate::catalog::build_catalog;
 use crate::checks::report_for;
 use crate::commands::telemetry_agent::TelemetryHooks;
+use crate::commands::telemetry_cloud::{CloudAgent, SourceKind};
 use crate::error::CliError;
 use crate::lock::StateLock;
 use crate::modal_ops::{
@@ -1562,6 +1563,23 @@ async fn apply_all(
                 .await?;
                 progress.stops.retain(|r| !r.same_instance(&old));
             }
+            // After the superseded stops, which stop an agent of the same label.
+            if let Some(kind) = cloud_source(dispatch, runpod.as_ref()) {
+                let handle = progress.started.last().cloned();
+                if let Some(handle) = handle {
+                    start_cloud_agent(
+                        kind,
+                        item,
+                        &handle,
+                        launch,
+                        (graph, &catalog),
+                        &progress.project_id,
+                        env,
+                        &*host_probe,
+                    )
+                    .await;
+                }
+            }
         } else {
             // Destroy: stop every recorded instance of this deployment. A
             // deployment leaves state only once each stop is confirmed (or the
@@ -2488,9 +2506,125 @@ async fn stop_record(
             env.telemetry.forget(&record.identity);
             Ok(())
         }
-        Backend::Modal => stop_modal(record, env, stops).await,
-        Backend::Runpod => stop_runpod(record, env, project_id, stops).await,
-        Backend::RunpodPod => pod::stop(record, env, project_id, stops).await,
+        Backend::Modal => {
+            stop_modal(record, env, stops).await?;
+            stop_cloud_agent(record, env, probe, project_id).await
+        }
+        Backend::Runpod => {
+            stop_runpod(record, env, project_id, stops).await?;
+            stop_cloud_agent(record, env, probe, project_id).await
+        }
+        Backend::RunpodPod => {
+            pod::stop(record, env, project_id, stops).await?;
+            stop_cloud_agent(record, env, probe, project_id).await
+        }
+    }
+}
+
+/// The agent of a cloud deployment goes with it: stop its job, delete its
+/// definition (which holds provider credentials) and drop its id and queue.
+/// A stop that fails is an error, as for a host agent: one that may still
+/// send must not be ignored.
+async fn stop_cloud_agent(
+    record: &StopRecord,
+    env: &Env<'_>,
+    host: &dyn ProcessSupervisor,
+    project_id: &str,
+) -> Result<(), CliError> {
+    let label = amicu_llamacpp::project_host_label(project_id, record.deployment.as_str());
+    host.stop_sidecar_of(&label).await.map_err(|e| {
+        CliError::Adapter(amicu_core::adapter::AdapterErrorKind::into_adapter_error(e))
+    })?;
+    env.telemetry.forget(&label);
+    Ok(())
+}
+
+/// Where a just-started deployment's metrics come from, when it runs in the
+/// cloud.
+fn cloud_source(dispatch: Dispatch, runpod: Option<&RunPodStart>) -> Option<SourceKind> {
+    match (dispatch, runpod) {
+        (Dispatch::Modal, _) => Some(SourceKind::Modal),
+        (Dispatch::RunPod, Some(rp)) if rp.pod => Some(SourceKind::RunpodPod),
+        (Dispatch::RunPod, _) => Some(SourceKind::RunpodEndpoint),
+        (Dispatch::Host, _) => None,
+    }
+}
+
+/// Start the opt-in telemetry agent of a cloud deployment that now serves.
+/// Does nothing unless consent resolves to on. Like a host agent's, its
+/// failure never fails the deployment: it is a warning.
+#[allow(clippy::too_many_arguments)]
+async fn start_cloud_agent(
+    kind: SourceKind,
+    item: &crate::planner::PlanItem,
+    handle: &RuntimeHandle,
+    launch: &LaunchPlan,
+    (graph, catalog): (&Graph, &dyn amicu_llamacpp::Catalog),
+    project_id: &str,
+    env: &Env<'_>,
+    host: &dyn ProcessSupervisor,
+) {
+    // Agent jobs are not started on Windows yet (as for host deployments).
+    if !cfg!(unix) || host.host_context().is_none() || !env.telemetry.consent_on() {
+        return;
+    }
+    let Some(deployment) = find_deployment(graph, &item.deployment) else {
+        return;
+    };
+    let (runtime, _, context_length, batch_size) =
+        crate::commands::telemetry_agent::runtime_facts(&launch.settings);
+    let req = CloudAgent {
+        kind,
+        main_label: amicu_llamacpp::project_host_label(project_id, item.deployment.as_str()),
+        resource_id: handle.id.clone(),
+        endpoint: handle.endpoint.clone(),
+        runtime,
+        descriptor: crate::commands::telemetry_agent::describe(
+            catalog,
+            deployment,
+            kind.provider(),
+        ),
+        region: item.action.region.clone(),
+        context_length,
+        batch_size,
+        idle_pause_secs: crate::commands::telemetry_cloud::idle_pause_secs(
+            kind,
+            deployment.scaling.as_ref(),
+        ),
+    };
+    let started = async {
+        // RunPod reads `/metrics` with the deployment's own `api_key`.
+        let key = match (&launch.api_key, kind) {
+            (Some(reference), SourceKind::RunpodEndpoint | SourceKind::RunpodPod) => {
+                let value = env
+                    .resolver
+                    .resolve(reference)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Some(
+                    value
+                        .expose_secret_str()
+                        .map(str::to_owned)
+                        .map_err(|e| e.to_string())?,
+                )
+            }
+            _ => None,
+        };
+        let Some(spec) = env.telemetry.cloud_agent(&req, key.as_deref())? else {
+            return Ok(());
+        };
+        host.start_cloud_sidecar(&req.main_label, &spec)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    .await;
+    if let Err(why) = started {
+        let _ = writeln!(
+            std::io::stderr(),
+            "warning: the telemetry agent for '{}' did not start ({why}); the deployment itself \
+             is running",
+            item.deployment
+        );
     }
 }
 
