@@ -5,7 +5,7 @@ description: Telemetry is off unless you opt in. This page lists every network c
 
 By default amicu sends no telemetry, analytics, crash reports or update checks. There is no account, and `init`, `fmt`, `validate`, `plan`, `apply`, `destroy`, `doctor` and `skill export` do not contact any amicu-operated server. The only HTTP clients in the code are the ones listed below.
 
-If you opt in to telemetry (see [Telemetry setting](#telemetry-setting)), each deployment that `amicu apply` starts on your machine runs a small agent next to it. **The agent makes outbound HTTPS calls to `api.amicu.dev`.** The [Opt-in telemetry](#opt-in-telemetry) section lists exactly what it sends.
+If you opt in to telemetry (see [Telemetry setting](#telemetry-setting)), each deployment that `amicu apply` starts runs a small agent on your machine: next to it for a local deployment, as a separate job for a Modal or RunPod one. **The agent makes outbound HTTPS calls to `api.amicu.dev`.** The [Opt-in telemetry](#opt-in-telemetry) section lists exactly what it sends.
 
 ## Connections the CLI makes
 
@@ -22,6 +22,7 @@ If you opt in to telemetry (see [Telemetry setting](#telemetry-setting)), each d
 | `apply` on a remote provider (Modal today) | The deployment's Modal URL | The endpoint auth check, and the proxy token headers (`Modal-Key`, `Modal-Secret`). |
 | `amicu modal metrics` | The deployment's Modal URL | A `GET /metrics` with the proxy token headers. Hardware metrics use a read-only probe run inside the container through Modal's API. |
 | Only when telemetry is on: the telemetry agent next to each local deployment | `127.0.0.1:<port>/metrics` | A `GET /metrics` to the deployment's own server, about once a minute. Nothing leaves the machine. |
+| Only when telemetry is on: the telemetry agent of a Modal or RunPod deployment | The deployment's endpoint (`/metrics`), plus `api.modal.com:443` or `api.runpod.io:443` | A `GET /metrics` with the same credential `apply` uses for that endpoint, and a read-only question to the provider (is a container or worker running, and for Modal the hardware probe). Only while a replica is already running: the agent never starts one, and stops scraping while the deployment is idle so it can scale to zero. |
 | Only when telemetry is on: the telemetry agent | `api.amicu.dev:443` (HTTPS) | About one `POST /v1/telemetry/rollups` per deployment per hour, carrying the [fields listed below](#what-is-sent). |
 
 Credentials are sent only to the endpoint they protect. The exposure check does not use environment HTTP proxies and does not follow redirects, so a key is never forwarded elsewhere.
@@ -60,7 +61,9 @@ If the stored file exists but cannot be read, the question is skipped and the fi
 
 ## Opt-in telemetry
 
-When the effective setting is on at `amicu apply` time, apply starts a second job next to each launchd (macOS) or systemd (Linux) deployment. The job is `io.amicu.telemetry.<project>.<deployment>`, and it runs `amicu telemetry-agent`. The job holds no secrets. It is stopped before its deployment whenever amicu stops, updates or destroys that deployment. When the setting is off at apply time, no agent is started.
+When the effective setting is on at `amicu apply` time, apply starts a second job next to each launchd (macOS) or systemd (Linux) deployment. The job is `io.amicu.telemetry.<project>.<deployment>`, and it runs `amicu telemetry-agent`. The job of a local deployment holds no secrets. It is stopped before its deployment whenever amicu stops, updates or destroys that deployment.
+
+For a Modal or RunPod deployment, apply starts the same job once the deployment serves, named after the deployment as for a local one. It reads `/metrics` from the provider endpoint instead of a loopback port, so its job definition holds the credentials it needs, as the job of a local deployment holds the endpoint `api_key`: your Modal token pair and Proxy Auth Token, or the RunPod key and the deployment's `api_key`. The file is private to you and is deleted when the agent stops. It is stopped and deleted when you destroy the deployment. A scrape is a request, so the agent first asks the provider whether a replica is already running and does nothing if not, and it pauses for the scale-down window once a scrape shows no new traffic. It never keeps a deployment awake, but it is not free: the agent's scrapes are requests, so detecting that a deployment is idle takes one or two more polls (about 1-2 minutes of extra warm time per idle cycle), and the pause is the scale-down window plus a margin. Traffic that starts during a pause is missed until the next scrape. If the Modal token the agent holds is rotated or revoked, the agent can no longer ask Modal whether a container is running and stops sending data. It logs one warning to its own log when that happens. Its job keeps the token it was started with, so after rotating a token, destroy and apply the deployment again to give the agent the new one. RunPod reports are sent with provider `other`. When the setting is off at apply time, no agent is started.
 
 The agent:
 
@@ -78,7 +81,7 @@ How opting out reaches running agents:
 
 If you opt in after deploying, a deployment gets its agent the next time `amicu apply` starts or updates it.
 
-Not covered yet: Modal deployments get no agent, because the container does not carry the amicu binary. Windows deployments do not get one yet either.
+Not covered yet: Windows deployments do not get an agent.
 
 ### What is sent
 

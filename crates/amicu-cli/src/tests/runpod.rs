@@ -3169,3 +3169,123 @@ fn refresh_reports_a_detached_volume_as_drift() {
         r.notes[0]
     );
 }
+
+// ---- the telemetry agent of a cloud deployment ------------------------------
+
+fn agent_events(rig: &Rig) -> Vec<String> {
+    rig.log
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.starts_with("start agent") || e.starts_with("stop agent of"))
+        .cloned()
+        .collect()
+}
+
+fn host_label_of_dep() -> String {
+    amicu_llamacpp::project_host_label(PROJECT, DEP)
+}
+
+#[cfg(unix)]
+#[test]
+fn apply_starts_an_agent_for_an_opted_in_cloud_deployment() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    let main = host_label_of_dep();
+    assert_eq!(
+        agent_events(&rig),
+        [format!(
+            "start agent {} for {main}",
+            amicu_llamacpp::sidecar_label(&main)
+        )]
+    );
+    // The agent is told which endpoint to ask about, how long to leave a
+    // scaled-down deployment alone (the 15 minute default window plus a
+    // margin), and gets the deployment's own api_key to read /metrics with.
+    let ep = stops_for(&project, DEP)[0].app_id.clone().unwrap();
+    assert_eq!(
+        *rig.telemetry.cloud_requests.lock().unwrap(),
+        [format!(
+            "runpod-endpoint {main} {ep} pause=1020 key=rpa_ENDPOINTKEY"
+        )]
+    );
+}
+
+// Agent jobs are not started on Windows yet, as for host deployments.
+#[cfg(windows)]
+#[test]
+fn apply_starts_no_agent_on_windows() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(agent_events(&rig).len(), 0);
+    assert!(rig.telemetry.cloud_requests.lock().unwrap().is_empty());
+    assert_eq!(
+        stops_for(&project, DEP).len(),
+        1,
+        "the endpoint is recorded"
+    );
+}
+
+#[test]
+fn apply_without_consent_starts_no_cloud_agent() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let mut rig = rig();
+    rig.telemetry.stored = Some(false);
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(agent_events(&rig).len(), 0);
+    assert!(rig.telemetry.cloud_requests.lock().unwrap().is_empty());
+    // Opting out also sweeps the agents already running, cloud ones included.
+    assert!(
+        rig.log
+            .events
+            .lock()
+            .unwrap()
+            .contains(&"stop telemetry agents".to_owned())
+    );
+    // `DO_NOT_TRACK` beats an opt-in file, as everywhere else.
+    let mut rig = self::rig();
+    rig.telemetry.env = vec![("DO_NOT_TRACK", "1")];
+    apply_with(&project, &rig).unwrap();
+    assert!(rig.telemetry.cloud_requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn an_agent_that_cannot_start_never_fails_the_deployment() {
+    let td = TempDir::new();
+    let project = project_with(&td, None);
+    let mut rig = rig();
+    rig.telemetry.cloud_error = Some("RUNPOD_API_KEY not set");
+    apply_with(&project, &rig).unwrap();
+    assert_eq!(agent_events(&rig).len(), 0);
+    assert_eq!(
+        stops_for(&project, DEP).len(),
+        1,
+        "the endpoint is recorded"
+    );
+}
+
+#[test]
+fn destroy_stops_the_agent_and_forgets_its_id() {
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(Some("ep7"), ACCOUNT, &[])));
+    let rig = rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    destroy(&project, &rig).unwrap();
+    let main = host_label_of_dep();
+    assert_eq!(agent_events(&rig), [format!("stop agent of {main}")]);
+    assert_eq!(*rig.telemetry.forgotten.lock().unwrap(), [main]);
+    // A destroy that cannot be confirmed leaves the agent alone.
+    let td = TempDir::new();
+    let project = project_with(&td, Some(record(Some("ep7"), ACCOUNT, &[])));
+    let rig = self::rig();
+    add_endpoint(&rig, "ep7", Some(owner()));
+    rig.runpod.world.state.lock().unwrap().delete_fails = true;
+    assert!(destroy(&project, &rig).is_err());
+    assert_eq!(agent_events(&rig).len(), 0);
+}
