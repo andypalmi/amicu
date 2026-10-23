@@ -35,9 +35,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::{COMPUTE_BASE_URL, GcpClient};
 use crate::compute::{
-    DEFAULT_IMAGE_FAMILY, DeleteOutcome, FirewallSpec, HealthTiming, SecretDelivery, StartupConfig,
-    TlsIdentity, VmRecord, VmSpec, VmState, create, create_firewall, delete, delete_firewall,
-    firewall_name, instance_name, prepare, probe_transport, provision_secrets, status, wait_ready,
+    DeleteOutcome, FirewallSpec, HealthTiming, SecretDelivery, StartupConfig, TlsIdentity,
+    VmRecord, VmSpec, VmState, create, create_firewall, default_image_family, delete,
+    delete_firewall, firewall_name, instance_name, prepare, probe_transport, provision_secrets,
+    status, wait_ready,
 };
 use crate::error::GcpError;
 use crate::labels::{owner_labels, owner_marker};
@@ -193,6 +194,17 @@ impl GceLaunch {
                 .map(TlsIdentity::fingerprint)
                 .transpose()?,
         })
+    }
+}
+
+/// The health timing to wait with: `configured` when the caller set one, else
+/// [`HealthTiming::for_spec`], because the plain default does not cover a
+/// flex-start queue.
+fn effective_health(configured: HealthTiming, spec: &VmSpec) -> HealthTiming {
+    if configured == HealthTiming::default() {
+        HealthTiming::for_spec(spec)
+    } else {
+        configured
     }
 }
 
@@ -404,7 +416,7 @@ impl GceSupervisor {
             },
             max_run: l.max_run,
             boot_disk_gb: l.boot_disk_gb,
-            image_family: DEFAULT_IMAGE_FAMILY.to_owned(),
+            image_family: default_image_family(&l.shape.machine_type).to_owned(),
             install_nvidia_driver: false,
             service_account: l.service_account.clone(),
             network_tag: record.instance.clone(),
@@ -541,13 +553,7 @@ impl ProcessSupervisor for GceSupervisor {
             Some(p) => Arc::clone(p),
             None => probe_transport(&vm).map_err(|e| err(&e))?,
         };
-        // The default health timeout does not cover a flex-start queue: size it
-        // from the spec unless the caller set one.
-        let health = if self.timing.health == HealthTiming::default() {
-            HealthTiming::for_spec(&self.spec(&zone, &record, &startup))
-        } else {
-            self.timing.health
-        };
+        let health = effective_health(self.timing.health, &self.spec(&zone, &record, &startup));
         let ip = wait_ready(&self.client, probe, &vm, port, health)
             .await
             .map_err(|e| err(&e))?;
@@ -846,6 +852,35 @@ mod tests {
             delivery: SecretDelivery::SecretManager,
             tls: None,
         }
+    }
+
+    #[test]
+    fn the_health_wait_is_sized_from_the_spec_unless_the_caller_set_one() {
+        let flex = crate::compute::spec::tests::spec(
+            "g2-standard-4",
+            None,
+            Provisioning::FlexStart {
+                wait: Duration::from_hours(2),
+            },
+        );
+        let sized = effective_health(HealthTiming::default(), &flex);
+        assert_eq!(sized, HealthTiming::for_spec(&flex));
+        assert!(sized.timeout > HealthTiming::default().timeout);
+        assert_eq!(
+            sized.timeout,
+            Duration::from_hours(2) + Duration::from_mins(30)
+        );
+        // A spot VM keeps the default; a caller-set timing is respected.
+        let spot = crate::compute::spec::tests::spec("g2-standard-4", None, Provisioning::Spot);
+        assert_eq!(
+            effective_health(HealthTiming::default(), &spot),
+            HealthTiming::default()
+        );
+        let custom = HealthTiming {
+            interval: Duration::from_millis(1),
+            timeout: Duration::from_secs(5),
+        };
+        assert_eq!(effective_health(custom, &flex), custom);
     }
 
     #[test]
