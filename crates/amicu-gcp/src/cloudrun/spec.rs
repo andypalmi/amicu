@@ -109,6 +109,14 @@ pub enum ServiceAccess {
     /// authentication. It changes no IAM policy (no `allUsers` binding), and
     /// works under a "domain restricted sharing" org policy. This is an
     /// explicit opt-in: the endpoint is on the public internet.
+    ///
+    /// Cost exposure: Cloud Run's IAM check no longer filters requests, so an
+    /// unauthenticated request (a wrong or missing key still gets a `401` from
+    /// vLLM) can wake a scaled-to-zero service and start a billed GPU instance
+    /// before vLLM rejects it. The spend is bounded by `max_instances` and the
+    /// idle timeout (an instance stops once it has served nothing for a
+    /// while); use [`ServiceAccess::IamProtected`] behind a proxy when that
+    /// exposure is not acceptable.
     #[default]
     PublicApiKey,
     /// Leaves Cloud Run IAM in force (`roles/run.invoker` required). Callers
@@ -258,7 +266,10 @@ impl ServiceSpec {
                 "expected an email address",
             ));
         }
+        // vLLM (argparse) accepts underscores for hyphens, so `--api_key=...` is
+        // the same option as `--api-key`.
         if self.extra_args.iter().any(|a| {
+            let a = a.replace('_', "-");
             a == "--api-key" || a.starts_with("--api-key=") || a.starts_with("--api-key-file")
         }) {
             return Err(invalid(

@@ -83,6 +83,23 @@ pub fn secret_id(instance: &str, kind: SecretKind) -> Result<String, GcpError> {
 #[serde(default)]
 struct SecretView {
     labels: Option<BTreeMap<String, String>>,
+    replication: Option<Value>,
+}
+
+impl SecretView {
+    /// The replication policy as the API reports it, reduced to what
+    /// [`Replication`] can express: `automatic`, or `userManaged` with exactly
+    /// one replica. `None` for anything else (several replicas, no policy).
+    fn replication(&self) -> Option<Replication> {
+        let r = self.replication.as_ref()?;
+        if r.get("automatic").is_some() {
+            return Some(Replication::Automatic);
+        }
+        match r["userManaged"]["replicas"].as_array()?.as_slice() {
+            [one] => Some(Replication::Region(one["location"].as_str()?.to_owned())),
+            _ => None,
+        }
+    }
 }
 
 /// What [`delete_secret`] did.
@@ -138,20 +155,24 @@ async fn get_owned(
     project: &str,
     id: &str,
     owner: &str,
-) -> Result<(), GcpError> {
+) -> Result<SecretView, GcpError> {
     let s: SecretView = client
         .request_as(HttpMethod::Get, &secret_url(project, id)?, None)
         .await?;
-    ensure_owned(&format!("secret {id}"), s.labels.as_ref(), owner)
+    ensure_owned(&format!("secret {id}"), s.labels.as_ref(), owner)?;
+    Ok(s)
 }
 
 /// Creates the secret with the owner label (`labels` must carry it) and the
 /// replication policy. A secret that already exists and is ours is left as it
-/// is (a retry after a lost response).
+/// is (a retry after a lost response), provided its replication policy is the
+/// requested one: replication cannot be changed, so a secret stored somewhere
+/// else would silently break the residency the caller asked for.
 ///
 /// # Errors
 /// [`GcpError::Conflict`] when a secret of that name exists without the owner
-/// label (it is left alone), or any API error.
+/// label (it is left alone) or with a different replication policy, or any API
+/// error.
 pub async fn create_secret(
     client: &GcpClient,
     project: &str,
@@ -166,7 +187,18 @@ pub async fn create_secret(
     match client.request(HttpMethod::Post, &url, Some(body)).await {
         Ok(_) => Ok(()),
         Err(GcpError::Conflict { message }) => match get_owned(client, project, id, owner).await {
-            Ok(()) => Ok(()),
+            Ok(existing) => match existing.replication() {
+                Some(found) if found == *replication => Ok(()),
+                found => Err(GcpError::Conflict {
+                    message: format!(
+                        "secret `{id}` already exists with replication {} but {} was \
+                         requested; replication cannot be changed, so delete the secret \
+                         or pick another name",
+                        describe(found.as_ref()),
+                        describe(Some(replication)),
+                    ),
+                }),
+            },
             Err(GcpError::NotOwned { .. }) => Err(GcpError::Conflict {
                 message: format!(
                     "a secret named `{id}` already exists without amicu's owner label; \
@@ -177,6 +209,14 @@ pub async fn create_secret(
             Err(e) => Err(e),
         },
         Err(e) => Err(e),
+    }
+}
+
+fn describe(r: Option<&Replication>) -> String {
+    match r {
+        Some(Replication::Automatic) => "automatic".to_owned(),
+        Some(Replication::Region(region)) => format!("region {region}"),
+        None => "an unrecognised policy".to_owned(),
     }
 }
 
@@ -230,7 +270,7 @@ pub async fn delete_secret(
     owner: &str,
 ) -> Result<SecretDelete, GcpError> {
     match get_owned(client, project, id, owner).await {
-        Ok(()) => {}
+        Ok(_) => {}
         Err(GcpError::NotFound { .. }) => return Ok(SecretDelete::AlreadyGone),
         Err(e) => return Err(e),
     }
@@ -349,7 +389,11 @@ mod tests {
     }
 
     fn ours() -> String {
-        json!({ "name": SECRET, "labels": labels() }).to_string()
+        ours_with(&json!({ "automatic": {} }))
+    }
+
+    fn ours_with(replication: &Value) -> String {
+        json!({ "name": SECRET, "labels": labels(), "replication": replication }).to_string()
     }
 
     const FOREIGN: &str = r#"{"name":"x","labels":{"team":"other"}}"#;
@@ -440,6 +484,41 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(e, GcpError::Conflict { .. }), "{e:?}");
+    }
+
+    #[tokio::test]
+    async fn a_409_on_a_secret_with_other_replication_is_an_error() {
+        let conflict = r#"{"error":{"code":409,"status":"ALREADY_EXISTS","message":"exists"}}"#;
+        let regional =
+            ours_with(&json!({"userManaged": {"replicas": [{"location": "europe-west4"}]}}));
+        let adopt = |existing: String, want: Replication| async move {
+            let (c, _) = client(
+                Mock::default()
+                    .on(HttpMethod::Post, "secretId=vm-1-api-key", 409, conflict)
+                    .on(HttpMethod::Get, ONE, 200, &existing),
+            );
+            create_secret(&c, P, "vm-1-api-key", &labels(), &owner(), &want).await
+        };
+        // Same policy: adopted.
+        let eu = Replication::Region("europe-west4".into());
+        adopt(regional.clone(), eu.clone()).await.unwrap();
+        // Automatic where a region was asked for, the reverse, another region,
+        // and a payload without any policy are all refused.
+        for (existing, want) in [
+            (ours(), eu.clone()),
+            (regional.clone(), Replication::Automatic),
+            (regional, Replication::Region("us-central1".into())),
+            (
+                json!({ "name": SECRET, "labels": labels() }).to_string(),
+                eu,
+            ),
+        ] {
+            let e = adopt(existing, want).await.unwrap_err();
+            assert!(
+                matches!(&e, GcpError::Conflict { message } if message.contains("replication")),
+                "{e:?}"
+            );
+        }
     }
 
     #[tokio::test]

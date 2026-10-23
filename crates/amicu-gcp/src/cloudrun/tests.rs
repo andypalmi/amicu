@@ -175,6 +175,21 @@ fn region_gpu_and_input_validation() {
     let mut s = spec("europe-west4", "l4");
     s.extra_args = vec!["--api-key=abc".into()];
     assert!(s.validate(&cat).is_err());
+    // vLLM reads underscores as hyphens, so these set the same option.
+    for arg in [
+        "--api_key",
+        "--api_key=abc",
+        "--api-key",
+        "--api_key_file=/x",
+        "--api-key-file=/x",
+    ] {
+        let mut s = spec("europe-west4", "l4");
+        s.extra_args = vec![arg.into()];
+        assert!(s.validate(&cat).is_err(), "{arg}");
+    }
+    let mut s = spec("europe-west4", "l4");
+    s.extra_args = vec!["--max_model_len".into(), "4096".into()];
+    assert!(s.validate(&cat).is_ok());
     let mut s = spec("europe-west4", "l4");
     s.api_key = SecretRef::new("bad name", "1");
     assert!(s.validate(&cat).is_err());
@@ -226,6 +241,33 @@ async fn create_waits_for_the_operation_and_returns_ready_status() {
         seen[0].body.as_ref().unwrap()["labels"]["amicu-owner"],
         owner(&s)
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn create_waits_at_least_the_startup_budget_whatever_the_poll_timing() {
+    let s = spec("europe-west4", "l4");
+    // The operation stays running for 200 s: far past `fast()`'s 30 s timeout,
+    // well inside the 30 minute startup budget plus margin.
+    let mut mock = Mock::default().on(
+        HttpMethod::Post,
+        &create_suffix(&s),
+        200,
+        &format!(r#"{{"name":"{OP}"}}"#),
+    );
+    for _ in 0..200 {
+        mock = mock.on(HttpMethod::Get, "/operations/op1", 200, r#"{"done":false}"#);
+    }
+    mock = mock
+        .on(HttpMethod::Get, "/operations/op1", 200, r#"{"done":true}"#)
+        .on(
+            HttpMethod::Get,
+            &svc_url(&s),
+            200,
+            &service_json(&s, &owner(&s), true),
+        );
+    let (lc, _) = lifecycle(mock);
+    let rec = lc.prepare(&s).unwrap();
+    assert!(lc.create(&rec, &s).await.unwrap().is_ready());
 }
 
 #[tokio::test(start_paused = true)]
