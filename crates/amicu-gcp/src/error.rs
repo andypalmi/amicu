@@ -80,6 +80,18 @@ pub enum GcpError {
     /// still complete: look the resource up before retrying.
     #[error("Google Cloud operation `{operation}` did not finish in time")]
     OperationTimeout { operation: String },
+    /// The zone has no capacity for the requested machine and accelerator
+    /// (`ZONE_RESOURCE_POOL_EXHAUSTED`, with or without `_WITH_DETAILS`). Not
+    /// retryable in the same zone: a caller may try another one.
+    #[error("zone {zone} has no capacity for the requested VM: {message}")]
+    ZoneExhausted { zone: String, message: String },
+    /// A VM amicu created is gone or stopped while it was being waited for
+    /// (a Spot preemption, the run-duration backstop, a failed start).
+    #[error("VM {name} is no longer running: {reason}")]
+    VmLost { name: String, reason: String },
+    /// The VM exists but its server did not become healthy in time.
+    #[error("VM {name} did not become ready: {message}")]
+    NotReady { name: String, message: String },
     /// A resource without amicu's owner label: left alone.
     #[error("{what} does not carry amicu's owner label; refusing to touch it")]
     NotOwned { what: String },
@@ -114,6 +126,12 @@ impl GcpError {
     #[must_use]
     pub fn is_quota(&self) -> bool {
         matches!(self, Self::QuotaExceeded { .. })
+    }
+
+    /// Whether the zone is out of capacity (try another zone).
+    #[must_use]
+    pub fn is_stockout(&self) -> bool {
+        matches!(self, Self::ZoneExhausted { .. })
     }
 
     /// Whether the error is Google rate limiting the caller.

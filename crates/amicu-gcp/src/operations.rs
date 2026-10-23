@@ -58,21 +58,56 @@ pub async fn wait_compute_zone_operation(
     validate_resource_name(operation)?;
     let url =
         format!("{COMPUTE_BASE_URL}/projects/{project}/zones/{zone}/operations/{operation}/wait");
-    poll(client, HttpMethod::Post, &url, operation, timing, |op| {
-        if op["status"] != "DONE" {
-            return None;
-        }
-        Some(
-            match op["error"]["errors"].as_array().and_then(|e| e.first()) {
-                Some(first) => Err((
-                    first["code"].as_str().unwrap_or("UNKNOWN").to_owned(),
-                    first["message"].as_str().unwrap_or("no message").to_owned(),
-                )),
-                None => Ok(()),
-            },
-        )
-    })
+    poll(
+        client,
+        HttpMethod::Post,
+        &url,
+        operation,
+        timing,
+        compute_finished,
+    )
     .await
+}
+
+/// Waits for the Compute Engine global operation `operation` (for example the
+/// one a firewall-rule create or delete returned) to be `DONE`.
+///
+/// # Errors
+/// As [`wait_compute_zone_operation`].
+pub async fn wait_compute_global_operation(
+    client: &GcpClient,
+    project: &str,
+    operation: &str,
+    timing: PollTiming,
+) -> Result<Value, GcpError> {
+    validate_project_id(project)?;
+    validate_resource_name(operation)?;
+    let url = format!("{COMPUTE_BASE_URL}/projects/{project}/global/operations/{operation}/wait");
+    poll(
+        client,
+        HttpMethod::Post,
+        &url,
+        operation,
+        timing,
+        compute_finished,
+    )
+    .await
+}
+
+/// The finished check shared by the Compute Engine operation waits.
+fn compute_finished(op: &Value) -> Option<Result<(), (String, String)>> {
+    if op["status"] != "DONE" {
+        return None;
+    }
+    Some(
+        match op["error"]["errors"].as_array().and_then(|e| e.first()) {
+            Some(first) => Err((
+                first["code"].as_str().unwrap_or("UNKNOWN").to_owned(),
+                first["message"].as_str().unwrap_or("no message").to_owned(),
+            )),
+            None => Ok(()),
+        },
+    )
 }
 
 /// Waits for the Cloud Run v2 operation `operation` (its full `name`,
