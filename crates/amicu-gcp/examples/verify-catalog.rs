@@ -9,6 +9,12 @@
 //! Credentials are Application Default Credentials (`gcloud auth
 //! application-default login`), with `GOOGLE_IMPERSONATE_SERVICE_ACCOUNT`
 //! honoured. Exit status: 0 no drift, 1 drift, 2 could not run.
+//!
+//! The API lists only what the project can see: zones gated to specific
+//! projects show up as MISSING even when the catalog is right, so run it from
+//! a project known to have access. Entries in AI zones (`europe-west4-ai1a`),
+//! which the API may hide, are printed as HIDDEN and never affect the exit
+//! status.
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -18,14 +24,18 @@ use amicu_gcp::{AdcTokenSource, AuthConfig, GcpClient};
 
 fn print(title: &str, diff: &Diff) {
     println!(
-        "\n== {title}: expected={} live={} missing={} extra={}",
+        "\n== {title}: expected={} live={} missing={} hidden={} extra={}",
         diff.expected,
         diff.live,
         diff.missing.len(),
+        diff.hidden.len(),
         diff.extra.len()
     );
     for (zone, name) in &diff.missing {
         println!("  MISSING (in catalog, not in API): {zone:<28} {name}");
+    }
+    for (zone, name) in &diff.hidden {
+        println!("  HIDDEN  (AI zone, may be hidden from the API; not drift): {zone:<28} {name}");
     }
     for (zone, name) in &diff.extra {
         println!("  EXTRA   (in API, not in catalog): {zone:<28} {name}");
@@ -61,7 +71,10 @@ async fn main() -> ExitCode {
         "zone x machine type (machineTypes)",
         &report.zone_machine_types,
     );
-    println!("\nNote: europe-west4-ai1a is an AI zone and may be hidden from the API.");
+    println!(
+        "\nNote: AI zones (europe-west4-ai1a) may be hidden from the API and are reported \
+         as HIDDEN, not drift. Zones gated to specific projects show as MISSING."
+    );
     if report.is_empty() {
         println!("\ncatalog matches the live API");
         ExitCode::SUCCESS

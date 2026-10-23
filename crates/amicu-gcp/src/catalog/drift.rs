@@ -5,6 +5,13 @@
 //! `aggregated/machineTypes` (the latter filtered to the GPU series) and
 //! [`compare`] diffs them against the catalog. Both only read. The
 //! `verify-catalog` example runs them against a real project.
+//!
+//! The API lists only what the queried project can see. Zones gated to
+//! specific projects (and AI zones such as `europe-west4-ai1a`) show up as
+//! MISSING even though the catalog is right. AI-zone entries are therefore
+//! reported separately in [`Diff::hidden`] and never count as drift; a
+//! missing entry in any other zone may be project gating too, so run the
+//! check from a project known to have access.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -12,7 +19,7 @@ use std::fmt::Write as _;
 use amicu_providers::HttpMethod;
 use serde_json::Value;
 
-use super::{GcpCatalog, MACHINE_TYPES, ZONES, resolve_model};
+use super::{GcpCatalog, MACHINE_TYPES, ZONES, Zone, resolve_model};
 use crate::client::{COMPUTE_BASE_URL, GcpClient};
 use crate::error::GcpError;
 use crate::validate::validate_project_id;
@@ -42,8 +49,11 @@ pub struct LiveState {
 pub struct Diff {
     pub expected: usize,
     pub live: usize,
-    /// In the catalog, not visible in the API.
+    /// In the catalog, not visible in the API. Excludes [`Self::hidden`].
     pub missing: BTreeSet<Pair>,
+    /// In the catalog but not visible in the API, in an AI zone
+    /// ([`Zone::ai_zone`]) that the API may hide. Not drift.
+    pub hidden: BTreeSet<Pair>,
     /// In the API, not in the catalog.
     pub extra: BTreeSet<Pair>,
 }
@@ -117,10 +127,15 @@ pub fn compare(live: &LiveState) -> DriftReport {
 
 #[must_use]
 pub fn diff(expected: &BTreeSet<Pair>, live: &BTreeSet<Pair>) -> Diff {
+    let (hidden, missing) = expected
+        .difference(live)
+        .cloned()
+        .partition(|(zone, _)| ZONES.iter().any(|z| z.name == zone && z.ai_zone));
     Diff {
         expected: expected.len(),
         live: live.len(),
-        missing: expected.difference(live).cloned().collect(),
+        missing,
+        hidden,
         extra: live.difference(expected).cloned().collect(),
     }
 }
@@ -277,6 +292,27 @@ mod tests {
         assert_eq!(report.zone_gpus.extra, BTreeSet::from([new]));
         assert!(report.zone_machine_types.is_empty());
         assert!(!report.is_empty());
+    }
+
+    #[test]
+    fn ai_zone_entries_missing_from_the_api_are_hidden_not_drift() {
+        let mut live = live_matching_the_catalog();
+        let ai: Vec<Pair> = expected_zone_gpus()
+            .into_iter()
+            .filter(|(z, _)| z == "europe-west4-ai1a")
+            .collect();
+        assert!(!ai.is_empty());
+        for p in &ai {
+            live.accelerators.remove(p);
+        }
+        let report = compare(&live);
+        assert!(report.is_empty(), "{report:?}");
+        assert_eq!(report.zone_gpus.hidden, ai.into_iter().collect());
+        assert!(report.zone_gpus.missing.is_empty());
+        // The same entries missing from an ordinary zone are real drift.
+        live.accelerators
+            .remove(&("us-central1-a".to_owned(), "nvidia-l4".to_owned()));
+        assert!(!compare(&live).is_empty());
     }
 
     #[test]
