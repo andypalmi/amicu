@@ -43,11 +43,15 @@ pub enum GcpError {
     /// `409`: the resource already exists or is being modified.
     #[error("Google Cloud conflict: {message}")]
     Conflict { message: String },
-    /// A quota or rate limit (`RESOURCE_EXHAUSTED`, `quotaExceeded`,
-    /// `rateLimitExceeded`, a `429`). Retrying later may help; a quota raise or
-    /// another region may be needed.
-    #[error("Google Cloud quota or rate limit exceeded: {message}")]
+    /// A hard quota (`quotaExceeded`, `RESOURCE_EXHAUSTED` on a non-`429`
+    /// status). Retrying does not help: a quota raise or another region is
+    /// needed, so this is not retryable.
+    #[error("Google Cloud quota exceeded: {message}")]
     QuotaExceeded { message: String },
+    /// Rate limiting (`429`, `rateLimitExceeded`, `RATE_LIMIT_EXCEEDED`).
+    /// Retrying after a pause is expected to succeed.
+    #[error("Google Cloud rate limit exceeded: {message}")]
+    RateLimited { message: String },
     /// `400`/`422`: the request was rejected.
     #[error("Google Cloud rejected the request (HTTP {status}, {code}): {message}")]
     BadRequest {
@@ -102,17 +106,23 @@ pub enum GcpError {
 
 impl GcpError {
     /// Whether retrying the same call later can plausibly succeed.
+    ///
+    /// This says a retry is not futile, not that it is safe: a
+    /// [`GcpError::Transport`] failure on a create `POST` may have been applied
+    /// by Google, so create calls must not be retried automatically on
+    /// transport errors. Look the resource up first (the owner label and name
+    /// make that possible) and only then create again.
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Transport(_) | Self::QuotaExceeded { .. } => true,
+            Self::Transport(_) | Self::RateLimited { .. } => true,
             Self::Token { retryable } => *retryable,
             Self::Api { status, .. } => *status >= 500,
             _ => false,
         }
     }
 
-    /// Whether the error is Google reporting a quota or rate limit.
+    /// Whether the error is Google reporting a hard quota (not a rate limit).
     #[must_use]
     pub fn is_quota(&self) -> bool {
         matches!(self, Self::QuotaExceeded { .. })
@@ -122,6 +132,12 @@ impl GcpError {
     #[must_use]
     pub fn is_stockout(&self) -> bool {
         matches!(self, Self::ZoneExhausted { .. })
+    }
+
+    /// Whether the error is Google rate limiting the caller.
+    #[must_use]
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(self, Self::RateLimited { .. })
     }
 
     /// Whether the resource is confirmed absent.

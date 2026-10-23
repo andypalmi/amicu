@@ -1,17 +1,18 @@
 //! Readiness: poll `GET /health` on the VM's external IP until it answers.
 //!
-//! With a pinned certificate in the [`VmRecord`] the probe is HTTPS and the
-//! transport from [`probe_transport`] accepts only that certificate. Without
-//! one (a VM created without TLS) the probe is plain HTTP, so the bearer key
-//! crosses the internet unencrypted on every poll: do not run that way.
+//! `GET /health` is the one route the auth middleware lets through without a
+//! key, so the probe sends none: the bearer key never crosses the network
+//! during readiness polling. With a pinned certificate in the [`VmRecord`] the
+//! probe is HTTPS and the transport from [`probe_transport`] accepts only that
+//! certificate; without one it is plain HTTP.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use amicu_core::secret::SecretValue;
 use amicu_providers::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport};
 use tokio::time::Instant;
 
+use super::spec::{Provisioning, VmSpec};
 use super::tls::PinnedTransport;
 use super::vm::{VmRecord, VmState, status};
 use crate::client::GcpClient;
@@ -25,11 +26,35 @@ pub struct HealthTiming {
     pub timeout: Duration,
 }
 
+/// Time allowed for boot, the image pull and the model load once the VM runs.
+const BOOT_BUDGET: Duration = Duration::from_mins(30);
+
 impl Default for HealthTiming {
+    /// Sized for a VM that starts at once (spot or standard): 30 minutes. For a
+    /// flex-start VM, which may queue for capacity for up to 2 hours before it
+    /// boots, use [`HealthTiming::for_spec`]; this default would give up while
+    /// the request is still waiting.
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(10),
-            timeout: Duration::from_mins(30),
+            timeout: BOOT_BUDGET,
+        }
+    }
+}
+
+impl HealthTiming {
+    /// The default timing with the timeout extended by the flex-start wait of
+    /// `spec` (zero for other provisioning models), so the wait covers queueing
+    /// for capacity plus boot.
+    #[must_use]
+    pub fn for_spec(spec: &VmSpec) -> Self {
+        let queue = match spec.provisioning {
+            Provisioning::FlexStart { wait } => wait,
+            _ => Duration::ZERO,
+        };
+        Self {
+            timeout: BOOT_BUDGET + queue,
+            ..Self::default()
         }
     }
 }
@@ -47,7 +72,7 @@ pub fn probe_transport(record: &VmRecord) -> Result<Arc<dyn HttpTransport>, GcpE
     })
 }
 
-/// Waits until `<scheme>://<external ip>:<port>/health` answers `200` (sending the
+/// Waits until `<scheme>://<external ip>:<port>/health` answers `200` (without the
 /// bearer key), and returns the IP. Each round also reads the VM's state, so a
 /// preemption or deletion ends the wait at once.
 ///
@@ -66,14 +91,8 @@ pub async fn wait_ready(
     probe: Arc<dyn HttpTransport>,
     record: &VmRecord,
     port: u16,
-    api_key: &SecretValue,
     timing: HealthTiming,
 ) -> Result<String, GcpError> {
-    let key = api_key.expose_secret_str().map_err(|_| GcpError::Invalid {
-        kind: "api key",
-        value: String::new(),
-        reason: "not valid UTF-8",
-    })?;
     let deadline = Instant::now() + timing.timeout;
     let mut last: String;
     loop {
@@ -87,8 +106,7 @@ pub async fn wait_ready(
                     "http"
                 };
                 let req =
-                    HttpRequest::new(HttpMethod::Get, format!("{scheme}://{ip}:{port}/health"))
-                        .with_bearer(key);
+                    HttpRequest::new(HttpMethod::Get, format!("{scheme}://{ip}:{port}/health"));
                 match probe.execute(req).await {
                     Ok(r) if r.status == 200 => return Ok(ip),
                     Ok(r) => last = format!("/health answered HTTP {}", r.status),
@@ -146,7 +164,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn polls_health_with_the_bearer_until_200() {
+    async fn polls_health_without_the_bearer_until_200() {
         let (c, _) = client(Mock::default().on(
             HttpMethod::Get,
             ONE,
@@ -159,21 +177,27 @@ mod tests {
             200,
             "{}",
         ));
-        let ip = wait_ready(
-            &c,
-            probe.clone(),
-            &record(),
-            8000,
-            &SecretValue::new("sk-test-key"),
-            timing(),
-        )
-        .await
-        .unwrap();
+        let ip = wait_ready(&c, probe.clone(), &record(), 8000, timing())
+            .await
+            .unwrap();
         assert_eq!(ip, "203.0.113.7");
         let seen = probe.requests();
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0].url, "http://203.0.113.7:8000/health");
-        assert_eq!(seen[0].bearer.as_deref(), Some("sk-test-key"));
+        assert!(seen.iter().all(|r| r.bearer.is_none()));
+    }
+
+    #[test]
+    fn health_timeout_covers_the_flex_start_wait() {
+        let t = |p| HealthTiming::for_spec(&spec("g2-standard-4", None, p)).timeout;
+        assert_eq!(t(Provisioning::Spot), Duration::from_mins(30));
+        assert_eq!(t(Provisioning::Standard), Duration::from_mins(30));
+        assert_eq!(
+            t(Provisioning::FlexStart {
+                wait: Duration::from_hours(2)
+            }),
+            Duration::from_mins(150)
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -191,16 +215,9 @@ mod tests {
             &instance_json("RUNNING", true, ""),
         ));
         let probe = Arc::new(Mock::default().on(HttpMethod::Get, "/health", 200, "{}"));
-        wait_ready(
-            &c,
-            probe.clone(),
-            &rec,
-            8000,
-            &SecretValue::new("k"),
-            timing(),
-        )
-        .await
-        .unwrap();
+        wait_ready(&c, probe.clone(), &rec, 8000, timing())
+            .await
+            .unwrap();
         assert_eq!(probe.requests()[0].url, "https://203.0.113.7:8000/health");
     }
 
@@ -216,16 +233,9 @@ mod tests {
                 r#","statusMessage":"Instance was preempted.""#,
             ),
         ));
-        let e = wait_ready(
-            &c,
-            Arc::new(Mock::default()),
-            &record(),
-            8000,
-            &SecretValue::new("k"),
-            timing(),
-        )
-        .await
-        .unwrap_err();
+        let e = wait_ready(&c, Arc::new(Mock::default()), &record(), 8000, timing())
+            .await
+            .unwrap_err();
         assert!(matches!(e, GcpError::VmLost { ref reason, .. } if reason == "preempted"));
     }
 
@@ -242,7 +252,7 @@ mod tests {
             "/health",
             Ok(HttpResponse::new(502, "")),
         ));
-        let e = wait_ready(&c, probe, &record(), 8000, &SecretValue::new("k"), timing())
+        let e = wait_ready(&c, probe, &record(), 8000, timing())
             .await
             .unwrap_err();
         assert!(matches!(e, GcpError::NotReady { .. }));
