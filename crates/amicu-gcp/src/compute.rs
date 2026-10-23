@@ -21,8 +21,8 @@ pub mod vm;
 pub use firewall::{FirewallSpec, create_firewall, delete_firewall, firewall_name};
 pub use health::{HealthTiming, wait_ready};
 pub use spec::{
-    ARM64_IMAGE_FAMILY, Accelerator, DEFAULT_IMAGE_FAMILY, Provisioning, VmSpec,
-    default_image_family, is_arm_machine_type,
+    A4X_UNSUPPORTED, ARM64_IMAGE_FAMILY, Accelerator, DEFAULT_IMAGE_FAMILY, Provisioning, VmSpec,
+    default_image_family, is_a4x_machine_type, is_arm_machine_type,
 };
 pub use startup::{SecretDelivery, StartupConfig};
 pub use vm::{
