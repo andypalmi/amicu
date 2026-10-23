@@ -124,6 +124,8 @@ pub fn startup_script(cfg: &StartupConfig) -> String {
         "docker",
         "run",
         "-d",
+        "--restart",
+        "on-failure",
         "--name",
         CONTAINER_NAME,
         "--gpus",
@@ -174,7 +176,14 @@ pub fn startup_script(cfg: &StartupConfig) -> String {
          for _ in $(seq 1 60); do nvidia-smi -L >/dev/null 2>&1 && break; sleep 5; done\n\
          nvidia-smi -L >/dev/null || {{ echo 'amicu: no NVIDIA driver' >&2; exit 1; }}\n\
          docker rm -f {CONTAINER_NAME} >/dev/null 2>&1 || true\n\
-         exec {run}\n"
+         {run} >/dev/null\n\
+         sleep 5\n\
+         state=\"$(docker inspect -f '{{{{.State.Status}}}}' {CONTAINER_NAME} 2>/dev/null || true)\"\n\
+         case \"$state\" in running|restarting) ;; *)\n\
+         echo \"amicu: container {CONTAINER_NAME} is not running (state: ${{state:-unknown}})\" >&2\n\
+         docker logs --tail 50 {CONTAINER_NAME} >&2 || true\n\
+         exit 1;; esac\n\
+         echo 'amicu: container {CONTAINER_NAME} started' >&2\n"
     )
 }
 
@@ -185,15 +194,28 @@ pub fn startup_script(cfg: &StartupConfig) -> String {
 fn secrets_block(delivery: SecretDelivery, has_hf_token: bool) -> String {
     match delivery {
         SecretDelivery::InstanceMetadata => {
-            let hf = if has_hf_token {
-                format!("  printf 'HF_TOKEN=%s\\n' \"$(md {HF_TOKEN_METADATA})\"\n")
+            // Each value is read into a variable first, so a failed fetch stops
+            // the script (`set -e`) and an empty one is rejected: a command
+            // substitution inside `printf` would hide both.
+            let (hf_read, hf) = if has_hf_token {
+                (
+                    format!(
+                        "hf_token=\"$(md {HF_TOKEN_METADATA})\"\n\
+                         [ -n \"$hf_token\" ] || {{ echo 'amicu: metadata {HF_TOKEN_METADATA} is empty' >&2; exit 1; }}\n"
+                    ),
+                    "  printf 'HF_TOKEN=%s\\n' \"$hf_token\"\n",
+                )
             } else {
-                String::new()
+                (String::new(), "")
             };
             format!(
-                "umask 077\n\
+                "api_key=\"$(md {API_KEY_METADATA})\"\n\
+                 [ -n \"$api_key\" ] || {{ echo 'amicu: metadata {API_KEY_METADATA} is empty' >&2; exit 1; }}\n\
+                 {hf_read}\
+                 umask 077\n\
                  install -d -m 0700 /run/amicu\n\
-                 {{\n  printf 'VLLM_API_KEY=%s\\n' \"$(md {API_KEY_METADATA})\"\n{hf}}} > /run/amicu/vllm.env\n\
+                 {{\n  printf 'VLLM_API_KEY=%s\\n' \"$api_key\"\n{hf}}} > /run/amicu/vllm.env\n\
+                 unset api_key hf_token\n\
                  umask 022\n"
             )
         }
@@ -232,6 +254,29 @@ mod tests {
         );
         assert!(s.contains("class RequireKey"));
         assert!(s.contains("md amicu-api-key") && s.contains("md amicu-hf-token"));
+    }
+
+    #[test]
+    fn empty_metadata_values_fail_the_script() {
+        let s = startup_script(&cfg());
+        assert!(s.contains("api_key=\"$(md amicu-api-key)\""));
+        assert!(s.contains("[ -n \"$api_key\" ] ||"));
+        assert!(s.contains("[ -n \"$hf_token\" ] ||"));
+        // No command substitution is left to hide a failure inside printf.
+        assert!(!s.contains("printf 'VLLM_API_KEY=%s\\n' \"$(md"));
+        let mut c = cfg();
+        c.hf_token = None;
+        assert!(!startup_script(&c).contains("$hf_token"));
+    }
+
+    #[test]
+    fn the_container_restarts_on_failure_and_is_verified_running() {
+        let s = startup_script(&cfg());
+        assert!(s.contains("'--restart' 'on-failure'"));
+        assert!(!s.contains("exec 'docker'"));
+        assert!(s.contains("docker inspect -f"));
+        assert!(s.contains("docker logs --tail 50 amicu-vllm"));
+        assert!(s.contains("exit 1;; esac"));
     }
 
     #[test]
