@@ -29,7 +29,7 @@ pub use spec::{
     default_image_family, is_a4x_machine_type, is_arm_machine_type,
 };
 pub use startup::{SecretDelivery, StartupConfig};
-pub use tls::{PinnedTransport, TlsIdentity, fingerprint_of_pem, write_cert_pem};
+pub use tls::{PinnedTransport, TlsIdentity, cert_path, fingerprint_of_pem, write_cert_pem};
 pub use vm::{
     DeleteOutcome, Instance, VmRecord, VmState, create, delete, get, instance_name, prepare, status,
 };

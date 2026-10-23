@@ -405,6 +405,22 @@ pub mod catalog {
     /// set on another provider, `cloud` outside pod mode, `scaling {}` on a
     /// pod other than one replica, or a pods-only GPU in serverless mode.
     pub const CAP_RUNPOD_SETTINGS_INVALID: DiagnosticCode = DiagnosticCode::new(Category::Cap, 15);
+    /// `AMICU-CAP-016` - a hardware profile's `gcp {}` block does not fit: no
+    /// `project`, no `service_account` (and no `insecure_metadata_secrets`), set
+    /// on another provider, a bad zone, machine type, duration, disk size or CIDR, `scaling {}` beyond one replica, or a runtime
+    /// the Compute Engine backend does not run.
+    pub const CAP_GCP_SETTINGS_INVALID: DiagnosticCode = DiagnosticCode::new(Category::Cap, 16);
+    /// `AMICU-CAP-017` - the GPU is not available on Google Cloud as configured:
+    /// unknown to the GCP catalog, not offered in the zone or region, or not
+    /// offered by the Cloud Run backend.
+    pub const CAP_GCP_GPU_UNAVAILABLE: DiagnosticCode = DiagnosticCode::new(Category::Cap, 17);
+    /// `AMICU-CAP-018` - the `provisioning` mode is not offered for the machine
+    /// type (or for any machine type of the GPU).
+    pub const CAP_GCP_PROVISIONING_UNSUPPORTED: DiagnosticCode =
+        DiagnosticCode::new(Category::Cap, 18);
+    /// `AMICU-CAP-019` - `gcp { backend = "cloud_run" }`: parsed, but `apply`
+    /// cannot deploy to Cloud Run yet.
+    pub const CAP_GCP_BACKEND_UNSUPPORTED: DiagnosticCode = DiagnosticCode::new(Category::Cap, 19);
     /// `AMICU-MEM-001` - model does not fit in available VRAM.
     pub const MEM_VRAM_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Mem, 1);
     /// `AMICU-MEM-002` - a single artifact/weight file exceeds the available
@@ -502,7 +518,7 @@ pub mod catalog {
 
     /// Every catalog entry, for discovery and coverage tests.
     #[must_use]
-    pub const fn all() -> [DiagnosticCode; 42] {
+    pub const fn all() -> [DiagnosticCode; 46] {
         [
             PARSE_UNCLOSED_BLOCK,
             PARSE_INVALID_SYNTAX,
@@ -525,6 +541,10 @@ pub mod catalog {
             CAP_GPU_UNKNOWN,
             CAP_GPU_ALIAS_MEMORY,
             CAP_RUNPOD_SETTINGS_INVALID,
+            CAP_GCP_SETTINGS_INVALID,
+            CAP_GCP_GPU_UNAVAILABLE,
+            CAP_GCP_PROVISIONING_UNSUPPORTED,
+            CAP_GCP_BACKEND_UNSUPPORTED,
             MEM_VRAM_EXCEEDED,
             MEM_ARTIFACT_OVERSIZE,
             MEM_PROFILE_EXCEEDS_HOST,

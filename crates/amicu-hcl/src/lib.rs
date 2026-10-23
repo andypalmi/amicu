@@ -158,6 +158,7 @@ mod tests {
             interconnect: None,
             price: None,
             runpod: None,
+            gcp: None,
         });
         g
     }
@@ -252,6 +253,61 @@ mod tests {
     }
 
     #[test]
+    fn gcp_block_parses_and_round_trips() {
+        use amicu_core::resource::{GcpBackend, GcpProvisioning};
+        let g = parse_graph(&with_runpod_block(
+            "  gcp {\n    project = \"my-proj\"\n    zone = \"europe-west4-a\"\n    \
+             machine_type = \"n1-standard-4\"\n    provisioning = \"flex_start\"\n    \
+             max_run_duration = \"2h\"\n    boot_disk_gb = 100\n    \
+             service_account = \"vm@my-proj.iam.gserviceaccount.com\"\n    \
+             insecure_metadata_secrets = true\n    \
+             allowed_source_cidrs = [\"203.0.113.4/32\"]\n    \
+             impersonate_service_account = \"amicu@my-proj.iam.gserviceaccount.com\"\n  }\n",
+        ))
+        .unwrap();
+        let s = g.hardware_profiles[0].gcp.clone().unwrap();
+        assert_eq!(s.project.as_deref(), Some("my-proj"));
+        assert_eq!(s.backend, GcpBackend::Compute);
+        assert_eq!(s.provisioning, GcpProvisioning::FlexStart);
+        assert_eq!(s.max_run_duration_secs, Some(7200));
+        assert_eq!(s.allowed_source_cidrs, ["203.0.113.4/32"]);
+        assert!(s.insecure_metadata_secrets);
+        assert_eq!(parse_graph(&format_graph(&g).unwrap()).unwrap(), g);
+
+        let g = parse_graph(&with_runpod_block(
+            "  gcp {\n    project = \"p\"\n    backend = \"cloud_run\"\n  }\n",
+        ))
+        .unwrap();
+        let s = g.hardware_profiles[0].gcp.clone().unwrap();
+        assert_eq!(
+            (s.backend, s.provisioning),
+            (GcpBackend::CloudRun, GcpProvisioning::Spot)
+        );
+        assert_eq!(s.max_run_secs(), 8 * 3600);
+        assert_eq!(parse_graph(&format_graph(&g).unwrap()).unwrap(), g);
+
+        let g = parse_graph(&gpu_profile("l4", None)).unwrap();
+        assert_eq!(g.hardware_profiles[0].gcp, None);
+        assert!(!format_graph(&g).unwrap().contains("gcp {"));
+    }
+
+    #[test]
+    fn gcp_block_rejects_unknown_values_and_fields() {
+        for bad in [
+            "backend = \"gke\"",
+            "provisioning = \"preemptible\"",
+            "max_run_duration = \"soon\"",
+            "boot_disk_gb = \"big\"",
+            "gpus = 2",
+        ] {
+            let err = parse_graph(&with_runpod_block(&format!("  gcp {{\n    {bad}\n  }}\n")))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(bad.split(' ').next().unwrap()), "{bad}: {err}");
+        }
+    }
+
+    #[test]
     fn gpu_memory_defaults_from_an_exact_catalog_id() {
         let g = parse_graph(&gpu_profile("h100-nvl-94gb", None)).unwrap();
         let acc = g.hardware_profiles[0].accelerator.as_ref().unwrap();
@@ -332,6 +388,7 @@ mod tests {
             interconnect: None,
             price: None,
             runpod: None,
+            gcp: None,
         }
     }
 

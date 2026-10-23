@@ -1316,6 +1316,7 @@ mod tests {
             interconnect: None,
             price: None,
             runpod: None,
+            gcp: None,
         };
         assert!(ModalSupervisor::for_hardware("amicu-x", &hardware).is_err());
     }
@@ -1331,6 +1332,7 @@ mod tests {
             interconnect: None,
             price: None,
             runpod: None,
+            gcp: None,
         }
     }
 

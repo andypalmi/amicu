@@ -11,10 +11,10 @@ use serde::de::DeserializeOwned;
 use amicu_core::graph::Graph;
 use amicu_core::resource::{
     Accelerator, AcceleratorKind, Artifact, Budget, Cpu, Credential, DataClass, Deployment,
-    FlashAttention, GgufVariant, GovernanceRule, GpuCard, HardwareProfile, KvCacheType,
-    LlamaCppSettings, MemoryCheck, Model, ModelSource, Money, MultimodalSettings, Price, Quota,
-    ReasoningFormat, Region, Residency, RoutingPolicy, RoutingTarget, RunpodSettings, Runtime,
-    ScalingSettings, SpeculativeSettings, Tenant, UseCase, VllmKvCacheDtype, VllmSettings,
+    FlashAttention, GcpSettings, GgufVariant, GovernanceRule, GpuCard, HardwareProfile,
+    KvCacheType, LlamaCppSettings, MemoryCheck, Model, ModelSource, Money, MultimodalSettings,
+    Price, Quota, ReasoningFormat, Region, Residency, RoutingPolicy, RoutingTarget, RunpodSettings,
+    Runtime, ScalingSettings, SpeculativeSettings, Tenant, UseCase, VllmKvCacheDtype, VllmSettings,
     resolve_gpu,
 };
 use amicu_core::secret::SecretRef;
@@ -186,6 +186,34 @@ fn hardware_profile(name: &str, f: &Fields) -> Result<HardwareProfile> {
                 })
             })
             .transpose()?,
+        gcp: f.opt_block("gcp").map(|g| gcp_settings(&g)).transpose()?,
+    })
+}
+
+/// The `gcp {}` block. `max_run_duration` is a duration string (`"8h"`);
+/// `project` is required but its absence is a diagnostic (`AMICU-CAP-016`).
+fn gcp_settings(g: &Fields) -> Result<GcpSettings> {
+    Ok(GcpSettings {
+        project: g.opt_string("project")?,
+        backend: g.opt_enum("backend")?.unwrap_or_default(),
+        zone: g.opt_string("zone")?,
+        machine_type: g.opt_string("machine_type")?,
+        provisioning: g.opt_enum("provisioning")?.unwrap_or_default(),
+        max_run_duration_secs: g
+            .opt_string("max_run_duration")?
+            .map(|w| {
+                ScalingSettings::parse_window(&w).ok_or_else(|| {
+                    HclError::schema(format!(
+                        "`max_run_duration` must be a duration like \"90m\" or \"8h\", got \"{w}\""
+                    ))
+                })
+            })
+            .transpose()?,
+        boot_disk_gb: g.opt_u32("boot_disk_gb")?,
+        service_account: g.opt_string("service_account")?,
+        insecure_metadata_secrets: g.opt_bool("insecure_metadata_secrets")?.unwrap_or(false),
+        allowed_source_cidrs: g.string_vec("allowed_source_cidrs")?,
+        impersonate_service_account: g.opt_string("impersonate_service_account")?,
     })
 }
 

@@ -323,6 +323,9 @@ fn exposure_round_trips_through_json() {
         EndpointExposure::Public {
             gateway: GatewayAuth::RunPodBearer,
         },
+        EndpointExposure::Public {
+            gateway: GatewayAuth::GceBearer,
+        },
     ] {
         let json = serde_json::to_string(&e).unwrap();
         assert_eq!(serde_json::from_str::<EndpointExposure>(&json).unwrap(), e);
@@ -336,6 +339,11 @@ fn runpod_bearer_serializes_stably_and_needs_no_extra_headers() {
         serde_json::to_string(&GatewayAuth::RunPodBearer).unwrap(),
         "\"runpod_bearer\""
     );
+    assert_eq!(
+        serde_json::to_string(&GatewayAuth::GceBearer).unwrap(),
+        "\"gce_bearer\""
+    );
+    assert!(!GatewayAuth::GceBearer.needs_extra_headers());
     assert!(!GatewayAuth::RunPodBearer.needs_extra_headers());
     assert!(!GatewayAuth::None.needs_extra_headers());
     assert!(GatewayAuth::ModalProxyToken.needs_extra_headers());

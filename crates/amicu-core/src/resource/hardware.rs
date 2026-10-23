@@ -30,6 +30,9 @@ pub struct HardwareProfile {
     /// `provider = "runpod"` only: how the deployment runs there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runpod: Option<RunpodSettings>,
+    /// `provider = "gcp"` only: where and how the deployment runs there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gcp: Option<GcpSettings>,
 }
 
 impl HardwareProfile {
@@ -39,6 +42,76 @@ impl HardwareProfile {
     pub fn runpod_mode(&self) -> RunpodMode {
         self.runpod.as_ref().map(|r| r.mode).unwrap_or_default()
     }
+}
+
+/// The `gcp {}` block of a hardware profile. Every field but `project` is
+/// optional; a missing `project` is reported as a diagnostic, not a parse error.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GcpSettings {
+    /// Google Cloud project id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub backend: GcpBackend,
+    /// `None`: the first catalog zone of the profile's region that offers the GPU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
+    /// `None`: the smallest catalog machine type for the GPU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_type: Option<String>,
+    #[serde(default)]
+    pub provisioning: GcpProvisioning,
+    /// The VM's lifetime backstop, in seconds; `None` means 8 hours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_run_duration_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_disk_gb: Option<u32>,
+    /// Runtime service account email for the VM. It reads the VM's secrets
+    /// from Secret Manager at boot, so it is required unless
+    /// [`Self::insecure_metadata_secrets`] is set; `None` then attaches none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account: Option<String>,
+    /// INSECURE opt-in: deliver the API key, Hugging Face token and TLS key as
+    /// instance metadata instead of through Secret Manager. Anyone who can
+    /// read the instance can read them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub insecure_metadata_secrets: bool,
+    /// Who may reach the serving port. Empty: the caller's public IP, `/32`,
+    /// detected at apply (never `0.0.0.0/0` unless listed here).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_source_cidrs: Vec<String>,
+    /// Service account amicu impersonates for its own API calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impersonate_service_account: Option<String>,
+}
+
+impl GcpSettings {
+    /// [`Self::max_run_duration_secs`] or the 8 hour default.
+    #[must_use]
+    pub fn max_run_secs(&self) -> u32 {
+        self.max_run_duration_secs.unwrap_or(8 * 3600)
+    }
+}
+
+/// Which Google Cloud service runs the deployment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GcpBackend {
+    /// A Compute Engine VM.
+    #[default]
+    Compute,
+    /// Cloud Run with GPUs (not supported by `apply` yet).
+    CloudRun,
+}
+
+/// How a Compute Engine VM is obtained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GcpProvisioning {
+    #[default]
+    Spot,
+    FlexStart,
+    Standard,
 }
 
 /// The `runpod {}` block of a hardware profile.

@@ -61,6 +61,7 @@ fn discrete_gpu(id: &str, vram: &str, bandwidth_gbps: u32) -> HardwareProfile {
         // Owned hardware has no rental rate.
         price: None,
         runpod: None,
+        gcp: None,
     }
 }
 
@@ -82,6 +83,7 @@ fn apple_silicon(id: &str, unified_memory: &str, bandwidth_gbps: u32) -> Hardwar
         interconnect: None,
         price: None,
         runpod: None,
+        gcp: None,
     }
 }
 

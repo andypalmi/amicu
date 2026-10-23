@@ -329,6 +329,39 @@ fn hardware_block(h: &HardwareProfile) -> Block {
         }
         body = body.add_block(rb.build());
     }
+    if let Some(g) = &h.gcp {
+        let mut gb = Block::builder("gcp");
+        if let Some(v) = &g.project {
+            gb = gb.add_attribute(("project", v.as_str()));
+        }
+        gb = gb.add_attribute(("backend", variant(&g.backend)));
+        if let Some(v) = &g.zone {
+            gb = gb.add_attribute(("zone", v.as_str()));
+        }
+        if let Some(v) = &g.machine_type {
+            gb = gb.add_attribute(("machine_type", v.as_str()));
+        }
+        gb = gb.add_attribute(("provisioning", variant(&g.provisioning)));
+        if let Some(v) = g.max_run_duration_secs {
+            gb = gb.add_attribute(("max_run_duration", ScalingSettings::format_window(v)));
+        }
+        if let Some(v) = g.boot_disk_gb {
+            gb = gb.add_attribute(("boot_disk_gb", v));
+        }
+        if let Some(v) = &g.service_account {
+            gb = gb.add_attribute(("service_account", v.as_str()));
+        }
+        if g.insecure_metadata_secrets {
+            gb = gb.add_attribute(("insecure_metadata_secrets", true));
+        }
+        if !g.allowed_source_cidrs.is_empty() {
+            gb = gb.add_attribute(("allowed_source_cidrs", g.allowed_source_cidrs.clone()));
+        }
+        if let Some(v) = &g.impersonate_service_account {
+            gb = gb.add_attribute(("impersonate_service_account", v.as_str()));
+        }
+        body = body.add_block(gb.build());
+    }
     resource("hardware_profile", h.id.as_str(), body.build())
 }
 

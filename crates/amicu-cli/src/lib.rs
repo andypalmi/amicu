@@ -7,6 +7,7 @@ mod catalog;
 mod checks;
 mod commands;
 mod error;
+mod gcp_ops;
 mod host;
 mod lock;
 mod modal_ops;

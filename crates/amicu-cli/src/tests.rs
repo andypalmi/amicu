@@ -1391,6 +1391,7 @@ struct Rig {
     host: Box<crate::commands::apply::HostSupervisorFactory>,
     modal: FakeModal,
     runpod: runpod::FakeRunPod,
+    gcp: gcp::FakeGcp,
     resolver: Box<dyn amicu_core::secret::SecretResolver>,
     forget: bool,
     purge: bool,
@@ -1446,6 +1447,7 @@ impl Rig {
             }),
             modal,
             runpod: runpod::FakeRunPod::default(),
+            gcp: gcp::FakeGcp::default(),
             resolver: Box::new(crate::secret::EnvSecretResolver),
             forget: false,
             purge: false,
@@ -1461,6 +1463,7 @@ impl Rig {
             host: &*self.host,
             modal: &self.modal,
             runpod: &self.runpod,
+            gcp: &self.gcp,
             resolver: &*self.resolver,
             forget_unconfirmed: self.forget,
             purge: self.purge,
@@ -2753,6 +2756,7 @@ fn plan_text(project: &Project, rig: &Rig) -> String {
         project,
         &rig.modal,
         &rig.runpod,
+        &rig.gcp,
         OutputFormat::Human,
         &mut out,
     )
@@ -2888,6 +2892,7 @@ fn a_failed_host_update_leaves_the_deployment_pending_with_its_stop_record() {
         &project,
         &rig.modal,
         &rig.runpod,
+        &crate::gcp_ops::NoGcp,
         OutputFormat::Human,
         &mut Vec::new(),
     )
@@ -4560,4 +4565,5 @@ resource "deployment" "d" {
     }
 }
 
+mod gcp;
 mod runpod;

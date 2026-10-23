@@ -29,6 +29,7 @@ use crate::checks::report_for;
 use crate::commands::telemetry_agent::TelemetryHooks;
 use crate::commands::telemetry_cloud::{CloudAgent, SourceKind};
 use crate::error::CliError;
+use crate::gcp_ops::GcpOps;
 use crate::lock::StateLock;
 use crate::modal_ops::{
     ModalBackend, ModalOps, Workspace, check_workspace, unlocatable_record, unproven_workspace,
@@ -41,6 +42,7 @@ use crate::stops::{Backend, StopRecord};
 use crate::write_json;
 use amicu_engine::fingerprint::Fingerprint;
 
+mod gce;
 mod pod;
 
 pub(crate) use pod::configured_pod;
@@ -110,7 +112,7 @@ fn run_for(
     stop_agents_if_opted_out(env)?;
 
     let (prior_state, pruned) =
-        crate::refresh::load_refreshed(project, env.modal, env.runpod, output, out)?;
+        crate::refresh::load_refreshed(project, env.modal, env.runpod, env.gcp, output, out)?;
     // A pending deployment (start begun, never confirmed) is planned as absent
     // so apply (re)starts it; destroy still sees it in state.
     let prior_graph = prior_state.as_ref().map(|s| {
@@ -212,7 +214,8 @@ fn run_for(
         env,
         Op::Apply,
     )?;
-    let code = report(&handles, &state.graph, output, out)?;
+    let tls = gce::tls_notes(project, &effective_stops(Some(&state)));
+    let code = report(&handles, &state.graph, &tls, output, out)?;
     // A host deployment comes back after a reboot; tell the user when this
     // machine would only do so at their next login (systemd lingering off).
     if !output.is_json()
@@ -275,6 +278,7 @@ pub(crate) struct Env<'a> {
     pub host: &'a HostSupervisorFactory,
     pub modal: &'a dyn ModalBackend,
     pub runpod: &'a dyn RunPodOps,
+    pub gcp: &'a dyn GcpOps,
     /// Resolves the launch secrets (the process environment for real runs).
     pub resolver: &'a dyn SecretResolver,
     /// Destroy only: treat a Modal app that cannot be found by name (and has
@@ -309,6 +313,7 @@ impl Env<'static> {
             host: &host_supervisor_with_sidecar,
             modal: &crate::refresh::ModalLookup,
             runpod: &crate::runpod_ops::RealRunPod,
+            gcp: &crate::gcp_ops::RealGcp,
             resolver: &EnvSecretResolver,
             forget_unconfirmed,
             purge,
@@ -385,6 +390,7 @@ fn derive_stop(state: &LocalState, d: &Deployment) -> StopRecord {
             Vec::new(),
         ),
         Dispatch::Host => StopRecord::host(&d.id, None),
+        Dispatch::Gce => StopRecord::gce_unrecorded(&d.id),
         Dispatch::Modal => {
             StopRecord::modal(&d.id, find_handle(state, &d.id).map(|h| h.id.clone()), None)
         }
@@ -906,10 +912,12 @@ enum Dispatch {
     /// [`ModalSupervisor`] (the runtime picks the adapter and the image).
     Modal,
     RunPod,
+    /// `provider = "gcp"` with vLLM: one Compute Engine VM.
+    Gce,
 }
 
 /// Providers `apply` can deploy to today, for the error message.
-const SUPPORTED_PROVIDERS: &str = "local, local_apple, local_cpu, on_prem, modal, runpod";
+const SUPPORTED_PROVIDERS: &str = "local, local_apple, local_cpu, on_prem, modal, runpod, gcp";
 
 /// Computes [`Dispatch`] for one deployment's runtime family and hardware
 /// profile provider. `None` when `apply` has no path for that provider.
@@ -918,6 +926,8 @@ fn dispatch_for(runtime: amicu_runtime::RuntimeKind, provider: Option<&str>) -> 
     match (runtime, provider) {
         (LlamaCpp | Vllm, Some(MODAL_PROVIDER)) => Some(Dispatch::Modal),
         (LlamaCpp | Vllm, Some(RUNPOD_PROVIDER)) => Some(Dispatch::RunPod),
+        // The VM's startup script runs the vLLM container only.
+        (Vllm, Some(gce::GCP_PROVIDER)) => Some(Dispatch::Gce),
         // A profile with no provider has always meant the local host.
         (LlamaCpp | Vllm, None) => Some(Dispatch::Host),
         (LlamaCpp | Vllm, Some(p)) if is_local_provider(p) => Some(Dispatch::Host),
@@ -1207,6 +1217,7 @@ async fn apply_all(
     let registry = EndpointRegistry::new();
     preflight(result, graph, env)?;
     let runpod_account = runpod_preflight(result, graph, env).await?;
+    gce_preflight(result, graph, &catalog, env).await?;
 
     for item in &result.items {
         if let Some(launch) = &item.launch {
@@ -1222,6 +1233,7 @@ async fn apply_all(
             // `start` fails after the deploy (see below).
             let mut deployed_app = None;
             let mut runpod = None;
+            let mut gce_start = None;
             let adapter: &dyn RuntimeAdapter = match (launch.runtime, dispatch) {
                 (runtime, Dispatch::Modal) => {
                     let previous_endpoint = prior
@@ -1321,6 +1333,15 @@ async fn apply_all(
                         remote_adapter.as_ref()
                     }
                 }
+                (runtime, Dispatch::Gce) => {
+                    let (supervisor, start) =
+                        gce::prepare(graph, &catalog, launch, &item.deployment, env, progress)
+                            .await?;
+                    gce_start = Some(start);
+                    remote_adapter =
+                        boxed_adapter(Box::new(catalog.clone()), runtime, Box::new(supervisor));
+                    remote_adapter.as_ref()
+                }
                 (amicu_runtime::RuntimeKind::LlamaCpp, Dispatch::Host) => &llama_adapter,
                 (amicu_runtime::RuntimeKind::Vllm, Dispatch::Host) => &vllm_adapter,
             };
@@ -1343,6 +1364,10 @@ async fn apply_all(
                     Some(&rp.account),
                     rp.secrets.clone(),
                 ),
+                (Dispatch::Gce, _) => gce_start
+                    .as_ref()
+                    .map(|g| g.stop.clone())
+                    .ok_or_else(|| CliError::Message("the VM was not prepared".to_owned()))?,
                 (Dispatch::Modal, _) => StopRecord::modal_in(
                     &progress.project_id,
                     &item.deployment,
@@ -1408,7 +1433,13 @@ async fn apply_all(
             // A provider (or identity) change: stop what is running under the
             // OLD identity first, and confirm it, before starting the new one.
             // The old record stays in state until that stop is confirmed.
-            let stale = stale_records(&progress.stops, &item.deployment, &new_stop);
+            let mut stale = stale_records(&progress.stops, &item.deployment, &new_stop);
+            if dispatch == Dispatch::Gce {
+                // The same VM under another Google project (or impersonation
+                // target) is stopped and confirmed first too: its record would
+                // otherwise be overwritten by the new one below.
+                stale.extend(gce::moved_records(&progress.stops, &new_stop));
+            }
             for old in stale {
                 stop_record(
                     &old,
@@ -1433,6 +1464,8 @@ async fn apply_all(
                 } else {
                     progress.stops.push(new_stop.clone());
                 }
+            } else if dispatch == Dispatch::Gce {
+                gce::write_ahead(&mut progress.stops, &new_stop)?;
             } else if !progress
                 .stops
                 .iter()
@@ -1471,6 +1504,10 @@ async fn apply_all(
                                 .await;
                         return Err(CliError::Message(format!("{e}{note}")));
                     }
+                    if let Some(gs) = &gce_start {
+                        let note = gce::failed_start(gs, adapter, &mut progress.stops).await;
+                        return Err(CliError::Message(format!("{e}{note}")));
+                    }
                     return Err(e.into());
                 }
             };
@@ -1503,6 +1540,18 @@ async fn apply_all(
                         )))
                     }
                 }
+            } else if let Some(gs) = &gce_start {
+                match verify_gce_handle(&handle, &gs.stop, launch, resolver, env.gcp).await {
+                    Ok(()) => Ok(()),
+                    Err(detail) => {
+                        let note = gce::failed_start(gs, adapter, &mut progress.stops).await;
+                        Err(CliError::Message(format!(
+                            "deployment '{}': endpoint {} failed its exposure check: \
+                             {detail}{note}",
+                            item.deployment, handle.endpoint
+                        )))
+                    }
+                }
             } else {
                 secure_endpoint(
                     adapter,
@@ -1529,6 +1578,9 @@ async fn apply_all(
                 }
                 return Err(e);
             }
+            if let Some(gs) = &gce_start {
+                gce::write_cert(project, gs);
+            }
             registry.register(&handle);
             let mut superseded = Vec::new();
             if dispatch == Dispatch::Modal {
@@ -1544,6 +1596,9 @@ async fn apply_all(
             }
             if let Some(rp) = &runpod {
                 sync_runpod_record(&mut progress.stops, &new_stop, Some(&handle.id), rp, true);
+            }
+            if let Some(gs) = &gce_start {
+                gce::sync_record(&mut progress.stops, gs);
             }
             progress.started.push(handle);
             if let Some(fp) = &item.fingerprint {
@@ -1689,6 +1744,7 @@ async fn secure_endpoint(
         Dispatch::Modal => format!("`modal app stop {}`", handle.id),
         Dispatch::Host => host_stop_hint(std::env::consts::OS, &handle.id),
         Dispatch::RunPod => format!("delete endpoint {} in the RunPod console", handle.id),
+        Dispatch::Gce => format!("delete VM {} in the Google Cloud console", handle.id),
     };
     // A Modal update redeploys under the same app: roll the new version back
     // and re-verify the previous endpoint recorded in state. Anything short of
@@ -1746,6 +1802,75 @@ async fn verify_runpod_handle(
         handle.endpoint
     );
     runpod.verify_exposure(&handle.endpoint, &key).await
+}
+
+/// The post-deploy check of a Compute Engine VM: an anonymous request is
+/// refused and the deployment's key is accepted.
+async fn verify_gce_handle(
+    handle: &RuntimeHandle,
+    stop: &StopRecord,
+    launch: &LaunchPlan,
+    resolver: &dyn SecretResolver,
+    gcp: &dyn GcpOps,
+) -> Result<(), String> {
+    let Some(key_ref) = &launch.api_key else {
+        return Err(
+            "the endpoint is reachable off-machine but the deployment declares no `api_key`"
+                .to_owned(),
+        );
+    };
+    let key = resolver
+        .resolve(key_ref)
+        .await
+        .map_err(|e| format!("could not resolve the endpoint API key to verify it ({e})"))?;
+    let _ = writeln!(
+        std::io::stderr(),
+        "verifying endpoint authentication at {} ...",
+        handle.endpoint
+    );
+    let Some(g) = &stop.gcp else {
+        return Err("the VM has no recorded certificate to verify the endpoint against".to_owned());
+    };
+    report_verify(
+        gcp.verify_exposure(&handle.endpoint, &g.vm(&g.zone), &key)
+            .await,
+    )
+}
+
+/// Checks the Google credentials and project of every Compute Engine launch,
+/// once per project, and warns when secrets would go through instance metadata.
+/// Nothing is written before this passes.
+async fn gce_preflight(
+    result: &PlanResult,
+    graph: &Graph,
+    catalog: &dyn Catalog,
+    env: &Env<'_>,
+) -> Result<(), CliError> {
+    let mut checked: Vec<(String, Option<String>)> = Vec::new();
+    for item in &result.items {
+        let gce_launch = item.launch.as_ref().is_some_and(|l| {
+            dispatch_for(l.runtime, item.action.provider.as_deref()) == Some(Dispatch::Gce)
+        });
+        if !gce_launch {
+            continue;
+        }
+        let access = gce::access_for(graph, catalog, &item.deployment)?;
+        if !checked.contains(&access) {
+            crate::gcp_ops::preflight(env.gcp, &access.0, access.1.as_deref()).await?;
+            checked.push(access);
+        }
+        if gce::uses_metadata_secrets(graph, catalog, &item.deployment)? {
+            let _ = writeln!(
+                std::io::stderr(),
+                "warning: '{}' sets `insecure_metadata_secrets`: its api_key, Hugging Face \
+                 token and TLS key will be instance metadata, readable by anyone who can read \
+                 the instance in the project. Use a `service_account` to keep them in Secret \
+                 Manager instead",
+                item.deployment
+            );
+        }
+    }
+    Ok(())
 }
 
 /// `Ok` when `handle` is protected as declared (or needs no check); `Err`
@@ -1828,7 +1953,7 @@ fn gateway_headers(exposure: &EndpointExposure) -> Result<Vec<(String, SecretVal
         // API key) itself: the shared check needs nothing beyond the key.
         EndpointExposure::Loopback
         | EndpointExposure::Public {
-            gateway: GatewayAuth::None | GatewayAuth::RunPodBearer,
+            gateway: GatewayAuth::None | GatewayAuth::RunPodBearer | GatewayAuth::GceBearer,
         } => Ok(Vec::new()),
         EndpointExposure::Public {
             gateway: GatewayAuth::ModalProxyToken,
@@ -2518,6 +2643,8 @@ async fn stop_record(
             pod::stop(record, env, project_id, stops).await?;
             stop_cloud_agent(record, env, probe, project_id).await
         }
+        // A Compute Engine VM has no telemetry agent.
+        Backend::Gce => gce::stop(record, env).await,
     }
 }
 
@@ -2546,7 +2673,8 @@ fn cloud_source(dispatch: Dispatch, runpod: Option<&RunPodStart>) -> Option<Sour
         (Dispatch::Modal, _) => Some(SourceKind::Modal),
         (Dispatch::RunPod, Some(rp)) if rp.pod => Some(SourceKind::RunpodPod),
         (Dispatch::RunPod, _) => Some(SourceKind::RunpodEndpoint),
-        (Dispatch::Host, _) => None,
+        // Compute Engine has no telemetry agent source.
+        (Dispatch::Host | Dispatch::Gce, _) => None,
     }
 }
 
@@ -2775,6 +2903,7 @@ fn find_deployment<'a>(
 fn report(
     handles: &[RuntimeHandle],
     graph: &Graph,
+    tls: &[(String, std::path::PathBuf, String)],
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
@@ -2785,6 +2914,29 @@ fn report(
         io(writeln!(out, "\nApplied {} deployment(s):", handles.len()))?;
         for h in handles {
             io(writeln!(out, "  {} -> {}", h.deployment, h.endpoint))?;
+            if h.exposure
+                == (EndpointExposure::Public {
+                    gateway: GatewayAuth::GceBearer,
+                })
+            {
+                if let Some((_, path, fingerprint)) = tls.iter().find(|t| t.0 == h.id) {
+                    io(writeln!(
+                        out,
+                        "    HTTPS with a pinned self-signed certificate; the firewall rule \
+                         limits who can connect\n    certificate: {}\n    SHA-256 \
+                         fingerprint: {fingerprint}\n    note: the certificate names no \
+                         resolvable host, so clients must pin it (a client that skips \
+                         verification is not protected)",
+                        path.display()
+                    ))?;
+                } else {
+                    io(writeln!(
+                        out,
+                        "    note: plain HTTP: the api_key is sent unencrypted; the firewall \
+                         rule limits who can connect"
+                    ))?;
+                }
+            }
             let deployment = find_deployment(graph, &h.deployment);
             let model = deployment
                 .and_then(|d| graph.models.iter().find(|m| m.id == d.model))
@@ -3019,6 +3171,16 @@ mod dispatch_tests {
                 Some(Dispatch::RunPod)
             );
         }
+    }
+
+    #[test]
+    fn vllm_on_gcp_selects_the_compute_engine_supervisor_and_llama_cpp_is_refused() {
+        assert_eq!(
+            dispatch_for(RuntimeKind::Vllm, Some("gcp")),
+            Some(Dispatch::Gce)
+        );
+        assert_eq!(dispatch_for(RuntimeKind::LlamaCpp, Some("gcp")), None);
+        assert!(super::SUPPORTED_PROVIDERS.contains("gcp"));
     }
 
     #[test]

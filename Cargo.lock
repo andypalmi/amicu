@@ -144,6 +144,7 @@ version = "0.1.4"
 dependencies = [
  "amicu-core",
  "amicu-engine",
+ "amicu-gcp",
  "amicu-hcl",
  "amicu-llamacpp",
  "amicu-modal",
@@ -185,6 +186,7 @@ name = "amicu-engine"
 version = "0.1.4"
 dependencies = [
  "amicu-core",
+ "amicu-gcp",
  "amicu-hcl",
  "amicu-llamacpp",
  "amicu-plan",
@@ -202,7 +204,9 @@ name = "amicu-gcp"
 version = "0.1.4"
 dependencies = [
  "amicu-core",
+ "amicu-llamacpp",
  "amicu-providers",
+ "amicu-runtime",
  "async-trait",
  "base64 0.22.1",
  "google-cloud-auth",

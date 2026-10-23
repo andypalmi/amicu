@@ -8,6 +8,8 @@ rust-version.workspace = true
 
 [dependencies]
 amicu-core = { path = "../amicu-core" }
+# The GPU catalog behind the `gcp {}` block checks (no network access).
+amicu-gcp = { path = "../amicu-gcp" }
 amicu-hcl = { path = "../amicu-hcl" }
 amicu-plan = { path = "../amicu-plan" }
 amicu-providers = { path = "../amicu-providers" }

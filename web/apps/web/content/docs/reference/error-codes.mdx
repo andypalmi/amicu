@@ -55,6 +55,10 @@ Diagnostics have the form `AMICU-<CATEGORY>-<NNN>`. The category is the fastest 
 | `AMICU-CAP-012` | error on `modal`/`runpod`, else warning | A GPU `accelerator.model` (with `accelerator.memory`) does not name exactly one card: a short name several variants share, such as `a100`, or a size no variant has. The message lists the candidate ids with their VRAM | Set `model` to one of the listed ids. See [GPU names](/docs/configuration/hardware-profile#gpu-names) |
 | `AMICU-CAP-013` | error on `modal`/`runpod`, else warning | The GPU `accelerator.model` is not in amicu's GPU catalog | Use a GPU id from [GPU names](/docs/configuration/hardware-profile#gpu-names) |
 | `AMICU-CAP-015` | error | A `runpod {}` block does not fit: set on another provider, `cloud` outside pod mode, `scaling {}` on a pod other than one replica, or a GPU RunPod offers only as a pod in serverless mode | Follow the message; for a pods-only GPU add `runpod { mode = "pod" }` |
+| `AMICU-CAP-016` | error | A `gcp {}` block does not fit: no `project`, no `service_account` (and no `insecure_metadata_secrets = true`), set on another provider, no `region` or `zone`, a bad zone, duration, disk size or CIDR, `scaling {}` beyond one replica, or a `llama_cpp` runtime (the Compute Engine backend runs vLLM only) | Follow the message |
+| `AMICU-CAP-017` | error | The GPU is not available on Google Cloud as configured: not in the GCP catalog, not offered in the zone or region, or not offered on Cloud Run | Pick a GPU and zone from the [GCP page](/docs/providers/gcp) |
+| `AMICU-CAP-018` | error | `provisioning` is not offered for the machine type (for example `standard` on `a3-highgpu-1g`), or for any machine type of the GPU | Use a mode the message lists |
+| `AMICU-CAP-019` | error | `backend = "cloud_run"` parses, but `apply` cannot deploy to Cloud Run yet | Use `backend = "compute"` |
 
 ## MEM
 

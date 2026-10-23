@@ -218,6 +218,7 @@ pub(crate) mod fake {
                 interconnect: None,
                 price: None,
                 runpod: None,
+                gcp: None,
             },
             nvidia: None,
         }
@@ -239,6 +240,7 @@ pub(crate) mod fake {
                 interconnect: None,
                 price: None,
                 runpod: None,
+                gcp: None,
             },
             nvidia: gpu.map(|(model, vram)| NvidiaGpu {
                 model: model.into(),

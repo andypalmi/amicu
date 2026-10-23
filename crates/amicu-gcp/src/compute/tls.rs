@@ -114,6 +114,12 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// Where [`write_cert_pem`] puts the certificate of `instance` in `dir`.
+#[must_use]
+pub fn cert_path(dir: &Path, instance: &str) -> PathBuf {
+    dir.join(format!("{instance}.tls.crt"))
+}
+
 /// Writes the certificate PEM to `<dir>/<instance>.tls.crt` (creating `dir`) and
 /// returns the path, for client snippets that need the file (`curl --cacert`
 /// works only against a name the certificate carries: pin the fingerprint
@@ -123,7 +129,7 @@ fn hex(bytes: &[u8]) -> String {
 /// Any I/O error.
 pub fn write_cert_pem(dir: &Path, instance: &str, cert_pem: &str) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let path = dir.join(format!("{instance}.tls.crt"));
+    let path = cert_path(dir, instance);
     std::fs::write(&path, cert_pem)?;
     Ok(path)
 }
