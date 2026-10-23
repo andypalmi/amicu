@@ -93,6 +93,14 @@ impl VmSpec {
             .ok_or_else(|| invalid("labels", OWNER_LABEL, "the owner label is required"))
     }
 
+    /// The boot disk type for the machine series: `hyperdisk-balanced` for the
+    /// series that cannot use Persistent Disk (G4, A4, A4X and A3 Ultra),
+    /// `pd-balanced` for the rest. See [`boot_disk_type`].
+    #[must_use]
+    pub fn boot_disk_type(&self) -> &'static str {
+        boot_disk_type(&self.machine_type)
+    }
+
     /// Checks identifiers, durations and the startup config.
     ///
     /// # Errors
@@ -130,7 +138,7 @@ impl VmSpec {
             return Err(invalid(
                 "max run duration",
                 &format!("{}s", self.max_run.as_secs()),
-                "must be between 10 minutes and 7 days (120 days unless flex-start)",
+                "must be between 10 minutes and 120 days (7 days for flex-start)",
             ));
         }
         if let Provisioning::FlexStart { wait } = self.provisioning
@@ -175,7 +183,7 @@ impl VmSpec {
                         self.image_family
                     ),
                     "diskSizeGb": self.boot_disk_gb.to_string(),
-                    "diskType": format!("zones/{zone}/diskTypes/pd-balanced"),
+                    "diskType": format!("zones/{zone}/diskTypes/{}", self.boot_disk_type()),
                 },
             }],
             "networkInterfaces": [{
@@ -232,6 +240,19 @@ impl VmSpec {
             Some(email) => json!([{ "email": email, "scopes": [SCOPE_CLOUD_PLATFORM] }]),
             None => json!([]),
         }
+    }
+}
+
+/// The boot disk type a machine type can use. G4, A4, A4X (and A4X Max) and
+/// A3 Ultra support Hyperdisk only; every other GPU series (N1, A2, A3 High,
+/// Mega and Edge, G2) boots from `pd-balanced`.
+#[must_use]
+pub fn boot_disk_type(machine_type: &str) -> &'static str {
+    const HYPERDISK_ONLY: [&str; 4] = ["g4-", "a4-", "a4x-", "a3-ultragpu-"];
+    if HYPERDISK_ONLY.iter().any(|p| machine_type.starts_with(p)) {
+        "hyperdisk-balanced"
+    } else {
+        "pd-balanced"
     }
 }
 
@@ -355,6 +376,57 @@ pub(crate) mod tests {
             "projects/deeplearning-platform-release/global/images/family/common-cu129-ubuntu-2204-nvidia-580"
         );
         assert!(b.get("params").is_none());
+    }
+
+    #[test]
+    fn boot_disk_type_follows_the_machine_series() {
+        for m in [
+            "g4-standard-48",
+            "a4-highgpu-8g",
+            "a4x-highgpu-4g",
+            "a4x-maxgpu-4g-metal",
+            "a3-ultragpu-8g",
+        ] {
+            assert_eq!(boot_disk_type(m), "hyperdisk-balanced", "{m}");
+        }
+        for m in [
+            "n1-standard-4",
+            "g2-standard-4",
+            "a2-highgpu-1g",
+            "a3-highgpu-8g",
+            "a3-megagpu-8g",
+            "a3-edgegpu-8g",
+        ] {
+            assert_eq!(boot_disk_type(m), "pd-balanced", "{m}");
+        }
+        let disk_type = |m: &str| {
+            spec(m, None, Provisioning::Spot).insert_body().unwrap()["disks"][0]["initializeParams"]
+                ["diskType"]
+                .clone()
+        };
+        assert_eq!(
+            disk_type("g4-standard-48"),
+            "zones/us-central1-a/diskTypes/hyperdisk-balanced"
+        );
+        let n1 = spec(
+            "n1-standard-4",
+            Some(("nvidia-tesla-t4", 1)),
+            Provisioning::Spot,
+        );
+        assert_eq!(
+            n1.insert_body().unwrap()["disks"][0]["initializeParams"]["diskType"],
+            "zones/us-central1-a/diskTypes/pd-balanced"
+        );
+    }
+
+    #[test]
+    fn max_run_limits_in_the_message_are_the_right_way_round() {
+        let mut s = spec("g2-standard-4", None, Provisioning::Spot);
+        s.max_run = Duration::from_hours(121 * 24);
+        let e = s.validate().unwrap_err().to_string();
+        assert!(e.contains("120 days (7 days for flex-start)"), "{e}");
+        s.max_run = Duration::from_hours(100 * 24);
+        assert!(s.validate().is_ok());
     }
 
     #[test]

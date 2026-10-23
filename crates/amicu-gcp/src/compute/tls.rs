@@ -5,9 +5,12 @@
 //! `<instance>.amicu.invalid` before the VM is created and clients pin the
 //! certificate itself: the SHA-256 fingerprint of its DER encoding, kept in the
 //! [`super::VmRecord`]. [`PinnedTransport`] accepts exactly that certificate and
-//! ignores the host name and the validity dates (the certificate is short-lived
-//! and pinned, not chained to a CA); it still checks the handshake signature,
-//! so the server must hold the private key.
+//! ignores the host name and the validity dates (the certificate is generated
+//! for one VM and pinned, not chained to a CA, and its validity window is the
+//! generator's default rather than a bound, so it is not "short-lived": what
+//! limits its use is that the key exists only for that VM and its secrets are
+//! deleted with it); it still checks the handshake signature, so the server
+//! must hold the private key.
 //!
 //! The certificate is public and travels as instance metadata. The private key
 //! is a secret: it goes to Secret Manager (`<instance>-tls-key`), or, with the

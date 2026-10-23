@@ -61,16 +61,26 @@ pub async fn provision_secrets(
 
 /// Deletes the deployment's secrets that carry the record's owner marker; ones
 /// that are absent are skipped, one without the marker is an error and is left
-/// alone.
+/// alone. Every secret is attempted even when an earlier one fails, so one bad
+/// secret never leaves the others behind.
 ///
 /// # Errors
-/// [`GcpError::NotOwned`] or any API error.
+/// The first error, after all secrets were attempted: [`GcpError::NotOwned`] or
+/// any API error.
 pub async fn delete_secrets(client: &GcpClient, record: &VmRecord) -> Result<(), GcpError> {
+    let mut first = None;
     for kind in SecretKind::ALL {
-        let id = secret_id(&record.name, kind)?;
-        delete_secret(client, &record.project, &id, &record.owner).await?;
+        let result = match secret_id(&record.name, kind) {
+            Ok(id) => delete_secret(client, &record.project, &id, &record.owner)
+                .await
+                .map(|_| ()),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = result {
+            first.get_or_insert(e);
+        }
     }
-    Ok(())
+    first.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]
@@ -174,6 +184,36 @@ mod tests {
             .filter(|r| r.method == HttpMethod::Delete)
             .count();
         assert_eq!(dels, 3);
+    }
+
+    #[tokio::test]
+    async fn delete_attempts_every_secret_then_returns_the_first_error() {
+        let s = sm_spec();
+        let rec = prepare(&s).unwrap();
+        let first = secret_id(&s.name, SecretKind::ALL[0]).unwrap();
+        // The first secret carries no owner label; the others are ours.
+        let mut mock = Mock::default().on(
+            HttpMethod::Get,
+            &format!("/secrets/{first}"),
+            200,
+            r#"{"labels":{"team":"other"}}"#,
+        );
+        let ours = serde_json::json!({"labels": s.labels}).to_string();
+        for kind in &SecretKind::ALL[1..] {
+            let id = secret_id(&s.name, *kind).unwrap();
+            mock = mock
+                .on(HttpMethod::Get, &format!("/secrets/{id}"), 200, &ours)
+                .on(HttpMethod::Delete, &format!("/secrets/{id}"), 200, "{}");
+        }
+        let (c, m) = client(mock);
+        let e = delete_secrets(&c, &rec).await.unwrap_err();
+        assert!(matches!(e, GcpError::NotOwned { .. }), "{e:?}");
+        let dels: Vec<_> = m
+            .requests()
+            .into_iter()
+            .filter(|r| r.method == HttpMethod::Delete)
+            .collect();
+        assert_eq!(dels.len(), 2);
     }
 
     #[test]

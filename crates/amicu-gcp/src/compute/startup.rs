@@ -169,6 +169,8 @@ pub fn startup_script(cfg: &StartupConfig, project: &str, instance: &str) -> Str
         "docker",
         "run",
         "-d",
+        "--restart",
+        "on-failure",
         "--name",
         CONTAINER_NAME,
         "--gpus",
@@ -233,7 +235,14 @@ pub fn startup_script(cfg: &StartupConfig, project: &str, instance: &str) -> Str
          for _ in $(seq 1 60); do nvidia-smi -L >/dev/null 2>&1 && break; sleep 5; done\n\
          nvidia-smi -L >/dev/null || {{ echo 'amicu: no NVIDIA driver' >&2; exit 1; }}\n\
          docker rm -f {CONTAINER_NAME} >/dev/null 2>&1 || true\n\
-         exec {run}\n"
+         {run} >/dev/null\n\
+         sleep 5\n\
+         state=\"$(docker inspect -f '{{{{.State.Status}}}}' {CONTAINER_NAME} 2>/dev/null || true)\"\n\
+         case \"$state\" in running|restarting) ;; *)\n\
+         echo \"amicu: container {CONTAINER_NAME} is not running (state: ${{state:-unknown}})\" >&2\n\
+         docker logs --tail 50 {CONTAINER_NAME} >&2 || true\n\
+         exit 1;; esac\n\
+         echo 'amicu: container {CONTAINER_NAME} started' >&2\n"
     )
 }
 
@@ -263,9 +272,10 @@ fn secrets_block(cfg: &StartupConfig, project: &str, instance: &str) -> String {
          install -d -m 0700 /run/amicu\n"
     );
     out.push_str(&fetch(API_KEY_METADATA, SecretKind::ApiKey, "api_key"));
-    out.push_str("[ -n \"$api_key\" ] || { echo 'amicu: empty api key' >&2; exit 1; }\n");
+    out.push_str(&non_empty("api_key", "api key"));
     if cfg.hf_token.is_some() {
         out.push_str(&fetch(HF_TOKEN_METADATA, SecretKind::HfToken, "hf_token"));
+        out.push_str(&non_empty("hf_token", "hugging face token"));
     }
     out.push_str("{\n  printf 'VLLM_API_KEY=%s\\n' \"$api_key\"\n");
     if cfg.hf_token.is_some() {
@@ -275,13 +285,24 @@ fn secrets_block(cfg: &StartupConfig, project: &str, instance: &str) -> String {
     if cfg.tls.is_some() {
         out.push_str("install -d -m 0700 /run/amicu/tls\n");
         out.push_str(&fetch(TLS_KEY_METADATA, SecretKind::TlsKey, "tls_key"));
+        out.push_str(&non_empty("tls_key", "tls key"));
         out.push_str("printf '%s\\n' \"$tls_key\" > /run/amicu/tls/tls.key\n");
         out.push_str("md ");
         out.push_str(TLS_CERT_METADATA);
         out.push_str(" > /run/amicu/tls/tls.crt\n");
+        out.push_str(
+            "[ -s /run/amicu/tls/tls.crt ] || { echo 'amicu: empty tls certificate' >&2; exit 1; }\n",
+        );
     }
     out.push_str("unset api_key hf_token tls_key\numask 022\n");
     out
+}
+
+/// Shell that stops the script when variable `var` came back empty. A failed
+/// fetch already stops it (`set -e` applies to the plain assignment); this
+/// catches a fetch that succeeds with nothing.
+fn non_empty(var: &str, what: &str) -> String {
+    format!("[ -n \"${var}\" ] || {{ echo 'amicu: empty {what}' >&2; exit 1; }}\n")
 }
 
 #[derive(Clone, Copy)]
@@ -415,6 +436,38 @@ mod tests {
     }
 
     #[test]
+    fn empty_secret_values_fail_the_script() {
+        for delivery in [
+            SecretDelivery::SecretManager,
+            SecretDelivery::InstanceMetadata,
+        ] {
+            let s = script(&tls_cfg(delivery));
+            for what in [
+                "api key",
+                "hugging face token",
+                "tls key",
+                "tls certificate",
+            ] {
+                assert!(s.contains(&format!("echo 'amicu: empty {what}'")), "{what}");
+            }
+            // Values are read by plain assignment, so a failed fetch stops
+            // the script too, and none is hidden inside a printf.
+            assert!(s.contains("api_key=$("));
+            assert!(!s.contains("printf 'VLLM_API_KEY=%s\\n' \"$("));
+        }
+    }
+
+    #[test]
+    fn the_container_restarts_on_failure_and_is_verified_running() {
+        let s = script(&cfg());
+        assert!(s.contains("'--restart' 'on-failure'"));
+        assert!(!s.contains("exec 'docker'"));
+        assert!(s.contains("docker inspect -f"));
+        assert!(s.contains("docker logs --tail 50 amicu-vllm"));
+        assert!(s.contains("exit 1;; esac"));
+    }
+
+    #[test]
     fn hf_token_line_is_absent_without_a_token() {
         for delivery in [
             SecretDelivery::SecretManager,
@@ -445,6 +498,8 @@ mod tests {
         assert!(c.validate().is_err());
     }
 
+    // `bash` on a Windows runner is the WSL launcher stub, not a shell.
+    #[cfg(unix)]
     #[test]
     fn every_script_variant_is_valid_bash() {
         use std::io::Write;

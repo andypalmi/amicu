@@ -36,19 +36,28 @@ pub struct FirewallSpec {
     pub owner: String,
 }
 
-/// The rule name for an instance: its name with a `-fw` suffix, cut to 63
-/// characters.
+/// The longest instance-name part of a rule name: 63 minus the `-fw` suffix.
+const MAX_BASE: usize = 63 - "-fw".len();
+
+/// The rule name for an instance: its name with a `-fw` suffix, within 63
+/// characters. When the name is too long the part before the last `-` is
+/// shortened, so the instance name's trailing nonce (which keeps the rule
+/// unique) survives whole.
 ///
 /// # Errors
 /// [`GcpError::Invalid`] for a bad instance name.
 pub fn firewall_name(instance_name: &str) -> Result<String, GcpError> {
     validate_resource_name(instance_name)?;
-    let mut base = instance_name.to_owned();
-    base.truncate(60);
-    while base.ends_with('-') {
-        base.pop();
+    let (head, tail) = match instance_name.rsplit_once('-') {
+        Some((head, nonce)) if nonce.len() < MAX_BASE => (head, format!("-{nonce}")),
+        _ => (instance_name, String::new()),
+    };
+    let mut head = head.to_owned();
+    head.truncate(MAX_BASE - tail.len());
+    while head.ends_with('-') {
+        head.pop();
     }
-    Ok(format!("{base}-fw"))
+    Ok(format!("{head}{tail}-fw"))
 }
 
 impl FirewallSpec {
@@ -272,6 +281,20 @@ mod tests {
         let long = firewall_name(&"a".repeat(63)).unwrap();
         assert!(long.len() <= 63 && long.ends_with("-fw"));
         assert!(firewall_name("Bad_Name").is_err());
+        // A full-length instance name keeps its whole nonce.
+        let name = crate::compute::instance_name(&"p".repeat(80), &"d".repeat(80), "0123456789ab")
+            .unwrap();
+        let fw = firewall_name(&name).unwrap();
+        assert!(fw.len() <= 63 && fw.ends_with("-0123456789ab-fw"), "{fw}");
+        crate::validate::validate_resource_name(&fw).unwrap();
+        assert_ne!(
+            fw,
+            firewall_name(
+                &crate::compute::instance_name(&"p".repeat(80), &"d".repeat(80), "ba9876543210")
+                    .unwrap()
+            )
+            .unwrap()
+        );
     }
 
     #[tokio::test]
