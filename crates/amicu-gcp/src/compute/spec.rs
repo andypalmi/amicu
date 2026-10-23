@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use super::startup::{StartupConfig, startup_metadata};
+use super::startup::{SecretDelivery, StartupConfig, startup_metadata};
 use crate::error::GcpError;
 use crate::labels::OWNER_LABEL;
 use crate::validate::{validate_project_id, validate_resource_name, validate_zone};
@@ -80,6 +80,9 @@ pub struct VmSpec {
     /// families ship the driver, so this is only for older families.
     pub install_nvidia_driver: bool,
     /// Runtime service account email; `None` attaches no service account.
+    /// Required with [`SecretDelivery::SecretManager`]: it is the identity that
+    /// reads the secrets (amicu grants it access on each secret, nothing more,
+    /// and never creates it or changes project IAM).
     pub service_account: Option<String>,
     /// The network tag the firewall rule targets.
     pub network_tag: String,
@@ -172,6 +175,14 @@ impl VmSpec {
                 "must be between 1 second and 2 hours",
             ));
         }
+        if self.startup.delivery == SecretDelivery::SecretManager && self.service_account.is_none()
+        {
+            return Err(invalid(
+                "service account",
+                "",
+                "required to read secrets from Secret Manager",
+            ));
+        }
         self.startup.validate()
     }
 
@@ -211,7 +222,12 @@ impl VmSpec {
             }],
             "scheduling": self.scheduling(),
             "serviceAccounts": self.service_accounts(),
-            "metadata": { "items": startup_metadata(&self.startup, self.install_nvidia_driver) },
+            "metadata": { "items": startup_metadata(
+                &self.startup,
+                &self.project,
+                &self.name,
+                self.install_nvidia_driver
+            ) },
         });
         if let Some(a) = &self.accelerator {
             body["guestAccelerators"] = json!([{
@@ -368,6 +384,8 @@ pub(crate) mod tests {
                 serving_port: 8000,
                 api_key: SecretValue::new("sk-test-key"),
                 hf_token: Some(SecretValue::new("hf_test")),
+                delivery: SecretDelivery::InstanceMetadata,
+                tls: None,
             },
         }
     }

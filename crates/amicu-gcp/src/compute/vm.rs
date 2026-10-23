@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::spec::VmSpec;
+use super::tls::TlsIdentity;
 use crate::client::{COMPUTE_BASE_URL, GcpClient};
 use crate::error::GcpError;
 use crate::labels::ensure_owned;
@@ -33,6 +34,10 @@ pub struct VmRecord {
     pub name: String,
     /// The owner marker the VM carries in its [`crate::OWNER_LABEL`] label.
     pub owner: String,
+    /// SHA-256 fingerprint (hex) of the VM's pinned TLS certificate; `None`
+    /// when the VM serves plain HTTP. Public, not a secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_fingerprint: Option<String>,
 }
 
 /// A VM as Compute Engine reports it (the fields amicu reads; instance
@@ -187,6 +192,12 @@ pub fn prepare(spec: &VmSpec) -> Result<VmRecord, GcpError> {
         zone: spec.zone.clone(),
         name: spec.name.clone(),
         owner: spec.owner()?.to_owned(),
+        tls_fingerprint: spec
+            .startup
+            .tls
+            .as_ref()
+            .map(TlsIdentity::fingerprint)
+            .transpose()?,
     })
 }
 
