@@ -24,7 +24,10 @@ pub mod vm;
 pub use firewall::{FirewallSpec, create_firewall, delete_firewall, firewall_name};
 pub use health::{HealthTiming, probe_transport, wait_ready};
 pub use secure::{delete_secrets, provision_secrets};
-pub use spec::{Accelerator, DEFAULT_IMAGE_FAMILY, Provisioning, VmSpec};
+pub use spec::{
+    ARM64_IMAGE_FAMILY, Accelerator, DEFAULT_IMAGE_FAMILY, Provisioning, VmSpec,
+    default_image_family, is_arm_machine_type,
+};
 pub use startup::{SecretDelivery, StartupConfig};
 pub use tls::{PinnedTransport, TlsIdentity, fingerprint_of_pem, write_cert_pem};
 pub use vm::{

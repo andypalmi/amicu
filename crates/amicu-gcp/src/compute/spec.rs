@@ -21,6 +21,15 @@ use crate::validate::{validate_project_id, validate_resource_name, validate_zone
 pub const DEFAULT_IMAGE_FAMILY: &str = "common-cu129-ubuntu-2204-nvidia-580";
 /// The project that publishes the Deep Learning VM images.
 pub const IMAGE_PROJECT: &str = "deeplearning-platform-release";
+/// The boot image family for the Arm machine types (A4X and A4X Max, NVIDIA
+/// Grace CPUs): Ubuntu 24.04 arm64 with the NVIDIA 580 driver, from Google's
+/// accelerator OS images. The Deep Learning VM project publishes no arm64
+/// family, so these machines cannot use [`DEFAULT_IMAGE_FAMILY`].
+pub const ARM64_IMAGE_FAMILY: &str = "ubuntu-accelerator-2404-arm64-with-nvidia-580";
+/// The project that publishes [`ARM64_IMAGE_FAMILY`].
+const UBUNTU_ACCELERATOR_PROJECT: &str = "ubuntu-os-accelerator-images";
+/// The project that publishes the Rocky Linux accelerator images.
+const ROCKY_ACCELERATOR_PROJECT: &str = "rocky-linux-accelerator-cloud";
 
 const SCOPE_CLOUD_PLATFORM: &str = "https://www.googleapis.com/auth/cloud-platform";
 const MIN_RUN: Duration = Duration::from_mins(10);
@@ -64,7 +73,8 @@ pub struct VmSpec {
     /// else happens.
     pub max_run: Duration,
     pub boot_disk_gb: u32,
-    /// Deep Learning VM image family; see [`DEFAULT_IMAGE_FAMILY`].
+    /// Boot image family; see [`default_image_family`] for the right one for a
+    /// machine type. Its CPU architecture must match the machine type.
     pub image_family: String,
     /// Also set the `install-nvidia-driver` metadata key. The default image
     /// families ship the driver, so this is only for older families.
@@ -113,6 +123,18 @@ impl VmSpec {
         self.owner()?;
         token("machine type", &self.machine_type)?;
         token("image family", &self.image_family)?;
+        let arm_machine = is_arm_machine_type(&self.machine_type);
+        if arm_machine != self.image_family.contains("arm64") {
+            return Err(invalid(
+                "image family",
+                &self.image_family,
+                if arm_machine {
+                    "A4X machine types are Arm and need an arm64 image family"
+                } else {
+                    "an arm64 image family needs an Arm machine type (A4X)"
+                },
+            ));
+        }
         if let Some(a) = &self.accelerator {
             token("accelerator type", &a.type_name)?;
             if a.count == 0 {
@@ -179,7 +201,8 @@ impl VmSpec {
                 "type": "PERSISTENT",
                 "initializeParams": {
                     "sourceImage": format!(
-                        "projects/{IMAGE_PROJECT}/global/images/family/{}",
+                        "projects/{}/global/images/family/{}",
+                        image_project(&self.image_family),
                         self.image_family
                     ),
                     "diskSizeGb": self.boot_disk_gb.to_string(),
@@ -240,6 +263,36 @@ impl VmSpec {
             Some(email) => json!([{ "email": email, "scopes": [SCOPE_CLOUD_PLATFORM] }]),
             None => json!([]),
         }
+    }
+}
+
+/// Whether a machine type runs on Arm CPUs. Of the GPU series, only A4X and
+/// A4X Max (NVIDIA Grace) do; everything else is x86.
+#[must_use]
+pub fn is_arm_machine_type(machine_type: &str) -> bool {
+    machine_type.starts_with("a4x-")
+}
+
+/// The boot image family for a machine type: [`ARM64_IMAGE_FAMILY`] for Arm
+/// machines, else the x86 Deep Learning VM [`DEFAULT_IMAGE_FAMILY`].
+#[must_use]
+pub fn default_image_family(machine_type: &str) -> &'static str {
+    if is_arm_machine_type(machine_type) {
+        ARM64_IMAGE_FAMILY
+    } else {
+        DEFAULT_IMAGE_FAMILY
+    }
+}
+
+/// The project publishing an image family: the accelerator OS image projects
+/// for their families, else the Deep Learning VM project.
+fn image_project(family: &str) -> &'static str {
+    if family.starts_with("ubuntu-accelerator-") {
+        UBUNTU_ACCELERATOR_PROJECT
+    } else if family.starts_with("rocky-linux-") {
+        ROCKY_ACCELERATOR_PROJECT
+    } else {
+        IMAGE_PROJECT
     }
 }
 
@@ -376,6 +429,49 @@ pub(crate) mod tests {
             "projects/deeplearning-platform-release/global/images/family/common-cu129-ubuntu-2204-nvidia-580"
         );
         assert!(b.get("params").is_none());
+    }
+
+    #[test]
+    fn a4x_boots_an_arm64_image_and_the_rest_x86() {
+        assert!(is_arm_machine_type("a4x-highgpu-4g"));
+        assert!(is_arm_machine_type("a4x-maxgpu-4g-metal"));
+        for m in [
+            "a4-highgpu-8g",
+            "a3-ultragpu-8g",
+            "g4-standard-48",
+            "g2-standard-4",
+        ] {
+            assert!(!is_arm_machine_type(m), "{m}");
+            assert_eq!(default_image_family(m), DEFAULT_IMAGE_FAMILY, "{m}");
+        }
+        for m in ["a4x-highgpu-4g", "a4x-maxgpu-4g-metal"] {
+            assert_eq!(default_image_family(m), ARM64_IMAGE_FAMILY);
+            let mut s = spec(m, None, Provisioning::Standard);
+            s.image_family = default_image_family(m).into();
+            assert_eq!(
+                s.insert_body().unwrap()["disks"][0]["initializeParams"]["sourceImage"],
+                "projects/ubuntu-os-accelerator-images/global/images/family/ubuntu-accelerator-2404-arm64-with-nvidia-580"
+            );
+        }
+    }
+
+    #[test]
+    fn the_image_architecture_must_match_the_machine() {
+        // x86 image on an Arm machine, and the reverse.
+        let a4x = spec("a4x-highgpu-4g", None, Provisioning::Standard);
+        assert!(a4x.validate().unwrap_err().to_string().contains("arm64"));
+        let mut g2 = spec("g2-standard-4", None, Provisioning::Standard);
+        g2.image_family = ARM64_IMAGE_FAMILY.into();
+        assert!(g2.validate().is_err());
+        // The Rocky arm64 family resolves to its own project.
+        let mut s = spec("a4x-highgpu-4g", None, Provisioning::Standard);
+        s.image_family = "rocky-linux-9-optimized-gcp-nvidia-580-arm64".into();
+        assert!(
+            s.insert_body().unwrap()["disks"][0]["initializeParams"]["sourceImage"]
+                .as_str()
+                .unwrap()
+                .starts_with("projects/rocky-linux-accelerator-cloud/")
+        );
     }
 
     #[test]
