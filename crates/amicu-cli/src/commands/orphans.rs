@@ -358,19 +358,24 @@ impl GcpResources for GcpOpsListing<'_> {
     }
 }
 
-/// Whether the error says the API is switched off in the project
-/// (`SERVICE_DISABLED`, "has not been used ... or it is disabled").
+/// Whether the error says the Secret Manager API is switched off in the
+/// project: the `SERVICE_DISABLED` reason, or Google's "API has not been used
+/// in project ... or it is disabled" text naming `secretmanager`. Wording that
+/// does not name Secret Manager (another API, an org policy) is a real
+/// permission failure.
 fn api_disabled(e: &amicu_gcp::GcpError) -> bool {
     let amicu_gcp::GcpError::PermissionDenied { code, message, .. } = e else {
         return false;
     };
     let m = message.to_ascii_lowercase();
-    code.contains("SERVICE_DISABLED")
-        || m.contains("service_disabled")
-        || m.contains("has not been used")
-        || m.contains("it is disabled")
-        || m.contains("not enabled")
-        || m.contains("api is disabled")
+    if code.contains("SERVICE_DISABLED") || m.contains("service_disabled") {
+        return true;
+    }
+    let names_secret_manager = m.contains("secretmanager") || m.contains("secret manager");
+    names_secret_manager
+        && (m.contains("has not been used in project")
+            || m.contains("api has not been used")
+            || m.contains("is disabled"))
 }
 
 /// Handles the result of listing a project's secrets. A project that delivers
@@ -1129,6 +1134,12 @@ fn render(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::stops::StopRecord;
+    use amicu_llamacpp::{ExecOutput, LlamaCppError};
+    use amicu_runtime::RuntimeHandle;
+    use std::sync::Mutex;
+
     #[test]
     fn secret_listing_tolerates_only_a_disabled_api() {
         use amicu_gcp::GcpError;
@@ -1141,7 +1152,9 @@ mod tests {
         let mut note = Vec::new();
         let off = denied(
             "PERMISSION_DENIED",
-            "Secret Manager API has not been used in project p before or it is disabled.",
+            "Secret Manager API has not been used in project p before or it is disabled. \
+             Enable it by visiting \
+             https://console.developers.google.com/apis/api/secretmanager.googleapis.com/overview?project=p",
         );
         assert_eq!(
             tolerate_secret_listing("p", Err(off), &mut note),
@@ -1154,6 +1167,21 @@ mod tests {
             Ok(vec![])
         );
         assert_eq!(note, Vec::<u8>::new());
+        // Loose wording that is not about Secret Manager's API being off is a
+        // real permission failure, not "no secrets".
+        for message in [
+            "Permission denied: feature is not enabled for this account",
+            "Compute Engine API has not been used in project p before or it is disabled.",
+            "it is disabled by an organization policy",
+        ] {
+            let other = denied("PERMISSION_DENIED", message);
+            let mut note = Vec::new();
+            assert_eq!(
+                tolerate_secret_listing("p", Err(other), &mut note),
+                Ok(vec![])
+            );
+            assert!(!note.is_empty(), "{message}");
+        }
         // A real permission failure: continue, but say so.
         let no = denied(
             "PERMISSION_DENIED",
@@ -1177,12 +1205,6 @@ mod tests {
             Ok(ok)
         );
     }
-
-    use super::*;
-    use crate::stops::StopRecord;
-    use amicu_llamacpp::{ExecOutput, LlamaCppError};
-    use amicu_runtime::RuntimeHandle;
-    use std::sync::Mutex;
 
     #[test]
     fn shell_quote_leaves_plain_and_escapes_unsafe() {
