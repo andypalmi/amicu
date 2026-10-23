@@ -166,10 +166,10 @@ enum Command {
         #[command(subcommand)]
         command: TelemetryCommand,
     },
-    /// The opt-in telemetry agent `apply` starts beside each local
-    /// deployment. Not meant to be run by hand.
+    /// The opt-in telemetry agent `apply` starts for each deployment, beside
+    /// a local one. Not meant to be run by hand.
     #[command(hide = true)]
-    TelemetryAgent(commands::telemetry_agent::AgentArgs),
+    TelemetryAgent(Box<commands::telemetry_agent::AgentArgs>),
 }
 
 #[derive(Debug, Subcommand)]
