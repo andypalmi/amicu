@@ -27,10 +27,12 @@ pub struct HealthTiming {
 const BOOT_BUDGET: Duration = Duration::from_mins(30);
 
 impl Default for HealthTiming {
-    /// Sized for a VM that starts at once (spot or standard): 30 minutes. For a
-    /// flex-start VM, which may queue for capacity for up to 2 hours before it
-    /// boots, use [`HealthTiming::for_spec`]; this default would give up while
-    /// the request is still waiting.
+    /// Sized for a VM that starts at once (spot or standard): 30 minutes.
+    ///
+    /// Callers that have a [`VmSpec`] must use [`HealthTiming::for_spec`]
+    /// instead. A flex-start VM may queue for capacity for up to 2 hours before
+    /// it boots, and this default would give up while the request is still
+    /// waiting.
     fn default() -> Self {
         Self {
             interval: Duration::from_secs(10),
