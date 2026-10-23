@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use amicu_providers::HttpMethod;
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,10 @@ use crate::validate::{validate_project_id, validate_region, validate_resource_na
 pub const QUOTA_HINT: &str = "Cloud Run GPU quota is per region and GPU type (new projects get \
      3 GPUs without zonal redundancy; RTX PRO 6000 is in milliGPUs). Request an increase on the \
      Quotas page, pick another region, or lower max instances.";
+
+/// Extra time `create` waits beyond the startup budget: the operation also
+/// covers pulling the image and creating the revision before the probe starts.
+pub const CREATE_MARGIN: Duration = Duration::from_mins(5);
 
 /// What `prepare` returns: enough to find, check and delete the service, to be
 /// persisted BEFORE `create` (write-ahead), so a crash cannot orphan a billed
@@ -145,7 +150,10 @@ impl CloudRunLifecycle {
         }
     }
 
-    /// Overrides how long operations are awaited.
+    /// Overrides how long operations are awaited. [`create`](Self::create)
+    /// never waits less than the spec's startup budget plus
+    /// [`CREATE_MARGIN`], whatever is set here; a caller that wants to stop
+    /// earlier drops the future and polls [`status`](Self::status).
     #[must_use]
     pub fn with_timing(mut self, timing: PollTiming) -> Self {
         self.timing = timing;
@@ -179,6 +187,12 @@ impl CloudRunLifecycle {
     /// we own is adopted too (a retried create); on any other service it is an
     /// error and nothing is touched. Quota errors carry [`QUOTA_HINT`].
     ///
+    /// The wait is at least `startup_budget_secs` plus [`CREATE_MARGIN`] (the
+    /// operation only finishes once the first revision's startup probe passes),
+    /// even when the configured [`PollTiming`] is shorter. Past that, the
+    /// timeout is [`GcpError::OperationTimeout`] and the caller polls
+    /// [`status`](Self::status) until the service is ready.
+    ///
     /// If the operation fails after the service resource exists (for example the
     /// first revision cannot start), the service is left in place for
     /// [`status`](Self::status) and [`delete`](Self::delete).
@@ -203,9 +217,11 @@ impl CloudRunLifecycle {
             .await;
         let outcome = match started {
             Ok(op) => match op["name"].as_str() {
-                Some(name) => wait_run_operation(&self.client, name, self.timing)
-                    .await
-                    .map(|_| ()),
+                Some(name) => {
+                    wait_run_operation(&self.client, name, create_timing(self.timing, spec))
+                        .await
+                        .map(|_| ())
+                }
                 None => Err(GcpError::Decode("create returned no operation name".into())),
             },
             Err(e) => Err(e),
@@ -330,11 +346,29 @@ impl CloudRunLifecycle {
 
 /// Quota failures arrive as HTTP 429 / `RESOURCE_EXHAUSTED`, or as a failed
 /// operation with gRPC code 8.
+/// `timing` with the timeout raised to the startup budget plus the margin.
+fn create_timing(timing: PollTiming, spec: &ServiceSpec) -> PollTiming {
+    PollTiming {
+        timeout: timing
+            .timeout
+            .max(Duration::from_secs(u64::from(spec.startup_budget_secs)) + CREATE_MARGIN),
+        ..timing
+    }
+}
+
 fn with_quota_hint(e: GcpError) -> GcpError {
     match e {
         GcpError::QuotaExceeded { message } => GcpError::QuotaExceeded {
             message: format!("{message}. {QUOTA_HINT}"),
         },
+        // Cloud Run answers an exhausted GPU quota with a `429`; waiting does
+        // not help, so it counts as a quota error. A plain `429` stays a
+        // retryable rate limit.
+        GcpError::RateLimited { message } if message.to_ascii_lowercase().contains("quota") => {
+            GcpError::QuotaExceeded {
+                message: format!("{message}. {QUOTA_HINT}"),
+            }
+        }
         GcpError::OperationFailed {
             ref code,
             ref message,
