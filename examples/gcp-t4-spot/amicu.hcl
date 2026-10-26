@@ -44,6 +44,11 @@ resource "hardware_profile" "gcp_t4" {
     provisioning = "spot"
     max_run_duration = "2h"
 
+    # Optional: power the VM off after 30 minutes without a request. The VM is
+    # kept (powered off) until the next `amicu apply` or `amicu destroy`
+    # deletes it. Leave it out to keep serving until max_run_duration.
+    idle_shutdown = "30m"
+
     # The account the VM runs as. It reads the API key, the Hugging Face token
     # and the TLS key from Secret Manager at boot; amicu grants it access to
     # those secrets only. Create it first (see the GCP provider docs) and replace

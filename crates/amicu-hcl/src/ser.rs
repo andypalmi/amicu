@@ -345,6 +345,9 @@ fn hardware_block(h: &HardwareProfile) -> Block {
         if let Some(v) = g.max_run_duration_secs {
             gb = gb.add_attribute(("max_run_duration", ScalingSettings::format_window(v)));
         }
+        if let Some(v) = g.idle_shutdown_secs {
+            gb = gb.add_attribute(("idle_shutdown", ScalingSettings::format_window(v)));
+        }
         if let Some(v) = g.boot_disk_gb {
             gb = gb.add_attribute(("boot_disk_gb", v));
         }

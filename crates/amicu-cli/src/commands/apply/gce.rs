@@ -60,6 +60,16 @@ pub(super) fn access_for(
     Ok((project, settings.impersonate_service_account))
 }
 
+/// The service account the VM runs as, for the preflight.
+pub(super) fn service_account_for(
+    graph: &Graph,
+    catalog: &dyn Catalog,
+    id: &DeploymentId,
+) -> Result<Option<String>, CliError> {
+    let (_, hardware) = deployment_hardware(graph, catalog, id)?;
+    Ok(hardware.gcp.unwrap_or_default().service_account)
+}
+
 /// Whether the deployment opted into delivering its secrets as instance
 /// metadata.
 pub(super) fn uses_metadata_secrets(
@@ -158,6 +168,9 @@ pub(crate) fn launch_for(
         } else {
             SecretDelivery::SecretManager
         },
+        idle_shutdown: s
+            .idle_shutdown_secs
+            .map(|s| Duration::from_secs(u64::from(s))),
         tls: None,
     }
     .with_tls()

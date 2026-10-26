@@ -17,6 +17,8 @@
 //! With a [`TlsIdentity`] vLLM serves HTTPS (`--ssl-certfile`, `--ssl-keyfile`)
 //! from `/run/amicu/tls`. The certificate is public and always instance metadata.
 
+use std::time::Duration;
+
 use amicu_core::secret::SecretValue;
 use serde_json::{Value, json};
 
@@ -39,6 +41,34 @@ pub const TLS_KEY_METADATA: &str = "amicu-tls-key";
 /// Metadata key holding the TLS certificate (public, in both deliveries).
 pub const TLS_CERT_METADATA: &str = "amicu-tls-cert";
 const CONTAINER_NAME: &str = "amicu-vllm";
+const IDLE_HEREDOC_END: &str = "AMICU_IDLE_EOF";
+const IDLE_UNIT: &str = "amicu-idle-watchdog";
+
+/// Polls vLLM's `/metrics` with the API key (read from the root-only env file)
+/// and powers the VM off once nothing has run, waited or finished for `WINDOW`
+/// seconds. The clock starts at the first answer, so model loading never
+/// counts, and an unreadable answer never counts as idle.
+const IDLE_WATCHDOG: &str = r#"#!/bin/bash
+url='URL'
+window=WINDOW
+key=$(sed -n 's/^VLLM_API_KEY=//p' /run/amicu/vllm.env)
+last_done=""
+last_active=""
+while sleep 30; do
+  m=$(printf 'header = "Authorization: Bearer %s"
+' "$key" | curl -ksS -m 10 -K - "$url") || continue
+  printf '%s
+' "$m" | grep -q '^vllm:' || continue
+  busy=$(printf '%s
+' "$m" | awk '/^vllm:num_requests_(running|waiting)[{ ]/ {s+=$NF} END {print s+0}')
+  finished=$(printf '%s
+' "$m" | awk '/^vllm:request_success_total[{ ]/ {s+=$NF} END {print s+0}')
+  now=$(date +%s)
+  if [ -z "$last_active" ] || [ "$busy" != 0 ] || [ "$finished" != "$last_done" ]; then last_active=$now; fi
+  last_done=$finished
+  if [ $((now - last_active)) -ge "$window" ]; then shutdown -h now; exit 0; fi
+done
+"#;
 
 /// How the VM gets its secrets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -71,6 +101,9 @@ pub struct StartupConfig {
     pub delivery: SecretDelivery,
     /// Serve HTTPS with this certificate and key; `None` serves plain HTTP.
     pub tls: Option<TlsIdentity>,
+    /// Power the VM off after this long without a request; `None` keeps it
+    /// until `max_run_duration`.
+    pub idle_shutdown: Option<Duration>,
 }
 
 impl StartupConfig {
@@ -102,6 +135,9 @@ impl StartupConfig {
         }
         if self.serving_port == 0 {
             return Err(bad("serving port", "must not be 0"));
+        }
+        if self.idle_shutdown.is_some_and(|d| d.as_secs() == 0) {
+            return Err(bad("idle shutdown", "must be at least one second"));
         }
         let image_ok = !self.container_image.is_empty()
             && self.container_image.bytes().all(|b| {
@@ -222,6 +258,7 @@ pub fn startup_script(cfg: &StartupConfig, project: &str, instance: &str) -> Str
         .collect::<Vec<_>>()
         .join(" ");
     let secrets = secrets_block(cfg, project, instance);
+    let idle = idle_block(cfg);
     format!(
         "#!/bin/bash\n\
          set -euo pipefail\n\
@@ -250,7 +287,29 @@ pub fn startup_script(cfg: &StartupConfig, project: &str, instance: &str) -> Str
          docker logs --tail 50 {CONTAINER_NAME} >&2 || true\n\
          exit 1\n\
          fi\n\
+         {idle}\
          echo 'amicu: container {CONTAINER_NAME} started' >&2\n"
+    )
+}
+
+/// Installs and starts the idle watchdog as a transient systemd unit (a plain
+/// background process would die with the startup script's cgroup).
+fn idle_block(cfg: &StartupConfig) -> String {
+    let Some(window) = cfg.idle_shutdown else {
+        return String::new();
+    };
+    let scheme = if cfg.tls.is_some() { "https" } else { "http" };
+    let script = IDLE_WATCHDOG
+        .replace(
+            "URL",
+            &format!("{scheme}://127.0.0.1:{}/metrics", cfg.serving_port),
+        )
+        .replace("WINDOW", &window.as_secs().to_string());
+    format!(
+        "cat > /opt/amicu/idle-watchdog.sh <<'{IDLE_HEREDOC_END}'\n\
+         {script}{IDLE_HEREDOC_END}\n\
+         systemctl stop {IDLE_UNIT} >/dev/null 2>&1 || true\n\
+         systemd-run --unit={IDLE_UNIT} --collect /bin/bash /opt/amicu/idle-watchdog.sh >/dev/null\n"
     )
 }
 
@@ -359,6 +418,7 @@ mod tests {
             hf_token: Some(SecretValue::new("hf_secret")),
             delivery: SecretDelivery::SecretManager,
             tls: None,
+            idle_shutdown: None,
         }
     }
 
@@ -376,6 +436,31 @@ mod tests {
 
     fn metadata_text(c: &StartupConfig) -> String {
         serde_json::to_string(&startup_metadata(c, P, N, false)).unwrap()
+    }
+
+    #[test]
+    fn the_watchdog_is_only_in_the_script_when_idle_shutdown_is_set() {
+        assert!(!script(&cfg()).contains("idle-watchdog"));
+        let c = StartupConfig {
+            idle_shutdown: Some(Duration::from_mins(30)),
+            ..cfg()
+        };
+        let s = script(&c);
+        assert!(s.contains("window=1800\n"));
+        assert!(s.contains("url='http://127.0.0.1:8000/metrics'"));
+        assert!(s.contains("shutdown -h now"));
+        assert!(s.contains("systemd-run --unit=amicu-idle-watchdog"));
+        assert!(!s.contains("sk-secret"));
+        let c = StartupConfig {
+            idle_shutdown: Some(Duration::from_mins(1)),
+            ..tls_cfg(SecretDelivery::SecretManager)
+        };
+        assert!(script(&c).contains("url='https://127.0.0.1:8000/metrics'"));
+        let zero = StartupConfig {
+            idle_shutdown: Some(Duration::ZERO),
+            ..cfg()
+        };
+        assert!(zero.validate().is_err());
     }
 
     #[test]

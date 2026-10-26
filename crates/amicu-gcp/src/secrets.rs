@@ -259,10 +259,32 @@ pub async fn read_latest(
     Ok(SecretValue::new(bytes))
 }
 
+/// Names the permissions a denied secret delete needs.
+fn denied_delete(id: &str, e: GcpError) -> GcpError {
+    match e {
+        GcpError::PermissionDenied {
+            status,
+            code,
+            message,
+        } => GcpError::PermissionDenied {
+            status,
+            code,
+            message: format!(
+                "{message}; deleting secret `{id}` needs secretmanager.secrets.get and \
+                 secretmanager.secrets.delete (roles/secretmanager.admin)"
+            ),
+        },
+        e => e,
+    }
+}
+
 /// Deletes a secret amicu owns, with all its versions.
 ///
 /// # Errors
-/// [`GcpError::NotOwned`] (nothing is deleted) or any API error.
+/// [`GcpError::NotOwned`] (nothing is deleted), [`GcpError::ServiceDisabled`]
+/// when the API is off (the secret's existence is then unknown: callers decide
+/// whether that counts as absent), [`GcpError::PermissionDenied`] naming the
+/// missing permissions, or any API error.
 pub async fn delete_secret(
     client: &GcpClient,
     project: &str,
@@ -272,7 +294,7 @@ pub async fn delete_secret(
     match get_owned(client, project, id, owner).await {
         Ok(_) => {}
         Err(GcpError::NotFound { .. }) => return Ok(SecretDelete::AlreadyGone),
-        Err(e) => return Err(e),
+        Err(e) => return Err(denied_delete(id, e)),
     }
     match client
         .request(HttpMethod::Delete, &secret_url(project, id)?, None)
@@ -280,7 +302,7 @@ pub async fn delete_secret(
     {
         Ok(_) => Ok(SecretDelete::Deleted),
         Err(e) if e.is_not_found() => Ok(SecretDelete::AlreadyGone),
-        Err(e) => Err(e),
+        Err(e) => Err(denied_delete(id, e)),
     }
 }
 

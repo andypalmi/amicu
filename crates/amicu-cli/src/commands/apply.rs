@@ -1846,7 +1846,7 @@ async fn gce_preflight(
     catalog: &dyn Catalog,
     env: &Env<'_>,
 ) -> Result<(), CliError> {
-    let mut checked: Vec<(String, Option<String>)> = Vec::new();
+    let mut checked: Vec<(String, Option<String>, Option<String>, bool)> = Vec::new();
     for item in &result.items {
         let gce_launch = item.launch.as_ref().is_some_and(|l| {
             dispatch_for(l.runtime, item.action.provider.as_deref()) == Some(Dispatch::Gce)
@@ -1854,12 +1854,24 @@ async fn gce_preflight(
         if !gce_launch {
             continue;
         }
-        let access = gce::access_for(graph, catalog, &item.deployment)?;
-        if !checked.contains(&access) {
-            crate::gcp_ops::preflight(env.gcp, &access.0, access.1.as_deref()).await?;
-            checked.push(access);
+        let (project, impersonate) = gce::access_for(graph, catalog, &item.deployment)?;
+        let metadata_secrets = gce::uses_metadata_secrets(graph, catalog, &item.deployment)?;
+        let service_account = gce::service_account_for(graph, catalog, &item.deployment)?;
+        let key = (project, impersonate, service_account, metadata_secrets);
+        if !checked.contains(&key) {
+            crate::gcp_ops::preflight_compute(
+                env.gcp,
+                &crate::gcp_ops::ComputeNeeds {
+                    project: &key.0,
+                    impersonate: key.1.as_deref(),
+                    service_account: key.2.as_deref(),
+                    secret_manager: !key.3,
+                },
+            )
+            .await?;
+            checked.push(key);
         }
-        if gce::uses_metadata_secrets(graph, catalog, &item.deployment)? {
+        if metadata_secrets {
             let _ = writeln!(
                 std::io::stderr(),
                 "warning: '{}' sets `insecure_metadata_secrets`: its api_key, Hugging Face \

@@ -131,6 +131,8 @@ pub struct GceLaunch {
     pub delivery: SecretDelivery,
     /// The VM's certificate and key, generated before the write-ahead record
     /// (see [`Self::with_tls`]); `None` serves plain HTTP.
+    /// Power the VM off after this long idle.
+    pub idle_shutdown: Option<Duration>,
     pub tls: Option<TlsIdentity>,
 }
 
@@ -397,6 +399,7 @@ impl GceSupervisor {
             hf_token,
             delivery: self.launch.delivery,
             tls: self.launch.tls.clone(),
+            idle_shutdown: self.launch.idle_shutdown,
         })
     }
 
@@ -631,7 +634,8 @@ pub const GONE: &str =
 ///
 /// # Errors
 /// [`GcpError::NotOwned`] (nothing deleted) for a VM, rule or secret of that
-/// name that is not ours, or an API error. The firewall rule and the secrets
+/// name that is not ours, or an API error. A disabled Secret Manager API means
+/// "no secrets" only when no VM existed. The firewall rule and the secrets
 /// are left in place when the VM could not be removed.
 pub async fn teardown(
     client: &GcpClient,
@@ -653,7 +657,16 @@ pub async fn teardown(
     )
     .await?;
     for id in &record.secrets {
-        delete_secret(client, &record.project, id, &record.owner).await?;
+        match delete_secret(client, &record.project, id, &record.owner).await {
+            Ok(_) => {}
+            // No VM was ever there and the API is off: a start that failed
+            // before it could store anything. With a VM present its secrets
+            // may exist, so that stays an error.
+            Err(e) if e.is_service_disabled() && outcome == DeleteOutcome::AlreadyGone => {
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
         // Confirm: asking again finds nothing.
         if delete_secret(client, &record.project, id, &record.owner).await?
             != SecretDelete::AlreadyGone
@@ -851,6 +864,7 @@ mod tests {
             impersonate: None,
             delivery: SecretDelivery::SecretManager,
             tls: None,
+            idle_shutdown: None,
         }
     }
 
