@@ -109,6 +109,18 @@ impl GcpClient {
     }
 }
 
+/// Reasons Google uses when an API is not enabled in the project.
+const DISABLED_REASONS: [&str; 3] = ["SERVICE_DISABLED", "accessNotConfigured", "API_DISABLED"];
+
+/// The API a request URL addresses: its host (`secretmanager.googleapis.com`).
+fn service_of(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or_default()
+        .to_owned()
+}
+
 /// Maps a non-`2xx` response onto [`GcpError`]. `url` only names the resource
 /// in a `404`.
 fn map_error(status: u16, body: &[u8], url: &str) -> GcpError {
@@ -143,6 +155,12 @@ fn map_error(status: u16, body: &[u8], url: &str) -> GcpError {
     }
     if reasons.iter().any(|r| QUOTA_REASONS.contains(r)) {
         return GcpError::QuotaExceeded { message };
+    }
+    if status == 403 && reasons.iter().any(|r| DISABLED_REASONS.contains(r)) {
+        return GcpError::ServiceDisabled {
+            service: service_of(url),
+            message,
+        };
     }
     match status {
         401 | 403 => GcpError::PermissionDenied {
@@ -403,6 +421,27 @@ pub(crate) mod tests {
                 message: "no access".into()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_disabled_api_is_not_a_permission_problem() {
+        let e = status_error(
+            403,
+            r#"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"Secret Manager API has not been used in project 1 before or it is disabled.","details":[{"reason":"SERVICE_DISABLED"}]}}"#,
+        )
+        .await;
+        assert!(e.is_service_disabled(), "{e:?}");
+        assert!(
+            e.to_string()
+                .contains("gcloud services enable compute.googleapis.com"),
+            "{e}"
+        );
+        let e = status_error(
+            403,
+            r#"{"error":{"code":403,"message":"x","errors":[{"reason":"accessNotConfigured"}]}}"#,
+        )
+        .await;
+        assert!(e.is_service_disabled(), "{e:?}");
     }
 
     #[tokio::test]

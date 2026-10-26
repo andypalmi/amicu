@@ -6,6 +6,8 @@
 //! them at boot. Only [`SecretDelivery::SecretManager`] uses Secret Manager;
 //! with the metadata fallback both functions do nothing.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use amicu_core::secret::SecretValue;
 
 use super::spec::VmSpec;
@@ -27,10 +29,15 @@ use crate::secrets::{
 /// [`GcpError::Invalid`] for a bad spec, [`GcpError::Conflict`] when a secret of
 /// that name exists without the owner label, or any API error. Secrets created
 /// before a failure stay: [`delete_secrets`] removes them.
+///
+/// `touched` is set as soon as a secret may have been written: before every
+/// attempt except a first create that fails because the API is disabled, which
+/// proves nothing was written.
 pub async fn provision_secrets(
     client: &GcpClient,
     spec: &VmSpec,
     replication: &Replication,
+    touched: &AtomicBool,
 ) -> Result<(), GcpError> {
     spec.validate()?;
     if spec.startup.delivery != SecretDelivery::SecretManager {
@@ -52,7 +59,17 @@ pub async fn provision_secrets(
     }
     for (kind, value) in items {
         let id = secret_id(&spec.name, kind)?;
-        create_secret(client, &spec.project, &id, &spec.labels, owner, replication).await?;
+        let created =
+            create_secret(client, &spec.project, &id, &spec.labels, owner, replication).await;
+        match created {
+            Err(e) if e.is_service_disabled() && !touched.load(Ordering::SeqCst) => {
+                return Err(e);
+            }
+            r => {
+                touched.store(true, Ordering::SeqCst);
+                r?;
+            }
+        }
         add_version(client, &spec.project, &id, owner, &value).await?;
         grant_accessor(client, &spec.project, &id, owner, sa).await?;
     }
@@ -147,9 +164,14 @@ mod tests {
                 );
         }
         let (c, m) = client(mock);
-        provision_secrets(&c, &s, &Replication::Region("europe-west4".into()))
-            .await
-            .unwrap();
+        provision_secrets(
+            &c,
+            &s,
+            &Replication::Region("europe-west4".into()),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
         let seen = m.requests();
         let prefix = "https://secretmanager.googleapis.com/v1/projects/my-proj/secrets";
         assert!(seen.iter().all(|r| r.url.starts_with(prefix)));
@@ -166,7 +188,7 @@ mod tests {
     async fn metadata_delivery_creates_nothing() {
         let s = spec("g2-standard-4", None, Provisioning::Spot);
         let (c, m) = client(Mock::default());
-        provision_secrets(&c, &s, &Replication::Automatic)
+        provision_secrets(&c, &s, &Replication::Automatic, &AtomicBool::new(false))
             .await
             .unwrap();
         assert!(m.requests().is_empty());

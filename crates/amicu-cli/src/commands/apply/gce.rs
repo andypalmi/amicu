@@ -42,6 +42,9 @@ pub(super) struct GceStart {
     pub cert_pem: Option<String>,
     landed: Arc<Mutex<Option<String>>>,
     created: Arc<AtomicBool>,
+    secrets_touched: Arc<AtomicBool>,
+    /// No record of this deployment existed before this run.
+    fresh: bool,
 }
 
 /// The Google project and impersonation target a deployment acts with.
@@ -58,6 +61,16 @@ pub(super) fn access_for(
         ))
     })?;
     Ok((project, settings.impersonate_service_account))
+}
+
+/// The service account the VM runs as, for the preflight.
+pub(super) fn service_account_for(
+    graph: &Graph,
+    catalog: &dyn Catalog,
+    id: &DeploymentId,
+) -> Result<Option<String>, CliError> {
+    let (_, hardware) = deployment_hardware(graph, catalog, id)?;
+    Ok(hardware.gcp.unwrap_or_default().service_account)
 }
 
 /// Whether the deployment opted into delivering its secrets as instance
@@ -158,6 +171,9 @@ pub(crate) fn launch_for(
         } else {
             SecretDelivery::SecretManager
         },
+        idle_shutdown: s
+            .idle_shutdown_secs
+            .map(|s| Duration::from_secs(u64::from(s))),
         tls: None,
     }
     .with_tls()
@@ -232,13 +248,14 @@ pub(super) async fn prepare(
         .with_probe_transport(probe)
         .with_timing(env.gcp.timing())
         .with_progress(env.progress);
-    let prior = progress
+    let found = progress.stops.iter().find(|r| {
+        r.deployment == *id && r.backend == Backend::Gce && r.identity == new_record.instance
+    });
+    let fresh = !progress
         .stops
         .iter()
-        .find(|r| {
-            r.deployment == *id && r.backend == Backend::Gce && r.identity == new_record.instance
-        })
-        .and_then(|r| r.gcp.clone());
+        .any(|r| r.backend == Backend::Gce && r.identity == new_record.instance);
+    let prior = found.and_then(|r| r.gcp.clone());
     // A record made for another project or impersonation target is not torn
     // down by the supervisor (it would act as the new identity): apply stops
     // it first and confirms, see `moved_records`.
@@ -256,6 +273,8 @@ pub(super) async fn prepare(
         cert_pem,
         landed: supervisor.landed_zone(),
         created: supervisor.created(),
+        secrets_touched: supervisor.secrets_touched(),
+        fresh,
     };
     Ok((supervisor, start))
 }
@@ -323,15 +342,23 @@ pub(super) fn write_ahead(stops: &mut Vec<StopRecord>, new: &StopRecord) -> Resu
     Ok(())
 }
 
-/// Records the zone the VM landed in (when known) in the matching record.
+/// Records the zone the VM landed in (when known) in the matching record, and
+/// that no secret was ever written when this run proves it (the record is then
+/// new, the secrets step was reached and nothing was written).
 pub(super) fn sync_record(stops: &mut [StopRecord], start: &GceStart) {
-    let Some(zone) = start.landed.lock().ok().and_then(|z| z.clone()) else {
+    let landed = start.landed.lock().ok().and_then(|z| z.clone());
+    let unwritten = start.fresh
+        && start.created.load(Ordering::SeqCst)
+        && !start.secrets_touched.load(Ordering::SeqCst);
+    if landed.is_none() && !unwritten {
         return;
-    };
+    }
     if let Some(r) = stops.iter_mut().find(|r| r.same_target(&start.stop))
         && let Some(g) = &r.gcp
     {
-        r.gcp = Some(g.landed(&zone));
+        let mut g = landed.map_or_else(|| g.clone(), |zone| g.landed(&zone));
+        g.secrets_unwritten |= unwritten && !g.secrets.is_empty();
+        r.gcp = Some(g);
     }
 }
 
@@ -435,6 +462,7 @@ mod tests {
                 impersonate: None,
                 secrets: secrets.iter().map(|s| (*s).to_owned()).collect(),
                 tls_fingerprint: None,
+                secrets_unwritten: false,
             },
         )
     }

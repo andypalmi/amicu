@@ -85,10 +85,11 @@ The `gcp {}` block on a `hardware_profile` with `provider = "gcp"`:
 | `machine_type` | string | smallest catalog machine for the GPU | no | For N1 GPUs (T4, V100, P4) an `n1-standard-N`; the default is `n1-standard-4` per GPU. |
 | `provisioning` | string | `spot` | no | `spot`, `flex_start` or `standard`. Not every machine offers every mode (`AMICU-CAP-018`, for example `standard` on `a3-highgpu-1g`). |
 | `max_run_duration` | duration | `8h` | no | `10m` to `2880h` (120 days), or `168h` (7 days) with `flex_start`. Write it in `s`, `m` or `h`: days are not accepted. Compute Engine deletes the VM after it. |
+| `idle_shutdown` | duration | off | no | Power the VM off after this long without a request (5m or more, shorter than `max_run_duration`). A watchdog on the VM polls vLLM's `/metrics`. After it fires the VM is only stopped, not deleted: its boot disk keeps billing and `max_run_duration` likely no longer applies, until the next `amicu apply` or `amicu destroy` deletes it. |
 | `boot_disk_gb` | number | `100` | no | At least 50. |
 | `service_account` | string | none | yes, unless `insecure_metadata_secrets` | Email of the account the VM runs as; it reads the VM's secrets from Secret Manager (`AMICU-CAP-016` if missing). |
 | `insecure_metadata_secrets` | bool | `false` | no | INSECURE. Deliver the secrets as instance metadata instead of Secret Manager, readable by anyone who can read the instance. |
-| `allowed_source_cidrs` | list | this machine's public IP `/32` | no | Who may reach the serving port. |
+| `allowed_source_cidrs` | list | this machine's public IP `/32` | no | Who may reach the serving port. IPv4 only: an IPv6 CIDR is rejected (`AMICU-CAP-016`). |
 | `impersonate_service_account` | string | none | no | Service account amicu acts as. |
 
 `region` is required unless `zone` is set, so the VM is placed where you expect. The profile's `region` and the project's `data_class` residency are checked against every candidate zone. A deployment on this provider runs one replica: `scaling {}` with more than 1 is rejected (`AMICU-CAP-016`).
@@ -96,6 +97,8 @@ The `gcp {}` block on a `hardware_profile` with `provider = "gcp"`:
 Other checks: an unknown GPU or one not offered in the zone or region is `AMICU-CAP-017`.
 
 ## Operations
+
+Before it writes anything, `apply` checks (read-only) that the credentials work, that the Secret Manager API is enabled, that the project has a `default` network (the firewall rule is attached to it) and that you may act as the `service_account`. Each failure names the fix, for example `gcloud services enable secretmanager.googleapis.com --project <project>` or granting `roles/iam.serviceAccountUser` on the service account. amicu never enables APIs or changes IAM itself.
 
 `amicu plan` and `apply` compare state with Compute Engine. A VM that is gone or stopped (a Spot preemption, the `max_run_duration` backstop, a delete outside amicu) is reported as drift and marked pending: `apply` recreates it, `destroy` confirms its firewall rule is removed. `amicu orphans` lists VMs, firewall rules and Secret Manager secrets in the project that carry amicu's marker but that state does not record, with the `gcloud` command to delete each. It never deletes anything.
 
@@ -141,6 +144,9 @@ Other checks: an unknown GPU or one not offered in the zone or region is `AMICU-
   </Accordion>
   <Accordion title="apply or destroy refuses a secret">
   A Secret Manager secret of amicu's name exists without amicu's owner label, so amicu will not use or delete it. Rename or delete it yourself if it is not needed.
+  </Accordion>
+  <Accordion title="destroy says the Secret Manager API is not enabled, or a permission is missing">
+  Enable the API (`gcloud services enable secretmanager.googleapis.com --project <project>`) or grant the account amicu runs as `secretmanager.secrets.get` and `secretmanager.secrets.delete` (`roles/secretmanager.admin`), then run `destroy` again. The record stays in state meanwhile. When no VM was ever created and the API is off, `destroy` treats the secrets as absent and releases the record.
   </Accordion>
   <Accordion title="destroy refuses a VM or firewall rule">
   It does not carry amicu's owner marker, so amicu will not touch it. Check it in the Google Cloud console; the record stays in state.

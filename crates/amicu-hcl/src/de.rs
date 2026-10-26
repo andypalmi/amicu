@@ -209,6 +209,16 @@ fn gcp_settings(g: &Fields) -> Result<GcpSettings> {
                 })
             })
             .transpose()?,
+        idle_shutdown_secs: g
+            .opt_string("idle_shutdown")?
+            .map(|w| {
+                ScalingSettings::parse_window(&w).ok_or_else(|| {
+                    HclError::schema(format!(
+                        "`idle_shutdown` must be a duration like \"30m\" or \"2h\", got \"{w}\""
+                    ))
+                })
+            })
+            .transpose()?,
         boot_disk_gb: g.opt_u32("boot_disk_gb")?,
         service_account: g.opt_string("service_account")?,
         insecure_metadata_secrets: g.opt_bool("insecure_metadata_secrets")?.unwrap_or(false),

@@ -37,6 +37,13 @@ pub enum GcpError {
         code: String,
         message: String,
     },
+    /// `403` because the API itself is not enabled in the project
+    /// (`SERVICE_DISABLED`). Not a permission problem: enabling the API fixes it.
+    #[error(
+        "the {service} API is not enabled in this Google Cloud project; enable it with \
+         `gcloud services enable {service} --project <project>`: {message}"
+    )]
+    ServiceDisabled { service: String, message: String },
     /// `404`: the resource does not exist (teardown reads this as "gone").
     #[error("Google Cloud resource not found: {what}")]
     NotFound { what: String },
@@ -138,6 +145,12 @@ impl GcpError {
     #[must_use]
     pub fn is_rate_limited(&self) -> bool {
         matches!(self, Self::RateLimited { .. })
+    }
+
+    /// Whether Google says the API is not enabled in the project.
+    #[must_use]
+    pub fn is_service_disabled(&self) -> bool {
+        matches!(self, Self::ServiceDisabled { .. })
     }
 
     /// Whether the resource is confirmed absent.

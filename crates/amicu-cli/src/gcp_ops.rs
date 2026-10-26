@@ -166,6 +166,104 @@ pub(crate) async fn preflight(
         })
 }
 
+/// What a Compute Engine launch needs from the project, beyond credentials.
+pub(crate) struct ComputeNeeds<'a> {
+    pub project: &'a str,
+    pub impersonate: Option<&'a str>,
+    /// The VM's runtime service account, when one is configured.
+    pub service_account: Option<&'a str>,
+    /// Whether the secrets go through Secret Manager.
+    pub secret_manager: bool,
+}
+
+/// [`preflight`], then read-only checks of what `apply` is about to rely on:
+/// the Secret Manager API is enabled, the `default` network the firewall rule
+/// is created on exists, and the caller may act as the VM's service account.
+/// Nothing is enabled, created or granted; each failure says what to run.
+/// A permission-denied answer is inconclusive and passes: the write that needs
+/// the permission then reports it.
+pub(crate) async fn preflight_compute(
+    ops: &dyn GcpOps,
+    needs: &ComputeNeeds<'_>,
+) -> Result<(), CliError> {
+    let project = needs.project;
+    preflight(ops, project, needs.impersonate).await?;
+    let client = ops.client(needs.impersonate)?;
+    let fail = |what: String| {
+        CliError::Message(format!(
+            "Google Cloud preflight for project {project} failed; nothing was started: {what}"
+        ))
+    };
+    if needs.secret_manager {
+        let url = format!(
+            "{}/projects/{project}/secrets?pageSize=1",
+            amicu_gcp::SECRETMANAGER_BASE_URL
+        );
+        match client.request(HttpMethod::Get, &url, None).await {
+            Err(e) if e.is_service_disabled() => {
+                return Err(fail(format!(
+                    "the Secret Manager API is not enabled; the VM's API key, Hugging Face \
+                    token and TLS key are stored there. Enable it with `gcloud services \
+                    enable secretmanager.googleapis.com --project {project}`, or set \
+                    `insecure_metadata_secrets = true` to skip it (not recommended)"
+                )));
+            }
+            Err(GcpError::PermissionDenied { .. }) | Ok(_) => {}
+            Err(e) => return Err(fail(e.to_string())),
+        }
+    }
+    let url = format!(
+        "{}/projects/{project}/global/networks/default",
+        amicu_gcp::client::COMPUTE_BASE_URL
+    );
+    match client.request(HttpMethod::Get, &url, None).await {
+        Err(GcpError::NotFound { .. }) => {
+            return Err(fail(format!(
+                "the `default` network does not exist; the firewall rule amicu creates is \
+                attached to it. Create it with `gcloud compute networks create default \
+                --subnet-mode=auto --project {project}`"
+            )));
+        }
+        Err(GcpError::PermissionDenied { .. }) | Ok(_) => {}
+        Err(e) => return Err(fail(e.to_string())),
+    }
+    if let Some(sa) = needs.service_account {
+        check_act_as(&client, sa).await.map_err(fail)?;
+    }
+    Ok(())
+}
+
+const ACT_AS: &str = "iam.serviceAccounts.actAs";
+
+/// Whether the caller holds `iam.serviceAccounts.actAs` on `sa`, via
+/// `testIamPermissions` (a read: it changes nothing). Any answer other than a
+/// clear "no" passes.
+async fn check_act_as(client: &GcpClient, sa: &str) -> Result<(), String> {
+    let url =
+        format!("https://iam.googleapis.com/v1/projects/-/serviceAccounts/{sa}:testIamPermissions");
+    let body = serde_json::json!({ "permissions": [ACT_AS] });
+    match client.request(HttpMethod::Post, &url, Some(body)).await {
+        Ok(v) => {
+            let granted = v["permissions"]
+                .as_array()
+                .is_some_and(|p| p.iter().any(|p| p == ACT_AS));
+            if granted {
+                Ok(())
+            } else {
+                Err(format!(
+                    "the caller cannot act as `{sa}` ({ACT_AS}), which the VM needs to run as \
+                    it. Grant `roles/iam.serviceAccountUser` on that service account to the \
+                    account amicu runs as"
+                ))
+            }
+        }
+        Err(GcpError::NotFound { .. }) => Err(format!(
+            "the service account `{sa}` does not exist; create it first (see the GCP provider docs)"
+        )),
+        Err(_) => Ok(()),
+    }
+}
+
 /// A Google Cloud seam with no credentials: tests never reach the network.
 #[cfg(test)]
 pub(crate) struct NoGcp;
