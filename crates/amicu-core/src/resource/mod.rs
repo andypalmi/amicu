@@ -35,8 +35,8 @@ pub use gpu::{
     normalize_gpu_name, resolve_gpu, verify_probed_gpu, vram_matches,
 };
 pub use hardware::{
-    Accelerator, AcceleratorKind, Cpu, GcpBackend, GcpProvisioning, GcpSettings, HardwareProfile,
-    Interconnect, Price, RunpodCloud, RunpodMode, RunpodSettings,
+    Accelerator, AcceleratorKind, Cpu, GcpAccess, GcpBackend, GcpProvisioning, GcpSettings,
+    HardwareProfile, Interconnect, Price, RunpodCloud, RunpodMode, RunpodSettings,
 };
 pub use model::{
     Artifact, ArtifactFormat, GgufVariant, Model, ModelSource, Quantization, SourceRegistry,

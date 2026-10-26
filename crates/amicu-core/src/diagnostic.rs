@@ -407,8 +407,10 @@ pub mod catalog {
     pub const CAP_RUNPOD_SETTINGS_INVALID: DiagnosticCode = DiagnosticCode::new(Category::Cap, 15);
     /// `AMICU-CAP-016` - a hardware profile's `gcp {}` block does not fit: no
     /// `project`, no `service_account` (and no `insecure_metadata_secrets`), set
-    /// on another provider, a bad zone, machine type, duration, disk size or CIDR, `scaling {}` beyond one replica, or a runtime
-    /// the Compute Engine backend does not run.
+    /// on another provider, a bad zone, machine type, duration, disk size or
+    /// CIDR, `scaling {}` beyond one replica on Compute Engine, more than one
+    /// GPU or `memory`/`cpu` below the GPU's minimum on Cloud Run, or a runtime
+    /// the backend does not run.
     pub const CAP_GCP_SETTINGS_INVALID: DiagnosticCode = DiagnosticCode::new(Category::Cap, 16);
     /// `AMICU-CAP-017` - the GPU is not available on Google Cloud as configured:
     /// unknown to the GCP catalog, not offered in the zone or region, or not
@@ -418,8 +420,10 @@ pub mod catalog {
     /// type (or for any machine type of the GPU).
     pub const CAP_GCP_PROVISIONING_UNSUPPORTED: DiagnosticCode =
         DiagnosticCode::new(Category::Cap, 18);
-    /// `AMICU-CAP-019` - `gcp { backend = "cloud_run" }`: parsed, but `apply`
-    /// cannot deploy to Cloud Run yet.
+    /// `AMICU-CAP-019` - a setting the `gcp {}` backend cannot honour: on
+    /// `backend = "cloud_run"`, a Compute Engine field (`zone`, `machine_type`,
+    /// `provisioning`, ...), `min_replicas` above 0 or `scaledown_window`; on a
+    /// VM, `access`.
     pub const CAP_GCP_BACKEND_UNSUPPORTED: DiagnosticCode = DiagnosticCode::new(Category::Cap, 19);
     /// `AMICU-MEM-001` - model does not fit in available VRAM.
     pub const MEM_VRAM_EXCEEDED: DiagnosticCode = DiagnosticCode::new(Category::Mem, 1);

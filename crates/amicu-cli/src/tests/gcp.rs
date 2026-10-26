@@ -77,6 +77,8 @@ struct World {
     on_secret_create: Mutex<Option<Hook>>,
     /// Fired once, just before the first firewall create.
     on_firewall: Mutex<Option<Hook>>,
+    /// The Cloud Run API and the services' own URLs.
+    run: Mutex<cloudrun::RunWorld>,
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -289,6 +291,9 @@ impl HttpTransport for World {
         let m = format!("{method:?}");
         if let Some(path) = req.url.strip_prefix(SM_BASE) {
             return self.secret_manager(method, path, &req);
+        }
+        if let Some(reply) = self.cloud_run(&req) {
+            return reply;
         }
         if req.url.starts_with("https://iam.googleapis.com/") {
             let denied = self.state.lock().unwrap().act_as_denied;
@@ -507,6 +512,22 @@ impl GcpOps for FakeGcp {
             Err("endpoint answered an unauthenticated request".to_owned())
         } else {
             Ok(())
+        }
+    }
+    fn service_transport(&self) -> Arc<dyn HttpTransport> {
+        self.world.clone()
+    }
+    fn run_timing(&self) -> amicu_gcp::cloudrun::CloudRunTiming {
+        amicu_gcp::cloudrun::CloudRunTiming {
+            poll: amicu_gcp::PollTiming {
+                interval: std::time::Duration::from_millis(1),
+                timeout: std::time::Duration::from_secs(5),
+            },
+            health: amicu_gcp::cloudrun::HealthTiming {
+                timeout: std::time::Duration::from_secs(5),
+                initial_backoff: std::time::Duration::from_millis(1),
+                max_backoff: std::time::Duration::from_millis(1),
+            },
         }
     }
     fn timing(&self) -> amicu_gcp::GceTiming {
@@ -1560,3 +1581,5 @@ fn idle_shutdown_puts_the_watchdog_in_the_startup_script() {
     assert!(script.contains("window=1800"), "{script}");
     assert!(script.contains("shutdown -h now"), "{script}");
 }
+
+mod cloudrun;

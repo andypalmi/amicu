@@ -60,11 +60,17 @@ signal; the number identifies the specific check.
 - `AMICU-CAP-016` - a hardware profile's `gcp {}` block does not fit: no
   `project`, no `service_account` (or `insecure_metadata_secrets = true`), no
   `region`/`zone`, a bad zone, duration, disk size or CIDR,
-  `scaling {}` beyond one replica, or a `llama_cpp` runtime.
+  `scaling {}` beyond one replica on a VM, more than one GPU or `memory` /
+  `cpu.cores` below the GPU's minimum on Cloud Run, or a
+  `llama_cpp` runtime.
 - `AMICU-CAP-017` - the GPU is unknown to the GCP catalog or not offered in the
   zone or region (or on Cloud Run).
 - `AMICU-CAP-018` - `provisioning` is not offered for that machine type.
-- `AMICU-CAP-019` - `backend = "cloud_run"` is not supported by `apply` yet.
+- `AMICU-CAP-019` - a setting the `gcp {}` backend cannot honour: on
+  `backend = "cloud_run"`, a Compute Engine field (`zone`, `machine_type`,
+  `provisioning`, `max_run_duration`, `idle_shutdown`, `boot_disk_gb`,
+  `allowed_source_cidrs`, `insecure_metadata_secrets`), `min_replicas` above 0
+  or `scaledown_window`; on a VM, `access`.
 - `AMICU-MEM-001` / `AMICU-MEM-002` - capacity/memory fit failures.
 - `AMICU-MEM-003` - warning: a local hardware profile declares more memory than
   this machine has (`plan` and `doctor` report it). Fix the profile, or ignore

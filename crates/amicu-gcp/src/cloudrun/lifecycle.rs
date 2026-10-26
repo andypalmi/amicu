@@ -173,7 +173,7 @@ impl CloudRunLifecycle {
             service: spec.service_name(),
             owner: owner_marker(
                 spec.workspace_id.as_deref(),
-                &spec.project,
+                &spec.project_id,
                 &spec.deployment_id,
             ),
         })

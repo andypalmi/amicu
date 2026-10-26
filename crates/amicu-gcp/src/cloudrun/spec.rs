@@ -24,7 +24,7 @@ const MAX_SERVICE_ID: usize = 49;
 const MAX_TIMEOUT_SECS: u32 = 3600;
 /// Highest per-instance request concurrency.
 const MAX_CONCURRENCY: u32 = 1000;
-/// Startup probes allow at most this period (`Probe.periodSeconds`).
+/// The startup probe's period (`Probe.periodSeconds`).
 const PROBE_PERIOD_SECS: u32 = 10;
 
 /// The Cloud Run service id for a deployment: the shared naming scheme, cut to
@@ -115,14 +115,14 @@ pub enum ServiceAccess {
     /// vLLM) can wake a scaled-to-zero service and start a billed GPU instance
     /// before vLLM rejects it. The spend is bounded by `max_instances` and the
     /// idle timeout (an instance stops once it has served nothing for a
-    /// while); use [`ServiceAccess::IamProtected`] behind a proxy when that
-    /// exposure is not acceptable.
+    /// while); use [`ServiceAccess::IamProtected`] when that exposure is not
+    /// acceptable.
     #[default]
     PublicApiKey,
     /// Leaves Cloud Run IAM in force (`roles/run.invoker` required). Callers
-    /// must send a Google identity token in `Authorization`, which vLLM's
-    /// `--api-key` also reads, so the two cannot be combined on one request:
-    /// use this only behind a proxy that adds the identity token.
+    /// send a Google identity token in `X-Serverless-Authorization` (Cloud Run
+    /// then checks only that header) and the API key in `Authorization` for
+    /// vLLM. An identity token in `Authorization` alone is refused by vLLM.
     IamProtected,
 }
 
@@ -130,6 +130,9 @@ pub enum ServiceAccess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceSpec {
     pub project: String,
+    /// amicu's project id: names the service and its owner marker. [`Self::new`]
+    /// sets it to the Google project.
+    pub project_id: String,
     pub region: String,
     /// Optional workspace id for the owner marker.
     pub workspace_id: Option<String>,
@@ -151,8 +154,8 @@ pub struct ServiceSpec {
     /// The key vLLM requires, delivered as `VLLM_API_KEY`.
     pub api_key: SecretRef,
     /// The runtime service account email. It needs
-    /// `roles/secretmanager.secretAccessor` on the secrets above; amicu does
-    /// not grant that.
+    /// `roles/secretmanager.secretAccessor` on the secrets above (the
+    /// supervisor grants it per secret; this spec does not).
     pub service_account: String,
     /// `RevisionScaling.maxInstanceCount`: each instance holds one GPU, so
     /// keep it within the region's GPU quota.
@@ -189,6 +192,7 @@ impl ServiceSpec {
     ) -> Self {
         Self {
             project: project.to_owned(),
+            project_id: project.to_owned(),
             region: region.to_owned(),
             workspace_id: None,
             deployment_id: deployment_id.to_owned(),
@@ -215,7 +219,7 @@ impl ServiceSpec {
     /// The service id (see [`service_name`]).
     #[must_use]
     pub fn service_name(&self) -> String {
-        service_name(&self.project, &self.deployment_id)
+        service_name(&self.project_id, &self.deployment_id)
     }
 
     /// Checks the spec, including that the region offers the GPU on Cloud Run.
@@ -371,7 +375,7 @@ impl ServiceSpec {
         let failure_threshold = self.startup_budget_secs.div_ceil(PROBE_PERIOD_SECS);
         let labels: BTreeMap<String, String> = owner_labels(
             self.workspace_id.as_deref(),
-            &self.project,
+            &self.project_id,
             &self.deployment_id,
         );
 

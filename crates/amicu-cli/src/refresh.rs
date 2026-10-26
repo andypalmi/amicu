@@ -279,8 +279,9 @@ pub(crate) fn refresh_state_mode(
     }
     let runpod = refresh_runpod(state, runpod);
     let gce = refresh_gce(state, gcp);
+    let cloud_run = refresh_cloud_run(state, gcp);
     let mut out = Refresh::default();
-    for part in [host, modal, runpod, gce] {
+    for part in [host, modal, runpod, gce, cloud_run] {
         out.notes.extend(part.notes);
         out.warning = match (out.warning, part.warning) {
             (Some(a), Some(b)) => Some(format!("{a}; {b}")),
@@ -659,6 +660,88 @@ fn refresh_gce(state: &mut LocalState, ops: &dyn GcpOps) -> Refresh {
     if !unchecked.is_empty() {
         out.warning = Some(format!(
             "could not reconcile Compute Engine VMs ({}); kept in state as recorded",
+            unchecked.join("; ")
+        ));
+    }
+    out
+}
+
+/// Checks every recorded, settled Cloud Run service against the API. One that
+/// is gone (deleted outside amicu) or whose revision failed is kept in state as
+/// pending: apply recreates it, destroy confirms the service and its secrets
+/// are removed. A service scaled to zero is still there and counts as live. A
+/// lookup that fails changes nothing and warns.
+fn refresh_cloud_run(state: &mut LocalState, ops: &dyn GcpOps) -> Refresh {
+    use amicu_gcp::cloudrun::lifecycle::ReadyState;
+
+    let records: Vec<StopRecord> = crate::commands::apply::effective_stops(Some(state))
+        .into_iter()
+        .filter(|r| {
+            r.backend.is_cloud_run()
+                && r.cloud_run.is_some()
+                && state.graph.deployments.iter().any(|d| d.id == r.deployment)
+                && !state.pending.contains(&r.deployment)
+        })
+        .collect();
+    if records.is_empty() {
+        return Refresh::default();
+    }
+    let looked_up = (|| -> Result<_, CliError> {
+        let rt = build_runtime()?;
+        let mut found = Vec::new();
+        for r in &records {
+            let c = r
+                .cloud_run
+                .as_ref()
+                .expect("filtered on a recorded service");
+            let one = match ops.client(c.impersonate.as_deref()) {
+                Ok(client) => rt
+                    .block_on(amicu_gcp::cloudrun::service_state(
+                        &std::sync::Arc::new(client),
+                        c,
+                    ))
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            found.push(one);
+        }
+        Ok(found)
+    })();
+    let found = match looked_up {
+        Ok(v) => v,
+        Err(e) => {
+            return Refresh {
+                warning: Some(format!(
+                    "could not check Cloud Run for live services ({e}); using local state as-is"
+                )),
+                ..Refresh::default()
+            };
+        }
+    };
+    let mut out = Refresh::default();
+    let mut unchecked = Vec::new();
+    for (r, live) in records.iter().zip(found) {
+        let why = match live {
+            Ok(None) => amicu_gcp::cloudrun::supervisor::GONE.to_owned(),
+            Ok(Some(s)) => match s.state {
+                ReadyState::Failed(m) => format!("its latest revision failed: {m}"),
+                ReadyState::Ready | ReadyState::Pending => continue,
+            },
+            Err(e) => {
+                unchecked.push(format!("{}: {e}", r.describe()));
+                continue;
+            }
+        };
+        state.pending.push(r.deployment.clone());
+        out.notes.push(format!(
+            "deployment {}: Cloud Run service '{}' is not serving: {why}; kept in state as \
+             pending: apply will recreate it, destroy will confirm it and its secrets are removed",
+            r.deployment, r.identity
+        ));
+    }
+    if !unchecked.is_empty() {
+        out.warning = Some(format!(
+            "could not reconcile Cloud Run services ({}); kept in state as recorded",
             unchecked.join("; ")
         ));
     }

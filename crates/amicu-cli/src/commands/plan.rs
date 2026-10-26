@@ -210,6 +210,10 @@ pub(crate) fn provider_switches(
                 },
                 project_id.map(|p| amicu_runpod::project_endpoint_name(p, id)),
             ),
+            Some("gcp") if cloud_run_hardware(graph, &item.deployment).is_some() => (
+                Backend::CloudRun,
+                project_id.map(|p| amicu_gcp::cloudrun::service_name(p, id)),
+            ),
             Some("gcp") => (
                 Backend::Gce,
                 project_id.and_then(|p| {
@@ -366,6 +370,7 @@ pub(crate) fn print_human_with(
             }
             let remote_launch = write_runpod(out, graph, item, project_id)
                 .map_err(|e| CliError::io("write failed", e))?;
+            io(write_cloud_run(out, graph, item, project_id))?;
             if let Some(artifact) = &item.action.artifact {
                 io(writeln!(out, "      artifact: {}", artifact.name))?;
             }
@@ -426,6 +431,97 @@ pub(crate) fn print_human_with(
             Some(resource) => io(writeln!(out, "  {marker}: {resource}: {}", d.message))?,
             None => io(writeln!(out, "  {marker}: {}", d.message))?,
         }
+    }
+    Ok(())
+}
+
+/// The hardware profile of `deployment` when it runs on Cloud Run.
+fn cloud_run_hardware<'g>(
+    graph: &'g Graph,
+    deployment: &DeploymentId,
+) -> Option<&'g HardwareProfile> {
+    let d = graph.deployments.iter().find(|d| &d.id == deployment)?;
+    graph
+        .hardware_profiles
+        .iter()
+        .find(|h| h.id == d.hardware_profile)
+        .filter(|h| crate::commands::apply::hardware_is_cloud_run(h))
+}
+
+/// The Cloud Run lines of a launch: the service, the instance shape `apply`
+/// asks for, how it scales and the GPU price while an instance runs.
+fn write_cloud_run(
+    out: &mut dyn Write,
+    graph: &Graph,
+    item: &PlanItem,
+    project_id: Option<&str>,
+) -> std::io::Result<()> {
+    if item.launch.is_none() {
+        return Ok(());
+    }
+    let Some(hw) = cloud_run_hardware(graph, &item.deployment) else {
+        return Ok(());
+    };
+    let catalog = amicu_gcp::GcpCatalog::new();
+    let region = hw.region.as_ref().map_or("?", |r| r.code.as_str());
+    let service = project_id.map_or_else(
+        || "named on first apply".to_owned(),
+        |p| amicu_gcp::cloudrun::service_name(p, item.deployment.as_str()),
+    );
+    let iam = hw.gcp.as_ref().and_then(|g| g.access) == Some(amicu_core::resource::GcpAccess::Iam);
+    let access = if iam {
+        "IAM identity token and api_key"
+    } else {
+        "public, api_key only"
+    };
+    writeln!(
+        out,
+        "      service:  {service} (Cloud Run, {region}, {access})"
+    )?;
+    let gpu = hw
+        .accelerator
+        .as_ref()
+        .and_then(|a| catalog.cloud_run_gpu(&a.model));
+    if let Some(g) = gpu {
+        let memory = u32::try_from(hw.memory.bytes().div_ceil(1 << 30))
+            .unwrap_or(u32::MAX)
+            .max(g.min_memory_gib);
+        let cpu = hw
+            .cpu
+            .as_ref()
+            .map_or(g.min_vcpus, |c| c.cores.max(g.min_vcpus));
+        writeln!(
+            out,
+            "      instance: 1x {} \u{b7} {cpu} vCPU \u{b7} {memory} GiB",
+            g.gpu
+        )?;
+    }
+    let scaling = graph
+        .deployments
+        .iter()
+        .find(|d| d.id == item.deployment)
+        .and_then(|d| d.scaling.clone())
+        .unwrap_or_default();
+    let max = scaling.max_replicas.unwrap_or(1);
+    let concurrency = scaling.target_concurrency.map_or_else(String::new, |c| {
+        format!(" \u{b7} {c} requests per instance")
+    });
+    writeln!(out, "      scaling:  min 0 \u{b7} max {max}{concurrency}")?;
+    let price = gpu
+        .and_then(|g| catalog.cloud_run_price(g.gpu, region, false))
+        .map_or_else(String::new, |p| {
+            format!(
+                " \u{b7} ~${:.2}/hr GPU per running instance (CPU and memory extra)",
+                p.usd_per_gpu_hour
+            )
+        });
+    writeln!(out, "      billing:  scale to zero{price}")?;
+    if !iam {
+        writeln!(
+            out,
+            "      note:     any request, even one without the api_key, can start a billed \
+             instance (at most {max}); `access = \"iam\"` lets only identity-token callers in"
+        )?;
     }
     Ok(())
 }

@@ -96,7 +96,8 @@ fn profile_problems(graph: &Graph, hw: &HardwareProfile) -> Vec<(DiagnosticCode,
             ));
         }
         let one = |v: Option<u32>| v.is_none_or(|v| v <= 1);
-        if let Some(s) = &d.scaling
+        if settings.backend == GcpBackend::Compute
+            && let Some(s) = &d.scaling
             && !(one(s.min_replicas) && one(s.max_replicas))
         {
             out.push((
@@ -110,7 +111,7 @@ fn profile_problems(graph: &Graph, hw: &HardwareProfile) -> Vec<(DiagnosticCode,
         }
     }
     if settings.backend == GcpBackend::CloudRun {
-        out.extend(cloud_run_problems(hw));
+        out.extend(cloud_run_problems(graph, hw, &settings));
         return out;
     }
     let Some(acc) = hw
@@ -122,19 +123,162 @@ fn profile_problems(graph: &Graph, hw: &HardwareProfile) -> Vec<(DiagnosticCode,
         return out;
     };
     out.extend(compute_problems(hw, &settings, &acc.model, acc.count));
+    if settings.access.is_some() {
+        out.push((
+            catalog::CAP_GCP_BACKEND_UNSUPPORTED,
+            "`access` applies to `backend = \"cloud_run\"` only; a VM is limited by \
+             `allowed_source_cidrs` instead"
+                .to_owned(),
+        ));
+    }
     out
 }
 
-fn cloud_run_problems(hw: &HardwareProfile) -> Vec<(DiagnosticCode, String)> {
-    let mut out = vec![(
-        catalog::CAP_GCP_BACKEND_UNSUPPORTED,
-        "`backend = \"cloud_run\"` is not supported by `apply` yet; use `backend = \"compute\"`"
-            .to_owned(),
-    )];
-    if let Some(acc) = &hw.accelerator
-        && let Some(model) = amicu_gcp::resolve_model(&acc.model)
-        && GcpCatalog::new().cloud_run_gpu(model.name).is_none()
+/// Most requests Cloud Run lets one instance serve at once, and the most
+/// instances one service may scale to.
+const CLOUD_RUN_MAX_CONCURRENCY: u32 = 1000;
+const CLOUD_RUN_MAX_INSTANCES: u32 = 1000;
+
+/// `scaling {}` of the deployments on a Cloud Run profile.
+fn cloud_run_scaling_problems(
+    graph: &Graph,
+    hw: &HardwareProfile,
+) -> Vec<(DiagnosticCode, String)> {
+    let invalid = catalog::CAP_GCP_SETTINGS_INVALID;
+    let unsupported = catalog::CAP_GCP_BACKEND_UNSUPPORTED;
+    let mut out = Vec::new();
+    for d in graph
+        .deployments
+        .iter()
+        .filter(|d| d.hardware_profile == hw.id)
     {
+        let Some(sc) = &d.scaling else { continue };
+        if sc.min_replicas.is_some_and(|m| m > 0) {
+            out.push((
+                unsupported,
+                format!(
+                    "deployment `{}`: Cloud Run deployments scale to zero, so `min_replicas` \
+                     must be 0 or unset",
+                    d.id
+                ),
+            ));
+        }
+        if sc.scaledown_window_secs.is_some() {
+            out.push((
+                unsupported,
+                format!(
+                    "deployment `{}`: Cloud Run decides when an idle instance stops, so \
+                     `scaledown_window` cannot be honoured; remove it",
+                    d.id
+                ),
+            ));
+        }
+        if sc.max_replicas.is_some_and(|m| m > CLOUD_RUN_MAX_INSTANCES) {
+            out.push((
+                invalid,
+                format!(
+                    "deployment `{}`: `max_replicas` can be at most {CLOUD_RUN_MAX_INSTANCES} \
+                     on Cloud Run",
+                    d.id
+                ),
+            ));
+        }
+        if sc
+            .target_concurrency
+            .is_some_and(|c| c > CLOUD_RUN_MAX_CONCURRENCY)
+        {
+            out.push((
+                invalid,
+                format!(
+                    "deployment `{}`: `target_concurrency` can be at most \
+                     {CLOUD_RUN_MAX_CONCURRENCY} on Cloud Run",
+                    d.id
+                ),
+            ));
+        }
+    }
+    out
+}
+
+/// The profile's `memory` and `cpu` against the GPU's Cloud Run minimum.
+fn cloud_run_size_problems(
+    hw: &HardwareProfile,
+    gpu: &amicu_gcp::catalog::CloudRunGpu,
+) -> Vec<(DiagnosticCode, String)> {
+    const GIB: u64 = 1 << 30;
+    let mut out = Vec::new();
+    if hw.memory.bytes() < u64::from(gpu.min_memory_gib) * GIB {
+        out.push((
+            catalog::CAP_GCP_SETTINGS_INVALID,
+            format!(
+                "`memory` is {}, below Cloud Run's minimum of {} GiB for {}; set at least \
+                 \"{}GiB\"",
+                hw.memory.human(),
+                gpu.min_memory_gib,
+                gpu.gpu,
+                gpu.min_memory_gib
+            ),
+        ));
+    }
+    if let Some(cpu) = hw.cpu.as_ref().filter(|c| c.cores < gpu.min_vcpus) {
+        out.push((
+            catalog::CAP_GCP_SETTINGS_INVALID,
+            format!(
+                "`cpu.cores` is {}, below Cloud Run's minimum of {} for {}",
+                cpu.cores, gpu.min_vcpus, gpu.gpu
+            ),
+        ));
+    }
+    out
+}
+
+fn cloud_run_problems(
+    graph: &Graph,
+    hw: &HardwareProfile,
+    s: &GcpSettings,
+) -> Vec<(DiagnosticCode, String)> {
+    let invalid = catalog::CAP_GCP_SETTINGS_INVALID;
+    let unsupported = catalog::CAP_GCP_BACKEND_UNSUPPORTED;
+    let mut out = Vec::new();
+    let compute_only = [
+        ("zone", s.zone.is_some()),
+        ("machine_type", s.machine_type.is_some()),
+        ("provisioning", s.provisioning != GcpProvisioning::Spot),
+        ("idle_shutdown", s.idle_shutdown_secs.is_some()),
+        ("max_run_duration", s.max_run_duration_secs.is_some()),
+        ("boot_disk_gb", s.boot_disk_gb.is_some()),
+        ("allowed_source_cidrs", !s.allowed_source_cidrs.is_empty()),
+        ("insecure_metadata_secrets", s.insecure_metadata_secrets),
+    ];
+    for (field, _) in compute_only.iter().filter(|(_, set)| *set) {
+        out.push((
+            unsupported,
+            format!(
+                "`{field}` applies to Compute Engine only; Cloud Run cannot honour it, so \
+                 remove it (or use `backend = \"compute\"`)"
+            ),
+        ));
+    }
+    if s.service_account.as_deref().is_none_or(str::is_empty) {
+        out.push((
+            invalid,
+            "`gcp {}` needs a `service_account`: the Cloud Run service runs as that account \
+             and reads its API key and Hugging Face token from Secret Manager with it"
+                .to_owned(),
+        ));
+    }
+    out.extend(cloud_run_scaling_problems(graph, hw));
+    let Some(acc) = hw
+        .accelerator
+        .as_ref()
+        .filter(|a| a.kind == AcceleratorKind::Gpu)
+    else {
+        out.push((invalid, "a GPU `accelerator` is required".to_owned()));
+        return out;
+    };
+    let cat = GcpCatalog::new();
+    let Some(gpu) = amicu_gcp::resolve_model(&acc.model).and_then(|m| cat.cloud_run_gpu(m.name))
+    else {
         out.push((
             catalog::CAP_GCP_GPU_UNAVAILABLE,
             format!(
@@ -143,6 +287,52 @@ fn cloud_run_problems(hw: &HardwareProfile) -> Vec<(DiagnosticCode, String)> {
                 acc.model
             ),
         ));
+        return out;
+    };
+    out.extend(cloud_run_size_problems(hw, gpu));
+    if acc.count != 1 {
+        out.push((
+            invalid,
+            format!(
+                "a Cloud Run instance has exactly one GPU, so `accelerator.count` must be 1 \
+                 (got {})",
+                acc.count
+            ),
+        ));
+    }
+    let Some(region) = hw.region.as_ref().map(|r| r.code.as_str()) else {
+        out.push((
+            invalid,
+            format!(
+                "set `region` to a region offering {} on Cloud Run ({})",
+                gpu.gpu,
+                cat.cloud_run_regions(gpu.gpu).join(", ")
+            ),
+        ));
+        return out;
+    };
+    let offer = cat
+        .cloud_run_offers()
+        .iter()
+        .find(|o| o.gpu == gpu.gpu && o.region == region);
+    match offer {
+        None => out.push((
+            catalog::CAP_GCP_GPU_UNAVAILABLE,
+            format!(
+                "{} is not offered on Cloud Run in `{region}`; it is in {}",
+                gpu.gpu,
+                cat.cloud_run_regions(gpu.gpu).join(", ")
+            ),
+        )),
+        Some(o) if o.invitation_only => out.push((
+            catalog::CAP_GCP_GPU_UNAVAILABLE,
+            format!(
+                "{} on Cloud Run in `{region}` is by invitation only; contact the Google \
+                 account team or pick another region",
+                gpu.gpu
+            ),
+        )),
+        Some(_) => {}
     }
     out
 }
@@ -445,24 +635,103 @@ resource "deployment" "d" {{
         assert_eq!(codes(&g), ["AMICU-CAP-018"]);
     }
 
+    const RUN: &str = "project = \"my-proj\"\n backend = \"cloud_run\"";
+
     #[test]
-    fn cloud_run_parses_but_is_not_supported_and_h100_has_no_cloud_run() {
+    fn a_cheap_cloud_run_l4_profile_has_no_diagnostics() {
+        let g = graph("gcp", EU, "l4", RUN, "scaling {\n max_replicas = 3\n }");
+        assert_eq!(codes(&g), Vec::<String>::new());
+        let mut g = graph(
+            "gcp",
+            r#"region = "us-central1""#,
+            "rtx-pro-6000",
+            RUN,
+            "scaling {\n min_replicas = 0\n target_concurrency = 4\n }",
+        );
+        assert_eq!(
+            codes(&g),
+            ["AMICU-CAP-016"],
+            "32 GiB is below the 80 GiB minimum"
+        );
+        assert!(gcp_diagnostics(&g)[0].message.contains("80GiB"));
+        g.hardware_profiles[0].memory = amicu_core::ByteSize::from_bytes(80 << 30);
+        assert_eq!(codes(&g), Vec::<String>::new());
+    }
+
+    #[test]
+    fn access_is_cloud_run_only_and_idle_shutdown_is_compute_only() {
+        let g = graph("gcp", EU, "l4", &format!("{RUN}\n access = \"iam\""), "");
+        assert_eq!(codes(&g), Vec::<String>::new());
         let g = graph(
             "gcp",
             EU,
-            "l4",
-            "project = \"my-proj\"\n backend = \"cloud_run\"",
+            "t4",
+            "project = \"my-proj\"\n machine_type = \"n1-standard-4\"\n access = \"iam\"",
             "",
         );
         assert_eq!(codes(&g), ["AMICU-CAP-019"]);
         let g = graph(
             "gcp",
             EU,
-            "h100",
-            "project = \"my-proj\"\n backend = \"cloud_run\"",
+            "l4",
+            &format!("{RUN}\n idle_shutdown = \"30m\""),
             "",
         );
-        assert_eq!(codes(&g), ["AMICU-CAP-019", "AMICU-CAP-017"]);
+        assert_eq!(codes(&g), ["AMICU-CAP-019"]);
+    }
+
+    #[test]
+    fn cloud_run_gpus_and_regions_come_from_the_catalog() {
+        let g = graph("gcp", EU, "h100", RUN, "");
+        assert_eq!(codes(&g), ["AMICU-CAP-017"]);
+        let g = graph("gcp", r#"region = "us-west1""#, "l4", RUN, "");
+        assert_eq!(codes(&g), ["AMICU-CAP-017"]);
+        let d = &gcp_diagnostics(&g)[0];
+        assert!(d.message.contains("europe-west4"), "{}", d.message);
+        let g = graph("gcp", r#"region = "asia-south1""#, "l4", RUN, "");
+        assert!(
+            gcp_diagnostics(&g)[0].message.contains("invitation"),
+            "{:?}",
+            gcp_diagnostics(&g)
+        );
+        let g = graph("gcp", "", "l4", RUN, "");
+        assert_eq!(codes(&g), ["AMICU-CAP-016"]);
+    }
+
+    #[test]
+    fn cloud_run_refuses_what_it_cannot_honour() {
+        let g = graph(
+            "gcp",
+            EU,
+            "l4",
+            &format!(
+                "{RUN}\n zone = \"europe-west4-a\"\n machine_type = \"g2-standard-4\"\n provisioning = \"standard\"\n allowed_source_cidrs = [\"203.0.113.4/32\"]"
+            ),
+            "scaling {\n min_replicas = 1\n max_replicas = 2\n scaledown_window = \"5m\"\n }",
+        );
+        let d = gcp_diagnostics(&g);
+        assert_eq!(codes(&g), ["AMICU-CAP-019"; 6], "{d:?}");
+        for field in [
+            "zone",
+            "machine_type",
+            "provisioning",
+            "allowed_source_cidrs",
+            "min_replicas",
+            "scaledown_window",
+        ] {
+            assert!(
+                d.iter().any(|d| d.message.contains(field)),
+                "{field}: {d:?}"
+            );
+        }
+        let g = graph(
+            "gcp",
+            EU,
+            "l4",
+            &format!("{RUN}\n service_account = \"\""),
+            "",
+        );
+        assert_eq!(codes(&g), ["AMICU-CAP-016"]);
     }
 
     #[test]

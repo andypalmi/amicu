@@ -4,6 +4,8 @@
 //! - [`spec`]: the service spec and the Cloud Run v2 `services.create` body.
 //! - [`lifecycle`]: `prepare` (write-ahead record), `create`, `get`, `delete`.
 //! - [`health`]: waiting for `<url>/health` after create.
+//! - [`supervisor`]: the write-ahead record, the supervisor `apply` drives and
+//!   the teardown `destroy` runs.
 //!
 //! API references (field names verified against these):
 //! - <https://docs.cloud.google.com/run/docs/reference/rest/v2/projects.locations.services>
@@ -29,6 +31,7 @@
 pub mod health;
 pub mod lifecycle;
 pub mod spec;
+pub mod supervisor;
 
 pub use health::{HealthTiming, wait_ready};
 pub use lifecycle::{
@@ -36,6 +39,10 @@ pub use lifecycle::{
 };
 pub use spec::{
     CONTAINER_PORT, DEFAULT_VLLM_IMAGE, SecretRef, ServiceAccess, ServiceSpec, service_name,
+};
+pub use supervisor::{
+    CloudRunLaunch, CloudRunRecord, CloudRunSupervisor, CloudRunTiming, OwnedService,
+    list_owned_services, service_state, teardown,
 };
 
 #[cfg(test)]
