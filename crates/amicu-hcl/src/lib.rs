@@ -258,7 +258,7 @@ mod tests {
         let g = parse_graph(&with_runpod_block(
             "  gcp {\n    project = \"my-proj\"\n    zone = \"europe-west4-a\"\n    \
              machine_type = \"n1-standard-4\"\n    provisioning = \"flex_start\"\n    \
-             max_run_duration = \"2h\"\n    boot_disk_gb = 100\n    \
+             max_run_duration = \"2h\"\n    idle_shutdown = \"30m\"\n    boot_disk_gb = 100\n    \
              service_account = \"vm@my-proj.iam.gserviceaccount.com\"\n    \
              insecure_metadata_secrets = true\n    \
              allowed_source_cidrs = [\"203.0.113.4/32\"]\n    \
@@ -270,6 +270,7 @@ mod tests {
         assert_eq!(s.backend, GcpBackend::Compute);
         assert_eq!(s.provisioning, GcpProvisioning::FlexStart);
         assert_eq!(s.max_run_duration_secs, Some(7200));
+        assert_eq!(s.idle_shutdown_secs, Some(1800));
         assert_eq!(s.allowed_source_cidrs, ["203.0.113.4/32"]);
         assert!(s.insecure_metadata_secrets);
         assert_eq!(parse_graph(&format_graph(&g).unwrap()).unwrap(), g);
@@ -297,6 +298,7 @@ mod tests {
             "backend = \"gke\"",
             "provisioning = \"preemptible\"",
             "max_run_duration = \"soon\"",
+            "idle_shutdown = \"never\"",
             "boot_disk_gb = \"big\"",
             "gpus = 2",
         ] {

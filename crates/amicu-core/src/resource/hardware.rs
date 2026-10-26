@@ -64,6 +64,10 @@ pub struct GcpSettings {
     /// The VM's lifetime backstop, in seconds; `None` means 8 hours.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_run_duration_secs: Option<u32>,
+    /// Shut the VM down after this long without a request (opt-in); `None`
+    /// keeps it until `max_run_duration`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_shutdown_secs: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_disk_gb: Option<u32>,
     /// Runtime service account email for the VM. It reads the VM's secrets

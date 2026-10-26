@@ -30,6 +30,7 @@ struct Vm {
 }
 
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)]
 struct WorldState {
     vms: Vec<Vm>,
     /// `(name, description)` of every firewall rule.
@@ -55,6 +56,12 @@ struct WorldState {
     probe_pins: Vec<Option<String>>,
     /// The fingerprint (if any) of the record the exposure check ran against.
     verify_pins: Vec<Option<String>>,
+    /// The project has no `default` network.
+    no_default_network: bool,
+    /// Secret Manager answers a plain 403 permission error.
+    secretmanager_denied: bool,
+    /// The caller lacks `iam.serviceAccounts.actAs`.
+    act_as_denied: bool,
 }
 
 type Hook = Box<dyn FnOnce() + Send>;
@@ -62,6 +69,8 @@ type Hook = Box<dyn FnOnce() + Send>;
 #[derive(Default)]
 struct World {
     state: Mutex<WorldState>,
+    /// Secret Manager answers 403 `SERVICE_DISABLED`.
+    sm_disabled: Arc<std::sync::atomic::AtomicBool>,
     /// Fired once, just before the first instance insert.
     on_insert: Mutex<Option<Hook>>,
     /// Fired once, just before the first secret create.
@@ -77,6 +86,13 @@ fn json_reply(status: u16, body: &Value) -> Result<HttpResponse, TransportError>
     Ok(HttpResponse::new(status, body.to_string().into_bytes()))
 }
 
+fn sm_disabled_reply() -> Result<HttpResponse, TransportError> {
+    json_reply(
+        403,
+        &json!({"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Secret Manager API has not been used in project 1 before or it is disabled.", "details": [{"reason": "SERVICE_DISABLED"}]}}),
+    )
+}
+
 fn not_found() -> Result<HttpResponse, TransportError> {
     json_reply(
         404,
@@ -85,6 +101,15 @@ fn not_found() -> Result<HttpResponse, TransportError> {
 }
 
 impl World {
+    fn sm_is_disabled(&self) -> bool {
+        self.sm_disabled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn disable_secret_manager(&self) {
+        self.sm_disabled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// The Secret Manager API: secrets, versions and per-secret IAM.
     fn secret_manager(
         &self,
@@ -95,6 +120,15 @@ impl World {
         let (path, query) = path.split_once('?').unwrap_or((path, ""));
         let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         let mut w = self.state.lock().unwrap();
+        if self.sm_is_disabled() {
+            return sm_disabled_reply();
+        }
+        if w.secretmanager_denied {
+            return json_reply(
+                403,
+                &json!({"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Permission denied on resource"}}),
+            );
+        }
         let m = format!("{method:?}");
         match (method, parts.as_slice()) {
             (HttpMethod::Get, ["projects", _, "secrets"]) => {
@@ -110,6 +144,9 @@ impl World {
             (HttpMethod::Post, ["projects", _, "secrets"]) => {
                 if let Some(hook) = self.on_secret_create.lock().unwrap().take() {
                     hook();
+                }
+                if self.sm_is_disabled() {
+                    return sm_disabled_reply();
                 }
                 let id = query.strip_prefix("secretId=").unwrap_or_default();
                 if w.secrets.iter().any(|s| s.0 == id) {
@@ -258,6 +295,15 @@ impl HttpTransport for World {
         if let Some(reply) = self.cloud_run(&req) {
             return reply;
         }
+        if req.url.starts_with("https://iam.googleapis.com/") {
+            let denied = self.state.lock().unwrap().act_as_denied;
+            let granted: Vec<&str> = if denied {
+                Vec::new()
+            } else {
+                vec!["iam.serviceAccounts.actAs"]
+            };
+            return json_reply(200, &json!({ "permissions": granted }));
+        }
         let Some(path) = req.url.strip_prefix(BASE) else {
             // The readiness probe to the VM itself.
             self.state
@@ -272,6 +318,13 @@ impl HttpTransport for World {
         let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         match (method, parts.as_slice()) {
             (HttpMethod::Get, ["projects", _]) => json_reply(200, &json!({})),
+            (HttpMethod::Get, ["projects", _, "global", "networks", "default"]) => {
+                if self.state.lock().unwrap().no_default_network {
+                    not_found()
+                } else {
+                    json_reply(200, &json!({"name": "default"}))
+                }
+            }
             (
                 _,
                 ["projects", _, "global", "operations", name, "wait"]
@@ -1374,6 +1427,159 @@ fn the_metadata_opt_in_skips_secret_manager_and_says_so_in_the_instance_metadata
     destroy(&project, &rig).unwrap();
     assert_eq!(rig.gcp.world.vm_names(), Vec::<String>::new());
     assert_eq!(rig.gcp.world.firewall_names(), Vec::<String>::new());
+}
+
+#[test]
+fn preflight_stops_before_any_write_when_secret_manager_is_not_enabled() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    rig.gcp.world.disable_secret_manager();
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(
+        err.contains("gcloud services enable secretmanager.googleapis.com"),
+        "{err}"
+    );
+    assert_eq!(rig.gcp.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn preflight_stops_before_any_write_when_the_default_network_is_missing() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    rig.gcp.world.state.lock().unwrap().no_default_network = true;
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("`default` network"), "{err}");
+    assert!(
+        err.contains("gcloud compute networks create default"),
+        "{err}"
+    );
+    assert_eq!(rig.gcp.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn preflight_names_the_role_when_the_caller_cannot_act_as_the_service_account() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    rig.gcp.world.state.lock().unwrap().act_as_denied = true;
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("roles/iam.serviceAccountUser"), "{err}");
+    assert!(err.contains(SERVICE_ACCOUNT), "{err}");
+    assert_eq!(rig.gcp.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn metadata_secrets_do_not_need_the_secret_manager_api() {
+    let td = TempDir::new();
+    let project = project_from(
+        &td,
+        &gcp_config_with(
+            "allowed_source_cidrs = [\"203.0.113.4/32\"]\n    insecure_metadata_secrets = true",
+        ),
+    );
+    let rig = rig();
+    rig.gcp.world.disable_secret_manager();
+    apply_with(&project, &rig).unwrap();
+}
+
+#[test]
+fn a_start_that_never_wrote_a_secret_is_released_when_secret_manager_is_disabled() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    let off = rig.gcp.world.sm_disabled.clone();
+    *rig.gcp.world.on_secret_create.lock().unwrap() = Some(Box::new(move || {
+        off.store(true, std::sync::atomic::Ordering::SeqCst);
+    }));
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("gcloud services enable"), "{err}");
+    assert_eq!(rig.gcp.world.vm_names(), Vec::<String>::new());
+    assert!(the_record(&project).secrets_unwritten);
+    destroy(&project, &rig).unwrap();
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn a_preempted_vm_with_a_disabled_secret_manager_keeps_its_record() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    assert!(!the_record(&project).secrets_unwritten);
+    rig.gcp.world.remove_vm(&instance());
+    rig.gcp.world.disable_secret_manager();
+    assert!(destroy(&project, &rig).is_err());
+    assert_eq!(stops_for(&project, DEP).len(), 1);
+    assert_ne!(rig.gcp.world.secret_ids(), Vec::<String>::new());
+}
+
+#[test]
+fn a_disabled_secret_manager_is_an_error_while_the_vm_may_still_exist() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    let record = the_record(&project);
+    let client = rig.gcp.client(None).unwrap();
+    let timing = rig.gcp.timing().poll;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rig.gcp.world.disable_secret_manager();
+    let err = rt
+        .block_on(amicu_gcp::gce::teardown(&client, &record, timing))
+        .unwrap_err();
+    assert!(err.is_service_disabled(), "{err:?}");
+    assert!(err.to_string().contains("gcloud services enable"), "{err}");
+}
+
+#[test]
+fn a_permission_denied_secret_delete_names_the_missing_permission_and_keeps_state() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    let record = the_record(&project);
+    let client = rig.gcp.client(None).unwrap();
+    let timing = rig.gcp.timing().poll;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rig.gcp.world.remove_vm(&instance());
+    rig.gcp.world.state.lock().unwrap().secretmanager_denied = true;
+    let err = rt
+        .block_on(amicu_gcp::gce::teardown(&client, &record, timing))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("secretmanager.secrets.delete"), "{err}");
+    assert_eq!(stops_for(&project, DEP).len(), 1);
+}
+
+#[test]
+fn idle_shutdown_puts_the_watchdog_in_the_startup_script() {
+    let td = TempDir::new();
+    let project = project_with(
+        &td,
+        "allowed_source_cidrs = [\"203.0.113.4/32\"]\n    idle_shutdown = \"30m\"",
+    );
+    let rig = rig();
+    apply_with(&project, &rig).unwrap();
+    let body = rig.gcp.world.state.lock().unwrap().insert_bodies[0].clone();
+    let script = body["metadata"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["key"] == "startup-script")
+        .unwrap()["value"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(script.contains("window=1800"), "{script}");
+    assert!(script.contains("shutdown -h now"), "{script}");
 }
 
 mod cloudrun;

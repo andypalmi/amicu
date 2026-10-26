@@ -386,6 +386,7 @@ pub(crate) mod tests {
                 hf_token: Some(SecretValue::new("hf_test")),
                 delivery: SecretDelivery::InstanceMetadata,
                 tls: None,
+                idle_shutdown: None,
             },
         }
     }

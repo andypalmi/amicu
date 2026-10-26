@@ -638,7 +638,8 @@ fn refresh_gce(state: &mut LocalState, ops: &dyn GcpOps) -> Refresh {
         let why = match live {
             Ok((_, VmState::Gone)) => amicu_gcp::gce::GONE.to_owned(),
             Ok((zone, VmState::Terminated { preempted })) => format!(
-                "the VM in {zone} is stopped{}",
+                "the VM in {zone} is stopped{} and still bills its boot disk until a later \
+                 apply or destroy deletes it",
                 if preempted { " (preempted)" } else { "" }
             ),
             Ok((zone, VmState::Suspended)) => format!("the VM in {zone} is suspended"),

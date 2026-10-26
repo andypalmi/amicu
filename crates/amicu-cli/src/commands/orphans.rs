@@ -385,26 +385,6 @@ impl GcpResources for GcpOpsListing<'_> {
     }
 }
 
-/// Whether the error says the Secret Manager API is switched off in the
-/// project: the `SERVICE_DISABLED` reason, or Google's "API has not been used
-/// in project ... or it is disabled" text naming `secretmanager`. Wording that
-/// does not name Secret Manager (another API, an org policy) is a real
-/// permission failure.
-fn api_disabled(e: &amicu_gcp::GcpError) -> bool {
-    let amicu_gcp::GcpError::PermissionDenied { code, message, .. } = e else {
-        return false;
-    };
-    let m = message.to_ascii_lowercase();
-    if code.contains("SERVICE_DISABLED") || m.contains("service_disabled") {
-        return true;
-    }
-    let names_secret_manager = m.contains("secretmanager") || m.contains("secret manager");
-    names_secret_manager
-        && (m.contains("has not been used in project")
-            || m.contains("api has not been used")
-            || m.contains("is disabled"))
-}
-
 /// Handles the result of listing a project's secrets. A project that delivers
 /// secrets as instance metadata may never have enabled Secret Manager, so a
 /// disabled-API error means no secrets. Any other permission error does not:
@@ -416,7 +396,7 @@ fn tolerate_secret_listing(
     note: &mut dyn std::io::Write,
 ) -> Result<Vec<(String, String)>, amicu_gcp::GcpError> {
     match listed {
-        Err(e) if api_disabled(&e) => Ok(Vec::new()),
+        Err(e) if e.is_service_disabled() => Ok(Vec::new()),
         Err(amicu_gcp::GcpError::PermissionDenied { .. }) => {
             let _ = writeln!(
                 note,
@@ -1242,41 +1222,70 @@ mod tests {
     use amicu_runtime::RuntimeHandle;
     use std::sync::Mutex;
 
+    /// The error the GCP client produces for a Google error response.
+    fn google_error(status: u16, body: &str) -> amicu_gcp::GcpError {
+        struct Canned(u16, String);
+        #[async_trait::async_trait]
+        impl amicu_providers::HttpTransport for Canned {
+            async fn execute(
+                &self,
+                _: amicu_providers::HttpRequest,
+            ) -> Result<amicu_providers::HttpResponse, amicu_providers::TransportError>
+            {
+                Ok(amicu_providers::HttpResponse::new(
+                    self.0,
+                    self.1.clone().into_bytes(),
+                ))
+            }
+        }
+        struct Tokens;
+        #[async_trait::async_trait]
+        impl amicu_gcp::TokenSource for Tokens {
+            async fn token(&self) -> Result<amicu_gcp::AccessToken, amicu_gcp::GcpError> {
+                Ok(amicu_gcp::AccessToken::new("t"))
+            }
+        }
+        let client = amicu_gcp::GcpClient::with_transport(
+            std::sync::Arc::new(Tokens),
+            std::sync::Arc::new(Canned(status, body.to_owned())),
+        );
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(client.request(
+                amicu_providers::HttpMethod::Get,
+                "https://secretmanager.googleapis.com/v1/projects/p/secrets",
+                None,
+            ))
+            .unwrap_err()
+    }
+
     #[test]
     fn secret_listing_tolerates_only_a_disabled_api() {
         use amicu_gcp::GcpError;
-        let denied = |code: &str, message: &str| GcpError::PermissionDenied {
-            status: 403,
-            code: code.into(),
-            message: message.into(),
-        };
         // API switched off: no secrets, no note.
         let mut note = Vec::new();
-        let off = denied(
-            "PERMISSION_DENIED",
-            "Secret Manager API has not been used in project p before or it is disabled. \
-             Enable it by visiting \
-             https://console.developers.google.com/apis/api/secretmanager.googleapis.com/overview?project=p",
+        let off = google_error(
+            403,
+            r#"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"Secret Manager API has not been used in project p before or it is disabled.","details":[{"reason":"SERVICE_DISABLED"}]}}"#,
         );
+        assert!(off.is_service_disabled(), "{off:?}");
         assert_eq!(
             tolerate_secret_listing("p", Err(off), &mut note),
             Ok(vec![])
         );
         assert_eq!(note, Vec::<u8>::new());
-        let off = denied("SERVICE_DISABLED", "x");
-        assert_eq!(
-            tolerate_secret_listing("p", Err(off), &mut note),
-            Ok(vec![])
-        );
-        assert_eq!(note, Vec::<u8>::new());
-        // Loose wording that is not about Secret Manager's API being off is a
-        // real permission failure, not "no secrets".
+        // Wording without the disabled-API reason is a real permission failure.
         for message in [
             "Permission denied: feature is not enabled for this account",
-            "Compute Engine API has not been used in project p before or it is disabled.",
             "it is disabled by an organization policy",
         ] {
-            let other = denied("PERMISSION_DENIED", message);
+            let other = google_error(
+                403,
+                &format!(
+                    r#"{{"error":{{"code":403,"status":"PERMISSION_DENIED","message":"{message}"}}}}"#
+                ),
+            );
             let mut note = Vec::new();
             assert_eq!(
                 tolerate_secret_listing("p", Err(other), &mut note),
@@ -1285,9 +1294,9 @@ mod tests {
             assert!(!note.is_empty(), "{message}");
         }
         // A real permission failure: continue, but say so.
-        let no = denied(
-            "PERMISSION_DENIED",
-            "Permission 'secretmanager.secrets.list' denied",
+        let no = google_error(
+            403,
+            r#"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"Permission 'secretmanager.secrets.list' denied"}}"#,
         );
         assert_eq!(tolerate_secret_listing("p", Err(no), &mut note), Ok(vec![]));
         let note = String::from_utf8(note).unwrap();

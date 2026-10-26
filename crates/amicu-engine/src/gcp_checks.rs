@@ -12,6 +12,7 @@ use amicu_gcp::{CatalogProvisioning, GcpCatalog, PlacementError, candidate_zones
 
 const GCP_PROVIDER: &str = "gcp";
 const MIN_RUN: Duration = Duration::from_mins(10);
+const MIN_IDLE: Duration = Duration::from_mins(5);
 const MAX_RUN: Duration = Duration::from_hours(120 * 24);
 const MAX_FLEX_RUN: Duration = Duration::from_hours(7 * 24);
 
@@ -29,12 +30,12 @@ fn cidr_ok(c: &str) -> bool {
     let Some((ip, bits)) = c.split_once('/') else {
         return false;
     };
-    let max = match ip.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(_)) => 32,
-        Ok(std::net::IpAddr::V6(_)) => 128,
-        Err(_) => return false,
-    };
-    bits.parse::<u8>().is_ok_and(|b| b <= max)
+    ip.parse::<std::net::Ipv4Addr>().is_ok() && bits.parse::<u8>().is_ok_and(|b| b <= 32)
+}
+
+fn is_ipv6_cidr(c: &str) -> bool {
+    c.split_once('/')
+        .is_some_and(|(ip, _)| ip.parse::<std::net::Ipv6Addr>().is_ok())
 }
 
 pub(crate) fn gcp_diagnostics(graph: &Graph) -> Vec<Diagnostic> {
@@ -364,10 +365,26 @@ fn compute_problems(
         ));
     }
     for c in s.allowed_source_cidrs.iter().filter(|c| !cidr_ok(c)) {
-        out.push((
-            invalid,
-            format!("`allowed_source_cidrs` entry `{c}` is not a CIDR like 203.0.113.4/32"),
-        ));
+        let message = if is_ipv6_cidr(c) {
+            format!(
+                "`allowed_source_cidrs` entry `{c}` is IPv6; the firewall rule amicu creates \
+                 is IPv4 only, so list IPv4 CIDRs like 203.0.113.4/32"
+            )
+        } else {
+            format!("`allowed_source_cidrs` entry `{c}` is not a CIDR like 203.0.113.4/32")
+        };
+        out.push((invalid, message));
+    }
+    if let Some(idle) = s.idle_shutdown_secs {
+        let idle = Duration::from_secs(u64::from(idle));
+        if idle < MIN_IDLE || idle >= run {
+            out.push((
+                invalid,
+                "`idle_shutdown` must be at least 5m and shorter than `max_run_duration`; \
+                 write it in s, m or h"
+                    .to_owned(),
+            ));
+        }
     }
     out
 }
@@ -656,6 +673,42 @@ resource "deployment" "d" {{
             "scaling {\n max_replicas = 2\n }",
         );
         assert_eq!(codes(&g), ["AMICU-CAP-016", "AMICU-CAP-016"]);
+    }
+
+    #[test]
+    fn ipv6_cidrs_are_rejected_because_the_firewall_rule_is_ipv4() {
+        let g = graph(
+            "gcp",
+            EU,
+            "t4",
+            "project = \"my-proj\"\n allowed_source_cidrs = [\"2001:db8::/32\", \"203.0.113.4/32\"]",
+            "",
+        );
+        let found = gcp_diagnostics(&g);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].message.contains("IPv6"), "{}", found[0].message);
+    }
+
+    #[test]
+    fn idle_shutdown_must_fit_inside_the_run_duration() {
+        let ok = graph(
+            "gcp",
+            EU,
+            "t4",
+            "project = \"my-proj\"\n idle_shutdown = \"30m\"",
+            "",
+        );
+        assert_eq!(gcp_diagnostics(&ok).len(), 0);
+        for bad in ["1m", "9h"] {
+            let g = graph(
+                "gcp",
+                EU,
+                "t4",
+                &format!("project = \"my-proj\"\n idle_shutdown = \"{bad}\""),
+                "",
+            );
+            assert_eq!(codes(&g), ["AMICU-CAP-016"], "{bad}");
+        }
     }
 
     #[test]
