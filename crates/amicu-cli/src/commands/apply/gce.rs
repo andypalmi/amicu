@@ -251,7 +251,10 @@ pub(super) async fn prepare(
     let found = progress.stops.iter().find(|r| {
         r.deployment == *id && r.backend == Backend::Gce && r.identity == new_record.instance
     });
-    let fresh = found.is_none();
+    let fresh = !progress
+        .stops
+        .iter()
+        .any(|r| r.backend == Backend::Gce && r.identity == new_record.instance);
     let prior = found.and_then(|r| r.gcp.clone());
     // A record made for another project or impersonation target is not torn
     // down by the supervisor (it would act as the new identity): apply stops

@@ -206,6 +206,11 @@ pub async fn create_secret(
                 ),
             }),
             Err(GcpError::NotFound { .. }) => Err(GcpError::Conflict { message }),
+            // The 409 proved the secret exists: never report "API disabled",
+            // which callers read as "nothing was written".
+            Err(e) if e.is_service_disabled() => Err(GcpError::Conflict {
+                message: format!("secret `{id}` already exists but could not be inspected: {e}"),
+            }),
             Err(e) => Err(e),
         },
         Err(e) => Err(e),
@@ -432,6 +437,36 @@ mod tests {
             "vm-1-hf-token"
         );
         assert!(secret_id("Bad/Name", SecretKind::ApiKey).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_409_followed_by_a_disabled_api_is_a_conflict_not_service_disabled() {
+        let (c, _) = client(
+            Mock::default()
+                .on(
+                    HttpMethod::Post,
+                    "secretId=vm-1-api-key",
+                    409,
+                    r#"{"error":{"code":409,"status":"ALREADY_EXISTS","message":"exists"}}"#,
+                )
+                .on(
+                    HttpMethod::Get,
+                    "/secrets/vm-1-api-key",
+                    403,
+                    r#"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"disabled","details":[{"reason":"SERVICE_DISABLED"}]}}"#,
+                ),
+        );
+        let e = create_secret(
+            &c,
+            P,
+            "vm-1-api-key",
+            &labels(),
+            &owner(),
+            &Replication::Automatic,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(e, GcpError::Conflict { .. }), "{e:?}");
     }
 
     #[tokio::test]
