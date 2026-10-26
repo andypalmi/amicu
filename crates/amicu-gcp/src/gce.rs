@@ -77,6 +77,12 @@ pub struct GceRecord {
     /// SHA-256 fingerprint (hex) of the VM's pinned certificate. Public.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_fingerprint: Option<String>,
+    /// Proof that this deployment's first start failed before any secret was
+    /// written (its first Secret Manager call found the API disabled). Only
+    /// then does a disabled API count as "no secrets" at teardown; records
+    /// without it assume the secrets may exist.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secrets_unwritten: bool,
 }
 
 impl GceRecord {
@@ -131,9 +137,9 @@ pub struct GceLaunch {
     pub delivery: SecretDelivery,
     /// The VM's certificate and key, generated before the write-ahead record
     /// (see [`Self::with_tls`]); `None` serves plain HTTP.
+    pub tls: Option<TlsIdentity>,
     /// Power the VM off after this long idle.
     pub idle_shutdown: Option<Duration>,
-    pub tls: Option<TlsIdentity>,
 }
 
 impl GceLaunch {
@@ -195,6 +201,7 @@ impl GceLaunch {
                 .as_ref()
                 .map(TlsIdentity::fingerprint)
                 .transpose()?,
+            secrets_unwritten: false,
         })
     }
 }
@@ -229,6 +236,7 @@ pub struct GceSupervisor {
     progress: Option<Sink>,
     landed: Arc<Mutex<Option<String>>>,
     created: Arc<AtomicBool>,
+    secrets_touched: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for GceSupervisor {
@@ -269,6 +277,7 @@ impl GceSupervisor {
             progress: None,
             landed: Arc::default(),
             created: Arc::default(),
+            secrets_touched: Arc::default(),
         }
     }
 
@@ -312,12 +321,24 @@ impl GceSupervisor {
         Arc::clone(&self.created)
     }
 
+    /// Set once a Secret Manager secret may have been written by this run.
+    #[must_use]
+    pub fn secrets_touched(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.secrets_touched)
+    }
+
     /// What the record is now: the landed zone, else the write-ahead list.
+    /// `secrets_unwritten` is set only when this run reached the secrets step,
+    /// replaced no earlier record and never wrote one.
     ///
     /// # Errors
     /// See [`GceLaunch::record`].
     pub fn record(&self) -> Result<GceRecord, GcpError> {
-        let base = self.launch.record()?;
+        let mut base = self.launch.record()?;
+        base.secrets_unwritten = self.recorded.is_none()
+            && self.launch.delivery == SecretDelivery::SecretManager
+            && self.created.load(Ordering::SeqCst)
+            && !self.secrets_touched.load(Ordering::SeqCst);
         Ok(match self.landed.lock().ok().and_then(|z| z.clone()) {
             Some(zone) => base.landed(&zone),
             None => base,
@@ -450,6 +471,7 @@ impl GceSupervisor {
             &self.client,
             &self.spec(&record.zone, record, startup),
             &Replication::Region(region.to_owned()),
+            &self.secrets_touched,
         )
         .await
         .map_err(|e| err(&e))
@@ -635,7 +657,8 @@ pub const GONE: &str =
 /// # Errors
 /// [`GcpError::NotOwned`] (nothing deleted) for a VM, rule or secret of that
 /// name that is not ours, or an API error. A disabled Secret Manager API means
-/// "no secrets" only when no VM existed. The firewall rule and the secrets
+/// "no secrets" only when the record proves none was written
+/// ([`GceRecord::secrets_unwritten`]). The firewall rule and the secrets
 /// are left in place when the VM could not be removed.
 pub async fn teardown(
     client: &GcpClient,
@@ -659,12 +682,9 @@ pub async fn teardown(
     for id in &record.secrets {
         match delete_secret(client, &record.project, id, &record.owner).await {
             Ok(_) => {}
-            // No VM was ever there and the API is off: a start that failed
-            // before it could store anything. With a VM present its secrets
-            // may exist, so that stays an error.
-            Err(e) if e.is_service_disabled() && outcome == DeleteOutcome::AlreadyGone => {
-                continue;
-            }
+            // Disabling the API does not delete secrets, so only the record's
+            // proof that none was ever written counts as absence.
+            Err(e) if e.is_service_disabled() && record.secrets_unwritten => continue,
             Err(e) => return Err(e),
         }
         // Confirm: asking again finds nothing.
@@ -790,8 +810,8 @@ pub async fn list_owned_firewalls(
 /// filter, so every page is read.
 ///
 /// # Errors
-/// An API error ([`GcpError::PermissionDenied`] when the API is not enabled or
-/// listing is not allowed).
+/// An API error ([`GcpError::ServiceDisabled`] when the API is not enabled,
+/// [`GcpError::PermissionDenied`] when listing is not allowed).
 pub async fn list_owned_secrets(
     client: &GcpClient,
     project: &str,

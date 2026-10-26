@@ -46,8 +46,9 @@ const IDLE_UNIT: &str = "amicu-idle-watchdog";
 
 /// Polls vLLM's `/metrics` with the API key (read from the root-only env file)
 /// and powers the VM off once nothing has run, waited or finished for `WINDOW`
-/// seconds. The clock starts at the first answer, so model loading never
-/// counts, and an unreadable answer never counts as idle.
+/// seconds. The clock starts at the first good answer, so model loading never
+/// counts; after that, a failed or garbled answer counts as idle (a dead vLLM
+/// serves nothing).
 const IDLE_WATCHDOG: &str = r#"#!/bin/bash
 url='URL'
 window=WINDOW
@@ -55,18 +56,16 @@ key=$(sed -n 's/^VLLM_API_KEY=//p' /run/amicu/vllm.env)
 last_done=""
 last_active=""
 while sleep 30; do
-  m=$(printf 'header = "Authorization: Bearer %s"
-' "$key" | curl -ksS -m 10 -K - "$url") || continue
-  printf '%s
-' "$m" | grep -q '^vllm:' || continue
-  busy=$(printf '%s
-' "$m" | awk '/^vllm:num_requests_(running|waiting)[{ ]/ {s+=$NF} END {print s+0}')
-  finished=$(printf '%s
-' "$m" | awk '/^vllm:request_success_total[{ ]/ {s+=$NF} END {print s+0}')
   now=$(date +%s)
-  if [ -z "$last_active" ] || [ "$busy" != 0 ] || [ "$finished" != "$last_done" ]; then last_active=$now; fi
-  last_done=$finished
-  if [ $((now - last_active)) -ge "$window" ]; then shutdown -h now; exit 0; fi
+  ok=0
+  m=$(printf 'header = "Authorization: Bearer %s"\n' "$key" | curl -ksS -m 10 -K - "$url") && printf '%s\n' "$m" | grep -q '^vllm:' && ok=1
+  if [ "$ok" = 1 ]; then
+    busy=$(printf '%s\n' "$m" | awk '/^vllm:num_requests_(running|waiting)[{ ]/ {s+=$NF} END {print s+0}')
+    finished=$(printf '%s\n' "$m" | awk '/^vllm:request_success_total[{ ]/ {s+=$NF} END {print s+0}')
+    if [ -z "$last_active" ] || [ "$busy" != 0 ] || [ "$finished" != "$last_done" ]; then last_active=$now; fi
+    last_done=$finished
+  fi
+  if [ -n "$last_active" ] && [ $((now - last_active)) -ge "$window" ]; then shutdown -h now; exit 0; fi
 done
 "#;
 

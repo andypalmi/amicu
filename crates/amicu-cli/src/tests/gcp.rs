@@ -58,8 +58,6 @@ struct WorldState {
     verify_pins: Vec<Option<String>>,
     /// The project has no `default` network.
     no_default_network: bool,
-    /// Secret Manager answers 403 `SERVICE_DISABLED`.
-    secretmanager_disabled: bool,
     /// Secret Manager answers a plain 403 permission error.
     secretmanager_denied: bool,
     /// The caller lacks `iam.serviceAccounts.actAs`.
@@ -71,6 +69,8 @@ type Hook = Box<dyn FnOnce() + Send>;
 #[derive(Default)]
 struct World {
     state: Mutex<WorldState>,
+    /// Secret Manager answers 403 `SERVICE_DISABLED`.
+    sm_disabled: Arc<std::sync::atomic::AtomicBool>,
     /// Fired once, just before the first instance insert.
     on_insert: Mutex<Option<Hook>>,
     /// Fired once, just before the first secret create.
@@ -84,6 +84,13 @@ fn json_reply(status: u16, body: &Value) -> Result<HttpResponse, TransportError>
     Ok(HttpResponse::new(status, body.to_string().into_bytes()))
 }
 
+fn sm_disabled_reply() -> Result<HttpResponse, TransportError> {
+    json_reply(
+        403,
+        &json!({"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Secret Manager API has not been used in project 1 before or it is disabled.", "details": [{"reason": "SERVICE_DISABLED"}]}}),
+    )
+}
+
 fn not_found() -> Result<HttpResponse, TransportError> {
     json_reply(
         404,
@@ -92,6 +99,15 @@ fn not_found() -> Result<HttpResponse, TransportError> {
 }
 
 impl World {
+    fn sm_is_disabled(&self) -> bool {
+        self.sm_disabled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn disable_secret_manager(&self) {
+        self.sm_disabled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// The Secret Manager API: secrets, versions and per-secret IAM.
     fn secret_manager(
         &self,
@@ -102,11 +118,8 @@ impl World {
         let (path, query) = path.split_once('?').unwrap_or((path, ""));
         let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         let mut w = self.state.lock().unwrap();
-        if w.secretmanager_disabled {
-            return json_reply(
-                403,
-                &json!({"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Secret Manager API has not been used in project 1 before or it is disabled.", "details": [{"reason": "SERVICE_DISABLED"}]}}),
-            );
+        if self.sm_is_disabled() {
+            return sm_disabled_reply();
         }
         if w.secretmanager_denied {
             return json_reply(
@@ -129,6 +142,9 @@ impl World {
             (HttpMethod::Post, ["projects", _, "secrets"]) => {
                 if let Some(hook) = self.on_secret_create.lock().unwrap().take() {
                     hook();
+                }
+                if self.sm_is_disabled() {
+                    return sm_disabled_reply();
                 }
                 let id = query.strip_prefix("secretId=").unwrap_or_default();
                 if w.secrets.iter().any(|s| s.0 == id) {
@@ -1397,7 +1413,7 @@ fn preflight_stops_before_any_write_when_secret_manager_is_not_enabled() {
     let td = TempDir::new();
     let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
     let rig = rig();
-    rig.gcp.world.state.lock().unwrap().secretmanager_disabled = true;
+    rig.gcp.world.disable_secret_manager();
     let err = apply_with(&project, &rig).unwrap_err().to_string();
     assert!(
         err.contains("gcloud services enable secretmanager.googleapis.com"),
@@ -1443,27 +1459,39 @@ fn metadata_secrets_do_not_need_the_secret_manager_api() {
         ),
     );
     let rig = rig();
-    rig.gcp.world.state.lock().unwrap().secretmanager_disabled = true;
+    rig.gcp.world.disable_secret_manager();
     apply_with(&project, &rig).unwrap();
 }
 
 #[test]
-fn a_record_whose_vm_never_existed_is_released_when_secret_manager_is_disabled() {
+fn a_start_that_never_wrote_a_secret_is_released_when_secret_manager_is_disabled() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    let off = rig.gcp.world.sm_disabled.clone();
+    *rig.gcp.world.on_secret_create.lock().unwrap() = Some(Box::new(move || {
+        off.store(true, std::sync::atomic::Ordering::SeqCst);
+    }));
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("gcloud services enable"), "{err}");
+    assert_eq!(rig.gcp.world.vm_names(), Vec::<String>::new());
+    assert!(the_record(&project).secrets_unwritten);
+    destroy(&project, &rig).unwrap();
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn a_preempted_vm_with_a_disabled_secret_manager_keeps_its_record() {
     let td = TempDir::new();
     let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
     let rig = rig();
     apply_with(&project, &rig).unwrap();
-    let record = the_record(&project);
-    let client = rig.gcp.client(None).unwrap();
-    let timing = rig.gcp.timing().poll;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    assert!(!the_record(&project).secrets_unwritten);
     rig.gcp.world.remove_vm(&instance());
-    rig.gcp.world.state.lock().unwrap().secretmanager_disabled = true;
-    rt.block_on(amicu_gcp::gce::teardown(&client, &record, timing))
-        .unwrap();
+    rig.gcp.world.disable_secret_manager();
+    assert!(destroy(&project, &rig).is_err());
+    assert_eq!(stops_for(&project, DEP).len(), 1);
+    assert_ne!(rig.gcp.world.secret_ids(), Vec::<String>::new());
 }
 
 #[test]
@@ -1479,7 +1507,7 @@ fn a_disabled_secret_manager_is_an_error_while_the_vm_may_still_exist() {
         .enable_all()
         .build()
         .unwrap();
-    rig.gcp.world.state.lock().unwrap().secretmanager_disabled = true;
+    rig.gcp.world.disable_secret_manager();
     let err = rt
         .block_on(amicu_gcp::gce::teardown(&client, &record, timing))
         .unwrap_err();

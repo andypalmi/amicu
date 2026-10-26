@@ -156,11 +156,7 @@ fn map_error(status: u16, body: &[u8], url: &str) -> GcpError {
     if reasons.iter().any(|r| QUOTA_REASONS.contains(r)) {
         return GcpError::QuotaExceeded { message };
     }
-    if status == 403
-        && (reasons.iter().any(|r| DISABLED_REASONS.contains(r))
-            || message.contains("has not been used in project")
-            || message.contains("it is disabled"))
-    {
+    if status == 403 && reasons.iter().any(|r| DISABLED_REASONS.contains(r)) {
         return GcpError::ServiceDisabled {
             service: service_of(url),
             message,

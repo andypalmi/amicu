@@ -85,7 +85,7 @@ The `gcp {}` block on a `hardware_profile` with `provider = "gcp"`:
 | `machine_type` | string | smallest catalog machine for the GPU | no | For N1 GPUs (T4, V100, P4) an `n1-standard-N`; the default is `n1-standard-4` per GPU. |
 | `provisioning` | string | `spot` | no | `spot`, `flex_start` or `standard`. Not every machine offers every mode (`AMICU-CAP-018`, for example `standard` on `a3-highgpu-1g`). |
 | `max_run_duration` | duration | `8h` | no | `10m` to `2880h` (120 days), or `168h` (7 days) with `flex_start`. Write it in `s`, `m` or `h`: days are not accepted. Compute Engine deletes the VM after it. |
-| `idle_shutdown` | duration | off | no | Power the VM off after this long without a request (5m or more, shorter than `max_run_duration`). A watchdog on the VM polls vLLM's `/metrics`. Compute Engine keeps a powered-off VM and its boot disk until the next `apply` or `destroy` deletes it. |
+| `idle_shutdown` | duration | off | no | Power the VM off after this long without a request (5m or more, shorter than `max_run_duration`). A watchdog on the VM polls vLLM's `/metrics`. After it fires the VM is only stopped, not deleted: its boot disk keeps billing and `max_run_duration` likely no longer applies, until the next `amicu apply` or `amicu destroy` deletes it. |
 | `boot_disk_gb` | number | `100` | no | At least 50. |
 | `service_account` | string | none | yes, unless `insecure_metadata_secrets` | Email of the account the VM runs as; it reads the VM's secrets from Secret Manager (`AMICU-CAP-016` if missing). |
 | `insecure_metadata_secrets` | bool | `false` | no | INSECURE. Deliver the secrets as instance metadata instead of Secret Manager, readable by anyone who can read the instance. |

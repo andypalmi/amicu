@@ -44,8 +44,9 @@ resource "hardware_profile" "gcp_t4" {
     provisioning = "spot"
     max_run_duration = "2h"
 
-    # Optional: power the VM off after 30 minutes without a request. The VM is
-    # kept (powered off) until the next `amicu apply` or `amicu destroy`
+    # Optional: power the VM off after 30 minutes without a request. It is only
+    # stopped, not deleted: the boot disk keeps billing and max_run_duration
+    # likely no longer applies until the next `amicu apply` or `amicu destroy`
     # deletes it. Leave it out to keep serving until max_run_duration.
     idle_shutdown = "30m"
 
