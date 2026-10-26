@@ -91,6 +91,7 @@ The `gcp {}` block on a `hardware_profile` with `provider = "gcp"`:
 | `insecure_metadata_secrets` | bool | `false` | no | INSECURE. Deliver the secrets as instance metadata instead of Secret Manager, readable by anyone who can read the instance. |
 | `allowed_source_cidrs` | list | this machine's public IP `/32` | no | Who may reach the serving port. IPv4 only: an IPv6 CIDR is rejected (`AMICU-CAP-016`). |
 | `impersonate_service_account` | string | none | no | Service account amicu acts as. |
+| `access` | string | `public` | no | Cloud Run only: `public` (the API key is the only guard) or `iam` (callers also send a Google identity token). See [Cloud Run](#cloud-run). |
 
 `region` is required unless `zone` is set, so the VM is placed where you expect. The profile's `region` and the project's `data_class` residency are checked against every candidate zone. A deployment on a VM runs one replica: `scaling {}` with more than 1 is rejected (`AMICU-CAP-016`).
 
@@ -98,7 +99,11 @@ Other checks: an unknown GPU or one not offered in the zone or region is `AMICU-
 
 ## Cloud Run
 
-With `backend = "cloud_run"`, `apply` creates one Cloud Run service per deployment instead of a VM. Each instance has one GPU: an L4 (4 vCPU, 16 GiB) or an RTX PRO 6000 (20 vCPU, 80 GiB), the minimum size Cloud Run allows for that GPU. The service scales to zero: no instance runs, and no GPU is billed, while it is idle.
+With `backend = "cloud_run"`, `apply` creates one Cloud Run service per deployment instead of a VM. Each instance has one GPU: an L4 (at least 4 vCPU, 16 GiB) or an RTX PRO 6000 (at least 20 vCPU, 80 GiB). The profile's `memory` (and `cpu.cores`, when set) is used when it is above that minimum; below it is `AMICU-CAP-016`. The service scales to zero: while no instance runs, nothing is billed for compute. GPU instances are billed for as long as they run, from the moment a request starts one.
+
+<Callout type="warning" title="Any request can start a billed instance">
+  With the default `access = "public"`, Cloud Run does not filter requests, so any request to the URL, including an anonymous one or a plain `GET /health`, starts an instance when none is running. That instance is billed while it starts and loads the model (often minutes, the weights are downloaded again on each cold start) and until Cloud Run stops it after it has been idle for a while. The spend is capped by `max_replicas` instances at a time. Use `access = "iam"` to let only callers with a Google identity token reach the service.
+</Callout>
 
 ```hcl
 resource "hardware_profile" "gcp_cloudrun_l4" {
@@ -121,16 +126,20 @@ resource "hardware_profile" "gcp_cloudrun_l4" {
 
 A complete example is in `examples/gcp-cloudrun-l4`.
 
-- **Endpoint and auth.** The endpoint is the service's `https://<service>-<hash>.<region>.run.app` URL, with Google-managed TLS. It is public (Cloud Run's IAM invoker check is turned off on this service only; no IAM policy is changed), and vLLM's API key is its only guard: every `/v1` route needs `Authorization: Bearer <api_key>`. After the deploy, `apply` checks that an anonymous request is refused and the key is accepted. If the check fails, it deletes the service and secrets it created.
+- **Endpoint and auth.** The endpoint is the service's `https://<service>-<hash>.<region>.run.app` URL, with Google-managed TLS. Every `/v1` route needs `Authorization: Bearer <api_key>`.
+  - `access = "public"` (default): Cloud Run's IAM invoker check is turned off on this service only (no IAM policy is changed), and the API key is the only guard. After the deploy, `apply` checks that an anonymous request is refused and the key is accepted. An organization policy `constraints/run.managed.requireInvokerIam` forbids this; `apply` then names the policy and suggests `access = "iam"`.
+  - `access = "iam"`: the IAM check stays on. Callers need `roles/run.invoker` on the service and send a Google identity token for the service URL in `X-Serverless-Authorization: Bearer <id token>`, plus the API key in `Authorization` (for example `curl -H "X-Serverless-Authorization: Bearer $(gcloud auth print-identity-token)" -H "Authorization: Bearer $CHAT_API_KEY" ...`). After the deploy, `apply` checks that an anonymous request is refused; it holds no identity token, so it does not send the key.
+
+  If the check fails, `apply` deletes the service and secrets it created.
 - **Secrets.** The API key (and `HF_TOKEN`, when set) are stored in Secret Manager in the service's region before the service is created. The service reads them as `service_account`, which amicu grants `roles/secretmanager.secretAccessor` on those secrets only.
 - **Write-ahead record.** The service and secret names are written to state before anything is created. `destroy` deletes the service only if it carries amicu's owner label, waits until a read returns not found, then deletes the secrets. The record leaves state only after that.
 - **Cold start.** The first request after an idle period starts an instance and loads the model. Cloud Run holds the request until the container is ready, which can take minutes, so give clients a long timeout. The startup probe on `/health` allows up to 30 minutes for the model download.
 - **Scaling.** `scaling { max_replicas }` is the maximum number of instances (default 1). Each instance holds one GPU, so keep it within the region's Cloud Run GPU quota. `target_concurrency` is how many requests one instance serves at once (default 8). Zonal redundancy is off, which is cheaper and needs less quota.
 - **Regions.** L4: `europe-west1`, `europe-west4`, `us-central1`, `us-east4`, `asia-southeast1` (`asia-south1` by invitation only). RTX PRO 6000: `europe-west4`, `us-central1`, `asia-southeast1`, `asia-south2`. Another region or GPU is `AMICU-CAP-017`.
 
-Cloud Run cannot honour some settings, and `validate`, `plan` and `apply` reject them with `AMICU-CAP-019`: `zone`, `machine_type`, `provisioning`, `max_run_duration`, `boot_disk_gb`, `allowed_source_cidrs` and `insecure_metadata_secrets` in the `gcp {}` block, and `min_replicas` above 0 or `scaledown_window` in `scaling {}`. `accelerator.count` must be 1, and `service_account` and `region` are required (`AMICU-CAP-016`).
+Cloud Run cannot honour some settings, and `validate`, `plan` and `apply` reject them with `AMICU-CAP-019`: `zone`, `machine_type`, `provisioning`, `max_run_duration`, `idle_shutdown`, `boot_disk_gb`, `allowed_source_cidrs` and `insecure_metadata_secrets` in the `gcp {}` block, and `min_replicas` above 0 or `scaledown_window` in `scaling {}`. `access` is Cloud Run only. `accelerator.count` must be 1, and `service_account` and `region` are required (`AMICU-CAP-016`).
 
-The account that runs `apply` needs `roles/run.admin` (or permission to create, read and delete services), Secret Manager access as above, and `roles/iam.serviceAccountUser` on the service account. Create the service account as for a VM:
+Before it writes anything, `apply` checks (read-only) that the Cloud Run Admin API and the Secret Manager API are enabled and that you may act as the `service_account`, and names the `gcloud` command or role that fixes each. The account that runs `apply` needs `roles/run.admin` (or permission to create, read and delete services), Secret Manager access as above, and `roles/iam.serviceAccountUser` on the service account. Create the service account as for a VM:
 
 ```sh
 gcloud iam service-accounts create amicu-run --project my-project-id
@@ -166,7 +175,7 @@ Before it writes anything, `apply` on a VM checks (read-only) that the credentia
 
 - The certificate is self-signed and pinned, not CA-signed: clients must pin its fingerprint.
 - vLLM only, one VM per deployment, no `env` block, no metrics or logs through amicu.
-- Cloud Run: one GPU per instance, no minimum instances (always scales to zero), no CIDR allowlist, and the idle timeout is Cloud Run's own.
+- Cloud Run: one GPU per instance, no minimum instances (always scales to zero), no CIDR allowlist, the idle timeout is Cloud Run's own, and with `access = "iam"` amicu cannot check that the API key is accepted.
 - A4X (`a4x-*`, the GB200 and GB300 machines) is not supported yet: its Arm boot images ship without Docker and the NVIDIA container toolkit. `apply` and `plan` reject an `a4x-*` `machine_type`, and a GB200 or GB300 GPU never picks one by default.
 - Prices in the catalog are illustrative values, not live quotes, so cost estimates are indicative.
 

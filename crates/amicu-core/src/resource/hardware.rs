@@ -87,6 +87,10 @@ pub struct GcpSettings {
     /// Service account amicu impersonates for its own API calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impersonate_service_account: Option<String>,
+    /// Cloud Run only: who may call the service. `None` is
+    /// [`GcpAccess::Public`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<GcpAccess>,
 }
 
 impl GcpSettings {
@@ -106,6 +110,18 @@ pub enum GcpBackend {
     Compute,
     /// A Cloud Run service with one GPU per instance, scaled to zero.
     CloudRun,
+}
+
+/// Who may call a Cloud Run service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GcpAccess {
+    /// Anyone on the internet; the deployment's `api_key` is the only guard.
+    #[default]
+    Public,
+    /// Cloud Run's IAM check stays on: callers also send a Google identity
+    /// token with `roles/run.invoker`.
+    Iam,
 }
 
 /// How a Compute Engine VM is obtained.

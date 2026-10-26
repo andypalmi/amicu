@@ -10,6 +10,8 @@ struct Service {
     region: String,
     name: String,
     labels: Value,
+    /// Cloud Run's IAM invoker check is in force.
+    iam: bool,
 }
 
 #[derive(Default)]
@@ -25,6 +27,10 @@ pub(super) struct RunWorld {
     on_create: Option<Hook>,
     /// The service answers unauthenticated requests (vLLM without its key).
     open_endpoint: bool,
+    /// The Cloud Run Admin API answers 403 `SERVICE_DISABLED`.
+    api_disabled: bool,
+    /// The org policy `run.managed.requireInvokerIam` is enforced.
+    require_invoker_iam: bool,
 }
 
 fn uri(name: &str) -> String {
@@ -60,11 +66,16 @@ impl World {
         let method = req.method;
         let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
         let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-        self.run
-            .lock()
-            .unwrap()
-            .log
-            .push(format!("{method:?} {path}"));
+        {
+            let mut w = self.run.lock().unwrap();
+            w.log.push(format!("{method:?} {path}"));
+            if w.api_disabled {
+                return json_reply(
+                    403,
+                    &json!({"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "Cloud Run Admin API has not been used in project 1 before or it is disabled.", "details": [{"reason": "SERVICE_DISABLED"}]}}),
+                );
+            }
+        }
         match (method, parts.as_slice()) {
             (HttpMethod::Post, ["projects", p, "locations", r, "services"]) => {
                 let hook = self.run.lock().unwrap().on_create.take();
@@ -74,6 +85,12 @@ impl World {
                 let name = query.strip_prefix("serviceId=").unwrap_or_default();
                 let body = req.body.clone().unwrap_or_default();
                 let mut w = self.run.lock().unwrap();
+                if w.require_invoker_iam && body["invokerIamDisabled"] == true {
+                    return json_reply(
+                        400,
+                        &json!({"error": {"code": 400, "status": "FAILED_PRECONDITION", "message": "Violation in CreateServiceRequest.service.invoker_iam_disabled: Organization Policy constraint constraints/run.managed.requireInvokerIam violated for projects/1"}}),
+                    );
+                }
                 if w.services.iter().any(|s| s.name == name && s.region == *r) {
                     return json_reply(
                         409,
@@ -85,6 +102,7 @@ impl World {
                     region: (*r).to_owned(),
                     name: name.to_owned(),
                     labels: body["labels"].clone(),
+                    iam: body["invokerIamDisabled"] != true,
                 });
                 w.next_op += 1;
                 let op = format!("projects/{p}/locations/{r}/operations/op-{}", w.next_op);
@@ -137,6 +155,17 @@ impl World {
             Some(_) => "wrong",
         };
         w.log.push(format!("app {path} {who}"));
+        let iam = w
+            .services
+            .iter()
+            .any(|s| s.iam && req.url.starts_with(&uri(&s.name)));
+        let identity = req
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("x-serverless-authorization"));
+        if iam && !identity {
+            return HttpResponse::new(403, "{}");
+        }
         let status = match (path, who) {
             ("/health", _) | (_, "key") => 200,
             (_, "anon") if w.open_endpoint => 200,
@@ -159,6 +188,7 @@ impl World {
             region: REGION.to_owned(),
             name: name.to_owned(),
             labels,
+            iam: false,
         });
     }
 
@@ -241,7 +271,7 @@ fn run_record(project: &Project) -> Option<amicu_gcp::cloudrun::CloudRunRecord> 
 fn applied() -> (TempDir, Project, Rig) {
     let td = TempDir::new();
     let project = project_from(&td, &config("", SCALING));
-    let rig = rig();
+    let rig = super::rig();
     apply_with(&project, &rig).unwrap();
     (td, project, rig)
 }
@@ -250,7 +280,7 @@ fn applied() -> (TempDir, Project, Rig) {
 fn apply_records_the_service_ahead_stores_its_key_and_verifies_the_endpoint() {
     let td = TempDir::new();
     let project = project_from(&td, &config("", SCALING));
-    let rig = rig();
+    let rig = super::rig();
     let ahead: Arc<Mutex<Option<StopRecord>>> = Arc::default();
     let secrets_before: Arc<Mutex<Vec<String>>> = Arc::default();
     {
@@ -354,7 +384,7 @@ fn a_crash_between_the_record_and_the_create_is_cleaned_up_by_destroy() {
     for created in [false, true] {
         let td = TempDir::new();
         let project = project_from(&td, &config("", SCALING));
-        let rig = rig();
+        let rig = super::rig();
         let at_create: Arc<Mutex<Option<LocalState>>> = Arc::default();
         {
             let slot = Arc::clone(&at_create);
@@ -385,7 +415,7 @@ fn a_crash_between_the_record_and_the_create_is_cleaned_up_by_destroy() {
 fn a_failed_exposure_check_deletes_the_service_and_secrets_this_run_created() {
     let td = TempDir::new();
     let project = project_from(&td, &config("", SCALING));
-    let rig = rig();
+    let rig = super::rig();
     rig.gcp.world.run.lock().unwrap().open_endpoint = true;
     let err = apply_with(&project, &rig).unwrap_err().to_string();
     assert!(err.contains("failed its exposure check"), "{err}");
@@ -393,8 +423,13 @@ fn a_failed_exposure_check_deletes_the_service_and_secrets_this_run_created() {
     assert!(err.contains("were deleted"), "{err}");
     assert_eq!(rig.gcp.world.service_names(), Vec::<String>::new());
     assert_eq!(rig.gcp.world.secret_ids(), Vec::<String>::new());
-    // The record stays until a later run confirms the stop.
-    assert!(run_record(&project).is_some());
+    // The record stays, with the deployment pending, until a later run
+    // confirms the stop; refresh skips a pending deployment.
+    let record = run_record(&project).unwrap();
+    assert!(!record.secrets_unwritten);
+    let (r, state) = refresh(&project, &rig);
+    assert_eq!(r, crate::refresh::Refresh::default());
+    assert!(state.pending.iter().any(|d| d.as_str() == DEP));
     destroy(&project, &rig).unwrap();
     assert_eq!(run_record(&project), None);
 }
@@ -502,6 +537,10 @@ fn plan_shows_the_cloud_run_service_its_instance_scaling_and_price() {
     );
     assert!(text.contains("min 0 \u{b7} max 2"), "{text}");
     assert!(text.contains("scale to zero \u{b7} ~$0.67/hr"), "{text}");
+    assert!(
+        text.contains("even one without the api_key, can start a billed instance (at most 2)"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -514,7 +553,7 @@ fn fields_cloud_run_cannot_honour_stop_apply_before_anything_is_written() {
             "scaling {\n    min_replicas = 1\n  }",
         ),
     );
-    let rig = rig();
+    let rig = super::rig();
     let mut out = Vec::new();
     let code = crate::commands::apply::run_with(
         &project,
@@ -640,10 +679,151 @@ fn the_preflight_reads_cloud_run_not_compute_engine_and_needs_credentials() {
 
     let td = TempDir::new();
     let project = project_from(&td, &config("", SCALING));
-    let mut rig = rig();
+    let mut rig = super::rig();
     rig.gcp.no_credentials = true;
     let err = apply_with(&project, &rig).unwrap_err().to_string();
     assert!(err.contains("no Google Cloud credentials found"), "{err}");
     assert_eq!(stops_for(&project, DEP).len(), 0);
     assert_eq!(rig.gcp.world.run_log(), Vec::<String>::new());
+}
+
+#[test]
+fn orphans_treat_a_disabled_cloud_run_api_as_no_services() {
+    use crate::commands::orphans::{Env, GcpOpsListing, Platform, Tracked, discover};
+    let (_td, project, rig) = applied();
+    rig.gcp.world.run.lock().unwrap().api_disabled = true;
+    let state = project.load_state().unwrap();
+    let report = discover(
+        &Env {
+            platform: Platform::Other,
+            exec: &amicu_llamacpp::HostExec,
+            modal: &NoModalApps,
+            runpod: &NoRunPodListing,
+            gcp: &GcpOpsListing(&rig.gcp),
+            agents_dir: None,
+        },
+        &Tracked::from_state(state.as_ref()),
+    );
+    let gcp = report.sources.iter().find(|s| s.name == "gcp").unwrap();
+    assert_eq!(gcp.status, "ok", "{:?}", gcp.detail);
+}
+
+#[test]
+fn preflight_stops_before_any_write_without_secret_manager_or_act_as() {
+    let td = TempDir::new();
+    let project = project_from(&td, &config("", SCALING));
+    let rig = super::rig();
+    rig.gcp.world.disable_secret_manager();
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(
+        err.contains("gcloud services enable secretmanager.googleapis.com"),
+        "{err}"
+    );
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+
+    let td = TempDir::new();
+    let project = project_from(&td, &config("", SCALING));
+    let rig = super::rig();
+    rig.gcp.world.state.lock().unwrap().act_as_denied = true;
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("roles/iam.serviceAccountUser"), "{err}");
+    assert!(err.contains("Cloud Run service"), "{err}");
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+    assert!(
+        rig.gcp.world.run_log().iter().all(|l| l.starts_with("Get")),
+        "nothing written"
+    );
+
+    let td = TempDir::new();
+    let project = project_from(&td, &config("", SCALING));
+    let rig = super::rig();
+    rig.gcp.world.run.lock().unwrap().api_disabled = true;
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(
+        err.contains("gcloud services enable run.googleapis.com"),
+        "{err}"
+    );
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn a_start_that_never_wrote_a_secret_is_released_when_secret_manager_is_disabled() {
+    let td = TempDir::new();
+    let project = project_from(&td, &config("", SCALING));
+    let rig = super::rig();
+    let off = rig.gcp.world.sm_disabled.clone();
+    *rig.gcp.world.on_secret_create.lock().unwrap() = Some(Box::new(move || {
+        off.store(true, std::sync::atomic::Ordering::SeqCst);
+    }));
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("gcloud services enable"), "{err}");
+    assert_eq!(rig.gcp.world.service_names(), Vec::<String>::new());
+    assert!(run_record(&project).unwrap().secrets_unwritten);
+    destroy(&project, &rig).unwrap();
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn written_secrets_and_a_disabled_secret_manager_keep_the_record() {
+    let (_td, project, rig) = applied();
+    assert!(!run_record(&project).unwrap().secrets_unwritten);
+    rig.gcp.world.disable_secret_manager();
+    assert!(destroy(&project, &rig).is_err());
+    assert!(run_record(&project).is_some(), "a secret may still exist");
+}
+
+#[test]
+fn the_require_invoker_iam_policy_is_named_with_the_fix() {
+    let td = TempDir::new();
+    let project = project_from(&td, &config("", SCALING));
+    let rig = super::rig();
+    rig.gcp.world.run.lock().unwrap().require_invoker_iam = true;
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(
+        err.contains("constraints/run.managed.requireInvokerIam"),
+        "{err}"
+    );
+    assert!(err.contains("access = \"iam\""), "{err}");
+    assert_eq!(
+        rig.gcp.world.secret_ids(),
+        Vec::<String>::new(),
+        "cleaned up"
+    );
+
+    let td = TempDir::new();
+    let project = project_from(&td, &config("access = \"iam\"", SCALING));
+    apply_with(&project, &rig).unwrap();
+}
+
+#[test]
+fn iam_access_keeps_the_invoker_check_and_verifies_anonymous_refusal() {
+    let td = TempDir::new();
+    let project = project_from(&td, &config("access = \"iam\"", SCALING));
+    let rig = super::rig();
+    apply_with(&project, &rig).unwrap();
+    let body = rig.gcp.world.run.lock().unwrap().bodies[0].clone();
+    assert_eq!(body["invokerIamDisabled"], false);
+    let log = rig.gcp.world.run_log();
+    assert!(log.contains(&"app /v1/models anon".to_owned()), "{log:?}");
+    assert!(!log.iter().any(|l| l.starts_with("app /health")), "{log:?}");
+    let td = TempDir::new();
+    let fresh = project_from(&td, &config("access = \"iam\"", SCALING));
+    let mut out = Vec::new();
+    crate::commands::plan::run_with(&fresh, OutputFormat::Human, &mut out, |_| true).unwrap();
+    let text = utf8(out);
+    assert!(text.contains("IAM identity token and api_key"), "{text}");
+    assert!(!text.contains("can start a billed instance"), "{text}");
+}
+
+#[test]
+fn memory_above_the_gpu_minimum_is_honoured() {
+    let td = TempDir::new();
+    let config = config("", SCALING).replace("memory = \"16GiB\"", "memory = \"32GiB\"");
+    let project = project_from(&td, &config);
+    let rig = super::rig();
+    apply_with(&project, &rig).unwrap();
+    let body = rig.gcp.world.run.lock().unwrap().bodies[0].clone();
+    let limits = &body["template"]["containers"][0]["resources"]["limits"];
+    assert_eq!(limits["memory"], "32Gi");
+    assert_eq!(limits["cpu"], "4");
 }

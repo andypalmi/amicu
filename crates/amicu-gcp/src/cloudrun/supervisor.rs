@@ -6,7 +6,8 @@
 //! service's own region, before the service exists; the service's runtime
 //! account reads them as `VLLM_API_KEY` and `HF_TOKEN`. The service is public
 //! ([`ServiceAccess::PublicApiKey`]): vLLM's key is the only guard on `/v1/*`,
-//! behind Google-managed TLS on the `*.run.app` URL.
+//! behind Google-managed TLS on the `*.run.app` URL. With
+//! [`ServiceAccess::IamProtected`] Cloud Run's IAM check stays on as well.
 
 use std::fmt;
 use std::sync::Arc;
@@ -60,6 +61,11 @@ pub struct CloudRunRecord {
     /// have been created).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<String>,
+    /// Proof that this deployment's first start failed before any secret was
+    /// written (its first Secret Manager call found the API disabled). Only
+    /// then does a disabled API count as "no secrets" at teardown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub secrets_unwritten: bool,
 }
 
 impl CloudRunRecord {
@@ -91,6 +97,10 @@ pub struct CloudRunLaunch {
     pub max_instances: u32,
     /// Requests one instance serves at once; `None` keeps the spec default.
     pub concurrency: Option<u32>,
+    /// CPUs and memory (GiB) per instance; `None` is the GPU's minimum.
+    pub cpu: Option<u32>,
+    pub memory_gib: Option<u32>,
+    pub access: ServiceAccess,
     pub impersonate: Option<String>,
 }
 
@@ -124,6 +134,7 @@ impl CloudRunLaunch {
             owner: self.owner(),
             impersonate: self.impersonate.clone(),
             secrets,
+            secrets_unwritten: false,
         })
     }
 
@@ -152,7 +163,9 @@ impl CloudRunLaunch {
         if let Some(c) = self.concurrency {
             spec.concurrency = c;
         }
-        spec.access = ServiceAccess::PublicApiKey;
+        spec.cpu = self.cpu;
+        spec.memory_gib = self.memory_gib;
+        spec.access = self.access;
         Ok(spec)
     }
 }
@@ -186,6 +199,7 @@ pub struct CloudRunSupervisor {
     recorded: Option<CloudRunRecord>,
     progress: Option<Sink>,
     created: Arc<AtomicBool>,
+    secrets_touched: Arc<AtomicBool>,
 }
 
 impl fmt::Debug for CloudRunSupervisor {
@@ -196,12 +210,23 @@ impl fmt::Debug for CloudRunSupervisor {
     }
 }
 
+/// The org policy that forbids `invokerIamDisabled`.
+const REQUIRE_INVOKER_IAM: &str = "constraints/run.managed.requireInvokerIam";
+
 fn err(e: &GcpError) -> LlamaCppError {
+    let text = e.to_string();
     let hint = match e {
         GcpError::NotOwned { .. } => "; amicu leaves resources it did not create alone",
+        _ if text.contains("requireInvokerIam") => {
+            return LlamaCppError::Supervisor(format!(
+                "the organization policy `{REQUIRE_INVOKER_IAM}` forbids a public Cloud Run \
+                 service; set `access = \"iam\"` in the `gcp {{}}` block (callers then send a \
+                 Google identity token too) or ask an org admin to exempt the project: {text}"
+            ));
+        }
         _ => "",
     };
-    LlamaCppError::Supervisor(format!("{e}{hint}"))
+    LlamaCppError::Supervisor(format!("{text}{hint}"))
 }
 
 fn unsupported(what: &str) -> LlamaCppError {
@@ -221,6 +246,7 @@ impl CloudRunSupervisor {
             recorded: None,
             progress: None,
             created: Arc::default(),
+            secrets_touched: Arc::default(),
         }
     }
 
@@ -255,6 +281,26 @@ impl CloudRunSupervisor {
     #[must_use]
     pub fn created(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.created)
+    }
+
+    /// Set once a Secret Manager secret may have been written by this run.
+    #[must_use]
+    pub fn secrets_touched(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.secrets_touched)
+    }
+
+    /// The record as this run leaves it: `secrets_unwritten` is set only when
+    /// this run reached the secrets step, replaced no earlier record and never
+    /// wrote a secret.
+    ///
+    /// # Errors
+    /// See [`CloudRunLaunch::record`].
+    pub fn record(&self) -> Result<CloudRunRecord, GcpError> {
+        let mut r = self.launch.record()?;
+        r.secrets_unwritten = self.recorded.is_none()
+            && self.created.load(Ordering::SeqCst)
+            && !self.secrets_touched.load(Ordering::SeqCst);
+        Ok(r)
     }
 
     fn say(&self, line: &str) {
@@ -383,7 +429,7 @@ impl CloudRunSupervisor {
         for (kind, value) in items {
             let id = secret_id(&record.service, kind).map_err(|e| err(&e))?;
             async {
-                create_secret(
+                let created = create_secret(
                     &self.client,
                     &l.project,
                     &id,
@@ -391,7 +437,21 @@ impl CloudRunSupervisor {
                     &record.owner,
                     &replication,
                 )
-                .await?;
+                .await;
+                // A first create refused because the API is disabled proves
+                // nothing was written; anything else may have written.
+                match created {
+                    Err(e)
+                        if e.is_service_disabled()
+                            && !self.secrets_touched.load(Ordering::SeqCst) =>
+                    {
+                        return Err(e);
+                    }
+                    r => {
+                        self.secrets_touched.store(true, Ordering::SeqCst);
+                        r?;
+                    }
+                }
                 add_version(&self.client, &l.project, &id, &record.owner, value).await?;
                 grant_accessor(
                     &self.client,
@@ -481,16 +541,21 @@ impl ProcessSupervisor for CloudRunSupervisor {
                 record.service
             ))
         })?;
-        self.say(&format!("service ready at {uri}; waiting for vLLM"));
-        let probe = self
-            .probe
-            .clone()
-            .unwrap_or_else(|| Arc::new(ReqwestTransport::new()));
-        let key = validate_api_key_value(&startup.api_key)
-            .map_err(|why| LlamaCppError::Supervisor(format!("the deployment's api_key {why}")))?;
-        wait_ready(&probe, &uri, key, self.timing.health)
-            .await
-            .map_err(|e| err(&e))?;
+        // Under IAM amicu holds no identity token for the URL; the ready
+        // revision already passed the `/health` startup probe.
+        if spec.access == ServiceAccess::PublicApiKey {
+            self.say(&format!("service ready at {uri}; waiting for vLLM"));
+            let probe = self
+                .probe
+                .clone()
+                .unwrap_or_else(|| Arc::new(ReqwestTransport::new()));
+            let key = validate_api_key_value(&startup.api_key).map_err(|why| {
+                LlamaCppError::Supervisor(format!("the deployment's api_key {why}"))
+            })?;
+            wait_ready(&probe, &uri, key, self.timing.health)
+                .await
+                .map_err(|e| err(&e))?;
+        }
         Ok(RuntimeHandle {
             id: record.service.clone(),
             deployment: plan.deployment.clone(),
@@ -537,7 +602,7 @@ impl ProcessSupervisor for CloudRunSupervisor {
     }
 
     async fn stop(&self, _handle: &RuntimeHandle) -> Result<(), LlamaCppError> {
-        let record = self.launch.record().map_err(|e| err(&e))?;
+        let record = self.record().map_err(|e| err(&e))?;
         teardown(&self.client, &record, self.timing.poll)
             .await
             .map(|_| ())
@@ -552,8 +617,10 @@ impl ProcessSupervisor for CloudRunSupervisor {
 ///
 /// # Errors
 /// [`GcpError::NotOwned`] (nothing deleted) for a service or secret of that
-/// name that is not ours, or an API error. The secrets are left in place when
-/// the service could not be removed.
+/// name that is not ours, or an API error. A disabled Secret Manager API means
+/// "no secrets" only when the record proves none was written
+/// ([`CloudRunRecord::secrets_unwritten`]). The secrets are left in place
+/// when the service could not be removed.
 pub async fn teardown(
     client: &Arc<GcpClient>,
     record: &CloudRunRecord,
@@ -564,7 +631,13 @@ pub async fn teardown(
         .delete(&record.service_record())
         .await?;
     for id in &record.secrets {
-        delete_secret(client, &record.project, id, &record.owner).await?;
+        match delete_secret(client, &record.project, id, &record.owner).await {
+            Ok(_) => {}
+            // Disabling the API does not delete secrets, so only the record's
+            // proof that none was ever written counts as absence.
+            Err(e) if e.is_service_disabled() && record.secrets_unwritten => continue,
+            Err(e) => return Err(e),
+        }
         if delete_secret(client, &record.project, id, &record.owner).await?
             != SecretDelete::AlreadyGone
         {
@@ -658,6 +731,9 @@ mod tests {
             service_account: "run@my-proj.iam.gserviceaccount.com".into(),
             max_instances: 2,
             concurrency: Some(4),
+            cpu: None,
+            memory_gib: Some(32),
+            access: ServiceAccess::PublicApiKey,
             impersonate: None,
         }
     }
@@ -701,6 +777,7 @@ mod tests {
         assert_eq!(spec.hf_token.as_ref().unwrap().secret, r.secrets[1]);
         assert_eq!(spec.max_instances, 2);
         assert_eq!(spec.concurrency, 4);
+        assert_eq!(spec.memory_gib, Some(32));
         assert!(!spec.zonal_redundancy);
         let service = CloudRunLifecycle::new(Arc::new(GcpClient::new(Arc::new(NoTokens))))
             .prepare(&spec)

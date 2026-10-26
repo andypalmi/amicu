@@ -123,6 +123,14 @@ fn profile_problems(graph: &Graph, hw: &HardwareProfile) -> Vec<(DiagnosticCode,
         return out;
     };
     out.extend(compute_problems(hw, &settings, &acc.model, acc.count));
+    if settings.access.is_some() {
+        out.push((
+            catalog::CAP_GCP_BACKEND_UNSUPPORTED,
+            "`access` applies to `backend = \"cloud_run\"` only; a VM is limited by \
+             `allowed_source_cidrs` instead"
+                .to_owned(),
+        ));
+    }
     out
 }
 
@@ -192,6 +200,38 @@ fn cloud_run_scaling_problems(
     out
 }
 
+/// The profile's `memory` and `cpu` against the GPU's Cloud Run minimum.
+fn cloud_run_size_problems(
+    hw: &HardwareProfile,
+    gpu: &amicu_gcp::catalog::CloudRunGpu,
+) -> Vec<(DiagnosticCode, String)> {
+    const GIB: u64 = 1 << 30;
+    let mut out = Vec::new();
+    if hw.memory.bytes() < u64::from(gpu.min_memory_gib) * GIB {
+        out.push((
+            catalog::CAP_GCP_SETTINGS_INVALID,
+            format!(
+                "`memory` is {}, below Cloud Run's minimum of {} GiB for {}; set at least \
+                 \"{}GiB\"",
+                hw.memory.human(),
+                gpu.min_memory_gib,
+                gpu.gpu,
+                gpu.min_memory_gib
+            ),
+        ));
+    }
+    if let Some(cpu) = hw.cpu.as_ref().filter(|c| c.cores < gpu.min_vcpus) {
+        out.push((
+            catalog::CAP_GCP_SETTINGS_INVALID,
+            format!(
+                "`cpu.cores` is {}, below Cloud Run's minimum of {} for {}",
+                cpu.cores, gpu.min_vcpus, gpu.gpu
+            ),
+        ));
+    }
+    out
+}
+
 fn cloud_run_problems(
     graph: &Graph,
     hw: &HardwareProfile,
@@ -204,6 +244,7 @@ fn cloud_run_problems(
         ("zone", s.zone.is_some()),
         ("machine_type", s.machine_type.is_some()),
         ("provisioning", s.provisioning != GcpProvisioning::Spot),
+        ("idle_shutdown", s.idle_shutdown_secs.is_some()),
         ("max_run_duration", s.max_run_duration_secs.is_some()),
         ("boot_disk_gb", s.boot_disk_gb.is_some()),
         ("allowed_source_cidrs", !s.allowed_source_cidrs.is_empty()),
@@ -248,6 +289,7 @@ fn cloud_run_problems(
         ));
         return out;
     };
+    out.extend(cloud_run_size_problems(hw, gpu));
     if acc.count != 1 {
         out.push((
             invalid,
@@ -599,14 +641,43 @@ resource "deployment" "d" {{
     fn a_cheap_cloud_run_l4_profile_has_no_diagnostics() {
         let g = graph("gcp", EU, "l4", RUN, "scaling {\n max_replicas = 3\n }");
         assert_eq!(codes(&g), Vec::<String>::new());
-        let g = graph(
+        let mut g = graph(
             "gcp",
             r#"region = "us-central1""#,
             "rtx-pro-6000",
             RUN,
             "scaling {\n min_replicas = 0\n target_concurrency = 4\n }",
         );
+        assert_eq!(
+            codes(&g),
+            ["AMICU-CAP-016"],
+            "32 GiB is below the 80 GiB minimum"
+        );
+        assert!(gcp_diagnostics(&g)[0].message.contains("80GiB"));
+        g.hardware_profiles[0].memory = amicu_core::ByteSize::from_bytes(80 << 30);
         assert_eq!(codes(&g), Vec::<String>::new());
+    }
+
+    #[test]
+    fn access_is_cloud_run_only_and_idle_shutdown_is_compute_only() {
+        let g = graph("gcp", EU, "l4", &format!("{RUN}\n access = \"iam\""), "");
+        assert_eq!(codes(&g), Vec::<String>::new());
+        let g = graph(
+            "gcp",
+            EU,
+            "t4",
+            "project = \"my-proj\"\n machine_type = \"n1-standard-4\"\n access = \"iam\"",
+            "",
+        );
+        assert_eq!(codes(&g), ["AMICU-CAP-019"]);
+        let g = graph(
+            "gcp",
+            EU,
+            "l4",
+            &format!("{RUN}\n idle_shutdown = \"30m\""),
+            "",
+        );
+        assert_eq!(codes(&g), ["AMICU-CAP-019"]);
     }
 
     #[test]

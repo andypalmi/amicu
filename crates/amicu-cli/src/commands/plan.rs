@@ -468,19 +468,32 @@ fn write_cloud_run(
         || "named on first apply".to_owned(),
         |p| amicu_gcp::cloudrun::service_name(p, item.deployment.as_str()),
     );
+    let iam = hw.gcp.as_ref().and_then(|g| g.access) == Some(amicu_core::resource::GcpAccess::Iam);
+    let access = if iam {
+        "IAM identity token and api_key"
+    } else {
+        "public, api_key only"
+    };
     writeln!(
         out,
-        "      service:  {service} (Cloud Run, {region}, public with api_key)"
+        "      service:  {service} (Cloud Run, {region}, {access})"
     )?;
     let gpu = hw
         .accelerator
         .as_ref()
         .and_then(|a| catalog.cloud_run_gpu(&a.model));
     if let Some(g) = gpu {
+        let memory = u32::try_from(hw.memory.bytes().div_ceil(1 << 30))
+            .unwrap_or(u32::MAX)
+            .max(g.min_memory_gib);
+        let cpu = hw
+            .cpu
+            .as_ref()
+            .map_or(g.min_vcpus, |c| c.cores.max(g.min_vcpus));
         writeln!(
             out,
-            "      instance: 1x {} \u{b7} {} vCPU \u{b7} {} GiB",
-            g.gpu, g.min_vcpus, g.min_memory_gib
+            "      instance: 1x {} \u{b7} {cpu} vCPU \u{b7} {memory} GiB",
+            g.gpu
         )?;
     }
     let scaling = graph
@@ -489,24 +502,28 @@ fn write_cloud_run(
         .find(|d| d.id == item.deployment)
         .and_then(|d| d.scaling.clone())
         .unwrap_or_default();
+    let max = scaling.max_replicas.unwrap_or(1);
     let concurrency = scaling.target_concurrency.map_or_else(String::new, |c| {
         format!(" \u{b7} {c} requests per instance")
     });
-    writeln!(
-        out,
-        "      scaling:  min 0 \u{b7} max {}{concurrency}",
-        scaling.max_replicas.unwrap_or(1)
-    )?;
-    let price = gpu.and_then(|g| catalog.cloud_run_price(g.gpu, region, false));
-    match price {
-        Some(p) => writeln!(
+    writeln!(out, "      scaling:  min 0 \u{b7} max {max}{concurrency}")?;
+    let price = gpu
+        .and_then(|g| catalog.cloud_run_price(g.gpu, region, false))
+        .map_or_else(String::new, |p| {
+            format!(
+                " \u{b7} ~${:.2}/hr GPU per running instance (CPU and memory extra)",
+                p.usd_per_gpu_hour
+            )
+        });
+    writeln!(out, "      billing:  scale to zero{price}")?;
+    if !iam {
+        writeln!(
             out,
-            "      billing:  scale to zero \u{b7} ~${:.2}/hr GPU while an instance runs (CPU \
-             and memory extra)",
-            p.usd_per_gpu_hour
-        ),
-        None => writeln!(out, "      billing:  scale to zero"),
+            "      note:     any request, even one without the api_key, can start a billed \
+             instance (at most {max}); `access = \"iam\"` lets only identity-token callers in"
+        )?;
     }
+    Ok(())
 }
 
 /// The hardware profile of `deployment` when it runs on RunPod.

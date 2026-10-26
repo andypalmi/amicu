@@ -11,9 +11,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use amicu_core::graph::Graph;
 use amicu_core::id::DeploymentId;
-use amicu_core::resource::{GcpBackend, HardwareProfile};
+use amicu_core::resource::{GcpAccess, GcpBackend, HardwareProfile};
 use amicu_core::secret::SecretResolver;
-use amicu_gcp::cloudrun::{CloudRunLaunch, CloudRunRecord, CloudRunSupervisor, teardown};
+use amicu_gcp::cloudrun::{
+    CloudRunLaunch, CloudRunRecord, CloudRunSupervisor, ServiceAccess, teardown,
+};
 use amicu_llamacpp::Catalog;
 use amicu_runtime::{
     EndpointExposure, GatewayAuth, LaunchPlan, RuntimeAdapter, RuntimeHandle, RuntimeKind,
@@ -29,6 +31,10 @@ pub(super) struct CloudRunStart {
     /// The write-ahead stop record.
     pub stop: StopRecord,
     created: Arc<AtomicBool>,
+    secrets_touched: Arc<AtomicBool>,
+    /// No record of this service was in state before this run.
+    fresh: bool,
+    public: bool,
 }
 
 /// Whether `hardware` selects Cloud Run.
@@ -89,6 +95,11 @@ pub(crate) fn launch_for(
         )));
     }
     let scaling = deployment.scaling.clone().unwrap_or_default();
+    let min = amicu_gcp::GcpCatalog::new()
+        .cloud_run_gpu(&gpu)
+        .ok_or_else(|| fail(&format!("`{gpu}` is not offered on Cloud Run")))?;
+    let memory_gib = u32::try_from(hardware.memory.bytes().div_ceil(1 << 30)).unwrap_or(u32::MAX);
+    let cores = hardware.cpu.as_ref().map(|c| c.cores);
     Ok(CloudRunLaunch {
         project,
         region,
@@ -98,47 +109,48 @@ pub(crate) fn launch_for(
         service_account,
         max_instances: scaling.max_replicas.unwrap_or(1),
         concurrency: scaling.target_concurrency,
+        cpu: cores.filter(|c| *c > min.min_vcpus),
+        memory_gib: Some(memory_gib).filter(|m| *m > min.min_memory_gib),
+        access: match s.access.unwrap_or_default() {
+            GcpAccess::Public => ServiceAccess::PublicApiKey,
+            GcpAccess::Iam => ServiceAccess::IamProtected,
+        },
         impersonate: s.impersonate_service_account,
     })
 }
 
-/// Checks the credentials, the project and the Cloud Run API of every Cloud
-/// Run launch with one cheap read per project and region, before anything is
-/// written.
+/// Runs [`crate::gcp_ops::preflight_cloud_run`] once per project, region and
+/// identity of the Cloud Run launches, before anything is written.
 pub(super) async fn preflight(
     result: &crate::planner::PlanResult,
     graph: &Graph,
     catalog: &dyn Catalog,
     env: &Env<'_>,
 ) -> Result<(), CliError> {
-    let mut checked: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut checked: Vec<(String, String, Option<String>, String)> = Vec::new();
     for item in result
         .items
         .iter()
         .filter(|i| i.launch.is_some() && deployment_is_cloud_run(graph, &i.deployment))
     {
         let l = launch_for(graph, catalog, &item.deployment, "preflight")?;
-        let key = (l.project.clone(), l.region.clone(), l.impersonate.clone());
+        let key = (
+            l.project.clone(),
+            l.region.clone(),
+            l.impersonate.clone(),
+            l.service_account.clone(),
+        );
         if checked.contains(&key) {
             continue;
         }
-        let client = env.gcp.client(l.impersonate.as_deref())?;
-        let url = format!(
-            "{}/projects/{}/locations/{}/services?pageSize=1",
-            amicu_gcp::RUN_BASE_URL,
-            l.project,
-            l.region
-        );
-        client
-            .request(amicu_providers::HttpMethod::Get, &url, None)
-            .await
-            .map_err(|e| {
-                CliError::Message(format!(
-                    "Google Cloud preflight for Cloud Run in project {} ({}) failed; nothing \
-                     was started: {e}",
-                    l.project, l.region
-                ))
-            })?;
+        crate::gcp_ops::preflight_cloud_run(
+            env.gcp,
+            &l.project,
+            &l.region,
+            l.impersonate.as_deref(),
+            &l.service_account,
+        )
+        .await?;
         checked.push(key);
     }
     Ok(())
@@ -171,6 +183,17 @@ pub(super) async fn prepare(
         )));
     }
     let spec = launch_for(graph, catalog, id, &progress.project_id)?;
+    let public = spec.access == ServiceAccess::PublicApiKey;
+    if public {
+        let _ = writeln!(
+            std::io::stderr(),
+            "note: '{id}': the Cloud Run service is public; any request, even one without the \
+             api_key, can start a billed GPU instance (up to {} at a time) until it scales back \
+             to zero. Set `access = \"iam\"` in its `gcp {{}}` block so only callers with a \
+             Google identity token reach it",
+            spec.max_instances
+        );
+    }
     let client = env.gcp.client(spec.impersonate.as_deref())?;
     let new_record = spec
         .record()
@@ -179,6 +202,10 @@ pub(super) async fn prepare(
         .with_probe_transport(env.gcp.service_transport())
         .with_timing(env.gcp.run_timing())
         .with_progress(env.progress);
+    let fresh = !progress
+        .stops
+        .iter()
+        .any(|r| r.backend == Backend::CloudRun && r.identity == new_record.service);
     let prior = progress
         .stops
         .iter()
@@ -202,6 +229,9 @@ pub(super) async fn prepare(
     let start = CloudRunStart {
         stop: StopRecord::cloud_run(id, new_record),
         created: supervisor.created(),
+        secrets_touched: supervisor.secrets_touched(),
+        fresh,
+        public,
     };
     Ok((supervisor, start))
 }
@@ -260,12 +290,27 @@ pub(super) fn write_ahead(stops: &mut Vec<StopRecord>, new: &StopRecord) -> Resu
     Ok(())
 }
 
-/// After a failed start or exposure check: delete what this run created
-/// (nothing was serving). Returns a note for the error. The record stays
-/// until a later apply or destroy confirms the stop.
-pub(super) async fn failed_start(start: &CloudRunStart, adapter: &dyn RuntimeAdapter) -> String {
+/// After a failed start or exposure check: record that no secret was ever
+/// written when this run proves it, then delete what this run created
+/// (nothing was serving). Returns a note for the error. The record stays, and
+/// the deployment stays pending, until a later apply or destroy confirms the
+/// stop.
+pub(super) async fn failed_start(
+    start: &CloudRunStart,
+    adapter: &dyn RuntimeAdapter,
+    stops: &mut [StopRecord],
+) -> String {
     if !start.created.load(Ordering::SeqCst) {
         return String::new();
+    }
+    if start.fresh
+        && !start.secrets_touched.load(Ordering::SeqCst)
+        && let Some(c) = stops
+            .iter_mut()
+            .find(|r| r.same_target(&start.stop))
+            .and_then(|r| r.cloud_run.as_mut())
+    {
+        c.secrets_unwritten = true;
     }
     let id = start.stop.identity.clone();
     match adapter.stop(&handle(&start.stop.deployment, &id)).await {
@@ -281,14 +326,25 @@ pub(super) async fn failed_start(start: &CloudRunStart, adapter: &dyn RuntimeAda
     }
 }
 
-/// The post-deploy check: an anonymous request is refused and the deployment's
-/// key is accepted.
+/// The post-deploy check: an anonymous request is refused and, on a public
+/// service, the deployment's key is accepted.
 pub(super) async fn verify(
+    start: &CloudRunStart,
     handle: &RuntimeHandle,
     launch: &LaunchPlan,
     resolver: &dyn SecretResolver,
     gcp: &dyn GcpOps,
 ) -> Result<(), String> {
+    if !start.public {
+        let _ = writeln!(
+            std::io::stderr(),
+            "verifying that {} refuses requests without a Google identity token ...",
+            handle.endpoint
+        );
+        return super::report_verify(
+            crate::gcp_ops::verify_service_refuses(gcp, &handle.endpoint).await,
+        );
+    }
     let Some(key_ref) = &launch.api_key else {
         return Err("the service is public but the deployment declares no `api_key`".to_owned());
     };
@@ -341,6 +397,7 @@ mod tests {
                 owner: "owner".to_owned(),
                 impersonate: None,
                 secrets: secrets.iter().map(|s| (*s).to_owned()).collect(),
+                secrets_unwritten: false,
             },
         )
     }

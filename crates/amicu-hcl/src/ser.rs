@@ -363,6 +363,9 @@ fn hardware_block(h: &HardwareProfile) -> Block {
         if let Some(v) = &g.impersonate_service_account {
             gb = gb.add_attribute(("impersonate_service_account", v.as_str()));
         }
+        if let Some(v) = &g.access {
+            gb = gb.add_attribute(("access", variant(v)));
+        }
         body = body.add_block(gb.build());
     }
     resource("hardware_profile", h.id.as_str(), body.build())

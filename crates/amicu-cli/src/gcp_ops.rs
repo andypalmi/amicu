@@ -109,6 +109,39 @@ impl GcpOps for RealGcp {
     }
 }
 
+/// The post-deploy check of an IAM-protected Cloud Run service: an anonymous
+/// request is refused. amicu holds no identity token for the service, so the
+/// key itself is not exercised. `Err` is secret-free.
+pub(crate) async fn verify_service_refuses(ops: &dyn GcpOps, endpoint: &str) -> Result<(), String> {
+    let transport = ops.service_transport();
+    let url = format!("{}{PROBE_PATH}", endpoint.trim_end_matches('/'));
+    let timing = CheckTiming::PUBLIC;
+    let deadline = tokio::time::Instant::now() + timing.reject_timeout;
+    loop {
+        match transport
+            .execute(HttpRequest::new(HttpMethod::Get, url.clone()))
+            .await
+            .map(|r| r.status)
+        {
+            Ok(401 | 403) => return Ok(()),
+            Ok(code) if (200..300).contains(&code) => {
+                return Err(format!(
+                    "{PROBE_PATH} answered an unauthenticated request ({code}); Cloud Run's IAM \
+                     check is not in force"
+                ));
+            }
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "could not confirm that {PROBE_PATH} refuses unauthenticated requests before \
+                 the deadline"
+            ));
+        }
+        tokio::time::sleep(timing.interval).await;
+    }
+}
+
 /// The exposure check of `amicu_runtime::exposure::verify_endpoint`, sent
 /// through `transport` (pinned to the VM's certificate): an anonymous request
 /// must be refused, then `key` must be accepted. Unreachable or not-ready
@@ -221,22 +254,14 @@ pub(crate) async fn preflight_compute(
         ))
     };
     if needs.secret_manager {
-        let url = format!(
-            "{}/projects/{project}/secrets?pageSize=1",
-            amicu_gcp::SECRETMANAGER_BASE_URL
-        );
-        match client.request(HttpMethod::Get, &url, None).await {
-            Err(e) if e.is_service_disabled() => {
-                return Err(fail(format!(
-                    "the Secret Manager API is not enabled; the VM's API key, Hugging Face \
-                    token and TLS key are stored there. Enable it with `gcloud services \
-                    enable secretmanager.googleapis.com --project {project}`, or set \
-                    `insecure_metadata_secrets = true` to skip it (not recommended)"
-                )));
-            }
-            Err(GcpError::PermissionDenied { .. }) | Ok(_) => {}
-            Err(e) => return Err(fail(e.to_string())),
-        }
+        check_secret_manager(
+            &client,
+            project,
+            "the VM's API key, Hugging Face token and TLS key are stored there",
+            ", or set `insecure_metadata_secrets = true` to skip it (not recommended)",
+        )
+        .await
+        .map_err(fail)?;
     }
     let url = format!(
         "{}/projects/{project}/global/networks/default",
@@ -254,9 +279,76 @@ pub(crate) async fn preflight_compute(
         Err(e) => return Err(fail(e.to_string())),
     }
     if let Some(sa) = needs.service_account {
-        check_act_as(&client, sa).await.map_err(fail)?;
+        check_act_as(&client, sa, "the VM").await.map_err(fail)?;
     }
     Ok(())
+}
+
+/// Read-only checks before a Cloud Run launch writes anything: credentials,
+/// project and the Cloud Run API (one list call in the region), the Secret
+/// Manager API, and that the caller may act as the service's runtime account
+/// (`services.create` needs `iam.serviceAccounts.actAs` on it).
+pub(crate) async fn preflight_cloud_run(
+    ops: &dyn GcpOps,
+    project: &str,
+    region: &str,
+    impersonate: Option<&str>,
+    service_account: &str,
+) -> Result<(), CliError> {
+    let client = ops.client(impersonate)?;
+    let fail = |what: String| {
+        CliError::Message(format!(
+            "Google Cloud preflight for Cloud Run in project {project} ({region}) failed; \
+             nothing was started: {what}"
+        ))
+    };
+    let url = format!(
+        "{}/projects/{project}/locations/{region}/services?pageSize=1",
+        amicu_gcp::RUN_BASE_URL
+    );
+    match client.request(HttpMethod::Get, &url, None).await {
+        Err(e) if e.is_service_disabled() => {
+            return Err(fail(format!(
+                "the Cloud Run Admin API is not enabled. Enable it with `gcloud services \
+                 enable run.googleapis.com --project {project}`"
+            )));
+        }
+        Err(e) => return Err(fail(e.to_string())),
+        Ok(_) => {}
+    }
+    check_secret_manager(
+        &client,
+        project,
+        "the service's API key and Hugging Face token are stored there",
+        "",
+    )
+    .await
+    .map_err(fail)?;
+    check_act_as(&client, service_account, "the Cloud Run service")
+        .await
+        .map_err(fail)
+}
+
+/// The Secret Manager API is enabled in `project`. A permission-denied answer
+/// is inconclusive and passes.
+async fn check_secret_manager(
+    client: &GcpClient,
+    project: &str,
+    why: &str,
+    alternative: &str,
+) -> Result<(), String> {
+    let url = format!(
+        "{}/projects/{project}/secrets?pageSize=1",
+        amicu_gcp::SECRETMANAGER_BASE_URL
+    );
+    match client.request(HttpMethod::Get, &url, None).await {
+        Err(e) if e.is_service_disabled() => Err(format!(
+            "the Secret Manager API is not enabled; {why}. Enable it with `gcloud services \
+             enable secretmanager.googleapis.com --project {project}`{alternative}"
+        )),
+        Err(GcpError::PermissionDenied { .. }) | Ok(_) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 const ACT_AS: &str = "iam.serviceAccounts.actAs";
@@ -264,7 +356,7 @@ const ACT_AS: &str = "iam.serviceAccounts.actAs";
 /// Whether the caller holds `iam.serviceAccounts.actAs` on `sa`, via
 /// `testIamPermissions` (a read: it changes nothing). Any answer other than a
 /// clear "no" passes.
-async fn check_act_as(client: &GcpClient, sa: &str) -> Result<(), String> {
+async fn check_act_as(client: &GcpClient, sa: &str, runner: &str) -> Result<(), String> {
     let url =
         format!("https://iam.googleapis.com/v1/projects/-/serviceAccounts/{sa}:testIamPermissions");
     let body = serde_json::json!({ "permissions": [ACT_AS] });
@@ -277,7 +369,7 @@ async fn check_act_as(client: &GcpClient, sa: &str) -> Result<(), String> {
                 Ok(())
             } else {
                 Err(format!(
-                    "the caller cannot act as `{sa}` ({ACT_AS}), which the VM needs to run as \
+                    "the caller cannot act as `{sa}` ({ACT_AS}), which {runner} needs to run as \
                     it. Grant `roles/iam.serviceAccountUser` on that service account to the \
                     account amicu runs as"
                 ))

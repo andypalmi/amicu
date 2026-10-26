@@ -422,19 +422,6 @@ fn cloud_run_regions() -> Vec<&'static str> {
     regions
 }
 
-/// Whether the error says the Cloud Run Admin API is switched off in the
-/// project.
-fn run_api_disabled(e: &amicu_gcp::GcpError) -> bool {
-    let amicu_gcp::GcpError::PermissionDenied { code, message, .. } = e else {
-        return false;
-    };
-    let m = message.to_ascii_lowercase();
-    code.contains("SERVICE_DISABLED")
-        || m.contains("service_disabled")
-        || (m.contains("run.googleapis.com")
-            && (m.contains("has not been used") || m.contains("is disabled")))
-}
-
 /// Like [`tolerate_secret_listing`], for Cloud Run: a project that only runs
 /// Compute Engine VMs may never have enabled the Cloud Run API.
 fn tolerate_run_listing(
@@ -443,7 +430,7 @@ fn tolerate_run_listing(
     note: &mut dyn std::io::Write,
 ) -> Result<Vec<amicu_gcp::cloudrun::OwnedService>, amicu_gcp::GcpError> {
     match listed {
-        Err(e) if run_api_disabled(&e) => Ok(Vec::new()),
+        Err(e) if e.is_service_disabled() => Ok(Vec::new()),
         Err(amicu_gcp::GcpError::PermissionDenied { .. }) => {
             let _ = writeln!(
                 note,

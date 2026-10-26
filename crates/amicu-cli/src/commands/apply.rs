@@ -1550,7 +1550,7 @@ async fn apply_all(
                         return Err(CliError::Message(format!("{e}{note}")));
                     }
                     if let Some(rs) = &run_start {
-                        let note = cloudrun::failed_start(rs, adapter).await;
+                        let note = cloudrun::failed_start(rs, adapter, &mut progress.stops).await;
                         return Err(CliError::Message(format!("{e}{note}")));
                     }
                     return Err(e.into());
@@ -1598,10 +1598,10 @@ async fn apply_all(
                     }
                 }
             } else if let Some(rs) = &run_start {
-                match cloudrun::verify(&handle, launch, resolver, env.gcp).await {
+                match cloudrun::verify(rs, &handle, launch, resolver, env.gcp).await {
                     Ok(()) => Ok(()),
                     Err(detail) => {
-                        let note = cloudrun::failed_start(rs, adapter).await;
+                        let note = cloudrun::failed_start(rs, adapter, &mut progress.stops).await;
                         Err(CliError::Message(format!(
                             "deployment '{}': endpoint {} failed its exposure check: \
                              {detail}{note}",
