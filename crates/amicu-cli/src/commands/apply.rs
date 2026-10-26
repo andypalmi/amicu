@@ -42,9 +42,11 @@ use crate::stops::{Backend, StopRecord};
 use crate::write_json;
 use amicu_engine::fingerprint::Fingerprint;
 
+mod cloudrun;
 mod gce;
 mod pod;
 
+pub(crate) use cloudrun::hardware_is_cloud_run;
 pub(crate) use pod::configured_pod;
 
 /// Recompute the plan, gate on approval, apply, and persist state.
@@ -390,7 +392,10 @@ fn derive_stop(state: &LocalState, d: &Deployment) -> StopRecord {
             Vec::new(),
         ),
         Dispatch::Host => StopRecord::host(&d.id, None),
-        Dispatch::Gce => StopRecord::gce_unrecorded(&d.id),
+        Dispatch::Gce if hardware.is_some_and(cloudrun::hardware_is_cloud_run) => {
+            StopRecord::cloud_run_unrecorded(&d.id)
+        }
+        Dispatch::Gce | Dispatch::CloudRun => StopRecord::gce_unrecorded(&d.id),
         Dispatch::Modal => {
             StopRecord::modal(&d.id, find_handle(state, &d.id).map(|h| h.id.clone()), None)
         }
@@ -914,6 +919,9 @@ enum Dispatch {
     RunPod,
     /// `provider = "gcp"` with vLLM: one Compute Engine VM.
     Gce,
+    /// `provider = "gcp"` with `backend = "cloud_run"`: one Cloud Run service.
+    /// [`dispatch_for`] never returns it; [`gcp_backend`] refines `Gce`.
+    CloudRun,
 }
 
 /// Providers `apply` can deploy to today, for the error message.
@@ -932,6 +940,15 @@ fn dispatch_for(runtime: amicu_runtime::RuntimeKind, provider: Option<&str>) -> 
         (LlamaCpp | Vllm, None) => Some(Dispatch::Host),
         (LlamaCpp | Vllm, Some(p)) if is_local_provider(p) => Some(Dispatch::Host),
         (LlamaCpp | Vllm, Some(_)) => None,
+    }
+}
+
+/// `Gce` refined by the deployment's `gcp { backend }`.
+fn gcp_backend(dispatch: Dispatch, graph: &Graph, id: &amicu_core::id::DeploymentId) -> Dispatch {
+    if dispatch == Dispatch::Gce && cloudrun::deployment_is_cloud_run(graph, id) {
+        Dispatch::CloudRun
+    } else {
+        dispatch
     }
 }
 
@@ -1218,14 +1235,19 @@ async fn apply_all(
     preflight(result, graph, env)?;
     let runpod_account = runpod_preflight(result, graph, env).await?;
     gce_preflight(result, graph, &catalog, env).await?;
+    cloudrun::preflight(result, graph, &catalog, env).await?;
 
     for item in &result.items {
         if let Some(launch) = &item.launch {
-            let dispatch = require_dispatch(
-                launch.runtime,
-                item.action.provider.as_deref(),
+            let dispatch = gcp_backend(
+                require_dispatch(
+                    launch.runtime,
+                    item.action.provider.as_deref(),
+                    &item.deployment,
+                )?,
+                graph,
                 &item.deployment,
-            )?;
+            );
             // Modal and RunPod build a per-deployment adapter; the host adapters
             // are shared.
             let remote_adapter: Box<dyn RuntimeAdapter>;
@@ -1234,6 +1256,7 @@ async fn apply_all(
             let mut deployed_app = None;
             let mut runpod = None;
             let mut gce_start = None;
+            let mut run_start = None;
             let adapter: &dyn RuntimeAdapter = match (launch.runtime, dispatch) {
                 (runtime, Dispatch::Modal) => {
                     let previous_endpoint = prior
@@ -1342,6 +1365,15 @@ async fn apply_all(
                         boxed_adapter(Box::new(catalog.clone()), runtime, Box::new(supervisor));
                     remote_adapter.as_ref()
                 }
+                (runtime, Dispatch::CloudRun) => {
+                    let (supervisor, start) =
+                        cloudrun::prepare(graph, &catalog, launch, &item.deployment, env, progress)
+                            .await?;
+                    run_start = Some(start);
+                    remote_adapter =
+                        boxed_adapter(Box::new(catalog.clone()), runtime, Box::new(supervisor));
+                    remote_adapter.as_ref()
+                }
                 (amicu_runtime::RuntimeKind::LlamaCpp, Dispatch::Host) => &llama_adapter,
                 (amicu_runtime::RuntimeKind::Vllm, Dispatch::Host) => &vllm_adapter,
             };
@@ -1368,6 +1400,11 @@ async fn apply_all(
                     .as_ref()
                     .map(|g| g.stop.clone())
                     .ok_or_else(|| CliError::Message("the VM was not prepared".to_owned()))?,
+                (Dispatch::CloudRun, _) => {
+                    run_start.as_ref().map(|r| r.stop.clone()).ok_or_else(|| {
+                        CliError::Message("the Cloud Run service was not prepared".to_owned())
+                    })?
+                }
                 (Dispatch::Modal, _) => StopRecord::modal_in(
                     &progress.project_id,
                     &item.deployment,
@@ -1439,6 +1476,8 @@ async fn apply_all(
                 // target) is stopped and confirmed first too: its record would
                 // otherwise be overwritten by the new one below.
                 stale.extend(gce::moved_records(&progress.stops, &new_stop));
+            } else if dispatch == Dispatch::CloudRun {
+                stale.extend(cloudrun::moved_records(&progress.stops, &new_stop));
             }
             for old in stale {
                 stop_record(
@@ -1466,6 +1505,8 @@ async fn apply_all(
                 }
             } else if dispatch == Dispatch::Gce {
                 gce::write_ahead(&mut progress.stops, &new_stop)?;
+            } else if dispatch == Dispatch::CloudRun {
+                cloudrun::write_ahead(&mut progress.stops, &new_stop)?;
             } else if !progress
                 .stops
                 .iter()
@@ -1508,6 +1549,10 @@ async fn apply_all(
                         let note = gce::failed_start(gs, adapter, &mut progress.stops).await;
                         return Err(CliError::Message(format!("{e}{note}")));
                     }
+                    if let Some(rs) = &run_start {
+                        let note = cloudrun::failed_start(rs, adapter).await;
+                        return Err(CliError::Message(format!("{e}{note}")));
+                    }
                     return Err(e.into());
                 }
             };
@@ -1545,6 +1590,18 @@ async fn apply_all(
                     Ok(()) => Ok(()),
                     Err(detail) => {
                         let note = gce::failed_start(gs, adapter, &mut progress.stops).await;
+                        Err(CliError::Message(format!(
+                            "deployment '{}': endpoint {} failed its exposure check: \
+                             {detail}{note}",
+                            item.deployment, handle.endpoint
+                        )))
+                    }
+                }
+            } else if let Some(rs) = &run_start {
+                match cloudrun::verify(&handle, launch, resolver, env.gcp).await {
+                    Ok(()) => Ok(()),
+                    Err(detail) => {
+                        let note = cloudrun::failed_start(rs, adapter).await;
                         Err(CliError::Message(format!(
                             "deployment '{}': endpoint {} failed its exposure check: \
                              {detail}{note}",
@@ -1745,6 +1802,10 @@ async fn secure_endpoint(
         Dispatch::Host => host_stop_hint(std::env::consts::OS, &handle.id),
         Dispatch::RunPod => format!("delete endpoint {} in the RunPod console", handle.id),
         Dispatch::Gce => format!("delete VM {} in the Google Cloud console", handle.id),
+        Dispatch::CloudRun => format!(
+            "delete Cloud Run service {} in the Google Cloud console",
+            handle.id
+        ),
     };
     // A Modal update redeploys under the same app: roll the new version back
     // and re-verify the previous endpoint recorded in state. Anything short of
@@ -1850,7 +1911,7 @@ async fn gce_preflight(
     for item in &result.items {
         let gce_launch = item.launch.as_ref().is_some_and(|l| {
             dispatch_for(l.runtime, item.action.provider.as_deref()) == Some(Dispatch::Gce)
-        });
+        }) && !cloudrun::deployment_is_cloud_run(graph, &item.deployment);
         if !gce_launch {
             continue;
         }
@@ -2643,8 +2704,9 @@ async fn stop_record(
             pod::stop(record, env, project_id, stops).await?;
             stop_cloud_agent(record, env, probe, project_id).await
         }
-        // A Compute Engine VM has no telemetry agent.
+        // Neither Google Cloud backend has a telemetry agent.
         Backend::Gce => gce::stop(record, env).await,
+        Backend::CloudRun => cloudrun::stop(record, env).await,
     }
 }
 
@@ -2673,8 +2735,8 @@ fn cloud_source(dispatch: Dispatch, runpod: Option<&RunPodStart>) -> Option<Sour
         (Dispatch::Modal, _) => Some(SourceKind::Modal),
         (Dispatch::RunPod, Some(rp)) if rp.pod => Some(SourceKind::RunpodPod),
         (Dispatch::RunPod, _) => Some(SourceKind::RunpodEndpoint),
-        // Compute Engine has no telemetry agent source.
-        (Dispatch::Host | Dispatch::Gce, _) => None,
+        // Neither Google Cloud backend has a telemetry agent source.
+        (Dispatch::Host | Dispatch::Gce | Dispatch::CloudRun, _) => None,
     }
 }
 

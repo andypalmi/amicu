@@ -71,7 +71,7 @@ pub(super) fn uses_metadata_secrets(
     Ok(hardware.gcp.unwrap_or_default().insecure_metadata_secrets)
 }
 
-fn residency_ok(region: &str, allowed: &[Residency]) -> bool {
+pub(super) fn residency_ok(region: &str, allowed: &[Residency]) -> bool {
     if allowed.is_empty() {
         return true;
     }
@@ -106,8 +106,7 @@ pub(crate) fn launch_for(
     })?;
     if s.backend == GcpBackend::CloudRun {
         return Err(CliError::Message(format!(
-            "deployment '{id}': `backend = \"cloud_run\"` is not supported by apply yet; use \
-             `backend = \"compute\"`"
+            "deployment '{id}': `backend = \"cloud_run\"` deploys a Cloud Run service, not a VM"
         )));
     }
     let acc = hardware.accelerator.as_ref().ok_or_else(|| {

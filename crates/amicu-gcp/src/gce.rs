@@ -817,7 +817,7 @@ pub async fn list_owned_secrets(
 }
 
 /// Percent-encodes a page token for a query string.
-fn pct(s: &str) -> String {
+pub(crate) fn pct(s: &str) -> String {
     s.bytes()
         .map(|b| {
             if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {

@@ -138,6 +138,7 @@ pub(crate) enum Kind {
     GceVm,
     GceFirewall,
     GceSecret,
+    CloudRunService,
     LaunchdJob,
     SystemdUnit,
     ScheduledTask,
@@ -153,6 +154,7 @@ impl Kind {
             Kind::GceVm => "compute engine vm",
             Kind::GceFirewall => "compute engine firewall rule",
             Kind::GceSecret => "secret manager secret",
+            Kind::CloudRunService => "cloud run service",
             Kind::LaunchdJob => "launchd job",
             Kind::SystemdUnit => "systemd unit",
             Kind::ScheduledTask => "scheduled task",
@@ -297,11 +299,20 @@ pub(crate) struct GcpSecret {
     pub name: String,
 }
 
+/// An amicu-labelled Cloud Run service in a Google Cloud project.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GcpService {
+    pub project: String,
+    pub region: String,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GcpListing {
     pub vms: Vec<GcpVm>,
     pub firewalls: Vec<GcpFirewall>,
     pub secrets: Vec<GcpSecret>,
+    pub services: Vec<GcpService>,
 }
 
 /// Injectable read-only Google Cloud lookup, per project (and the service
@@ -335,6 +346,22 @@ impl GcpResources for GcpOpsListing<'_> {
                     &mut std::io::stderr(),
                 )
                 .map_err(|e| fail("secrets", e))?;
+                let services = tolerate_run_listing(
+                    project,
+                    rt.block_on(amicu_gcp::cloudrun::list_owned_services(
+                        &client,
+                        project,
+                        &cloud_run_regions(),
+                    )),
+                    &mut std::io::stderr(),
+                )
+                .map_err(|e| fail("Cloud Run services", e))?;
+                out.services
+                    .extend(services.into_iter().map(|s| GcpService {
+                        project: project.clone(),
+                        region: s.region,
+                        name: s.name,
+                    }));
                 out.secrets
                     .extend(secrets.into_iter().map(|(name, _)| GcpSecret {
                         project: project.clone(),
@@ -402,6 +429,53 @@ fn tolerate_secret_listing(
     }
 }
 
+/// Every region that offers a GPU on Cloud Run: amicu creates services only
+/// there.
+fn cloud_run_regions() -> Vec<&'static str> {
+    let mut regions: Vec<_> = amicu_gcp::GcpCatalog::new()
+        .cloud_run_offers()
+        .iter()
+        .map(|o| o.region)
+        .collect();
+    regions.sort_unstable();
+    regions.dedup();
+    regions
+}
+
+/// Whether the error says the Cloud Run Admin API is switched off in the
+/// project.
+fn run_api_disabled(e: &amicu_gcp::GcpError) -> bool {
+    let amicu_gcp::GcpError::PermissionDenied { code, message, .. } = e else {
+        return false;
+    };
+    let m = message.to_ascii_lowercase();
+    code.contains("SERVICE_DISABLED")
+        || m.contains("service_disabled")
+        || (m.contains("run.googleapis.com")
+            && (m.contains("has not been used") || m.contains("is disabled")))
+}
+
+/// Like [`tolerate_secret_listing`], for Cloud Run: a project that only runs
+/// Compute Engine VMs may never have enabled the Cloud Run API.
+fn tolerate_run_listing(
+    project: &str,
+    listed: Result<Vec<amicu_gcp::cloudrun::OwnedService>, amicu_gcp::GcpError>,
+    note: &mut dyn std::io::Write,
+) -> Result<Vec<amicu_gcp::cloudrun::OwnedService>, amicu_gcp::GcpError> {
+    match listed {
+        Err(e) if run_api_disabled(&e) => Ok(Vec::new()),
+        Err(amicu_gcp::GcpError::PermissionDenied { .. }) => {
+            let _ = writeln!(
+                note,
+                "Cloud Run services not listed in {project}: permission denied (needs \
+                 run.services.list); leaked services there would not show"
+            );
+            Ok(Vec::new())
+        }
+        other => other,
+    }
+}
+
 /// The host platform, injectable for tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Platform {
@@ -458,6 +532,8 @@ pub(crate) struct Tracked {
     gcp_firewalls: BTreeSet<(String, String)>,
     /// `(project, id)` of recorded Secret Manager secrets.
     gcp_secrets: BTreeSet<(String, String)>,
+    /// `(project, region, name)` of recorded Cloud Run services.
+    gcp_services: BTreeSet<(String, String, String)>,
 }
 
 impl Tracked {
@@ -497,6 +573,13 @@ impl Tracked {
                     .insert((g.project.clone(), g.firewall.clone()));
                 t.gcp_secrets
                     .extend(g.secrets.iter().map(|id| (g.project.clone(), id.clone())));
+            } else if let Some(c) = &rec.cloud_run {
+                t.gcp_projects
+                    .insert((c.project.clone(), c.impersonate.clone()));
+                t.gcp_services
+                    .insert((c.project.clone(), c.region.clone(), c.service.clone()));
+                t.gcp_secrets
+                    .extend(c.secrets.iter().map(|id| (c.project.clone(), id.clone())));
             } else if rec.backend.is_host() {
                 t.insert_label(&rec.identity);
             }
@@ -644,9 +727,9 @@ fn runpod(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
     Ok(found)
 }
 
-/// Compute Engine VMs, firewall rules and Secret Manager secrets amicu created
-/// (they carry its owner marker) in the projects state or config names, with
-/// the `gcloud` commands that delete them by hand.
+/// Compute Engine VMs, firewall rules, Secret Manager secrets and Cloud Run
+/// services amicu created (they carry its owner marker) in the projects state
+/// or config names, with the `gcloud` commands that delete them by hand.
 fn gcp(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
     let projects: Vec<_> = tracked.gcp_projects.iter().cloned().collect();
     let listing = env.gcp.list(&projects)?;
@@ -698,6 +781,25 @@ fn gcp(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
             stop_command: format!(
                 "gcloud secrets delete {} --project {}",
                 q(&r.name),
+                q(&r.project)
+            ),
+        });
+    }
+    for r in &listing.services {
+        found.push(Found {
+            kind: Kind::CloudRunService,
+            identity: format!("{} ({}, {})", r.name, r.project, r.region),
+            state: "service".to_owned(),
+            tracked: tracked.gcp_services.contains(&(
+                r.project.clone(),
+                r.region.clone(),
+                r.name.clone(),
+            )),
+            ownership: ownership_of_runpod_name(&r.name, project_id),
+            stop_command: format!(
+                "gcloud run services delete {} --region {} --project {}",
+                q(&r.name),
+                q(&r.region),
                 q(&r.project)
             ),
         });

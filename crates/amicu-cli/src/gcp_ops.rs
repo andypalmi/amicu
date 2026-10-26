@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use amicu_core::secret::SecretValue;
+use amicu_gcp::cloudrun::CloudRunTiming;
 use amicu_gcp::compute::{VmRecord, probe_transport};
 use amicu_gcp::{AdcTokenSource, AuthConfig, GceTiming, GcpClient, GcpError};
 use amicu_providers::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport};
@@ -42,6 +43,31 @@ pub(crate) trait GcpOps: Send + Sync {
     fn timing(&self) -> GceTiming {
         GceTiming::default()
     }
+    /// The transport for requests to a Cloud Run service's own URL
+    /// (Google-managed TLS, so nothing is pinned).
+    fn service_transport(&self) -> Arc<dyn HttpTransport> {
+        Arc::new(ReqwestTransport::new())
+    }
+    /// Poll and readiness bounds for Cloud Run.
+    fn run_timing(&self) -> CloudRunTiming {
+        CloudRunTiming::default()
+    }
+}
+
+/// The post-deploy check of a Cloud Run service: an anonymous request is
+/// refused and `key` is accepted. `Err` is secret-free.
+pub(crate) async fn verify_service(
+    ops: &dyn GcpOps,
+    endpoint: &str,
+    key: &SecretValue,
+) -> Result<(), String> {
+    verify_pinned(
+        &*ops.service_transport(),
+        endpoint,
+        key,
+        CheckTiming::PUBLIC,
+    )
+    .await
 }
 
 pub(crate) struct RealGcp;

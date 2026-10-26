@@ -32,6 +32,8 @@ pub(crate) enum Backend {
     RunpodPod,
     /// A Google Compute Engine VM and its firewall rule.
     Gce,
+    /// A Google Cloud Run GPU service.
+    CloudRun,
 }
 
 impl Backend {
@@ -73,6 +75,10 @@ impl Backend {
         self == Self::Gce
     }
 
+    pub(crate) fn is_cloud_run(self) -> bool {
+        self == Self::CloudRun
+    }
+
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::HostLaunchd => "launchd",
@@ -82,6 +88,7 @@ impl Backend {
             Self::Runpod => "runpod",
             Self::RunpodPod => "runpod-pod",
             Self::Gce => "gce",
+            Self::CloudRun => "cloud-run",
         }
     }
 }
@@ -139,6 +146,10 @@ pub(crate) struct StopRecord {
     /// owner marker. Written before the VM is created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gcp: Option<amicu_gcp::GceRecord>,
+    /// Cloud Run only: the project, region, service, owner marker and secrets.
+    /// Written before the service is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_run: Option<amicu_gcp::cloudrun::CloudRunRecord>,
     /// Fields this amicu does not know (from a newer build of the same
     /// version), kept verbatim so a load-save cycle never drops them.
     #[serde(flatten)]
@@ -174,6 +185,7 @@ impl StopRecord {
             volumes: Vec::new(),
             secrets: Vec::new(),
             gcp: None,
+            cloud_run: None,
             extra: std::collections::BTreeMap::new(),
         }
     }
@@ -243,6 +255,7 @@ impl StopRecord {
             volumes: Vec::new(),
             secrets: Vec::new(),
             gcp: None,
+            cloud_run: None,
             extra: std::collections::BTreeMap::new(),
         }
     }
@@ -272,6 +285,7 @@ impl StopRecord {
             volumes: Vec::new(),
             secrets,
             gcp: None,
+            cloud_run: None,
             extra: std::collections::BTreeMap::new(),
         }
     }
@@ -306,6 +320,29 @@ impl StopRecord {
         Self {
             backend: Backend::Gce,
             identity: format!("gce-{deployment}"),
+            ..Self::modal(deployment, None, None)
+        }
+    }
+
+    /// A Cloud Run service: `record` is persisted before the first create.
+    pub(crate) fn cloud_run(
+        deployment: &DeploymentId,
+        record: amicu_gcp::cloudrun::CloudRunRecord,
+    ) -> Self {
+        Self {
+            backend: Backend::CloudRun,
+            identity: record.service.clone(),
+            cloud_run: Some(record),
+            ..Self::modal(deployment, None, None)
+        }
+    }
+
+    /// A Cloud Run record derived without one in state: it names nothing, and
+    /// stopping it explains why.
+    pub(crate) fn cloud_run_unrecorded(deployment: &DeploymentId) -> Self {
+        Self {
+            backend: Backend::CloudRun,
+            identity: format!("cloud-run-{deployment}"),
             ..Self::modal(deployment, None, None)
         }
     }
@@ -348,7 +385,11 @@ impl StopRecord {
             }
             Backend::HostSystemd => ("service", &[".config/systemd/user"]),
             Backend::HostTaskScheduler => ("xml", &["amicu/tasks"]),
-            Backend::Modal | Backend::Runpod | Backend::RunpodPod | Backend::Gce => {
+            Backend::Modal
+            | Backend::Runpod
+            | Backend::RunpodPod
+            | Backend::Gce
+            | Backend::CloudRun => {
                 return Err(format!(
                     "a {} record has a service file '{def}'",
                     self.backend.name()
@@ -457,6 +498,13 @@ impl StopRecord {
                     self.deployment, self.identity, g.project, g.zone
                 ),
                 None => format!("{}: Compute Engine VM '{}'", self.deployment, self.identity),
+            },
+            Backend::CloudRun => match &self.cloud_run {
+                Some(c) => format!(
+                    "{}: Cloud Run service '{}' (project {}, region {})",
+                    self.deployment, self.identity, c.project, c.region
+                ),
+                None => format!("{}: Cloud Run service '{}'", self.deployment, self.identity),
             },
             _ => format!(
                 "{}: {} job '{}'",

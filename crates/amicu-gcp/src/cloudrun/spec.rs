@@ -130,6 +130,9 @@ pub enum ServiceAccess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceSpec {
     pub project: String,
+    /// amicu's project id: names the service and its owner marker. [`Self::new`]
+    /// sets it to the Google project.
+    pub project_id: String,
     pub region: String,
     /// Optional workspace id for the owner marker.
     pub workspace_id: Option<String>,
@@ -189,6 +192,7 @@ impl ServiceSpec {
     ) -> Self {
         Self {
             project: project.to_owned(),
+            project_id: project.to_owned(),
             region: region.to_owned(),
             workspace_id: None,
             deployment_id: deployment_id.to_owned(),
@@ -215,7 +219,7 @@ impl ServiceSpec {
     /// The service id (see [`service_name`]).
     #[must_use]
     pub fn service_name(&self) -> String {
-        service_name(&self.project, &self.deployment_id)
+        service_name(&self.project_id, &self.deployment_id)
     }
 
     /// Checks the spec, including that the region offers the GPU on Cloud Run.
@@ -371,7 +375,7 @@ impl ServiceSpec {
         let failure_threshold = self.startup_budget_secs.div_ceil(PROBE_PERIOD_SECS);
         let labels: BTreeMap<String, String> = owner_labels(
             self.workspace_id.as_deref(),
-            &self.project,
+            &self.project_id,
             &self.deployment_id,
         );
 

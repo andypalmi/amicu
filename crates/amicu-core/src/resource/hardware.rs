@@ -100,7 +100,7 @@ pub enum GcpBackend {
     /// A Compute Engine VM.
     #[default]
     Compute,
-    /// Cloud Run with GPUs (not supported by `apply` yet).
+    /// A Cloud Run service with one GPU per instance, scaled to zero.
     CloudRun,
 }
 

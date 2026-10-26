@@ -68,6 +68,8 @@ struct World {
     on_secret_create: Mutex<Option<Hook>>,
     /// Fired once, just before the first firewall create.
     on_firewall: Mutex<Option<Hook>>,
+    /// The Cloud Run API and the services' own URLs.
+    run: Mutex<cloudrun::RunWorld>,
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -252,6 +254,9 @@ impl HttpTransport for World {
         let m = format!("{method:?}");
         if let Some(path) = req.url.strip_prefix(SM_BASE) {
             return self.secret_manager(method, path, &req);
+        }
+        if let Some(reply) = self.cloud_run(&req) {
+            return reply;
         }
         let Some(path) = req.url.strip_prefix(BASE) else {
             // The readiness probe to the VM itself.
@@ -454,6 +459,22 @@ impl GcpOps for FakeGcp {
             Err("endpoint answered an unauthenticated request".to_owned())
         } else {
             Ok(())
+        }
+    }
+    fn service_transport(&self) -> Arc<dyn HttpTransport> {
+        self.world.clone()
+    }
+    fn run_timing(&self) -> amicu_gcp::cloudrun::CloudRunTiming {
+        amicu_gcp::cloudrun::CloudRunTiming {
+            poll: amicu_gcp::PollTiming {
+                interval: std::time::Duration::from_millis(1),
+                timeout: std::time::Duration::from_secs(5),
+            },
+            health: amicu_gcp::cloudrun::HealthTiming {
+                timeout: std::time::Duration::from_secs(5),
+                initial_backoff: std::time::Duration::from_millis(1),
+                max_backoff: std::time::Duration::from_millis(1),
+            },
         }
     }
     fn timing(&self) -> amicu_gcp::GceTiming {
@@ -1354,3 +1375,5 @@ fn the_metadata_opt_in_skips_secret_manager_and_says_so_in_the_instance_metadata
     assert_eq!(rig.gcp.world.vm_names(), Vec::<String>::new());
     assert_eq!(rig.gcp.world.firewall_names(), Vec::<String>::new());
 }
+
+mod cloudrun;
