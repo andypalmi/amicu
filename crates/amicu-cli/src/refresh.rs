@@ -607,6 +607,7 @@ fn refresh_gce(state: &mut LocalState, ops: &dyn GcpOps) -> Refresh {
     }
     let looked_up = (|| -> Result<_, CliError> {
         let rt = build_runtime()?;
+        let _enter = rt.enter();
         let mut found = Vec::new();
         for r in &records {
             let g = r.gcp.as_ref().expect("filtered on a recorded VM");
@@ -688,6 +689,7 @@ fn refresh_cloud_run(state: &mut LocalState, ops: &dyn GcpOps) -> Refresh {
     }
     let looked_up = (|| -> Result<_, CliError> {
         let rt = build_runtime()?;
+        let _enter = rt.enter();
         let mut found = Vec::new();
         for r in &records {
             let c = r

@@ -328,6 +328,7 @@ impl GcpResources for GcpOpsListing<'_> {
     fn list(&self, projects: &[(String, Option<String>)]) -> Result<GcpListing, String> {
         let run = || -> Result<GcpListing, CliError> {
             let rt = build_runtime()?;
+            let _enter = rt.enter();
             let mut out = GcpListing::default();
             for (project, impersonate) in projects {
                 let client = self.0.client(impersonate.as_deref())?;
