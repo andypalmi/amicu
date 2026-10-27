@@ -75,6 +75,12 @@ impl GcpClient {
     ) -> Result<Value, GcpError> {
         let token = self.tokens.token().await?;
         let mut req = HttpRequest::new(method, url).with_bearer(token.expose());
+        let body = match (body, method) {
+            (None, HttpMethod::Post | HttpMethod::Patch) => {
+                Some(Value::Object(serde_json::Map::new()))
+            }
+            (body, _) => body,
+        };
         if let Some(body) = body {
             req = req.with_json(body);
         }
@@ -304,6 +310,26 @@ pub(crate) mod tests {
         assert_eq!(seen[0].method, HttpMethod::Post);
         assert_eq!(seen[0].bearer.as_deref(), Some(TOKEN));
         assert_eq!(seen[0].body, Some(serde_json::json!({"name": "i"})));
+    }
+
+    #[tokio::test]
+    async fn bodiless_post_and_patch_send_an_empty_json_object() {
+        for method in [HttpMethod::Post, HttpMethod::Patch] {
+            let (c, mock) = client(Mock::default().on(method, "/wait", 200, "{}"));
+            c.request(method, &format!("{URL}/wait"), None)
+                .await
+                .unwrap();
+            assert_eq!(mock.requests()[0].body, Some(serde_json::json!({})));
+        }
+    }
+
+    #[tokio::test]
+    async fn bodiless_get_and_delete_send_no_body() {
+        for method in [HttpMethod::Get, HttpMethod::Delete] {
+            let (c, mock) = client(Mock::default().on(method, "/i", 200, "{}"));
+            c.request(method, URL, None).await.unwrap();
+            assert_eq!(mock.requests()[0].body, None);
+        }
     }
 
     #[tokio::test]
