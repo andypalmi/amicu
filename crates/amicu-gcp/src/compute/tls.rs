@@ -294,7 +294,7 @@ impl HttpTransport for PinnedTransport {
         let resp = b.send().await.map_err(|e| err(&e))?;
         let status = resp.status().as_u16();
         let body = resp.bytes().await.map_err(|e| err(&e))?.to_vec();
-        Ok(HttpResponse { status, body })
+        Ok(HttpResponse::new(status, body))
     }
 }
 

@@ -5,6 +5,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use amicu_providers::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport, TransportError};
 use serde::de::DeserializeOwned;
@@ -91,7 +92,7 @@ impl GcpClient {
             })
         })?;
         if !resp.is_success() {
-            return Err(map_error(resp.status, &resp.body, url));
+            return Err(map_error(resp.status, &resp.body, resp.retry_after, url));
         }
         if resp.body.iter().all(u8::is_ascii_whitespace) {
             return Ok(Value::Null);
@@ -129,7 +130,7 @@ fn service_of(url: &str) -> String {
 
 /// Maps a non-`2xx` response onto [`GcpError`]. `url` only names the resource
 /// in a `404`.
-fn map_error(status: u16, body: &[u8], url: &str) -> GcpError {
+fn map_error(status: u16, body: &[u8], retry_after: Option<Duration>, url: &str) -> GcpError {
     let parsed: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
     let err = &parsed["error"];
     let code = err["status"]
@@ -157,7 +158,10 @@ fn map_error(status: u16, body: &[u8], url: &str) -> GcpError {
         .collect();
     // Rate limiting wins over a quota reason: a `429` is always worth retrying.
     if status == 429 || reasons.iter().any(|r| RATE_LIMIT_REASONS.contains(r)) {
-        return GcpError::RateLimited { message };
+        return GcpError::RateLimited {
+            message,
+            retry_after,
+        };
     }
     if reasons.iter().any(|r| QUOTA_REASONS.contains(r)) {
         return GcpError::QuotaExceeded { message };

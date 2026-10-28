@@ -364,7 +364,7 @@ fn with_quota_hint(e: GcpError) -> GcpError {
         // Cloud Run answers an exhausted GPU quota with a `429`; waiting does
         // not help, so it counts as a quota error. A plain `429` stays a
         // retryable rate limit.
-        GcpError::RateLimited { message } if message.to_ascii_lowercase().contains("quota") => {
+        GcpError::RateLimited { message, .. } if message.to_ascii_lowercase().contains("quota") => {
             GcpError::QuotaExceeded {
                 message: format!("{message}. {QUOTA_HINT}"),
             }

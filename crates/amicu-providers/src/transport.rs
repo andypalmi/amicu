@@ -11,6 +11,8 @@
 //! response - including `4xx`/`5xx` - is returned as an [`HttpResponse`] for the
 //! adapter to map onto a typed [`ProviderError`](crate::provider::ProviderError).
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 
@@ -90,6 +92,8 @@ pub struct HttpResponse {
     pub status: u16,
     /// The raw response body.
     pub body: Vec<u8>,
+    /// The `Retry-After` header, when it is a number of seconds.
+    pub retry_after: Option<Duration>,
 }
 
 impl HttpResponse {
@@ -99,7 +103,15 @@ impl HttpResponse {
         Self {
             status,
             body: body.into(),
+            retry_after: None,
         }
+    }
+
+    /// Sets [`Self::retry_after`].
+    #[must_use]
+    pub fn with_retry_after(mut self, after: Duration) -> Self {
+        self.retry_after = Some(after);
+        self
     }
 
     /// Whether the status is in the `2xx` success range.
@@ -246,12 +258,17 @@ impl HttpTransport for ReqwestTransport {
             .await
             .map_err(|e| send_error(&e))?;
         let status = response.status().as_u16();
+        let retry_after = retry_after(&response);
         let body = response
             .bytes()
             .await
             .map_err(|e| TransportError::Connection(e.to_string()))?
             .to_vec();
-        Ok(HttpResponse { status, body })
+        Ok(HttpResponse {
+            status,
+            body,
+            retry_after,
+        })
     }
 
     async fn execute_bounded(
@@ -265,6 +282,7 @@ impl HttpTransport for ReqwestTransport {
             .map_err(|_| TransportError::Timeout)?
             .map_err(|e| send_error(&e))?;
         let status = response.status().as_u16();
+        let retry_after = retry_after(&response);
         let mut body = Vec::new();
         loop {
             let until = deadline.min(tokio::time::Instant::now() + limits.idle);
@@ -282,8 +300,24 @@ impl HttpTransport for ReqwestTransport {
                 Ok(Ok(None) | Err(_)) | Err(_) => break,
             }
         }
-        Ok(HttpResponse { status, body })
+        Ok(HttpResponse {
+            status,
+            body,
+            retry_after,
+        })
     }
+}
+
+fn retry_after(response: &reqwest::Response) -> Option<Duration> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+        .map(Duration::from_secs)
 }
 
 /// A canned response registered on a [`MockTransport`], keyed by method and

@@ -50,6 +50,7 @@ const ZONE_CONCURRENCY: usize = 8;
 /// `RETRY_BASE * 2^attempt` first.
 const MAX_ATTEMPTS: u32 = 6;
 const RETRY_BASE: Duration = Duration::from_secs(1);
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
 /// A `(zone, name)` pair, where the name is a GPU or a machine type.
 pub type Pair = (String, String);
@@ -63,6 +64,8 @@ pub struct LiveState {
     pub machine_types: BTreeSet<Pair>,
     /// Zone and accelerator type, inferred from `machineTypes`.
     pub machine_type_gpus: BTreeSet<Pair>,
+    /// Zones the project may not read (`403` or `404`); skipped.
+    pub not_visible: BTreeSet<String>,
 }
 
 /// The difference between what the catalog expects and what is live.
@@ -249,13 +252,30 @@ fn encode(value: &str) -> String {
     })
 }
 
-/// `GET`s `url`, retrying rate limits, 5xx and transport failures.
+/// Up to a quarter of `base` extra, so zones retrying together spread out.
+fn jittered(base: Duration) -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    base + base / 4 * (nanos % 1000) / 1000
+}
+
+/// `GET`s `url`, retrying rate limits, 5xx and transport failures. A `429`
+/// with `Retry-After` waits at least that long.
 async fn get(client: &GcpClient, url: &str) -> Result<Value, GcpError> {
     let mut attempt = 0;
     loop {
         match client.request(HttpMethod::Get, url, None).await {
             Err(e) if e.is_retryable() && attempt + 1 < MAX_ATTEMPTS => {
-                tokio::time::sleep(RETRY_BASE * 2u32.pow(attempt)).await;
+                let mut wait = RETRY_BASE * 2u32.pow(attempt);
+                if let GcpError::RateLimited {
+                    retry_after: Some(after),
+                    ..
+                } = e
+                {
+                    wait = wait.max(after.min(MAX_RETRY_AFTER));
+                }
+                tokio::time::sleep(jittered(wait)).await;
                 attempt += 1;
             }
             other => return other,
@@ -281,8 +301,8 @@ async fn pages(
         let page = get(client, &url).await?;
         each(&page);
         match page["nextPageToken"].as_str().filter(|t| !t.is_empty()) {
-            Some(next) => token = Some(next.to_owned()),
-            None => return Ok(()),
+            Some(next) if token.as_deref() != Some(next) => token = Some(next.to_owned()),
+            _ => return Ok(()),
         }
     }
 }
@@ -320,17 +340,26 @@ pub async fn fetch_live_state(client: &GcpClient, project: &str) -> Result<LiveS
                 .as_array()
                 .into_iter()
                 .flatten()
+                .filter(|z| z["status"].as_str() == Some("UP"))
                 .filter_map(|z| z["name"].as_str().map(str::to_owned)),
         );
     })
     .await?;
     let base = &base;
     let mut results = stream::iter(&zones)
-        .map(|zone| async move { fetch_zone(client, base, zone).await })
+        .map(|zone| async move { (zone.clone(), fetch_zone(client, base, zone).await) })
         .buffer_unordered(ZONE_CONCURRENCY);
     let mut state = LiveState::default();
     while let Some(zone) = results.next().await {
-        let zone = zone?;
+        let (name, zone) = zone;
+        let zone = match zone {
+            Ok(zone) => zone,
+            Err(GcpError::PermissionDenied { status: 403, .. } | GcpError::NotFound { .. }) => {
+                state.not_visible.insert(name);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         state.accelerators.extend(zone.accelerators);
         state.machine_types.extend(zone.machine_types);
         state.machine_type_gpus.extend(zone.machine_type_gpus);
@@ -340,6 +369,7 @@ pub async fn fetch_live_state(client: &GcpClient, project: &str) -> Result<LiveS
 
 #[cfg(test)]
 mod tests {
+    use amicu_providers::HttpResponse;
     use serde_json::json;
 
     use super::*;
@@ -470,7 +500,7 @@ mod tests {
                     HttpMethod::Get,
                     "/projects/my-project/zones?maxResults=500",
                     200,
-                    r#"{"items":[{"name":"us-central1-a"},{"name":"us-central1-b"}]}"#,
+                    r#"{"items":[{"name":"us-central1-a","status":"UP"},{"name":"us-central1-b","status":"UP"},{"name":"us-central1-c","status":"DOWN"}]}"#,
                 )
                 .on(
                     HttpMethod::Get,
@@ -522,6 +552,112 @@ mod tests {
             seen.iter()
                 .all(|r| !r.url.contains("/aggregated/") && r.url.contains("/projects/my-project/"))
         );
+    }
+
+    fn zone_list(zone: &str) -> String {
+        format!(r#"{{"items":[{{"name":"{zone}","status":"UP"}}]}}"#)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_zone_the_project_cannot_read_is_skipped() {
+        for (status, body) in [
+            (
+                403,
+                r#"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"no"}}"#,
+            ),
+            (
+                404,
+                r#"{"error":{"code":404,"status":"NOT_FOUND","message":"gone"}}"#,
+            ),
+        ] {
+            let (c, _) = client(
+                Mock::default()
+                    .on(
+                        HttpMethod::Get,
+                        "/projects/my-project/zones?maxResults=500",
+                        200,
+                        &zone_list("us-east4-c"),
+                    )
+                    .on(
+                        HttpMethod::Get,
+                        "/zones/us-east4-c/acceleratorTypes?maxResults=500",
+                        status,
+                        body,
+                    ),
+            );
+            let live = fetch_live_state(&c, "my-project").await.unwrap();
+            assert_eq!(live.not_visible, BTreeSet::from(["us-east4-c".to_owned()]));
+            assert!(live.accelerators.is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn other_zone_errors_still_fail_the_run() {
+        let (c, _) = client(
+            Mock::default()
+                .on(
+                    HttpMethod::Get,
+                    "/projects/my-project/zones?maxResults=500",
+                    200,
+                    &zone_list("us-east4-c"),
+                )
+                .on(
+                    HttpMethod::Get,
+                    "/zones/us-east4-c/acceleratorTypes?maxResults=500",
+                    400,
+                    "{}",
+                ),
+        );
+        assert!(fetch_live_state(&c, "my-project").await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_repeated_page_token_ends_the_listing() {
+        let (c, mock) = client(
+            Mock::default()
+                .on(
+                    HttpMethod::Get,
+                    "/zones?maxResults=500&pageToken=CAE%3D",
+                    200,
+                    r#"{"items":[],"nextPageToken":"CAE="}"#,
+                )
+                .on(
+                    HttpMethod::Get,
+                    "/zones?maxResults=500",
+                    200,
+                    r#"{"items":[],"nextPageToken":"CAE="}"#,
+                ),
+        );
+        fetch_live_state(&c, "my-project").await.unwrap();
+        let zones = mock
+            .requests()
+            .into_iter()
+            .filter(|r| r.url.contains("/zones?"))
+            .count();
+        assert_eq!(zones, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_429_waits_for_retry_after() {
+        let limited = HttpResponse::new(429, r#"{"error":{"code":429}}"#)
+            .with_retry_after(Duration::from_secs(30));
+        let (c, _) = client(
+            Mock::default()
+                .then(
+                    HttpMethod::Get,
+                    "/projects/my-project/zones?maxResults=500",
+                    Ok(limited),
+                )
+                .on(
+                    HttpMethod::Get,
+                    "/projects/my-project/zones?maxResults=500",
+                    200,
+                    "{}",
+                ),
+        );
+        let start = tokio::time::Instant::now();
+        fetch_live_state(&c, "my-project").await.unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(30));
     }
 
     #[tokio::test(start_paused = true)]

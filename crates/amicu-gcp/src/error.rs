@@ -1,5 +1,7 @@
 //! Typed errors for the GCP client.
 
+use std::time::Duration;
+
 /// Everything that can go wrong talking to Google Cloud or validating amicu
 /// config for it. No variant carries a token or key: `message` strings come
 /// from Google's `error.message` (truncated) and credential-loading errors are
@@ -58,7 +60,11 @@ pub enum GcpError {
     /// Rate limiting (`429`, `rateLimitExceeded`, `RATE_LIMIT_EXCEEDED`).
     /// Retrying after a pause is expected to succeed.
     #[error("Google Cloud rate limit exceeded: {message}")]
-    RateLimited { message: String },
+    RateLimited {
+        message: String,
+        /// The `Retry-After` the API sent, if any.
+        retry_after: Option<Duration>,
+    },
     /// `400`/`422`: the request was rejected.
     #[error("Google Cloud rejected the request (HTTP {status}, {code}): {message}")]
     BadRequest {
