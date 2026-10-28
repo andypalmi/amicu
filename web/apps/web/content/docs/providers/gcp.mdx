@@ -73,6 +73,16 @@ The VM is deleted by Compute Engine after `max_run_duration` (default 8 hours) w
 
 ## Setup and credentials
 
+### Quick setup
+
+For an existing project with billing linked, one command enables the APIs, creates the `amicu-vm` and `amicu-run` service accounts, grants you `roles/iam.serviceAccountUser` on them, requests GPU quota and removes the default SSH and RDP firewall rules:
+
+```sh
+examples/gcp-setup/setup.sh my-project-id europe-west4
+```
+
+It prints the `gcp {}` values to paste and does not create the project or link billing. `examples/gcp-setup/main.tf` is the Terraform equivalent for projects managed by Terraform. Both are described in `examples/gcp-setup/README.md`. The rest of this section explains each step.
+
 amicu uses Application Default Credentials: run `gcloud auth application-default login`, or set `GOOGLE_APPLICATION_CREDENTIALS`. To act as a service account, set `impersonate_service_account` in the block (or `GOOGLE_IMPERSONATE_SERVICE_ACCOUNT`). `apply` makes one read of the project before it writes anything, so missing credentials fail first. The caller needs permission to create and delete instances and firewall rules in the project, to create, version, set the IAM policy of and delete secrets (`roles/secretmanager.admin` covers it), and GPU quota in the region.
 
 ### The service account
