@@ -61,7 +61,9 @@ client = OpenAI(
     api_key=os.environ["CHAT_API_KEY"],
     http_client=httpx.Client(verify=tls),
 )
-``` The firewall rule allows only the addresses in `allowed_source_cidrs`, or by default this machine's public IP as a `/32`. amicu never opens the port to `0.0.0.0/0` unless you list it.
+```
+
+The firewall rule allows only the addresses in `allowed_source_cidrs`, or by default this machine's public IP as a `/32`. amicu never opens the port to `0.0.0.0/0` unless you list it.
 
 The API key, the Hugging Face token and the TLS private key are stored in Secret Manager (one secret each, in the deployment's region only) before the VM is created. The VM's service account reads them at boot, so they are never in instance metadata. The secret ids and the certificate fingerprint are in the record `apply` writes to state first, so `destroy` removes the secrets even after a crash.
 

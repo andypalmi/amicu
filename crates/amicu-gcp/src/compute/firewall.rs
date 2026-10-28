@@ -194,7 +194,7 @@ pub async fn create_firewall(
                 status,
                 code,
                 message: format!(
-                    "the network is in project {project}, so its firewall rule must be created                      there: the caller needs `compute.firewalls.create` on {project}, or a                      host-project admin must create an ingress rule for tag `{}` on port {}",
+                    "the network is in project {project}, so its firewall rule must be created there: the caller needs `compute.firewalls.create` on {project}, or a host-project admin must create an ingress rule for tag `{}` on port {}",
                     spec.network_tag, spec.port
                 ),
             })
@@ -350,6 +350,7 @@ mod tests {
             .to_string();
         assert!(err.contains("compute.firewalls.create"), "{err}");
         assert!(err.contains("host-proj"), "{err}");
+        assert!(!err.contains("  "), "{err}");
     }
 
     #[test]
