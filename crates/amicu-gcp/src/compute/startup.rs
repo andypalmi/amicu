@@ -7,7 +7,8 @@
 //! ([`DOCKER_KEY_FINGERPRINT`], [`NVIDIA_KEY_FINGERPRINT`]) before apt trusts it.
 //!
 //! The script reports its outcome as guest attributes (namespace
-//! [`GUEST_NAMESPACE`]): `status` is `ready` once vLLM answers `/health` on the
+//! [`GUEST_NAMESPACE`]): `status` is `booting` (with the kernel's `boot_id`)
+//! from the start of each boot, then `ready` once vLLM answers `/health` on the
 //! VM, or `failed:<step>` with the tail of the script's log in `detail`. The
 //! readiness wait reads them to stop at once on a failed boot.
 //!
@@ -61,9 +62,8 @@ const DOCKER_KEY_URL: &str = "https://download.docker.com/linux/ubuntu/gpg";
 /// (`NVIDIA CORPORATION (Open Source Projects)`).
 pub const NVIDIA_KEY_FINGERPRINT: &str = "C95B321B61E88C1809C4F759DDCAE044F796ECB0";
 const NVIDIA_KEY_URL: &str = "https://nvidia.github.io/libnvidia-container/gpgkey";
-/// Tries, 5 s apart, of vLLM's `/health` on the VM after the container starts:
-/// the model download and load.
-const HEALTH_TRIES: u32 = 360;
+/// Written once Docker and the NVIDIA runtime are installed and configured.
+const TOOLS_MARKER: &str = "/var/lib/amicu/tools-ready";
 /// Container restarts that count as a crash loop.
 const MAX_RESTARTS: u32 = 3;
 const CONTAINER_NAME: &str = "amicu-vllm";
@@ -298,6 +298,8 @@ pub fn startup_script(cfg: &StartupConfig, project: &str, instance: &str) -> Str
          ga() {{ curl -fsS -m 10 -X PUT -H 'Metadata-Flavor: Google' --data-binary @- \
          \"http://metadata.google.internal/computeMetadata/v1/instance/guest-attributes/{GUEST_NAMESPACE}/$1\" \
          >/dev/null 2>&1 || true; }}\n\
+         printf booting | ga status\n\
+         ga boot_id < /proc/sys/kernel/random/boot_id\n\
          step='read secrets'\n\
          on_exit() {{ rc=$?; if [ \"$rc\" != 0 ]; then sleep 1; \
          tail -c 4000 /run/amicu/startup.log | ga detail; printf 'failed:%s' \"$step\" | ga status; fi; }}\n\
@@ -322,19 +324,19 @@ pub fn startup_script(cfg: &StartupConfig, project: &str, instance: &str) -> Str
     )
 }
 
-/// Waits on the VM for vLLM's `/health`, failing on a stopped container or
-/// a crash loop, then reports `ready`.
+/// Waits on the VM for vLLM's `/health`, then reports `ready`. It fails only on
+/// a stopped container or a crash loop: a slow model load is left to apply's
+/// own deadline, which knows how long it is willing to wait.
 fn wait_block(cfg: &StartupConfig) -> String {
     let scheme = if cfg.tls.is_some() { "https" } else { "http" };
     let port = cfg.serving_port;
     format!(
         "step='wait for vLLM to load the model'\n\
          bad=0\n\
-         for i in $(seq 1 {HEALTH_TRIES}); do\n\
-         curl -ksf -m 5 -o /dev/null '{scheme}://127.0.0.1:{port}/health' && break\n\
+         until curl -ksf -m 5 -o /dev/null '{scheme}://127.0.0.1:{port}/health'; do\n\
          read -r cs restarts <<< \"$(docker inspect -f '{{{{.State.Status}}}} {{{{.RestartCount}}}}' {CONTAINER_NAME} 2>/dev/null || echo missing 0)\"\n\
          case \"$cs\" in exited|dead|missing) bad=$((bad + 1)) ;; *) bad=0 ;; esac\n\
-         if [ \"$bad\" -ge 2 ] || [ \"$restarts\" -ge {MAX_RESTARTS} ] || [ \"$i\" = {HEALTH_TRIES} ]; then\n\
+         if [ \"$bad\" -ge 2 ] || [ \"$restarts\" -ge {MAX_RESTARTS} ]; then\n\
          echo \"amicu: vLLM is not serving (container {CONTAINER_NAME}: $cs, $restarts restarts)\" >&2\n\
          docker logs --tail 50 {CONTAINER_NAME} >&2 || true\n\
          exit 1\n\
@@ -348,24 +350,35 @@ fn wait_block(cfg: &StartupConfig) -> String {
 
 /// Installs Docker Engine and the NVIDIA container toolkit from their
 /// official apt repositories when either is missing, then points Docker at the
-/// NVIDIA runtime. A no-op on an image (or a reboot) that has both. `trust`
-/// accepts a repository key file only when it holds exactly one key with the
-/// pinned fingerprint, since apt trusts every key in it.
+/// NVIDIA runtime. Skipped only when the marker from an earlier boot is there,
+/// Docker runs and lists the `nvidia` runtime; otherwise an install that a
+/// reboot or preemption cut short is finished first (`dpkg --configure -a`).
+///
+/// `trust` imports the downloaded key file into a scratch keyring and exports
+/// only the key with the pinned fingerprint, so apt trusts exactly that key.
+/// `apt-get update` may fail on an unrelated repository of the image: only a
+/// candidate for each needed package is required.
 fn tools_block() -> String {
     format!(
         "step='install Docker and the NVIDIA container toolkit'\n\
-         if ! command -v docker >/dev/null 2>&1 || ! command -v nvidia-ctk >/dev/null 2>&1; then\n\
+         nvidia_runtime() {{ docker info --format '{{{{json .Runtimes}}}}' 2>/dev/null | grep -q '\"nvidia\"'; }}\n\
+         systemctl start docker >/dev/null 2>&1 || true\n\
+         if [ ! -f {TOOLS_MARKER} ] || ! systemctl is-active --quiet docker || ! nvidia_runtime; then\n\
          echo 'amicu: installing Docker and the NVIDIA container toolkit' >&2\n\
          export DEBIAN_FRONTEND=noninteractive GNUPGHOME=/run/amicu/gnupg\n\
          install -d -m 0700 \"$GNUPGHOME\"\n\
          install -d -m 0755 /etc/apt/keyrings\n\
-         aptq() {{ apt-get -qq -o DPkg::Lock::Timeout=600 -o Acquire::Retries=5 \"$@\" >>/run/amicu/startup.log 2>&1; }}\n\
-         trust() {{ curl -fsSL --retry 5 \"$2\" -o \"/run/amicu/$1.asc\"; \
-         keys=$(gpg --show-keys --with-colons \"/run/amicu/$1.asc\" 2>/dev/null | grep -c '^pub:' || true); \
-         fpr=$(gpg --show-keys --with-colons \"/run/amicu/$1.asc\" 2>/dev/null | awk -F: '$1 == \"fpr\" {{ print $10; exit }}'); \
-         [ \"$keys\" = 1 ] && [ \"$fpr\" = \"$3\" ] || {{ echo \"amicu: unexpected $1 repository key ${{fpr:-none}} ($keys keys)\" >&2; exit 1; }}; \
-         install -m 0644 \"/run/amicu/$1.asc\" \"/etc/apt/keyrings/$1.asc\"; \
-         printf 'deb [arch=%s signed-by=/etc/apt/keyrings/%s.asc] %s\\n' \"$(dpkg --print-architecture)\" \"$1\" \"$4\" \
+         log=/run/amicu/startup.log\n\
+         aptq() {{ apt-get -qq -o DPkg::Lock::Timeout=600 -o Acquire::Retries=5 \"$@\" >>\"$log\" 2>&1; }}\n\
+         for i in $(seq 1 60); do dpkg --configure -a >>\"$log\" 2>&1 && break; [ \"$i\" = 60 ] && exit 1; sleep 10; done\n\
+         trust() {{ curl -fsSL --retry 5 --retry-connrefused \"$2\" -o \"/run/amicu/$1.asc\"; \
+         gpg --batch --quiet --import \"/run/amicu/$1.asc\" >>\"$log\" 2>&1; \
+         gpg --batch --export \"$3\" > \"/run/amicu/$1.gpg\" 2>>\"$log\"; \
+         keys=$(gpg --show-keys --with-colons \"/run/amicu/$1.gpg\" 2>/dev/null | grep -c '^pub:' || true); \
+         fpr=$(gpg --show-keys --with-colons \"/run/amicu/$1.gpg\" 2>/dev/null | awk -F: '$1 == \"fpr\" {{ print $10; exit }}'); \
+         [ \"$keys\" = 1 ] && [ \"$fpr\" = \"$3\" ] || {{ echo \"amicu: the $1 repository key is not $3\" >&2; exit 1; }}; \
+         install -m 0644 \"/run/amicu/$1.gpg\" \"/etc/apt/keyrings/$1.gpg\"; \
+         printf 'deb [arch=%s signed-by=/etc/apt/keyrings/%s.gpg] %s\\n' \"$(dpkg --print-architecture)\" \"$1\" \"$4\" \
          > \"/etc/apt/sources.list.d/$1.list\"; }}\n\
          pkgs=''\n\
          if ! command -v docker >/dev/null 2>&1; then\n\
@@ -379,10 +392,21 @@ fn tools_block() -> String {
          'https://nvidia.github.io/libnvidia-container/stable/deb/$(ARCH) /'\n\
          pkgs=\"$pkgs nvidia-container-toolkit\"\n\
          fi\n\
-         for i in 1 2 3; do aptq update && break; [ \"$i\" = 3 ] && exit 1; sleep 10; done\n\
+         if [ -n \"$pkgs\" ]; then\n\
+         for i in 1 2 3; do\n\
+         aptq update || echo 'amicu: apt-get update reported errors; checking the needed packages' >&2\n\
+         missing=''\n\
+         for p in $pkgs; do apt-cache policy \"$p\" 2>/dev/null | grep -q 'Candidate: [^(]' || missing=\"$missing $p\"; done\n\
+         [ -z \"$missing\" ] && break\n\
+         [ \"$i\" = 3 ] && {{ echo \"amicu: apt cannot find$missing\" >&2; exit 1; }}\n\
+         sleep 10\n\
+         done\n\
          aptq install -y --no-install-recommends $pkgs\n\
+         fi\n\
          nvidia-ctk runtime configure --runtime=docker >/dev/null\n\
          systemctl restart docker\n\
+         nvidia_runtime || {{ echo 'amicu: Docker does not list the nvidia runtime' >&2; exit 1; }}\n\
+         install -D -m 0644 /dev/null {TOOLS_MARKER}\n\
          fi\n"
     )
 }
@@ -646,13 +670,13 @@ mod tests {
     }
 
     #[test]
-    fn the_script_waits_for_vllm_on_the_vm_and_fails_on_a_crash_loop() {
+    fn the_script_waits_for_vllm_until_it_answers_or_the_container_fails() {
         let s = script(&cfg());
         assert!(s.contains("'--restart' 'on-failure'"));
-        assert!(s.contains("curl -ksf -m 5 -o /dev/null 'http://127.0.0.1:8000/health' && break"));
+        assert!(s.contains("until curl -ksf -m 5 -o /dev/null 'http://127.0.0.1:8000/health'; do"));
         assert!(s.contains("{{.State.Status}} {{.RestartCount}}"));
-        assert!(s.contains("[ \"$restarts\" -ge 3 ]"));
-        assert!(s.contains("[ \"$i\" = 360 ]"));
+        assert!(s.contains("if [ \"$bad\" -ge 2 ] || [ \"$restarts\" -ge 3 ]; then"));
+        assert!(!s.contains("seq 1 360"));
         assert_eq!(
             s.matches("docker logs --tail 50 amicu-vllm >&2 || true")
                 .count(),
@@ -667,45 +691,56 @@ mod tests {
     }
 
     #[test]
-    fn docker_and_the_toolkit_are_installed_only_when_missing_with_a_pinned_key() {
+    fn docker_and_the_toolkit_are_installed_from_pinned_repositories_and_repaired() {
         let s = script(&cfg());
-        assert!(!s.contains("docker is not installed"));
         assert!(s.contains(
-            "if ! command -v docker >/dev/null 2>&1 || ! command -v nvidia-ctk >/dev/null 2>&1; then"
+            "if [ ! -f /var/lib/amicu/tools-ready ] || ! systemctl is-active --quiet docker || \
+             ! nvidia_runtime; then"
         ));
-        assert!(s.contains(
-            "trust docker 'https://download.docker.com/linux/ubuntu/gpg' \
-             9DC858229FC7DD38854AE2D88D81803C0EBFCD88 \
-             \"https://download.docker.com/linux/ubuntu ${UBUNTU_CODENAME:-$VERSION_CODENAME} stable\"\n"
-        ));
+        assert!(s.contains("docker info --format '{{json .Runtimes}}'"));
+        assert!(s.contains("trust docker 'https://download.docker.com/linux/ubuntu/gpg' 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 \"https://download.docker.com/linux/ubuntu ${UBUNTU_CODENAME:-$VERSION_CODENAME} stable\"\n"));
         assert!(s.contains("pkgs='docker-ce docker-ce-cli containerd.io'"));
-        assert!(s.contains(
-            "trust nvidia-container-toolkit 'https://nvidia.github.io/libnvidia-container/gpgkey' \
-             C95B321B61E88C1809C4F759DDCAE044F796ECB0 \
-             'https://nvidia.github.io/libnvidia-container/stable/deb/$(ARCH) /'\n"
-        ));
+        assert!(s.contains("trust nvidia-container-toolkit 'https://nvidia.github.io/libnvidia-container/gpgkey' C95B321B61E88C1809C4F759DDCAE044F796ECB0 'https://nvidia.github.io/libnvidia-container/stable/deb/$(ARCH) /'\n"));
         assert!(s.contains("pkgs=\"$pkgs nvidia-container-toolkit\""));
-        assert!(s.contains("aptq install -y --no-install-recommends $pkgs"));
-        assert!(s.contains("DPkg::Lock::Timeout=600"));
         assert!(!s.contains("docker.io"));
-        // A key file is trusted only with exactly one key of the pinned
-        // fingerprint, and only after that check.
+
+        let repair = s.find("dpkg --configure -a").unwrap();
+        let install = s
+            .find("aptq install -y --no-install-recommends $pkgs")
+            .unwrap();
+        assert!(repair < install);
+        assert!(s.contains("DPkg::Lock::Timeout=600"));
+
+        assert!(s.contains("curl -fsSL --retry 5 --retry-connrefused \"$2\""));
+        assert!(s.contains("gpg --batch --quiet --import \"/run/amicu/$1.asc\""));
+        let export = s
+            .find("gpg --batch --export \"$3\" > \"/run/amicu/$1.gpg\"")
+            .unwrap();
         let check = s
             .find("[ \"$keys\" = 1 ] && [ \"$fpr\" = \"$3\" ] ||")
             .unwrap();
-        let trust = s
-            .find("install -m 0644 \"/run/amicu/$1.asc\" \"/etc/apt/keyrings/$1.asc\"")
+        let trusted = s
+            .find("install -m 0644 \"/run/amicu/$1.gpg\" \"/etc/apt/keyrings/$1.gpg\"")
             .unwrap();
-        assert!(check < trust);
-        assert!(s.contains("signed-by=/etc/apt/keyrings/%s.asc"));
+        assert!(export < check && check < trusted);
+        assert!(!s.contains("keyrings/$1.asc"));
+        assert!(s.contains("signed-by=/etc/apt/keyrings/%s.gpg"));
+
+        assert!(s.contains(
+            "aptq update || echo 'amicu: apt-get update reported errors; checking the needed packages' >&2"
+        ));
+        assert!(s.contains("apt-cache policy \"$p\" 2>/dev/null | grep -q 'Candidate: [^(]'"));
+
         let configure = s
             .find("nvidia-ctk runtime configure --runtime=docker")
             .unwrap();
-        assert!(configure < s.find("systemctl restart docker").unwrap());
-        // Installed before the first docker command, after the driver check.
-        let install = s.find("aptq install").unwrap();
+        let restart = s.find("systemctl restart docker").unwrap();
+        let marker = s
+            .find("install -D -m 0644 /dev/null /var/lib/amicu/tools-ready")
+            .unwrap();
+        assert!(install < configure && configure < restart && restart < marker);
         assert!(s.find("nvidia-smi -L >/dev/null ||").unwrap() < install);
-        assert!(install < s.find("docker pull").unwrap());
+        assert!(marker < s.find("docker pull").unwrap());
     }
 
     #[test]
@@ -728,7 +763,9 @@ mod tests {
         }
         assert!(s.trim_end().ends_with("echo 'amicu: vLLM is ready' >&2"));
         assert!(s.contains("printf ready | ga status\n"));
-        // The trap is set before the first step that can fail.
+        let booting = s.find("printf booting | ga status\n").unwrap();
+        assert!(s.contains("ga boot_id < /proc/sys/kernel/random/boot_id\n"));
+        assert!(booting < s.find("step='read secrets'").unwrap());
         assert!(s.find("trap on_exit EXIT").unwrap() < s.find("sm vm-1-api-key").unwrap());
         let meta = startup_metadata(&cfg(), P, N, false);
         assert!(
