@@ -209,6 +209,7 @@ dependencies = [
  "amicu-runtime",
  "async-trait",
  "base64 0.22.1",
+ "futures-util",
  "google-cloud-auth",
  "rcgen",
  "reqwest 0.13.4",

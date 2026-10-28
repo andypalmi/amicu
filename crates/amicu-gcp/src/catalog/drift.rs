@@ -1,10 +1,12 @@
 //! Drift check: compares the catalog with what a project's Compute Engine
 //! API lists, so a stale table shows up before a deploy fails on it.
 //!
-//! [`fetch_live_state`] reads `aggregated/acceleratorTypes` and
-//! `aggregated/machineTypes` (the latter filtered to the GPU series) and
-//! [`compare`] diffs them against the catalog. Both only read. The
-//! `verify-catalog` example runs them against a real project.
+//! [`fetch_live_state`] lists the project's zones, then each zone's
+//! `acceleratorTypes` and `machineTypes` (the latter filtered to the GPU
+//! series), and [`compare`] diffs them against the catalog. Both only read.
+//! The `verify-catalog` example runs them against a real project. The
+//! `aggregated/*` list calls are not used: they omit zones the zonal calls
+//! return, and differ between runs.
 //!
 //! The API lists only what the queried project can see. Zones gated to
 //! specific projects (and AI zones such as `europe-west4-ai1a`) show up as
@@ -15,6 +17,9 @@
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::time::Duration;
+
+use futures_util::stream::{self, StreamExt as _};
 
 use amicu_providers::HttpMethod;
 use serde_json::Value;
@@ -23,6 +28,10 @@ use super::{GcpCatalog, MACHINE_TYPES, ZONES, resolve_model};
 use crate::client::{COMPUTE_BASE_URL, GcpClient};
 use crate::error::GcpError;
 use crate::validate::validate_project_id;
+
+/// GPUs the API never lists as an accelerator type: only their machine types
+/// (A4X Max) carry them, in every zone.
+const MACHINE_TYPE_ONLY: [&str; 1] = ["nvidia-gb300"];
 
 /// Machine type names of the GPU series, as a Compute Engine list filter.
 const MACHINE_TYPE_FILTER: &str = r#"name eq "(a4x|a4|a3|a2|g4|g2)-.*""#;
@@ -33,6 +42,15 @@ const N1_ONLY: [&str; 3] = ["nvidia-tesla-t4", "nvidia-tesla-p4", "nvidia-tesla-
 /// `a3-edgegpu-8g-nolssd` and `a3-ultragpu-8g-nolssd` are the same shapes as
 /// their base machine types minus the local SSD, so the catalog does not list them.
 const NO_LSSD_SUFFIX: &str = "-nolssd";
+
+/// Zones fetched at once.
+const ZONE_CONCURRENCY: usize = 8;
+
+/// Attempts per request; a retryable failure (429, 5xx, transport) waits
+/// `RETRY_BASE * 2^attempt` first.
+const MAX_ATTEMPTS: u32 = 6;
+const RETRY_BASE: Duration = Duration::from_secs(1);
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
 /// A `(zone, name)` pair, where the name is a GPU or a machine type.
 pub type Pair = (String, String);
@@ -46,6 +64,8 @@ pub struct LiveState {
     pub machine_types: BTreeSet<Pair>,
     /// Zone and accelerator type, inferred from `machineTypes`.
     pub machine_type_gpus: BTreeSet<Pair>,
+    /// Zones the project may not read (`403` or `404`); skipped.
+    pub not_visible: BTreeSet<String>,
 }
 
 /// The difference between what the catalog expects and what is live.
@@ -117,6 +137,11 @@ pub fn expected_zone_machine_types() -> BTreeSet<Pair> {
 #[must_use]
 pub fn compare(live: &LiveState) -> DriftReport {
     let zone_gpus = expected_zone_gpus();
+    let accelerator_view: BTreeSet<Pair> = zone_gpus
+        .iter()
+        .filter(|(_, g)| !MACHINE_TYPE_ONLY.contains(&g.as_str()))
+        .cloned()
+        .collect();
     let from_machine_types = zone_gpus
         .iter()
         .filter(|(_, g)| !N1_ONLY.contains(&g.as_str()))
@@ -149,7 +174,7 @@ pub fn compare(live: &LiveState) -> DriftReport {
         .cloned()
         .collect();
     DriftReport {
-        zone_gpus: diff(&zone_gpus, &usable),
+        zone_gpus: diff(&accelerator_view, &usable),
         zone_gpus_from_machine_types: diff(&from_machine_types, &live.machine_type_gpus),
         zone_machine_types: diff(&expected_zone_machine_types(), &machine_types),
     }
@@ -170,12 +195,6 @@ pub fn diff(expected: &BTreeSet<Pair>, live: &BTreeSet<Pair>) -> Diff {
     }
 }
 
-/// `zones/us-central1-a` to `us-central1-a`; other scopes (`regions/...`) are
-/// not zones.
-fn zone_of(scope: &str) -> Option<&str> {
-    scope.strip_prefix("zones/")
-}
-
 /// The accelerator type without its `-vws` suffix, if the catalog knows it.
 fn known_gpu(name: &str) -> Option<&'static str> {
     resolve_model(name.strip_suffix("-vws").unwrap_or(name))
@@ -183,46 +202,40 @@ fn known_gpu(name: &str) -> Option<&'static str> {
         .map(|m| m.name)
 }
 
-/// Adds one `acceleratorTypes` aggregated-list page to `state`.
-pub fn add_accelerator_page(state: &mut LiveState, page: &Value) {
-    for (scope, items) in page["items"].as_object().into_iter().flatten() {
-        let Some(zone) = zone_of(scope) else { continue };
-        for a in items["acceleratorTypes"].as_array().into_iter().flatten() {
-            if let Some(gpu) = a["name"].as_str().and_then(known_gpu) {
-                state.accelerators.insert((zone.to_owned(), gpu.to_owned()));
-            }
+/// Adds one zonal `acceleratorTypes` list page to `state`.
+pub fn add_accelerator_page(state: &mut LiveState, zone: &str, page: &Value) {
+    for a in page["items"].as_array().into_iter().flatten() {
+        if let Some(gpu) = a["name"].as_str().and_then(known_gpu) {
+            state.accelerators.insert((zone.to_owned(), gpu.to_owned()));
         }
     }
 }
 
-/// Adds one `machineTypes` aggregated-list page to `state`. A machine type
-/// the catalog does not know still counts when it carries a known GPU.
-pub fn add_machine_type_page(state: &mut LiveState, page: &Value) {
+/// Adds one zonal `machineTypes` list page to `state`. A machine type the
+/// catalog does not know still counts when it carries a known GPU.
+pub fn add_machine_type_page(state: &mut LiveState, zone: &str, page: &Value) {
     let catalog = GcpCatalog::new();
-    for (scope, items) in page["items"].as_object().into_iter().flatten() {
-        let Some(zone) = zone_of(scope) else { continue };
-        for m in items["machineTypes"].as_array().into_iter().flatten() {
-            let Some(name) = m["name"].as_str() else {
-                continue;
-            };
-            let gpu = match catalog.machine_type(name) {
-                Some(known) => Some(known.gpu),
-                None => m["accelerators"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .find_map(|a| a["guestAcceleratorType"].as_str().and_then(known_gpu)),
-            };
-            if let Some(gpu) = gpu {
-                if !name.ends_with(NO_LSSD_SUFFIX) {
-                    state
-                        .machine_types
-                        .insert((zone.to_owned(), name.to_owned()));
-                }
+    for m in page["items"].as_array().into_iter().flatten() {
+        let Some(name) = m["name"].as_str() else {
+            continue;
+        };
+        let gpu = match catalog.machine_type(name) {
+            Some(known) => Some(known.gpu),
+            None => m["accelerators"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find_map(|a| a["guestAcceleratorType"].as_str().and_then(known_gpu)),
+        };
+        if let Some(gpu) = gpu {
+            if !name.ends_with(NO_LSSD_SUFFIX) {
                 state
-                    .machine_type_gpus
-                    .insert((zone.to_owned(), gpu.to_owned()));
+                    .machine_types
+                    .insert((zone.to_owned(), name.to_owned()));
             }
+            state
+                .machine_type_gpus
+                .insert((zone.to_owned(), gpu.to_owned()));
         }
     }
 }
@@ -237,6 +250,37 @@ fn encode(value: &str) -> String {
         }
         out
     })
+}
+
+/// Up to a quarter of `base` extra, so zones retrying together spread out.
+fn jittered(base: Duration) -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    base + base / 4 * (nanos % 1000) / 1000
+}
+
+/// `GET`s `url`, retrying rate limits, 5xx and transport failures. A `429`
+/// with `Retry-After` waits at least that long.
+async fn get(client: &GcpClient, url: &str) -> Result<Value, GcpError> {
+    let mut attempt = 0;
+    loop {
+        match client.request(HttpMethod::Get, url, None).await {
+            Err(e) if e.is_retryable() && attempt + 1 < MAX_ATTEMPTS => {
+                let mut wait = RETRY_BASE * 2u32.pow(attempt);
+                if let GcpError::RateLimited {
+                    retry_after: Some(after),
+                    ..
+                } = e
+                {
+                    wait = wait.max(after.min(MAX_RETRY_AFTER));
+                }
+                tokio::time::sleep(jittered(wait)).await;
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
 }
 
 async fn pages(
@@ -254,40 +298,78 @@ async fn pages(
         if let Some(token) = &token {
             let _ = write!(url, "&pageToken={}", encode(token));
         }
-        let page = client.request(HttpMethod::Get, &url, None).await?;
+        let page = get(client, &url).await?;
         each(&page);
         match page["nextPageToken"].as_str().filter(|t| !t.is_empty()) {
-            Some(next) => token = Some(next.to_owned()),
-            None => return Ok(()),
+            Some(next) if token.as_deref() != Some(next) => token = Some(next.to_owned()),
+            _ => return Ok(()),
         }
     }
 }
 
-/// Reads what `project` lists, following `nextPageToken`. Only `GET`s.
-///
-/// # Errors
-/// [`GcpError::Invalid`] for a malformed project id, and any client error
-/// (permission denied when the project cannot list Compute Engine zones).
-pub async fn fetch_live_state(client: &GcpClient, project: &str) -> Result<LiveState, GcpError> {
-    validate_project_id(project)?;
+async fn fetch_zone(client: &GcpClient, base: &str, zone: &str) -> Result<LiveState, GcpError> {
     let mut state = LiveState::default();
-    let base = format!("{COMPUTE_BASE_URL}/projects/{project}/aggregated");
+    let base = format!("{base}/zones/{zone}");
     pages(client, &format!("{base}/acceleratorTypes"), None, |page| {
-        add_accelerator_page(&mut state, page);
+        add_accelerator_page(&mut state, zone, page);
     })
     .await?;
     pages(
         client,
         &format!("{base}/machineTypes"),
         Some(MACHINE_TYPE_FILTER),
-        |page| add_machine_type_page(&mut state, page),
+        |page| add_machine_type_page(&mut state, zone, page),
     )
     .await?;
     Ok(state)
 }
 
+/// Reads what `project` lists, zone by zone, following `nextPageToken`. Only
+/// `GET`s.
+///
+/// # Errors
+/// [`GcpError::Invalid`] for a malformed project id, and any client error
+/// (permission denied when the project cannot list Compute Engine zones).
+pub async fn fetch_live_state(client: &GcpClient, project: &str) -> Result<LiveState, GcpError> {
+    validate_project_id(project)?;
+    let base = format!("{COMPUTE_BASE_URL}/projects/{project}");
+    let mut zones = BTreeSet::new();
+    pages(client, &format!("{base}/zones"), None, |page| {
+        zones.extend(
+            page["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|z| z["status"].as_str() == Some("UP"))
+                .filter_map(|z| z["name"].as_str().map(str::to_owned)),
+        );
+    })
+    .await?;
+    let base = &base;
+    let mut results = stream::iter(&zones)
+        .map(|zone| async move { (zone.clone(), fetch_zone(client, base, zone).await) })
+        .buffer_unordered(ZONE_CONCURRENCY);
+    let mut state = LiveState::default();
+    while let Some(zone) = results.next().await {
+        let (name, zone) = zone;
+        let zone = match zone {
+            Ok(zone) => zone,
+            Err(GcpError::PermissionDenied { status: 403, .. } | GcpError::NotFound { .. }) => {
+                state.not_visible.insert(name);
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        state.accelerators.extend(zone.accelerators);
+        state.machine_types.extend(zone.machine_types);
+        state.machine_type_gpus.extend(zone.machine_type_gpus);
+    }
+    Ok(state)
+}
+
 #[cfg(test)]
 mod tests {
+    use amicu_providers::HttpResponse;
     use serde_json::json;
 
     use super::*;
@@ -295,7 +377,10 @@ mod tests {
 
     fn live_matching_the_catalog() -> LiveState {
         let mut live = LiveState {
-            accelerators: expected_zone_gpus(),
+            accelerators: expected_zone_gpus()
+                .into_iter()
+                .filter(|(_, g)| !MACHINE_TYPE_ONLY.contains(&g.as_str()))
+                .collect(),
             machine_types: expected_zone_machine_types(),
             ..LiveState::default()
         };
@@ -353,14 +438,12 @@ mod tests {
         let mut state = LiveState::default();
         add_accelerator_page(
             &mut state,
-            &json!({"items": {
-                "zones/us-central1-a": {"acceleratorTypes": [
-                    {"name": "nvidia-l4"}, {"name": "nvidia-l4-vws"},
-                    {"name": "nvidia-unknown"}, {"name": "nvidia-tesla-t4"}]},
-                "zones/us-east1-b": {"warning": {"code": "NO_RESULTS_ON_PAGE"}},
-                "regions/us-east1": {"acceleratorTypes": [{"name": "nvidia-l4"}]}
-            }}),
+            "us-central1-a",
+            &json!({"items": [
+                {"name": "nvidia-l4"}, {"name": "nvidia-l4-vws"},
+                {"name": "nvidia-unknown"}, {"name": "nvidia-tesla-t4"}]}),
         );
+        add_accelerator_page(&mut state, "us-east1-b", &json!({}));
         assert_eq!(
             state.accelerators,
             BTreeSet::from([
@@ -375,13 +458,14 @@ mod tests {
         let mut state = LiveState::default();
         add_machine_type_page(
             &mut state,
-            &json!({"items": {"zones/us-central1-b": {"machineTypes": [
+            "us-central1-b",
+            &json!({"items": [
                 {"name": "a3-highgpu-8g"},
                 {"name": "g2-standard-4"},
                 {"name": "a5-newgpu-8g", "accelerators": [
                     {"guestAcceleratorType": "nvidia-b200", "guestAcceleratorCount": 8}]},
                 {"name": "a9-nogpu-1g"}
-            ]}}}),
+            ]}),
         );
         let zone = "us-central1-b".to_owned();
         assert_eq!(
@@ -408,41 +492,179 @@ mod tests {
         assert_eq!(encode("CAE="), "CAE%3D");
     }
 
-    #[tokio::test]
-    async fn fetch_follows_pages_and_only_reads() {
+    #[tokio::test(start_paused = true)]
+    async fn fetch_lists_each_zone_follows_pages_retries_and_only_reads() {
         let (c, mock) = client(
             Mock::default()
                 .on(
                     HttpMethod::Get,
-                    "/aggregated/acceleratorTypes?maxResults=500",
+                    "/projects/my-project/zones?maxResults=500",
                     200,
-                    r#"{"items":{"zones/us-central1-a":{"acceleratorTypes":[{"name":"nvidia-l4"}]}},"nextPageToken":"CAE="}"#,
+                    r#"{"items":[{"name":"us-central1-a","status":"UP"},{"name":"us-central1-b","status":"UP"},{"name":"us-central1-c","status":"DOWN"}]}"#,
                 )
                 .on(
                     HttpMethod::Get,
-                    "/aggregated/acceleratorTypes?maxResults=500&pageToken=CAE%3D",
+                    "/zones/us-central1-a/acceleratorTypes?maxResults=500",
                     200,
-                    r#"{"items":{"zones/us-central1-b":{"acceleratorTypes":[{"name":"nvidia-b200"}]}}}"#,
+                    r#"{"items":[{"name":"nvidia-l4"}],"nextPageToken":"CAE="}"#,
                 )
                 .on(
                     HttpMethod::Get,
-                    "%22",
+                    "/zones/us-central1-a/acceleratorTypes?maxResults=500&pageToken=CAE%3D",
                     200,
-                    r#"{"items":{"zones/us-central1-a":{"machineTypes":[{"name":"g2-standard-4"}]}}}"#,
+                    r#"{"items":[{"name":"nvidia-tesla-t4"}]}"#,
+                )
+                .on(
+                    HttpMethod::Get,
+                    "/zones/us-central1-b/acceleratorTypes?maxResults=500",
+                    429,
+                    r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"slow"}}"#,
+                )
+                .on(
+                    HttpMethod::Get,
+                    "/zones/us-central1-b/acceleratorTypes?maxResults=500",
+                    200,
+                    r#"{"items":[{"name":"nvidia-b200"}]}"#,
+                )
+                .on(
+                    HttpMethod::Get,
+                    "/zones/us-central1-a/machineTypes?maxResults=500&filter=name%20eq%20%22%28a4x%7Ca4%7Ca3%7Ca2%7Cg4%7Cg2%29-.%2A%22",
+                    200,
+                    r#"{"items":[{"name":"g2-standard-4"}]}"#,
+                )
+                .on(
+                    HttpMethod::Get,
+                    "/zones/us-central1-b/machineTypes?maxResults=500&filter=name%20eq%20%22%28a4x%7Ca4%7Ca3%7Ca2%7Cg4%7Cg2%29-.%2A%22",
+                    200,
+                    "{}",
                 ),
         );
         let live = fetch_live_state(&c, "my-project").await.unwrap();
-        assert_eq!(live.accelerators.len(), 2);
+        assert_eq!(live.accelerators.len(), 3);
         assert_eq!(live.machine_types.len(), 1);
         let seen = mock.requests();
-        assert_eq!(seen.len(), 3);
+        assert_eq!(seen.len(), 7);
         assert!(
             seen.iter()
                 .all(|r| r.method == HttpMethod::Get && r.body.is_none())
         );
-        assert!(seen[2].url.starts_with(
-            "https://compute.googleapis.com/compute/v1/projects/my-project/aggregated/machineTypes?"
-        ));
+        assert!(
+            seen.iter()
+                .all(|r| !r.url.contains("/aggregated/") && r.url.contains("/projects/my-project/"))
+        );
+    }
+
+    fn zone_list(zone: &str) -> String {
+        format!(r#"{{"items":[{{"name":"{zone}","status":"UP"}}]}}"#)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_zone_the_project_cannot_read_is_skipped() {
+        for (status, body) in [
+            (
+                403,
+                r#"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"no"}}"#,
+            ),
+            (
+                404,
+                r#"{"error":{"code":404,"status":"NOT_FOUND","message":"gone"}}"#,
+            ),
+        ] {
+            let (c, _) = client(
+                Mock::default()
+                    .on(
+                        HttpMethod::Get,
+                        "/projects/my-project/zones?maxResults=500",
+                        200,
+                        &zone_list("us-east4-c"),
+                    )
+                    .on(
+                        HttpMethod::Get,
+                        "/zones/us-east4-c/acceleratorTypes?maxResults=500",
+                        status,
+                        body,
+                    ),
+            );
+            let live = fetch_live_state(&c, "my-project").await.unwrap();
+            assert_eq!(live.not_visible, BTreeSet::from(["us-east4-c".to_owned()]));
+            assert!(live.accelerators.is_empty());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn other_zone_errors_still_fail_the_run() {
+        let (c, _) = client(
+            Mock::default()
+                .on(
+                    HttpMethod::Get,
+                    "/projects/my-project/zones?maxResults=500",
+                    200,
+                    &zone_list("us-east4-c"),
+                )
+                .on(
+                    HttpMethod::Get,
+                    "/zones/us-east4-c/acceleratorTypes?maxResults=500",
+                    400,
+                    "{}",
+                ),
+        );
+        assert!(fetch_live_state(&c, "my-project").await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_repeated_page_token_ends_the_listing() {
+        let (c, mock) = client(
+            Mock::default()
+                .on(
+                    HttpMethod::Get,
+                    "/zones?maxResults=500&pageToken=CAE%3D",
+                    200,
+                    r#"{"items":[],"nextPageToken":"CAE="}"#,
+                )
+                .on(
+                    HttpMethod::Get,
+                    "/zones?maxResults=500",
+                    200,
+                    r#"{"items":[],"nextPageToken":"CAE="}"#,
+                ),
+        );
+        fetch_live_state(&c, "my-project").await.unwrap();
+        let zones = mock
+            .requests()
+            .into_iter()
+            .filter(|r| r.url.contains("/zones?"))
+            .count();
+        assert_eq!(zones, 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_429_waits_for_retry_after() {
+        let limited = HttpResponse::new(429, r#"{"error":{"code":429}}"#)
+            .with_retry_after(Duration::from_secs(30));
+        let (c, _) = client(
+            Mock::default()
+                .then(
+                    HttpMethod::Get,
+                    "/projects/my-project/zones?maxResults=500",
+                    Ok(limited),
+                )
+                .on(
+                    HttpMethod::Get,
+                    "/projects/my-project/zones?maxResults=500",
+                    200,
+                    "{}",
+                ),
+        );
+        let start = tokio::time::Instant::now();
+        fetch_live_state(&c, "my-project").await.unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(30));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fetch_gives_up_after_repeated_server_errors() {
+        let (c, mock) = client(Mock::default());
+        assert!(fetch_live_state(&c, "my-project").await.is_err());
+        assert_eq!(mock.requests().len(), MAX_ATTEMPTS as usize);
     }
 
     #[tokio::test]
