@@ -29,4 +29,25 @@ ignore = [
     # the rsa dep, adds a cmake build-time requirement), or jsonwebtoken is
     # replaced with a non-RSA-coupled JWT crate.
     "RUSTSEC-2023-0071",
+
+    # crypto-bigint 0.5.5 - timing variability in operations meant to be
+    # constant-time. Fixed only in crypto-bigint >=0.7.6; there is no patched
+    # 0.5.x. This copy is pulled solely by jsonwebtoken 11's `rust_crypto`
+    # feature: jsonwebtoken -> p256 0.13 / p384 0.13 -> elliptic-curve 0.13
+    # -> crypto-bigint 0.5.5 (every jsonwebtoken release up to 11.1.0 still
+    # requires p256/p384 ^0.13). That code only runs for ES256/ES384, which
+    # amicu never accepts or produces: every `Validation` pins one algorithm
+    # (EdDSA at crates/amicu-auth/src/verifier.rs:162, RS256 at
+    # crates/amicu-auth/src/google.rs:204, also checked on the header at
+    # google.rs:251), `jsonwebtoken::decode` rejects any header alg outside
+    # that set before it builds a verifier, every DecodingKey is Ed25519 or
+    # RSA, and signing uses EdDSA only (crates/amicu-auth/src/key.rs:92).
+    # See crates/amicu-auth/SECURITY-NOTES.md.
+    # The same advisory also covers the crypto-bigint 0.7.x copy (russh ->
+    # p256 0.14), which is fixed by version instead: cargo-audit ignores by ID,
+    # so that copy must stay at >=0.7.10 in Cargo.lock.
+    # Removal condition: remove this ignore once jsonwebtoken moves to the
+    # elliptic-curve 0.14 / RustCrypto 0.14 stack (crypto-bigint 0.7), or
+    # jsonwebtoken is replaced with a JWT crate that does not pull it.
+    "RUSTSEC-2026-0387",
 ]
