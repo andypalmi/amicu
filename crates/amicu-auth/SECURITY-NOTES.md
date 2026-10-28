@@ -3,10 +3,17 @@
 ## RSA (RUSTSEC-2023-0071, Marvin Attack) — accepted risk, not exploitable here
 
 `amicu-auth` depends on `jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }`.
-This app signs and verifies **EdDSA (Ed25519) only** — see `Algorithm::EdDSA` in
-`src/key.rs` (`Header::new`) and `src/verifier.rs` (`Validation::new`); no code
-path ever constructs an `Algorithm::RS256`/`RS384`/`RS512`/`PS*` header or
-validation, and there is no RSA key material anywhere in this crate.
+This crate uses RSA in one place, and only to **verify** signatures with Google's
+public keys. Google ID tokens are verified with `Algorithm::RS256`:
+`Validation::new(Algorithm::RS256)` at `src/google.rs:204`, the header
+algorithm check at `src/google.rs:251`, and `DecodingKey::from_rsa_components(&jwk.n, &jwk.e)`
+built from Google's published JWKs at `src/google.rs:330`. amicu's own tokens are
+signed and verified with **EdDSA (Ed25519) only**: `Header::new(Algorithm::EdDSA)` at
+`src/key.rs:92` and `Validation::new(Algorithm::EdDSA)` at `src/verifier.rs:162`.
+Private-key RSA is test-only. `EncodingKey::from_rsa_der` appears at `src/google.rs:520`,
+inside the `mod tests` that starts at `src/google.rs:464`, and the RS256 test headers are at
+`src/google.rs:536` and `src/google.rs:819`. No production code signs with RSA, and
+no RSA private-key material exists in production.
 
 We investigated dropping the `rsa` crate from the dependency tree (it is
 `rsa 0.9.10`, flagged by `cargo audit` for RUSTSEC-2023-0071, the Marvin
@@ -38,13 +45,13 @@ scope for a targeted cleanup:
   architecture decision, not a scoped dependency cleanup, so we did not do it
   here.
 
-**Accepted risk**: `rsa` stays in the dependency tree as dead code (compiled
-in via `jsonwebtoken`'s `rust_crypto` feature bundle but never invoked — no
-`Algorithm::RS*`/`PS*` value is ever constructed by `amicu-auth` or its
-callers). The Marvin attack requires the victim to actually perform RSA
-PKCS#1v1.5 decryption/signing operations with attacker-observable timing;
-since this codebase never does that, the advisory does not describe an
-exploitable condition here.
+**Accepted risk**: `rsa` stays in the dependency tree. Its verify path is live,
+because Google ID-token verification runs through it (`src/google.rs:204`, `src/google.rs:330`).
+The Marvin attack needs an attacker to observe the timing of RSA private-key operations
+(PKCS#1 v1.5 decryption or signing) performed by the victim. Verification with a public key
+uses only the public exponent, so no secret-dependent timing exists to observe. Production never
+performs private-key RSA, so the advisory does not describe an exploitable condition here.
+If amicu ever signs or decrypts with RSA in production, this acceptance must be revisited.
 
 **Removal condition**: re-evaluate when either (a) `jsonwebtoken` ships a
 `rust_crypto`-compatible feature split that excludes `rsa`, or (b) the team
