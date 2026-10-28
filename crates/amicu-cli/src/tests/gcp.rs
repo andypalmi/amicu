@@ -71,6 +71,8 @@ struct WorldState {
     startup_failed: Option<(String, String)>,
     /// Instance deletes answer 403.
     vm_delete_denied: bool,
+    /// Firewall listings in this project answer 403.
+    firewall_list_denied: Option<String>,
 }
 
 type Hook = Box<dyn FnOnce() + Send>;
@@ -386,8 +388,14 @@ impl HttpTransport for World {
                 let o = op(&mut w, "g");
                 json_reply(200, &o)
             }
-            (HttpMethod::Get, ["projects", _, "global", "firewalls"]) => {
+            (HttpMethod::Get, ["projects", project, "global", "firewalls"]) => {
                 let w = self.state.lock().unwrap();
+                if w.firewall_list_denied.as_deref() == Some(*project) {
+                    return json_reply(
+                        403,
+                        &json!({"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "denied"}}),
+                    );
+                }
                 let items: Vec<Value> = w
                     .firewalls
                     .iter()
@@ -1041,6 +1049,66 @@ fn a_failed_startup_with_an_undeletable_vm_says_it_bills_and_how_to_read_its_log
     );
     assert!(err.contains("amicu destroy --target chat"), "{err}");
     assert_eq!(the_record(&project).instance, instance());
+}
+
+#[test]
+fn orphans_scans_the_host_project_for_untracked_firewall_rules() {
+    use crate::commands::orphans::{Env, GcpOpsListing, Kind, Platform, Tracked, discover};
+    let td = TempDir::new();
+    let project = project_with(
+        &td,
+        "network = \"projects/host-proj/global/networks/vpc-main\"\nsubnetwork = \"gpu\"",
+    );
+    let rig = rig();
+    rig.gcp.world.state.lock().unwrap().firewalls.push((
+        "amicu-old-fw".to_owned(),
+        "amicu-owner=abc123; created by amicu".to_owned(),
+    ));
+    let run = || {
+        let state = project.load_state().unwrap();
+        let tracked =
+            Tracked::from_state(state.as_ref()).with_config(project.load_graph().ok().as_ref());
+        discover(
+            &Env {
+                platform: Platform::Other,
+                exec: &amicu_llamacpp::HostExec,
+                modal: &NoModalApps,
+                runpod: &NoRunPodListing,
+                gcp: &GcpOpsListing(&rig.gcp),
+                agents_dir: None,
+            },
+            &tracked,
+        )
+    };
+    let report = run();
+    let gcp = report.sources.iter().find(|s| s.name == "gcp").unwrap();
+    assert_eq!(gcp.status, "ok", "{:?}", gcp.detail);
+    assert!(
+        report.resources.iter().any(|r| r.kind == Kind::GceFirewall
+            && r.identity == "amicu-old-fw (host-proj)"
+            && !r.tracked),
+        "{:?}",
+        report.resources
+    );
+
+    rig.gcp.world.state.lock().unwrap().firewall_list_denied = Some("host-proj".to_owned());
+    let report = run();
+    let gcp = report.sources.iter().find(|s| s.name == "gcp").unwrap();
+    assert_eq!(gcp.status, "ok", "{:?}", gcp.detail);
+    assert!(
+        report
+            .resources
+            .iter()
+            .any(|r| r.identity == "amicu-old-fw (my-proj)"),
+        "{:?}",
+        report.resources
+    );
+    assert!(
+        report
+            .resources
+            .iter()
+            .all(|r| !r.identity.contains("host-proj"))
+    );
 }
 
 #[test]
