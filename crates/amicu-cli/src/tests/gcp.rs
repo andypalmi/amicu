@@ -65,6 +65,8 @@ struct WorldState {
     /// The VM's startup script reports `failed:<step>` with this
     /// `(step, log)`, and vLLM never answers.
     startup_failed: Option<(String, String)>,
+    /// Instance deletes answer 403.
+    vm_delete_denied: bool,
 }
 
 type Hook = Box<dyn FnOnce() + Send>;
@@ -423,6 +425,12 @@ impl HttpTransport for World {
             }
             (HttpMethod::Delete, ["projects", _, "zones", zone, "instances", name]) => {
                 let mut w = self.state.lock().unwrap();
+                if w.vm_delete_denied {
+                    return json_reply(
+                        403,
+                        &json!({"error": {"code": 403, "status": "PERMISSION_DENIED", "message": "compute.instances.delete denied"}}),
+                    );
+                }
                 w.vms.retain(|v| !(v.name == *name && v.zone == *zone));
                 let o = op(&mut w, "z");
                 json_reply(200, &o)
@@ -947,17 +955,21 @@ fn a_failed_exposure_check_deletes_what_this_run_created() {
     assert_eq!(rig.gcp.world.firewall_names(), Vec::<String>::new());
 }
 
+fn fail_startup(rig: &Rig) {
+    rig.gcp.world.state.lock().unwrap().startup_failed = Some((
+        "install Docker and the NVIDIA container toolkit".to_owned(),
+        "amicu: installing Docker and the NVIDIA container toolkit\n\
+         amicu: apt cannot find nvidia-container-toolkit\n"
+            .to_owned(),
+    ));
+}
+
 #[test]
 fn a_failed_startup_script_stops_apply_at_once_and_destroy_finishes_the_cleanup() {
     let td = TempDir::new();
     let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
     let rig = rig();
-    rig.gcp.world.state.lock().unwrap().startup_failed = Some((
-        "install Docker and the NVIDIA container toolkit".to_owned(),
-        "amicu: installing Docker and the NVIDIA container toolkit\n\
-         E: Unable to locate package nvidia-container-toolkit\n"
-            .to_owned(),
-    ));
+    fail_startup(&rig);
     let started = std::time::Instant::now();
     let err = apply_with(&project, &rig).unwrap_err().to_string();
     // Well inside the 5 s health timeout of the fake: the report ended the wait.
@@ -969,23 +981,44 @@ fn a_failed_startup_script_stops_apply_at_once_and_destroy_finishes_the_cleanup(
         "{err}"
     );
     assert!(
-        err.contains("E: Unable to locate package nvidia-container-toolkit"),
+        err.contains("amicu: apt cannot find nvidia-container-toolkit"),
+        "{err}"
+    );
+    assert!(!err.contains("get-serial-port-output"), "{err}");
+    assert!(err.contains("were deleted"), "{err}");
+    assert_eq!(rig.gcp.world.vm_names(), Vec::<String>::new());
+    assert_eq!(rig.gcp.world.firewall_names(), Vec::<String>::new());
+    assert_eq!(the_record(&project).instance, instance());
+    assert_eq!(destroy(&project, &rig).unwrap(), 0);
+    assert_eq!(stops_for(&project, DEP).len(), 0);
+}
+
+#[test]
+fn a_failed_startup_with_an_undeletable_vm_says_it_bills_and_how_to_read_its_log() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    fail_startup(&rig);
+    rig.gcp.world.state.lock().unwrap().vm_delete_denied = true;
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    let zone = rig
+        .gcp
+        .world
+        .vm_zone(&instance())
+        .expect("the VM is still there");
+    assert!(
+        err.contains(&format!("may still be running and billing in {zone}")),
         "{err}"
     );
     assert!(
         err.contains(&format!(
-            "gcloud compute instances get-serial-port-output {}",
+            "gcloud compute instances get-serial-port-output {} --zone {zone} --project {GOOGLE_PROJECT}",
             instance()
         )),
         "{err}"
     );
-    assert!(err.contains("were deleted"), "{err}");
-    assert_eq!(rig.gcp.world.vm_names(), Vec::<String>::new());
-    assert_eq!(rig.gcp.world.firewall_names(), Vec::<String>::new());
-    // The record stays until a stop is confirmed, so destroy can finish.
+    assert!(err.contains("amicu destroy --target chat"), "{err}");
     assert_eq!(the_record(&project).instance, instance());
-    assert_eq!(destroy(&project, &rig).unwrap(), 0);
-    assert_eq!(stops_for(&project, DEP).len(), 0);
 }
 
 #[test]
@@ -1366,6 +1399,22 @@ fn the_pinned_transport_is_used_and_the_certificate_is_written_and_printed() {
     assert!(out.contains(&cert.display().to_string()), "{out}");
     assert!(out.contains(&fingerprint), "{out}");
     assert!(!out.contains("plain HTTP"), "{out}");
+    let spki = amicu_gcp::compute::spki_pin_of_pem(&pem).unwrap();
+    assert!(
+        out.contains(&format!("public key pin (sha256, base64): {spki}")),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("-k --pinnedpubkey 'sha256//{spki}'")),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "ssl.create_default_context(cafile=\"{}\")",
+            cert.display()
+        )),
+        "{out}"
+    );
 }
 
 #[test]

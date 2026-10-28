@@ -45,6 +45,8 @@ pub struct VmRecord {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Instance {
+    /// The numeric id Compute Engine assigned (a decimal string).
+    pub id: Option<String>,
     pub name: String,
     pub status: String,
     pub status_message: Option<String>,
@@ -415,6 +417,44 @@ pub async fn delete(
         }
         tokio::time::sleep(timing.interval).await;
     }
+}
+
+/// [`status`] plus the VM's id while it exists.
+pub(crate) async fn observe(
+    client: &GcpClient,
+    record: &VmRecord,
+) -> Result<(VmState, Option<String>), GcpError> {
+    match get_owned(client, record).await {
+        Ok(inst) => Ok((inst.state(), inst.id.clone())),
+        Err(GcpError::NotFound { .. }) => Ok((VmState::Gone, None)),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether the zone's operations show Compute Engine preempting this VM: by
+/// `id` when known (an earlier VM of the same name may have been preempted
+/// too), else by name. `false` when the operations cannot be read.
+pub async fn was_preempted(client: &GcpClient, record: &VmRecord, id: Option<&str>) -> bool {
+    if check_record(record).is_err() {
+        return false;
+    }
+    let url = format!(
+        "{COMPUTE_BASE_URL}/projects/{}/zones/{}/operations?filter=operationType%3D%22compute.instances.preempted%22",
+        record.project, record.zone
+    );
+    let Ok(v) = client.request(HttpMethod::Get, &url, None).await else {
+        return false;
+    };
+    let target = format!("/instances/{}", record.name);
+    v["items"].as_array().into_iter().flatten().any(|op| {
+        op["operationType"] == "compute.instances.preempted"
+            && match id {
+                Some(id) => op["targetId"] == id,
+                None => op["targetLink"]
+                    .as_str()
+                    .is_some_and(|l| l.ends_with(&target)),
+            }
+    })
 }
 
 /// The VM's guest attributes in `namespace` as `(key, value)` pairs; empty

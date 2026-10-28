@@ -379,18 +379,28 @@ pub(super) async fn failed_start(
             "; VM {id} and its firewall rule, created by this run, were deleted (the record \
              stays until a later apply or destroy confirms it)"
         ),
-        Err(e) => format!(
-            "; deleting VM {id} and its firewall rule, created by this run, FAILED ({e}); the VM \
-             may still be running and billing in {zone}. They stay recorded and `amicu destroy \
-             --target {}` retries",
-            start.stop.deployment,
-            zone = start
+        Err(e) => {
+            let (project, recorded_zone) = start
+                .stop
+                .gcp
+                .as_ref()
+                .map(|g| (g.project.clone(), g.zone.clone()))
+                .unwrap_or_default();
+            let zone = start
                 .landed
                 .lock()
                 .ok()
                 .and_then(|z| z.clone())
-                .unwrap_or_else(|| "its zone".to_owned()),
-        ),
+                .unwrap_or(recorded_zone);
+            format!(
+                "; deleting VM {id} and its firewall rule, created by this run, FAILED ({e}); \
+                 the VM may still be running and billing in {zone}. They stay recorded and \
+                 `amicu destroy --target {}` retries. While the VM exists, its boot log: \
+                 gcloud compute instances get-serial-port-output {id} --zone {zone} \
+                 --project {project}",
+                start.stop.deployment,
+            )
+        }
     }
 }
 
@@ -410,19 +420,39 @@ pub(super) fn write_cert(project: &crate::project::Project, start: &GceStart) {
     }
 }
 
-/// What a client of each applied Compute Engine VM pins: the VM's id, the
-/// certificate file next to state and the certificate's fingerprint.
-pub(super) fn tls_notes(
-    project: &crate::project::Project,
-    stops: &[StopRecord],
-) -> Vec<(String, std::path::PathBuf, String)> {
+/// What a client of one applied Compute Engine VM pins.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TlsNote {
+    pub instance: String,
+    /// The certificate file next to state.
+    pub path: std::path::PathBuf,
+    /// SHA-256 of the certificate's DER, as recorded in state.
+    pub fingerprint: String,
+    /// The `curl --pinnedpubkey` value, from the certificate file when it is
+    /// there and matches the recorded fingerprint.
+    pub spki_pin: Option<String>,
+}
+
+/// What a client of each applied Compute Engine VM pins.
+pub(super) fn tls_notes(project: &crate::project::Project, stops: &[StopRecord]) -> Vec<TlsNote> {
     stops
         .iter()
         .filter_map(|r| r.gcp.as_ref())
         .filter_map(|g| {
-            let f = g.tls_fingerprint.clone()?;
+            let fingerprint = g.tls_fingerprint.clone()?;
             let path = amicu_gcp::compute::cert_path(&project.state_dir(), &g.instance);
-            Some((g.instance.clone(), path, f))
+            let spki_pin = std::fs::read_to_string(&path)
+                .ok()
+                .filter(|pem| {
+                    amicu_gcp::compute::fingerprint_of_pem(pem).is_ok_and(|f| f == fingerprint)
+                })
+                .and_then(|pem| amicu_gcp::compute::spki_pin_of_pem(&pem).ok());
+            Some(TlsNote {
+                instance: g.instance.clone(),
+                path,
+                fingerprint,
+                spki_pin,
+            })
         })
         .collect()
 }

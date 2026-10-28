@@ -15,7 +15,7 @@ use tokio::time::Instant;
 use super::spec::{Provisioning, VmSpec};
 use super::startup::GUEST_NAMESPACE;
 use super::tls::PinnedTransport;
-use super::vm::{VmRecord, VmState, guest_attributes, status};
+use super::vm::{VmRecord, VmState, guest_attributes, observe, was_preempted};
 use crate::client::GcpClient;
 use crate::error::GcpError;
 
@@ -78,6 +78,10 @@ pub fn probe_transport(record: &VmRecord) -> Result<Arc<dyn HttpTransport>, GcpE
 /// Guest attributes are read at most this often: Compute Engine allows 10
 /// queries a minute per VM, and may drop attributes when they come faster.
 const REPORT_GAP: Duration = Duration::from_secs(15);
+/// The [`GcpError::VmLost`] reason for a Spot VM Compute Engine reclaimed.
+pub const PREEMPTED: &str = "preempted: Compute Engine reclaimed the Spot capacity; run \
+                             `amicu apply` again, or set `provisioning = \"standard\"` to avoid \
+                             preemption";
 /// Lines of the startup script's log kept in [`GcpError::StartupFailed`].
 const DETAIL_LINES: usize = 25;
 
@@ -163,9 +167,14 @@ pub async fn wait_ready(
     let deadline = Instant::now() + timing.timeout;
     let mut next_report = Instant::now();
     let mut vm_ready = false;
+    let mut vm_id = None;
     let mut last: String;
     loop {
-        match status(client, record).await {
+        let seen = observe(client, record).await.map(|(state, id)| {
+            vm_id = id.or(vm_id.take());
+            state
+        });
+        match seen {
             Ok(VmState::Running {
                 external_ip: Some(ip),
             }) => {
@@ -187,8 +196,6 @@ pub async fn wait_ready(
                         Some(StartupReport::Failed { step, detail }) => {
                             return Err(GcpError::StartupFailed {
                                 name: record.name.clone(),
-                                zone: record.zone.clone(),
-                                project: record.project.clone(),
                                 step,
                                 detail,
                             });
@@ -199,10 +206,15 @@ pub async fn wait_ready(
                 }
             }
             Ok(state @ (VmState::Gone | VmState::Terminated { .. } | VmState::Suspended)) => {
+                let preempted = match state {
+                    VmState::Terminated { preempted } => preempted,
+                    VmState::Gone => was_preempted(client, record, vm_id.as_deref()).await,
+                    _ => false,
+                };
                 return Err(GcpError::VmLost {
                     name: record.name.clone(),
                     reason: match state {
-                        VmState::Terminated { preempted: true } => "preempted".to_owned(),
+                        _ if preempted => PREEMPTED.to_owned(),
                         VmState::Terminated { .. } => "stopped".to_owned(),
                         VmState::Suspended => "suspended".to_owned(),
                         _ => "deleted".to_owned(),
@@ -327,7 +339,60 @@ mod tests {
         let e = wait_ready(&c, Arc::new(Mock::default()), &record(), 8000, timing())
             .await
             .unwrap_err();
-        assert!(matches!(e, GcpError::VmLost { ref reason, .. } if reason == "preempted"));
+        assert!(matches!(e, GcpError::VmLost { ref reason, .. } if reason == PREEMPTED));
+    }
+
+    const PREEMPTIONS: &str =
+        "/zones/us-central1-a/operations?filter=operationType%3D%22compute.instances.preempted%22";
+
+    fn preemptions(target_id: &str) -> String {
+        serde_json::json!({"items": [{
+            "operationType": "compute.instances.preempted",
+            "targetId": target_id,
+            "targetLink": "https://compute.googleapis.com/compute/v1/projects/my-proj/zones/us-central1-a/instances/amicu-demo-chat-0123456789ab-n1",
+        }]})
+        .to_string()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_spot_vm_deleted_by_preemption_is_reported_as_preempted() {
+        let gone_after_running = |ops: &str| {
+            Mock::default()
+                .on(
+                    HttpMethod::Get,
+                    ONE,
+                    200,
+                    &instance_json("RUNNING", true, r#","id":"4242""#),
+                )
+                .on(HttpMethod::Get, ONE, 404, "")
+                .on(HttpMethod::Get, PREEMPTIONS, 200, ops)
+        };
+        let (c, _) = client(gone_after_running(&preemptions("4242")));
+        let e = wait_ready(&c, down(), &record(), 8000, timing())
+            .await
+            .unwrap_err();
+        let msg = e.to_string();
+        assert!(matches!(e, GcpError::VmLost { ref reason, .. } if reason == PREEMPTED));
+        assert!(msg.contains("provisioning = \"standard\""), "{msg}");
+        assert!(msg.contains("amicu apply"), "{msg}");
+
+        // An earlier VM of the same name, preempted before, does not count.
+        let (c, _) = client(gone_after_running(&preemptions("1")));
+        let e = wait_ready(&c, down(), &record(), 8000, timing())
+            .await
+            .unwrap_err();
+        assert!(matches!(e, GcpError::VmLost { ref reason, .. } if reason == "deleted"));
+
+        let (c, _) = client(Mock::default().on(HttpMethod::Get, ONE, 404, "").on(
+            HttpMethod::Get,
+            PREEMPTIONS,
+            403,
+            "{}",
+        ));
+        let e = wait_ready(&c, down(), &record(), 8000, timing())
+            .await
+            .unwrap_err();
+        assert!(matches!(e, GcpError::VmLost { ref reason, .. } if reason == "deleted"));
     }
 
     const GUEST: &str =
@@ -391,12 +456,13 @@ mod tests {
         assert_eq!(detail.lines().count(), DETAIL_LINES);
         let msg = e.to_string();
         assert!(
-            msg.contains(
-                "gcloud compute instances get-serial-port-output amicu-demo-chat-0123456789ab-n1 \
-                 --zone us-central1-a --project my-proj"
+            msg.starts_with(
+                "VM amicu-demo-chat-0123456789ab-n1: the startup script failed at step \
+                 `install Docker and the NVIDIA container toolkit`; the end of its log:\n  apt noise"
             ),
             "{msg}"
         );
+        assert!(!msg.contains("gcloud"), "{msg}");
         let guest_reads = api
             .requests()
             .iter()

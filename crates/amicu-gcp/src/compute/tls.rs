@@ -106,6 +106,24 @@ pub fn fingerprint_of_pem(pem: &str) -> Result<String, GcpError> {
     Ok(hex(&Sha256::digest(der.as_ref())))
 }
 
+/// Base64 SHA-256 of the certificate's public key (its DER
+/// `SubjectPublicKeyInfo`): the value `curl --pinnedpubkey sha256//<pin>` takes.
+///
+/// # Errors
+/// [`GcpError::Invalid`] when `pem` holds no parseable certificate.
+pub fn spki_pin_of_pem(pem: &str) -> Result<String, GcpError> {
+    use base64::Engine as _;
+    let bad = || GcpError::Invalid {
+        kind: "tls certificate",
+        value: String::new(),
+        reason: "not a PEM certificate",
+    };
+    let der = CertificateDer::from_pem_slice(pem.as_bytes()).map_err(|_| bad())?;
+    let cert = webpki::EndEntityCert::try_from(&der).map_err(|_| bad())?;
+    let spki = cert.subject_public_key_info();
+    Ok(base64::engine::general_purpose::STANDARD.encode(Sha256::digest(spki.as_ref())))
+}
+
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
     bytes.iter().fold(String::new(), |mut s, b| {
@@ -287,6 +305,24 @@ mod tests {
     use tokio_rustls::TlsAcceptor;
 
     use super::*;
+
+    #[test]
+    fn the_spki_pin_is_the_hash_of_the_certificates_public_key() {
+        use base64::Engine as _;
+        let id = TlsIdentity::generate("vm-1").unwrap();
+        let key = rcgen::KeyPair::from_pem(id.key_pem.expose_secret_str().unwrap()).unwrap();
+        let spki = rustls::pki_types::SubjectPublicKeyInfoDer::from_pem_slice(
+            key.public_key_pem().as_bytes(),
+        )
+        .unwrap();
+        let want = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(spki.as_ref()));
+        assert_eq!(spki_pin_of_pem(&id.cert_pem).unwrap(), want);
+        assert_ne!(
+            spki_pin_of_pem(&TlsIdentity::generate("vm-1").unwrap().cert_pem).unwrap(),
+            want
+        );
+        assert!(spki_pin_of_pem("not a certificate").is_err());
+    }
 
     /// Serves one `200` per connection over TLS with `id`, on 127.0.0.1.
     async fn serve(id: &TlsIdentity) -> u16 {
