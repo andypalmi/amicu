@@ -1410,8 +1410,8 @@ fn the_pinned_transport_is_used_and_the_certificate_is_written_and_printed() {
     );
     assert!(
         out.contains(&format!(
-            "ssl.create_default_context(cafile=\"{}\")",
-            cert.display()
+            "ssl.create_default_context(cafile={})",
+            serde_json::to_string(&cert.display().to_string()).unwrap()
         )),
         "{out}"
     );

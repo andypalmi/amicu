@@ -4127,6 +4127,15 @@ mod exposure_tests {
             "{text}"
         );
         assert!(!text.contains("verify=False"), "{text}");
+        let windows = super::gce::TlsNote {
+            path: r#"C:\Users\a "b"\.amicu\state\vm-1.tls.crt"#.into(),
+            ..note.clone()
+        };
+        let text = usage_snippets(&h, Some(&key), Some("m"), Some(&windows));
+        assert!(
+            text.contains(r#"cafile="C:\\Users\\a \"b\"\\.amicu\\state\\vm-1.tls.crt")"#),
+            "{text}"
+        );
         note.spki_pin = None;
         let text = usage_snippets(&h, Some(&key), Some("m"), Some(&note));
         assert!(!text.contains("--pinnedpubkey"), "{text}");
