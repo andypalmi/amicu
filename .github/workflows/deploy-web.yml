@@ -76,7 +76,6 @@ jobs:
       - name: Refresh page dates
         run: pnpm --filter @amicu/web gen:facts
 
-      # --keep-vars preserves dashboard-set vars and secrets on the Worker.
       - name: Build Worker
         run: pnpm --filter @amicu/web exec opennextjs-cloudflare build
         env:
@@ -93,6 +92,7 @@ jobs:
           SKIP_BUILD: "1"
         run: scripts/worker-smoke.sh
 
+      # --keep-vars preserves dashboard-set vars and secrets on the Worker.
       - name: Deploy
         run: pnpm --filter @amicu/web exec opennextjs-cloudflare deploy -- --keep-vars
         env:
