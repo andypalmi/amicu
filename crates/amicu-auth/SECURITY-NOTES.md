@@ -52,3 +52,18 @@ decides to take on the `aws_lc_rs` backend (and its `cmake` build
 dependency) project-wide, or (c) a maintained non-RSA-coupled JWT crate
 replaces `jsonwebtoken`. Tracked via the `cargo audit` ignore in
 `.cargo/audit.toml`.
+
+## crypto-bigint 0.5 (RUSTSEC-2026-0387, non-constant-time operations): accepted risk, not reachable here
+
+`jsonwebtoken` 11's `rust_crypto` feature pulls `p256 0.13` and `p384 0.13`, which depend on `elliptic-curve 0.13` and so on `crypto-bigint 0.5.5`. The advisory is fixed only in `crypto-bigint >=0.7.6`, there is no patched 0.5.x, and every `jsonwebtoken` release up to 11.1.0 still requires `p256`/`p384` `^0.13`. Nothing else in the workspace depends on this copy (`cargo tree -i crypto-bigint@0.5.5` leads only to `jsonwebtoken`).
+
+That code runs only for ES256/ES384 tokens, and none can reach it:
+
+- Each `Validation` pins one algorithm: `Algorithm::EdDSA` in `src/verifier.rs:162` and `Algorithm::RS256` in `src/google.rs:204`. `google.rs:251` also rejects any header that is not RS256 before decoding.
+- `jsonwebtoken::decode` (11.0.0, `src/decoding.rs:278`) rejects a header `alg` outside `validation.algorithms` before it builds a verifier, so an ES256/ES384 header never gets to the P-256/P-384 code.
+- Every `DecodingKey` is Ed25519 (`DecodingKey::from_ed_der`, `src/verifier.rs`) or RSA (`DecodingKey::from_rsa_components`, `src/google.rs`). No EC key is ever built.
+- Signing uses EdDSA only (`Header::new(Algorithm::EdDSA)` in `src/key.rs:92`). The `HS256` and `RS256` headers in this crate appear only in tests.
+
+The other copy, `crypto-bigint 0.7.x` (through `russh`), is fixed by version and must stay at >=0.7.10. `cargo audit` ignores by advisory ID, so the ignore would also hide a regression of that copy.
+
+**Removal condition**: remove the ignore in `.cargo/audit.toml` when `jsonwebtoken` moves to the `elliptic-curve 0.14` / RustCrypto 0.14 stack, or when `jsonwebtoken` is replaced with a JWT crate that does not pull `crypto-bigint 0.5`.
