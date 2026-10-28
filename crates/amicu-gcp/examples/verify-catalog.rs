@@ -10,7 +10,8 @@
 //! application-default login`), with `GOOGLE_IMPERSONATE_SERVICE_ACCOUNT`
 //! honoured. Exit status: 0 no drift, 1 drift, 2 could not run.
 //!
-//! The API lists only what the project can see: zones gated to specific
+//! Zones are listed one by one (aggregated calls are lossy). The API lists
+//! only what the project can see: zones gated to specific
 //! projects show up as MISSING even when the catalog is right, so run it from
 //! a project known to have access. Entries in AI zones (`europe-west4-ai1a`),
 //! which the API may hide, are printed as HIDDEN and never affect the exit

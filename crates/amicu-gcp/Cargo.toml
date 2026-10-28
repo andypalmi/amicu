@@ -38,6 +38,8 @@ sha2 = "0.10"
 thiserror = "2"
 # Operation polling: the poll interval and the overall deadline.
 tokio = { version = "1", features = ["time"] }
+# Bounded concurrency in the drift check.
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "test-util", "net", "io-util"] }
