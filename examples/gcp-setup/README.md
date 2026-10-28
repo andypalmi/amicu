@@ -23,5 +23,6 @@ It manages the API enablement (`disable_on_destroy = false`), the two service ac
 
 - amicu owns the resources it creates: its labelled VMs, firewall rules, Cloud Run services and secrets. Terraform must not manage them, or the two will fight over them.
 - Use only additive IAM resources (`_member`), never `_binding` or `_policy`, which would remove grants made by amicu or others.
+- `google_cloud_quotas_quota_preference` fails if a preference for the same quota and dimensions already exists (created in the console, by hand or by `setup.sh`). Import it first, for example `terraform import 'google_cloud_quotas_quota_preference.gpu["amicu-gpus-all-regions"]' projects/my-project-id/locations/global/quotaPreferences/<existing-preference-id>`, or set `-var request_quota=false`. `setup.sh` skips quotas that already have a preference and raises ones whose requested value is lower.
 - Quota requests can need manual approval and take from minutes to days. New projects start with `GPUS-ALL-REGIONS-per-project` at 0.
 - Keep GPU workloads out of projects that have a billing kill switch (a budget that disables billing): the kill switch would take the project down mid-run and block amicu from cleaning up.

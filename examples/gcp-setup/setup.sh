@@ -93,22 +93,67 @@ for sa in amicu-vm amicu-run; do
     --member "user:$ACCOUNT" --role roles/iam.serviceAccountUser --condition=None >/dev/null
 done
 
+QUOTA_API="https://cloudquotas.googleapis.com/v1/projects/$PROJECT/locations/global/quotaPreferences"
+TOKEN=""
+
+quota_curl() {
+  # The token goes in a header and is never printed.
+  curl -sS -H "Authorization: Bearer $TOKEN" -H "x-goog-user-project: $PROJECT" "$@"
+}
+
 request_quota() {
   # args: preference-id service quotaId dimensions-json
-  local id="$1" service="$2" quota_id="$3" dims="$4" token body code out
-  token="$(gcloud auth print-access-token)"
+  local id="$1" service="$2" quota_id="$3" dims="$4" body code out existing name etag preferred granted
+  out="$(mktemp)"
+
+  # A preference for the same quota and dimensions under any id is reused, not duplicated.
+  if command -v jq >/dev/null; then
+    code="$(quota_curl -G -o "$out" -w '%{http_code}' \
+      --data-urlencode "filter=service=\"$service\" AND quotaId=\"$quota_id\"" "$QUOTA_API")" || code=000
+    if [ "$code" = 200 ]; then
+      existing="$(jq -c --argjson d "$dims" \
+        '[.quotaPreferences[]? | select((.dimensions // {}) == $d)][0] // empty' "$out")"
+      if [ -n "$existing" ]; then
+        name="$(jq -r '.name' <<<"$existing")"
+        etag="$(jq -r '.etag // empty' <<<"$existing")"
+        preferred="$(jq -r '.quotaConfig.preferredValue // "0"' <<<"$existing")"
+        granted="$(jq -r '.quotaConfig.grantedValue // "0"' <<<"$existing")"
+        if [ "$preferred" -ge "$GPU_COUNT" ]; then
+          log "Quota $quota_id already requested ($preferred, granted $granted)"
+        else
+          body="$(jq -n --arg v "$GPU_COUNT" --arg e "$etag" \
+            '{quotaConfig:{preferredValue:$v}} + (if $e == "" then {} else {etag:$e} end)')"
+          code="$(quota_curl -o "$out" -w '%{http_code}' -X PATCH \
+            -H "Content-Type: application/json" -d "$body" \
+            "https://cloudquotas.googleapis.com/v1/$name?updateMask=quotaConfig.preferredValue")" || code=000
+          if [ "$code" = 200 ]; then
+            log "Quota $quota_id raised from $preferred to $GPU_COUNT (granted $granted)"
+          else
+            echo "warning: could not raise $quota_id from $preferred to $GPU_COUNT (HTTP $code); change it in the console: https://console.cloud.google.com/iam-admin/quotas?project=$PROJECT" >&2
+          fi
+        fi
+        rm -f "$out"
+        return 0
+      fi
+    fi
+  fi
+
   body="$(printf '{"service":"%s","quotaId":"%s","quotaConfig":{"preferredValue":"%s"},"dimensions":%s,"justification":"amicu GPU workloads","contactEmail":"%s"}' \
     "$service" "$quota_id" "$GPU_COUNT" "$dims" "$ACCOUNT")"
-  out="$(mktemp)"
-  code="$(curl -sS -o "$out" -w '%{http_code}' -X POST \
-    -H "Authorization: Bearer $token" \
-    -H "x-goog-user-project: $PROJECT" \
-    -H "Content-Type: application/json" \
-    -d "$body" \
-    "https://cloudquotas.googleapis.com/v1/projects/$PROJECT/locations/global/quotaPreferences?quotaPreferenceId=$id")" || code=000
+  code="$(quota_curl -o "$out" -w '%{http_code}' -X POST \
+    -H "Content-Type: application/json" -d "$body" "$QUOTA_API?quotaPreferenceId=$id")" || code=000
   case "$code" in
-    200) log "Quota requested: $quota_id ($GPU_COUNT)" ;;
+    200)
+      granted="$(jq -r '.quotaConfig.grantedValue // "0"' "$out" 2>/dev/null || echo 0)"
+      log "Quota requested: $quota_id ($GPU_COUNT, granted $granted)" ;;
     409) log "Quota preference $id already exists (change the value in the console)" ;;
+    400)
+      if grep -qi "already exist" "$out"; then
+        log "Quota $quota_id already requested"
+      else
+        echo "warning: quota request $quota_id failed (HTTP 400); request it in the console instead" >&2
+        head -c 400 "$out" >&2; echo >&2
+      fi ;;
     *) echo "warning: quota request $quota_id failed (HTTP $code); request it in the console instead" >&2
        head -c 400 "$out" >&2; echo >&2 ;;
   esac
@@ -117,6 +162,7 @@ request_quota() {
 
 if [ "$SKIP_QUOTA" -eq 0 ]; then
   log "Requesting GPU quota in $REGION (value $GPU_COUNT)"
+  TOKEN="$(gcloud auth print-access-token)"
   rdims="{\"region\":\"$REGION\"}"
   request_quota amicu-gpus-all-regions compute.googleapis.com GPUS-ALL-REGIONS-per-project '{}'
   request_quota "amicu-t4-$REGION" compute.googleapis.com NVIDIA-T4-GPUS-per-project-region "$rdims"
