@@ -76,19 +76,10 @@ jobs:
       - name: Refresh page dates
         run: pnpm --filter @amicu/web gen:facts
 
-      # `cf:deploy` (web/apps/web/package.json) is
-      # `opennextjs-cloudflare build && opennextjs-cloudflare deploy --
-      # --keep-vars` - `--keep-vars` preserves whatever non-secret `vars`
-      # and `wrangler secret put` values already set on the Worker
-      # (Cloudflare dashboard / CLI) that are not in wrangler.jsonc (which
-      # now commits the production vars). Runtime
-      # secrets (a BFF session secret, etc.) are never set here - see
-      # docs/deploy/cloud-run.md and web/apps/web/README-deploy-cloudflare.md.
-      - name: Build & deploy
-        run: pnpm --filter @amicu/web cf:deploy
+      # --keep-vars preserves dashboard-set vars and secrets on the Worker.
+      - name: Build Worker
+        run: pnpm --filter @amicu/web exec opennextjs-cloudflare build
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           # Public/build-time only (baked into the client bundle either
           # way, per web/apps/web/README-deploy-cloudflare.md) - a repo
           # variable, not a secret.
@@ -96,3 +87,14 @@ jobs:
           NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL || 'https://app.amicu.dev' }}
           # Build-time, default OFF (unset/empty => sign-in hidden). Set the repo variable to "true" to expose it.
           NEXT_PUBLIC_SIGNIN_ENABLED: ${{ vars.NEXT_PUBLIC_SIGNIN_ENABLED }}
+
+      - name: Smoke test Worker
+        env:
+          SKIP_BUILD: "1"
+        run: scripts/worker-smoke.sh
+
+      - name: Deploy
+        run: pnpm --filter @amicu/web exec opennextjs-cloudflare deploy -- --keep-vars
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
