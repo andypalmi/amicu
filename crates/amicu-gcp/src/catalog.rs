@@ -607,7 +607,7 @@ mod tests {
         }
         assert!(!c.is_eu("europe-nowhere9"));
         assert_eq!(REGIONS.len(), 34);
-        assert_eq!(ZONES.len(), 89);
+        assert_eq!(ZONES.len(), 92);
     }
 
     #[test]
@@ -747,7 +747,7 @@ mod tests {
         // Source discrepancies resolved in the data.
         assert!(c.zone_offers_gpu("us-central1-c", "rtx-pro-6000"));
         assert!(c.zone_offers_gpu("europe-west1-b", "nvidia-h100-mega-80gb"));
-        assert!(!c.zone_offers_gpu("europe-west1-b", "h100"));
+        assert!(c.zone_offers_gpu("europe-west1-b", "h100"));
         assert!(c.zone("europe-west4-ai1a").unwrap().ai_zone);
     }
 
@@ -759,6 +759,7 @@ mod tests {
         assert_eq!(
             names("a2-megagpu-16g"),
             [
+                "asia-southeast1-a",
                 "asia-southeast1-c",
                 "europe-west4-a",
                 "europe-west4-b",

@@ -30,6 +30,10 @@ const MACHINE_TYPE_FILTER: &str = r#"name eq "(a4x|a4|a3|a2|g4|g2)-.*""#;
 /// N1 GPUs have no machine type of their own, so machine types never show them.
 const N1_ONLY: [&str; 3] = ["nvidia-tesla-t4", "nvidia-tesla-p4", "nvidia-tesla-v100"];
 
+/// `a3-edgegpu-8g-nolssd` and `a3-ultragpu-8g-nolssd` are the same shapes as
+/// their base machine types minus the local SSD, so the catalog does not list them.
+const NO_LSSD_SUFFIX: &str = "-nolssd";
+
 /// A `(zone, name)` pair, where the name is a GPU or a machine type.
 pub type Pair = (String, String);
 
@@ -118,10 +122,36 @@ pub fn compare(live: &LiveState) -> DriftReport {
         .filter(|(_, g)| !N1_ONLY.contains(&g.as_str()))
         .cloned()
         .collect();
+    // Compute Engine lists some accelerator types in zones where no machine
+    // type carries them, so nothing can use them there.
+    let usable: BTreeSet<Pair> = live
+        .accelerators
+        .iter()
+        .filter(|p| N1_ONLY.contains(&p.1.as_str()) || live.machine_type_gpus.contains(*p))
+        .cloned()
+        .collect();
+    // The API lists the fractional G4 machine types in every G4 zone, but
+    // Google documents them in one zone only.
+    let machine_types: BTreeSet<Pair> = live
+        .machine_types
+        .iter()
+        .filter(|(zone, name)| {
+            MACHINE_TYPES
+                .iter()
+                .find(|m| m.name == name)
+                .is_none_or(|m| {
+                    !m.is_fractional()
+                        || ZONES
+                            .iter()
+                            .any(|z| z.name == zone && z.offers_machine_type(m))
+                })
+        })
+        .cloned()
+        .collect();
     DriftReport {
-        zone_gpus: diff(&zone_gpus, &live.accelerators),
+        zone_gpus: diff(&zone_gpus, &usable),
         zone_gpus_from_machine_types: diff(&from_machine_types, &live.machine_type_gpus),
-        zone_machine_types: diff(&expected_zone_machine_types(), &live.machine_types),
+        zone_machine_types: diff(&expected_zone_machine_types(), &machine_types),
     }
 }
 
@@ -184,9 +214,11 @@ pub fn add_machine_type_page(state: &mut LiveState, page: &Value) {
                     .find_map(|a| a["guestAcceleratorType"].as_str().and_then(known_gpu)),
             };
             if let Some(gpu) = gpu {
-                state
-                    .machine_types
-                    .insert((zone.to_owned(), name.to_owned()));
+                if !name.ends_with(NO_LSSD_SUFFIX) {
+                    state
+                        .machine_types
+                        .insert((zone.to_owned(), name.to_owned()));
+                }
                 state
                     .machine_type_gpus
                     .insert((zone.to_owned(), gpu.to_owned()));
@@ -287,6 +319,7 @@ mod tests {
         let new = ("us-central1-z".to_owned(), "nvidia-h100-80gb".to_owned());
         assert!(live.accelerators.remove(&gone));
         live.accelerators.insert(new.clone());
+        live.machine_type_gpus.insert(new.clone());
         let report = compare(&live);
         assert_eq!(report.zone_gpus.missing, BTreeSet::from([gone]));
         assert_eq!(report.zone_gpus.extra, BTreeSet::from([new]));
