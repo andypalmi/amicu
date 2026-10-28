@@ -84,6 +84,15 @@ pub struct GcpSettings {
     /// detected at apply (never `0.0.0.0/0` unless listed here).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_source_cidrs: Vec<String>,
+    /// Compute Engine only: the VPC network the VM and its firewall rule
+    /// attach to, as a name or a partial or full self link. `None`: the
+    /// project's `default` network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
+    /// Compute Engine only: the subnetwork of `network` the VM's interface
+    /// uses, in the deployment's region. Required in a custom-mode network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subnetwork: Option<String>,
     /// Service account amicu impersonates for its own API calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub impersonate_service_account: Option<String>,

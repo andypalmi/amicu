@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 use super::startup::{SecretDelivery, StartupConfig, startup_metadata};
 use crate::error::GcpError;
 use crate::labels::OWNER_LABEL;
-use crate::validate::{validate_project_id, validate_resource_name, validate_zone};
+use crate::network::interface_paths;
+use crate::validate::{validate_project_id, validate_resource_name, validate_zone, zone_region};
 
 /// The Deep Learning VM image family used for the boot disk: Ubuntu 22.04 with
 /// CUDA 12.9 and the NVIDIA 580 driver preinstalled, in project
@@ -86,6 +87,11 @@ pub struct VmSpec {
     pub service_account: Option<String>,
     /// The network tag the firewall rule targets.
     pub network_tag: String,
+    /// The VPC network (a name or link); `None` is the project's `default`.
+    pub network: Option<String>,
+    /// The subnetwork (a name or link); required in a custom-mode VPC, and
+    /// only valid together with `network`.
+    pub subnetwork: Option<String>,
     /// Labels from [`crate::owner_labels`]; must carry [`OWNER_LABEL`].
     pub labels: BTreeMap<String, String>,
     pub startup: StartupConfig,
@@ -121,6 +127,7 @@ impl VmSpec {
         validate_resource_name(&self.name)?;
         validate_resource_name(&self.network_tag)?;
         self.owner()?;
+        self.interface_paths()?;
         token("machine type", &self.machine_type)?;
         token("image family", &self.image_family)?;
         if is_a4x_machine_type(&self.machine_type) {
@@ -186,6 +193,15 @@ impl VmSpec {
         self.startup.validate()
     }
 
+    fn interface_paths(&self) -> Result<(String, Option<String>), GcpError> {
+        interface_paths(
+            &self.project,
+            zone_region(&self.zone)?,
+            self.network.as_deref(),
+            self.subnetwork.as_deref(),
+        )
+    }
+
     /// The `instances.insert` request body.
     ///
     /// # Errors
@@ -193,6 +209,18 @@ impl VmSpec {
     pub fn insert_body(&self) -> Result<Value, GcpError> {
         self.validate()?;
         let zone = &self.zone;
+        let (network, subnetwork) = self.interface_paths()?;
+        let mut nic = json!({
+            "network": network,
+            "accessConfigs": [{
+                "name": "External NAT",
+                "type": "ONE_TO_ONE_NAT",
+                "networkTier": "PREMIUM",
+            }],
+        });
+        if let Some(sub) = subnetwork {
+            nic["subnetwork"] = json!(sub);
+        }
         let mut body = json!({
             "name": self.name,
             "machineType": format!("zones/{zone}/machineTypes/{}", self.machine_type),
@@ -212,14 +240,7 @@ impl VmSpec {
                     "diskType": format!("zones/{zone}/diskTypes/{}", self.boot_disk_type()),
                 },
             }],
-            "networkInterfaces": [{
-                "network": "global/networks/default",
-                "accessConfigs": [{
-                    "name": "External NAT",
-                    "type": "ONE_TO_ONE_NAT",
-                    "networkTier": "PREMIUM",
-                }],
-            }],
+            "networkInterfaces": [nic],
             "scheduling": self.scheduling(),
             "serviceAccounts": self.service_accounts(),
             "metadata": { "items": startup_metadata(
@@ -377,6 +398,8 @@ pub(crate) mod tests {
             install_nvidia_driver: false,
             service_account: None,
             network_tag: "amicu-vllm".into(),
+            network: None,
+            subnetwork: None,
             labels: owner_labels(None, "demo", "chat"),
             startup: StartupConfig {
                 container_image: "vllm/vllm-openai:v0.11.0".into(),
@@ -435,6 +458,7 @@ pub(crate) mod tests {
             b["networkInterfaces"][0]["network"],
             "global/networks/default"
         );
+        assert!(b["networkInterfaces"][0].get("subnetwork").is_none());
         let disk = &b["disks"][0];
         assert_eq!(disk["boot"], true);
         assert_eq!(disk["autoDelete"], true);
@@ -627,6 +651,30 @@ pub(crate) mod tests {
         s.install_nvidia_driver = true;
         assert!(keys(&s).contains(&"install-nvidia-driver".to_owned()));
         assert!(keys(&s).contains(&"startup-script".to_owned()));
+    }
+
+    #[test]
+    fn a_custom_network_and_subnetwork_replace_the_default() {
+        let mut s = spec("g2-standard-4", None, Provisioning::Spot);
+        s.network = Some("vpc-main".into());
+        s.subnetwork = Some("gpu".into());
+        let nic = &s.insert_body().unwrap()["networkInterfaces"][0];
+        assert_eq!(nic["network"], "projects/my-proj/global/networks/vpc-main");
+        assert_eq!(
+            nic["subnetwork"],
+            "projects/my-proj/regions/us-central1/subnetworks/gpu"
+        );
+        assert_eq!(nic["accessConfigs"][0]["type"], "ONE_TO_ONE_NAT");
+        s.subnetwork = Some("https://www.googleapis.com/compute/v1/projects/host-proj/regions/us-central1/subnetworks/gpu".into());
+        assert_eq!(
+            s.insert_body().unwrap()["networkInterfaces"][0]["subnetwork"],
+            "projects/host-proj/regions/us-central1/subnetworks/gpu"
+        );
+        s.subnetwork = Some("regions/europe-west4/subnetworks/gpu".into());
+        assert!(s.insert_body().is_err());
+        s.network = None;
+        s.subnetwork = Some("gpu".into());
+        assert!(s.insert_body().is_err());
     }
 
     #[test]

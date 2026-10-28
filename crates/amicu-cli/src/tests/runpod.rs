@@ -1342,6 +1342,7 @@ impl crate::commands::orphans::GcpResources for NoGcpListing {
     fn list(
         &self,
         _: &[(String, Option<String>)],
+        _: &[(String, Option<String>)],
     ) -> Result<crate::commands::orphans::GcpListing, String> {
         panic!("Google Cloud must not be queried")
     }

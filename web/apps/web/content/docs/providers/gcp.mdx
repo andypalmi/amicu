@@ -61,7 +61,9 @@ client = OpenAI(
     api_key=os.environ["CHAT_API_KEY"],
     http_client=httpx.Client(verify=tls),
 )
-``` The firewall rule allows only the addresses in `allowed_source_cidrs`, or by default this machine's public IP as a `/32`. amicu never opens the port to `0.0.0.0/0` unless you list it.
+```
+
+The firewall rule allows only the addresses in `allowed_source_cidrs`, or by default this machine's public IP as a `/32`. amicu never opens the port to `0.0.0.0/0` unless you list it.
 
 The API key, the Hugging Face token and the TLS private key are stored in Secret Manager (one secret each, in the deployment's region only) before the VM is created. The VM's service account reads them at boot, so they are never in instance metadata. The secret ids and the certificate fingerprint are in the record `apply` writes to state first, so `destroy` removes the secrets even after a crash.
 
@@ -127,12 +129,38 @@ The `gcp {}` block on a `hardware_profile` with `provider = "gcp"`:
 | `service_account` | string | none | yes, unless `insecure_metadata_secrets` | Email of the account the VM runs as; it reads the VM's secrets from Secret Manager (`AMICU-CAP-016` if missing). |
 | `insecure_metadata_secrets` | bool | `false` | no | INSECURE. Deliver the secrets as instance metadata instead of Secret Manager, readable by anyone who can read the instance. |
 | `allowed_source_cidrs` | list | this machine's public IP `/32` | no | Who may reach the serving port. IPv4 only: an IPv6 CIDR is rejected (`AMICU-CAP-016`). |
+| `network` | string | `default` | no | Compute Engine only. The VPC network the VM and its firewall rule attach to: a name, `projects/<project>/global/networks/<name>`, or a full self link (a Shared VPC host project is accepted). Malformed is `AMICU-CAP-016`; on `cloud_run` it is `AMICU-CAP-019`. |
+| `subnetwork` | string | none | when `network` is a custom-mode VPC | Compute Engine only. The subnetwork the VM's interface uses: a name, `regions/<region>/subnetworks/<name>`, `projects/<project>/regions/<region>/subnetworks/<name>`, or a full self link. It must be in the VM's region (`AMICU-CAP-016` when a link names another region) and needs `network`. On `cloud_run` it is `AMICU-CAP-019`. |
 | `impersonate_service_account` | string | none | no | Service account amicu acts as. |
 | `access` | string | `public` | no | Cloud Run only: `public` (the API key is the only guard) or `iam` (callers also send a Google identity token). See [Cloud Run](#cloud-run). |
 
 `region` is required unless `zone` is set, so the VM is placed where you expect. The profile's `region` and the project's `data_class` residency are checked against every candidate zone. A deployment on a VM runs one replica: `scaling {}` with more than 1 is rejected (`AMICU-CAP-016`).
 
 Other checks: an unknown GPU or one not offered in the zone or region is `AMICU-CAP-017`.
+
+## Networks
+
+By default the VM and its firewall rule go on the project's `default` network. A project without one (for example `auto_create_network = false` in Terraform) needs `network` and, because a custom-mode VPC has no automatic subnets, `subnetwork`:
+
+```hcl
+gcp {
+  project    = "my-project-id"
+  network    = "vpc-main"
+  subnetwork = "gpu-europe-west4"
+}
+```
+
+amicu does not pick a subnetwork for you, even when the region has only one: a silent choice would change when someone adds a second subnetwork. If `network` is custom-mode and `subnetwork` is missing, `apply` stops before writing and lists the network's subnetworks in the region.
+
+The VM always gets an external IPv4 address, which is how amicu reaches it. A subnetwork that cannot give one (IPv6-only) is rejected in the preflight, and VMs without an external IP (private-only setups behind Cloud NAT or a VPN) are not supported yet. An organization policy that denies external IPs (`constraints/compute.vmExternalIpAccess`) makes the VM create fail for the same reason. With a Shared VPC network, the firewall rule is created in the network's (host) project, because a rule belongs to its network's project: the account that runs `apply` needs `compute.firewalls.create` there, or a host-project admin must open the serving port for the VM's network tag. A bare `subnetwork` name is looked up in the network's project. State records the network, so `destroy` and `orphans` look for the rule in that project even if the config changes later; records from before this option fall back to the deployment's project.
+
+## Projects managed by Terraform
+
+amicu and Terraform can share a project if each manages its own part:
+
+- Terraform manages what amicu only reads or uses: the project, the enabled APIs, the service accounts and their roles, and the network. amicu never enables APIs, creates service accounts or changes IAM; it only reads (preflight) and grants the VM's service account `roles/secretmanager.secretAccessor` on the secrets it creates.
+- amicu manages the VMs, firewall rules, Cloud Run services and Secret Manager secrets it creates, each carrying its owner marker (a label, or a description prefix on firewall rules). Keep those out of Terraform, and do not edit them by hand.
+- Set `network` and `subnetwork` when the project has no `default` network.
 
 ## Cloud Run
 
@@ -174,7 +202,7 @@ A complete example is in `examples/gcp-cloudrun-l4`.
 - **Scaling.** `scaling { max_replicas }` is the maximum number of instances (default 1). Each instance holds one GPU, so keep it within the region's Cloud Run GPU quota. `target_concurrency` is how many requests one instance serves at once (default 8). Zonal redundancy is off, which is cheaper and needs less quota.
 - **Regions.** L4: `europe-west1`, `europe-west4`, `us-central1`, `us-east4`, `asia-southeast1` (`asia-south1` by invitation only). RTX PRO 6000: `europe-west4`, `us-central1`, `asia-southeast1`, `asia-south2`. Another region or GPU is `AMICU-CAP-017`.
 
-Cloud Run cannot honour some settings, and `validate`, `plan` and `apply` reject them with `AMICU-CAP-019`: `zone`, `machine_type`, `provisioning`, `max_run_duration`, `idle_shutdown`, `boot_disk_gb`, `allowed_source_cidrs` and `insecure_metadata_secrets` in the `gcp {}` block, and `min_replicas` above 0 or `scaledown_window` in `scaling {}`. `access` is Cloud Run only. `accelerator.count` must be 1, and `service_account` and `region` are required (`AMICU-CAP-016`).
+Cloud Run cannot honour some settings, and `validate`, `plan` and `apply` reject them with `AMICU-CAP-019`: `zone`, `machine_type`, `provisioning`, `max_run_duration`, `idle_shutdown`, `boot_disk_gb`, `allowed_source_cidrs`, `network`, `subnetwork` and `insecure_metadata_secrets` in the `gcp {}` block, and `min_replicas` above 0 or `scaledown_window` in `scaling {}`. `access` is Cloud Run only. `accelerator.count` must be 1, and `service_account` and `region` are required (`AMICU-CAP-016`).
 
 Before it writes anything, `apply` checks (read-only) that the Cloud Run Admin API and the Secret Manager API are enabled and that you may act as the `service_account`, and names the `gcloud` command or role that fixes each. The account that runs `apply` needs `roles/run.admin` (or permission to create, read and delete services), Secret Manager access as above, and `roles/iam.serviceAccountUser` on the service account. Create the service account as for a VM:
 
@@ -184,7 +212,7 @@ gcloud iam service-accounts create amicu-run --project my-project-id
 
 ## Operations
 
-Before it writes anything, `apply` on a VM checks (read-only) that the credentials work, that the Secret Manager API is enabled, that the project has a `default` network (the firewall rule is attached to it) and that you may act as the `service_account`. Each failure names the fix, for example `gcloud services enable secretmanager.googleapis.com --project <project>` or granting `roles/iam.serviceAccountUser` on the service account. amicu never enables APIs or changes IAM itself.
+Before it writes anything, `apply` on a VM checks (read-only) that the credentials work, that the Secret Manager API is enabled, that the network exists (the project's `default`, or `network`), that a custom-mode network comes with a `subnetwork` that exists, belongs to that network and has IPv4, and that you may act as the `service_account`. Each failure names the fix, for example `gcloud services enable secretmanager.googleapis.com --project <project>`, `gcloud compute networks subnets create` for a missing subnetwork, or granting `roles/iam.serviceAccountUser` on the service account. amicu never enables APIs or changes IAM itself.
 
 `amicu plan` and `apply` compare state with Compute Engine and Cloud Run. A VM that is gone or stopped (a Spot preemption, the `max_run_duration` backstop, a delete outside amicu), or a Cloud Run service that is gone or whose revision failed, is reported as drift and marked pending: `apply` recreates it, `destroy` confirms what is left is removed. A service scaled to zero is not drift. `amicu orphans` lists VMs, firewall rules, Cloud Run services and Secret Manager secrets in the project that carry amicu's marker but that state does not record, with the `gcloud` command to delete each. It never deletes anything.
 

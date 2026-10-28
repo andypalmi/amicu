@@ -26,6 +26,7 @@ use amicu_runtime::{
 
 use super::{Env, Progress, deployment_hardware, residency_allowlist, supervisor_err};
 use crate::error::CliError;
+use crate::gcp_ops::NetworkChoice;
 use crate::stops::{Backend, StopRecord};
 
 pub(super) const GCP_PROVIDER: &str = "gcp";
@@ -71,6 +72,32 @@ pub(super) fn service_account_for(
 ) -> Result<Option<String>, CliError> {
     let (_, hardware) = deployment_hardware(graph, catalog, id)?;
     Ok(hardware.gcp.unwrap_or_default().service_account)
+}
+
+/// The network and subnetwork the VM attaches to, and the region it is placed
+/// in, for the preflight.
+pub(super) fn network_for(
+    graph: &Graph,
+    catalog: &dyn Catalog,
+    id: &DeploymentId,
+) -> Result<NetworkChoice, CliError> {
+    let (_, hardware) = deployment_hardware(graph, catalog, id)?;
+    let s = hardware.gcp.clone().unwrap_or_default();
+    let region = hardware
+        .region
+        .as_ref()
+        .map(|r| r.code.clone())
+        .or_else(|| {
+            s.zone
+                .as_deref()
+                .and_then(|z| amicu_gcp::zone_region(z).ok())
+                .map(str::to_owned)
+        });
+    Ok(NetworkChoice {
+        network: s.network,
+        subnetwork: s.subnetwork,
+        region,
+    })
 }
 
 /// Whether the deployment opted into delivering its secrets as instance
@@ -163,6 +190,8 @@ pub(crate) fn launch_for(
         max_run: Duration::from_secs(u64::from(s.max_run_secs())),
         boot_disk_gb: s.boot_disk_gb.unwrap_or(DEFAULT_BOOT_DISK_GB),
         service_account: s.service_account,
+        network: s.network,
+        subnetwork: s.subnetwork,
         source_ranges,
         impersonate: s.impersonate_service_account,
         delivery: if s.insecure_metadata_secrets {
@@ -494,6 +523,7 @@ mod tests {
                 alternates: Vec::new(),
                 instance: "amicu-p-chat-0123abcd".to_owned(),
                 firewall: "amicu-p-chat-0123abcd-fw".to_owned(),
+                network: None,
                 owner: "owner".to_owned(),
                 impersonate: None,
                 secrets: secrets.iter().map(|s| (*s).to_owned()).collect(),

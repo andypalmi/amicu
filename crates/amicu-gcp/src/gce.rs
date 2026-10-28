@@ -42,6 +42,7 @@ use crate::compute::{
 };
 use crate::error::GcpError;
 use crate::labels::{owner_labels, owner_marker};
+use crate::network::NetworkRef;
 use crate::operations::PollTiming;
 use crate::placement::Shape;
 use crate::secrets::{Replication, SecretDelete, SecretKind, delete_secret, secret_id};
@@ -65,6 +66,10 @@ pub struct GceRecord {
     pub alternates: Vec<String>,
     pub instance: String,
     pub firewall: String,
+    /// The network the firewall rule was created on, as
+    /// `projects/<p>/global/networks/<n>`; `None` is the project's `default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
     /// The owner marker both resources carry.
     pub owner: String,
     /// The service account amicu acted as (for destroy).
@@ -92,6 +97,17 @@ impl GceRecord {
         std::iter::once(self.zone.as_str())
             .chain(self.alternates.iter().map(String::as_str))
             .collect()
+    }
+
+    /// The project the firewall rule lives in: its network's, else the
+    /// deployment's (records from before `network` was kept).
+    #[must_use]
+    pub fn firewall_project(&self) -> &str {
+        self.network
+            .as_deref()
+            .and_then(|n| n.strip_prefix("projects/"))
+            .and_then(|n| n.split('/').next())
+            .unwrap_or(&self.project)
     }
 
     /// The VM's record in `zone`, as the compute functions take it.
@@ -131,6 +147,10 @@ pub struct GceLaunch {
     pub max_run: Duration,
     pub boot_disk_gb: u32,
     pub service_account: Option<String>,
+    /// The VPC network (a name or link); `None` is the project's `default`.
+    pub network: Option<String>,
+    /// The subnetwork (a name or link); needs `network`.
+    pub subnetwork: Option<String>,
     pub source_ranges: Vec<String>,
     pub impersonate: Option<String>,
     /// Where the VM gets its secrets.
@@ -192,6 +212,11 @@ impl GceLaunch {
             zone: zone.clone(),
             alternates: zones.cloned().collect(),
             firewall: firewall_name(&instance)?,
+            network: self
+                .network
+                .as_deref()
+                .map(|n| NetworkRef::parse(n).map(|n| n.path(&self.project)))
+                .transpose()?,
             instance,
             owner: self.owner(),
             impersonate: self.impersonate.clone(),
@@ -444,6 +469,8 @@ impl GceSupervisor {
             install_nvidia_driver: false,
             service_account: l.service_account.clone(),
             network_tag: record.instance.clone(),
+            network: l.network.clone(),
+            subnetwork: l.subnetwork.clone(),
             labels: owner_labels(None, &l.project_id, &l.deployment_id),
             startup: startup.clone(),
         }
@@ -528,6 +555,7 @@ impl ProcessSupervisor for GceSupervisor {
                 port,
                 source_ranges: self.launch.source_ranges.clone(),
                 network_tag: record.instance.clone(),
+                network: self.launch.network.clone(),
                 owner: record.owner.clone(),
             },
             self.timing.poll,
@@ -673,7 +701,7 @@ pub async fn teardown(
     }
     delete_firewall(
         client,
-        &record.project,
+        record.firewall_project(),
         &record.firewall,
         &record.owner,
         timing,
@@ -880,12 +908,22 @@ mod tests {
             max_run: Duration::from_hours(2),
             boot_disk_gb: 100,
             service_account: Some("vm@my-proj.iam.gserviceaccount.com".into()),
+            network: None,
+            subnetwork: None,
             source_ranges: vec!["203.0.113.4/32".into()],
             impersonate: None,
             delivery: SecretDelivery::SecretManager,
             tls: None,
             idle_shutdown: None,
         }
+    }
+
+    #[test]
+    fn the_firewall_project_is_the_networks_or_else_the_deployments() {
+        let mut r = launch().record().unwrap();
+        assert_eq!(r.firewall_project(), "my-proj");
+        r.network = Some("projects/host-proj/global/networks/vpc".into());
+        assert_eq!(r.firewall_project(), "host-proj");
     }
 
     #[test]

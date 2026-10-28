@@ -58,7 +58,7 @@ Diagnostics have the form `AMICU-<CATEGORY>-<NNN>`. The category is the fastest 
 | `AMICU-CAP-016` | error | A `gcp {}` block does not fit: no `project`, no `service_account` (and no `insecure_metadata_secrets = true`), set on another provider, no `region` or `zone`, a bad zone, duration, disk size or CIDR, `scaling {}` beyond one replica on a VM, more than one GPU or `memory`/`cpu.cores` below the GPU's minimum on Cloud Run, or a `llama_cpp` runtime (both backends run vLLM only) | Follow the message |
 | `AMICU-CAP-017` | error | The GPU is not available on Google Cloud as configured: not in the GCP catalog, not offered in the zone or region, or not offered on Cloud Run | Pick a GPU and zone from the [GCP page](/docs/providers/gcp) |
 | `AMICU-CAP-018` | error | `provisioning` is not offered for the machine type (for example `standard` on `a3-highgpu-1g`), or for any machine type of the GPU | Use a mode the message lists |
-| `AMICU-CAP-019` | error | A setting the `gcp {}` backend cannot honour: on `backend = "cloud_run"`, a Compute Engine field (`zone`, `machine_type`, `provisioning`, `max_run_duration`, `idle_shutdown`, `boot_disk_gb`, `allowed_source_cidrs`, `insecure_metadata_secrets`), `min_replicas` above 0 or `scaledown_window`; on a VM, `access` | Remove the setting, or use `backend = "compute"` |
+| `AMICU-CAP-019` | error | A setting the `gcp {}` backend cannot honour: on `backend = "cloud_run"`, a Compute Engine field (`zone`, `machine_type`, `provisioning`, `max_run_duration`, `idle_shutdown`, `boot_disk_gb`, `allowed_source_cidrs`, `network`, `subnetwork`, `insecure_metadata_secrets`), `min_replicas` above 0 or `scaledown_window`; on a VM, `access` | Remove the setting, or use `backend = "compute"` |
 
 ## MEM
 

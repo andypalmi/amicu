@@ -316,16 +316,25 @@ pub(crate) struct GcpListing {
 }
 
 /// Injectable read-only Google Cloud lookup, per project (and the service
-/// account to act as, if any).
+/// account to act as, if any). `firewall_projects` are Shared VPC host
+/// projects: only their firewall rules are listed.
 pub(crate) trait GcpResources {
-    fn list(&self, projects: &[(String, Option<String>)]) -> Result<GcpListing, String>;
+    fn list(
+        &self,
+        projects: &[(String, Option<String>)],
+        firewall_projects: &[(String, Option<String>)],
+    ) -> Result<GcpListing, String>;
 }
 
 /// Lists through a [`GcpOps`] client: only `GET` calls.
 pub(crate) struct GcpOpsListing<'a>(pub &'a dyn GcpOps);
 
 impl GcpResources for GcpOpsListing<'_> {
-    fn list(&self, projects: &[(String, Option<String>)]) -> Result<GcpListing, String> {
+    fn list(
+        &self,
+        projects: &[(String, Option<String>)],
+        firewall_projects: &[(String, Option<String>)],
+    ) -> Result<GcpListing, String> {
         let run = || -> Result<GcpListing, CliError> {
             let rt = build_runtime()?;
             let _enter = rt.enter();
@@ -379,6 +388,26 @@ impl GcpResources for GcpOpsListing<'_> {
                         project: project.clone(),
                         name,
                     }));
+            }
+            for (project, impersonate) in firewall_projects
+                .iter()
+                .filter(|(p, _)| !projects.iter().any(|(q, _)| q == p))
+            {
+                let client = self.0.client(impersonate.as_deref())?;
+                match rt.block_on(amicu_gcp::gce::list_owned_firewalls(&client, project)) {
+                    Ok(fws) => out
+                        .firewalls
+                        .extend(fws.into_iter().map(|(name, _)| GcpFirewall {
+                            project: project.clone(),
+                            name,
+                        })),
+                    Err(e) => {
+                        let _ = writeln!(
+                            std::io::stderr(),
+                            "note: could not list firewall rules in network project {project}: {e}"
+                        );
+                    }
+                }
             }
             Ok(out)
         };
@@ -495,6 +524,8 @@ pub(crate) struct Tracked {
     runpod_referenced: bool,
     /// Google projects (and the account to act as) that state or config name.
     gcp_projects: BTreeSet<(String, Option<String>)>,
+    /// Shared VPC host projects whose firewall rules to scan.
+    gcp_firewall_projects: BTreeSet<(String, Option<String>)>,
     /// `(project, name)` of recorded VMs and firewall rules.
     gcp_vms: BTreeSet<(String, String)>,
     gcp_firewalls: BTreeSet<(String, String)>,
@@ -538,7 +569,11 @@ impl Tracked {
                     .insert((g.project.clone(), g.impersonate.clone()));
                 t.gcp_vms.insert((g.project.clone(), g.instance.clone()));
                 t.gcp_firewalls
-                    .insert((g.project.clone(), g.firewall.clone()));
+                    .insert((g.firewall_project().to_owned(), g.firewall.clone()));
+                if g.firewall_project() != g.project {
+                    t.gcp_firewall_projects
+                        .insert((g.firewall_project().to_owned(), g.impersonate.clone()));
+                }
                 t.gcp_secrets
                     .extend(g.secrets.iter().map(|id| (g.project.clone(), id.clone())));
             } else if let Some(c) = &rec.cloud_run {
@@ -589,6 +624,16 @@ impl Tracked {
             if let Some(p) = &s.project {
                 self.gcp_projects
                     .insert((p.clone(), s.impersonate_service_account.clone()));
+                if let Some(host) = s
+                    .network
+                    .as_deref()
+                    .and_then(|n| amicu_gcp::NetworkRef::parse(n).ok())
+                    .and_then(|n| n.project)
+                    .filter(|h| h != p)
+                {
+                    self.gcp_firewall_projects
+                        .insert((host, s.impersonate_service_account.clone()));
+                }
             }
         }
     }
@@ -700,7 +745,8 @@ fn runpod(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
 /// or config names, with the `gcloud` commands that delete them by hand.
 fn gcp(env: &Env<'_>, tracked: &Tracked) -> Result<Vec<Found>, String> {
     let projects: Vec<_> = tracked.gcp_projects.iter().cloned().collect();
-    let listing = env.gcp.list(&projects)?;
+    let firewall_projects: Vec<_> = tracked.gcp_firewall_projects.iter().cloned().collect();
+    let listing = env.gcp.list(&projects, &firewall_projects)?;
     let project_id = tracked.project_id.as_deref();
     let q = |s: &str| quote_for(env.platform, s);
     let mut found = Vec::new();
@@ -1439,7 +1485,11 @@ mod tests {
     struct NoGcpResources;
 
     impl GcpResources for NoGcpResources {
-        fn list(&self, _: &[(String, Option<String>)]) -> Result<GcpListing, String> {
+        fn list(
+            &self,
+            _: &[(String, Option<String>)],
+            _: &[(String, Option<String>)],
+        ) -> Result<GcpListing, String> {
             panic!("Google Cloud must not be queried")
         }
     }

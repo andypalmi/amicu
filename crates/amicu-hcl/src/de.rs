@@ -223,6 +223,8 @@ fn gcp_settings(g: &Fields) -> Result<GcpSettings> {
         service_account: g.opt_string("service_account")?,
         insecure_metadata_secrets: g.opt_bool("insecure_metadata_secrets")?.unwrap_or(false),
         allowed_source_cidrs: g.string_vec("allowed_source_cidrs")?,
+        network: g.opt_string("network")?,
+        subnetwork: g.opt_string("subnetwork")?,
         impersonate_service_account: g.opt_string("impersonate_service_account")?,
         access: g.opt_enum("access")?,
     })
