@@ -357,11 +357,13 @@ fn wait_block(cfg: &StartupConfig) -> String {
 /// `trust` imports the downloaded key file into a scratch keyring and exports
 /// only the key with the pinned fingerprint, so apt trusts exactly that key.
 /// `apt-get update` may fail on an unrelated repository of the image: only a
-/// candidate for each needed package is required.
+/// candidate for each needed package is required. The script runs with
+/// `pipefail`, so no pipeline here ends in a reader that exits early (`grep -q`,
+/// `awk ... exit`): the writer's SIGPIPE would fail the pipeline.
 fn tools_block() -> String {
     format!(
         "step='install Docker and the NVIDIA container toolkit'\n\
-         nvidia_runtime() {{ docker info --format '{{{{json .Runtimes}}}}' 2>/dev/null | grep -q '\"nvidia\"'; }}\n\
+         nvidia_runtime() {{ docker info --format '{{{{json .Runtimes}}}}' 2>/dev/null | grep '\"nvidia\"' >/dev/null; }}\n\
          systemctl start docker >/dev/null 2>&1 || true\n\
          if [ ! -f {TOOLS_MARKER} ] || ! systemctl is-active --quiet docker || ! nvidia_runtime; then\n\
          echo 'amicu: installing Docker and the NVIDIA container toolkit' >&2\n\
@@ -375,7 +377,7 @@ fn tools_block() -> String {
          gpg --batch --quiet --import \"/run/amicu/$1.asc\" >>\"$log\" 2>&1; \
          gpg --batch --export \"$3\" > \"/run/amicu/$1.gpg\" 2>>\"$log\"; \
          keys=$(gpg --show-keys --with-colons \"/run/amicu/$1.gpg\" 2>/dev/null | grep -c '^pub:' || true); \
-         fpr=$(gpg --show-keys --with-colons \"/run/amicu/$1.gpg\" 2>/dev/null | awk -F: '$1 == \"fpr\" {{ print $10; exit }}'); \
+         fpr=$(gpg --show-keys --with-colons \"/run/amicu/$1.gpg\" 2>/dev/null | awk -F: '$1 == \"fpr\" && !n++ {{ print $10 }}'); \
          [ \"$keys\" = 1 ] && [ \"$fpr\" = \"$3\" ] || {{ echo \"amicu: the $1 repository key is not $3\" >&2; exit 1; }}; \
          install -m 0644 \"/run/amicu/$1.gpg\" \"/etc/apt/keyrings/$1.gpg\"; \
          printf 'deb [arch=%s signed-by=/etc/apt/keyrings/%s.gpg] %s\\n' \"$(dpkg --print-architecture)\" \"$1\" \"$4\" \
@@ -394,11 +396,19 @@ fn tools_block() -> String {
          fi\n\
          if [ -n \"$pkgs\" ]; then\n\
          for i in 1 2 3; do\n\
-         aptq update || echo 'amicu: apt-get update reported errors; checking the needed packages' >&2\n\
+         apt-get -o DPkg::Lock::Timeout=600 -o Acquire::Retries=5 update > /run/amicu/apt-update.log 2>&1 \
+         || echo 'amicu: apt-get update reported errors; checking the needed packages' >&2\n\
          missing=''\n\
-         for p in $pkgs; do apt-cache policy \"$p\" 2>/dev/null | grep -q 'Candidate: [^(]' || missing=\"$missing $p\"; done\n\
+         for p in $pkgs; do\n\
+         c=$(apt-cache policy \"$p\" 2>/dev/null | sed -n 's/^ *Candidate: //p')\n\
+         [ -n \"$c\" ] && [ \"$c\" != '(none)' ] || missing=\"$missing $p\"\n\
+         done\n\
          [ -z \"$missing\" ] && break\n\
-         [ \"$i\" = 3 ] && {{ echo \"amicu: apt cannot find$missing\" >&2; exit 1; }}\n\
+         if [ \"$i\" = 3 ]; then\n\
+         grep -E '^(E|Err):|download\\.docker\\.com|nvidia\\.github\\.io' /run/amicu/apt-update.log | grep -v '^Hit:' >&2 || true\n\
+         echo \"amicu: apt cannot find$missing\" >&2\n\
+         exit 1\n\
+         fi\n
          sleep 10\n\
          done\n\
          aptq install -y --no-install-recommends $pkgs\n\
@@ -726,10 +736,18 @@ mod tests {
         assert!(!s.contains("keyrings/$1.asc"));
         assert!(s.contains("signed-by=/etc/apt/keyrings/%s.gpg"));
 
+        assert!(s.contains("update > /run/amicu/apt-update.log 2>&1"));
         assert!(s.contains(
-            "aptq update || echo 'amicu: apt-get update reported errors; checking the needed packages' >&2"
+            "|| echo 'amicu: apt-get update reported errors; checking the needed packages' >&2"
         ));
-        assert!(s.contains("apt-cache policy \"$p\" 2>/dev/null | grep -q 'Candidate: [^(]'"));
+        assert!(
+            s.contains("c=$(apt-cache policy \"$p\" 2>/dev/null | sed -n 's/^ *Candidate: //p')")
+        );
+        assert!(s.contains("[ -n \"$c\" ] && [ \"$c\" != '(none)' ]"));
+        let reason = s
+            .find("grep -E '^(E|Err):|download\\.docker\\.com|nvidia\\.github\\.io' /run/amicu/apt-update.log")
+            .unwrap();
+        assert!(reason < s.find("echo \"amicu: apt cannot find$missing\"").unwrap());
 
         let configure = s
             .find("nvidia-ctk runtime configure --runtime=docker")
@@ -741,6 +759,19 @@ mod tests {
         assert!(install < configure && configure < restart && restart < marker);
         assert!(s.find("nvidia-smi -L >/dev/null ||").unwrap() < install);
         assert!(marker < s.find("docker pull").unwrap());
+    }
+
+    /// Under `pipefail` a reader that stops early (`grep -q`, `awk` with
+    /// `exit`) fails the pipeline with the writer's SIGPIPE: that made every
+    /// apt candidate look missing.
+    #[test]
+    fn no_pipeline_in_the_script_ends_in_an_early_exiting_reader() {
+        for c in [cfg(), tls_cfg(SecretDelivery::SecretManager)] {
+            let s = script(&c);
+            assert!(s.contains("set -euo pipefail"));
+            assert!(!s.contains("| grep -q"), "{s}");
+            assert!(!s.contains("exit }'"), "{s}");
+        }
     }
 
     #[test]
