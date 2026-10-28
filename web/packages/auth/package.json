@@ -21,6 +21,6 @@
   "dependencies": {
     "@amicu/api-client": "workspace:*",
     "jose": "^6.2.9",
-    "zod": "^4.4.3"
+    "zod": "^4.6.6"
   }
 }
