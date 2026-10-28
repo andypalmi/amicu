@@ -4,6 +4,47 @@ All notable changes to amicu are documented here. Maintained by release-plz from
 
 ## [Unreleased]
 
+## [0.1.5](https://github.com/andypalmi/amicu/compare/v0.1.4...v0.1.5) - 2026-10-28
+
+### Added
+
+- *(gcp)* network and subnetwork options for Compute Engine ([#369](https://github.com/andypalmi/amicu/pull/369))
+- *(cli)* deploy to Cloud Run GPUs with amicu apply ([#361](https://github.com/andypalmi/amicu/pull/361))
+- *(cli)* deploy to Compute Engine GPU VMs with amicu apply ([#354](https://github.com/andypalmi/amicu/pull/354))
+- *(runpod)* network-volume model cache, flashboot and live test ([#333](https://github.com/andypalmi/amicu/pull/333))
+- *(runpod)* Pods in refresh, orphans and runpod commands ([#328](https://github.com/andypalmi/amicu/pull/328))
+- *(runpod)* always-on Pods mode ([#324](https://github.com/andypalmi/amicu/pull/324))
+- *(runpod)* status, logs and metrics ([#320](https://github.com/andypalmi/amicu/pull/320))
+- *(runpod)* reconcile RunPod in refresh and orphans ([#319](https://github.com/andypalmi/amicu/pull/319))
+- *(runpod)* pod client and PodSupervisor ([#315](https://github.com/andypalmi/amicu/pull/315))
+- *(runpod)* wire RunPod into apply with write-ahead state ([#316](https://github.com/andypalmi/amicu/pull/316))
+- *(hardware)* shared GPU catalog with exact variant names ([#312](https://github.com/andypalmi/amicu/pull/312))
+- *(runpod)* supervisor and gateway auth ([#309](https://github.com/andypalmi/amicu/pull/309))
+- *(runpod)* crate skeleton and v2 REST client ([#307](https://github.com/andypalmi/amicu/pull/307))
+- *(providers)* Cloud Run GPU service lifecycle for GCP ([#352](https://github.com/andypalmi/amicu/pull/352))
+- *(providers)* Secret Manager secrets and pinned TLS for GCP VMs ([#353](https://github.com/andypalmi/amicu/pull/353))
+- *(providers)* Compute Engine GPU VM lifecycle for GCP ([#351](https://github.com/andypalmi/amicu/pull/351))
+- *(providers)* GCP GPU catalog by zone with a live drift check ([#350](https://github.com/andypalmi/amicu/pull/350))
+- *(providers)* add amicu-gcp core crate (auth, REST client, operations, owner labels) ([#348](https://github.com/andypalmi/amicu/pull/348))
+
+### Fixed
+
+- *(gcp)* install Docker on the VM at boot and fail apply fast on a failed startup script ([#363](https://github.com/andypalmi/amicu/pull/363))
+- *(gcp)* send a body with every POST and build GCP clients inside the runtime ([#362](https://github.com/andypalmi/amicu/pull/362))
+- *(providers)* GCP preflight, secret teardown and idle shutdown ([#360](https://github.com/andypalmi/amicu/pull/360))
+- *(cli)* run the telemetry agent for Modal and RunPod deployments ([#349](https://github.com/andypalmi/amicu/pull/349))
+- *(gcp)* list GPU zones one by one in the catalog drift check ([#370](https://github.com/andypalmi/amicu/pull/370))
+- *(runpod)* raise the serverless startup timeout for long model loads ([#337](https://github.com/andypalmi/amicu/pull/337))
+- *(runpod)* require the key on every vLLM pod route ([#332](https://github.com/andypalmi/amicu/pull/332))
+- *(runpod)* plan shows the remote launch and placement ([#331](https://github.com/andypalmi/amicu/pull/331))
+- *(runpod)* llama.cpp routing and live-test follow-ups ([#330](https://github.com/andypalmi/amicu/pull/330))
+- *(runpod)* region placement, llama.cpp health and CUDA floor, readiness progress ([#325](https://github.com/andypalmi/amicu/pull/325))
+- *(gcp)* sync the GPU catalog with the live Compute Engine API ([#366](https://github.com/andypalmi/amicu/pull/366))
+
+### Other
+
+- *(deps)* bump russh from 0.63.2 to 0.64.1 ([#346](https://github.com/andypalmi/amicu/pull/346))
+
 ## [0.1.4](https://github.com/andypalmi/amicu/compare/v0.1.3...v0.1.4) - 2026-10-19
 
 ### Added
