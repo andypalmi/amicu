@@ -6,7 +6,9 @@ use std::sync::Arc;
 use amicu_core::secret::SecretValue;
 use amicu_gcp::cloudrun::CloudRunTiming;
 use amicu_gcp::compute::{VmRecord, probe_transport};
-use amicu_gcp::{AdcTokenSource, AuthConfig, GceTiming, GcpClient, GcpError};
+use amicu_gcp::{
+    AdcTokenSource, AuthConfig, GceTiming, GcpClient, GcpError, NetworkRef, SubnetworkRef,
+};
 use amicu_providers::{HttpMethod, HttpRequest, HttpTransport, ReqwestTransport};
 use amicu_runtime::exposure::{CheckTiming, PROBE_PATH, validate_api_key_value};
 use async_trait::async_trait;
@@ -233,11 +235,22 @@ pub(crate) struct ComputeNeeds<'a> {
     pub service_account: Option<&'a str>,
     /// Whether the secrets go through Secret Manager.
     pub secret_manager: bool,
+    /// The VPC the VM and firewall rule attach to, as configured.
+    pub network: &'a NetworkChoice,
+}
+
+/// The `network` and `subnetwork` of a `gcp {}` block, and the region the VM
+/// is placed in (what a bare subnetwork name refers to).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct NetworkChoice {
+    pub network: Option<String>,
+    pub subnetwork: Option<String>,
+    pub region: Option<String>,
 }
 
 /// [`preflight`], then read-only checks of what `apply` is about to rely on:
-/// the Secret Manager API is enabled, the `default` network the firewall rule
-/// is created on exists, and the caller may act as the VM's service account.
+/// the Secret Manager API is enabled, the network (and subnetwork) the VM and
+/// firewall rule use exist, and the caller may act as the VM's service account.
 /// Nothing is enabled, created or granted; each failure says what to run.
 /// A permission-denied answer is inconclusive and passes: the write that needs
 /// the permission then reports it.
@@ -263,23 +276,142 @@ pub(crate) async fn preflight_compute(
         .await
         .map_err(fail)?;
     }
-    let url = format!(
-        "{}/projects/{project}/global/networks/default",
-        amicu_gcp::client::COMPUTE_BASE_URL
-    );
-    match client.request(HttpMethod::Get, &url, None).await {
-        Err(GcpError::NotFound { .. }) => {
-            return Err(fail(format!(
-                "the `default` network does not exist; the firewall rule amicu creates is \
-                attached to it. Create it with `gcloud compute networks create default \
-                --subnet-mode=auto --project {project}`"
-            )));
-        }
-        Err(GcpError::PermissionDenied { .. }) | Ok(_) => {}
-        Err(e) => return Err(fail(e.to_string())),
-    }
+    check_network(&client, project, needs.network)
+        .await
+        .map_err(fail)?;
     if let Some(sa) = needs.service_account {
         check_act_as(&client, sa, "the VM").await.map_err(fail)?;
+    }
+    Ok(())
+}
+
+/// The network the VM and firewall rule attach to exists, a custom-mode
+/// network comes with a `subnetwork`, and that subnetwork exists, belongs to
+/// the network and can give the VM an external IPv4 address. Read-only; a
+/// permission-denied answer is inconclusive and passes.
+async fn check_network(
+    client: &GcpClient,
+    project: &str,
+    choice: &NetworkChoice,
+) -> Result<(), String> {
+    let base = amicu_gcp::client::COMPUTE_BASE_URL;
+    let net = choice
+        .network
+        .as_deref()
+        .map(NetworkRef::parse)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    let (net_project, net_name) = net.as_ref().map_or((project, "default"), |n| {
+        (n.project_or(project), n.name.as_str())
+    });
+    let url = format!("{base}/projects/{net_project}/global/networks/{net_name}");
+    let network = match client.request(HttpMethod::Get, &url, None).await {
+        Err(GcpError::NotFound { .. }) if net.is_none() => {
+            return Err(format!(
+                "the `default` network does not exist; the VM and the firewall rule amicu \
+                 creates are attached to it. Either create it with `gcloud compute networks \
+                 create default --subnet-mode=auto --project {project}`, or set `network` \
+                 (and `subnetwork`) in the `gcp {{}}` block to a VPC you have"
+            ));
+        }
+        Err(GcpError::NotFound { .. }) => {
+            return Err(format!(
+                "the network `{net_name}` does not exist in project {net_project}; set `network` \
+                 to an existing VPC, or create one with `gcloud compute networks create \
+                 {net_name} --subnet-mode=custom --project {net_project}`"
+            ));
+        }
+        Err(GcpError::PermissionDenied { .. }) => serde_json::Value::Null,
+        Err(e) => return Err(e.to_string()),
+        Ok(v) => v,
+    };
+    let region = choice.region.as_deref().unwrap_or_default();
+    let custom_mode = network["autoCreateSubnetworks"] == false;
+    let Some(sub) = choice.subnetwork.as_deref() else {
+        if custom_mode {
+            let here = format!("/regions/{region}/subnetworks/");
+            let known: Vec<&str> = network["subnetworks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|s| s.as_str())
+                .filter(|s| s.contains(&here))
+                .filter_map(|s| s.rsplit('/').next())
+                .collect();
+            let hint = if known.is_empty() {
+                format!(
+                    "it has no subnetwork in `{region}`; create one with `gcloud compute \
+                     networks subnets create <name> --network {net_name} --region {region} \
+                     --range <cidr> --project {net_project}`"
+                )
+            } else {
+                format!("its subnetworks in `{region}` are: {}", known.join(", "))
+            };
+            return Err(format!(
+                "the network `{net_name}` is custom-mode, so the VM needs a subnetwork: set \
+                 `subnetwork` in the `gcp {{}}` block; {hint}"
+            ));
+        }
+        return Ok(());
+    };
+    check_subnetwork(client, project, (net_project, net_name), region, sub).await
+}
+
+/// The subnetwork exists, belongs to the network, and has IPv4.
+async fn check_subnetwork(
+    client: &GcpClient,
+    project: &str,
+    (net_project, net_name): (&str, &str),
+    region: &str,
+    sub: &str,
+) -> Result<(), String> {
+    let base = amicu_gcp::client::COMPUTE_BASE_URL;
+    let sub = SubnetworkRef::parse(sub).map_err(|e| e.to_string())?;
+    let sub_region = sub.region_or(region);
+    let sub_project = sub.project_or(project);
+    let url = format!(
+        "{base}/projects/{sub_project}/regions/{sub_region}/subnetworks/{}",
+        sub.name
+    );
+    let found = match client.request(HttpMethod::Get, &url, None).await {
+        Err(GcpError::NotFound { .. }) => {
+            return Err(format!(
+                "the subnetwork `{0}` does not exist in `{sub_region}` of project {sub_project}; \
+                 set `subnetwork` to an existing one, or create it with `gcloud compute networks \
+                 subnets create {0} --network {net_name} --region {sub_region} --range <cidr> \
+                 --project {sub_project}`",
+                sub.name
+            ));
+        }
+        Err(GcpError::PermissionDenied { .. }) => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+        Ok(v) => v,
+    };
+    let want = format!("/projects/{net_project}/global/networks/{net_name}");
+    if let Some(actual) = found["network"].as_str()
+        && !actual.ends_with(&want)
+    {
+        return Err(format!(
+            "the subnetwork `{}` belongs to the network `{}`, not `{net_name}`; set `network` \
+             and `subnetwork` to a matching pair",
+            sub.name,
+            actual.rsplit('/').next().unwrap_or(actual)
+        ));
+    }
+    if let Some(purpose) = found["purpose"].as_str().filter(|p| *p != "PRIVATE") {
+        return Err(format!(
+            "the subnetwork `{}` has purpose {purpose}, which cannot host a VM; use a regular \
+             (PRIVATE) subnetwork",
+            sub.name
+        ));
+    }
+    if found["stackType"] == "IPV6_ONLY" {
+        return Err(format!(
+            "the subnetwork `{}` is IPv6-only, so the VM cannot get the external IPv4 address \
+             amicu connects to; amicu does not support VMs without an external IP yet. Use a \
+             subnetwork with IPv4",
+            sub.name
+        ));
     }
     Ok(())
 }

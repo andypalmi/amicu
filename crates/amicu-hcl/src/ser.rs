@@ -360,6 +360,12 @@ fn hardware_block(h: &HardwareProfile) -> Block {
         if !g.allowed_source_cidrs.is_empty() {
             gb = gb.add_attribute(("allowed_source_cidrs", g.allowed_source_cidrs.clone()));
         }
+        if let Some(v) = &g.network {
+            gb = gb.add_attribute(("network", v.as_str()));
+        }
+        if let Some(v) = &g.subnetwork {
+            gb = gb.add_attribute(("subnetwork", v.as_str()));
+        }
         if let Some(v) = &g.impersonate_service_account {
             gb = gb.add_attribute(("impersonate_service_account", v.as_str()));
         }

@@ -262,6 +262,7 @@ mod tests {
              service_account = \"vm@my-proj.iam.gserviceaccount.com\"\n    \
              insecure_metadata_secrets = true\n    \
              allowed_source_cidrs = [\"203.0.113.4/32\"]\n    \
+             network = \"vpc-main\"\n    subnetwork = \"gpu\"\n    \
              impersonate_service_account = \"amicu@my-proj.iam.gserviceaccount.com\"\n  }\n",
         ))
         .unwrap();
@@ -273,6 +274,8 @@ mod tests {
         assert_eq!(s.idle_shutdown_secs, Some(1800));
         assert_eq!(s.allowed_source_cidrs, ["203.0.113.4/32"]);
         assert!(s.insecure_metadata_secrets);
+        assert_eq!(s.network.as_deref(), Some("vpc-main"));
+        assert_eq!(s.subnetwork.as_deref(), Some("gpu"));
         assert_eq!(parse_graph(&format_graph(&g).unwrap()).unwrap(), g);
 
         let g = parse_graph(&with_runpod_block(

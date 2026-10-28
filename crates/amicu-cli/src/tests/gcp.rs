@@ -58,6 +58,10 @@ struct WorldState {
     verify_pins: Vec<Option<String>>,
     /// The project has no `default` network.
     no_default_network: bool,
+    /// `(name, body)` of every custom network the project has.
+    networks: Vec<(String, Value)>,
+    /// `(region, name, body)` of every subnetwork the project has.
+    subnetworks: Vec<(String, String, Value)>,
     /// Secret Manager answers a plain 403 permission error.
     secretmanager_denied: bool,
     /// The caller lacks `iam.serviceAccounts.actAs`.
@@ -331,6 +335,24 @@ impl HttpTransport for World {
                     not_found()
                 } else {
                     json_reply(200, &json!({"name": "default"}))
+                }
+            }
+            (HttpMethod::Get, ["projects", _, "global", "networks", name]) => {
+                let w = self.state.lock().unwrap();
+                match w.networks.iter().find(|n| n.0 == *name) {
+                    Some((_, body)) => json_reply(200, body),
+                    None => not_found(),
+                }
+            }
+            (HttpMethod::Get, ["projects", _, "regions", region, "subnetworks", name]) => {
+                let w = self.state.lock().unwrap();
+                match w
+                    .subnetworks
+                    .iter()
+                    .find(|s| s.0 == *region && s.1 == *name)
+                {
+                    Some((_, _, body)) => json_reply(200, body),
+                    None => not_found(),
                 }
             }
             (
@@ -1578,6 +1600,124 @@ fn preflight_stops_before_any_write_when_the_default_network_is_missing() {
         "{err}"
     );
     assert_eq!(rig.gcp.world.writes(), Vec::<String>::new());
+}
+
+const VPC: &str = "projects/my-proj/global/networks/vpc-main";
+
+fn with_vpc(rig: &Rig, subnet_extra: &Value) {
+    let mut w = rig.gcp.world.state.lock().unwrap();
+    w.no_default_network = true;
+    w.networks.push((
+        "vpc-main".to_owned(),
+        json!({
+            "name": "vpc-main",
+            "autoCreateSubnetworks": false,
+            "subnetworks": [
+                "https://www.googleapis.com/compute/v1/projects/my-proj/regions/europe-west4/subnetworks/gpu",
+                "https://www.googleapis.com/compute/v1/projects/my-proj/regions/us-central1/subnetworks/other",
+            ],
+        }),
+    ));
+    let mut sub = json!({
+        "name": "gpu",
+        "network": format!("https://www.googleapis.com/compute/v1/{VPC}"),
+        "purpose": "PRIVATE",
+    });
+    sub.as_object_mut()
+        .unwrap()
+        .extend(subnet_extra.as_object().cloned().unwrap_or_default());
+    w.subnetworks
+        .push(("europe-west4".to_owned(), "gpu".to_owned(), sub));
+}
+
+#[test]
+fn a_custom_vpc_is_used_by_the_vm_and_the_firewall_and_recorded() {
+    let td = TempDir::new();
+    let project = project_with(
+        &td,
+        "allowed_source_cidrs = [\"203.0.113.4/32\"]\nnetwork = \"vpc-main\"\nsubnetwork = \"gpu\"",
+    );
+    let rig = rig();
+    with_vpc(&rig, &json!({}));
+    apply_with(&project, &rig).unwrap();
+    let w = rig.gcp.world.state.lock().unwrap();
+    assert_eq!(w.firewall_bodies[0]["network"], VPC);
+    let nic = &w.insert_bodies[0]["networkInterfaces"][0];
+    assert_eq!(nic["network"], VPC);
+    assert_eq!(
+        nic["subnetwork"],
+        "projects/my-proj/regions/europe-west4/subnetworks/gpu"
+    );
+    assert_eq!(nic["accessConfigs"][0]["type"], "ONE_TO_ONE_NAT");
+    drop(w);
+    assert_eq!(the_record(&project).network.as_deref(), Some(VPC));
+    destroy(&project, &rig).unwrap();
+    assert_eq!(rig.gcp.world.firewall_names(), Vec::<String>::new());
+}
+
+#[test]
+fn preflight_requires_a_subnetwork_for_a_custom_mode_network() {
+    let td = TempDir::new();
+    let project = project_with(
+        &td,
+        "allowed_source_cidrs = [\"203.0.113.4/32\"]\nnetwork = \"vpc-main\"",
+    );
+    let rig = rig();
+    with_vpc(&rig, &json!({}));
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("custom-mode"), "{err}");
+    assert!(err.contains("gpu"), "{err}");
+    assert_eq!(rig.gcp.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn preflight_names_the_fix_for_a_missing_network_or_subnetwork() {
+    let td = TempDir::new();
+    let project = project_with(
+        &td,
+        "allowed_source_cidrs = [\"203.0.113.4/32\"]\nnetwork = \"vpc-main\"\nsubnetwork = \"gpu\"",
+    );
+    let rig = rig();
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("`vpc-main` does not exist"), "{err}");
+    assert!(
+        err.contains("gcloud compute networks create vpc-main"),
+        "{err}"
+    );
+    assert_eq!(rig.gcp.world.writes(), Vec::<String>::new());
+
+    let rig = self::rig();
+    with_vpc(&rig, &json!({}));
+    rig.gcp.world.state.lock().unwrap().subnetworks.clear();
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("subnetwork `gpu` does not exist"), "{err}");
+    assert!(
+        err.contains("gcloud compute networks subnets create gpu"),
+        "{err}"
+    );
+    assert_eq!(rig.gcp.world.writes(), Vec::<String>::new());
+}
+
+#[test]
+fn preflight_rejects_a_subnetwork_that_cannot_give_the_vm_an_external_ip() {
+    let td = TempDir::new();
+    let project = project_with(
+        &td,
+        "allowed_source_cidrs = [\"203.0.113.4/32\"]\nnetwork = \"vpc-main\"\nsubnetwork = \"gpu\"",
+    );
+    let rig = rig();
+    with_vpc(&rig, &json!({"stackType": "IPV6_ONLY"}));
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("external"), "{err}");
+    assert_eq!(rig.gcp.world.writes(), Vec::<String>::new());
+
+    let rig = self::rig();
+    with_vpc(
+        &rig,
+        &json!({"network": "https://www.googleapis.com/compute/v1/projects/my-proj/global/networks/other"}),
+    );
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    assert!(err.contains("belongs to the network `other`"), "{err}");
 }
 
 #[test]

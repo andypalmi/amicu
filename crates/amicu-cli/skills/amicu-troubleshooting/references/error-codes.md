@@ -69,7 +69,7 @@ signal; the number identifies the specific check.
 - `AMICU-CAP-019` - a setting the `gcp {}` backend cannot honour: on
   `backend = "cloud_run"`, a Compute Engine field (`zone`, `machine_type`,
   `provisioning`, `max_run_duration`, `idle_shutdown`, `boot_disk_gb`,
-  `allowed_source_cidrs`, `insecure_metadata_secrets`), `min_replicas` above 0
+  `allowed_source_cidrs`, `network`, `subnetwork`, `insecure_metadata_secrets`), `min_replicas` above 0
   or `scaledown_window`; on a VM, `access`.
 - `AMICU-MEM-001` / `AMICU-MEM-002` - capacity/memory fit failures.
 - `AMICU-MEM-003` - warning: a local hardware profile declares more memory than

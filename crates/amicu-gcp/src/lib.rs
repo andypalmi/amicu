@@ -19,6 +19,7 @@ pub mod compute;
 pub mod error;
 pub mod gce;
 pub mod labels;
+pub mod network;
 pub mod operations;
 pub mod placement;
 pub mod secrets;
@@ -37,6 +38,7 @@ pub use gce::{GceLaunch, GceRecord, GceSupervisor, GceTiming};
 pub use labels::{
     OWNER_LABEL, ensure_owned, has_owner_marker, owner_labels, owner_marker, sanitize_label_value,
 };
+pub use network::{DEFAULT_NETWORK_PATH, NetworkRef, SubnetworkRef};
 pub use operations::{
     PollTiming, wait_compute_global_operation, wait_compute_zone_operation, wait_run_operation,
 };

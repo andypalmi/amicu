@@ -4,8 +4,9 @@
 //! field), so ownership is a marker at the start of the rule's `description`
 //! plus a name derived from the instance name. Only rules whose description
 //! carries the owner marker are updated or deleted; a rule of the same name
-//! without it is an error and is left alone. The rule is added to the `default`
-//! network, which is never modified.
+//! without it is an error and is left alone. The rule is added to the
+//! configured network (the project's `default` unless set), which is never
+//! modified.
 
 use amicu_providers::HttpMethod;
 use serde::Deserialize;
@@ -13,6 +14,7 @@ use serde_json::{Value, json};
 
 use crate::client::{COMPUTE_BASE_URL, GcpClient};
 use crate::error::GcpError;
+use crate::network::{DEFAULT_NETWORK_PATH, NetworkRef};
 use crate::operations::{PollTiming, wait_compute_global_operation};
 use crate::validate::{validate_project_id, validate_resource_name};
 
@@ -32,6 +34,8 @@ pub struct FirewallSpec {
     pub source_ranges: Vec<String>,
     /// The tag the VM carries ([`crate::compute::VmSpec::network_tag`]).
     pub network_tag: String,
+    /// The VPC network (a name or link); `None` is the project's `default`.
+    pub network: Option<String>,
     /// The owner marker of the deployment.
     pub owner: String,
 }
@@ -72,6 +76,7 @@ impl FirewallSpec {
         validate_project_id(&self.project)?;
         validate_resource_name(&self.name)?;
         validate_resource_name(&self.network_tag)?;
+        self.network_path()?;
         let bad = |value: &str, reason| GcpError::Invalid {
             kind: "firewall",
             value: value.to_owned(),
@@ -97,18 +102,25 @@ impl FirewallSpec {
         Ok(())
     }
 
-    fn insert_body(&self) -> Value {
+    fn network_path(&self) -> Result<String, GcpError> {
+        match &self.network {
+            Some(n) => Ok(NetworkRef::parse(n)?.path(&self.project)),
+            None => Ok(DEFAULT_NETWORK_PATH.to_owned()),
+        }
+    }
+
+    fn insert_body(&self) -> Result<Value, GcpError> {
         let mut body = json!({
             "name": self.name,
             "description": self.description(),
-            "network": "global/networks/default",
+            "network": self.network_path()?,
             "direction": "INGRESS",
             "priority": PRIORITY,
         });
         body.as_object_mut()
             .expect("an object")
             .extend(self.mutable_fields());
-        body
+        Ok(body)
     }
 
     /// The fields a `PATCH` may change.
@@ -159,7 +171,7 @@ pub async fn create_firewall(
     spec.validate()?;
     let url = rules_url(&spec.project);
     match client
-        .request(HttpMethod::Post, &url, Some(spec.insert_body()))
+        .request(HttpMethod::Post, &url, Some(spec.insert_body()?))
         .await
     {
         Ok(op) => wait(client, &spec.project, &op, timing).await,
@@ -271,8 +283,26 @@ mod tests {
             port: 8000,
             source_ranges: vec!["203.0.113.4/32".into()],
             network_tag: "amicu-vllm".into(),
+            network: None,
             owner: "abc123".into(),
         }
+    }
+
+    #[test]
+    fn rule_is_created_on_the_configured_network() {
+        let mut s = spec();
+        s.network = Some("vpc-main".into());
+        assert_eq!(
+            s.insert_body().unwrap()["network"],
+            "projects/my-proj/global/networks/vpc-main"
+        );
+        s.network = Some("projects/host-proj/global/networks/shared".into());
+        assert_eq!(
+            s.insert_body().unwrap()["network"],
+            "projects/host-proj/global/networks/shared"
+        );
+        s.network = Some("Not A Network".into());
+        assert!(s.validate().is_err());
     }
 
     #[test]

@@ -1907,7 +1907,15 @@ async fn gce_preflight(
     catalog: &dyn Catalog,
     env: &Env<'_>,
 ) -> Result<(), CliError> {
-    let mut checked: Vec<(String, Option<String>, Option<String>, bool)> = Vec::new();
+    #[derive(PartialEq)]
+    struct Checked {
+        project: String,
+        impersonate: Option<String>,
+        service_account: Option<String>,
+        metadata_secrets: bool,
+        network: crate::gcp_ops::NetworkChoice,
+    }
+    let mut checked: Vec<Checked> = Vec::new();
     for item in &result.items {
         let gce_launch = item.launch.as_ref().is_some_and(|l| {
             dispatch_for(l.runtime, item.action.provider.as_deref()) == Some(Dispatch::Gce)
@@ -1918,15 +1926,22 @@ async fn gce_preflight(
         let (project, impersonate) = gce::access_for(graph, catalog, &item.deployment)?;
         let metadata_secrets = gce::uses_metadata_secrets(graph, catalog, &item.deployment)?;
         let service_account = gce::service_account_for(graph, catalog, &item.deployment)?;
-        let key = (project, impersonate, service_account, metadata_secrets);
+        let key = Checked {
+            project,
+            impersonate,
+            service_account,
+            metadata_secrets,
+            network: gce::network_for(graph, catalog, &item.deployment)?,
+        };
         if !checked.contains(&key) {
             crate::gcp_ops::preflight_compute(
                 env.gcp,
                 &crate::gcp_ops::ComputeNeeds {
-                    project: &key.0,
-                    impersonate: key.1.as_deref(),
-                    service_account: key.2.as_deref(),
-                    secret_manager: !key.3,
+                    project: &key.project,
+                    impersonate: key.impersonate.as_deref(),
+                    service_account: key.service_account.as_deref(),
+                    secret_manager: !key.metadata_secrets,
+                    network: &key.network,
                 },
             )
             .await?;

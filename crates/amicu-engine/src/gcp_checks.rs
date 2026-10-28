@@ -134,6 +134,41 @@ fn profile_problems(graph: &Graph, hw: &HardwareProfile) -> Vec<(DiagnosticCode,
     out
 }
 
+/// `network` and `subnetwork` of a VM: well-formed, paired, and the
+/// subnetwork in the VM's region when its link says which region that is.
+fn network_problems(s: &GcpSettings, region: Option<&str>) -> Vec<(DiagnosticCode, String)> {
+    let invalid = catalog::CAP_GCP_SETTINGS_INVALID;
+    let mut out = Vec::new();
+    if let Some(n) = &s.network
+        && let Err(e) = amicu_gcp::NetworkRef::parse(n)
+    {
+        out.push((invalid, format!("`network`: {e}")));
+    }
+    if let Some(sub) = &s.subnetwork {
+        match amicu_gcp::SubnetworkRef::parse(sub) {
+            Err(e) => out.push((invalid, format!("`subnetwork`: {e}"))),
+            Ok(r) => {
+                if let (Some(lr), Some(region)) = (&r.region, region)
+                    && lr != region
+                {
+                    out.push((
+                        invalid,
+                        format!("`subnetwork` is in `{lr}` but the VM is placed in `{region}`"),
+                    ));
+                }
+            }
+        }
+        if s.network.is_none() {
+            out.push((
+                invalid,
+                "`subnetwork` needs `network` too: the firewall rule is created on the network"
+                    .to_owned(),
+            ));
+        }
+    }
+    out
+}
+
 /// Most requests Cloud Run lets one instance serve at once, and the most
 /// instances one service may scale to.
 const CLOUD_RUN_MAX_CONCURRENCY: u32 = 1000;
@@ -248,6 +283,8 @@ fn cloud_run_problems(
         ("max_run_duration", s.max_run_duration_secs.is_some()),
         ("boot_disk_gb", s.boot_disk_gb.is_some()),
         ("allowed_source_cidrs", !s.allowed_source_cidrs.is_empty()),
+        ("network", s.network.is_some()),
+        ("subnetwork", s.subnetwork.is_some()),
         ("insecure_metadata_secrets", s.insecure_metadata_secrets),
     ];
     for (field, _) in compute_only.iter().filter(|(_, set)| *set) {
@@ -406,6 +443,14 @@ fn compute_problems(
                 .to_owned(),
         ));
     }
+    out.extend(network_problems(
+        s,
+        region.or_else(|| {
+            s.zone
+                .as_deref()
+                .and_then(|z| amicu_gcp::zone_region(z).ok())
+        }),
+    ));
     for c in s.allowed_source_cidrs.iter().filter(|c| !cidr_ok(c)) {
         let message = if is_ipv6_cidr(c) {
             format!(
@@ -732,6 +777,60 @@ resource "deployment" "d" {{
             "",
         );
         assert_eq!(codes(&g), ["AMICU-CAP-016"]);
+    }
+
+    #[test]
+    fn network_and_subnetwork_are_checked_and_compute_only() {
+        let base = "project = \"my-proj\"\n";
+        let g = graph(
+            "gcp",
+            EU,
+            "t4",
+            &format!("{base}network = \"vpc-main\"\n subnetwork = \"gpu\""),
+            "",
+        );
+        assert_eq!(codes(&g), Vec::<String>::new());
+        let g = graph(
+            "gcp",
+            EU,
+            "t4",
+            &format!(
+                "{base}network = \"projects/h-project/global/networks/vpc\"\n \
+                 subnetwork = \"regions/europe-west4/subnetworks/gpu\""
+            ),
+            "",
+        );
+        assert_eq!(codes(&g), Vec::<String>::new());
+        let g = graph(
+            "gcp",
+            EU,
+            "t4",
+            &format!(
+                "{base}network = \"vpc\"\n subnetwork = \"regions/us-central1/subnetworks/gpu\""
+            ),
+            "",
+        );
+        let d = gcp_diagnostics(&g);
+        assert_eq!(codes(&g), ["AMICU-CAP-016"]);
+        assert!(d[0].message.contains("us-central1"), "{}", d[0].message);
+        let g = graph("gcp", EU, "t4", &format!("{base}subnetwork = \"gpu\""), "");
+        assert_eq!(codes(&g), ["AMICU-CAP-016"]);
+        let g = graph(
+            "gcp",
+            EU,
+            "t4",
+            &format!("{base}network = \"Bad Name\""),
+            "",
+        );
+        assert_eq!(codes(&g), ["AMICU-CAP-016"]);
+        let g = graph(
+            "gcp",
+            EU,
+            "l4",
+            &format!("{RUN}\n network = \"vpc\"\n subnetwork = \"gpu\""),
+            "",
+        );
+        assert_eq!(codes(&g), ["AMICU-CAP-019"; 2]);
     }
 
     #[test]

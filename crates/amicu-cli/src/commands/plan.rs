@@ -371,6 +371,7 @@ pub(crate) fn print_human_with(
             let remote_launch = write_runpod(out, graph, item, project_id)
                 .map_err(|e| CliError::io("write failed", e))?;
             io(write_cloud_run(out, graph, item, project_id))?;
+            io(write_gce_network(out, graph, item))?;
             if let Some(artifact) = &item.action.artifact {
                 io(writeln!(out, "      artifact: {}", artifact.name))?;
             }
@@ -446,6 +447,33 @@ fn cloud_run_hardware<'g>(
         .iter()
         .find(|h| h.id == d.hardware_profile)
         .filter(|h| crate::commands::apply::hardware_is_cloud_run(h))
+}
+
+/// The VPC network a Compute Engine VM is placed on, when the profile sets one.
+fn write_gce_network(out: &mut dyn Write, graph: &Graph, item: &PlanItem) -> std::io::Result<()> {
+    if item.launch.is_none() || item.action.provider.as_deref() != Some("gcp") {
+        return Ok(());
+    }
+    let Some(g) = graph
+        .deployments
+        .iter()
+        .find(|d| d.id == item.deployment)
+        .and_then(|d| {
+            graph
+                .hardware_profiles
+                .iter()
+                .find(|h| h.id == d.hardware_profile)
+        })
+        .filter(|h| !crate::commands::apply::hardware_is_cloud_run(h))
+        .and_then(|h| h.gcp.as_ref())
+    else {
+        return Ok(());
+    };
+    match (&g.network, &g.subnetwork) {
+        (Some(n), Some(s)) => writeln!(out, "      network:  {n} (subnetwork {s})"),
+        (Some(n), None) => writeln!(out, "      network:  {n}"),
+        _ => Ok(()),
+    }
 }
 
 /// The Cloud Run lines of a launch: the service, the instance shape `apply`
