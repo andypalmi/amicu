@@ -475,6 +475,10 @@ impl Default for FakeGcp {
 #[async_trait::async_trait]
 impl GcpOps for FakeGcp {
     fn client(&self, _: Option<&str>) -> Result<GcpClient, crate::error::CliError> {
+        assert!(
+            tokio::runtime::Handle::try_current().is_ok(),
+            "the real client builds credentials that need a Tokio runtime context"
+        );
         if self.no_credentials {
             return Err(crate::error::CliError::Message(
                 GcpError::MissingCredentials.to_string(),
@@ -1329,12 +1333,13 @@ fn teardown_is_idempotent_and_never_deletes_a_secret_that_is_not_ours() {
     let rig = rig();
     apply_with(&project, &rig).unwrap();
     let record = the_record(&project);
-    let client = rig.gcp.client(None).unwrap();
     let timing = rig.gcp.timing().poll;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
+    let _enter = rt.enter();
+    let client = rig.gcp.client(None).unwrap();
     rt.block_on(amicu_gcp::gce::teardown(&client, &record, timing))
         .unwrap();
     assert_eq!(rig.gcp.world.secret_ids(), Vec::<String>::new());
@@ -1522,12 +1527,13 @@ fn a_disabled_secret_manager_is_an_error_while_the_vm_may_still_exist() {
     let rig = rig();
     apply_with(&project, &rig).unwrap();
     let record = the_record(&project);
-    let client = rig.gcp.client(None).unwrap();
     let timing = rig.gcp.timing().poll;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
+    let _enter = rt.enter();
+    let client = rig.gcp.client(None).unwrap();
     rig.gcp.world.disable_secret_manager();
     let err = rt
         .block_on(amicu_gcp::gce::teardown(&client, &record, timing))
@@ -1543,12 +1549,13 @@ fn a_permission_denied_secret_delete_names_the_missing_permission_and_keeps_stat
     let rig = rig();
     apply_with(&project, &rig).unwrap();
     let record = the_record(&project);
-    let client = rig.gcp.client(None).unwrap();
     let timing = rig.gcp.timing().poll;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
+    let _enter = rt.enter();
+    let client = rig.gcp.client(None).unwrap();
     rig.gcp.world.remove_vm(&instance());
     rig.gcp.world.state.lock().unwrap().secretmanager_denied = true;
     let err = rt
