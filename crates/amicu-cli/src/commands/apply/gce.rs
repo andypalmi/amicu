@@ -380,9 +380,16 @@ pub(super) async fn failed_start(
              stays until a later apply or destroy confirms it)"
         ),
         Err(e) => format!(
-            "; deleting VM {id} and its firewall rule, created by this run, FAILED ({e}); they \
-             stay recorded and `amicu destroy --target {}` retries",
-            start.stop.deployment
+            "; deleting VM {id} and its firewall rule, created by this run, FAILED ({e}); the VM \
+             may still be running and billing in {zone}. They stay recorded and `amicu destroy \
+             --target {}` retries",
+            start.stop.deployment,
+            zone = start
+                .landed
+                .lock()
+                .ok()
+                .and_then(|z| z.clone())
+                .unwrap_or_else(|| "its zone".to_owned()),
         ),
     }
 }

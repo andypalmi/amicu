@@ -271,7 +271,7 @@ impl VmSpec {
 
 /// Why A4X machine types are refused. Shared with the placement checks so the
 /// message is the same wherever a machine type is picked.
-pub const A4X_UNSUPPORTED: &str = "A4X (a4x-*) is not supported yet: its Arm boot images ship without Docker and the NVIDIA container toolkit";
+pub const A4X_UNSUPPORTED: &str = "A4X (a4x-*) is not supported yet: amicu has not been tested on its Arm (NVIDIA Grace) boot image and the arm64 vLLM container";
 
 /// Whether a machine type is in the A4X family (A4X and A4X Max), which amicu
 /// cannot launch yet.

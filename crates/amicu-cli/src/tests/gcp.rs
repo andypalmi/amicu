@@ -62,6 +62,9 @@ struct WorldState {
     secretmanager_denied: bool,
     /// The caller lacks `iam.serviceAccounts.actAs`.
     act_as_denied: bool,
+    /// The VM's startup script reports `failed:<step>` with this
+    /// `(step, log)`, and vLLM never answers.
+    startup_failed: Option<(String, String)>,
 }
 
 type Hook = Box<dyn FnOnce() + Send>;
@@ -311,6 +314,9 @@ impl HttpTransport for World {
                 .unwrap()
                 .log
                 .push(format!("probe {} {}", m, req.url));
+            if self.state.lock().unwrap().startup_failed.is_some() {
+                return Err(TransportError::Connection("connection refused".to_owned()));
+            }
             return Ok(HttpResponse::new(200, "ok"));
         };
         let path = path.split('?').next().unwrap_or_default().to_owned();
@@ -421,6 +427,27 @@ impl HttpTransport for World {
                 let o = op(&mut w, "z");
                 json_reply(200, &o)
             }
+            (
+                HttpMethod::Get,
+                [
+                    "projects",
+                    _,
+                    "zones",
+                    _,
+                    "instances",
+                    _,
+                    "getGuestAttributes",
+                ],
+            ) => match self.state.lock().unwrap().startup_failed.clone() {
+                Some((step, log)) => json_reply(
+                    200,
+                    &json!({"queryValue": {"items": [
+                        {"namespace": "amicu", "key": "status", "value": format!("failed:{step}")},
+                        {"namespace": "amicu", "key": "detail", "value": log},
+                    ]}}),
+                ),
+                None => not_found(),
+            },
             (HttpMethod::Get, ["projects", _, "aggregated", "instances"]) => {
                 let w = self.state.lock().unwrap();
                 let mut items = serde_json::Map::new();
@@ -918,6 +945,47 @@ fn a_failed_exposure_check_deletes_what_this_run_created() {
     assert!(err.contains("failed its exposure check"), "{err}");
     assert_eq!(rig.gcp.world.vm_names(), Vec::<String>::new());
     assert_eq!(rig.gcp.world.firewall_names(), Vec::<String>::new());
+}
+
+#[test]
+fn a_failed_startup_script_stops_apply_at_once_and_destroy_finishes_the_cleanup() {
+    let td = TempDir::new();
+    let project = project_with(&td, "allowed_source_cidrs = [\"203.0.113.4/32\"]");
+    let rig = rig();
+    rig.gcp.world.state.lock().unwrap().startup_failed = Some((
+        "install Docker and the NVIDIA container toolkit".to_owned(),
+        "amicu: installing Docker and the NVIDIA container toolkit\n\
+         E: Unable to locate package nvidia-container-toolkit\n"
+            .to_owned(),
+    ));
+    let started = std::time::Instant::now();
+    let err = apply_with(&project, &rig).unwrap_err().to_string();
+    // Well inside the 5 s health timeout of the fake: the report ended the wait.
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    assert!(
+        err.contains(
+            "startup script failed at step `install Docker and the NVIDIA container toolkit`"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("E: Unable to locate package nvidia-container-toolkit"),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!(
+            "gcloud compute instances get-serial-port-output {}",
+            instance()
+        )),
+        "{err}"
+    );
+    assert!(err.contains("were deleted"), "{err}");
+    assert_eq!(rig.gcp.world.vm_names(), Vec::<String>::new());
+    assert_eq!(rig.gcp.world.firewall_names(), Vec::<String>::new());
+    // The record stays until a stop is confirmed, so destroy can finish.
+    assert_eq!(the_record(&project).instance, instance());
+    assert_eq!(destroy(&project, &rig).unwrap(), 0);
+    assert_eq!(stops_for(&project, DEP).len(), 0);
 }
 
 #[test]

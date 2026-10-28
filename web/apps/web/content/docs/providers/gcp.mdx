@@ -34,6 +34,10 @@ A complete example is in `examples/gcp-t4-spot`.
 
 `apply` creates one Compute Engine VM per deployment, with the GPU attached (N1) or built in (A2, A3, G2, G4), and one firewall rule for the serving port. A startup script runs the vLLM container behind amicu's key check: every route except `GET /health` needs the deployment's `api_key`. Only `runtime = "vllm"` is supported; llama.cpp is rejected (`AMICU-CAP-016`).
 
+The VM boots the Deep Learning VM image `common-cu129-ubuntu-2204-nvidia-580`, which has the NVIDIA driver but not Docker. On first boot the startup script installs Docker Engine and the NVIDIA container toolkit from Docker's and NVIDIA's apt repositories, after checking each repository's signing key against a fingerprint built into amicu. This adds about one to two minutes before the vLLM image pull, so a small model is usually ready 6 to 10 minutes after `apply` creates the VM.
+
+The startup script reports each boot as a guest attribute on the VM (`amicu/status`). If a step fails, for example the install, the image pull or the model load, `apply` stops waiting at once. It prints the failed step and the end of the script's log, then deletes the VM and firewall rule it created. Reading the report needs `compute.instances.getGuestAttributes`, which `roles/compute.instanceAdmin.v1` includes. Without that permission, `apply` waits for `/health` until its usual deadline.
+
 The endpoint is `https://<VM IP>:8000`. The VM serves a self-signed certificate that amicu generates before it creates the VM. The certificate names no host you can resolve, so clients pin it instead of trusting a CA: `apply` writes it to `.amicu/state/<instance>.tls.crt` and prints its path and SHA-256 fingerprint. amicu pins it for its own health and exposure checks. A client that skips certificate verification is not protected. The firewall rule allows only the addresses in `allowed_source_cidrs`, or by default this machine's public IP as a `/32`. amicu never opens the port to `0.0.0.0/0` unless you list it.
 
 The API key, the Hugging Face token and the TLS private key are stored in Secret Manager (one secret each, in the deployment's region only) before the VM is created. The VM's service account reads them at boot, so they are never in instance metadata. The secret ids and the certificate fingerprint are in the record `apply` writes to state first, so `destroy` removes the secrets even after a crash.
@@ -176,7 +180,7 @@ Before it writes anything, `apply` on a VM checks (read-only) that the credentia
 - The certificate is self-signed and pinned, not CA-signed: clients must pin its fingerprint.
 - vLLM only, one VM per deployment, no `env` block, no metrics or logs through amicu.
 - Cloud Run: one GPU per instance, no minimum instances (always scales to zero), no CIDR allowlist, the idle timeout is Cloud Run's own, and with `access = "iam"` amicu cannot check that the API key is accepted.
-- A4X (`a4x-*`, the GB200 and GB300 machines) is not supported yet: its Arm boot images ship without Docker and the NVIDIA container toolkit. `apply` and `plan` reject an `a4x-*` `machine_type`, and a GB200 or GB300 GPU never picks one by default.
+- A4X (`a4x-*`, the GB200 and GB300 machines) is not supported yet: amicu has not been tested on its Arm (NVIDIA Grace) boot image and the arm64 vLLM container. `apply` and `plan` reject an `a4x-*` `machine_type`, and a GB200 or GB300 GPU never picks one by default.
 - Prices in the catalog are illustrative values, not live quotes, so cost estimates are indicative.
 
 ## Troubleshooting
@@ -187,6 +191,9 @@ Before it writes anything, `apply` on a VM checks (read-only) that the credentia
   </Accordion>
   <Accordion title="apply says no zone has capacity">
   Compute Engine had no GPUs of that kind in the zones tried. Retry later, pick another `region` or `zone`, another GPU, or `provisioning = "flex_start"`. What the run created was deleted.
+  </Accordion>
+  <Accordion title="apply says the startup script failed at a step">
+  The VM reported that a boot step failed. The error names the step and shows the end of the script's log. `apply` deletes the VM and firewall rule it created, and the record stays in state until a later `apply` or `destroy` confirms they are gone. For the full boot log, run the `gcloud compute instances get-serial-port-output` command printed with the error while the VM still exists. If the error says the VM could not be deleted, it may still be billing: run `amicu destroy --target <deployment>`.
   </Accordion>
   <Accordion title="I cannot reach the endpoint">
   The firewall rule allows only `allowed_source_cidrs`, or the public IP of the machine that ran `apply`. If your address changed, set `allowed_source_cidrs` and run `apply` again.

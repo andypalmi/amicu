@@ -417,6 +417,40 @@ pub async fn delete(
     }
 }
 
+/// The VM's guest attributes in `namespace` as `(key, value)` pairs; empty
+/// when the guest has written none there yet.
+///
+/// # Errors
+/// An API error, for example `403` without `compute.instances.getGuestAttributes`.
+pub async fn guest_attributes(
+    client: &GcpClient,
+    record: &VmRecord,
+    namespace: &str,
+) -> Result<Vec<(String, String)>, GcpError> {
+    check_record(record)?;
+    let url = format!(
+        "{}/getGuestAttributes?queryPath={namespace}%2F",
+        instance_url(record)
+    );
+    let v = match client.request(HttpMethod::Get, &url, None).await {
+        Ok(v) => v,
+        Err(GcpError::NotFound { .. }) => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    Ok(v["queryValue"]["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|i| i["namespace"] == namespace)
+        .filter_map(|i| {
+            Some((
+                i["key"].as_str()?.to_owned(),
+                i["value"].as_str()?.to_owned(),
+            ))
+        })
+        .collect())
+}
+
 fn check_record(record: &VmRecord) -> Result<(), GcpError> {
     validate_project_id(&record.project)?;
     validate_zone(&record.zone)?;
