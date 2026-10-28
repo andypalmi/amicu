@@ -23,7 +23,7 @@
     "@amicu/api-client": "workspace:*",
     "@amicu/auth": "workspace:*",
     "@amicu/ui": "workspace:*",
-    "@opennextjs/cloudflare": "^1.20.9",
+    "@opennextjs/cloudflare": "^1.20.13",
     "@sentry/nextjs": "^11.7.0",
     "fumadocs-core": "16.14.5",
     "fumadocs-mdx": "15.3.0",
@@ -51,6 +51,6 @@
     "tailwindcss": "^4.3.3",
     "tsx": "^4.23.13",
     "typescript": "^6.0.3",
-    "wrangler": "^4.132.0"
+    "wrangler": "^4.148.0"
   }
 }
