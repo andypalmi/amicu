@@ -259,6 +259,13 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # Builds the OpenNext Worker exactly as deploy-web.yml does, serves it
+      # with `wrangler dev --local` (no Cloudflare credentials) and requests
+      # a few routes; catches Worker-only runtime breaks that `next build`
+      # cannot see.
+      - name: Worker smoke test
+        run: scripts/worker-smoke.sh
+
   dist-check:
     name: dist generate is up to date
     runs-on: ubuntu-latest
