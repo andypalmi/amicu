@@ -99,6 +99,17 @@ impl GceRecord {
             .collect()
     }
 
+    /// The project the firewall rule lives in: its network's, else the
+    /// deployment's (records from before `network` was kept).
+    #[must_use]
+    pub fn firewall_project(&self) -> &str {
+        self.network
+            .as_deref()
+            .and_then(|n| n.strip_prefix("projects/"))
+            .and_then(|n| n.split('/').next())
+            .unwrap_or(&self.project)
+    }
+
     /// The VM's record in `zone`, as the compute functions take it.
     #[must_use]
     pub fn vm(&self, zone: &str) -> VmRecord {
@@ -690,7 +701,7 @@ pub async fn teardown(
     }
     delete_firewall(
         client,
-        &record.project,
+        record.firewall_project(),
         &record.firewall,
         &record.owner,
         timing,
@@ -905,6 +916,14 @@ mod tests {
             tls: None,
             idle_shutdown: None,
         }
+    }
+
+    #[test]
+    fn the_firewall_project_is_the_networks_or_else_the_deployments() {
+        let mut r = launch().record().unwrap();
+        assert_eq!(r.firewall_project(), "my-proj");
+        r.network = Some("projects/host-proj/global/networks/vpc".into());
+        assert_eq!(r.firewall_project(), "host-proj");
     }
 
     #[test]

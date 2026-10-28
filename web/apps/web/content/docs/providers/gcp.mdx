@@ -140,16 +140,15 @@ gcp {
 
 amicu does not pick a subnetwork for you, even when the region has only one: a silent choice would change when someone adds a second subnetwork. If `network` is custom-mode and `subnetwork` is missing, `apply` stops before writing and lists the network's subnetworks in the region.
 
-The VM always gets an external IPv4 address, which is how amicu reaches it. A subnetwork that cannot give one (IPv6-only) is rejected in the preflight, and VMs without an external IP (private-only setups behind Cloud NAT or a VPN) are not supported yet. An organization policy that denies external IPs (`constraints/compute.vmExternalIpAccess`) makes the VM create fail for the same reason. The recorded state keeps the network the firewall rule was created on; `destroy`, `refresh` and `orphans` find the rule by name, so they keep working if the config changes later.
+The VM always gets an external IPv4 address, which is how amicu reaches it. A subnetwork that cannot give one (IPv6-only) is rejected in the preflight, and VMs without an external IP (private-only setups behind Cloud NAT or a VPN) are not supported yet. An organization policy that denies external IPs (`constraints/compute.vmExternalIpAccess`) makes the VM create fail for the same reason. With a Shared VPC network, the firewall rule is created in the network's (host) project, because a rule belongs to its network's project: the account that runs `apply` needs `compute.firewalls.create` there, or a host-project admin must open the serving port for the VM's network tag. A bare `subnetwork` name is looked up in the network's project. State records the network, so `destroy` and `orphans` look for the rule in that project even if the config changes later; records from before this option fall back to the deployment's project.
 
 ## Projects managed by Terraform
 
-amicu and Terraform can share a project if each owns its own part:
+amicu and Terraform can share a project if each manages its own part:
 
-- Terraform owns the project, the enabled APIs (use `disable_on_destroy = false` on `google_project_service`, so a destroy does not turn APIs off under running deployments), the service accounts, their IAM (use additive `google_project_iam_member`, never authoritative `_iam_binding` or `_iam_policy`, which would remove what amicu grants) and the network.
-- amicu owns what it labels: VMs, firewall rules, Cloud Run services and Secret Manager secrets, each carrying its owner marker. Do not manage those in Terraform, and do not edit them by hand.
+- Terraform manages what amicu only reads or uses: the project, the enabled APIs, the service accounts and their roles, and the network. amicu never enables APIs, creates service accounts or changes IAM; it only reads (preflight) and grants the VM's service account `roles/secretmanager.secretAccessor` on the secrets it creates.
+- amicu manages the VMs, firewall rules, Cloud Run services and Secret Manager secrets it creates, each carrying its owner marker (a label, or a description prefix on firewall rules). Keep those out of Terraform, and do not edit them by hand.
 - Set `network` and `subnetwork` when the project has no `default` network.
-- Keep GPU workloads out of projects that have a billing kill switch (a budget alert that detaches billing). Cutting billing stops resources without going through amicu, so a running GPU VM or service would end abruptly and the state would no longer match what exists.
 
 ## Cloud Run
 

@@ -102,6 +102,18 @@ impl FirewallSpec {
         Ok(())
     }
 
+    /// The project the rule lives in: the network's, since a firewall rule
+    /// belongs to its network's project (a Shared VPC host project).
+    ///
+    /// # Errors
+    /// [`GcpError::Invalid`] for a bad network link.
+    pub fn rule_project(&self) -> Result<String, GcpError> {
+        match &self.network {
+            Some(n) => Ok(NetworkRef::parse(n)?.project_or(&self.project).to_owned()),
+            None => Ok(self.project.clone()),
+        }
+    }
+
     fn network_path(&self) -> Result<String, GcpError> {
         match &self.network {
             Some(n) => Ok(NetworkRef::parse(n)?.path(&self.project)),
@@ -169,12 +181,24 @@ pub async fn create_firewall(
     timing: PollTiming,
 ) -> Result<(), GcpError> {
     spec.validate()?;
-    let url = rules_url(&spec.project);
+    let project = spec.rule_project()?;
+    validate_project_id(&project)?;
+    let url = rules_url(&project);
     match client
         .request(HttpMethod::Post, &url, Some(spec.insert_body()?))
         .await
     {
-        Ok(op) => wait(client, &spec.project, &op, timing).await,
+        Ok(op) => wait(client, &project, &op, timing).await,
+        Err(GcpError::PermissionDenied { status, code, .. }) if project != spec.project => {
+            Err(GcpError::PermissionDenied {
+                status,
+                code,
+                message: format!(
+                    "the network is in project {project}, so its firewall rule must be created                      there: the caller needs `compute.firewalls.create` on {project}, or a                      host-project admin must create an ingress rule for tag `{}` on port {}",
+                    spec.network_tag, spec.port
+                ),
+            })
+        }
         Err(GcpError::Conflict { message }) => {
             let rule: RuleView = client
                 .request_as(HttpMethod::Get, &format!("{url}/{}", spec.name), None)
@@ -204,7 +228,7 @@ pub async fn create_firewall(
                     Some(Value::Object(spec.mutable_fields())),
                 )
                 .await?;
-            wait(client, &spec.project, &op, timing).await
+            wait(client, &project, &op, timing).await
         }
         Err(e) => Err(e),
     }
@@ -286,6 +310,46 @@ mod tests {
             network: None,
             owner: "abc123".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn a_shared_vpc_rule_is_created_in_the_host_project() {
+        let host_rules = "/projects/host-proj/global/firewalls";
+        let (c, mock) = client(
+            Mock::default()
+                .on(
+                    HttpMethod::Post,
+                    host_rules,
+                    200,
+                    r#"{"name":"op-9","status":"RUNNING"}"#,
+                )
+                .on(
+                    HttpMethod::Post,
+                    "/projects/host-proj/global/operations/op-9/wait",
+                    200,
+                    DONE,
+                ),
+        );
+        let mut s = spec();
+        s.network = Some("projects/host-proj/global/networks/shared".into());
+        create_firewall(&c, &s, fast()).await.unwrap();
+        assert_eq!(
+            mock.requests()[0].body.clone().unwrap()["network"],
+            "projects/host-proj/global/networks/shared"
+        );
+
+        let (c, _) = client(Mock::default().on(
+            HttpMethod::Post,
+            host_rules,
+            403,
+            r#"{"error":{"code":403,"status":"PERMISSION_DENIED","message":"denied"}}"#,
+        ));
+        let err = create_firewall(&c, &s, fast())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("compute.firewalls.create"), "{err}");
+        assert!(err.contains("host-proj"), "{err}");
     }
 
     #[test]

@@ -325,8 +325,19 @@ async fn check_network(
         Err(e) => return Err(e.to_string()),
         Ok(v) => v,
     };
-    let region = choice.region.as_deref().unwrap_or_default();
     let custom_mode = network["autoCreateSubnetworks"] == false;
+    let sub_has_region = choice
+        .subnetwork
+        .as_deref()
+        .and_then(|s| SubnetworkRef::parse(s).ok())
+        .is_some_and(|s| s.region.is_some());
+    let region = choice.region.as_deref().filter(|r| !r.is_empty());
+    if region.is_none() && (custom_mode || choice.subnetwork.is_some()) && !sub_has_region {
+        return Err(
+            "set `region` (or `gcp { zone }`) so the VM's subnetwork can be looked up".to_owned(),
+        );
+    }
+    let region = region.unwrap_or_default();
     let Some(sub) = choice.subnetwork.as_deref() else {
         if custom_mode {
             let here = format!("/regions/{region}/subnetworks/");
@@ -354,13 +365,12 @@ async fn check_network(
         }
         return Ok(());
     };
-    check_subnetwork(client, project, (net_project, net_name), region, sub).await
+    check_subnetwork(client, (net_project, net_name), region, sub).await
 }
 
 /// The subnetwork exists, belongs to the network, and has IPv4.
 async fn check_subnetwork(
     client: &GcpClient,
-    project: &str,
     (net_project, net_name): (&str, &str),
     region: &str,
     sub: &str,
@@ -368,7 +378,7 @@ async fn check_subnetwork(
     let base = amicu_gcp::client::COMPUTE_BASE_URL;
     let sub = SubnetworkRef::parse(sub).map_err(|e| e.to_string())?;
     let sub_region = sub.region_or(region);
-    let sub_project = sub.project_or(project);
+    let sub_project = sub.project_or(net_project);
     let url = format!(
         "{base}/projects/{sub_project}/regions/{sub_region}/subnetworks/{}",
         sub.name

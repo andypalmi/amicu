@@ -192,11 +192,12 @@ pub fn interface_paths(
             None => Ok((DEFAULT_NETWORK_PATH.to_owned(), None)),
         };
     };
-    let net = NetworkRef::parse(network)?.path(project);
+    let net = NetworkRef::parse(network)?;
+    let net_project = net.project_or(project);
     let sub = sub
-        .map(|s| s.check_region(region).map(|()| s.path(project, region)))
+        .map(|s| s.check_region(region).map(|()| s.path(net_project, region)))
         .transpose()?;
-    Ok((net, sub))
+    Ok((net.path(project), sub))
 }
 
 #[cfg(test)]
@@ -246,6 +247,21 @@ mod tests {
         assert!(s.check_region("us-central1").is_ok());
         assert!(s.check_region("europe-west4").is_err());
         assert!(SubnetworkRef::parse("regions/europe-west4/gpu").is_err());
+    }
+
+    #[test]
+    fn a_bare_subnetwork_follows_the_networks_project() {
+        let (_, s) = interface_paths(
+            "svc-proj",
+            "europe-west4",
+            Some("projects/host-proj/global/networks/vpc"),
+            Some("gpu"),
+        )
+        .unwrap();
+        assert_eq!(
+            s.unwrap(),
+            "projects/host-proj/regions/europe-west4/subnetworks/gpu"
+        );
     }
 
     #[test]

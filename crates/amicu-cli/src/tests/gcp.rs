@@ -1656,6 +1656,51 @@ fn a_custom_vpc_is_used_by_the_vm_and_the_firewall_and_recorded() {
 }
 
 #[test]
+fn a_shared_vpc_firewall_lives_in_the_host_project_and_a_bare_subnetwork_follows_it() {
+    let td = TempDir::new();
+    let project = project_with(
+        &td,
+        "allowed_source_cidrs = [\"203.0.113.4/32\"]\nnetwork = \"projects/host-proj/global/networks/vpc-main\"\nsubnetwork = \"gpu\"",
+    );
+    let rig = rig();
+    with_vpc(
+        &rig,
+        &json!({"network": "https://www.googleapis.com/compute/v1/projects/host-proj/global/networks/vpc-main"}),
+    );
+    apply_with(&project, &rig).unwrap();
+    {
+        let w = rig.gcp.world.state.lock().unwrap();
+        assert!(
+            w.log
+                .contains(&"Post /projects/host-proj/global/firewalls".to_owned()),
+            "{:?}",
+            w.log
+        );
+        assert!(
+            w.log.contains(
+                &"Get /projects/host-proj/regions/europe-west4/subnetworks/gpu".to_owned()
+            ),
+            "{:?}",
+            w.log
+        );
+        assert_eq!(
+            w.insert_bodies[0]["networkInterfaces"][0]["subnetwork"],
+            "projects/host-proj/regions/europe-west4/subnetworks/gpu"
+        );
+    }
+    assert_eq!(the_record(&project).firewall_project(), "host-proj");
+    destroy(&project, &rig).unwrap();
+    let w = rig.gcp.world.state.lock().unwrap();
+    assert!(
+        w.log
+            .iter()
+            .any(|l| l.starts_with("Delete /projects/host-proj/global/firewalls/")),
+        "{:?}",
+        w.log
+    );
+}
+
+#[test]
 fn preflight_requires_a_subnetwork_for_a_custom_mode_network() {
     let td = TempDir::new();
     let project = project_with(
