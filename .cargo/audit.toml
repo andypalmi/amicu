@@ -19,10 +19,18 @@ ignore = [
     # rsa 0.9.10 — Marvin Attack timing sidechannel. No upstream fix exists.
     # Pulled by jsonwebtoken 11's `rust_crypto` feature, which bundles `rsa`
     # unconditionally alongside ed25519-dalek/hmac/p256/p384 (no finer-grained
-    # feature to exclude just RSA on this backend). amicu-auth only ever
-    # signs/verifies Algorithm::EdDSA (see crates/amicu-auth/src/key.rs and
-    # src/verifier.rs) — no RSA algorithm value is ever constructed, so the
-    # timing sidechannel is not reachable. See
+    # feature to exclude just RSA on this backend). The Marvin attack needs
+    # timing of RSA private-key operations (PKCS#1 v1.5 decryption or
+    # signing). Production only verifies RS256 with Google's RSA public keys:
+    # Validation::new(Algorithm::RS256) at crates/amicu-auth/src/google.rs:204,
+    # the header check at google.rs:251, and
+    # DecodingKey::from_rsa_components(&jwk.n, &jwk.e) at google.rs:330.
+    # Public-key verification uses only the public exponent, so there is no
+    # secret-dependent timing to observe. Private-key RSA
+    # (EncodingKey::from_rsa_der, google.rs:520, and RS256 headers at
+    # google.rs:536 and 819) exists only in the `mod tests` that starts at
+    # google.rs:464. amicu's own tokens are signed with EdDSA only
+    # (crates/amicu-auth/src/key.rs:92). See
     # crates/amicu-auth/SECURITY-NOTES.md for the full writeup.
     # Removal condition: jsonwebtoken ships a rust_crypto feature split that
     # excludes rsa, the project adopts the aws_lc_rs backend instead (drops
