@@ -99,6 +99,17 @@ pub enum GcpError {
     /// The VM exists but its server did not become healthy in time.
     #[error("VM {name} did not become ready: {message}")]
     NotReady { name: String, message: String },
+    /// The VM's startup script reported a failure: vLLM will not come up.
+    /// `detail` is the tail of the script's log, as the VM reported it.
+    #[error(
+        "VM {name}: the startup script failed at step `{step}`{}",
+        if detail.is_empty() { String::new() } else { format!("; the end of its log:\n{detail}") }
+    )]
+    StartupFailed {
+        name: String,
+        step: String,
+        detail: String,
+    },
     /// A resource without amicu's owner label: left alone.
     #[error("{what} does not carry amicu's owner label; refusing to touch it")]
     NotOwned { what: String },

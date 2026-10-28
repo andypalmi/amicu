@@ -2977,7 +2977,7 @@ fn find_deployment<'a>(
 fn report(
     handles: &[RuntimeHandle],
     graph: &Graph,
-    tls: &[(String, std::path::PathBuf, String)],
+    tls: &[gce::TlsNote],
     output: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<u8, CliError> {
@@ -2993,15 +2993,22 @@ fn report(
                     gateway: GatewayAuth::GceBearer,
                 })
             {
-                if let Some((_, path, fingerprint)) = tls.iter().find(|t| t.0 == h.id) {
+                if let Some(t) = tls.iter().find(|t| t.instance == h.id) {
                     io(writeln!(
                         out,
                         "    HTTPS with a pinned self-signed certificate; the firewall rule \
                          limits who can connect\n    certificate: {}\n    SHA-256 \
-                         fingerprint: {fingerprint}\n    note: the certificate names no \
-                         resolvable host, so clients must pin it (a client that skips \
-                         verification is not protected)",
-                        path.display()
+                         fingerprint: {}",
+                        t.path.display(),
+                        t.fingerprint
+                    ))?;
+                    if let Some(pin) = &t.spki_pin {
+                        io(writeln!(out, "    public key pin (sha256, base64): {pin}"))?;
+                    }
+                    io(writeln!(
+                        out,
+                        "    note: the certificate names no resolvable host, so clients must \
+                         pin it (a client that skips verification is not protected)"
                     ))?;
                 } else {
                     io(writeln!(
@@ -3027,7 +3034,8 @@ fn report(
                     }
                 });
             let key = deployment.and_then(|d| d.api_key.as_ref());
-            io(write!(out, "{}", usage_snippets(h, key, model)))?;
+            let pin = tls.iter().find(|t| t.instance == h.id);
+            io(write!(out, "{}", usage_snippets(h, key, model, pin)))?;
         }
     }
     Ok(0)
@@ -3051,6 +3059,8 @@ fn is_shell_ident(name: &str) -> bool {
 }
 
 /// Ready-to-copy `curl` and OpenAI-SDK snippets for one applied endpoint.
+/// With a `pin` (a Compute Engine VM) both verify the VM's own certificate:
+/// curl pins its public key, Python trusts only that certificate.
 ///
 /// Credentials are referenced by environment variable name only: the
 /// deployment's `api_key` secret name (the variable the local secret resolver
@@ -3060,6 +3070,7 @@ fn usage_snippets(
     handle: &RuntimeHandle,
     api_key: Option<&amicu_core::secret::SecretRef>,
     model: Option<&str>,
+    pin: Option<&gce::TlsNote>,
 ) -> String {
     use std::fmt::Write as _;
     let base = handle.endpoint.trim_end_matches('/');
@@ -3107,21 +3118,78 @@ fn usage_snippets(
     if let Some(note) = key_note {
         let _ = writeln!(out, "      note:   {note}");
     }
+    if pin.is_some_and(|p| p.spki_pin.is_none()) {
+        let _ = writeln!(
+            out,
+            "      note:   the certificate file is missing or does not match state; re-run \
+             `amicu apply` to write it before using these snippets"
+        );
+    } else if pin.is_some() {
+        let _ = writeln!(
+            out,
+            "      note:   -k skips only the CA and host name checks the certificate cannot \
+             pass; --pinnedpubkey still refuses any other key"
+        );
+    }
     let _ = writeln!(out, "      curl:");
     let _ = writeln!(out, "        curl {sh_url} \\");
+    if let Some(spki) = pin.and_then(|p| p.spki_pin.as_deref()) {
+        let _ = writeln!(
+            out,
+            "          -k --pinnedpubkey {} \\",
+            sh_quote(&format!("sha256//{spki}"))
+        );
+    }
     for h in &curl_headers {
         let _ = writeln!(out, "          {h} \\");
     }
     let _ = writeln!(out, "          -d {sh_body}");
     let _ = writeln!(out, "      python (openai):");
     let _ = writeln!(out, "        import os");
+    if pin.is_some() {
+        let _ = writeln!(out, "        import ssl");
+        let _ = writeln!(out, "        import httpx");
+    }
     let _ = writeln!(out, "        from openai import OpenAI");
     let api_key_expr = if api_key.is_some() {
         format!("os.environ[\"{key_var}\"]")
     } else {
         "\"unused\"".to_owned()
     };
-    if proxy_auth {
+    out.push_str(&python_client(&py_base, &api_key_expr, pin, proxy_auth));
+    let _ = writeln!(
+        out,
+        "        client.chat.completions.create(model={py_model}, messages=[{{\"role\": \"user\", \"content\": \"Hello\"}}])"
+    );
+    out.push('\n');
+    out
+}
+
+/// The `client = OpenAI(...)` lines of the Python snippet.
+fn python_client(
+    py_base: &str,
+    api_key_expr: &str,
+    pin: Option<&gce::TlsNote>,
+    proxy_auth: bool,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    if let Some(p) = pin {
+        let cafile = py_str(&p.path.display().to_string());
+        let _ = writeln!(
+            out,
+            "        tls = ssl.create_default_context(cafile={cafile})"
+        );
+        let _ = writeln!(
+            out,
+            "        tls.check_hostname = False  # the pinned certificate is the only one trusted; it names no host"
+        );
+        let _ = writeln!(out, "        client = OpenAI(");
+        let _ = writeln!(out, "            base_url={py_base},");
+        let _ = writeln!(out, "            api_key={api_key_expr},");
+        let _ = writeln!(out, "            http_client=httpx.Client(verify=tls),");
+        let _ = writeln!(out, "        )");
+    } else if proxy_auth {
         let _ = writeln!(out, "        client = OpenAI(");
         let _ = writeln!(out, "            base_url={py_base},");
         let _ = writeln!(out, "            api_key={api_key_expr},");
@@ -3142,11 +3210,6 @@ fn usage_snippets(
             "        client = OpenAI(base_url={py_base}, api_key={api_key_expr})"
         );
     }
-    let _ = writeln!(
-        out,
-        "        client.chat.completions.create(model={py_model}, messages=[{{\"role\": \"user\", \"content\": \"Hello\"}}])"
-    );
-    out.push('\n');
     out
 }
 
@@ -3981,7 +4044,12 @@ mod exposure_tests {
                 gateway: GatewayAuth::ModalProxyToken,
             },
         );
-        let text = usage_snippets(&h, Some(&SecretRef::new("CHAT_API_KEY")), Some("org/model"));
+        let text = usage_snippets(
+            &h,
+            Some(&SecretRef::new("CHAT_API_KEY")),
+            Some("org/model"),
+            None,
+        );
         assert!(
             text.contains("https://x.modal.direct/v1/chat/completions"),
             "{text}"
@@ -4019,16 +4087,67 @@ mod exposure_tests {
     #[test]
     fn snippets_escape_hostile_model_and_url_values() {
         let h = handle("http://h/'; touch x; '", EndpointExposure::Loopback);
-        let text = usage_snippets(&h, None, Some("m'\"; $(id)"));
+        let text = usage_snippets(&h, None, Some("m'\"; $(id)"), None);
         assert!(text.contains("'\\''"), "{text}");
         assert!(!text.contains("curl http://h/'; touch"), "{text}");
         assert!(text.contains("\\\""), "{text}");
     }
 
     #[test]
+    fn snippets_for_a_pinned_vm_verify_its_certificate() {
+        let h = handle(
+            "https://198.51.100.7:8000",
+            EndpointExposure::Public {
+                gateway: GatewayAuth::GceBearer,
+            },
+        );
+        let mut note = super::gce::TlsNote {
+            instance: "vm-1".into(),
+            path: "/p/.amicu/state/vm-1.tls.crt".into(),
+            fingerprint: "ab".repeat(32),
+            spki_pin: Some("7gAsNVt8gaFeIXZJVmaRQsq/IO77R8srYF1WoGBqYk8=".into()),
+        };
+        let key = SecretRef::new("CHAT_API_KEY");
+        let text = usage_snippets(&h, Some(&key), Some("m"), Some(&note));
+        assert!(
+            text.contains(
+                "          -k --pinnedpubkey 'sha256//7gAsNVt8gaFeIXZJVmaRQsq/IO77R8srYF1WoGBqYk8=' \\\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "tls = ssl.create_default_context(cafile=\"/p/.amicu/state/vm-1.tls.crt\")"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("tls.check_hostname = False"), "{text}");
+        assert!(
+            text.contains("http_client=httpx.Client(verify=tls)"),
+            "{text}"
+        );
+        assert!(!text.contains("verify=False"), "{text}");
+        let windows = super::gce::TlsNote {
+            path: r#"C:\Users\a "b"\.amicu\state\vm-1.tls.crt"#.into(),
+            ..note.clone()
+        };
+        let text = usage_snippets(&h, Some(&key), Some("m"), Some(&windows));
+        assert!(
+            text.contains(r#"cafile="C:\\Users\\a \"b\"\\.amicu\\state\\vm-1.tls.crt")"#),
+            "{text}"
+        );
+        note.spki_pin = None;
+        let text = usage_snippets(&h, Some(&key), Some("m"), Some(&note));
+        assert!(!text.contains("--pinnedpubkey"), "{text}");
+        assert!(text.contains("re-run `amicu apply` to write it"), "{text}");
+        let plain = usage_snippets(&h, Some(&key), Some("m"), None);
+        assert!(!plain.contains("-k ") && !plain.contains("ssl"), "{plain}");
+    }
+
+    #[test]
     fn snippets_for_a_keyless_loopback_endpoint_send_no_credentials() {
         let h = handle("http://127.0.0.1:8080", EndpointExposure::Loopback);
-        let text = usage_snippets(&h, None, None);
+        let text = usage_snippets(&h, None, None, None);
         assert!(!text.contains("Authorization"), "{text}");
         assert!(!text.contains("Modal-"), "{text}");
         assert!(text.contains("api_key=\"unused\""), "{text}");
@@ -4037,7 +4156,7 @@ mod exposure_tests {
     #[test]
     fn a_secret_name_that_is_not_a_shell_identifier_gets_a_stand_in() {
         let h = handle("http://127.0.0.1:8080", EndpointExposure::Loopback);
-        let text = usage_snippets(&h, Some(&SecretRef::new("chat-api-key")), None);
+        let text = usage_snippets(&h, Some(&SecretRef::new("chat-api-key")), None, None);
         assert!(text.contains("Bearer $AMICU_API_KEY"), "{text}");
         assert!(text.contains("value of secret 'chat-api-key'"), "{text}");
     }

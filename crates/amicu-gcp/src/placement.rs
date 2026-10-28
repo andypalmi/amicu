@@ -37,7 +37,7 @@ pub enum PlacementError {
         provisioning: &'static str,
     },
     #[error(
-        "A4X (a4x-*) is not supported yet: its Arm boot images ship without Docker and the NVIDIA container toolkit"
+        "A4X (a4x-*) is not supported yet: amicu has not been tested on its Arm (NVIDIA Grace) boot image and the arm64 vLLM container"
     )]
     A4xUnsupported,
     #[error("no zone {scope} offers {what}")]

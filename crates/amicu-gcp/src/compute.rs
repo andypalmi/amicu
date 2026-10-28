@@ -22,14 +22,17 @@ pub mod tls;
 pub mod vm;
 
 pub use firewall::{FirewallSpec, create_firewall, delete_firewall, firewall_name};
-pub use health::{HealthTiming, probe_transport, wait_ready};
+pub use health::{HealthTiming, StartupReport, probe_transport, startup_report, wait_ready};
 pub use secure::{delete_secrets, provision_secrets};
 pub use spec::{
     A4X_UNSUPPORTED, ARM64_IMAGE_FAMILY, Accelerator, DEFAULT_IMAGE_FAMILY, Provisioning, VmSpec,
     default_image_family, is_a4x_machine_type, is_arm_machine_type,
 };
 pub use startup::{SecretDelivery, StartupConfig};
-pub use tls::{PinnedTransport, TlsIdentity, cert_path, fingerprint_of_pem, write_cert_pem};
+pub use tls::{
+    PinnedTransport, TlsIdentity, cert_path, fingerprint_of_pem, spki_pin_of_pem, write_cert_pem,
+};
 pub use vm::{
-    DeleteOutcome, Instance, VmRecord, VmState, create, delete, get, instance_name, prepare, status,
+    DeleteOutcome, Instance, VmRecord, VmState, create, delete, get, guest_attributes,
+    instance_name, prepare, status,
 };
