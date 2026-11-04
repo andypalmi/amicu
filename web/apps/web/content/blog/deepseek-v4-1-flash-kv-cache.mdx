@@ -86,15 +86,4 @@ Some caveats, so the comparison is fair:
 
 This is why `amicu plan` counts the KV cache, not only the weights, before it starts anything: "does it fit?" depends on how much context you want and how many people will use it at once.
 
-The standard formula only works for standard attention. For models like DeepSeek V4.1 Flash, GLM-5.3 or Kimi, you can state the cache cost directly on the model resource with `kv_bytes_per_token` (and `kv_fixed_bytes` for state that does not grow), and plan uses that instead.
-
-```hcl
-resource "model" "deepseek_v41_flash" {
-  # ...
-  context_length     = 1048576
-  kv_bytes_per_token = 890
-  kv_fixed_bytes     = "3MB"
-}
-```
-
-The [model resource reference](/docs/configuration) lists values for the models in this post.
+Today plan uses the standard formula above, which is right for standard attention and too high for designs like DeepSeek V4.1 Flash's. Built-in cache sizes for these models, starting with DeepSeek V4.1 Flash, are coming in the next release.
