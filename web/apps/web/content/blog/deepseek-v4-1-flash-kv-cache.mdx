@@ -35,7 +35,7 @@ Most people don't run it at bf16. They run quantized weights, often [Unsloth's d
 | Weights | 54 GB | 29–31 GB (Q8_0, UD-Q8_K_XL) | 22–25 GB (UD-Q6_K, UD-Q6_K_XL) | 16–18 GB (UD-Q4_K_M, UD-Q4_K_XL) |
 | KV cache, 1M tokens | 66 GB | 33–35 GB | – | 18 GB |
 
-Unsloth's dynamic 2-bit file (UD-Q2_K_XL) goes down to 10 GB of weights. Runtimes offer the cache at 16, 8 or 4 bits, not 6. Qwen3.8-27B supports 262k tokens natively, so the 1M row is extrapolated; at 262k divide it by four.
+Unsloth's dynamic 2-bit file (UD-Q2_K_XL) goes down to 10 GB of weights. There is no 6-bit cache type, hence the dash. Qwen3.8-27B supports 262k tokens natively, so the 1M row is extrapolated; at 262k divide it by four.
 
 Even with the cache squeezed to 4-bit, a 27B model needs about 18 GB for a 1M-token conversation, 20 times what DeepSeek V4.1 Flash needs, and DeepSeek is a 552B model. Quantization shrinks every model by about the same factor. What DeepSeek changed is the design of the cache itself, which is why the gap stays even after you quantize.
 
