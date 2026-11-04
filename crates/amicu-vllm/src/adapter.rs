@@ -147,18 +147,47 @@ fn vllm_kv_bytes_per_element(dtype: amicu_core::resource::VllmKvCacheDtype) -> f
     }
 }
 
-/// Estimated total KV-cache memory for one vLLM deployment, when the model
-/// declares full shape metadata (the fit-estimate formula:
-/// "weights + kv cache only").
+/// Estimated total KV-cache memory for one vLLM deployment, when its cost is
+/// known (the fit-estimate formula: "weights + kv cache only"). The source
+/// follows [`amicu_registry::resolve_kv_cost`]:
 ///
-/// `ctx × kv_layers × n_kv_heads × head_dim × 2 × bytes_per_element(dtype)`:
-/// one K vector and one V vector per attention head per KV-holding layer per
-/// cached token. `kv_layers` is [`amicu_core::resource::Model::kv_layers`]
-/// (only the full-attention layers for a hybrid-attention model) - vLLM applies a single `--kv-cache-dtype` to both K and V, unlike
-/// llama.cpp's independently-settable `-ctk`/`-ctv`. `dtype` defaults to
-/// [`amicu_core::resource::VllmKvCacheDtype::Auto`] when
-/// `settings.kv_cache_dtype` is unset, matching vLLM's own CLI default.
+/// - `ctx × bytes_per_token` when the model states
+///   [`amicu_core::resource::Model::kv_bytes_per_token`] or a built-in entry
+///   ([`amicu_registry::KNOWN_KV_COSTS`]) matches it. Either figure already
+///   is the cache format it is served with, so `kv_cache_dtype` does not
+///   rescale it (a built-in one is for the model's native cache format).
+/// - `ctx × kv_layers × n_kv_heads × head_dim × 2 × bytes_per_element(dtype)`
+///   otherwise: one K vector and one V vector per attention head per
+///   KV-holding layer per cached token. `kv_layers` is
+///   [`amicu_core::resource::Model::kv_layers`] (only the full-attention
+///   layers for a hybrid-attention model) - vLLM applies a single
+///   `--kv-cache-dtype` to both K and V, unlike llama.cpp's
+///   independently-settable `-ctk`/`-ctv`. `dtype` defaults to
+///   [`amicu_core::resource::VllmKvCacheDtype::Auto`] when
+///   `settings.kv_cache_dtype` is unset, matching vLLM's own CLI default.
+///
+/// The fixed per-sequence state is added once: the estimate covers a single
+/// sequence at the full context (see
+/// [`amicu_core::resource::Runtime::kv_fixed_sequences`]).
 fn kv_cache_params(
+    model: &amicu_core::resource::Model,
+    settings: &VllmSettings,
+) -> Option<ByteSize> {
+    let cost = amicu_registry::resolve_kv_cost(model, amicu_registry::KvRuntime::Vllm);
+    let growing = match cost.bytes_per_token() {
+        Some(per_token) => {
+            amicu_registry::stated_kv_cache_bytes(settings.context_length, per_token)
+        }
+        None => heads_kv_cache_bytes(model, settings)?,
+    };
+    Some(ByteSize::from_bytes(
+        growing.bytes().saturating_add(cost.fixed_for(1).bytes()),
+    ))
+}
+
+/// The head-formula part of [`kv_cache_params`]; `None` without full shape
+/// metadata.
+fn heads_kv_cache_bytes(
     model: &amicu_core::resource::Model,
     settings: &VllmSettings,
 ) -> Option<ByteSize> {
@@ -194,8 +223,8 @@ fn kv_cache_not_estimated_diagnostic(settings: &VllmSettings) -> Diagnostic {
         Severity::Warning,
         format!(
             "kv cache: not estimated (model shape unknown; set n_layers, n_kv_heads, head_dim \
-             on the model); the fit check covers weights only, and a {}-token context may need \
-             far more",
+             or kv_bytes_per_token on the model); the fit check covers weights only, and a \
+             {}-token context may need far more",
             settings.context_length
         ),
     )

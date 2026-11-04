@@ -2,6 +2,7 @@
 //! needs, diffing against prior state to choose the action kind.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use amicu_core::diagnostic::{Diagnostic, DiagnosticReport, Severity};
@@ -16,7 +17,7 @@ use amicu_plan::Plan;
 use amicu_plan::contract::{
     ActionKind, Artifact, ChangeOp, CostPerformance, PlannedAction, PlannedChange, Range, Setting,
 };
-use amicu_registry::GgufResolver;
+use amicu_registry::{GgufResolver, KvCostSource};
 use amicu_runtime::{LaunchPlan, RuntimeAdapter};
 use amicu_vllm::VllmAdapter;
 
@@ -721,7 +722,7 @@ fn action_for(
         hardware: hardware.map(hardware_label),
         provider: hardware.map(|h| h.provider.clone()),
         region: hardware.and_then(|h| h.region.as_ref().map(|r| r.code.clone())),
-        cost_performance: Some(cost_performance(hardware, launch, &d.runtime)),
+        cost_performance: Some(cost_performance(hardware, model, launch, &d.runtime)),
         required_secrets: launch
             .secret_refs
             .iter()
@@ -985,6 +986,7 @@ fn setting(key: &str, value: impl Into<String>) -> Setting {
 
 fn cost_performance(
     hardware: Option<&HardwareProfile>,
+    model: Option<&Model>,
     launch: &LaunchPlan,
     runtime: &Runtime,
 ) -> CostPerformance {
@@ -1016,7 +1018,8 @@ fn cost_performance(
     // problem is found.
     if matches!(runtime, Runtime::Vllm(_)) {
         assumptions.push(if kv_unknown {
-            "kv cache: not estimated (model shape unknown; set n_layers, n_kv_heads, head_dim on the model)"
+            "kv cache: not estimated (model shape unknown; set n_layers, n_kv_heads, head_dim \
+             or kv_bytes_per_token on the model)"
                 .to_owned()
         } else {
             "vllm fit estimate: weights + kv cache only".to_owned()
@@ -1029,7 +1032,7 @@ fn cost_performance(
     if multimodal_present(runtime) {
         assumptions.push("multimodal: projector weights not estimated".to_owned());
     }
-    if let Some(assumption) = kv_cache_assumption(runtime, launch.estimate.kv_cache) {
+    if let Some(assumption) = kv_cache_assumption(runtime, model, launch.estimate.kv_cache) {
         assumptions.push(assumption);
     }
     if speculative_present(runtime) {
@@ -1076,17 +1079,38 @@ fn multimodal_present(runtime: &Runtime) -> bool {
     matches!(runtime, Runtime::LlamaCpp(s) if s.multimodal.is_some())
 }
 
-/// A human-readable summary of the KV-cache estimate
-/// (`e.g. "KV cache: 4GiB at q8_0 for 32768 ctx"`), when [`kv_cache_params`]
-/// (`amicu_llamacpp::adapter`) found enough typed fields to compute one - see
-/// [`amicu_registry::fit::kv_cache_bytes`]. `None` when the estimator had
-/// nothing to fold in, matching `kv_bytes.is_none()`.
+/// A human-readable summary of the KV-cache estimate, naming where its
+/// per-token figure came from ([`amicu_registry::resolve_kv_cost`]):
+///
+/// - computed from heads (`n_layers`/`n_kv_heads`/`head_dim`, see
+///   [`amicu_registry::fit::kv_cache_bytes`]):
+///   `"KV cache: ~2.1 GiB at q8_0 for 32768 ctx (computed from attention heads)"`;
+/// - stated in config (`kv_bytes_per_token`), which the cache dtype setting
+///   does not rescale: `"KV cache: ~2.1 GiB for 32768 ctx (stated in config:
+///   kv_bytes_per_token 70272 B, not rescaled by cache_type_k/cache_type_v)"`;
+/// - a built-in value (vLLM only): `"KV cache: ~892.8 MiB for 1048576 ctx
+///   (built-in value for DeepSeek-V4.1-Flash: 890 B per token at its native FP4
+///   cache; incl. ~2.8 MiB fixed state for 1 sequence, built-in)"`.
+///
+/// Fixed per-sequence state, when there is any, is part of the total and
+/// called out with the sequence count it was multiplied by. When a built-in
+/// value exists but does not apply on this runtime there is no estimate, and
+/// the line says so. `None` when there is nothing to report.
 fn kv_cache_assumption(
     runtime: &Runtime,
+    model: Option<&Model>,
     kv_bytes: Option<amicu_core::ByteSize>,
 ) -> Option<String> {
+    let cost = model.map(|m| amicu_registry::resolve_kv_cost(m, runtime.into()));
+    if let Some(KvCostSource::Withheld(known)) = cost.map(|c| c.source) {
+        return Some(format!(
+            "kv cache: not estimated (the built-in value for {} is for its native {} cache \
+             under vllm; set kv_bytes_per_token on the model)",
+            known.name, known.cache_format
+        ));
+    }
     let kv_bytes = kv_bytes?;
-    match runtime {
+    let (context_length, dtype, dtype_setting, dtype_overridden) = match runtime {
         Runtime::LlamaCpp(s) => {
             let dtype = match (s.cache_type_k, s.cache_type_v) {
                 (Some(k), Some(v)) if k == v => k.to_string(),
@@ -1095,23 +1119,69 @@ fn kv_cache_assumption(
                 (None, Some(v)) => format!("k=f16 v={v}"),
                 (None, None) => "f16".to_owned(),
             };
-            Some(format!(
-                "KV cache: {} at {dtype} for {} ctx",
-                kv_bytes.approx(),
-                s.context_length
-            ))
+            let set = s.cache_type_k.is_some() || s.cache_type_v.is_some();
+            (s.context_length, dtype, "cache_type_k/cache_type_v", set)
         }
         Runtime::Vllm(s) => {
             let dtype = s
                 .kv_cache_dtype
                 .map_or_else(|| "auto".to_owned(), |d| d.to_string());
-            Some(format!(
-                "KV cache: {} at {dtype} for {} ctx",
-                kv_bytes.approx(),
-                s.context_length
-            ))
+            let set = s
+                .kv_cache_dtype
+                .is_some_and(|d| d != amicu_core::resource::VllmKvCacheDtype::Auto);
+            (s.context_length, dtype, "kv_cache_dtype", set)
         }
+    };
+    let source = cost.map_or(KvCostSource::Heads, |c| c.source);
+    let mut detail = vec![match source {
+        KvCostSource::Stated(per_token) => format!(
+            "stated in config: kv_bytes_per_token {} B, not rescaled by {dtype_setting}",
+            per_token.bytes()
+        ),
+        KvCostSource::BuiltIn(known) => {
+            let mut text = format!(
+                "built-in value for {}: {} B per token at its native {} cache",
+                known.name,
+                known.bytes_per_token.bytes(),
+                known.cache_format
+            );
+            if dtype_overridden {
+                let _ = write!(
+                    text,
+                    ", not rescaled for {dtype_setting} = {dtype} (the figure is for the \
+                     native {} cache)",
+                    known.cache_format
+                );
+            }
+            text
+        }
+        KvCostSource::Heads | KvCostSource::Withheld(_) => {
+            "computed from attention heads".to_owned()
+        }
+    }];
+    if let Some(c) = cost.filter(|c| c.fixed_per_sequence.bytes() > 0) {
+        let sequences = runtime.kv_fixed_sequences();
+        detail.push(format!(
+            "incl. {} fixed state for {sequences} sequence{}{}",
+            c.fixed_for(sequences).approx(),
+            if sequences == 1 { "" } else { "s" },
+            if c.fixed_is_built_in {
+                ", built-in"
+            } else {
+                ""
+            }
+        ));
     }
+    let at_dtype = if matches!(source, KvCostSource::Heads) {
+        format!(" at {dtype}")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "KV cache: {}{at_dtype} for {context_length} ctx ({})",
+        kv_bytes.approx(),
+        detail.join("; ")
+    ))
 }
 
 fn hardware_label(hardware: &HardwareProfile) -> String {
@@ -1201,6 +1271,8 @@ mod tests {
             n_layers: None,
             n_kv_heads: None,
             n_kv_layers: None,
+            kv_bytes_per_token: None,
+            kv_fixed_bytes: None,
             head_dim: None,
         }
     }
@@ -1414,6 +1486,164 @@ mod tests {
                 .any(|a| a.starts_with("KV cache: ") && a.contains("q8_0") && a.contains("32768")),
             "expected a KV cache assumption, got {:?}",
             cp.assumptions
+        );
+    }
+
+    fn kv_line(g: &Graph) -> String {
+        assumptions(g)
+            .into_iter()
+            .find(|s| s.starts_with("KV cache: "))
+            .expect("KV cache line")
+    }
+
+    #[test]
+    fn kv_cache_assumption_says_a_head_estimate_is_computed() {
+        let mut g = graph(Vec::new());
+        g.models[0].n_layers = Some(32);
+        g.models[0].n_kv_heads = Some(8);
+        g.models[0].head_dim = Some(128);
+        let Runtime::LlamaCpp(s) = &mut g.deployments[0].runtime else {
+            unreachable!("graph() always builds a llama_cpp deployment");
+        };
+        s.context_length = 32768;
+        s.cache_type_k = Some(amicu_core::resource::KvCacheType::Q8_0);
+        s.cache_type_v = Some(amicu_core::resource::KvCacheType::Q8_0);
+        assert_eq!(
+            kv_line(&g),
+            "KV cache: ~2.1 GiB at q8_0 for 32768 ctx (computed from attention heads)"
+        );
+    }
+
+    #[test]
+    fn kv_cache_assumption_names_a_stated_per_token_cost_on_llama_cpp() {
+        // A stated figure wins over the shape and the cache types.
+        let mut g = graph(Vec::new());
+        g.models[0].n_layers = Some(61);
+        g.models[0].n_kv_heads = Some(128);
+        g.models[0].head_dim = Some(128);
+        g.models[0].kv_bytes_per_token = Some(amicu_core::ByteSize::from_bytes(70_272));
+        let Runtime::LlamaCpp(s) = &mut g.deployments[0].runtime else {
+            unreachable!("graph() always builds a llama_cpp deployment");
+        };
+        s.context_length = 32768;
+        s.cache_type_k = Some(amicu_core::resource::KvCacheType::Q8_0);
+        s.cache_type_v = Some(amicu_core::resource::KvCacheType::Q8_0);
+        assert_eq!(
+            kv_line(&g),
+            "KV cache: ~2.1 GiB for 32768 ctx (stated in config: kv_bytes_per_token 70272 B, \
+             not rescaled by cache_type_k/cache_type_v)"
+        );
+    }
+
+    #[test]
+    fn kv_cache_assumption_for_a_stated_deepseek_v4_1_flash_cost_on_vllm() {
+        // 890 B/token at 1,048,576 ctx = ~0.93 GB, plus a ~2.9 MB sliding
+        // window for the one sequence vLLM's estimate covers.
+        let mut g = vllm_graph(false);
+        g.models[0].kv_bytes_per_token = Some(amicu_core::ByteSize::from_bytes(890));
+        g.models[0].kv_fixed_bytes = Some(amicu_core::ByteSize::from_bytes(2_900_000));
+        let Runtime::Vllm(s) = &mut g.deployments[0].runtime else {
+            unreachable!()
+        };
+        s.context_length = 1_048_576;
+        s.kv_cache_dtype = Some(amicu_core::resource::VllmKvCacheDtype::Fp8);
+        let a = assumptions(&g);
+        assert!(!a.iter().any(|s| s.contains("not estimated")), "{a:?}");
+        assert!(!a[0].contains("weights only"), "{a:?}");
+        assert_eq!(
+            kv_line(&g),
+            "KV cache: ~892.8 MiB for 1048576 ctx (stated in config: kv_bytes_per_token 890 B, \
+             not rescaled by kv_cache_dtype; incl. ~2.8 MiB fixed state for 1 sequence)"
+        );
+    }
+
+    fn deepseek_v4_1_flash(g: &mut Graph) {
+        g.models[0].source.reference = "deepseek-ai/DeepSeek-V4.1-Flash".into();
+    }
+
+    #[test]
+    fn kv_cache_assumption_names_the_built_in_value_on_vllm() {
+        let mut g = vllm_graph(false);
+        deepseek_v4_1_flash(&mut g);
+        let Runtime::Vllm(s) = &mut g.deployments[0].runtime else {
+            unreachable!()
+        };
+        s.context_length = 1_048_576;
+        let a = assumptions(&g);
+        assert!(!a.iter().any(|s| s.contains("not estimated")), "{a:?}");
+        assert_eq!(
+            kv_line(&g),
+            "KV cache: ~892.8 MiB for 1048576 ctx (built-in value for DeepSeek-V4.1-Flash: \
+             890 B per token at its native FP4 cache; incl. ~2.8 MiB fixed state for 1 \
+             sequence, built-in)"
+        );
+    }
+
+    #[test]
+    fn kv_cache_assumption_notes_a_non_native_vllm_dtype_for_a_built_in_value() {
+        let mut g = vllm_graph(false);
+        deepseek_v4_1_flash(&mut g);
+        let Runtime::Vllm(s) = &mut g.deployments[0].runtime else {
+            unreachable!()
+        };
+        s.kv_cache_dtype = Some(amicu_core::resource::VllmKvCacheDtype::Fp8);
+        let line = kv_line(&g);
+        assert!(
+            line.contains(
+                "not rescaled for kv_cache_dtype = fp8 (the figure is for the native FP4 cache)"
+            ),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn kv_cache_assumption_prefers_config_over_the_built_in_value() {
+        let mut g = vllm_graph(true);
+        deepseek_v4_1_flash(&mut g);
+        g.models[0].kv_bytes_per_token = Some(amicu_core::ByteSize::from_bytes(1000));
+        let line = kv_line(&g);
+        assert!(
+            line.contains("(stated in config: kv_bytes_per_token 1000 B"),
+            "{line}"
+        );
+        // The explicit per-token figure keeps the built-in fixed state.
+        assert!(
+            line.ends_with("fixed state for 1 sequence, built-in)"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn built_in_value_is_withheld_on_llama_cpp_without_a_head_fallback() {
+        let mut g = graph(Vec::new());
+        deepseek_v4_1_flash(&mut g);
+        g.models[0].n_layers = Some(40);
+        g.models[0].n_kv_heads = Some(8);
+        g.models[0].head_dim = Some(128);
+        let a = assumptions(&g);
+        assert!(!a.iter().any(|s| s.starts_with("KV cache: ")), "{a:?}");
+        assert!(
+            a.iter().any(|s| s
+                == "kv cache: not estimated (the built-in value for DeepSeek-V4.1-Flash is for \
+                    its native FP4 cache under vllm; set kv_bytes_per_token on the model)"),
+            "{a:?}"
+        );
+    }
+
+    #[test]
+    fn kv_cache_assumption_counts_fixed_state_per_llama_cpp_slot() {
+        let mut g = graph(Vec::new());
+        g.models[0].n_layers = Some(40);
+        g.models[0].n_kv_layers = Some(10);
+        g.models[0].n_kv_heads = Some(2);
+        g.models[0].head_dim = Some(256);
+        g.models[0].kv_fixed_bytes = Some(amicu_core::ByteSize::from_bytes(64 * 1024 * 1024));
+        let line = kv_line(&g);
+        assert!(
+            line.ends_with(
+                "(computed from attention heads; incl. ~256.0 MiB fixed state for 4 sequences)"
+            ),
+            "{line}"
         );
     }
 

@@ -74,7 +74,7 @@ to the flat overhead band exactly as before.
 For vLLM the same three fields are required for any KV-cache estimate, and
 there is no overhead band to fall back on: without them `amicu plan` labels
 the peak memory "(weights only)", adds the assumption `kv cache: not estimated
-(model shape unknown; set n_layers, n_kv_heads, head_dim on the model)`, and
+(model shape unknown; set n_layers, n_kv_heads, head_dim or kv_bytes_per_token on the model)`, and
 `amicu validate`/`plan` raise the warning `AMICU-CAP-010`. A fit pass in that
 state says nothing about the KV cache, which at a long `context_length` can
 exceed the weights.
@@ -91,6 +91,24 @@ layer counts:
   n_kv_heads  = 2
   head_dim    = 256
 ```
+
+When the cache is not one K and one V vector per head per layer (MLA in
+DeepSeek V3 / Kimi / GLM 5.x, sparse-attention indexers, cross-layer KV
+sharing, compressed caches), the head formula is wrong. State the cost
+instead; it overrides the formula on every runtime and the cache dtype
+settings do not rescale it:
+
+```hcl
+  kv_bytes_per_token = 53940    # bytes per token of context, all layers, at the served format
+  kv_fixed_bytes     = "64MB"   # optional: per-sequence state that does not grow (sliding window, linear attention)
+```
+
+`kv_fixed_bytes` counts once per llama.cpp slot (`parallel_slots`, default 4)
+and once on vLLM. amicu has a built-in value for
+`deepseek-ai/DeepSeek-V4.1-Flash` (890 B/token + 2,906,112 B, native FP4
+cache), used on vLLM only; on llama.cpp that model gets `AMICU-CAP-010` until
+you set `kv_bytes_per_token`. The plan's `KV cache:` line names the source
+(`stated in config`, `built-in value for ...`, `computed from attention heads`).
 
 ## llama.cpp: chat template, jinja, reasoning format, build pin, artifact checksum
 

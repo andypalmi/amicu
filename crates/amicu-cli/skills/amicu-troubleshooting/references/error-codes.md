@@ -38,9 +38,10 @@ signal; the number identifies the specific check.
   primary model.
 - `AMICU-CAP-008` - invalid `scaling {}` values.
 - `AMICU-CAP-009` - `scaling {}` on a provider with no scaling mapping.
-- `AMICU-CAP-010` - warning: vLLM KV cache not estimated because the model
-  lacks `n_layers`/`n_kv_heads`/`head_dim`; the fit check covers weights only.
-  Declare the shape on the model.
+- `AMICU-CAP-010` - warning: KV cache not estimated. On vLLM the model lacks
+  `n_layers`/`n_kv_heads`/`head_dim` and `kv_bytes_per_token`; on llama.cpp
+  the model has only a vLLM built-in value (DeepSeek-V4.1-Flash). The fit
+  check leaves the KV cache out. Declare the shape or `kv_bytes_per_token`.
 - `AMICU-CAP-011` - a typed llama.cpp field is out of range or inconsistent
   (`top_p` outside `[0, 1]`, `parallel_slots = 0`, ...). The message names the
   field. `ubatch_size` above `batch_size` is only a warning (llama-server clamps it).

@@ -24,9 +24,9 @@ pub use budget::{Budget, BudgetPeriod};
 pub use credential::Credential;
 pub use data_class::{DataClass, Sensitivity};
 pub use deployment::{
-    Deployment, FlashAttention, KvCacheType, LOCAL_PROVIDERS, LlamaCppSettings, MemoryCheck,
-    MultimodalSettings, ReasoningFormat, Runtime, ScalingSettings, SpeculativeSettings,
-    VllmKvCacheDtype, VllmSettings, is_local_provider,
+    Deployment, FlashAttention, KvCacheType, LLAMA_SERVER_DEFAULT_PARALLEL_SLOTS, LOCAL_PROVIDERS,
+    LlamaCppSettings, MemoryCheck, MultimodalSettings, ReasoningFormat, Runtime, ScalingSettings,
+    SpeculativeSettings, VllmKvCacheDtype, VllmSettings, is_local_provider,
 };
 pub use governance::{GovernanceRule, RuleEffect};
 pub use gpu::{
@@ -39,7 +39,8 @@ pub use hardware::{
     HardwareProfile, Interconnect, Price, RunpodCloud, RunpodMode, RunpodSettings,
 };
 pub use model::{
-    Artifact, ArtifactFormat, GgufVariant, Model, ModelSource, Quantization, SourceRegistry,
+    Artifact, ArtifactFormat, GgufVariant, MAX_KV_BYTES_PER_TOKEN, MAX_KV_FIXED_BYTES, Model,
+    ModelSource, Quantization, SourceRegistry,
 };
 pub use region::{Region, Residency};
 pub use routing::{FailoverPolicy, OptimizeFor, RoutingPolicy, RoutingTarget};

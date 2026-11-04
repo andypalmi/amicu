@@ -71,6 +71,8 @@ fn gguf_model(sizes: &[(Quantization, &str, u64)]) -> Model {
         n_layers: None,
         n_kv_heads: None,
         n_kv_layers: None,
+        kv_bytes_per_token: None,
+        kv_fixed_bytes: None,
         head_dim: None,
     }
 }
@@ -1411,6 +1413,122 @@ fn plan_launch_peak_is_weights_plus_kv_plus_runtime_overhead_at_every_context() 
     assert!(small.abs_diff(4 * GIB + kv_small + runtime_overhead) <= 16);
     assert!(large.abs_diff(4 * GIB + kv_large + runtime_overhead) <= 16);
     assert!(large > small);
+}
+
+/// A llama.cpp adapter over a 4 GiB GGUF model edited by `edit`, and the KV
+/// estimate it plans for `deployment()` edited by `settings`.
+fn planned_kv(edit: impl FnOnce(&mut Model), settings: impl FnOnce(&mut LlamaCppSettings)) -> u64 {
+    let mut model = gguf_model(&[(Quantization::Q4KM, "tiny.Q4_K_M.gguf", 4 * GIB)]);
+    edit(&mut model);
+    let catalog = MapCatalog::new()
+        .with_model(model, 7_000_000_000)
+        .with_hardware(apple_silicon(64));
+    let adapter = LlamaCppAdapter::new(Box::new(catalog), Box::new(FakeSupervisor::default()));
+    let mut d = deployment();
+    let Runtime::LlamaCpp(s) = &mut d.runtime else {
+        unreachable!("deployment() always builds a llama_cpp runtime");
+    };
+    settings(s);
+    let plan = adapter.plan_launch(&d).expect("plan");
+    plan.estimate.kv_cache.expect("kv estimate").bytes()
+}
+
+#[test]
+fn stated_kv_bytes_per_token_overrides_the_head_formula_and_cache_types() {
+    // MLA (DeepSeek V3 shape): 61 layers x (512 latent + 64 rope) x 2 bytes.
+    let per_token = 61 * (512 + 64) * 2;
+    let kv = planned_kv(
+        |m| {
+            m.n_layers = Some(61);
+            m.n_kv_heads = Some(128);
+            m.head_dim = Some(128);
+            m.kv_bytes_per_token = Some(amicu_core::ByteSize::from_bytes(per_token));
+        },
+        |s| {
+            s.context_length = 32768;
+            s.cache_type_k = Some(amicu_core::resource::KvCacheType::Q4_0);
+            s.cache_type_v = Some(amicu_core::resource::KvCacheType::Q4_0);
+        },
+    );
+    assert_eq!(kv, 32768 * per_token);
+}
+
+#[test]
+fn deepseek_v4_1_flash_kv_at_a_million_tokens_is_under_a_gigabyte() {
+    // 890 B/token at its native FP4 cache, plus a ~2.9 MB sliding window per
+    // slot, at llama-server's default 4 slots.
+    let kv = planned_kv(
+        |m| {
+            m.kv_bytes_per_token = Some(amicu_core::ByteSize::from_bytes(890));
+            m.kv_fixed_bytes = Some(amicu_core::ByteSize::from_bytes(2_900_000));
+        },
+        |s| s.context_length = 1_048_576,
+    );
+    assert_eq!(kv, 890 * 1_048_576 + 4 * 2_900_000);
+    assert!(kv > 900_000_000 && kv < 1_000_000_000, "{kv}");
+}
+
+#[test]
+fn built_in_vllm_kv_cost_is_withheld_on_llama_cpp_with_a_warning() {
+    // DeepSeek V4.1 Flash's built-in cost is for its native FP4 cache under
+    // vLLM; on llama.cpp neither it nor the (wrong) head formula is used.
+    let mut model = gguf_model(&[(Quantization::Q4KM, "tiny.Q4_K_M.gguf", 4 * GIB)]);
+    model.source.reference = "deepseek-ai/DeepSeek-V4.1-Flash".into();
+    model.n_layers = Some(40);
+    model.n_kv_heads = Some(8);
+    model.head_dim = Some(128);
+    let catalog = MapCatalog::new()
+        .with_model(model.clone(), 7_000_000_000)
+        .with_hardware(apple_silicon(64));
+    let adapter = LlamaCppAdapter::new(Box::new(catalog), Box::new(FakeSupervisor::default()));
+    let plan = adapter.plan_launch(&deployment()).expect("plan");
+    assert_eq!(plan.estimate.kv_cache, None);
+    let diags = adapter.validate(&deployment());
+    let warn = diags
+        .iter()
+        .find(|d| d.code == catalog::CAP_KV_CACHE_NOT_ESTIMATED)
+        .unwrap_or_else(|| panic!("AMICU-CAP-010: {diags:?}"));
+    assert!(
+        warn.message.contains("set kv_bytes_per_token"),
+        "{}",
+        warn.message
+    );
+
+    // A stated figure is honoured, and silences the warning.
+    let kv = planned_kv(
+        |m| {
+            *m = model.clone();
+            m.kv_bytes_per_token = Some(amicu_core::ByteSize::from_bytes(890));
+        },
+        |s| s.context_length = 8192,
+    );
+    assert_eq!(kv, 8192 * 890);
+}
+
+#[test]
+fn fixed_kv_state_is_counted_per_parallel_slot() {
+    // Hybrid attention (Qwen3.6-35B-A3B shape) on the head formula plus its
+    // fixed linear-attention state.
+    let fixed = 64 * 1024 * 1024;
+    let kv = |slots: Option<u32>| {
+        planned_kv(
+            |m| {
+                m.n_layers = Some(40);
+                m.n_kv_layers = Some(10);
+                m.n_kv_heads = Some(2);
+                m.head_dim = Some(256);
+                m.kv_fixed_bytes = Some(amicu_core::ByteSize::from_bytes(fixed));
+            },
+            |s| {
+                s.context_length = 8192;
+                s.parallel_slots = slots;
+            },
+        )
+    };
+    let growing = 8192 * 10 * 2 * 256 * 2 * 2;
+    assert_eq!(kv(Some(1)), growing + fixed);
+    assert_eq!(kv(Some(2)), growing + 2 * fixed);
+    assert_eq!(kv(None), growing + 4 * fixed);
 }
 
 // ---- typed-field range checks --------------------------

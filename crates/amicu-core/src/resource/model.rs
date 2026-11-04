@@ -43,7 +43,37 @@ pub struct Model {
     /// supplies the layer count - see [`Model::kv_layers`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n_kv_layers: Option<u32>,
+    /// Bytes of KV cache per token of context, summed over every layer, at
+    /// the cache format the model is served with. Declared for architectures
+    /// whose cache is not one K and one V vector per head per layer (MLA
+    /// latents, sparse-attention indexer keys, cross-layer KV sharing,
+    /// compressed caches), where the head formula from [`Model::n_layers`],
+    /// [`Model::n_kv_heads`] and [`Model::head_dim`] is wrong. When set it
+    /// replaces that formula, and any built-in value for the model
+    /// (`amicu_registry::kv_cost`), on every runtime path, and a runtime's cache
+    /// dtype setting (`cache_type_k`/`cache_type_v`, `kv_cache_dtype`) does
+    /// not rescale it: the stated figure already is the served format.
+    /// Positive and at most [`MAX_KV_BYTES_PER_TOKEN`] (enforced when parsing
+    /// HCL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_bytes_per_token: Option<ByteSize>,
+    /// Per-sequence cache state that does not grow with context: a sliding
+    /// window's ring buffer, linear-attention or DeltaNet recurrent state.
+    /// Added once per concurrent sequence on top of the per-token part,
+    /// whatever its source (stated, built in, or the head formula). Positive
+    /// and at most [`MAX_KV_FIXED_BYTES`] (enforced when parsing HCL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_fixed_bytes: Option<ByteSize>,
 }
+
+/// Upper bound on [`Model::kv_bytes_per_token`]: 64 MiB per token is far
+/// beyond any real model (a dense 405B model with full multi-head attention
+/// at f32 is about 16 MiB), so a larger value is a unit mistake.
+pub const MAX_KV_BYTES_PER_TOKEN: ByteSize = ByteSize::from_bytes(64 * 1024 * 1024);
+
+/// Upper bound on [`Model::kv_fixed_bytes`]: 1 TiB of fixed per-sequence
+/// state is a unit mistake, not a model.
+pub const MAX_KV_FIXED_BYTES: ByteSize = ByteSize::from_bytes(1024 * 1024 * 1024 * 1024);
 
 impl Model {
     /// The model id a local llama.cpp server reports in `/v1/models` (passed as

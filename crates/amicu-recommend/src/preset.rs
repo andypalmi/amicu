@@ -721,6 +721,8 @@ fn build_local_dev_chat(preset: &Preset, answers: &WizardAnswers) -> Graph {
         n_layers: None,
         n_kv_heads: None,
         n_kv_layers: None,
+        kv_bytes_per_token: None,
+        kv_fixed_bytes: None,
         head_dim: None,
     });
 
@@ -801,6 +803,8 @@ fn build_private_eu_production(preset: &Preset, answers: &WizardAnswers) -> Grap
         n_layers: None,
         n_kv_heads: None,
         n_kv_layers: None,
+        kv_bytes_per_token: None,
+        kv_fixed_bytes: None,
         head_dim: None,
     });
 
@@ -891,6 +895,8 @@ fn build_cost_optimized_batch(preset: &Preset, answers: &WizardAnswers) -> Graph
         n_layers: None,
         n_kv_heads: None,
         n_kv_layers: None,
+        kv_bytes_per_token: None,
+        kv_fixed_bytes: None,
         head_dim: None,
     });
 
@@ -990,6 +996,8 @@ fn build_internal_knowledge_chatbot(preset: &Preset, answers: &WizardAnswers) ->
         n_layers: None,
         n_kv_heads: None,
         n_kv_layers: None,
+        kv_bytes_per_token: None,
+        kv_fixed_bytes: None,
         head_dim: None,
     });
 
@@ -1079,6 +1087,8 @@ fn build_customer_support_assistant(preset: &Preset, answers: &WizardAnswers) ->
         n_layers: None,
         n_kv_heads: None,
         n_kv_layers: None,
+        kv_bytes_per_token: None,
+        kv_fixed_bytes: None,
         head_dim: None,
     });
 
@@ -1164,6 +1174,8 @@ fn build_document_extraction_pipeline(preset: &Preset, answers: &WizardAnswers) 
         n_layers: None,
         n_kv_heads: None,
         n_kv_layers: None,
+        kv_bytes_per_token: None,
+        kv_fixed_bytes: None,
         head_dim: None,
     });
 
@@ -1250,6 +1262,8 @@ fn build_code_assistant_endpoint(preset: &Preset, answers: &WizardAnswers) -> Gr
         n_layers: None,
         n_kv_heads: None,
         n_kv_layers: None,
+        kv_bytes_per_token: None,
+        kv_fixed_bytes: None,
         head_dim: None,
     });
 
@@ -1334,6 +1348,8 @@ fn build_api_replacement_migration(preset: &Preset, answers: &WizardAnswers) -> 
         n_layers: None,
         n_kv_heads: None,
         n_kv_layers: None,
+        kv_bytes_per_token: None,
+        kv_fixed_bytes: None,
         head_dim: None,
     });
 
@@ -1418,6 +1434,8 @@ fn build_custom_stack(preset: &Preset, answers: &WizardAnswers) -> Graph {
         n_layers: None,
         n_kv_heads: None,
         n_kv_layers: None,
+        kv_bytes_per_token: None,
+        kv_fixed_bytes: None,
         head_dim: None,
     });
 

@@ -296,7 +296,7 @@ Today, `apply` supports Modal and RunPod as remote GPU providers. Hetzner, OVHcl
   </Tab>
 </Tabs>
 
-`validate` and `plan` print the warning `AMICU-CAP-010` for this model, because it does not declare `n_layers`, `n_kv_heads`, and `head_dim`. It is expected: the fit check then covers weights only. Declare the shape on the model to silence it.
+`validate` and `plan` print the warning `AMICU-CAP-010` for this model, because it does not declare `n_layers`, `n_kv_heads`, and `head_dim`. It is expected: the fit check then covers weights only. Declare the shape (or [`kv_bytes_per_token`](/docs/configuration/model#kv-cache-cost)) on the model to silence it.
 
 ## 4. Tear down
 

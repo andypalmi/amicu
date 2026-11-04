@@ -13,7 +13,7 @@ Amicu has no command that tunes a deployment automatically, and it never changes
 |---|---|
 | `AMICU-MEM-001`: model does not fit in VRAM | Smaller quantization, lower `context_length`, more accelerators, or larger hardware |
 | `AMICU-MEM-002`: one artifact exceeds available memory | A smaller variant or different hardware |
-| `AMICU-CAP-010`: vLLM KV cache not estimated | Declare `n_layers`, `n_kv_heads`, and `head_dim` on the [model](/docs/configuration/model) |
+| `AMICU-CAP-010`: KV cache not estimated | Declare `n_layers`, `n_kv_heads`, and `head_dim`, or `kv_bytes_per_token`, on the [model](/docs/configuration/model) |
 | `AMICU-CAP-004`: `extra_args` set | The fit verdict is unverified; check the real memory use |
 | `AMICU-CAP-011`: a typed llama.cpp field is out of range | Fix the named field (for example `parallel_slots` must be at least 1). `ubatch_size` above `batch_size` only warns |
 

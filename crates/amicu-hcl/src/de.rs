@@ -12,10 +12,10 @@ use amicu_core::graph::Graph;
 use amicu_core::resource::{
     Accelerator, AcceleratorKind, Artifact, Budget, Cpu, Credential, DataClass, Deployment,
     FlashAttention, GcpSettings, GgufVariant, GovernanceRule, GpuCard, HardwareProfile,
-    KvCacheType, LlamaCppSettings, MemoryCheck, Model, ModelSource, Money, MultimodalSettings,
-    Price, Quota, ReasoningFormat, Region, Residency, RoutingPolicy, RoutingTarget, RunpodSettings,
-    Runtime, ScalingSettings, SpeculativeSettings, Tenant, UseCase, VllmKvCacheDtype, VllmSettings,
-    resolve_gpu,
+    KvCacheType, LlamaCppSettings, MAX_KV_BYTES_PER_TOKEN, MAX_KV_FIXED_BYTES, MemoryCheck, Model,
+    ModelSource, Money, MultimodalSettings, Price, Quota, ReasoningFormat, Region, Residency,
+    RoutingPolicy, RoutingTarget, RunpodSettings, Runtime, ScalingSettings, SpeculativeSettings,
+    Tenant, UseCase, VllmKvCacheDtype, VllmSettings, resolve_gpu,
 };
 use amicu_core::secret::SecretRef;
 use amicu_core::units::ByteSize;
@@ -121,6 +121,10 @@ fn model(name: &str, f: &Fields) -> Result<Model> {
         n_kv_heads: f.opt_positive_u32("n_kv_heads")?,
         head_dim: f.opt_positive_u32("head_dim")?,
         n_kv_layers,
+        // Stated cache cost, for architectures the head formula gets wrong.
+        kv_bytes_per_token: f
+            .opt_bounded_byte_size("kv_bytes_per_token", MAX_KV_BYTES_PER_TOKEN)?,
+        kv_fixed_bytes: f.opt_bounded_byte_size("kv_fixed_bytes", MAX_KV_FIXED_BYTES)?,
     })
 }
 
@@ -761,6 +765,29 @@ impl<'a> Fields<'a> {
     fn opt_byte_size(&self, key: &str) -> Result<Option<ByteSize>> {
         self.attr(key)
             .map_or(Ok(None), |_| self.byte_size(key).map(Some))
+    }
+
+    /// An optional byte size written either as a string (`"890B"`,
+    /// `"64MiB"`) or as a plain integer count of bytes, rejecting 0 (which
+    /// would silently zero the estimate it feeds) and anything above `max`
+    /// (a unit mistake, not a model).
+    fn opt_bounded_byte_size(&self, key: &str, max: ByteSize) -> Result<Option<ByteSize>> {
+        let Some(expr) = self.attr(key) else {
+            return Ok(None);
+        };
+        let expected = || format!("a positive byte size of at most {max}, like \"890B\" or 890");
+        let size = match expr {
+            Expression::Number(n) => n
+                .as_u64()
+                .map(ByteSize::from_bytes)
+                .ok_or_else(|| self.bad(key, &expected()))?,
+            Expression::String(s) => s.parse().map_err(|_| self.bad(key, &expected()))?,
+            _ => return Err(self.bad(key, &expected())),
+        };
+        if size.bytes() == 0 || size > max {
+            return Err(self.bad(key, &expected()));
+        }
+        Ok(Some(size))
     }
 
     /// A `sha256` attribute: exactly 64 hex characters (case-insensitive),

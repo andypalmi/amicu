@@ -15,8 +15,8 @@ use amicu_core::resource::{
 };
 use amicu_core::secret::SecretResolver;
 use amicu_registry::{
-    FitConfig, GgufResolver, KvCacheParams, check_variant_fit_with_draft, estimated_peak,
-    variant_weights,
+    FitConfig, GgufResolver, KvCacheParams, KvCostSource, KvPerToken, KvRuntime,
+    check_variant_fit_with_draft, estimated_peak, resolve_kv_cost, variant_weights,
 };
 use amicu_runtime::{
     LaunchPlan, LogOptions, LogStream, Parallelism, Platform, RenderedLaunch, ResourceEstimate,
@@ -274,8 +274,16 @@ fn diagnostic(error: &LlamaCppError) -> Diagnostic {
 }
 
 /// Assemble [`KvCacheParams`] for the KV-cache estimator, when the model
-/// declares all three shape fields. Returns `None` otherwise, leaving the flat
-/// overhead band as the only memory-beyond-weights estimate.
+/// states its per-token cache cost or declares all three shape fields.
+/// Returns `None` otherwise, leaving the flat overhead band as the only
+/// memory-beyond-weights estimate. The source follows
+/// [`resolve_kv_cost`]: a stated [`Model::kv_bytes_per_token`] wins over the
+/// head formula and is not rescaled by `cache_type_k`/`cache_type_v` (it
+/// already is the served cache format). A model with a built-in vLLM-only
+/// cost gets no estimate here rather than a head formula known to be wrong
+/// for it (see [`kv_cost_withheld_diagnostic`]). Fixed per-sequence state is
+/// added once per slot ([`LlamaCppSettings::effective_parallel_slots`]),
+/// since llama-server allocates it for every slot up front.
 ///
 /// An unset `cache_type_k`/`cache_type_v` defaults to [`KvCacheType::F16`]:
 /// that is llama-server's own per-flag default (`-ctk`/`-ctv` each), so the
@@ -286,19 +294,51 @@ fn diagnostic(error: &LlamaCppError) -> Diagnostic {
 /// under-counts a long `context_length`. A user who wants a smaller footprint
 /// sets a quantized cache type, which the estimate then honors.
 fn kv_cache_params(model: &Model, settings: &LlamaCppSettings) -> Option<KvCacheParams> {
-    let (Some(n_layers), Some(n_kv_heads), Some(head_dim)) =
-        (model.kv_layers(), model.n_kv_heads, model.head_dim)
-    else {
-        return None;
+    let cost = resolve_kv_cost(model, KvRuntime::LlamaCpp);
+    let per_token = match cost.source {
+        KvCostSource::Stated(stated) => KvPerToken::Stated(stated),
+        KvCostSource::BuiltIn(known) => KvPerToken::Stated(known.bytes_per_token),
+        KvCostSource::Withheld(_) => return None,
+        KvCostSource::Heads => {
+            let (Some(n_layers), Some(n_kv_heads), Some(head_dim)) =
+                (model.kv_layers(), model.n_kv_heads, model.head_dim)
+            else {
+                return None;
+            };
+            KvPerToken::Heads {
+                n_layers,
+                n_kv_heads,
+                head_dim,
+                cache_type_k: settings.cache_type_k.unwrap_or(KvCacheType::F16),
+                cache_type_v: settings.cache_type_v.unwrap_or(KvCacheType::F16),
+            }
+        }
     };
     Some(KvCacheParams {
         context_length: settings.context_length,
-        n_layers,
-        n_kv_heads,
-        head_dim,
-        cache_type_k: settings.cache_type_k.unwrap_or(KvCacheType::F16),
-        cache_type_v: settings.cache_type_v.unwrap_or(KvCacheType::F16),
+        per_token,
+        fixed: cost.fixed_for(settings.effective_parallel_slots()),
     })
+}
+
+/// `AMICU-CAP-010` for a model whose built-in KV-cache cost is for vLLM only
+/// (its native cache format there): on llama.cpp the cost is unknown and the
+/// head formula is wrong for it, so the KV cache is left out. `None` for any
+/// other model.
+fn kv_cost_withheld_diagnostic(model: &Model, settings: &LlamaCppSettings) -> Option<Diagnostic> {
+    let KvCostSource::Withheld(known) = resolve_kv_cost(model, KvRuntime::LlamaCpp).source else {
+        return None;
+    };
+    Some(Diagnostic::new(
+        catalog::CAP_KV_CACHE_NOT_ESTIMATED,
+        Severity::Warning,
+        format!(
+            "kv cache: not estimated (the built-in value for {} is for its native {} cache \
+             under vllm; set kv_bytes_per_token on the model for llama_cpp); the fit check \
+             leaves it out, and a {}-token context may need far more",
+            known.name, known.cache_format, settings.context_length
+        ),
+    ))
 }
 
 /// Range- and consistency-check the typed numeric fields, one `AMICU-CAP-011`
@@ -584,6 +624,7 @@ impl RuntimeAdapter for LlamaCppAdapter {
                 return out;
             }
         };
+        out.extend(kv_cost_withheld_diagnostic(model, settings));
         match GgufResolver::from_variants(&model.variants).recommended() {
             Some(variant) => {
                 let kv = kv_cache_params(model, settings);

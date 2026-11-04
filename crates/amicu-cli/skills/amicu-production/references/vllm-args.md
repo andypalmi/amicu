@@ -83,7 +83,9 @@ Health is checked against `GET /health` on the configured port.
   weights (dtype-based; the model's `artifact.quantization`, defaulting to
   `bf16` when unset) plus a KV-cache estimate (when the model declares
   `n_layers`/`n_kv_heads`/`head_dim`; `n_kv_layers` restricts the layer count
-  for hybrid-attention models) against
+  for hybrid-attention models; `kv_bytes_per_token`, or a built-in value such
+  as DeepSeek-V4.1-Flash's, replaces that formula and is not rescaled by
+  `kv_cache_dtype`; `kv_fixed_bytes` adds once) against
   `gpu_memory_utilization × per-GPU memory × tensor_parallel_size`. Unlike
   llama.cpp's fit check, there is no separate flat overhead band on top -
   `gpu_memory_utilization` already *is* vLLM's own usable-fraction knob - so
@@ -91,7 +93,7 @@ Health is checked against `GET /health` on the configured port.
   estimate: weights + kv cache only" as a reminder that this is a first-order
   estimate, not activation/fragmentation-aware. When the model shape is
   unknown that note becomes "kv cache: not estimated (model shape unknown; set
-  n_layers, n_kv_heads, head_dim on the model)", the peak memory is labelled
+  n_layers, n_kv_heads, head_dim or kv_bytes_per_token on the model)", the peak memory is labelled
   "(weights only)", and validate/plan warn with `AMICU-CAP-010`.
 
 ## Throughput tips

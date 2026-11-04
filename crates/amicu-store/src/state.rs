@@ -929,6 +929,8 @@ mod content_cipher_tests {
                 n_layers: None,
                 n_kv_heads: None,
                 n_kv_layers: None,
+                kv_bytes_per_token: None,
+                kv_fixed_bytes: None,
                 head_dim: None,
             }],
             ..Graph::new()

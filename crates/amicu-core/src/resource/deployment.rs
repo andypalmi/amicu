@@ -541,6 +541,40 @@ pub struct LlamaCppSettings {
     pub multimodal: Option<MultimodalSettings>,
 }
 
+/// The slot count `llama-server` uses when `--parallel` is not passed: its
+/// `-1` ("auto") default becomes 4 slots sharing one unified KV cache
+/// (`tools/server/server.cpp`).
+pub const LLAMA_SERVER_DEFAULT_PARALLEL_SLOTS: u32 = 4;
+
+impl Runtime {
+    /// How many concurrent sequences a memory estimate counts a model's
+    /// fixed per-sequence cache state (`kv_fixed_bytes`) for.
+    ///
+    /// llama.cpp allocates that state for every slot up front, so this is
+    /// [`LlamaCppSettings::effective_parallel_slots`]. vLLM's estimate
+    /// covers one sequence at the full `context_length` (the paged pool is
+    /// whatever memory is left, and concurrency shrinks to fit), so it counts
+    /// one.
+    #[must_use]
+    pub fn kv_fixed_sequences(&self) -> u32 {
+        match self {
+            Self::LlamaCpp(s) => s.effective_parallel_slots(),
+            Self::Vllm(_) => 1,
+        }
+    }
+}
+
+impl LlamaCppSettings {
+    /// The slot count llama-server will run with: [`Self::parallel_slots`],
+    /// or [`LLAMA_SERVER_DEFAULT_PARALLEL_SLOTS`] when unset.
+    #[must_use]
+    pub fn effective_parallel_slots(&self) -> u32 {
+        self.parallel_slots
+            .unwrap_or(LLAMA_SERVER_DEFAULT_PARALLEL_SLOTS)
+            .max(1)
+    }
+}
+
 /// `llama-server`'s multimodal projector settings (`--mmproj`/
 /// `--mmproj-offload`): both fields optional and
 /// independent.

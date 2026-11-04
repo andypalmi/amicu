@@ -67,10 +67,50 @@ resource "model" "chat_prod" {
 | `n_kv_heads` | number | no | Key/value heads. Feeds the KV-cache estimate. |
 | `head_dim` | number | no | Attention head dimension. Feeds the KV-cache estimate. |
 | `n_kv_layers` | number | no | Layers that hold a KV cache, for hybrid-attention models. At most `n_layers`. |
+| `kv_bytes_per_token` | size string or number | no | KV-cache bytes per token of context, across all layers, at the cache format the model is served with. Overrides the head formula. Positive, at most `"64MiB"`. |
+| `kv_fixed_bytes` | size string or number | no | Per-sequence cache state that does not grow with context (sliding windows, linear-attention state). Positive, at most `"1TiB"`. |
 
 Quantization values: `f32`, `f16`, `bf16`, `fp8`, `int8`, `int4`, `q4_k_m`, `q5_k_m`, `q6_k`, `q8_0`.
 
-`n_layers`, `n_kv_heads`, and `head_dim` are declared, never derived. Without them the vLLM fit check covers weights only and `validate` warns with `AMICU-CAP-010`.
+`n_layers`, `n_kv_heads`, and `head_dim` are declared, never derived. Without them (or `kv_bytes_per_token`) the vLLM fit check covers weights only and `validate` warns with `AMICU-CAP-010`.
+
+## KV-cache cost
+
+By default the fit check sizes the KV cache from the attention shape: `context_length × n_kv_layers × n_kv_heads × head_dim × 2` at the runtime's cache dtype. That is right for standard and grouped-query attention, and wrong for models whose cache is not one K and one V vector per head per layer: multi-head latent attention (DeepSeek V3, Kimi, GLM 5.x), sparse-attention indexer keys, cross-layer KV sharing, and compressed caches. For those, state the cost directly:
+
+```hcl
+resource "model" "glm" {
+  # ... source, architecture, artifact ...
+  kv_bytes_per_token = 53940     # GLM-5.3 at an fp8 cache
+}
+```
+
+- `kv_bytes_per_token` is the bytes of KV cache per token of context, summed over all layers, at the cache format you serve the model with. The estimate is `kv_bytes_per_token × context_length`. When set it replaces the head formula on every runtime, and `cache_type_k`/`cache_type_v` (llama.cpp) or `kv_cache_dtype` (vLLM) do not rescale it: pick the figure for the format you serve.
+- `kv_fixed_bytes` is per-sequence state that does not grow with context, such as a sliding window or linear-attention (DeltaNet, KDA) state. It is added to either estimate, once per llama.cpp slot (`parallel_slots`, or llama-server's default of 4 when unset) and once for vLLM, whose estimate covers one sequence at the full context.
+- Both take a size string (`"890B"`, `"64MiB"`) or a plain number of bytes.
+
+The plan's assumptions say which source was used: `stated in config`, `built-in value for <model>`, or `computed from attention heads`.
+
+### Built-in values
+
+amicu knows the cost of some models, matched by their Hugging Face `source.reference` (case-insensitive), so you need not set anything. Today that is `deepseek-ai/DeepSeek-V4.1-Flash`: 890 B per token plus 2,906,112 B of sliding window per sequence. More models will be added.
+
+A built-in value is for the model's native cache format as served by vLLM, so it applies only to `vllm` deployments. On `llama_cpp` such a model gets no KV estimate, and `validate` warns with `AMICU-CAP-010`, instead of falling back to a head formula known to be wrong for it; set `kv_bytes_per_token` to get one. Values on the model always win over a built-in value, field by field. Setting `kv_cache_dtype` to something other than `auto` does not change a built-in figure; the plan notes that it is for the native cache.
+
+### Example values
+
+Bytes per token of context (the part that grows with context) and the fixed per-sequence part.
+
+| Model | `kv_bytes_per_token` | `kv_fixed_bytes` |
+|---|---|---|
+| DeepSeek-V4.1-Flash | 890 (native FP4 cache; built in) | ~2.9 MB sliding window (built in: 2906112) |
+| DeepSeek-V4-Flash | 3,514 | none |
+| GLM-5.3 | 92,628 at bf16, 53,940 at fp8 | none |
+| Kimi-K3.1-Pro | 30,816 at bf16, 18,912 at fp8 | ~449 MB linear-attention state (fp32) |
+| Qwen3.6-35B-A3B | 20,480 at bf16 | ~64 MB |
+| Qwen3.8-27B | 65,536 at bf16 | ~154 MB |
+
+At these rates DeepSeek-V4.1-Flash's full 1,048,576-token context needs about 0.93 GB of KV cache.
 
 ## Notes
 

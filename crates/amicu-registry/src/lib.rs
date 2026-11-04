@@ -7,14 +7,19 @@
 
 pub mod fit;
 pub mod gguf;
+pub mod kv_cost;
 pub mod source;
 
 pub use fit::{
-    FitConfig, FitReport, KvCacheParams, MemoryPool, OverheadRange, bytes_per_parameter, check_fit,
-    check_variant_fit, check_variant_fit_with_draft, check_variant_fit_with_kv_cache,
-    check_vllm_fit, estimated_peak, kv_cache_bytes, variant_weights, weights_memory,
+    FitConfig, FitReport, KvCacheParams, KvPerToken, MemoryPool, OverheadRange,
+    bytes_per_parameter, check_fit, check_variant_fit, check_variant_fit_with_draft,
+    check_variant_fit_with_kv_cache, check_vllm_fit, estimated_peak, kv_cache_bytes,
+    stated_kv_cache_bytes, variant_weights, weights_memory,
 };
 pub use gguf::{GgufError, GgufResolver};
+pub use kv_cost::{
+    KNOWN_KV_COSTS, KnownKvCost, KvCost, KvCostSource, KvRuntime, known_kv_cost, resolve_kv_cost,
+};
 pub use source::{
     ArtifactRef, ArtifactSelector, DownloadResult, ModelMetadata, ModelQuery, ModelSourceAdapter,
     ModelSummary, SourceCapabilities, SourceError,
