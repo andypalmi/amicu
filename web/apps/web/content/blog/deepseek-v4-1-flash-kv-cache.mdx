@@ -1,0 +1,100 @@
+---
+title: 'DeepSeek V4.1 Flash needs up to 60× less context memory than other open models'
+description: 'A 1M-token conversation takes 0.9 GB of KV cache on DeepSeek V4.1 Flash and 54 GB on GLM-5.3. What that means for self-hosting, and how the numbers are worked out.'
+date: '2026-11-04'
+author: 'Andrea Palmieri'
+---
+
+When people talk about running a model, they usually talk about the weights: how many billion parameters, how many GB at 4-bit, which GPU it fits on. That is only half of the memory. The other half is the **context memory**, the KV cache, and for long conversations it can be bigger than you expect.
+
+DeepSeek V4.1 Flash is the most interesting model I have looked at on this front. A full 1M-token conversation needs **0.9 GB** of context memory. The same conversation needs 19 GB on Kimi K3.1 Pro and 54 GB on GLM-5.3.
+
+<KvBars />
+
+\* Qwen3.8 2.4T supports 262k tokens natively; its 1M figure is extrapolated.
+
+## What the KV cache is
+
+A model reads your conversation one token at a time. For every token it has already seen, each attention layer keeps a small record (a key and a value) so it does not have to recompute it for every new token. That stored record is the KV cache.
+
+It grows with every token in the conversation, and it is per conversation: ten users with 100k tokens each need ten times the memory of one. The weights are loaded once; the KV cache is paid again for every user and every token.
+
+For a standard transformer the cost per token is simple (the 2 is one key and one value):
+
+```
+layers × heads × head size × 2 × bytes
+```
+
+Qwen3.8-27B, for example, has 16 layers that keep a cache, 4 KV heads of size 256, at 2 bytes (bf16):
+16 × 4 × 256 × 2 × 2 = **65,536 bytes per token**, about 66 GB for 1M tokens.
+
+Most people don't run it at bf16. They run quantized weights, often [Unsloth's dynamic GGUFs](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF), which keep the layers that matter most at higher precision, and they can quantize the cache too: vLLM and llama.cpp set it separately from the weights. The numbers move a lot:
+
+| Qwen3.8-27B | bf16 | 8-bit | 6-bit | 4-bit |
+|---|---|---|---|---|
+| Weights | 54 GB | 29–31 GB (Q8_0, UD-Q8_K_XL) | 22–25 GB (UD-Q6_K, UD-Q6_K_XL) | 16–18 GB (UD-Q4_K_M, UD-Q4_K_XL) |
+| KV cache, 1M tokens | 66 GB | 33–35 GB | – | 18 GB |
+
+Unsloth's dynamic 2-bit file (UD-Q2_K_XL) goes down to 10 GB of weights. There is no 6-bit cache type, hence the dash. Qwen3.8-27B supports 262k tokens natively, so the 1M row is extrapolated; at 262k divide it by four.
+
+To be clear, Qwen3.8-27B is still far cheaper to run overall: at 4-bit it is about 35 GB of weights and cache together, against DeepSeek's 510 GB of weights alone. That is not the point. The point is what each extra token costs. Even with its cache squeezed to 4-bit, a 27B model needs about 18 GB for a 1M-token conversation, 20 times what DeepSeek V4.1 Flash needs, and DeepSeek is a 552B model. Quantization shrinks every model by about the same factor. What DeepSeek changed is the design of the cache itself, which is why the gap stays after you quantize, and why the same design in a smaller model would be such a win.
+
+## What it means if you host it yourself
+
+DeepSeek V4.1 Flash is still a big model. The weights are about 510 GB, so serving it properly means a multi-GPU server, like GLM-5.3 or Kimi. The difference shows up after the weights are loaded: whatever memory is left over goes much further.
+
+<SessionTiles />
+
+- **More users on the same hardware.** In 80 GB of free GPU memory you can keep about 340 conversations of 262k tokens open at once. With GLM-5.3 it is 5.
+- **Agents.** An agent that calls tools keeps adding to its history: file contents, command output, search results. With a small cache that history stops being the thing that limits how long the agent can run.
+- **Cost.** On rented GPUs you pay for memory. If each conversation needs less of it, each user costs less.
+- **Locally, too.** A friend runs it with Strata on 64 GB of RAM and a 48 GB GPU, with part of the model on SSD. On that card, GLM-5.3's context at 1M tokens would not even fit. DeepSeek's takes under 1 GB, so the GPU is spent on the model, not the conversation.
+
+## How DeepSeek does it
+
+Three ideas from the [DeepSeek V4.1 Flash report](https://arxiv.org/abs/2609.19969) stack up.
+
+**1. Only 4 of the 40 layers store the context.** The other layers reuse what those four stored. The model is split into two halves (an encoder and a decoder, each 20 layers), and the config lists layers 2, 8, 14 and 20 as the only ones that produce stored entries. Most models keep a separate cache in every attention layer.
+
+<LayerMap />
+
+**2. The stored entries are compressed.** Each entry is a single shared vector of 512 numbers rather than a set of keys and values per head. In the encoder half, every 2 tokens are merged into one entry before they are stored.
+
+**3. They are kept in 4-bit.** The model was trained to use a 4-bit cache, which the report says costs "only marginal performance degradation". Every layer also keeps its last 128 tokens at 8-bit, which adds about 3 MB per conversation and does not grow.
+
+Put together, per token of context:
+
+| Part | Layers | Tokens per entry | Bytes | Per token |
+|---|---|---|---|---|
+| Encoder entries | 3 | 2 | 288 | 432 |
+| Decoder entry | 1 | 1 | 288 | 288 |
+| Encoder search keys | 3 | 2 | 68 | 102 |
+| Decoder search key | 1 | 1 | 68 | 68 |
+| **Total** | | | | **890 bytes** |
+
+The search keys belong to the sparse attention: instead of reading the whole history, each layer picks the 512 most relevant entries for the token it is writing. The total matches the 890 bytes per token in the report.
+
+## The numbers
+
+Every figure here is computed from the model's `config.json` on Hugging Face and the model's own report, at the cache format it is normally served with. DeepSeek publishes its own figures; the others are worked out from the config.
+
+| Model | Native context | Bytes per token | 1M tokens | 262k sessions in 80 GB |
+|---|---|---|---|---|
+| DeepSeek V4.1 Flash (FP4) | 1M | 890 | 0.9 GB | 338 |
+| DeepSeek V4 Flash (FP8) | 1M | 3,514 | 3.5 GB | 86 |
+| Kimi K3.1 Pro (FP8) | 1M | 18,912 | 19.4 GB | 14 |
+| Qwen3.8 2.4T (FP8) | 262k | 47,104 | 47.7 GB\* | 6 |
+| GLM-5.3 (FP8) | 1M | 53,940 | 53.9 GB | 5 |
+
+Some caveats, so the comparison is fair:
+
+- **Different formats.** DeepSeek is shown at its native 4-bit cache. The others are at FP8, which halves their default 16-bit cache. At 16-bit, GLM-5.3 needs 93 GB for 1M tokens.
+- **Fixed state is included.** Kimi and Qwen mix in linear-attention layers that keep a fixed-size state per conversation instead of a growing cache (about 450 MB and 590 MB). It is added once per conversation.
+- **One GPU's view.** When a model is split across several GPUs, some engines copy this kind of cache to every GPU, so the total across a server can be several times higher.
+- **Context only.** None of this includes the weights.
+
+## Checking it before you deploy
+
+This is why `amicu plan` counts the KV cache, not only the weights, before it starts anything: "does it fit?" depends on how much context you want and how many people will use it at once.
+
+Today plan uses the standard formula above, which is right for standard attention and too high for designs like DeepSeek V4.1 Flash's. Built-in cache sizes for these models, starting with DeepSeek V4.1 Flash, are coming in the next release.
