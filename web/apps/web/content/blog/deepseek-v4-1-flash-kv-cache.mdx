@@ -37,7 +37,7 @@ Most people don't run it at bf16. They run quantized weights, often [Unsloth's d
 
 Unsloth's dynamic 2-bit file (UD-Q2_K_XL) goes down to 10 GB of weights. There is no 6-bit cache type, hence the dash. Qwen3.8-27B supports 262k tokens natively, so the 1M row is extrapolated; at 262k divide it by four.
 
-Even with the cache squeezed to 4-bit, a 27B model needs about 18 GB for a 1M-token conversation, 20 times what DeepSeek V4.1 Flash needs, and DeepSeek is a 552B model. Quantization shrinks every model by about the same factor. What DeepSeek changed is the design of the cache itself, which is why the gap stays even after you quantize.
+To be clear, Qwen3.8-27B is still far cheaper to run overall: at 4-bit it is about 35 GB of weights and cache together, against DeepSeek's 510 GB of weights alone. That is not the point. The point is what each extra token costs. Even with its cache squeezed to 4-bit, a 27B model needs about 18 GB for a 1M-token conversation, 20 times what DeepSeek V4.1 Flash needs, and DeepSeek is a 552B model. Quantization shrinks every model by about the same factor. What DeepSeek changed is the design of the cache itself, which is why the gap stays after you quantize, and why the same design in a smaller model would be such a win.
 
 ## What it means if you host it yourself
 
