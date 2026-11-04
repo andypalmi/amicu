@@ -4,7 +4,7 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2024"
-version = "0.1.4"
+version = "0.1.5"
 license = "AGPL-3.0-only"
 repository = "https://github.com/andypalmi/amicu"
 rust-version = "1.97"
