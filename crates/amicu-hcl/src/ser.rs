@@ -277,6 +277,12 @@ fn model_block(m: &Model) -> Block {
     if let Some(v) = m.n_kv_layers {
         body = body.add_attribute(("n_kv_layers", v));
     }
+    if let Some(v) = m.kv_bytes_per_token {
+        body = body.add_attribute(("kv_bytes_per_token", v.to_string()));
+    }
+    if let Some(v) = m.kv_fixed_bytes {
+        body = body.add_attribute(("kv_fixed_bytes", v.to_string()));
+    }
     resource("model", m.id.as_str(), body.build())
 }
 

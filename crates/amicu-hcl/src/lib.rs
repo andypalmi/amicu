@@ -101,6 +101,8 @@ mod tests {
             n_layers: None,
             n_kv_heads: None,
             n_kv_layers: None,
+            kv_bytes_per_token: None,
+            kv_fixed_bytes: None,
             head_dim: None,
         }
     }
@@ -1488,6 +1490,69 @@ mod tests {
     }
 
     #[test]
+    fn stated_kv_cache_cost_round_trips() {
+        let mut g = graph_with_model("m");
+        g.models[0].kv_bytes_per_token = Some(ByteSize::from_bytes(890));
+        g.models[0].kv_fixed_bytes = Some(ByteSize::from_bytes(2_900_000));
+        let formatted = format_graph(&g).unwrap();
+        assert!(formatted.contains("kv_bytes_per_token"), "{formatted}");
+        let reparsed = parse_graph(&formatted).unwrap();
+        assert_eq!(g, reparsed, "round trip through:\n{formatted}");
+    }
+
+    #[test]
+    fn stated_kv_cache_cost_accepts_a_byte_size_string_or_an_integer() {
+        for (hcl, per_token, fixed) in [
+            ("  kv_bytes_per_token = 890\n", 890, None),
+            ("  kv_bytes_per_token = \"890B\"\n", 890, None),
+            (
+                "  kv_bytes_per_token = \"20KiB\"\n  kv_fixed_bytes = \"64MiB\"\n",
+                20 * 1024,
+                Some(64 * 1024 * 1024),
+            ),
+            // Alongside the head shape: the stated figure wins for the
+            // per-token part, the shape stays declared.
+            (
+                "  n_layers = 61\n  n_kv_heads = 128\n  head_dim = 128\n  \
+                 kv_bytes_per_token = 92628\n",
+                92_628,
+                None,
+            ),
+        ] {
+            let g = parse_graph(&model_hcl(hcl)).unwrap_or_else(|e| panic!("rejected {hcl}: {e}"));
+            assert_eq!(
+                g.models[0].kv_bytes_per_token,
+                Some(ByteSize::from_bytes(per_token)),
+                "{hcl}"
+            );
+            assert_eq!(
+                g.models[0].kv_fixed_bytes,
+                fixed.map(ByteSize::from_bytes),
+                "{hcl}"
+            );
+        }
+    }
+
+    #[test]
+    fn stated_kv_cache_cost_rejects_zero_absurd_and_malformed_values() {
+        for bad in [
+            "  kv_bytes_per_token = 0\n",
+            "  kv_bytes_per_token = \"0B\"\n",
+            "  kv_bytes_per_token = -1\n",
+            "  kv_bytes_per_token = 1.5\n",
+            "  kv_bytes_per_token = \"lots\"\n",
+            "  kv_bytes_per_token = true\n",
+            // Over 64 MiB per token is a unit mistake.
+            "  kv_bytes_per_token = \"65MiB\"\n",
+            "  kv_fixed_bytes = 0\n",
+            "  kv_fixed_bytes = \"2TiB\"\n",
+        ] {
+            let err = parse_graph(&model_hcl(bad)).expect_err(bad);
+            assert!(err.to_string().contains("kv_"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
     fn model_shape_metadata_is_optional_and_absent_by_default() {
         let g = graph_with_model("m");
         assert_eq!(g.models[0].n_layers, None);
@@ -1496,6 +1561,8 @@ mod tests {
         assert!(!formatted.contains("n_kv_heads"));
         assert!(!formatted.contains("head_dim"));
         assert!(!formatted.contains("n_kv_layers"));
+        assert!(!formatted.contains("kv_bytes_per_token"));
+        assert!(!formatted.contains("kv_fixed_bytes"));
     }
 
     #[test]

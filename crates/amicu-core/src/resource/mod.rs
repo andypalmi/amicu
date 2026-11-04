@@ -39,7 +39,8 @@ pub use hardware::{
     HardwareProfile, Interconnect, Price, RunpodCloud, RunpodMode, RunpodSettings,
 };
 pub use model::{
-    Artifact, ArtifactFormat, GgufVariant, Model, ModelSource, Quantization, SourceRegistry,
+    Artifact, ArtifactFormat, GgufVariant, MAX_KV_BYTES_PER_TOKEN, MAX_KV_FIXED_BYTES, Model,
+    ModelSource, Quantization, SourceRegistry,
 };
 pub use region::{Region, Residency};
 pub use routing::{FailoverPolicy, OptimizeFor, RoutingPolicy, RoutingTarget};
