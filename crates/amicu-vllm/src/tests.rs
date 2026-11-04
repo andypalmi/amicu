@@ -507,6 +507,69 @@ fn n_kv_layers_alone_supplies_the_layer_count() {
     assert_eq!(kv_bytes(model, 8192), 8192 * 10 * 8 * 128 * 2 * 2);
 }
 
+/// MLA (DeepSeek V3 shape): one latent of `kv_lora_rank` 512 +
+/// `qk_rope_head_dim` 64 per layer, 61 layers, bf16 = 70,272 bytes per token.
+/// The head formula over its 128 attention heads would count ~57x that.
+const MLA_BYTES_PER_TOKEN: u64 = 61 * (512 + 64) * 2;
+
+fn mla_model() -> Model {
+    let mut model = safetensors_model();
+    model.n_layers = Some(61);
+    model.n_kv_heads = Some(128);
+    model.head_dim = Some(128);
+    model.kv_bytes_per_token = Some(amicu_core::ByteSize::from_bytes(MLA_BYTES_PER_TOKEN));
+    model
+}
+
+#[test]
+fn stated_kv_bytes_per_token_overrides_the_head_formula() {
+    assert_eq!(kv_bytes(mla_model(), 8192), 8192 * MLA_BYTES_PER_TOKEN);
+    let mut heads_only = mla_model();
+    heads_only.kv_bytes_per_token = None;
+    assert_eq!(kv_bytes(heads_only, 8192), 8192 * 61 * 128 * 128 * 2 * 2);
+}
+
+#[test]
+fn stated_kv_bytes_per_token_alone_activates_the_estimate() {
+    let mut model = safetensors_model();
+    model.kv_bytes_per_token = Some(amicu_core::ByteSize::from_bytes(890));
+    assert_eq!(kv_bytes(model.clone(), 1_048_576), 890 * 1_048_576);
+    let a = adapter(model, gpu_hardware(80, 1), LLAMA_8B);
+    assert!(
+        !a.validate(&deployment(base_settings()))
+            .iter()
+            .any(|d| d.code == catalog::CAP_KV_CACHE_NOT_ESTIMATED)
+    );
+}
+
+#[test]
+fn kv_cache_dtype_does_not_rescale_a_stated_per_token_cost() {
+    let mut settings = base_settings();
+    settings.context_length = 8192;
+    settings.kv_cache_dtype = Some(VllmKvCacheDtype::Fp8);
+    let a = adapter(mla_model(), gpu_hardware(80, 1), LLAMA_8B);
+    let plan = a.plan_launch(&deployment(settings)).expect("plan_launch");
+    assert_eq!(
+        plan.estimate.kv_cache.map(amicu_core::ByteSize::bytes),
+        Some(8192 * MLA_BYTES_PER_TOKEN)
+    );
+}
+
+#[test]
+fn fixed_kv_state_is_added_once_for_the_single_sequence_estimate() {
+    let mut model = mla_model();
+    model.kv_fixed_bytes = Some(amicu_core::ByteSize::from_bytes(64 * 1024 * 1024));
+    let mut settings = base_settings();
+    settings.context_length = 8192;
+    settings.max_num_seqs = Some(256);
+    let a = adapter(model, gpu_hardware(80, 1), LLAMA_8B);
+    let plan = a.plan_launch(&deployment(settings)).expect("plan_launch");
+    assert_eq!(
+        plan.estimate.kv_cache.map(amicu_core::ByteSize::bytes),
+        Some(8192 * MLA_BYTES_PER_TOKEN + 64 * 1024 * 1024)
+    );
+}
+
 #[test]
 fn validate_warns_when_kv_cache_cannot_be_estimated() {
     let a = adapter(safetensors_model(), gpu_hardware(80, 1), LLAMA_8B);

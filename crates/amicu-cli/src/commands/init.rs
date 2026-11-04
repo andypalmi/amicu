@@ -15,7 +15,7 @@ use std::path::Path;
 use amicu_core::ByteSize;
 use amicu_core::resource::{GgufVariant, HardwareProfile, KvCacheType, Quantization};
 use amicu_hcl::{format_graph, parse_graph};
-use amicu_registry::{FitConfig, KvCacheParams, check_variant_fit_with_kv_cache};
+use amicu_registry::{FitConfig, KvCacheParams, KvPerToken, check_variant_fit_with_kv_cache};
 use clap::ValueEnum;
 
 use crate::error::CliError;
@@ -196,11 +196,14 @@ pub(crate) fn context_for(tier: &Tier, hw: &HardwareProfile) -> u32 {
     while ctx > MIN_CONTEXT {
         let kv = KvCacheParams {
             context_length: ctx,
-            n_layers: tier.n_kv_layers,
-            n_kv_heads: tier.n_kv_heads,
-            head_dim: tier.head_dim,
-            cache_type_k: KvCacheType::F16,
-            cache_type_v: KvCacheType::F16,
+            per_token: KvPerToken::Heads {
+                n_layers: tier.n_kv_layers,
+                n_kv_heads: tier.n_kv_heads,
+                head_dim: tier.head_dim,
+                cache_type_k: KvCacheType::F16,
+                cache_type_v: KvCacheType::F16,
+            },
+            fixed: ByteSize::from_bytes(0),
         };
         if check_variant_fit_with_kv_cache(0, &variant, hw, &cfg, Some(kv)).fits {
             return ctx;

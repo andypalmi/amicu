@@ -922,6 +922,63 @@ mod vllm_dispatch_tests {
         );
     }
 
+    fn errors(g: &Graph) -> Vec<Diagnostic> {
+        report_for(g)
+            .diagnostics
+            .into_iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect()
+    }
+
+    /// An MLA model (DeepSeek V3 shape: 61 layers, 128 heads of 128 dims, but
+    /// a single 512 + 64 latent per layer) on a 24 GiB card: the head
+    /// formula counts 4 MiB per token and rejects it, the stated 70,272 B per
+    /// token fits.
+    #[test]
+    fn vllm_fit_uses_a_stated_mla_kv_cost_over_the_head_formula() {
+        let mut m = model("Qwen/Qwen3-8B");
+        m.n_layers = Some(61);
+        m.n_kv_heads = Some(128);
+        m.head_dim = Some(128);
+        let graph_with = |m: Model| {
+            let mut g = Graph::new();
+            g.models.push(m);
+            g.hardware_profiles.push(hw(24));
+            g.deployments.push(vllm_deployment(vllm_settings()));
+            g
+        };
+        assert_ne!(errors(&graph_with(m.clone())), Vec::new());
+        m.kv_bytes_per_token = Some(ByteSize::from_bytes(61 * (512 + 64) * 2));
+        assert_eq!(errors(&graph_with(m)), Vec::new());
+    }
+
+    /// DeepSeek V4.1 Flash's stated cache (890 B/token, ~2.9 MB fixed) at a
+    /// full 1,048,576-token context adds under a gigabyte, so a model that
+    /// fits a 24 GiB card without it still fits.
+    #[test]
+    fn vllm_fit_with_a_deepseek_v4_1_flash_sized_cache_at_a_million_tokens() {
+        let mut m = model("Qwen/Qwen3-8B");
+        m.kv_bytes_per_token = Some(ByteSize::from_bytes(890));
+        m.kv_fixed_bytes = Some(ByteSize::from_bytes(2_900_000));
+        let mut g = Graph::new();
+        g.models.push(m);
+        g.hardware_profiles.push(hw(24));
+        g.deployments.push(vllm_deployment(VllmSettings {
+            context_length: 1_048_576,
+            ..vllm_settings()
+        }));
+        let report = report_for(&g);
+        assert!(report.valid, "{:?}", report.diagnostics);
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == catalog::CAP_KV_CACHE_NOT_ESTIMATED),
+            "{:?}",
+            report.diagnostics
+        );
+    }
+
     /// Two over-sized deployments on one graph (a 16 GB model on an 8 GiB
     /// card), the first optionally bypassed.
     fn two_oversized(first: MemoryCheck) -> Graph {

@@ -95,6 +95,18 @@ impl Model {
     pub fn kv_layers(&self) -> Option<u32> {
         self.n_kv_layers.or(self.n_layers).filter(|n| *n > 0)
     }
+
+    /// The fixed (non-growing) cache state for `sequences` concurrent
+    /// sequences: [`Model::kv_fixed_bytes`] times `sequences`, zero when the
+    /// model declares none.
+    #[must_use]
+    pub fn kv_fixed_bytes_for(&self, sequences: u32) -> ByteSize {
+        ByteSize::from_bytes(
+            self.kv_fixed_bytes
+                .map_or(0, ByteSize::bytes)
+                .saturating_mul(u64::from(sequences)),
+        )
+    }
 }
 
 /// Where a model's weights are fetched from.

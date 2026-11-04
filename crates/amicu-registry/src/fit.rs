@@ -49,27 +49,84 @@ pub fn weights_memory(total_parameters: u64, quantization: Quantization) -> Byte
     bytes_from_f64(params_as_f64(total_parameters) * bytes_per_parameter(quantization))
 }
 
-/// Model shape and KV-cache dtype needed to estimate KV-cache memory.
-/// Folded into a fit check only when every field is
-/// known - see [`check_variant_fit_with_kv_cache`].
+/// Where the per-token part of a KV-cache estimate comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvPerToken {
+    /// Computed from the attention shape: one K and one V vector per KV head
+    /// per KV-holding layer per token, at the configured dtypes (see
+    /// [`kv_cache_bytes`]). Right for plain and GQA attention only.
+    Heads {
+        /// KV-holding layer count (`amicu_core::resource::Model::kv_layers`).
+        n_layers: u32,
+        /// Key/value attention head count (post-GQA, if applicable).
+        n_kv_heads: u32,
+        /// Per-head dimension.
+        head_dim: u32,
+        /// KV-cache dtype for K. llama-server defaults each of `-ctk`/`-ctv`
+        /// independently to `f16` when unset (`common/arg.cpp`), so a caller
+        /// that only has one of the pair typed should pass
+        /// [`KvCacheType::F16`] for the other rather than omitting the
+        /// estimate.
+        cache_type_k: KvCacheType,
+        /// KV-cache dtype for V. See `cache_type_k`.
+        cache_type_v: KvCacheType,
+    },
+    /// Stated by the model resource (`kv_bytes_per_token`): bytes per token
+    /// of context across all layers, already at the served cache format, so
+    /// no cache dtype setting rescales it. Covers architectures the head
+    /// formula gets wrong (MLA, sparse-attention indexers, cross-layer KV
+    /// sharing, compressed caches).
+    Stated(ByteSize),
+}
+
+/// Everything needed to estimate one deployment's KV-cache memory.
+/// Folded into a fit check only when the per-token part is known - see
+/// [`check_variant_fit_with_kv_cache`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KvCacheParams {
     /// The deployment's configured context length (`--ctx-size`), not the
     /// model's maximum supported context.
     pub context_length: u32,
-    /// Transformer layer count.
-    pub n_layers: u32,
-    /// Key/value attention head count (post-GQA, if applicable).
-    pub n_kv_heads: u32,
-    /// Per-head dimension.
-    pub head_dim: u32,
-    /// KV-cache dtype for K. llama-server defaults each of `-ctk`/`-ctv`
-    /// independently to `f16` when unset (`common/arg.cpp`), so a caller
-    /// that only has one of the pair typed should pass [`KvCacheType::F16`]
-    /// for the other rather than omitting this whole struct.
-    pub cache_type_k: KvCacheType,
-    /// KV-cache dtype for V. See [`Self::cache_type_k`].
-    pub cache_type_v: KvCacheType,
+    /// The part that grows with context.
+    pub per_token: KvPerToken,
+    /// State that does not grow with context (sliding windows, linear
+    /// attention), already multiplied by the concurrent sequences the
+    /// runtime allocates it for. Zero for a plain transformer.
+    pub fixed: ByteSize,
+}
+
+impl KvCacheParams {
+    /// The estimated KV-cache memory: the per-token part times the context,
+    /// plus [`Self::fixed`].
+    #[must_use]
+    pub fn bytes(&self) -> ByteSize {
+        let growing = match self.per_token {
+            KvPerToken::Heads {
+                n_layers,
+                n_kv_heads,
+                head_dim,
+                cache_type_k,
+                cache_type_v,
+            } => kv_cache_bytes(
+                self.context_length,
+                n_layers,
+                n_kv_heads,
+                head_dim,
+                cache_type_k,
+                cache_type_v,
+            ),
+            KvPerToken::Stated(per_token) => stated_kv_cache_bytes(self.context_length, per_token),
+        };
+        ByteSize::from_bytes(growing.bytes().saturating_add(self.fixed.bytes()))
+    }
+}
+
+/// The context-growing KV cache from a stated per-token cost:
+/// `context_length × bytes_per_token`. Like [`kv_cache_bytes`] it does not
+/// multiply by a parallel-slot count: the context is the shared total.
+#[must_use]
+pub fn stated_kv_cache_bytes(context_length: u32, bytes_per_token: ByteSize) -> ByteSize {
+    ByteSize::from_bytes(u64::from(context_length).saturating_mul(bytes_per_token.bytes()))
 }
 
 /// Estimated total KV-cache memory for one deployment.
@@ -378,16 +435,7 @@ pub fn check_variant_fit_with_draft(
             .saturating_add(draft_weights.map_or(0, ByteSize::bytes)),
     );
     let mut report = evaluate(weights, hw, cfg);
-    report.kv_cache = kv.map(|p| {
-        kv_cache_bytes(
-            p.context_length,
-            p.n_layers,
-            p.n_kv_heads,
-            p.head_dim,
-            p.cache_type_k,
-            p.cache_type_v,
-        )
-    });
+    report.kv_cache = kv.map(|p| p.bytes());
     if let Some(kv_bytes) = report.kv_cache {
         apply_peak(&mut report, kv_bytes, cfg);
     }
@@ -908,6 +956,78 @@ mod tests {
     }
 
     #[test]
+    fn stated_kv_cache_is_per_token_bytes_times_context() {
+        // DeepSeek V4.1 Flash: 890 B/token at its native FP4 cache, so a full
+        // 1,048,576-token context is ~0.93 GB.
+        let kv = stated_kv_cache_bytes(1_048_576, ByteSize::from_bytes(890));
+        assert_eq!(kv.bytes(), 933_232_640);
+    }
+
+    #[test]
+    fn kv_cache_params_add_fixed_state_to_either_source() {
+        let fixed = ByteSize::from_bytes(2_900_000);
+        let stated = KvCacheParams {
+            context_length: 1_048_576,
+            per_token: KvPerToken::Stated(ByteSize::from_bytes(890)),
+            fixed,
+        };
+        assert_eq!(stated.bytes().bytes(), 933_232_640 + 2_900_000);
+        let heads = KvCacheParams {
+            context_length: 1000,
+            per_token: KvPerToken::Heads {
+                n_layers: 1,
+                n_kv_heads: 1,
+                head_dim: 1,
+                cache_type_k: KvCacheType::F16,
+                cache_type_v: KvCacheType::F16,
+            },
+            fixed,
+        };
+        assert_eq!(heads.bytes().bytes(), 4000 + 2_900_000);
+    }
+
+    #[test]
+    fn a_stated_mla_cost_fits_where_the_head_formula_would_not() {
+        // MLA (DeepSeek V3 shape): one 512 + 64 latent per layer, 61 layers,
+        // bf16 = 70,272 B/token. The head formula over 128 heads of 128 dims
+        // counts 4 MiB/token, which no 8 GiB card holds at 32k context.
+        let hw = gpu_8_gib();
+        let cfg = FitConfig::default();
+        let variant = sized_variant(2 * GIB);
+        let at = |per_token| KvCacheParams {
+            context_length: 32768,
+            per_token,
+            fixed: ByteSize::from_bytes(0),
+        };
+        let mla = check_variant_fit_with_kv_cache(
+            0,
+            &variant,
+            &hw,
+            &cfg,
+            Some(at(KvPerToken::Stated(ByteSize::from_bytes(61 * 576 * 2)))),
+        );
+        assert_eq!(
+            mla.kv_cache,
+            Some(ByteSize::from_bytes(32768 * 61 * 576 * 2))
+        );
+        assert!(mla.fits, "{mla:?}");
+        let heads = check_variant_fit_with_kv_cache(
+            0,
+            &variant,
+            &hw,
+            &cfg,
+            Some(at(KvPerToken::Heads {
+                n_layers: 61,
+                n_kv_heads: 128,
+                head_dim: 128,
+                cache_type_k: KvCacheType::F16,
+                cache_type_v: KvCacheType::F16,
+            })),
+        );
+        assert!(!heads.fits, "{heads:?}");
+    }
+
+    #[test]
     fn check_variant_fit_with_kv_cache_is_none_when_kv_is_none() {
         let variant = GgufVariant {
             quantization: Quantization::Q4KM,
@@ -956,11 +1076,14 @@ mod tests {
         let cfg = FitConfig::default();
         let kv = KvCacheParams {
             context_length: 32768,
-            n_layers: 32,
-            n_kv_heads: 8,
-            head_dim: 128,
-            cache_type_k: KvCacheType::Q8_0,
-            cache_type_v: KvCacheType::Q8_0,
+            per_token: KvPerToken::Heads {
+                n_layers: 32,
+                n_kv_heads: 8,
+                head_dim: 128,
+                cache_type_k: KvCacheType::Q8_0,
+                cache_type_v: KvCacheType::Q8_0,
+            },
+            fixed: ByteSize::from_bytes(0),
         };
         let baseline = check_variant_fit(7_000_000_000, &variant, &hw, &cfg);
         let with_kv = check_variant_fit_with_kv_cache(7_000_000_000, &variant, &hw, &cfg, Some(kv));
@@ -986,11 +1109,14 @@ mod tests {
     fn qwen35_9b_kv(context_length: u32) -> KvCacheParams {
         KvCacheParams {
             context_length,
-            n_layers: 8,
-            n_kv_heads: 4,
-            head_dim: 256,
-            cache_type_k: KvCacheType::F16,
-            cache_type_v: KvCacheType::F16,
+            per_token: KvPerToken::Heads {
+                n_layers: 8,
+                n_kv_heads: 4,
+                head_dim: 256,
+                cache_type_k: KvCacheType::F16,
+                cache_type_v: KvCacheType::F16,
+            },
+            fixed: ByteSize::from_bytes(0),
         }
     }
 

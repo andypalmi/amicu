@@ -376,8 +376,9 @@ pub mod catalog {
     pub const CAP_SCALING_UNSUPPORTED_PROVIDER: DiagnosticCode =
         DiagnosticCode::new(Category::Cap, 9);
     // --- never silently drop the KV cache ---
-    /// `AMICU-CAP-010` - a vLLM deployment's model does not declare
-    /// `n_layers`/`n_kv_heads`/`head_dim`, so the KV cache is left out of the
+    /// `AMICU-CAP-010` - a vLLM deployment's model declares neither
+    /// `n_layers`/`n_kv_heads`/`head_dim` nor `kv_bytes_per_token`, so the KV
+    /// cache is left out of the
     /// memory estimate and the fit check covers weights only. Warning, not an
     /// error: the deployment may well fit, but at long `context_length` the KV
     /// cache can dominate, so a pass here is not evidence of fit.
