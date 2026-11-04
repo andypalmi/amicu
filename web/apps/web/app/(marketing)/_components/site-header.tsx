@@ -13,6 +13,7 @@ const siteLinks = [
   { href: '/providers', label: 'Providers' },
   { href: '/pricing', label: 'Pricing' },
   { href: '/security', label: 'Security' },
+  { href: '/blog', label: 'Blog' },
 ];
 
 const mobileItems: MobileNavItem[] = [
@@ -30,6 +31,7 @@ const mobileItems: MobileNavItem[] = [
   { href: '/providers', label: 'Providers' },
   { href: '/pricing', label: 'Pricing' },
   { href: '/security', label: 'Security' },
+  { href: '/blog', label: 'Blog' },
 ];
 
 // Outline variants first, the filled primary last.

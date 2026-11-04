@@ -1,5 +1,6 @@
 import type { MetadataRoute } from 'next';
 import { source } from '@/lib/source';
+import { blog } from '@/lib/blog';
 import { legalPages } from '@/lib/legal/company';
 import { comparePages } from '@/app/(marketing)/_lib/compare';
 import { siteUrl } from '@/lib/shared';
@@ -18,6 +19,7 @@ const marketingRoutes = [
   '/security',
   '/about',
   '/compare',
+  '/blog',
   ...comparePages.map((c) => `/compare/${c.slug}`),
   // Legal pages are listed only per lib/legal/company.ts (imprint stays hidden until identity is filled).
   ...(legalPages.privacy ? ['/privacy'] : []),
@@ -49,5 +51,12 @@ export default function sitemap(): MetadataRoute.Sitemap {
     priority: 0.6,
   }));
 
-  return [...marketing, ...docs];
+  const posts: MetadataRoute.Sitemap = blog.getPages().map((post) => ({
+    url: absolute(post.url),
+    lastModified: new Date(post.data.date),
+    changeFrequency: 'yearly',
+    priority: 0.7,
+  }));
+
+  return [...marketing, ...docs, ...posts];
 }
