@@ -377,9 +377,11 @@ pub mod catalog {
         DiagnosticCode::new(Category::Cap, 9);
     // --- never silently drop the KV cache ---
     /// `AMICU-CAP-010` - a vLLM deployment's model declares neither
-    /// `n_layers`/`n_kv_heads`/`head_dim` nor `kv_bytes_per_token`, so the KV
-    /// cache is left out of the
-    /// memory estimate and the fit check covers weights only. Warning, not an
+    /// `n_layers`/`n_kv_heads`/`head_dim` nor `kv_bytes_per_token` (and has
+    /// no built-in cache cost), or a llama.cpp deployment's model has only a
+    /// vLLM built-in cache cost and no `kv_bytes_per_token`. The KV cache is
+    /// left out of the memory estimate and the fit check covers weights only
+    /// (plus, on llama.cpp, the flat overhead band). Warning, not an
     /// error: the deployment may well fit, but at long `context_length` the KV
     /// cache can dominate, so a pass here is not evidence of fit.
     pub const CAP_KV_CACHE_NOT_ESTIMATED: DiagnosticCode = DiagnosticCode::new(Category::Cap, 10);

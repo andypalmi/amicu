@@ -1469,6 +1469,43 @@ fn deepseek_v4_1_flash_kv_at_a_million_tokens_is_under_a_gigabyte() {
 }
 
 #[test]
+fn built_in_vllm_kv_cost_is_withheld_on_llama_cpp_with_a_warning() {
+    // DeepSeek V4.1 Flash's built-in cost is for its native FP4 cache under
+    // vLLM; on llama.cpp neither it nor the (wrong) head formula is used.
+    let mut model = gguf_model(&[(Quantization::Q4KM, "tiny.Q4_K_M.gguf", 4 * GIB)]);
+    model.source.reference = "deepseek-ai/DeepSeek-V4.1-Flash".into();
+    model.n_layers = Some(40);
+    model.n_kv_heads = Some(8);
+    model.head_dim = Some(128);
+    let catalog = MapCatalog::new()
+        .with_model(model.clone(), 7_000_000_000)
+        .with_hardware(apple_silicon(64));
+    let adapter = LlamaCppAdapter::new(Box::new(catalog), Box::new(FakeSupervisor::default()));
+    let plan = adapter.plan_launch(&deployment()).expect("plan");
+    assert_eq!(plan.estimate.kv_cache, None);
+    let diags = adapter.validate(&deployment());
+    let warn = diags
+        .iter()
+        .find(|d| d.code == catalog::CAP_KV_CACHE_NOT_ESTIMATED)
+        .unwrap_or_else(|| panic!("AMICU-CAP-010: {diags:?}"));
+    assert!(
+        warn.message.contains("set kv_bytes_per_token"),
+        "{}",
+        warn.message
+    );
+
+    // A stated figure is honoured, and silences the warning.
+    let kv = planned_kv(
+        |m| {
+            *m = model.clone();
+            m.kv_bytes_per_token = Some(amicu_core::ByteSize::from_bytes(890));
+        },
+        |s| s.context_length = 8192,
+    );
+    assert_eq!(kv, 8192 * 890);
+}
+
+#[test]
 fn fixed_kv_state_is_counted_per_parallel_slot() {
     // Hybrid attention (Qwen3.6-35B-A3B shape) on the head formula plus its
     // fixed linear-attention state.

@@ -49,7 +49,8 @@ pub struct Model {
     /// latents, sparse-attention indexer keys, cross-layer KV sharing,
     /// compressed caches), where the head formula from [`Model::n_layers`],
     /// [`Model::n_kv_heads`] and [`Model::head_dim`] is wrong. When set it
-    /// replaces that formula on every runtime path, and a runtime's cache
+    /// replaces that formula, and any built-in value for the model
+    /// (`amicu_registry::kv_cost`), on every runtime path, and a runtime's cache
     /// dtype setting (`cache_type_k`/`cache_type_v`, `kv_cache_dtype`) does
     /// not rescale it: the stated figure already is the served format.
     /// Positive and at most [`MAX_KV_BYTES_PER_TOKEN`] (enforced when parsing
@@ -58,10 +59,9 @@ pub struct Model {
     pub kv_bytes_per_token: Option<ByteSize>,
     /// Per-sequence cache state that does not grow with context: a sliding
     /// window's ring buffer, linear-attention or DeltaNet recurrent state.
-    /// Added once per concurrent sequence on top of the per-token part, from
-    /// either source (stated [`Model::kv_bytes_per_token`] or the head
-    /// formula). Positive and at most [`MAX_KV_FIXED_BYTES`] (enforced when
-    /// parsing HCL).
+    /// Added once per concurrent sequence on top of the per-token part,
+    /// whatever its source (stated, built in, or the head formula). Positive
+    /// and at most [`MAX_KV_FIXED_BYTES`] (enforced when parsing HCL).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_fixed_bytes: Option<ByteSize>,
 }
@@ -94,18 +94,6 @@ impl Model {
     #[must_use]
     pub fn kv_layers(&self) -> Option<u32> {
         self.n_kv_layers.or(self.n_layers).filter(|n| *n > 0)
-    }
-
-    /// The fixed (non-growing) cache state for `sequences` concurrent
-    /// sequences: [`Model::kv_fixed_bytes`] times `sequences`, zero when the
-    /// model declares none.
-    #[must_use]
-    pub fn kv_fixed_bytes_for(&self, sequences: u32) -> ByteSize {
-        ByteSize::from_bytes(
-            self.kv_fixed_bytes
-                .map_or(0, ByteSize::bytes)
-                .saturating_mul(u64::from(sequences)),
-        )
     }
 }
 

@@ -570,6 +570,52 @@ fn fixed_kv_state_is_added_once_for_the_single_sequence_estimate() {
     );
 }
 
+fn deepseek_v4_1_flash() -> Model {
+    let mut model = safetensors_model();
+    model.source.reference = "deepseek-ai/DeepSeek-V4.1-Flash".into();
+    model
+}
+
+#[test]
+fn built_in_kv_cost_applies_without_shape_metadata() {
+    assert_eq!(
+        kv_bytes(deepseek_v4_1_flash(), 1_048_576),
+        890 * 1_048_576 + 2_906_112
+    );
+    let a = adapter(deepseek_v4_1_flash(), gpu_hardware(80, 1), LLAMA_8B);
+    assert!(
+        !a.validate(&deployment(base_settings()))
+            .iter()
+            .any(|d| d.code == catalog::CAP_KV_CACHE_NOT_ESTIMATED)
+    );
+}
+
+#[test]
+fn built_in_kv_cost_wins_over_the_head_formula_and_is_not_rescaled() {
+    let mut model = deepseek_v4_1_flash();
+    model.n_layers = Some(43);
+    model.n_kv_heads = Some(8);
+    model.head_dim = Some(512);
+    let mut settings = base_settings();
+    settings.context_length = 8192;
+    settings.kv_cache_dtype = Some(VllmKvCacheDtype::Fp8);
+    let a = adapter(model, gpu_hardware(80, 1), LLAMA_8B);
+    let plan = a.plan_launch(&deployment(settings)).expect("plan_launch");
+    assert_eq!(
+        plan.estimate.kv_cache.map(amicu_core::ByteSize::bytes),
+        Some(8192 * 890 + 2_906_112)
+    );
+}
+
+#[test]
+fn explicit_kv_values_win_over_the_built_in_entry() {
+    let mut model = deepseek_v4_1_flash();
+    model.kv_bytes_per_token = Some(amicu_core::ByteSize::from_bytes(1000));
+    assert_eq!(kv_bytes(model.clone(), 8192), 8192 * 1000 + 2_906_112);
+    model.kv_fixed_bytes = Some(amicu_core::ByteSize::from_bytes(7));
+    assert_eq!(kv_bytes(model, 8192), 8192 * 1000 + 7);
+}
+
 #[test]
 fn validate_warns_when_kv_cache_cannot_be_estimated() {
     let a = adapter(safetensors_model(), gpu_hardware(80, 1), LLAMA_8B);
