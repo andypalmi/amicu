@@ -97,4 +97,10 @@ Some caveats, so the comparison is fair:
 
 This is why `amicu plan` counts the KV cache, not only the weights, before it starts anything: "does it fit?" depends on how much context you want and how many people will use it at once.
 
-Today plan uses the standard formula above, which is right for standard attention and too high for designs like DeepSeek V4.1 Flash's. Built-in cache sizes for these models, starting with DeepSeek V4.1 Flash, are coming in the next release.
+The standard formula above is right for standard attention and too high for designs like DeepSeek V4.1 Flash's. Since v0.1.5, plan knows DeepSeek V4.1 Flash's real cost (890 bytes per token at its native FP4 cache, on vLLM) and says where the number came from:
+
+```
+KV cache: ~892.8 MiB for 1048576 ctx (built-in value for DeepSeek-V4.1-Flash: 890 B per token at its native FP4 cache; incl. ~2.8 MiB fixed state for 1 sequence, built-in)
+```
+
+For other models with a non-standard cache you can state the cost yourself with `kv_bytes_per_token` and `kv_fixed_bytes`. The [model resource reference](/docs/configuration/model#kv-cache-cost) explains both and lists values for the models in this post.
