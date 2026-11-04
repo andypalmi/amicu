@@ -93,7 +93,7 @@ The plan's assumptions say which source was used: `stated in config`, `built-in 
 
 ### Built-in values
 
-amicu knows the cost of some models, matched by their Hugging Face `source.reference` (case-insensitive), so you need not set anything. Today that is `deepseek-ai/DeepSeek-V4.1-Flash`: 890 B per token plus 2,906,112 B of sliding window per sequence. More models will be added.
+amicu knows the cost of some models, matched by their Hugging Face `source.reference` (case-insensitive), so you need not set anything. Today that is `deepseek-ai/DeepSeek-V4.1-Flash` (and its `-1017` release): 890 B per token plus 2,906,112 B of sliding window per sequence. More models will be added.
 
 A built-in value is for the model's native cache format as served by vLLM, so it applies only to `vllm` deployments. On `llama_cpp` such a model gets no KV estimate, and `validate` warns with `AMICU-CAP-010`, instead of falling back to a head formula known to be wrong for it; set `kv_bytes_per_token` to get one. Values on the model always win over a built-in value, field by field. Setting `kv_cache_dtype` to something other than `auto` does not change a built-in figure; the plan notes that it is for the native cache.
 

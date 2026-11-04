@@ -34,7 +34,11 @@ pub struct KnownKvCost {
 /// model's native cache format as served by vLLM.
 pub const KNOWN_KV_COSTS: &[KnownKvCost] = &[KnownKvCost {
     name: "DeepSeek-V4.1-Flash",
-    hf_references: &["deepseek-ai/DeepSeek-V4.1-Flash"],
+    // The -1017 release ships the same config.json.
+    hf_references: &[
+        "deepseek-ai/DeepSeek-V4.1-Flash",
+        "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+    ],
     // Only 4 of 40 layers store KV, compressed 2:1 in the encoder half, at
     // the native FP4 cache.
     bytes_per_token: ByteSize::from_bytes(890),
@@ -200,6 +204,14 @@ mod tests {
         .expect("entry");
         assert_eq!(k.bytes_per_token.bytes(), 890);
         assert_eq!(k.fixed_bytes.bytes(), 2_906_112);
+        assert_eq!(
+            known_kv_cost(&model(
+                SourceRegistry::HuggingFace,
+                "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+            ))
+            .map(|k| k.name),
+            Some("DeepSeek-V4.1-Flash")
+        );
         assert_eq!(
             known_kv_cost(&model(
                 SourceRegistry::Url,
