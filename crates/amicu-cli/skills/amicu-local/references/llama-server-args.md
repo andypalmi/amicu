@@ -119,7 +119,9 @@ The result appears as `FitReport.kv_cache`, feeds the plan's
 the flat overhead band, 10% of weights) rather than weights + the band high
 end, which is the figure when the KV cache is unknown, and shows up in the plan's
 `cost_performance.assumptions` as a line like
-`"KV cache: 4GiB at q8_0 for 32768 ctx"`. Leave the model's shape fields
+`"KV cache: ~2.1 GiB at q8_0 for 32768 ctx (computed from attention heads)"`.
+A model's `kv_bytes_per_token` replaces this formula (cache types do not
+rescale it) and its `kv_fixed_bytes` adds once per slot. Leave the model's shape fields
 unset (there is no GGUF header parser in-tree to derive them) to keep the
 flat overhead band - nothing else about the fit check changes.
 
